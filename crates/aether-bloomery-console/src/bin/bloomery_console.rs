@@ -3,6 +3,7 @@
 use std::io::{self, stdout};
 use std::panic;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time::Duration;
 
 use aether_bloomery_console::http::Endpoint;
@@ -64,29 +65,31 @@ fn run(endpoint: Endpoint, poll: Duration) -> Result<()> {
 }
 
 fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, endpoint: Endpoint, poll: Duration) -> Result<()> {
-    let mut shell = Shell::new(endpoint, poll);
+    thread::scope(|scope| {
+        let mut shell = Shell::new(scope, endpoint, poll);
 
-    loop {
-        if SHUTDOWN.load(Ordering::SeqCst) {
-            return Ok(());
-        }
+        loop {
+            if SHUTDOWN.load(Ordering::SeqCst) {
+                return Ok(());
+            }
 
-        shell.pump();
-        terminal.draw(|frame| shell.render(frame)).context("draw board")?;
+            shell.pump();
+            terminal.draw(|frame| shell.render(frame)).context("draw board")?;
 
-        if !event::poll(INPUT_SLICE).context("poll input")? {
-            continue;
+            if !event::poll(INPUT_SLICE).context("poll input")? {
+                continue;
+            }
+            let Event::Key(key) = event::read().context("read input")? else {
+                continue;
+            };
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            if matches!(shell.handle_key(key), Outcome::Quit) {
+                return Ok(());
+            }
         }
-        let Event::Key(key) = event::read().context("read input")? else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-        if matches!(shell.handle_key(key), Outcome::Quit) {
-            return Ok(());
-        }
-    }
+    })
 }
 
 fn install_panic_hook() {

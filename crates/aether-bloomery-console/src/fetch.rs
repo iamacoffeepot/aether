@@ -1,7 +1,8 @@
 //! Two blocking HTTP lanes off the event loop.
 //!
 //! `live` uses a 1 s timeout for `/view`. `bulk` uses 10 s for later large
-//! reads. The shell sends requests and drains replies with `try_recv`.
+//! reads. Both run on a `thread::scope` the shell's caller owns. The shell
+//! sends requests and drains replies with `try_recv`.
 
 use std::iter;
 use std::sync::mpsc::{self, Receiver, RecvError, SendError, Sender};
@@ -42,13 +43,14 @@ pub struct FetchLanes {
 }
 
 impl FetchLanes {
+    /// Start both workers on `scope`. They exit when the request senders drop.
     #[must_use]
-    pub fn spawn(endpoint: Endpoint) -> Self {
+    pub fn spawn<'scope>(scope: &'scope thread::Scope<'scope, '_>, endpoint: Endpoint) -> Self {
         let (live_tx, live_rx) = mpsc::channel();
         let (bulk_tx, bulk_rx) = mpsc::channel();
         let (reply_tx, reply_rx) = mpsc::channel();
-        spawn_lane("bloomery-console-live", endpoint.clone(), live_rx, reply_tx.clone(), LIVE_TIMEOUT);
-        spawn_lane("bloomery-console-bulk", endpoint, bulk_rx, reply_tx, BULK_TIMEOUT);
+        spawn_lane(scope, "bloomery-console-live", endpoint.clone(), live_rx, reply_tx.clone(), LIVE_TIMEOUT);
+        spawn_lane(scope, "bloomery-console-bulk", endpoint, bulk_rx, reply_tx, BULK_TIMEOUT);
         Self { live_tx, bulk_tx, reply_rx }
     }
 
@@ -66,17 +68,20 @@ impl FetchLanes {
     }
 }
 
-fn spawn_lane(
+fn spawn_lane<'scope>(
+    scope: &'scope thread::Scope<'scope, '_>,
     name: &'static str,
     endpoint: Endpoint,
     requests: Receiver<FetchRequest>,
     replies: Sender<FetchReply>,
     timeout: Duration,
 ) {
-    // Infra HTTP worker below the actor/mail layer: the console is not a
-    // chassis actor, and the live timeout must not sit on the input loop.
-    #[allow(clippy::disallowed_methods)]
-    let _ = thread::Builder::new().name(name.into()).spawn(move || lane_loop(&endpoint, &requests, &replies, timeout));
+    // `thread::scope`, not `thread::spawn`: raw spawn is disallowed
+    // (settlement/trace umbrella). These workers sit below the actor/mail
+    // layer and join when the shell drops the request senders.
+    let _ = thread::Builder::new()
+        .name(name.into())
+        .spawn_scoped(scope, move || lane_loop(&endpoint, &requests, &replies, timeout));
 }
 
 fn lane_loop(endpoint: &Endpoint, requests: &Receiver<FetchRequest>, replies: &Sender<FetchReply>, timeout: Duration) {

@@ -4,6 +4,7 @@
 
 pub mod chrome;
 
+use std::thread;
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -34,9 +35,9 @@ pub struct Shell {
 
 impl Shell {
     #[must_use]
-    pub fn new(endpoint: Endpoint, view_cadence: Duration) -> Self {
+    pub fn new<'scope>(scope: &'scope thread::Scope<'scope, '_>, endpoint: Endpoint, view_cadence: Duration) -> Self {
         let endpoint_label = endpoint.label();
-        Self::assemble(endpoint_label, Store::new(view_cadence), Some(FetchLanes::spawn(endpoint)))
+        Self::assemble(endpoint_label, Store::new(view_cadence), Some(FetchLanes::spawn(scope, endpoint)))
     }
 
     fn assemble(endpoint_label: String, store: Store, fetch: Option<FetchLanes>) -> Self {
@@ -194,6 +195,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use std::net::TcpListener;
+    use std::thread;
     use std::time::{Duration, Instant};
 
     fn digest(byte: u8) -> DigestHex {
@@ -317,18 +319,21 @@ mod tests {
         // coordinator that never answers freezes j/k for the full live timeout.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a silent coordinator");
         let addr = listener.local_addr().expect("addr");
-        let mut shell = Shell::new(Endpoint { host: addr.ip().to_string(), port: addr.port() }, Duration::from_secs(1));
+        thread::scope(|scope| {
+            let mut shell =
+                Shell::new(scope, Endpoint { host: addr.ip().to_string(), port: addr.port() }, Duration::from_secs(1));
 
-        let start = Instant::now();
-        shell.pump();
-        for _ in 0..20 {
-            assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('j'))), Outcome::Handled);
-        }
-        let elapsed = start.elapsed();
-        assert!(
-            elapsed < Duration::from_millis(200),
-            "shell work took {elapsed:?}; a blocking /view would cost the 1s live timeout"
-        );
-        drop(listener);
+            let start = Instant::now();
+            shell.pump();
+            for _ in 0..20 {
+                assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('j'))), Outcome::Handled);
+            }
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed < Duration::from_millis(200),
+                "shell work took {elapsed:?}; a blocking /view would cost the 1s live timeout"
+            );
+            drop(listener);
+        });
     }
 }
