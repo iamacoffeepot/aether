@@ -77,6 +77,11 @@ mod correspondence;
 pub use correspondence::SqliteCorrespondence;
 
 #[cfg(feature = "runtime")]
+mod commission;
+#[cfg(feature = "runtime")]
+pub use commission::{CommissionBackend, CommissionError, CommissionHead, CommissionView};
+
+#[cfg(feature = "runtime")]
 mod runtime;
 #[cfg(feature = "runtime")]
 pub use runtime::{

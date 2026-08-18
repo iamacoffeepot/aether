@@ -8,6 +8,7 @@
 
 mod approval;
 mod bloom;
+mod commission;
 mod composition;
 mod config;
 mod finding;
@@ -30,6 +31,10 @@ pub use approval::{ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, surface_i
 pub use bloom::{
     BloomDraft, BloomSpec, DependencyError, LandingReceipt, MemberCandidate, MemberDependency, MemberSubject,
     Membership, ResolutionClaim, ResolvedBloom, resolve_member_dependencies,
+};
+pub use commission::{
+    CommissionApprovalTier, CommissionStatementRole, CommissionStatus, CommissionValueError, SCOPE_REVISION_SCHEMA,
+    ScopeRevision, ScopeRouting,
 };
 pub use composition::CompositionFinding;
 pub use config::{

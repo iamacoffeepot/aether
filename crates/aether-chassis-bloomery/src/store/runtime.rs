@@ -509,7 +509,7 @@ pub trait StoreBackend: Send {
 /// A WAL-mode `SQLite` store. Opening runs the migrations idempotently, so
 /// reopening the same file on restart resumes against the persisted journal.
 pub struct SqliteStore {
-    conn: Connection,
+    pub(super) conn: Connection,
 }
 
 impl SqliteStore {
@@ -531,6 +531,12 @@ impl SqliteStore {
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.execute_batch(MIGRATIONS)?;
         migrate_schema(&mut conn)?;
+        // Foreign keys are per-connection and default OFF. Existing tables have
+        // no REFERENCES, so turning the pragma on does not change their DML.
+        // The commission tables do use REFERENCES; enforcement is a deliberate
+        // migration decision (ADR-0199), not a free property of sharing this
+        // connection.
+        conn.pragma_update(None, "foreign_keys", "ON")?;
         Ok(Self { conn })
     }
 }
@@ -567,7 +573,13 @@ impl SqliteStore {
 /// `metric_day` / `metric_cursor`). Tables are cache, never truth: delete and
 /// refold repairs them. Empty on creation; nothing is backfilled here — the
 /// first open after migrate folds from the journal.
-const SCHEMA_VERSION: i64 = 6;
+///
+/// `7` is the commission store (ADR-0199): `commissions`,
+/// `commission_statements`, `scope_revisions`, `commission_approvals`. Empty
+/// on creation; nothing is backfilled — a GitHub issue body is not a signed
+/// commission. Foreign-key enforcement is switched on per connection after
+/// migrate, not by this version stamp.
+const SCHEMA_VERSION: i64 = 7;
 
 /// Bring a store opened at [`MIGRATIONS`] up to [`SCHEMA_VERSION`], or refuse it.
 ///
@@ -658,6 +670,13 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     // journal.
     if !has_table(&migration, "metric_cursor")? {
         migration.execute_batch(METRICS_TABLES)?;
+    }
+
+    // Version 7 (ADR-0199): the commission store. Empty on creation; a
+    // pre-existing store has no signed commissions to invent from issue
+    // bodies.
+    if !has_table(&migration, "commissions")? {
+        migration.execute_batch(super::commission::COMMISSION_TABLES)?;
     }
 
     migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;
