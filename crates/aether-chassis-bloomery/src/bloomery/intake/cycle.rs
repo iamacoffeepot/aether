@@ -169,8 +169,15 @@ fn record_cost(
     let (Some(cost), Some(artifacts)) = (upload.cost, artifacts) else {
         return None;
     };
-    let record =
-        UploadedStudyRecord { nonce: upload.nonce.clone(), subject: upload.subject, cost, calls: upload.calls.clone() };
+    let record = UploadedStudyRecord {
+        nonce: upload.nonce.clone(),
+        subject: upload.subject,
+        cost,
+        calls: upload.calls.clone(),
+        session_reuse_arm: upload.session_reuse_arm.clone(),
+        session_reuse_saved_micro_usd: upload.session_reuse_saved_micro_usd,
+        peak_resident_bytes: upload.peak_resident_bytes,
+    };
 
     match admit_study(store, artifacts, &record) {
         Ok(StudyAdmitDecision::Admitted(admission)) => Some(admission),

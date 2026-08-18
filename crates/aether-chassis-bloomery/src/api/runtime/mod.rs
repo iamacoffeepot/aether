@@ -60,6 +60,7 @@ mod claims;
 mod configs;
 mod drafts;
 mod hex;
+mod metrics;
 mod reads;
 mod response;
 mod seal;
@@ -72,7 +73,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use aether_actor::{Manual, runtime};
-use aether_bloomery::{AdmitResult, EnumerateClaimsResult, LoadConfigsResult, QueryResult, ResolvedConfigs};
+use aether_bloomery::{
+    AdmitResult, EnumerateClaimsResult, LoadConfigsResult, MetricsQueryResult, QueryResult, ResolvedConfigs,
+    SpendQueryResult,
+};
 use aether_http as http;
 use aether_http::HttpServerResponse;
 use aether_kinds::trace::Settled;
@@ -478,6 +482,74 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, calibration::read())
     }
 
+    /// `GET /metrics/summary` — fixed-size fleet summary, joined with live
+    /// in-flight bloom count.
+    #[http::route(Get, "/metrics/summary")]
+    fn on_get_metrics_summary(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+    ) -> http::Outcome {
+        finish(state, ctx, metrics::summary())
+    }
+
+    /// `GET /metrics/days` — day rollups, clamped at 90.
+    #[http::route(Get, "/metrics/days")]
+    fn on_get_metrics_days(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+        finish(state, ctx, metrics::days())
+    }
+
+    /// `GET /metrics/blooms` — bloom rollups, cursor on seal sequence.
+    #[http::route(Get, "/metrics/blooms")]
+    fn on_get_metrics_blooms(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+    ) -> http::Outcome {
+        match metrics::blooms(&ctx.request().query) {
+            Ok(routed) => finish(state, ctx, routed),
+            Err(error) => http::Outcome::Reply(error_response(400, &error)),
+        }
+    }
+
+    /// `GET /metrics/blooms/{id}/timeline` — per-member stage spans.
+    #[http::route(Get, "/metrics/blooms/{id}/timeline")]
+    fn on_get_metrics_timeline(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        match metrics::timeline(&id.0) {
+            Ok(routed) => finish(state, ctx, routed),
+            Err(error) => http::Outcome::Reply(error_response(400, &error)),
+        }
+    }
+
+    /// `GET /metrics/seats` — calibration seats plus token and cache columns.
+    #[http::route(Get, "/metrics/seats")]
+    fn on_get_metrics_seats(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+    ) -> http::Outcome {
+        finish(state, ctx, metrics::seats())
+    }
+
+    /// `GET /metrics/dispatches` — dispatch rows, cursor on journal sequence.
+    #[http::route(Get, "/metrics/dispatches")]
+    fn on_get_metrics_dispatches(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+    ) -> http::Outcome {
+        match metrics::dispatches(&ctx.request().query) {
+            Ok(routed) => finish(state, ctx, routed),
+            Err(error) => http::Outcome::Reply(error_response(400, &error)),
+        }
+    }
+
+    /// `GET /spend` — window totals `spend::measure` already computes.
+    #[http::route(Get, "/spend")]
+    fn on_get_spend(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+        finish(state, ctx, metrics::spend())
+    }
+
     /// `GET /journal` — one bounded page of the durable event journal.
     #[http::route(Get, "/journal")]
     fn on_get_journal(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
@@ -584,6 +656,24 @@ impl NativeActor for BloomeryApiCapability {
             QueryResult::Calibration { document } => calibration_response(&document),
             mail => query_response(mail),
         }
+    }
+
+    #[http::reply]
+    fn on_metrics_result(
+        _state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: MetricsQueryResult,
+    ) -> HttpServerResponse {
+        metrics::metrics_response(mail)
+    }
+
+    #[http::reply]
+    fn on_spend_result(
+        _state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: SpendQueryResult,
+    ) -> HttpServerResponse {
+        metrics::spend_response(mail)
     }
 
     /// The source cap's reply to a claim enumeration (ADR-0179).

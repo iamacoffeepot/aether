@@ -119,6 +119,9 @@ impl EvidenceClaims for NameEvidenceClaims {
             findings: reference.findings.clone(),
             cost: reference.cost,
             calls: reference.calls.clone(),
+            session_reuse_arm: reference.session_reuse_arm.clone(),
+            session_reuse_saved_micro_usd: reference.session_reuse_saved_micro_usd,
+            peak_resident_bytes: reference.peak_resident_bytes,
         })
     }
 }

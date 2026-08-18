@@ -33,8 +33,8 @@ use aether_actor::actor;
 // here (like the store / api caps) so the always-on identity markers resolve
 // without the `runtime` runtime module.
 use aether_bloomery::control::{
-    Admit, ClaimResult, CommitResult, CompleteReleaseResult, EnumerateClaimsResult, LoadConfigsResult,
-    ObserveMainlineResult, Query, ReplayJournalResult,
+    Admit, ClaimResult, CommitResult, CompleteReleaseResult, EnumerateClaimsResult, LoadConfigsResult, MetricsQuery,
+    ObserveMainlineResult, Query, ReplayJournalResult, SpendQuery,
 };
 
 pub mod kinds;

@@ -34,15 +34,17 @@ pub use aether_substrate::chassis::error::BootError;
 use aether_bloomery::control::{
     Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, ClaimResult, ClaimSeal, Commit, CommitResult,
     CompleteReleaseResult, DispatchPayload, EnumerateClaims, EnumerateClaimsResult, HealOp, IntegratePayload,
-    LandPayload, LoadConfigs, LoadConfigsResult, MembershipMutation, ObserveMainline, ObserveMainlineResult,
-    OrphanClaimReleasePayload, OutboxPayload, Query, QueryResult, ReconcileOp, RedispatchPayload, ReplayJournal,
-    ReplayJournalResult, ReviewPass, SplicePayload, Topic, TransferSeal, held_to_seal_error, held_to_supersede_error,
-    plan_heals, reconcile_op, release_seal_mail, seal_claim_mail, transfer_seal_mail,
+    LandPayload, LoadConfigs, LoadConfigsResult, MembershipMutation, MetricsQuery, MetricsQueryResult, MetricsView,
+    ObserveMainline, ObserveMainlineResult, OrphanClaimReleasePayload, OutboxPayload, Query, QueryResult, ReconcileOp,
+    RedispatchPayload, ReplayJournal, ReplayJournalResult, ReviewPass, SpendQuery, SpendQueryResult, SplicePayload,
+    Topic, TransferSeal, held_to_seal_error, held_to_supersede_error, plan_heals, reconcile_op, release_seal_mail,
+    seal_claim_mail, transfer_seal_mail,
 };
 use aether_bloomery::{
-    BloomId, CalibrationDocument, CalibrationLedger, ClaimRefKind, ClaimRefState, Decision, Decisions, Digest, Event,
-    EvidenceKind, Fact, IdempotencyKey, OperatorRepairError, Outcome, ResolvedConfigs, Snapshot, SpendWindow,
-    StudyRecord, Unproducible, decode_recorded_decisions, grade, measure, reduce, view_of,
+    BloomId, CalibrationDocument, CalibrationLedger, ClaimRefKind, ClaimRefState, DAYS_CAP, Decision, Decisions,
+    Digest, Event, EvidenceKind, Fact, IdempotencyKey, METRICS_DEFAULT_LIMIT, METRICS_MAX_LIMIT, MetricsLedger,
+    OperatorRepairError, Outcome, ResolvedConfigs, Snapshot, SpendWindow, StudyRecord, Unproducible,
+    decode_recorded_decisions, grade, is_active_unlanded, measure, reduce, view_of, window_label,
 };
 
 use super::{ControlCore, ControlSetup, ObserveTick};
@@ -143,6 +145,9 @@ pub struct ControlCoreState {
     /// commit — so accumulating it costs one call beside `Snapshot::apply` and
     /// re-deriving it would cost a second whole-journal read per request.
     calibration: CalibrationLedger,
+    /// Cost / timing / throughput fold, beside the snapshot and the
+    /// calibration ledger. Rebuilt on journal replay; extended on each admit.
+    metrics: MetricsLedger,
     configs: ResolvedConfigs,
     /// The window's measured spend, refreshed whenever the snapshot's study
     /// evidence could have changed. The reducer cannot fetch study-record
@@ -200,6 +205,7 @@ impl NativeActor for ControlCore {
         Ok(ControlCoreState {
             snapshot: Snapshot::default(),
             calibration: CalibrationLedger::default(),
+            metrics: MetricsLedger::default(),
             configs: ResolvedConfigs::default(),
             spend: SpendWindow::default(),
             artifacts: open_artifacts(config.artifacts_root.as_deref()),
@@ -383,6 +389,14 @@ impl NativeActor for ControlCore {
         let result = match mail {
             CommitResult::Applied { .. } => {
                 state.calibration.observe(&event, &decisions, &state.configs);
+                let sequence = state.metrics.through_sequence().saturating_add(1);
+                state.metrics.observe(
+                    sequence,
+                    &event,
+                    &decisions,
+                    &state.configs,
+                    Some(crate::store::now_unix_millis()),
+                );
                 state.snapshot = state.snapshot.apply(&event, &decisions, &state.configs);
                 state.refresh_spend();
                 // A committed land decision is already in the outbox; wake the
@@ -499,6 +513,7 @@ impl NativeActor for ControlCore {
             // The calibration ledger folds the same pair, so a replay rebuilds
             // it exactly as the live commits built it (ADR-0184).
             state.calibration.observe(&event, &decisions, &state.configs);
+            state.metrics.observe(record.sequence, &event, &decisions, &state.configs, record.recorded_unix_millis);
             state.snapshot = state.snapshot.apply(&event, &decisions, &state.configs);
         }
         state.refresh_spend();
@@ -736,6 +751,20 @@ impl NativeActor for ControlCore {
         };
         inbound.reply(&result);
     }
+
+    /// `GET /metrics/*` — bounded reads off the folded metrics ledger.
+    #[handler::manual]
+    fn on_metrics_query(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, mail: MetricsQuery) {
+        let inbound = ctx.take_inbound();
+        inbound.reply(&metrics_response(state, mail));
+    }
+
+    /// `GET /spend` — the window `measure` already computes, previously unserved.
+    #[handler::manual]
+    fn on_spend_query(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, _mail: SpendQuery) {
+        let inbound = ctx.take_inbound();
+        inbound.reply(&spend_response(&state.spend));
+    }
 }
 
 impl ControlCoreState {
@@ -825,6 +854,9 @@ impl ControlCoreState {
     fn refresh_spend(&mut self) {
         let records = load_study_records(self.artifacts.as_mut(), &self.snapshot);
         self.spend = measure(&self.snapshot, |digest| records.get(digest).copied());
+        if self.spend.label.is_empty() {
+            self.spend.label = window_label(crate::store::now_unix_millis());
+        }
     }
 
     fn inflight_for_key(&self, key: &str) -> usize {
@@ -944,6 +976,77 @@ fn calibration_response(
     match to_vec(&document) {
         Ok(document) => QueryResult::Calibration { document },
         Err(error) => QueryResult::Err { error: format!("calibration document encode failed: {error}") },
+    }
+}
+
+fn metrics_response(state: &mut ControlCoreState, query: MetricsQuery) -> MetricsQueryResult {
+    let clamp = |requested: Option<u64>| match requested {
+        None => METRICS_DEFAULT_LIMIT,
+        Some(limit) if limit > METRICS_MAX_LIMIT => METRICS_MAX_LIMIT,
+        Some(limit) => limit,
+    };
+    match query.view {
+        MetricsView::Summary => {
+            let records = load_study_records(state.artifacts.as_mut(), &state.snapshot);
+            let active = u64::try_from(
+                state.snapshot.blooms.values().filter(|record| is_active_unlanded(record.status)).count(),
+            )
+            .unwrap_or(u64::MAX);
+            encode_metrics(state.metrics.summary(active, |digest| records.get(digest).copied()))
+        }
+        MetricsView::Days => {
+            let mut rows = state.metrics.day_rows();
+            let cap = usize::try_from(DAYS_CAP).unwrap_or(usize::MAX);
+            if rows.len() > cap {
+                let start = rows.len() - cap;
+                rows = rows.split_off(start);
+            }
+            encode_metrics(rows)
+        }
+        MetricsView::Blooms => {
+            let limit = usize::try_from(clamp(query.limit)).unwrap_or(usize::MAX);
+            let from = query.from_sequence.unwrap_or(0);
+            let rows: Vec<_> =
+                state.metrics.bloom_rows().into_iter().filter(|row| row.seal_sequence > from).take(limit).collect();
+            encode_metrics(rows)
+        }
+        MetricsView::Timeline => {
+            let Some(bytes) = query.bloom.as_deref() else {
+                return MetricsQueryResult::Err { error: "timeline requires a bloom id".into() };
+            };
+            let Some(bloom) = Digest::from_slice(bytes).map(BloomId) else {
+                return MetricsQueryResult::Err { error: "bloom is not a 32-byte digest".into() };
+            };
+            if !state.snapshot.blooms.contains_key(&bloom) && state.metrics.timeline(bloom).spans.is_empty() {
+                return MetricsQueryResult::NotFound;
+            }
+            encode_metrics(state.metrics.timeline(bloom))
+        }
+        MetricsView::Seats => {
+            let records = load_study_records(state.artifacts.as_mut(), &state.snapshot);
+            encode_metrics(state.metrics.seats(|digest| records.get(digest).copied()))
+        }
+        MetricsView::Dispatches => {
+            let limit = usize::try_from(clamp(query.limit)).unwrap_or(usize::MAX);
+            let from = query.from_sequence.unwrap_or(0);
+            let rows: Vec<_> =
+                state.metrics.dispatch_rows().into_iter().filter(|row| row.sequence > from).take(limit).collect();
+            encode_metrics(rows)
+        }
+    }
+}
+
+fn encode_metrics<T: serde::Serialize>(document: T) -> MetricsQueryResult {
+    match to_vec(&document) {
+        Ok(document) => MetricsQueryResult::Ok { document },
+        Err(error) => MetricsQueryResult::Err { error: format!("metrics document encode failed: {error}") },
+    }
+}
+
+fn spend_response(spend: &SpendWindow) -> SpendQueryResult {
+    match to_vec(spend) {
+        Ok(window) => SpendQueryResult::Ok { window },
+        Err(error) => SpendQueryResult::Err { error: format!("spend window encode failed: {error}") },
     }
 }
 

@@ -466,6 +466,9 @@ fn terminate_live_order(
         failed_verifiers,
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     };
     match admit_uploaded(store, &upload) {
         Ok(AdmitDecision::Admitted(admission)) => {
@@ -2155,6 +2158,9 @@ fn admit_scripted(state: &mut ExecutorReactorState, encoded: &[u8]) -> (Scripted
                 subject: upload.subject,
                 cost,
                 calls: upload.calls.clone(),
+                session_reuse_arm: upload.session_reuse_arm.clone(),
+                session_reuse_saved_micro_usd: upload.session_reuse_saved_micro_usd,
+                peak_resident_bytes: upload.peak_resident_bytes,
             };
             match admit_study(store, artifacts, &record) {
                 Ok(StudyAdmitDecision::Admitted(admission)) => {
