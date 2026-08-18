@@ -219,6 +219,19 @@ impl Shell {
             (ResourceKey::Spend, Ok(_)) => {
                 self.store.apply_spend(Err("spend lane returned a non-spend body".to_owned()));
             }
+            (ResourceKey::Commissions, Ok(ResourceBody::Commissions(value))) => self.store.apply_commissions(Ok(value)),
+            (ResourceKey::Commissions, Ok(ResourceBody::CommissionsMissing)) => self.store.apply_commissions_missing(),
+            (ResourceKey::Commissions, Err(error)) => self.store.apply_commissions(Err(error)),
+            (ResourceKey::Commissions, Ok(_)) => {
+                self.store.apply_commissions(Err("commissions lane returned a non-commissions body".to_owned()));
+            }
+            (ResourceKey::Commission(id), Ok(ResourceBody::Commission(value))) => {
+                self.store.apply_commission(id, Ok(value));
+            }
+            (ResourceKey::Commission(id), Err(error)) => self.store.apply_commission(id, Err(error)),
+            (ResourceKey::Commission(id), Ok(_)) => {
+                self.store.apply_commission(id, Err("commission lane returned a non-commission body".to_owned()));
+            }
         }
     }
 
@@ -873,5 +886,31 @@ mod tests {
         assert_eq!(shell.stack_depth(), depth);
         assert_eq!(shell.top_selected(), cursor);
         assert_eq!(shell.top_scroll(), scroll);
+    }
+
+    #[test]
+    fn a_predating_coordinator_states_the_backlog_and_keeps_the_board_live() {
+        // The plausible bug: a 404 on /commissions is treated as a store
+        // failure that dims /view, so opening the backlog takes every other
+        // pane down with it.
+        let view = bloom_with(vec![MemberView { workpiece: "wp-keep".to_owned(), ..MemberView::default() }], |_| {});
+        let (mut shell, probe) = Shell::harness(Duration::from_secs(1));
+        probe.reply(FetchReply { key: ResourceKey::View, outcome: Ok(ResourceBody::View(view)) });
+        shell.pump();
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('b'))), Outcome::Handled);
+        probe.reply(FetchReply { key: ResourceKey::Commissions, outcome: Ok(ResourceBody::CommissionsMissing) });
+        shell.pump();
+
+        let text = draw(&mut shell);
+        assert!(text.contains("predates the commission store"), "{text}");
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Esc)), Outcome::Handled);
+        let text = draw(&mut shell);
+        assert!(text.contains("wp-keep"), "{text}");
+        assert!(!text.contains("predates the commission store"), "{text}");
+
+        while probe.take_live().is_some() {}
+        while probe.take_bulk().is_some() {}
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('r'))), Outcome::Handled);
+        assert_eq!(probe.take_live().map(|request| request.key), Some(ResourceKey::View));
     }
 }

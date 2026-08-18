@@ -10,8 +10,8 @@ use std::thread;
 use std::time::Duration;
 
 use crate::dto::{
-    DecodedArtifact, DispatchFilePage, JournalPage, MetricDay, MetricDispatch, MetricsSeat, MetricsSummary,
-    MetricsTimeline, SpendWindowView, ViewDocument,
+    CommissionShowView, CommissionsView, DecodedArtifact, DispatchFilePage, JournalPage, MetricDay, MetricDispatch,
+    MetricsSeat, MetricsSummary, MetricsTimeline, SpendWindowView, ViewDocument,
 };
 use crate::http::{self, Endpoint};
 use crate::store::{Lane, ResourceKey};
@@ -38,6 +38,9 @@ pub enum ResourceBody {
     Seats(Vec<MetricsSeat>),
     Dispatches(Vec<MetricDispatch>),
     Spend(SpendWindowView),
+    Commissions(CommissionsView),
+    CommissionsMissing,
+    Commission(CommissionShowView),
 }
 
 /// Outcome posted back to the shell. The event loop never calls HTTP.
@@ -142,6 +145,14 @@ fn fetch_key(endpoint: &Endpoint, key: &ResourceKey, timeout: Duration) -> Resul
             .map_err(|error| error.to_string()),
         ResourceKey::Spend => http::get_json::<SpendWindowView>(endpoint, &path, timeout)
             .map(ResourceBody::Spend)
+            .map_err(|error| error.to_string()),
+        ResourceKey::Commissions => match http::get_json_optional::<CommissionsView>(endpoint, &path, timeout) {
+            Ok(None) => Ok(ResourceBody::CommissionsMissing),
+            Ok(Some(value)) => Ok(ResourceBody::Commissions(value)),
+            Err(error) => Err(error.to_string()),
+        },
+        ResourceKey::Commission(_) => http::get_json::<CommissionShowView>(endpoint, &path, timeout)
+            .map(ResourceBody::Commission)
             .map_err(|error| error.to_string()),
     }
 }

@@ -1,6 +1,7 @@
 //! Navigation stack entries. Each variant owns only its view state.
 
 mod artifact;
+mod backlog;
 mod board;
 mod detail;
 mod journal;
@@ -18,6 +19,7 @@ use crate::nav::Nav;
 use crate::store::{ResourceKey, Store};
 use crate::warroom::Focus;
 
+pub use backlog::Backlog;
 pub use board::{BloomRow, Board, BoardLane, BoardRow, MemberRow, RowId, member_status_state};
 pub use detail::Detail;
 pub use metrics::{Breakdown, Dashboard, Days, Timeline, compose};
@@ -25,6 +27,7 @@ pub use partition::{is_history_status, is_live_status};
 pub use transcript::{LineBuffer, Transcript};
 
 use artifact::Artifact;
+use backlog::Workpiece;
 use journal::{Journal, Record};
 
 /// One frame on the shell's stack.
@@ -38,6 +41,8 @@ pub enum Screen {
     Timeline(Timeline),
     Days(Days),
     Cost(Breakdown),
+    Backlog(Backlog),
+    Workpiece(Workpiece),
 }
 
 impl Screen {
@@ -62,12 +67,14 @@ impl Screen {
             Nav::Focus(Focus::Record { sequence }) => Self::Record(Record::new(sequence)),
             Nav::Focus(Focus::Artifact { digest }) => Self::Artifact(Artifact::new(digest)),
             Nav::Focus(Focus::Transcript { nonce }) => Self::Transcript(Transcript::new(nonce)),
+            Nav::Focus(Focus::Workpiece { id }) => Self::Workpiece(Workpiece::new(id)),
             Nav::Focus(focus) => Self::Detail(Detail::new(focus)),
             Nav::History => Self::history(),
             Nav::Journal { bloom } => Self::Journal(Journal::new(bloom)),
             Nav::Timeline { bloom } => Self::Timeline(Timeline::new(bloom)),
             Nav::Days => Self::Days(Days::new()),
             Nav::Cost => Self::Cost(Breakdown::new()),
+            Nav::Backlog => Self::Backlog(Backlog::new()),
         }
     }
 
@@ -78,7 +85,13 @@ impl Screen {
             Self::Record(record) => Some(record.focus()),
             Self::Artifact(artifact) => Some(artifact.focus()),
             Self::Transcript(transcript) => Some(transcript.focus()),
-            Self::Board(_) | Self::Journal(_) | Self::Timeline(_) | Self::Days(_) | Self::Cost(_) => None,
+            Self::Board(_)
+            | Self::Journal(_)
+            | Self::Timeline(_)
+            | Self::Days(_)
+            | Self::Cost(_)
+            | Self::Backlog(_) => None,
+            Self::Workpiece(workpiece) => Some(workpiece.focus()),
         }
     }
 
@@ -93,7 +106,9 @@ impl Screen {
             | Self::Transcript(_)
             | Self::Timeline(_)
             | Self::Days(_)
-            | Self::Cost(_) => 0,
+            | Self::Cost(_)
+            | Self::Backlog(_)
+            | Self::Workpiece(_) => 0,
         }
     }
 
@@ -102,6 +117,8 @@ impl Screen {
         match self {
             Self::Board(board) => board.cursor().selected().map(|id| format!("{id:?}")),
             Self::Detail(detail) => detail.selected_key().map(|key| format!("{key:?}")),
+            Self::Backlog(backlog) => backlog.selected_key().cloned(),
+            Self::Workpiece(workpiece) => workpiece.selected_key().map(|key| format!("{key:?}")),
             Self::Journal(_)
             | Self::Record(_)
             | Self::Artifact(_)
@@ -124,6 +141,8 @@ impl Screen {
             Self::Timeline(timeline) => timeline.subscriptions(),
             Self::Days(days) => days.subscriptions(),
             Self::Cost(cost) => cost.subscriptions(),
+            Self::Backlog(backlog) => backlog.subscriptions(),
+            Self::Workpiece(workpiece) => workpiece.subscriptions(),
         }
     }
 
@@ -139,6 +158,8 @@ impl Screen {
             Self::Timeline(_) => Timeline::key_hints(),
             Self::Days(_) => Days::key_hints(),
             Self::Cost(_) => Breakdown::key_hints(),
+            Self::Backlog(_) => Backlog::key_hints(),
+            Self::Workpiece(_) => Workpiece::key_hints(),
         }
     }
 
@@ -150,6 +171,8 @@ impl Screen {
             Self::Journal(_) | Self::Record(_) | Self::Transcript(_) | Self::Days(_) | Self::Cost(_) => None,
             Self::Artifact(artifact) => Some(artifact.digest_under_cursor()),
             Self::Timeline(timeline) => Some(timeline.bloom()),
+            Self::Backlog(backlog) => backlog.digest_under_cursor(),
+            Self::Workpiece(workpiece) => workpiece.digest_under_cursor(),
         }
     }
 
@@ -164,6 +187,8 @@ impl Screen {
             Self::Timeline(timeline) => timeline.handle_key(key, store),
             Self::Days(days) => days.handle_key(key, store),
             Self::Cost(cost) => cost.handle_key(key, store),
+            Self::Backlog(backlog) => backlog.handle_key(key, store),
+            Self::Workpiece(workpiece) => workpiece.handle_key(key, store),
         }
     }
 
@@ -175,6 +200,8 @@ impl Screen {
             Self::Transcript(transcript) => transcript.reseat(store),
             Self::Timeline(timeline) => timeline.reseat(store),
             Self::Cost(cost) => cost.reseat(store),
+            Self::Backlog(backlog) => backlog.reseat(store),
+            Self::Workpiece(workpiece) => workpiece.reseat(store),
             Self::Record(_) | Self::Artifact(_) | Self::Days(_) => {}
         }
     }
@@ -190,6 +217,8 @@ impl Screen {
             Self::Timeline(timeline) => timeline.render(frame, area, store),
             Self::Days(days) => days.render(frame, area, store),
             Self::Cost(cost) => cost.render(frame, area, store),
+            Self::Backlog(backlog) => backlog.render(frame, area, store),
+            Self::Workpiece(workpiece) => workpiece.render(frame, area, store),
         }
     }
 
@@ -204,6 +233,8 @@ impl Screen {
             Self::Timeline(timeline) => timeline.selected_is_first(store),
             Self::Cost(cost) => cost.selected_is_first(store),
             Self::Days(days) => days.selected_is_first(),
+            Self::Backlog(backlog) => backlog.selected_is_first(store),
+            Self::Workpiece(workpiece) => workpiece.selected_is_first(),
             Self::Record(_) | Self::Artifact(_) => true,
         }
     }
