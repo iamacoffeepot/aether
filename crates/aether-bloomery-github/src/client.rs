@@ -50,6 +50,8 @@ pub use aether_bloomery_git::{
     PullRequestState, RunConclusion, RunStatus, WorkflowRun, strip_heads,
 };
 
+use aether_bloomery_git::RefTxnOp;
+
 /// A check-run conclusion — the *inward* channel's input vocabulary (a
 /// reviewer verdict / check run normalizes through
 /// [`crate::normalize_stage_result`]). Kept here because it is the shape the
@@ -902,6 +904,40 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
             }
             status => Err(git_data_error(GithubError::Status { status, body: response.body })),
         }
+    }
+
+    fn compare_and_swap_ref(&self, name: &str, sha: &str, expected: &str) -> Result<GitRef, GitDataError> {
+        match self.get_ref(name)? {
+            Some(current) if current.sha == expected => self.update_ref(name, sha, true),
+            Some(current) => {
+                Err(GitDataError::RefConflict(format!("ref {name} is at {}, expected {expected}", current.sha)))
+            }
+            None => Err(GitDataError::MissingObject(format!("no ref {name}"))),
+        }
+    }
+
+    fn transact_refs(&self, ops: &[RefTxnOp]) -> Result<(), GitDataError> {
+        let mut created: Vec<String> = Vec::new();
+        for op in ops {
+            let result = match op {
+                RefTxnOp::Create { name, sha } => self.create_ref(name, sha).map(|_| created.push(name.clone())),
+                RefTxnOp::Update { name, sha, expected } => self.compare_and_swap_ref(name, sha, expected).map(|_| ()),
+                RefTxnOp::Delete { name, expected } => match self.get_ref(name)? {
+                    None => Ok(()),
+                    Some(current) if current.sha == *expected => self.delete_ref(name),
+                    Some(current) => {
+                        Err(GitDataError::RefConflict(format!("ref {name} is at {}, expected {expected}", current.sha)))
+                    }
+                },
+            };
+            if let Err(error) = result {
+                for name in created.iter().rev() {
+                    let _ = self.delete_ref(name);
+                }
+                return Err(error);
+            }
+        }
+        Ok(())
     }
 }
 

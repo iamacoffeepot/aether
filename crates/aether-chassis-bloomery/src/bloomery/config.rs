@@ -345,6 +345,20 @@ pub struct CoordinatorConfig {
     /// operated, not of the GitHub connection.
     #[config(env = "AETHER_BLOOMERY_MAINLINE_REF", default = "refs/heads/main")]
     pub mainline_ref: String,
+    /// Which git-data backend the source port talks to: `github` (the default,
+    /// the GitHub REST adapter remains authoritative) or `local` (an absolute
+    /// bare-repository path via [`authority_repo`](Self::authority_repo)).
+    ///
+    /// Named `AETHER_BLOOMERY_AUTHORITY_BACKEND` rather than under this
+    /// struct's `AETHER_GITHUB` prefix: which store owns the refs is how the
+    /// coordinator is being operated, not a GitHub-connection property.
+    #[config(env = "AETHER_BLOOMERY_AUTHORITY_BACKEND", default = "github")]
+    pub authority_backend: String,
+    /// Absolute filesystem path to the bare repository used when
+    /// [`authority_backend`](Self::authority_backend) is `local`. Empty (the
+    /// default) is only valid for the GitHub backend. No `file://` prefix.
+    #[config(env = "AETHER_BLOOMERY_AUTHORITY_REPO", default = "")]
+    pub authority_repo: String,
     /// How long a running batch gate stays young enough that arriving work
     /// restarts it (ADR-0200 §The batch gate). The eight-finish-then-twenty-four-more
     /// case restarts because the first eight's build is still young when the
@@ -413,6 +427,8 @@ impl Default for CoordinatorConfig {
             operator_name: String::new(),
             operator_email: String::new(),
             mainline_ref: "refs/heads/main".to_owned(),
+            authority_backend: "github".to_owned(),
+            authority_repo: String::new(),
             batch_restart_young_secs: 60,
             batch_restart_addition: 24,
         }
@@ -426,6 +442,12 @@ impl CoordinatorConfig {
     #[must_use]
     pub fn mainline(&self) -> MainlineRef {
         MainlineRef::new(&self.mainline_ref)
+    }
+
+    /// Whether the source port should open a fleet-local git-data backend.
+    #[must_use]
+    pub fn uses_local_authority(&self) -> bool {
+        self.authority_backend == "local"
     }
 
     #[must_use]
@@ -706,6 +728,8 @@ xAtw6HCuoUIzjbWZe1H+wS8KmJmYkTvf8f70x0/jMYRUyvMQy3beUUQ=
         assert_eq!(coordinator.heartbeat_silence_secs().expect("the default is nonzero"), 600);
         assert_eq!(coordinator.batch_restart_young_secs, 60);
         assert_eq!(coordinator.batch_restart_addition, 24);
+        assert_eq!(coordinator.authority_backend, "github");
+        assert!(!coordinator.uses_local_authority());
     }
 
     #[test]

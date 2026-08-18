@@ -49,6 +49,7 @@ fn member(number: u64, revision: u8) -> MemberView {
         machinery_rolls: 0,
         machinery_budget: 0,
         wedge_cause: None,
+        cursor: None,
     }
 }
 
@@ -62,6 +63,7 @@ fn one_bloom(id: BloomId, members: Vec<MemberView>) -> ViewDocument {
         executor_fault: None,
         review_park: None,
         composition: None,
+        operator_hold: None,
     };
     ViewDocument { mainline: digest(0), observed: digest(0), spend_quiesce: None, blooms: vec![bloom] }
 }

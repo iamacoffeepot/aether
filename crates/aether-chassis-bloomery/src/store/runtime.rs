@@ -11,9 +11,9 @@
 use super::StoreCapability;
 use super::kinds::{
     AckOutbox, AckOutboxResult, AppendEvent, AppendEventResult, ClaimSeal, ClaimSealResult, DrainOutbox,
-    DrainOutboxResult, EnqueueOutbox, EnqueueOutboxResult, OutboxEntry, RecordConfig, RecordConfigResult,
-    RecordDispatchDescription, RecordDispatchDescriptionResult, ReleaseMembership, ReleaseMembershipResult, Supersede,
-    SupersedeResult,
+    DrainOutboxResult, EnqueueOutbox, EnqueueOutboxResult, OutboxEntry, PageJournal, PageJournalResult, RecordConfig,
+    RecordConfigResult, RecordDispatchDescription, RecordDispatchDescriptionResult, ReleaseMembership,
+    ReleaseMembershipResult, Supersede, SupersedeResult,
 };
 use aether_actor::runtime;
 // The control-plane transact-mails the wasm control actor drives — `Commit` and
@@ -25,7 +25,7 @@ use aether_bloomery::{
     MembershipMutation, OutboxPayload, ReplayJournal, ReplayJournalResult, WorkpieceId,
 };
 use std::iter::repeat_n;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::Connection;
 use rusqlite::ffi::{Error as SqliteFfiError, SQLITE_ERROR};
@@ -445,6 +445,10 @@ pub trait StoreBackend: Send {
     fn journal_holds_any(&mut self, keys: &[String]) -> rusqlite::Result<bool>;
     /// Read the whole journal, in sequence order — the recovery replay source.
     fn replay_journal(&mut self) -> rusqlite::Result<Vec<JournalRecord>>;
+    /// The host-clock stamp written on each journal row at admission, in
+    /// sequence order. `None` is a row written before the column existed:
+    /// reconstruct from other sources and say so. Never invented.
+    fn journal_recorded_unix_millis(&mut self) -> rusqlite::Result<Vec<Option<u64>>>;
     /// Read every journaled event's bytes, in sequence order — the facts alone,
     /// without the recorded decisions replay folds (#4957).
     ///
@@ -517,7 +521,13 @@ impl SqliteStore {
 /// `4` is ADR-0200: the `proof_facts` ledger. Append-only rows, created empty.
 /// Existing stores gain the table; nothing is backfilled — a fact that was
 /// never discriminated is not invented. Stale closure keys are not deleted.
-const SCHEMA_VERSION: i64 = 4;
+///
+/// `5` is the journal envelope's host-clock stamp (`recorded_unix_millis`).
+/// New admissions write the clock the intake already uses for deadlines.
+/// Pre-existing rows stay `NULL` — inventing a time on a historical row is
+/// worse than an absent one, and every consumer treats `NULL` as reconstruct
+/// from other sources.
+const SCHEMA_VERSION: i64 = 5;
 
 /// Bring a store opened at [`MIGRATIONS`] up to [`SCHEMA_VERSION`], or refuse it.
 ///
@@ -597,6 +607,12 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
         migration.execute_batch(PROOF_FACTS_TABLE)?;
     }
 
+    // Version 5: the journal envelope's host-clock stamp. Added nullable
+    // with no default and no backfill — a pre-existing row stays NULL.
+    if !has_column(&migration, "journal", "recorded_unix_millis")? {
+        migration.execute_batch("ALTER TABLE journal ADD COLUMN recorded_unix_millis INTEGER;")?;
+    }
+
     migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     migration.commit()
 }
@@ -674,7 +690,8 @@ CREATE TABLE IF NOT EXISTS journal (
     event           BLOB NOT NULL,
     decisions       BLOB,
     decider         TEXT,
-    decisions_schema TEXT
+    decisions_schema TEXT,
+    recorded_unix_millis INTEGER
 );
 CREATE TABLE IF NOT EXISTS active_membership (
     workpiece TEXT PRIMARY KEY,
@@ -824,6 +841,27 @@ fn order_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutstandingOrder>
 /// nothing a real dispatch can observe.
 fn deadline_column(order: &OutstandingOrder) -> i64 {
     i64::try_from(order.deadline_unix_millis).unwrap_or(i64::MAX)
+}
+
+/// The current wall clock in Unix milliseconds — the same host-clock reading
+/// intake uses to seal a dispatch deadline (ADR-0177). A clock before the
+/// epoch is not a time any stamp can use, so it reads as `0`; that is a
+/// recorded reading, distinct from a pre-column `NULL`.
+pub fn now_unix_millis() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// One admission stamp as the signed integer the column stores, saturating at
+/// [`i64::MAX`] — the same clamp [`deadline_column`] applies.
+fn recorded_column(now_unix_millis: u64) -> i64 {
+    i64::try_from(now_unix_millis).unwrap_or(i64::MAX)
+}
+
+/// A nullable envelope stamp as the host-clock reading it stores. A negative
+/// is not a time this writer produces, so it reads as absent rather than as
+/// an invented instant.
+fn recorded_from_column(value: Option<i64>) -> Option<u64> {
+    value.and_then(|millis| u64::try_from(millis).ok())
 }
 
 /// An [`OutstandingOrder`]'s columns as positional parameters matching
@@ -1115,10 +1153,19 @@ impl StoreBackend for SqliteStore {
         outbox: &[OutboxPayload],
     ) -> rusqlite::Result<CommitOutcome> {
         let tx = self.conn.transaction()?;
+        let recorded = recorded_column(now_unix_millis());
         let changed = tx.execute(
-            "INSERT OR IGNORE INTO journal (idempotency_key, event, decisions, decider, decisions_schema) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![write.idempotency_key, write.event, write.decisions, write.decider, DECISIONS_SCHEMA],
+            "INSERT OR IGNORE INTO journal \
+             (idempotency_key, event, decisions, decider, decisions_schema, recorded_unix_millis) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                write.idempotency_key,
+                write.event,
+                write.decisions,
+                write.decider,
+                DECISIONS_SCHEMA,
+                recorded,
+            ],
         )?;
         if changed == 0 {
             // The key was already journaled — the whole commit is a no-op. The
@@ -1163,10 +1210,19 @@ impl StoreBackend for SqliteStore {
     }
 
     fn append_event(&mut self, write: &JournalWrite<'_>) -> rusqlite::Result<AppendOutcome> {
+        let recorded = recorded_column(now_unix_millis());
         let changed = self.conn.execute(
-            "INSERT OR IGNORE INTO journal (idempotency_key, event, decisions, decider, decisions_schema) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![write.idempotency_key, write.event, write.decisions, write.decider, DECISIONS_SCHEMA],
+            "INSERT OR IGNORE INTO journal \
+             (idempotency_key, event, decisions, decider, decisions_schema, recorded_unix_millis) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                write.idempotency_key,
+                write.event,
+                write.decisions,
+                write.decider,
+                DECISIONS_SCHEMA,
+                recorded,
+            ],
         )?;
         if changed == 0 {
             Ok(AppendOutcome::Duplicate)
@@ -1321,6 +1377,12 @@ impl StoreBackend for SqliteStore {
                 decisions_schema: row.get(5)?,
             })
         })?;
+        rows.collect()
+    }
+
+    fn journal_recorded_unix_millis(&mut self) -> rusqlite::Result<Vec<Option<u64>>> {
+        let mut stmt = self.conn.prepare("SELECT recorded_unix_millis FROM journal ORDER BY sequence")?;
+        let rows = stmt.query_map([], |row| Ok(recorded_from_column(row.get(0)?)))?;
         rows.collect()
     }
 
@@ -1533,6 +1595,15 @@ impl NativeActor for StoreCapability {
         match state.backend.replay_journal() {
             Ok(records) => ReplayJournalResult::Ok { records },
             Err(error) => ReplayJournalResult::Err { error: error.to_string() },
+        }
+    }
+
+    #[handler::single]
+    fn on_page_journal(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: PageJournal) -> PageJournalResult {
+        let PageJournal { bloom, from_sequence, limit, descending, notice } = mail;
+        match state.backend.replay_journal() {
+            Ok(records) => PageJournalResult::Ok { records, bloom, from_sequence, limit, descending, notice },
+            Err(error) => PageJournalResult::Err { error: error.to_string() },
         }
     }
 }

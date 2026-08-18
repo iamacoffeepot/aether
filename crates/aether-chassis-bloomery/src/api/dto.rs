@@ -303,11 +303,49 @@ pub struct JournalEntry {
     pub decider: String,
 }
 
-/// `GET /journal` — the whole journal, oldest first, decoded.
+/// `GET /journal` — one bounded page of decoded records.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JournalView {
-    /// Every journaled event, in sequence order.
+    /// The page of journaled events, in the requested order.
     pub records: Vec<JournalEntry>,
+    /// How many records match the filter (the whole journal, or one bloom).
+    pub total_matched: u64,
+    /// How many records this page carries.
+    pub shown: u64,
+    /// True when more matching records remain after this page.
+    pub truncated: bool,
+    /// Exclusive cursor for the next page. Absent when [`truncated`](Self::truncated)
+    /// is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_from_sequence: Option<u64>,
+    /// Set when the caller named a `limit` above the clamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
+}
+
+/// `GET /artifacts/{digest}/decoded` — a known kind, or a raw range.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecodedArtifactView {
+    /// The content-address domain of the resolved type, or `null`.
+    pub kind: Option<String>,
+    /// The decoded value, present only when [`kind`](Self::kind) is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+    /// A raw byte range, present only when no known type matched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<Vec<u8>>,
+    /// Offset of [`bytes`](Self::bytes) when this is a raw fallback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u64>,
+    /// Full artifact length when this is a raw fallback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    /// Whether the raw fallback was truncated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+    /// Set when the caller named a `limit` above the clamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 #[cfg(feature = "github")]
