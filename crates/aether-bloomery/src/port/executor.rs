@@ -149,6 +149,14 @@ pub struct EvidenceRef {
     /// sub-band rate and names the hole, rather than band-selecting from the
     /// aggregate.
     pub calls: Option<Vec<StudyCall>>,
+    /// Session-reuse arm from `evidence.json` (`fresh` / `resumed`), when the
+    /// backend read the file. Folded at intake — the janitor deletes the file.
+    pub session_reuse_arm: Option<String>,
+    /// Micro-USD the reuse arm saved against its counterfactual, when both
+    /// prices were present.
+    pub session_reuse_saved_micro_usd: Option<u64>,
+    /// Peak resident bytes from `evidence.json`, when the harness stamped one.
+    pub peak_resident_bytes: Option<u64>,
 }
 
 /// The disposable-worker boundary (ADR-0149 §The boundary). Exactly the four

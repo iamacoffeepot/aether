@@ -1154,6 +1154,20 @@ fn replay_state_matches_whether_the_envelope_stamp_is_populated() {
     assert_eq!(fold_journal(&mut stamped), fold_journal(&mut unstamped));
 }
 
+#[test]
+fn metrics_rollups_refold_to_identical_payloads() {
+    // The tables are cache: delete and refold from the journal must reproduce
+    // the same dispatch payloads. The fold itself is proven in aether-bloomery;
+    // this pins the persist/clear/refold path the host uses.
+    let mut store = memory();
+    store.fold_metrics_from_journal().unwrap();
+    let first = store.metric_dispatch_payloads().unwrap();
+    store.clear_metrics().unwrap();
+    assert_eq!(store.metrics_cursor().unwrap(), 0, "clear drops the cursor");
+    store.fold_metrics_from_journal().unwrap();
+    assert_eq!(store.metric_dispatch_payloads().unwrap(), first);
+}
+
 fn fold_journal(store: &mut SqliteStore) -> aether_bloomery::Snapshot {
     use aether_bloomery::{Decisions, Event, ResolvedConfigs, Snapshot};
     use aether_data::wire::from_bytes;
@@ -1191,4 +1205,39 @@ fn proof_facts_append_and_never_replace() {
     assert_eq!(rows[1].sequence, 2);
     assert_eq!(rows[0].test_id, "crate::once");
     assert_eq!(rows[1].producing_dispatch, "n-1");
+}
+
+#[test]
+fn lookup_named_dispatch_survives_consume_and_misses_an_unknown_nonce() {
+    // Only the coordinator can tell "swept" from "never existed". consume
+    // drops the outstanding row but dispatch_owners keeps the name.
+    let mut store = memory();
+    store.record_order(&order("dispatch-7")).unwrap();
+    assert_eq!(
+        store.lookup_named_dispatch("dispatch-7").unwrap().as_deref(),
+        Some(order("dispatch-7").bloom.as_slice()),
+    );
+    assert!(store.consume_order("dispatch-7").unwrap());
+    assert_eq!(
+        store.lookup_named_dispatch("dispatch-7").unwrap().as_deref(),
+        Some(order("dispatch-7").bloom.as_slice()),
+        "a consumed order is still a name the journal knows",
+    );
+    assert_eq!(store.lookup_named_dispatch("dispatch-missing").unwrap(), None);
+}
+
+#[test]
+fn list_bloom_dispatch_live_is_scoped_to_the_named_bloom() {
+    let mut store = memory();
+    let mut ours = order("dispatch-1");
+    ours.bloom = vec![0xAA; 32];
+    let mut theirs = order("dispatch-2");
+    theirs.bloom = vec![0xBB; 32];
+    store.record_order(&ours).unwrap();
+    store.record_order(&theirs).unwrap();
+
+    let live = store.list_bloom_dispatch_live(&[0xAA; 32]).unwrap();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].nonce, "dispatch-1");
+    assert_eq!(store.list_bloom_dispatch_live(&[0xCC; 32]).unwrap().len(), 0);
 }

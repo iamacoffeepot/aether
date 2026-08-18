@@ -39,6 +39,9 @@
 //!   a versioned policy artifact rejects the attempt before dispatch.
 //! - [`mod@reduce`] — the pure control core: [`reduce`](reduce::reduce) owns
 //!   every state transition, with no I/O, no engine boot, no GitHub types.
+//! - [`metrics`] — the metrics ledger: [`MetricsLedger`] folds the
+//!   journal into dispatch / bloom / day rollups and seat rows. Cost stays a
+//!   study-artifact digest; `cost == 0` is unpriced, never free.
 //! - [`calibration`] — the capability ledger: [`CalibrationLedger`] folds the
 //!   journal into per-`(harness, model, effort) × stage` counts — attempts,
 //!   rolls, typed verifier failures, and study-measured cost — so which agent to
@@ -69,6 +72,7 @@ pub mod digest;
 pub mod ids;
 pub mod inward;
 pub mod manifest;
+pub mod metrics;
 pub mod port;
 pub mod reduce;
 pub mod sign;
@@ -83,8 +87,9 @@ pub use control::{
     Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, CONTROL_CORE_NAMESPACE, ClaimResult, ClaimSeal,
     Commit, CommitResult, CompleteRelease, CompleteReleaseResult, CompleteTransfer, ConfigRecord, DispatchPayload,
     EnumerateClaims, EnumerateClaimsResult, IntegratePayload, JournalRecord, LandPayload, LoadConfigs,
-    LoadConfigsResult, MembershipMutation, ObserveMainline, ObserveMainlineResult, OrphanClaimReleasePayload,
-    OutboxPayload, Query, QueryResult, RedispatchPayload, ReleaseSeal, ReplayJournal, ReplayJournalResult, ReviewPass,
+    LoadConfigsResult, MembershipMutation, MetricsQuery, MetricsQueryResult, MetricsView, ObserveMainline,
+    ObserveMainlineResult, OrphanClaimReleasePayload, OutboxPayload, Query, QueryResult, RedispatchPayload,
+    ReleaseSeal, ReplayJournal, ReplayJournalResult, ReviewPass, SourceReplicaPayload, SpendQuery, SpendQueryResult,
     SplicePayload, Topic, TransferSeal,
 };
 pub use correspondence::{BackendObjectId, Correspondence, CorrespondenceError, SharedCorrespondence};
@@ -93,6 +98,10 @@ pub use ids::{BloomId, IdempotencyKey, KeyId, Nonce, StageId, WorkpieceId};
 pub use inward::{InwardError, StageResult, StageVerdict, StudyResult, normalize_stage_result, normalize_study_result};
 pub use manifest::{
     ClosureViolation, MANIFEST_CLOSURE_BUDGET, PromptManifest, ProvenanceIndex, Slot, SlotRole, assemble_manifest,
+};
+pub use metrics::{
+    DAYS_CAP, METRICS_DEFAULT_LIMIT, METRICS_MAX_LIMIT, MetricBloom, MetricDay, MetricDispatch, MetricsLedger,
+    MetricsSeat, MetricsSummary, MetricsTimeline, RECONSTRUCTED_WINDOW, TIMELINE_SPAN_CAP, TimelineSpan, window_label,
 };
 pub use port::{
     BloomView, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome,

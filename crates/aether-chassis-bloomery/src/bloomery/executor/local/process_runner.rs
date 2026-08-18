@@ -113,14 +113,42 @@ pub struct ProcessTransformRunner {
     identity: CaptureIdentity,
     /// Which program a dispatch spawns in the scratch worktree (#4727).
     lane_program: LaneProgram,
+    /// The coordinator repository worktrees are added to. An absolute path —
+    /// the local authority, or the process current directory captured at
+    /// construction — never `"."`.
+    repo: PathBuf,
+    /// Where [`fetch_subject_if_absent`] pulls a missing order identity from.
+    /// Empty means the GitHub `origin` remote; a local authority stores the
+    /// absolute repository path (no `file://` prefix).
+    fetch_remote: String,
 }
 
 impl ProcessTransformRunner {
-    /// Build the runner over the capture identity and lane invocation the host
-    /// resolved.
+    /// Build the runner over the capture identity, lane invocation, and
+    /// repository the host resolved.
     #[must_use]
-    pub fn new(identity: CaptureIdentity, lane_program: LaneProgram) -> Self {
-        Self { identity, lane_program }
+    pub fn new(identity: CaptureIdentity, lane_program: LaneProgram, repo: impl Into<PathBuf>) -> Self {
+        let repo = repo.into();
+        let repo = repo.canonicalize().unwrap_or(repo);
+        Self { identity, lane_program, repo, fetch_remote: String::new() }
+    }
+
+    /// Fetch missing order identities from `remote` instead of `origin`.
+    ///
+    /// A local authority passes its absolute path so a dispatch never depends
+    /// on a network remote existing.
+    #[must_use]
+    pub fn with_fetch_remote(mut self, remote: impl Into<String>) -> Self {
+        self.fetch_remote = remote.into();
+        self
+    }
+
+    fn fetch_remote(&self) -> &str {
+        if self.fetch_remote.is_empty() {
+            "origin"
+        } else {
+            &self.fetch_remote
+        }
     }
 }
 
@@ -136,12 +164,12 @@ impl TransformRunner for ProcessTransformRunner {
         // `--diff-base` travels to the lane's verify gates, whose
         // `rev-parse --verify <base>^{commit}` / `merge-base` fail on a
         // tree and wedge the member on verify.preflight (#5026).
-        fetch_order_identities(Path::new("."), spec.checkout_hex, spec.diff_base_hex)?;
-        let checkout = commitish_for(Path::new("."), spec.checkout_hex)?;
-        let diff_base = spec.diff_base_hex.map(|hex| commitish_for(Path::new("."), hex)).transpose()?;
+        fetch_order_identities(&self.repo, spec.checkout_hex, spec.diff_base_hex, self.fetch_remote())?;
+        let checkout = commitish_for(&self.repo, spec.checkout_hex)?;
+        let diff_base = spec.diff_base_hex.map(|hex| commitish_for(&self.repo, hex)).transpose()?;
         // Bring the slot's checkout to the sealed subject — reset in place when the
         // slot already holds one, created when it does not.
-        materialize_checkout(Path::new("."), spec.worktree_dir, &checkout)?;
+        materialize_checkout(&self.repo, spec.worktree_dir, &checkout)?;
         // The scratch worktree is a full checkout carrying the repo's interactive
         // `.claude/settings.json` hooks, and the construct lane spawns headless
         // `claude` in it — so the SessionStart worktree-rebind hook would fire and
@@ -179,6 +207,7 @@ impl TransformRunner for ProcessTransformRunner {
         // captured and read) and drops the admin entry `git worktree add` registered,
         // so a long-lived backend does not leak one worktree per order.
         let removed = Command::new("git")
+            .current_dir(&self.repo)
             .args(["worktree", "remove", "--force"])
             .arg(worktree_dir)
             .output()
@@ -194,7 +223,7 @@ impl TransformRunner for ProcessTransformRunner {
         // opening with a `worktree <absolute path>` line. Everything else in the
         // stanza (HEAD, branch, detached, locked, prunable) says nothing about
         // which checkout the path is, so only that line is read.
-        Ok(git_in(Path::new("."), &["worktree", "list", "--porcelain"])?
+        Ok(git_in(&self.repo, &["worktree", "list", "--porcelain"])?
             .lines()
             .filter_map(|line| line.strip_prefix("worktree "))
             .map(PathBuf::from)
@@ -248,7 +277,7 @@ impl TransformRunner for ProcessTransformRunner {
     }
 
     fn checkout_parents(&self, checkout_hex: &str) -> Result<Vec<String>, LocalExecutorError> {
-        commit_parents(Path::new("."), checkout_hex)
+        commit_parents(&self.repo, checkout_hex)
     }
 }
 
@@ -408,10 +437,11 @@ fn fetch_order_identities(
     repo_dir: &Path,
     checkout_hex: &str,
     diff_base_hex: Option<&str>,
+    remote: &str,
 ) -> Result<(), LocalExecutorError> {
-    fetch_subject_if_absent(repo_dir, checkout_hex)?;
+    fetch_subject_if_absent(repo_dir, checkout_hex, remote)?;
     if let Some(hex) = diff_base_hex {
-        fetch_subject_if_absent(repo_dir, hex)?;
+        fetch_subject_if_absent(repo_dir, hex, remote)?;
     }
     Ok(())
 }
@@ -432,15 +462,25 @@ fn fetch_order_identities(
 /// requires the sealed identity, not a branch tip, and the bloom ref
 /// namespace grows without bound across runs.
 ///
-/// Already-local objects skip the fetch: `git fetch origin <sha>` still
-/// needs `origin` to exist even when git would satisfy the want from the
+/// Already-local objects skip the fetch: `git fetch <remote> <sha>` still
+/// needs the remote to exist even when git would satisfy the want from the
 /// local database, and a dispatch whose identities this clone already holds
-/// must not depend on the remote being reachable.
-fn fetch_subject_if_absent(repo_dir: &Path, hex: &str) -> Result<(), LocalExecutorError> {
+/// must not depend on the remote being reachable. `remote` is `origin` when
+/// GitHub is authoritative, or an absolute repository path (no `file://`)
+/// when the fleet-local authority holds the objects.
+fn fetch_subject_if_absent(repo_dir: &Path, hex: &str, remote: &str) -> Result<(), LocalExecutorError> {
     if git_in(repo_dir, &["cat-file", "-e", hex]).is_ok() {
         return Ok(());
     }
-    git_in(repo_dir, &["fetch", "--no-tags", "--quiet", "origin", hex]).map_err(|error| match error {
+    // The coordinator repository *is* the authority: a missing object is
+    // not on another host, so reaching for a network remote would be a lie.
+    if same_object_database(repo_dir, remote) {
+        return Err(LocalExecutorError::Worktree(format!(
+            "fetching order subject {hex}: object is not in {}",
+            repo_dir.display()
+        )));
+    }
+    git_in(repo_dir, &["fetch", "--no-tags", "--quiet", remote, hex]).map_err(|error| match error {
         // Name the identity in the failure: a bare "couldn't find remote ref" says
         // nothing about which order could not be materialized.
         LocalExecutorError::Worktree(detail) => {
@@ -449,6 +489,38 @@ fn fetch_subject_if_absent(repo_dir: &Path, hex: &str) -> Result<(), LocalExecut
         other => other,
     })?;
     Ok(())
+}
+
+/// Whether `remote` names the same object database as `repo_dir`.
+///
+/// A named remote (`origin`) never does. An absolute path does when it is the
+/// coordinator repository itself, or a worktree that shares its common dir —
+/// the local-authority case, where a fetch would be a self-fetch.
+fn same_object_database(repo_dir: &Path, remote: &str) -> bool {
+    let remote = Path::new(remote);
+    if !remote.is_absolute() {
+        return false;
+    }
+    match (resolved_git_common_dir(repo_dir), resolved_git_common_dir(remote)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// Canonical path of `repo`'s object database (`rev-parse --git-common-dir`).
+///
+/// `--absolute-git-common-dir` is not on the git this host ships (2.43),
+/// which treats the unknown flag as a revision name and prints it back —
+/// every repository then "shares" the same database.
+fn resolved_git_common_dir(repo: &Path) -> Option<PathBuf> {
+    let raw = git_in(repo, &["rev-parse", "--git-common-dir"]).ok()?;
+    let raw = raw.trim();
+    let path = if Path::new(raw).is_absolute() {
+        PathBuf::from(raw)
+    } else {
+        repo.join(raw)
+    };
+    path.canonicalize().ok()
 }
 
 /// Bring the checkout at `worktree_dir` to `checkout_hex`, reusing the directory
@@ -725,7 +797,7 @@ fn neutralize_hooks(worktree_dir: &Path) -> Result<(), LocalExecutorError> {
 mod tests {
     use std::fs;
     use std::io;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::slice;
     #[cfg(unix)]
@@ -735,6 +807,7 @@ mod tests {
 
     use tempfile::TempDir;
 
+    use super::super::lane_program::LaneProgram;
     use super::super::runner::{RunLifecycle, RunSpec};
     use super::{
         CaptureIdentity, FALLBACK_CAPTURE_SUBJECT, FALLBACK_IDENTITY, ProcessTransformRunner, SETTINGS_PATH,
@@ -995,7 +1068,8 @@ mod tests {
         let (repo, _) = repo_with_one_commit();
         let missing = "0".repeat(40);
 
-        let error = fetch_subject_if_absent(repo.path(), &missing).expect_err("an absent subject cannot be fetched");
+        let error =
+            fetch_subject_if_absent(repo.path(), &missing, "origin").expect_err("an absent subject cannot be fetched");
 
         assert!(format!("{error:?}").contains(&missing), "the failure names the subject it could not fetch");
     }
@@ -1019,7 +1093,7 @@ mod tests {
             "the comparison base must start remote-only, or the fetch is never exercised",
         );
 
-        fetch_order_identities(clone.path(), &checkout, Some(&diff_base))
+        fetch_order_identities(clone.path(), &checkout, Some(&diff_base), "origin")
             .expect("a remote-only base is fetched before resolution");
 
         assert_eq!(
@@ -1338,5 +1412,126 @@ mod tests {
         assert!(decode_object_hex(&"a".repeat(39)).is_none(), "an odd length is half a byte short");
         assert!(decode_object_hex(&"z".repeat(40)).is_none(), "a non-hex character is refused");
         assert!(decode_object_hex("+f").is_none(), "a sign is not a hex digit");
+    }
+
+    /// A bare authority at `name` (which may contain spaces) plus a clone of
+    /// it. The clone has no `origin` remote, so a fetch has to name the
+    /// authority by path.
+    fn authority_and_clone(name: &str) -> (TempDir, PathBuf, PathBuf, String) {
+        let root = tempfile::tempdir().unwrap();
+        let seed = root.path().join("seed");
+        fs::create_dir(&seed).unwrap();
+        run_git(&seed, &["init", "--quiet", "-b", "main"]);
+        run_git(&seed, &["config", "--local", "user.name", "test"]);
+        run_git(&seed, &["config", "--local", "user.email", "test@example.test"]);
+        run_git(&seed, &["commit", "--quiet", "--allow-empty", "--message", "root"]);
+        let head = git_in(&seed, &["rev-parse", "HEAD"]).unwrap().trim().to_owned();
+
+        let authority = root.path().join(name);
+        assert!(
+            Command::new("git")
+                .args(["clone", "--bare", "--quiet"])
+                .arg(&seed)
+                .arg(&authority)
+                .status()
+                .unwrap()
+                .success(),
+            "clone --bare into {authority:?}"
+        );
+
+        let clone = root.path().join("clone");
+        assert!(
+            Command::new("git").args(["clone", "--quiet"]).arg(&authority).arg(&clone).status().unwrap().success(),
+            "clone from {authority:?} without a file:// prefix"
+        );
+        run_git(&clone, &["remote", "remove", "origin"]);
+        (root, authority, clone, head)
+    }
+
+    #[test]
+    fn a_local_authority_path_with_spaces_supplies_a_missing_object() {
+        // Tripwire (ADR-0199): fetch names the authority as an absolute
+        // filesystem path. A `file://` prefix is not required, and a space in
+        // the path is not a reason to invent one — `git fetch` takes the
+        // path as an argv element.
+        let (_root, authority, clone, checkout) = authority_and_clone("authority with spaces.git");
+        let tree = git_in(&authority, &["rev-parse", &format!("{checkout}^{{tree}}")]).unwrap();
+        let advanced = {
+            let output = Command::new("git")
+                .current_dir(&authority)
+                .args(["commit-tree", tree.trim(), "-p", &checkout, "-m", "advance"])
+                .envs([
+                    ("GIT_AUTHOR_NAME", "test"),
+                    ("GIT_AUTHOR_EMAIL", "test@example.test"),
+                    ("GIT_COMMITTER_NAME", "test"),
+                    ("GIT_COMMITTER_EMAIL", "test@example.test"),
+                ])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "commit-tree: {}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        run_git(&authority, &["update-ref", "refs/heads/main", &advanced]);
+        assert!(
+            git_in(&clone, &["cat-file", "-e", &advanced]).is_err(),
+            "the advance must start absent from the clone, or the fetch is never exercised",
+        );
+
+        fetch_subject_if_absent(&clone, &advanced, authority.to_str().expect("utf-8 path"))
+            .expect("an absolute authority path with spaces is a valid fetch remote");
+
+        assert_eq!(
+            commitish_for(&clone, &advanced).expect("the fetched subject must resolve"),
+            advanced,
+            "the exact sealed identity arrived through the path remote",
+        );
+    }
+
+    #[test]
+    fn a_repo_path_with_spaces_materializes_a_worktree() {
+        let (root, authority, _clone, head) = authority_and_clone("repo with spaces.git");
+        let slot = root.path().join("slot-0");
+
+        materialize_checkout(&authority, &slot, &head).expect("git worktree add from a spaced bare path");
+
+        assert_eq!(
+            git_in(&slot, &["rev-parse", "HEAD"]).unwrap().trim(),
+            head,
+            "the slot stands on the authority's subject",
+        );
+    }
+
+    #[test]
+    fn registered_worktrees_read_the_configured_repo_not_the_process_cwd() {
+        // The plausible bug: listing still shells `git worktree list` against
+        // `"."`, so a coordinator whose cwd is not the authority reports the
+        // wrong set (or the developer's own checkout).
+        let (root, authority, _clone, head) = authority_and_clone("authority.git");
+        let slot = root.path().join("slot-0");
+        materialize_checkout(&authority, &slot, &head).unwrap();
+
+        let runner = ProcessTransformRunner::new(CaptureIdentity::default(), LaneProgram::default(), &authority);
+        let listed = runner.registered_worktrees().expect("list the authority's worktrees");
+
+        assert!(
+            listed.iter().any(|path| path == &slot),
+            "the configured repository's worktree is listed, not whatever cwd happens to be: {listed:?}"
+        );
+    }
+
+    #[test]
+    fn an_absent_subject_in_the_authority_itself_does_not_fetch_origin() {
+        // When the runner *is* the local authority, a missing object is not
+        // on a network remote. Reaching for `origin` would be the old cwd
+        // assumption leaking back in.
+        let (_root, authority, _clone, _head) = authority_and_clone("authority.git");
+        let missing = "0".repeat(40);
+
+        let error = fetch_subject_if_absent(&authority, &missing, authority.to_str().expect("utf-8 path"))
+            .expect_err("a self-authority miss is not a network fetch");
+
+        let detail = format!("{error:?}");
+        assert!(detail.contains(&missing), "the failure names the subject: {detail}");
+        assert!(!detail.contains("origin"), "a local authority must not name the GitHub remote: {detail}");
     }
 }

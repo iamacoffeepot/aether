@@ -1,7 +1,9 @@
 //! Bloomery coordinator and GitHub adapter configuration boundaries.
 
+use std::env;
 use std::error::Error;
 use std::fmt;
+use std::path::PathBuf;
 
 #[cfg(feature = "github")]
 use std::fs;
@@ -380,6 +382,17 @@ pub struct CoordinatorConfig {
     /// is: accumulation policy is coordinator-owned.
     #[config(env = "AETHER_BLOOMERY_BATCH_RESTART_ADDITION", default = 24)]
     pub batch_restart_addition: usize,
+    /// Absolute path to the single-writer marker file this coordinator must
+    /// present before it will push source refs to GitHub (ADR-0199). Empty
+    /// means no writer claim. A local-authority boot that has a GitHub replica
+    /// configured refuses to start unless this path names an existing file,
+    /// so two writers cannot be enabled by accident.
+    ///
+    /// Named `AETHER_BLOOMERY_SINGLE_WRITER_MARKER` rather than under this
+    /// struct's `AETHER_GITHUB` prefix: which host may write the replica is
+    /// how the coordinator is being operated.
+    #[config(env = "AETHER_BLOOMERY_SINGLE_WRITER_MARKER", default = "")]
+    pub single_writer_marker: String,
 }
 
 #[cfg(feature = "github")]
@@ -431,6 +444,7 @@ impl Default for CoordinatorConfig {
             authority_repo: String::new(),
             batch_restart_young_secs: 60,
             batch_restart_addition: 24,
+            single_writer_marker: String::new(),
         }
     }
 }
@@ -448,6 +462,32 @@ impl CoordinatorConfig {
     #[must_use]
     pub fn uses_local_authority(&self) -> bool {
         self.authority_backend == "local"
+    }
+
+    /// The git repository the transform runner materializes worktrees from.
+    ///
+    /// A local authority names its absolute path (`authority_repo`); GitHub
+    /// still runs from the process's current directory, captured once here so
+    /// the runner never re-reads `"."`.
+    #[must_use]
+    pub fn lane_repository(&self) -> PathBuf {
+        if self.uses_local_authority() && !self.authority_repo.is_empty() {
+            PathBuf::from(&self.authority_repo)
+        } else {
+            env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        }
+    }
+
+    /// Where missing order objects are fetched from, and where an admitted
+    /// capture is published: the local authority path, or the `origin` remote
+    /// when GitHub is authoritative. An absolute path, never a `file://` URL.
+    #[must_use]
+    pub fn candidate_remote(&self) -> String {
+        if self.uses_local_authority() && !self.authority_repo.is_empty() {
+            self.authority_repo.clone()
+        } else {
+            "origin".to_owned()
+        }
     }
 
     #[must_use]
@@ -469,12 +509,49 @@ impl CoordinatorConfig {
         }
         Ok(self.heartbeat_silence_secs)
     }
+
+    /// Whether this boot should push allowlisted refs to the GitHub replica.
+    ///
+    /// Local authority plus a fully-configured GitHub connection — not a
+    /// fixture, which has no git remote.
+    #[cfg(feature = "github")]
+    #[must_use]
+    pub fn source_replica_enabled(&self, github: &GithubConnectionConfig) -> bool {
+        self.uses_local_authority()
+            && !self.authority_repo.is_empty()
+            && github.missing_connection_knobs().is_empty()
+            && !github.uses_fixture()
+    }
+
+    /// Refuse a source-replica boot that does not present the single-writer
+    /// marker, so two writers cannot be enabled by accident.
+    ///
+    /// # Errors
+    /// Source replication is enabled and the marker path is empty or is not
+    /// an existing file.
+    #[cfg(feature = "github")]
+    pub fn require_single_writer_marker(&self, github: &GithubConnectionConfig) -> Result<(), MissingWriterMarker> {
+        if !self.source_replica_enabled(github) {
+            return Ok(());
+        }
+        if super::replica::writer_marker_present(&self.single_writer_marker) {
+            return Ok(());
+        }
+        Err(MissingWriterMarker { path: self.single_writer_marker.clone() })
+    }
 }
 
 /// Why a zero heartbeat-silence setting is refused rather than treated as
 /// "never reap on silence".
 #[derive(Debug)]
 struct HeartbeatSilenceZero;
+
+/// Why a source-replica boot without the single-writer marker is refused.
+#[derive(Debug)]
+pub struct MissingWriterMarker {
+    /// The configured marker path, empty when the knob was left unset.
+    pub path: String,
+}
 
 impl fmt::Display for HeartbeatSilenceZero {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -483,6 +560,24 @@ impl fmt::Display for HeartbeatSilenceZero {
 }
 
 impl Error for HeartbeatSilenceZero {}
+
+impl fmt::Display for MissingWriterMarker {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.path.is_empty() {
+            f.write_str(
+                "source replica requires AETHER_BLOOMERY_SINGLE_WRITER_MARKER to name an existing file so two writers cannot be enabled by accident",
+            )
+        } else {
+            write!(
+                f,
+                "source replica requires the single-writer marker at '{}' to exist so two writers cannot be enabled by accident",
+                self.path
+            )
+        }
+    }
+}
+
+impl Error for MissingWriterMarker {}
 
 #[cfg(feature = "github")]
 impl GithubConnectionConfig {
@@ -730,6 +825,43 @@ xAtw6HCuoUIzjbWZe1H+wS8KmJmYkTvf8f70x0/jMYRUyvMQy3beUUQ=
         assert_eq!(coordinator.batch_restart_addition, 24);
         assert_eq!(coordinator.authority_backend, "github");
         assert!(!coordinator.uses_local_authority());
+        assert!(coordinator.single_writer_marker.is_empty());
+    }
+
+    #[test]
+    fn a_source_replica_boot_refuses_to_start_without_the_writer_marker() {
+        // Tripwire: two local-authority coordinators that both have GitHub
+        // credentials would both push. The marker is the operator-created file
+        // that makes the writer claim explicit; an empty or missing path must
+        // refuse the boot rather than start a second writer.
+        use std::fs;
+
+        let github = GithubConnectionConfig {
+            token: "t".into(),
+            owner: "octo".into(),
+            repo: "shadow".into(),
+            ..GithubConnectionConfig::default()
+        };
+        let local = CoordinatorConfig {
+            authority_backend: "local".into(),
+            authority_repo: "/tmp/authority.git".into(),
+            ..CoordinatorConfig::default()
+        };
+        let error = local.require_single_writer_marker(&github).expect_err("no marker");
+        let message = error.to_string();
+        assert!(message.contains("SINGLE_WRITER_MARKER"), "{message}");
+        assert!(message.contains("two writers"), "{message}");
+
+        let dir = tempfile::tempdir().expect("writer-marker fixture dir");
+        let writer_file = dir.path().join("writer");
+        fs::write(&writer_file, "this host writes the replica\n").expect("writer marker writes");
+        let claimed = CoordinatorConfig { single_writer_marker: writer_file.to_string_lossy().into_owned(), ..local };
+        claimed.require_single_writer_marker(&github).expect("a present marker is the writer claim");
+
+        assert!(
+            CoordinatorConfig::default().require_single_writer_marker(&GithubConnectionConfig::default()).is_ok(),
+            "a GitHub-authority boot does not need the marker",
+        );
     }
 
     #[test]

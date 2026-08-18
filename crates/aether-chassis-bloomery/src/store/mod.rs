@@ -81,7 +81,7 @@ mod runtime;
 #[cfg(feature = "runtime")]
 pub use runtime::{
     AppendOutcome, CommitOutcome, JournalWrite, OutstandingOrder, ProofFactRow, ProofFactWrite, RecordOutcome,
-    SealOutcome, SqliteStore, StoreBackend, StoreCapabilityState, StudyRow,
+    SealOutcome, SqliteStore, StoreBackend, StoreCapabilityState, StudyRow, now_unix_millis,
 };
 
 #[cfg(all(test, feature = "runtime"))]
