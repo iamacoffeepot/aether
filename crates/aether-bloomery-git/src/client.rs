@@ -217,51 +217,55 @@ pub trait GitDataApi {
     /// exist — a clean 404 is `Ok(None)`, not an error.
     ///
     /// # Errors
-    /// A transport fault or a non-404 error status.
-    fn get_ref(&self, name: &str) -> Result<Option<GitRef>, GithubError>;
+    /// A transport or adapter fault, or a non-absent miss (a clean miss is
+    /// [`Ok`]`(None)`).
+    fn get_ref(&self, name: &str) -> Result<Option<GitRef>, GitDataError>;
 
     /// Create ref `name` at `sha`.
     ///
     /// # Errors
-    /// A transport fault or an error status (e.g. the ref already exists).
-    fn create_ref(&self, name: &str, sha: &str) -> Result<GitRef, GithubError>;
+    /// [`GitDataError::RefConflict`] when the ref already exists; any other
+    /// adapter execution failure.
+    fn create_ref(&self, name: &str, sha: &str) -> Result<GitRef, GitDataError>;
 
     /// Move ref `name` to `sha`. With `force` false the update is
-    /// fast-forward-only — GitHub rejects a non-fast-forward with a 422, the
-    /// compare-and-swap guard the source port's `land` and `integrate` rely on.
+    /// compare-and-swap: a lost swap is [`GitDataError::RefConflict`], the
+    /// guard the source port's `land` and `integrate` rely on.
     ///
     /// # Errors
-    /// A transport fault or an error status — a `Status { status: 422, .. }`
-    /// is the non-fast-forward refusal a caller maps to its CAS-lost outcome.
-    fn update_ref(&self, name: &str, sha: &str, force: bool) -> Result<GitRef, GithubError>;
+    /// [`GitDataError::RefConflict`] when the compare-and-swap lost;
+    /// [`GitDataError::MissingObject`] when the ref is gone; any other adapter
+    /// execution failure.
+    fn update_ref(&self, name: &str, sha: &str, force: bool) -> Result<GitRef, GitDataError>;
 
-    /// Delete ref `name` (`heads/…` short form). A ref that is already gone — a
-    /// 404 or the 422 GitHub answers for a non-existent ref — is the clean
-    /// idempotent `Ok(())`, not a fault: release's name-only cleanup delete runs
-    /// after a tombstone CAS and an acquire's rollback re-deletes freely.
+    /// Delete ref `name` (`heads/…` short form). A ref that is already gone is
+    /// the clean idempotent `Ok(())`, not a fault: release's name-only cleanup
+    /// delete runs after a tombstone CAS and an acquire's rollback re-deletes
+    /// freely.
     ///
     /// # Errors
-    /// A transport fault or an error status other than the already-gone 404/422.
-    fn delete_ref(&self, name: &str) -> Result<(), GithubError>;
+    /// An adapter execution failure other than an already-absent ref.
+    fn delete_ref(&self, name: &str) -> Result<(), GitDataError>;
 
     /// List every ref under `prefix` (`heads/…` form) — the enumeration a
     /// successor bloom walks to reuse checkpoints drift did not invalidate.
     ///
     /// # Errors
-    /// A transport fault or an error status.
-    fn list_matching_refs(&self, prefix: &str) -> Result<Vec<GitRef>, GithubError>;
+    /// An adapter execution failure.
+    fn list_matching_refs(&self, prefix: &str) -> Result<Vec<GitRef>, GitDataError>;
 
     /// Read commit object `sha` (for its tree).
     ///
     /// # Errors
-    /// A transport fault or an error status.
-    fn get_commit(&self, sha: &str) -> Result<GitCommit, GithubError>;
+    /// [`GitDataError::MissingObject`] when `sha` is unknown; any other adapter
+    /// execution failure.
+    fn get_commit(&self, sha: &str) -> Result<GitCommit, GitDataError>;
 
     /// Create a commit carrying `tree` with `parents`.
     ///
     /// # Errors
-    /// A transport fault or an error status.
-    fn create_commit(&self, message: &str, tree: &str, parents: &[String]) -> Result<GitCommit, GithubError>;
+    /// An adapter execution failure.
+    fn create_commit(&self, message: &str, tree: &str, parents: &[String]) -> Result<GitCommit, GitDataError>;
 
     /// Whether `ancestor` is reachable from `commit` — the ancestry an
     /// observation uses to refuse a stale or sideways mainline head (#4938).
@@ -272,8 +276,9 @@ pub trait GitDataApi {
     /// head it could not actually classify.
     ///
     /// # Errors
-    /// A transport fault or an error status (including a 404 for an unknown sha).
-    fn is_ancestor(&self, ancestor: &str, commit: &str) -> Result<bool, GithubError>;
+    /// [`GitDataError::MissingObject`] when either sha is unknown; any other
+    /// adapter execution failure.
+    fn is_ancestor(&self, ancestor: &str, commit: &str) -> Result<bool, GitDataError>;
 
     /// Merge commit `head` into branch `base` server-side, both in the short
     /// `heads/…` / branch-name form the merge endpoint takes.
@@ -292,8 +297,9 @@ pub trait GitDataApi {
     /// transport fault to retry.
     ///
     /// # Errors
-    /// A transport fault, a missing base or head, or a non-conflict error status.
-    fn merge(&self, base: &str, head: &str, message: &str) -> Result<MergeResult, GithubError>;
+    /// A missing base or head, or an adapter execution failure other than a
+    /// content conflict (those stay [`MergeResult::Conflict`]).
+    fn merge(&self, base: &str, head: &str, message: &str) -> Result<MergeResult, GitDataError>;
 }
 
 /// What a server-side merge did.
@@ -359,10 +365,10 @@ pub trait PullRequestApi {
     /// Open a pull request.
     ///
     /// # Errors
-    /// A transport fault or an error status — a `Status { status: 422, .. }`
-    /// is GitHub's refusal for a duplicate head or an empty diff, which the
-    /// land path distinguishes by looking the existing one up.
-    fn create_pull_request(&self, new: &NewPullRequest) -> Result<PullRequest, GithubError>;
+    /// [`GitDataError::RefConflict`] for a duplicate head (the land path
+    /// distinguishes that by looking the existing one up); any other adapter
+    /// execution failure, including an empty diff.
+    fn create_pull_request(&self, new: &NewPullRequest) -> Result<PullRequest, GitDataError>;
 
     /// Read pull request `number`, or `None` if it does not exist — a clean 404
     /// is `Ok(None)`, not an error, matching [`GitDataApi::get_ref`].
@@ -412,6 +418,37 @@ pub trait PullRequestApi {
     /// which are [`PullMergeResult::Refused`].
     fn squash_merge_pull_request(&self, number: u64, expected_head_sha: &str) -> Result<PullMergeResult, GithubError>;
 }
+
+/// A git-data fault. Adapter-neutral: a local `git` backend and the GitHub
+/// REST adapter both produce these, so a caller never has to read an HTTP
+/// status to know what happened.
+#[derive(Debug)]
+pub enum GitDataError {
+    /// The compare-and-swap lost: the ref already exists, the update was not
+    /// the expected successor, or a landing proposal already sits on this head.
+    RefConflict(String),
+    /// A named object (ref, commit, tree) does not exist.
+    MissingObject(String),
+    /// Two histories cannot be combined unattended. Distinct from
+    /// [`MergeResult::Conflict`], which is the merge endpoint's `Ok` report of
+    /// the same fact when the adapter could still name the collision.
+    MergeConflict(String),
+    /// The adapter could not execute the operation (spawn, transport, decode).
+    Command(String),
+}
+
+impl fmt::Display for GitDataError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RefConflict(detail) => write!(f, "ref conflict: {detail}"),
+            Self::MissingObject(detail) => write!(f, "missing object: {detail}"),
+            Self::MergeConflict(detail) => write!(f, "merge conflict: {detail}"),
+            Self::Command(detail) => write!(f, "git-data operation failed: {detail}"),
+        }
+    }
+}
+
+impl Error for GitDataError {}
 
 /// A client or transport failure. A clean not-found is `Ok(None)` at the API
 /// layer, not an error; this type is a genuine transport fault or a non-2xx

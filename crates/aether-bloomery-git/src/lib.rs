@@ -50,9 +50,9 @@ pub mod source;
 pub mod testing;
 
 pub use client::{
-    ActionsApi, Artifact, ChecksState, Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError, IssueStateApi,
-    MergeResult, NewComment, NewPullRequest, PullMergeResult, PullRequest, PullRequestApi, PullRequestState,
-    RunConclusion, RunStatus, WorkflowRun, strip_heads,
+    ActionsApi, Artifact, ChecksState, Comment, GitCommit, GitDataApi, GitDataError, GitRef, GithubApi, GithubError,
+    IssueStateApi, MergeResult, NewComment, NewPullRequest, PullMergeResult, PullRequest, PullRequestApi,
+    PullRequestState, RunConclusion, RunStatus, WorkflowRun, strip_heads,
 };
 pub use correspondence::{GitObjectFormat, GitObjectId};
 pub use mainline::MainlineRef;
