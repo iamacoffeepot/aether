@@ -431,6 +431,8 @@ impl BootableChassis for BloomeryChassis {
         // Capture the tier-policy path before `github` is moved into the source
         // cap below; the api cap's pre-seal approve gate loads it at init (#3583).
         let approval_policy_file = coordinator.approval_policy_file.clone();
+        let worktree_base = coordinator.local_worktree_base.clone();
+        let artifacts_root = coordinator.artifacts_root.clone();
         let http_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), http_port);
         // The component host serves on-demand `aether.component.load` over RPC (the
         // MCP harness / fleet load components at runtime). Built from the same
@@ -522,6 +524,8 @@ impl BootableChassis for BloomeryChassis {
                 approval_policy_file,
                 correspondence: Some(setups.correspondence),
                 pusher: Some(setups.pusher),
+                worktree_base,
+                artifacts_root,
             }))
     }
     #[cfg(not(feature = "github"))]
@@ -529,6 +533,8 @@ impl BootableChassis for BloomeryChassis {
         KitReport::inspect().log_at_boot();
         let BloomeryEnv { rpc_port, http_port, store, artifacts, coordinator, session, signing } = env;
         let approval_policy_file = coordinator.approval_policy_file.clone();
+        let worktree_base = coordinator.local_worktree_base.clone();
+        let artifacts_root = coordinator.artifacts_root.clone();
         let http_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), http_port);
         let component_host = ComponentHostParams {
             engine: Arc::clone(&boot.engine),
@@ -562,7 +568,7 @@ impl BootableChassis for BloomeryChassis {
                 (),
                 HttpServerConfig { enabled: true, bind_addr: http_addr.to_string(), ..HttpServerConfig::default() },
             )
-            .with_actor::<BloomeryApiCapability>(ApiParams { approval_policy_file }))
+            .with_actor::<BloomeryApiCapability>(ApiParams { approval_policy_file, worktree_base, artifacts_root }))
     }
 }
 

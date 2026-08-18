@@ -24,6 +24,7 @@
 //! are domain join state, not correlation bookkeeping.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use aether_actor::{HandlesKind, Manual};
@@ -49,10 +50,11 @@ use crate::bloomery::CandidatePush;
 // (ADR-0149 §The boundary, amended), addressed as a typed peer
 // (`ctx.defer(&request).to::<ControlCore>()`) rather than a `resolve_embedded`
 // component lineage.
+use crate::artifacts::ArtifactsCapabilityState;
 use crate::control::ControlCore;
 #[cfg(feature = "github")]
 use crate::source::SourceCapability;
-use crate::store::{PageJournal, RecordConfig, StoreCapability};
+use crate::store::{ListBloomDispatches, LookupDispatch, PageJournal, RecordConfig, StoreCapability};
 
 /// Per-process ceilings on the pre-seal shaping maps. Staged workpieces and
 /// open drafts are pure in-memory shaping state with no durable owner to evict
@@ -111,6 +113,10 @@ pub struct ApiCapabilityState {
     /// The candidate-ref pusher a `from_commit` repair uses after recording.
     #[cfg(feature = "github")]
     pub(super) pusher: Option<Arc<dyn CandidatePush>>,
+    /// Scratch-worktree base the evidence directories live under.
+    pub(super) worktree_base: PathBuf,
+    /// Optional artifacts handle for resolving study cost on the dispatch list.
+    pub(super) artifacts: Option<ArtifactsCapabilityState>,
     /// Staged workpieces, keyed by their workpiece id.
     pub(super) staged: BTreeMap<String, Workpiece>,
     /// Open drafts, keyed by a monotonic per-process handle.
@@ -255,6 +261,10 @@ pub(super) enum Routed {
     Spend(SpendQuery),
     /// Relay to the store; its `PageJournalResult` answers.
     ReplayJournal(PageJournal),
+    /// Relay to the store; its `ListBloomDispatchesResult` answers.
+    ListBloomDispatches(ListBloomDispatches),
+    /// Relay to the store; its `LookupDispatchResult` answers.
+    LookupDispatch(LookupDispatch),
     /// Relay to the artifacts cap; its `GetRangeResult` answers.
     GetRange(GetRange),
     /// Relay to the store; its `RecordConfigResult` answers.
@@ -360,6 +370,8 @@ pub(super) fn finish(
         Routed::Metrics(request) => ctx.defer(&request).to::<ControlCore>(),
         Routed::Spend(request) => ctx.defer(&request).to::<ControlCore>(),
         Routed::ReplayJournal(request) => ctx.defer(&request).to::<StoreCapability>(),
+        Routed::ListBloomDispatches(request) => ctx.defer(&request).to::<StoreCapability>(),
+        Routed::LookupDispatch(request) => ctx.defer(&request).to::<StoreCapability>(),
         Routed::GetRange(request) => ctx.defer(&request).to::<ArtifactsCapability>(),
         Routed::RecordConfig(request) => ctx.defer(&request).to::<StoreCapability>(),
         #[cfg(feature = "github")]

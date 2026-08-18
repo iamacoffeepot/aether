@@ -59,6 +59,7 @@ mod calibration;
 mod claims;
 mod configs;
 mod drafts;
+mod evidence;
 mod hex;
 mod metrics;
 mod reads;
@@ -68,10 +69,11 @@ mod state;
 mod workpieces;
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 #[cfg(feature = "github")]
 use std::sync::Arc;
 
+use crate::store::{ListBloomDispatchesResult, LookupDispatchResult};
 use aether_actor::{Manual, runtime};
 use aether_bloomery::{
     AdmitResult, EnumerateClaimsResult, LoadConfigsResult, MetricsQueryResult, QueryResult, ResolvedConfigs,
@@ -98,7 +100,7 @@ use state::{Routed, SealVerify, VerifyPending, finish};
 use super::BloomeryApiCapability;
 use super::dto::WorkpiecesView;
 
-use crate::artifacts::{GetRange, GetRangeResult};
+use crate::artifacts::{ArtifactsCapabilityState, GetRange, GetRangeResult, resolve_root};
 #[cfg(feature = "github")]
 use crate::bloomery::CandidatePush;
 use crate::bloomery::load_policy;
@@ -177,6 +179,11 @@ pub struct ApiParams {
     /// then refuses).
     #[cfg(feature = "github")]
     pub pusher: Option<Arc<dyn CandidatePush>>,
+    /// Scratch-worktree base: `{nonce}-evidence` directories live here.
+    pub worktree_base: String,
+    /// Artifacts root used to resolve study cost on the dispatch list. `None`
+    /// leaves every cost `null`.
+    pub artifacts_root: Option<String>,
 }
 
 #[http::router]
@@ -222,6 +229,8 @@ impl NativeActor for BloomeryApiCapability {
             correspondence: params.correspondence,
             #[cfg(feature = "github")]
             pusher: params.pusher,
+            worktree_base: PathBuf::from(params.worktree_base),
+            artifacts: open_api_artifacts(params.artifacts_root.as_deref()),
             staged: BTreeMap::new(),
             drafts: BTreeMap::new(),
             next_draft: 1,
@@ -551,6 +560,65 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, metrics::spend())
     }
 
+    /// `GET /blooms/{id}/dispatches` — rollup attempts plus live outstanding orders.
+    #[http::route(Get, "/blooms/{id}/dispatches")]
+    fn on_get_bloom_dispatches(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        match evidence::list_dispatches(&id) {
+            Ok(routed) => finish(state, ctx, routed),
+            Err(error) => http::Outcome::Reply(error_response(400, &error)),
+        }
+    }
+
+    /// `GET /dispatches/{nonce}` — one dispatch's evidence header.
+    #[http::route(Get, "/dispatches/{nonce}")]
+    fn on_get_dispatch(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        nonce: http::Path<String>,
+    ) -> http::Outcome {
+        let nonce = nonce.0;
+        finish(state, ctx, evidence::lookup_dispatch(&nonce))
+    }
+
+    /// `GET /dispatches/{nonce}/transcript` — line-snapped ranged read.
+    #[http::route(Get, "/dispatches/{nonce}/transcript")]
+    fn on_get_dispatch_transcript(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        nonce: http::Path<String>,
+    ) -> http::Outcome {
+        let nonce = nonce.0;
+        let response = evidence::file_page(&state.worktree_base, &nonce, "transcript.jsonl", &ctx.request().query);
+        finish(state, ctx, Routed::Reply(response))
+    }
+
+    /// `GET /dispatches/{nonce}/prompt` — the same ranged shape as the transcript.
+    #[http::route(Get, "/dispatches/{nonce}/prompt")]
+    fn on_get_dispatch_prompt(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        nonce: http::Path<String>,
+    ) -> http::Outcome {
+        let nonce = nonce.0;
+        let response = evidence::file_page(&state.worktree_base, &nonce, "prompt.md", &ctx.request().query);
+        finish(state, ctx, Routed::Reply(response))
+    }
+
+    /// `GET /logs/coordinator` — bounded journald proxy.
+    #[http::route(Get, "/logs/coordinator")]
+    fn on_get_coordinator_logs(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+    ) -> http::Outcome {
+        let response = evidence::coordinator_logs(&ctx.request().query);
+        finish(state, ctx, Routed::Reply(response))
+    }
+
     /// `GET /journal` — one bounded page of the durable event journal.
     #[http::route(Get, "/journal")]
     fn on_get_journal(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
@@ -677,6 +745,24 @@ impl NativeActor for BloomeryApiCapability {
         metrics::spend_response(mail)
     }
 
+    #[http::reply]
+    fn on_list_bloom_dispatches_result(
+        state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: ListBloomDispatchesResult,
+    ) -> HttpServerResponse {
+        evidence::list_response(&state.worktree_base, state.artifacts.as_mut(), mail)
+    }
+
+    #[http::reply]
+    fn on_lookup_dispatch_result(
+        state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: LookupDispatchResult,
+    ) -> HttpServerResponse {
+        evidence::header_response(&state.worktree_base, mail)
+    }
+
     /// The source cap's reply to a claim enumeration (ADR-0179).
     #[http::reply]
     fn on_enumerate_claims_result(
@@ -788,4 +874,8 @@ impl NativeActor for BloomeryApiCapability {
             state.fail_seal(seal, 504, "signature verification settled without a reply");
         }
     }
+}
+
+fn open_api_artifacts(configured: Option<&str>) -> Option<ArtifactsCapabilityState> {
+    ArtifactsCapabilityState::open(&resolve_root(configured)).ok()
 }
