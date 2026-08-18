@@ -107,10 +107,7 @@ impl Store {
         if cell.inflight {
             return false;
         }
-        match cell.completed_at {
-            None => true,
-            Some(at) => at.elapsed() >= self.cadence(key),
-        }
+        cell.completed_at.is_none_or(|at| at.elapsed() >= self.cadence(key))
     }
 
     #[must_use]

@@ -35,6 +35,11 @@ pub fn footer_line(hints: &[KeyHint]) -> String {
 /// Every advertised key must be one `handles` accepts. Later screens call
 /// this against their own hint list so a painted key cannot drift from
 /// the match arm that should honour it.
+///
+/// # Panics
+///
+/// Panics if a footer key is not handled, or if a hint token is not a
+/// key the harness knows.
 pub fn assert_footer_honest(hints: &[KeyHint], mut handles: impl FnMut(KeyCode) -> bool) {
     for hint in hints {
         for code in hint.advertised_codes() {
@@ -63,6 +68,7 @@ fn parse_key_token(token: &str) -> KeyCode {
 mod tests {
     use super::{KeyHint, assert_footer_honest, footer_line};
     use crossterm::event::KeyCode;
+    use std::panic::catch_unwind;
 
     #[test]
     fn footer_line_matches_the_board_chrome() {
@@ -81,7 +87,7 @@ mod tests {
         // The plausible bug: the harness only checks that hints are non-empty,
         // so a painted `q` that the match ignores still passes.
         let hints = [KeyHint { keys: "q", action: "quit" }];
-        let boom = std::panic::catch_unwind(|| {
+        let boom = catch_unwind(|| {
             assert_footer_honest(&hints, |code| code == KeyCode::Char('j'));
         });
         assert!(boom.is_err(), "an unhandled advertised key must fail the harness");

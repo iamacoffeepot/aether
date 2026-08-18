@@ -65,10 +65,7 @@ impl<Id: Clone + PartialEq> Cursor<Id> {
         {
             return;
         }
-        self.selected = match &self.selected {
-            Some(id) => fallback(id, rows),
-            None => rows.first().map(id_of),
-        };
+        self.selected = self.selected.as_ref().map_or_else(|| rows.first().map(id_of), |id| fallback(id, rows));
     }
 }
 

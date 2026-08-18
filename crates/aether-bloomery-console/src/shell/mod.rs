@@ -16,6 +16,13 @@ use crate::keys::Outcome;
 use crate::screen::Screen;
 use crate::store::{ResourceKey, Store};
 
+#[cfg(test)]
+use crate::dto::ViewDocument;
+#[cfg(test)]
+use crate::fetch::FetchProbe;
+#[cfg(test)]
+use crate::screen::Board;
+
 /// The running console: one stack, one store, two fetch lanes.
 pub struct Shell {
     endpoint_label: String,
@@ -80,7 +87,7 @@ impl Shell {
         if let Some(screen) = self.stack.last_mut() {
             screen.render(frame, chunks[2], &self.store);
         }
-        let hints = self.stack.last().map(Screen::key_hints).unwrap_or(&[]);
+        let hints = self.stack.last().map_or(&[] as &[_], Screen::key_hints);
         frame.render_widget(chrome::footer(hints), chunks[3]);
     }
 
@@ -148,12 +155,12 @@ impl Shell {
 
 #[cfg(test)]
 impl Shell {
-    fn harness(view_cadence: Duration) -> (Self, crate::fetch::FetchProbe) {
+    fn harness(view_cadence: Duration) -> (Self, FetchProbe) {
         let (fetch, probe) = FetchLanes::pair();
         (Self::assemble("127.0.0.1:8910".to_owned(), Store::new(view_cadence), Some(fetch)), probe)
     }
 
-    fn showing(view: &crate::dto::ViewDocument, error: Option<&str>) -> Self {
+    fn showing(view: &ViewDocument, error: Option<&str>) -> Self {
         let mut store = Store::new(Duration::from_secs(1));
         store.apply_view(Ok(view.clone()));
         if let Some(error) = error {
@@ -166,7 +173,7 @@ impl Shell {
         shell
     }
 
-    fn board(&self) -> &crate::screen::Board {
+    fn board(&self) -> &Board {
         match self.stack.first() {
             Some(Screen::Board(board)) => board,
             _ => panic!("the stack starts with the board"),
@@ -179,6 +186,7 @@ mod tests {
     use super::Shell;
     use crate::dto::{BloomView, DigestHex, LandingBlock, MemberView, Present, ReviewParkView, ViewDocument};
     use crate::fetch::{FetchReply, ResourceBody};
+    use crate::http::Endpoint;
     use crate::keys::Outcome;
     use crate::screen::RowId;
     use crate::store::ResourceKey;
@@ -309,10 +317,7 @@ mod tests {
         // coordinator that never answers freezes j/k for the full live timeout.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a silent coordinator");
         let addr = listener.local_addr().expect("addr");
-        let mut shell = Shell::new(
-            crate::http::Endpoint { host: addr.ip().to_string(), port: addr.port() },
-            Duration::from_secs(1),
-        );
+        let mut shell = Shell::new(Endpoint { host: addr.ip().to_string(), port: addr.port() }, Duration::from_secs(1));
 
         let start = Instant::now();
         shell.pump();

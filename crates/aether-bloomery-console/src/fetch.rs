@@ -3,6 +3,7 @@
 //! `live` uses a 1 s timeout for `/view`. `bulk` uses 10 s for later large
 //! reads. The shell sends requests and drains replies with `try_recv`.
 
+use std::iter;
 use std::sync::mpsc::{self, Receiver, RecvError, SendError, Sender};
 use std::thread;
 use std::time::Duration;
@@ -61,7 +62,7 @@ impl FetchLanes {
 
     /// Non-blocking drain. Empty or a closed lane both yield no item.
     pub fn drain(&self) -> impl Iterator<Item = FetchReply> + '_ {
-        std::iter::from_fn(|| self.reply_rx.try_recv().ok())
+        iter::from_fn(|| self.reply_rx.try_recv().ok())
     }
 }
 
@@ -74,14 +75,15 @@ fn spawn_lane(
 ) {
     // Infra HTTP worker below the actor/mail layer: the console is not a
     // chassis actor, and the live timeout must not sit on the input loop.
-    let _ = thread::Builder::new().name(name.into()).spawn(move || lane_loop(endpoint, requests, replies, timeout));
+    #[allow(clippy::disallowed_methods)]
+    let _ = thread::Builder::new().name(name.into()).spawn(move || lane_loop(&endpoint, &requests, &replies, timeout));
 }
 
-fn lane_loop(endpoint: Endpoint, requests: Receiver<FetchRequest>, replies: Sender<FetchReply>, timeout: Duration) {
+fn lane_loop(endpoint: &Endpoint, requests: &Receiver<FetchRequest>, replies: &Sender<FetchReply>, timeout: Duration) {
     loop {
         match requests.recv() {
             Ok(FetchRequest { key }) => {
-                let outcome = fetch_key(&endpoint, key, timeout);
+                let outcome = fetch_key(endpoint, key, timeout);
                 if replies.send(FetchReply { key, outcome }).is_err() {
                     return;
                 }
@@ -129,6 +131,11 @@ impl FetchProbe {
         self.bulk_rx.try_recv().ok()
     }
 
+    /// Push a completed fetch into the shell's reply queue.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shell has dropped its reply receiver.
     pub fn reply(&self, reply: FetchReply) {
         self.reply_tx.send(reply).expect("shell still owns the reply receiver");
     }
