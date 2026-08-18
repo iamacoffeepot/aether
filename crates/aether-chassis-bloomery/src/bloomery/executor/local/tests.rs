@@ -892,6 +892,7 @@ struct SeenSpec {
     effort: Option<String>,
     checkout: Option<String>,
     diff_base: Option<String>,
+    seeded: Option<String>,
     resume: Option<String>,
     worktree: Option<PathBuf>,
     task: Option<String>,
@@ -913,6 +914,7 @@ impl TransformRunner for CapturingRunner {
             effort: spec.effort.map(str::to_owned),
             checkout: Some(spec.checkout_hex.to_owned()),
             diff_base: spec.diff_base_hex.map(str::to_owned),
+            seeded: spec.seeded.map(str::to_owned),
             resume: spec.resume.map(str::to_owned),
             worktree: Some(spec.worktree_dir.to_owned()),
             task: spec.task.map(str::to_owned),
@@ -1086,6 +1088,35 @@ fn an_aggregate_review_spawn_names_the_range_a_member_spawn_does_not() {
         Some(to_hex(&digest(0xB0)).as_str()),
         "the verify spawn names the sealed base its candidate's diff is taken against",
     );
+}
+
+// The plausible bug: a Construct that names a checkpoint still looks like a
+// clean start at the spawn, or the marker is forwarded as `--diff-base` so
+// the lane judges the sealed base and the prompt stays silent (#5052).
+// Resume is a separate axis — neither order carries a session.
+#[test]
+fn a_checkpoint_construct_crosses_as_seeded_and_a_clean_one_does_not() {
+    let seen = Arc::new(Mutex::new(SeenSpec::default()));
+    let base = TempDir::new().unwrap();
+    let exec = LocalExecutor::new(Arc::new(CapturingRunner { seen: Arc::clone(&seen) }), correspondence(), base.path());
+
+    exec.submit(&construct_order(digest(5), &test_nonce("clean"))).unwrap();
+    let clean = seen.lock().unwrap().clone();
+    assert_eq!(clean.seeded, None, "a clean Construct must not name a checkpoint");
+    assert_eq!(clean.diff_base, None, "a clean Construct is the working tree, not a range");
+    assert_eq!(clean.resume, None, "seeding is independent of session resume");
+
+    let mut seeded_order = construct_order(digest(5), &test_nonce("seeded"));
+    seeded_order.transformation.diff_base = Some(digest(0xB0));
+    exec.submit(&seeded_order).unwrap();
+    let seeded = seen.lock().unwrap().clone();
+    assert_eq!(
+        seeded.seeded.as_deref(),
+        Some(to_hex(&digest(0xC0)).as_str()),
+        "the spawn names the already-resolved checkout as the checkpoint",
+    );
+    assert_eq!(seeded.diff_base, None, "Construct provenance must not become --diff-base");
+    assert_eq!(seeded.resume, None, "a seeded Construct does not imply a resumed session");
 }
 
 // The complement, fail-closed: a diff base that resolves to no git object must
@@ -2093,6 +2124,7 @@ impl TransformRunner for ReuseRunner {
             effort: spec.effort.map(str::to_owned),
             checkout: Some(spec.checkout_hex.to_owned()),
             diff_base: spec.diff_base_hex.map(str::to_owned),
+            seeded: spec.seeded.map(str::to_owned),
             resume: spec.resume.map(str::to_owned),
             worktree: Some(spec.worktree_dir.to_owned()),
             task: spec.task.map(str::to_owned),

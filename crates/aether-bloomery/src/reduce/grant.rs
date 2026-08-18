@@ -10,7 +10,7 @@
 //! revision — to express an execution decision, and throws away the candidate
 //! the wedged member had already built. This door expresses it directly.
 
-use super::attempt::{SealedLine, move_effects_with_candidate, reconcile_or_line_targets};
+use super::attempt::{SealedLine, move_effects_with_checkpoint, reconcile_or_line_targets};
 use super::{BloomStatus, Decision, Decisions, GrantAttemptsError, Outcome, Snapshot, StageProgress};
 use crate::ids::{BloomId, StageId, WorkpieceId};
 
@@ -96,7 +96,7 @@ pub(super) fn reduce_grant_attempts(
     // way a same-stage retry does (#4994).
     let candidate = cursor.candidate;
     let fold_checkpoint = cursor.fold_checkpoint.filter(|_| stage == StageId::Reconcile);
-    let targets = reconcile_or_line_targets(
+    let (targets, construct_checkpoint_base) = reconcile_or_line_targets(
         member.scope_revision,
         super::splice::member_construct_base(record, workpiece),
         candidate,
@@ -135,7 +135,7 @@ pub(super) fn reduce_grant_attempts(
             fold_conflict_evidence: cursor.fold_conflict_evidence,
         }
     };
-    let mut effects = move_effects_with_candidate(
+    let mut effects = move_effects_with_checkpoint(
         *bloom,
         workpiece,
         member.scope_revision,
@@ -143,6 +143,7 @@ pub(super) fn reduce_grant_attempts(
         targets,
         candidate.map(|current| current.tree),
         SealedLine::of(record, member),
+        construct_checkpoint_base,
     )
     .to_vec();
     if machinery {

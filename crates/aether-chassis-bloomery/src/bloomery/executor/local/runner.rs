@@ -25,8 +25,14 @@ pub struct RunSpec<'a> {
     /// The order's diff base rendered to hex (`--diff-base`, #4723) — the commit
     /// the candidate is judged *against*, when the order names one. `None` is the
     /// working-tree contract every member lane runs under; `Some` is the
-    /// committed range an aggregate review judges.
+    /// committed range an aggregate review judges. A Construct checkpoint
+    /// marker never lands here — that provenance is [`seeded`](Self::seeded).
     pub diff_base_hex: Option<&'a str>,
+    /// The construct checkpoint this dispatch resumes from (`--seeded`, #5052),
+    /// rendered as the already-resolved checkout SHA. `None` on a clean
+    /// Construct start and on every non-Construct lane. Independent of
+    /// [`resume`](Self::resume): session reuse and tree seeding are separate.
+    pub seeded: Option<&'a str>,
     /// Absolute path of the lane slot's canonical checkout — where this dispatch
     /// builds, and where every later dispatch in the same slot builds too.
     pub worktree_dir: &'a Path,
