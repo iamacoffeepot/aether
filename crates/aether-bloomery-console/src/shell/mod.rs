@@ -195,7 +195,7 @@ impl Shell {
             if !self.store.due(&key) {
                 continue;
             }
-            self.send_request(key);
+            self.send_request(&key);
         }
     }
 
@@ -204,17 +204,17 @@ impl Shell {
             if self.store.is_inflight(&key) {
                 continue;
             }
-            self.send_request(key);
+            self.send_request(&key);
         }
     }
 
-    fn send_request(&mut self, key: ResourceKey) {
+    fn send_request(&mut self, key: &ResourceKey) {
         let Some(fetch) = &self.fetch else {
             return;
         };
-        self.store.mark_inflight(&key);
+        self.store.mark_inflight(key);
         if let Err(error) = fetch.request(key.clone()) {
-            self.store.apply_err(&key, error);
+            self.store.apply_err(key, error);
         }
     }
 
