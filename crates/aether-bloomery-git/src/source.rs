@@ -659,13 +659,18 @@ impl<C: GitDataApi> GitSource<C> {
     /// commit. Idempotent — an already-present ref is left as is, so a
     /// re-created namespace is a no-op rather than a conflict.
     ///
+    /// Returns the integration ref the existing-or-create produced: a live
+    /// advanced head when the namespace already existed, or the create response
+    /// when this call bootstrapped it. The caller must not re-read that name
+    /// immediately — GitHub can lag the write (#5072).
+    ///
     /// # Errors
     /// The Git Data ref reads/writes failed.
-    pub fn create_namespace(&self, bloom: &BloomId, base: &Digest) -> Result<(), SourceError> {
+    pub fn create_namespace(&self, bloom: &BloomId, base: &Digest) -> Result<GitRef, SourceError> {
         let base_sha = self.resolve_git_sha(base, "namespace base head digest")?;
-        self.ensure_ref(&Self::integration_ref(bloom), &base_sha)?;
+        let integration = self.ensure_ref(&Self::integration_ref(bloom), &base_sha)?;
         self.ensure_ref(&Self::attempt_ref(bloom, 1), &base_sha)?;
-        Ok(())
+        Ok(integration)
     }
 
     // The integration branch's current position: its tree digest —
@@ -681,9 +686,8 @@ impl<C: GitDataApi> GitSource<C> {
         &self,
         bloom: &BloomId,
         base_sha: &str,
+        current: &GitRef,
     ) -> Result<IntegrationPosition, SourceError> {
-        let integration = Self::integration_ref(bloom);
-        let current = self.client.get_ref(&integration)?.ok_or(SourceError::MissingRef(integration))?;
         let commit = self.client.get_commit(&current.sha)?;
         let tree = self.integration_tree_digest(&commit.tree)?;
         let head = if current.sha == base_sha {
@@ -698,11 +702,11 @@ impl<C: GitDataApi> GitSource<C> {
         Ok(IntegrationPosition { checkpoint: Checkpoint { bloom: *bloom, tree }, head })
     }
 
-    fn ensure_ref(&self, name: &str, sha: &str) -> Result<(), SourceError> {
-        if self.client.get_ref(name)?.is_none() {
-            self.client.create_ref(name, sha)?;
+    fn ensure_ref(&self, name: &str, sha: &str) -> Result<GitRef, SourceError> {
+        match self.client.get_ref(name)? {
+            Some(existing) => Ok(existing),
+            None => Ok(self.client.create_ref(name, sha)?),
         }
-        Ok(())
     }
 
     // Built from `claims_prefix` so the writer and the `enumerate_claims`
@@ -964,8 +968,8 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
 
     fn integration_checkpoint(&self, bloom: &BloomId, base: &Digest) -> Result<IntegrationPosition, Self::Error> {
         let base_sha = self.resolve_git_sha(base, "namespace base head digest")?;
-        self.create_namespace(bloom, base)?;
-        self.current_integration_position(bloom, &base_sha)
+        let current = self.create_namespace(bloom, base)?;
+        self.current_integration_position(bloom, &base_sha, &current)
     }
 
     fn integrate(
@@ -1361,7 +1365,7 @@ mod tests {
     use aether_bloomery::{
         BackendObjectId, BloomId, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState,
         ClaimReleaseOutcome, Correspondence as DomainCorrespondence, CorrespondenceError, Digest, IntegrateOutcome,
-        LandOutcome, SourceBackend, WorkpieceId,
+        IntegrationPosition, LandOutcome, SourceBackend, WorkpieceId,
     };
 
     use std::sync::Arc;
@@ -1379,7 +1383,7 @@ mod tests {
         source
     }
 
-    use crate::client::GitDataApi;
+    use crate::client::{GitDataApi, GitDataError};
     use crate::short_hex;
     use crate::testing::FakeGithub;
 
@@ -1563,6 +1567,85 @@ mod tests {
         let (fake, bloom, _base) = seeded();
         assert!(fake.ref_exists(&GitSource::<FakeGithub>::integration_ref(&bloom)), "integration branch created");
         assert!(fake.ref_exists(&GitSource::<FakeGithub>::attempt_ref(&bloom, 1)), "attempt handle created");
+    }
+
+    #[test]
+    fn integration_checkpoint_uses_the_create_response_when_the_follow_up_read_lags() {
+        // Tripwire: a successful create_ref must supply the integration SHA.
+        // Re-reading the same name can miss GitHub's cache window and turn a
+        // successful bootstrap into MissingRef (#5072).
+        let fake = FakeGithub::new();
+        fake.lag_next_read_after_create();
+        let base = fake.seed_base_commit(&digest(10));
+        fake.seed_ref_at("heads/main", &base);
+        let source = git_source(&fake, false);
+        let bloom = bloom();
+
+        let IntegrationPosition { checkpoint, head } = source.integration_checkpoint(&bloom, &base).unwrap();
+        assert_eq!(checkpoint.bloom, bloom);
+        assert_eq!(head, None, "a freshly created namespace is still at the sealed base");
+
+        let integration = GitSource::<FakeGithub>::integration_ref(&bloom);
+        assert!(fake.ref_exists(&integration), "the write landed even though get_ref still lags");
+        assert_eq!(fake.get_ref(&integration).unwrap(), None, "the fake still owes the lagged read");
+        assert!(fake.get_ref(&integration).unwrap().is_some(), "the second read sees the ref");
+    }
+
+    #[test]
+    fn an_existing_advanced_integration_ref_supplies_its_current_head() {
+        // Tripwire: recovery must not assume the sealed base after seeing an
+        // already-present namespace. The first get_ref is the live head.
+        let (fake, bloom, base) = seeded();
+        let source = git_source(&fake, false);
+        let expected = source.checkpoint(&bloom, &source.snapshot(&base).unwrap().tree).unwrap();
+        let candidate = digest(50);
+        fake.seed_git_object(&candidate);
+        let IntegrateOutcome::Integrated { head, tree } = source.integrate(&bloom, &candidate, &expected).unwrap()
+        else {
+            panic!("the first fold advances the integration branch");
+        };
+
+        let position = source.integration_checkpoint(&bloom, &base).unwrap();
+        assert_eq!(position.head, Some(head), "recovery names the advanced head, not the sealed base");
+        assert_eq!(position.checkpoint.tree, tree);
+    }
+
+    #[test]
+    fn a_create_ref_transport_fault_is_not_a_base_fallback() {
+        let fake = FakeGithub::new();
+        fake.fail_next_create_ref("git-data create timed out");
+        let base = fake.seed_base_commit(&digest(10));
+        fake.seed_ref_at("heads/main", &base);
+
+        match git_source(&fake, false).integration_checkpoint(&bloom(), &base) {
+            Err(SourceError::Git(GitDataError::Command(detail))) => {
+                assert!(detail.contains("create timed out"), "the transport fault surfaces: {detail}");
+            }
+            other => panic!("expected a git-data command fault, got {other:?}"),
+        }
+        assert!(
+            !fake.ref_exists(&GitSource::<FakeGithub>::integration_ref(&bloom())),
+            "a failed create must not invent the namespace",
+        );
+    }
+
+    #[test]
+    fn a_get_ref_transport_fault_is_not_a_base_fallback() {
+        let fake = FakeGithub::new();
+        fake.fail_next_get_ref("git-data read timed out");
+        let base = fake.seed_base_commit(&digest(10));
+        fake.seed_ref_at("heads/main", &base);
+
+        match git_source(&fake, false).integration_checkpoint(&bloom(), &base) {
+            Err(SourceError::Git(GitDataError::Command(detail))) => {
+                assert!(detail.contains("read timed out"), "the transport fault surfaces: {detail}");
+            }
+            other => panic!("expected a git-data command fault, got {other:?}"),
+        }
+        assert!(
+            !fake.ref_exists(&GitSource::<FakeGithub>::integration_ref(&bloom())),
+            "a failed read must not invent the namespace at the sealed base",
+        );
     }
 
     #[test]
