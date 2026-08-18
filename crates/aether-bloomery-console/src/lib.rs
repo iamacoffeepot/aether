@@ -2,7 +2,8 @@
 //!
 //! Polls `GET /view` and renders one Board: an alert band for the loud
 //! states, then every bloom and member. The crate mirrors the REST JSON
-//! locally so hex digests deserialize; it never writes back.
+//! locally so hex digests deserialize and unknown enum variants degrade
+//! rather than killing the poll; it never writes back.
 
 pub mod dto;
 pub mod http;
