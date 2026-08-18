@@ -3,15 +3,14 @@
 use std::io::{self, stdout};
 use std::panic;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use aether_bloomery_console::dto::ViewDocument;
-use aether_bloomery_console::http::{self, Endpoint};
-use aether_bloomery_console::state::BoardState;
-use aether_bloomery_console::ui;
+use aether_bloomery_console::http::Endpoint;
+use aether_bloomery_console::keys::Outcome;
+use aether_bloomery_console::shell::Shell;
 use anyhow::{Context, Result};
 use clap::Parser;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
 use ratatui::Terminal;
@@ -21,7 +20,6 @@ use ratatui::backend::CrosstermBackend;
 /// `aether-chassis-bloomery` uses.
 const DEFAULT_HTTP_PORT: u16 = 8910;
 const DEFAULT_POLL_MILLIS: u64 = 1000;
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
 const INPUT_SLICE: Duration = Duration::from_millis(100);
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
@@ -47,10 +45,10 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let endpoint = Endpoint { host: args.host, port: args.port };
     let poll = Duration::from_millis(args.poll_millis);
-    run(&endpoint, poll)
+    run(endpoint, poll)
 }
 
-fn run(endpoint: &Endpoint, poll: Duration) -> Result<()> {
+fn run(endpoint: Endpoint, poll: Duration) -> Result<()> {
     install_panic_hook();
     install_shutdown_signals();
     enable_raw_mode().context("enter raw mode")?;
@@ -65,33 +63,18 @@ fn run(endpoint: &Endpoint, poll: Duration) -> Result<()> {
     result
 }
 
-fn event_loop(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    endpoint: &Endpoint,
-    poll: Duration,
-) -> Result<()> {
-    let mut state = BoardState::new(endpoint.label());
-    let mut last_poll = Instant::now();
-    let mut force = true;
+fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, endpoint: Endpoint, poll: Duration) -> Result<()> {
+    let mut shell = Shell::new(endpoint, poll);
 
     loop {
         if SHUTDOWN.load(Ordering::SeqCst) {
             return Ok(());
         }
 
-        if force || last_poll.elapsed() >= poll {
-            match http::get_json::<ViewDocument>(endpoint, "/view", REQUEST_TIMEOUT) {
-                Ok(view) => state.apply_view(&view),
-                Err(error) => state.apply_error(error),
-            }
-            last_poll = Instant::now();
-            force = false;
-        }
+        shell.pump();
+        terminal.draw(|frame| shell.render(frame)).context("draw board")?;
 
-        terminal.draw(|frame| ui::render(frame, &state)).context("draw board")?;
-
-        let wait = poll.saturating_sub(last_poll.elapsed()).min(INPUT_SLICE);
-        if !event::poll(wait).context("poll input")? {
+        if !event::poll(INPUT_SLICE).context("poll input")? {
             continue;
         }
         let Event::Key(key) = event::read().context("read input")? else {
@@ -100,13 +83,8 @@ fn event_loop(
         if key.kind != KeyEventKind::Press {
             continue;
         }
-        match key.code {
-            KeyCode::Char('q') => return Ok(()),
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
-            KeyCode::Char('j') | KeyCode::Down => state.select_next(),
-            KeyCode::Char('k') | KeyCode::Up => state.select_prev(),
-            KeyCode::Char('r') => force = true,
-            _ => {}
+        if matches!(shell.handle_key(key), Outcome::Quit) {
+            return Ok(());
         }
     }
 }
