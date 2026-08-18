@@ -1,0 +1,34 @@
+====================================================================
+item                   lvl   minimal     low  medium    high   xhigh
+====================================================================
+s1_swallowed_error     L1        HIT     HIT     HIT     HIT     HIT
+s2_unwrap              L1        HIT     HIT     HIT     HIT     HIT
+s3_off_by_one          L2        HIT     HIT     HIT     HIT     HIT
+s4_silent_noop         L2          .     HIT     HIT     HIT     HIT
+s5_bounds_order        L3        HIT     HIT       .     HIT       .
+s6_leak                L3        HIT     HIT     HIT     HIT     HIT
+s7_ewma                L4          .       .     HIT       .     HIT
+s8_pan_law             L4          .       .     HIT     HIT     HIT
+r1_config_cap          L3          .       .     HIT     HIT     HIT
+r2_fuel_order          L4          .       .     HIT       .       .
+t1_mirror              L1        HIT     HIT     HIT     HIT     HIT
+t2_roundtrip           L2        HIT     HIT     HIT     HIT     HIT
+c1_clean               CLEAN      ok      ok      ok      ok      ok
+c2_clean               CLEAN      ok      ok      ok      ok      ok
+c3_clean               CLEAN      ok      ok      ok      ok      ok
+c4_tripwire            CLEAN      ok      ok      ok      ok      ok
+====================================================================
+
+effort           recall   FP  parsefail    mean     med     p90      max    total
+minimal    7/12 (58.3%)    0          0   12.7s   11.8s   14.4s    31.9s   203.5s
+low        8/12 (66.7%)    1          0   18.6s   16.4s   26.4s    32.3s   298.2s
+medium    11/12 (91.7%)    0          0   23.6s   23.4s   32.8s    34.6s   377.0s
+high      10/12 (83.3%)    0          0   26.4s   24.6s   35.1s    40.8s   421.9s
+xhigh     10/12 (83.3%)    0          0   39.0s   39.9s   50.2s    58.9s   623.5s
+
+misses by effort:
+  minimal   ['s4_silent_noop(L2)', 's7_ewma(L4)', 's8_pan_law(L4)', 'r1_config_cap(L3)', 'r2_fuel_order(L4)']
+  low       ['s7_ewma(L4)', 's8_pan_law(L4)', 'r1_config_cap(L3)', 'r2_fuel_order(L4)']
+  medium    ['s5_bounds_order(L3)']
+  high      ['s7_ewma(L4)', 'r2_fuel_order(L4)']
+  xhigh     ['s5_bounds_order(L3)', 'r2_fuel_order(L4)']

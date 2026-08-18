@@ -1,0 +1,109 @@
+You are one specialist judge on a code-review panel, auditing a Rust file under a single lens.
+
+Lens: Correctness
+Oracle (what you judge against): the code's own contract — what it implies it should do
+Named bug-shapes (NOT "find any bug" — flag only these, each with a concrete misbehaving input/path).
+- SWALLOWED ERROR: a fallible result dropped — let _ = on a Result, .ok() discarding an Err, unwrap()/expect() on a runtime-fallible path, an omitted ? that loses an error, an error remapped to a less-informative one.
+- MISSING BOUNDS CAP: recursion or geometrically-/user-derived iteration without the CLAUDE.md-mandated depth/budget cap that returns an error rather than overflowing; unbounded growth; integer overflow on user-derived arithmetic.
+- SILENT INCOMPLETENESS: TODO / todo!() / unimplemented!() / a "for now" stub / a branch or match arm that no-ops where the logic is required.
+- INVARIANT VIOLATION: new code that can put a type into a state its invariant forbids (flag the violation; the over-broad pub exposing the field is economy/visibility).
+- RESOURCE LEAK: a handle / subscription / mixer-lane / texture / spawned child acquired without the matching release on every path, including early-return and error paths.
+- CONCURRENCY: a data race / lost update / lock-order hazard. SCOPED: actor state is single-threaded behind its run-token (ADR-0038), so this shape is N/A in actor/component code — apply it ONLY in aether-substrate / native chassis code.
+
+CARVE-OUT (do NOT raise as judgment findings — route to lintCandidates or the named pillar): Judgment about behavior, not lints. rustc owns type/borrow safety (on Rust source only); where a clippy lint already fires, route it to lintCandidates. Do not flag style/verbosity (economy) or wrong-feature (spec). A finding must name the concrete input or path that misbehaves.
+
+FILE: <WORKTREE>/crates/aether-capabilities/src/http/client/runtime.rs
+Focus on the CHANGED lines below; open the full file for context, and scope every finding to the change.
+DIFF:
+diff --git a/crates/aether-capabilities/src/http/client/runtime.rs b/crates/aether-capabilities/src/http/client/runtime.rs
+index 5a823420..c126840a 100644
+--- a/crates/aether-capabilities/src/http/client/runtime.rs
++++ b/crates/aether-capabilities/src/http/client/runtime.rs
+@@ -29,7 +29,7 @@ pub use aether_substrate::chassis::error::BootError;
+ use crate::http::kinds::{Fetch, FetchResult, HttpError, HttpHeader, HttpMethod};
+ 
+ /// Adapter-facing request shape. Converted from the wire `Fetch`
+-/// kind by the cap before handing to the adapter.
++/// kind by the cap before it is handed to the adapter.
+ pub struct FetchRequest {
+     pub url: String,
+     pub method: HttpMethod,
+@@ -124,14 +124,17 @@ impl NativeActor for HttpCapability {
+             FetchRequest { url: mail.url, method: mail.method, headers: mail.headers, body: mail.body, timeout };
+ 
+         match state.adapter.fetch(adapter_req) {
+-            Ok(r) => FetchResult::Ok { url, status: r.status, headers: r.headers, body: r.body },
++            Ok(resp) => FetchResult::Ok { url, status: resp.status, headers: resp.headers, body: resp.body },
+             Err(error) => FetchResult::Err { url, error },
+         }
+     }
+ }
+ 
++/// Default `User-Agent` header value applied when the caller sets none.
++const DEFAULT_USER_AGENT: &str = concat!("aether/", env!("CARGO_PKG_VERSION"));
++
+ /// `ureq`-backed adapter. Holds the shared agent, the initial-host allowlist
+-/// (empty = deny all), the response cap, and the `require_https`
++/// (empty = deny all), the response body cap, and the `require_https`
+ /// flag. Thread-safe: `ureq::Agent` is cheaply cloneable and
+ /// internally synchronised, so the same adapter drives the cap from
+ /// one dispatch thread today and would parallelise cleanly behind a
+@@ -170,13 +173,13 @@ impl HttpAdapter for UreqHttpAdapter {
+     fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, HttpError> {
+         use ureq::RequestExt;
+ 
+-        let parsed = url::Url::parse(&req.url).map_err(|e| HttpError::InvalidUrl(format!("{e}")))?;
++        let parsed_url = url::Url::parse(&req.url).map_err(|e| HttpError::InvalidUrl(format!("{e}")))?;
+ 
+-        if self.require_https && parsed.scheme() != "https" {
++        if self.require_https && parsed_url.scheme() != "https" {
+             return Err(HttpError::InvalidUrl("http scheme not allowed (AETHER_HTTP_REQUIRE_HTTPS=1)".to_string()));
+         }
+ 
+-        let host = parsed.host_str().ok_or_else(|| HttpError::InvalidUrl("no host in url".to_string()))?;
++        let host = parsed_url.host_str().ok_or_else(|| HttpError::InvalidUrl("no host in url".to_string()))?;
+         self.check_allowlist(host)?;
+ 
+         if req.body.len() > self.max_body_bytes {
+@@ -191,22 +194,22 @@ impl HttpAdapter for UreqHttpAdapter {
+         // but `Host: B` routes the vhost to B server-side). User-
+         // Agent defaults to `aether/<version>` if not set.
+         let mut saw_user_agent = false;
+-        for h in &req.headers {
+-            if h.name.eq_ignore_ascii_case("host") {
++        for header in &req.headers {
++            if header.name.eq_ignore_ascii_case("host") {
+                 tracing::warn!(
+                     target: "aether_substrate::http",
+-                    value = %h.value,
++                    value = %header.value,
+                     "stripping caller-set Host header",
+                 );
+                 continue;
+             }
+-            if h.name.eq_ignore_ascii_case("user-agent") {
++            if header.name.eq_ignore_ascii_case("user-agent") {
+                 saw_user_agent = true;
+             }
+-            builder = builder.header(&h.name, &h.value);
++            builder = builder.header(&header.name, &header.value);
+         }
+         if !saw_user_agent {
+-            builder = builder.header("User-Agent", concat!("aether/", env!("CARGO_PKG_VERSION")));
++            builder = builder.header("User-Agent", DEFAULT_USER_AGENT);
+         }
+ 
+         let http_req = builder.body(req.body).map_err(|e| HttpError::InvalidUrl(format!("{e}")))?;
+@@ -261,7 +264,8 @@ fn ureq_error_to_http_error(e: ureq::Error) -> HttpError {
+     }
+ }
+ 
+-/// Build an HTTP adapter from explicit configuration.
++/// Build an HTTP adapter from explicit configuration: the disabled
++/// stub when `config.disabled` is set, the `ureq`-backed stack otherwise.
+ pub fn build_http_adapter(config: HttpConfig) -> Arc<dyn HttpAdapter> {
+     if config.disabled {
+         tracing::info!(
+
+
+Report every site this lens flags as a finding: symbol + approximate line, category (the sub-shape), severity, the current form, the suggested fix, a rationale stating the judgment (why the fix is at least as clear/correct/safe — not a restatement), and your confidence. Put mechanically-decidable observations in lintCandidates, not findings. Report nothing this lens does not own — another panelist covers the others. Report ONLY sites located in the file(s) above: if you notice an issue in a different file they reference, do not report it (that file gets its own finder). If the file is clean under this lens, return an empty findings array. Be precise and conservative: a confident story is not a finding; flag only when you can name the concrete better form AND why it wins.

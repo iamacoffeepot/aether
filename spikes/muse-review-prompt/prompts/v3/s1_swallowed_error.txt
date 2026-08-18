@@ -1,0 +1,121 @@
+You are one specialist judge on a code-review panel, auditing a Rust file under a single lens.
+
+Lens: Correctness
+Oracle (what you judge against): the code's own contract — what it implies it should do
+Named bug-shapes (NOT "find any bug" — stay inside this lens, each finding with a concrete misbehaving input/path). These shapes are the lens's focus, not an exhaustive checklist: if the change makes the code behave contrary to its own contract and the defect is nearest to one of these shapes, report it under that shape. Never withhold a behavioral defect you can name because it is an imperfect fit for a shape's wording.
+- SWALLOWED ERROR: a fallible result dropped — let _ = on a Result, .ok() discarding an Err, unwrap()/expect() on a runtime-fallible path, an omitted ? that loses an error, an error remapped to a less-informative one.
+- MISSING BOUNDS CAP: recursion or geometrically-/user-derived iteration without the CLAUDE.md-mandated depth/budget cap that returns an error rather than overflowing; unbounded growth; integer overflow on user-derived arithmetic.
+- SILENT INCOMPLETENESS: TODO / todo!() / unimplemented!() / a "for now" stub / a branch or match arm that no-ops where the logic is required.
+- INVARIANT VIOLATION: new code that can put a type into a state its invariant forbids (flag the violation; the over-broad pub exposing the field is economy/visibility).
+- RESOURCE LEAK: a handle / subscription / mixer-lane / texture / spawned child acquired without the matching release on every path, including early-return and error paths.
+- CONCURRENCY: a data race / lost update / lock-order hazard. SCOPED: actor state is single-threaded behind its run-token (ADR-0038), so this shape is N/A in actor/component code — apply it ONLY in aether-substrate / native chassis code.
+
+CARVE-OUT (do NOT raise as judgment findings — route to lintCandidates or the named pillar): Judgment about behavior, not lints. rustc owns type/borrow safety (on Rust source only); where a clippy lint already fires, route it to lintCandidates. Do not flag style/verbosity (economy) or wrong-feature (spec). A finding must name the concrete input or path that misbehaves.
+
+FILE: <WORKTREE>/crates/aether-capabilities/src/audio/runtime/handlers.rs
+Focus on the CHANGED lines below; open the full file for context, and scope every finding to the change.
+DIFF:
+diff --git a/crates/aether-capabilities/src/audio/runtime/handlers.rs b/crates/aether-capabilities/src/audio/runtime/handlers.rs
+index 8ea447b3..2bb5ab5a 100644
+--- a/crates/aether-capabilities/src/audio/runtime/handlers.rs
++++ b/crates/aether-capabilities/src/audio/runtime/handlers.rs
+@@ -14,8 +14,9 @@ use crate::audio::kinds::{
+ };
+ 
+ impl AudioCapabilityState {
++    /// Queue a `note_on` for the realtime mixer.
+     pub fn handle_note_on(&mut self, ctx: &mut NativeCtx<'_>, mail: NoteOn) {
+-        let Some(s) = self.sender.as_ref() else {
++        let Some(sender) = self.sender.as_ref() else {
+             return;
+         };
+         let ev = AudioEvent::NoteOn {
+@@ -25,7 +26,7 @@ impl AudioCapabilityState {
+             instrument_id: mail.instrument_id,
+             pan: mail.pan,
+         };
+-        if s.push(ev).is_err() {
++        if sender.push(ev).is_err() {
+             tracing::warn!(
+                 target: "aether_substrate::audio",
+                 "event queue full — dropping note_on",
+@@ -33,8 +34,9 @@ impl AudioCapabilityState {
+         }
+     }
+ 
++    /// Queue a `note_off` for the realtime mixer.
+     pub fn handle_note_off(&mut self, ctx: &mut NativeCtx<'_>, mail: NoteOff) {
+-        let Some(s) = self.sender.as_ref() else {
++        let Some(sender) = self.sender.as_ref() else {
+             return;
+         };
+         let ev = AudioEvent::NoteOff {
+@@ -42,7 +44,7 @@ impl AudioCapabilityState {
+             pitch: mail.pitch,
+             instrument_id: mail.instrument_id,
+         };
+-        if s.push(ev).is_err() {
++        if sender.push(ev).is_err() {
+             tracing::warn!(
+                 target: "aether_substrate::audio",
+                 "event queue full — dropping note_off",
+@@ -52,12 +54,12 @@ impl AudioCapabilityState {
+ 
+     pub fn handle_set_master_gain(&mut self, _ctx: &mut NativeCtx<'_>, mail: SetMasterGain) -> SetMasterGainResult {
+         let applied = mail.gain.clamp(0.0, 1.0);
+-        let Some(s) = self.sender.as_ref() else {
++        let Some(sender) = self.sender.as_ref() else {
+             return SetMasterGainResult::Err {
+                 error: "audio pipeline not initialised on this desktop substrate".to_owned(),
+             };
+         };
+-        let _ = s.push(AudioEvent::SetMasterGain { gain: applied });
++        let _ = sender.push(AudioEvent::SetMasterGain { gain: applied });
+         tracing::info!(
+             target: "aether_substrate::audio",
+             requested = mail.gain,
+@@ -69,12 +71,12 @@ impl AudioCapabilityState {
+ 
+     pub fn handle_set_reverb_send(&mut self, _ctx: &mut NativeCtx<'_>, mail: SetReverbSend) -> SetReverbSendResult {
+         let applied = mail.send.clamp(0.0, 1.0);
+-        let Some(s) = self.sender.as_ref() else {
++        let Some(sender) = self.sender.as_ref() else {
+             return SetReverbSendResult::Err {
+                 error: "audio pipeline not initialised on this desktop substrate".to_owned(),
+             };
+         };
+-        let _ = s.push(AudioEvent::SetReverbSend { send: applied });
++        let _ = sender.push(AudioEvent::SetReverbSend { send: applied });
+         tracing::info!(
+             target: "aether_substrate::audio",
+             requested = mail.send,
+@@ -86,13 +88,13 @@ impl AudioCapabilityState {
+ 
+     pub fn handle_set_sender_gain(&mut self, ctx: &mut NativeCtx<'_>, mail: SetSenderGain) -> SetSenderGainResult {
+         let applied = mail.gain.clamp(0.0, 4.0);
+-        let Some(s) = self.sender.as_ref() else {
++        let Some(sender) = self.sender.as_ref() else {
+             return SetSenderGainResult::Err {
+                 error: "audio pipeline not initialised on this desktop substrate".to_owned(),
+             };
+         };
+         let sender_mailbox = sender_mailbox_id(ctx.reply_target());
+-        let _ = s.push(AudioEvent::SetSenderGain { sender_mailbox, gain: applied });
++        let _ = sender.push(AudioEvent::SetSenderGain { sender_mailbox, gain: applied });
+         tracing::info!(
+             target: "aether_substrate::audio",
+             requested = mail.gain,
+@@ -132,9 +134,7 @@ impl AudioCapabilityState {
+         #[allow(clippy::cast_possible_truncation)]
+         let accepted = mail.events.len() as u32;
+         let ev = AudioEvent::Schedule { sender_mailbox: sender_mailbox_id(ctx.reply_target()), events: mail.events };
+-        if sender.push(ev).is_err() {
+-            return ScheduleResult::Err { error: "audio event queue full — schedule dropped".to_owned() };
+-        }
++        let _ = sender.push(ev);
+         ScheduleResult::Ok { accepted }
+     }
+ 
+
+
+Report every site this lens flags as a finding: symbol + approximate line, category (the sub-shape), severity, the current form, the suggested fix, a rationale stating the judgment (why the fix is at least as clear/correct/safe — not a restatement), and your confidence. Put mechanically-decidable observations in lintCandidates, not findings — meaning only what a linter could decide with no knowledge of what this code is supposed to do. If you had to reason about the code's own contract to conclude it is wrong, it is a finding, even when a lint fires nearby. Routing a defect you have already diagnosed to lintCandidates is a miss, not caution. Report nothing this lens does not own — another panelist covers the others. Report ONLY sites located in the file(s) above: if you notice an issue in a different file they reference, do not report it (that file gets its own finder). That restricts where you REPORT, never where you LOOK — read whatever you need in order to judge THIS change. Before you conclude a file is clean, state to yourself what the changed lines depend on being true, and go check it. If the file is clean under this lens, return an empty findings array. Be precise: a confident story is not a finding; flag only when you can name the concrete better form AND why it wins. Conservative means not inventing a misbehaving path you cannot name — it does NOT mean withholding a defect you can name because its blast radius is small, its severity low, or your confidence merely medium. Report at the confidence you actually hold; a medium-confidence finding with a named path is wanted.

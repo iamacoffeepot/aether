@@ -1,0 +1,52 @@
+=============================================================================================
+item                   lvl     t1    t2    t3    t4    t5   v2a   v2b   v2c   v3a   v3b   v3c
+                               v1    v1    v1    v1    v1    v2    v2    v2    v3    v3    v3
+=============================================================================================
+s1_swallowed_error     L1     HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT
+s2_unwrap              L1     HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT
+s3_off_by_one          L2     HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT
+s4_silent_noop         L2     HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT
+s5_bounds_order        L3       .     .   HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT
+s6_leak                L3     HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT
+s7_ewma                L4     HIT   HIT   HIT     .   HIT   HIT   HIT   HIT   HIT   HIT   HIT
+s8_pan_law             L4     HIT     .   HIT     .   HIT   HIT   HIT   HIT   HIT   HIT   HIT
+r1_config_cap          L3     HIT   HIT     .   HIT     .   HIT   HIT   HIT   HIT   HIT   HIT
+r2_fuel_order          L4     HIT     .     .     .   HIT   HIT   HIT   HIT   HIT   HIT   HIT
+t1_mirror              L1     HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT
+t2_roundtrip           L2     HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT   HIT
+c1_clean               CLEAN   ok    ok    ok    ok    ok    ok    ok    ok    ok    ok    ok
+c2_clean               CLEAN   ok    ok    ok    ok    ok    ok    ok    ok    ok    ok    ok
+c3_clean               CLEAN   ok    ok    ok    ok    ok    ok    ok    ok    ok    ok    ok
+c4_tripwire            CLEAN   ok    ok    ok    ok    ok    ok    ok    ok    ok    ok    ok
+=============================================================================================
+
+trial  arm          recall   FP    mean     max   misses
+t1     v1    11/12 (91.7%)    0   23.6s   34.6s   s5_bounds_order
+t2     v1     9/12 (75.0%)    0   24.5s   61.9s   s5_bounds_order, s8_pan_law, r2_fuel_order
+t3     v1    10/12 (83.3%)    0   24.3s   37.9s   r1_config_cap, r2_fuel_order
+t4     v1     9/12 (75.0%)    0   25.1s   48.7s   s7_ewma, s8_pan_law, r2_fuel_order
+t5     v1    11/12 (91.7%)    0   25.0s   43.7s   r1_config_cap
+v2a    v2   12/12 (100.0%)    0   28.4s   69.6s   -
+v2b    v2   12/12 (100.0%)    0   25.1s   41.7s   -
+v2c    v2   12/12 (100.0%)    0   27.1s   43.7s   -
+v3a    v3   12/12 (100.0%)    0   25.0s   49.2s   -
+v3b    v3   12/12 (100.0%)    0   25.3s   51.7s   -
+v3c    v3   12/12 (100.0%)    0   24.3s   38.3s   -
+
+v1: 5 trials, mean recall 83.3% (sd 8.3pp), range 75.0-91.7%, 0 FP total
+v2: 3 trials, mean recall 100.0% (sd 0.0pp), range 100.0-100.0%, 0 FP total
+v3: 3 trials, mean recall 100.0% (sd 0.0pp), range 100.0-100.0%, 0 FP total
+
+per-item catch rate by arm:
+  s1_swallowed_error     L1    v1  5/5   v2  3/3   v3  3/3
+  s2_unwrap              L1    v1  5/5   v2  3/3   v3  3/3
+  s3_off_by_one          L2    v1  5/5   v2  3/3   v3  3/3
+  s4_silent_noop         L2    v1  5/5   v2  3/3   v3  3/3
+  s5_bounds_order        L3    v1  3/5   v2  3/3   v3  3/3
+  s6_leak                L3    v1  5/5   v2  3/3   v3  3/3
+  s7_ewma                L4    v1  4/5   v2  3/3   v3  3/3
+  s8_pan_law             L4    v1  3/5   v2  3/3   v3  3/3
+  r1_config_cap          L3    v1  3/5   v2  3/3   v3  3/3
+  r2_fuel_order          L4    v1  2/5   v2  3/3   v3  3/3
+  t1_mirror              L1    v1  5/5   v2  3/3   v3  3/3
+  t2_roundtrip           L2    v1  5/5   v2  3/3   v3  3/3

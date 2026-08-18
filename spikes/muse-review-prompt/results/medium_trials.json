@@ -1,0 +1,34 @@
+{
+  "trials": [
+    "t1",
+    "t2",
+    "t3",
+    "t4",
+    "t5"
+  ],
+  "per_item_catch": {
+    "s1_swallowed_error": 5,
+    "s2_unwrap": 5,
+    "s3_off_by_one": 5,
+    "s4_silent_noop": 5,
+    "s5_bounds_order": 3,
+    "s6_leak": 5,
+    "s7_ewma": 4,
+    "s8_pan_law": 3,
+    "r1_config_cap": 3,
+    "r2_fuel_order": 2,
+    "t1_mirror": 5,
+    "t2_roundtrip": 5,
+    "c1_clean": 0,
+    "c2_clean": 0,
+    "c3_clean": 0,
+    "c4_tripwire": 0
+  },
+  "pcts": [
+    91.66666666666667,
+    75.0,
+    83.33333333333333,
+    75.0,
+    91.66666666666667
+  ]
+}

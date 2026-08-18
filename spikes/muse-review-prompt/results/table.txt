@@ -1,0 +1,42 @@
+==============================================================================
+item                     level                muse             sonnet
+==============================================================================
+s1_swallowed_error       L1      HIT   24.5s fp=0   HIT   15.2s fp=0 
+s2_unwrap                L1      HIT   16.8s fp=0   HIT   16.6s fp=0 
+s3_off_by_one            L2      HIT   35.4s fp=0   HIT   28.5s fp=0 
+s4_silent_noop           L2      HIT   24.0s fp=0   HIT   98.1s fp=0 
+s5_bounds_order          L3      --    44.4s fp=0   HIT   46.3s fp=0 
+s6_leak                  L3      HIT   15.0s fp=0   HIT   44.1s fp=0 
+s7_ewma                  L4      HIT   34.4s fp=0   HIT  110.7s fp=0 
+s8_pan_law               L4      HIT   43.6s fp=0   --    37.6s fp=0 
+r1_config_cap            L3      --    30.3s fp=0   --    40.8s fp=0 
+r2_fuel_order            L4      --    35.5s fp=0   --   170.1s fp=0 
+t1_mirror                L1      HIT   24.2s fp=0   HIT   15.4s fp=0 
+t2_roundtrip             L2      HIT   20.1s fp=0   HIT   40.1s fp=0 
+c1_clean                 CLEAN   ok    21.5s fp=0   ok    14.6s fp=0 
+c2_clean                 CLEAN   ok    15.0s fp=0   ok     9.0s fp=0 
+c3_clean                 CLEAN   ok    30.6s fp=0   ok    13.1s fp=0 
+c4_tripwire              CLEAN   ok    25.8s fp=0   ok    44.8s fp=0 
+==============================================================================
+{
+  "muse": {
+    "recall": "9/12 (75.0%)",
+    "false_positives": 0,
+    "parse_failures": 0,
+    "mean_s": 27.6,
+    "median_s": 25.1,
+    "max_s": 44.4,
+    "total_wall_s": 441.1,
+    "total_cost_usd": null
+  },
+  "sonnet": {
+    "recall": "9/12 (75.0%)",
+    "false_positives": 0,
+    "parse_failures": 2,
+    "mean_s": 46.6,
+    "median_s": 38.9,
+    "max_s": 170.1,
+    "total_wall_s": 745.0,
+    "total_cost_usd": 6.5625
+  }
+}

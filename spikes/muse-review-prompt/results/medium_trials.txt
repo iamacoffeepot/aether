@@ -1,0 +1,38 @@
+=========================================================================
+item                   lvl      t1    t2    t3    t4    t5   rate  sonnet
+=========================================================================
+s1_swallowed_error     L1      HIT   HIT   HIT   HIT   HIT    5/5  HIT
+s2_unwrap              L1      HIT   HIT   HIT   HIT   HIT    5/5  HIT
+s3_off_by_one          L2      HIT   HIT   HIT   HIT   HIT    5/5  HIT
+s4_silent_noop         L2      HIT   HIT   HIT   HIT   HIT    5/5  HIT
+s5_bounds_order        L3        .     .   HIT   HIT   HIT    3/5  HIT
+s6_leak                L3      HIT   HIT   HIT   HIT   HIT    5/5  HIT
+s7_ewma                L4      HIT   HIT   HIT     .   HIT    4/5  HIT
+s8_pan_law             L4      HIT     .   HIT     .   HIT    3/5  .
+r1_config_cap          L3      HIT   HIT     .   HIT     .    3/5  HIT*
+r2_fuel_order          L4      HIT     .     .     .   HIT    2/5  HIT*
+t1_mirror              L1      HIT   HIT   HIT   HIT   HIT    5/5  HIT
+t2_roundtrip           L2      HIT   HIT   HIT   HIT   HIT    5/5  HIT
+c1_clean               CLEAN    ok    ok    ok    ok    ok      -  ok
+c2_clean               CLEAN    ok    ok    ok    ok    ok      -  ok
+c3_clean               CLEAN    ok    ok    ok    ok    ok      -  ok
+c4_tripwire            CLEAN    ok    ok    ok    ok    ok      -  ok
+=========================================================================
+* adjudicated: correct prose diagnosis that broke the JSON contract
+
+trial          recall   FP  pf    mean     med     max   misses
+t1      11/12 (91.7%)    0   0   23.6s   23.4s   34.6s   s5_bounds_order
+t2       9/12 (75.0%)    0   0   24.5s   22.9s   61.9s   s5_bounds_order, s8_pan_law, r2_fuel_order
+t3      10/12 (83.3%)    0   0   24.3s   23.1s   37.9s   r1_config_cap, r2_fuel_order
+t4       9/12 (75.0%)    0   0   25.1s   22.6s   48.7s   s7_ewma, s8_pan_law, r2_fuel_order
+t5      11/12 (91.7%)    0   0   25.0s   25.1s   43.7s   r1_config_cap
+
+pooled over 5 trials: mean recall 83.3%, sd 8.3pp, range 75.0-91.7%
+items caught every trial: 7/12
+unreliable items (caught in some trials, missed in others):
+  s5_bounds_order        3/5  level=L3
+  s7_ewma                4/5  level=L4
+  s8_pan_law             3/5  level=L4
+  r1_config_cap          3/5  level=L3
+  r2_fuel_order          2/5  level=L4
+never caught:

@@ -1,0 +1,93 @@
+You are one specialist judge on a code-review panel, auditing a Rust file under a single lens.
+
+Lens: Correctness
+Oracle (what you judge against): the code's own contract — what it implies it should do
+Named bug-shapes (NOT "find any bug" — stay inside this lens, each finding with a concrete misbehaving input/path). These shapes are the lens's focus, not an exhaustive checklist: if the change makes the code behave contrary to its own contract and the defect is nearest to one of these shapes, report it under that shape. Never withhold a behavioral defect you can name because it is an imperfect fit for a shape's wording.
+- SWALLOWED ERROR: a fallible result dropped — let _ = on a Result, .ok() discarding an Err, unwrap()/expect() on a runtime-fallible path, an omitted ? that loses an error, an error remapped to a less-informative one.
+- MISSING BOUNDS CAP: recursion or geometrically-/user-derived iteration without the CLAUDE.md-mandated depth/budget cap that returns an error rather than overflowing; unbounded growth; integer overflow on user-derived arithmetic.
+- SILENT INCOMPLETENESS: TODO / todo!() / unimplemented!() / a "for now" stub / a branch or match arm that no-ops where the logic is required.
+- INVARIANT VIOLATION: new code that can put a type into a state its invariant forbids (flag the violation; the over-broad pub exposing the field is economy/visibility).
+- RESOURCE LEAK: a handle / subscription / mixer-lane / texture / spawned child acquired without the matching release on every path, including early-return and error paths.
+- CONCURRENCY: a data race / lost update / lock-order hazard. SCOPED: actor state is single-threaded behind its run-token (ADR-0038), so this shape is N/A in actor/component code — apply it ONLY in aether-substrate / native chassis code.
+
+CARVE-OUT (do NOT raise as judgment findings — route to lintCandidates or the named pillar): Judgment about behavior, not lints. rustc owns type/borrow safety (on Rust source only); where a clippy lint already fires, route it to lintCandidates. Do not flag style/verbosity (economy) or wrong-feature (spec). A finding must name the concrete input or path that misbehaves.
+
+FILE: <WORKTREE>/crates/aether-codec/src/encode.rs
+Focus on the CHANGED lines below; open the full file for context, and scope every finding to the change.
+DIFF:
+diff --git a/crates/aether-codec/src/encode.rs b/crates/aether-codec/src/encode.rs
+index 14857e62..4fc9478a 100644
+--- a/crates/aether-codec/src/encode.rs
++++ b/crates/aether-codec/src/encode.rs
+@@ -504,9 +504,10 @@ fn encode_enum_body(body: &Value, variant: &EnumVariant, path: &str, out: &mut V
+     }
+ }
+ 
+-/// Recursively walk a `repr_c: true` struct's fields, packing them
+-/// into `out` with `#[repr(C)]` alignment rules. Returns the maximum
+-/// field alignment so the caller can apply trailing padding.
++/// Recursively walk a `repr_c: true` struct's fields, packing each into
++/// `out` under `#[repr(C)]` alignment rules. Returns the maximum field
++/// alignment so the caller can apply the trailing padding that rounds
++/// the struct up to its own alignment.
+ fn encode_struct_fields(
+     out: &mut Vec<u8>,
+     obj: &serde_json::Map<String, Value>,
+@@ -514,9 +515,9 @@ fn encode_struct_fields(
+ ) -> Result<usize, EncodeError> {
+     let mut max_align = 1usize;
+     for field in fields {
+-        let value = obj.get(&*field.name).ok_or_else(|| EncodeError::MissingField(field.name.to_string()))?;
+-        let a = encode_field_value(out, &field.name, &field.ty, value)?;
+-        max_align = max_align.max(a);
++        let field_value = obj.get(&*field.name).ok_or_else(|| EncodeError::MissingField(field.name.to_string()))?;
++        let field_align = encode_field_value(out, &field.name, &field.ty, field_value)?;
++        max_align = max_align.max(field_align);
+     }
+     Ok(max_align)
+ }
+@@ -533,10 +534,10 @@ fn encode_field_value(out: &mut Vec<u8>, name: &str, ty: &SchemaType, value: &Va
+     }
+     match ty {
+         SchemaType::Scalar(p) => {
+-            let a = align_of_primitive(*p);
+-            pad_to(out, a);
++            let align = align_of_primitive(*p);
++            pad_to(out, align);
+             write_primitive_schema(out, *p, value, name)?;
+-            Ok(a)
++            Ok(align)
+         }
+         SchemaType::Array { element, len } => {
+             let arr = value
+@@ -599,8 +600,9 @@ fn encode_field_value(out: &mut Vec<u8>, name: &str, ty: &SchemaType, value: &Va
+     }
+ }
+ 
+-/// Compute the `#[repr(C)]` alignment of a cast-shaped schema. Used to
+-/// place fields at the right offsets without actually encoding them.
++/// Compute the `#[repr(C)]` alignment of a cast-shaped schema — the
++/// largest alignment among its leaves. Used to place fields at the right
++/// offsets without actually encoding them.
+ fn alignment_of_schema(ty: &SchemaType) -> Result<usize, EncodeError> {
+     match ty {
+         SchemaType::Scalar(p) => Ok(align_of_primitive(*p)),
+@@ -608,11 +610,11 @@ fn alignment_of_schema(ty: &SchemaType) -> Result<usize, EncodeError> {
+         SchemaType::TypeId(_) => Ok(8),
+         SchemaType::Array { element, .. } => alignment_of_schema(element),
+         SchemaType::Struct { fields, repr_c: true } => {
+-            let mut a = 1usize;
+-            for f in fields.iter() {
+-                a = a.max(alignment_of_schema(&f.ty)?);
++            let mut max_align = 1usize;
++            for field in fields.iter() {
++                max_align = max_align.max(alignment_of_schema(&field.ty)?);
+             }
+-            Ok(a)
++            Ok(max_align)
+         }
+         _ => Err(EncodeError::UnsupportedSchema("alignment query on non-cast schema")),
+     }
+
+
+Report every site this lens flags as a finding: symbol + approximate line, category (the sub-shape), severity, the current form, the suggested fix, a rationale stating the judgment (why the fix is at least as clear/correct/safe — not a restatement), and your confidence. Put mechanically-decidable observations in lintCandidates, not findings — meaning only what a linter could decide with no knowledge of what this code is supposed to do. If you had to reason about the code's own contract to conclude it is wrong, it is a finding, even when a lint fires nearby. Routing a defect you have already diagnosed to lintCandidates is a miss, not caution. Report nothing this lens does not own — another panelist covers the others. Report ONLY sites located in the file(s) above: if you notice an issue in a different file they reference, do not report it (that file gets its own finder). That restricts where you REPORT, never where you LOOK — read whatever you need in order to judge THIS change. Before you conclude a file is clean, state to yourself what the changed lines depend on being true, and go check it. If the file is clean under this lens, return an empty findings array. Be precise: a confident story is not a finding; flag only when you can name the concrete better form AND why it wins. Conservative means not inventing a misbehaving path you cannot name — it does NOT mean withholding a defect you can name because its blast radius is small, its severity low, or your confidence merely medium. Report at the confidence you actually hold; a medium-confidence finding with a named path is wanted.

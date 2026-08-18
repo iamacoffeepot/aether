@@ -1,0 +1,66 @@
+item                   lvl   rate  miss=empty miss=wrong   hit_s  miss_s   delta
+s1_swallowed_error     L1   5/5           0          0   22.8s       -       -
+s2_unwrap              L1   5/5           0          0   15.9s       -       -
+s3_off_by_one          L2   5/5           0          0   24.2s       -       -
+s4_silent_noop         L2   5/5           0          0   30.1s       -       -
+s5_bounds_order        L3   3/5           2          0   25.8s   26.9s   +1.1s
+s6_leak                L3   5/5           0          0   17.6s       -       -
+s7_ewma                L4   4/5           1          0   30.4s   32.6s   +2.2s
+s8_pan_law             L4   3/5           2          0   27.1s   27.3s   +0.2s
+r1_config_cap          L3   3/5           2          0   34.3s   36.2s   +1.9s
+r2_fuel_order          L4   2/5           3          0   39.0s   41.1s   +2.0s
+t1_mirror              L1   5/5           0          0   22.6s       -       -
+t2_roundtrip           L2   5/5           0          0   22.8s       -       -
+
+findings returned per call, by whether the target was hit:
+  on a hit : mean 1.00 findings over 50 calls
+  on a miss: mean 0.00 findings over 10 calls, 10 returned nothing at all
+
+what it said instead, on every miss that returned something:
+item                    rate  confidence on its hits           severity
+s1_swallowed_error     5/5  {'high': 5}                      {'high': 5}
+s2_unwrap              5/5  {'high': 5}                      {'high': 5}
+s3_off_by_one          5/5  {'high': 5}                      {'medium': 4, 'high': 1}
+s4_silent_noop         5/5  {'high': 5}                      {'high': 5}
+s5_bounds_order        3/5  {'high': 3}                      {'medium': 3}
+s6_leak                5/5  {'high': 5}                      {'medium': 5}
+s7_ewma                4/5  {'high': 4}                      {'medium': 4}
+s8_pan_law             3/5  {'medium': 2, 'high': 1}         {'low': 3}
+r1_config_cap          3/5  {'medium': 3}                    {'medium': 3}
+r2_fuel_order          2/5  {'high': 1, 'medium': 1}         {'medium': 2}
+t1_mirror              5/5  {'high': 5}                      {'medium': 3, 'low': 2}
+t2_roundtrip           5/5  {'high': 5}                      {'medium': 5}
+
+always (5/5)   n= 35  confidence {'high': 35}  -> 100% high
+                      severity   {'high': 16, 'medium': 17, 'low': 2}
+flaky (<5/5)   n= 15  confidence {'high': 9, 'medium': 6}  -> 60% high
+                      severity   {'medium': 12, 'low': 3}
+ 1. s5_bounds_order      t1  lints=1  diagnosis_demoted=True
+      symbol: decode_wire_value::Vec
+      note:   Vec arm at ~334 now clamps with len.min(cur.bytes.len()) while Map arm at 378 still uses len.min(cur.remaining()) and the Vec comment still says 'against the bytes that remain' – inconsistency weakens the allocation clamp to total input size rather than remaining bytes. Not flagged under this lens's
+ 2. s5_bounds_order      t2  lints=1  diagnosis_demoted=True
+      symbol: decode_wire_value::Vec
+      note:   Vec arm at ~334 uses cur.bytes.len() (total input length) while Map arm at ~378 and the Vec comment both use cur.remaining(). Inconsistent clamp weakens pre-allocation bound after pos>0 (allocates up to total length vs remaining). Still bounded by input length and iteration gated by charge_value bud
+ 3. s7_ewma              t4  lints=0  diagnosis_demoted=False
+ 4. s8_pan_law           t2  lints=0  diagnosis_demoted=False
+ 5. s8_pan_law           t4  lints=0  diagnosis_demoted=False
+ 6. r1_config_cap        t3  lints=0  diagnosis_demoted=False
+ 7. r1_config_cap        t5  lints=0  diagnosis_demoted=False
+ 8. r2_fuel_order        t2  lints=1  diagnosis_demoted=True
+      symbol: ScriptSlot::offer_state
+      note:   lines 204-205 use `let _ =` on `Result` (`Store::set_fuel` and `TypedFunc::call`) discarding the must-use value; this is mechanically `clippy::let_underscore_must_use` / `must_use` and intentional per the doc comment's fail-open contract (mirroring `state_load_serde`/`save_state` fail-open) — route 
+ 9. r2_fuel_order        t3  lints=0  diagnosis_demoted=False
+10. r2_fuel_order        t4  lints=1  diagnosis_demoted=True
+      symbol: ScriptSlot::offer_state
+      note:   let _ = on Result at lines 204-205 (set_fuel, load.call) is mechanically linted (clippy let_underscore_must_use/must_use). Carved out from Correctness findings: fail-open ignore is the stated contract (lines 194-196) and mirrors save_state's fail-open, so not a SWALLOWED ERROR correctness violation;
+
+4/10 misses had the correct diagnosis sitting in lintCandidates
+
+--- for contrast, lintCandidates emitted alongside a HIT ---
+2/50 hits also emitted lintCandidates
+
+--- lintCandidates on the four CLEAN controls (all 5 trials) ---
+  c1_clean             0 lint candidates across 5 trials
+  c2_clean             0 lint candidates across 5 trials
+  c3_clean             0 lint candidates across 5 trials
+  c4_tripwire          0 lint candidates across 5 trials

@@ -1,0 +1,346 @@
+{
+  "summary": {
+    "muse": {
+      "recall": "9/12 (75.0%)",
+      "false_positives": 0,
+      "parse_failures": 0,
+      "mean_s": 27.6,
+      "median_s": 25.1,
+      "max_s": 44.4,
+      "total_wall_s": 441.1,
+      "total_cost_usd": null
+    },
+    "sonnet": {
+      "recall": "9/12 (75.0%)",
+      "false_positives": 0,
+      "parse_failures": 2,
+      "mean_s": 46.6,
+      "median_s": 38.9,
+      "max_s": 170.1,
+      "total_wall_s": 745.0,
+      "total_cost_usd": 6.5625
+    }
+  },
+  "rows": [
+    {
+      "arm": "muse",
+      "item": "s1_swallowed_error",
+      "level": "L1",
+      "hit": true,
+      "fp": 0,
+      "duration_s": 24.5,
+      "parsed": true,
+      "n_findings": 1
+    },
+    {
+      "arm": "muse",
+      "item": "s2_unwrap",
+      "level": "L1",
+      "hit": true,
+      "fp": 0,
+      "duration_s": 16.8,
+      "parsed": true,
+      "n_findings": 1
+    },
+    {
+      "arm": "muse",
+      "item": "s3_off_by_one",
+      "level": "L2",
+      "hit": true,
+      "fp": 0,
+      "duration_s": 35.4,
+      "parsed": true,
+      "n_findings": 1
+    },
+    {
+      "arm": "muse",
+      "item": "s4_silent_noop",
+      "level": "L2",
+      "hit": true,
+      "fp": 0,
+      "duration_s": 24.0,
+      "parsed": true,
+      "n_findings": 1
+    },
+    {
+      "arm": "muse",
+      "item": "s5_bounds_order",
+      "level": "L3",
+      "hit": false,
+      "fp": 0,
+      "duration_s": 44.4,
+      "parsed": true,
+      "n_findings": 0
+    },
+    {
+      "arm": "muse",
+      "item": "s6_leak",
+      "level": "L3",
+      "hit": true,
+      "fp": 0,
+      "duration_s": 15.0,
+      "parsed": true,
+      "n_findings": 1
+    },
+    {
+      "arm": "muse",
+      "item": "s7_ewma",
+      "level": "L4",
+      "hit": true,
+      "fp": 0,
+      "duration_s": 34.4,
+      "parsed": true,
+      "n_findings": 1
+    },
+    {
+      "arm": "muse",
+      "item": "s8_pan_law",
+      "level": "L4",
+      "hit": true,
+      "fp": 0,
+      "duration_s": 43.6,
+      "parsed": true,
+      "n_findings": 1
+    },
+    {
+      "arm": "muse",
+      "item": "r1_config_cap",
+      "level": "L3",
+      "hit": false,
+      "fp": 0,
+      "duration_s": 30.3,
+      "parsed": true,
+      "n_findings": 0
+    },
+    {
+      "arm": "muse",
+      "item": "r2_fuel_order",
+      "level": "L4",
+      "hit": false,
+      "fp": 0,
+      "duration_s": 35.5,
+      "parsed": true,
+      "n_findings": 0
+    },
+    {
+      "arm": "muse",
+      "item": "t1_mirror",
+      "level": "L1",
+      "hit": true,
+      "fp": 0,
+      "duration_s": 24.2,
+      "parsed": true,
+      "n_findings": 1
+    },
+    {
+      "arm": "muse",
+      "item": "t2_roundtrip",
+      "level": "L2",
+      "hit": true,
+      "fp": 0,
+      "duration_s": 20.1,
+      "parsed": true,
+      "n_findings": 1
+    },
+    {
+      "arm": "muse",
+      "item": "c1_clean",
+      "level": "CLEAN",
+      "hit": false,
+      "fp": 0,
+      "duration_s": 21.5,
+      "parsed": true,
+      "n_findings": 0
+    },
+    {
+      "arm": "muse",
+      "item": "c2_clean",
+      "level": "CLEAN",
+      "hit": false,
+      "fp": 0,
+      "duration_s": 15.0,
+      "parsed": true,
+      "n_findings": 0
+    },
+    {
+      "arm": "muse",
+      "item": "c3_clean",
+      "level": "CLEAN",
+      "hit": false,
+      "fp": 0,
+      "duration_s": 30.6,
+      "parsed": true,
+      "n_findings": 0
+    },
+    {
+      "arm": "muse",
+      "item": "c4_tripwire",
+      "level": "CLEAN",
+      "hit": false,
+      "fp": 0,
+      "duration_s": 25.8,
+      "parsed": true,
+      "n_findings": 0
+    },
+    {
+      "arm": "sonnet",
+      "item": "s1_swallowed_error",
+      "level": "L1",
+      "hit": true,
+      "fp": 0,
+      "duration_s": 15.2,
+      "parsed": true,
+      "n_findings": 1
+    },
+    {
+      "arm": "sonnet",
+      "item": "s2_unwrap",
+      "level": "L1",
+      "hit": true,
+      "fp": 0,
+      "duration_s": 16.6,
+      "parsed": true,
+      "n_findings": 1
+    },
+    {
+      "arm": "sonnet",
+      "item": "s3_off_by_one",
+      "level": "L2",
+      "hit": true,
+      "fp": 0,
+      "duration_s": 28.5,
+      "parsed": true,
+      "n_findings": 1
+    },
+    {
+      "arm": "sonnet",
+      "item": "s4_silent_noop",
+      "level": "L2",
+      "hit": true,
+      "fp": 0,
+      "duration_s": 98.1,
+      "parsed": true,
+      "n_findings": 1
+    },
+    {
+      "arm": "sonnet",
+      "item": "s5_bounds_order",
+      "level": "L3",
+      "hit": true,
+      "fp": 0,
+      "duration_s": 46.3,
+      "parsed": true,
+      "n_findings": 1
+    },
+    {
+      "arm": "sonnet",
+      "item": "s6_leak",
+      "level": "L3",
+      "hit": true,
+      "fp": 0,
+      "duration_s": 44.1,
+      "parsed": true,
+      "n_findings": 1
+    },
+    {
+      "arm": "sonnet",
+      "item": "s7_ewma",
+      "level": "L4",
+      "hit": true,
+      "fp": 0,
+      "duration_s": 110.7,
+      "parsed": true,
+      "n_findings": 1
+    },
+    {
+      "arm": "sonnet",
+      "item": "s8_pan_law",
+      "level": "L4",
+      "hit": false,
+      "fp": 0,
+      "duration_s": 37.6,
+      "parsed": true,
+      "n_findings": 0
+    },
+    {
+      "arm": "sonnet",
+      "item": "r1_config_cap",
+      "level": "L3",
+      "hit": false,
+      "fp": 0,
+      "duration_s": 40.8,
+      "parsed": false,
+      "n_findings": 0
+    },
+    {
+      "arm": "sonnet",
+      "item": "r2_fuel_order",
+      "level": "L4",
+      "hit": false,
+      "fp": 0,
+      "duration_s": 170.1,
+      "parsed": false,
+      "n_findings": 0
+    },
+    {
+      "arm": "sonnet",
+      "item": "t1_mirror",
+      "level": "L1",
+      "hit": true,
+      "fp": 0,
+      "duration_s": 15.4,
+      "parsed": true,
+      "n_findings": 1
+    },
+    {
+      "arm": "sonnet",
+      "item": "t2_roundtrip",
+      "level": "L2",
+      "hit": true,
+      "fp": 0,
+      "duration_s": 40.1,
+      "parsed": true,
+      "n_findings": 1
+    },
+    {
+      "arm": "sonnet",
+      "item": "c1_clean",
+      "level": "CLEAN",
+      "hit": false,
+      "fp": 0,
+      "duration_s": 14.6,
+      "parsed": true,
+      "n_findings": 0
+    },
+    {
+      "arm": "sonnet",
+      "item": "c2_clean",
+      "level": "CLEAN",
+      "hit": false,
+      "fp": 0,
+      "duration_s": 9.0,
+      "parsed": true,
+      "n_findings": 0
+    },
+    {
+      "arm": "sonnet",
+      "item": "c3_clean",
+      "level": "CLEAN",
+      "hit": false,
+      "fp": 0,
+      "duration_s": 13.1,
+      "parsed": true,
+      "n_findings": 0
+    },
+    {
+      "arm": "sonnet",
+      "item": "c4_tripwire",
+      "level": "CLEAN",
+      "hit": false,
+      "fp": 0,
+      "duration_s": 44.8,
+      "parsed": true,
+      "n_findings": 0
+    }
+  ]
+}
