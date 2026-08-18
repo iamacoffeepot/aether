@@ -41,6 +41,7 @@ fn record(sequence: u64, event: &Event) -> JournalRecord {
         decisions: to_vec(&decisions).expect("decisions encode"),
         decider: "test".to_owned(),
         decisions_schema: Some(DECISIONS_SCHEMA.to_owned()),
+        recorded_unix_millis: None,
     }
 }
 

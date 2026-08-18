@@ -12,6 +12,7 @@
 //! fields are ignored, so the console survives running against a newer or
 //! older coordinator.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::de::Error;
@@ -142,6 +143,34 @@ pub enum StageId {
     Unknown,
 }
 
+impl StageId {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Sketch => "Sketch",
+            Self::Scope => "Scope",
+            Self::Approve => "Approve",
+            Self::Construct => "Construct",
+            Self::Verify => "Verify",
+            Self::Refine => "Refine",
+            Self::Review => "Review",
+            Self::Integrate => "Integrate",
+            Self::AggregateVerify => "AggregateVerify",
+            Self::AggregateReview => "AggregateReview",
+            Self::Land => "Land",
+            Self::Study => "Study",
+            Self::Reconcile => "Reconcile",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl fmt::Display for StageId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 /// Why the seal door closed (ADR-0192), as `/view` spells it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub enum SpendQuiesce {
@@ -165,6 +194,22 @@ pub enum SpendQuiesce {
     },
     #[serde(other)]
     Unknown,
+}
+
+impl SpendQuiesce {
+    /// Seal-door line: window and ceiling when present.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Window { window, spent_micro_usd, ceiling_micro_usd } => {
+                format!("SEAL CLOSED  {window}  {spent_micro_usd}/{ceiling_micro_usd}")
+            }
+            Self::Bloom { window, bloom, spent_micro_usd, ceiling_micro_usd } => {
+                format!("SEAL CLOSED  {window}  {}  {spent_micro_usd}/{ceiling_micro_usd}", bloom.prefix())
+            }
+            Self::Unknown => "SEAL CLOSED".to_owned(),
+        }
+    }
 }
 
 /// `GET /view` as the console consumes it.
@@ -199,6 +244,10 @@ pub struct BloomView {
     pub review_park: Option<ReviewParkView>,
     #[serde(default)]
     pub composition: Option<CompositionView>,
+    /// The operator brake (#4976). Absent when the coordinator predates the
+    /// field or the bloom is not held.
+    #[serde(default)]
+    pub operator_hold: Option<OperatorHoldView>,
 }
 
 /// One sealed member as the projection renders it.
@@ -215,13 +264,23 @@ pub struct MemberView {
     #[serde(default)]
     pub blocked_by: Option<String>,
     #[serde(default)]
-    pub host_fault: Option<Present>,
+    pub host_fault: Option<HostFaultView>,
     #[serde(default)]
     pub machinery_rolls: u32,
     #[serde(default)]
     pub machinery_budget: u32,
     #[serde(default)]
     pub wedge_cause: Option<WedgeCause>,
+    /// Stage cursor when the coordinator serves it. Absent-tolerant.
+    #[serde(default)]
+    pub cursor: Option<CompositionCursorView>,
+}
+
+/// Host-fault findings, listed verbatim when the coordinator serves them.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct HostFaultView {
+    #[serde(default)]
+    pub findings: String,
 }
 
 /// A bloom's landing-gate standing, once a landing has been refused.
@@ -327,11 +386,223 @@ pub struct CandidateRef {
     pub checkout: DigestHex,
 }
 
+/// The operator brake on a bloom, when the coordinator serves it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct OperatorHoldView {
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub operator: String,
+}
+
 /// Presence marker: any JSON object (or other value) deserializes, extra
 /// fields ignored. Used for `/view` objects the board only tests for
-/// presence — a wedge, a host fault, a resolution claim.
+/// presence — a wedge, a resolution claim.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Present {}
+
+/// One bounded `GET /journal` page.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct JournalPage {
+    #[serde(default)]
+    pub records: Vec<JournalRecordView>,
+    #[serde(default)]
+    pub total_matched: u64,
+    #[serde(default)]
+    pub shown: u64,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default)]
+    pub next_from_sequence: Option<u64>,
+    #[serde(default)]
+    pub notice: Option<String>,
+}
+
+/// One decoded journal record. Event and outcome stay JSON so an unknown
+/// fact variant cannot take the page down.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct JournalRecordView {
+    #[serde(default)]
+    pub sequence: u64,
+    #[serde(default)]
+    pub idempotency_key: String,
+    #[serde(default)]
+    pub event: Value,
+    #[serde(default)]
+    pub outcome: Value,
+    #[serde(default)]
+    pub decider: String,
+}
+
+/// `GET /artifacts/{digest}/decoded` — a known kind, or a raw range.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DecodedArtifact {
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub value: Option<Value>,
+    #[serde(default)]
+    pub bytes: Option<Vec<u8>>,
+    #[serde(default)]
+    pub offset: Option<u64>,
+    #[serde(default)]
+    pub total: Option<u64>,
+    #[serde(default)]
+    pub truncated: Option<bool>,
+    #[serde(default)]
+    pub notice: Option<String>,
+}
+
+/// One bounded `GET /dispatches/{nonce}/transcript` (or `/prompt`) page.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DispatchFilePage {
+    #[serde(default)]
+    pub lines: Vec<String>,
+    #[serde(default)]
+    pub cursor: u64,
+    #[serde(default)]
+    pub next_cursor: Option<u64>,
+    #[serde(default)]
+    pub length: u64,
+    #[serde(default)]
+    pub notice: Option<String>,
+}
+
+/// `GET /metrics/summary`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MetricsSummary {
+    #[serde(default)]
+    pub blooms: u64,
+    #[serde(default)]
+    pub dispatches: u64,
+    #[serde(default)]
+    pub unpriced: u64,
+    #[serde(default)]
+    pub reconstructed: u64,
+    #[serde(default)]
+    pub active_blooms: u64,
+}
+
+/// One `GET /metrics/days` row. Extra series fields default so a thinner
+/// coordinator still decodes.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MetricDay {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub dispatches: u64,
+    #[serde(default)]
+    pub spend_micro_usd: u64,
+    #[serde(default)]
+    pub landed: u64,
+    #[serde(default)]
+    pub wedges: u64,
+    #[serde(default)]
+    pub cycle_time_millis: Option<u64>,
+    #[serde(default)]
+    pub quiesced: bool,
+}
+
+/// One per-member stage span on `GET /metrics/blooms/{id}/timeline`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TimelineSpan {
+    #[serde(default)]
+    pub workpiece: String,
+    #[serde(default)]
+    pub stage: StageId,
+    #[serde(default)]
+    pub sequence: u64,
+    #[serde(default)]
+    pub started_unix_millis: Option<u64>,
+    #[serde(default)]
+    pub reconstructed: bool,
+}
+
+/// `GET /metrics/blooms/{id}/timeline`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MetricsTimeline {
+    #[serde(default)]
+    pub bloom: DigestHex,
+    #[serde(default)]
+    pub spans: Vec<TimelineSpan>,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+/// The resolved agent on a seat row. Strings so an unknown harness or
+/// effort degrades instead of taking the poll down.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SeatAgent {
+    #[serde(default)]
+    pub harness: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub effort: String,
+}
+
+/// One `GET /metrics/seats` row.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MetricsSeat {
+    #[serde(default)]
+    pub agent: SeatAgent,
+    #[serde(default)]
+    pub stage: StageId,
+    #[serde(default)]
+    pub attempts: u64,
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    #[serde(default)]
+    pub cache_write_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cost_micro_usd: u64,
+    #[serde(default)]
+    pub priced_samples: u64,
+    #[serde(default)]
+    pub unpriced: u64,
+}
+
+/// One `GET /metrics/dispatches` row.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MetricDispatch {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub bloom: DigestHex,
+    #[serde(default)]
+    pub workpiece: String,
+    #[serde(default)]
+    pub stage: StageId,
+    #[serde(default)]
+    pub displayed: DigestHex,
+    #[serde(default)]
+    pub sequence: u64,
+    #[serde(default)]
+    pub recorded_unix_millis: Option<u64>,
+    #[serde(default)]
+    pub reconstructed: bool,
+    #[serde(default)]
+    pub study: Option<DigestHex>,
+}
+
+/// `GET /spend`. `per_bloom` keys are the REST hex spelling of a bloom id.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SpendWindowView {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub total_micro_usd: u64,
+    #[serde(default)]
+    pub per_bloom: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub unaccounted_dispatches: u64,
+    #[serde(default)]
+    pub unpriced_records: u64,
+}
 
 fn encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -373,7 +644,8 @@ fn from_json(value: &Value) -> Result<[u8; 32], String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BloomStatus, BloomView, DigestHex, MemberView, SpendQuiesce, StageId, ViewDocument, WedgeCause, decode, encode,
+        BloomStatus, BloomView, DigestHex, MemberView, MetricDay, MetricsSeat, SpendQuiesce, SpendWindowView, StageId,
+        TimelineSpan, ViewDocument, WedgeCause, decode, encode,
     };
     use serde_json::json;
 
@@ -480,6 +752,7 @@ mod tests {
         assert!(bloom.review_park.is_none());
         assert!(bloom.composition.is_none());
         assert!(bloom.landing_blocked.is_none());
+        assert!(bloom.operator_hold.is_none());
         let member = &bloom.members[0];
         assert_eq!(member.workpiece, "issue-1");
         assert!(member.wedge.is_some());
@@ -488,14 +761,14 @@ mod tests {
         assert_eq!(member.blocked_by.as_deref(), Some("issue-0"));
         assert_eq!(member.machinery_rolls, 2);
         assert_eq!(member.machinery_budget, 3);
-        assert!(member.host_fault.is_some());
+        assert_eq!(member.host_fault.as_ref().map(|fault| fault.findings.as_str()), Some("no cargo"));
     }
 
     #[test]
     fn widened_fields_decode_from_a_realistic_document() {
         // The plausible bug: the mirror still drops mainline / observed /
         // spend_quiesce / superseded_by / review-park prose / pending_decision
-        // / composition, so the war-room chrome has nothing to paint.
+        // / composition / operator_hold, so the war-room chrome has nothing to paint.
         let view: ViewDocument = serde_json::from_value(json!({
             "mainline": hex(0x11),
             "observed": hex(0x22),
@@ -529,6 +802,10 @@ mod tests {
                         "detail": hex(0x99),
                         "implicated": ["issue-1"]
                     }]
+                },
+                "operator_hold": {
+                    "reason": "wait for the host",
+                    "operator": "owner"
                 },
                 "members": [{
                     "workpiece": "issue-1",
@@ -575,6 +852,9 @@ mod tests {
         assert_eq!(composition.findings.len(), 1);
         assert_eq!(composition.findings[0].detail, digest(0x99));
         assert_eq!(composition.findings[0].implicated, ["issue-1"]);
+        let hold = bloom.operator_hold.as_ref().expect("operator hold");
+        assert_eq!(hold.reason, "wait for the host");
+        assert_eq!(hold.operator, "owner");
         let pending = bloom.members[0].pending_decision.as_ref().expect("pending decision");
         assert_eq!(pending.question, digest(0xaa));
         assert_eq!(pending.stage, Some(StageId::Construct));
@@ -598,5 +878,54 @@ mod tests {
         let member: MemberView = serde_json::from_value(json!({})).expect("empty member");
         assert!(member.workpiece.is_empty());
         assert!(member.wedge.is_none());
+    }
+
+    #[test]
+    fn a_thin_metrics_document_still_decodes() {
+        // The plausible bug: the console requires spend / landed / cycle
+        // columns the current coordinator's day row does not serve, so the
+        // first /metrics/days poll fails and the dashboard stays blank.
+        let day: MetricDay = serde_json::from_value(json!({
+            "label": "bloomery/daily/2026-08-17",
+            "dispatches": 3
+        }))
+        .expect("thin day");
+        assert_eq!(day.dispatches, 3);
+        assert_eq!(day.spend_micro_usd, 0);
+        assert_eq!(day.landed, 0);
+        assert!(day.cycle_time_millis.is_none());
+        assert!(!day.quiesced);
+
+        let seat: MetricsSeat = serde_json::from_value(json!({
+            "agent": {"harness": "Claude", "model": "opus", "effort": "High"},
+            "stage": "Construct",
+            "attempts": 2,
+            "cost_micro_usd": 0,
+            "priced_samples": 0,
+            "unpriced": 2
+        }))
+        .expect("seat");
+        assert_eq!(seat.agent.harness, "Claude");
+        assert_eq!(seat.unpriced, 2);
+
+        let span: TimelineSpan = serde_json::from_value(json!({
+            "workpiece": "issue-1",
+            "stage": "Verify",
+            "sequence": 9,
+            "reconstructed": true
+        }))
+        .expect("span");
+        assert!(span.started_unix_millis.is_none());
+        assert!(span.reconstructed);
+
+        let spend: SpendWindowView = serde_json::from_value(json!({
+            "label": "bloomery/daily/2026-08-17",
+            "total_micro_usd": 12,
+            "per_bloom": { hex(0x33): 12 },
+            "unpriced_records": 1
+        }))
+        .expect("spend");
+        assert_eq!(spend.per_bloom.get(&hex(0x33)), Some(&12));
+        assert_eq!(spend.unpriced_records, 1);
     }
 }

@@ -34,7 +34,7 @@ use aether_bloomery::Topic;
 // `pub` rather than `pub(crate)` because this module is itself private: the
 // crate-only restriction is applied once, where the chain reaches the public
 // `bloomery` module, and repeating it here is the redundancy clippy flags.
-pub use runtime::default_candidate_push;
+pub use runtime::candidate_push_at;
 pub use runtime::{CandidatePush, DispatchTick, ExecutorReactorState};
 
 pub struct ExecutorReactorSetup {

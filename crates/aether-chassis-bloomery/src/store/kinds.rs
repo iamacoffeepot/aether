@@ -396,3 +396,86 @@ pub enum PageJournalResult {
         error: String,
     },
 }
+
+/// One rollup dispatch row for `GET /blooms/{id}/dispatches`.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct BloomDispatchRollup {
+    /// Host nonce when the evidence join has landed; otherwise the fold id.
+    pub nonce: String,
+    /// Journal sequence the fold observed.
+    pub sequence: u64,
+    /// Wire-encoded [`aether_bloomery::MetricDispatch`].
+    #[serde(with = "aether_data::bytes")]
+    pub payload: Vec<u8>,
+}
+
+/// One live outstanding order for `GET /blooms/{id}/dispatches`.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct BloomDispatchLive {
+    /// The host dispatch nonce (`dispatch-` or `redispatch-`).
+    pub nonce: String,
+    /// Member workpiece this order is for.
+    pub workpiece: String,
+    /// Wire-encoded [`aether_bloomery::StageId`].
+    #[serde(with = "aether_data::bytes")]
+    pub stage: Vec<u8>,
+    /// Displayed digest the evidence must bind to.
+    #[serde(with = "aether_data::bytes")]
+    pub displayed: Vec<u8>,
+}
+
+/// `GET /blooms/{id}/dispatches` — rollup rows plus live outstanding orders.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.store.list_bloom_dispatches")]
+pub struct ListBloomDispatches {
+    /// The bloom's digest bytes.
+    #[serde(with = "aether_data::bytes")]
+    pub bloom: Vec<u8>,
+}
+
+/// Reply to [`ListBloomDispatches`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.store.list_bloom_dispatches_result")]
+pub enum ListBloomDispatchesResult {
+    /// Rollup cache plus outstanding orders for the bloom.
+    Ok {
+        /// Folded dispatch rows, oldest first.
+        rollup: Vec<BloomDispatchRollup>,
+        /// Orders still outstanding against this bloom.
+        outstanding: Vec<BloomDispatchLive>,
+    },
+    /// The read failed.
+    Err {
+        /// A human-readable failure reason.
+        error: String,
+    },
+}
+
+/// `GET /dispatches/{nonce}` — did the journal ever name this nonce?
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.store.lookup_dispatch")]
+pub struct LookupDispatch {
+    /// The nonce as the caller spelled it.
+    pub nonce: String,
+}
+
+/// Reply to [`LookupDispatch`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.store.lookup_dispatch_result")]
+pub enum LookupDispatchResult {
+    /// The journal (or a still-outstanding order) names this nonce.
+    Ok {
+        /// The spelling that matched, which may be the alternate prefix.
+        nonce: String,
+        /// Owning bloom digest bytes.
+        #[serde(with = "aether_data::bytes")]
+        bloom: Vec<u8>,
+    },
+    /// No `dispatch_owners`, outstanding, or `metric_dispatch` row names it.
+    NotFound,
+    /// The read failed.
+    Err {
+        /// A human-readable failure reason.
+        error: String,
+    },
+}

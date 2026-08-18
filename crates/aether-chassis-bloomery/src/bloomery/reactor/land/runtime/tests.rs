@@ -8,7 +8,8 @@
 use std::sync::Arc;
 
 use aether_bloomery::{
-    Adjudication, Admit, BloomId, Correspondence, Digest, Disposition, Event, Fact, IdempotencyKey, LandPayload, Topic,
+    Adjudication, Admit, BloomId, Correspondence, Digest, Disposition, Event, Fact, IdempotencyKey, LandPayload,
+    SourceReplicaPayload, Topic,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -16,7 +17,7 @@ use aether_bloomery_github::{
 };
 use aether_data::wire::{from_bytes, to_vec};
 
-use super::drain_and_land;
+use super::{drain_and_land, drain_and_land_emitting};
 use crate::bloomery::outbox::TopicOutbox;
 use crate::store::{AppendOutcome, JournalWrite, SqliteStore, StoreBackend};
 
@@ -726,4 +727,34 @@ fn journal_confirmation_acknowledges_the_land_prefix() {
     assert_eq!(ack_through, None, "an empty prefix acknowledges nothing");
     assert_eq!(proposal_number(&fake, bloom), number);
     assert_eq!(fake.pull_request_merged(number), Some(true));
+}
+
+#[test]
+fn a_committed_land_emits_a_source_replica_row_only_after_the_receipt_is_admitted() {
+    // Host-minted: the replica topic is not part of the land commit. Before
+    // the journal holds the land key there is nothing to push; after it does,
+    // one source-replica row carries the admitted head.
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    let source = shell(fake, true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    enqueue_land(&mut store, bloom, base, new_head);
+
+    let (admits, _) = drain_and_land_emitting(&mut store, &source, true).unwrap();
+    assert!(
+        store.drain_topic(Topic::SourceReplica).unwrap().is_empty(),
+        "no replica row before the receipt is admitted"
+    );
+    assert!(!admits.is_empty(), "the land is observed before the replica is minted");
+
+    journal_event(&mut store, &land_admit(&admits));
+    let (_, ack) = drain_and_land_emitting(&mut store, &source, true).unwrap();
+    assert_eq!(ack, Some(1));
+
+    let entries = store.drain_topic(Topic::SourceReplica).unwrap();
+    assert_eq!(entries.len(), 1, "exactly one replica request after admit");
+    let payload: SourceReplicaPayload = from_bytes(&entries[0].payload).unwrap();
+    assert_eq!(payload.new_head, new_head, "the replica request carries the landed head the outbox named");
 }

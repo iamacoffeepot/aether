@@ -455,7 +455,10 @@ impl LocalExecutor {
         let lane_program = LaneProgram::parse(&config.local_lane_program);
 
         let backend = Self::new(
-            Arc::new(ProcessTransformRunner::new(identity, lane_program.clone())),
+            Arc::new(
+                ProcessTransformRunner::new(identity, lane_program.clone(), config.lane_repository())
+                    .with_fetch_remote(config.candidate_remote()),
+            ),
             correspondence,
             config.local_worktree_base.clone(),
         )
@@ -1387,6 +1390,9 @@ impl LocalExecutor {
             failed_verifiers,
             cost: parse_cost(bytes),
             calls: parse_calls(bytes),
+            session_reuse_arm: parse_session_reuse_arm(bytes),
+            session_reuse_saved_micro_usd: parse_session_reuse_saved(bytes),
+            peak_resident_bytes: parse_peak_resident_bytes(bytes),
         }]
     }
 }
@@ -1501,6 +1507,9 @@ fn executor_fault_ref(
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost,
         calls,
+        session_reuse_arm: parse_session_reuse_arm(bytes),
+        session_reuse_saved_micro_usd: parse_session_reuse_saved(bytes),
+        peak_resident_bytes: parse_peak_resident_bytes(bytes),
     }
 }
 
@@ -2001,6 +2010,24 @@ fn parse_cost(bytes: &[u8]) -> Option<StudyCost> {
 
 fn parse_calls(bytes: &[u8]) -> Option<Vec<aether_bloomery::StudyCall>> {
     parse_measured(bytes).and_then(|(_, calls)| calls)
+}
+
+fn parse_session_reuse_arm(bytes: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    value.get("session_reuse")?.get("arm")?.as_str().map(ToOwned::to_owned)
+}
+
+fn parse_session_reuse_saved(bytes: &[u8]) -> Option<u64> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let reuse = value.get("session_reuse")?;
+    let priced = reuse.get("priced_micro_usd")?.as_u64()?;
+    let counterfactual = reuse.get("counterfactual_micro_usd")?.as_u64()?;
+    counterfactual.checked_sub(priced)
+}
+
+fn parse_peak_resident_bytes(bytes: &[u8]) -> Option<u64> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    value.get("peak_resident_bytes")?.as_u64()
 }
 
 /// Whether a construct lane's `evidence.json` byte string shows a **substantive

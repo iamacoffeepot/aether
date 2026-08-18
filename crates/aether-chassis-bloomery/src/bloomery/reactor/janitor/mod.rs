@@ -38,6 +38,9 @@ pub struct JanitorReactorSetup {
     pub evidence_retention_days: u64,
     /// How often to wake and sweep.
     pub poll_interval_secs: u64,
+    /// The coordinator repository whose worktrees the janitor lists and
+    /// removes — the same path the transform runner materializes against.
+    pub repo: String,
 }
 
 /// Addressing identity for the janitor reactor capability.

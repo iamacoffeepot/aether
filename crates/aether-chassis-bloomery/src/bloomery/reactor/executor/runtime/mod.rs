@@ -36,7 +36,9 @@
 //! drain/ack through the store's `DrainOutbox`/`AckOutbox` mail (as the mirror
 //! reactor does) is a follow-up once the registry ops gain a mail surface.
 
+use std::env;
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -464,6 +466,9 @@ fn terminate_live_order(
         failed_verifiers,
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     };
     match admit_uploaded(store, &upload) {
         Ok(AdmitDecision::Admitted(admission)) => {
@@ -1558,18 +1563,26 @@ fn drain_and_redispatch(
 /// out and the API-side integrate can resolve its tree. Production shells the
 /// operator's own authenticated clone; tests substitute a recorder.
 pub trait CandidatePush: Send + Sync {
-    /// Force-push `commit_hex` to `target_ref` on `origin`.
+    /// Publish `commit_hex` onto `target_ref` at the configured authority.
     ///
     /// # Errors
-    /// The push shell-out failed; the message is the diagnostic tail.
+    /// The publish shell-out failed; the message is the diagnostic tail.
     fn push(&self, commit_hex: &str, target_ref: &str) -> Result<(), String>;
 }
 
-/// The production push: `git push --force origin <sha>:<ref>` from the host
-/// process's own clone. The capture commit was created in a scratch worktree of
-/// this same repository, so its object is in the shared object store and
-/// pushable after the worktree is gone; the host's ambient credentials are the
-/// ADR-0150 trust domain (the worker itself never pushes).
+/// The production push: publish `commit_hex` onto `target_ref` at the
+/// configured authority.
+///
+/// GitHub still force-pushes to the `origin` remote from the coordinator
+/// clone. A local authority (ADR-0199) takes an absolute repository path:
+/// when the coordinator already shares that object database the ref is
+/// updated in place and no objects move; otherwise `git push --force`
+/// transfers them over the filesystem, never the network.
+///
+/// The capture commit was created in a scratch worktree of `repo`, so its
+/// object is in that object store and publishable after the worktree is
+/// gone; the host's ambient credentials are the ADR-0150 trust domain
+/// (the worker itself never pushes).
 ///
 /// # Warning to anyone extending the in-process fixture tier
 ///
@@ -1599,7 +1612,19 @@ pub trait CandidatePush: Send + Sync {
 /// having picked the refusing arm for you.
 ///
 /// [`on_dispatch_tick`]: ExecutorReactorCapability
-struct GitCandidatePush;
+struct GitCandidatePush {
+    /// Coordinator repository whose object database holds the capture.
+    repo: PathBuf,
+    /// `"origin"` when GitHub is authoritative; an absolute repository path
+    /// (no `file://`) when the fleet-local authority holds the refs.
+    remote: String,
+}
+
+impl GitCandidatePush {
+    fn github() -> Self {
+        Self { repo: env::current_dir().unwrap_or_else(|_| PathBuf::from(".")), remote: "origin".into() }
+    }
+}
 
 impl CandidatePush for GitCandidatePush {
     fn push(&self, commit_hex: &str, target_ref: &str) -> Result<(), String> {
@@ -1621,9 +1646,14 @@ impl CandidatePush for GitCandidatePush {
             ));
         }
 
+        if Path::new(&self.remote).is_absolute() && shares_object_database(&self.repo, Path::new(&self.remote)) {
+            return update_authority_ref(Path::new(&self.remote), commit_hex, target_ref);
+        }
+
         let refspec = format!("{commit_hex}:{target_ref}");
         let output = Command::new("git")
-            .args(["push", "--force", "origin"])
+            .current_dir(&self.repo)
+            .args(["push", "--force", &self.remote])
             .arg(&refspec)
             .output()
             .map_err(|error| error.to_string())?;
@@ -1633,6 +1663,46 @@ impl CandidatePush for GitCandidatePush {
             Err(String::from_utf8_lossy(&output.stderr).into_owned())
         }
     }
+}
+
+/// `git update-ref` on the authority: the capture is already in this object
+/// database, so publishing is a ref move and transfers nothing.
+fn update_authority_ref(authority: &Path, commit_hex: &str, target_ref: &str) -> Result<(), String> {
+    let output = Command::new("git")
+        .current_dir(authority)
+        .args(["update-ref", target_ref, commit_hex])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).into_owned())
+    }
+}
+
+fn shares_object_database(repo: &Path, authority: &Path) -> bool {
+    match (absolute_git_common_dir(repo), absolute_git_common_dir(authority)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn absolute_git_common_dir(repo: &Path) -> Option<PathBuf> {
+    // `--absolute-git-common-dir` is not on the git this host ships (2.43);
+    // the unknown flag is parsed as a revision name and every repository
+    // then appears to share one database.
+    let output = Command::new("git").current_dir(repo).args(["rev-parse", "--git-common-dir"]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let raw = raw.trim();
+    let path = if Path::new(raw).is_absolute() {
+        PathBuf::from(raw)
+    } else {
+        repo.join(raw)
+    };
+    path.canonicalize().ok()
 }
 
 /// The fixture-boot push: declines every push rather than no-opping. A no-op
@@ -1674,7 +1744,20 @@ pub fn default_candidate_push(refuse: bool) -> Arc<dyn CandidatePush> {
     if refuse {
         Arc::new(RefusingCandidatePush)
     } else {
-        Arc::new(GitCandidatePush)
+        let github = GitCandidatePush::github();
+        Arc::new(github)
+    }
+}
+
+/// Select the [`CandidatePush`] seam for a known coordinator repository and
+/// publish remote. `remote` is `"origin"` when GitHub is authoritative, or
+/// an absolute local-authority path (no `file://`).
+#[must_use]
+pub fn candidate_push_at(refuse: bool, repo: impl Into<PathBuf>, remote: impl Into<String>) -> Arc<dyn CandidatePush> {
+    if refuse {
+        Arc::new(RefusingCandidatePush)
+    } else {
+        Arc::new(GitCandidatePush { repo: repo.into(), remote: remote.into() })
     }
 }
 
@@ -2075,6 +2158,9 @@ fn admit_scripted(state: &mut ExecutorReactorState, encoded: &[u8]) -> (Scripted
                 subject: upload.subject,
                 cost,
                 calls: upload.calls.clone(),
+                session_reuse_arm: upload.session_reuse_arm.clone(),
+                session_reuse_saved_micro_usd: upload.session_reuse_saved_micro_usd,
+                peak_resident_bytes: upload.peak_resident_bytes,
             };
             match admit_study(store, artifacts, &record) {
                 Ok(StudyAdmitDecision::Admitted(admission)) => {

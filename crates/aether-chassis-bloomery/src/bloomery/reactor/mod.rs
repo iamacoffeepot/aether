@@ -28,7 +28,8 @@
 //! - [`land`] — issues the source-port compare-and-swap that lands a resolved
 //!   bloom on the mainline (ADR-0149 §The boundary).
 //! - [`mirror`] — routes landing receipts and view documents out to the GitHub
-//!   projection (ADR-0149 migration step 1).
+//!   projection (ADR-0149 migration step 1) and, after a local land, the
+//!   allowlisted source-replica push (ADR-0199).
 //! - [`claim_release`] — runs the expected-holder compare-and-swap that retires
 //!   an authorized orphan claim ref (ADR-0179). Mounted only on the GitHub
 //!   branch: there is no ref namespace to release without one.
@@ -47,7 +48,7 @@ pub use claim_release::{
     ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, ClaimReleaseReactorState, ClaimReleaseTick,
 };
 // `pub` because `reactor` is a private module — see the note in `executor`.
-pub use executor::default_candidate_push;
+pub use executor::candidate_push_at;
 pub use executor::{
     CandidatePush, DispatchTick, ExecutorReactorCapability, ExecutorReactorSetup, ExecutorReactorState,
 };

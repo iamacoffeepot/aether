@@ -10,9 +10,10 @@
 
 use super::StoreCapability;
 use super::kinds::{
-    AckOutbox, AckOutboxResult, AppendEvent, AppendEventResult, ClaimSeal, ClaimSealResult, DrainOutbox,
-    DrainOutboxResult, EnqueueOutbox, EnqueueOutboxResult, OutboxEntry, PageJournal, PageJournalResult, RecordConfig,
-    RecordConfigResult, RecordDispatchDescription, RecordDispatchDescriptionResult, ReleaseMembership,
+    AckOutbox, AckOutboxResult, AppendEvent, AppendEventResult, BloomDispatchLive, BloomDispatchRollup, ClaimSeal,
+    ClaimSealResult, DrainOutbox, DrainOutboxResult, EnqueueOutbox, EnqueueOutboxResult, ListBloomDispatches,
+    ListBloomDispatchesResult, LookupDispatch, LookupDispatchResult, OutboxEntry, PageJournal, PageJournalResult,
+    RecordConfig, RecordConfigResult, RecordDispatchDescription, RecordDispatchDescriptionResult, ReleaseMembership,
     ReleaseMembershipResult, Supersede, SupersedeResult,
 };
 use aether_actor::runtime;
@@ -21,9 +22,11 @@ use aether_actor::runtime;
 // package cycle (the actor lives there; host depends on it). Host imports them
 // inward for its `StoreCapability` handlers (issue #3497).
 use aether_bloomery::{
-    Commit, CommitResult, ConfigRecord, DECISIONS_SCHEMA, JournalRecord, LoadConfigs, LoadConfigsResult,
-    MembershipMutation, OutboxPayload, ReplayJournal, ReplayJournalResult, WorkpieceId,
+    Commit, CommitResult, ConfigRecord, DECISIONS_SCHEMA, Event, JournalRecord, LoadConfigs, LoadConfigsResult,
+    MembershipMutation, MetricDispatch, MetricsLedger, OutboxPayload, ReplayJournal, ReplayJournalResult, WorkpieceId,
+    decode_recorded_decisions,
 };
+use aether_data::wire::{from_bytes, to_vec};
 use std::iter::repeat_n;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -469,6 +472,38 @@ pub trait StoreBackend: Send {
     /// Every proof-fact row, in append order — the test oracle and the
     /// consultation read a later slice will key.
     fn list_proof_facts(&mut self) -> rusqlite::Result<Vec<ProofFactRow>>;
+    /// Drop the metrics rollup cache. The next
+    /// [`fold_metrics_from_journal`](Self::fold_metrics_from_journal) rebuilds
+    /// it from the journal — the tables are cache, never truth.
+    fn clear_metrics(&mut self) -> rusqlite::Result<()>;
+    /// Highest journal sequence the cache has consumed, or `0` when empty.
+    fn metrics_cursor(&mut self) -> rusqlite::Result<u64>;
+    /// Fold journal rows after the cursor into the cache. A zero cursor is a
+    /// full rebuild. Returns the resulting ledger.
+    fn fold_metrics_from_journal(&mut self) -> rusqlite::Result<MetricsLedger>;
+    /// Persist a ledger's rows and cursor. Idempotent replace on the fold
+    /// identity.
+    fn persist_metrics(&mut self, ledger: &MetricsLedger) -> rusqlite::Result<()>;
+    /// Wire-encoded dispatch payloads in sequence order — the determinism oracle.
+    fn metric_dispatch_payloads(&mut self) -> rusqlite::Result<Vec<Vec<u8>>>;
+    /// Fold evidence-only scalars onto the dispatch row for `nonce`.
+    fn record_metric_evidence(
+        &mut self,
+        nonce: &str,
+        session_reuse_arm: Option<&str>,
+        session_reuse_saved_micro_usd: Option<u64>,
+        peak_resident_bytes: Option<u64>,
+        calls_json: Option<&str>,
+    ) -> rusqlite::Result<()>;
+    /// Rollup dispatch rows for one bloom, oldest first.
+    fn list_bloom_dispatch_rollup(&mut self, bloom: &[u8]) -> rusqlite::Result<Vec<BloomDispatchRollup>>;
+    /// Outstanding orders for one bloom, in nonce order.
+    fn list_bloom_dispatch_live(&mut self, bloom: &[u8]) -> rusqlite::Result<Vec<BloomDispatchLive>>;
+    /// The bloom that names `nonce` in `dispatch_owners`, `outstanding_orders`, or
+    /// `metric_dispatch` — `None` when the journal has never heard of it.
+    fn lookup_named_dispatch(&mut self, nonce: &str) -> rusqlite::Result<Option<Vec<u8>>>;
+    /// Rebuild the metrics cache when the journal has moved past the cursor.
+    fn ensure_metrics(&mut self) -> rusqlite::Result<()>;
 }
 
 /// A WAL-mode `SQLite` store. Opening runs the migrations idempotently, so
@@ -527,7 +562,12 @@ impl SqliteStore {
 /// Pre-existing rows stay `NULL` — inventing a time on a historical row is
 /// worse than an absent one, and every consumer treats `NULL` as reconstruct
 /// from other sources.
-const SCHEMA_VERSION: i64 = 5;
+///
+/// `6` is the metrics rollup cache (`metric_dispatch` / `metric_bloom` /
+/// `metric_day` / `metric_cursor`). Tables are cache, never truth: delete and
+/// refold repairs them. Empty on creation; nothing is backfilled here — the
+/// first open after migrate folds from the journal.
+const SCHEMA_VERSION: i64 = 6;
 
 /// Bring a store opened at [`MIGRATIONS`] up to [`SCHEMA_VERSION`], or refuse it.
 ///
@@ -611,6 +651,13 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     // with no default and no backfill — a pre-existing row stays NULL.
     if !has_column(&migration, "journal", "recorded_unix_millis")? {
         migration.execute_batch("ALTER TABLE journal ADD COLUMN recorded_unix_millis INTEGER;")?;
+    }
+
+    // Version 6: metrics rollup cache. Empty on creation; a pre-existing
+    // store has no invented rollups — the first open folds them from the
+    // journal.
+    if !has_table(&migration, "metric_cursor")? {
+        migration.execute_batch(METRICS_TABLES)?;
     }
 
     migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -784,6 +831,30 @@ CREATE TABLE IF NOT EXISTS proof_facts (
     producing_dispatch  TEXT NOT NULL,
     producing_bloom     BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS metric_dispatch (
+    id TEXT PRIMARY KEY,
+    nonce TEXT,
+    sequence INTEGER NOT NULL,
+    bloom BLOB NOT NULL,
+    payload BLOB NOT NULL,
+    session_reuse_arm TEXT,
+    session_reuse_saved_micro_usd INTEGER,
+    peak_resident_bytes INTEGER,
+    calls_json TEXT
+);
+CREATE TABLE IF NOT EXISTS metric_bloom (
+    bloom BLOB PRIMARY KEY,
+    seal_sequence INTEGER NOT NULL,
+    payload BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS metric_day (
+    label TEXT PRIMARY KEY,
+    payload BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS metric_cursor (
+    id INTEGER PRIMARY KEY CHECK (id = 0),
+    through_sequence INTEGER NOT NULL
+);
 ";
 
 /// The ADR-0200 proof-fact ledger. Column order is load-bearing from row one.
@@ -796,6 +867,33 @@ CREATE TABLE IF NOT EXISTS proof_facts (
     host_class          TEXT NOT NULL,
     producing_dispatch  TEXT NOT NULL,
     producing_bloom     BLOB NOT NULL
+);
+";
+
+const METRICS_TABLES: &str = "\
+CREATE TABLE IF NOT EXISTS metric_dispatch (
+    id TEXT PRIMARY KEY,
+    nonce TEXT,
+    sequence INTEGER NOT NULL,
+    bloom BLOB NOT NULL,
+    payload BLOB NOT NULL,
+    session_reuse_arm TEXT,
+    session_reuse_saved_micro_usd INTEGER,
+    peak_resident_bytes INTEGER,
+    calls_json TEXT
+);
+CREATE TABLE IF NOT EXISTS metric_bloom (
+    bloom BLOB PRIMARY KEY,
+    seal_sequence INTEGER NOT NULL,
+    payload BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS metric_day (
+    label TEXT PRIMARY KEY,
+    payload BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS metric_cursor (
+    id INTEGER PRIMARY KEY CHECK (id = 0),
+    through_sequence INTEGER NOT NULL
 );
 ";
 
@@ -847,6 +945,7 @@ fn deadline_column(order: &OutstandingOrder) -> i64 {
 /// intake uses to seal a dispatch deadline (ADR-0177). A clock before the
 /// epoch is not a time any stamp can use, so it reads as `0`; that is a
 /// recorded reading, distinct from a pre-column `NULL`.
+#[must_use]
 pub fn now_unix_millis() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
 }
@@ -1175,6 +1274,7 @@ impl StoreBackend for SqliteStore {
         }
         // A rowid is a non-negative i64; the fallback never triggers.
         let sequence = u64::try_from(tx.last_insert_rowid()).unwrap_or_default();
+        let recorded_unix_millis = recorded_from_column(Some(recorded));
         // Releases before claims: a superseding successor reclaims a workpiece
         // its predecessor freed in this same transaction (ADR-0149 §The bloom).
         for release in releases {
@@ -1206,6 +1306,7 @@ impl StoreBackend for SqliteStore {
             )?;
         }
         tx.commit()?;
+        let _ = self.upsert_metrics_from_write(sequence, write, recorded_unix_millis);
         Ok(CommitOutcome::Applied(sequence))
     }
 
@@ -1228,7 +1329,9 @@ impl StoreBackend for SqliteStore {
             Ok(AppendOutcome::Duplicate)
         } else {
             // A rowid is a non-negative i64; the fallback never triggers.
-            Ok(AppendOutcome::Applied(u64::try_from(self.conn.last_insert_rowid()).unwrap_or_default()))
+            let sequence = u64::try_from(self.conn.last_insert_rowid()).unwrap_or_default();
+            let _ = self.upsert_metrics_from_write(sequence, write, recorded_from_column(Some(recorded)));
+            Ok(AppendOutcome::Applied(sequence))
         }
     }
 
@@ -1359,8 +1462,8 @@ impl StoreBackend for SqliteStore {
 
     fn replay_journal(&mut self) -> rusqlite::Result<Vec<JournalRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT sequence, idempotency_key, event, decisions, decider, decisions_schema FROM journal \
-             ORDER BY sequence",
+            "SELECT sequence, idempotency_key, event, decisions, decider, decisions_schema, recorded_unix_millis \
+             FROM journal ORDER BY sequence",
         )?;
         let rows = stmt.query_map([], |row| {
             let sequence = u64::try_from(row.get::<_, i64>(0)?).unwrap_or_default();
@@ -1375,6 +1478,7 @@ impl StoreBackend for SqliteStore {
                 decisions,
                 decider: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
                 decisions_schema: row.get(5)?,
+                recorded_unix_millis: recorded_from_column(row.get(6)?),
             })
         })?;
         rows.collect()
@@ -1435,6 +1539,269 @@ impl StoreBackend for SqliteStore {
         })?;
         rows.collect()
     }
+
+    fn clear_metrics(&mut self) -> rusqlite::Result<()> {
+        self.conn.execute_batch(
+            "DELETE FROM metric_dispatch;
+             DELETE FROM metric_bloom;
+             DELETE FROM metric_day;
+             DELETE FROM metric_cursor;",
+        )
+    }
+
+    fn metrics_cursor(&mut self) -> rusqlite::Result<u64> {
+        let value = self
+            .conn
+            .query_row("SELECT through_sequence FROM metric_cursor WHERE id = 0", [], |row| row.get::<_, i64>(0));
+        match value {
+            Ok(sequence) => Ok(u64::try_from(sequence).unwrap_or_default()),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn persist_metrics(&mut self, ledger: &MetricsLedger) -> rusqlite::Result<()> {
+        let tx = self.conn.transaction()?;
+        for row in ledger.dispatch_rows() {
+            let payload = encode_metric(&row)?;
+            // Preserve a host nonce the evidence join already wrote. A rebuild
+            // that put the fold id back would un-join every completed attempt.
+            tx.execute(
+                "INSERT INTO metric_dispatch (id, nonce, sequence, bloom, payload) \
+                 VALUES (?1, ?2, ?3, ?4, ?5) \
+                 ON CONFLICT(id) DO UPDATE SET \
+                 sequence = excluded.sequence, bloom = excluded.bloom, payload = excluded.payload",
+                rusqlite::params![
+                    row.id,
+                    row.id,
+                    i64::try_from(row.sequence).unwrap_or(i64::MAX),
+                    row.bloom.0.as_bytes().as_slice(),
+                    payload,
+                ],
+            )?;
+        }
+        for row in ledger.bloom_rows() {
+            let payload = encode_metric(&row)?;
+            tx.execute(
+                "INSERT OR REPLACE INTO metric_bloom (bloom, seal_sequence, payload) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    row.bloom.0.as_bytes().as_slice(),
+                    i64::try_from(row.seal_sequence).unwrap_or(i64::MAX),
+                    payload,
+                ],
+            )?;
+        }
+        for row in ledger.day_rows() {
+            let payload = encode_metric(&row)?;
+            tx.execute(
+                "INSERT OR REPLACE INTO metric_day (label, payload) VALUES (?1, ?2)",
+                rusqlite::params![row.label, payload],
+            )?;
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO metric_cursor (id, through_sequence) VALUES (0, ?1)",
+            rusqlite::params![i64::try_from(ledger.through_sequence()).unwrap_or(i64::MAX)],
+        )?;
+        tx.commit()
+    }
+
+    fn fold_metrics_from_journal(&mut self) -> rusqlite::Result<MetricsLedger> {
+        let configs = resolved_configs(self)?;
+        let records = self.replay_journal()?;
+        let mut ledger = MetricsLedger::default();
+        self.clear_metrics()?;
+        for record in &records {
+            let event: Event = from_bytes(&record.event).map_err(|error| {
+                rusqlite::Error::SqliteFailure(
+                    SqliteFfiError::new(SQLITE_ERROR),
+                    Some(format!("metrics fold: event {} did not decode: {error}", record.sequence)),
+                )
+            })?;
+            let decisions =
+                decode_recorded_decisions(&record.decisions, record.decisions_schema.as_deref()).map_err(|error| {
+                    rusqlite::Error::SqliteFailure(
+                        SqliteFfiError::new(SQLITE_ERROR),
+                        Some(format!("metrics fold: record {} {error}", record.sequence)),
+                    )
+                })?;
+            ledger.observe(record.sequence, &event, &decisions, &configs, record.recorded_unix_millis);
+        }
+        self.persist_metrics(&ledger)?;
+        Ok(ledger)
+    }
+
+    fn metric_dispatch_payloads(&mut self) -> rusqlite::Result<Vec<Vec<u8>>> {
+        let mut stmt = self.conn.prepare("SELECT payload FROM metric_dispatch ORDER BY sequence, id")?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect()
+    }
+
+    fn record_metric_evidence(
+        &mut self,
+        nonce: &str,
+        session_reuse_arm: Option<&str>,
+        session_reuse_saved_micro_usd: Option<u64>,
+        peak_resident_bytes: Option<u64>,
+        calls_json: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        let saved = session_reuse_saved_micro_usd.map(|value| i64::try_from(value).unwrap_or(i64::MAX));
+        let peak = peak_resident_bytes.map(|value| i64::try_from(value).unwrap_or(i64::MAX));
+        let updated = self.conn.execute(
+            "UPDATE metric_dispatch SET session_reuse_arm = ?2, session_reuse_saved_micro_usd = ?3, \
+             peak_resident_bytes = ?4, calls_json = ?5, nonce = ?1 \
+             WHERE nonce = ?1 OR id = ?1",
+            rusqlite::params![nonce, session_reuse_arm, saved, peak, calls_json],
+        )?;
+        if updated > 0 {
+            return Ok(());
+        }
+        // persist_metrics keys the row by fold identity, not the host nonce.
+        // Join through the still-outstanding order's (bloom, displayed) pair.
+        let Some(order) = self.lookup_order(nonce)? else {
+            return Ok(());
+        };
+        let mut stmt = self.conn.prepare("SELECT id, payload FROM metric_dispatch WHERE bloom = ?1")?;
+        let rows = stmt.query_map(rusqlite::params![&order.bloom], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+        let mut matched = None;
+        for row in rows {
+            let (id, payload) = row?;
+            let Ok(dispatch) = from_bytes::<MetricDispatch>(&payload) else {
+                continue;
+            };
+            if dispatch.displayed.as_bytes() == order.displayed_digest.as_slice() {
+                matched = Some(id);
+                break;
+            }
+        }
+        drop(stmt);
+        if let Some(id) = matched {
+            self.conn.execute(
+                "UPDATE metric_dispatch SET session_reuse_arm = ?2, session_reuse_saved_micro_usd = ?3, \
+                 peak_resident_bytes = ?4, calls_json = ?5, nonce = ?1 \
+                 WHERE id = ?6",
+                rusqlite::params![nonce, session_reuse_arm, saved, peak, calls_json, id],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn list_bloom_dispatch_rollup(&mut self, bloom: &[u8]) -> rusqlite::Result<Vec<BloomDispatchRollup>> {
+        let _ = self.ensure_metrics();
+        let mut stmt = self
+            .conn
+            .prepare("SELECT nonce, sequence, payload FROM metric_dispatch WHERE bloom = ?1 ORDER BY sequence, id")?;
+        let rows = stmt.query_map(rusqlite::params![bloom], |row| {
+            Ok(BloomDispatchRollup {
+                nonce: row.get(0)?,
+                sequence: u64::try_from(row.get::<_, i64>(1)?).unwrap_or_default(),
+                payload: row.get(2)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    fn list_bloom_dispatch_live(&mut self, bloom: &[u8]) -> rusqlite::Result<Vec<BloomDispatchLive>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT nonce, workpiece, stage, displayed_digest FROM outstanding_orders \
+             WHERE bloom = ?1 ORDER BY nonce",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![bloom], |row| {
+            Ok(BloomDispatchLive {
+                nonce: row.get(0)?,
+                workpiece: row.get(1)?,
+                stage: row.get(2)?,
+                displayed: row.get(3)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    fn lookup_named_dispatch(&mut self, nonce: &str) -> rusqlite::Result<Option<Vec<u8>>> {
+        if let Some(bloom) = self.lookup_dispatch_owner(nonce)? {
+            return Ok(Some(bloom));
+        }
+        if let Some(order) = self.lookup_order(nonce)? {
+            return Ok(Some(order.bloom));
+        }
+        let mut stmt = self.conn.prepare("SELECT bloom FROM metric_dispatch WHERE nonce = ?1")?;
+        let mut rows = stmt.query_map(rusqlite::params![nonce], |row| row.get(0))?;
+        rows.next().transpose()
+    }
+
+    fn ensure_metrics(&mut self) -> rusqlite::Result<()> {
+        let cursor = self.metrics_cursor()?;
+        let latest =
+            self.conn.query_row("SELECT COALESCE(MAX(sequence), 0) FROM journal", [], |row| row.get::<_, i64>(0))?;
+        let latest = u64::try_from(latest).unwrap_or_default();
+        if latest > cursor {
+            self.fold_metrics_from_journal()?;
+        }
+        Ok(())
+    }
+}
+
+impl SqliteStore {
+    fn upsert_metrics_from_write(
+        &mut self,
+        sequence: u64,
+        write: &JournalWrite<'_>,
+        envelope: Option<u64>,
+    ) -> rusqlite::Result<()> {
+        let Ok(event) = from_bytes::<Event>(write.event) else {
+            return Ok(());
+        };
+        let Ok(decisions) = decode_recorded_decisions(write.decisions, Some(DECISIONS_SCHEMA)) else {
+            return Ok(());
+        };
+        let configs = resolved_configs(self)?;
+        let mut ledger = MetricsLedger::default();
+        ledger.observe(sequence, &event, &decisions, &configs, envelope);
+        for row in ledger.dispatch_rows() {
+            let payload = encode_metric(&row)?;
+            self.conn.execute(
+                "INSERT INTO metric_dispatch (id, nonce, sequence, bloom, payload) \
+                 VALUES (?1, ?2, ?3, ?4, ?5) \
+                 ON CONFLICT(id) DO UPDATE SET \
+                 sequence = excluded.sequence, bloom = excluded.bloom, payload = excluded.payload",
+                rusqlite::params![
+                    row.id,
+                    row.id,
+                    i64::try_from(row.sequence).unwrap_or(i64::MAX),
+                    row.bloom.0.as_bytes().as_slice(),
+                    payload,
+                ],
+            )?;
+        }
+        let through = i64::try_from(sequence).unwrap_or(i64::MAX);
+        self.conn.execute(
+            "INSERT INTO metric_cursor (id, through_sequence) VALUES (0, ?1) \
+             ON CONFLICT(id) DO UPDATE SET through_sequence = MAX(through_sequence, excluded.through_sequence)",
+            rusqlite::params![through],
+        )?;
+        Ok(())
+    }
+}
+
+fn encode_metric<T: serde::Serialize>(value: &T) -> rusqlite::Result<Vec<u8>> {
+    to_vec(value).map_err(|error| {
+        rusqlite::Error::SqliteFailure(
+            SqliteFfiError::new(SQLITE_ERROR),
+            Some(format!("metrics encode failed: {error}")),
+        )
+    })
+}
+
+fn resolved_configs(store: &mut SqliteStore) -> rusqlite::Result<aether_bloomery::ResolvedConfigs> {
+    let mut configs = aether_bloomery::ResolvedConfigs::default();
+    for record in store.load_configs()? {
+        let Some(address) = aether_bloomery::Digest::from_slice(&record.digest) else {
+            continue;
+        };
+        configs.insert(address, record.kind, record.bytes);
+    }
+    Ok(configs)
 }
 
 /// Runtime state for [`StoreCapability`]: the one durable backend the
@@ -1606,4 +1973,50 @@ impl NativeActor for StoreCapability {
             Err(error) => PageJournalResult::Err { error: error.to_string() },
         }
     }
+
+    #[handler::single]
+    fn on_list_bloom_dispatches(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: ListBloomDispatches,
+    ) -> ListBloomDispatchesResult {
+        let ListBloomDispatches { bloom } = mail;
+        let rollup = match state.backend.list_bloom_dispatch_rollup(&bloom) {
+            Ok(rollup) => rollup,
+            Err(error) => return ListBloomDispatchesResult::Err { error: error.to_string() },
+        };
+        match state.backend.list_bloom_dispatch_live(&bloom) {
+            Ok(outstanding) => ListBloomDispatchesResult::Ok { rollup, outstanding },
+            Err(error) => ListBloomDispatchesResult::Err { error: error.to_string() },
+        }
+    }
+
+    #[handler::single]
+    fn on_lookup_dispatch(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: LookupDispatch,
+    ) -> LookupDispatchResult {
+        let LookupDispatch { nonce } = mail;
+        for nonce in nonce_spellings(&nonce) {
+            match state.backend.lookup_named_dispatch(&nonce) {
+                Ok(Some(bloom)) => return LookupDispatchResult::Ok { nonce, bloom },
+                Ok(None) => {}
+                Err(error) => return LookupDispatchResult::Err { error: error.to_string() },
+            }
+        }
+        LookupDispatchResult::NotFound
+    }
+}
+
+/// The nonce as given, then the `dispatch-` / `redispatch-` alternate if either
+/// prefix is present — so a caller can name either spelling.
+fn nonce_spellings(nonce: &str) -> Vec<String> {
+    let mut spellings = vec![nonce.to_owned()];
+    if let Some(rest) = nonce.strip_prefix("dispatch-") {
+        spellings.push(format!("redispatch-{rest}"));
+    } else if let Some(rest) = nonce.strip_prefix("redispatch-") {
+        spellings.push(format!("dispatch-{rest}"));
+    }
+    spellings
 }

@@ -431,6 +431,9 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
                 findings: None,
                 cost: None,
                 calls: None,
+                session_reuse_arm: None,
+                session_reuse_saved_micro_usd: None,
+                peak_resident_bytes: None,
             })
             .collect())
     }

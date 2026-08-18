@@ -67,6 +67,12 @@ pub struct UploadedEvidence {
     /// Per-call usage when the harness reported it. Rides with `cost` into the
     /// study admit so a banded price row can charge each call, not the sum.
     pub calls: Option<Vec<StudyCall>>,
+    /// Session-reuse arm from `evidence.json`, when the backend read it.
+    pub session_reuse_arm: Option<String>,
+    /// Micro-USD saved by the reuse arm against its counterfactual.
+    pub session_reuse_saved_micro_usd: Option<u64>,
+    /// Peak resident bytes from `evidence.json`.
+    pub peak_resident_bytes: Option<u64>,
 }
 
 /// Why the broker refused an upload without touching the reducer.

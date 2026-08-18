@@ -72,6 +72,12 @@ pub struct UploadedStudyRecord {
     /// study artifact — the priced dollar column is. Missing on a banded row
     /// bills the dispatch at the sub-band rate and is named as a ledger defect.
     pub calls: Option<Vec<StudyCall>>,
+    /// Session-reuse arm from evidence.json, folded at admission.
+    pub session_reuse_arm: Option<String>,
+    /// Micro-USD saved by the reuse arm against its counterfactual.
+    pub session_reuse_saved_micro_usd: Option<u64>,
+    /// Peak resident bytes from evidence.json.
+    pub peak_resident_bytes: Option<u64>,
 }
 
 /// Why the study broker refused an upload without writing anything. Mirrors
@@ -213,6 +219,14 @@ pub fn admit_study(
         PutResult::Err { error } => return Err(StudyIntakeError::Artifacts(error)),
     };
     store.record_study(bloom.0.as_bytes(), displayed.as_bytes(), &study_artifact)?;
+    let calls_json = upload.calls.as_ref().and_then(|calls| serde_json::to_string(calls).ok());
+    let _ = store.record_metric_evidence(
+        &upload.nonce.0,
+        upload.session_reuse_arm.as_deref(),
+        upload.session_reuse_saved_micro_usd,
+        upload.peak_resident_bytes,
+        calls_json.as_deref(),
+    );
     Ok(StudyAdmitDecision::Admitted(StudyAdmission { bloom, subject: displayed, study_artifact }))
 }
 
@@ -499,8 +513,15 @@ mod tests {
         nonce: &str,
         attempt: Digest,
     ) -> StudyAdmission {
-        let upload =
-            UploadedStudyRecord { nonce: Nonce(nonce.to_owned()), subject: attempt, cost: cost(), calls: None };
+        let upload = UploadedStudyRecord {
+            nonce: Nonce(nonce.to_owned()),
+            subject: attempt,
+            cost: cost(),
+            calls: None,
+            session_reuse_arm: None,
+            session_reuse_saved_micro_usd: None,
+            peak_resident_bytes: None,
+        };
         match admit_study(store, artifacts, &upload).unwrap() {
             StudyAdmitDecision::Admitted(admission) => admission,
             StudyAdmitDecision::Refused(refusal) => panic!("expected an admission, got a refusal: {refusal:?}"),
@@ -568,6 +589,9 @@ mod tests {
             subject: Digest::from_bytes([5; 32]),
             cost: cost(),
             calls: None,
+            session_reuse_arm: None,
+            session_reuse_saved_micro_usd: None,
+            peak_resident_bytes: None,
         };
         assert!(matches!(
             admit_study(&mut store, &mut artifacts, &upload).unwrap(),
@@ -591,6 +615,9 @@ mod tests {
             subject: Digest::from_bytes([9; 32]),
             cost: cost(),
             calls: None,
+            session_reuse_arm: None,
+            session_reuse_saved_micro_usd: None,
+            peak_resident_bytes: None,
         };
         match admit_study(&mut store, &mut artifacts, &lying).unwrap() {
             StudyAdmitDecision::Refused(StudyRefusal::DigestMismatch { displayed, claimed }) => {
@@ -653,7 +680,15 @@ mod tests {
         let json = br#"{"num_turns": 7, "cost_usd": 0.42, "duration_ms": 123456, "input": 1000,
             "cache_write": 200, "cache_write_1h": 150, "cache_write_5m": 50, "cache_read": 8000, "output": 900}"#;
         let cost = parse_study_cost(json).unwrap();
-        let upload = UploadedStudyRecord { nonce: Nonce("n-e2e".to_owned()), subject: attempt, cost, calls: None };
+        let upload = UploadedStudyRecord {
+            nonce: Nonce("n-e2e".to_owned()),
+            subject: attempt,
+            cost,
+            calls: None,
+            session_reuse_arm: None,
+            session_reuse_saved_micro_usd: None,
+            peak_resident_bytes: None,
+        };
         let StudyAdmitDecision::Admitted(admission) = admit_study(&mut store, &mut artifacts, &upload).unwrap() else {
             panic!("the matching fake record admits");
         };
@@ -680,6 +715,9 @@ mod tests {
             subject: Digest::from_bytes([9; 32]),
             cost,
             calls: None,
+            session_reuse_arm: None,
+            session_reuse_saved_micro_usd: None,
+            peak_resident_bytes: None,
         };
         assert!(matches!(
             admit_study(&mut store, &mut artifacts, &bad).unwrap(),
@@ -731,6 +769,9 @@ mod tests {
             subject: attempt,
             cost,
             calls: Some(vec![under, over]),
+            session_reuse_arm: None,
+            session_reuse_saved_micro_usd: None,
+            peak_resident_bytes: None,
         };
         let StudyAdmitDecision::Admitted(admission) =
             admit_study(&mut band_store, &mut band_artifacts, &upload).unwrap()
@@ -748,7 +789,15 @@ mod tests {
         let mut gap_store = store();
         let (_gap_dir, mut gap_artifacts) = artifacts();
         seed_priced_order(&mut gap_store, "n-gap", bloom, attempt, &table, "grok-4.6");
-        let gap = UploadedStudyRecord { nonce: Nonce("n-gap".to_owned()), subject: attempt, cost, calls: None };
+        let gap = UploadedStudyRecord {
+            nonce: Nonce("n-gap".to_owned()),
+            subject: attempt,
+            cost,
+            calls: None,
+            session_reuse_arm: None,
+            session_reuse_saved_micro_usd: None,
+            peak_resident_bytes: None,
+        };
         let StudyAdmitDecision::Admitted(admission) = admit_study(&mut gap_store, &mut gap_artifacts, &gap).unwrap()
         else {
             panic!("the gap upload still admits");

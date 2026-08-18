@@ -181,6 +181,9 @@ fn stream_preserves_the_backend_failure_set_unchanged() {
         failed_verifiers: failures,
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     };
     let (actions, _actions_seen) = Recorder::<ExecutorError>::new();
     let (local, _local_seen) = Recorder::<LocalExecutorError>::returning(vec![reference.clone()]);

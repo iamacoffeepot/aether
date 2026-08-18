@@ -87,6 +87,7 @@ impl NativeActor for JanitorReactorCapability {
             runner: Arc::new(ProcessTransformRunner::new(
                 CaptureIdentity::default(),
                 LaneProgram::parse(DEFAULT_LANE_PROGRAM),
+                PathBuf::from(&config.repo),
             )),
             worktree_base,
             target_base,

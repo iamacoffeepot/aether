@@ -9,7 +9,10 @@ use std::sync::mpsc::{self, Receiver, RecvError, SendError, Sender};
 use std::thread;
 use std::time::Duration;
 
-use crate::dto::ViewDocument;
+use crate::dto::{
+    DecodedArtifact, DispatchFilePage, JournalPage, MetricDay, MetricDispatch, MetricsSeat, MetricsSummary,
+    MetricsTimeline, SpendWindowView, ViewDocument,
+};
 use crate::http::{self, Endpoint};
 use crate::store::{Lane, ResourceKey};
 
@@ -17,7 +20,7 @@ const LIVE_TIMEOUT: Duration = Duration::from_secs(1);
 const BULK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One fetch the shell wants a lane to perform.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FetchRequest {
     pub key: ResourceKey,
 }
@@ -26,6 +29,15 @@ pub struct FetchRequest {
 #[derive(Clone, Debug)]
 pub enum ResourceBody {
     View(ViewDocument),
+    Journal(JournalPage),
+    Artifact(DecodedArtifact),
+    Transcript(DispatchFilePage),
+    Summary(MetricsSummary),
+    Days(Vec<MetricDay>),
+    Timeline(MetricsTimeline),
+    Seats(Vec<MetricsSeat>),
+    Dispatches(Vec<MetricDispatch>),
+    Spend(SpendWindowView),
 }
 
 /// Outcome posted back to the shell. The event loop never calls HTTP.
@@ -88,7 +100,7 @@ fn lane_loop(endpoint: &Endpoint, requests: &Receiver<FetchRequest>, replies: &S
     loop {
         match requests.recv() {
             Ok(FetchRequest { key }) => {
-                let outcome = fetch_key(endpoint, key, timeout);
+                let outcome = fetch_key(endpoint, &key, timeout);
                 if replies.send(FetchReply { key, outcome }).is_err() {
                     return;
                 }
@@ -98,10 +110,38 @@ fn lane_loop(endpoint: &Endpoint, requests: &Receiver<FetchRequest>, replies: &S
     }
 }
 
-fn fetch_key(endpoint: &Endpoint, key: ResourceKey, timeout: Duration) -> Result<ResourceBody, String> {
+fn fetch_key(endpoint: &Endpoint, key: &ResourceKey, timeout: Duration) -> Result<ResourceBody, String> {
+    let path = key.path();
     match key {
-        ResourceKey::View => http::get_json::<ViewDocument>(endpoint, key.path(), timeout)
+        ResourceKey::View => http::get_json::<ViewDocument>(endpoint, &path, timeout)
             .map(ResourceBody::View)
+            .map_err(|error| error.to_string()),
+        ResourceKey::Journal(_) => http::get_json::<JournalPage>(endpoint, &path, timeout)
+            .map(ResourceBody::Journal)
+            .map_err(|error| error.to_string()),
+        ResourceKey::Artifact(_) => http::get_json::<DecodedArtifact>(endpoint, &path, timeout)
+            .map(ResourceBody::Artifact)
+            .map_err(|error| error.to_string()),
+        ResourceKey::Transcript(_) => http::get_json::<DispatchFilePage>(endpoint, &path, timeout)
+            .map(ResourceBody::Transcript)
+            .map_err(|error| error.to_string()),
+        ResourceKey::MetricsSummary => http::get_json::<MetricsSummary>(endpoint, &path, timeout)
+            .map(ResourceBody::Summary)
+            .map_err(|error| error.to_string()),
+        ResourceKey::MetricsDays => http::get_json::<Vec<MetricDay>>(endpoint, &path, timeout)
+            .map(ResourceBody::Days)
+            .map_err(|error| error.to_string()),
+        ResourceKey::MetricsTimeline(_) => http::get_json::<MetricsTimeline>(endpoint, &path, timeout)
+            .map(ResourceBody::Timeline)
+            .map_err(|error| error.to_string()),
+        ResourceKey::MetricsSeats => http::get_json::<Vec<MetricsSeat>>(endpoint, &path, timeout)
+            .map(ResourceBody::Seats)
+            .map_err(|error| error.to_string()),
+        ResourceKey::MetricsDispatches => http::get_json::<Vec<MetricDispatch>>(endpoint, &path, timeout)
+            .map(ResourceBody::Dispatches)
+            .map_err(|error| error.to_string()),
+        ResourceKey::Spend => http::get_json::<SpendWindowView>(endpoint, &path, timeout)
+            .map(ResourceBody::Spend)
             .map_err(|error| error.to_string()),
     }
 }
