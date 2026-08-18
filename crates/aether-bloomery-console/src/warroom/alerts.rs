@@ -120,7 +120,7 @@ mod tests {
                 executor_fault: Some(ExecutorFaultView { rolls: 3, budget: 3, terminal: true }),
                 members: vec![
                     MemberView { wedge: Some(Present {}), wedge_cause: Some(WedgeCause::Work), ..member("issue-1") },
-                    MemberView { host_fault: Some(Present {}), ..member("issue-2") },
+                    MemberView { host_fault: Some(crate::dto::HostFaultView::default()), ..member("issue-2") },
                 ],
                 ..BloomView::default()
             }],

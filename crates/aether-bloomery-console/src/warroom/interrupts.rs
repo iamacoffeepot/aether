@@ -143,7 +143,7 @@ fn member_detail(bloom: &BloomView, workpiece: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::interrupts;
-    use crate::dto::{BloomView, DigestHex, ExecutorFaultView, LandingBlock, MemberView, Present, ViewDocument};
+    use crate::dto::{BloomView, DigestHex, ExecutorFaultView, LandingBlock, MemberView, ViewDocument};
 
     fn digest(byte: u8) -> DigestHex {
         DigestHex::from_bytes([byte; 32])
@@ -160,7 +160,7 @@ mod tests {
                 executor_fault: Some(ExecutorFaultView { rolls: 1, budget: 3, terminal: false }),
                 members: vec![MemberView {
                     workpiece: "issue-1".to_owned(),
-                    host_fault: Some(Present {}),
+                    host_fault: Some(crate::dto::HostFaultView::default()),
                     ..MemberView::default()
                 }],
                 ..BloomView::default()
