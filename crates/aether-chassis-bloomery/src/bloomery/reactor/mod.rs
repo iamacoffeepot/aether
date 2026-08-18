@@ -47,7 +47,7 @@ pub use claim_release::{
     ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, ClaimReleaseReactorState, ClaimReleaseTick,
 };
 // `pub` because `reactor` is a private module — see the note in `executor`.
-pub use executor::default_candidate_push;
+pub use executor::candidate_push_at;
 pub use executor::{
     CandidatePush, DispatchTick, ExecutorReactorCapability, ExecutorReactorSetup, ExecutorReactorState,
 };

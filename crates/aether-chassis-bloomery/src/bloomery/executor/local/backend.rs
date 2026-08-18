@@ -455,7 +455,10 @@ impl LocalExecutor {
         let lane_program = LaneProgram::parse(&config.local_lane_program);
 
         let backend = Self::new(
-            Arc::new(ProcessTransformRunner::new(identity, lane_program.clone())),
+            Arc::new(
+                ProcessTransformRunner::new(identity, lane_program.clone(), config.lane_repository())
+                    .with_fetch_remote(config.candidate_remote()),
+            ),
             correspondence,
             config.local_worktree_base.clone(),
         )

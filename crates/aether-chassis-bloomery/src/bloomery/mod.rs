@@ -63,7 +63,7 @@ pub use intake::{
 pub use mirror::ProjectionShell;
 pub use outbox::TopicOutbox;
 #[cfg(feature = "github")]
-pub(crate) use reactor::default_candidate_push;
+pub(crate) use reactor::candidate_push_at;
 #[cfg(feature = "github")]
 pub use reactor::{
     CandidatePush, ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, ClaimReleaseReactorState, ClaimReleaseTick,

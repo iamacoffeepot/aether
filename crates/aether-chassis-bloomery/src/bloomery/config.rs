@@ -1,7 +1,9 @@
 //! Bloomery coordinator and GitHub adapter configuration boundaries.
 
+use std::env;
 use std::error::Error;
 use std::fmt;
+use std::path::PathBuf;
 
 #[cfg(feature = "github")]
 use std::fs;
@@ -448,6 +450,32 @@ impl CoordinatorConfig {
     #[must_use]
     pub fn uses_local_authority(&self) -> bool {
         self.authority_backend == "local"
+    }
+
+    /// The git repository the transform runner materializes worktrees from.
+    ///
+    /// A local authority names its absolute path (`authority_repo`); GitHub
+    /// still runs from the process's current directory, captured once here so
+    /// the runner never re-reads `"."`.
+    #[must_use]
+    pub fn lane_repository(&self) -> PathBuf {
+        if self.uses_local_authority() && !self.authority_repo.is_empty() {
+            PathBuf::from(&self.authority_repo)
+        } else {
+            env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        }
+    }
+
+    /// Where missing order objects are fetched from, and where an admitted
+    /// capture is published: the local authority path, or the `origin` remote
+    /// when GitHub is authoritative. An absolute path, never a `file://` URL.
+    #[must_use]
+    pub fn candidate_remote(&self) -> String {
+        if self.uses_local_authority() && !self.authority_repo.is_empty() {
+            self.authority_repo.clone()
+        } else {
+            "origin".to_owned()
+        }
     }
 
     #[must_use]
