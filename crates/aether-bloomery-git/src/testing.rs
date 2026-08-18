@@ -32,9 +32,9 @@ use aether_bloomery::{BackendObjectId, BloomId, Correspondence, CorrespondenceEr
 use sha2::{Digest as _, Sha256};
 
 use crate::client::{
-    ActionsApi, Artifact, ChecksState, Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError, IssueStateApi,
-    MergeResult, NewComment, NewPullRequest, PullMergeResult, PullRequest, PullRequestApi, PullRequestState,
-    RunConclusion, RunStatus, WorkflowRun, strip_heads,
+    ActionsApi, Artifact, ChecksState, Comment, GitCommit, GitDataApi, GitDataError, GitRef, GithubApi, GithubError,
+    IssueStateApi, MergeResult, NewComment, NewPullRequest, PullMergeResult, PullRequest, PullRequestApi,
+    PullRequestState, RunConclusion, RunStatus, WorkflowRun, strip_heads,
 };
 use crate::correspondence::GitObjectId;
 use crate::executor::INPUT_NONCE;
@@ -556,7 +556,7 @@ impl FakeGithub {
     /// The commit sha `name` resolves to — a branch (bare name) through its ref,
     /// or a commit sha directly, mirroring what the merge endpoint accepts as a
     /// head.
-    fn commit_at(&self, name: &str) -> Result<String, GithubError> {
+    fn commit_at(&self, name: &str) -> Result<String, GitDataError> {
         let (sha, repo) = {
             let state = self.lock();
             let sha = state.refs.get(&format!("heads/{name}")).map_or(name, String::as_str).to_owned();
@@ -570,11 +570,11 @@ impl FakeGithub {
         if repo.is_some_and(|repo| real_commit_tree(&repo, &sha).is_ok()) {
             return Ok(sha);
         }
-        Err(GithubError::Status { status: 404, body: format!("no commit or branch {name}") })
+        Err(GitDataError::MissingObject(format!("no commit or branch {name}")))
     }
 
     /// The tree sha at `name`.
-    fn tree_at(&self, name: &str) -> Result<String, GithubError> {
+    fn tree_at(&self, name: &str) -> Result<String, GitDataError> {
         let sha = self.commit_at(name)?;
         GitDataApi::get_commit(self, &sha).map(|commit| commit.tree)
     }
@@ -696,42 +696,41 @@ fn hex_of(bytes: &[u8; 32]) -> String {
 }
 
 impl GitDataApi for FakeGithub {
-    fn get_ref(&self, name: &str) -> Result<Option<GitRef>, GithubError> {
+    fn get_ref(&self, name: &str) -> Result<Option<GitRef>, GitDataError> {
         let state = self.lock();
         Ok(state.refs.get(name).map(|sha| GitRef { name: name.to_owned(), sha: sha.clone() }))
     }
 
-    fn create_ref(&self, name: &str, sha: &str) -> Result<GitRef, GithubError> {
+    fn create_ref(&self, name: &str, sha: &str) -> Result<GitRef, GitDataError> {
         let mut state = self.lock();
         if state.refs.contains_key(name) {
-            return Err(GithubError::Status { status: 422, body: format!("ref {name} already exists") });
+            return Err(GitDataError::RefConflict(format!("ref {name} already exists")));
         }
         state.refs.insert(name.to_owned(), sha.to_owned());
         Ok(GitRef { name: name.to_owned(), sha: sha.to_owned() })
     }
 
-    fn update_ref(&self, name: &str, sha: &str, _force: bool) -> Result<GitRef, GithubError> {
+    fn update_ref(&self, name: &str, sha: &str, _force: bool) -> Result<GitRef, GitDataError> {
         // The fake does not model commit ancestry, so it cannot enforce the
         // fast-forward-only meaning of `force:false`; the source backend does
         // its compare-and-swap by reading and comparing before it updates, so a
         // plain set here is faithful to how the port drives the store.
         let mut state = self.lock();
         if !state.refs.contains_key(name) {
-            return Err(GithubError::Status { status: 404, body: format!("no ref {name}") });
+            return Err(GitDataError::MissingObject(format!("no ref {name}")));
         }
         state.refs.insert(name.to_owned(), sha.to_owned());
         Ok(GitRef { name: name.to_owned(), sha: sha.to_owned() })
     }
 
-    fn delete_ref(&self, name: &str) -> Result<(), GithubError> {
+    fn delete_ref(&self, name: &str) -> Result<(), GitDataError> {
         // Name-only: an absent ref is the clean idempotent Ok — the fake models
-        // GitHub's already-gone tolerance the source port's cleanup delete relies
-        // on.
+        // the already-gone tolerance the source port's cleanup delete relies on.
         self.lock().refs.remove(name);
         Ok(())
     }
 
-    fn list_matching_refs(&self, prefix: &str) -> Result<Vec<GitRef>, GithubError> {
+    fn list_matching_refs(&self, prefix: &str) -> Result<Vec<GitRef>, GitDataError> {
         let state = self.lock();
         let mut refs: Vec<GitRef> = state
             .refs
@@ -743,7 +742,7 @@ impl GitDataApi for FakeGithub {
         Ok(refs)
     }
 
-    fn get_commit(&self, sha: &str) -> Result<GitCommit, GithubError> {
+    fn get_commit(&self, sha: &str) -> Result<GitCommit, GitDataError> {
         if let Some(stored) = self.lock().commits.get(sha) {
             return Ok(GitCommit { sha: sha.to_owned(), tree: stored.tree.clone(), message: stored.message.clone() });
         }
@@ -752,16 +751,15 @@ impl GitDataApi for FakeGithub {
         // commit the repository already held — so the object database answers
         // it. The message is not read back through this port, so the empty one
         // costs a second `cat-file` nothing.
-        let repo =
-            self.object_repo().ok_or_else(|| GithubError::Status { status: 404, body: format!("no commit {sha}") })?;
+        let repo = self.object_repo().ok_or_else(|| GitDataError::MissingObject(format!("no commit {sha}")))?;
         Ok(GitCommit { sha: sha.to_owned(), tree: real_commit_tree(&repo, sha)?, message: String::new() })
     }
 
-    fn is_ancestor(&self, ancestor: &str, commit: &str) -> Result<bool, GithubError> {
+    fn is_ancestor(&self, ancestor: &str, commit: &str) -> Result<bool, GitDataError> {
         Ok(self.contains(commit, ancestor))
     }
 
-    fn create_commit(&self, message: &str, tree: &str, parents: &[String]) -> Result<GitCommit, GithubError> {
+    fn create_commit(&self, message: &str, tree: &str, parents: &[String]) -> Result<GitCommit, GitDataError> {
         let sha = mint_commit(self.object_repo().as_deref(), message, tree, parents)?;
         self.lock().commits.insert(
             sha.clone(),
@@ -770,7 +768,7 @@ impl GitDataApi for FakeGithub {
         Ok(GitCommit { sha, tree: tree.to_owned(), message: message.to_owned() })
     }
 
-    fn merge(&self, base: &str, head: &str, message: &str) -> Result<MergeResult, GithubError> {
+    fn merge(&self, base: &str, head: &str, message: &str) -> Result<MergeResult, GitDataError> {
         let (base, head) = (strip_heads(base), strip_heads(head));
         let (base_sha, head_sha) = (self.commit_at(base)?, self.commit_at(head)?);
 
@@ -831,21 +829,18 @@ impl GitDataApi for FakeGithub {
 
 /// Run `git` in `repo`, returning its trimmed stdout.
 ///
-/// A git that could not be spawned is [`Transport`](GithubError::Transport) —
-/// the environment failed, not the request. A git that ran and refused is a
-/// [`Status`](GithubError::Status), so a caller distinguishes the two the same
-/// way it does against the real client.
-fn git_in(repo: &Path, args: &[&str]) -> Result<String, GithubError> {
+/// Spawn failure and a refused invocation are both [`GitDataError::Command`] —
+/// the adapter could not complete the operation. A caller that needs a more
+/// specific class (a missing object, a lost compare-and-swap) classifies at
+/// the call site rather than inventing an HTTP status here.
+fn git_in(repo: &Path, args: &[&str]) -> Result<String, GitDataError> {
     let output = Command::new("git")
         .current_dir(repo)
         .args(args)
         .output()
-        .map_err(|error| GithubError::Transport(format!("git {args:?} in {}: {error}", repo.display())))?;
+        .map_err(|error| GitDataError::Command(format!("git {args:?} in {}: {error}", repo.display())))?;
     if !output.status.success() {
-        return Err(GithubError::Status {
-            status: 422,
-            body: format!("git {args:?}: {}", String::from_utf8_lossy(&output.stderr).trim()),
-        });
+        return Err(GitDataError::Command(format!("git {args:?}: {}", String::from_utf8_lossy(&output.stderr).trim())));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
@@ -870,13 +865,13 @@ const COMMIT_IDENTITY: [(&str, &str); 6] = [
 /// The sha a commit over `tree` with `parents` takes: a real object in `repo`
 /// when the fake is backed by one, the synthetic hash otherwise. The one place
 /// the two modes part company, so `create_commit` and `merge` cannot drift.
-fn mint_commit(repo: Option<&Path>, message: &str, tree: &str, parents: &[String]) -> Result<String, GithubError> {
+fn mint_commit(repo: Option<&Path>, message: &str, tree: &str, parents: &[String]) -> Result<String, GitDataError> {
     repo.map_or_else(|| Ok(commit_sha(message, tree, parents)), |repo| real_commit(repo, message, tree, parents))
 }
 
 /// Mint `message` over `tree` with `parents` as a real commit object in `repo`,
 /// returning its git sha.
-fn real_commit(repo: &Path, message: &str, tree: &str, parents: &[String]) -> Result<String, GithubError> {
+fn real_commit(repo: &Path, message: &str, tree: &str, parents: &[String]) -> Result<String, GitDataError> {
     let mut args = vec!["commit-tree".to_owned(), tree.to_owned()];
     for parent in parents {
         args.push("-p".to_owned());
@@ -890,21 +885,21 @@ fn real_commit(repo: &Path, message: &str, tree: &str, parents: &[String]) -> Re
         .envs(COMMIT_IDENTITY)
         .args(&borrowed)
         .output()
-        .map_err(|error| GithubError::Transport(format!("git commit-tree in {}: {error}", repo.display())))?;
+        .map_err(|error| GitDataError::Command(format!("git commit-tree in {}: {error}", repo.display())))?;
     if !output.status.success() {
-        return Err(GithubError::Status {
-            status: 422,
-            body: format!("git commit-tree {tree}: {}", String::from_utf8_lossy(&output.stderr).trim()),
-        });
+        return Err(GitDataError::Command(format!(
+            "git commit-tree {tree}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 /// The tree commit `sha` carries, read from `repo` — the real-object answer to
 /// the question the in-memory `commits` map answers for a minted commit.
-fn real_commit_tree(repo: &Path, sha: &str) -> Result<String, GithubError> {
+fn real_commit_tree(repo: &Path, sha: &str) -> Result<String, GitDataError> {
     git_in(repo, &["rev-parse", "--verify", "--quiet", &format!("{sha}^{{tree}}")])
-        .map_err(|_| GithubError::Status { status: 404, body: format!("no commit {sha}") })
+        .map_err(|_| GitDataError::MissingObject(format!("no commit {sha}")))
 }
 
 impl FakeGithub {
@@ -940,14 +935,12 @@ fn stub_conflict_patch(paths: &[String]) -> String {
 
 /// Paths `git merge-tree --name-only` names as colliding. The tree oid it
 /// still prints first is skipped; anything else is a path.
-fn conflicted_paths(repo: &Path, base: &str, head: &str) -> Result<Vec<String>, GithubError> {
+fn conflicted_paths(repo: &Path, base: &str, head: &str) -> Result<Vec<String>, GitDataError> {
     let output = Command::new("git")
         .current_dir(repo)
         .args(["merge-tree", "--write-tree", "--name-only", base, head])
         .output()
-        .map_err(|error| {
-            GithubError::Transport(format!("git merge-tree --name-only in {}: {error}", repo.display()))
-        })?;
+        .map_err(|error| GitDataError::Command(format!("git merge-tree --name-only in {}: {error}", repo.display())))?;
     let paths = String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(str::trim)
@@ -970,20 +963,20 @@ fn is_git_oid(line: &str) -> bool {
 /// that judged by the presence of a tree would read every conflict as merged.
 /// Any other status is a real refusal — a missing object, or a git too old for
 /// `--write-tree` — and must not pass as a conflict.
-fn real_merge_tree(repo: &Path, base: &str, head: &str) -> Result<Option<String>, GithubError> {
+fn real_merge_tree(repo: &Path, base: &str, head: &str) -> Result<Option<String>, GitDataError> {
     let output = Command::new("git")
         .current_dir(repo)
         .args(["merge-tree", "--write-tree", base, head])
         .output()
-        .map_err(|error| GithubError::Transport(format!("git merge-tree in {}: {error}", repo.display())))?;
+        .map_err(|error| GitDataError::Command(format!("git merge-tree in {}: {error}", repo.display())))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     match output.status.code() {
         Some(0) => Ok(Some(stdout.lines().next().unwrap_or_default().trim().to_owned())),
         Some(1) => Ok(None),
-        _ => Err(GithubError::Status {
-            status: 422,
-            body: format!("git merge-tree {base} {head}: {}", String::from_utf8_lossy(&output.stderr).trim()),
-        }),
+        _ => Err(GitDataError::Command(format!(
+            "git merge-tree {base} {head}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))),
     }
 }
 
@@ -1098,16 +1091,13 @@ impl StoredRun {
 }
 
 impl PullRequestApi for FakeGithub {
-    fn create_pull_request(&self, new: &NewPullRequest) -> Result<PullRequest, GithubError> {
+    fn create_pull_request(&self, new: &NewPullRequest) -> Result<PullRequest, GitDataError> {
         let mut state = self.lock();
-        // GitHub refuses a second open pull request for the same head with a
-        // 422. Modelling it is what lets a test prove the land path adopts the
+        // A second open pull request for the same head is a `RefConflict`.
+        // Modelling it is what lets a test prove the land path adopts the
         // existing proposal rather than relying on the refusal never happening.
         if state.pull_requests.iter().any(|pull| pull.head == new.head && pull.state == PullRequestState::Open) {
-            return Err(GithubError::Status {
-                status: 422,
-                body: format!("a pull request already exists for {}", new.head),
-            });
+            return Err(GitDataError::RefConflict(format!("a pull request already exists for {}", new.head)));
         }
         // The head sha comes from the ref the branch names, as it does on the
         // real surface: opening a pull request proposes whatever that ref

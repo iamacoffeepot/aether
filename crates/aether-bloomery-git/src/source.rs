@@ -64,7 +64,7 @@ use aether_bloomery::{
 use serde::Serialize;
 
 use crate::client::{
-    GitDataApi, GitRef, GithubApi, GithubError, IssueStateApi, MergeResult, NewComment, NewPullRequest,
+    GitDataApi, GitDataError, GitRef, GithubApi, GithubError, IssueStateApi, MergeResult, NewComment, NewPullRequest,
     PullMergeResult, PullRequestApi, PullRequestState, strip_heads,
 };
 use crate::correspondence::GitObjectId;
@@ -183,8 +183,8 @@ pub fn landing_branch(bloom: &BloomId) -> String {
 /// refusal — alongside the underlying transport faults.
 #[derive(Debug)]
 pub enum SourceError {
-    /// The underlying Git Data call failed (transport or non-2xx status).
-    Github(GithubError),
+    /// The underlying git-data call failed.
+    Git(GitDataError),
     /// `land` was called while compare-and-swap mainline landing is gated off
     /// (`cas_land_enabled` is false). The gate defaults on since ADR-0149
     /// migration step 3, so this is now the explicit kill-switch state, not the
@@ -214,7 +214,7 @@ pub enum SourceError {
 impl fmt::Display for SourceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Github(error) => write!(f, "git source backend: {error}"),
+            Self::Git(error) => write!(f, "git source backend: {error}"),
             Self::LandingDisabled => {
                 write!(f, "compare-and-swap land is disabled (cas_land_enabled kill switch is off)")
             }
@@ -231,16 +231,22 @@ impl fmt::Display for SourceError {
 impl Error for SourceError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Github(error) => Some(error),
+            Self::Git(error) => Some(error),
             Self::Correspondence(error) => Some(error),
             _ => None,
         }
     }
 }
 
+impl From<GitDataError> for SourceError {
+    fn from(error: GitDataError) -> Self {
+        Self::Git(error)
+    }
+}
+
 impl From<GithubError> for SourceError {
     fn from(error: GithubError) -> Self {
-        Self::Github(error)
+        Self::Git(GitDataError::Command(error.to_string()))
     }
 }
 
@@ -734,8 +740,8 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GitSource<C> {
         let name = Self::landing_ref(bloom);
         match self.client.get_ref(&name)? {
             Some(existing) if existing.sha == sha => Ok(()),
-            Some(_) => self.client.update_ref(&name, sha, true).map(|_| ()).map_err(SourceError::Github),
-            None => self.client.create_ref(&name, sha).map(|_| ()).map_err(SourceError::Github),
+            Some(_) => self.client.update_ref(&name, sha, true).map(|_| ()).map_err(SourceError::Git),
+            None => self.client.create_ref(&name, sha).map(|_| ()).map_err(SourceError::Git),
         }
     }
 
@@ -871,8 +877,8 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GitSource<C> {
     }
 
     // Resolve the holder of a ref an acquire/transfer/release just found held —
-    // the ref must exist (a 422/absent-holder here is a race, surfaced as a
-    // fault rather than a fabricated holder).
+    // the ref must exist (a lost CAS / absent-holder here is a race, surfaced as
+    // a fault rather than a fabricated holder).
     fn require_holder(&self, name: &str) -> Result<BloomId, SourceError> {
         self.claim_holder(name)?.ok_or_else(|| SourceError::MissingRef(name.to_owned()))
     }
@@ -882,7 +888,7 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GitSource<C> {
     // only after the whole rollback is attempted so one wedged delete cannot
     // strand the rest.
     fn rollback(&self, created: &[String]) -> Result<(), SourceError> {
-        let mut first_error: Option<GithubError> = None;
+        let mut first_error: Option<GitDataError> = None;
         for name in created {
             if let Err(error) = self.client.delete_ref(name)
                 && first_error.is_none()
@@ -890,7 +896,7 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GitSource<C> {
                 first_error = Some(error);
             }
         }
-        first_error.map_or(Ok(()), |error| Err(SourceError::Github(error)))
+        first_error.map_or(Ok(()), |error| Err(SourceError::Git(error)))
     }
 
     // Release each of `targets` the named `owner` holds by a fast-forward CAS to a
@@ -944,17 +950,17 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GitSource<C> {
         // delete would race a fresh claim that reused the name in the window since
         // the read, so re-assert the observed tombstone via a no-op fast-forward
         // first. If the ref moved to an unrelated fresh claim commit that
-        // reassertion 422s (the new commit is not a fast-forward descendant of the
-        // stale tombstone), so the name has already been reclaimed by that holder —
-        // skip the delete rather than clobbering a claim we never owned. Either way
-        // the holder this call was authorized against is gone, which is
-        // `AlreadyAbsent`.
+        // reassertion is a `RefConflict` (the new commit is not a fast-forward
+        // descendant of the stale tombstone), so the name has already been
+        // reclaimed by that holder — skip the delete rather than clobbering a
+        // claim we never owned. Either way the holder this call was authorized
+        // against is gone, which is `AlreadyAbsent`.
         let holder = match self.classify_holder(&current.sha)? {
             ClaimHolder::Tombstoned => {
                 match self.client.update_ref(name, &current.sha, false) {
                     Ok(_) => self.client.delete_ref(name)?,
-                    Err(GithubError::Status { status: 422, .. }) => {}
-                    Err(error) => return Err(SourceError::Github(error)),
+                    Err(GitDataError::RefConflict(_)) => {}
+                    Err(error) => return Err(SourceError::Git(error)),
                 }
                 return Ok(ClaimReleaseOutcome::AlreadyAbsent);
             }
@@ -970,12 +976,12 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GitSource<C> {
         let tombstone = self.client.create_commit(&render_tombstone_message(), EMPTY_TREE, &[current.sha])?;
         match self.client.update_ref(name, &tombstone.sha, false) {
             Ok(_) => {}
-            // Lost the fast-forward CAS to a concurrent mutation — re-read the
+            // Lost the compare-and-swap to a concurrent mutation — re-read the
             // holder and report it rather than deleting a ref we no longer own.
-            Err(GithubError::Status { status: 422, .. }) => {
+            Err(GitDataError::RefConflict(_)) => {
                 return Ok(ClaimReleaseOutcome::Changed { observed_holder: self.require_holder(name)? });
             }
-            Err(error) => return Err(SourceError::Github(error)),
+            Err(error) => return Err(SourceError::Git(error)),
         }
         self.client.delete_ref(name)?;
         Ok(ClaimReleaseOutcome::Released)
@@ -1107,15 +1113,15 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> SourceBackend f
         self.correspondence.record(&head, &BackendObjectId::from(commit_object))?;
         match self.client.update_ref(&integration, &commit.sha, false) {
             Ok(_) => Ok(IntegrateOutcome::Integrated { tree: *candidate, head }),
-            // A 422 is GitHub's non-fast-forward refusal: a concurrent writer
+            // A `RefConflict` is the lost compare-and-swap: a concurrent writer
             // moved the branch between our read and our update. That is the
             // same stale-checkpoint condition — re-read and report it as such.
-            Err(GithubError::Status { status: 422, .. }) => {
+            Err(GitDataError::RefConflict(_)) => {
                 let advanced = self.client.get_ref(&integration)?.ok_or(SourceError::MissingRef(integration))?.sha;
                 let actual = self.integration_tree(&advanced)?;
                 Ok(IntegrateOutcome::StaleCheckpoint { actual })
             }
-            Err(error) => Err(SourceError::Github(error)),
+            Err(error) => Err(SourceError::Git(error)),
         }
     }
 
@@ -1132,10 +1138,10 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> SourceBackend f
         // Same single-writer CAS the tree-replace path runs. It is a pre-check
         // rather than a swap here: the merge endpoint commits onto the branch
         // itself and takes no expected-sha, so unlike `integrate`'s
-        // `update_ref` there is no 422 to catch a writer that raced in behind
-        // the read. The fold owning this branch alone is what makes that safe;
-        // the pre-check catches the case that actually happens, a restart
-        // resuming against a checkpoint the branch has already passed.
+        // `update_ref` there is no `RefConflict` to catch a writer that raced
+        // in behind the read. The fold owning this branch alone is what makes
+        // that safe; the pre-check catches the case that actually happens, a
+        // restart resuming against a checkpoint the branch has already passed.
         if current_tree != expected.tree {
             return Ok(IntegrateOutcome::StaleCheckpoint { actual: current_tree });
         }
@@ -1211,7 +1217,7 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> SourceBackend f
             return Ok(false);
         };
 
-        self.client.create_ref(&target, &source.sha).map(|_| true).map_err(SourceError::Github)
+        self.client.create_ref(&target, &source.sha).map(|_| true).map_err(SourceError::Git)
     }
 
     fn land(&self, bloom: &BloomId, expected_base: &Digest, new_head: &Digest) -> Result<LandOutcome, Self::Error> {
@@ -1269,16 +1275,16 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> SourceBackend f
             };
             match self.client.create_ref(name, &commit) {
                 Ok(_) => created.push(name.clone()),
-                // A 422 is another bloom's existing hold. Roll back our own refs
-                // first — the conflicting ref is another bloom's, never among
-                // them — then resolve and report the first conflict.
-                Err(GithubError::Status { status: 422, .. }) => {
+                // A `RefConflict` is another bloom's existing hold. Roll back our
+                // own refs first — the conflicting ref is another bloom's, never
+                // among them — then resolve and report the first conflict.
+                Err(GitDataError::RefConflict(_)) => {
                     let _ = self.rollback(&created);
                     return Ok(ClaimOutcome::Held { ref_kind: kind.clone(), held_by: self.require_holder(name)? });
                 }
                 Err(error) => {
                     let _ = self.rollback(&created);
-                    return Err(SourceError::Github(error));
+                    return Err(SourceError::Git(error));
                 }
             }
         }
@@ -1312,34 +1318,34 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> SourceBackend f
             let successor_commit = self.create_claim_commit(successor, &[current.sha])?;
             match self.client.update_ref(&name, &successor_commit, false) {
                 Ok(_) => {}
-                Err(GithubError::Status { status: 422, .. }) => {
+                Err(GitDataError::RefConflict(_)) => {
                     let held_by = self.require_holder(&name)?;
                     if held_by == *successor {
                         continue;
                     }
                     return Ok(ClaimOutcome::Held { ref_kind: kind, held_by });
                 }
-                Err(error) => return Err(SourceError::Github(error)),
+                Err(error) => return Err(SourceError::Git(error)),
             }
         }
 
         // Fresh-acquire the successor's net-new workpieces (conflicting only on a
         // foreign hold, since the carried refs already named the predecessor). A
-        // 422 whose holder is already the successor is the same prior-attempt
-        // resume as the carried skip above.
+        // `RefConflict` whose holder is already the successor is the same
+        // prior-attempt resume as the carried skip above.
         for workpiece in net_new {
             let name = Self::workpiece_claim_ref(workpiece);
             let commit = self.create_claim_commit(successor, &[])?;
             match self.client.create_ref(&name, &commit) {
                 Ok(_) => {}
-                Err(GithubError::Status { status: 422, .. }) => {
+                Err(GitDataError::RefConflict(_)) => {
                     let held_by = self.require_holder(&name)?;
                     if held_by == *successor {
                         continue;
                     }
                     return Ok(ClaimOutcome::Held { ref_kind: ClaimRefKind::Workpiece(workpiece.clone()), held_by });
                 }
-                Err(error) => return Err(SourceError::Github(error)),
+                Err(error) => return Err(SourceError::Git(error)),
             }
         }
 
@@ -1408,10 +1414,10 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> SourceBackend f
         let successor_commit = self.create_claim_commit(successor, &[current.sha])?;
         match self.client.update_ref(&name, &successor_commit, false) {
             Ok(_) => Ok(ClaimOutcome::Acquired),
-            Err(GithubError::Status { status: 422, .. }) => {
+            Err(GitDataError::RefConflict(_)) => {
                 Ok(ClaimOutcome::Held { ref_kind: ref_kind.clone(), held_by: self.require_holder(&name)? })
             }
-            Err(error) => Err(SourceError::Github(error)),
+            Err(error) => Err(SourceError::Git(error)),
         }
     }
 
@@ -1565,17 +1571,18 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> LandingSource f
         let opening = NewPullRequest { title, body, head: branch.clone(), base: self.mainline.branch().to_owned() };
         match self.client.create_pull_request(&opening) {
             Ok(opened) => Ok(LandOutcome::Proposed { number: opened.number }),
-            // A 422 is the duplicate-head refusal: something opened a proposal
-            // for this branch between our lookup and our create. Re-read and
-            // adopt it — the same idempotent answer the lookup above gives, one
-            // race later. A 422 with still no proposal to adopt is a genuine
-            // refusal (an empty diff, a missing base) and propagates.
-            Err(GithubError::Status { status: 422, body }) => self
+            // A `RefConflict` is the duplicate-head refusal: something opened a
+            // proposal for this branch between our lookup and our create.
+            // Re-read and adopt it — the same idempotent answer the lookup
+            // above gives, one race later. A conflict with still no proposal to
+            // adopt is a genuine refusal (an empty diff, a missing base) and
+            // propagates.
+            Err(GitDataError::RefConflict(detail)) => self
                 .client
                 .find_pull_request_for_head(&branch)?
                 .map(|raced| LandOutcome::Proposed { number: raced.number })
-                .ok_or(SourceError::Github(GithubError::Status { status: 422, body })),
-            Err(error) => Err(SourceError::Github(error)),
+                .ok_or(SourceError::Git(GitDataError::RefConflict(detail))),
+            Err(error) => Err(SourceError::Git(error)),
         }
     }
 
