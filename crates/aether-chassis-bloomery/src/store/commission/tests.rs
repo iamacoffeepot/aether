@@ -404,3 +404,39 @@ fn canonical_index_columns_match_the_decoded_revision() {
     assert_eq!(ordinal, 1);
     assert_eq!(canonical, to_vec(&decoded).expect("encode"));
 }
+
+#[test]
+fn cancel_closes_an_open_commission_and_refuses_a_second_close() {
+    // Cancel is a write, not a status flip: the statement is stored and the
+    // row is closed in one transaction. A second cancel must not rewrite it.
+    let mut store = memory();
+    let intent = seed(&mut store, "wp-1");
+    let statement = Statement {
+        words: intent.as_bytes().to_vec(),
+        provenance: Provenance::AuthorSignature(SignatureEnvelope {
+            signer: KeyId("owner".to_owned()),
+            signature: vec![1, 2, 3],
+        }),
+        parents: Vec::new(),
+    };
+    assert!(store.cancel(&workpiece("wp-1"), &statement).is_ok());
+    let view = store.load(&workpiece("wp-1")).expect("load").expect("exists");
+    assert_eq!(view.head.status, CommissionStatus::Cancelled);
+    assert_eq!(store.cancel(&workpiece("wp-1"), &statement), Err(CommissionError::NotOpen));
+}
+
+#[test]
+fn cancel_refuses_words_that_are_not_the_intent() {
+    let mut store = memory();
+    seed(&mut store, "wp-1");
+    let statement = Statement {
+        words: vec![9; 32],
+        provenance: Provenance::AuthorSignature(SignatureEnvelope {
+            signer: KeyId("owner".to_owned()),
+            signature: vec![1, 2, 3],
+        }),
+        parents: Vec::new(),
+    };
+    assert_eq!(store.cancel(&workpiece("wp-1"), &statement), Err(CommissionError::WrongSubject));
+    assert_eq!(store.load(&workpiece("wp-1")).expect("load").expect("exists").head.status, CommissionStatus::Open);
+}

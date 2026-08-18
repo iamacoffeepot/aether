@@ -526,6 +526,7 @@ impl BootableChassis for BloomeryChassis {
                 pusher: Some(setups.pusher),
                 worktree_base,
                 artifacts_root,
+                control_token: coordinator.http_control_token,
             }))
     }
     #[cfg(not(feature = "github"))]
@@ -568,7 +569,12 @@ impl BootableChassis for BloomeryChassis {
                 (),
                 HttpServerConfig { enabled: true, bind_addr: http_addr.to_string(), ..HttpServerConfig::default() },
             )
-            .with_actor::<BloomeryApiCapability>(ApiParams { approval_policy_file, worktree_base, artifacts_root }))
+            .with_actor::<BloomeryApiCapability>(ApiParams {
+                approval_policy_file,
+                worktree_base,
+                artifacts_root,
+                control_token: coordinator.http_control_token,
+            }))
     }
 }
 

@@ -54,7 +54,10 @@ use crate::artifacts::ArtifactsCapabilityState;
 use crate::control::ControlCore;
 #[cfg(feature = "github")]
 use crate::source::SourceCapability;
-use crate::store::{ListBloomDispatches, LookupDispatch, PageJournal, RecordConfig, StoreCapability};
+use crate::store::{
+    CreateCommission, ListBloomDispatches, ListCommissions, LoadCommission, LookupDispatch, PageJournal, RecordConfig,
+    StoreCapability, WriteScopeRevision,
+};
 
 /// Per-process ceilings on the pre-seal shaping maps. Staged workpieces and
 /// open drafts are pure in-memory shaping state with no durable owner to evict
@@ -147,6 +150,13 @@ pub struct ApiCapabilityState {
     /// dispatch `MailId.correlation_id`, back-pointing at the held [`PendingSeal`]
     /// and the member it forms the approval for on a verified reply.
     pub(super) seal_verifications: HashMap<u64, SealVerify>,
+    /// Bearer token commission routes require. Empty refuses every commission
+    /// request.
+    pub(super) control_token: String,
+    /// Commission approval / cancel requests awaiting a signature verification.
+    pub(super) commission_verifying: HashMap<u64, super::commissions::CommissionVerify>,
+    /// Commission writes dispatched after a verified signature, awaiting store.
+    pub(super) commission_writing: HashMap<u64, InboundMail>,
 }
 
 /// A request held across a signature-verification round trip: the reply
@@ -287,6 +297,21 @@ pub(super) enum Routed {
     /// #3599); the last verified reply seals and admits, any rejection refuses
     /// the whole seal (`422`, fail closed).
     DeferredSeal(Box<PendingSealSetup>),
+    /// Relay a commission create to the store.
+    CreateCommission(CreateCommission),
+    /// Relay a scope-revision write to the store.
+    WriteScopeRevision(WriteScopeRevision),
+    /// Relay a commission load to the store.
+    LoadCommission(LoadCommission),
+    /// Relay a commission list to the store.
+    ListCommissions(ListCommissions),
+    /// Await a signing-cap verify, then persist the commission write.
+    DeferredCommissionVerify {
+        /// The verify dispatch correlation the reply will echo.
+        correlation: u64,
+        /// The write to persist once the signature verifies.
+        write: super::commissions::CommissionWrite,
+    },
 }
 
 /// Encode `event` and wrap it in an [`Admit`] for the control core, or answer
@@ -396,6 +421,16 @@ pub(super) fn finish(
                 seal,
                 PendingSeal { inbound, predecessor, gated, descriptions, idempotency_key, edges, remaining },
             );
+            http::Outcome::Deferred
+        }
+        Routed::CreateCommission(request) => ctx.defer(&request).to::<StoreCapability>(),
+        Routed::WriteScopeRevision(request) => ctx.defer(&request).to::<StoreCapability>(),
+        Routed::LoadCommission(request) => ctx.defer(&request).to::<StoreCapability>(),
+        Routed::ListCommissions(request) => ctx.defer(&request).to::<StoreCapability>(),
+        Routed::DeferredCommissionVerify { correlation, write } => {
+            state
+                .commission_verifying
+                .insert(correlation, super::commissions::CommissionVerify { inbound: ctx.take_inbound(), write });
             http::Outcome::Deferred
         }
     }

@@ -393,6 +393,13 @@ pub struct CoordinatorConfig {
     /// how the coordinator is being operated.
     #[config(env = "AETHER_BLOOMERY_SINGLE_WRITER_MARKER", default = "")]
     pub single_writer_marker: String,
+    /// Bearer token the commission control-API routes require. Empty (the
+    /// default) refuses every commission request — fail-closed rather than an
+    /// unauthenticated surface that can approve work. Named
+    /// `AETHER_HTTP_CONTROL_TOKEN` so it sits with the REST ingress, not the
+    /// GitHub prefix this struct otherwise uses.
+    #[config(env = "AETHER_HTTP_CONTROL_TOKEN", default = "")]
+    pub http_control_token: String,
 }
 
 #[cfg(feature = "github")]
@@ -445,6 +452,7 @@ impl Default for CoordinatorConfig {
             batch_restart_young_secs: 60,
             batch_restart_addition: 24,
             single_writer_marker: String::new(),
+            http_control_token: String::new(),
         }
     }
 }

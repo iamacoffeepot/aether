@@ -27,8 +27,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "github")]
 use aether_bloomery::{BloomId, ClaimHolder, ClaimRefKind};
 use aether_bloomery::{
-    CandidateRef, ConfigRegistry, Digest, Disposition, Event, Forecast, MemberDependency, Membership, Outcome, StageId,
-    Statement, Workpiece, WorkpieceId,
+    CandidateRef, ConfigRegistry, Digest, Disposition, Event, Forecast, MemberDependency, Membership, Outcome,
+    ScopeRevision, StageId, Statement, Workpiece, WorkpieceId,
 };
 
 use crate::bloomery::{AdrTouch, Completeness};
@@ -514,6 +514,98 @@ pub struct CoordinatorLogsView {
     /// Set when the caller named a `limit` above the clamp.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notice: Option<String>,
+}
+
+/// `POST /commissions` body — the workpiece id plus its intent statement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateCommissionRequest {
+    /// The workpiece this commission is.
+    pub id: WorkpieceId,
+    /// The intent statement named by `commissions.intent`.
+    pub intent: Statement,
+}
+
+/// `POST /commissions` reply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommissionCreatedView {
+    /// The workpiece this commission is.
+    pub id: WorkpieceId,
+    /// Digest of the stored intent statement.
+    pub intent: Digest,
+}
+
+/// One commission head as the list and show routes render it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommissionHeadView {
+    /// The workpiece this commission is.
+    pub id: WorkpieceId,
+    /// Digest of the stored intent statement.
+    pub intent: Digest,
+    /// Digest of the current scope revision, when one has been written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_revision: Option<Digest>,
+    /// Store-side chain position of the current revision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_ordinal: Option<u64>,
+    /// Lifecycle flag. Not signed.
+    pub status: String,
+}
+
+/// `GET /commissions` — every matching commission head.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommissionsView {
+    /// Matching commissions, in workpiece-id order.
+    pub commissions: Vec<CommissionHeadView>,
+}
+
+/// `GET /commissions/{id}` — the head, current revision, and current approvals.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommissionShowView {
+    /// The workpiece this commission is.
+    pub id: WorkpieceId,
+    /// Digest of the stored intent statement.
+    pub intent: Digest,
+    /// Digest of the current scope revision, when one has been written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_revision: Option<Digest>,
+    /// Store-side chain position of the current revision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_ordinal: Option<u64>,
+    /// Lifecycle flag. Not signed.
+    pub status: String,
+    /// The current revision decoded from its canonical bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current: Option<ScopeRevision>,
+    /// Approval statements stored for the current revision, in insert order.
+    pub approvals: Vec<Statement>,
+}
+
+/// `POST /commissions/{id}/revisions` reply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopeRevisionWrittenView {
+    /// Digest of the stored revision.
+    pub digest: Digest,
+}
+
+/// `POST /commissions/{id}/approvals` reply — the stored statement plus the
+/// evidence form the seal path consumes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommissionApprovalView {
+    /// Digest of the stored approval statement.
+    pub digest: Digest,
+    /// The verified-statement evidence bound to the approved scope.
+    pub evidence: aether_bloomery::Evidence,
+}
+
+/// `POST /commissions/{id}/cancel` reply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommissionCancelledView {
+    /// Digest of the stored cancel statement.
+    pub digest: Digest,
+    /// The workpiece this commission is.
+    pub id: WorkpieceId,
+    /// Always `"cancelled"`.
+    pub status: String,
 }
 
 /// One journald entry as the coordinator log route renders it.
