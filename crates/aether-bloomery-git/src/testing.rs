@@ -863,6 +863,61 @@ impl GitDataApi for FakeGithub {
         }
         Ok(MergeResult::Merged(GitCommit { sha, tree, message: message.to_owned() }))
     }
+
+    fn compare_and_swap_ref(&self, name: &str, sha: &str, expected: &str) -> Result<GitRef, GitDataError> {
+        let mut state = self.lock();
+        match state.refs.get(name) {
+            None => Err(GitDataError::MissingObject(format!("no ref {name}"))),
+            Some(current) if current != expected => {
+                Err(GitDataError::RefConflict(format!("ref {name} is at {current}, expected {expected}")))
+            }
+            Some(_) => {
+                state.refs.insert(name.to_owned(), sha.to_owned());
+                Ok(GitRef { name: name.to_owned(), sha: sha.to_owned() })
+            }
+        }
+    }
+
+    fn transact_refs(&self, ops: &[crate::client::RefTxnOp]) -> Result<(), GitDataError> {
+        use crate::client::RefTxnOp;
+
+        let mut state = self.lock();
+        let mut next = state.refs.clone();
+        for op in ops {
+            match op {
+                RefTxnOp::Create { name, sha } => {
+                    if next.contains_key(name) {
+                        return Err(GitDataError::RefConflict(format!("ref {name} already exists")));
+                    }
+                    next.insert(name.clone(), sha.clone());
+                }
+                RefTxnOp::Update { name, sha, expected } => match next.get(name) {
+                    None => return Err(GitDataError::MissingObject(format!("no ref {name}"))),
+                    Some(current) if current != expected => {
+                        return Err(GitDataError::RefConflict(format!(
+                            "ref {name} is at {current}, expected {expected}"
+                        )));
+                    }
+                    Some(_) => {
+                        next.insert(name.clone(), sha.clone());
+                    }
+                },
+                RefTxnOp::Delete { name, expected } => match next.get(name) {
+                    None => {}
+                    Some(current) if current != expected => {
+                        return Err(GitDataError::RefConflict(format!(
+                            "ref {name} is at {current}, expected {expected}"
+                        )));
+                    }
+                    Some(_) => {
+                        next.remove(name);
+                    }
+                },
+            }
+        }
+        state.refs = next;
+        Ok(())
+    }
 }
 
 /// Run `git` in `repo`, returning its trimmed stdout.

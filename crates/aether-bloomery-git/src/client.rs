@@ -300,6 +300,57 @@ pub trait GitDataApi {
     /// A missing base or head, or an adapter execution failure other than a
     /// content conflict (those stay [`MergeResult::Conflict`]).
     fn merge(&self, base: &str, head: &str, message: &str) -> Result<MergeResult, GitDataError>;
+
+    /// Move ref `name` to `sha` only if it currently points at `expected`.
+    ///
+    /// This is expected-value compare-and-swap, not a fast-forward check: a
+    /// successor that is a descendant of a *different* current value still
+    /// loses. A lost swap is [`GitDataError::RefConflict`].
+    ///
+    /// # Errors
+    /// [`GitDataError::RefConflict`] when the compare lost;
+    /// [`GitDataError::MissingObject`] when the ref is gone; any other adapter
+    /// execution failure.
+    fn compare_and_swap_ref(&self, name: &str, sha: &str, expected: &str) -> Result<GitRef, GitDataError>;
+
+    /// Apply `ops` as one all-or-nothing ref transaction. A mid-batch failure
+    /// leaves every name as it was — the local primitive `claim_seal` relies
+    /// on so a partial acquire cannot survive.
+    ///
+    /// # Errors
+    /// [`GitDataError::RefConflict`] when a create hits an existing name or an
+    /// update/delete loses its expected-old compare; [`GitDataError::MissingObject`]
+    /// when an update names a missing ref; any other adapter execution failure.
+    fn transact_refs(&self, ops: &[RefTxnOp]) -> Result<(), GitDataError>;
+}
+
+/// One command in a [`GitDataApi::transact_refs`] batch.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum RefTxnOp {
+    /// Create `name` at `sha`. Fails with [`GitDataError::RefConflict`] if the
+    /// name already exists.
+    Create {
+        /// The ref name in `heads/…` (or other `refs/`-less) form.
+        name: String,
+        /// The object sha the new ref should point at.
+        sha: String,
+    },
+    /// Move `name` to `sha` only if it currently points at `expected`.
+    Update {
+        /// The ref name in `heads/…` (or other `refs/`-less) form.
+        name: String,
+        /// The object sha the ref should point at.
+        sha: String,
+        /// The object sha the ref must currently point at.
+        expected: String,
+    },
+    /// Delete `name` only if it currently points at `expected`.
+    Delete {
+        /// The ref name in `heads/…` (or other `refs/`-less) form.
+        name: String,
+        /// The object sha the ref must currently point at.
+        expected: String,
+    },
 }
 
 /// What a server-side merge did.

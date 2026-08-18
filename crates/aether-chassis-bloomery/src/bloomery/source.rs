@@ -23,7 +23,9 @@ use aether_bloomery::{
     CorrespondenceError, Digest, IntegrateOutcome, IntegrationPosition, LandOutcome, SharedCorrespondence, Snapshot,
     SourceSnapshot, WorkpieceId,
 };
-use aether_bloomery_github::{GitObjectId, GitSource, GithubError, HostSource, SourceError};
+use aether_bloomery_github::{
+    GitDataError, GitObjectId, GitSource, GithubError, HostSource, LocalGitData, SourceError,
+};
 
 use super::{CoordinatorConfig, GithubConnectionConfig};
 
@@ -87,6 +89,23 @@ impl SourceShell {
             config.cas_land_enabled,
             coordinator.mainline(),
         ));
+        Ok(Self { backend, correspondence: Some(correspondence) })
+    }
+
+    /// Connect a fleet-local git-data source port over `repo` (ADR-0199).
+    ///
+    /// # Errors
+    /// The path is not an absolute git repository, or the installed git is
+    /// missing or older than 2.38.
+    pub fn connect_local(
+        repo: &str,
+        coordinator: &CoordinatorConfig,
+        correspondence: SharedCorrespondence,
+        cas_land_enabled: bool,
+    ) -> Result<Self, GitDataError> {
+        let client = LocalGitData::open(repo)?;
+        let backend =
+            Arc::new(GitSource::new(client, Arc::clone(&correspondence), cas_land_enabled, coordinator.mainline()));
         Ok(Self { backend, correspondence: Some(correspondence) })
     }
 

@@ -70,10 +70,11 @@ pub use aether_bloomery_git::{correspondence, mainline, marker, source};
 
 pub use aether_bloomery_git::{
     ActionsApi, Artifact, ChecksState, Comment, GitCommit, GitDataApi, GitDataError, GitObjectFormat, GitObjectId,
-    GitRef, GitSource, GithubApi, GithubError, HostSource, IssueStateApi, MainlineRef, Marker, MergeResult, NewComment,
-    NewPullRequest, PullMergeResult, PullRequest, PullRequestApi, PullRequestState, RunConclusion, RunStatus,
-    SourceError, WorkflowRun, candidate_ref_name, check_run_external_id, landing_branch, member_checkpoint_ref_name,
-    parse_check_run_external_id, parse_marker, render_marker, short_hex, strip_heads, to_hex,
+    GitRef, GitSource, GithubApi, GithubError, HostSource, IssueStateApi, LocalGitData, MainlineRef, Marker,
+    MergeResult, NewComment, NewPullRequest, PullMergeResult, PullRequest, PullRequestApi, PullRequestState, RefTxnOp,
+    RunConclusion, RunStatus, SourceError, WorkflowRun, candidate_ref_name, check_run_external_id, landing_branch,
+    member_checkpoint_ref_name, parse_check_run_external_id, parse_marker, render_marker, short_hex, strip_heads,
+    to_hex,
 };
 pub use app_auth::{AppTokenSource, InstallationTokenExchange};
 pub use client::{
