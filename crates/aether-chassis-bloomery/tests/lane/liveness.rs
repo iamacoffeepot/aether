@@ -170,6 +170,7 @@ mod tests {
             machinery_rolls: 0,
             machinery_budget: 0,
             wedge_cause: None,
+            cursor: None,
         }
     }
 
@@ -187,6 +188,7 @@ mod tests {
                 executor_fault: None,
                 review_park: None,
                 composition: None,
+                operator_hold: None,
             }],
         }
     }
@@ -238,6 +240,7 @@ mod tests {
                 }),
                 review_park: None,
                 composition: None,
+                operator_hold: None,
             }],
         };
 

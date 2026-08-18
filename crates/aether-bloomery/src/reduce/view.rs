@@ -25,11 +25,14 @@ use crate::values::Question;
 /// integrated (`None` until then), — matched by workpiece from the
 /// [`Question`] each open hold resolves to — its pending-decision hold (`None`
 /// when the member is not held), its wedge if it has stopped dispatching
-/// for good (`None` while it is still working), and — when the sealed graph
-/// is holding it out of the line — the ancestor it is waiting on. The
-/// composition workpiece is not a sealed member: its cursor, wedge, and open
-/// findings ride on [`BloomView::composition`] so a refine-budget stop is
-/// visible without attaching it to every member.
+/// for good (`None` while it is still working), — when the sealed graph
+/// is holding it out of the line — the ancestor it is waiting on, and — from
+/// [`BloomRecord::progress`] — its stage cursor (`None` until it has been
+/// dispatched). The composition workpiece is not a sealed member: its cursor,
+/// wedge, and open findings ride on [`BloomView::composition`] so a
+/// refine-budget stop is visible without attaching it to every member. A
+/// bloom-level [`BloomRecord::operator_hold`] rides on the bloom so a braked
+/// one is not indistinguishable from an idle one.
 ///
 /// `resolve_question` resolves an open hold's question digest to its
 /// [`Question`] bytes, the same injected read-only resolver
@@ -61,6 +64,7 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
                 executor_fault: executor_fault_view(record),
                 review_park: review_park_view(record, &resolve_question),
                 composition: composition_view(record),
+                operator_hold: record.operator_hold.clone(),
             }
         })
         .collect();
@@ -137,6 +141,7 @@ fn member_views(
                     _ => WedgeCause::Work,
                 }
             }),
+            cursor: stage_cursor(record, &member.workpiece),
         })
         .collect()
 }
@@ -184,14 +189,21 @@ fn review_park_view(
 /// Rendered only once the composition has a cursor, a wedge, or an open
 /// finding, so an ordinary bloom's view is unchanged here too.
 fn composition_view(record: &BloomRecord) -> Option<CompositionView> {
-    let cursor = record.progress.get(&WorkpieceId::composition()).map(|progress| CompositionCursorView {
-        stage: progress.stage,
-        attempts: progress.attempts,
-        candidate: progress.candidate,
-    });
+    let cursor = stage_cursor(record, &WorkpieceId::composition());
     let wedge = record.wedged.get(&WorkpieceId::composition()).copied();
     let findings = record.open_composition_findings().cloned().collect::<Vec<_>>();
     (cursor.is_some() || wedge.is_some() || !findings.is_empty()).then_some(CompositionView { cursor, wedge, findings })
+}
+
+/// The operator-facing cursor: stage, attempts, candidate. `None` until the
+/// workpiece has been dispatched — dependents waiting on an ancestor stay off
+/// [`BloomRecord::progress`] until they enter the line.
+fn stage_cursor(record: &BloomRecord, workpiece: &WorkpieceId) -> Option<CompositionCursorView> {
+    record.progress.get(workpiece).map(|progress| CompositionCursorView {
+        stage: progress.stage,
+        attempts: progress.attempts,
+        candidate: progress.candidate,
+    })
 }
 
 #[cfg(test)]
@@ -204,8 +216,8 @@ mod tests {
     use crate::port::{BloomView, ViewDocument, WedgeCause};
     use crate::reduce::{BloomStatus, Event, Fact, Outcome, Snapshot, reduce};
     use crate::values::{
-        BloomDraft, CandidateRef, ConfigRegistry, Evidence, EvidenceKind, MemberDependency, Membership, Question,
-        ResolutionClaim, ResolvedConfigs, SpendWindow, VerifyFailureSet, Wedge,
+        BloomDraft, CandidateRef, ConfigRegistry, Evidence, EvidenceKind, MemberDependency, Membership, OperatorHold,
+        Question, ResolutionClaim, ResolvedConfigs, SpendWindow, VerifyFailureSet, Wedge,
     };
 
     fn digest(seed: u8) -> Digest {
@@ -392,6 +404,7 @@ mod tests {
             executor_fault: None,
             review_park: None,
             composition: None,
+            operator_hold: None,
         }
     }
 
@@ -655,5 +668,103 @@ mod tests {
             view.blooms[0].members.iter().all(|member| member.wedge.is_none()),
             "the stop is the composition's, not a member's",
         );
+    }
+
+    // The plausible bug: MemberView has no cursor, so an operator reading
+    // /view cannot tell which stage a dispatched member sits at without
+    // scanning /journal outcomes newest-first.
+    #[test]
+    fn a_dispatched_member_surfaces_its_cursor_and_a_waiting_one_does_not() {
+        let spec = BloomDraft {
+            proposals: vec![membership("wp-a", 1), membership("wp-b", 2)],
+            base: digest(0),
+            ..BloomDraft::default()
+        }
+        .seal();
+        let bloom = spec.id();
+        let mut snapshot = Snapshot::new(digest(0));
+        snapshot = step(
+            &snapshot,
+            &event(
+                "seal",
+                Fact::GraphSeal {
+                    predecessor: None,
+                    spec,
+                    edges: vec![MemberDependency {
+                        member: WorkpieceId("wp-b".into()),
+                        depends_on: WorkpieceId("wp-a".into()),
+                    }],
+                },
+            ),
+        )
+        .0;
+
+        let captured = CandidateRef { tree: digest(21), checkout: digest(22) };
+        snapshot = step(
+            &snapshot,
+            &event(
+                "c-pass",
+                Fact::AttemptCompleted {
+                    bloom,
+                    workpiece: WorkpieceId("wp-a".into()),
+                    stage: StageId::Construct,
+                    passed: true,
+                    evidence: Evidence {
+                        subject: digest(21),
+                        kind: EvidenceKind::VerificationResult,
+                        detail: digest(70),
+                    },
+                    candidate: Some(captured),
+                },
+            ),
+        )
+        .0;
+
+        let view = view_of(&snapshot, |_| None);
+        let members = &view.blooms[0].members;
+        let root = members.iter().find(|member| member.workpiece.0 == "wp-a").expect("root member");
+        let dependent = members.iter().find(|member| member.workpiece.0 == "wp-b").expect("dependent member");
+        let cursor = root.cursor.as_ref().expect("a member with dispatch history names its stage");
+        assert_eq!(cursor.stage, StageId::Verify, "the cursor is the record's, not a hardcoded entry stage");
+        assert_eq!(cursor.attempts, 1);
+        assert_eq!(cursor.candidate, Some(captured));
+        assert_eq!(dependent.cursor, None, "a member that has never entered the line has no cursor");
+    }
+
+    // The plausible bug: a held bloom and an idle one render identically, so
+    // /view cannot name the brake an operator already pulled.
+    #[test]
+    fn a_held_bloom_surfaces_its_hold_and_a_release_clears_it() {
+        let mut snapshot = sealed("wp");
+        let bloom = snapshot.blooms.keys().copied().next().expect("the sealed bloom");
+        let hold =
+            OperatorHold { reason: "the fixture stall is not going to clear".into(), operator: "iamacoffeepot".into() };
+
+        snapshot = step(&snapshot, &event("hold", Fact::OperatorHold { bloom, hold: hold.clone() })).0;
+        let view = with_following_bloom(view_of(&snapshot, |_| None));
+        let decoded = wire_round_trip(&view);
+        assert_eq!(decoded, view, "the hold slot must not steal the next bloom's bytes");
+        assert_eq!(view.blooms[0].operator_hold.as_ref(), Some(&hold), "a braked bloom names who pulled it and why");
+
+        snapshot = step(&snapshot, &event("release", Fact::OperatorRelease { bloom, release: hold })).0;
+        let released = view_of(&snapshot, |_| None);
+        assert_eq!(released.blooms[0].operator_hold, None, "releasing clears the projection");
+    }
+
+    // The plausible bug: the new slots are required on the JSON document, so a
+    // reader that predates them (or a fixture written before they existed)
+    // fails to decode.
+    #[test]
+    fn a_document_without_the_new_fields_still_decodes() {
+        let view = view_of(&sealed("wp"), |_| None);
+        let mut json = serde_json::to_value(&view).expect("the projection has a JSON form");
+        let bloom = json["blooms"][0].as_object_mut().expect("a bloom object");
+        assert!(bloom.remove("operator_hold").is_some(), "the live document carries the new hold slot");
+        let member = bloom["members"][0].as_object_mut().expect("a member object");
+        assert!(member.remove("cursor").is_some(), "the live document carries the new cursor slot");
+
+        let decoded: ViewDocument = serde_json::from_value(json).expect("an older document still decodes");
+        assert_eq!(decoded.blooms[0].operator_hold, None);
+        assert_eq!(decoded.blooms[0].members[0].cursor, None);
     }
 }
