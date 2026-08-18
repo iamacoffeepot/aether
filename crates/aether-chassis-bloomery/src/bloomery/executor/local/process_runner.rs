@@ -26,6 +26,7 @@ use super::error::LocalExecutorError;
 use super::lane_env::{inherited_keys, scrub_coordinator_env};
 use super::lane_program::LaneProgram;
 use super::runner::{CapturedObjects, RunLifecycle, RunProcess, RunSpec, TransformRunner};
+use super::task_argv;
 
 /// The operator a candidate capture is authored as (#4630), resolved from the
 /// `AETHER_BLOOMERY_OPERATOR_*` knobs.
@@ -184,7 +185,10 @@ impl TransformRunner for ProcessTransformRunner {
                 lane.args(["--effort", effort]);
             }
             if let Some(task) = spec.task {
-                lane.args(["--task", task]);
+                // One argv string caps at 128KiB (`E2BIG` past it), and the
+                // composed task is unbounded — see `task_argv` (#5161).
+                let task = task_argv::argv_safe_task(task, spec.evidence_dir).map_err(LocalExecutorError::Io)?;
+                lane.arg("--task").arg(task.as_ref());
             }
             if let Some(session) = spec.resume {
                 lane.args(["--resume", session]);

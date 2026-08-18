@@ -1,8 +1,8 @@
 //! Dispatch-record persistence: the outstanding-order registry write side.
 
 use std::error::Error;
-use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{fmt, io};
 
 use aether_bloomery::{
     AgentProfile, BloomId, ConfigRegistry, Digest, Nonce, StageId, Transformation, WorkHandle, WorkOrder, WorkpieceId,
@@ -10,7 +10,7 @@ use aether_bloomery::{
 use aether_bloomery_github::{ExecutorError, GithubError};
 use aether_data::wire::to_vec;
 
-use crate::bloomery::executor::{ExecutorPortError, ExecutorShell};
+use crate::bloomery::executor::{ExecutorPortError, ExecutorShell, LocalExecutorError};
 use crate::store::{OutstandingOrder, RecordOutcome, StoreBackend};
 
 /// The idempotency nonce a drained outbox entry dispatches under.
@@ -196,19 +196,27 @@ impl Error for DispatchError {
 }
 
 impl DispatchError {
-    /// Whether this fault is permanent — a GitHub HTTP refusal that will not
-    /// clear on retry (a 4xx other than the 429 rate-limit) — as opposed to a
-    /// transient fault that a re-drive can recover from: a 429, any 5xx,
-    /// transport/decode/pagination faults, `NoRunForNonce`, the whole local-lane
-    /// arm (worktree/spawn/io/evidence, never HTTP), and a post-submit registry
-    /// write fault.
+    /// Whether this fault is permanent — a refusal that will not clear on
+    /// retry, so the drain parks the entry instead of re-driving it forever.
+    /// Two shapes qualify: a GitHub HTTP 4xx other than the 429 rate-limit, and
+    /// a local spawn refused with `E2BIG` — the argv the coordinator composed
+    /// exceeds a kernel constant, so the identical re-drive fails identically
+    /// (#5161: ten hours of silent five-minute retries, board unwedged). All
+    /// else is transient and a re-drive can recover it: a 429, any 5xx,
+    /// transport/decode/pagination faults, `NoRunForNonce`, the rest of the
+    /// local-lane arm (worktree/io/evidence, other spawn faults), and a
+    /// post-submit registry write fault.
     #[must_use]
     pub fn is_permanent(&self) -> bool {
-        matches!(
-            self,
-            Self::Submit(ExecutorPortError::Actions(ExecutorError::Github(GithubError::Status { status, .. })))
-                if (400..500).contains(status) && *status != 429
-        )
+        match self {
+            Self::Submit(ExecutorPortError::Actions(ExecutorError::Github(GithubError::Status { status, .. }))) => {
+                (400..500).contains(status) && *status != 429
+            }
+            Self::Submit(ExecutorPortError::Local(LocalExecutorError::Spawn(error))) => {
+                error.kind() == io::ErrorKind::ArgumentListTooLong
+            }
+            _ => false,
+        }
     }
 }
 
