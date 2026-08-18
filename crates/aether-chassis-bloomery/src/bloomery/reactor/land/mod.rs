@@ -20,6 +20,8 @@ pub struct LandReactorSetup {
     pub poll_interval_secs: u64,
     pub repository: Option<(String, String)>,
     pub cas_land_enabled: bool,
+    /// Enqueue [`Topic::SourceReplica`] after a landing receipt is admitted.
+    pub emit_source_replica: bool,
 }
 
 /// Addressing identity for the land reactor capability.

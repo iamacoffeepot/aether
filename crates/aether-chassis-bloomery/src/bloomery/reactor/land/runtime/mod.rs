@@ -66,7 +66,9 @@ use std::time::Duration;
 
 use aether_actor::Addressable;
 use aether_actor::runtime;
-use aether_bloomery::{Admit, BloomId, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, LandPayload};
+use aether_bloomery::{
+    Admit, BloomId, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, LandPayload, SourceReplicaPayload,
+};
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
@@ -110,6 +112,7 @@ pub struct LandReactorState {
     // The poll timer sidecar; `None` when disabled. Held for its `Drop`, which
     // stops + joins the thread on teardown.
     _timer: Option<TimerHandle>,
+    emit_source_replica: bool,
 }
 
 impl LandReactorState {
@@ -131,6 +134,7 @@ impl LandReactorState {
             mailer,
             self_mailbox,
             _timer: None,
+            emit_source_replica: false,
         }
     }
 }
@@ -152,6 +156,32 @@ fn land_key(bloom: &Digest) -> IdempotencyKey {
 /// the acknowledgement oracle for a merged proposal.
 fn journal_holds_land(store: &mut dyn StoreBackend, bloom: &Digest) -> rusqlite::Result<bool> {
     store.journal_holds_any(&[land_key(bloom).0])
+}
+
+/// Host-mint the source-replica row after the land key is in the journal.
+/// `false` leaves the land entry unacked so a encode/store fault redrives.
+fn enqueue_source_replica(store: &mut dyn StoreBackend, new_head: &Digest) -> bool {
+    match to_vec(&SourceReplicaPayload { new_head: *new_head }) {
+        Ok(bytes) => match store.enqueue_outbox(Topic::SourceReplica.as_str(), &bytes) {
+            Ok(_) => true,
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::land",
+                    %error,
+                    "source replica enqueue failed; leaving the land entry durable",
+                );
+                false
+            }
+        },
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::land",
+                %error,
+                "source replica payload did not encode; leaving the land entry durable",
+            );
+            false
+        }
+    }
 }
 
 /// The idempotency key a landing rejection admits under.
@@ -323,9 +353,18 @@ fn landed(bloom: &BloomId, payload: &LandPayload, new_head: Digest) -> Result<Wa
 /// failed entry re-drains; a clean base-moved refusal is a processed entry
 /// (acked, no admit). The factored-out network side, unit-testable against a
 /// `SqliteStore` + a fake-GitHub-backed shell without the mail harness.
+#[cfg(test)]
 fn drain_and_land(
     store: &mut dyn StoreBackend,
     source: &dyn LandingSource,
+) -> rusqlite::Result<(Vec<Admit>, Option<u64>)> {
+    drain_and_land_emitting(store, source, false)
+}
+
+fn drain_and_land_emitting(
+    store: &mut dyn StoreBackend,
+    source: &dyn LandingSource,
+    emit_source_replica: bool,
 ) -> rusqlite::Result<(Vec<Admit>, Option<u64>)> {
     let entries = store.drain_topic(Topic::Land)?;
     let mut admits = Vec::new();
@@ -343,6 +382,9 @@ fn drain_and_land(
         // this row is done: ack it and do not propose, merge, or admit again.
         match journal_holds_land(store, &payload.bloom) {
             Ok(true) => {
+                if emit_source_replica && !enqueue_source_replica(store, &payload.new_head) {
+                    break;
+                }
                 ack_through = Some(entry.sequence);
                 continue;
             }
@@ -511,6 +553,7 @@ impl NativeActor for LandReactorCapability {
                 mailer,
                 self_mailbox,
                 _timer: None,
+                emit_source_replica: false,
             });
         };
 
@@ -538,6 +581,7 @@ impl NativeActor for LandReactorCapability {
             mailer,
             self_mailbox,
             _timer: Some(timer),
+            emit_source_replica: config.emit_source_replica,
         })
     }
 
@@ -563,7 +607,7 @@ impl NativeActor for LandReactorCapability {
             return;
         };
 
-        match drain_and_land(store, source.as_ref()) {
+        match drain_and_land_emitting(store, source.as_ref(), state.emit_source_replica) {
             Ok((admits, ack_through)) => {
                 if let Some(sequence) = ack_through
                     && let Err(error) = store.ack_topic(Topic::Land, sequence)

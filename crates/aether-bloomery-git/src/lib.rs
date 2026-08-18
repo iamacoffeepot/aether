@@ -45,6 +45,7 @@ pub mod correspondence;
 pub mod local;
 pub mod mainline;
 pub mod marker;
+pub mod replica;
 pub mod source;
 
 #[cfg(any(test, feature = "testing"))]
@@ -59,6 +60,7 @@ pub use correspondence::{GitObjectFormat, GitObjectId};
 pub use local::LocalGitData;
 pub use mainline::MainlineRef;
 pub use marker::{Marker, check_run_external_id, parse_check_run_external_id, parse_marker, render_marker};
+pub use replica::{GitSourceReplica, PublishedRefspec, ReplicaError, SourceReplica, published_refspecs};
 pub use source::{
     GitSource, HostSource, SourceError, candidate_ref_name, landing_branch, member_checkpoint_ref_name, to_hex,
 };

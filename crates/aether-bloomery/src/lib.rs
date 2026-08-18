@@ -85,7 +85,7 @@ pub use control::{
     EnumerateClaims, EnumerateClaimsResult, IntegratePayload, JournalRecord, LandPayload, LoadConfigs,
     LoadConfigsResult, MembershipMutation, ObserveMainline, ObserveMainlineResult, OrphanClaimReleasePayload,
     OutboxPayload, Query, QueryResult, RedispatchPayload, ReleaseSeal, ReplayJournal, ReplayJournalResult, ReviewPass,
-    SplicePayload, Topic, TransferSeal,
+    SourceReplicaPayload, SplicePayload, Topic, TransferSeal,
 };
 pub use correspondence::{BackendObjectId, Correspondence, CorrespondenceError, SharedCorrespondence};
 pub use digest::{ContentAddressed, Digest, digest_of};

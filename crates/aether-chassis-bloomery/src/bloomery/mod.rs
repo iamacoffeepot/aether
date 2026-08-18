@@ -17,6 +17,8 @@ mod intake;
 #[cfg(feature = "github")]
 mod mirror;
 mod outbox;
+#[cfg(feature = "github")]
+mod replica;
 // Crate-visible: the control core runs the same sidecar for its mainline
 // observer, and that cap lives outside this module.
 #[cfg(feature = "github")]
@@ -42,7 +44,7 @@ pub use approve::{
 };
 pub use chassis::{BloomeryChassis, BloomeryEnv, DEFAULT_RPC_PORT, RpcPortConfig};
 pub use cli::BloomeryCli;
-pub use config::{CoordinatorConfig, CoordinatorOverlay};
+pub use config::{CoordinatorConfig, CoordinatorOverlay, MissingWriterMarker};
 #[cfg(feature = "github")]
 pub use config::{GithubConnectionConfig, GithubConnectionOverlay};
 pub use construct::{CONSTRUCT_IMPLEMENT_COMMAND, dispatch_model};
@@ -78,6 +80,8 @@ pub use reactor::{
 #[cfg(feature = "github")]
 pub use repair::{CandidateSource, PrepareError, prepare_candidate};
 pub use repair::{candidate_tree_digest, capture_commit_digest};
+#[cfg(feature = "github")]
+pub use replica::{SourceReplicaShell, github_push_url, writer_marker_present};
 #[cfg(feature = "github")]
 pub use source::SourceShell;
 #[cfg(feature = "github")]
