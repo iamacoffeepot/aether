@@ -136,6 +136,16 @@ fn source_shell(
         return Ok(github.fixture_source(coordinator.mainline(), correspondence));
     }
 
+    if coordinator.uses_local_authority() {
+        return SourceShell::connect_local(
+            &coordinator.authority_repo,
+            coordinator,
+            correspondence,
+            github.cas_land_enabled,
+        )
+        .map_err(|error| BootError::Other(Box::new(error)));
+    }
+
     SourceShell::connect(github, coordinator, correspondence).map_err(|error| BootError::Other(Box::new(error)))
 }
 
@@ -175,6 +185,7 @@ fn actor_setups(
     session: &SessionConfig,
 ) -> Result<BloomeryActorSetups, BootError> {
     let configured = github.uses_fixture() || github.missing_connection_knobs().is_empty();
+    let source_configured = configured || coordinator.uses_local_authority();
     let repository = configured.then(|| (github.owner.clone(), github.repo.clone()));
     let correspondence = correspondence_store(github, &coordinator.store_path)?;
     let source = source_shell(github, coordinator, Arc::clone(&correspondence))?;
@@ -220,19 +231,19 @@ fn actor_setups(
             cas_land_enabled: github.cas_land_enabled,
         },
         integrate: IntegrateReactorSetup {
-            source: configured.then(|| source.clone()),
+            source: source_configured.then(|| source.clone()),
             store_path: coordinator.store_path.clone(),
             artifacts_root: coordinator.artifacts_root.clone(),
             poll_interval_secs: coordinator.poll_interval_secs,
             repository,
         },
         claim_release: ClaimReleaseReactorSetup {
-            source: configured.then(|| source.clone()),
+            source: source_configured.then(|| source.clone()),
             store_path: coordinator.store_path.clone(),
             poll_interval_secs: coordinator.poll_interval_secs,
         },
         janitor: JanitorReactorSetup {
-            source: configured.then(|| source.clone()),
+            source: source_configured.then(|| source.clone()),
             executor: executor.clone(),
             store_path: coordinator.store_path.clone(),
             worktree_base: coordinator.local_worktree_base.clone(),
@@ -241,7 +252,7 @@ fn actor_setups(
             evidence_retention_days: coordinator.evidence_retention_days,
             poll_interval_secs: coordinator.poll_interval_secs,
         },
-        source: SourceSetup { shell: source, claims_enabled: configured, mainline: coordinator.mainline() },
+        source: SourceSetup { shell: source, claims_enabled: source_configured, mainline: coordinator.mainline() },
         correspondence,
         pusher,
     })

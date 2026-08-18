@@ -54,6 +54,7 @@
 
 use std::error::Error;
 use std::fmt;
+use std::slice::from_ref;
 use std::sync::Arc;
 
 use aether_bloomery::{
@@ -63,7 +64,7 @@ use aether_bloomery::{
 };
 use serde::Serialize;
 
-use crate::client::{GitDataApi, GitDataError, GitRef, GithubError, MergeResult, strip_heads};
+use crate::client::{GitDataApi, GitDataError, GitRef, GithubError, MergeResult, RefTxnOp, strip_heads};
 use crate::correspondence::GitObjectId;
 use crate::mainline::MainlineRef;
 use crate::short_hex;
@@ -796,22 +797,6 @@ impl<C: GitDataApi> GitSource<C> {
         self.claim_holder(name)?.ok_or_else(|| SourceError::MissingRef(name.to_owned()))
     }
 
-    // Delete every ref an acquire created before it hit a conflict — attempt all
-    // of them (no first-error short-circuit), surfacing the first delete error
-    // only after the whole rollback is attempted so one wedged delete cannot
-    // strand the rest.
-    fn rollback(&self, created: &[String]) -> Result<(), SourceError> {
-        let mut first_error: Option<GitDataError> = None;
-        for name in created {
-            if let Err(error) = self.client.delete_ref(name)
-                && first_error.is_none()
-            {
-                first_error = Some(error);
-            }
-        }
-        first_error.map_or(Ok(()), |error| Err(SourceError::Git(error)))
-    }
-
     // Release each of `targets` the named `owner` holds by a fast-forward CAS to a
     // tombstone child commit (the linearization point) then a name-only cleanup
     // delete. An absent ref is skipped (idempotent); a ref already at the tombstone
@@ -833,18 +818,47 @@ impl<C: GitDataApi> GitSource<C> {
         owner: Option<&BloomId>,
         targets: &[(ClaimRefKind, String)],
     ) -> Result<ClaimOutcome, SourceError> {
+        let mut ops = Vec::new();
         for (kind, name) in targets {
-            match self.release_target(owner, name)? {
-                // Both clean terminals mean this ref is no longer held by the
-                // owner, which is all an all-or-nothing release needs; the walk
-                // continues.
-                ClaimReleaseOutcome::Released | ClaimReleaseOutcome::AlreadyAbsent => {}
-                ClaimReleaseOutcome::Changed { observed_holder } => {
-                    return Ok(ClaimOutcome::Held { ref_kind: kind.clone(), held_by: observed_holder });
+            let Some(current) = self.client.get_ref(name)? else {
+                continue;
+            };
+            match self.classify_holder(&current.sha)? {
+                ClaimHolder::Tombstoned => {
+                    ops.push(RefTxnOp::Delete { name: name.clone(), expected: current.sha });
+                }
+                ClaimHolder::Held(holder) if owner == Some(&holder) => {
+                    let tombstone =
+                        self.client.create_commit(&render_tombstone_message(), EMPTY_TREE, from_ref(&current.sha))?;
+                    ops.push(RefTxnOp::Update {
+                        name: name.clone(),
+                        sha: tombstone.sha.clone(),
+                        expected: current.sha,
+                    });
+                    ops.push(RefTxnOp::Delete { name: name.clone(), expected: tombstone.sha });
+                }
+                ClaimHolder::Held(holder) => {
+                    return Ok(ClaimOutcome::Held { ref_kind: kind.clone(), held_by: holder });
                 }
             }
         }
-        Ok(ClaimOutcome::Acquired)
+        match self.client.transact_refs(&ops) {
+            Ok(()) => Ok(ClaimOutcome::Acquired),
+            Err(GitDataError::RefConflict(_)) => {
+                for (kind, name) in targets {
+                    let Some(current) = self.client.get_ref(name)? else {
+                        continue;
+                    };
+                    if let ClaimHolder::Held(held_by) = self.classify_holder(&current.sha)?
+                        && owner != Some(&held_by)
+                    {
+                        return Ok(ClaimOutcome::Held { ref_kind: kind.clone(), held_by });
+                    }
+                }
+                Err(SourceError::Git(GitDataError::RefConflict("claim release lost with no foreign hold".into())))
+            }
+            Err(error) => Err(SourceError::Git(error)),
+        }
     }
 
     // Release exactly one ref by name, reporting which of the three terminals it
@@ -870,7 +884,7 @@ impl<C: GitDataApi> GitSource<C> {
         // against is gone, which is `AlreadyAbsent`.
         let holder = match self.classify_holder(&current.sha)? {
             ClaimHolder::Tombstoned => {
-                match self.client.update_ref(name, &current.sha, false) {
+                match self.client.compare_and_swap_ref(name, &current.sha, &current.sha) {
                     Ok(_) => self.client.delete_ref(name)?,
                     Err(GitDataError::RefConflict(_)) => {}
                     Err(error) => return Err(SourceError::Git(error)),
@@ -886,8 +900,8 @@ impl<C: GitDataApi> GitSource<C> {
             return Ok(ClaimReleaseOutcome::Changed { observed_holder: holder });
         }
 
-        let tombstone = self.client.create_commit(&render_tombstone_message(), EMPTY_TREE, &[current.sha])?;
-        match self.client.update_ref(name, &tombstone.sha, false) {
+        let tombstone = self.client.create_commit(&render_tombstone_message(), EMPTY_TREE, from_ref(&current.sha))?;
+        match self.client.compare_and_swap_ref(name, &tombstone.sha, &current.sha) {
             Ok(_) => {}
             // Lost the compare-and-swap to a concurrent mutation — re-read the
             // holder and report it rather than deleting a ref we no longer own.
@@ -999,7 +1013,7 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
         // tree-object`, and carry that head back in the outcome for the core to
         // thread through `land`'s `new_head`.
         let candidate_tree_sha = self.resolve_git_sha(candidate, "candidate tree digest")?;
-        let commit = self.client.create_commit("bloomery integrate", &candidate_tree_sha, &[current.sha])?;
+        let commit = self.client.create_commit("bloomery integrate", &candidate_tree_sha, from_ref(&current.sha))?;
         let head = digest_of(&IntegratedHead { bloom: *bloom, tree: *candidate });
         let commit_object = GitObjectId::from_hex(&commit.sha)
             .ok_or_else(|| SourceError::Malformed(format!("integrate commit sha `{}`", commit.sha)))?;
@@ -1024,7 +1038,7 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
         // The commit exists either way by this point; only its reachability is
         // in question, and an unreferenced commit is ordinary git garbage.
         self.correspondence.record(&head, &BackendObjectId::from(commit_object))?;
-        match self.client.update_ref(&integration, &commit.sha, false) {
+        match self.client.compare_and_swap_ref(&integration, &commit.sha, &current.sha) {
             Ok(_) => Ok(IntegrateOutcome::Integrated { tree: *candidate, head }),
             // A `RefConflict` is the lost compare-and-swap: a concurrent writer
             // moved the branch between our read and our update. That is the
@@ -1147,8 +1161,9 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
             return Ok(LandOutcome::BaseMoved { expected: *expected_base, actual });
         }
 
+        let expected_sha = self.resolve_git_sha(expected_base, "land expected base digest")?;
         let new_sha = self.resolve_git_sha(new_head, "land new head digest")?;
-        match self.client.update_ref(self.mainline.git_ref(), &new_sha, false) {
+        match self.client.compare_and_swap_ref(self.mainline.git_ref(), &new_sha, &expected_sha) {
             Ok(_) => Ok(LandOutcome::Landed { new_head: *new_head }),
             Err(GitDataError::RefConflict(_)) => {
                 let actual = self.mainline_digest(&self.mainline_head()?.sha)?;
@@ -1164,38 +1179,24 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
 
     fn claim_seal(&self, bloom: &BloomId, workpieces: &[WorkpieceId]) -> Result<ClaimOutcome, Self::Error> {
         let targets = Self::claim_targets(workpieces, true);
-        let mut created: Vec<String> = Vec::new();
-        for (kind, name) in &targets {
-            // A fresh root claim commit per member, then an atomic create. Every
-            // failure path — the commit create, the ref create, and (below) the
-            // holder resolution — first rolls back every ref this acquire already
-            // created, so an aborted acquire never leaks a partial claim.
-            // Rollback is best-effort here: a rollback fault must never mask the
-            // triggering error/outcome below, which is what the caller needs to
-            // see — so its own Result is deliberately dropped, not `?`-propagated.
-            let commit = match self.create_claim_commit(bloom, &[]) {
-                Ok(commit) => commit,
-                Err(error) => {
-                    let _ = self.rollback(&created);
-                    return Err(error);
-                }
-            };
-            match self.client.create_ref(name, &commit) {
-                Ok(_) => created.push(name.clone()),
-                // A `RefConflict` is another bloom's existing hold. Roll back our
-                // own refs first — the conflicting ref is another bloom's, never
-                // among them — then resolve and report the first conflict.
-                Err(GitDataError::RefConflict(_)) => {
-                    let _ = self.rollback(&created);
-                    return Ok(ClaimOutcome::Held { ref_kind: kind.clone(), held_by: self.require_holder(name)? });
-                }
-                Err(error) => {
-                    let _ = self.rollback(&created);
-                    return Err(SourceError::Git(error));
-                }
-            }
+        let mut ops = Vec::with_capacity(targets.len());
+        for (_, name) in &targets {
+            // Commits are content-addressed garbage if the transaction loses;
+            // the all-or-nothing property lives on the ref batch below.
+            ops.push(RefTxnOp::Create { name: name.clone(), sha: self.create_claim_commit(bloom, &[])? });
         }
-        Ok(ClaimOutcome::Acquired)
+        match self.client.transact_refs(&ops) {
+            Ok(()) => Ok(ClaimOutcome::Acquired),
+            Err(GitDataError::RefConflict(_)) => {
+                for (kind, name) in &targets {
+                    if self.client.get_ref(name)?.is_some() {
+                        return Ok(ClaimOutcome::Held { ref_kind: kind.clone(), held_by: self.require_holder(name)? });
+                    }
+                }
+                Err(SourceError::Git(GitDataError::RefConflict("claim acquire lost with no remaining hold".into())))
+            }
+            Err(error) => Err(SourceError::Git(error)),
+        }
     }
 
     fn transfer_seal(
@@ -1210,6 +1211,7 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
         // predecessor to successor. A ref already at the successor is this same
         // deterministic transfer's prior attempt — skip it and finish the rest
         // (issue 5135). A foreign holder still loses the CAS cleanly.
+        let mut ops = Vec::new();
         for (kind, name) in Self::claim_targets(carried, true) {
             let current = self.client.get_ref(&name)?.ok_or_else(|| SourceError::MissingRef(name.clone()))?;
             let holder = self.resolve_holder(&current.sha)?;
@@ -1220,20 +1222,10 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
                 return Ok(ClaimOutcome::Held { ref_kind: kind, held_by: holder });
             }
             // The successor claim commit is parented on the predecessor's, so the
-            // commit chain IS the claim lineage and `update_ref(force:false)` is a
-            // genuine fast-forward CAS.
-            let successor_commit = self.create_claim_commit(successor, &[current.sha])?;
-            match self.client.update_ref(&name, &successor_commit, false) {
-                Ok(_) => {}
-                Err(GitDataError::RefConflict(_)) => {
-                    let held_by = self.require_holder(&name)?;
-                    if held_by == *successor {
-                        continue;
-                    }
-                    return Ok(ClaimOutcome::Held { ref_kind: kind, held_by });
-                }
-                Err(error) => return Err(SourceError::Git(error)),
-            }
+            // commit chain IS the claim lineage and the expected-old CAS is a
+            // genuine compare against that predecessor sha.
+            let successor_commit = self.create_claim_commit(successor, from_ref(&current.sha))?;
+            ops.push(RefTxnOp::Update { name, sha: successor_commit, expected: current.sha });
         }
 
         // Fresh-acquire the successor's net-new workpieces (conflicting only on a
@@ -1242,17 +1234,35 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
         // prior-attempt resume as the carried skip above.
         for workpiece in net_new {
             let name = Self::workpiece_claim_ref(workpiece);
-            let commit = self.create_claim_commit(successor, &[])?;
-            match self.client.create_ref(&name, &commit) {
-                Ok(_) => {}
-                Err(GitDataError::RefConflict(_)) => {
-                    let held_by = self.require_holder(&name)?;
-                    if held_by == *successor {
-                        continue;
-                    }
-                    return Ok(ClaimOutcome::Held { ref_kind: ClaimRefKind::Workpiece(workpiece.clone()), held_by });
+            if let Some(existing) = self.client.get_ref(&name)? {
+                let held_by = self.resolve_holder(&existing.sha)?;
+                if held_by == *successor {
+                    continue;
                 }
-                Err(error) => return Err(SourceError::Git(error)),
+                return Ok(ClaimOutcome::Held { ref_kind: ClaimRefKind::Workpiece(workpiece.clone()), held_by });
+            }
+            ops.push(RefTxnOp::Create { name, sha: self.create_claim_commit(successor, &[])? });
+        }
+
+        if let Err(error) = self.client.transact_refs(&ops) {
+            match error {
+                GitDataError::RefConflict(_) => {
+                    for (kind, name) in Self::claim_targets(carried, true).into_iter().chain(
+                        net_new.iter().map(|w| (ClaimRefKind::Workpiece(w.clone()), Self::workpiece_claim_ref(w))),
+                    ) {
+                        let Some(current) = self.client.get_ref(&name)? else {
+                            continue;
+                        };
+                        let held_by = self.resolve_holder(&current.sha)?;
+                        if held_by != *successor && held_by != *predecessor {
+                            return Ok(ClaimOutcome::Held { ref_kind: kind, held_by });
+                        }
+                    }
+                    return Err(SourceError::Git(GitDataError::RefConflict(
+                        "claim transfer lost with no foreign hold".into(),
+                    )));
+                }
+                other => return Err(SourceError::Git(other)),
             }
         }
 
@@ -1318,8 +1328,8 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
         // At the predecessor — finish the fast-forward CAS to the successor, the
         // successor commit parented on the current one so `update_ref(force:false)`
         // is a genuine fast-forward (the same lineage `transfer_seal` builds).
-        let successor_commit = self.create_claim_commit(successor, &[current.sha])?;
-        match self.client.update_ref(&name, &successor_commit, false) {
+        let successor_commit = self.create_claim_commit(successor, from_ref(&current.sha))?;
+        match self.client.compare_and_swap_ref(&name, &successor_commit, &current.sha) {
             Ok(_) => Ok(ClaimOutcome::Acquired),
             Err(GitDataError::RefConflict(_)) => {
                 Ok(ClaimOutcome::Held { ref_kind: ref_kind.clone(), held_by: self.require_holder(&name)? })
