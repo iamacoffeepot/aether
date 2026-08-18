@@ -7,12 +7,15 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Cell, Row, Table, TableState};
 
 use crate::cursor::Cursor;
-use crate::dto::{BloomStatus, DigestHex, MemberView, ViewDocument};
+use crate::dto::{BloomStatus, DigestHex, MemberView, TimelineSpan, ViewDocument};
 use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
 use crate::store::{ResourceKey, Store};
 use crate::warroom::Focus;
 
+use super::metrics::{
+    Silence, axis_range, format_duration, format_micro_usd, paint_member_line, reconstructed_range, reconstructed_start,
+};
 use super::partition::{history_blooms, live_blooms};
 
 /// Stable identity of one selectable row. Refreshes look this up so the
@@ -65,6 +68,9 @@ const LIVE_HINTS: &[KeyHint] = &[
     KeyHint { keys: "Enter", action: "open" },
     KeyHint { keys: "h", action: "history" },
     KeyHint { keys: "l", action: "journal" },
+    KeyHint { keys: "t", action: "timeline" },
+    KeyHint { keys: "d", action: "days" },
+    KeyHint { keys: "c", action: "cost" },
     KeyHint { keys: "r", action: "refresh" },
     KeyHint { keys: "q", action: "quit" },
 ];
@@ -73,6 +79,9 @@ const HISTORY_HINTS: &[KeyHint] = &[
     KeyHint { keys: "j/k", action: "select" },
     KeyHint { keys: "Enter", action: "open" },
     KeyHint { keys: "l", action: "journal" },
+    KeyHint { keys: "t", action: "timeline" },
+    KeyHint { keys: "d", action: "days" },
+    KeyHint { keys: "c", action: "cost" },
     KeyHint { keys: "Esc", action: "back" },
     KeyHint { keys: "r", action: "refresh" },
     KeyHint { keys: "q", action: "quit" },
@@ -117,7 +126,13 @@ impl Board {
 
     #[must_use]
     pub fn subscriptions(&self) -> Vec<ResourceKey> {
-        vec![ResourceKey::View]
+        vec![
+            ResourceKey::View,
+            ResourceKey::MetricsSummary,
+            ResourceKey::MetricsDays,
+            ResourceKey::MetricsDispatches,
+            ResourceKey::Spend,
+        ]
     }
 
     #[must_use]
@@ -166,6 +181,11 @@ impl Board {
             KeyCode::Char('h') if self.lane == BoardLane::Live => Outcome::Push(Nav::History),
             KeyCode::Esc if self.lane == BoardLane::History => Outcome::Handled,
             KeyCode::Char('l') => Outcome::Push(Nav::journal(None)),
+            KeyCode::Char('t') => {
+                self.digest_under_cursor().map_or(Outcome::Handled, |bloom| Outcome::Push(Nav::timeline(bloom)))
+            }
+            KeyCode::Char('d') => Outcome::Push(Nav::days()),
+            KeyCode::Char('c') => Outcome::Push(Nav::cost()),
             KeyCode::Char('r') => Outcome::Refresh,
             KeyCode::Char('q') => Outcome::Quit,
             _ => Outcome::Ignored,
@@ -195,10 +215,10 @@ impl Board {
     pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, store: &Store) {
         let rows = rows_from(store, self.lane);
         let dimmed = store.view().is_stale();
-        self.render_table(frame, area, &rows, dimmed);
+        self.render_table(frame, area, store, &rows, dimmed);
     }
 
-    fn render_table(&mut self, frame: &mut Frame<'_>, area: Rect, rows: &[BoardRow], dimmed: bool) {
+    fn render_table(&mut self, frame: &mut Frame<'_>, area: Rect, store: &Store, rows: &[BoardRow], dimmed: bool) {
         let muted = if dimmed {
             Style::default().add_modifier(Modifier::DIM)
         } else {
@@ -208,17 +228,21 @@ impl Board {
             BoardLane::Live => "BLOOM / MEMBER",
             BoardLane::History => "HISTORY (landed · superseded)",
         };
-        let header = Row::new([title, "STATE", "MACH", "BLOCKED BY", "WEDGE"])
+        let header = Row::new([title, "STATE", "ELAPSED", "COST", "LANE"])
             .style(Style::default().add_modifier(Modifier::BOLD).patch(muted));
+        let extras = metrics_of(store);
         let table_rows = rows.iter().map(|row| match row {
-            BoardRow::Bloom(bloom) => Row::new([
-                Cell::from(bloom.id_prefix.clone()),
-                Cell::from(bloom.status.clone()),
-                Cell::from(format!("{} mem", bloom.member_count)),
-                Cell::from(""),
-                Cell::from(""),
-            ])
-            .style(Style::default().add_modifier(Modifier::BOLD).patch(muted)),
+            BoardRow::Bloom(bloom) => {
+                let extra = extras.iter().find(|extra| extra.bloom == bloom.id);
+                Row::new([
+                    Cell::from(bloom.id_prefix.clone()),
+                    Cell::from(format!("{}  {} mem", bloom.status, bloom.member_count)),
+                    Cell::from(extra.map_or("", |extra| extra.elapsed.as_str())),
+                    Cell::from(extra.map_or("", |extra| extra.cost.as_str())),
+                    Cell::from(extra.map_or("", |extra| extra.lane.as_str())),
+                ])
+                .style(Style::default().add_modifier(Modifier::BOLD).patch(muted))
+            }
             BoardRow::Member(member) => Row::new([
                 Cell::from(format!("  {}", member.workpiece)),
                 Cell::from(member.state.clone()),
@@ -231,11 +255,11 @@ impl Board {
         let table = Table::new(
             table_rows,
             [
-                Constraint::Length(28),
-                Constraint::Length(12),
-                Constraint::Length(10),
-                Constraint::Length(20),
-                Constraint::Min(8),
+                Constraint::Length(16),
+                Constraint::Length(16),
+                Constraint::Length(8),
+                Constraint::Length(8),
+                Constraint::Min(10),
             ],
         )
         .header(header)
@@ -312,6 +336,73 @@ fn rows_of(view: &ViewDocument, lane: BoardLane) -> Vec<BoardRow> {
 
 fn bloom_status_label(status: Option<BloomStatus>) -> String {
     status.map_or_else(|| "?".to_owned(), |status| status.to_string())
+}
+
+struct BloomMetrics {
+    bloom: DigestHex,
+    elapsed: String,
+    cost: String,
+    lane: String,
+}
+
+fn metrics_of(store: &Store) -> Vec<BloomMetrics> {
+    let dispatches = store.dispatches().value.as_ref().map_or(&[][..], Vec::as_slice);
+    let spend = store.spend().value.as_ref();
+    let mut blooms: Vec<DigestHex> = Vec::new();
+    for row in dispatches {
+        if !blooms.contains(&row.bloom) {
+            blooms.push(row.bloom);
+        }
+    }
+    if let Some(view) = store.view().value.as_ref() {
+        for bloom in &view.blooms {
+            if !blooms.contains(&bloom.id) {
+                blooms.push(bloom.id);
+            }
+        }
+    }
+    blooms
+        .into_iter()
+        .map(|bloom| {
+            let rows: Vec<_> = dispatches.iter().filter(|row| row.bloom == bloom).collect();
+            let stamps: Vec<u64> = rows.iter().filter_map(|row| row.recorded_unix_millis).collect();
+            let elapsed = match (stamps.iter().copied().min(), stamps.iter().copied().max()) {
+                (Some(first), Some(last)) if last > first => format_duration(last - first),
+                _ => "—".to_owned(),
+            };
+            let cost = spend
+                .and_then(|window| window.per_bloom.get(&bloom.as_hex()).copied())
+                .filter(|micro| *micro > 0)
+                .map_or_else(|| "—".to_owned(), format_micro_usd);
+            let spans: Vec<TimelineSpan> = rows
+                .iter()
+                .map(|row| TimelineSpan {
+                    workpiece: row.workpiece.clone(),
+                    stage: row.stage,
+                    sequence: row.sequence,
+                    started_unix_millis: row.recorded_unix_millis,
+                    reconstructed: row.reconstructed,
+                })
+                .collect();
+            let reconstructed = spans.iter().any(|span| span.reconstructed || span.started_unix_millis.is_none());
+            let (start, end) = if reconstructed {
+                reconstructed_range(&spans)
+            } else {
+                axis_range(&spans, stamps.iter().copied().max().unwrap_or(1))
+                    .map_or((0, 1), |(start, end, _)| (start, end))
+            };
+            let paint = if reconstructed {
+                spans
+                    .iter()
+                    .map(|span| TimelineSpan { started_unix_millis: Some(reconstructed_start(span)), ..span.clone() })
+                    .collect::<Vec<_>>()
+            } else {
+                spans
+            };
+            let lane = paint_member_line(&paint, start, end, 12, Silence::Queued, false, false);
+            BloomMetrics { bloom, elapsed, cost, lane }
+        })
+        .collect()
 }
 
 #[cfg(test)]

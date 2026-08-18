@@ -19,7 +19,7 @@ use crate::fetch::{FetchLanes, FetchReply, ResourceBody};
 use crate::http::Endpoint;
 use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
-use crate::screen::Screen;
+use crate::screen::{Screen, compose};
 use crate::store::{ResourceKey, Store};
 use crate::warroom::{self, Alert, ChromeId, Focus, Interrupt};
 
@@ -94,8 +94,10 @@ impl Shell {
 
     pub fn render(&mut self, frame: &mut Frame<'_>) {
         let (alerts, interrupts) = self.bands();
+        let dashboard = compose(&self.store);
         let filter_height = u16::from(!self.filter.is_empty());
         let status_height = self.status_height();
+        let today_height = u16::from(!dashboard.today.is_empty());
         let alert_height = u16::from(!alerts.is_empty());
         let interrupt_height = u16::try_from(interrupts.len().min(8)).unwrap_or(0);
         let chunks = Layout::default()
@@ -103,6 +105,7 @@ impl Shell {
             .constraints([
                 Constraint::Length(1),
                 Constraint::Length(status_height),
+                Constraint::Length(today_height),
                 Constraint::Length(filter_height),
                 Constraint::Length(alert_height),
                 Constraint::Length(interrupt_height),
@@ -111,26 +114,29 @@ impl Shell {
             ])
             .split(frame.area());
 
-        frame.render_widget(chrome::header(&self.endpoint_label, self.store.view()), chunks[0]);
+        frame.render_widget(chrome::header(&self.endpoint_label, self.store.view(), Some(&dashboard)), chunks[0]);
         if let Some(view) = self.store.view().value.as_ref() {
             Self::render_status(frame, chunks[1], view, status_height);
         }
+        if today_height > 0 {
+            frame.render_widget(chrome::today(&dashboard), chunks[2]);
+        }
         if filter_height > 0 {
-            frame.render_widget(chrome::filter_line(&self.filter), chunks[2]);
+            frame.render_widget(chrome::filter_line(&self.filter), chunks[3]);
         }
         if alert_height > 0 {
-            frame.render_widget(chrome::alert_band(&alerts, self.selected_alert_index(&alerts)), chunks[3]);
+            frame.render_widget(chrome::alert_band(&alerts, self.selected_alert_index(&alerts)), chunks[4]);
         }
         if interrupt_height > 0 {
             frame.render_widget(
                 chrome::interrupt_band(&interrupts, self.selected_interrupt_index(&interrupts)),
-                chunks[4],
+                chunks[5],
             );
         }
         if let Some(screen) = self.stack.last_mut() {
-            screen.render(frame, chunks[5], &self.store);
+            screen.render(frame, chunks[6], &self.store);
         }
-        frame.render_widget(chrome::footer(&self.footer_hints()), chunks[6]);
+        frame.render_widget(chrome::footer(&self.footer_hints(), Some(&dashboard.footer)), chunks[7]);
     }
 
     fn drain_replies(&mut self) {
@@ -141,51 +147,78 @@ impl Shell {
         let mut view_changed = false;
         let mut other_changed = false;
         for reply in replies {
-            match reply.key {
-                ResourceKey::View => {
-                    view_changed = true;
-                    match reply.outcome {
-                        Ok(ResourceBody::View(view)) => self.store.apply_view(Ok(view)),
-                        Err(error) => self.store.apply_view(Err(error)),
-                        Ok(_) => self.store.apply_view(Err("view lane returned a non-view body".to_owned())),
-                    }
-                }
-                ResourceKey::Journal(query) => {
-                    other_changed = true;
-                    match reply.outcome {
-                        Ok(ResourceBody::Journal(page)) => self.store.apply_journal(query, Ok(page)),
-                        Err(error) => self.store.apply_journal(query, Err(error)),
-                        Ok(_) => {
-                            self.store.apply_journal(query, Err("journal lane returned a non-journal body".to_owned()));
-                        }
-                    }
-                }
-                ResourceKey::Artifact(digest) => {
-                    other_changed = true;
-                    match reply.outcome {
-                        Ok(ResourceBody::Artifact(body)) => self.store.apply_artifact(digest, Ok(body)),
-                        Err(error) => self.store.apply_artifact(digest, Err(error)),
-                        Ok(_) => self
-                            .store
-                            .apply_artifact(digest, Err("artifact lane returned a non-artifact body".to_owned())),
-                    }
-                }
-                ResourceKey::Transcript(query) => {
-                    other_changed = true;
-                    match reply.outcome {
-                        Ok(ResourceBody::Transcript(page)) => self.store.apply_transcript(query, Ok(page)),
-                        Err(error) => self.store.apply_transcript(query, Err(error)),
-                        Ok(_) => self
-                            .store
-                            .apply_transcript(query, Err("transcript lane returned a non-transcript body".to_owned())),
-                    }
-                }
+            if matches!(reply.key, ResourceKey::View) {
+                view_changed = true;
+            } else {
+                other_changed = true;
             }
+            self.apply_reply(reply);
         }
         if view_changed {
             self.reseat_top();
         } else if other_changed && let Some(top) = self.stack.last_mut() {
             top.reseat(&self.store);
+        }
+    }
+
+    fn apply_reply(&mut self, reply: FetchReply) {
+        match (reply.key, reply.outcome) {
+            (ResourceKey::View, Ok(ResourceBody::View(view))) => self.store.apply_view(Ok(view)),
+            (ResourceKey::View, Err(error)) => self.store.apply_view(Err(error)),
+            (ResourceKey::View, Ok(_)) => self.store.apply_view(Err("view lane returned a non-view body".to_owned())),
+            (ResourceKey::Journal(query), Ok(ResourceBody::Journal(page))) => self.store.apply_journal(query, Ok(page)),
+            (ResourceKey::Journal(query), Err(error)) => self.store.apply_journal(query, Err(error)),
+            (ResourceKey::Journal(query), Ok(_)) => {
+                self.store.apply_journal(query, Err("journal lane returned a non-journal body".to_owned()));
+            }
+            (ResourceKey::Artifact(digest), Ok(ResourceBody::Artifact(body))) => {
+                self.store.apply_artifact(digest, Ok(body));
+            }
+            (ResourceKey::Artifact(digest), Err(error)) => self.store.apply_artifact(digest, Err(error)),
+            (ResourceKey::Artifact(digest), Ok(_)) => {
+                self.store.apply_artifact(digest, Err("artifact lane returned a non-artifact body".to_owned()));
+            }
+            (ResourceKey::Transcript(query), Ok(ResourceBody::Transcript(page))) => {
+                self.store.apply_transcript(query, Ok(page));
+            }
+            (ResourceKey::Transcript(query), Err(error)) => self.store.apply_transcript(query, Err(error)),
+            (ResourceKey::Transcript(query), Ok(_)) => {
+                self.store.apply_transcript(query, Err("transcript lane returned a non-transcript body".to_owned()));
+            }
+            (ResourceKey::MetricsSummary, Ok(ResourceBody::Summary(value))) => self.store.apply_summary(Ok(value)),
+            (ResourceKey::MetricsSummary, Err(error)) => self.store.apply_summary(Err(error)),
+            (ResourceKey::MetricsSummary, Ok(_)) => {
+                self.store.apply_summary(Err("summary lane returned a non-summary body".to_owned()));
+            }
+            (ResourceKey::MetricsDays, Ok(ResourceBody::Days(value))) => self.store.apply_days(Ok(value)),
+            (ResourceKey::MetricsDays, Err(error)) => self.store.apply_days(Err(error)),
+            (ResourceKey::MetricsDays, Ok(_)) => {
+                self.store.apply_days(Err("days lane returned a non-days body".to_owned()));
+            }
+            (ResourceKey::MetricsTimeline(bloom), Ok(ResourceBody::Timeline(value))) => {
+                self.store.apply_timeline(bloom, Ok(value));
+            }
+            (ResourceKey::MetricsTimeline(bloom), Err(error)) => self.store.apply_timeline(bloom, Err(error)),
+            (ResourceKey::MetricsTimeline(bloom), Ok(_)) => {
+                self.store.apply_timeline(bloom, Err("timeline lane returned a non-timeline body".to_owned()));
+            }
+            (ResourceKey::MetricsSeats, Ok(ResourceBody::Seats(value))) => self.store.apply_seats(Ok(value)),
+            (ResourceKey::MetricsSeats, Err(error)) => self.store.apply_seats(Err(error)),
+            (ResourceKey::MetricsSeats, Ok(_)) => {
+                self.store.apply_seats(Err("seats lane returned a non-seats body".to_owned()));
+            }
+            (ResourceKey::MetricsDispatches, Ok(ResourceBody::Dispatches(value))) => {
+                self.store.apply_dispatches(Ok(value));
+            }
+            (ResourceKey::MetricsDispatches, Err(error)) => self.store.apply_dispatches(Err(error)),
+            (ResourceKey::MetricsDispatches, Ok(_)) => {
+                self.store.apply_dispatches(Err("dispatches lane returned a non-dispatches body".to_owned()));
+            }
+            (ResourceKey::Spend, Ok(ResourceBody::Spend(value))) => self.store.apply_spend(Ok(value)),
+            (ResourceKey::Spend, Err(error)) => self.store.apply_spend(Err(error)),
+            (ResourceKey::Spend, Ok(_)) => {
+                self.store.apply_spend(Err("spend lane returned a non-spend body".to_owned()));
+            }
         }
     }
 
@@ -525,7 +558,15 @@ mod tests {
         shell.pump();
         assert_eq!(probe.take_live().map(|request| request.key), Some(ResourceKey::View));
         assert!(probe.take_live().is_none());
-        assert!(probe.take_bulk().is_none());
+        let mut bulk = Vec::new();
+        while let Some(request) = probe.take_bulk() {
+            bulk.push(request.key);
+        }
+        assert!(bulk.contains(&ResourceKey::MetricsSummary), "{bulk:?}");
+        assert!(bulk.contains(&ResourceKey::MetricsDays), "{bulk:?}");
+        assert!(bulk.contains(&ResourceKey::MetricsDispatches), "{bulk:?}");
+        assert!(bulk.contains(&ResourceKey::Spend), "{bulk:?}");
+        assert_eq!(bulk.len(), 4, "dashboard metrics must each have one inflight: {bulk:?}");
     }
 
     #[test]

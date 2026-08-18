@@ -19,6 +19,9 @@ const HINTS: &[KeyHint] = &[
     KeyHint { keys: "j/k", action: "select" },
     KeyHint { keys: "Enter", action: "open" },
     KeyHint { keys: "l", action: "journal" },
+    KeyHint { keys: "t", action: "timeline" },
+    KeyHint { keys: "d", action: "days" },
+    KeyHint { keys: "c", action: "cost" },
     KeyHint { keys: "Esc", action: "back" },
     KeyHint { keys: "r", action: "refresh" },
     KeyHint { keys: "q", action: "quit" },
@@ -114,6 +117,9 @@ impl Detail {
                 self.selected_line().and_then(|line| line.enter.clone()).map_or(Outcome::Handled, Outcome::Push)
             }
             KeyCode::Char('l') => self.bloom_id().map_or(Outcome::Handled, |id| Outcome::Push(Nav::journal(Some(id)))),
+            KeyCode::Char('t') => self.bloom_id().map_or(Outcome::Handled, |id| Outcome::Push(Nav::timeline(id))),
+            KeyCode::Char('d') => Outcome::Push(Nav::days()),
+            KeyCode::Char('c') => Outcome::Push(Nav::cost()),
             KeyCode::Esc => Outcome::Handled,
             KeyCode::Char('r') => Outcome::Refresh,
             KeyCode::Char('q') => Outcome::Quit,

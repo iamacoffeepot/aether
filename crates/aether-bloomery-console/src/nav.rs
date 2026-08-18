@@ -12,6 +12,9 @@ pub enum Nav {
     Focus(Focus),
     History,
     Journal { bloom: Option<DigestHex> },
+    Timeline { bloom: DigestHex },
+    Days,
+    Cost,
 }
 
 impl Nav {
@@ -28,5 +31,20 @@ impl Nav {
     #[must_use]
     pub fn transcript(nonce: impl Into<String>) -> Self {
         Self::Focus(Focus::transcript(nonce))
+    }
+
+    #[must_use]
+    pub fn timeline(bloom: DigestHex) -> Self {
+        Self::Timeline { bloom }
+    }
+
+    #[must_use]
+    pub fn days() -> Self {
+        Self::Days
+    }
+
+    #[must_use]
+    pub fn cost() -> Self {
+        Self::Cost
     }
 }

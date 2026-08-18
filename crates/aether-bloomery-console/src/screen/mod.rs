@@ -4,6 +4,7 @@ mod artifact;
 mod board;
 mod detail;
 mod journal;
+mod metrics;
 mod partition;
 mod transcript;
 
@@ -19,6 +20,7 @@ use crate::warroom::Focus;
 
 pub use board::{BloomRow, Board, BoardLane, BoardRow, MemberRow, RowId, member_status_state};
 pub use detail::Detail;
+pub use metrics::{Breakdown, Dashboard, Days, Timeline, compose};
 pub use partition::{is_history_status, is_live_status};
 pub use transcript::{LineBuffer, Transcript};
 
@@ -33,6 +35,9 @@ pub enum Screen {
     Record(Record),
     Artifact(Artifact),
     Transcript(Transcript),
+    Timeline(Timeline),
+    Days(Days),
+    Cost(Breakdown),
 }
 
 impl Screen {
@@ -60,6 +65,9 @@ impl Screen {
             Nav::Focus(focus) => Self::Detail(Detail::new(focus)),
             Nav::History => Self::history(),
             Nav::Journal { bloom } => Self::Journal(Journal::new(bloom)),
+            Nav::Timeline { bloom } => Self::Timeline(Timeline::new(bloom)),
+            Nav::Days => Self::Days(Days::new()),
+            Nav::Cost => Self::Cost(Breakdown::new()),
         }
     }
 
@@ -70,7 +78,7 @@ impl Screen {
             Self::Record(record) => Some(record.focus()),
             Self::Artifact(artifact) => Some(artifact.focus()),
             Self::Transcript(transcript) => Some(transcript.focus()),
-            Self::Board(_) | Self::Journal(_) => None,
+            Self::Board(_) | Self::Journal(_) | Self::Timeline(_) | Self::Days(_) | Self::Cost(_) => None,
         }
     }
 
@@ -79,7 +87,13 @@ impl Screen {
         match self {
             Self::Board(board) => board.scroll(),
             Self::Detail(detail) => detail.scroll(),
-            Self::Journal(_) | Self::Record(_) | Self::Artifact(_) | Self::Transcript(_) => 0,
+            Self::Journal(_)
+            | Self::Record(_)
+            | Self::Artifact(_)
+            | Self::Transcript(_)
+            | Self::Timeline(_)
+            | Self::Days(_)
+            | Self::Cost(_) => 0,
         }
     }
 
@@ -88,7 +102,13 @@ impl Screen {
         match self {
             Self::Board(board) => board.cursor().selected().map(|id| format!("{id:?}")),
             Self::Detail(detail) => detail.selected_key().map(|key| format!("{key:?}")),
-            Self::Journal(_) | Self::Record(_) | Self::Artifact(_) | Self::Transcript(_) => None,
+            Self::Journal(_)
+            | Self::Record(_)
+            | Self::Artifact(_)
+            | Self::Transcript(_)
+            | Self::Timeline(_)
+            | Self::Days(_)
+            | Self::Cost(_) => None,
         }
     }
 
@@ -101,6 +121,9 @@ impl Screen {
             Self::Record(_) => Record::subscriptions(),
             Self::Artifact(artifact) => artifact.subscriptions(),
             Self::Transcript(transcript) => transcript.subscriptions(),
+            Self::Timeline(timeline) => timeline.subscriptions(),
+            Self::Days(days) => days.subscriptions(),
+            Self::Cost(cost) => cost.subscriptions(),
         }
     }
 
@@ -113,6 +136,9 @@ impl Screen {
             Self::Record(_) => Record::key_hints(),
             Self::Artifact(_) => Artifact::key_hints(),
             Self::Transcript(_) => Transcript::key_hints(),
+            Self::Timeline(_) => Timeline::key_hints(),
+            Self::Days(_) => Days::key_hints(),
+            Self::Cost(_) => Breakdown::key_hints(),
         }
     }
 
@@ -121,8 +147,9 @@ impl Screen {
         match self {
             Self::Board(board) => board.digest_under_cursor(),
             Self::Detail(detail) => detail.digest_under_cursor(),
-            Self::Journal(_) | Self::Record(_) | Self::Transcript(_) => None,
+            Self::Journal(_) | Self::Record(_) | Self::Transcript(_) | Self::Days(_) | Self::Cost(_) => None,
             Self::Artifact(artifact) => Some(artifact.digest_under_cursor()),
+            Self::Timeline(timeline) => Some(timeline.bloom()),
         }
     }
 
@@ -134,6 +161,9 @@ impl Screen {
             Self::Record(record) => record.handle_key(key, store),
             Self::Artifact(artifact) => artifact.handle_key(key, store),
             Self::Transcript(transcript) => transcript.handle_key(key, store),
+            Self::Timeline(timeline) => timeline.handle_key(key, store),
+            Self::Days(days) => days.handle_key(key, store),
+            Self::Cost(cost) => cost.handle_key(key, store),
         }
     }
 
@@ -143,7 +173,9 @@ impl Screen {
             Self::Detail(detail) => detail.reseat(store),
             Self::Journal(journal) => journal.reseat(store),
             Self::Transcript(transcript) => transcript.reseat(store),
-            Self::Record(_) | Self::Artifact(_) => {}
+            Self::Timeline(timeline) => timeline.reseat(store),
+            Self::Cost(cost) => cost.reseat(store),
+            Self::Record(_) | Self::Artifact(_) | Self::Days(_) => {}
         }
     }
 
@@ -155,6 +187,9 @@ impl Screen {
             Self::Record(record) => record.render(frame, area, store),
             Self::Artifact(artifact) => artifact.render(frame, area, store),
             Self::Transcript(transcript) => transcript.render(frame, area, store),
+            Self::Timeline(timeline) => timeline.render(frame, area, store),
+            Self::Days(days) => days.render(frame, area, store),
+            Self::Cost(cost) => cost.render(frame, area, store),
         }
     }
 
@@ -166,6 +201,9 @@ impl Screen {
             Self::Detail(detail) => detail.selected_is_first(),
             Self::Journal(journal) => journal.selected_is_first(store),
             Self::Transcript(transcript) => transcript.selected_is_first(),
+            Self::Timeline(timeline) => timeline.selected_is_first(store),
+            Self::Cost(cost) => cost.selected_is_first(store),
+            Self::Days(days) => days.selected_is_first(),
             Self::Record(_) | Self::Artifact(_) => true,
         }
     }
