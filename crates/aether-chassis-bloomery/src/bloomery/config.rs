@@ -345,6 +345,27 @@ pub struct CoordinatorConfig {
     /// operated, not of the GitHub connection.
     #[config(env = "AETHER_BLOOMERY_MAINLINE_REF", default = "refs/heads/main")]
     pub mainline_ref: String,
+    /// How long a running batch gate stays young enough that arriving work
+    /// restarts it (ADR-0200 §The batch gate). The eight-finish-then-twenty-four-more
+    /// case restarts because the first eight's build is still young when the
+    /// rest arrive. The default is the observed one-minute window: long enough
+    /// that a burst of resolves joins one prove, short enough that a mature
+    /// compile is not thrown away for a late single member.
+    ///
+    /// Named `AETHER_BLOOMERY_BATCH_RESTART_YOUNG_SECS` rather than under this
+    /// struct's `AETHER_GITHUB` prefix: when a host preempts a prove is a
+    /// property of the machine, not of the GitHub connection.
+    #[config(env = "AETHER_BLOOMERY_BATCH_RESTART_YOUNG_SECS", default = 60)]
+    pub batch_restart_young_secs: u64,
+    /// How many newly-resolved members restart even a mature batch gate.
+    /// The observed twenty-four-more case is the default: a large arrival
+    /// pays for the restart; a single late member waits for the next take.
+    ///
+    /// Named `AETHER_BLOOMERY_BATCH_RESTART_ADDITION` rather than under this
+    /// struct's `AETHER_GITHUB` prefix, for the reason the young-window knob
+    /// is: accumulation policy is coordinator-owned.
+    #[config(env = "AETHER_BLOOMERY_BATCH_RESTART_ADDITION", default = 24)]
+    pub batch_restart_addition: usize,
 }
 
 #[cfg(feature = "github")]
@@ -392,6 +413,8 @@ impl Default for CoordinatorConfig {
             operator_name: String::new(),
             operator_email: String::new(),
             mainline_ref: "refs/heads/main".to_owned(),
+            batch_restart_young_secs: 60,
+            batch_restart_addition: 24,
         }
     }
 }
@@ -666,6 +689,8 @@ xAtw6HCuoUIzjbWZe1H+wS8KmJmYkTvf8f70x0/jMYRUyvMQy3beUUQ=
         assert_eq!(coordinator.store_path, ":memory:");
         assert_eq!(coordinator.heartbeat_silence_secs, 600);
         assert_eq!(coordinator.heartbeat_silence_secs().expect("the default is nonzero"), 600);
+        assert_eq!(coordinator.batch_restart_young_secs, 60);
+        assert_eq!(coordinator.batch_restart_addition, 24);
     }
 
     #[test]

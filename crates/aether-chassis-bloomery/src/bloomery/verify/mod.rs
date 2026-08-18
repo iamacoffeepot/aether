@@ -1,15 +1,18 @@
-//! Proof-fact addressing, recording, and attribution for the verification
-//! ledger (ADR-0200 §The fact, §"Attribution through the ledger").
+//! Proof-fact addressing, recording, attribution, and the batch gate
+//! (ADR-0200 §The fact, §"Attribution through the ledger", §"The batch gate").
 //!
 //! A proof fact is addressed by `(closure_key, test, result, host_class)`.
 //! [`closure_key`] hashes a package's git-addressed dependency closure;
 //! [`HostClass`] is the opaque host the coordinator supplies; [`discriminate`]
 //! is the only constructor of facts the ledger will store;
 //! [`attribute_gate_failure`] is the failure-attribution path member verify
-//! and the aggregate gate share.
+//! and the aggregate gate share; [`run_batch_gate`] composes disjoint-surface
+//! members into one prove.
 
 #[cfg(feature = "runtime")]
 mod attribution;
+#[cfg(feature = "runtime")]
+mod batch;
 mod closure;
 mod facts;
 
@@ -17,6 +20,12 @@ mod facts;
 pub use attribution::{
     Attribution, AttributionError, AttributionRequest, BaseProbe, BaseRepairWorkpiece, RepairBoard,
     attribute_gate_failure, consult_proof_fact,
+};
+#[cfg(feature = "runtime")]
+pub use batch::{
+    Accumulation, BatchBisect, BatchComposer, BatchContext, BatchFailure, BatchFailureHooks, BatchGate, BatchMember,
+    BatchReport, BatchRestart, GateOutcome, MemberFate, RunningGate, SurfaceOverlap, decide_accumulation,
+    run_batch_gate,
 };
 pub use closure::{ClosureKey, ClosureKeyError, closure_key};
 #[cfg(feature = "runtime")]
