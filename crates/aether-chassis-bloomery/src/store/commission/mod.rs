@@ -2,8 +2,11 @@
 //!
 //! Authoring and query transactions live here, not on [`StoreBackend`](super::StoreBackend).
 //! That trait is the journal; this one is the signed-intent store. Both share
-//! the same [`SqliteStore`](super::SqliteStore) connection and
+//! the same [`SqliteStore`] connection and
 //! `PRAGMA user_version` migration.
+
+use std::error::Error;
+use std::fmt;
 
 use aether_bloomery::{
     AuthorityDoor, CommissionApprovalTier, CommissionStatementRole, CommissionStatus, CommissionValueError, Digest,
@@ -122,8 +125,8 @@ pub enum CommissionError {
     Store(String),
 }
 
-impl core::fmt::Display for CommissionError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Display for CommissionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingCommission(id) => write!(f, "no commission named {id}"),
             Self::DuplicateCommission(id) => write!(f, "commission {id} already exists"),
@@ -146,7 +149,13 @@ impl core::fmt::Display for CommissionError {
     }
 }
 
-impl std::error::Error for CommissionError {}
+impl Error for CommissionError {}
+
+impl From<rusqlite::Error> for CommissionError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Store(error.to_string())
+    }
+}
 
 /// One commission's durable head: identity, intent digest, and the current
 /// revision pointer. The pointer is an index; [`CommissionBackend::load`]
@@ -253,19 +262,16 @@ impl CommissionBackend for SqliteStore {
 fn create_commission(conn: &mut Connection, id: &WorkpieceId, intent: &Statement) -> Result<Digest, CommissionError> {
     let intent_digest = digest_of(intent);
     let intent_bytes = encode_statement(intent);
-    let txn = conn.transaction().map_err(store_err)?;
-    let exists: Option<String> = txn
-        .query_row("SELECT id FROM commissions WHERE id = ?1", [&id.0], |row| row.get(0))
-        .optional()
-        .map_err(store_err)?;
+    let txn = conn.transaction()?;
+    let exists: Option<String> =
+        txn.query_row("SELECT id FROM commissions WHERE id = ?1", [&id.0], |row| row.get(0)).optional()?;
     if exists.is_some() {
         return Err(CommissionError::DuplicateCommission(id.0.clone()));
     }
     txn.execute(
         "INSERT INTO commissions (id, intent, current_revision, current_ordinal, status) VALUES (?1, ?2, NULL, NULL, ?3)",
         rusqlite::params![id.0, intent_digest.as_bytes().as_slice(), CommissionStatus::Open.as_str()],
-    )
-    .map_err(store_err)?;
+    )?;
     txn.execute(
         "INSERT INTO commission_statements (digest, commission, role, canonical) VALUES (?1, ?2, ?3, ?4)",
         rusqlite::params![
@@ -274,9 +280,8 @@ fn create_commission(conn: &mut Connection, id: &WorkpieceId, intent: &Statement
             CommissionStatementRole::Intent.as_str(),
             intent_bytes
         ],
-    )
-    .map_err(store_err)?;
-    txn.commit().map_err(store_err)?;
+    )?;
+    txn.commit()?;
     Ok(intent_digest)
 }
 
@@ -287,7 +292,7 @@ fn write_revision(conn: &mut Connection, revision: &ScopeRevision) -> Result<Dig
         return Err(CommissionError::MalformedCanonical);
     }
     let digest = digest_of(&decoded);
-    let txn = conn.transaction().map_err(store_err)?;
+    let txn = conn.transaction()?;
     let Some(head) = load_head(&txn, &decoded.workpiece.0)? else {
         return Err(CommissionError::MissingCommission(decoded.workpiece.0));
     };
@@ -314,23 +319,17 @@ fn write_revision(conn: &mut Connection, revision: &ScopeRevision) -> Result<Dig
     };
 
     let predecessor = decoded.predecessor.map(|digest| digest.as_bytes().to_vec());
+    let ordinal = i64::try_from(expected_ordinal).unwrap_or(i64::MAX);
     txn.execute(
         "INSERT INTO scope_revisions (digest, commission, predecessor, ordinal, canonical) VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![
-            digest.as_bytes().as_slice(),
-            decoded.workpiece.0,
-            predecessor,
-            expected_ordinal as i64,
-            canonical
-        ],
+        rusqlite::params![digest.as_bytes().as_slice(), decoded.workpiece.0, predecessor, ordinal, canonical],
     )
     .map_err(map_write)?;
     txn.execute(
         "UPDATE commissions SET current_revision = ?1, current_ordinal = ?2 WHERE id = ?3",
-        rusqlite::params![digest.as_bytes().as_slice(), expected_ordinal as i64, decoded.workpiece.0],
-    )
-    .map_err(store_err)?;
-    txn.commit().map_err(store_err)?;
+        rusqlite::params![digest.as_bytes().as_slice(), ordinal, decoded.workpiece.0],
+    )?;
+    txn.commit()?;
     Ok(digest)
 }
 
@@ -347,7 +346,7 @@ fn insert_approval(
 
     let statement_digest = digest_of(statement);
     let statement_bytes = encode_statement(statement);
-    let txn = conn.transaction().map_err(store_err)?;
+    let txn = conn.transaction()?;
     let Some(revision) = load_revision(&txn, scope)? else {
         return Err(CommissionError::MissingRevision);
     };
@@ -359,7 +358,7 @@ fn insert_approval(
     }
 
     if approval_exists(&txn, statement_digest)? {
-        txn.commit().map_err(store_err)?;
+        txn.commit()?;
         return Ok(statement_digest);
     }
 
@@ -376,7 +375,7 @@ fn insert_approval(
         ],
     )
     .map_err(map_write)?;
-    txn.commit().map_err(store_err)?;
+    txn.commit()?;
     Ok(statement_digest)
 }
 
@@ -392,14 +391,21 @@ fn load_commission(conn: &mut Connection, id: &WorkpieceId) -> Result<Option<Com
 }
 
 fn load_revision(conn: &Connection, digest: Digest) -> Result<Option<ScopeRevision>, CommissionError> {
-    let row: Option<(Vec<u8>, String, Option<Vec<u8>>, i64, Vec<u8>)> = conn
+    let row = conn
         .query_row(
             "SELECT digest, commission, predecessor, ordinal, canonical FROM scope_revisions WHERE digest = ?1",
             [digest.as_bytes().as_slice()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<Vec<u8>>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                ))
+            },
         )
-        .optional()
-        .map_err(store_err)?;
+        .optional()?;
     let Some((stored_digest, commission, predecessor, _ordinal, canonical)) = row else {
         return Ok(None);
     };
@@ -415,15 +421,13 @@ fn load_revision(conn: &Connection, digest: Digest) -> Result<Option<ScopeRevisi
 }
 
 fn load_approvals(conn: &Connection, scope: Digest) -> Result<Vec<Statement>, CommissionError> {
-    let mut stmt = conn
-        .prepare("SELECT digest, statement FROM commission_approvals WHERE scope_digest = ?1 ORDER BY rowid")
-        .map_err(store_err)?;
+    let mut stmt =
+        conn.prepare("SELECT digest, statement FROM commission_approvals WHERE scope_digest = ?1 ORDER BY rowid")?;
     let rows = stmt
-        .query_map([scope.as_bytes().as_slice()], |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)))
-        .map_err(store_err)?;
+        .query_map([scope.as_bytes().as_slice()], |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)))?;
     let mut approvals = Vec::new();
     for row in rows {
-        let (digest_bytes, canonical) = row.map_err(store_err)?;
+        let (digest_bytes, canonical) = row?;
         let statement: Statement = from_bytes(&canonical).map_err(|_| CommissionError::MalformedCanonical)?;
         let stored = Digest::from_slice(&digest_bytes).ok_or(CommissionError::MalformedCanonical)?;
         if digest_of(&statement) != stored {
@@ -438,44 +442,46 @@ fn list_commissions(
     conn: &Connection,
     status: Option<CommissionStatus>,
 ) -> Result<Vec<CommissionHead>, CommissionError> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, intent, current_revision, current_ordinal, status FROM commissions
+    let mut stmt = conn.prepare(
+        "SELECT id, intent, current_revision, current_ordinal, status FROM commissions
              WHERE (?1 IS NULL OR status = ?1) ORDER BY id",
-        )
-        .map_err(store_err)?;
+    )?;
     let status = status.map(CommissionStatus::as_str);
-    let rows = stmt
-        .query_map([status], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, Option<Vec<u8>>>(2)?,
-                row.get::<_, Option<i64>>(3)?,
-                row.get::<_, String>(4)?,
-            ))
-        })
-        .map_err(store_err)?;
+    let rows = stmt.query_map([status], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Vec<u8>>(1)?,
+            row.get::<_, Option<Vec<u8>>>(2)?,
+            row.get::<_, Option<i64>>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
     let mut heads = Vec::new();
     for row in rows {
-        let (id, intent, current, ordinal, status) = row.map_err(store_err)?;
-        heads.push(recompute_head(conn, id, intent, current, ordinal, status)?);
+        let (id, intent, current, ordinal, status) = row?;
+        heads.push(recompute_head(conn, id, &intent, current, ordinal, &status)?);
     }
     Ok(heads)
 }
 
 fn load_head(conn: &Connection, id: &str) -> Result<Option<CommissionHead>, CommissionError> {
-    let row: Option<(Vec<u8>, Option<Vec<u8>>, Option<i64>, String)> = conn
+    let row = conn
         .query_row(
             "SELECT intent, current_revision, current_ordinal, status FROM commissions WHERE id = ?1",
             [id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Option<Vec<u8>>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
         )
-        .optional()
-        .map_err(store_err)?;
+        .optional()?;
     match row {
         Some((intent, current, ordinal, status)) => {
-            Ok(Some(recompute_head(conn, id.to_owned(), intent, current, ordinal, status)?))
+            Ok(Some(recompute_head(conn, id.to_owned(), &intent, current, ordinal, &status)?))
         }
         None => Ok(None),
     }
@@ -484,12 +490,12 @@ fn load_head(conn: &Connection, id: &str) -> Result<Option<CommissionHead>, Comm
 fn recompute_head(
     conn: &Connection,
     id: String,
-    intent_bytes: Vec<u8>,
+    intent_bytes: &[u8],
     current: Option<Vec<u8>>,
     ordinal: Option<i64>,
-    status: String,
+    status: &str,
 ) -> Result<CommissionHead, CommissionError> {
-    let stored_intent = Digest::from_slice(&intent_bytes).ok_or(CommissionError::MalformedCanonical)?;
+    let stored_intent = Digest::from_slice(intent_bytes).ok_or(CommissionError::MalformedCanonical)?;
     let intent = recompute_intent(conn, &id, stored_intent)?;
     let current_revision = match current {
         Some(bytes) => Some(Digest::from_slice(&bytes).ok_or(CommissionError::MalformedCanonical)?),
@@ -499,7 +505,7 @@ fn recompute_head(
         Some(value) => Some(u64::try_from(value).map_err(|_| CommissionError::MalformedCanonical)?),
         None => None,
     };
-    let status = CommissionStatus::parse(&status).ok_or(CommissionError::MalformedCanonical)?;
+    let status = CommissionStatus::parse(status).ok_or(CommissionError::MalformedCanonical)?;
     Ok(CommissionHead { id: WorkpieceId(id), intent, current_revision, current_ordinal, status })
 }
 
@@ -522,8 +528,7 @@ fn recompute_intent(conn: &Connection, commission: &str, stored: Digest) -> Resu
 fn revision_exists(conn: &Transaction<'_>, digest: Digest) -> Result<bool, CommissionError> {
     let found: Option<i64> = conn
         .query_row("SELECT 1 FROM scope_revisions WHERE digest = ?1", [digest.as_bytes().as_slice()], |row| row.get(0))
-        .optional()
-        .map_err(store_err)?;
+        .optional()?;
     Ok(found.is_some())
 }
 
@@ -532,8 +537,7 @@ fn approval_exists(conn: &Transaction<'_>, digest: Digest) -> Result<bool, Commi
         .query_row("SELECT 1 FROM commission_approvals WHERE digest = ?1", [digest.as_bytes().as_slice()], |row| {
             row.get(0)
         })
-        .optional()
-        .map_err(store_err)?;
+        .optional()?;
     Ok(found.is_some())
 }
 
@@ -561,10 +565,6 @@ fn encode_statement(statement: &Statement) -> Vec<u8> {
     to_vec(statement).expect("commission statements never exceed the ADR-0118 u32 wire-length ceiling")
 }
 
-fn store_err(error: rusqlite::Error) -> CommissionError {
-    CommissionError::Store(error.to_string())
-}
-
 fn map_write(error: rusqlite::Error) -> CommissionError {
     if let rusqlite::Error::SqliteFailure(_, Some(message)) = &error {
         if message.contains("immutable") {
@@ -580,5 +580,5 @@ fn map_write(error: rusqlite::Error) -> CommissionError {
             return CommissionError::Store(message.clone());
         }
     }
-    store_err(error)
+    error.into()
 }

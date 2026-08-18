@@ -31,18 +31,19 @@ fn intent() -> Statement {
 }
 
 fn revision(id: &str, predecessor: Option<Digest>) -> ScopeRevision {
-    ScopeRevision::v1(
-        workpiece(id),
+    ScopeRevision {
+        schema: SCOPE_REVISION_SCHEMA,
+        workpiece: workpiece(id),
         predecessor,
-        "problem".to_owned(),
-        "design".to_owned(),
-        "plan".to_owned(),
-        vec!["crates/aether-bloomery/**".to_owned()],
-        "dogfood".to_owned(),
-        ScopeRouting { size: "M".to_owned(), model: "construct: test".to_owned() },
-        Vec::new(),
-        "advisory".to_owned(),
-    )
+        problem: "problem".to_owned(),
+        design: "design".to_owned(),
+        plan: "plan".to_owned(),
+        declared_surface: vec!["crates/aether-bloomery/**".to_owned()],
+        dogfood_brief: "dogfood".to_owned(),
+        routing: ScopeRouting { size: "M".to_owned(), model: "construct: test".to_owned() },
+        dependencies: Vec::new(),
+        description: "advisory".to_owned(),
+    }
 }
 
 fn signing_key(seed: u8) -> SigningKey {

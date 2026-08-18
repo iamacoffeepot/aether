@@ -14,6 +14,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use aether_data::wire::{from_bytes, to_vec};
 use serde::{Deserialize, Serialize};
 
 use crate::digest::{ContentAddressed, Digest};
@@ -78,35 +79,6 @@ pub struct ScopeRevision {
 }
 
 impl ScopeRevision {
-    /// A version-1 revision. The schema field is always [`SCOPE_REVISION_SCHEMA`].
-    #[must_use]
-    pub fn v1(
-        workpiece: WorkpieceId,
-        predecessor: Option<Digest>,
-        problem: String,
-        design: String,
-        plan: String,
-        declared_surface: Vec<String>,
-        dogfood_brief: String,
-        routing: ScopeRouting,
-        dependencies: Vec<WorkpieceId>,
-        description: String,
-    ) -> Self {
-        Self {
-            schema: SCOPE_REVISION_SCHEMA,
-            workpiece,
-            predecessor,
-            problem,
-            design,
-            plan,
-            declared_surface,
-            dogfood_brief,
-            routing,
-            dependencies,
-            description,
-        }
-    }
-
     /// Decode canonical bytes as a version-1 revision.
     ///
     /// # Errors
@@ -114,7 +86,7 @@ impl ScopeRevision {
     /// [`CommissionValueError::UnsupportedSchema`] when they decode as a
     /// later (or zero) schema this encoder does not write.
     pub fn from_canonical(bytes: &[u8]) -> Result<Self, CommissionValueError> {
-        let value: Self = aether_data::wire::from_bytes(bytes).map_err(|_| CommissionValueError::Malformed)?;
+        let value: Self = from_bytes(bytes).map_err(|_| CommissionValueError::Malformed)?;
         if value.schema != SCOPE_REVISION_SCHEMA {
             return Err(CommissionValueError::UnsupportedSchema(value.schema));
         }
@@ -128,7 +100,7 @@ impl ScopeRevision {
     /// which no commission value does.
     #[must_use]
     pub fn to_canonical(&self) -> Vec<u8> {
-        aether_data::wire::to_vec(self).expect("commission values never exceed the ADR-0118 u32 wire-length ceiling")
+        to_vec(self).expect("commission values never exceed the ADR-0118 u32 wire-length ceiling")
     }
 }
 
@@ -239,6 +211,7 @@ impl CommissionStatementRole {
 
 #[cfg(test)]
 mod tests {
+    use alloc::collections::BTreeMap;
     use alloc::string::String;
     use alloc::vec;
     use alloc::vec::Vec;
@@ -255,18 +228,19 @@ mod tests {
     /// fixed so a layout or encoder change is a visible golden drift, not a
     /// rewrite of production prose.
     fn fixture() -> ScopeRevision {
-        ScopeRevision::v1(
-            WorkpieceId(String::from("issue-5045")),
-            None,
-            String::from("p"),
-            String::from("d"),
-            String::from("n"),
-            vec![String::from("crates/aether-bloomery/**")],
-            String::from("df"),
-            ScopeRouting { size: String::from("M"), model: String::from("construct: test") },
-            Vec::new(),
-            String::from("desc"),
-        )
+        ScopeRevision {
+            schema: SCOPE_REVISION_SCHEMA,
+            workpiece: WorkpieceId(String::from("issue-5045")),
+            predecessor: None,
+            problem: String::from("p"),
+            design: String::from("d"),
+            plan: String::from("n"),
+            declared_surface: vec![String::from("crates/aether-bloomery/**")],
+            dogfood_brief: String::from("df"),
+            routing: ScopeRouting { size: String::from("M"), model: String::from("construct: test") },
+            dependencies: Vec::new(),
+            description: String::from("desc"),
+        }
     }
 
     // Tripwire: version-1 wire bytes. A signature covers these exact bytes; the
@@ -350,10 +324,7 @@ mod tests {
             "Approve signature drifted; signature={signature:?}"
         );
 
-        let keys = Ed25519KeyProvider::new(alloc::collections::BTreeMap::from([(
-            KeyId(String::from("owner")),
-            key.verifying_key(),
-        )]));
+        let keys = Ed25519KeyProvider::new(BTreeMap::from([(KeyId(String::from("owner")), key.verifying_key())]));
         let statement = Statement {
             words: digest.as_bytes().to_vec(),
             provenance: Provenance::AuthorSignature(SignatureEnvelope {
