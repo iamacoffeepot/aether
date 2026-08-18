@@ -33,7 +33,8 @@ use crate::bloomery::{
     CandidatePush, ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, ExecutorReactorCapability,
     ExecutorReactorSetup, ExecutorShell, GithubConnectionConfig, IntegrateReactorCapability, IntegrateReactorSetup,
     JanitorReactorCapability, JanitorReactorSetup, LandReactorCapability, LandReactorSetup, LaneProgram,
-    MirrorReactorCapability, MirrorReactorSetup, ProjectionShell, SourceShell, candidate_push_at,
+    MirrorReactorCapability, MirrorReactorSetup, ProjectionShell, SourceReplicaShell, SourceShell, candidate_push_at,
+    github_push_url,
 };
 use crate::control::{ControlCore, ControlSetup};
 use crate::session::{SessionConfig, SessionPoolCapability};
@@ -188,6 +189,10 @@ fn actor_setups(
 ) -> Result<BloomeryActorSetups, BootError> {
     let configured = github.uses_fixture() || github.missing_connection_knobs().is_empty();
     let source_configured = configured || coordinator.uses_local_authority();
+    let replica_enabled = coordinator.source_replica_enabled(github);
+    if replica_enabled {
+        coordinator.require_single_writer_marker(github).map_err(|error| BootError::Other(Box::new(error)))?;
+    }
     let repository = configured.then(|| (github.owner.clone(), github.repo.clone()));
     let correspondence = correspondence_store(github, &coordinator.store_path)?;
     let source = source_shell(github, coordinator, Arc::clone(&correspondence))?;
@@ -209,6 +214,14 @@ fn actor_setups(
         mirror: MirrorReactorSetup {
             projection: projection_shell(github, configured)?,
             source: configured.then(|| source.clone()),
+            replica: replica_enabled.then(|| {
+                SourceReplicaShell::connect(
+                    &coordinator.authority_repo,
+                    &github_push_url(&github.api_base, &github.owner, &github.repo),
+                    coordinator.mainline(),
+                    &github.token,
+                )
+            }),
             poll_interval_secs: coordinator.poll_interval_secs,
             repository: repository.clone(),
         },
@@ -242,6 +255,7 @@ fn actor_setups(
             poll_interval_secs: coordinator.poll_interval_secs,
             repository: repository.clone(),
             cas_land_enabled: github.cas_land_enabled,
+            emit_source_replica: replica_enabled,
         },
         integrate: IntegrateReactorSetup {
             source: source_configured.then(|| source.clone()),

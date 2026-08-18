@@ -195,6 +195,13 @@ topic_vocabulary! {
     /// [`Fact::FoldConflict`](crate::Fact::FoldConflict). Appended so the prior
     /// topics' display spellings and ordering are unchanged.
     Splice,
+    /// A source-replica push (host-minted): after a local landing receipt is
+    /// admitted, the host enqueues a request to push the allowlisted refs to
+    /// the configured GitHub URL. Independent of [`Self::LandingReceipt`] so a
+    /// projection stall cannot hold source refs and vice versa (ADR-0199).
+    /// Appended so the prior topics' display spellings and ordering are
+    /// unchanged.
+    SourceReplica,
 }
 
 impl Topic {
@@ -217,6 +224,7 @@ impl Topic {
             Self::ViewDocument => "topic:view_document",
             Self::OrphanClaimRelease => "topic:orphan_claim_release",
             Self::Splice => "topic:splice",
+            Self::SourceReplica => "topic:source_replica",
         }
     }
 
@@ -554,6 +562,17 @@ pub struct LandPayload {
     /// refusal, not a land onto the new head.
     pub expected_base: Digest,
     /// The head mainline advances to on a successful land.
+    pub new_head: Digest,
+}
+
+/// A source-replica outbox payload (ADR-0199): the mainline head the local
+/// authority just admitted. Host-minted under [`Topic::SourceReplica`] after
+/// the landing receipt is in the journal — the push is best-effort and never
+/// part of the land commit. The drain coalesces to the latest head so an
+/// outage does not replay every intermediate tip.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SourceReplicaPayload {
+    /// The admitted mainline head the replica should catch up to.
     pub new_head: Digest,
 }
 
