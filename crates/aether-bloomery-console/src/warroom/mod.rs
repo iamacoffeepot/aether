@@ -21,6 +21,7 @@ pub enum Focus {
     Dispatch { bloom: DigestHex, workpiece: String },
     Record { sequence: u64 },
     Artifact { digest: DigestHex },
+    Transcript { nonce: String },
 }
 
 impl Focus {
@@ -59,6 +60,11 @@ impl Focus {
         Self::Artifact { digest }
     }
 
+    #[must_use]
+    pub fn transcript(nonce: impl Into<String>) -> Self {
+        Self::Transcript { nonce: nonce.into() }
+    }
+
     /// The one line a pushed subject frame paints.
     #[must_use]
     pub fn label(&self) -> String {
@@ -70,6 +76,7 @@ impl Focus {
             Self::Dispatch { workpiece, .. } => format!("dispatch {workpiece}"),
             Self::Record { sequence } => format!("record {sequence}"),
             Self::Artifact { digest } => format!("artifact {}", digest.prefix()),
+            Self::Transcript { nonce } => format!("transcript {nonce}"),
         }
     }
 
@@ -79,7 +86,9 @@ impl Focus {
         match self {
             Self::Dispatch { bloom, workpiece } => Some(Self::member(*bloom, workpiece.clone())),
             Self::Member { bloom, .. } | Self::Composition { bloom } => Some(Self::bloom(*bloom)),
-            Self::Bloom { .. } | Self::Seal | Self::Record { .. } | Self::Artifact { .. } => None,
+            Self::Bloom { .. } | Self::Seal | Self::Record { .. } | Self::Artifact { .. } | Self::Transcript { .. } => {
+                None
+            }
         }
     }
 }

@@ -5,6 +5,7 @@ mod board;
 mod detail;
 mod journal;
 mod partition;
+mod transcript;
 
 use crossterm::event::KeyEvent;
 use ratatui::Frame;
@@ -19,6 +20,7 @@ use crate::warroom::Focus;
 pub use board::{BloomRow, Board, BoardLane, BoardRow, MemberRow, RowId, member_status_state};
 pub use detail::Detail;
 pub use partition::{is_history_status, is_live_status};
+pub use transcript::{LineBuffer, Transcript};
 
 use artifact::Artifact;
 use journal::{Journal, Record};
@@ -30,6 +32,7 @@ pub enum Screen {
     Journal(Journal),
     Record(Record),
     Artifact(Artifact),
+    Transcript(Transcript),
 }
 
 impl Screen {
@@ -53,6 +56,7 @@ impl Screen {
         match nav {
             Nav::Focus(Focus::Record { sequence }) => Self::Record(Record::new(sequence)),
             Nav::Focus(Focus::Artifact { digest }) => Self::Artifact(Artifact::new(digest)),
+            Nav::Focus(Focus::Transcript { nonce }) => Self::Transcript(Transcript::new(nonce)),
             Nav::Focus(focus) => Self::Detail(Detail::new(focus)),
             Nav::History => Self::history(),
             Nav::Journal { bloom } => Self::Journal(Journal::new(bloom)),
@@ -65,6 +69,7 @@ impl Screen {
             Self::Detail(detail) => Some(detail.focus().clone()),
             Self::Record(record) => Some(record.focus()),
             Self::Artifact(artifact) => Some(artifact.focus()),
+            Self::Transcript(transcript) => Some(transcript.focus()),
             Self::Board(_) | Self::Journal(_) => None,
         }
     }
@@ -74,7 +79,7 @@ impl Screen {
         match self {
             Self::Board(board) => board.scroll(),
             Self::Detail(detail) => detail.scroll(),
-            Self::Journal(_) | Self::Record(_) | Self::Artifact(_) => 0,
+            Self::Journal(_) | Self::Record(_) | Self::Artifact(_) | Self::Transcript(_) => 0,
         }
     }
 
@@ -83,7 +88,7 @@ impl Screen {
         match self {
             Self::Board(board) => board.cursor().selected().map(|id| format!("{id:?}")),
             Self::Detail(detail) => detail.selected_key().map(|key| format!("{key:?}")),
-            Self::Journal(_) | Self::Record(_) | Self::Artifact(_) => None,
+            Self::Journal(_) | Self::Record(_) | Self::Artifact(_) | Self::Transcript(_) => None,
         }
     }
 
@@ -95,6 +100,7 @@ impl Screen {
             Self::Journal(journal) => journal.subscriptions(),
             Self::Record(_) => Record::subscriptions(),
             Self::Artifact(artifact) => artifact.subscriptions(),
+            Self::Transcript(transcript) => transcript.subscriptions(),
         }
     }
 
@@ -106,6 +112,7 @@ impl Screen {
             Self::Journal(_) => Journal::key_hints(),
             Self::Record(_) => Record::key_hints(),
             Self::Artifact(_) => Artifact::key_hints(),
+            Self::Transcript(_) => Transcript::key_hints(),
         }
     }
 
@@ -114,7 +121,7 @@ impl Screen {
         match self {
             Self::Board(board) => board.digest_under_cursor(),
             Self::Detail(detail) => detail.digest_under_cursor(),
-            Self::Journal(_) | Self::Record(_) => None,
+            Self::Journal(_) | Self::Record(_) | Self::Transcript(_) => None,
             Self::Artifact(artifact) => Some(artifact.digest_under_cursor()),
         }
     }
@@ -126,6 +133,7 @@ impl Screen {
             Self::Journal(journal) => journal.handle_key(key, store),
             Self::Record(record) => record.handle_key(key, store),
             Self::Artifact(artifact) => artifact.handle_key(key, store),
+            Self::Transcript(transcript) => transcript.handle_key(key, store),
         }
     }
 
@@ -134,6 +142,7 @@ impl Screen {
             Self::Board(board) => board.reseat(store),
             Self::Detail(detail) => detail.reseat(store),
             Self::Journal(journal) => journal.reseat(store),
+            Self::Transcript(transcript) => transcript.reseat(store),
             Self::Record(_) | Self::Artifact(_) => {}
         }
     }
@@ -145,6 +154,7 @@ impl Screen {
             Self::Journal(journal) => journal.render(frame, area, store),
             Self::Record(record) => record.render(frame, area, store),
             Self::Artifact(artifact) => artifact.render(frame, area, store),
+            Self::Transcript(transcript) => transcript.render(frame, area, store),
         }
     }
 
@@ -155,6 +165,7 @@ impl Screen {
             Self::Board(board) => board.selected_is_first(store),
             Self::Detail(detail) => detail.selected_is_first(),
             Self::Journal(journal) => journal.selected_is_first(store),
+            Self::Transcript(transcript) => transcript.selected_is_first(),
             Self::Record(_) | Self::Artifact(_) => true,
         }
     }

@@ -9,7 +9,7 @@ use std::sync::mpsc::{self, Receiver, RecvError, SendError, Sender};
 use std::thread;
 use std::time::Duration;
 
-use crate::dto::{DecodedArtifact, JournalPage, ViewDocument};
+use crate::dto::{DecodedArtifact, DispatchFilePage, JournalPage, ViewDocument};
 use crate::http::{self, Endpoint};
 use crate::store::{Lane, ResourceKey};
 
@@ -17,7 +17,7 @@ const LIVE_TIMEOUT: Duration = Duration::from_secs(1);
 const BULK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One fetch the shell wants a lane to perform.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FetchRequest {
     pub key: ResourceKey,
 }
@@ -28,6 +28,7 @@ pub enum ResourceBody {
     View(ViewDocument),
     Journal(JournalPage),
     Artifact(DecodedArtifact),
+    Transcript(DispatchFilePage),
 }
 
 /// Outcome posted back to the shell. The event loop never calls HTTP.
@@ -90,7 +91,7 @@ fn lane_loop(endpoint: &Endpoint, requests: &Receiver<FetchRequest>, replies: &S
     loop {
         match requests.recv() {
             Ok(FetchRequest { key }) => {
-                let outcome = fetch_key(endpoint, key, timeout);
+                let outcome = fetch_key(endpoint, &key, timeout);
                 if replies.send(FetchReply { key, outcome }).is_err() {
                     return;
                 }
@@ -100,7 +101,7 @@ fn lane_loop(endpoint: &Endpoint, requests: &Receiver<FetchRequest>, replies: &S
     }
 }
 
-fn fetch_key(endpoint: &Endpoint, key: ResourceKey, timeout: Duration) -> Result<ResourceBody, String> {
+fn fetch_key(endpoint: &Endpoint, key: &ResourceKey, timeout: Duration) -> Result<ResourceBody, String> {
     let path = key.path();
     match key {
         ResourceKey::View => http::get_json::<ViewDocument>(endpoint, &path, timeout)
@@ -111,6 +112,9 @@ fn fetch_key(endpoint: &Endpoint, key: ResourceKey, timeout: Duration) -> Result
             .map_err(|error| error.to_string()),
         ResourceKey::Artifact(_) => http::get_json::<DecodedArtifact>(endpoint, &path, timeout)
             .map(ResourceBody::Artifact)
+            .map_err(|error| error.to_string()),
+        ResourceKey::Transcript(_) => http::get_json::<DispatchFilePage>(endpoint, &path, timeout)
+            .map(ResourceBody::Transcript)
             .map_err(|error| error.to_string()),
     }
 }

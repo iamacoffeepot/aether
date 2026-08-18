@@ -25,6 +25,9 @@ impl KeyHint {
     /// Codes the footer string claims to handle (`"j/k"` → `j` and `k`).
     #[must_use]
     pub fn advertised_codes(self) -> Vec<KeyCode> {
+        if self.keys == "/" {
+            return vec![KeyCode::Char('/')];
+        }
         self.keys.split('/').map(parse_key_token).collect()
     }
 }
@@ -83,6 +86,15 @@ mod tests {
             KeyHint { keys: "q", action: "quit" },
         ];
         assert_eq!(footer_line(&hints), "j/k select   r refresh   q quit");
+    }
+
+    #[test]
+    fn a_slash_hint_is_the_search_key() {
+        // The plausible bug: advertised_codes splits on '/', so a "/" hint
+        // becomes two empty tokens and the honesty harness panics on a
+        // real search key.
+        let hint = KeyHint { keys: "/", action: "search" };
+        assert_eq!(hint.advertised_codes(), vec![KeyCode::Char('/')]);
     }
 
     #[test]

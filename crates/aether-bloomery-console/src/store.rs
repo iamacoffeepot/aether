@@ -4,14 +4,15 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::time::{Duration, Instant};
 
-use crate::dto::{DecodedArtifact, DigestHex, JournalPage, JournalRecordView, ViewDocument};
+use crate::dto::{DecodedArtifact, DigestHex, DispatchFilePage, JournalPage, JournalRecordView, ViewDocument};
 
 /// Which coordinator resource a screen can subscribe to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ResourceKey {
     View,
     Journal(JournalQuery),
     Artifact(DigestHex),
+    Transcript(TranscriptQuery),
 }
 
 /// Query identity for one journal page. Filter text lives on the screen.
@@ -39,6 +40,24 @@ impl JournalQuery {
     }
 }
 
+/// One ranged transcript page. `live` is cadence only — it is not on the wire.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TranscriptQuery {
+    pub nonce: String,
+    pub cursor: Option<u64>,
+    pub live: bool,
+}
+
+impl TranscriptQuery {
+    #[must_use]
+    pub fn path(&self) -> String {
+        self.cursor.map_or_else(
+            || format!("/dispatches/{}/transcript", self.nonce),
+            |cursor| format!("/dispatches/{}/transcript?cursor={cursor}", self.nonce),
+        )
+    }
+}
+
 /// Which fetch thread serves a resource.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lane {
@@ -48,19 +67,20 @@ pub enum Lane {
 
 impl ResourceKey {
     #[must_use]
-    pub fn lane(self) -> Lane {
+    pub fn lane(&self) -> Lane {
         match self {
             Self::View => Lane::Live,
-            Self::Journal(_) | Self::Artifact(_) => Lane::Bulk,
+            Self::Journal(_) | Self::Artifact(_) | Self::Transcript(_) => Lane::Bulk,
         }
     }
 
     #[must_use]
-    pub fn path(self) -> String {
+    pub fn path(&self) -> String {
         match self {
             Self::View => "/view".to_owned(),
             Self::Journal(query) => query.path(),
             Self::Artifact(digest) => format!("/artifacts/{}/decoded", digest.as_hex()),
+            Self::Transcript(query) => query.path(),
         }
     }
 }
@@ -118,12 +138,19 @@ pub struct Store {
     view_cadence: Duration,
     journals: HashMap<JournalQuery, Cell<JournalPage>>,
     artifacts: HashMap<DigestHex, Cell<DecodedArtifact>>,
+    transcripts: HashMap<TranscriptQuery, Cell<DispatchFilePage>>,
 }
 
 impl Store {
     #[must_use]
     pub fn new(view_cadence: Duration) -> Self {
-        Self { view: Cell::default(), view_cadence, journals: HashMap::new(), artifacts: HashMap::new() }
+        Self {
+            view: Cell::default(),
+            view_cadence,
+            journals: HashMap::new(),
+            artifacts: HashMap::new(),
+            transcripts: HashMap::new(),
+        }
     }
 
     #[must_use]
@@ -142,6 +169,11 @@ impl Store {
     }
 
     #[must_use]
+    pub fn transcript(&self, query: &TranscriptQuery) -> Option<&Cell<DispatchFilePage>> {
+        self.transcripts.get(query)
+    }
+
+    #[must_use]
     pub fn record(&self, sequence: u64) -> Option<&JournalRecordView> {
         self.journals
             .values()
@@ -150,15 +182,16 @@ impl Store {
     }
 
     #[must_use]
-    pub fn cadence(&self, key: ResourceKey) -> Duration {
+    pub fn cadence(&self, key: &ResourceKey) -> Duration {
         match key {
             ResourceKey::View => self.view_cadence,
-            ResourceKey::Journal(_) | ResourceKey::Artifact(_) => Duration::ZERO,
+            ResourceKey::Transcript(query) if query.live => self.view_cadence,
+            ResourceKey::Journal(_) | ResourceKey::Artifact(_) | ResourceKey::Transcript(_) => Duration::ZERO,
         }
     }
 
     #[must_use]
-    pub fn due(&self, key: ResourceKey) -> bool {
+    pub fn due(&self, key: &ResourceKey) -> bool {
         match key {
             ResourceKey::View => {
                 if self.view.inflight {
@@ -166,25 +199,34 @@ impl Store {
                 }
                 self.view.completed_at.is_none_or(|at| at.elapsed() >= self.view_cadence)
             }
-            ResourceKey::Journal(query) => self.journals.get(&query).is_none_or(Cell::on_demand_due),
-            ResourceKey::Artifact(digest) => self.artifacts.get(&digest).is_none_or(Cell::on_demand_due),
+            ResourceKey::Journal(query) => self.journals.get(query).is_none_or(Cell::on_demand_due),
+            ResourceKey::Artifact(digest) => self.artifacts.get(digest).is_none_or(Cell::on_demand_due),
+            ResourceKey::Transcript(query) if query.live => {
+                let Some(cell) = self.transcripts.get(query) else {
+                    return true;
+                };
+                !cell.inflight && cell.completed_at.is_none_or(|at| at.elapsed() >= self.view_cadence)
+            }
+            ResourceKey::Transcript(query) => self.transcripts.get(query).is_none_or(Cell::on_demand_due),
         }
     }
 
     #[must_use]
-    pub fn is_inflight(&self, key: ResourceKey) -> bool {
+    pub fn is_inflight(&self, key: &ResourceKey) -> bool {
         match key {
             ResourceKey::View => self.view.inflight,
-            ResourceKey::Journal(query) => self.journals.get(&query).is_some_and(|cell| cell.inflight),
-            ResourceKey::Artifact(digest) => self.artifacts.get(&digest).is_some_and(|cell| cell.inflight),
+            ResourceKey::Journal(query) => self.journals.get(query).is_some_and(|cell| cell.inflight),
+            ResourceKey::Artifact(digest) => self.artifacts.get(digest).is_some_and(|cell| cell.inflight),
+            ResourceKey::Transcript(query) => self.transcripts.get(query).is_some_and(|cell| cell.inflight),
         }
     }
 
-    pub fn mark_inflight(&mut self, key: ResourceKey) {
+    pub fn mark_inflight(&mut self, key: &ResourceKey) {
         match key {
             ResourceKey::View => self.view.inflight = true,
-            ResourceKey::Journal(query) => self.journals.entry(query).or_default().inflight = true,
-            ResourceKey::Artifact(digest) => self.artifacts.entry(digest).or_default().inflight = true,
+            ResourceKey::Journal(query) => self.journals.entry(*query).or_default().inflight = true,
+            ResourceKey::Artifact(digest) => self.artifacts.entry(*digest).or_default().inflight = true,
+            ResourceKey::Transcript(query) => self.transcripts.entry(query.clone()).or_default().inflight = true,
         }
     }
 
@@ -211,11 +253,20 @@ impl Store {
         }
     }
 
-    pub fn apply_err(&mut self, key: ResourceKey, error: impl Display) {
+    pub fn apply_transcript(&mut self, query: TranscriptQuery, result: Result<DispatchFilePage, String>) {
+        let cell = self.transcripts.entry(query).or_default();
+        match result {
+            Ok(page) => cell.apply_ok(page),
+            Err(error) => cell.apply_err(error),
+        }
+    }
+
+    pub fn apply_err(&mut self, key: &ResourceKey, error: impl Display) {
         match key {
             ResourceKey::View => self.view.apply_err(error),
-            ResourceKey::Journal(query) => self.journals.entry(query).or_default().apply_err(error),
-            ResourceKey::Artifact(digest) => self.artifacts.entry(digest).or_default().apply_err(error),
+            ResourceKey::Journal(query) => self.journals.entry(*query).or_default().apply_err(error),
+            ResourceKey::Artifact(digest) => self.artifacts.entry(*digest).or_default().apply_err(error),
+            ResourceKey::Transcript(query) => self.transcripts.entry(query.clone()).or_default().apply_err(error),
         }
     }
 }

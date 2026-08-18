@@ -24,4 +24,9 @@ impl Nav {
     pub fn journal(bloom: Option<DigestHex>) -> Self {
         Self::Journal { bloom }
     }
+
+    #[must_use]
+    pub fn transcript(nonce: impl Into<String>) -> Self {
+        Self::Focus(Focus::transcript(nonce))
+    }
 }

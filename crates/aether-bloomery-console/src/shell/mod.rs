@@ -170,6 +170,16 @@ impl Shell {
                             .apply_artifact(digest, Err("artifact lane returned a non-artifact body".to_owned())),
                     }
                 }
+                ResourceKey::Transcript(query) => {
+                    other_changed = true;
+                    match reply.outcome {
+                        Ok(ResourceBody::Transcript(page)) => self.store.apply_transcript(query, Ok(page)),
+                        Err(error) => self.store.apply_transcript(query, Err(error)),
+                        Ok(_) => self
+                            .store
+                            .apply_transcript(query, Err("transcript lane returned a non-transcript body".to_owned())),
+                    }
+                }
             }
         }
         if view_changed {
@@ -182,7 +192,7 @@ impl Shell {
     fn request_due(&mut self) {
         let keys = self.subscribed();
         for key in keys {
-            if !self.store.due(key) {
+            if !self.store.due(&key) {
                 continue;
             }
             self.send_request(key);
@@ -191,7 +201,7 @@ impl Shell {
 
     fn refresh(&mut self) {
         for key in self.subscribed() {
-            if self.store.is_inflight(key) {
+            if self.store.is_inflight(&key) {
                 continue;
             }
             self.send_request(key);
@@ -202,9 +212,9 @@ impl Shell {
         let Some(fetch) = &self.fetch else {
             return;
         };
-        self.store.mark_inflight(key);
-        if let Err(error) = fetch.request(key) {
-            self.store.apply_err(key, error);
+        self.store.mark_inflight(&key);
+        if let Err(error) = fetch.request(key.clone()) {
+            self.store.apply_err(&key, error);
         }
     }
 

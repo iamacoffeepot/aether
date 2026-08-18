@@ -178,7 +178,7 @@ impl Detail {
         match &self.focus {
             Focus::Bloom { id } | Focus::Composition { bloom: id } => Some(*id),
             Focus::Member { bloom, .. } | Focus::Dispatch { bloom, .. } => Some(*bloom),
-            Focus::Seal | Focus::Record { .. } | Focus::Artifact { .. } => None,
+            Focus::Seal | Focus::Record { .. } | Focus::Artifact { .. } | Focus::Transcript { .. } => None,
         }
     }
 
@@ -195,6 +195,7 @@ impl Detail {
             Focus::Seal => seal_lines(view),
             Focus::Record { sequence } => vec![label(RowKey::Identity, format!("record {sequence}"))],
             Focus::Artifact { digest } => vec![label(RowKey::Identity, format!("artifact {}", digest.prefix()))],
+            Focus::Transcript { nonce } => vec![label(RowKey::Identity, format!("transcript {nonce}"))],
         };
     }
 }
@@ -207,7 +208,7 @@ fn focus_exists(focus: &Focus, view: &ViewDocument) -> bool {
         }
         Focus::Composition { bloom } => find_bloom(view, *bloom).is_some_and(|bloom| bloom.composition.is_some()),
         Focus::Seal => true,
-        Focus::Record { .. } | Focus::Artifact { .. } => false,
+        Focus::Record { .. } | Focus::Artifact { .. } | Focus::Transcript { .. } => false,
     }
 }
 
