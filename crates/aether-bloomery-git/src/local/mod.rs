@@ -1,9 +1,10 @@
 //! Fleet-local [`GitDataApi`] over an absolute bare-repository path (ADR-0199).
 //!
 //! Speaks the installed `git` binary — no `git2`, no `gix`. Command execution
-//! and error classification live in [`command`] so every verb classifies the
+//! and error classification live in one helper so every verb classifies the
 //! same way.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::client::{GitCommit, GitDataApi, GitDataError, GitRef, MergeResult, RefTxnOp, strip_heads};
@@ -294,13 +295,13 @@ impl GitDataApi for LocalGitData {
         for op in ops {
             match op {
                 RefTxnOp::Create { name, sha } => {
-                    stdin.push_str(&format!("create {} {sha}\n", Self::qualified(name)));
+                    let _ = writeln!(stdin, "create {} {sha}", Self::qualified(name));
                 }
                 RefTxnOp::Update { name, sha, expected } => {
-                    stdin.push_str(&format!("update {} {sha} {expected}\n", Self::qualified(name)));
+                    let _ = writeln!(stdin, "update {} {sha} {expected}", Self::qualified(name));
                 }
                 RefTxnOp::Delete { name, expected } => {
-                    stdin.push_str(&format!("delete {} {expected}\n", Self::qualified(name)));
+                    let _ = writeln!(stdin, "delete {} {expected}", Self::qualified(name));
                 }
             }
         }

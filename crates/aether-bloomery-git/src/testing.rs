@@ -34,7 +34,7 @@ use sha2::{Digest as _, Sha256};
 use crate::client::{
     ActionsApi, Artifact, ChecksState, Comment, GitCommit, GitDataApi, GitDataError, GitRef, GithubApi, GithubError,
     IssueStateApi, MergeResult, NewComment, NewPullRequest, PullMergeResult, PullRequest, PullRequestApi,
-    PullRequestState, RunConclusion, RunStatus, WorkflowRun, strip_heads,
+    PullRequestState, RefTxnOp, RunConclusion, RunStatus, WorkflowRun, strip_heads,
 };
 use crate::correspondence::GitObjectId;
 use crate::executor::INPUT_NONCE;
@@ -878,9 +878,7 @@ impl GitDataApi for FakeGithub {
         }
     }
 
-    fn transact_refs(&self, ops: &[crate::client::RefTxnOp]) -> Result<(), GitDataError> {
-        use crate::client::RefTxnOp;
-
+    fn transact_refs(&self, ops: &[RefTxnOp]) -> Result<(), GitDataError> {
         let mut state = self.lock();
         let mut next = state.refs.clone();
         for op in ops {

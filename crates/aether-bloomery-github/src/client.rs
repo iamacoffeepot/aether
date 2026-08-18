@@ -50,6 +50,8 @@ pub use aether_bloomery_git::{
     PullRequestState, RunConclusion, RunStatus, WorkflowRun, strip_heads,
 };
 
+use aether_bloomery_git::RefTxnOp;
+
 /// A check-run conclusion — the *inward* channel's input vocabulary (a
 /// reviewer verdict / check run normalizes through
 /// [`crate::normalize_stage_result`]). Kept here because it is the shape the
@@ -914,9 +916,7 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
         }
     }
 
-    fn transact_refs(&self, ops: &[aether_bloomery_git::RefTxnOp]) -> Result<(), GitDataError> {
-        use aether_bloomery_git::RefTxnOp;
-
+    fn transact_refs(&self, ops: &[RefTxnOp]) -> Result<(), GitDataError> {
         let mut created: Vec<String> = Vec::new();
         for op in ops {
             let result = match op {

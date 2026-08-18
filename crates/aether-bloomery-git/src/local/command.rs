@@ -161,14 +161,14 @@ mod tests {
 
     #[test]
     fn parse_version_reads_plain_and_suffixed_git_version_lines() {
-        assert_eq!(parse_version("git version 2.43.0\n").unwrap(), (2, 43, 0));
-        assert_eq!(parse_version("git version 2.39.5 (Apple Git-154)").unwrap(), (2, 39, 5));
-        assert_eq!(parse_version("git version 2.38.0").unwrap(), MIN_GIT);
+        assert_eq!(parse_version("git version 2.43.0\n").expect("plain"), (2, 43, 0));
+        assert_eq!(parse_version("git version 2.39.5 (Apple Git-154)").expect("suffixed"), (2, 39, 5));
+        assert_eq!(parse_version("git version 2.38.0").expect("floor"), MIN_GIT);
     }
 
     #[test]
     fn require_min_names_a_too_old_version() {
-        let error = require_min((2, 37, 0)).unwrap_err();
+        let error = require_min((2, 37, 0)).expect_err("too old");
         let text = error.to_string();
         assert!(text.contains("2.38"), "{text}");
         assert!(text.contains("2.37.0"), "{text}");

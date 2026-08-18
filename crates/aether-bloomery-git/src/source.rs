@@ -54,6 +54,7 @@
 
 use std::error::Error;
 use std::fmt;
+use std::slice::from_ref;
 use std::sync::Arc;
 
 use aether_bloomery::{
@@ -827,11 +828,8 @@ impl<C: GitDataApi> GitSource<C> {
                     ops.push(RefTxnOp::Delete { name: name.clone(), expected: current.sha });
                 }
                 ClaimHolder::Held(holder) if owner == Some(&holder) => {
-                    let tombstone = self.client.create_commit(
-                        &render_tombstone_message(),
-                        EMPTY_TREE,
-                        std::slice::from_ref(&current.sha),
-                    )?;
+                    let tombstone =
+                        self.client.create_commit(&render_tombstone_message(), EMPTY_TREE, from_ref(&current.sha))?;
                     ops.push(RefTxnOp::Update {
                         name: name.clone(),
                         sha: tombstone.sha.clone(),
@@ -902,8 +900,7 @@ impl<C: GitDataApi> GitSource<C> {
             return Ok(ClaimReleaseOutcome::Changed { observed_holder: holder });
         }
 
-        let tombstone =
-            self.client.create_commit(&render_tombstone_message(), EMPTY_TREE, std::slice::from_ref(&current.sha))?;
+        let tombstone = self.client.create_commit(&render_tombstone_message(), EMPTY_TREE, from_ref(&current.sha))?;
         match self.client.compare_and_swap_ref(name, &tombstone.sha, &current.sha) {
             Ok(_) => {}
             // Lost the compare-and-swap to a concurrent mutation — re-read the
@@ -1016,8 +1013,7 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
         // tree-object`, and carry that head back in the outcome for the core to
         // thread through `land`'s `new_head`.
         let candidate_tree_sha = self.resolve_git_sha(candidate, "candidate tree digest")?;
-        let commit =
-            self.client.create_commit("bloomery integrate", &candidate_tree_sha, std::slice::from_ref(&current.sha))?;
+        let commit = self.client.create_commit("bloomery integrate", &candidate_tree_sha, from_ref(&current.sha))?;
         let head = digest_of(&IntegratedHead { bloom: *bloom, tree: *candidate });
         let commit_object = GitObjectId::from_hex(&commit.sha)
             .ok_or_else(|| SourceError::Malformed(format!("integrate commit sha `{}`", commit.sha)))?;
@@ -1228,7 +1224,7 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
             // The successor claim commit is parented on the predecessor's, so the
             // commit chain IS the claim lineage and the expected-old CAS is a
             // genuine compare against that predecessor sha.
-            let successor_commit = self.create_claim_commit(successor, std::slice::from_ref(&current.sha))?;
+            let successor_commit = self.create_claim_commit(successor, from_ref(&current.sha))?;
             ops.push(RefTxnOp::Update { name, sha: successor_commit, expected: current.sha });
         }
 
@@ -1332,7 +1328,7 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
         // At the predecessor — finish the fast-forward CAS to the successor, the
         // successor commit parented on the current one so `update_ref(force:false)`
         // is a genuine fast-forward (the same lineage `transfer_seal` builds).
-        let successor_commit = self.create_claim_commit(successor, std::slice::from_ref(&current.sha))?;
+        let successor_commit = self.create_claim_commit(successor, from_ref(&current.sha))?;
         match self.client.compare_and_swap_ref(&name, &successor_commit, &current.sha) {
             Ok(_) => Ok(ClaimOutcome::Acquired),
             Err(GitDataError::RefConflict(_)) => {
