@@ -147,103 +147,78 @@ impl Shell {
         let mut view_changed = false;
         let mut other_changed = false;
         for reply in replies {
-            match reply.key {
-                ResourceKey::View => {
-                    view_changed = true;
-                    match reply.outcome {
-                        Ok(ResourceBody::View(view)) => self.store.apply_view(Ok(view)),
-                        Err(error) => self.store.apply_view(Err(error)),
-                        Ok(_) => self.store.apply_view(Err("view lane returned a non-view body".to_owned())),
-                    }
-                }
-                ResourceKey::Journal(query) => {
-                    other_changed = true;
-                    match reply.outcome {
-                        Ok(ResourceBody::Journal(page)) => self.store.apply_journal(query, Ok(page)),
-                        Err(error) => self.store.apply_journal(query, Err(error)),
-                        Ok(_) => {
-                            self.store.apply_journal(query, Err("journal lane returned a non-journal body".to_owned()));
-                        }
-                    }
-                }
-                ResourceKey::Artifact(digest) => {
-                    other_changed = true;
-                    match reply.outcome {
-                        Ok(ResourceBody::Artifact(body)) => self.store.apply_artifact(digest, Ok(body)),
-                        Err(error) => self.store.apply_artifact(digest, Err(error)),
-                        Ok(_) => self
-                            .store
-                            .apply_artifact(digest, Err("artifact lane returned a non-artifact body".to_owned())),
-                    }
-                }
-                ResourceKey::Transcript(query) => {
-                    other_changed = true;
-                    match reply.outcome {
-                        Ok(ResourceBody::Transcript(page)) => self.store.apply_transcript(query, Ok(page)),
-                        Err(error) => self.store.apply_transcript(query, Err(error)),
-                        Ok(_) => self
-                            .store
-                            .apply_transcript(query, Err("transcript lane returned a non-transcript body".to_owned())),
-                    }
-                }
-                ResourceKey::MetricsSummary => {
-                    other_changed = true;
-                    match reply.outcome {
-                        Ok(ResourceBody::Summary(value)) => self.store.apply_summary(Ok(value)),
-                        Err(error) => self.store.apply_summary(Err(error)),
-                        Ok(_) => self.store.apply_summary(Err("summary lane returned a non-summary body".to_owned())),
-                    }
-                }
-                ResourceKey::MetricsDays => {
-                    other_changed = true;
-                    match reply.outcome {
-                        Ok(ResourceBody::Days(value)) => self.store.apply_days(Ok(value)),
-                        Err(error) => self.store.apply_days(Err(error)),
-                        Ok(_) => self.store.apply_days(Err("days lane returned a non-days body".to_owned())),
-                    }
-                }
-                ResourceKey::MetricsTimeline(bloom) => {
-                    other_changed = true;
-                    match reply.outcome {
-                        Ok(ResourceBody::Timeline(value)) => self.store.apply_timeline(bloom, Ok(value)),
-                        Err(error) => self.store.apply_timeline(bloom, Err(error)),
-                        Ok(_) => self
-                            .store
-                            .apply_timeline(bloom, Err("timeline lane returned a non-timeline body".to_owned())),
-                    }
-                }
-                ResourceKey::MetricsSeats => {
-                    other_changed = true;
-                    match reply.outcome {
-                        Ok(ResourceBody::Seats(value)) => self.store.apply_seats(Ok(value)),
-                        Err(error) => self.store.apply_seats(Err(error)),
-                        Ok(_) => self.store.apply_seats(Err("seats lane returned a non-seats body".to_owned())),
-                    }
-                }
-                ResourceKey::MetricsDispatches => {
-                    other_changed = true;
-                    match reply.outcome {
-                        Ok(ResourceBody::Dispatches(value)) => self.store.apply_dispatches(Ok(value)),
-                        Err(error) => self.store.apply_dispatches(Err(error)),
-                        Ok(_) => self
-                            .store
-                            .apply_dispatches(Err("dispatches lane returned a non-dispatches body".to_owned())),
-                    }
-                }
-                ResourceKey::Spend => {
-                    other_changed = true;
-                    match reply.outcome {
-                        Ok(ResourceBody::Spend(value)) => self.store.apply_spend(Ok(value)),
-                        Err(error) => self.store.apply_spend(Err(error)),
-                        Ok(_) => self.store.apply_spend(Err("spend lane returned a non-spend body".to_owned())),
-                    }
-                }
+            if matches!(reply.key, ResourceKey::View) {
+                view_changed = true;
+            } else {
+                other_changed = true;
             }
+            self.apply_reply(reply);
         }
         if view_changed {
             self.reseat_top();
         } else if other_changed && let Some(top) = self.stack.last_mut() {
             top.reseat(&self.store);
+        }
+    }
+
+    fn apply_reply(&mut self, reply: FetchReply) {
+        match (reply.key, reply.outcome) {
+            (ResourceKey::View, Ok(ResourceBody::View(view))) => self.store.apply_view(Ok(view)),
+            (ResourceKey::View, Err(error)) => self.store.apply_view(Err(error)),
+            (ResourceKey::View, Ok(_)) => self.store.apply_view(Err("view lane returned a non-view body".to_owned())),
+            (ResourceKey::Journal(query), Ok(ResourceBody::Journal(page))) => self.store.apply_journal(query, Ok(page)),
+            (ResourceKey::Journal(query), Err(error)) => self.store.apply_journal(query, Err(error)),
+            (ResourceKey::Journal(query), Ok(_)) => {
+                self.store.apply_journal(query, Err("journal lane returned a non-journal body".to_owned()));
+            }
+            (ResourceKey::Artifact(digest), Ok(ResourceBody::Artifact(body))) => {
+                self.store.apply_artifact(digest, Ok(body));
+            }
+            (ResourceKey::Artifact(digest), Err(error)) => self.store.apply_artifact(digest, Err(error)),
+            (ResourceKey::Artifact(digest), Ok(_)) => {
+                self.store.apply_artifact(digest, Err("artifact lane returned a non-artifact body".to_owned()));
+            }
+            (ResourceKey::Transcript(query), Ok(ResourceBody::Transcript(page))) => {
+                self.store.apply_transcript(query, Ok(page));
+            }
+            (ResourceKey::Transcript(query), Err(error)) => self.store.apply_transcript(query, Err(error)),
+            (ResourceKey::Transcript(query), Ok(_)) => {
+                self.store.apply_transcript(query, Err("transcript lane returned a non-transcript body".to_owned()));
+            }
+            (ResourceKey::MetricsSummary, Ok(ResourceBody::Summary(value))) => self.store.apply_summary(Ok(value)),
+            (ResourceKey::MetricsSummary, Err(error)) => self.store.apply_summary(Err(error)),
+            (ResourceKey::MetricsSummary, Ok(_)) => {
+                self.store.apply_summary(Err("summary lane returned a non-summary body".to_owned()));
+            }
+            (ResourceKey::MetricsDays, Ok(ResourceBody::Days(value))) => self.store.apply_days(Ok(value)),
+            (ResourceKey::MetricsDays, Err(error)) => self.store.apply_days(Err(error)),
+            (ResourceKey::MetricsDays, Ok(_)) => {
+                self.store.apply_days(Err("days lane returned a non-days body".to_owned()));
+            }
+            (ResourceKey::MetricsTimeline(bloom), Ok(ResourceBody::Timeline(value))) => {
+                self.store.apply_timeline(bloom, Ok(value));
+            }
+            (ResourceKey::MetricsTimeline(bloom), Err(error)) => self.store.apply_timeline(bloom, Err(error)),
+            (ResourceKey::MetricsTimeline(bloom), Ok(_)) => {
+                self.store.apply_timeline(bloom, Err("timeline lane returned a non-timeline body".to_owned()));
+            }
+            (ResourceKey::MetricsSeats, Ok(ResourceBody::Seats(value))) => self.store.apply_seats(Ok(value)),
+            (ResourceKey::MetricsSeats, Err(error)) => self.store.apply_seats(Err(error)),
+            (ResourceKey::MetricsSeats, Ok(_)) => {
+                self.store.apply_seats(Err("seats lane returned a non-seats body".to_owned()));
+            }
+            (ResourceKey::MetricsDispatches, Ok(ResourceBody::Dispatches(value))) => {
+                self.store.apply_dispatches(Ok(value));
+            }
+            (ResourceKey::MetricsDispatches, Err(error)) => self.store.apply_dispatches(Err(error)),
+            (ResourceKey::MetricsDispatches, Ok(_)) => {
+                self.store.apply_dispatches(Err("dispatches lane returned a non-dispatches body".to_owned()));
+            }
+            (ResourceKey::Spend, Ok(ResourceBody::Spend(value))) => self.store.apply_spend(Ok(value)),
+            (ResourceKey::Spend, Err(error)) => self.store.apply_spend(Err(error)),
+            (ResourceKey::Spend, Ok(_)) => {
+                self.store.apply_spend(Err("spend lane returned a non-spend body".to_owned()));
+            }
         }
     }
 
