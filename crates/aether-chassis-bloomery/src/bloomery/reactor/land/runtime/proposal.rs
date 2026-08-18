@@ -12,10 +12,9 @@
 //! that will not answer — each drops one rung and lands anyway.
 
 use aether_bloomery::{Adjudication, BloomId, Disposition, Event, Fact};
-use aether_bloomery_github::{LandingProposal, canonical_issue_number};
+use aether_bloomery_github::{LandingProposal, LandingSource, canonical_issue_number};
 use aether_data::wire::from_bytes;
 
-use crate::bloomery::SourceShell;
 use crate::store::StoreBackend;
 
 /// The Conventional Commits types `.github/workflows/lint-title.yml` accepts.
@@ -45,7 +44,7 @@ struct Member {
 /// fault does not — see [`fallback_title`].
 pub(super) fn assemble(
     store: &mut dyn StoreBackend,
-    source: &SourceShell,
+    source: &dyn LandingSource,
     bloom: &BloomId,
 ) -> rusqlite::Result<LandingProposal> {
     let members = roster(store, bloom)?;
@@ -139,7 +138,7 @@ fn roster(store: &mut dyn StoreBackend, bloom: &BloomId) -> rusqlite::Result<Vec
 /// several-member bloom is several changes, and picking one member's subject to
 /// stand for all of them would name the mainline commit after a fraction of what
 /// it carries.
-fn title_for(source: &SourceShell, members: &[Member]) -> Option<String> {
+fn title_for(source: &dyn LandingSource, members: &[Member]) -> Option<String> {
     let [member] = members else {
         return None;
     };
@@ -158,7 +157,7 @@ fn title_for(source: &SourceShell, members: &[Member]) -> Option<String> {
 /// A source that will not answer folds to `None` with a warn rather than an
 /// error: this is the *fallback* path, so a transport fault here must cost the
 /// proposal its title and not its landing.
-fn fallback_title(source: &SourceShell, member: &Member) -> Option<String> {
+fn fallback_title(source: &dyn LandingSource, member: &Member) -> Option<String> {
     let issue = member.issue?;
     match source.issue_title(issue) {
         Ok(title) => title.filter(|title| title_is_lint_valid(title)),

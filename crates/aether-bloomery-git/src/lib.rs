@@ -58,6 +58,5 @@ pub use correspondence::{GitObjectFormat, GitObjectId};
 pub use mainline::MainlineRef;
 pub use marker::{Marker, check_run_external_id, parse_check_run_external_id, parse_marker, render_marker};
 pub use source::{
-    GitSource, LandAcceptance, LandingProposal, LandingRefusal, LandingSource, SourceError, candidate_ref_name,
-    landing_branch, landing_floor_title, member_checkpoint_ref_name, to_hex,
+    GitSource, HostSource, SourceError, candidate_ref_name, landing_branch, member_checkpoint_ref_name, to_hex,
 };

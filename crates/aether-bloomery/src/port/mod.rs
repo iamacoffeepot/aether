@@ -35,5 +35,5 @@ pub use projection::{
 };
 pub use source::{
     Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome, IntegrateOutcome,
-    IntegrationPosition, LandOutcome, LandProposal, SourceBackend, SourceSnapshot,
+    IntegrationPosition, LandOutcome, SourceBackend, SourceSnapshot,
 };

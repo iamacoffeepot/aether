@@ -140,6 +140,23 @@ fn source_shell(
 }
 
 #[cfg(feature = "github")]
+fn landing_source(
+    github: &GithubConnectionConfig,
+    coordinator: &CoordinatorConfig,
+    correspondence: SharedCorrespondence,
+) -> Result<Arc<dyn aether_bloomery_github::LandingSource>, BootError> {
+    #[cfg(any(test, feature = "testing"))]
+    if github.uses_fixture() {
+        return Ok(github.fixture_landing(coordinator.mainline(), correspondence));
+    }
+
+    let client = github.connect_client().map_err(|error| BootError::Other(Box::new(error)))?;
+    let source =
+        aether_bloomery_github::GitSource::new(client, correspondence, github.cas_land_enabled, coordinator.mainline());
+    Ok(Arc::new(aether_bloomery_github::GithubLanding::new(source)))
+}
+
+#[cfg(feature = "github")]
 fn projection_shell(github: &GithubConnectionConfig, configured: bool) -> Result<Option<ProjectionShell>, BootError> {
     #[cfg(any(test, feature = "testing"))]
     if github.uses_fixture() {
@@ -196,7 +213,7 @@ fn actor_setups(
             pusher: Arc::clone(&pusher),
         },
         land: LandReactorSetup {
-            source: configured.then(|| source.clone()),
+            source: configured.then(|| landing_source(github, coordinator, Arc::clone(&correspondence))).transpose()?,
             store_path: coordinator.store_path.clone(),
             poll_interval_secs: coordinator.poll_interval_secs,
             repository: repository.clone(),

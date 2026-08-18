@@ -1,5 +1,5 @@
 //! The drain → land core of the land reactor, over a real `SqliteStore` and a
-//! fake-GitHub-backed `SourceShell` — the network side the running capability
+//! fake-GitHub-backed landing face — the network side the running capability
 //! drives, without the mail harness. `init` / the timer / the ctx send are the
 //! thin glue the chassis-boot test and compilation cover; this pins the loop that
 //! turns a land decision into a landing proposal, merges that proposal once
@@ -11,11 +11,12 @@ use aether_bloomery::{
     Adjudication, Admit, BloomId, Correspondence, Digest, Disposition, Event, Fact, IdempotencyKey, LandPayload, Topic,
 };
 use aether_bloomery_github::testing::FakeGithub;
-use aether_bloomery_github::{GitObjectId, GitSource, MainlineRef, PullRequestApi, short_hex, to_hex};
+use aether_bloomery_github::{
+    GitObjectId, GitSource, GithubLanding, LandingSource, MainlineRef, PullRequestApi, short_hex, to_hex,
+};
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::drain_and_land;
-use crate::bloomery::SourceShell;
 use crate::bloomery::outbox::TopicOutbox;
 use crate::store::{AppendOutcome, JournalWrite, SqliteStore, StoreBackend};
 
@@ -25,8 +26,8 @@ fn digest(seed: u8) -> Digest {
 
 // A fake-GitHub-backed source shell with the land gate set explicitly, so a
 // test drives the same shell the running reactor holds.
-fn shell(fake: FakeGithub, cas_land_enabled: bool) -> SourceShell {
-    SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake), cas_land_enabled, MainlineRef::default())))
+fn shell(fake: FakeGithub, cas_land_enabled: bool) -> Arc<dyn LandingSource> {
+    Arc::new(GithubLanding::new(GitSource::new(fake.clone(), Arc::new(fake), cas_land_enabled, MainlineRef::default())))
 }
 
 // Seed a fake with a base commit and a mainline ref at it, returning the fake and
@@ -60,7 +61,9 @@ fn an_accepted_proposal_admits_a_fact_land_carrying_the_merge_commit() {
     // An operator squash-merges the proposal the reactor opened, before the
     // reactor's own accept fires. Opening first, then merging by hand, is
     // what keeps this the observation path rather than the reactor's merge.
-    let aether_bloomery::LandOutcome::Proposed { number } = source.land(&bloom, &base, &new_head, None).unwrap() else {
+    let aether_bloomery_github::ProposalOutcome::Proposed { number } =
+        source.land_proposal(&bloom, &base, &new_head, None).unwrap()
+    else {
         panic!("expected Proposed");
     };
     let squashed = "5c".repeat(20);
@@ -102,7 +105,9 @@ fn a_declined_proposal_admits_nothing_and_acks_the_definitive_refusal() {
     let bloom = BloomId(digest(1));
     let sequence = enqueue_land(&mut store, bloom, base, new_head);
 
-    let aether_bloomery::LandOutcome::Proposed { number } = source.land(&bloom, &base, &new_head, None).unwrap() else {
+    let aether_bloomery_github::ProposalOutcome::Proposed { number } =
+        source.land_proposal(&bloom, &base, &new_head, None).unwrap()
+    else {
         panic!("expected Proposed");
     };
     fake.close_pull_request(number);
@@ -273,7 +278,9 @@ fn an_open_proposal_does_not_close_member_issues() {
     // Propose without accepting — closing belongs to the merge, not the
     // open. A drain would accept immediately (#5110), so this calls `land`
     // itself.
-    let aether_bloomery::LandOutcome::Proposed { .. } = source.land(&bloom, &base, &new_head, None).unwrap() else {
+    let aether_bloomery_github::ProposalOutcome::Proposed { .. } =
+        source.land_proposal(&bloom, &base, &new_head, None).unwrap()
+    else {
         panic!("expected Proposed");
     };
 
@@ -373,7 +380,9 @@ fn a_landing_whose_proposal_drifted_is_refused_and_journaled_rather_than_merged(
     let bloom = BloomId(digest(1));
     let sequence = enqueue_land(&mut store, bloom, base, new_head);
 
-    let aether_bloomery::LandOutcome::Proposed { number } = source.land(&bloom, &base, &new_head, None).unwrap() else {
+    let aether_bloomery_github::ProposalOutcome::Proposed { number } =
+        source.land_proposal(&bloom, &base, &new_head, None).unwrap()
+    else {
         panic!("expected Proposed");
     };
     let pushed = "ee".repeat(20);
@@ -424,7 +433,8 @@ fn two_landings_refused_for_the_same_cause_admit_under_distinct_keys() {
     let bloom = BloomId(digest(1));
 
     enqueue_land(&mut store, bloom, base, first_head);
-    let aether_bloomery::LandOutcome::Proposed { number } = source.land(&bloom, &base, &first_head, None).unwrap()
+    let aether_bloomery_github::ProposalOutcome::Proposed { number } =
+        source.land_proposal(&bloom, &base, &first_head, None).unwrap()
     else {
         panic!("expected Proposed");
     };
@@ -479,7 +489,9 @@ fn a_base_that_moved_under_an_open_proposal_leaves_the_bloom_supersedable() {
     let bloom = BloomId(digest(1));
     let sequence = enqueue_land(&mut store, bloom, base, new_head);
 
-    let aether_bloomery::LandOutcome::Proposed { number } = source.land(&bloom, &base, &new_head, None).unwrap() else {
+    let aether_bloomery_github::ProposalOutcome::Proposed { number } =
+        source.land_proposal(&bloom, &base, &new_head, None).unwrap()
+    else {
         panic!("expected Proposed");
     };
     // Mainline moves between the proposal opening and the accept.
