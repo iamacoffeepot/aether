@@ -45,9 +45,9 @@ use crate::marker::parse_marker;
 // fleet-local backend can share it; re-exported here so `crate::client::…`
 // paths and this module's `ReqwestGithub` impls stay put.
 pub use aether_bloomery_git::{
-    ActionsApi, Artifact, ChecksState, Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError, IssueStateApi,
-    MergeResult, NewComment, NewPullRequest, PullMergeResult, PullRequest, PullRequestApi, PullRequestState,
-    RunConclusion, RunStatus, WorkflowRun, strip_heads,
+    ActionsApi, Artifact, ChecksState, Comment, GitCommit, GitDataApi, GitDataError, GitRef, GithubApi, GithubError,
+    IssueStateApi, MergeResult, NewComment, NewPullRequest, PullMergeResult, PullRequest, PullRequestApi,
+    PullRequestState, RunConclusion, RunStatus, WorkflowRun, strip_heads,
 };
 
 /// A check-run conclusion — the *inward* channel's input vocabulary (a
@@ -722,6 +722,17 @@ fn decode<D: for<'de> Deserialize<'de>>(response: &HttpResponse) -> Result<D, Gi
     serde_json::from_str(&response.body).map_err(|error| GithubError::Decode(error.to_string()))
 }
 
+/// Fold a GitHub-shaped fault onto the git-data vocabulary. Status codes stay
+/// here, at the REST adapter boundary: the neutral crate never sees them.
+fn git_data_error(error: GithubError) -> GitDataError {
+    match error {
+        GithubError::Status { status: 422, body } => GitDataError::RefConflict(body),
+        GithubError::Status { status: 404, body } => GitDataError::MissingObject(body),
+        GithubError::Status { status: 409, body } => GitDataError::MergeConflict(body),
+        other => GitDataError::Command(other.to_string()),
+    }
+}
+
 impl<T: HttpTransport> GithubApi for ReqwestGithub<T> {
     fn issue_title(&self, number: u64) -> Result<Option<String>, GithubError> {
         let Some(response) = self.request_opt(Method::Get, format!("{}/{number}", self.issues_url()))? else {
@@ -777,41 +788,43 @@ impl<T: HttpTransport> IssueStateApi for ReqwestGithub<T> {
 }
 
 impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
-    fn get_ref(&self, name: &str) -> Result<Option<GitRef>, GithubError> {
-        let Some(response) = self.request_opt(Method::Get, self.git_url(&format!("ref/{name}")))? else {
+    fn get_ref(&self, name: &str) -> Result<Option<GitRef>, GitDataError> {
+        let Some(response) =
+            self.request_opt(Method::Get, self.git_url(&format!("ref/{name}"))).map_err(git_data_error)?
+        else {
             return Ok(None);
         };
-        let gh: GhRef = decode(&response)?;
-        Ok(Some(gh.into_git_ref()))
+        decode::<GhRef>(&response).map_err(git_data_error).map(|gh| Some(gh.into_git_ref()))
     }
 
-    fn create_ref(&self, name: &str, sha: &str) -> Result<GitRef, GithubError> {
+    fn create_ref(&self, name: &str, sha: &str) -> Result<GitRef, GitDataError> {
         let payload = serde_json::json!({ "ref": format!("refs/{name}"), "sha": sha }).to_string();
-        let response = self.request(Method::Post, self.git_url("refs"), Some(payload))?;
-        let gh: GhRef = decode(&response)?;
-        Ok(gh.into_git_ref())
+        let response = self.request(Method::Post, self.git_url("refs"), Some(payload)).map_err(git_data_error)?;
+        decode::<GhRef>(&response).map_err(git_data_error).map(GhRef::into_git_ref)
     }
 
-    fn update_ref(&self, name: &str, sha: &str, force: bool) -> Result<GitRef, GithubError> {
+    fn update_ref(&self, name: &str, sha: &str, force: bool) -> Result<GitRef, GitDataError> {
         let payload = serde_json::json!({ "sha": sha, "force": force }).to_string();
-        let response = self.request(Method::Patch, self.git_url(&format!("refs/{name}")), Some(payload))?;
-        let gh: GhRef = decode(&response)?;
-        Ok(gh.into_git_ref())
+        let response = self
+            .request(Method::Patch, self.git_url(&format!("refs/{name}")), Some(payload))
+            .map_err(git_data_error)?;
+        decode::<GhRef>(&response).map_err(git_data_error).map(GhRef::into_git_ref)
     }
 
-    fn delete_ref(&self, name: &str) -> Result<(), GithubError> {
+    fn delete_ref(&self, name: &str) -> Result<(), GitDataError> {
         // Name-only DELETE on the qualified `refs/{name}` route. A 404/422 means
         // the ref is already gone — the idempotent outcome release's cleanup
         // delete and an acquire's rollback both rely on, not a fault.
-        let response = self.dispatch(Method::Delete, self.git_url(&format!("refs/{name}")), None)?;
+        let response =
+            self.dispatch(Method::Delete, self.git_url(&format!("refs/{name}")), None).map_err(git_data_error)?;
         if (200..300).contains(&response.status) || response.status == 404 || response.status == 422 {
             Ok(())
         } else {
-            Err(GithubError::Status { status: response.status, body: response.body })
+            Err(git_data_error(GithubError::Status { status: response.status, body: response.body }))
         }
     }
 
-    fn list_matching_refs(&self, prefix: &str) -> Result<Vec<GitRef>, GithubError> {
+    fn list_matching_refs(&self, prefix: &str) -> Result<Vec<GitRef>, GitDataError> {
         // matching-refs is paginated (100/page), so a bloom with more than one
         // page of checkpoints must be walked to the end — a single GET would
         // silently truncate the enumeration and drop reusable checkpoints. Same
@@ -819,8 +832,10 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
         let base = self.git_url(&format!("matching-refs/{prefix}"));
         let mut out = Vec::new();
         for page in 1..=MAX_LIST_PAGES {
-            let response = self.request(Method::Get, format!("{base}?per_page={PER_PAGE}&page={page}"), None)?;
-            let refs: Vec<GhRef> = decode(&response)?;
+            let response = self
+                .request(Method::Get, format!("{base}?per_page={PER_PAGE}&page={page}"), None)
+                .map_err(git_data_error)?;
+            let refs: Vec<GhRef> = decode(&response).map_err(git_data_error)?;
             let count = refs.len();
             out.extend(refs.into_iter().map(GhRef::into_git_ref));
             if count < PER_PAGE as usize {
@@ -829,35 +844,34 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
         }
         // Falling off the page cap means the enumeration truncated — a silently
         // short ref list would drop reusable checkpoints, so surface it.
-        Err(GithubError::PaginationExhausted { what: "matching refs".to_owned() })
+        Err(git_data_error(GithubError::PaginationExhausted { what: "matching refs".to_owned() }))
     }
 
-    fn get_commit(&self, sha: &str) -> Result<GitCommit, GithubError> {
-        let response = self.request(Method::Get, self.git_url(&format!("commits/{sha}")), None)?;
-        let gh: GhCommit = decode(&response)?;
-        Ok(gh.into_git_commit())
+    fn get_commit(&self, sha: &str) -> Result<GitCommit, GitDataError> {
+        let response =
+            self.request(Method::Get, self.git_url(&format!("commits/{sha}")), None).map_err(git_data_error)?;
+        decode::<GhCommit>(&response).map_err(git_data_error).map(GhCommit::into_git_commit)
     }
 
-    fn is_ancestor(&self, ancestor: &str, commit: &str) -> Result<bool, GithubError> {
+    fn is_ancestor(&self, ancestor: &str, commit: &str) -> Result<bool, GitDataError> {
         if ancestor == commit {
             return Ok(true);
         }
         // `ahead` / `identical`: `commit` contains `ancestor`. `behind` is
         // the stale-ancestor case #4938 refuses. `diverged` is a rewrite of
         // the live ref; observation asks this both ways and follows it.
-        let response = self.request(Method::Get, self.compare_url(ancestor, commit), None)?;
-        let compared: GhCompare = decode(&response)?;
+        let response = self.request(Method::Get, self.compare_url(ancestor, commit), None).map_err(git_data_error)?;
+        let compared: GhCompare = decode(&response).map_err(git_data_error)?;
         Ok(matches!(compared.status.as_str(), "ahead" | "identical"))
     }
 
-    fn create_commit(&self, message: &str, tree: &str, parents: &[String]) -> Result<GitCommit, GithubError> {
+    fn create_commit(&self, message: &str, tree: &str, parents: &[String]) -> Result<GitCommit, GitDataError> {
         let payload = serde_json::json!({ "message": message, "tree": tree, "parents": parents }).to_string();
-        let response = self.request(Method::Post, self.git_url("commits"), Some(payload))?;
-        let gh: GhCommit = decode(&response)?;
-        Ok(gh.into_git_commit())
+        let response = self.request(Method::Post, self.git_url("commits"), Some(payload)).map_err(git_data_error)?;
+        decode::<GhCommit>(&response).map_err(git_data_error).map(GhCommit::into_git_commit)
     }
 
-    fn merge(&self, base: &str, head: &str, message: &str) -> Result<MergeResult, GithubError> {
+    fn merge(&self, base: &str, head: &str, message: &str) -> Result<MergeResult, GitDataError> {
         // The merges endpoint speaks branch names, not refs — it is a repository
         // operation rather than a Git Data one, so it takes neither the `refs/`
         // form nor this trait's `heads/` shorthand. Normalizing here keeps every
@@ -868,7 +882,7 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
             "commit_message": message,
         })
         .to_string();
-        let response = self.dispatch(Method::Post, self.merges_url(), Some(payload))?;
+        let response = self.dispatch(Method::Post, self.merges_url(), Some(payload)).map_err(git_data_error)?;
 
         // 204 is "base already contains head" — a success with no body, so it
         // must be read before any decode. 409 is a conflict, which is an answer
@@ -884,15 +898,15 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
                 Ok(MergeResult::Conflict { detail: response.body, paths, patch })
             }
             status if (200..300).contains(&status) => {
-                Ok(MergeResult::Merged(decode::<GhMergeCommit>(&response)?.into_git_commit()))
+                Ok(MergeResult::Merged(decode::<GhMergeCommit>(&response).map_err(git_data_error)?.into_git_commit()))
             }
-            status => Err(GithubError::Status { status, body: response.body }),
+            status => Err(git_data_error(GithubError::Status { status, body: response.body })),
         }
     }
 }
 
 impl<T: HttpTransport> PullRequestApi for ReqwestGithub<T> {
-    fn create_pull_request(&self, new: &NewPullRequest) -> Result<PullRequest, GithubError> {
+    fn create_pull_request(&self, new: &NewPullRequest) -> Result<PullRequest, GitDataError> {
         let payload = serde_json::json!({
             "title": new.title,
             "body": new.body,
@@ -900,9 +914,8 @@ impl<T: HttpTransport> PullRequestApi for ReqwestGithub<T> {
             "base": new.base,
         })
         .to_string();
-        let response = self.request(Method::Post, self.pulls_url(""), Some(payload))?;
-        let gh: GhPullRequest = decode(&response)?;
-        Ok(gh.into_pull_request())
+        let response = self.request(Method::Post, self.pulls_url(""), Some(payload)).map_err(git_data_error)?;
+        decode::<GhPullRequest>(&response).map_err(git_data_error).map(GhPullRequest::into_pull_request)
     }
 
     fn get_pull_request(&self, number: u64) -> Result<Option<PullRequest>, GithubError> {
@@ -1024,8 +1037,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        GitDataApi, GithubApi, GithubError, HttpRequest, HttpResponse, HttpTransport, IssueStateApi, MergeResult,
-        Method, NewComment, ReqwestGithub, StaticTokenSource, TokenSource,
+        GitDataApi, GitDataError, GithubApi, GithubError, HttpRequest, HttpResponse, HttpTransport, IssueStateApi,
+        MergeResult, Method, NewComment, NewPullRequest, PullRequestApi, ReqwestGithub, StaticTokenSource, TokenSource,
     };
 
     // Records the last request and replays a queued response — the seam that
@@ -1281,7 +1294,7 @@ mod tests {
         assert!(
             matches!(
                 client(404, r#"{"message":"Not Found"}"#).merge("heads/base", "heads/gone", "m"),
-                Err(GithubError::Status { status: 404, .. })
+                Err(GitDataError::MissingObject(_))
             ),
             "a missing base or head is a fault, not a conflict",
         );
@@ -1339,6 +1352,37 @@ mod tests {
         let request = github.transport.last.borrow().clone().unwrap();
         assert_eq!(request.method, Method::Get);
         assert_eq!(request.url, "https://api.github.com/repos/octo/shadow/git/ref/heads/bloom/x/integration");
+    }
+
+    #[test]
+    fn git_data_maps_http_contention_to_ref_conflict() {
+        // Tripwire: a 422 on the git-data / duplicate-head surfaces is the
+        // compare-and-swap loss, not a leftover HTTP status. Mapping it to
+        // `Command` would make every former 422 site an unhandled fault once a
+        // local backend is live.
+        let create = client(422, r#"{"message":"Reference already exists"}"#);
+        assert!(
+            matches!(create.create_ref("heads/bloom/x/integration", "abc"), Err(GitDataError::RefConflict(_))),
+            "create_ref 422 is RefConflict",
+        );
+        let update = client(422, r#"{"message":"Update is not a fast forward"}"#);
+        assert!(
+            matches!(update.update_ref("heads/main", "new", false), Err(GitDataError::RefConflict(_))),
+            "update_ref 422 is RefConflict",
+        );
+        let opening = client(422, r#"{"message":"A pull request already exists"}"#);
+        assert!(
+            matches!(
+                opening.create_pull_request(&NewPullRequest {
+                    title: "t".into(),
+                    body: "b".into(),
+                    head: "bloom/x/landing".into(),
+                    base: "main".into(),
+                }),
+                Err(GitDataError::RefConflict(_))
+            ),
+            "create_pull_request 422 is RefConflict",
+        );
     }
 
     #[test]
@@ -1578,7 +1622,7 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5), "transport did not bound the stalled request");
     }
 
-    use super::{NewPullRequest, PullMergeResult, PullRequestApi, PullRequestState};
+    use super::{PullMergeResult, PullRequestState};
 
     #[test]
     fn create_pull_request_posts_the_repo_pulls_route_with_head_and_base() {

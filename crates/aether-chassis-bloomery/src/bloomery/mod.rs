@@ -87,8 +87,12 @@ pub use study::{
 pub use testing::{ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload, ScriptedVerdict};
 #[cfg(feature = "runtime")]
 pub use verify::{
-    Attribution, AttributionError, AttributionRequest, BaseProbe, BaseRepairWorkpiece, RepairBoard,
-    attribute_gate_failure, consult_proof_fact, record_proof_facts,
+    Accumulation, Attribution, AttributionError, AttributionRequest, BaseProbe, BaseRepairWorkpiece, BatchBisect,
+    BatchComposer, BatchContext, BatchFailure, BatchFailureHooks, BatchGate, BatchMember, BatchReport, BatchRestart,
+    BloomDisposition, GateOutcome, Land, LandProbe, MemberFate, RepairBoard, RunningGate, SurfaceOverlap, SweepContext,
+    SweepDecision, SweepOutcome, TaintSet, UnknownFact, attribute_gate_failure, bisect_land_order, bloom_disposition,
+    consult_proof_fact, decide_accumulation, decide_sweep, record_proof_facts, repair_landed, run_batch_gate,
+    run_sweep, unknowns,
 };
 pub use verify::{
     ClosureKey, ClosureKeyError, DiscriminatedFact, DiscriminatedFacts, HostClass, ProofResult, ProofSource,

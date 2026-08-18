@@ -1,18 +1,21 @@
 //! Attribution of a gate failure through the proof-fact ledger (ADR-0200
 //! §"Attribution through the ledger").
 //!
-//! A named failing test resolves three ways. A green fact at the base
-//! closure is certain — the member's diff broke it, and nothing is rerun.
-//! No fact means the base is probed with that one test; the probe is
-//! discriminated and recorded before it is believed. A red probe predates
-//! the member: a base-repair workpiece is filed onto the board as an
-//! ordinary issue, and the member is not charged a refine lap.
+//! A named failing test resolves four ways. A sweep taint on the closure
+//! is consulted first and charges no one — the daily sweep already owns
+//! that red. A green fact at the base closure is certain — the member's
+//! diff broke it, and nothing is rerun. No fact means the base is probed
+//! with that one test; the probe is discriminated and recorded before it
+//! is believed. A red probe predates the member: a base-repair workpiece
+//! is filed onto the board as an ordinary issue, and the member is not
+//! charged a refine lap.
 //!
 //! ADR-0195 failure classes compose by not entering this ladder: the
 //! caller invokes it only for a named test failure (`ArtifactRejected`).
 //! A machinery observation never consults, never probes, and never
 //! charges a model lap.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
@@ -20,6 +23,40 @@ use super::{
     ClosureKey, DiscriminatedFacts, HostClass, ProofResult, ProofSource, RunnerReport, discriminate, record_proof_facts,
 };
 use crate::store::StoreBackend;
+
+/// Closures a sweep-discovered red has tainted (ADR-0200 §The gate ladder).
+///
+/// A red from the daily sweep taints its closure: blooms whose members touch
+/// it hold at seal and dispatch, and the attribution ladder consults the
+/// taint before charging anyone. A repair landing releases the taint.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TaintSet {
+    tainted: BTreeMap<ClosureKey, String>,
+}
+
+impl TaintSet {
+    /// An empty set — nothing holds, nothing is predating via taint.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Mark `closure` tainted by the named test.
+    pub fn taint(&mut self, closure: ClosureKey, test_id: impl Into<String>) {
+        self.tainted.insert(closure, test_id.into());
+    }
+
+    /// Drop the taint on `closure` — the repair has landed.
+    pub fn release(&mut self, closure: &ClosureKey) {
+        self.tainted.remove(closure);
+    }
+
+    /// Whether this closure is currently tainted.
+    #[must_use]
+    pub fn is_tainted(&self, closure: &ClosureKey) -> bool {
+        self.tainted.contains_key(closure)
+    }
+}
 
 /// Who a gate failure is charged to after the ledger has been consulted.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -162,10 +199,11 @@ pub fn consult_proof_fact(
 
 /// Attribute one named test failure at member verify or the aggregate gate.
 ///
-/// Certain green issues no probe. A missing fact probes the base twice,
-/// records what discrimination accepted, and charges the member if the
-/// base is green. A red probe files a base-repair workpiece and charges
-/// no lap.
+/// A tainted closure is predating — the sweep already owns the red, so
+/// nobody is charged. Certain green issues no probe. A missing fact
+/// probes the base twice, records what discrimination accepted, and
+/// charges the member if the base is green. A red probe files a
+/// base-repair workpiece and charges no lap.
 ///
 /// # Errors
 /// The ledger could not be read or written, or the board refused the repair.
@@ -174,7 +212,11 @@ pub fn attribute_gate_failure(
     request: &AttributionRequest<'_>,
     probe: &mut dyn BaseProbe,
     board: &mut dyn RepairBoard,
+    taints: &TaintSet,
 ) -> Result<Attribution, AttributionError> {
+    if taints.is_tainted(&request.base_closure) {
+        return Ok(Attribution::Predating);
+    }
     match consult_proof_fact(store, &request.base_closure, request.test_id, request.host_class)? {
         Some(ProofResult::Green) => Ok(Attribution::Member),
         Some(ProofResult::Red) => Ok(Attribution::Predating),
@@ -232,7 +274,9 @@ fn closure_hex(key: &ClosureKey) -> String {
 mod tests {
     use aether_bloomery::Digest;
 
-    use super::{Attribution, AttributionRequest, BaseProbe, BaseRepairWorkpiece, RepairBoard, attribute_gate_failure};
+    use super::{
+        Attribution, AttributionRequest, BaseProbe, BaseRepairWorkpiece, RepairBoard, TaintSet, attribute_gate_failure,
+    };
     use crate::bloomery::verify::{
         ClosureKey, HostClass, ProofResult, ProofSource, RunnerReport, discriminate, record_proof_facts,
     };
@@ -253,8 +297,9 @@ mod tests {
 
         let mut probe = ScriptedProbe::new([]);
         let mut board = RecordingBoard::default();
-        let attribution = attribute_gate_failure(&mut store, &request(closure, &host), &mut probe, &mut board)
-            .expect("certain green resolves");
+        let attribution =
+            attribute_gate_failure(&mut store, &request(closure, &host), &mut probe, &mut board, &TaintSet::new())
+                .expect("certain green resolves");
 
         assert_eq!(attribution, Attribution::Member);
         assert!(attribution.charges_refine_lap(), "a broken-by-diff green charges the member");
@@ -274,8 +319,9 @@ mod tests {
         let mut probe = ScriptedProbe::new([ProofResult::Green, ProofResult::Green]);
         let mut board = RecordingBoard::default();
 
-        let attribution = attribute_gate_failure(&mut store, &request(closure, &host), &mut probe, &mut board)
-            .expect("a green probe resolves");
+        let attribution =
+            attribute_gate_failure(&mut store, &request(closure, &host), &mut probe, &mut board, &TaintSet::new())
+                .expect("a green probe resolves");
 
         assert_eq!(attribution, Attribution::Member);
         assert_eq!(probe.runs, 2, "discrimination is two independent base runs, not the suite");
@@ -300,8 +346,9 @@ mod tests {
         let mut probe = ScriptedProbe::new([ProofResult::Red, ProofResult::Red]);
         let mut board = RecordingBoard::default();
 
-        let attribution = attribute_gate_failure(&mut store, &request(closure, &host), &mut probe, &mut board)
-            .expect("a red probe resolves");
+        let attribution =
+            attribute_gate_failure(&mut store, &request(closure, &host), &mut probe, &mut board, &TaintSet::new())
+                .expect("a red probe resolves");
 
         assert_eq!(attribution, Attribution::Predating);
         assert!(!attribution.charges_refine_lap(), "a predating red charges no refine lap");
