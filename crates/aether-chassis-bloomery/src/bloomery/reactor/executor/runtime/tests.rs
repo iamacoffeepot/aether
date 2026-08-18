@@ -4,6 +4,7 @@
 //! `init` / the timer / the ctx send are the thin glue the chassis-boot test and
 //! compilation cover; this pins the loop that actually dispatches and admits.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::slice;
@@ -1744,7 +1745,7 @@ fn git_stdout(dir: &Path, args: &[&str]) -> String {
 fn local_authority(name: &str) -> (tempfile::TempDir, PathBuf, String) {
     let root = tempfile::tempdir().unwrap();
     let seed = root.path().join("seed");
-    std::fs::create_dir(&seed).unwrap();
+    fs::create_dir(&seed).unwrap();
     run_git(&seed, &["init", "--quiet", "-b", "main"]);
     run_git(&seed, &["config", "--local", "user.name", "test"]);
     run_git(&seed, &["config", "--local", "user.email", "test@example.test"]);

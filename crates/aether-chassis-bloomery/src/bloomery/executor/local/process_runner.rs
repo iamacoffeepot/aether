@@ -1489,8 +1489,8 @@ mod tests {
 
     #[test]
     fn a_repo_path_with_spaces_materializes_a_worktree() {
-        let (_root, authority, _clone, head) = authority_and_clone("repo with spaces.git");
-        let slot = _root.path().join("slot-0");
+        let (root, authority, _clone, head) = authority_and_clone("repo with spaces.git");
+        let slot = root.path().join("slot-0");
 
         materialize_checkout(&authority, &slot, &head).expect("git worktree add from a spaced bare path");
 
@@ -1506,8 +1506,8 @@ mod tests {
         // The plausible bug: listing still shells `git worktree list` against
         // `"."`, so a coordinator whose cwd is not the authority reports the
         // wrong set (or the developer's own checkout).
-        let (_root, authority, _clone, head) = authority_and_clone("authority.git");
-        let slot = _root.path().join("slot-0");
+        let (root, authority, _clone, head) = authority_and_clone("authority.git");
+        let slot = root.path().join("slot-0");
         materialize_checkout(&authority, &slot, &head).unwrap();
 
         let runner = ProcessTransformRunner::new(CaptureIdentity::default(), LaneProgram::default(), &authority);
