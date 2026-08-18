@@ -140,10 +140,9 @@ pub(super) fn reduce_grant_attempts(
         workpiece,
         member.scope_revision,
         progress,
-        targets,
+        (targets, construct_checkpoint_base),
         candidate.map(|current| current.tree),
         SealedLine::of(record, member),
-        construct_checkpoint_base,
     )
     .to_vec();
     if machinery {

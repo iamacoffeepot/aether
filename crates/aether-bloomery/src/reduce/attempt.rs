@@ -39,10 +39,9 @@ pub(super) fn move_effects(
         workpiece,
         scope_revision,
         progress,
-        targets,
+        (targets, None),
         progress.candidate.map(|current| current.tree),
         sealed,
-        None,
     )
 }
 
@@ -76,7 +75,7 @@ pub(super) fn move_effects_with_candidate(
     candidate: Option<Digest>,
     sealed: SealedLine<'_>,
 ) -> [Decision; 2] {
-    move_effects_with_checkpoint(bloom, workpiece, scope_revision, progress, targets, candidate, sealed, None)
+    move_effects_with_checkpoint(bloom, workpiece, scope_revision, progress, (targets, None), candidate, sealed)
 }
 
 /// The same builder as [`move_effects_with_candidate`], carrying Construct
@@ -92,10 +91,9 @@ pub(super) fn move_effects_with_checkpoint(
     workpiece: &WorkpieceId,
     scope_revision: Digest,
     progress: StageProgress,
-    targets: DispatchTargets,
+    (targets, construct_checkpoint_base): (DispatchTargets, Option<Digest>),
     candidate: Option<Digest>,
     sealed: SealedLine<'_>,
-    construct_checkpoint_base: Option<Digest>,
 ) -> [Decision; 2] {
     let advance = Decision::AdvanceStage { bloom, workpiece: workpiece.clone(), progress };
     if sealed.held {
@@ -439,10 +437,9 @@ pub(super) fn reduce_member_executor_fault(
         workpiece,
         member.scope_revision,
         cursor,
-        targets,
+        (targets, construct_checkpoint_base),
         cursor.candidate.map(|current| current.tree),
         SealedLine::of(record, member),
-        construct_checkpoint_base,
     ));
     Decisions {
         outcome: Outcome::MachineryRetried { bloom: *bloom, workpiece: workpiece.clone(), stage, rolls, budget },
@@ -512,10 +509,9 @@ fn advance_after_pass(
         workpiece,
         member.scope_revision,
         progress,
-        targets,
+        (targets, construct_checkpoint_base),
         candidate.map(|current| current.tree),
         SealedLine::of(record, member),
-        construct_checkpoint_base,
     ));
     Decisions {
         outcome: Outcome::AttemptAdvanced { bloom, workpiece: workpiece.clone(), from: cursor.stage, to: next },
@@ -549,10 +545,9 @@ fn retry_or_wedge(
             workpiece,
             member.scope_revision,
             progress,
-            targets,
+            (targets, construct_checkpoint_base),
             candidate.map(|current| current.tree),
             SealedLine::of(record, member),
-            construct_checkpoint_base,
         ));
         return Decisions {
             outcome: Outcome::AttemptRetried { bloom, workpiece: workpiece.clone(), stage, attempt },
@@ -595,15 +590,15 @@ pub(super) fn reconcile_or_line_targets(
             None,
         );
     }
-    match candidate {
-        Some(current) => (DispatchTargets { subject: current.tree, checkout: current.checkout }, None),
-        None => match member_checkpoint {
-            Some(checkpoint) => {
-                (DispatchTargets { subject: scope_revision, checkout: checkpoint.checkout }, Some(base))
-            }
-            None => (DispatchTargets { subject: scope_revision, checkout: base }, None),
+    candidate.map_or_else(
+        || {
+            member_checkpoint
+                .map_or((DispatchTargets { subject: scope_revision, checkout: base }, None), |checkpoint| {
+                    (DispatchTargets { subject: scope_revision, checkout: checkpoint.checkout }, Some(base))
+                })
         },
-    }
+        |current| (DispatchTargets { subject: current.tree, checkout: current.checkout }, None),
+    )
 }
 
 /// The terminal answer for a member that has spent `stage`'s retry budget: stop
@@ -887,9 +882,9 @@ mod tests {
     fn a_release_rederives_the_checkpoint_marker_on_a_deferred_construct_retry() {
         let (snapshot, bloom) = sealed();
         let hold = OperatorHold { reason: "stop".into(), operator: "op".into() };
-        let (held, _) = step(&snapshot, &event("hold", Fact::OperatorHold { bloom, hold: hold.clone() }));
+        let (after_hold, _) = step(&snapshot, &event("hold", Fact::OperatorHold { bloom, hold: hold.clone() }));
         let checkpoint = CandidateRef { tree: digest(21), checkout: digest(22) };
-        let (deferred, retried) = step(&held, &fail_construct(bloom, "c-die", Some(checkpoint)));
+        let (deferred, retried) = step(&after_hold, &fail_construct(bloom, "c-die", Some(checkpoint)));
         assert!(matches!(retried.outcome, Outcome::AttemptRetried { stage: StageId::Construct, .. }));
         assert!(
             retried.effects.iter().any(|effect| matches!(effect, Decision::DeferDispatch { .. })),

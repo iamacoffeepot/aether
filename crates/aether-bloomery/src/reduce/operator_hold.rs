@@ -239,9 +239,8 @@ pub(super) fn owed_dispatch(
         workpiece,
         member.scope_revision,
         cursor,
-        targets,
+        (targets, construct_checkpoint_base),
         candidate.map(|current| current.tree),
         SealedLine::of(record, member).released(),
-        construct_checkpoint_base,
     ))
 }
