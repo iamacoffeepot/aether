@@ -11,6 +11,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::dto::{SpendQuiesce, ViewDocument};
 use crate::keys::{KeyHint, footer_line};
+use crate::screen::Dashboard;
 use crate::store::Cell;
 use crate::warroom::{Alert, AlertKind, Interrupt, InterruptKind};
 
@@ -32,7 +33,7 @@ pub fn format_age(age: Option<Duration>) -> String {
 }
 
 #[must_use]
-pub fn header(endpoint_label: &str, view: &Cell<ViewDocument>) -> Paragraph<'static> {
+pub fn header(endpoint_label: &str, view: &Cell<ViewDocument>, dashboard: Option<&Dashboard>) -> Paragraph<'static> {
     let age = format_age(view.sample_age());
     let mut spans = vec![
         Span::styled("bloomery-console", Style::default().add_modifier(Modifier::BOLD)),
@@ -44,7 +45,18 @@ pub fn header(endpoint_label: &str, view: &Cell<ViewDocument>) -> Paragraph<'sta
             spans.push(Span::raw(format!("  {error}")));
         }
     }
+    if let Some(dashboard) = dashboard {
+        spans.push(Span::raw(format!(
+            "  ${}  L{}  W{}",
+            dashboard.spend_spark, dashboard.landed_spark, dashboard.wedge_spark
+        )));
+    }
     Paragraph::new(Line::from(spans))
+}
+
+#[must_use]
+pub fn today(dashboard: &Dashboard) -> Paragraph<'static> {
+    Paragraph::new(dashboard.today.clone())
 }
 
 #[must_use]
@@ -134,8 +146,11 @@ fn interrupt_color(kind: InterruptKind) -> Color {
 }
 
 #[must_use]
-pub fn footer(hints: &[KeyHint]) -> Paragraph<'static> {
-    Paragraph::new(footer_line(hints))
+pub fn footer(hints: &[KeyHint], metrics: Option<&str>) -> Paragraph<'static> {
+    match metrics {
+        Some(metrics) if !metrics.is_empty() => Paragraph::new(format!("{metrics}   {}", footer_line(hints))),
+        _ => Paragraph::new(footer_line(hints)),
+    }
 }
 
 #[cfg(test)]

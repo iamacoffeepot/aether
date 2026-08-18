@@ -9,7 +9,10 @@ use std::sync::mpsc::{self, Receiver, RecvError, SendError, Sender};
 use std::thread;
 use std::time::Duration;
 
-use crate::dto::{DecodedArtifact, DispatchFilePage, JournalPage, ViewDocument};
+use crate::dto::{
+    DecodedArtifact, DispatchFilePage, JournalPage, MetricDay, MetricDispatch, MetricsSeat, MetricsSummary,
+    MetricsTimeline, SpendWindowView, ViewDocument,
+};
 use crate::http::{self, Endpoint};
 use crate::store::{Lane, ResourceKey};
 
@@ -29,6 +32,12 @@ pub enum ResourceBody {
     Journal(JournalPage),
     Artifact(DecodedArtifact),
     Transcript(DispatchFilePage),
+    Summary(MetricsSummary),
+    Days(Vec<MetricDay>),
+    Timeline(MetricsTimeline),
+    Seats(Vec<MetricsSeat>),
+    Dispatches(Vec<MetricDispatch>),
+    Spend(SpendWindowView),
 }
 
 /// Outcome posted back to the shell. The event loop never calls HTTP.
@@ -115,6 +124,24 @@ fn fetch_key(endpoint: &Endpoint, key: &ResourceKey, timeout: Duration) -> Resul
             .map_err(|error| error.to_string()),
         ResourceKey::Transcript(_) => http::get_json::<DispatchFilePage>(endpoint, &path, timeout)
             .map(ResourceBody::Transcript)
+            .map_err(|error| error.to_string()),
+        ResourceKey::MetricsSummary => http::get_json::<MetricsSummary>(endpoint, &path, timeout)
+            .map(ResourceBody::Summary)
+            .map_err(|error| error.to_string()),
+        ResourceKey::MetricsDays => http::get_json::<Vec<MetricDay>>(endpoint, &path, timeout)
+            .map(ResourceBody::Days)
+            .map_err(|error| error.to_string()),
+        ResourceKey::MetricsTimeline(_) => http::get_json::<MetricsTimeline>(endpoint, &path, timeout)
+            .map(ResourceBody::Timeline)
+            .map_err(|error| error.to_string()),
+        ResourceKey::MetricsSeats => http::get_json::<Vec<MetricsSeat>>(endpoint, &path, timeout)
+            .map(ResourceBody::Seats)
+            .map_err(|error| error.to_string()),
+        ResourceKey::MetricsDispatches => http::get_json::<Vec<MetricDispatch>>(endpoint, &path, timeout)
+            .map(ResourceBody::Dispatches)
+            .map_err(|error| error.to_string()),
+        ResourceKey::Spend => http::get_json::<SpendWindowView>(endpoint, &path, timeout)
+            .map(ResourceBody::Spend)
             .map_err(|error| error.to_string()),
     }
 }

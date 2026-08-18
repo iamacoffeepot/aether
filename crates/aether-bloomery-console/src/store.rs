@@ -4,7 +4,10 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::time::{Duration, Instant};
 
-use crate::dto::{DecodedArtifact, DigestHex, DispatchFilePage, JournalPage, JournalRecordView, ViewDocument};
+use crate::dto::{
+    DecodedArtifact, DigestHex, DispatchFilePage, JournalPage, JournalRecordView, MetricDay, MetricDispatch,
+    MetricsSeat, MetricsSummary, MetricsTimeline, SpendWindowView, ViewDocument,
+};
 
 /// Which coordinator resource a screen can subscribe to.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -13,6 +16,12 @@ pub enum ResourceKey {
     Journal(JournalQuery),
     Artifact(DigestHex),
     Transcript(TranscriptQuery),
+    MetricsSummary,
+    MetricsDays,
+    MetricsTimeline(DigestHex),
+    MetricsSeats,
+    MetricsDispatches,
+    Spend,
 }
 
 /// Query identity for one journal page. Filter text lives on the screen.
@@ -70,7 +79,15 @@ impl ResourceKey {
     pub fn lane(&self) -> Lane {
         match self {
             Self::View => Lane::Live,
-            Self::Journal(_) | Self::Artifact(_) | Self::Transcript(_) => Lane::Bulk,
+            Self::Journal(_)
+            | Self::Artifact(_)
+            | Self::Transcript(_)
+            | Self::MetricsSummary
+            | Self::MetricsDays
+            | Self::MetricsTimeline(_)
+            | Self::MetricsSeats
+            | Self::MetricsDispatches
+            | Self::Spend => Lane::Bulk,
         }
     }
 
@@ -81,6 +98,12 @@ impl ResourceKey {
             Self::Journal(query) => query.path(),
             Self::Artifact(digest) => format!("/artifacts/{}/decoded", digest.as_hex()),
             Self::Transcript(query) => query.path(),
+            Self::MetricsSummary => "/metrics/summary".to_owned(),
+            Self::MetricsDays => "/metrics/days".to_owned(),
+            Self::MetricsTimeline(bloom) => format!("/metrics/blooms/{}/timeline", bloom.as_hex()),
+            Self::MetricsSeats => "/metrics/seats".to_owned(),
+            Self::MetricsDispatches => "/metrics/dispatches".to_owned(),
+            Self::Spend => "/spend".to_owned(),
         }
     }
 }
@@ -139,6 +162,12 @@ pub struct Store {
     journals: HashMap<JournalQuery, Cell<JournalPage>>,
     artifacts: HashMap<DigestHex, Cell<DecodedArtifact>>,
     transcripts: HashMap<TranscriptQuery, Cell<DispatchFilePage>>,
+    summary: Cell<MetricsSummary>,
+    days: Cell<Vec<MetricDay>>,
+    timelines: HashMap<DigestHex, Cell<MetricsTimeline>>,
+    seats: Cell<Vec<MetricsSeat>>,
+    dispatches: Cell<Vec<MetricDispatch>>,
+    spend: Cell<SpendWindowView>,
 }
 
 impl Store {
@@ -150,6 +179,12 @@ impl Store {
             journals: HashMap::new(),
             artifacts: HashMap::new(),
             transcripts: HashMap::new(),
+            summary: Cell::default(),
+            days: Cell::default(),
+            timelines: HashMap::new(),
+            seats: Cell::default(),
+            dispatches: Cell::default(),
+            spend: Cell::default(),
         }
     }
 
@@ -174,6 +209,36 @@ impl Store {
     }
 
     #[must_use]
+    pub fn summary(&self) -> &Cell<MetricsSummary> {
+        &self.summary
+    }
+
+    #[must_use]
+    pub fn days(&self) -> &Cell<Vec<MetricDay>> {
+        &self.days
+    }
+
+    #[must_use]
+    pub fn timeline(&self, bloom: DigestHex) -> Option<&Cell<MetricsTimeline>> {
+        self.timelines.get(&bloom)
+    }
+
+    #[must_use]
+    pub fn seats(&self) -> &Cell<Vec<MetricsSeat>> {
+        &self.seats
+    }
+
+    #[must_use]
+    pub fn dispatches(&self) -> &Cell<Vec<MetricDispatch>> {
+        &self.dispatches
+    }
+
+    #[must_use]
+    pub fn spend(&self) -> &Cell<SpendWindowView> {
+        &self.spend
+    }
+
+    #[must_use]
     pub fn record(&self, sequence: u64) -> Option<&JournalRecordView> {
         self.journals
             .values()
@@ -184,9 +249,16 @@ impl Store {
     #[must_use]
     pub fn cadence(&self, key: &ResourceKey) -> Duration {
         match key {
-            ResourceKey::View => self.view_cadence,
+            ResourceKey::View | ResourceKey::MetricsSummary | ResourceKey::MetricsDays | ResourceKey::Spend => {
+                self.view_cadence
+            }
             ResourceKey::Transcript(query) if query.live => self.view_cadence,
-            ResourceKey::Journal(_) | ResourceKey::Artifact(_) | ResourceKey::Transcript(_) => Duration::ZERO,
+            ResourceKey::Journal(_)
+            | ResourceKey::Artifact(_)
+            | ResourceKey::Transcript(_)
+            | ResourceKey::MetricsTimeline(_)
+            | ResourceKey::MetricsSeats
+            | ResourceKey::MetricsDispatches => Duration::ZERO,
         }
     }
 
@@ -208,7 +280,17 @@ impl Store {
                 !cell.inflight && cell.completed_at.is_none_or(|at| at.elapsed() >= self.view_cadence)
             }
             ResourceKey::Transcript(query) => self.transcripts.get(query).is_none_or(Cell::on_demand_due),
+            ResourceKey::MetricsSummary => self.polled_due(&self.summary),
+            ResourceKey::MetricsDays => self.polled_due(&self.days),
+            ResourceKey::Spend => self.polled_due(&self.spend),
+            ResourceKey::MetricsSeats => self.seats.on_demand_due(),
+            ResourceKey::MetricsDispatches => self.dispatches.on_demand_due(),
+            ResourceKey::MetricsTimeline(bloom) => self.timelines.get(bloom).is_none_or(Cell::on_demand_due),
         }
+    }
+
+    fn polled_due<T>(&self, cell: &Cell<T>) -> bool {
+        !cell.inflight && cell.completed_at.is_none_or(|at| at.elapsed() >= self.view_cadence)
     }
 
     #[must_use]
@@ -218,6 +300,12 @@ impl Store {
             ResourceKey::Journal(query) => self.journals.get(query).is_some_and(|cell| cell.inflight),
             ResourceKey::Artifact(digest) => self.artifacts.get(digest).is_some_and(|cell| cell.inflight),
             ResourceKey::Transcript(query) => self.transcripts.get(query).is_some_and(|cell| cell.inflight),
+            ResourceKey::MetricsSummary => self.summary.inflight,
+            ResourceKey::MetricsDays => self.days.inflight,
+            ResourceKey::MetricsTimeline(bloom) => self.timelines.get(bloom).is_some_and(|cell| cell.inflight),
+            ResourceKey::MetricsSeats => self.seats.inflight,
+            ResourceKey::MetricsDispatches => self.dispatches.inflight,
+            ResourceKey::Spend => self.spend.inflight,
         }
     }
 
@@ -227,6 +315,12 @@ impl Store {
             ResourceKey::Journal(query) => self.journals.entry(*query).or_default().inflight = true,
             ResourceKey::Artifact(digest) => self.artifacts.entry(*digest).or_default().inflight = true,
             ResourceKey::Transcript(query) => self.transcripts.entry(query.clone()).or_default().inflight = true,
+            ResourceKey::MetricsSummary => self.summary.inflight = true,
+            ResourceKey::MetricsDays => self.days.inflight = true,
+            ResourceKey::MetricsTimeline(bloom) => self.timelines.entry(*bloom).or_default().inflight = true,
+            ResourceKey::MetricsSeats => self.seats.inflight = true,
+            ResourceKey::MetricsDispatches => self.dispatches.inflight = true,
+            ResourceKey::Spend => self.spend.inflight = true,
         }
     }
 
@@ -261,13 +355,50 @@ impl Store {
         }
     }
 
+    pub fn apply_summary(&mut self, result: Result<MetricsSummary, String>) {
+        apply(&mut self.summary, result);
+    }
+
+    pub fn apply_days(&mut self, result: Result<Vec<MetricDay>, String>) {
+        apply(&mut self.days, result);
+    }
+
+    pub fn apply_timeline(&mut self, bloom: DigestHex, result: Result<MetricsTimeline, String>) {
+        apply(self.timelines.entry(bloom).or_default(), result);
+    }
+
+    pub fn apply_seats(&mut self, result: Result<Vec<MetricsSeat>, String>) {
+        apply(&mut self.seats, result);
+    }
+
+    pub fn apply_dispatches(&mut self, result: Result<Vec<MetricDispatch>, String>) {
+        apply(&mut self.dispatches, result);
+    }
+
+    pub fn apply_spend(&mut self, result: Result<SpendWindowView, String>) {
+        apply(&mut self.spend, result);
+    }
+
     pub fn apply_err(&mut self, key: &ResourceKey, error: impl Display) {
         match key {
             ResourceKey::View => self.view.apply_err(error),
             ResourceKey::Journal(query) => self.journals.entry(*query).or_default().apply_err(error),
             ResourceKey::Artifact(digest) => self.artifacts.entry(*digest).or_default().apply_err(error),
             ResourceKey::Transcript(query) => self.transcripts.entry(query.clone()).or_default().apply_err(error),
+            ResourceKey::MetricsSummary => self.summary.apply_err(error),
+            ResourceKey::MetricsDays => self.days.apply_err(error),
+            ResourceKey::MetricsTimeline(bloom) => self.timelines.entry(*bloom).or_default().apply_err(error),
+            ResourceKey::MetricsSeats => self.seats.apply_err(error),
+            ResourceKey::MetricsDispatches => self.dispatches.apply_err(error),
+            ResourceKey::Spend => self.spend.apply_err(error),
         }
+    }
+}
+
+fn apply<T>(cell: &mut Cell<T>, result: Result<T, String>) {
+    match result {
+        Ok(value) => cell.apply_ok(value),
+        Err(error) => cell.apply_err(error),
     }
 }
 

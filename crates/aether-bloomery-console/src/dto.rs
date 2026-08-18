@@ -12,6 +12,7 @@
 //! fields are ignored, so the console survives running against a newer or
 //! older coordinator.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::de::Error;
@@ -467,6 +468,142 @@ pub struct DispatchFilePage {
     pub notice: Option<String>,
 }
 
+/// `GET /metrics/summary`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MetricsSummary {
+    #[serde(default)]
+    pub blooms: u64,
+    #[serde(default)]
+    pub dispatches: u64,
+    #[serde(default)]
+    pub unpriced: u64,
+    #[serde(default)]
+    pub reconstructed: u64,
+    #[serde(default)]
+    pub active_blooms: u64,
+}
+
+/// One `GET /metrics/days` row. Extra series fields default so a thinner
+/// coordinator still decodes.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MetricDay {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub dispatches: u64,
+    #[serde(default)]
+    pub spend_micro_usd: u64,
+    #[serde(default)]
+    pub landed: u64,
+    #[serde(default)]
+    pub wedges: u64,
+    #[serde(default)]
+    pub cycle_time_millis: Option<u64>,
+    #[serde(default)]
+    pub quiesced: bool,
+}
+
+/// One per-member stage span on `GET /metrics/blooms/{id}/timeline`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TimelineSpan {
+    #[serde(default)]
+    pub workpiece: String,
+    #[serde(default)]
+    pub stage: StageId,
+    #[serde(default)]
+    pub sequence: u64,
+    #[serde(default)]
+    pub started_unix_millis: Option<u64>,
+    #[serde(default)]
+    pub reconstructed: bool,
+}
+
+/// `GET /metrics/blooms/{id}/timeline`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MetricsTimeline {
+    #[serde(default)]
+    pub bloom: DigestHex,
+    #[serde(default)]
+    pub spans: Vec<TimelineSpan>,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+/// The resolved agent on a seat row. Strings so an unknown harness or
+/// effort degrades instead of taking the poll down.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SeatAgent {
+    #[serde(default)]
+    pub harness: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub effort: String,
+}
+
+/// One `GET /metrics/seats` row.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MetricsSeat {
+    #[serde(default)]
+    pub agent: SeatAgent,
+    #[serde(default)]
+    pub stage: StageId,
+    #[serde(default)]
+    pub attempts: u64,
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    #[serde(default)]
+    pub cache_write_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cost_micro_usd: u64,
+    #[serde(default)]
+    pub priced_samples: u64,
+    #[serde(default)]
+    pub unpriced: u64,
+}
+
+/// One `GET /metrics/dispatches` row.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MetricDispatch {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub bloom: DigestHex,
+    #[serde(default)]
+    pub workpiece: String,
+    #[serde(default)]
+    pub stage: StageId,
+    #[serde(default)]
+    pub displayed: DigestHex,
+    #[serde(default)]
+    pub sequence: u64,
+    #[serde(default)]
+    pub recorded_unix_millis: Option<u64>,
+    #[serde(default)]
+    pub reconstructed: bool,
+    #[serde(default)]
+    pub study: Option<DigestHex>,
+}
+
+/// `GET /spend`. `per_bloom` keys are the REST hex spelling of a bloom id.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SpendWindowView {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub total_micro_usd: u64,
+    #[serde(default)]
+    pub per_bloom: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub unaccounted_dispatches: u64,
+    #[serde(default)]
+    pub unpriced_records: u64,
+}
+
 fn encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -507,7 +644,8 @@ fn from_json(value: &Value) -> Result<[u8; 32], String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BloomStatus, BloomView, DigestHex, MemberView, SpendQuiesce, StageId, ViewDocument, WedgeCause, decode, encode,
+        BloomStatus, BloomView, DigestHex, MemberView, MetricDay, MetricsSeat, SpendQuiesce, SpendWindowView, StageId,
+        TimelineSpan, ViewDocument, WedgeCause, decode, encode,
     };
     use serde_json::json;
 
@@ -740,5 +878,54 @@ mod tests {
         let member: MemberView = serde_json::from_value(json!({})).expect("empty member");
         assert!(member.workpiece.is_empty());
         assert!(member.wedge.is_none());
+    }
+
+    #[test]
+    fn a_thin_metrics_document_still_decodes() {
+        // The plausible bug: the console requires spend / landed / cycle
+        // columns the current coordinator's day row does not serve, so the
+        // first /metrics/days poll fails and the dashboard stays blank.
+        let day: MetricDay = serde_json::from_value(json!({
+            "label": "bloomery/daily/2026-08-17",
+            "dispatches": 3
+        }))
+        .expect("thin day");
+        assert_eq!(day.dispatches, 3);
+        assert_eq!(day.spend_micro_usd, 0);
+        assert_eq!(day.landed, 0);
+        assert!(day.cycle_time_millis.is_none());
+        assert!(!day.quiesced);
+
+        let seat: MetricsSeat = serde_json::from_value(json!({
+            "agent": {"harness": "Claude", "model": "opus", "effort": "High"},
+            "stage": "Construct",
+            "attempts": 2,
+            "cost_micro_usd": 0,
+            "priced_samples": 0,
+            "unpriced": 2
+        }))
+        .expect("seat");
+        assert_eq!(seat.agent.harness, "Claude");
+        assert_eq!(seat.unpriced, 2);
+
+        let span: TimelineSpan = serde_json::from_value(json!({
+            "workpiece": "issue-1",
+            "stage": "Verify",
+            "sequence": 9,
+            "reconstructed": true
+        }))
+        .expect("span");
+        assert!(span.started_unix_millis.is_none());
+        assert!(span.reconstructed);
+
+        let spend: SpendWindowView = serde_json::from_value(json!({
+            "label": "bloomery/daily/2026-08-17",
+            "total_micro_usd": 12,
+            "per_bloom": { hex(0x33): 12 },
+            "unpriced_records": 1
+        }))
+        .expect("spend");
+        assert_eq!(spend.per_bloom.get(&hex(0x33)), Some(&12));
+        assert_eq!(spend.unpriced_records, 1);
     }
 }

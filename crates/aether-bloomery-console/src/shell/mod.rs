@@ -19,7 +19,7 @@ use crate::fetch::{FetchLanes, FetchReply, ResourceBody};
 use crate::http::Endpoint;
 use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
-use crate::screen::Screen;
+use crate::screen::{Screen, compose};
 use crate::store::{ResourceKey, Store};
 use crate::warroom::{self, Alert, ChromeId, Focus, Interrupt};
 
@@ -94,8 +94,10 @@ impl Shell {
 
     pub fn render(&mut self, frame: &mut Frame<'_>) {
         let (alerts, interrupts) = self.bands();
+        let dashboard = compose(&self.store);
         let filter_height = u16::from(!self.filter.is_empty());
         let status_height = self.status_height();
+        let today_height = u16::from(!dashboard.today.is_empty());
         let alert_height = u16::from(!alerts.is_empty());
         let interrupt_height = u16::try_from(interrupts.len().min(8)).unwrap_or(0);
         let chunks = Layout::default()
@@ -103,6 +105,7 @@ impl Shell {
             .constraints([
                 Constraint::Length(1),
                 Constraint::Length(status_height),
+                Constraint::Length(today_height),
                 Constraint::Length(filter_height),
                 Constraint::Length(alert_height),
                 Constraint::Length(interrupt_height),
@@ -111,26 +114,29 @@ impl Shell {
             ])
             .split(frame.area());
 
-        frame.render_widget(chrome::header(&self.endpoint_label, self.store.view()), chunks[0]);
+        frame.render_widget(chrome::header(&self.endpoint_label, self.store.view(), Some(&dashboard)), chunks[0]);
         if let Some(view) = self.store.view().value.as_ref() {
             Self::render_status(frame, chunks[1], view, status_height);
         }
+        if today_height > 0 {
+            frame.render_widget(chrome::today(&dashboard), chunks[2]);
+        }
         if filter_height > 0 {
-            frame.render_widget(chrome::filter_line(&self.filter), chunks[2]);
+            frame.render_widget(chrome::filter_line(&self.filter), chunks[3]);
         }
         if alert_height > 0 {
-            frame.render_widget(chrome::alert_band(&alerts, self.selected_alert_index(&alerts)), chunks[3]);
+            frame.render_widget(chrome::alert_band(&alerts, self.selected_alert_index(&alerts)), chunks[4]);
         }
         if interrupt_height > 0 {
             frame.render_widget(
                 chrome::interrupt_band(&interrupts, self.selected_interrupt_index(&interrupts)),
-                chunks[4],
+                chunks[5],
             );
         }
         if let Some(screen) = self.stack.last_mut() {
-            screen.render(frame, chunks[5], &self.store);
+            screen.render(frame, chunks[6], &self.store);
         }
-        frame.render_widget(chrome::footer(&self.footer_hints()), chunks[6]);
+        frame.render_widget(chrome::footer(&self.footer_hints(), Some(&dashboard.footer)), chunks[7]);
     }
 
     fn drain_replies(&mut self) {
@@ -178,6 +184,58 @@ impl Shell {
                         Ok(_) => self
                             .store
                             .apply_transcript(query, Err("transcript lane returned a non-transcript body".to_owned())),
+                    }
+                }
+                ResourceKey::MetricsSummary => {
+                    other_changed = true;
+                    match reply.outcome {
+                        Ok(ResourceBody::Summary(value)) => self.store.apply_summary(Ok(value)),
+                        Err(error) => self.store.apply_summary(Err(error)),
+                        Ok(_) => self.store.apply_summary(Err("summary lane returned a non-summary body".to_owned())),
+                    }
+                }
+                ResourceKey::MetricsDays => {
+                    other_changed = true;
+                    match reply.outcome {
+                        Ok(ResourceBody::Days(value)) => self.store.apply_days(Ok(value)),
+                        Err(error) => self.store.apply_days(Err(error)),
+                        Ok(_) => self.store.apply_days(Err("days lane returned a non-days body".to_owned())),
+                    }
+                }
+                ResourceKey::MetricsTimeline(bloom) => {
+                    other_changed = true;
+                    match reply.outcome {
+                        Ok(ResourceBody::Timeline(value)) => self.store.apply_timeline(bloom, Ok(value)),
+                        Err(error) => self.store.apply_timeline(bloom, Err(error)),
+                        Ok(_) => self
+                            .store
+                            .apply_timeline(bloom, Err("timeline lane returned a non-timeline body".to_owned())),
+                    }
+                }
+                ResourceKey::MetricsSeats => {
+                    other_changed = true;
+                    match reply.outcome {
+                        Ok(ResourceBody::Seats(value)) => self.store.apply_seats(Ok(value)),
+                        Err(error) => self.store.apply_seats(Err(error)),
+                        Ok(_) => self.store.apply_seats(Err("seats lane returned a non-seats body".to_owned())),
+                    }
+                }
+                ResourceKey::MetricsDispatches => {
+                    other_changed = true;
+                    match reply.outcome {
+                        Ok(ResourceBody::Dispatches(value)) => self.store.apply_dispatches(Ok(value)),
+                        Err(error) => self.store.apply_dispatches(Err(error)),
+                        Ok(_) => self
+                            .store
+                            .apply_dispatches(Err("dispatches lane returned a non-dispatches body".to_owned())),
+                    }
+                }
+                ResourceKey::Spend => {
+                    other_changed = true;
+                    match reply.outcome {
+                        Ok(ResourceBody::Spend(value)) => self.store.apply_spend(Ok(value)),
+                        Err(error) => self.store.apply_spend(Err(error)),
+                        Ok(_) => self.store.apply_spend(Err("spend lane returned a non-spend body".to_owned())),
                     }
                 }
             }
@@ -525,7 +583,15 @@ mod tests {
         shell.pump();
         assert_eq!(probe.take_live().map(|request| request.key), Some(ResourceKey::View));
         assert!(probe.take_live().is_none());
-        assert!(probe.take_bulk().is_none());
+        let mut bulk = Vec::new();
+        while let Some(request) = probe.take_bulk() {
+            bulk.push(request.key);
+        }
+        assert!(bulk.contains(&ResourceKey::MetricsSummary), "{bulk:?}");
+        assert!(bulk.contains(&ResourceKey::MetricsDays), "{bulk:?}");
+        assert!(bulk.contains(&ResourceKey::MetricsDispatches), "{bulk:?}");
+        assert!(bulk.contains(&ResourceKey::Spend), "{bulk:?}");
+        assert_eq!(bulk.len(), 4, "dashboard metrics must each have one inflight: {bulk:?}");
     }
 
     #[test]
