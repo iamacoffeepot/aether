@@ -7,6 +7,8 @@
 //! the build. A charged failure returns as [`MemberFate::Resume`] so the
 //! executor can resume that member's lane session in place (#4986).
 
+use std::mem::take;
+
 use aether_bloomery::{SurfacePattern, WorkpieceId, surface_intersection};
 
 use super::{
@@ -137,7 +139,7 @@ impl BatchComposer {
     /// Drain the waiting set as the next gate's membership.
     #[must_use]
     pub fn take(&mut self) -> Vec<BatchMember> {
-        std::mem::take(&mut self.waiting)
+        take(&mut self.waiting)
     }
 
     /// [`decide_accumulation`] over this composer's waiting set.
@@ -393,8 +395,8 @@ mod tests {
         BatchMember, BatchRestart, GateOutcome, MemberFate, RunningGate, decide_accumulation, run_batch_gate,
     };
     use crate::bloomery::verify::{
-        AttributionError, BaseProbe, BaseRepairWorkpiece, ClosureKey, HostClass, ProofResult, ProofSource, RepairBoard,
-        RunnerReport, discriminate, record_proof_facts,
+        AttributionError, BaseProbe, BaseRepairWorkpiece, ClosureKey, DiscriminatedFacts, HostClass, ProofResult,
+        ProofSource, RepairBoard, RunnerReport, discriminate, record_proof_facts,
     };
     use crate::store::{SqliteStore, StoreBackend};
 
@@ -556,7 +558,7 @@ mod tests {
         WorkpieceId(name.to_owned())
     }
 
-    fn green_facts(ids: impl IntoIterator<Item = impl Into<String>>) -> crate::bloomery::verify::DiscriminatedFacts {
+    fn green_facts(ids: impl IntoIterator<Item = impl Into<String>>) -> DiscriminatedFacts {
         let mut first = RunnerReport::new();
         let mut second = RunnerReport::new();
         for id in ids {
