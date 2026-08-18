@@ -1,9 +1,16 @@
-//! Snapshot → rows, alert extraction, selection identity, staleness clock.
+//! The Board: alert band plus bloom/member table.
 
-use std::fmt::Display;
-use std::time::{Duration, Instant};
+use crossterm::event::{KeyCode, KeyEvent};
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState};
 
+use crate::cursor::Cursor;
 use crate::dto::{BloomStatus, BloomView, DigestHex, MemberView, ViewDocument};
+use crate::keys::{KeyHint, Outcome};
+use crate::store::{ResourceKey, Store};
 
 /// Stable identity of one selectable row. Refreshes look this up so the
 /// cursor does not walk out from under the operator when `/view` reorders.
@@ -57,83 +64,134 @@ pub struct Alert {
     pub detail: String,
 }
 
-/// The board the UI paints each frame.
-#[derive(Clone, Debug)]
-pub struct BoardState {
-    pub rows: Vec<BoardRow>,
-    pub alerts: Vec<Alert>,
-    pub selected: Option<RowId>,
-    pub last_ok: Option<Instant>,
-    pub last_error: Option<String>,
-    pub endpoint_label: String,
+const HINTS: &[KeyHint] = &[
+    KeyHint { keys: "j/k", action: "select" },
+    KeyHint { keys: "r", action: "refresh" },
+    KeyHint { keys: "q", action: "quit" },
+];
+
+/// Board view state. Cursor and scroll live here so a later pop restores them.
+#[derive(Clone, Debug, Default)]
+pub struct Board {
+    cursor: Cursor<RowId>,
+    scroll: usize,
 }
 
-impl BoardState {
+impl Board {
     #[must_use]
-    pub fn new(endpoint_label: String) -> Self {
-        Self { rows: Vec::new(), alerts: Vec::new(), selected: None, last_ok: None, last_error: None, endpoint_label }
-    }
-
-    pub fn apply_view(&mut self, view: &ViewDocument) {
-        self.rows = rows_of(view);
-        self.alerts = alerts_of(view);
-        self.last_ok = Some(Instant::now());
-        self.last_error = None;
-        self.reseat_selection();
-    }
-
-    pub fn apply_error(&mut self, error: impl Display) {
-        self.last_error = Some(error.to_string());
+    pub fn new() -> Self {
+        Self::default()
     }
 
     #[must_use]
-    pub fn is_stale(&self) -> bool {
-        self.last_error.is_some()
+    pub fn cursor(&self) -> &Cursor<RowId> {
+        &self.cursor
     }
 
     #[must_use]
-    pub fn sample_age(&self) -> Option<Duration> {
-        self.last_ok.map(|when| when.elapsed())
+    pub fn subscriptions(&self) -> &'static [ResourceKey] {
+        &[ResourceKey::View]
     }
 
     #[must_use]
-    pub fn selected_index(&self) -> Option<usize> {
-        let id = self.selected.as_ref()?;
-        self.rows.iter().position(|row| row.id() == *id)
+    pub fn key_hints(&self) -> &'static [KeyHint] {
+        HINTS
     }
 
-    pub fn select_next(&mut self) {
-        match self.selected_index() {
-            Some(index) => {
-                if let Some(row) = self.rows.get(index + 1) {
-                    self.selected = Some(row.id());
+    pub fn handle_key(&mut self, key: KeyEvent, store: &Store) -> Outcome {
+        let rows = rows_from(store);
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.cursor.select_next(&rows, BoardRow::id);
+                Outcome::Handled
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.cursor.select_prev(&rows, BoardRow::id);
+                Outcome::Handled
+            }
+            KeyCode::Char('r') => Outcome::Refresh,
+            KeyCode::Char('q') => Outcome::Quit,
+            _ => Outcome::Ignored,
+        }
+    }
+
+    pub fn reseat(&mut self, store: &Store) {
+        let rows = rows_from(store);
+        self.cursor.reseat(&rows, BoardRow::id, |id, rows| {
+            if let RowId::Member { bloom, .. } = id {
+                let bloom = *bloom;
+                if rows.iter().any(|row| matches!(row, BoardRow::Bloom(row) if row.id == bloom)) {
+                    return Some(RowId::Bloom { id: bloom });
                 }
             }
-            None => self.selected = self.rows.first().map(BoardRow::id),
-        }
+            rows.first().map(BoardRow::id)
+        });
     }
 
-    pub fn select_prev(&mut self) {
-        match self.selected_index() {
-            Some(0) | None => self.selected = self.rows.first().map(BoardRow::id),
-            Some(index) => self.selected = self.rows.get(index - 1).map(BoardRow::id),
+    pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, store: &Store) {
+        let rows = rows_from(store);
+        let alerts = alerts_from(store);
+        let dimmed = store.view().is_stale();
+        let alert_height = if alerts.is_empty() {
+            0
+        } else {
+            u16::try_from(alerts.len().clamp(1, 4)).unwrap_or(1)
+        };
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(alert_height), Constraint::Min(3)])
+            .split(area);
+
+        if alert_height > 0 {
+            frame.render_widget(alert_band(&alerts), chunks[0]);
         }
+        self.render_table(frame, chunks[1], &rows, dimmed);
     }
 
-    fn reseat_selection(&mut self) {
-        if let Some(id) = &self.selected
-            && self.rows.iter().any(|row| row.id() == *id)
-        {
-            return;
-        }
-        if let Some(RowId::Member { bloom, .. }) = &self.selected {
-            let bloom = *bloom;
-            if self.rows.iter().any(|row| matches!(row, BoardRow::Bloom(row) if row.id == bloom)) {
-                self.selected = Some(RowId::Bloom { id: bloom });
-                return;
-            }
-        }
-        self.selected = self.rows.first().map(BoardRow::id);
+    fn render_table(&mut self, frame: &mut Frame<'_>, area: Rect, rows: &[BoardRow], dimmed: bool) {
+        let muted = if dimmed {
+            Style::default().add_modifier(Modifier::DIM)
+        } else {
+            Style::default()
+        };
+        let header = Row::new(["BLOOM / MEMBER", "STATE", "MACH", "BLOCKED BY", "WEDGE"])
+            .style(Style::default().add_modifier(Modifier::BOLD).patch(muted));
+        let table_rows = rows.iter().map(|row| match row {
+            BoardRow::Bloom(bloom) => Row::new([
+                Cell::from(bloom.id_prefix.clone()),
+                Cell::from(bloom.status.clone()),
+                Cell::from(format!("{} mem", bloom.member_count)),
+                Cell::from(""),
+                Cell::from(""),
+            ])
+            .style(Style::default().add_modifier(Modifier::BOLD).patch(muted)),
+            BoardRow::Member(member) => Row::new([
+                Cell::from(format!("  {}", member.workpiece)),
+                Cell::from(member.state.clone()),
+                Cell::from(member.machinery.clone()),
+                Cell::from(member.blocked_by.clone()),
+                Cell::from(member.wedge_cause.clone()),
+            ])
+            .style(muted),
+        });
+        let table = Table::new(
+            table_rows,
+            [
+                Constraint::Length(28),
+                Constraint::Length(12),
+                Constraint::Length(10),
+                Constraint::Length(20),
+                Constraint::Min(8),
+            ],
+        )
+        .header(header)
+        .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .highlight_symbol("> ");
+        let mut table_state = TableState::default()
+            .with_selected(self.cursor.selected_index(rows, BoardRow::id))
+            .with_offset(self.scroll);
+        frame.render_stateful_widget(table, area, &mut table_state);
+        self.scroll = table_state.offset();
     }
 }
 
@@ -159,6 +217,14 @@ pub fn member_status_state(member: &MemberView, has_order: bool) -> &'static str
         return "blocked";
     }
     "idle"
+}
+
+fn rows_from(store: &Store) -> Vec<BoardRow> {
+    store.view().value.as_ref().map(rows_of).unwrap_or_default()
+}
+
+fn alerts_from(store: &Store) -> Vec<Alert> {
+    store.view().value.as_ref().map(alerts_of).unwrap_or_default()
 }
 
 fn rows_of(view: &ViewDocument) -> Vec<BoardRow> {
@@ -234,30 +300,40 @@ fn bloom_status_label(status: Option<BloomStatus>) -> String {
     status.map_or_else(|| "?".to_owned(), |status| status.to_string())
 }
 
-/// Age of the last successful sample, for the header.
-#[must_use]
-pub fn format_age(age: Option<Duration>) -> String {
-    let Some(age) = age else {
-        return "never".to_owned();
-    };
-    let secs = age.as_secs();
-    if secs < 60 {
-        return format!("{secs}s");
+fn alert_band(alerts: &[Alert]) -> Paragraph<'static> {
+    let spans: Vec<Span<'static>> = alerts
+        .iter()
+        .flat_map(|alert| {
+            [
+                Span::styled(
+                    alert.token.clone(),
+                    Style::default().fg(alert_color(&alert.token)).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(" {}  ", alert.detail)),
+            ]
+        })
+        .collect();
+    Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Black))
+}
+
+fn alert_color(token: &str) -> Color {
+    if token == "PARK" || token == "hostfault" {
+        Color::Yellow
+    } else {
+        Color::Red
     }
-    let mins = secs / 60;
-    if mins < 60 {
-        return format!("{mins}m");
-    }
-    format!("{}h", mins / 60)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BoardRow, BoardState, RowId, alerts_of, format_age, member_status_state, rows_of};
+    use super::{Board, BoardRow, alerts_of, member_status_state, rows_of};
     use crate::dto::{
         BloomStatus, BloomView, DigestHex, ExecutorFaultView, LandingBlock, MemberView, PendingDecisionView, Present,
         ReviewParkView, ViewDocument, WedgeCause,
     };
+    use crate::keys::{Outcome, assert_footer_honest};
+    use crate::store::Store;
+    use crossterm::event::KeyEvent;
     use std::time::Duration;
 
     fn digest(byte: u8) -> DigestHex {
@@ -326,53 +402,6 @@ mod tests {
     }
 
     #[test]
-    fn selection_stays_on_the_workpiece_across_a_reorder() {
-        // The plausible bug: j/k is stored as a row index, so a refresh that
-        // inserts a bloom above the cursor silently moves the highlight.
-        let first = ViewDocument {
-            blooms: vec![
-                BloomView { id: digest(1), members: vec![member("wp-a"), member("wp-b")], ..BloomView::default() },
-                BloomView { id: digest(2), members: vec![member("wp-c")], ..BloomView::default() },
-            ],
-            ..ViewDocument::default()
-        };
-        let mut state = BoardState::new("127.0.0.1:8910".to_owned());
-        state.apply_view(&first);
-        state.selected = Some(RowId::Member { bloom: digest(1), workpiece: "wp-b".to_owned() });
-        assert_eq!(state.selected_index(), Some(2));
-
-        let reordered = ViewDocument {
-            blooms: vec![
-                BloomView { id: digest(2), members: vec![member("wp-c")], ..BloomView::default() },
-                BloomView { id: digest(1), members: vec![member("wp-b"), member("wp-a")], ..BloomView::default() },
-            ],
-            ..ViewDocument::default()
-        };
-        state.apply_view(&reordered);
-        assert_eq!(state.selected, Some(RowId::Member { bloom: digest(1), workpiece: "wp-b".to_owned() }));
-        assert_eq!(state.selected_index(), Some(3));
-    }
-
-    #[test]
-    fn a_failed_poll_keeps_the_last_board() {
-        // The plausible bug: a connection-refused mid-run clears the rows,
-        // so a coordinator restart blanks the board instead of dimming it.
-        let view = ViewDocument {
-            blooms: vec![BloomView { id: digest(1), members: vec![member("wp-a")], ..BloomView::default() }],
-            ..ViewDocument::default()
-        };
-        let mut state = BoardState::new("127.0.0.1:8910".to_owned());
-        state.apply_view(&view);
-        assert_eq!(state.rows.len(), 2);
-        assert!(!state.is_stale());
-        state.apply_error("connection refused");
-        assert!(state.is_stale());
-        assert_eq!(state.rows.len(), 2);
-        assert_eq!(state.last_error.as_deref(), Some("connection refused"));
-        assert!(state.last_ok.is_some());
-    }
-
-    #[test]
     fn rows_carry_machinery_blocker_and_wedge_cause() {
         // The plausible bug: the table prints bloom status and workpiece
         // only, so a machinery wedge and its blocked_by ancestor never reach
@@ -405,11 +434,13 @@ mod tests {
     }
 
     #[test]
-    fn format_age_names_never_before_the_first_sample() {
-        assert_eq!(format_age(None), "never");
-        assert_eq!(format_age(Some(Duration::from_secs(0))), "0s");
-        assert_eq!(format_age(Some(Duration::from_secs(59))), "59s");
-        assert_eq!(format_age(Some(Duration::from_mins(1))), "1m");
-        assert_eq!(format_age(Some(Duration::from_hours(1))), "1h");
+    fn board_footer_keys_are_handled() {
+        // The plausible bug: the footer paints `r` / `q` / `j/k` while the
+        // match dropped one of them, so an advertised key does nothing.
+        let store = Store::new(Duration::from_secs(1));
+        let mut board = Board::new();
+        assert_footer_honest(board.key_hints(), |code| {
+            board.handle_key(KeyEvent::from(code), &store) != Outcome::Ignored
+        });
     }
 }
