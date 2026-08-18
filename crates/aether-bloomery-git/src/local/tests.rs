@@ -5,6 +5,7 @@ use std::path::Path;
 use std::process::Command;
 use std::slice::from_ref;
 use std::sync::{Arc, Mutex};
+use std::thread;
 
 use aether_bloomery::{
     BackendObjectId, BloomId, ClaimOutcome, Correspondence, CorrespondenceError, Digest, IntegrateOutcome, LandOutcome,
@@ -161,7 +162,7 @@ fn compare_and_swap_race_lets_exactly_one_writer_win() {
     let expected = a.sha;
     let to_b = b.sha.clone();
     let to_c = c.sha.clone();
-    std::thread::scope(|scope| {
+    thread::scope(|scope| {
         let left = scope.spawn(|| first.compare_and_swap_ref("heads/main", &to_b, &expected));
         let right = scope.spawn(|| second.compare_and_swap_ref("heads/main", &to_c, &expected));
         let wins =
@@ -288,7 +289,7 @@ fn git_source_snapshot_land_and_claim_run_against_the_local_backend() {
 
     match source.land(&bloom, &base, &head).expect("land") {
         LandOutcome::Landed { new_head } => assert_eq!(new_head, head),
-        other => panic!("expected Landed, got {other:?}"),
+        other @ LandOutcome::BaseMoved { .. } => panic!("expected Landed, got {other:?}"),
     }
 
     let recovered = GitSource::new(local, Arc::clone(&correspondence), true, MainlineRef::default())
@@ -302,6 +303,6 @@ fn git_source_snapshot_land_and_claim_run_against_the_local_backend() {
     let other = BloomId(digest(3));
     match source.claim_seal(&other, &[workpiece]).expect("held") {
         ClaimOutcome::Held { held_by, .. } => assert_eq!(held_by, claimant),
-        other => panic!("expected Held, got {other:?}"),
+        other @ ClaimOutcome::Acquired => panic!("expected Held, got {other:?}"),
     }
 }
