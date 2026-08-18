@@ -1,6 +1,8 @@
 //! Shell: endpoint, store, fetch lanes, chrome, filter, and the screen stack.
 //!
 //! Screens receive the store read-only and cannot fetch or mutate it.
+//! Alert band, interrupt queue, and status line are chrome — they render
+//! at every stack depth.
 
 pub mod chrome;
 
@@ -9,20 +11,25 @@ use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
+use crate::cursor::Cursor;
+use crate::dto::ViewDocument;
 use crate::fetch::{FetchLanes, FetchReply, ResourceBody};
 use crate::http::Endpoint;
-use crate::keys::Outcome;
+use crate::keys::{KeyHint, Outcome};
 use crate::screen::Screen;
 use crate::store::{ResourceKey, Store};
+use crate::warroom::{self, Alert, ChromeId, Interrupt};
 
-#[cfg(test)]
-use crate::dto::ViewDocument;
 #[cfg(test)]
 use crate::fetch::FetchProbe;
 #[cfg(test)]
 use crate::screen::Board;
+#[cfg(test)]
+use crate::warroom::Focus;
+
+const ENTER_HINT: KeyHint = KeyHint { keys: "Enter", action: "jump" };
 
 /// The running console: one stack, one store, two fetch lanes.
 pub struct Shell {
@@ -31,6 +38,7 @@ pub struct Shell {
     fetch: Option<FetchLanes>,
     stack: Vec<Screen>,
     filter: String,
+    chrome: Cursor<ChromeId>,
 }
 
 impl Shell {
@@ -41,7 +49,14 @@ impl Shell {
     }
 
     fn assemble(endpoint_label: String, store: Store, fetch: Option<FetchLanes>) -> Self {
-        Self { endpoint_label, store, fetch, stack: vec![Screen::board()], filter: String::new() }
+        Self {
+            endpoint_label,
+            store,
+            fetch,
+            stack: vec![Screen::board()],
+            filter: String::new(),
+            chrome: Cursor::new(),
+        }
     }
 
     /// Drain finished fetches and issue any due subscriptions. No HTTP.
@@ -57,39 +72,62 @@ impl Shell {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return Outcome::Quit;
         }
-        let Some(top) = self.stack.last_mut() else {
-            return Outcome::Ignored;
-        };
-        match top.handle_key(key, &self.store) {
-            Outcome::Refresh => {
-                self.refresh();
+        if key.code == KeyCode::Esc && self.stack.len() > 1 {
+            self.stack.pop();
+            return Outcome::Handled;
+        }
+
+        let ids = self.chrome_ids();
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down if self.chrome.selected().is_some() => {
+                self.chrome_next(&ids);
                 Outcome::Handled
             }
-            other => other,
+            KeyCode::Char('k') | KeyCode::Up => self.handle_up(&ids, key),
+            KeyCode::Enter => self.handle_enter(key),
+            _ => self.delegate_key(key),
         }
     }
 
     pub fn render(&mut self, frame: &mut Frame<'_>) {
+        let (alerts, interrupts) = self.bands();
         let filter_height = u16::from(!self.filter.is_empty());
+        let status_height = self.status_height();
+        let alert_height = u16::from(!alerts.is_empty());
+        let interrupt_height = u16::try_from(interrupts.len().min(8)).unwrap_or(0);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1),
+                Constraint::Length(status_height),
                 Constraint::Length(filter_height),
+                Constraint::Length(alert_height),
+                Constraint::Length(interrupt_height),
                 Constraint::Min(3),
                 Constraint::Length(1),
             ])
             .split(frame.area());
 
         frame.render_widget(chrome::header(&self.endpoint_label, self.store.view()), chunks[0]);
+        if let Some(view) = self.store.view().value.as_ref() {
+            self.render_status(frame, chunks[1], view, status_height);
+        }
         if filter_height > 0 {
-            frame.render_widget(chrome::filter_line(&self.filter), chunks[1]);
+            frame.render_widget(chrome::filter_line(&self.filter), chunks[2]);
+        }
+        if alert_height > 0 {
+            frame.render_widget(chrome::alert_band(&alerts, self.selected_alert_index(&alerts)), chunks[3]);
+        }
+        if interrupt_height > 0 {
+            frame.render_widget(
+                chrome::interrupt_band(&interrupts, self.selected_interrupt_index(&interrupts)),
+                chunks[4],
+            );
         }
         if let Some(screen) = self.stack.last_mut() {
-            screen.render(frame, chunks[2], &self.store);
+            screen.render(frame, chunks[5], &self.store);
         }
-        let hints = self.stack.last().map_or(&[] as &[_], Screen::key_hints);
-        frame.render_widget(chrome::footer(hints), chunks[3]);
+        frame.render_widget(chrome::footer(&self.footer_hints()), chunks[6]);
     }
 
     fn drain_replies(&mut self) {
@@ -107,8 +145,8 @@ impl Shell {
                 }
             }
         }
-        if view_changed && let Some(top) = self.stack.last_mut() {
-            top.reseat(&self.store);
+        if view_changed {
+            self.reseat_top();
         }
     }
 
@@ -152,6 +190,126 @@ impl Shell {
         }
         keys
     }
+
+    fn delegate_key(&mut self, key: KeyEvent) -> Outcome {
+        let Some(top) = self.stack.last_mut() else {
+            return Outcome::Ignored;
+        };
+        match top.handle_key(key, &self.store) {
+            Outcome::Refresh => {
+                self.refresh();
+                Outcome::Handled
+            }
+            other => other,
+        }
+    }
+
+    fn handle_up(&mut self, ids: &[ChromeId], key: KeyEvent) -> Outcome {
+        if self.chrome.selected().is_some() {
+            self.chrome.select_prev(ids, Clone::clone);
+            return Outcome::Handled;
+        }
+        if !ids.is_empty() && self.stack.last().is_some_and(|screen| screen.selected_is_first(&self.store)) {
+            self.chrome.select(ids.last().cloned());
+            return Outcome::Handled;
+        }
+        self.delegate_key(key)
+    }
+
+    fn handle_enter(&mut self, key: KeyEvent) -> Outcome {
+        if let Some(id) = self.chrome.selected() {
+            self.stack.push(Screen::subject(id.focus().clone()));
+            return Outcome::Handled;
+        }
+        self.delegate_key(key)
+    }
+
+    fn chrome_next(&mut self, ids: &[ChromeId]) {
+        match self.chrome.selected().and_then(|id| ids.iter().position(|item| item == id)) {
+            Some(index) if index + 1 < ids.len() => self.chrome.select(Some(ids[index + 1].clone())),
+            Some(_) => self.chrome.select(None),
+            None => self.chrome.select(ids.first().cloned()),
+        }
+    }
+
+    fn chrome_ids(&self) -> Vec<ChromeId> {
+        let (alerts, interrupts) = self.bands();
+        warroom::chrome_ids(&interrupts, &alerts)
+    }
+
+    fn bands(&self) -> (Vec<Alert>, Vec<Interrupt>) {
+        match self.store.view().value.as_ref() {
+            Some(view) => (warroom::alerts(view), warroom::interrupts(view)),
+            None => (Vec::new(), Vec::new()),
+        }
+    }
+
+    fn reseat_top(&mut self) {
+        if let Some(top) = self.stack.last_mut() {
+            top.reseat(&self.store);
+        }
+        self.reseat_chrome();
+    }
+
+    fn reseat_chrome(&mut self) {
+        let ids = self.chrome_ids();
+        self.chrome.reseat(&ids, Clone::clone, |_, ids| ids.first().cloned());
+    }
+
+    fn status_height(&self) -> u16 {
+        match self.store.view().value.as_ref() {
+            Some(view) if view.spend_quiesce.is_some() => 2,
+            Some(_) => 1,
+            None => 0,
+        }
+    }
+
+    fn render_status(&self, frame: &mut Frame<'_>, area: Rect, view: &ViewDocument, height: u16) {
+        if height == 0 {
+            return;
+        }
+        if height == 1 {
+            frame.render_widget(chrome::status(view), area);
+            return;
+        }
+        let lines = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Length(1)])
+            .split(area);
+        frame.render_widget(chrome::status(view), lines[0]);
+        if let Some(quiesce) = &view.spend_quiesce {
+            frame.render_widget(chrome::seal(quiesce), lines[1]);
+        }
+    }
+
+    fn selected_interrupt_index(&self, interrupts: &[Interrupt]) -> Option<usize> {
+        match self.chrome.selected() {
+            Some(ChromeId::Interrupt { kind, focus }) => {
+                interrupts.iter().position(|entry| entry.kind == *kind && entry.focus == *focus)
+            }
+            _ => None,
+        }
+    }
+
+    fn selected_alert_index(&self, alerts: &[Alert]) -> Option<usize> {
+        match self.chrome.selected() {
+            Some(ChromeId::Alert { kind, focus }) => {
+                alerts.iter().position(|alert| alert.kind == *kind && alert.focus == *focus)
+            }
+            _ => None,
+        }
+    }
+
+    fn footer_hints(&self) -> Vec<KeyHint> {
+        let mut hints = Vec::new();
+        if self.chrome.selected().is_some() {
+            hints.push(ENTER_HINT);
+        }
+        if let Some(screen) = self.stack.last() {
+            hints.extend_from_slice(screen.key_hints());
+        }
+        hints
+    }
 }
 
 #[cfg(test)]
@@ -168,10 +326,15 @@ impl Shell {
             store.apply_view(Err(error.to_owned()));
         }
         let mut shell = Self::assemble("127.0.0.1:8910".to_owned(), store, None);
-        if let Some(top) = shell.stack.last_mut() {
-            top.reseat(&shell.store);
-        }
+        shell.reseat_top();
         shell
+    }
+
+    fn top_focus(&self) -> Option<&Focus> {
+        match self.stack.last() {
+            Some(Screen::Subject(subject)) => Some(subject.focus()),
+            _ => None,
+        }
     }
 
     fn board(&self) -> &Board {
@@ -185,12 +348,16 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::Shell;
-    use crate::dto::{BloomView, DigestHex, LandingBlock, MemberView, Present, ReviewParkView, ViewDocument};
+    use crate::dto::{
+        BloomView, CompositionFinding, CompositionView, DigestHex, ExecutorFaultView, LandingBlock, MemberView,
+        OperatorHoldView, PendingDecisionView, Present, ReviewParkView, SpendQuiesce, ViewDocument,
+    };
     use crate::fetch::{FetchReply, ResourceBody};
     use crate::http::Endpoint;
     use crate::keys::Outcome;
     use crate::screen::RowId;
     use crate::store::ResourceKey;
+    use crate::warroom::Focus;
     use crossterm::event::{KeyCode, KeyEvent};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -335,5 +502,164 @@ mod tests {
             );
             drop(listener);
         });
+    }
+
+    fn bloom_with(members: Vec<MemberView>, mutate: impl FnOnce(&mut BloomView)) -> ViewDocument {
+        let mut bloom = BloomView { id: digest(0xab), members, ..BloomView::default() };
+        mutate(&mut bloom);
+        ViewDocument { blooms: vec![bloom], ..ViewDocument::default() }
+    }
+
+    fn draw(shell: &mut Shell) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        buffer_text(&terminal)
+    }
+
+    fn assert_interrupt_jumps(view: ViewDocument, label: &str, focus: Focus) {
+        // The plausible bug: the source is an alert only, so the queue has no
+        // row and Enter cannot jump to the subject that is stopped.
+        let mut shell = Shell::showing(&view, None);
+        let text = draw(&mut shell);
+        assert!(text.contains(label), "interrupt {label} missing from:\n{text}");
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
+        assert_eq!(shell.top_focus(), Some(&focus), "Enter on {label} jumped to the wrong subject");
+    }
+
+    #[test]
+    fn park_interrupt_renders_and_enter_jumps() {
+        assert_interrupt_jumps(
+            bloom_with(Vec::new(), |bloom| bloom.review_park = Some(ReviewParkView::default())),
+            "park",
+            Focus::bloom(digest(0xab)),
+        );
+    }
+
+    #[test]
+    fn decision_interrupt_renders_and_enter_jumps() {
+        assert_interrupt_jumps(
+            bloom_with(
+                vec![MemberView {
+                    workpiece: "issue-1".to_owned(),
+                    pending_decision: Some(PendingDecisionView::default()),
+                    ..MemberView::default()
+                }],
+                |_| {},
+            ),
+            "decision",
+            Focus::member(digest(0xab), "issue-1"),
+        );
+    }
+
+    #[test]
+    fn findings_interrupt_renders_and_enter_jumps() {
+        assert_interrupt_jumps(
+            bloom_with(Vec::new(), |bloom| {
+                bloom.composition = Some(CompositionView {
+                    findings: vec![CompositionFinding::default()],
+                    ..CompositionView::default()
+                });
+            }),
+            "findings",
+            Focus::composition(digest(0xab)),
+        );
+    }
+
+    #[test]
+    fn terminal_interrupt_renders_and_enter_jumps() {
+        assert_interrupt_jumps(
+            bloom_with(Vec::new(), |bloom| {
+                bloom.executor_fault = Some(ExecutorFaultView { rolls: 3, budget: 3, terminal: true });
+            }),
+            "terminal",
+            Focus::bloom(digest(0xab)),
+        );
+    }
+
+    #[test]
+    fn wedge_interrupt_renders_and_enter_jumps() {
+        assert_interrupt_jumps(
+            bloom_with(
+                vec![MemberView { workpiece: "issue-1".to_owned(), wedge: Some(Present {}), ..MemberView::default() }],
+                |_| {},
+            ),
+            "wedge",
+            Focus::member(digest(0xab), "issue-1"),
+        );
+    }
+
+    #[test]
+    fn landing_interrupt_renders_and_enter_jumps() {
+        assert_interrupt_jumps(
+            bloom_with(Vec::new(), |bloom| {
+                bloom.landing_blocked = Some(LandingBlock { rolls: 2, budget: 2 });
+            }),
+            "landing",
+            Focus::bloom(digest(0xab)),
+        );
+    }
+
+    #[test]
+    fn quiesce_interrupt_renders_and_enter_jumps() {
+        let view = ViewDocument {
+            spend_quiesce: Some(SpendQuiesce::Window {
+                window: "bloomery/daily/2026-08-17".to_owned(),
+                spent_micro_usd: 12,
+                ceiling_micro_usd: 10,
+            }),
+            ..ViewDocument::default()
+        };
+        assert_interrupt_jumps(view, "quiesce", Focus::Seal);
+    }
+
+    #[test]
+    fn hold_interrupt_renders_and_enter_jumps() {
+        assert_interrupt_jumps(
+            bloom_with(Vec::new(), |bloom| {
+                bloom.operator_hold =
+                    Some(OperatorHoldView { reason: "wait".to_owned(), operator: "owner".to_owned() });
+            }),
+            "hold",
+            Focus::bloom(digest(0xab)),
+        );
+    }
+
+    #[test]
+    fn an_empty_interrupt_queue_contributes_no_rows() {
+        // The plausible bug: the band reserves a row for an empty queue, so a
+        // quiet document still paints a blank interrupt strip.
+        let view = bloom_with(
+            vec![MemberView { workpiece: "issue-1".to_owned(), host_fault: Some(Present {}), ..MemberView::default() }],
+            |bloom| bloom.landing_blocked = Some(LandingBlock { rolls: 1, budget: 3 }),
+        );
+        let mut shell = Shell::showing(&view, None);
+        let text = draw(&mut shell);
+        assert!(text.contains("hostfault"), "{text}");
+        assert!(text.contains("land: blocked 1/3"), "{text}");
+        for label in ["park", "decision", "findings", "terminal", "wedge", "landing", "quiesce", "hold"] {
+            assert!(!text.contains(&format!("{label}  ")), "empty queue painted {label} in:\n{text}");
+        }
+
+        let lines: Vec<&str> = text.lines().collect();
+        let alert_at = lines.iter().position(|line| line.contains("hostfault")).expect("alert line");
+        let table_at = lines.iter().position(|line| line.contains("BLOOM / MEMBER")).expect("table header");
+        assert_eq!(table_at, alert_at + 1, "a collapsed queue leaves no row between alerts and the table:\n{text}");
+    }
+
+    #[test]
+    fn alerts_render_while_a_pushed_frame_is_on_top() {
+        // The plausible bug: the alert band still lives on the board, so a
+        // drill-in blanks PARK / WEDGED even though chrome should keep them.
+        let view = bloom_with(
+            vec![MemberView { workpiece: "issue-1".to_owned(), wedge: Some(Present {}), ..MemberView::default() }],
+            |bloom| bloom.review_park = Some(ReviewParkView::default()),
+        );
+        let mut shell = Shell::showing(&view, None);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
+        assert!(shell.top_focus().is_some(), "Enter must push a frame over the board");
+        let text = draw(&mut shell);
+        assert!(text.contains("PARK"), "{text}");
+        assert!(text.contains("WEDGED"), "{text}");
+        assert!(text.contains("bloom"), "{text}");
     }
 }
