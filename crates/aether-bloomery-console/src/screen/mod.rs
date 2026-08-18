@@ -93,7 +93,7 @@ impl Screen {
             Self::Board(board) => board.subscriptions(),
             Self::Detail(detail) => detail.subscriptions(),
             Self::Journal(journal) => journal.subscriptions(),
-            Self::Record(record) => record.subscriptions(),
+            Self::Record(_) => Record::subscriptions(),
             Self::Artifact(artifact) => artifact.subscriptions(),
         }
     }
@@ -103,9 +103,9 @@ impl Screen {
         match self {
             Self::Board(board) => board.key_hints(),
             Self::Detail(detail) => detail.key_hints(),
-            Self::Journal(journal) => journal.key_hints(),
-            Self::Record(record) => record.key_hints(),
-            Self::Artifact(artifact) => artifact.key_hints(),
+            Self::Journal(_) => Journal::key_hints(),
+            Self::Record(_) => Record::key_hints(),
+            Self::Artifact(_) => Artifact::key_hints(),
         }
     }
 
@@ -115,7 +115,7 @@ impl Screen {
             Self::Board(board) => board.digest_under_cursor(),
             Self::Detail(detail) => detail.digest_under_cursor(),
             Self::Journal(_) | Self::Record(_) => None,
-            Self::Artifact(artifact) => artifact.digest_under_cursor(),
+            Self::Artifact(artifact) => Some(artifact.digest_under_cursor()),
         }
     }
 
@@ -134,8 +134,7 @@ impl Screen {
             Self::Board(board) => board.reseat(store),
             Self::Detail(detail) => detail.reseat(store),
             Self::Journal(journal) => journal.reseat(store),
-            Self::Record(record) => record.reseat(store),
-            Self::Artifact(artifact) => artifact.reseat(store),
+            Self::Record(_) | Self::Artifact(_) => {}
         }
     }
 

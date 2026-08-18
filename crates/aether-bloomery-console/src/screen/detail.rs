@@ -146,11 +146,11 @@ impl Detail {
     }
 
     pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, store: &Store) {
-        if self.lines.is_empty() {
-            if let Some(view) = store.view().value.as_ref() {
-                self.rebuild(view);
-                self.reseat_cursor();
-            }
+        if self.lines.is_empty()
+            && let Some(view) = store.view().value.as_ref()
+        {
+            self.rebuild(view);
+            self.reseat_cursor();
         }
         let dimmed = self.vanished || store.view().is_stale();
         let muted = if dimmed {

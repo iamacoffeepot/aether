@@ -1,5 +1,8 @@
 //! Artifact viewer: decoded JSON, line-delimited text, or a hex dump.
 
+use std::fmt::Write as _;
+use std::str::from_utf8;
+
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -41,13 +44,13 @@ impl Artifact {
     }
 
     #[must_use]
-    pub fn key_hints(&self) -> &'static [KeyHint] {
+    pub fn key_hints() -> &'static [KeyHint] {
         HINTS
     }
 
     #[must_use]
-    pub fn digest_under_cursor(&self) -> Option<DigestHex> {
-        Some(self.digest)
+    pub fn digest_under_cursor(&self) -> DigestHex {
+        self.digest
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, _store: &Store) -> Outcome {
@@ -66,8 +69,6 @@ impl Artifact {
             _ => Outcome::Ignored,
         }
     }
-
-    pub fn reseat(&mut self, _store: &Store) {}
 
     pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, store: &Store) {
         let mut lines = vec![format!("artifact  {}  {}", self.digest.prefix(), self.digest.as_hex())];
@@ -102,7 +103,7 @@ pub fn present_artifact(body: &DecodedArtifact) -> String {
     let Some(bytes) = body.bytes.as_deref() else {
         return body.kind.clone().unwrap_or_else(|| "empty".to_owned());
     };
-    if let Ok(text) = std::str::from_utf8(bytes)
+    if let Ok(text) = from_utf8(bytes)
         && text.chars().all(|ch| ch == '\n' || ch == '\r' || ch == '\t' || !ch.is_control())
     {
         return text.to_owned();
@@ -116,12 +117,12 @@ fn hex_dump(bytes: &[u8]) -> String {
         if !out.is_empty() {
             out.push('\n');
         }
-        out.push_str(&format!("{:04x}  ", index * 16));
+        let _ = write!(out, "{:04x}  ", index * 16);
         for (i, byte) in chunk.iter().enumerate() {
             if i == 8 {
                 out.push(' ');
             }
-            out.push_str(&format!("{byte:02x} "));
+            let _ = write!(out, "{byte:02x} ");
         }
         for _ in chunk.len()..16 {
             out.push_str("   ");
@@ -162,14 +163,14 @@ mod tests {
         let binary = DecodedArtifact { bytes: Some(vec![0x00, 0xff, 0x41]), ..DecodedArtifact::default() };
         let dump = present_artifact(&binary);
         assert!(dump.contains("00 ff 41"), "{dump}");
-        assert!(dump.contains(".A") || dump.contains("."), "{dump}");
+        assert!(dump.contains(".A") || dump.contains('.'), "{dump}");
     }
 
     #[test]
     fn artifact_footer_keys_are_handled() {
         let store = Store::new(Duration::from_secs(1));
         let mut artifact = Artifact::new(DigestHex::from_bytes([1; 32]));
-        assert_footer_honest(artifact.key_hints(), |code| {
+        assert_footer_honest(Artifact::key_hints(), |code| {
             artifact.handle_key(KeyEvent::from(code), &store) != Outcome::Ignored
         });
     }

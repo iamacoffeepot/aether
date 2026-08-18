@@ -13,12 +13,10 @@ pub fn is_live_status(status: Option<BloomStatus>) -> bool {
     !is_history_status(status)
 }
 
-#[must_use]
 pub fn live_blooms(view: &ViewDocument) -> impl Iterator<Item = &BloomView> {
     view.blooms.iter().filter(|bloom| is_live_status(bloom.status))
 }
 
-#[must_use]
 pub fn history_blooms(view: &ViewDocument) -> impl Iterator<Item = &BloomView> {
     view.blooms.iter().filter(|bloom| is_history_status(bloom.status))
 }

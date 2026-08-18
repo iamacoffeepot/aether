@@ -59,7 +59,7 @@ impl Journal {
     }
 
     #[must_use]
-    pub fn key_hints(&self) -> &'static [KeyHint] {
+    pub fn key_hints() -> &'static [KeyHint] {
         LIST_HINTS
     }
 
@@ -212,12 +212,12 @@ impl Record {
     }
 
     #[must_use]
-    pub fn subscriptions(&self) -> Vec<ResourceKey> {
+    pub fn subscriptions() -> Vec<ResourceKey> {
         Vec::new()
     }
 
     #[must_use]
-    pub fn key_hints(&self) -> &'static [KeyHint] {
+    pub fn key_hints() -> &'static [KeyHint] {
         RECORD_HINTS
     }
 
@@ -237,8 +237,6 @@ impl Record {
             _ => Outcome::Ignored,
         }
     }
-
-    pub fn reseat(&mut self, _store: &Store) {}
 
     pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, store: &Store) {
         let mut lines = vec![format!("record  {}", self.sequence)];
@@ -312,7 +310,7 @@ mod tests {
     fn journal_footer_keys_are_handled() {
         let store = Store::new(Duration::from_secs(1));
         let mut journal = Journal::new(None);
-        assert_footer_honest(journal.key_hints(), |code| {
+        assert_footer_honest(Journal::key_hints(), |code| {
             journal.handle_key(KeyEvent::from(code), &store) != Outcome::Ignored
         });
     }
@@ -321,7 +319,7 @@ mod tests {
     fn record_footer_keys_are_handled() {
         let store = Store::new(Duration::from_secs(1));
         let mut record = Record::new(1);
-        assert_footer_honest(record.key_hints(), |code| {
+        assert_footer_honest(Record::key_hints(), |code| {
             record.handle_key(KeyEvent::from(code), &store) != Outcome::Ignored
         });
     }

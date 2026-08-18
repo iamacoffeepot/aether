@@ -14,7 +14,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 use crate::cursor::Cursor;
-use crate::dto::{DigestHex, ViewDocument};
+use crate::dto::ViewDocument;
 use crate::fetch::{FetchLanes, FetchReply, ResourceBody};
 use crate::http::Endpoint;
 use crate::keys::{KeyHint, Outcome};
@@ -23,6 +23,8 @@ use crate::screen::Screen;
 use crate::store::{ResourceKey, Store};
 use crate::warroom::{self, Alert, ChromeId, Focus, Interrupt};
 
+#[cfg(test)]
+use crate::dto::DigestHex;
 #[cfg(test)]
 use crate::fetch::FetchProbe;
 #[cfg(test)]
@@ -154,7 +156,7 @@ impl Shell {
                         Ok(ResourceBody::Journal(page)) => self.store.apply_journal(query, Ok(page)),
                         Err(error) => self.store.apply_journal(query, Err(error)),
                         Ok(_) => {
-                            self.store.apply_journal(query, Err("journal lane returned a non-journal body".to_owned()))
+                            self.store.apply_journal(query, Err("journal lane returned a non-journal body".to_owned()));
                         }
                     }
                 }
@@ -417,8 +419,9 @@ impl Shell {
 mod tests {
     use super::Shell;
     use crate::dto::{
-        BloomView, CompositionFinding, CompositionView, DigestHex, ExecutorFaultView, LandingBlock, MemberView,
-        OperatorHoldView, PendingDecisionView, Present, ReviewParkView, SpendQuiesce, ViewDocument,
+        BloomStatus, BloomView, CompositionFinding, CompositionView, DigestHex, ExecutorFaultView, HostFaultView,
+        LandingBlock, MemberView, OperatorHoldView, PendingDecisionView, Present, ReviewParkView, SpendQuiesce,
+        ViewDocument,
     };
     use crate::fetch::{FetchReply, ResourceBody};
     use crate::http::Endpoint;
@@ -463,7 +466,7 @@ mod tests {
                 members: vec![MemberView {
                     workpiece: "issue-1".to_owned(),
                     wedge: Some(Present {}),
-                    host_fault: Some(crate::dto::HostFaultView::default()),
+                    host_fault: Some(HostFaultView::default()),
                     ..MemberView::default()
                 }],
                 ..BloomView::default()
@@ -700,7 +703,7 @@ mod tests {
         let view = bloom_with(
             vec![MemberView {
                 workpiece: "issue-1".to_owned(),
-                host_fault: Some(crate::dto::HostFaultView::default()),
+                host_fault: Some(HostFaultView::default()),
                 ..MemberView::default()
             }],
             |bloom| bloom.landing_blocked = Some(LandingBlock { rolls: 1, budget: 3 }),
@@ -765,7 +768,7 @@ mod tests {
             blooms: vec![
                 BloomView {
                     id: digest(0xab),
-                    status: Some(crate::dto::BloomStatus::Superseded),
+                    status: Some(BloomStatus::Superseded),
                     superseded_by: Some(other),
                     members: Vec::new(),
                     ..BloomView::default()

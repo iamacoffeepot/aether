@@ -96,8 +96,8 @@ fn executor_fault_token(rolls: u32, budget: u32, terminal: bool) -> String {
 mod tests {
     use super::{AlertKind, alerts};
     use crate::dto::{
-        BloomView, DigestHex, ExecutorFaultView, LandingBlock, MemberView, Present, ReviewParkView, ViewDocument,
-        WedgeCause,
+        BloomView, DigestHex, ExecutorFaultView, HostFaultView, LandingBlock, MemberView, Present, ReviewParkView,
+        ViewDocument, WedgeCause,
     };
 
     fn digest(byte: u8) -> DigestHex {
@@ -120,7 +120,7 @@ mod tests {
                 executor_fault: Some(ExecutorFaultView { rolls: 3, budget: 3, terminal: true }),
                 members: vec![
                     MemberView { wedge: Some(Present {}), wedge_cause: Some(WedgeCause::Work), ..member("issue-1") },
-                    MemberView { host_fault: Some(crate::dto::HostFaultView::default()), ..member("issue-2") },
+                    MemberView { host_fault: Some(HostFaultView::default()), ..member("issue-2") },
                 ],
                 ..BloomView::default()
             }],
