@@ -142,6 +142,11 @@ fn cycle_band(scc: &[&str], edges: &[(&str, &str)]) -> Vec<String> {
 }
 
 fn strongly_connected<'a>(ids: &'a [String], edges: &[(&'a str, &'a str)]) -> Vec<Vec<&'a str>> {
+    enum Frame<'b> {
+        Enter(&'b str),
+        Finish(&'b str),
+    }
+
     let mut index_of: HashMap<&str, usize> = HashMap::new();
     let mut lowlink: HashMap<&str, usize> = HashMap::new();
     let mut on_stack: HashSet<&str> = HashSet::new();
@@ -152,11 +157,6 @@ fn strongly_connected<'a>(ids: &'a [String], edges: &[(&'a str, &'a str)]) -> Ve
     let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
     for (from, to) in edges {
         adj.entry(*from).or_default().push(*to);
-    }
-
-    enum Frame<'a> {
-        Enter(&'a str),
-        Finish(&'a str),
     }
 
     for id in ids {

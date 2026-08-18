@@ -1,5 +1,7 @@
 //! Intent first line from the artifact route.
 
+use std::str::from_utf8;
+
 use serde_json::Value;
 
 use crate::dto::DecodedArtifact;
@@ -28,7 +30,7 @@ fn words_first_line(value: &Value) -> Option<String> {
 }
 
 fn bytes_first_line(bytes: &[u8]) -> Option<String> {
-    let text = std::str::from_utf8(bytes).ok()?;
+    let text = from_utf8(bytes).ok()?;
     text.lines().next().filter(|line| !line.is_empty()).map(str::to_owned)
 }
 

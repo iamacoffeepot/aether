@@ -33,6 +33,7 @@ use label::{annotation_text, workpiece_key};
 pub use workpiece::Workpiece;
 
 /// Coordinator paths this pane may request. A GitHub host cannot appear here.
+#[cfg(test)]
 pub const COORDINATOR_PATHS: &[&str] = &["/commissions", "/commissions/{id}", "/artifacts/{digest}/decoded"];
 
 const PREDATING: &str = "this coordinator predates the commission store";
@@ -100,8 +101,9 @@ impl Backlog {
     pub fn handle_key(&mut self, key: KeyEvent, store: &Store) -> Outcome {
         if store.commission_capability() == Some(CommissionCapability::Absent) {
             return match key.code {
-                KeyCode::Char('j' | 'k') | KeyCode::Down | KeyCode::Up | KeyCode::Enter => Outcome::Handled,
-                KeyCode::Esc => Outcome::Handled,
+                KeyCode::Char('j' | 'k') | KeyCode::Down | KeyCode::Up | KeyCode::Enter | KeyCode::Esc => {
+                    Outcome::Handled
+                }
                 KeyCode::Char('r') => Outcome::Refresh,
                 KeyCode::Char('q') => Outcome::Quit,
                 _ => Outcome::Ignored,
@@ -162,14 +164,13 @@ impl Backlog {
         let table_rows = rows.iter().map(|row| {
             let indent = "  ".repeat(row.depth);
             let annotation = annotation_text(&row.id).unwrap_or_default();
-            let intent = row.intent.clone();
             Row::new([
                 Cell::from(Line::from(vec![
                     Span::raw(format!("{indent}{}", row.id)),
                     Span::styled(format!("  {annotation}"), Style::default().add_modifier(Modifier::DIM)),
                 ])),
                 Cell::from(row.status.clone()),
-                Cell::from(intent),
+                Cell::from(row.intent.clone()),
             ])
         });
         let table = Table::new(table_rows, [Constraint::Length(28), Constraint::Length(10), Constraint::Min(16)])
@@ -249,22 +250,9 @@ fn intent_line(store: &Store, head: &CommissionHeadView) -> String {
     store.artifact(head.intent).and_then(|cell| cell.value.as_ref()).and_then(first_line).unwrap_or_default()
 }
 
-/// The cycle bands the pane would paint for `store`. Test seam.
-#[must_use]
-pub fn painted_cycles(store: &Store) -> Vec<String> {
-    forest_from(store).cycles.into_iter().map(|cycle| cycle_line(&cycle)).collect()
-}
-
-/// Resource keys this pane asks the shell to fetch. Test seam for the
-/// coordinator-only pin.
-#[must_use]
-pub fn fetch_paths(keys: &[ResourceKey]) -> Vec<String> {
-    keys.iter().map(ResourceKey::path).collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Backlog, COORDINATOR_PATHS, PREDATING, fetch_paths, painted_cycles};
+    use super::{Backlog, COORDINATOR_PATHS, PREDATING, cycle_line, forest_from};
     use crate::dto::{CommissionHeadView, CommissionShowView, CommissionsView, DigestHex, ScopeRevisionView};
     use crate::keys::{Outcome, assert_footer_honest};
     use crate::store::{CommissionCapability, ResourceKey, Store};
@@ -299,11 +287,12 @@ mod tests {
             assert!(path.starts_with('/'), "{path}");
             assert!(!path.contains("github"), "{path}");
         }
-        let paths = fetch_paths(&[
+        let paths = [
             ResourceKey::Commissions,
             ResourceKey::Commission("wp-local".to_owned()),
             ResourceKey::Artifact(digest(1)),
-        ]);
+        ]
+        .map(|key| key.path());
         assert_eq!(paths[0], "/commissions");
         assert_eq!(paths[1], "/commissions/wp-local");
         assert!(paths[2].starts_with("/artifacts/"), "{}", paths[2]);
@@ -319,7 +308,7 @@ mod tests {
         store.apply_commissions(Ok(CommissionsView { commissions: vec![head("wp-a"), head("wp-b")] }));
         store.apply_commission("wp-a".to_owned(), Ok(show("wp-a", vec!["wp-b".to_owned()])));
         store.apply_commission("wp-b".to_owned(), Ok(show("wp-b", vec!["wp-a".to_owned()])));
-        let bands = painted_cycles(&store);
+        let bands: Vec<String> = forest_from(&store).cycles.into_iter().map(|cycle| cycle_line(&cycle)).collect();
         assert_eq!(bands.len(), 1, "{bands:?}");
         assert!(bands[0].contains("wp-a"), "{}", bands[0]);
         assert!(bands[0].contains("wp-b"), "{}", bands[0]);
