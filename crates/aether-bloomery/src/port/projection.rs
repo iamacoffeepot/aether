@@ -22,7 +22,9 @@ use alloc::string::String;
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::reduce::BloomStatus;
-use crate::values::{CandidateRef, CompositionFinding, Evidence, LandingReceipt, ResolutionClaim, SpendQuiesce, Wedge};
+use crate::values::{
+    CandidateRef, CompositionFinding, Evidence, LandingReceipt, OperatorHold, ResolutionClaim, SpendQuiesce, Wedge,
+};
 
 /// The self-contained render input a reconcile pushes outward: the current
 /// mainline, the last-reported observed head, and every projectable bloom,
@@ -51,9 +53,10 @@ pub struct ViewDocument {
 
 /// One bloom's outward view: its sealed identity, lifecycle status, optional
 /// successor, the full per-member render data, the composition workpiece's
-/// own line when it has a cursor, a wedge, or an open finding, and — when
-/// the aggregate review has parked the bloom — the bloom-scoped question an
-/// operator must settle.
+/// own line when it has a cursor, a wedge, or an open finding, — when the
+/// aggregate review has parked the bloom — the bloom-scoped question an
+/// operator must settle, and — when an operator has pulled the brake — the
+/// hold that distinguishes a frozen bloom from an idle one.
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct BloomView {
     /// The bloom's identity — the sealed-spec digest ([`crate::BloomSpec::id`]).
@@ -99,6 +102,12 @@ pub struct BloomView {
     /// reader that predates the field still decodes.
     #[serde(default)]
     pub composition: Option<CompositionView>,
+    /// The operator brake currently on this bloom (#4976); `None` while it
+    /// dispatches normally. Without it a held bloom and an idle one render
+    /// identically. Trailing and `#[serde(default)]` so a reader that predates
+    /// the field still decodes.
+    #[serde(default)]
+    pub operator_hold: Option<OperatorHold>,
 }
 
 /// The composition workpiece's outward line: the cursor a weave repair sits
@@ -126,9 +135,11 @@ pub struct CompositionView {
     pub findings: Vec<CompositionFinding>,
 }
 
-/// The composition workpiece's stage cursor as the operator reads it: the
-/// stage, how many attempts that stage has taken, and the candidate the
-/// repair is targeting.
+/// A workpiece's stage cursor as the operator reads it: the stage, how many
+/// attempts that stage has taken, and the candidate it is targeting.
+///
+/// Shared by [`CompositionView::cursor`] and [`MemberView::cursor`] — the
+/// composition cursor already proved this shape.
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct CompositionCursorView {
     /// The stage the composition currently sits at.
@@ -202,10 +213,11 @@ pub struct LandingBlock {
 
 /// One member's outward view: the admitted workpiece, the exact scope
 /// revision the bloom pinned, the approval evidence bound to that revision,
-/// — once the member is integrated — its resolution claim, and — while its
-/// stage is held on a parked question — its pending-decision. A member is
-/// integrated iff `resolution` is `Some` (the coarse per-member state the
-/// reducer tracks) and held iff `pending_decision` is `Some`.
+/// — once the member is integrated — its resolution claim, — while its
+/// stage is held on a parked question — its pending-decision, and — once it
+/// has been dispatched — its stage cursor. A member is integrated iff
+/// `resolution` is `Some` (the coarse per-member state the reducer tracks)
+/// and held iff `pending_decision` is `Some`.
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct MemberView {
     /// The admitted workpiece.
@@ -256,6 +268,13 @@ pub struct MemberView {
     /// the field still decodes.
     #[serde(default)]
     pub wedge_cause: Option<WedgeCause>,
+    /// The member's stage cursor, when it has dispatch history; `None` for a
+    /// member that has never entered the line. Same [`CompositionCursorView`]
+    /// shape the composition cursor already proves — stage, attempts, and the
+    /// candidate it is targeting. Trailing and `#[serde(default)]` so a reader
+    /// that predates the field still decodes.
+    #[serde(default)]
+    pub cursor: Option<CompositionCursorView>,
 }
 
 /// Why a member stopped dispatching (ADR-0195).
