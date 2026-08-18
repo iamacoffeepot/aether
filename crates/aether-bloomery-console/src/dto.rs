@@ -142,6 +142,34 @@ pub enum StageId {
     Unknown,
 }
 
+impl StageId {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Sketch => "Sketch",
+            Self::Scope => "Scope",
+            Self::Approve => "Approve",
+            Self::Construct => "Construct",
+            Self::Verify => "Verify",
+            Self::Refine => "Refine",
+            Self::Review => "Review",
+            Self::Integrate => "Integrate",
+            Self::AggregateVerify => "AggregateVerify",
+            Self::AggregateReview => "AggregateReview",
+            Self::Land => "Land",
+            Self::Study => "Study",
+            Self::Reconcile => "Reconcile",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl fmt::Display for StageId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 /// Why the seal door closed (ADR-0192), as `/view` spells it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub enum SpendQuiesce {
@@ -165,6 +193,22 @@ pub enum SpendQuiesce {
     },
     #[serde(other)]
     Unknown,
+}
+
+impl SpendQuiesce {
+    /// Seal-door line: window and ceiling when present.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Window { window, spent_micro_usd, ceiling_micro_usd } => {
+                format!("SEAL CLOSED  {window}  {spent_micro_usd}/{ceiling_micro_usd}")
+            }
+            Self::Bloom { window, bloom, spent_micro_usd, ceiling_micro_usd } => {
+                format!("SEAL CLOSED  {window}  {}  {spent_micro_usd}/{ceiling_micro_usd}", bloom.prefix())
+            }
+            Self::Unknown => "SEAL CLOSED".to_owned(),
+        }
+    }
 }
 
 /// `GET /view` as the console consumes it.
@@ -199,6 +243,10 @@ pub struct BloomView {
     pub review_park: Option<ReviewParkView>,
     #[serde(default)]
     pub composition: Option<CompositionView>,
+    /// The operator brake (#4976). Absent when the coordinator predates the
+    /// field or the bloom is not held.
+    #[serde(default)]
+    pub operator_hold: Option<OperatorHoldView>,
 }
 
 /// One sealed member as the projection renders it.
@@ -215,13 +263,23 @@ pub struct MemberView {
     #[serde(default)]
     pub blocked_by: Option<String>,
     #[serde(default)]
-    pub host_fault: Option<Present>,
+    pub host_fault: Option<HostFaultView>,
     #[serde(default)]
     pub machinery_rolls: u32,
     #[serde(default)]
     pub machinery_budget: u32,
     #[serde(default)]
     pub wedge_cause: Option<WedgeCause>,
+    /// Stage cursor when the coordinator serves it. Absent-tolerant.
+    #[serde(default)]
+    pub cursor: Option<CompositionCursorView>,
+}
+
+/// Host-fault findings, listed verbatim when the coordinator serves them.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct HostFaultView {
+    #[serde(default)]
+    pub findings: String,
 }
 
 /// A bloom's landing-gate standing, once a landing has been refused.
@@ -327,11 +385,72 @@ pub struct CandidateRef {
     pub checkout: DigestHex,
 }
 
+/// The operator brake on a bloom, when the coordinator serves it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct OperatorHoldView {
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub operator: String,
+}
+
 /// Presence marker: any JSON object (or other value) deserializes, extra
 /// fields ignored. Used for `/view` objects the board only tests for
-/// presence — a wedge, a host fault, a resolution claim.
+/// presence — a wedge, a resolution claim.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Present {}
+
+/// One bounded `GET /journal` page.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct JournalPage {
+    #[serde(default)]
+    pub records: Vec<JournalRecordView>,
+    #[serde(default)]
+    pub total_matched: u64,
+    #[serde(default)]
+    pub shown: u64,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default)]
+    pub next_from_sequence: Option<u64>,
+    #[serde(default)]
+    pub notice: Option<String>,
+}
+
+/// One decoded journal record. Event and outcome stay JSON so an unknown
+/// fact variant cannot take the page down.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct JournalRecordView {
+    #[serde(default)]
+    pub sequence: u64,
+    #[serde(default)]
+    pub idempotency_key: String,
+    #[serde(default)]
+    pub event: Value,
+    #[serde(default)]
+    pub outcome: Value,
+    #[serde(default)]
+    pub decider: String,
+}
+
+/// `GET /artifacts/{digest}/decoded` — a known kind, or a raw range.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DecodedArtifact {
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub value: Option<Value>,
+    #[serde(default)]
+    pub bytes: Option<Vec<u8>>,
+    #[serde(default)]
+    pub offset: Option<u64>,
+    #[serde(default)]
+    pub total: Option<u64>,
+    #[serde(default)]
+    pub truncated: Option<bool>,
+    #[serde(default)]
+    pub notice: Option<String>,
+}
 
 fn encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -480,6 +599,7 @@ mod tests {
         assert!(bloom.review_park.is_none());
         assert!(bloom.composition.is_none());
         assert!(bloom.landing_blocked.is_none());
+        assert!(bloom.operator_hold.is_none());
         let member = &bloom.members[0];
         assert_eq!(member.workpiece, "issue-1");
         assert!(member.wedge.is_some());
@@ -488,14 +608,14 @@ mod tests {
         assert_eq!(member.blocked_by.as_deref(), Some("issue-0"));
         assert_eq!(member.machinery_rolls, 2);
         assert_eq!(member.machinery_budget, 3);
-        assert!(member.host_fault.is_some());
+        assert_eq!(member.host_fault.as_ref().map(|fault| fault.findings.as_str()), Some("no cargo"));
     }
 
     #[test]
     fn widened_fields_decode_from_a_realistic_document() {
         // The plausible bug: the mirror still drops mainline / observed /
         // spend_quiesce / superseded_by / review-park prose / pending_decision
-        // / composition, so the war-room chrome has nothing to paint.
+        // / composition / operator_hold, so the war-room chrome has nothing to paint.
         let view: ViewDocument = serde_json::from_value(json!({
             "mainline": hex(0x11),
             "observed": hex(0x22),
@@ -529,6 +649,10 @@ mod tests {
                         "detail": hex(0x99),
                         "implicated": ["issue-1"]
                     }]
+                },
+                "operator_hold": {
+                    "reason": "wait for the host",
+                    "operator": "owner"
                 },
                 "members": [{
                     "workpiece": "issue-1",
@@ -575,6 +699,9 @@ mod tests {
         assert_eq!(composition.findings.len(), 1);
         assert_eq!(composition.findings[0].detail, digest(0x99));
         assert_eq!(composition.findings[0].implicated, ["issue-1"]);
+        let hold = bloom.operator_hold.as_ref().expect("operator hold");
+        assert_eq!(hold.reason, "wait for the host");
+        assert_eq!(hold.operator, "owner");
         let pending = bloom.members[0].pending_decision.as_ref().expect("pending decision");
         assert_eq!(pending.question, digest(0xaa));
         assert_eq!(pending.stage, Some(StageId::Construct));

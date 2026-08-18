@@ -2,6 +2,8 @@
 
 use crossterm::event::KeyCode;
 
+use crate::nav::Nav;
+
 /// One footer entry a screen advertises: the keys as shown, and the action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KeyHint {
@@ -10,12 +12,13 @@ pub struct KeyHint {
 }
 
 /// What a screen (or the shell) did with a key.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Ignored,
     Handled,
     Refresh,
     Quit,
+    Push(Nav),
 }
 
 impl KeyHint {
