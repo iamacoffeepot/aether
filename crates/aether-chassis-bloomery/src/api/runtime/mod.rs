@@ -57,6 +57,7 @@ mod blooms;
 mod calibration;
 #[cfg(feature = "github")]
 mod claims;
+mod commission_reader;
 mod commissions;
 mod configs;
 mod drafts;
@@ -99,7 +100,6 @@ use response::{error_response, json};
 use state::{Routed, SealVerify, VerifyPending, finish};
 
 use super::BloomeryApiCapability;
-use super::dto::WorkpiecesView;
 
 use crate::artifacts::{ArtifactsCapabilityState, GetRange, GetRangeResult, resolve_root};
 #[cfg(feature = "github")]
@@ -111,6 +111,7 @@ use crate::store::{
     PageJournalResult, RecordCommissionApprovalResult, RecordConfigResult, RecordDispatchDescriptionResult,
     WriteScopeRevisionResult,
 };
+use state::{CommissionHttp, CommissionHttpRender};
 
 /// The claim routes' bodies for a build with no GitHub source runtime: an
 /// immediate `503` rather than a deferral onto a `SourceCapability` mailbox that
@@ -250,6 +251,10 @@ impl NativeActor for BloomeryApiCapability {
             control_token: params.control_token,
             commission_verifying: HashMap::new(),
             commission_writing: HashMap::new(),
+            commission_http: HashMap::new(),
+            commission_seals: HashMap::new(),
+            next_commission_seal: 1,
+            seal_commission_loads: HashMap::new(),
         })
     }
 
@@ -342,10 +347,10 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, routed)
     }
 
-    /// `GET /workpieces` — list the staged workpieces.
+    /// `GET /workpieces` — list durable open commissions as workpieces.
     #[http::route(Get, "/workpieces")]
     fn on_get_workpieces(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
-        let routed = Routed::Reply(json(200, &WorkpiecesView { workpieces: state.staged.values().cloned().collect() }));
+        let routed = state.list_open_workpieces();
         finish(state, ctx, routed)
     }
 
@@ -931,22 +936,41 @@ impl NativeActor for BloomeryApiCapability {
         state.answer_commission_write(ctx, &commissions::approval_response(mail));
     }
 
-    #[http::reply]
-    fn on_load_commission_result(
-        _state: &mut ApiCapabilityState,
-        _ctx: &mut NativeCtx<'_, Manual>,
-        mail: LoadCommissionResult,
-    ) -> HttpServerResponse {
-        commissions::show_response(mail)
+    #[handler::manual]
+    fn on_load_commission_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: LoadCommissionResult) {
+        let correlation = ctx.reply_target().correlation_id;
+        if state.seal_commission_loads.contains_key(&correlation) {
+            state.resolve_seal_commission_load(ctx, mail);
+            return;
+        }
+        if let Some(CommissionHttp { inbound, render: CommissionHttpRender::Show }) =
+            state.commission_http.remove(&correlation)
+        {
+            inbound.reply(&commissions::show_response(mail));
+        }
     }
 
-    #[http::reply]
+    #[handler::manual]
     fn on_list_commissions_result(
-        _state: &mut ApiCapabilityState,
-        _ctx: &mut NativeCtx<'_, Manual>,
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Manual>,
         mail: ListCommissionsResult,
-    ) -> HttpServerResponse {
-        commissions::list_response(mail)
+    ) {
+        let correlation = ctx.reply_target().correlation_id;
+        let Some(CommissionHttp { inbound, render }) = state.commission_http.remove(&correlation) else {
+            return;
+        };
+        match render {
+            CommissionHttpRender::List => {
+                inbound.reply(&commissions::list_response(mail));
+            }
+            CommissionHttpRender::Workpieces => {
+                inbound.reply(&workpieces::list_response(mail));
+            }
+            CommissionHttpRender::Show => {
+                inbound.reply(&error_response(500, "commission list answered a show read"));
+            }
+        }
     }
 
     #[handler::manual]
@@ -1007,6 +1031,10 @@ impl NativeActor for BloomeryApiCapability {
             // whole seal cannot complete, so fail it closed and tear down its
             // still-outstanding siblings (a dropped signing capability).
             state.fail_seal(seal, 504, "signature verification settled without a reply");
+        } else if let Some(CommissionHttp { inbound, .. }) = state.commission_http.remove(&mail.root.correlation_id) {
+            inbound.reply(&error_response(504, "commission store read settled without a reply"));
+        } else if let Some(load) = state.seal_commission_loads.remove(&mail.root.correlation_id) {
+            state.fail_commission_seal(load.seal, 504, "commission store read settled without a reply");
         }
     }
 }

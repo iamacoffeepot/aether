@@ -31,8 +31,8 @@ use aether_actor::{HandlesKind, Manual};
 #[cfg(feature = "github")]
 use aether_bloomery::EnumerateClaims;
 use aether_bloomery::{
-    Admit, ApprovalPolicy, BloomDraft, BloomId, Digest, Event, MemberDependency, MetricsQuery, Query, ResolvedConfigs,
-    SpendQuery, Statement, Workpiece,
+    Admit, ApprovalPolicy, BloomDraft, BloomId, Event, MemberDependency, MetricsQuery, Query, ResolvedConfigs,
+    SpendQuery, Statement, Workpiece, WorkpieceId,
 };
 use aether_data::wire::to_vec;
 use aether_data::{Kind, MailId, MailboxId};
@@ -55,8 +55,8 @@ use crate::control::ControlCore;
 #[cfg(feature = "github")]
 use crate::source::SourceCapability;
 use crate::store::{
-    CreateCommission, ListBloomDispatches, ListCommissions, LoadCommission, LookupDispatch, PageJournal, RecordConfig,
-    StoreCapability, WriteScopeRevision,
+    CreateCommission, ListBloomDispatches, ListCommissions, LoadCommission, LoadCommissionResult, LookupDispatch,
+    PageJournal, RecordConfig, StoreCapability, WriteScopeRevision,
 };
 
 /// Per-process ceilings on the pre-seal shaping maps. Staged workpieces and
@@ -157,6 +157,16 @@ pub struct ApiCapabilityState {
     pub(super) commission_verifying: HashMap<u64, super::commissions::CommissionVerify>,
     /// Commission writes dispatched after a verified signature, awaiting store.
     pub(super) commission_writing: HashMap<u64, InboundMail>,
+    /// Commission list/show/workpiece reads awaiting the store, keyed by the
+    /// load or list dispatch correlation.
+    pub(super) commission_http: HashMap<u64, CommissionHttp>,
+    /// Seals held across N commission loads, keyed by a minted handle.
+    pub(super) commission_seals: HashMap<u64, PendingCommissionSeal>,
+    /// The next commission-seal handle to mint.
+    pub(super) next_commission_seal: u64,
+    /// Each in-flight seal-time `LoadCommission`, keyed by its dispatch
+    /// correlation, back-pointing at the held [`PendingCommissionSeal`].
+    pub(super) seal_commission_loads: HashMap<u64, SealCommissionLoad>,
 }
 
 /// A request held across a signature-verification round trip: the reply
@@ -216,10 +226,10 @@ pub(super) struct SealVerify {
     pub(super) seal: u64,
     /// The index into the seal's `gated.proposals` of the member it forms.
     pub(super) member_index: usize,
-    /// The scope revision the formed approval binds.
-    pub(super) scope_revision: Digest,
     /// The signed statement whose verified form (`verified_statement_approval`)
-    /// becomes the member's approval.
+    /// becomes the member's approval. The evidence subject is the gated
+    /// proposal's `subject()` — the store statement is bound to the scope
+    /// revision, not the member subject.
     pub(super) statement: Statement,
 }
 
@@ -245,8 +255,66 @@ pub(super) struct PendingSealSetup {
 pub(super) struct PendingVerify {
     pub(super) correlation: u64,
     pub(super) member_index: usize,
-    pub(super) scope_revision: Digest,
     pub(super) statement: Statement,
+}
+
+/// How a held commission read should render once the store replies.
+pub(super) enum CommissionHttpRender {
+    /// `GET /commissions/{id}`.
+    Show,
+    /// `GET /commissions`.
+    List,
+    /// `GET /workpieces`.
+    Workpieces,
+}
+
+/// A commission HTTP read waiting on the store.
+pub(super) struct CommissionHttp {
+    /// The held HTTP reply obligation.
+    pub(super) inbound: InboundMail,
+    /// Which renderer answers.
+    pub(super) render: CommissionHttpRender,
+}
+
+/// A seal held across N commission loads (#5048). Each member's store row
+/// lands here; the last load materializes projections and continues into
+/// [`gate_and_admit`](ApiCapabilityState::gate_and_admit).
+pub(super) struct PendingCommissionSeal {
+    /// The held HTTP reply obligation.
+    pub(super) inbound: InboundMail,
+    /// The draft being sealed.
+    pub(super) draft: BloomDraft,
+    /// The predecessor this seal supersedes, or `None` for a first seal.
+    pub(super) predecessor: Option<BloomId>,
+    /// The admit idempotency key override.
+    pub(super) idempotency_key: Option<String>,
+    /// Declared edges from the request, unioned with store-frozen edges after
+    /// every member loads.
+    pub(super) edges: Vec<MemberDependency>,
+    /// Loads still outstanding.
+    pub(super) remaining: usize,
+    /// Loaded rows, keyed by workpiece id.
+    pub(super) loaded: BTreeMap<String, LoadCommissionResult>,
+}
+
+/// The pre-wired parts of a store-backed seal, handed to [`finish`] so the
+/// handle mint and map inserts happen there.
+pub(super) struct PendingCommissionSealSetup {
+    pub(super) draft: BloomDraft,
+    pub(super) predecessor: Option<BloomId>,
+    pub(super) idempotency_key: Option<String>,
+    pub(super) edges: Vec<MemberDependency>,
+    /// One entry per draft member — the dispatched load correlation and the
+    /// workpiece it fetches.
+    pub(super) loads: Vec<(u64, WorkpieceId)>,
+}
+
+/// One in-flight seal-time commission load.
+pub(super) struct SealCommissionLoad {
+    /// The held [`PendingCommissionSeal`] handle.
+    pub(super) seal: u64,
+    /// The workpiece this load is for.
+    pub(super) workpiece: WorkpieceId,
 }
 
 /// A route's disposition: an immediate response (the in-memory shaping routes),
@@ -305,6 +373,10 @@ pub(super) enum Routed {
     LoadCommission(LoadCommission),
     /// Relay a commission list to the store.
     ListCommissions(ListCommissions),
+    /// Relay an open-commission list rendered as workpieces.
+    ListOpenWorkpieces(ListCommissions),
+    /// Await N commission loads, then gate and admit (#5048).
+    DeferredCommissionSeal(Box<PendingCommissionSealSetup>),
     /// Await a signing-cap verify, then persist the commission write.
     DeferredCommissionVerify {
         /// The verify dispatch correlation the reply will echo.
@@ -406,27 +478,39 @@ pub(super) fn finish(
             http::Outcome::Deferred
         }
         Routed::DeferredSeal(setup) => {
-            let PendingSealSetup { gated, predecessor, descriptions, idempotency_key, edges, verifications } = *setup;
-            let seal = state.next_seal;
-            state.next_seal += 1;
-            let remaining = verifications.len();
-            for verify in verifications {
-                let PendingVerify { correlation, member_index, scope_revision, statement } = verify;
-                state
-                    .seal_verifications
-                    .insert(correlation, SealVerify { seal, member_index, scope_revision, statement });
-            }
-            let inbound = ctx.take_inbound();
-            state.seals.insert(
-                seal,
-                PendingSeal { inbound, predecessor, gated, descriptions, idempotency_key, edges, remaining },
-            );
+            state.begin_deferred_seal(ctx.take_inbound(), *setup);
             http::Outcome::Deferred
         }
         Routed::CreateCommission(request) => ctx.defer(&request).to::<StoreCapability>(),
         Routed::WriteScopeRevision(request) => ctx.defer(&request).to::<StoreCapability>(),
-        Routed::LoadCommission(request) => ctx.defer(&request).to::<StoreCapability>(),
-        Routed::ListCommissions(request) => ctx.defer(&request).to::<StoreCapability>(),
+        Routed::LoadCommission(request) => hold_commission_http(state, &mut ctx, &request, CommissionHttpRender::Show),
+        Routed::ListCommissions(request) => hold_commission_http(state, &mut ctx, &request, CommissionHttpRender::List),
+        Routed::ListOpenWorkpieces(request) => {
+            hold_commission_http(state, &mut ctx, &request, CommissionHttpRender::Workpieces)
+        }
+        Routed::DeferredCommissionSeal(setup) => {
+            let PendingCommissionSealSetup { draft, predecessor, idempotency_key, edges, loads } = *setup;
+            let seal = state.next_commission_seal;
+            state.next_commission_seal += 1;
+            let remaining = loads.len();
+            for (correlation, workpiece) in loads {
+                state.seal_commission_loads.insert(correlation, SealCommissionLoad { seal, workpiece });
+            }
+            let inbound = ctx.take_inbound();
+            state.commission_seals.insert(
+                seal,
+                PendingCommissionSeal {
+                    inbound,
+                    draft,
+                    predecessor,
+                    idempotency_key,
+                    edges,
+                    remaining,
+                    loaded: BTreeMap::new(),
+                },
+            );
+            http::Outcome::Deferred
+        }
         Routed::DeferredCommissionVerify { correlation, write } => {
             state
                 .commission_verifying
@@ -434,4 +518,22 @@ pub(super) fn finish(
             http::Outcome::Deferred
         }
     }
+}
+
+/// Hold a commission HTTP read across a store hop and answer it from the
+/// matching result handler. Seal loads share the `LoadCommission` kind, so
+/// these reads cannot ride the ADR-0154 relay.
+fn hold_commission_http<K>(
+    state: &mut ApiCapabilityState,
+    ctx: &mut http::Ctx<'_, NativeCtx<'_, Manual>>,
+    request: &K,
+    render: CommissionHttpRender,
+) -> http::Outcome
+where
+    StoreCapability: HandlesKind<K>,
+    K: Kind,
+{
+    let correlation = state.send_tracked(ctx.actor::<StoreCapability>(), request);
+    state.commission_http.insert(correlation, CommissionHttp { inbound: ctx.take_inbound(), render });
+    http::Outcome::Deferred
 }
