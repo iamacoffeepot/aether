@@ -404,8 +404,8 @@ impl FakeGithub {
 
     /// After each [`GitDataApi::create_ref`], the next [`GitDataApi::get_ref`] of
     /// that name returns `Ok(None)` once — the GitHub read-after-create window
-    /// Wave 3 sequence 432 hit. Subsequent reads see the ref. [`seed_ref`] is
-    /// not a create and is not lagged.
+    /// Wave 3 sequence 432 hit. Subsequent reads see the ref. [`Self::seed_ref`]
+    /// is not a create and is not lagged.
     pub fn lag_next_read_after_create(&self) {
         self.lock().lag_created_refs = true;
     }
