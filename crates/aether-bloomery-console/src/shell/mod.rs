@@ -110,7 +110,7 @@ impl Shell {
 
         frame.render_widget(chrome::header(&self.endpoint_label, self.store.view()), chunks[0]);
         if let Some(view) = self.store.view().value.as_ref() {
-            self.render_status(frame, chunks[1], view, status_height);
+            Self::render_status(frame, chunks[1], view, status_height);
         }
         if filter_height > 0 {
             frame.render_widget(chrome::filter_line(&self.filter), chunks[2]);
@@ -238,10 +238,11 @@ impl Shell {
     }
 
     fn bands(&self) -> (Vec<Alert>, Vec<Interrupt>) {
-        match self.store.view().value.as_ref() {
-            Some(view) => (warroom::alerts(view), warroom::interrupts(view)),
-            None => (Vec::new(), Vec::new()),
-        }
+        self.store
+            .view()
+            .value
+            .as_ref()
+            .map_or_else(|| (Vec::new(), Vec::new()), |view| (warroom::alerts(view), warroom::interrupts(view)))
     }
 
     fn reseat_top(&mut self) {
@@ -264,7 +265,7 @@ impl Shell {
         }
     }
 
-    fn render_status(&self, frame: &mut Frame<'_>, area: Rect, view: &ViewDocument, height: u16) {
+    fn render_status(frame: &mut Frame<'_>, area: Rect, view: &ViewDocument, height: u16) {
         if height == 0 {
             return;
         }
@@ -516,29 +517,29 @@ mod tests {
         buffer_text(&terminal)
     }
 
-    fn assert_interrupt_jumps(view: ViewDocument, label: &str, focus: Focus) {
+    fn assert_interrupt_jumps(view: &ViewDocument, label: &str, focus: &Focus) {
         // The plausible bug: the source is an alert only, so the queue has no
         // row and Enter cannot jump to the subject that is stopped.
-        let mut shell = Shell::showing(&view, None);
+        let mut shell = Shell::showing(view, None);
         let text = draw(&mut shell);
         assert!(text.contains(label), "interrupt {label} missing from:\n{text}");
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
-        assert_eq!(shell.top_focus(), Some(&focus), "Enter on {label} jumped to the wrong subject");
+        assert_eq!(shell.top_focus(), Some(focus), "Enter on {label} jumped to the wrong subject");
     }
 
     #[test]
     fn park_interrupt_renders_and_enter_jumps() {
         assert_interrupt_jumps(
-            bloom_with(Vec::new(), |bloom| bloom.review_park = Some(ReviewParkView::default())),
+            &bloom_with(Vec::new(), |bloom| bloom.review_park = Some(ReviewParkView::default())),
             "park",
-            Focus::bloom(digest(0xab)),
+            &Focus::bloom(digest(0xab)),
         );
     }
 
     #[test]
     fn decision_interrupt_renders_and_enter_jumps() {
         assert_interrupt_jumps(
-            bloom_with(
+            &bloom_with(
                 vec![MemberView {
                     workpiece: "issue-1".to_owned(),
                     pending_decision: Some(PendingDecisionView::default()),
@@ -547,55 +548,55 @@ mod tests {
                 |_| {},
             ),
             "decision",
-            Focus::member(digest(0xab), "issue-1"),
+            &Focus::member(digest(0xab), "issue-1"),
         );
     }
 
     #[test]
     fn findings_interrupt_renders_and_enter_jumps() {
         assert_interrupt_jumps(
-            bloom_with(Vec::new(), |bloom| {
+            &bloom_with(Vec::new(), |bloom| {
                 bloom.composition = Some(CompositionView {
                     findings: vec![CompositionFinding::default()],
                     ..CompositionView::default()
                 });
             }),
             "findings",
-            Focus::composition(digest(0xab)),
+            &Focus::composition(digest(0xab)),
         );
     }
 
     #[test]
     fn terminal_interrupt_renders_and_enter_jumps() {
         assert_interrupt_jumps(
-            bloom_with(Vec::new(), |bloom| {
+            &bloom_with(Vec::new(), |bloom| {
                 bloom.executor_fault = Some(ExecutorFaultView { rolls: 3, budget: 3, terminal: true });
             }),
             "terminal",
-            Focus::bloom(digest(0xab)),
+            &Focus::bloom(digest(0xab)),
         );
     }
 
     #[test]
     fn wedge_interrupt_renders_and_enter_jumps() {
         assert_interrupt_jumps(
-            bloom_with(
+            &bloom_with(
                 vec![MemberView { workpiece: "issue-1".to_owned(), wedge: Some(Present {}), ..MemberView::default() }],
                 |_| {},
             ),
             "wedge",
-            Focus::member(digest(0xab), "issue-1"),
+            &Focus::member(digest(0xab), "issue-1"),
         );
     }
 
     #[test]
     fn landing_interrupt_renders_and_enter_jumps() {
         assert_interrupt_jumps(
-            bloom_with(Vec::new(), |bloom| {
+            &bloom_with(Vec::new(), |bloom| {
                 bloom.landing_blocked = Some(LandingBlock { rolls: 2, budget: 2 });
             }),
             "landing",
-            Focus::bloom(digest(0xab)),
+            &Focus::bloom(digest(0xab)),
         );
     }
 
@@ -609,18 +610,18 @@ mod tests {
             }),
             ..ViewDocument::default()
         };
-        assert_interrupt_jumps(view, "quiesce", Focus::Seal);
+        assert_interrupt_jumps(&view, "quiesce", &Focus::Seal);
     }
 
     #[test]
     fn hold_interrupt_renders_and_enter_jumps() {
         assert_interrupt_jumps(
-            bloom_with(Vec::new(), |bloom| {
+            &bloom_with(Vec::new(), |bloom| {
                 bloom.operator_hold =
                     Some(OperatorHoldView { reason: "wait".to_owned(), operator: "owner".to_owned() });
             }),
             "hold",
-            Focus::bloom(digest(0xab)),
+            &Focus::bloom(digest(0xab)),
         );
     }
 

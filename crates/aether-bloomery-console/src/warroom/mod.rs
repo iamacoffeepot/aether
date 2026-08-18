@@ -1,6 +1,6 @@
 //! War-room chrome rules: the loud set and the owner-authority set.
 //!
-//! Severity lives in [`alerts`]; owner-authority lives in [`interrupts`].
+//! Severity lives in [`mod@alerts`]; owner-authority lives in [`mod@interrupts`].
 //! The two files are siblings so the sets cannot drift into each other.
 
 pub mod alerts;
