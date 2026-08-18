@@ -72,10 +72,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use aether_actor::{Manual, runtime};
-use aether_bloomery::{
-    AdmitResult, EnumerateClaimsResult, LoadConfigsResult, QueryResult, ReplayJournal, ReplayJournalResult,
-    ResolvedConfigs,
-};
+use aether_bloomery::{AdmitResult, EnumerateClaimsResult, LoadConfigsResult, QueryResult, ResolvedConfigs};
 use aether_http as http;
 use aether_http::HttpServerResponse;
 use aether_kinds::trace::Settled;
@@ -90,13 +87,13 @@ use calibration::calibration_response;
 #[cfg(feature = "github")]
 use claims::{claims_response, release_status_response};
 use configs::{config_response, load_configs};
-use reads::{artifact_response, journal_response};
+use reads::{ArtifactQuery, JournalQuery, artifact_response, journal_response};
 use response::{error_response, json};
 use state::{Routed, SealVerify, VerifyPending, finish};
 
 use super::BloomeryApiCapability;
 use super::dto::WorkpiecesView;
-use crate::artifacts::{Get, GetResult};
+
 #[cfg(feature = "github")]
 use crate::bloomery::CandidatePush;
 use crate::bloomery::load_policy;
@@ -480,20 +477,73 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, calibration::read())
     }
 
-    /// `GET /journal` — read the durable event journal from the store.
+    /// `GET /journal` — one bounded page of the durable event journal.
     #[http::route(Get, "/journal")]
     fn on_get_journal(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
-        finish(state, ctx, Routed::ReplayJournal(ReplayJournal))
+        let query = match JournalQuery::parse(&ctx.request().query) {
+            Ok(query) => query,
+            Err(error) => return http::Outcome::Reply(error_response(400, &error)),
+        };
+        finish(
+            state,
+            ctx,
+            Routed::ReplayJournal(crate::store::PageJournal {
+                bloom: query.bloom.map(|digest| hex::hex_encode(digest.as_bytes())),
+                from_sequence: query.from_sequence,
+                limit: query.limit,
+                descending: query.descending,
+                notice: query.notice,
+            }),
+        )
     }
 
-    /// `GET /artifacts/{digest}` — fetch a content-addressed artifact.
+    /// `GET /artifacts/{digest}` — a bounded byte range of a stored artifact.
     #[http::route(Get, "/artifacts/{digest}")]
     fn on_get_artifact(
         state: &mut ApiCapabilityState,
         ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
         digest: http::Path<String>,
     ) -> http::Outcome {
-        finish(state, ctx, Routed::Get(Get { digest: digest.0 }))
+        let query = match ArtifactQuery::parse(&ctx.request().query) {
+            Ok(query) => query,
+            Err(error) => return http::Outcome::Reply(error_response(400, &error)),
+        };
+        finish(
+            state,
+            ctx,
+            Routed::GetRange(crate::artifacts::GetRange {
+                digest: digest.0,
+                offset: query.offset,
+                limit: query.limit,
+                decoded: false,
+                notice: query.notice,
+            }),
+        )
+    }
+
+    /// `GET /artifacts/{digest}/decoded` — resolve a known artifact kind, or
+    /// return a raw range when nothing matches.
+    #[http::route(Get, "/artifacts/{digest}/decoded")]
+    fn on_get_artifact_decoded(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        digest: http::Path<String>,
+    ) -> http::Outcome {
+        let query = match ArtifactQuery::parse(&ctx.request().query) {
+            Ok(query) => query,
+            Err(error) => return http::Outcome::Reply(error_response(400, &error)),
+        };
+        finish(
+            state,
+            ctx,
+            Routed::GetRange(crate::artifacts::GetRange {
+                digest: digest.0,
+                offset: query.offset,
+                limit: query.limit,
+                decoded: true,
+                notice: query.notice,
+            }),
+        )
     }
 
     /// The control core's reply to an admit — the reducer outcome, or an admit
@@ -550,7 +600,7 @@ impl NativeActor for BloomeryApiCapability {
     fn on_replay_result(
         _state: &mut ApiCapabilityState,
         _ctx: &mut NativeCtx<'_, Manual>,
-        mail: ReplayJournalResult,
+        mail: crate::store::PageJournalResult,
     ) -> HttpServerResponse {
         journal_response(mail)
     }
@@ -560,7 +610,7 @@ impl NativeActor for BloomeryApiCapability {
     fn on_get_result(
         _state: &mut ApiCapabilityState,
         _ctx: &mut NativeCtx<'_, Manual>,
-        mail: GetResult,
+        mail: crate::artifacts::GetRangeResult,
     ) -> HttpServerResponse {
         artifact_response(mail)
     }

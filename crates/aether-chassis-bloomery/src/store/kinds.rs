@@ -351,3 +351,48 @@ pub enum RecordConfigResult {
 // `aether-bloomery`, so the reverse edge would be a package cycle. One
 // definition both sides share; the `#[kind(name = "aether.store.replay_journal…")]`
 // literal is the wire identity wherever the type is declared (issue #3497).
+
+/// A REST journal page request. Echoed on [`PageJournalResult`] so the HTTP
+/// reply can bound the body without a second correlation table. The
+/// coordinator's own replay still uses [`ReplayJournal`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.store.page_journal")]
+pub struct PageJournal {
+    /// Hex bloom id to filter on, or `None` for every record.
+    pub bloom: Option<String>,
+    /// Exclusive sequence cursor, or `None` to start at the end / start.
+    pub from_sequence: Option<u64>,
+    /// Applied page size (already clamped by the HTTP edge).
+    pub limit: u64,
+    /// Newest-first when true.
+    pub descending: bool,
+    /// Clamp notice to echo onto the HTTP envelope.
+    pub notice: Option<String>,
+}
+
+/// Reply to [`PageJournal`]. `records` is the whole journal; the HTTP edge
+/// selects the page. Echoes the request so the reply route can page.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.store.page_journal_result")]
+pub enum PageJournalResult {
+    /// The journal, plus the page request that selected it.
+    Ok {
+        /// Every journaled event, oldest first.
+        records: Vec<aether_bloomery::JournalRecord>,
+        /// Echo of [`PageJournal::bloom`].
+        bloom: Option<String>,
+        /// Echo of [`PageJournal::from_sequence`].
+        from_sequence: Option<u64>,
+        /// Echo of [`PageJournal::limit`].
+        limit: u64,
+        /// Echo of [`PageJournal::descending`].
+        descending: bool,
+        /// Echo of [`PageJournal::notice`].
+        notice: Option<String>,
+    },
+    /// The read failed.
+    Err {
+        /// A human-readable failure reason.
+        error: String,
+    },
+}

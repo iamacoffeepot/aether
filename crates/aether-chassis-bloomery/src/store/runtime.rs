@@ -11,9 +11,9 @@
 use super::StoreCapability;
 use super::kinds::{
     AckOutbox, AckOutboxResult, AppendEvent, AppendEventResult, ClaimSeal, ClaimSealResult, DrainOutbox,
-    DrainOutboxResult, EnqueueOutbox, EnqueueOutboxResult, OutboxEntry, RecordConfig, RecordConfigResult,
-    RecordDispatchDescription, RecordDispatchDescriptionResult, ReleaseMembership, ReleaseMembershipResult, Supersede,
-    SupersedeResult,
+    DrainOutboxResult, EnqueueOutbox, EnqueueOutboxResult, OutboxEntry, PageJournal, PageJournalResult, RecordConfig,
+    RecordConfigResult, RecordDispatchDescription, RecordDispatchDescriptionResult, ReleaseMembership,
+    ReleaseMembershipResult, Supersede, SupersedeResult,
 };
 use aether_actor::runtime;
 // The control-plane transact-mails the wasm control actor drives — `Commit` and
@@ -1595,6 +1595,15 @@ impl NativeActor for StoreCapability {
         match state.backend.replay_journal() {
             Ok(records) => ReplayJournalResult::Ok { records },
             Err(error) => ReplayJournalResult::Err { error: error.to_string() },
+        }
+    }
+
+    #[handler::single]
+    fn on_page_journal(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: PageJournal) -> PageJournalResult {
+        let PageJournal { bloom, from_sequence, limit, descending, notice } = mail;
+        match state.backend.replay_journal() {
+            Ok(records) => PageJournalResult::Ok { records, bloom, from_sequence, limit, descending, notice },
+            Err(error) => PageJournalResult::Err { error: error.to_string() },
         }
     }
 }

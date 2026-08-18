@@ -30,8 +30,8 @@ use aether_actor::{HandlesKind, Manual};
 #[cfg(feature = "github")]
 use aether_bloomery::EnumerateClaims;
 use aether_bloomery::{
-    Admit, ApprovalPolicy, BloomDraft, BloomId, Digest, Event, MemberDependency, Query, ReplayJournal, ResolvedConfigs,
-    Statement, Workpiece,
+    Admit, ApprovalPolicy, BloomDraft, BloomId, Digest, Event, MemberDependency, Query, ResolvedConfigs, Statement,
+    Workpiece,
 };
 use aether_data::wire::to_vec;
 use aether_data::{Kind, MailId, MailboxId};
@@ -42,7 +42,7 @@ use aether_substrate::actor::native::{NativeActorMailbox, NativeCtx};
 use aether_substrate::{InboundMail, Mailer};
 
 use super::response::error_response;
-use crate::artifacts::{ArtifactsCapability, Get};
+use crate::artifacts::ArtifactsCapability;
 #[cfg(feature = "github")]
 use crate::bloomery::CandidatePush;
 // The control core is a native sibling cap since the wasm-boundary retirement
@@ -249,10 +249,10 @@ pub(super) enum Routed {
     Admit(Admit),
     /// Relay to the control core; its `QueryResult` answers.
     Query(Query),
-    /// Relay to the store; its `ReplayJournalResult` answers.
-    ReplayJournal(ReplayJournal),
-    /// Relay to the artifacts cap; its `GetResult` answers.
-    Get(Get),
+    /// Relay to the store; its `PageJournalResult` answers.
+    ReplayJournal(crate::store::PageJournal),
+    /// Relay to the artifacts cap; its `GetRangeResult` answers.
+    GetRange(crate::artifacts::GetRange),
     /// Relay to the store; its `RecordConfigResult` answers.
     RecordConfig(RecordConfig),
     /// Relay to the source cap; its `EnumerateClaimsResult` answers (ADR-0179).
@@ -354,7 +354,7 @@ pub(super) fn finish(
         Routed::Admit(request) => ctx.defer(&request).to::<ControlCore>(),
         Routed::Query(request) => ctx.defer(&request).to::<ControlCore>(),
         Routed::ReplayJournal(request) => ctx.defer(&request).to::<StoreCapability>(),
-        Routed::Get(request) => ctx.defer(&request).to::<ArtifactsCapability>(),
+        Routed::GetRange(request) => ctx.defer(&request).to::<ArtifactsCapability>(),
         Routed::RecordConfig(request) => ctx.defer(&request).to::<StoreCapability>(),
         #[cfg(feature = "github")]
         Routed::EnumerateClaims(request) => ctx.defer(&request).to::<SourceCapability>(),
