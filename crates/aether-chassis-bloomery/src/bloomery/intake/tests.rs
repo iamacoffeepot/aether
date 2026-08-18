@@ -1603,25 +1603,7 @@ fn a_measured_attempt_writes_one_priced_study_row_and_an_unmeasured_one_writes_n
         output_tokens: 500_000,
         ..StudyCost::default()
     };
-    let mut claims = HashMap::new();
-    claims.insert(
-        "n-study".to_owned(),
-        UploadedEvidence {
-            nonce: Nonce("n-study".to_owned()),
-            subject: candidate,
-            verdict: StageVerdict::VerificationPassed,
-            detail: Digest::from_bytes([7; 32]),
-            candidate: None,
-            findings: None,
-            failed_verifiers: VerifyFailureSet::EMPTY,
-            cost: Some(cost),
-            calls: None,
-            session_reuse_arm: None,
-            session_reuse_saved_micro_usd: None,
-            peak_resident_bytes: None,
-        },
-    );
-    let claims = SeededClaims(claims);
+    let claims = seeded_claim("n-study", candidate, Some(cost));
     let mut sink = Collector::default();
 
     let report = run_intake_cycle(&mut store, &shell, &[handle], &claims, Some(&mut artifacts), &mut sink).unwrap();
@@ -1707,6 +1689,10 @@ fn second_attempt(
     fake.seed_run_artifacts(run_id, vec![Artifact { id: 1, name: format!("evidence-{nonce}"), size_bytes: 10 }]);
 
     let (subject, cost) = claimed.map_or((candidate, None), |(subject, cost)| (subject, Some(cost)));
+    (handle, seeded_claim(nonce, subject, cost))
+}
+
+fn seeded_claim(nonce: &str, subject: Digest, cost: Option<aether_bloomery::StudyCost>) -> SeededClaims {
     let mut claims = HashMap::new();
     claims.insert(
         nonce.to_owned(),
@@ -1725,7 +1711,7 @@ fn second_attempt(
             peak_resident_bytes: None,
         },
     );
-    (handle, SeededClaims(claims))
+    SeededClaims(claims)
 }
 
 /// The finding from bloom `10a1228c` (#4959): a coverage gap that fails no

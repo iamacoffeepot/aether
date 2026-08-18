@@ -324,7 +324,7 @@ impl MetricsLedger {
         }
         for study in &self.studies {
             let Some(acc) =
-                self.dispatches.values().find(|row| (row.bloom == study.bloom) && (row.displayed == study.subject))
+                self.dispatches.values().find(|row| (row.bloom, row.displayed) == (study.bloom, study.subject))
             else {
                 continue;
             };
@@ -476,7 +476,7 @@ impl MetricsLedger {
         let study = self
             .studies
             .iter()
-            .find(|study| (study.bloom == acc.bloom) && (study.subject == acc.displayed))
+            .find(|study| (study.bloom, study.subject) == (acc.bloom, acc.displayed))
             .map(|study| study.detail);
         MetricDispatch {
             id: dispatch_id(acc),

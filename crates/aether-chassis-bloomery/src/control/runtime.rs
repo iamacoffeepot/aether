@@ -750,7 +750,7 @@ impl NativeActor for ControlCore {
     #[handler::manual]
     fn on_metrics_query(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, mail: MetricsQuery) {
         let inbound = ctx.take_inbound();
-        inbound.reply(&metrics_response(state, &mail));
+        inbound.reply(&metrics_response(state, mail));
     }
 
     /// `GET /spend` — the window `measure` already computes, previously unserved.
@@ -973,13 +973,14 @@ fn calibration_response(
     }
 }
 
-fn metrics_response(state: &mut ControlCoreState, query: &MetricsQuery) -> MetricsQueryResult {
+fn metrics_response(state: &mut ControlCoreState, query: MetricsQuery) -> MetricsQueryResult {
+    let MetricsQuery { view, bloom, from_sequence, limit } = query;
     let clamp = |requested: Option<u64>| match requested {
         None => METRICS_DEFAULT_LIMIT,
         Some(limit) if limit > METRICS_MAX_LIMIT => METRICS_MAX_LIMIT,
         Some(limit) => limit,
     };
-    match query.view {
+    match view {
         MetricsView::Summary => {
             let records = load_study_records(state.artifacts.as_mut(), &state.snapshot);
             let active = u64::try_from(
@@ -998,14 +999,14 @@ fn metrics_response(state: &mut ControlCoreState, query: &MetricsQuery) -> Metri
             encode_metrics(rows)
         }
         MetricsView::Blooms => {
-            let limit = usize::try_from(clamp(query.limit)).unwrap_or(usize::MAX);
-            let from = query.from_sequence.unwrap_or(0);
+            let limit = usize::try_from(clamp(limit)).unwrap_or(usize::MAX);
+            let from = from_sequence.unwrap_or(0);
             let rows: Vec<_> =
                 state.metrics.bloom_rows().into_iter().filter(|row| row.seal_sequence > from).take(limit).collect();
             encode_metrics(rows)
         }
         MetricsView::Timeline => {
-            let Some(bytes) = query.bloom.as_deref() else {
+            let Some(bytes) = bloom.as_deref() else {
                 return MetricsQueryResult::Err { error: "timeline requires a bloom id".into() };
             };
             let Some(bloom) = Digest::from_slice(bytes).map(BloomId) else {
@@ -1021,8 +1022,8 @@ fn metrics_response(state: &mut ControlCoreState, query: &MetricsQuery) -> Metri
             encode_metrics(state.metrics.seats(|digest| records.get(digest).copied()))
         }
         MetricsView::Dispatches => {
-            let limit = usize::try_from(clamp(query.limit)).unwrap_or(usize::MAX);
-            let from = query.from_sequence.unwrap_or(0);
+            let limit = usize::try_from(clamp(limit)).unwrap_or(usize::MAX);
+            let from = from_sequence.unwrap_or(0);
             let rows: Vec<_> =
                 state.metrics.dispatch_rows().into_iter().filter(|row| row.sequence > from).take(limit).collect();
             encode_metrics(rows)
