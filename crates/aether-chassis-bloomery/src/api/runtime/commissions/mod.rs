@@ -20,7 +20,7 @@ use crate::api::dto::{
     CommissionsView, CreateCommissionRequest, ScopeRevisionWrittenView,
 };
 use crate::bloomery::{StatementRejected, precheck_statement, verified_statement_approval};
-use crate::signing::{SigningCapability, Verify, authority_bytes};
+use crate::signing::{SigningCapability, Verify, VerifyResult, authority_bytes};
 use crate::store::{
     CancelCommission, CancelCommissionResult, CreateCommission, CreateCommissionResult, ListCommissions,
     ListCommissionsResult, ListedCommission, LoadCommission, LoadCommissionResult, RecordCommissionApproval,
@@ -208,17 +208,13 @@ impl ApiCapabilityState {
 
     /// Resolve a held commission verify: persist on a verified signature, or
     /// answer `400` so a refusal is not a transport error.
-    pub(super) fn resolve_commission_verify(
-        &mut self,
-        ctx: &NativeCtx<'_, Manual>,
-        result: crate::signing::VerifyResult,
-    ) {
+    pub(super) fn resolve_commission_verify(&mut self, ctx: &NativeCtx<'_, Manual>, result: VerifyResult) {
         let correlation = ctx.reply_target().correlation_id;
         let Some(CommissionVerify { inbound, write }) = self.commission_verifying.remove(&correlation) else {
             return;
         };
         match result {
-            crate::signing::VerifyResult::Ok { verified: true } => match persist_verified(self, ctx, write) {
+            VerifyResult::Ok { verified: true } => match persist_verified(self, ctx, write) {
                 Ok(correlation) => {
                     self.commission_writing.insert(correlation, inbound);
                 }
@@ -226,19 +222,19 @@ impl ApiCapabilityState {
                     inbound.reply(&response);
                 }
             },
-            crate::signing::VerifyResult::Ok { verified: false } => {
+            VerifyResult::Ok { verified: false } => {
                 inbound.reply(&error_response(400, "signed statement is not an author signature or did not verify"));
             }
-            crate::signing::VerifyResult::Err { error } => {
+            VerifyResult::Err { error } => {
                 inbound.reply(&error_response(400, &format!("signed statement did not verify: {error}")));
             }
         }
     }
 
     /// Answer a held commission write from the store's reply.
-    pub(super) fn answer_commission_write(&mut self, ctx: &NativeCtx<'_, Manual>, response: HttpServerResponse) {
+    pub(super) fn answer_commission_write(&mut self, ctx: &NativeCtx<'_, Manual>, response: &HttpServerResponse) {
         if let Some(inbound) = self.commission_writing.remove(&ctx.reply_target().correlation_id) {
-            inbound.reply(&response);
+            inbound.reply(response);
         }
     }
 }

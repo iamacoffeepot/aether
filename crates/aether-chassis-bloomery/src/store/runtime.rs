@@ -2057,7 +2057,8 @@ impl NativeActor for StoreCapability {
         _ctx: &mut NativeCtx<'_>,
         mail: WriteScopeRevision,
     ) -> WriteScopeRevisionResult {
-        let revision = match ScopeRevision::from_canonical(&mail.canonical) {
+        let WriteScopeRevision { canonical } = mail;
+        let revision = match ScopeRevision::from_canonical(&canonical) {
             Ok(revision) => revision,
             Err(error) => return write_revision_error(CommissionError::from(error)),
         };
@@ -2130,7 +2131,8 @@ impl NativeActor for StoreCapability {
         _ctx: &mut NativeCtx<'_>,
         mail: ListCommissions,
     ) -> ListCommissionsResult {
-        let status = match mail.status.as_deref() {
+        let ListCommissions { status } = mail;
+        let status = match status.as_deref() {
             None => None,
             Some(raw) => match aether_bloomery::CommissionStatus::parse(raw) {
                 Some(status) => Some(status),

@@ -1,6 +1,6 @@
 //! Auth, refusal mapping, and response-status tests for commission routes.
 
-use aether_http::{HttpHeader, HttpServerRequest};
+use aether_http::{HttpHeader, HttpServerRequest, HttpServerResponse};
 
 use super::{
     approval_response, authorize, cancel_response, create_response, list_response, query_status, revision_response,
@@ -24,15 +24,22 @@ fn request(authorization: Option<&str>) -> HttpServerRequest {
     }
 }
 
+fn refused(request: &HttpServerRequest, token: &str) -> HttpServerResponse {
+    match authorize(request, token) {
+        Err(response) => response,
+        Ok(()) => panic!("expected a refused request"),
+    }
+}
+
 #[test]
 fn an_unauthenticated_request_is_refused() {
     // A missing, empty, or wrong bearer must not reach the store. The
     // configured token being empty is also a refusal: the surface that can
     // approve work is fail-closed when nothing has been configured.
-    assert_eq!(authorize(&request(None), "secret").unwrap_err().status, 401);
-    assert_eq!(authorize(&request(Some("Bearer secret")), "").unwrap_err().status, 401);
-    assert_eq!(authorize(&request(Some("Bearer other")), "secret").unwrap_err().status, 401);
-    assert_eq!(authorize(&request(Some("Basic secret")), "secret").unwrap_err().status, 401);
+    assert_eq!(refused(&request(None), "secret").status, 401);
+    assert_eq!(refused(&request(Some("Bearer secret")), "").status, 401);
+    assert_eq!(refused(&request(Some("Bearer other")), "secret").status, 401);
+    assert_eq!(refused(&request(Some("Basic secret")), "secret").status, 401);
     assert!(authorize(&request(Some("Bearer secret")), "secret").is_ok());
 }
 

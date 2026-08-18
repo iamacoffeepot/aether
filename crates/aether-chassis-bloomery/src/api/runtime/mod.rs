@@ -285,7 +285,8 @@ impl NativeActor for BloomeryApiCapability {
         ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
         id: http::Path<String>,
     ) -> http::Outcome {
-        let routed = state.show_commission(ctx.request(), &id.0);
+        let id = id.0;
+        let routed = state.show_commission(ctx.request(), &id);
         finish(state, ctx, routed)
     }
 
@@ -296,7 +297,8 @@ impl NativeActor for BloomeryApiCapability {
         ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
         id: http::Path<String>,
     ) -> http::Outcome {
-        let routed = state.write_commission_revision(ctx.request(), &id.0);
+        let id = id.0;
+        let routed = state.write_commission_revision(ctx.request(), &id);
         finish(state, ctx, routed)
     }
 
@@ -307,7 +309,8 @@ impl NativeActor for BloomeryApiCapability {
         ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
         id: http::Path<String>,
     ) -> http::Outcome {
-        let routed = state.submit_commission_approval(&ctx, ctx.request(), &id.0);
+        let id = id.0;
+        let routed = state.submit_commission_approval(&ctx, ctx.request(), &id);
         finish(state, ctx, routed)
     }
 
@@ -318,7 +321,8 @@ impl NativeActor for BloomeryApiCapability {
         ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
         id: http::Path<String>,
     ) -> http::Outcome {
-        let routed = state.cancel_commission(&ctx, ctx.request(), &id.0);
+        let id = id.0;
+        let routed = state.cancel_commission(&ctx, ctx.request(), &id);
         finish(state, ctx, routed)
     }
 
@@ -924,7 +928,7 @@ impl NativeActor for BloomeryApiCapability {
         ctx: &mut NativeCtx<'_, Manual>,
         mail: RecordCommissionApprovalResult,
     ) {
-        state.answer_commission_write(ctx, commissions::approval_response(mail));
+        state.answer_commission_write(ctx, &commissions::approval_response(mail));
     }
 
     #[http::reply]
@@ -951,7 +955,7 @@ impl NativeActor for BloomeryApiCapability {
         ctx: &mut NativeCtx<'_, Manual>,
         mail: CancelCommissionResult,
     ) {
-        state.answer_commission_write(ctx, commissions::cancel_response(mail));
+        state.answer_commission_write(ctx, &commissions::cancel_response(mail));
     }
 
     /// The store's reply to the boot configuration read (#4616). Fills the
