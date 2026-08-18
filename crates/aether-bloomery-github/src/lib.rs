@@ -58,6 +58,7 @@ mod client;
 mod config;
 mod executor;
 mod inward;
+mod landing;
 mod projection;
 
 // Re-export the moved modules so in-crate paths (`crate::source::…`,
@@ -69,10 +70,9 @@ pub use aether_bloomery_git::{correspondence, mainline, marker, source};
 
 pub use aether_bloomery_git::{
     ActionsApi, Artifact, ChecksState, Comment, GitCommit, GitDataApi, GitDataError, GitObjectFormat, GitObjectId,
-    GitRef, GitSource, GithubApi, GithubError, IssueStateApi, LandAcceptance, LandingProposal, LandingRefusal,
-    LandingSource, MainlineRef, Marker, MergeResult, NewComment, NewPullRequest, PullMergeResult, PullRequest,
-    PullRequestApi, PullRequestState, RunConclusion, RunStatus, SourceError, WorkflowRun, candidate_ref_name,
-    check_run_external_id, landing_branch, landing_floor_title, member_checkpoint_ref_name,
+    GitRef, GitSource, GithubApi, GithubError, HostSource, IssueStateApi, MainlineRef, Marker, MergeResult, NewComment,
+    NewPullRequest, PullMergeResult, PullRequest, PullRequestApi, PullRequestState, RunConclusion, RunStatus,
+    SourceError, WorkflowRun, candidate_ref_name, check_run_external_id, landing_branch, member_checkpoint_ref_name,
     parse_check_run_external_id, parse_marker, render_marker, short_hex, strip_heads, to_hex,
 };
 pub use app_auth::{AppTokenSource, InstallationTokenExchange};
@@ -85,5 +85,9 @@ pub use executor::{ActionsExecutor, ExecutorError, LaneWorkflows};
 pub use inward::{
     InwardError, StageResult, StageVerdict, StudyRecordError, StudyResult, normalize_stage_result,
     normalize_study_result, parse_study, parse_study_cost,
+};
+pub use landing::{
+    GithubLanding, LandAcceptance, LandProposal, LandingProposal, LandingRefusal, LandingSource, ProposalOutcome,
+    landing_floor_title,
 };
 pub use projection::{GithubProjection, canonical_issue_number};

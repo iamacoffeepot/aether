@@ -159,37 +159,11 @@ impl TransformRunner for ProcessTransformRunner {
         let mut lane = self.lane_program.command();
         scrub_coordinator_env(&mut lane, inherited_keys());
         export_build_env(&mut lane, spec);
-        lane.current_dir(spec.worktree_dir)
-            .args([spec.command, "--out"])
-            .arg(spec.evidence_dir)
-            .args(["--nonce", spec.nonce]);
-        // The diff base is not a model-lane detail: the critic reads it to see
-        // a committed candidate, and the mechanical verify lane reads it to
-        // narrow its compiling gates to that candidate's reverse-dependency
-        // closure (#4890). An order naming none — the whole-bloom aggregate
-        // verify, and every stage whose candidate is the working tree — leaves
-        // both lanes exactly as they were.
-        if let Some(diff_base) = diff_base.as_deref() {
-            lane.args(["--diff-base", diff_base]);
-        }
-        if is_model_lane(spec.command) {
-            lane.args(["--subject", checkout.as_str()]);
-            if let Some(harness) = spec.harness {
-                lane.args(["--harness", harness]);
-            }
-            if let Some(model) = spec.model {
-                lane.args(["--model", model]);
-            }
-            if let Some(effort) = spec.effort {
-                lane.args(["--effort", effort]);
-            }
-            if let Some(task) = spec.task {
-                lane.args(["--task", task]);
-            }
-            if let Some(session) = spec.resume {
-                lane.args(["--resume", session]);
-            }
-        }
+        lane.current_dir(spec.worktree_dir);
+        // Command, `--out`, `--nonce`, and the optional `--diff-base` /
+        // `--seeded` / model-lane flags. A Construct checkpoint is
+        // `--seeded` only (#5052); Verify and Review still name a range.
+        append_work_order_args(&mut lane, spec, &checkout, diff_base.as_deref());
         // Own process group so a re-attached kill after a coordinator restart
         // can signal the lane *and* the harness it spawned, not just the head
         // pid this process recorded (issue #4999). `process_group(0)` is the
@@ -317,6 +291,54 @@ fn capture_diff(worktree_dir: &Path) -> Option<String> {
             None
         }
     }
+}
+
+/// Append the work-order flags `cargo xtask transform` reads.
+fn append_work_order_args(lane: &mut Command, spec: &RunSpec<'_>, checkout: &str, diff_base: Option<&str>) {
+    for arg in work_order_args(spec, checkout, diff_base) {
+        lane.arg(arg);
+    }
+}
+
+/// The argv tail after the lane program: command, `--out`, `--nonce`, and the
+/// optional range / model / seeded flags.
+///
+/// A Construct checkpoint is `--seeded <checkout>` and never `--diff-base`
+/// (#5052): the marker on the work order is provenance, not a range the
+/// lane judges. A clean Construct emits neither.
+fn work_order_args(spec: &RunSpec<'_>, checkout: &str, diff_base: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        spec.command.to_owned(),
+        "--out".into(),
+        spec.evidence_dir.display().to_string(),
+        "--nonce".into(),
+        spec.nonce.to_owned(),
+    ];
+    if let Some(diff_base) = diff_base {
+        args.extend(["--diff-base".into(), diff_base.to_owned()]);
+    }
+    if is_model_lane(spec.command) {
+        args.extend(["--subject".into(), checkout.to_owned()]);
+        if let Some(harness) = spec.harness {
+            args.extend(["--harness".into(), harness.to_owned()]);
+        }
+        if let Some(model) = spec.model {
+            args.extend(["--model".into(), model.to_owned()]);
+        }
+        if let Some(effort) = spec.effort {
+            args.extend(["--effort".into(), effort.to_owned()]);
+        }
+        if let Some(task) = spec.task {
+            args.extend(["--task".into(), task.to_owned()]);
+        }
+        if let Some(session) = spec.resume {
+            args.extend(["--resume".into(), session.to_owned()]);
+        }
+        if spec.seeded.is_some() {
+            args.extend(["--seeded".into(), checkout.to_owned()]);
+        }
+    }
+    args
 }
 
 /// Point a lane's build at its slot's own target directory and cap how much of
@@ -713,12 +735,12 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::super::runner::RunLifecycle;
+    use super::super::runner::{RunLifecycle, RunSpec};
     use super::{
         CaptureIdentity, FALLBACK_CAPTURE_SUBJECT, FALLBACK_IDENTITY, ProcessTransformRunner, SETTINGS_PATH,
         TransformRunner, capture_subject, commit_parents, commitish_for, decode_object_hex, fetch_order_identities,
         fetch_subject_if_absent, git_in, materialize_checkout, neutralize_hooks, reclaim_worktree_path, reset_checkout,
-        strip_hooks,
+        strip_hooks, work_order_args,
     };
 
     #[test]
@@ -730,6 +752,84 @@ mod tests {
         assert_eq!(lifecycle, RunLifecycle::ObservationFault);
         assert!(lifecycle.is_terminal());
         assert!(!lifecycle.clean_success());
+    }
+
+    // The plausible bug: `--seeded` is omitted on a checkpoint Construct, or
+    // emitted on a clean start, or the Construct provenance marker is
+    // forwarded as `--diff-base` and the prompt either stays silent or
+    // treats an untrusted tree as a committed range (#5052).
+    #[test]
+    fn a_seeded_construct_emits_seeded_and_a_clean_one_does_not() {
+        let evidence = Path::new("/tmp/evidence");
+        let worktree = Path::new("/tmp/slot");
+        let target = Path::new("/tmp/target");
+        let checkout = "abc123def456";
+
+        let clean = work_order_args(
+            &spec("construct.implement", checkout, None, None, evidence, worktree, target),
+            checkout,
+            None,
+        );
+        assert!(!clean.iter().any(|arg| arg == "--seeded"), "a clean Construct must not name a checkpoint: {clean:?}");
+        assert!(
+            !clean.iter().any(|arg| arg == "--diff-base"),
+            "Construct never forwards provenance as --diff-base: {clean:?}"
+        );
+
+        let seeded = work_order_args(
+            &spec("construct.implement", checkout, None, Some(checkout), evidence, worktree, target),
+            checkout,
+            None,
+        );
+        let seeded_at =
+            seeded.iter().position(|arg| arg == "--seeded").expect("a checkpoint Construct must emit --seeded");
+        assert_eq!(
+            seeded.get(seeded_at + 1).map(String::as_str),
+            Some(checkout),
+            "the prompt names the checkout it started from"
+        );
+        assert!(
+            !seeded.iter().any(|arg| arg == "--diff-base"),
+            "the Construct marker must not become --diff-base: {seeded:?}"
+        );
+
+        let verify = work_order_args(
+            &spec("verify.check", checkout, Some("base000"), None, evidence, worktree, target),
+            checkout,
+            Some("base000"),
+        );
+        assert!(
+            verify.windows(2).any(|pair| pair == ["--diff-base", "base000"]),
+            "verify still names its range: {verify:?}"
+        );
+        assert!(!verify.iter().any(|arg| arg == "--seeded"), "verify is not a construct checkpoint: {verify:?}");
+    }
+
+    fn spec<'a>(
+        command: &'a str,
+        checkout_hex: &'a str,
+        diff_base_hex: Option<&'a str>,
+        seeded: Option<&'a str>,
+        evidence_dir: &'a Path,
+        worktree_dir: &'a Path,
+        target_dir: &'a Path,
+    ) -> RunSpec<'a> {
+        RunSpec {
+            command,
+            checkout_hex,
+            diff_base_hex,
+            seeded,
+            worktree_dir,
+            target_dir,
+            build_jobs: 1,
+            evidence_dir,
+            nonce: "n-1",
+            harness: None,
+            model: None,
+            effort: None,
+            task: None,
+            resume: None,
+        }
     }
 
     #[cfg(unix)]

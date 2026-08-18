@@ -24,9 +24,9 @@
 
 use std::sync::Arc;
 
-use aether_bloomery::{BloomId, Digest, IntegrateOutcome, LandOutcome, LandProposal};
+use aether_bloomery::{BloomId, Digest, IntegrateOutcome};
 use aether_bloomery_github::testing::FakeGithub;
-use aether_bloomery_github::{GitSource, MainlineRef, SourceError};
+use aether_bloomery_github::{GitSource, GithubLanding, LandingSource, MainlineRef, ProposalOutcome, SourceError};
 use aether_chassis_bloomery::bloomery::SourceShell;
 
 fn digest(seed: u8) -> Digest {
@@ -80,7 +80,7 @@ fn a_synthetic_bloom_snapshots_integrates_and_observes_gated_land() {
     assert!(reusable.iter().any(|c| c.tree == base_tree), "the successor reuses the checkpoint by digest");
 
     // Land is refused while gated, and mainline is untouched.
-    match shell.land(&bloom, &base, &digest(90), None) {
+    match shell.land(&bloom, &base, &digest(90)) {
         Err(SourceError::LandingDisabled) => {}
         other => panic!("expected LandingDisabled, got {other:?}"),
     }
@@ -94,46 +94,38 @@ fn land_proposes_the_new_head_and_observes_the_acceptance_when_enabled() {
     // A second shell over the same fake with the gate enabled: the guard passes
     // against the expected base and a landing proposal is opened. The new head's
     // git-object correspondence is seeded so the landing branch resolves.
-    let enabled =
-        SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake.clone()), true, MainlineRef::default())));
+    let git = GitSource::new(fake.clone(), Arc::new(fake.clone()), true, MainlineRef::default());
+    let landing = GithubLanding::new(git);
     let new_head = digest(90);
     fake.seed_git_object(&new_head);
-    let number = match enabled.land(&bloom, &base, &new_head, None).unwrap() {
-        LandOutcome::Proposed { number } => number,
-        other @ LandOutcome::BaseMoved { .. } => panic!("expected Proposed, got {other:?}"),
+    let number = match landing.land_proposal(&bloom, &base, &new_head, None).unwrap() {
+        ProposalOutcome::Proposed { number } => number,
+        other @ ProposalOutcome::BaseMoved { .. } => panic!("expected Proposed, got {other:?}"),
     };
     assert_eq!(fake.ref_digest("heads/main"), Some(base), "mainline is protected — proposing never writes it");
-    assert_eq!(enabled.poll_land(&bloom, &base, number).unwrap(), LandProposal::Open, "the proposal stands open");
+    assert_eq!(landing.poll_land(&bloom, &base, number).unwrap(), aether_bloomery_github::LandProposal::Open);
 
-    // Accepting it is what lands the bloom, and the receipt attests the commit
-    // mainline actually became rather than the head that was proposed.
     fake.merge_pull_request(number, &"5c".repeat(20));
-    let landed = enabled.poll_land(&bloom, &base, number).unwrap();
-    let LandProposal::Landed(receipt) = landed else {
+    let landed = landing.poll_land(&bloom, &base, number).unwrap();
+    let aether_bloomery_github::LandProposal::Landed(receipt) = landed else {
         panic!("expected Landed, got {landed:?}")
     };
     assert_eq!(receipt.previous_base, base);
     assert_ne!(receipt.new_head, new_head, "the landed head is the merge commit");
 
-    // Re-issuing this bloom's land adopts the proposal it already opened, even
-    // now that mainline has moved off the sealed base — moving is what accepting
-    // the proposal *did*, so refusing here would abandon the bloom at the moment
-    // it succeeded.
     assert_eq!(
-        enabled.land(&bloom, &base, &new_head, None).unwrap(),
-        LandOutcome::Proposed { number },
+        landing.land_proposal(&bloom, &base, &new_head, None).unwrap(),
+        ProposalOutcome::Proposed { number },
         "an open proposal is adopted rather than re-judged against the base",
     );
 
-    // For a bloom with no proposal, though, a stale expected base is the clean
-    // BaseMoved refusal, not an error — and it proposes nothing.
     fake.seed_ref_at("heads/main", &new_head);
     let successor = BloomId(digest(77));
-    match enabled.land(&successor, &base, &digest(91), None).unwrap() {
-        LandOutcome::BaseMoved { expected, actual } => {
+    match landing.land_proposal(&successor, &base, &digest(91), None).unwrap() {
+        ProposalOutcome::BaseMoved { expected, actual } => {
             assert_eq!(expected, base);
             assert_eq!(actual, new_head);
         }
-        other @ LandOutcome::Proposed { .. } => panic!("expected BaseMoved, got {other:?}"),
+        other @ ProposalOutcome::Proposed { .. } => panic!("expected BaseMoved, got {other:?}"),
     }
 }

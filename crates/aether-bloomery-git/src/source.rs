@@ -1,12 +1,11 @@
 //! The git source-port backend (ADR-0149 §The boundary, [#3465]).
 //!
-//! Implements [`SourceBackend`] over GitHub's Git Data REST API ([`GitDataApi`])
-//! — blob/tree/commit/ref reads and writes and the compare-and-swap ref update
-//! all over HTTP, **no working copy on disk and no `git` / `git2` / `gix`
-//! dependency**. Branch names are working handles, never identity: every value
-//! the port returns is digest-addressed ([`SourceSnapshot`] / [`Checkpoint`] /
-//! [`IntegrateOutcome`] / [`LandOutcome`]), and no GitHub type crosses into a
-//! core `aether_bloomery` module.
+//! Implements [`SourceBackend`] over a [`GitDataApi`] client — blob/tree/commit/ref
+//! reads and writes and the compare-and-swap ref update, **no working copy on
+//! disk and no `git` / `git2` / `gix` dependency**. Branch names are working
+//! handles, never identity: every value the port returns is digest-addressed
+//! ([`SourceSnapshot`] / [`Checkpoint`] / [`IntegrateOutcome`] / [`LandOutcome`]),
+//! and no GitHub type crosses into a core `aether_bloomery` module.
 //!
 //! # Digests map to git objects through persisted correspondence
 //!
@@ -55,18 +54,16 @@
 
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
 
 use aether_bloomery::{
     BackendObjectId, BloomId, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome,
-    ContentAddressed, CorrespondenceError, Digest, IntegrateOutcome, IntegrationPosition, LandOutcome, LandProposal,
-    LandingReceipt, SharedCorrespondence, Snapshot, SourceBackend, SourceSnapshot, WorkpieceId, digest_of,
+    ContentAddressed, CorrespondenceError, Digest, IntegrateOutcome, IntegrationPosition, LandOutcome,
+    SharedCorrespondence, Snapshot, SourceBackend, SourceSnapshot, WorkpieceId, digest_of,
 };
 use serde::Serialize;
 
-use crate::client::{
-    GitDataApi, GitDataError, GitRef, GithubApi, GithubError, IssueStateApi, MergeResult, NewComment, NewPullRequest,
-    PullMergeResult, PullRequestApi, PullRequestState, strip_heads,
-};
+use crate::client::{GitDataApi, GitDataError, GitRef, GithubError, MergeResult, strip_heads};
 use crate::correspondence::GitObjectId;
 use crate::mainline::MainlineRef;
 use crate::short_hex;
@@ -286,160 +283,6 @@ impl ContentAddressed for CandidateCommitAddress<'_> {
     const DOMAIN: &'static str = "aether.bloomery.candidate.checkout";
 }
 
-/// The prose a landing proposal is opened with, assembled by the caller that can
-/// see the bloom's membership — the messages its lanes wrote and the objects its
-/// workpieces address. This port sees neither, so the text arrives here already
-/// composed rather than being derived from the three digests `land` is given.
-///
-/// The title is optional because a bloom does not always have one to offer: a
-/// member whose lane wrote no usable subject, and a multi-member bloom whose
-/// several messages name no single change, both land under
-/// [`landing_floor_title`] instead. The caller says which by leaving it `None`,
-/// so the floor keeps one spelling — here, beside the proposal it opens.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
-pub struct LandingProposal {
-    /// The proposal's title, or `None` to land under the floor.
-    pub title: Option<String>,
-    /// The caller's half of the body. The provenance footer is appended below
-    /// it, so an assembly never restates the digests.
-    pub body: String,
-}
-
-/// What asking the port to accept a bloom's own landing proposal did
-/// (issue #4953).
-///
-/// The coordinator opens the proposal and merges it once the structural gates
-/// hold — the proposal is this bloom's landing branch aimed at mainline, its
-/// head is still the proven head, and the base compare-and-swap still passes.
-/// ADR-0186 gives the daily ref no required checks because bloomery's own
-/// verify and aggregate gates prove each landing; the proposal is
-/// correspondence, not a review surface, so this vocabulary does not consult
-/// check state.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum LandAcceptance {
-    /// The proposal merged, or had already merged. Either way the watch's next
-    /// poll reads the commit mainline actually became; this reports only that
-    /// there is nothing left to press.
-    Accepted,
-    /// Nothing to accept yet. The watch leaves the proposal open and looks
-    /// again on the next pass.
-    Pending,
-    /// Refused, and why. The landing does not proceed under this proposal.
-    Refused(LandingRefusal),
-}
-
-/// Why a landing acceptance refused. Each variant is a different thing for an
-/// operator to do, which is why they are not one string.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum LandingRefusal {
-    /// The proposal no longer proposes what the bloom proved — its head is not
-    /// the resolved head (it gained commits, or the branch was repointed), it
-    /// aims at a branch other than this coordinator's mainline, or it is no
-    /// longer open.
-    Drifted {
-        /// What moved, in the terms a reader of the journal needs.
-        detail: String,
-    },
-    /// Mainline is no longer the base the bloom sealed against. It moved after
-    /// the proposal was opened, so merging now would land the bloom's work onto
-    /// a base it was never built or verified against.
-    BaseMoved {
-        /// The sealed base the bloom proved against.
-        expected: Digest,
-        /// The base mainline actually stands at now.
-        actual: Digest,
-    },
-    /// The source itself refused the merge — a conflict, a protection rule, or
-    /// a head that moved between the guard read and the merge call.
-    Merge {
-        /// The refusing status.
-        status: u16,
-        /// The refusal body, verbatim.
-        detail: String,
-    },
-}
-
-/// The drift refusal, spelled once so the several ways a proposal can stop
-/// being the one that was proven all read the same in the journal.
-fn refused_drift(detail: String) -> LandAcceptance {
-    LandAcceptance::Refused(LandingRefusal::Drifted { detail })
-}
-
-impl fmt::Display for LandingRefusal {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Drifted { detail } => write!(f, "the landing proposal drifted off the proven head ({detail})"),
-            Self::BaseMoved { expected, actual } => write!(
-                f,
-                "mainline moved off the sealed base after the proposal opened (sealed `{}`, now `{}`)",
-                to_hex(expected),
-                to_hex(actual),
-            ),
-            Self::Merge { status, detail } => write!(f, "the source refused the merge with {status}: {detail}"),
-        }
-    }
-}
-
-/// The title a landing proposal falls back to: the bloom named by its short hex,
-/// under the repository's `chore(meta)` type. Always a lint-valid Conventional
-/// Commits header, which is what makes it a floor rather than a guess — mainline
-/// squash-merges with this as the commit subject.
-#[must_use]
-pub fn landing_floor_title(bloom: &BloomId) -> String {
-    format!("chore(meta): land bloom {}", short_hex(&bloom.0))
-}
-
-/// The provenance footer every landing proposal body ends on: what is being
-/// landed, onto what, and the digests a reader verifies it against. Prose for a
-/// person — the machine side reads the proposal's number, never this text — so
-/// it names the bloom and both ends of the swap rather than restating the whole
-/// spec, and it sits below the assembled body because the change is what a
-/// reader came for and the provenance is what they check afterwards.
-///
-/// It names the mainline ref alongside the two digests (ADR-0186): which branch
-/// bloomery integrates on is boot configuration and moves per day, so a reader
-/// of an older proposal should not have to reconstruct which ref it was aimed at
-/// from the coordinator's configuration at the time.
-fn render_provenance_footer(
-    bloom: &BloomId,
-    expected_base: &Digest,
-    new_head: &Digest,
-    mainline: &MainlineRef,
-) -> String {
-    format!(
-        "---\n\n\
-         Landing bloom `{}` onto `{mainline}`.\n\n\
-         - sealed base: `{}`\n\
-         - resolved head: `{}`\n\n\
-         Bloomery opened this proposal after the bloom resolved and its aggregate \
-         review passed. Merging it is what lands the bloom: the merge is observed, \
-         a `Fact::Land` is admitted against the commit mainline actually becomes, \
-         and the next bloom seals on that receipt.\n\n\
-         Closing it without merging leaves the bloom resolved and supersedable.\n",
-        to_hex(&bloom.0),
-        to_hex(expected_base),
-        to_hex(new_head),
-    )
-}
-
-/// The title and body a proposal is opened with: the caller's assembly when it
-/// made one, the floor plus a bare footer when it did not.
-fn render_landing_proposal(
-    bloom: &BloomId,
-    expected_base: &Digest,
-    new_head: &Digest,
-    mainline: &MainlineRef,
-    proposal: Option<&LandingProposal>,
-) -> (String, String) {
-    let footer = render_provenance_footer(bloom, expected_base, new_head, mainline);
-    let title = proposal.and_then(|proposal| proposal.title.clone()).unwrap_or_else(|| landing_floor_title(bloom));
-    let body = match proposal.map(|proposal| proposal.body.trim()) {
-        Some(assembled) if !assembled.is_empty() => format!("{assembled}\n\n{footer}"),
-        _ => footer,
-    };
-    (title, body)
-}
-
 /// The single mainline-admission claim ref (short `heads/…`-style form, no
 /// leading `refs/` — the client prepends it), realizing Bloomery's "one sealed,
 /// unlanded bloom per mainline" invariant as a shared repository ref
@@ -547,17 +390,25 @@ pub fn digest_from_hex(sha: &str) -> Option<Digest> {
 /// of record — a `false` gate is the explicit kill switch under which `land`
 /// refuses.
 ///
-/// The [`GithubApi`] bound is the landing assembly's: a proposal whose member
-/// named no commit message falls back to that member's source issue title, so
-/// the backend that opens the proposal has to be able to read one.
-pub struct GitSource<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> {
+pub struct GitSource<C: GitDataApi> {
     client: C,
     correspondence: SharedCorrespondence,
     cas_land_enabled: bool,
     mainline: MainlineRef,
 }
 
-impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GitSource<C> {
+impl<C: Clone + GitDataApi> Clone for GitSource<C> {
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            correspondence: Arc::clone(&self.correspondence),
+            cas_land_enabled: self.cas_land_enabled,
+            mainline: self.mainline.clone(),
+        }
+    }
+}
+
+impl<C: GitDataApi> GitSource<C> {
     /// Build a source backend over `client` and `correspondence`, with mainline
     /// landing gated by `cas_land_enabled` (`false` is the kill switch under
     /// which `land` refuses; production wires it on, per ADR-0149 migration
@@ -570,22 +421,47 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GitSource<C> {
     // The live mainline ref, or the clean `MissingRef` naming the ref that is
     // not there — the one read every mainline path goes through, so observation
     // and the land compare can never end up aimed at different branches.
-    fn mainline_head(&self) -> Result<GitRef, SourceError> {
+    /// The live mainline ref, or the clean `MissingRef` naming the ref that is
+    /// not there — the one read every mainline path goes through, so observation
+    /// and the land compare can never end up aimed at different branches.
+    ///
+    /// # Errors
+    /// [`SourceError::MissingRef`] when the configured mainline is absent.
+    pub fn mainline_head(&self) -> Result<GitRef, SourceError> {
         self.client
             .get_ref(self.mainline.git_ref())?
             .ok_or_else(|| SourceError::MissingRef(self.mainline.git_ref().to_owned()))
     }
 
-    /// Borrow the underlying client (test introspection).
+    /// Borrow the underlying client (test introspection and GitHub presentation).
     #[must_use]
     pub const fn client(&self) -> &C {
         &self.client
     }
 
-    // Forward-resolve a bloom digest to the real git object sha it corresponds
-    // to, or the clean `UnresolvedCorrespondence` when none was recorded. `what`
-    // names the resolution for the error message.
-    fn resolve_git_sha(&self, digest: &Digest, what: &str) -> Result<String, SourceError> {
+    /// Whether compare-and-swap mainline landing is enabled.
+    #[must_use]
+    pub const fn cas_land_enabled(&self) -> bool {
+        self.cas_land_enabled
+    }
+
+    /// The mainline ref this backend reads and CAS-lands onto.
+    #[must_use]
+    pub const fn mainline(&self) -> &MainlineRef {
+        &self.mainline
+    }
+
+    /// The correspondence store this backend resolves git objects through.
+    #[must_use]
+    pub fn correspondence(&self) -> &SharedCorrespondence {
+        &self.correspondence
+    }
+
+    /// Forward-resolve a bloom digest to its git object sha.
+    ///
+    /// # Errors
+    /// [`SourceError::UnresolvedCorrespondence`] when none was recorded.
+    pub fn resolve_git_sha(&self, digest: &Digest, what: &str) -> Result<String, SourceError> {
         self.correspondence
             .resolve_backend_object(digest)?
             .map(GitObjectId::try_from)
@@ -618,7 +494,12 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GitSource<C> {
     // outside Bloomery. Minting the address is what [`poll_land`] already does
     // for a squash-merge commit, for the same reason; doing it here lets an
     // unrecognized head be reported as the moved base it is.
-    fn mainline_digest(&self, sha: &str) -> Result<Digest, SourceError> {
+    /// The digest naming mainline's current head, minting and recording one when
+    /// the head is a commit Bloomery did not produce.
+    ///
+    /// # Errors
+    /// The sha is malformed, or the correspondence store faulted.
+    pub fn mainline_digest(&self, sha: &str) -> Result<Digest, SourceError> {
         let object =
             GitObjectId::from_hex(sha).ok_or_else(|| SourceError::Malformed(format!("git object sha `{sha}`")))?;
         if let Some(known) = self.correspondence.resolve_digest(&BackendObjectId::from(&object))? {
@@ -696,7 +577,9 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GitSource<C> {
         format!("{}{}", Self::checkpoint_prefix(bloom), to_hex(tree))
     }
 
-    fn landing_ref(bloom: &BloomId) -> String {
+    /// The landing-branch ref in the `heads/…` form the Git Data surface takes.
+    #[must_use]
+    pub fn landing_ref(bloom: &BloomId) -> String {
         format!("heads/{}", landing_branch(bloom))
     }
 
@@ -726,7 +609,29 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GitSource<C> {
     /// # Errors
     /// A transport or backend fault other than an already-absent ref.
     pub fn prune_working_refs(&self, bloom: &BloomId) -> Result<usize, SourceError> {
-        LandingSource::prune_working_refs(self, bloom)
+        let prefix = Self::working_ref_prefix(bloom);
+        let mut pruned = 0;
+        for git_ref in self.client.list_matching_refs(&prefix)? {
+            if !Self::is_reclaimable_working_ref(&git_ref.name, &prefix) {
+                continue;
+            }
+            self.client.delete_ref(&git_ref.name)?;
+            pruned += 1;
+        }
+        Ok(pruned)
+    }
+
+    /// Mint and record a digest for a commit mainline became that Bloomery did
+    /// not produce — a squash-accept merge, or any other foreign mainline write.
+    ///
+    /// # Errors
+    /// The sha is malformed, or the correspondence store faulted.
+    pub fn record_landed_commit(&self, merge_commit: &str) -> Result<Digest, SourceError> {
+        let object = GitObjectId::from_hex(merge_commit)
+            .ok_or_else(|| SourceError::Malformed(format!("landing merge commit sha `{merge_commit}`")))?;
+        let new_head = digest_of(&LandedHeadAddress { object: object.bytes() });
+        self.correspondence.record(&new_head, &BackendObjectId::from(object))?;
+        Ok(new_head)
     }
 
     // Point the bloom's landing branch at `sha`, creating it or moving it. The
@@ -736,7 +641,11 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GitSource<C> {
     // path reaches here when a still-open proposal sits on a stale head after a
     // refine. Fast-forward-only would wedge that bloom's landing forever on a
     // ref nobody else reads.
-    fn point_landing_branch(&self, bloom: &BloomId, sha: &str) -> Result<(), SourceError> {
+    /// Point the bloom's landing branch at `sha`, creating it or moving it.
+    ///
+    /// # Errors
+    /// A transport or backend fault other than an already-absent ref.
+    pub fn point_landing_branch(&self, bloom: &BloomId, sha: &str) -> Result<(), SourceError> {
         let name = Self::landing_ref(bloom);
         match self.client.get_ref(&name)? {
             Some(existing) if existing.sha == sha => Ok(()),
@@ -750,13 +659,18 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GitSource<C> {
     /// commit. Idempotent — an already-present ref is left as is, so a
     /// re-created namespace is a no-op rather than a conflict.
     ///
+    /// Returns the integration ref the existing-or-create produced: a live
+    /// advanced head when the namespace already existed, or the create response
+    /// when this call bootstrapped it. The caller must not re-read that name
+    /// immediately — GitHub can lag the write (#5072).
+    ///
     /// # Errors
     /// The Git Data ref reads/writes failed.
-    pub fn create_namespace(&self, bloom: &BloomId, base: &Digest) -> Result<(), SourceError> {
+    pub fn create_namespace(&self, bloom: &BloomId, base: &Digest) -> Result<GitRef, SourceError> {
         let base_sha = self.resolve_git_sha(base, "namespace base head digest")?;
-        self.ensure_ref(&Self::integration_ref(bloom), &base_sha)?;
+        let integration = self.ensure_ref(&Self::integration_ref(bloom), &base_sha)?;
         self.ensure_ref(&Self::attempt_ref(bloom, 1), &base_sha)?;
-        Ok(())
+        Ok(integration)
     }
 
     // The integration branch's current position: its tree digest —
@@ -772,9 +686,8 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GitSource<C> {
         &self,
         bloom: &BloomId,
         base_sha: &str,
+        current: &GitRef,
     ) -> Result<IntegrationPosition, SourceError> {
-        let integration = Self::integration_ref(bloom);
-        let current = self.client.get_ref(&integration)?.ok_or(SourceError::MissingRef(integration))?;
         let commit = self.client.get_commit(&current.sha)?;
         let tree = self.integration_tree_digest(&commit.tree)?;
         let head = if current.sha == base_sha {
@@ -789,11 +702,11 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GitSource<C> {
         Ok(IntegrationPosition { checkpoint: Checkpoint { bloom: *bloom, tree }, head })
     }
 
-    fn ensure_ref(&self, name: &str, sha: &str) -> Result<(), SourceError> {
-        if self.client.get_ref(name)?.is_none() {
-            self.client.create_ref(name, sha)?;
+    fn ensure_ref(&self, name: &str, sha: &str) -> Result<GitRef, SourceError> {
+        match self.client.get_ref(name)? {
+            Some(existing) => Ok(existing),
+            None => Ok(self.client.create_ref(name, sha)?),
         }
-        Ok(())
     }
 
     // Built from `claims_prefix` so the writer and the `enumerate_claims`
@@ -988,7 +901,7 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GitSource<C> {
     }
 }
 
-impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> SourceBackend for GitSource<C> {
+impl<C: GitDataApi> SourceBackend for GitSource<C> {
     type Error = SourceError;
 
     fn snapshot(&self, base: &Digest) -> Result<SourceSnapshot, Self::Error> {
@@ -1055,8 +968,8 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> SourceBackend f
 
     fn integration_checkpoint(&self, bloom: &BloomId, base: &Digest) -> Result<IntegrationPosition, Self::Error> {
         let base_sha = self.resolve_git_sha(base, "namespace base head digest")?;
-        self.create_namespace(bloom, base)?;
-        self.current_integration_position(bloom, &base_sha)
+        let current = self.create_namespace(bloom, base)?;
+        self.current_integration_position(bloom, &base_sha, &current)
     }
 
     fn integrate(
@@ -1221,38 +1134,32 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> SourceBackend f
     }
 
     fn land(&self, bloom: &BloomId, expected_base: &Digest, new_head: &Digest) -> Result<LandOutcome, Self::Error> {
-        self.land_proposal(bloom, expected_base, new_head, None)
-    }
+        let _ = bloom;
+        if !self.cas_land_enabled {
+            return Err(SourceError::LandingDisabled);
+        }
 
-    fn poll_land(&self, bloom: &BloomId, expected_base: &Digest, number: u64) -> Result<LandProposal, Self::Error> {
-        // A proposal that no longer exists cannot land and will never resolve,
-        // so it reads as declined rather than leaving a watch spinning forever
-        // on a number nothing answers.
-        let Some(pull) = self.client.get_pull_request(number)? else {
-            return Ok(LandProposal::Declined);
-        };
-        let Some(merge_commit) = pull.merge_commit_sha else {
-            if pull.state != PullRequestState::Open {
-                return Ok(LandProposal::Declined);
+        let actual = self.mainline_digest(&self.mainline_head()?.sha)?;
+        if actual == *new_head {
+            return Ok(LandOutcome::Landed { new_head: *new_head });
+        }
+        if actual != *expected_base {
+            return Ok(LandOutcome::BaseMoved { expected: *expected_base, actual });
+        }
+
+        let new_sha = self.resolve_git_sha(new_head, "land new head digest")?;
+        match self.client.update_ref(self.mainline.git_ref(), &new_sha, false) {
+            Ok(_) => Ok(LandOutcome::Landed { new_head: *new_head }),
+            Err(GitDataError::RefConflict(_)) => {
+                let actual = self.mainline_digest(&self.mainline_head()?.sha)?;
+                if actual == *new_head {
+                    Ok(LandOutcome::Landed { new_head: *new_head })
+                } else {
+                    Ok(LandOutcome::BaseMoved { expected: *expected_base, actual })
+                }
             }
-            // An open proposal is open until it merges, is closed, or drifts.
-            // Check conclusions are not a landing verdict: bloomery's own
-            // gates already proved this head (ADR-0186), and mapping a red
-            // check to `ChecksFailed` is what rejected a fully proven tree
-            // on a runner-side flake (#5110).
-            return Ok(LandProposal::Open);
-        };
-
-        // Mainline became the *merge* commit, which under a squash accept is a
-        // commit nothing on our side produced — so there is no correspondence
-        // for it yet, and the next bloom's `land` would fail to reverse-resolve
-        // mainline's digest. Mint its address and record it here, so the chain
-        // from this receipt to the next bloom's base check closes.
-        let object = GitObjectId::from_hex(&merge_commit)
-            .ok_or_else(|| SourceError::Malformed(format!("landing merge commit sha `{merge_commit}`")))?;
-        let new_head = digest_of(&LandedHeadAddress { object: object.bytes() });
-        self.correspondence.record(&new_head, &BackendObjectId::from(object))?;
-        Ok(LandProposal::Landed(LandingReceipt { bloom: *bloom, previous_base: *expected_base, new_head }))
+            Err(error) => Err(SourceError::Git(error)),
+        }
     }
 
     fn claim_seal(&self, bloom: &BloomId, workpieces: &[WorkpieceId]) -> Result<ClaimOutcome, Self::Error> {
@@ -1430,252 +1337,21 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> SourceBackend f
     }
 }
 
-/// The landing-assembly face of the source port: what a caller that can see a
-/// bloom's membership needs, over and above the digest-only
-/// [`SourceBackend::land`].
-///
-/// Its own trait rather than a wider `land` on the port, because the port's
-/// vocabulary is digests and outcomes and this is prose: a title, a body, and
-/// the issue titles the body falls back to. The reactor holds a
-/// [`LandingSource`] and calls [`land_proposal`](Self::land_proposal); the port
-/// contract stays exactly as narrow as it was, and `land` delegates here with no
-/// proposal, which is the floor the assembly falls back to anyway.
-pub trait LandingSource: SourceBackend<Error = SourceError> {
-    /// The human-authored title of issue `number`, or `None` when the repository
-    /// holds no such object.
-    ///
-    /// # Errors
-    /// The surface is unreachable or returned a non-404 error status.
-    fn issue_title(&self, number: u64) -> Result<Option<String>, SourceError>;
-
-    /// Propose landing `new_head` onto mainline under caller-assembled prose,
-    /// guarded by `expected_base` exactly as [`SourceBackend::land`] is.
-    ///
-    /// # Errors
-    /// [`SourceError::LandingDisabled`] while the land gate is off, or a
-    /// transport/backend fault (a moved base is the clean
-    /// [`LandOutcome::BaseMoved`], not an error).
-    fn land_proposal(
-        &self,
-        bloom: &BloomId,
-        expected_base: &Digest,
-        new_head: &Digest,
-        proposal: Option<&LandingProposal>,
-    ) -> Result<LandOutcome, SourceError>;
-
-    /// Accept the landing proposal numbered `number` — merge the pull request
-    /// the port itself opened for `bloom`, once the structural gates hold and
-    /// it still proposes exactly what the bloom proved (issue #4953).
-    ///
-    /// Gated by the same `cas_land_enabled` kill switch
-    /// [`land_proposal`](Self::land_proposal) is, and guarded by the same
-    /// compare-and-swap the proposal was opened under: `expected_base` has to
-    /// still be mainline, `new_head` has to still be the proposal's head, and
-    /// the merge itself is issued against that head sha so the source refuses
-    /// it if the branch moves in between. Check state is not consulted
-    /// (ADR-0186, #5110). Refuse-and-surface is the answer to every one of
-    /// those moving — never merge-anyway.
-    ///
-    /// # Errors
-    /// [`SourceError::LandingDisabled`] while the land gate is off, or a
-    /// transport/backend fault. A refusal is [`LandAcceptance::Refused`], not an
-    /// error: nothing about it gets better by re-driving the same call.
-    fn accept_land(
-        &self,
-        bloom: &BloomId,
-        expected_base: &Digest,
-        new_head: &Digest,
-        number: u64,
-    ) -> Result<LandAcceptance, SourceError>;
-
+/// Host-facing repository operations that sit beside [`SourceBackend::land`] —
+/// prune is not a landing outcome, but the janitor needs it on the same
+/// object the rest of the source shell holds.
+pub trait HostSource: SourceBackend<Error = SourceError> {
     /// Delete `bloom`'s candidate, integration, and checkpoint refs. Claim refs
     /// and the landing branch are spared. See [`GitSource::prune_working_refs`].
     ///
     /// # Errors
     /// A transport or backend fault other than an already-absent ref.
     fn prune_working_refs(&self, bloom: &BloomId) -> Result<usize, SourceError>;
-
-    /// Close issue `number` after leaving `comment` on it — the land reactor's
-    /// human-facing close so GitHub agrees with a day-branch land that closing
-    /// keywords will not see until nightly sync-back.
-    ///
-    /// Both writes are attempted: a comment the repository refuses still closes,
-    /// and a close that fails still leaves the comment when one was accepted.
-    ///
-    /// # Errors
-    /// The surface is unreachable, the issue is absent, or either write was refused.
-    fn close_issue(&self, number: u64, comment: &str) -> Result<(), SourceError>;
 }
 
-impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> LandingSource for GitSource<C> {
-    fn issue_title(&self, number: u64) -> Result<Option<String>, SourceError> {
-        Ok(self.client.issue_title(number)?.map(|title| title.trim().to_owned()).filter(|title| !title.is_empty()))
-    }
-
-    fn close_issue(&self, number: u64, comment: &str) -> Result<(), SourceError> {
-        let commented = self.client.create_comment(&NewComment { issue_number: number, body: comment.to_owned() });
-        let closed = self.client.close_issue(number);
-        commented?;
-        Ok(closed?)
-    }
-
-    fn land_proposal(
-        &self,
-        bloom: &BloomId,
-        expected_base: &Digest,
-        new_head: &Digest,
-        proposal: Option<&LandingProposal>,
-    ) -> Result<LandOutcome, SourceError> {
-        if !self.cas_land_enabled {
-            return Err(SourceError::LandingDisabled);
-        }
-        // Adopt before anything else: a re-drained land entry (or a crash-and-
-        // replay) must find the proposal it already opened rather than opening a
-        // second one. This is what makes issuing a land idempotent.
-        //
-        // A redrive of the same head is still a no-write (`point_landing_branch`
-        // no-ops). A later land with a new proven head — a refine after the
-        // first proposal was refused — must move the branch onto that head
-        // before returning, or the #4953 head-match then refuses the new
-        // landing as drift, one gate too late.
-        //
-        // Ahead of the base check, deliberately. The base check decides whether to
-        // *open* a landing; once one is open its fate belongs to the proposal, and
-        // re-deciding it here would abandon the bloom the moment mainline moved —
-        // including when it moved *because this very proposal merged*, which is
-        // the one outcome the watch exists to observe.
-        let branch = landing_branch(bloom);
-        if let Some(existing) = self.client.find_pull_request_for_head(&branch)? {
-            if existing.state == PullRequestState::Open {
-                let proven = self.resolve_git_sha(new_head, "land new head digest")?;
-                if existing.head_sha != proven {
-                    self.point_landing_branch(bloom, &proven)?;
-                }
-            }
-            return Ok(LandOutcome::Proposed { number: existing.number });
-        }
-
-        // Reverse-resolve the real mainline object (a sha1/40-hex on a real repo,
-        // which the old fixed-64-hex gate rejected as `Malformed` before any swap)
-        // to the base digest, then compare against the sealed base.
-        let actual = self.mainline_digest(&self.mainline_head()?.sha)?;
-
-        if actual != *expected_base {
-            return Ok(LandOutcome::BaseMoved { expected: *expected_base, actual });
-        }
-
-        // Forward-resolve the new head digest to its real git object, point the
-        // bloom's landing branch at it, and propose that branch onto mainline.
-        self.point_landing_branch(bloom, &self.resolve_git_sha(new_head, "land new head digest")?)?;
-        let (title, body) = render_landing_proposal(bloom, expected_base, new_head, &self.mainline, proposal);
-        let opening = NewPullRequest { title, body, head: branch.clone(), base: self.mainline.branch().to_owned() };
-        match self.client.create_pull_request(&opening) {
-            Ok(opened) => Ok(LandOutcome::Proposed { number: opened.number }),
-            // A `RefConflict` is the duplicate-head refusal: something opened a
-            // proposal for this branch between our lookup and our create.
-            // Re-read and adopt it — the same idempotent answer the lookup
-            // above gives, one race later. A conflict with still no proposal to
-            // adopt is a genuine refusal (an empty diff, a missing base) and
-            // propagates.
-            Err(GitDataError::RefConflict(detail)) => self
-                .client
-                .find_pull_request_for_head(&branch)?
-                .map(|raced| LandOutcome::Proposed { number: raced.number })
-                .ok_or(SourceError::Git(GitDataError::RefConflict(detail))),
-            Err(error) => Err(SourceError::Git(error)),
-        }
-    }
-
-    fn accept_land(
-        &self,
-        bloom: &BloomId,
-        expected_base: &Digest,
-        new_head: &Digest,
-        number: u64,
-    ) -> Result<LandAcceptance, SourceError> {
-        // The kill switch first, before any read and long before the write. An
-        // acceptance that consulted the gate only on the way past would be a
-        // way to land with `cas_land_enabled` off — the one thing the switch
-        // exists to make impossible.
-        if !self.cas_land_enabled {
-            return Err(SourceError::LandingDisabled);
-        }
-
-        let Some(pull) = self.client.get_pull_request(number)? else {
-            return Ok(refused_drift(format!("proposal #{number} is gone")));
-        };
-        // Already merged — by an operator, or by this very call on a pass whose
-        // observation was lost. Idempotent rather than a refusal: re-pressing a
-        // button that is already pressed is a no-op, and calling it drift would
-        // reject a bloom for having landed.
-        if pull.merged {
-            return Ok(LandAcceptance::Accepted);
-        }
-        if pull.state != PullRequestState::Open {
-            return Ok(refused_drift(format!("proposal #{number} is closed without having merged")));
-        }
-        // Only a landing this coordinator opened is accepted here, and only
-        // onto its own mainline. The pair is the identity check: a human-flow
-        // pull request proposes from a branch that is not this bloom's landing
-        // branch, so it can never be what a number resolves to here, and a
-        // landing aimed somewhere other than mainline is not the landing that
-        // was proposed whatever branch it came from.
-        let branch = landing_branch(bloom);
-        if strip_heads(&pull.head_ref) != branch {
-            return Ok(refused_drift(format!(
-                "proposal #{number} proposes `{}`, not this bloom's landing branch `{branch}`",
-                pull.head_ref,
-            )));
-        }
-        if strip_heads(&pull.base) != self.mainline.branch() {
-            return Ok(refused_drift(format!(
-                "proposal #{number} aims at `{}`, not `{}`",
-                pull.base,
-                self.mainline.branch(),
-            )));
-        }
-
-        // The head the bloom proved. A proposal whose head is anything else has
-        // gained commits nobody verified — the one shape a merge must never
-        // wave through, because every gate upstream judged the other tree.
-        let proven = self.resolve_git_sha(new_head, "landing acceptance head digest")?;
-        if pull.head_sha != proven {
-            return Ok(refused_drift(format!(
-                "proposal #{number} is at `{}`, not the proven head `{proven}`",
-                pull.head_sha,
-            )));
-        }
-
-        // The same compare-and-swap `land_proposal` opened under, re-asked at
-        // the moment of the write. `land_proposal` deliberately does not
-        // re-decide a base once a proposal is open — an open proposal's fate
-        // belongs to the proposal — but a merge *is* the write that base
-        // guards, and mainline can have moved in the ticks between opening
-        // and this accept.
-        let actual = self.mainline_digest(&self.mainline_head()?.sha)?;
-        if actual != *expected_base {
-            return Ok(LandAcceptance::Refused(LandingRefusal::BaseMoved { expected: *expected_base, actual }));
-        }
-
-        match self.client.squash_merge_pull_request(number, &pull.head_sha)? {
-            PullMergeResult::Merged { .. } => Ok(LandAcceptance::Accepted),
-            PullMergeResult::Refused { status, detail } => {
-                Ok(LandAcceptance::Refused(LandingRefusal::Merge { status, detail }))
-            }
-        }
-    }
-
+impl<C: GitDataApi> HostSource for GitSource<C> {
     fn prune_working_refs(&self, bloom: &BloomId) -> Result<usize, SourceError> {
-        let prefix = Self::working_ref_prefix(bloom);
-        let mut pruned = 0;
-        for git_ref in self.client.list_matching_refs(&prefix)? {
-            if !Self::is_reclaimable_working_ref(&git_ref.name, &prefix) {
-                continue;
-            }
-            self.client.delete_ref(&git_ref.name)?;
-            pruned += 1;
-        }
-        Ok(pruned)
+        Self::prune_working_refs(self, bloom)
     }
 }
 
@@ -1684,23 +1360,30 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> LandingSource f
 mod tests {
     use std::slice::from_ref;
 
-    use crate::client::ChecksState;
     use crate::correspondence::GitObjectId;
 
     use aether_bloomery::{
         BackendObjectId, BloomId, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState,
         ClaimReleaseOutcome, Correspondence as DomainCorrespondence, CorrespondenceError, Digest, IntegrateOutcome,
-        LandOutcome, LandProposal, SourceBackend, WorkpieceId,
+        IntegrationPosition, LandOutcome, SourceBackend, WorkpieceId,
     };
 
     use std::sync::Arc;
 
     use super::{
-        ADMISSION_REF, EMPTY_TREE, GitSource, LandAcceptance, LandingRefusal, LandingSource, MainlineRef, SourceError,
-        candidate_ref_name, landing_branch, member_checkpoint_ref_name, parse_bloom_line, render_claim_message,
-        render_tombstone_message, to_hex,
+        ADMISSION_REF, EMPTY_TREE, GitSource, MainlineRef, SourceError, candidate_ref_name, member_checkpoint_ref_name,
+        parse_bloom_line, render_claim_message, render_tombstone_message, to_hex,
     };
-    use crate::client::{GitDataApi, PullRequestApi};
+
+    // Tripwire: GitSource's bound is the git-data trait alone. A GitHub-shaped
+    // extra bound here would silently re-couple the repository backend.
+    fn _git_source_is_bounded_on_git_data_only<C: GitDataApi>(
+        source: GitSource<C>,
+    ) -> impl SourceBackend<Error = SourceError> {
+        source
+    }
+
+    use crate::client::{GitDataApi, GitDataError};
     use crate::short_hex;
     use crate::testing::FakeGithub;
 
@@ -1884,6 +1567,85 @@ mod tests {
         let (fake, bloom, _base) = seeded();
         assert!(fake.ref_exists(&GitSource::<FakeGithub>::integration_ref(&bloom)), "integration branch created");
         assert!(fake.ref_exists(&GitSource::<FakeGithub>::attempt_ref(&bloom, 1)), "attempt handle created");
+    }
+
+    #[test]
+    fn integration_checkpoint_uses_the_create_response_when_the_follow_up_read_lags() {
+        // Tripwire: a successful create_ref must supply the integration SHA.
+        // Re-reading the same name can miss GitHub's cache window and turn a
+        // successful bootstrap into MissingRef (#5072).
+        let fake = FakeGithub::new();
+        fake.lag_next_read_after_create();
+        let base = fake.seed_base_commit(&digest(10));
+        fake.seed_ref_at("heads/main", &base);
+        let source = git_source(&fake, false);
+        let bloom = bloom();
+
+        let IntegrationPosition { checkpoint, head } = source.integration_checkpoint(&bloom, &base).unwrap();
+        assert_eq!(checkpoint.bloom, bloom);
+        assert_eq!(head, None, "a freshly created namespace is still at the sealed base");
+
+        let integration = GitSource::<FakeGithub>::integration_ref(&bloom);
+        assert!(fake.ref_exists(&integration), "the write landed even though get_ref still lags");
+        assert_eq!(fake.get_ref(&integration).unwrap(), None, "the fake still owes the lagged read");
+        assert!(fake.get_ref(&integration).unwrap().is_some(), "the second read sees the ref");
+    }
+
+    #[test]
+    fn an_existing_advanced_integration_ref_supplies_its_current_head() {
+        // Tripwire: recovery must not assume the sealed base after seeing an
+        // already-present namespace. The first get_ref is the live head.
+        let (fake, bloom, base) = seeded();
+        let source = git_source(&fake, false);
+        let expected = source.checkpoint(&bloom, &source.snapshot(&base).unwrap().tree).unwrap();
+        let candidate = digest(50);
+        fake.seed_git_object(&candidate);
+        let IntegrateOutcome::Integrated { head, tree } = source.integrate(&bloom, &candidate, &expected).unwrap()
+        else {
+            panic!("the first fold advances the integration branch");
+        };
+
+        let position = source.integration_checkpoint(&bloom, &base).unwrap();
+        assert_eq!(position.head, Some(head), "recovery names the advanced head, not the sealed base");
+        assert_eq!(position.checkpoint.tree, tree);
+    }
+
+    #[test]
+    fn a_create_ref_transport_fault_is_not_a_base_fallback() {
+        let fake = FakeGithub::new();
+        fake.fail_next_create_ref("git-data create timed out");
+        let base = fake.seed_base_commit(&digest(10));
+        fake.seed_ref_at("heads/main", &base);
+
+        match git_source(&fake, false).integration_checkpoint(&bloom(), &base) {
+            Err(SourceError::Git(GitDataError::Command(detail))) => {
+                assert!(detail.contains("create timed out"), "the transport fault surfaces: {detail}");
+            }
+            other => panic!("expected a git-data command fault, got {other:?}"),
+        }
+        assert!(
+            !fake.ref_exists(&GitSource::<FakeGithub>::integration_ref(&bloom())),
+            "a failed create must not invent the namespace",
+        );
+    }
+
+    #[test]
+    fn a_get_ref_transport_fault_is_not_a_base_fallback() {
+        let fake = FakeGithub::new();
+        fake.fail_next_get_ref("git-data read timed out");
+        let base = fake.seed_base_commit(&digest(10));
+        fake.seed_ref_at("heads/main", &base);
+
+        match git_source(&fake, false).integration_checkpoint(&bloom(), &base) {
+            Err(SourceError::Git(GitDataError::Command(detail))) => {
+                assert!(detail.contains("read timed out"), "the transport fault surfaces: {detail}");
+            }
+            other => panic!("expected a git-data command fault, got {other:?}"),
+        }
+        assert!(
+            !fake.ref_exists(&GitSource::<FakeGithub>::integration_ref(&bloom())),
+            "a failed read must not invent the namespace at the sealed base",
+        );
     }
 
     #[test]
@@ -2221,12 +1983,9 @@ mod tests {
     }
 
     #[test]
-    fn land_proposes_the_resolved_head_and_never_writes_mainline() {
+    fn land_cas_updates_mainline_and_returns_landed() {
         let fake = FakeGithub::new();
         let bloom = bloom();
-        // A real sha1 (40-hex) mainline — the object format the reported failure
-        // (#3590) hit, which the old fixed-64-hex `digest_from_hex` gate rejected
-        // as `Malformed` before any read. The correspondence resolves it.
         let base = digest(10);
         let mainline_sha1 = "a1".repeat(20);
         assert_eq!(mainline_sha1.len(), 40, "a sha1 object id is 40 hex");
@@ -2235,42 +1994,37 @@ mod tests {
         let new_head = digest(90);
         fake.seed_git_object(&new_head);
 
-        // Gated off (the kill switch): a typed refusal, before any write.
         let gated = git_source(&fake, false);
         match gated.land(&bloom, &base, &new_head) {
             Err(SourceError::LandingDisabled) => {}
             other => panic!("expected LandingDisabled, got {other:?}"),
         }
 
-        // Enabled: reverse-resolve the sha1 mainline to the base, point the
-        // landing branch at the resolved head, and propose it.
         let enabled = git_source(&fake, true);
-        let number = match enabled.land(&bloom, &base, &new_head).unwrap() {
-            LandOutcome::Proposed { number } => number,
-            other @ LandOutcome::BaseMoved { .. } => panic!("expected Proposed, got {other:?}"),
-        };
+        match enabled.land(&bloom, &base, &new_head).unwrap() {
+            LandOutcome::Landed { new_head: landed } => assert_eq!(landed, new_head),
+            other @ LandOutcome::BaseMoved { .. } => panic!("expected Landed, got {other:?}"),
+        }
         assert_eq!(
-            fake.ref_target(&format!("heads/{}", landing_branch(&bloom))),
+            fake.ref_target("heads/main"),
             Some(to_hex(&new_head)),
-            "the landing branch points at the resolved head",
+            "a compare-and-swap land writes mainline onto the proven head",
         );
-        // Tripwire: mainline is protected, so `land` must never write it. A slip
-        // back to the direct compare-and-swap would 403 against the real repo —
-        // a failure no fake-backed test would otherwise catch.
-        assert_eq!(fake.ref_target("heads/main"), Some(mainline_sha1), "land never writes mainline");
-        assert!(fake.get_pull_request(number).unwrap().is_some(), "the proposal exists");
+        assert_eq!(
+            enabled.land(&bloom, &base, &new_head).unwrap(),
+            LandOutcome::Landed { new_head },
+            "a re-issued land of an already-applied swap is Landed, not BaseMoved",
+        );
     }
 
     // Tripwire: a repoint moves every mainline read at once (ADR-0186). The
-    // observation, the compare-and-swap base check, and the proposal's base are
-    // three separate reads of the same ref, and a slip back to `main` on any one
-    // of them is silent: the observation would name a head the day branch never
-    // held, the compare would refuse a base that had not moved, and the proposal
-    // would aim yesterday's landing at the branch bloomery no longer owns. So
-    // `main` is seeded here too, at a different commit, and every assertion is
-    // one the default ref would fail.
+    // observation and the compare-and-swap must aim at the same configured
+    // ref, and a slip back to `main` on either is silent: the observation
+    // would name a head the day branch never held, and the compare would
+    // refuse a base that had not moved. So `main` is seeded here too, at a
+    // different commit, and every assertion is one the default ref would fail.
     #[test]
-    fn a_repointed_mainline_observes_compares_and_proposes_against_the_configured_ref() {
+    fn a_repointed_mainline_observes_and_cas_lands_against_the_configured_ref() {
         let fake = FakeGithub::new();
         let bloom = bloom();
         let day = MainlineRef::new("refs/heads/bloomery/daily/2026-08-13");
@@ -2287,16 +2041,18 @@ mod tests {
         assert_eq!(source.mainline_head_sha().unwrap(), day_sha, "the observation reads the configured ref");
         assert_eq!(source.observe_mainline_head().unwrap(), base, "and names the base the day branch sits at");
 
-        let LandOutcome::Proposed { number } = source.land(&bloom, &base, &new_head).unwrap() else {
-            panic!("the sealed base is what the day branch holds, so the land proposes");
-        };
+        match source.land(&bloom, &base, &new_head).unwrap() {
+            LandOutcome::Landed { new_head: landed } => assert_eq!(landed, new_head),
+            other @ LandOutcome::BaseMoved { .. } => {
+                panic!("the sealed base is what the day branch holds, so the land commits: {other:?}")
+            }
+        }
         assert_eq!(
-            fake.get_pull_request(number).unwrap().expect("the proposal exists").base,
-            day.branch(),
-            "the landing is proposed onto the day branch",
+            fake.ref_target(day.git_ref()),
+            Some(to_hex(&new_head)),
+            "the swap writes the configured mainline, not heads/main",
         );
-        let (_, body) = fake.pull_request_proposal(number).expect("the proposal's prose is recorded");
-        assert!(body.contains(&day.to_string()), "the provenance footer names the ref it lands onto: {body}");
+        assert_eq!(fake.ref_target("heads/main"), Some("b2".repeat(20)), "heads/main is left alone");
     }
 
     // Tripwire: a mainline ref that is not there names *itself* in the refusal.
@@ -2315,65 +2071,6 @@ mod tests {
         }
     }
 
-    // Tripwire: issuing a land is idempotent. The land outbox re-drains on any
-    // transport fault and replays after a crash, so a `land` that proposed again
-    // instead of adopting would open a fresh pull request every poll tick.
-    #[test]
-    fn land_adopts_the_proposal_it_already_opened() {
-        let fake = FakeGithub::new();
-        let bloom = bloom();
-        let base = digest(10);
-        fake.seed_ref("heads/main", &"a1".repeat(20));
-        fake.seed_correspondence(&base, &"a1".repeat(20));
-        let new_head = digest(90);
-        fake.seed_git_object(&new_head);
-        let source = git_source(&fake, true);
-
-        let first = source.land(&bloom, &base, &new_head).unwrap();
-        let second = source.land(&bloom, &base, &new_head).unwrap();
-        assert_eq!(first, second, "a re-issued land adopts the same proposal");
-    }
-
-    // Tripwire: a refine produces a new proven head while the landing pull
-    // request from the refused first land is still open on the old one. Adopt
-    // without re-pointing leaves the proposal on the old commit, and the
-    // later head-match gate (#4953) then refuses the new landing as drift —
-    // one gate too late. The adopt path is the one that knows both heads and
-    // must move the branch before returning Proposed.
-    #[test]
-    fn land_after_a_refine_repoints_an_open_proposal_onto_the_new_proven_head() {
-        let fake = FakeGithub::new();
-        let bloom = bloom();
-        let base = digest(10);
-        fake.seed_ref("heads/main", &"a1".repeat(20));
-        fake.seed_correspondence(&base, &"a1".repeat(20));
-        let refused = digest(90);
-        let refined = digest(91);
-        fake.seed_git_object(&refused);
-        fake.seed_git_object(&refined);
-        let source = git_source(&fake, true);
-
-        let LandOutcome::Proposed { number } = source.land(&bloom, &base, &refused).unwrap() else {
-            panic!("the first land opens the proposal");
-        };
-        assert_eq!(
-            fake.ref_target(&format!("heads/{}", landing_branch(&bloom))),
-            Some(to_hex(&refused)),
-            "the first land points the branch at the refused head",
-        );
-
-        assert_eq!(
-            source.land(&bloom, &base, &refined).unwrap(),
-            LandOutcome::Proposed { number },
-            "the second land adopts the same proposal",
-        );
-        assert_eq!(
-            fake.ref_target(&format!("heads/{}", landing_branch(&bloom))),
-            Some(to_hex(&refined)),
-            "the adopted proposal's branch now points at the refined head",
-        );
-    }
-
     #[test]
     fn land_reports_base_moved_when_the_mainline_correspondence_mismatches() {
         let fake = FakeGithub::new();
@@ -2384,21 +2081,15 @@ mod tests {
         fake.seed_correspondence(&actual_base, &mainline_sha1);
         let enabled = git_source(&fake, true);
 
-        // A stale expected base is the clean BaseMoved refusal, carrying the base
-        // the mainline object actually resolves to — and no proposal is opened.
         let stale_expected = digest(200);
         match enabled.land(&bloom, &stale_expected, &digest(91)).unwrap() {
             LandOutcome::BaseMoved { expected, actual } => {
                 assert_eq!(expected, stale_expected);
                 assert_eq!(actual, actual_base);
             }
-            other @ LandOutcome::Proposed { .. } => panic!("expected BaseMoved, got {other:?}"),
+            other @ LandOutcome::Landed { .. } => panic!("expected BaseMoved, got {other:?}"),
         }
-        assert_eq!(
-            fake.find_pull_request_for_head(&landing_branch(&bloom)).unwrap(),
-            None,
-            "a moved base proposes nothing",
-        );
+        assert_eq!(fake.ref_target("heads/main"), Some(mainline_sha1), "a moved base writes nothing");
     }
 
     // Tripwire: an unrecognized mainline head is a *moved base*, not a fault.
@@ -2406,8 +2097,7 @@ mod tests {
     // recorded correspondence, and the land reactor re-drives a fault — so
     // raising one here spun the coordinator every tick on a condition no retry
     // could resolve, since nothing ever records a correspondence for a commit
-    // made outside Bloomery. Minting the head's address is what `poll_land`
-    // already does for a squash commit; it is what lets the refusal be clean.
+    // made outside Bloomery.
     #[test]
     fn an_unrecognized_mainline_head_is_a_moved_base_not_a_fault() {
         let fake = FakeGithub::new();
@@ -2419,280 +2109,17 @@ mod tests {
         match enabled.land(&bloom(), &expected_base, &digest(90)).expect("an unknown head refuses, it does not fault") {
             LandOutcome::BaseMoved { expected, actual } => {
                 assert_eq!(expected, expected_base);
-                // The head is now nameable, so the refusal reports what mainline
-                // actually is rather than declining to say.
                 assert_eq!(
                     enabled
-                        .correspondence
+                        .correspondence()
                         .resolve_digest(&BackendObjectId::from(GitObjectId::from_hex(&foreign).unwrap()))
                         .unwrap(),
                     Some(actual),
                     "the minted address is recorded, so the next check resolves it",
                 );
             }
-            other @ LandOutcome::Proposed { .. } => panic!("expected BaseMoved, got {other:?}"),
+            other @ LandOutcome::Landed { .. } => panic!("expected BaseMoved, got {other:?}"),
         }
-    }
-
-    // Tripwire: the adopt runs ahead of the base check. Mainline moving is the
-    // *expected* consequence of a landing proposal being merged, so re-deciding
-    // the base on a re-drive abandoned the bloom at precisely the moment its
-    // landing succeeded — the watch could never observe the merge it was waiting
-    // for, because observing it is what moved the base.
-    #[test]
-    fn an_open_proposal_is_adopted_even_after_mainline_moved_off_the_sealed_base() {
-        let fake = FakeGithub::new();
-        let bloom = bloom();
-        let base = digest(10);
-        let mainline_sha1 = "a1".repeat(20);
-        fake.seed_ref("heads/main", &mainline_sha1);
-        fake.seed_correspondence(&base, &mainline_sha1);
-        let new_head = digest(90);
-        fake.seed_git_object(&new_head);
-        let enabled = git_source(&fake, true);
-
-        let LandOutcome::Proposed { number } = enabled.land(&bloom, &base, &new_head).unwrap() else {
-            panic!("the first land opens the proposal");
-        };
-
-        // Mainline moves on — the merge of this very proposal is one way it does.
-        fake.seed_ref("heads/main", &"d4".repeat(20));
-
-        assert_eq!(
-            enabled.land(&bloom, &base, &new_head).unwrap(),
-            LandOutcome::Proposed { number },
-            "the same proposal is re-adopted so the watch can still reach its terminal",
-        );
-    }
-
-    // Tripwire: the receipt attests the commit mainline *became*, and records a
-    // correspondence for it. A squash accept produces a commit that is not the
-    // proposed head and that nothing on our side created, so re-deriving the
-    // head from the proposal would attest a commit that is on no branch — and
-    // leaving it unrecorded would break the next bloom's base check, which
-    // reverse-resolves mainline through exactly this correspondence.
-    // #5110 — an open proposal stays open until it merges, is closed, or
-    // drifts. Mapping a concluded-red check to `ChecksFailed` is what
-    // rejected a fully proven tree after a runner-side flake.
-    #[test]
-    fn an_open_proposal_stays_open_regardless_of_check_state() {
-        let fake = FakeGithub::new();
-        let bloom = bloom();
-        let base = digest(10);
-        fake.seed_ref("heads/main", &"a1".repeat(20));
-        fake.seed_correspondence(&base, &"a1".repeat(20));
-        let new_head = digest(90);
-        fake.seed_git_object(&new_head);
-        let source = git_source(&fake, true);
-
-        let LandOutcome::Proposed { number } = source.land(&bloom, &base, &new_head).unwrap() else {
-            panic!("expected Proposed");
-        };
-        let head_sha = fake.pull_request_head_sha(number).expect("the proposal has a head");
-
-        for state in [
-            ChecksState::Absent,
-            ChecksState::Pending,
-            ChecksState::Passed,
-            ChecksState::Failed { failing: vec!["Clippy".into(), "Rustdoc".into()] },
-        ] {
-            fake.seed_checks(&head_sha, state.clone());
-            assert_eq!(
-                source.poll_land(&bloom, &base, number).unwrap(),
-                LandProposal::Open,
-                "a {state:?} check is not a landing verdict",
-            );
-        }
-    }
-
-    #[test]
-    fn poll_land_reports_the_squash_commit_as_the_landed_head_and_records_it() {
-        let fake = FakeGithub::new();
-        let bloom = bloom();
-        let base = digest(10);
-        fake.seed_ref("heads/main", &"a1".repeat(20));
-        fake.seed_correspondence(&base, &"a1".repeat(20));
-        let new_head = digest(90);
-        fake.seed_git_object(&new_head);
-        let source = git_source(&fake, true);
-
-        let LandOutcome::Proposed { number } = source.land(&bloom, &base, &new_head).unwrap() else {
-            panic!("expected Proposed");
-        };
-        assert_eq!(source.poll_land(&bloom, &base, number).unwrap(), LandProposal::Open, "an open proposal waits");
-
-        // The operator squash-merges: mainline becomes a commit that is neither
-        // the proposed head nor anything Bloomery created.
-        let squashed = "5c".repeat(20);
-        fake.merge_pull_request(number, &squashed);
-        let landed = source.poll_land(&bloom, &base, number).unwrap();
-        let LandProposal::Landed(receipt) = landed else {
-            panic!("expected Landed, got {landed:?}")
-        };
-        assert_eq!(receipt.previous_base, base);
-        assert_ne!(receipt.new_head, new_head, "the landed head is the squash commit, not the proposed head");
-        assert_eq!(
-            resolve_git(&fake, &receipt.new_head).map(|object| object.to_hex()),
-            Some(squashed),
-            "the landed head's correspondence is recorded, so the next bloom's base check resolves",
-        );
-    }
-
-    #[test]
-    fn poll_land_reports_declined_for_a_closed_or_vanished_proposal() {
-        let fake = FakeGithub::new();
-        let bloom = bloom();
-        let base = digest(10);
-        fake.seed_ref("heads/main", &"a1".repeat(20));
-        fake.seed_correspondence(&base, &"a1".repeat(20));
-        fake.seed_git_object(&digest(90));
-        let source = git_source(&fake, true);
-
-        let LandOutcome::Proposed { number } = source.land(&bloom, &base, &digest(90)).unwrap() else {
-            panic!("expected Proposed");
-        };
-        fake.close_pull_request(number);
-        assert_eq!(source.poll_land(&bloom, &base, number).unwrap(), LandProposal::Declined, "closed unmerged");
-
-        // A number nothing answers is terminal too — otherwise the watch spins
-        // forever on a proposal that will never resolve.
-        assert_eq!(source.poll_land(&bloom, &base, 9999).unwrap(), LandProposal::Declined, "vanished");
-    }
-
-    // A proposal, its head sha, and an enabled port over `fake` — the state
-    // every acceptance test starts from, since accepting is only ever asked of
-    // a landing the port itself opened.
-    fn proposed(fake: &FakeGithub, base: &Digest, new_head: &Digest) -> (GitSource<FakeGithub>, u64, String) {
-        fake.seed_ref("heads/main", &"a1".repeat(20));
-        fake.seed_correspondence(base, &"a1".repeat(20));
-        fake.seed_git_object(new_head);
-        let source = git_source(fake, true);
-        let LandOutcome::Proposed { number } = source.land(&bloom(), base, new_head).unwrap() else {
-            panic!("the port opens the proposal it is then asked to accept");
-        };
-        let head_sha = fake.pull_request_head_sha(number).expect("the proposal has a head");
-        (source, number, head_sha)
-    }
-
-    // Acceptance 1: a structurally valid landing merges with nobody pressing
-    // anything. The merge commit is what mainline became — the port never
-    // reports a landing under the head it proposed, because a squash produces
-    // neither branch's commit.
-    #[test]
-    fn a_structurally_valid_proposal_is_accepted_and_mainline_becomes_the_squash_commit() {
-        let fake = FakeGithub::new();
-        let (base, new_head) = (digest(10), digest(90));
-        let (source, number, _) = proposed(&fake, &base, &new_head);
-
-        assert_eq!(source.accept_land(&bloom(), &base, &new_head, number).unwrap(), LandAcceptance::Accepted);
-        assert_eq!(fake.pull_request_merged(number), Some(true), "the port merged the proposal it opened");
-
-        let LandProposal::Landed(receipt) = source.poll_land(&bloom(), &base, number).unwrap() else {
-            panic!("the accepted proposal reads as landed");
-        };
-        assert_ne!(receipt.new_head, new_head, "the receipt attests the squash commit, not the proposed head");
-    }
-
-    // Tripwire: the kill switch bounds the *merge*, not only the proposal.
-    // `cas_land_enabled` off is the one control that must make a landing
-    // impossible, and an acceptance that consulted it after opening — or not at
-    // all — would be a second door into the same write.
-    #[test]
-    fn accepting_a_landing_refuses_while_the_land_gate_is_off() {
-        let fake = FakeGithub::new();
-        let (base, new_head) = (digest(10), digest(90));
-        let (_, number, _) = proposed(&fake, &base, &new_head);
-
-        match git_source(&fake, false).accept_land(&bloom(), &base, &new_head, number) {
-            Err(SourceError::LandingDisabled) => {}
-            other => panic!("expected LandingDisabled, got {other:?}"),
-        }
-        assert_eq!(fake.pull_request_merged(number), Some(false), "a gated-off port merges nothing");
-    }
-
-    // Tripwire: consulting check state is what parked a proven landing for
-    // ten to twenty minutes, and what rejected one when a runner flake
-    // concluded red after aggregate verify had already passed the same
-    // suite (#5110).
-    #[test]
-    fn a_proposal_is_accepted_without_consulting_check_state() {
-        for state in [
-            ChecksState::Absent,
-            ChecksState::Pending,
-            ChecksState::Passed,
-            ChecksState::Failed { failing: vec!["CI pass".into()] },
-        ] {
-            let fake = FakeGithub::new();
-            let (base, new_head) = (digest(10), digest(90));
-            let (source, number, head_sha) = proposed(&fake, &base, &new_head);
-            fake.seed_checks(&head_sha, state.clone());
-
-            assert_eq!(
-                source.accept_land(&bloom(), &base, &new_head, number).unwrap(),
-                LandAcceptance::Accepted,
-                "a {state:?} check does not block acceptance",
-            );
-            assert_eq!(fake.pull_request_merged(number), Some(true), "a {state:?} check still merged");
-        }
-    }
-
-    // Acceptance 2: a proposal that gained a commit nobody proved is refused,
-    // not merged. Every gate upstream judged the head the bloom resolved on, so
-    // a merge that waved a different tree through would land work under a proof
-    // that was never about it.
-    #[test]
-    fn a_proposal_whose_head_moved_off_the_proven_one_is_refused() {
-        let fake = FakeGithub::new();
-        let (base, new_head) = (digest(10), digest(90));
-        let (source, number, _) = proposed(&fake, &base, &new_head);
-
-        let pushed = "ee".repeat(20);
-        fake.push_to_pull_request(number, &pushed);
-
-        match source.accept_land(&bloom(), &base, &new_head, number).unwrap() {
-            LandAcceptance::Refused(LandingRefusal::Drifted { detail }) => {
-                assert!(detail.contains(&pushed), "the refusal names the head it found: {detail}");
-            }
-            other => panic!("expected a drift refusal, got {other:?}"),
-        }
-        assert_eq!(fake.pull_request_merged(number), Some(false), "a drifted proposal is not merged");
-    }
-
-    // Acceptance 2, the other axis. `land` deliberately stops re-deciding the
-    // base once a proposal is open, so without this check the acceptance would
-    // be the one write in the landing that no base guard covers — and the
-    // window is real: a proposal can sit open across ticks before the accept.
-    #[test]
-    fn a_base_that_moved_after_the_proposal_opened_refuses_the_merge() {
-        let fake = FakeGithub::new();
-        let (base, new_head) = (digest(10), digest(90));
-        let (source, number, _) = proposed(&fake, &base, &new_head);
-
-        let moved = digest(77);
-        fake.seed_ref("heads/main", &"d4".repeat(20));
-        fake.seed_correspondence(&moved, &"d4".repeat(20));
-
-        match source.accept_land(&bloom(), &base, &new_head, number).unwrap() {
-            LandAcceptance::Refused(LandingRefusal::BaseMoved { expected, actual }) => {
-                assert_eq!(expected, base);
-                assert_eq!(actual, moved, "the refusal names where mainline actually stands");
-            }
-            other => panic!("expected a base-moved refusal, got {other:?}"),
-        }
-        assert_eq!(fake.pull_request_merged(number), Some(false), "a moved base is not landed onto");
-    }
-
-    // A proposal a person merged out from under the coordinator is not a
-    // refusal — the button it would press is already pressed. Calling that
-    // drift would reject a bloom for having landed.
-    #[test]
-    fn accepting_an_already_merged_proposal_is_the_idempotent_no_op() {
-        let fake = FakeGithub::new();
-        let (base, new_head) = (digest(10), digest(90));
-        let (source, number, _) = proposed(&fake, &base, &new_head);
-        fake.merge_pull_request(number, &"5c".repeat(20));
-
-        assert_eq!(source.accept_land(&bloom(), &base, &new_head, number).unwrap(), LandAcceptance::Accepted);
     }
 
     #[test]
@@ -3009,28 +2436,5 @@ mod tests {
             source.complete_release(Some(&owner), &ClaimRefKind::Workpiece(mine)).unwrap(),
             ClaimReleaseOutcome::AlreadyAbsent
         );
-    }
-
-    #[test]
-    fn close_issue_comments_then_closes() {
-        // Tripwire: the land reactor's human-facing close is a comment that
-        // names the landing plus the state write. Dropping either half leaves
-        // GitHub disagreeing with the journal about work that has landed.
-        let fake = FakeGithub::new();
-        fake.seed_issue(7, "the order");
-        let source = git_source(&fake, false);
-
-        source.close_issue(7, "landed via pull request #3").unwrap();
-
-        assert_eq!(fake.comments_on(7), ["landed via pull request #3"]);
-        assert_eq!(fake.issue_is_closed(7), Some(true));
-    }
-
-    #[test]
-    fn close_issue_on_a_missing_target_is_an_error() {
-        let fake = FakeGithub::new();
-        let source = git_source(&fake, false);
-        assert!(source.close_issue(7, "landed via pull request #3").is_err());
-        assert_eq!(fake.issue_is_closed(7), None, "a miss does not fabricate the object");
     }
 }

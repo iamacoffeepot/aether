@@ -15,7 +15,7 @@
 use aether_actor::runtime;
 use aether_bloomery::{
     BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, ClaimReleaseOutcome, Digest, IntegrateOutcome, LandOutcome,
-    LandProposal, WorkpieceId,
+    WorkpieceId,
 };
 use aether_data::wire::{from_bytes, to_vec};
 
@@ -222,11 +222,11 @@ impl SourceCapabilityState {
             Ok(new_head) => new_head,
             Err(error) => return LandResult::Err { error: error.to_string() },
         };
-        // No proposal: this surface decodes three digests off a mail and has no
-        // sight of the bloom's membership, so it lands under the adapter's floor.
-        // The land reactor, which holds the store, is what assembles prose.
-        match self.shell.land(&bloom, &expected_base, &new_head, None) {
-            Ok(LandOutcome::Proposed { number }) => LandResult::Proposed { number },
+        match self.shell.land(&bloom, &expected_base, &new_head) {
+            Ok(LandOutcome::Landed { new_head }) => match to_vec(&new_head) {
+                Ok(new_head) => LandResult::Landed { new_head },
+                Err(error) => LandResult::Err { error: error.to_string() },
+            },
             Ok(LandOutcome::BaseMoved { expected, actual }) => match (to_vec(&expected), to_vec(&actual)) {
                 (Ok(expected), Ok(actual)) => LandResult::BaseMoved { expected, actual },
                 (Err(error), _) | (_, Err(error)) => LandResult::Err { error: error.to_string() },
@@ -247,15 +247,9 @@ impl SourceCapabilityState {
             Ok(expected_base) => expected_base,
             Err(error) => return PollLandResult::Err { error: error.to_string() },
         };
-        match self.shell.poll_land(&bloom, &expected_base, number) {
-            Ok(LandProposal::Open) => PollLandResult::Open,
-            Ok(LandProposal::Landed(receipt)) => match to_vec(&receipt) {
-                Ok(receipt) => PollLandResult::Landed { receipt },
-                Err(error) => PollLandResult::Err { error: error.to_string() },
-            },
-            Ok(LandProposal::Declined) => PollLandResult::Declined,
-            Ok(LandProposal::ChecksFailed { failing }) => PollLandResult::ChecksFailed { failing },
-            Err(error) => PollLandResult::Err { error: error.to_string() },
+        let _ = (bloom, expected_base, number);
+        PollLandResult::Err {
+            error: "poll_land is a GitHub landing operation; the source port compare-and-swaps".to_owned(),
         }
     }
 

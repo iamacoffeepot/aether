@@ -17,7 +17,7 @@ use aether_bloomery::SharedCorrespondence;
 #[cfg(feature = "github")]
 use aether_bloomery_github::{AppTokenSource, GithubConfig, GithubError, MainlineRef, ReqwestGithub};
 #[cfg(all(feature = "github", any(test, feature = "testing")))]
-use aether_bloomery_github::{GitSource, testing::FakeGithub};
+use aether_bloomery_github::{GitSource, GithubLanding, testing::FakeGithub};
 use aether_substrate::config::ConfigError;
 
 const DEFAULT_LANE_PROGRAM: &str = "cargo xtask transform";
@@ -564,6 +564,21 @@ impl GithubConnectionConfig {
         }
         let source = GitSource::new(fake, Arc::clone(&correspondence), self.cas_land_enabled, mainline);
         SourceShell::new_with_correspondence(Arc::new(source), correspondence)
+    }
+
+    #[cfg(all(feature = "github", any(test, feature = "testing")))]
+    #[must_use]
+    pub fn fixture_landing(
+        &self,
+        mainline: MainlineRef,
+        correspondence: SharedCorrespondence,
+    ) -> Arc<dyn aether_bloomery_github::LandingSource> {
+        let fake = self.shared_fixture();
+        if let Some(seeded) = fake.ref_target("heads/main") {
+            fake.seed_ref(mainline.git_ref(), &seeded);
+        }
+        let source = GitSource::new(fake, correspondence, self.cas_land_enabled, mainline);
+        Arc::new(GithubLanding::new(source))
     }
 }
 

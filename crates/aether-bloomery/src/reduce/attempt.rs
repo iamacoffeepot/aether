@@ -34,12 +34,12 @@ pub(super) fn move_effects(
     targets: DispatchTargets,
     sealed: SealedLine<'_>,
 ) -> [Decision; 2] {
-    move_effects_with_candidate(
+    move_effects_with_checkpoint(
         bloom,
         workpiece,
         scope_revision,
         progress,
-        targets,
+        (targets, None),
         progress.candidate.map(|current| current.tree),
         sealed,
     )
@@ -75,11 +75,37 @@ pub(super) fn move_effects_with_candidate(
     candidate: Option<Digest>,
     sealed: SealedLine<'_>,
 ) -> [Decision; 2] {
+    move_effects_with_checkpoint(bloom, workpiece, scope_revision, progress, (targets, None), candidate, sealed)
+}
+
+/// The same builder as [`move_effects_with_candidate`], carrying Construct
+/// checkpoint provenance when `reconcile_or_line_targets` selected one.
+///
+/// `construct_checkpoint_base` is the member's clean or spliced base. It
+/// becomes [`Transformation::diff_base`] only on Construct — the local
+/// backend turns that marker into `--seeded` and withholds it from
+/// `--diff-base` (#5052). Every other stage stays unmarked here; Verify
+/// still names its range through [`Transformation::for_member_stage`].
+pub(super) fn move_effects_with_checkpoint(
+    bloom: BloomId,
+    workpiece: &WorkpieceId,
+    scope_revision: Digest,
+    progress: StageProgress,
+    (targets, construct_checkpoint_base): (DispatchTargets, Option<Digest>),
+    candidate: Option<Digest>,
+    sealed: SealedLine<'_>,
+) -> [Decision; 2] {
     let advance = Decision::AdvanceStage { bloom, workpiece: workpiece.clone(), progress };
     if sealed.held {
         return [advance, Decision::DeferDispatch { bloom, workpiece: workpiece.clone() }];
     }
     let binding = stage_binding(sealed.catalog, progress.stage);
+    let mut transformation = Transformation::for_member_stage(&binding, targets.subject, targets.checkout, sealed.base);
+    if progress.stage == StageId::Construct
+        && let Some(base) = construct_checkpoint_base
+    {
+        transformation.diff_base = Some(base);
+    }
 
     [
         advance,
@@ -87,7 +113,7 @@ pub(super) fn move_effects_with_candidate(
             bloom,
             workpiece: workpiece.clone(),
             stage: progress.stage,
-            transformation: Transformation::for_member_stage(&binding, targets.subject, targets.checkout, sealed.base),
+            transformation,
             scope_revision,
             candidate,
             profile: binding.profile,
@@ -291,15 +317,26 @@ pub(super) fn reduce_attempt_completed(
     let member_checkpoint = captured
         .filter(|_| stage == StageId::Construct && !passed)
         .or_else(|| snapshot.member_checkpoint(bloom, workpiece));
-    let targets = if assembling && passed {
-        DispatchTargets {
-            subject: member.scope_revision,
-            checkout: candidate.map_or(construct_base, |current| current.checkout),
-        }
+    let (targets, construct_checkpoint_base) = if assembling && passed {
+        (
+            DispatchTargets {
+                subject: member.scope_revision,
+                checkout: candidate.map_or(construct_base, |current| current.checkout),
+            },
+            None,
+        )
     } else {
         reconcile_or_line_targets(member.scope_revision, construct_base, candidate, fold_checkpoint, member_checkpoint)
     };
-    let ctx = CompletionCtx { bloom: *bloom, workpiece, member, cursor: &cursor, candidate, targets };
+    let ctx = CompletionCtx {
+        bloom: *bloom,
+        workpiece,
+        member,
+        cursor: &cursor,
+        candidate,
+        targets,
+        construct_checkpoint_base,
+    };
     let effects = alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }];
     if let Some(next) = next.filter(|_| passed) {
         return advance_after_pass(snapshot, record, next, &ctx, effects);
@@ -388,19 +425,20 @@ pub(super) fn reduce_member_executor_fault(
     }
 
     let fold_checkpoint = cursor.fold_checkpoint.filter(|_| stage == StageId::Reconcile);
-    let targets = reconcile_or_line_targets(
+    let (targets, construct_checkpoint_base) = reconcile_or_line_targets(
         member.scope_revision,
         member_construct_base(record, workpiece),
         cursor.candidate,
         fold_checkpoint,
         snapshot.member_checkpoint(bloom, workpiece),
     );
-    effects.extend(move_effects(
+    effects.extend(move_effects_with_checkpoint(
         *bloom,
         workpiece,
         member.scope_revision,
         cursor,
-        targets,
+        (targets, construct_checkpoint_base),
+        cursor.candidate.map(|current| current.tree),
         SealedLine::of(record, member),
     ));
     Decisions {
@@ -417,6 +455,7 @@ struct CompletionCtx<'a> {
     cursor: &'a StageProgress,
     candidate: Option<CandidateRef>,
     targets: DispatchTargets,
+    construct_checkpoint_base: Option<Digest>,
 }
 
 fn advance_after_pass(
@@ -426,7 +465,7 @@ fn advance_after_pass(
     ctx: &CompletionCtx<'_>,
     mut effects: Vec<Decision>,
 ) -> Decisions {
-    let CompletionCtx { bloom, workpiece, member, cursor, candidate, targets } = *ctx;
+    let CompletionCtx { bloom, workpiece, member, cursor, candidate, targets, construct_checkpoint_base } = *ctx;
     // The fold round outlives the stage (#4952): a reconciled candidate has not
     // folded yet when its lane passes, so the checkpoint it was reconciled onto
     // stays on the cursor until the fold either takes the candidate or moves.
@@ -465,12 +504,12 @@ fn advance_after_pass(
         };
     }
 
-    effects.extend(move_effects_with_candidate(
+    effects.extend(move_effects_with_checkpoint(
         bloom,
         workpiece,
         member.scope_revision,
         progress,
-        targets,
+        (targets, construct_checkpoint_base),
         candidate.map(|current| current.tree),
         SealedLine::of(record, member),
     ));
@@ -487,7 +526,7 @@ fn retry_or_wedge(
     evidence: &Evidence,
     mut effects: Vec<Decision>,
 ) -> Decisions {
-    let CompletionCtx { bloom, workpiece, member, cursor, candidate, targets } = *ctx;
+    let CompletionCtx { bloom, workpiece, member, cursor, candidate, targets, construct_checkpoint_base } = *ctx;
     let fold_conflict_evidence = cursor.fold_conflict_evidence.filter(|_| stage == StageId::Reconcile);
     let budget = record.stage_catalog.retry_budget_of(stage).unwrap_or(1);
     if cursor.attempts < budget {
@@ -501,12 +540,12 @@ fn retry_or_wedge(
             fold_checkpoint: cursor.fold_checkpoint,
             fold_conflict_evidence,
         };
-        effects.extend(move_effects_with_candidate(
+        effects.extend(move_effects_with_checkpoint(
             bloom,
             workpiece,
             member.scope_revision,
             progress,
-            targets,
+            (targets, construct_checkpoint_base),
             candidate.map(|current| current.tree),
             SealedLine::of(record, member),
         ));
@@ -533,25 +572,32 @@ fn retry_or_wedge(
 /// spliced) base. A candidate outranks a checkpoint so finished work beats
 /// partial work; a checkpoint never becomes the evidence-binding subject
 /// (#4994).
+///
+/// The second return is the member's clean or spliced `base` only when the
+/// checkout is that construct checkpoint — the provenance [`move_effects_with_checkpoint`]
+/// stamps onto a Construct `diff_base`. Fold checkpoints, finished
+/// candidates, and a cold or spliced-base start return `None`.
 pub(super) fn reconcile_or_line_targets(
     scope_revision: Digest,
     base: Digest,
     candidate: Option<CandidateRef>,
     fold_checkpoint: Option<Digest>,
     member_checkpoint: Option<CandidateRef>,
-) -> DispatchTargets {
+) -> (DispatchTargets, Option<Digest>) {
     if let Some(checkpoint) = fold_checkpoint {
-        return DispatchTargets {
-            subject: candidate.map_or(scope_revision, |current| current.tree),
-            checkout: checkpoint,
-        };
+        return (
+            DispatchTargets { subject: candidate.map_or(scope_revision, |current| current.tree), checkout: checkpoint },
+            None,
+        );
     }
     candidate.map_or_else(
-        || DispatchTargets {
-            subject: scope_revision,
-            checkout: member_checkpoint.map_or(base, |checkpoint| checkpoint.checkout),
+        || {
+            member_checkpoint
+                .map_or((DispatchTargets { subject: scope_revision, checkout: base }, None), |checkpoint| {
+                    (DispatchTargets { subject: scope_revision, checkout: checkpoint.checkout }, Some(base))
+                })
         },
-        |current| DispatchTargets { subject: current.tree, checkout: current.checkout },
+        |current| (DispatchTargets { subject: current.tree, checkout: current.checkout }, None),
     )
 }
 
@@ -591,7 +637,7 @@ mod tests {
     use super::*;
     use crate::ids::IdempotencyKey;
     use crate::reduce::{Event, Fact, Outcome, reduce};
-    use crate::values::{BloomDraft, EvidenceKind, Membership, ResolvedConfigs, SpendWindow};
+    use crate::values::{BloomDraft, EvidenceKind, Membership, OperatorHold, ResolvedConfigs, SpendWindow};
 
     fn digest(seed: u8) -> Digest {
         Digest::from_bytes([seed; 32])
@@ -683,17 +729,24 @@ mod tests {
         let checkpoint = CandidateRef { tree: digest(21), checkout: digest(22) };
         let candidate = CandidateRef { tree: digest(31), checkout: digest(32) };
 
-        let cold = reconcile_or_line_targets(scope, base, None, None, None);
+        let (cold, cold_mark) = reconcile_or_line_targets(scope, base, None, None, None);
         assert_eq!(cold.checkout, base, "neither a candidate nor a checkpoint checks out the sealed base");
         assert_eq!(cold.subject, scope);
+        assert_eq!(cold_mark, None, "a cold or spliced-base start is unmarked");
 
-        let seeded = reconcile_or_line_targets(scope, base, None, None, Some(checkpoint));
+        let (seeded, seeded_mark) = reconcile_or_line_targets(scope, base, None, None, Some(checkpoint));
         assert_eq!(seeded.checkout, checkpoint.checkout, "a checkpoint without a candidate seeds the checkout");
         assert_eq!(seeded.subject, scope, "a checkpoint is not a finished candidate: evidence still binds the scope");
+        assert_eq!(seeded_mark, Some(base), "only the checkpoint case carries the member's base as provenance");
 
-        let finished = reconcile_or_line_targets(scope, base, Some(candidate), None, Some(checkpoint));
+        let (finished, finished_mark) = reconcile_or_line_targets(scope, base, Some(candidate), None, Some(checkpoint));
         assert_eq!(finished.checkout, candidate.checkout, "a candidate outranks a checkpoint");
         assert_eq!(finished.subject, candidate.tree);
+        assert_eq!(finished_mark, None, "a finished candidate is not a construct checkpoint");
+
+        let (folded, folded_mark) = reconcile_or_line_targets(scope, base, None, Some(digest(40)), Some(checkpoint));
+        assert_eq!(folded.checkout, digest(40), "a fold checkpoint outranks the construct checkpoint");
+        assert_eq!(folded_mark, None, "a Reconcile fold checkout is not Construct provenance");
     }
 
     // The plausible bug: a first construct is seeded from an empty checkpoint
@@ -708,6 +761,11 @@ mod tests {
             construct_dispatch(&decided).checkout,
             digest(0),
             "a member with neither a candidate nor a checkpoint checks out the sealed base",
+        );
+        assert_eq!(
+            construct_dispatch(&decided).diff_base,
+            None,
+            "a cold Construct must not carry the checkpoint provenance marker",
         );
         assert_eq!(after.member_checkpoint(&bloom, &WorkpieceId("wp".into())), None);
     }
@@ -738,6 +796,11 @@ mod tests {
             Some(Decision::DispatchAttempt { transformation, candidate, .. }) => {
                 assert_eq!(transformation.checkout, checkpoint.checkout, "the retry checks out the checkpoint");
                 assert_eq!(*candidate, None, "the retry still binds the scope revision, not the checkpoint");
+                assert_eq!(
+                    transformation.diff_base,
+                    Some(digest(0)),
+                    "a seeded Construct names the member's base so the host can emit --seeded",
+                );
             }
             other => panic!("expected a Construct retry, got {other:?}"),
         }
@@ -804,6 +867,41 @@ mod tests {
             construct_dispatch(&granted).checkout,
             second.checkout,
             "a grant resumes from the newest checkpoint, not the sealed base",
+        );
+        assert_eq!(
+            construct_dispatch(&granted).diff_base,
+            Some(digest(0)),
+            "a granted Construct retry keeps the checkpoint provenance marker",
+        );
+    }
+
+    // The plausible bug: hold/release re-aims from the cursor and forgets
+    // the checkpoint marker, so a deferred Construct retry resumes as a
+    // clean start and the prompt never names the untrusted tree.
+    #[test]
+    fn a_release_rederives_the_checkpoint_marker_on_a_deferred_construct_retry() {
+        let (snapshot, bloom) = sealed();
+        let hold = OperatorHold { reason: "stop".into(), operator: "op".into() };
+        let (after_hold, _) = step(&snapshot, &event("hold", Fact::OperatorHold { bloom, hold: hold.clone() }));
+        let checkpoint = CandidateRef { tree: digest(21), checkout: digest(22) };
+        let (deferred, retried) = step(&after_hold, &fail_construct(bloom, "c-die", Some(checkpoint)));
+        assert!(matches!(retried.outcome, Outcome::AttemptRetried { stage: StageId::Construct, .. }));
+        assert!(
+            retried.effects.iter().any(|effect| matches!(effect, Decision::DeferDispatch { .. })),
+            "the hold swallows the retry work order",
+        );
+
+        let (_, released) = step(&deferred, &event("release", Fact::OperatorRelease { bloom, release: hold }));
+        assert!(matches!(released.outcome, Outcome::BloomReleased { .. }));
+        assert_eq!(
+            construct_dispatch(&released).checkout,
+            checkpoint.checkout,
+            "the release checks out the checkpoint the death left",
+        );
+        assert_eq!(
+            construct_dispatch(&released).diff_base,
+            Some(digest(0)),
+            "the release re-derives the same Construct checkpoint marker the grant path stamps",
         );
     }
 

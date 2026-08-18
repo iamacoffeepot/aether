@@ -14,16 +14,17 @@
 //!    (its own connection, mirroring the executor reactor's store ownership) and
 //!    decodes each [`LandPayload`] — the resolving
 //!    bloom, its sealed `expected_base`, and the `new_head` being proposed.
-//! 2. **Propose.** It issues [`SourceShell::land`] against `expected_base`. On
-//!    [`LandOutcome::BaseMoved`] it declines: a moved mainline forces
-//!    supersession, never a land onto the new head (ADR-0149 §The bloom), and V1
-//!    permits one unlanded bloom per mainline so this is the defensive case. The
-//!    bloom stays `Resolved` and thus supersedable through the intent-native
-//!    supersede path — a reactor has no re-authored successor spec to fabricate,
-//!    and the ADR's successor-seal is a caller act, not a reactor one.
-//! 3. **Accept.** On [`LandOutcome::Proposed`] it polls the proposal in the same
+//! 2. **Propose.** It issues [`LandingSource::land_proposal`] against
+//!    `expected_base`. On [`ProposalOutcome::BaseMoved`] it declines: a moved
+//!    mainline forces supersession, never a land onto the new head (ADR-0149
+//!    §The bloom), and V1 permits one unlanded bloom per mainline so this is the
+//!    defensive case. The bloom stays `Resolved` and thus supersedable through
+//!    the intent-native supersede path — a reactor has no re-authored successor
+//!    spec to fabricate, and the ADR's successor-seal is a caller act, not a
+//!    reactor one.
+//! 3. **Accept.** On [`ProposalOutcome::Proposed`] it polls the proposal in the same
 //!    pass, and while that proposal is open it asks
-//!    [`SourceShell::accept_land`] to merge it. That merge happens once the
+//!    [`LandingSource::accept_land`] to merge it. That merge happens once the
 //!    structural gates hold — the proposal is this bloom's landing branch
 //!    aimed at mainline, still offering the exact head the bloom proved onto
 //!    the exact base it sealed against — without consulting check state
@@ -65,9 +66,7 @@ use std::time::Duration;
 
 use aether_actor::Addressable;
 use aether_actor::runtime;
-use aether_bloomery::{
-    Admit, BloomId, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, LandOutcome, LandPayload, LandProposal,
-};
+use aether_bloomery::{Admit, BloomId, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, LandPayload};
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
@@ -77,10 +76,13 @@ use aether_substrate::mail::mailer::Mailer;
 use serde::{Deserialize, Serialize};
 
 use super::LandReactorCapability;
-use aether_bloomery_github::{LandAcceptance, LandingRefusal, SourceError, canonical_issue_number, short_hex};
+use aether_bloomery_github::{
+    LandAcceptance, LandProposal, LandingRefusal, LandingSource, ProposalOutcome, SourceError, canonical_issue_number,
+    short_hex,
+};
 
 use crate::bloomery::LandReactorSetup;
-use crate::bloomery::SourceShell;
+
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::control::ControlCore;
@@ -100,7 +102,7 @@ pub struct LandTick {}
 /// Runtime state for [`LandReactorCapability`]. The shell + store are `Some` only
 /// when configured; a disabled reactor holds neither and spawns no timer.
 pub struct LandReactorState {
-    source: Option<SourceShell>,
+    source: Option<Arc<dyn LandingSource>>,
     store: Option<SqliteStore>,
     control_mailbox: MailboxId,
     mailer: Arc<Mailer>,
@@ -117,7 +119,7 @@ impl LandReactorState {
     /// drives the loop by feeding a [`LandTick`] into the handler directly.
     #[must_use]
     pub fn with_parts(
-        source: Option<SourceShell>,
+        source: Option<Arc<dyn LandingSource>>,
         store: Option<SqliteStore>,
         mailer: Arc<Mailer>,
         self_mailbox: MailboxId,
@@ -247,7 +249,7 @@ enum Watched {
 /// Poll an issued land proposal, accept it when the structural gates hold, and
 /// fold what happened into the drain loop's outcomes.
 fn watch_proposal(
-    source: &SourceShell,
+    source: &dyn LandingSource,
     bloom: &BloomId,
     payload: &LandPayload,
     number: u64,
@@ -271,7 +273,7 @@ fn watch_proposal(
 /// checks because bloomery's own gates prove each landing, so the proposal is
 /// correspondence ceremony rather than a review surface.
 fn accept_proposal(
-    source: &SourceShell,
+    source: &dyn LandingSource,
     bloom: &BloomId,
     payload: &LandPayload,
     number: u64,
@@ -321,7 +323,10 @@ fn landed(bloom: &BloomId, payload: &LandPayload, new_head: Digest) -> Result<Wa
 /// failed entry re-drains; a clean base-moved refusal is a processed entry
 /// (acked, no admit). The factored-out network side, unit-testable against a
 /// `SqliteStore` + a fake-GitHub-backed shell without the mail harness.
-fn drain_and_land(store: &mut dyn StoreBackend, source: &SourceShell) -> rusqlite::Result<(Vec<Admit>, Option<u64>)> {
+fn drain_and_land(
+    store: &mut dyn StoreBackend,
+    source: &dyn LandingSource,
+) -> rusqlite::Result<(Vec<Admit>, Option<u64>)> {
     let entries = store.drain_topic(Topic::Land)?;
     let mut admits = Vec::new();
     let mut ack_through = None;
@@ -357,8 +362,8 @@ fn drain_and_land(store: &mut dyn StoreBackend, source: &SourceShell) -> rusqlit
         // land: the title is the mainline commit's subject forever, so it is
         // authored here rather than defaulted in the adapter.
         let assembled = proposal::assemble(store, source, &bloom)?;
-        match source.land(&bloom, &payload.expected_base, &payload.new_head, Some(&assembled)) {
-            Ok(LandOutcome::Proposed { number }) => {
+        match source.land_proposal(&bloom, &payload.expected_base, &payload.new_head, Some(&assembled)) {
+            Ok(ProposalOutcome::Proposed { number }) => {
                 match watch_proposal(source, &bloom, &payload, number) {
                     Ok(Watched::Landed(admit)) => {
                         close_member_issues(store, source, &bloom, number);
@@ -418,7 +423,7 @@ fn drain_and_land(store: &mut dyn StoreBackend, source: &SourceShell) -> rusqlit
                     }
                 }
             }
-            Ok(LandOutcome::BaseMoved { .. }) => {
+            Ok(ProposalOutcome::BaseMoved { .. }) => {
                 // A moved mainline forces supersession, never a land onto the new
                 // head (ADR-0149 §The bloom). The reactor declines: the bloom stays
                 // Resolved and supersedable through the intent-native path. Ack the
@@ -448,7 +453,7 @@ fn drain_and_land(store: &mut dyn StoreBackend, source: &SourceShell) -> rusqlit
 /// hiccup, a missing object, or a store read that cannot name the roster is
 /// warned and dropped so the land itself still admits. Members whose workpiece
 /// ids do not name an issue are skipped with no write.
-fn close_member_issues(store: &mut dyn StoreBackend, source: &SourceShell, bloom: &BloomId, pull_request: u64) {
+fn close_member_issues(store: &mut dyn StoreBackend, source: &dyn LandingSource, bloom: &BloomId, pull_request: u64) {
     let members = match store.list_dispatch_descriptions(bloom.0.as_bytes()) {
         Ok(members) => members,
         Err(error) => {
@@ -558,7 +563,7 @@ impl NativeActor for LandReactorCapability {
             return;
         };
 
-        match drain_and_land(store, &source) {
+        match drain_and_land(store, source.as_ref()) {
             Ok((admits, ack_through)) => {
                 if let Some(sequence) = ack_through
                     && let Err(error) = store.ack_topic(Topic::Land, sequence)

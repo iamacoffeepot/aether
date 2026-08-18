@@ -665,6 +665,14 @@ pub struct Transformation {
     /// working tree (#4723), and the compiler would otherwise run the whole
     /// workspace instead of the woven tree's reverse-dependency closure.
     ///
+    /// A Construct dispatch that selected a member checkpoint (#5052) also
+    /// names the member's clean or spliced base here. That is provenance, not
+    /// a range the lane judges: constructors leave Construct unmarked so the
+    /// portable default stays a working-tree start, and the dispatch builder
+    /// sets the field only when a checkpoint was actually chosen. The local
+    /// backend turns that marker into `--seeded <checkout>` and withholds it
+    /// from `--diff-base`.
+    ///
     /// A digest like [`checkout`](Self::checkout), resolved to a real git object
     /// by the executor backend through the same correspondence store, so the
     /// reducer keeps holding digests rather than shas.
@@ -768,7 +776,10 @@ impl Transformation {
             // `base..checkout`, and naming that range is what lets it narrow
             // its compiling gates to the diff's reverse-dependency closure
             // instead of recompiling the workspace on every refine lap
-            // (#4890). The whole-bloom aggregate verify is built by
+            // (#4890). A Construct checkpoint marker is stamped by the
+            // dispatch builder, never here — an unmarked default is what
+            // keeps a cold start from looking seeded (#5052). The
+            // whole-bloom aggregate verify is built by
             // `for_aggregate_verify`, not this constructor.
             diff_base: matches!(binding.stage, StageId::Verify).then_some(base),
             outputs: alloc::vec![String::from(RESULT_RECORD_OUTPUT)],
@@ -1198,12 +1209,13 @@ mod tests {
     // and naming it is what lets the lane read that range instead of the
     // working tree.
     //
-    // Tripwire in both directions. A model lane that gained one would judge
-    // the sealed base's own history instead of the uncommitted candidate in
-    // front of it. An aggregate verify that dropped one would silently
-    // restore the full-suite gate — the woven tree against the sealed base
-    // *is* the union of member diffs, and `Scope::resolve` computes that
-    // union only when the range is named.
+    // Tripwire in both directions. A model lane that gained one in this
+    // constructor would judge the sealed base's own history instead of the
+    // uncommitted candidate in front of it — and would make every Construct
+    // look seeded (#5052). An aggregate verify that dropped one would
+    // silently restore the full-suite gate — the woven tree against the
+    // sealed base *is* the union of member diffs, and `Scope::resolve`
+    // computes that union only when the range is named.
     #[test]
     fn a_committed_candidate_names_the_range_it_was_captured_over() {
         let subject = Digest::from_bytes([7; 32]);

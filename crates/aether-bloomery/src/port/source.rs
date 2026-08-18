@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::Digest;
 use crate::ids::{BloomId, WorkpieceId};
-use crate::values::LandingReceipt;
 
 /// A snapshot of the source at a base: its head and tree digests.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -96,21 +95,12 @@ pub enum IntegrateOutcome {
 /// the land is refused — the bloom is not rebased under its evidence; a
 /// successor seals on the new head (ADR-0149 §The bloom).
 ///
-/// Landing is a *two-step* on a protected mainline: Bloomery proposes the
-/// resolved head, something outside Bloomery accepts it, and the landing is
-/// observed afterwards. So issuing a land can only ever report "proposed" or
-/// "refused" — the landed case lives on [`LandProposal`], which is what
-/// observing produces. Neither enum carries a variant its producer cannot
-/// return.
+/// A repository-backed land is a compare-and-swap: the backend either moves
+/// mainline onto `new_head` or refuses because the base moved. Hosted
+/// presentation (opening a pull request, watching checks) is not a source-port
+/// concern and does not appear here.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum LandOutcome {
-    /// The resolved head was proposed; mainline has not moved yet. The caller
-    /// records the proposal and watches it to its terminal.
-    Proposed {
-        /// The proposal's number on the backend — the handle a watch re-reads
-        /// it by.
-        number: u64,
-    },
     /// The land was refused: mainline had moved off the expected base.
     BaseMoved {
         /// The base the caller expected mainline to still be at.
@@ -118,40 +108,12 @@ pub enum LandOutcome {
         /// The base mainline was actually at.
         actual: Digest,
     },
-}
-
-/// Where an issued land proposal has got to — the three states a watch
-/// distinguishes, each routing the bloom somewhere different.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum LandProposal {
-    /// Still open. Mainline has not moved; keep watching.
-    Open,
-    /// Accepted — mainline moved, and the receipt says where to.
-    ///
-    /// The receipt's `new_head` is what mainline *became*, which on a
-    /// squash-accepting backend is not the head that was proposed. A watch
-    /// records this value rather than re-deriving it from the proposal, or it
-    /// would attest a mainline commit that exists nowhere.
-    Landed(LandingReceipt),
-    /// Terminated without landing — the proposal was declined. The bloom stays
-    /// resolved and supersedable, the same terminal
-    /// [`LandOutcome::BaseMoved`] reaches; it is a distinct variant because the
-    /// cause is an operator decision rather than a moved base, and an operator
-    /// reading the log needs to tell those apart.
-    Declined,
-    /// The proposal's own checks failed, so it cannot merge and will not
-    /// without a repair.
-    ///
-    /// Distinct from [`Open`](Self::Open), which is what this used to read as:
-    /// a watch cannot tell "still running" from "already failed" without asking,
-    /// and reading a red gate as open is what leaves a bloom polling a proposal
-    /// nothing will ever accept. Distinct from [`Declined`](Self::Declined) too
-    /// — that is an operator's decision and terminal, whereas this is a
-    /// mechanical verdict the bloom may still be able to answer.
-    ChecksFailed {
-        /// The failing check names, in listing order — the findings the repair
-        /// dispatch is directed by.
-        failing: Vec<String>,
+    /// Mainline now points at `new_head`. Appended so a direct compare-and-swap
+    /// can report the swap it performed rather than fabricating a proposal
+    /// number (ADR-0199).
+    Landed {
+        /// The head mainline now names — the digest the caller asked to land.
+        new_head: Digest,
     },
 }
 
@@ -423,28 +385,22 @@ pub trait SourceBackend {
         expected: &Checkpoint,
     ) -> Result<IntegrateOutcome, Self::Error>;
 
-    /// Propose landing `bloom`'s `new_head` onto mainline, guarded by
-    /// `expected_base`: a mainline that has moved off the sealed base is the
-    /// clean [`LandOutcome::BaseMoved`] refusal, not an error, and no proposal
-    /// is issued.
+    /// Land `bloom`'s `new_head` onto mainline, guarded by `expected_base`: a
+    /// mainline that has moved off the sealed base is the clean
+    /// [`LandOutcome::BaseMoved`] refusal, not an error, and mainline is not
+    /// written. A successful compare-and-swap reports
+    /// [`LandOutcome::Landed`].
     ///
-    /// The guard runs first and is the compare half of the compare-and-swap
-    /// ADR-0149 assigns to landing; the swap half is the backend's own
-    /// accept-time conflict check. Issuing is idempotent — a bloom already
-    /// proposed reports the same [`LandOutcome::Proposed`] number rather than
-    /// proposing again.
+    /// The guard is the compare half of the compare-and-swap ADR-0149 assigns
+    /// to landing; the swap half updates the mainline ref onto `new_head`.
+    /// Issuing is idempotent — a mainline already at `new_head` reports
+    /// [`LandOutcome::Landed`] rather than treating the already-applied swap
+    /// as a moved base.
     ///
     /// # Errors
     /// Backend-defined — a transport or backend fault, distinct from the
     /// clean base-moved refusal.
     fn land(&self, bloom: &BloomId, expected_base: &Digest, new_head: &Digest) -> Result<LandOutcome, Self::Error>;
-
-    /// Read where the land proposal `number`, previously issued for `bloom`
-    /// against `expected_base`, has got to.
-    ///
-    /// # Errors
-    /// Backend-defined — a transport or backend fault.
-    fn poll_land(&self, bloom: &BloomId, expected_base: &Digest, number: u64) -> Result<LandProposal, Self::Error>;
 
     /// Acquire `bloom`'s claim refs — one per member `workpieces` plus the
     /// single mainline-admission ref — all-or-nothing (ADR-0150 §The claim
