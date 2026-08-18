@@ -6,6 +6,7 @@
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::str;
 
 use crate::api::dto::DispatchFilePage;
 
@@ -71,10 +72,7 @@ pub fn read_ranged(path: &Path, cursor: Option<u64>, limit: u64) -> Result<Dispa
         return Ok(DispatchFilePage { lines: Vec::new(), cursor: 0, next_cursor: None, length, notice: None });
     }
 
-    let raw_start = match cursor {
-        Some(offset) => offset.min(length),
-        None => length.saturating_sub(limit),
-    };
+    let raw_start = cursor.map_or_else(|| length.saturating_sub(limit), |offset| offset.min(length));
     let start = snap_start(&mut file, raw_start, length).map_err(RangedError::Io)?;
     if start >= length {
         return Ok(DispatchFilePage { lines: Vec::new(), cursor: start, next_cursor: None, length, notice: None });
@@ -154,7 +152,7 @@ fn cap_line(raw: &[u8]) -> String {
         return String::from_utf8_lossy(without_cr).into_owned();
     }
     let mut end = TRANSCRIPT_LINE_CAP;
-    while end > 0 && std::str::from_utf8(&without_cr[..end]).is_err() {
+    while end > 0 && str::from_utf8(&without_cr[..end]).is_err() {
         end -= 1;
     }
     String::from_utf8_lossy(&without_cr[..end]).into_owned()

@@ -24,6 +24,7 @@
 //! are domain join state, not correlation bookkeeping.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use aether_actor::{HandlesKind, Manual};
@@ -113,7 +114,7 @@ pub struct ApiCapabilityState {
     #[cfg(feature = "github")]
     pub(super) pusher: Option<Arc<dyn CandidatePush>>,
     /// Scratch-worktree base the evidence directories live under.
-    pub(super) worktree_base: std::path::PathBuf,
+    pub(super) worktree_base: PathBuf,
     /// Optional artifacts handle for resolving study cost on the dispatch list.
     pub(super) artifacts: Option<ArtifactsCapabilityState>,
     /// Staged workpieces, keyed by their workpiece id.

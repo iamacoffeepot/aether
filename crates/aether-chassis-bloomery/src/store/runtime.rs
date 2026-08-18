@@ -1980,24 +1980,25 @@ impl NativeActor for StoreCapability {
         _ctx: &mut NativeCtx<'_>,
         mail: ListBloomDispatches,
     ) -> ListBloomDispatchesResult {
-        let rollup = match state.backend.list_bloom_dispatch_rollup(&mail.bloom) {
+        let ListBloomDispatches { bloom } = mail;
+        let rollup = match state.backend.list_bloom_dispatch_rollup(&bloom) {
             Ok(rollup) => rollup,
             Err(error) => return ListBloomDispatchesResult::Err { error: error.to_string() },
         };
-        match state.backend.list_bloom_dispatch_live(&mail.bloom) {
+        match state.backend.list_bloom_dispatch_live(&bloom) {
             Ok(outstanding) => ListBloomDispatchesResult::Ok { rollup, outstanding },
             Err(error) => ListBloomDispatchesResult::Err { error: error.to_string() },
         }
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_lookup_dispatch(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
         mail: LookupDispatch,
     ) -> LookupDispatchResult {
-        for nonce in nonce_spellings(&mail.nonce) {
+        let LookupDispatch { nonce } = mail;
+        for nonce in nonce_spellings(&nonce) {
             match state.backend.lookup_named_dispatch(&nonce) {
                 Ok(Some(bloom)) => return LookupDispatchResult::Ok { nonce, bloom },
                 Ok(None) => {}

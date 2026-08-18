@@ -69,7 +69,7 @@ mod state;
 mod workpieces;
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 #[cfg(feature = "github")]
 use std::sync::Arc;
 
@@ -229,7 +229,7 @@ impl NativeActor for BloomeryApiCapability {
             correspondence: params.correspondence,
             #[cfg(feature = "github")]
             pusher: params.pusher,
-            worktree_base: std::path::PathBuf::from(params.worktree_base),
+            worktree_base: PathBuf::from(params.worktree_base),
             artifacts: open_api_artifacts(params.artifacts_root.as_deref()),
             staged: BTreeMap::new(),
             drafts: BTreeMap::new(),
@@ -567,7 +567,8 @@ impl NativeActor for BloomeryApiCapability {
         ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
         id: http::Path<String>,
     ) -> http::Outcome {
-        match evidence::list_dispatches(&id.0) {
+        let id = id.0;
+        match evidence::list_dispatches(&id) {
             Ok(routed) => finish(state, ctx, routed),
             Err(error) => http::Outcome::Reply(error_response(400, &error)),
         }
@@ -580,7 +581,8 @@ impl NativeActor for BloomeryApiCapability {
         ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
         nonce: http::Path<String>,
     ) -> http::Outcome {
-        finish(state, ctx, evidence::lookup_dispatch(&nonce.0))
+        let nonce = nonce.0;
+        finish(state, ctx, evidence::lookup_dispatch(&nonce))
     }
 
     /// `GET /dispatches/{nonce}/transcript` — line-snapped ranged read.
@@ -590,7 +592,8 @@ impl NativeActor for BloomeryApiCapability {
         ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
         nonce: http::Path<String>,
     ) -> http::Outcome {
-        let response = evidence::file_page(&state.worktree_base, &nonce.0, "transcript.jsonl", &ctx.request().query);
+        let nonce = nonce.0;
+        let response = evidence::file_page(&state.worktree_base, &nonce, "transcript.jsonl", &ctx.request().query);
         finish(state, ctx, Routed::Reply(response))
     }
 
@@ -601,7 +604,8 @@ impl NativeActor for BloomeryApiCapability {
         ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
         nonce: http::Path<String>,
     ) -> http::Outcome {
-        let response = evidence::file_page(&state.worktree_base, &nonce.0, "prompt.md", &ctx.request().query);
+        let nonce = nonce.0;
+        let response = evidence::file_page(&state.worktree_base, &nonce, "prompt.md", &ctx.request().query);
         finish(state, ctx, Routed::Reply(response))
     }
 

@@ -18,9 +18,9 @@ use crate::store::{BloomDispatchLive, BloomDispatchRollup};
 fn ranged_reads_snap_both_ends_to_line_boundaries() {
     // A mid-line cursor must not return a partial first or last line. Paging
     // then walks purely by the returned cursors.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("a scratch directory is available");
     let path = dir.path().join("transcript.jsonl");
-    fs::write(&path, "one\ntwo\nthree\nfour\nfive\n").unwrap();
+    fs::write(&path, "one\ntwo\nthree\nfour\nfive\n").expect("the fixture writes");
 
     let first = read_ranged(&path, Some(1), 8).expect("an in-range read succeeds");
     assert_eq!(first.lines, vec!["two".to_owned()], "limit 8 from mid-'one' yields the next complete line only");
@@ -46,16 +46,16 @@ fn a_transcript_read_leaves_mtime_untouched() {
     // ADR-0195 §8: mtime is the executor's live-progress signal. A header or
     // transcript read that wrote metadata would look like the lane is still
     // making progress.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("a scratch directory is available");
     let path = dir.path().join("transcript.jsonl");
-    fs::write(&path, "alpha\nbeta\n").unwrap();
+    fs::write(&path, "alpha\nbeta\n").expect("the fixture writes");
     let pinned = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-    let file = fs::File::options().write(true).open(&path).unwrap();
-    file.set_modified(pinned).unwrap();
+    let file = fs::File::options().write(true).open(&path).expect("the fixture opens for mtime pin");
+    file.set_modified(pinned).expect("mtime pins");
     drop(file);
 
     let _page = read_ranged(&path, None, 64).expect("the tail read succeeds");
-    let after = fs::metadata(&path).unwrap().modified().unwrap();
+    let after = fs::metadata(&path).expect("metadata is readable").modified().expect("mtime is readable");
     assert_eq!(after, pinned, "a ranged read must not write the file's mtime");
 }
 
@@ -63,7 +63,7 @@ fn a_transcript_read_leaves_mtime_untouched() {
 fn a_swept_nonce_reports_retained_false_with_a_notice() {
     // The journal named this nonce; the janitor deleted the directory. A disk
     // client would 404 and cannot tell absence from "never existed".
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("a scratch directory is available");
     let view = read_header(dir.path(), "dispatch-9");
     assert!(!view.retained);
     assert_eq!(view.notice.as_deref(), Some(SWEPT_NOTICE));
@@ -72,15 +72,15 @@ fn a_swept_nonce_reports_retained_false_with_a_notice() {
 
 #[test]
 fn assistant_text_and_commit_message_cap_independently() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("a scratch directory is available");
     let evidence = evidence_dir(dir.path(), "dispatch-1");
-    fs::create_dir_all(&evidence).unwrap();
+    fs::create_dir_all(&evidence).expect("the evidence directory is created");
     let assistant = "a".repeat(ASSISTANT_TEXT_CAP + 32);
     fs::write(
         evidence.join("evidence.json"),
         format!(r#"{{"assistant_text":"{assistant}","commit_message":"fix(store): join"}}"#),
     )
-    .unwrap();
+    .expect("the evidence header writes");
 
     let view = read_header(dir.path(), "dispatch-1");
     assert!(view.retained);
@@ -94,7 +94,7 @@ fn assistant_text_and_commit_message_cap_independently() {
 fn cost_is_null_without_a_study_record_and_never_a_synthesized_zero() {
     // The plausible bug: treating a missing study as cost 0, which is how an
     // unpriced attempt is spelled and would hide the gap.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("a scratch directory is available");
     let payload = to_vec(&MetricDispatch {
         id: "fold:x".to_owned(),
         bloom: BloomId(Digest::from_bytes([1; 32])),
@@ -121,7 +121,7 @@ fn cost_is_null_without_a_study_record_and_never_a_synthesized_zero() {
 
 #[test]
 fn live_outstanding_joins_the_rollup_and_keeps_its_nonce() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("a scratch directory is available");
     let payload = to_vec(&MetricDispatch {
         id: "fold:x".to_owned(),
         bloom: BloomId(Digest::from_bytes([1; 32])),
@@ -188,10 +188,10 @@ fn a_transcript_limit_above_the_clamp_is_applied_and_named() {
 
 #[test]
 fn a_per_line_cap_truncates_the_rendered_line_and_still_advances() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("a scratch directory is available");
     let path = dir.path().join("transcript.jsonl");
     let huge = "x".repeat(TRANSCRIPT_LINE_CAP + 40);
-    fs::write(&path, format!("{huge}\nnext\n")).unwrap();
+    fs::write(&path, format!("{huge}\nnext\n")).expect("the fixture writes");
     let page = read_ranged(&path, Some(0), TRANSCRIPT_MAX_LIMIT).expect("the over-long line is readable");
     assert_eq!(page.lines[0].len(), TRANSCRIPT_LINE_CAP);
     assert_eq!(page.lines[1], "next");

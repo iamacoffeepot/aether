@@ -1,6 +1,7 @@
 //! Join rollup rows with live outstanding orders, retention, and study cost.
 
 use std::collections::{BTreeMap, HashSet};
+use std::fs;
 use std::path::Path;
 
 use aether_bloomery::{MetricDispatch, StageId, StudyRecord};
@@ -102,7 +103,7 @@ fn retained_verdict(worktree_base: &Path, nonce: &str) -> Option<String> {
     if !evidence_retained(worktree_base, nonce) {
         return None;
     }
-    let bytes = std::fs::read(evidence_dir(worktree_base, nonce).join("evidence.json")).ok()?;
+    let bytes = fs::read(evidence_dir(worktree_base, nonce).join("evidence.json")).ok()?;
     let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     match value.get("status").and_then(serde_json::Value::as_str)? {
         "pass" | "fail" | "environment" => Some(value["status"].as_str()?.to_owned()),

@@ -12,6 +12,7 @@ mod ranged;
 #[cfg(test)]
 mod tests;
 
+use std::io;
 use std::path::{Path, PathBuf};
 
 use aether_http::HttpServerResponse;
@@ -108,7 +109,7 @@ fn read_named_file(
         let path = evidence_dir(worktree_base, &spelling).join(file);
         match ranged::read_ranged(&path, cursor, limit) {
             Ok(page) => return Ok(page),
-            Err(ranged::RangedError::NotFound) => continue,
+            Err(ranged::RangedError::NotFound) => {}
             Err(ranged::RangedError::Io(error)) => return Err(FileReadError::Io(error)),
         }
     }
@@ -117,7 +118,7 @@ fn read_named_file(
 
 enum FileReadError {
     Missing,
-    Io(std::io::Error),
+    Io(io::Error),
 }
 
 fn evidence_dir(worktree_base: &Path, nonce: &str) -> PathBuf {
