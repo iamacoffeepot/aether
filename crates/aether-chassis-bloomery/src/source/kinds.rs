@@ -188,6 +188,13 @@ pub enum LandResult {
         /// A human-readable failure reason.
         error: String,
     },
+    /// Mainline now points at this head — a direct compare-and-swap. Appended
+    /// so prior variants' wire discriminants stay put.
+    Landed {
+        /// The `aether_data::wire`-encoded landed [`aether_bloomery::Digest`].
+        #[serde(with = "aether_data::bytes")]
+        new_head: Vec<u8>,
+    },
 }
 
 /// Read where the land proposal `number`, previously issued for `bloom` against
@@ -205,7 +212,7 @@ pub struct PollLand {
     pub number: u64,
 }
 
-/// Reply to [`PollLand`], mirroring [`aether_bloomery::LandProposal`].
+/// Reply to [`PollLand`], mirroring the GitHub landing watch states.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.source.poll_land_result")]
 pub enum PollLandResult {

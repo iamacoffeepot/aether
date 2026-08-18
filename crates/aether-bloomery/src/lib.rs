@@ -97,9 +97,9 @@ pub use manifest::{
 pub use port::{
     BloomView, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome,
     CompositionCursorView, CompositionView, Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend,
-    ExecutorFaultView, HostFaultView, IntegrateOutcome, IntegrationPosition, LandOutcome, LandProposal, LandingBlock,
-    MemberView, PendingDecisionView, ProjectedReceipt, ProjectionBackend, ReviewParkView, SourceBackend,
-    SourceSnapshot, ViewDocument, WedgeCause, WorkHandle, WorkOrder,
+    ExecutorFaultView, HostFaultView, IntegrateOutcome, IntegrationPosition, LandOutcome, LandingBlock, MemberView,
+    PendingDecisionView, ProjectedReceipt, ProjectionBackend, ReviewParkView, SourceBackend, SourceSnapshot,
+    ViewDocument, WedgeCause, WorkHandle, WorkOrder,
 };
 pub use reduce::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,

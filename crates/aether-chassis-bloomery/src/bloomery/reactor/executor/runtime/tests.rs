@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use aether_bloomery::{
     Admit, AgentSelection, AggregateReviewPayload, BloomId, CandidateRef, Conclusion, ConfigKind, ConfigRegistry,
-    DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, Harness, LandOutcome, ModelOverride, Nonce,
+    DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, Harness, ModelOverride, Nonce,
     ReasoningEffort, RedispatchPayload, ReviewPass, SharedCorrespondence, StageCatalog, StageId, StageOverride,
     TimeoutRecord, Topic, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId,
     pin_workpiece_description,
@@ -45,12 +45,11 @@ use crate::bloomery::intake::{
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::{CoordinatorConfig, GithubConnectionConfig};
 use crate::bloomery::{
-    ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle, SourceShell,
-    UnconfiguredActionsBackend,
+    ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle, UnconfiguredActionsBackend,
 };
 use crate::session::SessionConfig;
 use crate::store::{JournalWrite, OutstandingOrder, SqliteStore, StoreBackend};
-use aether_bloomery_github::{candidate_ref_name, member_checkpoint_ref_name};
+use aether_bloomery_github::{LandingSource, candidate_ref_name, member_checkpoint_ref_name};
 
 // A capturing executor backend: it records every submitted `WorkOrder` so a test
 // can assert exactly what `drain_and_dispatch` built — the advisory description it
@@ -2056,13 +2055,15 @@ fn an_aggregate_verify_repair_candidate_reaches_landing_ref_creation() {
         "the published ref is the reserved composition candidate",
     );
 
-    let source = SourceShell::new(Arc::new(GitSource::new(
+    let landing = aether_bloomery_github::GithubLanding::new(GitSource::new(
         github.clone(),
         Arc::new(github.clone()),
         true,
         MainlineRef::default(),
-    )));
-    let LandOutcome::Proposed { .. } = source.land(&bloom, &base, &captured.checkout, None).unwrap() else {
+    ));
+    let aether_bloomery_github::ProposalOutcome::Proposed { .. } =
+        landing.land_proposal(&bloom, &base, &captured.checkout, None).unwrap()
+    else {
         panic!("landing creates its branch from the published repair head");
     };
     assert_eq!(
