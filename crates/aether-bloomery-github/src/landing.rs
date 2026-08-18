@@ -1,11 +1,12 @@
 //! GitHub landing presentation: propose, poll, accept, and close after local
 //! truth is committed (ADR-0199).
 //!
-//! [`GitSource`](aether_bloomery_git::GitSource) is the repository backend and
-//! is bounded on the git-data trait alone. This module is the pull-request and
-//! issue face the land reactor drives — it does not move mainline.
+//! [`GitSource`] is the repository backend and is bounded on the git-data trait
+//! alone. This module is the pull-request and issue face the land reactor drives
+//! — it does not move mainline.
 
 use std::fmt;
+use std::sync::Arc;
 
 use aether_bloomery::{BloomId, Digest, LandingReceipt};
 use aether_bloomery_git::{
@@ -205,12 +206,12 @@ pub trait LandingSource: Send + Sync {
 
 /// GitHub landing over a repository-backed [`GitSource`].
 pub struct GithubLanding<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> {
-    source: std::sync::Arc<GitSource<C>>,
+    source: Arc<GitSource<C>>,
 }
 
 impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> Clone for GithubLanding<C> {
     fn clone(&self) -> Self {
-        Self { source: std::sync::Arc::clone(&self.source) }
+        Self { source: Arc::clone(&self.source) }
     }
 }
 
@@ -218,12 +219,12 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GithubLanding<C
     /// Wrap a git-data [`GitSource`] as the GitHub landing face.
     #[must_use]
     pub fn new(source: GitSource<C>) -> Self {
-        Self { source: std::sync::Arc::new(source) }
+        Self { source: Arc::new(source) }
     }
 
     /// Share an existing repository backend as the GitHub landing face.
     #[must_use]
-    pub fn from_arc(source: std::sync::Arc<GitSource<C>>) -> Self {
+    pub fn from_arc(source: Arc<GitSource<C>>) -> Self {
         Self { source }
     }
 
@@ -400,7 +401,7 @@ impl<T: LandingSource + ?Sized> LandingSource for &T {
     }
 }
 
-impl<T: LandingSource + ?Sized> LandingSource for std::sync::Arc<T> {
+impl<T: LandingSource + ?Sized> LandingSource for Arc<T> {
     fn issue_title(&self, number: u64) -> Result<Option<String>, SourceError> {
         (**self).issue_title(number)
     }
@@ -435,7 +436,6 @@ impl<T: LandingSource + ?Sized> LandingSource for std::sync::Arc<T> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use std::sync::Arc;
 
@@ -471,7 +471,9 @@ mod tests {
         fake.seed_correspondence(base, &"a1".repeat(20));
         fake.seed_git_object(new_head);
         let source = landing(fake, true);
-        let ProposalOutcome::Proposed { number } = source.land_proposal(&bloom(), base, new_head, None).unwrap() else {
+        let ProposalOutcome::Proposed { number } =
+            source.land_proposal(&bloom(), base, new_head, None).expect("the landing fixture")
+        else {
             panic!("the port opens the proposal it is then asked to accept");
         };
         let head_sha = fake.pull_request_head_sha(number).expect("the proposal has a head");
@@ -495,7 +497,7 @@ mod tests {
         }
 
         let enabled = landing(&fake, true);
-        let number = match enabled.land_proposal(&bloom, &base, &new_head, None).unwrap() {
+        let number = match enabled.land_proposal(&bloom, &base, &new_head, None).expect("the landing fixture") {
             ProposalOutcome::Proposed { number } => number,
             other @ ProposalOutcome::BaseMoved { .. } => panic!("expected Proposed, got {other:?}"),
         };
@@ -507,7 +509,7 @@ mod tests {
         // Tripwire: GitHub presentation must never write mainline. A slip back
         // to the repository CAS would 403 against a protected real repo.
         assert_eq!(fake.ref_target("heads/main"), Some(mainline_sha1), "land never writes mainline");
-        assert!(fake.get_pull_request(number).unwrap().is_some(), "the proposal exists");
+        assert!(fake.get_pull_request(number).expect("the landing fixture").is_some(), "the proposal exists");
     }
 
     #[test]
@@ -524,11 +526,13 @@ mod tests {
         fake.seed_git_object(&new_head);
 
         let source = landing_on(&fake, true, day.clone());
-        let ProposalOutcome::Proposed { number } = source.land_proposal(&bloom, &base, &new_head, None).unwrap() else {
+        let ProposalOutcome::Proposed { number } =
+            source.land_proposal(&bloom, &base, &new_head, None).expect("the landing fixture")
+        else {
             panic!("the sealed base is what the day branch holds, so the land proposes");
         };
         assert_eq!(
-            fake.get_pull_request(number).unwrap().expect("the proposal exists").base,
+            fake.get_pull_request(number).expect("the landing fixture").expect("the proposal exists").base,
             day.branch(),
             "the landing is proposed onto the day branch",
         );
@@ -547,8 +551,8 @@ mod tests {
         fake.seed_git_object(&new_head);
         let source = landing(&fake, true);
 
-        let first = source.land_proposal(&bloom, &base, &new_head, None).unwrap();
-        let second = source.land_proposal(&bloom, &base, &new_head, None).unwrap();
+        let first = source.land_proposal(&bloom, &base, &new_head, None).expect("the landing fixture");
+        let second = source.land_proposal(&bloom, &base, &new_head, None).expect("the landing fixture");
         assert_eq!(first, second, "a re-issued land adopts the same proposal");
     }
 
@@ -565,11 +569,13 @@ mod tests {
         fake.seed_git_object(&refined);
         let source = landing(&fake, true);
 
-        let ProposalOutcome::Proposed { number } = source.land_proposal(&bloom, &base, &refused, None).unwrap() else {
+        let ProposalOutcome::Proposed { number } =
+            source.land_proposal(&bloom, &base, &refused, None).expect("the landing fixture")
+        else {
             panic!("the first land opens the proposal");
         };
         assert_eq!(
-            source.land_proposal(&bloom, &base, &refined, None).unwrap(),
+            source.land_proposal(&bloom, &base, &refined, None).expect("the landing fixture"),
             ProposalOutcome::Proposed { number },
             "the second land adopts the same proposal",
         );
@@ -591,13 +597,14 @@ mod tests {
         fake.seed_git_object(&new_head);
         let enabled = landing(&fake, true);
 
-        let ProposalOutcome::Proposed { number } = enabled.land_proposal(&bloom, &base, &new_head, None).unwrap()
+        let ProposalOutcome::Proposed { number } =
+            enabled.land_proposal(&bloom, &base, &new_head, None).expect("the landing fixture")
         else {
             panic!("the first land opens the proposal");
         };
         fake.seed_ref("heads/main", &"d4".repeat(20));
         assert_eq!(
-            enabled.land_proposal(&bloom, &base, &new_head, None).unwrap(),
+            enabled.land_proposal(&bloom, &base, &new_head, None).expect("the landing fixture"),
             ProposalOutcome::Proposed { number },
             "the same proposal is re-adopted so the watch can still reach its terminal",
         );
@@ -617,7 +624,7 @@ mod tests {
         ] {
             fake.seed_checks(&head_sha, state.clone());
             assert_eq!(
-                source.poll_land(&bloom(), &base, number).unwrap(),
+                source.poll_land(&bloom(), &base, number).expect("the landing fixture"),
                 LandProposal::Open,
                 "a {state:?} check is not a landing verdict",
             );
@@ -629,11 +636,12 @@ mod tests {
         let fake = FakeGithub::new();
         let (base, new_head) = (digest(10), digest(90));
         let (source, number, _) = proposed(&fake, &base, &new_head);
-        assert_eq!(source.poll_land(&bloom(), &base, number).unwrap(), LandProposal::Open);
+        assert_eq!(source.poll_land(&bloom(), &base, number).expect("the landing fixture"), LandProposal::Open);
 
         let squashed = "5c".repeat(20);
         fake.merge_pull_request(number, &squashed);
-        let LandProposal::Landed(receipt) = source.poll_land(&bloom(), &base, number).unwrap() else {
+        let LandProposal::Landed(receipt) = source.poll_land(&bloom(), &base, number).expect("the landing fixture")
+        else {
             panic!("expected Landed");
         };
         assert_eq!(receipt.previous_base, base);
@@ -646,8 +654,8 @@ mod tests {
         let (base, new_head) = (digest(10), digest(90));
         let (source, number, _) = proposed(&fake, &base, &new_head);
         fake.close_pull_request(number);
-        assert_eq!(source.poll_land(&bloom(), &base, number).unwrap(), LandProposal::Declined);
-        assert_eq!(source.poll_land(&bloom(), &base, 9999).unwrap(), LandProposal::Declined);
+        assert_eq!(source.poll_land(&bloom(), &base, number).expect("the landing fixture"), LandProposal::Declined);
+        assert_eq!(source.poll_land(&bloom(), &base, 9999).expect("the landing fixture"), LandProposal::Declined);
     }
 
     #[test]
@@ -656,9 +664,13 @@ mod tests {
         let (base, new_head) = (digest(10), digest(90));
         let (source, number, _) = proposed(&fake, &base, &new_head);
 
-        assert_eq!(source.accept_land(&bloom(), &base, &new_head, number).unwrap(), LandAcceptance::Accepted);
+        assert_eq!(
+            source.accept_land(&bloom(), &base, &new_head, number).expect("the landing fixture"),
+            LandAcceptance::Accepted
+        );
         assert_eq!(fake.pull_request_merged(number), Some(true));
-        let LandProposal::Landed(receipt) = source.poll_land(&bloom(), &base, number).unwrap() else {
+        let LandProposal::Landed(receipt) = source.poll_land(&bloom(), &base, number).expect("the landing fixture")
+        else {
             panic!("the accepted proposal reads as landed");
         };
         assert_ne!(receipt.new_head, new_head);
@@ -691,7 +703,7 @@ mod tests {
             fake.seed_checks(&head_sha, state.clone());
 
             assert_eq!(
-                source.accept_land(&bloom(), &base, &new_head, number).unwrap(),
+                source.accept_land(&bloom(), &base, &new_head, number).expect("the landing fixture"),
                 LandAcceptance::Accepted,
                 "a {state:?} check does not block acceptance",
             );
@@ -706,7 +718,7 @@ mod tests {
         let pushed = "ee".repeat(20);
         fake.push_to_pull_request(number, &pushed);
 
-        match source.accept_land(&bloom(), &base, &new_head, number).unwrap() {
+        match source.accept_land(&bloom(), &base, &new_head, number).expect("the landing fixture") {
             LandAcceptance::Refused(LandingRefusal::Drifted { detail }) => {
                 assert!(detail.contains(&pushed), "the refusal names the head it found: {detail}");
             }
@@ -723,7 +735,7 @@ mod tests {
         fake.seed_ref("heads/main", &"d4".repeat(20));
         fake.seed_correspondence(&moved, &"d4".repeat(20));
 
-        match source.accept_land(&bloom(), &base, &new_head, number).unwrap() {
+        match source.accept_land(&bloom(), &base, &new_head, number).expect("the landing fixture") {
             LandAcceptance::Refused(LandingRefusal::BaseMoved { expected, actual }) => {
                 assert_eq!(expected, base);
                 assert_eq!(actual, moved);
@@ -738,14 +750,17 @@ mod tests {
         let (base, new_head) = (digest(10), digest(90));
         let (source, number, _) = proposed(&fake, &base, &new_head);
         fake.merge_pull_request(number, &"5c".repeat(20));
-        assert_eq!(source.accept_land(&bloom(), &base, &new_head, number).unwrap(), LandAcceptance::Accepted);
+        assert_eq!(
+            source.accept_land(&bloom(), &base, &new_head, number).expect("the landing fixture"),
+            LandAcceptance::Accepted
+        );
     }
 
     #[test]
     fn close_issue_comments_then_closes() {
         let fake = FakeGithub::new();
         fake.seed_issue(7, "the order");
-        landing(&fake, false).close_issue(7, "landed via pull request #3").unwrap();
+        landing(&fake, false).close_issue(7, "landed via pull request #3").expect("the landing fixture");
         assert_eq!(fake.comments_on(7), ["landed via pull request #3"]);
         assert_eq!(fake.issue_is_closed(7), Some(true));
     }

@@ -1960,7 +1960,9 @@ mod tests {
 
         match source.land(&bloom, &base, &new_head).unwrap() {
             LandOutcome::Landed { new_head: landed } => assert_eq!(landed, new_head),
-            other => panic!("the sealed base is what the day branch holds, so the land commits: {other:?}"),
+            other @ LandOutcome::BaseMoved { .. } => {
+                panic!("the sealed base is what the day branch holds, so the land commits: {other:?}")
+            }
         }
         assert_eq!(
             fake.ref_target(day.git_ref()),

@@ -14,16 +14,17 @@
 //!    (its own connection, mirroring the executor reactor's store ownership) and
 //!    decodes each [`LandPayload`] — the resolving
 //!    bloom, its sealed `expected_base`, and the `new_head` being proposed.
-//! 2. **Propose.** It issues [`SourceShell::land`] against `expected_base`. On
-//!    [`LandOutcome::BaseMoved`] it declines: a moved mainline forces
-//!    supersession, never a land onto the new head (ADR-0149 §The bloom), and V1
-//!    permits one unlanded bloom per mainline so this is the defensive case. The
-//!    bloom stays `Resolved` and thus supersedable through the intent-native
-//!    supersede path — a reactor has no re-authored successor spec to fabricate,
-//!    and the ADR's successor-seal is a caller act, not a reactor one.
+//! 2. **Propose.** It issues [`LandingSource::land_proposal`] against
+//!    `expected_base`. On [`ProposalOutcome::BaseMoved`] it declines: a moved
+//!    mainline forces supersession, never a land onto the new head (ADR-0149
+//!    §The bloom), and V1 permits one unlanded bloom per mainline so this is the
+//!    defensive case. The bloom stays `Resolved` and thus supersedable through
+//!    the intent-native supersede path — a reactor has no re-authored successor
+//!    spec to fabricate, and the ADR's successor-seal is a caller act, not a
+//!    reactor one.
 //! 3. **Accept.** On [`ProposalOutcome::Proposed`] it polls the proposal in the same
 //!    pass, and while that proposal is open it asks
-//!    [`SourceShell::accept_land`] to merge it. That merge happens once the
+//!    [`LandingSource::accept_land`] to merge it. That merge happens once the
 //!    structural gates hold — the proposal is this bloom's landing branch
 //!    aimed at mainline, still offering the exact head the bloom proved onto
 //!    the exact base it sealed against — without consulting check state
