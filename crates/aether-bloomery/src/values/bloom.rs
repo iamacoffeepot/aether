@@ -96,13 +96,15 @@ pub enum DependencyError {
 }
 
 /// Union `declared` with one ordering edge per pair of `members` whose
-/// declared surfaces intersect, in listed order; refuse a cycle or an edge
-/// that names a non-member.
+/// declared surfaces intersect, in canonical `WorkpieceId` order; refuse a
+/// cycle or an edge that names a non-member.
 ///
-/// The later-listed member of an overlapping pair depends on the earlier one,
-/// so the listing is the sequencing the door can see. The returned set is
-/// sorted and de-duplicated so two seals that decide the same graph journal
-/// the same bytes.
+/// The later-canonical member of an overlapping pair depends on the earlier
+/// one — the same leading key [`BloomDraft::seal`] sorts memberships on — so
+/// two listings of the same set produce the same graph. Declared-edge
+/// endpoints are still validated against the unsorted member set. The
+/// returned set is sorted and de-duplicated so two seals that decide the
+/// same graph journal the same bytes.
 pub fn resolve_member_dependencies(
     members: &[(WorkpieceId, &[String])],
     declared: &[MemberDependency],
@@ -118,8 +120,10 @@ pub fn resolve_member_dependencies(
         }
         edges.insert(edge.clone());
     }
-    for (index, (workpiece, surface)) in members.iter().enumerate() {
-        for (peer, peer_surface) in &members[index + 1..] {
+    let mut ordered: Vec<_> = members.iter().collect();
+    ordered.sort_by(|left, right| left.0.cmp(&right.0));
+    for (index, (workpiece, surface)) in ordered.iter().enumerate() {
+        for (peer, peer_surface) in &ordered[index + 1..] {
             if !surface_intersection(surface, peer_surface).is_empty() {
                 edges.insert(MemberDependency { member: (*peer).clone(), depends_on: (*workpiece).clone() });
             }
@@ -381,8 +385,8 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_surfaces_derive_an_ordering_edge_in_listed_order() {
-        // The later-listed member of an overlapping pair must wait for the
+    fn overlapping_surfaces_derive_an_ordering_edge_in_canonical_order() {
+        // The later-canonical member of an overlapping pair must wait for the
         // earlier one. Pairing the other way, or emitting no edge, would leave
         // the known collision to fold-time Reconcile — the bug this derivation
         // exists to close.
@@ -394,6 +398,44 @@ mod tests {
         let resolved = resolve_member_dependencies(&members, &[]).expect("acyclic");
 
         assert_eq!(resolved, [edge("wp-b", "wp-a")], "one overlapping pair is one later-depends-on-earlier edge");
+    }
+
+    #[test]
+    fn derived_edges_are_identical_for_every_permutation_of_three_overlapping_members() {
+        // Three pairwise-overlapping members: a first/last-only swap would
+        // still leave the middle member's direction input-order dependent.
+        // Every permutation must produce the same edge list as the canonical
+        // workpiece order.
+        let bloom = ["crates/aether-bloomery/**".to_owned()];
+        let values = ["crates/aether-bloomery/src/values/**".to_owned()];
+        let file = ["crates/aether-bloomery/src/values/price.rs".to_owned()];
+        let named = [(wp("wp-a"), bloom.as_slice()), (wp("wp-b"), values.as_slice()), (wp("wp-c"), file.as_slice())];
+        let expected = [edge("wp-b", "wp-a"), edge("wp-c", "wp-a"), edge("wp-c", "wp-b")];
+
+        for order in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+            let members = [named[order[0]].clone(), named[order[1]].clone(), named[order[2]].clone()];
+            let resolved = resolve_member_dependencies(&members, &[]).expect("acyclic");
+            assert_eq!(resolved, expected, "permutation must match the canonical edge list");
+        }
+    }
+
+    #[test]
+    fn sorting_keeps_declared_edges_and_does_not_invent_disjoint_ones() {
+        // Canonicalizing input order must not drop a declared-only edge and
+        // must not invent one for a disjoint surface. Either would make
+        // order independence a data loss.
+        let bloom = ["crates/aether-bloomery/**".to_owned()];
+        let file = ["crates/aether-bloomery/src/lib.rs".to_owned()];
+        let docs = ["docs/guide/**".to_owned()];
+        let named = [(wp("wp-a"), bloom.as_slice()), (wp("wp-b"), file.as_slice()), (wp("wp-c"), docs.as_slice())];
+        let declared = [edge("wp-c", "wp-a")];
+        let expected = [edge("wp-b", "wp-a"), edge("wp-c", "wp-a")];
+
+        for order in [[0, 1, 2], [2, 1, 0], [1, 2, 0]] {
+            let members = [named[order[0]].clone(), named[order[1]].clone(), named[order[2]].clone()];
+            let resolved = resolve_member_dependencies(&members, &declared).expect("acyclic");
+            assert_eq!(resolved, expected);
+        }
     }
 
     #[test]

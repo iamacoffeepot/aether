@@ -514,11 +514,13 @@ fn resolve_seal_memberships(
 
 /// Resolve the seal's member-dependency graph (ADR-0196): declared edges
 /// unioned with one ordering edge per overlapping declared-surface pair, in
-/// seal-listed order. A cycle, an edge naming a non-member, or a member with
-/// no matching projection is a fail-closed `422` — the graph is decided here,
-/// before any admit. A missing projection is a malformed request, not an
+/// canonical workpiece order. A cycle, an edge naming a non-member, or a member
+/// with no matching projection is a fail-closed `422` — the graph is decided
+/// here, before any admit. A missing projection is a malformed request, not an
 /// edgeless member: dropping it would derive a graph that pretends the member
-/// was never there.
+/// was never there. The door matches projections by `{workpiece, scope_revision}`
+/// and leaves order independence to the resolver, so a permuted request of the
+/// same member set journals the graph its canonical [`BloomSpec`] implies.
 fn resolve_seal_graph(
     members: &[Membership],
     projections: &[MemberProjection],
@@ -830,6 +832,45 @@ mod tests {
         assert_eq!(
             edges,
             [MemberDependency { member: WorkpieceId("wp-b".to_owned()), depends_on: WorkpieceId("wp-a".to_owned()) }]
+        );
+    }
+
+    #[test]
+    fn permuted_request_order_resolves_the_same_graph_as_the_canonical_spec() {
+        // The door matches projections by {workpiece, scope_revision} and
+        // hands the resolver the request's listing. BloomDraft::seal then
+        // sorts the same members into the spec. If derivation followed
+        // request order, two permutations would share a BloomId and
+        // journal opposite edges — the graph would not be a function of
+        // the sealed spec. Three overlapping members so a first/last-only
+        // swap cannot hide a leftover middle-order dependence.
+        let members = [member("wp-c", 3), member("wp-a", 1), member("wp-b", 2)];
+        let projections = [
+            projection("wp-c", 3, &["crates/aether-bloomery/src/values/price.rs"]),
+            projection("wp-a", 1, &["crates/aether-bloomery/**"]),
+            projection("wp-b", 2, &["crates/aether-bloomery/src/values/**"]),
+        ];
+        let reversed_members = [member("wp-b", 2), member("wp-a", 1), member("wp-c", 3)];
+        let reversed_projections = [
+            projection("wp-b", 2, &["crates/aether-bloomery/src/values/**"]),
+            projection("wp-a", 1, &["crates/aether-bloomery/**"]),
+            projection("wp-c", 3, &["crates/aether-bloomery/src/values/price.rs"]),
+        ];
+
+        let forward = resolve_seal_graph(&members, &projections, &[]).expect("acyclic");
+        let reversed = resolve_seal_graph(&reversed_members, &reversed_projections, &[]).expect("acyclic");
+        assert_eq!(forward, reversed, "request order must not change the derived graph");
+
+        let spec_forward = BloomDraft { proposals: members.to_vec(), ..BloomDraft::default() }.seal();
+        let spec_reversed = BloomDraft { proposals: reversed_members.to_vec(), ..BloomDraft::default() }.seal();
+        assert_eq!(spec_forward.id(), spec_reversed.id(), "the same member set seals to one BloomId");
+        assert_eq!(
+            forward,
+            [
+                MemberDependency { member: WorkpieceId("wp-b".to_owned()), depends_on: WorkpieceId("wp-a".to_owned()) },
+                MemberDependency { member: WorkpieceId("wp-c".to_owned()), depends_on: WorkpieceId("wp-a".to_owned()) },
+                MemberDependency { member: WorkpieceId("wp-c".to_owned()), depends_on: WorkpieceId("wp-b".to_owned()) },
+            ]
         );
     }
 
