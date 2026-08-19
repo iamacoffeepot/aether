@@ -1,9 +1,12 @@
 //! Allowlist and push-path tests for the source replica.
 
 use std::fs;
+use std::io::{self, Write};
+use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
 
 use tempfile::TempDir;
 
@@ -42,6 +45,14 @@ fn published_refspecs_are_exactly_mainline_plus_tags() {
         args.iter().filter(|arg| arg.starts_with('+')).all(|arg| arg.contains("refs/heads/main")),
         "force is reserved for the configured mainline",
     );
+}
+
+#[test]
+fn published_refspecs_do_not_synthesize_an_absent_mainline() {
+    let mainline = MainlineRef::new("refs/heads/main");
+    let specs = published_refspecs(&mainline, ["refs/tags/v1.0"]);
+    let args: Vec<String> = specs.iter().map(super::allowlist::PublishedRefspec::as_arg).collect();
+    assert_eq!(args, ["refs/tags/v1.0:refs/tags/v1.0"], "an absent mainline is not invented as a refspec");
 }
 
 #[test]
@@ -119,6 +130,99 @@ fn a_protected_mainline_force_is_classified_as_rejected() {
     );
 }
 
+#[test]
+fn an_absent_mainline_classifies_as_deterministic() {
+    let (_root, authority, replica) = paired_repos();
+    run_git(&authority, &["update-ref", "-d", "refs/heads/main"]);
+    let error = GitSourceReplica::new(&authority, replica.to_str().expect("utf-8"), MainlineRef::default(), "")
+        .publish()
+        .expect_err("an authority without mainline is a deterministic refusal");
+    assert!(
+        matches!(error, ReplicaError::Deterministic(_)),
+        "absent mainline must not redrive as Transient, got {error}"
+    );
+    let text = error.to_string();
+    assert!(text.contains("refs/heads/main"), "{text}");
+}
+
+#[test]
+fn an_authentication_failure_classifies_as_deterministic() {
+    let (_root, authority, _replica) = paired_repos();
+    let port = spawn_http_401();
+    let error =
+        GitSourceReplica::new(&authority, format!("http://127.0.0.1:{port}/repo.git"), MainlineRef::default(), "")
+            .publish()
+            .expect_err("HTTP 401 is an auth failure");
+    assert!(matches!(error, ReplicaError::Deterministic(_)), "auth must not redrive as Transient, got {error}");
+}
+
+#[test]
+fn an_unknown_remote_classifies_as_deterministic() {
+    let (_root, authority, _replica) = paired_repos();
+    let error = GitSourceReplica::new(&authority, "/no/such/remote.git", MainlineRef::default(), "")
+        .publish()
+        .expect_err("an unknown remote is a deterministic refusal");
+    assert!(
+        matches!(error, ReplicaError::Deterministic(_)),
+        "unknown remote must not redrive as Transient, got {error}"
+    );
+}
+
+#[test]
+fn a_connection_refusal_classifies_as_transient() {
+    let (_root, authority, _replica) = paired_repos();
+    let error = GitSourceReplica::new(&authority, "git://127.0.0.1:1/repo.git", MainlineRef::default(), "")
+        .publish()
+        .expect_err("a closed port is a transport failure");
+    assert!(
+        matches!(error, ReplicaError::Transient(_)),
+        "a genuine transport failure must stay Transient, got {error}"
+    );
+}
+
+#[test]
+fn a_mixed_push_reports_per_ref_outcomes() {
+    let (_root, authority, replica) = paired_repos();
+    advance_mainline(&authority);
+    run_git(&authority, &["tag", "v-mixed"]);
+    install_tag_rejecting_update_hook(&replica);
+    let error = GitSourceReplica::new(&authority, replica.to_str().expect("utf-8"), MainlineRef::default(), "")
+        .publish()
+        .expect_err("a rejected tag fails the push");
+    assert!(
+        matches!(error, ReplicaError::Deterministic(_)),
+        "a tag rejection is not a mainline force rejection, got {error}"
+    );
+    let text = error.to_string();
+    assert!(text.contains("refs/heads/main"), "per-ref report names the delivered mainline: {text}");
+    assert!(text.contains("refs/tags/v-mixed"), "per-ref report names the rejected tag: {text}");
+    assert!(text.to_ascii_lowercase().contains("rejected"), "{text}");
+}
+
+#[test]
+fn identical_transient_redrive_beyond_the_bound_escalates() {
+    let (_root, authority, _replica) = paired_repos();
+    let replica = GitSourceReplica::new(&authority, "git://127.0.0.1:1/repo.git", MainlineRef::default(), "")
+        .with_transient_redrive_limit(1);
+    let first = replica.publish().expect_err("first closed-port push");
+    assert!(matches!(first, ReplicaError::Transient(_)), "first failure stays Transient, got {first}");
+    let second = replica.publish().expect_err("second closed-port push");
+    assert!(
+        matches!(second, ReplicaError::Deterministic(_)),
+        "identical redrive beyond the bound escalates, got {second}"
+    );
+    assert!(second.to_string().contains("repeated"), "{second}");
+}
+
+#[test]
+fn a_missing_git_binary_classifies_as_deterministic() {
+    let error = ReplicaError::from(io::Error::new(io::ErrorKind::NotFound, "No such file or directory"));
+    assert!(
+        matches!(error, ReplicaError::Deterministic(_)),
+        "a missing git binary must not redrive as Transient, got {error}"
+    );
+}
+
 fn paired_repos() -> (TempDir, PathBuf, PathBuf) {
     let root = tempfile::tempdir().expect("root");
     let seed = root.path().join("seed");
@@ -176,16 +280,44 @@ fn advance_mainline(repo: &Path) {
 }
 
 fn install_rejecting_hook(replica: &Path) {
-    let hook = replica.join("hooks").join("pre-receive");
-    fs::create_dir_all(hook.parent().expect("hooks")).expect("hooks dir");
-    fs::write(
-        &hook,
+    write_executable_hook(
+        replica,
+        "pre-receive",
         "#!/bin/sh\necho 'remote: error: GH006: Protected branch update failed' >&2\necho '! [remote rejected] main -> main (protected branch hook declined)' >&2\nexit 1\n",
-    )
-    .expect("hook");
+    );
+}
+
+fn install_tag_rejecting_update_hook(replica: &Path) {
+    write_executable_hook(
+        replica,
+        "update",
+        "#!/bin/sh\ncase \"$1\" in\nrefs/tags/*) echo 'remote: tag update rejected' >&2; exit 1 ;;\nesac\nexit 0\n",
+    );
+}
+
+fn write_executable_hook(replica: &Path, name: &str, body: &str) {
+    let hook = replica.join("hooks").join(name);
+    fs::create_dir_all(hook.parent().expect("hooks")).expect("hooks dir");
+    fs::write(&hook, body).expect("hook");
     let mut perms = fs::metadata(&hook).expect("hook meta").permissions();
     perms.set_mode(0o755);
     fs::set_permissions(&hook, perms).expect("chmod hook");
+}
+
+fn spawn_http_401() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind 401 server");
+    let port = listener.local_addr().expect("401 addr").port();
+    thread::spawn(move || {
+        for _ in 0..32 {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+            let _ = stream.write_all(
+                b"HTTP/1.0 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"git\"\r\nContent-Length: 22\r\nConnection: close\r\n\r\ninvalid credentials\n",
+            );
+        }
+    });
+    port
 }
 
 fn run_git(repo: &Path, args: &[&str]) {

@@ -44,20 +44,15 @@ pub fn published_refspecs(
 ) -> Vec<PublishedRefspec> {
     let mainline_ref = mainline.to_string();
     let mut specs = Vec::new();
-    let mut saw_mainline = false;
     for name in refs {
         let name = name.as_ref();
         if name == mainline_ref {
             specs.push(PublishedRefspec { src: name.to_owned(), dst: name.to_owned(), force: true });
-            saw_mainline = true;
             continue;
         }
         if name.starts_with("refs/tags/") && !name.starts_with("refs/tags/bloom/") {
             specs.push(PublishedRefspec { src: name.to_owned(), dst: name.to_owned(), force: false });
         }
-    }
-    if !saw_mainline {
-        specs.insert(0, PublishedRefspec { src: mainline_ref.clone(), dst: mainline_ref, force: true });
     }
     specs
 }

@@ -10,15 +10,21 @@ use std::error::Error;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Command;
+use std::sync::Mutex;
 
 use crate::mainline::MainlineRef;
 
 mod allowlist;
+mod classify;
 #[cfg(test)]
 mod tests;
 
 pub use allowlist::{PublishedRefspec, published_refspecs};
+
+/// Identical [`ReplicaError::Transient`] failures beyond this count escalate
+/// to [`ReplicaError::Deterministic`] rather than staying queued at warn.
+pub const DEFAULT_TRANSIENT_REDRIVE_LIMIT: usize = 5;
 
 /// Why a replica publish failed.
 #[derive(Debug)]
@@ -28,6 +34,11 @@ pub enum ReplicaError {
     /// The replica refused a mainline force-push. Operator-visible: do not
     /// retry this request silently.
     ForceRejected(String),
+    /// A deterministic refusal — auth, absent mainline, unknown remote,
+    /// missing binary, a non-mainline ref rejection, or a transient failure
+    /// that has redriven past [`DEFAULT_TRANSIENT_REDRIVE_LIMIT`].
+    /// Operator-visible: do not retry this request silently.
+    Deterministic(String),
 }
 
 impl fmt::Display for ReplicaError {
@@ -37,6 +48,7 @@ impl fmt::Display for ReplicaError {
             Self::ForceRejected(detail) => {
                 write!(f, "source replica force-push was rejected: {detail}")
             }
+            Self::Deterministic(detail) => write!(f, "source replica push refused: {detail}"),
         }
     }
 }
@@ -45,8 +57,17 @@ impl Error for ReplicaError {}
 
 impl From<io::Error> for ReplicaError {
     fn from(error: io::Error) -> Self {
-        Self::Transient(error.to_string())
+        if error.kind() == io::ErrorKind::NotFound {
+            Self::Deterministic(format!("git binary not found: {error}"))
+        } else {
+            Self::Transient(error.to_string())
+        }
     }
+}
+
+struct TransientRedrive {
+    detail: String,
+    count: usize,
 }
 
 /// Publish allowlisted refs from a local authority to a git remote URL.
@@ -55,6 +76,8 @@ pub struct GitSourceReplica {
     remote: String,
     mainline: MainlineRef,
     token: String,
+    transient_redrive_limit: usize,
+    transient_redrives: Mutex<Option<TransientRedrive>>,
 }
 
 impl GitSourceReplica {
@@ -67,7 +90,22 @@ impl GitSourceReplica {
         mainline: MainlineRef,
         token: impl Into<String>,
     ) -> Self {
-        Self { authority: authority.into(), remote: remote.into(), mainline, token: token.into() }
+        Self {
+            authority: authority.into(),
+            remote: remote.into(),
+            mainline,
+            token: token.into(),
+            transient_redrive_limit: DEFAULT_TRANSIENT_REDRIVE_LIMIT,
+            transient_redrives: Mutex::new(None),
+        }
+    }
+
+    /// Bound identical [`ReplicaError::Transient`] redrives before escalation
+    /// to [`ReplicaError::Deterministic`].
+    #[must_use]
+    pub fn with_transient_redrive_limit(mut self, limit: usize) -> Self {
+        self.transient_redrive_limit = limit;
+        self
     }
 
     /// The remote URL this replica pushes to (no credentials).
@@ -109,11 +147,43 @@ impl GitSourceReplica {
     /// Push the allowlisted refs now.
     ///
     /// # Errors
-    /// The remote was unreachable, git failed, or the replica rejected a
-    /// mainline force-push.
+    /// The remote was unreachable, git failed, the replica rejected a
+    /// mainline force-push, or a deterministic refusal (auth, absent
+    /// mainline, unknown remote).
     pub fn push(&self) -> Result<(), ReplicaError> {
-        let specs = published_refspecs(&self.mainline, &Self::list_refs(&self.authority)?);
-        classify_push(&self.git_push_command(&specs).output()?)
+        let refs = Self::list_refs(&self.authority)?;
+        let mainline = self.mainline.to_string();
+        if !refs.iter().any(|name| name == &mainline) {
+            return Err(ReplicaError::Deterministic(format!("authority has no mainline ref {mainline}")));
+        }
+        let specs = published_refspecs(&self.mainline, &refs);
+        self.record_push(classify::classify_push(&self.git_push_command(&specs).output()?, &mainline))
+    }
+
+    fn record_push(&self, result: Result<(), ReplicaError>) -> Result<(), ReplicaError> {
+        let mut slot = self.transient_redrives.lock().expect("replica redrive mutex");
+        match result {
+            Ok(()) => {
+                *slot = None;
+                Ok(())
+            }
+            Err(ReplicaError::Transient(detail)) => {
+                let count = match slot.as_ref() {
+                    Some(prior) if prior.detail == detail => prior.count.saturating_add(1),
+                    _ => 1,
+                };
+                *slot = Some(TransientRedrive { detail: detail.clone(), count });
+                if count > self.transient_redrive_limit {
+                    Err(ReplicaError::Deterministic(format!("transient failure repeated {count} times: {detail}")))
+                } else {
+                    Err(ReplicaError::Transient(detail))
+                }
+            }
+            Err(other) => {
+                *slot = None;
+                Err(other)
+            }
+        }
     }
 
     fn git_push_command(&self, specs: &[PublishedRefspec]) -> Command {
@@ -161,7 +231,8 @@ pub trait SourceReplica: Send + Sync {
     /// Push the current allowlisted refs.
     ///
     /// # Errors
-    /// Transient transport failure or a rejected mainline force-push.
+    /// Transient transport failure, a rejected mainline force-push, or a
+    /// deterministic refusal.
     fn publish(&self) -> Result<(), ReplicaError>;
 }
 
@@ -169,25 +240,4 @@ impl SourceReplica for GitSourceReplica {
     fn publish(&self) -> Result<(), ReplicaError> {
         self.push()
     }
-}
-
-fn classify_push(output: &Output) -> Result<(), ReplicaError> {
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let detail = format!("{stderr}{stdout}");
-    let lower = detail.to_ascii_lowercase();
-    if is_force_rejection(&lower) {
-        return Err(ReplicaError::ForceRejected(detail.trim().to_owned()));
-    }
-    Err(ReplicaError::Transient(detail.trim().to_owned()))
-}
-
-fn is_force_rejection(lower: &str) -> bool {
-    lower.contains("protected branch")
-        || lower.contains("hook declined")
-        || lower.contains("remote rejected")
-        || (lower.contains("rejected") && lower.contains("non-fast-forward"))
 }
