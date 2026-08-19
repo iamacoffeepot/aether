@@ -22,7 +22,7 @@ from typing import Any, Sequence
 
 
 CANONICAL_PATH = "scripts/surface-match.py"
-POLICY_PATH = "approval-policy.yml"
+POLICY_PATH = "approval-policy.toml"
 FULL_SHA = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\Z")
 SAFE_SURFACE = re.compile(r"[A-Za-z0-9._/*\-]+\Z")
 SAFE_TARGET = re.compile(r"[A-Za-z0-9._/\-]+\Z")

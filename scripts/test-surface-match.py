@@ -19,26 +19,43 @@ SPEC.loader.exec_module(surface_match)
 
 
 POLICY = """\
-default: judge
-rules:
-  - glob: "/Cargo.toml"
-    tier: human
-  - glob: "crates/*/Cargo.toml"
-    tier: human
-  - glob: "crates/aether-data/**"
-    tier: human
-  - glob: "docs/adr/**"
-    tier: human
-  - glob: ".agents/**"
-    tier: human
-  - glob: "docs/guide/**"
-    tier: auto
-  - glob: "crates/aether-kit/**"
-    tier: auto
-  - glob: "crates/aether-chassis-desktop/**"
-    tier: judge
-  - glob: "scripts/surface-match.py"
-    tier: human
+default = "judge"
+
+[[rules]]
+glob = "/Cargo.toml"
+tier = "human"
+
+[[rules]]
+glob = "crates/*/Cargo.toml"
+tier = "human"
+
+[[rules]]
+glob = "crates/aether-data/**"
+tier = "human"
+
+[[rules]]
+glob = "docs/adr/**"
+tier = "human"
+
+[[rules]]
+glob = ".agents/**"
+tier = "human"
+
+[[rules]]
+glob = "docs/guide/**"
+tier = "auto"
+
+[[rules]]
+glob = "crates/aether-kit/**"
+tier = "auto"
+
+[[rules]]
+glob = "crates/aether-chassis-desktop/**"
+tier = "judge"
+
+[[rules]]
+glob = "scripts/surface-match.py"
+tier = "human"
 """
 
 
@@ -91,14 +108,18 @@ class MatcherTests(unittest.TestCase):
 
     def test_malformed_policy_fails_closed(self) -> None:
         malformed = [
-            'default: judge\nrules:\n  - glob: "docs/**"\n    tier: owner\n',
-            'default: judge\nrules:\n  - glob: "docs//**"\n    tier: auto\n',
-            'default: judge\nrules:\n  - glob: "docs***"\n    tier: auto\n',
-            'default: judge\nrules:\n  - glob: "../**"\n    tier: auto\n',
-            'default: judge\nrules:\n  - glob: "docs/guide/**\n    tier: auto\n',
-            'default: judge\nrules:\n  - glob: docs/guide/**"\n    tier: auto\n',
-            'default: judge\nrules:\n- glob: docs/guide/**\ntier: auto\n',
-            'default: judge\nrules:\n  - glob: docs/guide/**\n  tier: auto\n',
+            'default = "judge"\nextra = true\n[[rules]]\nglob = "docs/**"\ntier = "auto"\n',
+            'default = "judge"\n[[rules]]\nglob = "docs/**"\ntier = "auto"\nnote = "x"\n',
+            'default = "owner"\n[[rules]]\nglob = "docs/**"\ntier = "auto"\n',
+            'default = "judge"\n[[rules]]\nglob = "docs/**"\ntier = "owner"\n',
+            "",
+            '[[rules]]\nglob = "docs/**"\ntier = "auto"\n',
+            'default = "judge"\n',
+            'default = ["judge"]\n[[rules]]\nglob = "docs/**"\ntier = "auto"\n',
+            'default = "judge"\n[[rules]]\nglob = "docs/**"\ntier = ["auto"]\n',
+            'default = "judge"\n[[rules]]\nglob = "docs//**"\ntier = "auto"\n',
+            'default = "judge"\n[[rules]]\nglob = "docs***"\ntier = "auto"\n',
+            'default = "judge"\n[[rules]]\nglob = "../**"\ntier = "auto"\n',
         ]
         for policy in malformed:
             with self.subTest(policy=policy):
@@ -138,10 +159,10 @@ class MatcherTests(unittest.TestCase):
         # real policy file would silently stop every auto dispatch — this is the
         # one place that failure is loud. The guarded paths pin the
         # constitutional carve-outs against an accidental policy edit.
-        policy = surface_match.load_policy(str(SCRIPT.parent.parent / "approval-policy.yml"))
+        policy = surface_match.load_policy(str(SCRIPT.parent.parent / "approval-policy.toml"))
         self.assertIsNotNone(policy)
         for guarded in [
-            "approval-policy.yml",
+            "approval-policy.toml",
             "AGENTS.md",
             "CLAUDE.md",
             ".github/workflows/ci.yml",
@@ -156,7 +177,7 @@ class MatcherTests(unittest.TestCase):
             with self.subTest(surface=surface), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 surfaces = root / "surface.txt"
-                policy = root / "policy.yml"
+                policy = root / "policy.toml"
                 surfaces.write_text(surface + "\n", encoding="utf-8")
                 policy.write_text(POLICY, encoding="utf-8")
                 completed = subprocess.run(
@@ -176,7 +197,7 @@ class MatcherTests(unittest.TestCase):
             root = Path(directory)
             globs = root / "globs.txt"
             paths = root / "paths.txt"
-            policy = root / "policy.yml"
+            policy = root / "policy.toml"
             globs.write_text(hostile + "\ndocs/guide/**\n", encoding="utf-8")
             paths.write_text("b/" * 40 + "c\ndocs/guide/page.md\n", encoding="utf-8")
             policy.write_text(POLICY, encoding="utf-8")
@@ -195,7 +216,7 @@ class MatcherTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             surfaces = root / "surface.txt"
-            policy = root / "policy.yml"
+            policy = root / "policy.toml"
             surfaces.write_text("docs/guide/**\ncrates/aether-data/src/lib.rs\n", encoding="utf-8")
             policy.write_text(POLICY, encoding="utf-8")
             completed = subprocess.run(
@@ -210,7 +231,7 @@ class MatcherTests(unittest.TestCase):
     def test_cargo_lock_exempt_when_manifest_declared(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            policy = root / "policy.yml"
+            policy = root / "policy.toml"
             policy.write_text(POLICY, encoding="utf-8")
 
             # Case A: an in-surface, changed manifest exempts root Cargo.lock
@@ -251,7 +272,7 @@ class MatcherTests(unittest.TestCase):
     def test_cargo_lock_exempt_under_wildcard_subtree_covering_changed_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            policy = root / "policy.yml"
+            policy = root / "policy.toml"
             policy.write_text(POLICY, encoding="utf-8")
 
             # Positive: a `/**` subtree surface that covers a changed manifest
@@ -292,7 +313,7 @@ class MatcherTests(unittest.TestCase):
             root = Path(directory)
             globs = root / "globs.txt"
             paths = root / "paths.txt"
-            policy = root / "policy.yml"
+            policy = root / "policy.toml"
             globs.write_text("Cargo.toml\nCargo.lock\ndocs/guide/**\n", encoding="utf-8")
             paths.write_text(
                 "Cargo.toml\nnested/Cargo.toml\nCargo.lock\n.agents/Cargo.lock\ndocs/guide/page.md\n",
