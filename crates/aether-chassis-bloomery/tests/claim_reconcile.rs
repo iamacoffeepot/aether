@@ -40,7 +40,7 @@ use aether_bloomery::control::{
     HealOp, ReconcileOp, held_to_seal_error, held_to_supersede_error, plan_heals, reconcile_op, release_reclaim_mail,
     release_seal_mail, seal_claim_mail, transfer_seal_mail,
 };
-use aether_bloomery::testing::{digest, event, membership, step, workpiece};
+use aether_bloomery::testing::{digest, draft, event, membership, step, workpiece};
 use aether_bloomery::{
     BloomId, BloomSpec, ClaimRefKind, ClaimRefState, ClaimSeal, Decisions, EnumerateClaimsResult, Evidence,
     EvidenceKind, Fact, Membership, ReleaseSeal, ResolutionClaim, SealConflict, SealError, Snapshot, SupersedeError,
@@ -56,7 +56,7 @@ use aether_data::wire::from_bytes;
 /// A draft sealing on `base` with the given memberships, stamped with the line
 /// catalog digest the reducer admits.
 fn spec(base: u8, members: Vec<Membership>) -> BloomSpec {
-    aether_bloomery::testing::draft(base, members).seal()
+    draft(base, members).seal()
 }
 
 /// Seal `spec` into a fresh snapshot on its base mainline.

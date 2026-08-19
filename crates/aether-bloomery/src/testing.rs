@@ -58,6 +58,10 @@ pub fn draft(base: u8, members: Vec<Membership>) -> BloomDraft {
 
 /// A draft sealing `catalog` bloom-wide, with the [`ResolvedConfigs`] that
 /// produce it — the pair a reducer call needs to admit an authored line.
+///
+/// # Panics
+/// Never in practice — a [`StageCatalog`] always encodes; a panic here is a
+/// broken kind invariant.
 #[must_use]
 pub fn draft_with_catalog(base: u8, members: Vec<Membership>, catalog: &StageCatalog) -> (BloomDraft, ResolvedConfigs) {
     let mut configs = ConfigRegistry::default();
@@ -72,6 +76,10 @@ pub fn draft_with_catalog(base: u8, members: Vec<Membership>, catalog: &StageCat
 /// A draft whose sole member seals `override_` in its own registry, with the
 /// [`ResolvedConfigs`] that produce it — the member-scoped counterpart of
 /// [`draft_with_catalog`].
+///
+/// # Panics
+/// Never in practice — a [`ModelOverride`] always encodes; a panic here is a
+/// broken kind invariant.
 #[must_use]
 pub fn draft_with_member_override(
     base: u8,
