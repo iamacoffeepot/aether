@@ -34,7 +34,7 @@ pub enum Invariant {
     NoTombstoneClaimRef,
     /// `/view` mainline corresponds to the actual mainline ref head.
     ViewMainlineCorresponds,
-    /// A Landed bloom's resolution tree is an ancestor of the daily head.
+    /// A current-era Landed bloom's resolution tree is an ancestor of the daily head.
     LandedResolutionIsAncestor,
     /// The observed head equals the actual daily ref head.
     ObservedHeadEqualsDailyHead,
@@ -101,7 +101,7 @@ impl Invariant {
                 "the /view mainline digest corresponds to the actual mainline ref head through the correspondence store"
             }
             Self::LandedResolutionIsAncestor => {
-                "a Landed bloom's resolution tree is an ancestor of the current daily head"
+                "a bloom landed on the current daily ref has a resolution tree that is an ancestor of the current daily head"
             }
             Self::ObservedHeadEqualsDailyHead => "the observed head equals the actual daily ref head",
             Self::CorrespondenceIsBijection => "the correspondence table is a bijection",
@@ -363,6 +363,9 @@ fn landed_resolution_is_ancestor(live: &LiveState<'_>) -> Vec<String> {
     };
     let mut divergences = Vec::new();
     for (bloom, head) in live.landed_heads {
+        if !landed_in_current_era(live, bloom, daily, ancestry) {
+            continue;
+        }
         match ancestry(head, &daily) {
             Some(true) => {}
             Some(false) => divergences.push(format!(
@@ -380,6 +383,21 @@ fn landed_resolution_is_ancestor(live: &LiveState<'_>) -> Vec<String> {
         }
     }
     divergences
+}
+
+/// Whether this Landed bloom belongs to the current daily ref's history.
+///
+/// A land compare-and-swaps against the bloom's sealed base, so a base that
+/// is not an ancestor of the current daily head sits on a previous day's
+/// chain. The day roll rewrites history across the cut: those resolutions are
+/// structurally never ancestors of the new head, and their ancestry was
+/// notarized by that day's sync-back. [`ViewMainlineCorresponds`] and
+/// [`ObservedHeadEqualsDailyHead`] compare live pointers, not historical lands
+/// — a post-roll mismatch there is a missed observation, not rewritten
+/// history, and stays in scope. Unknown era (missing record, ancestry that
+/// does not resolve) stays in the check so a current-era defect cannot hide.
+fn landed_in_current_era(live: &LiveState<'_>, bloom: &BloomId, daily: Digest, ancestry: &Ancestry<'_>) -> bool {
+    live.snapshot.blooms.get(bloom).and_then(|record| ancestry(&record.spec.base(), &daily)).unwrap_or(true)
 }
 
 fn observed_head_equals_daily_head(live: &LiveState<'_>) -> Vec<String> {
@@ -655,6 +673,63 @@ mod tests {
         let named = check.divergences.join(" ");
         assert!(named.contains("nonce-1"), "the nonce is named: {named}");
         assert!(named.contains("issue-1"), "the member is named: {named}");
+    }
+
+    #[test]
+    fn a_pre_roll_landed_bloom_is_not_a_divergence_against_the_new_day() {
+        // Pre-fix: every Landed bloom was walked against the current daily
+        // head, so a day-roll rewrite made yesterday's resolutions look
+        // diverged. Those lands were notarized by that day's sync-back.
+        let pre = draft(1, vec![membership("issue-yesterday", 1)]).seal();
+        let healthy = draft(9, vec![membership("issue-today", 1)]).seal();
+        let mut snapshot = Snapshot::default();
+        splice_bloom(&mut snapshot, &pre, BloomStatus::Landed);
+        splice_bloom(&mut snapshot, &healthy, BloomStatus::Landed);
+        let landed = [(pre.id(), digest(2)), (healthy.id(), digest(10))];
+        let ancestry = current_era_chain();
+        let mut state = live(&snapshot, &[]);
+        state.actual_head = Some(digest(10));
+        state.landed_heads = &landed;
+        state.ancestry = Some(&ancestry);
+
+        let report = evaluate(&state);
+        let check =
+            report.named(Invariant::LandedResolutionIsAncestor.name()).expect("the seed list includes landed ancestry");
+        assert!(check.passed, "a previous day's land is out of jurisdiction: {check:?}");
+    }
+
+    #[test]
+    fn a_current_era_landed_bloom_that_diverged_is_named() {
+        // A bloom sealed on today's chain whose recorded head is not an
+        // ancestor of the daily ref is still a real defect — the era filter
+        // must not swallow it, and must not name a previous day's land beside it.
+        let pre = draft(1, vec![membership("issue-yesterday", 1)]).seal();
+        let diverged = draft(9, vec![membership("issue-today", 1)]).seal();
+        let mut snapshot = Snapshot::default();
+        splice_bloom(&mut snapshot, &pre, BloomStatus::Landed);
+        splice_bloom(&mut snapshot, &diverged, BloomStatus::Landed);
+        let landed = [(pre.id(), digest(2)), (diverged.id(), digest(3))];
+        let ancestry = current_era_chain();
+        let mut state = live(&snapshot, &[]);
+        state.actual_head = Some(digest(10));
+        state.landed_heads = &landed;
+        state.ancestry = Some(&ancestry);
+
+        let report = evaluate(&state);
+        let check =
+            report.named(Invariant::LandedResolutionIsAncestor.name()).expect("the seed list includes landed ancestry");
+        assert!(!check.passed, "a current-era divergence is a violation: {check:?}");
+        let named = check.divergences.join(" ");
+        assert!(named.contains(&hex_of(&diverged.id().0)), "the current-era bloom is named: {named}");
+        assert!(named.contains(&hex_of(&digest(3))), "the diverged resolution is named: {named}");
+        assert!(named.contains(&hex_of(&digest(10))), "the daily head is named: {named}");
+        assert!(!named.contains(&hex_of(&pre.id().0)), "a previous day's land is not named: {named}");
+    }
+
+    /// Today's daily ref is `9 → 10`. Yesterday's `1 → 2` is a parallel history
+    /// the roll rewrote out from under.
+    fn current_era_chain() -> impl Fn(&aether_bloomery::Digest, &aether_bloomery::Digest) -> Option<bool> {
+        |from, to| Some(*from == *to || (*from == digest(9) && *to == digest(10)))
     }
 
     fn hex_of(digest: &aether_bloomery::Digest) -> String {
