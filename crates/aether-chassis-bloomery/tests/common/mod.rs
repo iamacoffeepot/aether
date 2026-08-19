@@ -2,6 +2,10 @@
 //! coordinator bin: a free localhost port, and a guard that owns a forked
 //! coordinator for the life of a binding.
 //!
+//! Scenario harnesses live in [`crate::harness`]. This module holds the pieces
+//! every cell shares: the child guard, the wire driver, the repo builder, and
+//! the in-memory correspondence double.
+//!
 //! The guard is why this module exists. `std::process::Child::drop` does not
 //! kill the child, so a teardown written as a call at the end of a test runs on
 //! the happy path only — a failed assert or a timeout unwinds straight past it
@@ -19,6 +23,9 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
 pub mod client;
+pub mod correspondence;
+pub mod repo;
+pub mod wire;
 
 /// Reserve a free localhost port by binding `:0`, then release it for the bin to
 /// claim. A small race window, tolerated by the callers' connect retry loops.
