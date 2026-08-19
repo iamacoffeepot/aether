@@ -54,7 +54,6 @@ pub const REQUIRED_KIT: &[KitTool] = &[
     KitTool { program: "jscpd", install: "npm install -g jscpd" },
     KitTool { program: "python3", install: "install Python 3 (https://www.python.org)" },
     KitTool { program: "claude", install: "install the Claude Code CLI" },
-    KitTool { program: "codex", install: "install the Codex CLI" },
     KitTool { program: "muse", install: "install the Muse Code CLI" },
     KitTool { program: "grok", install: "install the Grok Build CLI" },
 ];
@@ -294,7 +293,7 @@ mod tests {
 
     use super::{KitReport, REQUIRED_KIT, ResolvedTool, ToolStatus, resolve_on_path, version_of, version_of_within};
 
-    const MODEL_HARNESSES: [Harness; 4] = [Harness::Claude, Harness::Codex, Harness::Muse, Harness::Grok];
+    const MODEL_HARNESSES: [Harness; 3] = [Harness::Claude, Harness::Muse, Harness::Grok];
 
     /// A directory whose only runnable program is `git`, answering `--version`
     /// with a known line — the stand-in PATH a missing-tool case inspects.

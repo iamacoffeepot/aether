@@ -32,11 +32,12 @@ fn construct_argv(model: Option<&str>, effort: Option<&str>, resume: Option<&str
     // the lane investigates for dozens of turns and leaves a clean worktree —
     // `produced_candidate: false` twice wedged the first live Claude member
     // (bloom `73d025b42e0a`, 2026-08-12). The sibling arms already carry their
-    // headless equivalents (`--disable-approval` on muse, `--approve-for-me` on
-    // codex); Claude's flag is broader because its bash-running lane needs more
-    // than auto-accepted edits, and the lane is already the trust boundary's
-    // narrow side (ADR-0152): a scrubbed environment, no credentials, a scratch
-    // worktree, and every capture, commit, and push host-side.
+    // headless equivalents (`--disable-approval` on muse, `--permission-mode
+    // bypassPermissions` on grok); Claude's flag is broader because its
+    // bash-running lane needs more than auto-accepted edits, and the lane is
+    // already the trust boundary's narrow side (ADR-0152): a scrubbed
+    // environment, no credentials, a scratch worktree, and every capture,
+    // commit, and push host-side.
     let mut argv = vec!["-p".to_owned(), "--dangerously-skip-permissions".to_owned()];
     if let Some(model) = model {
         argv.push("--model".to_owned());
@@ -157,8 +158,8 @@ pub(super) fn run_headless_claude(
     // wrapper's reading covers the whole reaped tree rather than this process.
     let mut claude = peak.command("claude");
     let mut flags = construct_argv(args.model.as_deref(), args.effort.as_deref(), args.resume.as_deref());
-    // Tool injection is Claude-only. Codex / muse / grok review paths have no
-    // MCP hook and keep the terminal `VERDICT:` parse.
+    // Tool injection is Claude-only. Muse / grok review paths have no MCP hook
+    // and keep the terminal `VERDICT:` parse.
     if args.command == REVIEW_CRITIC {
         let config = review_mcp::prepare(&args.out)?;
         flags.extend(review_mcp::mcp_argv(&config));

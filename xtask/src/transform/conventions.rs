@@ -2,7 +2,7 @@
 //!
 //! The lanes used to *point* at `CLAUDE.md` — "read it before editing" — which
 //! only lands if the forked harness happens to read it. Headless Claude
-//! auto-loads it; Codex reads `AGENTS.md`; Muse reads neither. So the lane
+//! auto-loads it; Muse reads neither. So the lane
 //! inlines the conventions here, at prompt assembly. #5141 curates that
 //! inline from [`LANE_CONTEXT`] rather than the whole subject-tree
 //! `CLAUDE.md`: MCP / runtime / wasm / pipeline workflow have no lane tool

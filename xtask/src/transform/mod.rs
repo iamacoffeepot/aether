@@ -19,7 +19,6 @@
 //!   coordinator never sees it.
 
 mod claude;
-mod codex;
 mod construct;
 mod conventions;
 mod fixers;
@@ -100,11 +99,10 @@ pub struct TransformArgs {
     #[arg(long)]
     task: Option<String>,
     /// The harness session a retry lap resumes, in whatever the resolved
-    /// harness calls it — a Claude or Grok session id (`--resume`), a Codex
-    /// thread id (`exec … resume <id>`), or a Muse session uuid
-    /// (`--session-id`). Absent launches a fresh session; the Muse arm mints
-    /// its own uuid in that case, because Muse addresses a new and a continued
-    /// session through the same flag. Ignored by the verify lane.
+    /// harness calls it — a Claude or Grok session id (`--resume`), or a Muse
+    /// session uuid (`--session-id`). Absent launches a fresh session; the Muse
+    /// arm mints its own uuid in that case, because Muse addresses a new and a
+    /// continued session through the same flag. Ignored by the verify lane.
     #[arg(long)]
     resume: Option<String>,
     /// The construct checkpoint this dispatch resumes from (#4994). Named in
@@ -326,9 +324,9 @@ fn run_model_lane(prompt: &str, args: &TransformArgs) -> Result<LaneRun> {
 
     let record = match harness {
         Harness::Claude => claude::run_headless_claude(prompt, args, &scratch, cache.as_ref(), &peak)?,
-        Harness::Codex => codex::run(prompt, args, &scratch, cache.as_ref(), &peak)?,
         Harness::Muse => muse::run(prompt, args, &scratch, cache.as_ref(), &peak)?,
         Harness::Grok => grok::run(prompt, args, &scratch, cache.as_ref(), &peak)?,
+        Harness::Codex => bail!("codex harness support has been removed"),
     };
 
     Ok(LaneRun {

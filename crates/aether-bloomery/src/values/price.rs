@@ -426,7 +426,7 @@ mod tests {
 
     #[test]
     fn an_undifferentiated_cache_write_total_still_prices() {
-        // The muse/codex shape: a total with no TTL split reported. It must not
+        // The muse/grok shape: a total with no TTL split reported. It must not
         // silently price at zero just because neither split column is set —
         // the whole remainder falls through to the untiered rate ($6.25).
         let cost = StudyCost { cache_write_tokens: 2_000_000, ..StudyCost::default() };
