@@ -122,7 +122,9 @@ fn decode<T: DeserializeOwned + Serialize>(bytes: &[u8]) -> Result<T, String> {
     from_bytes::<T>(bytes).map_err(|error| format!("metrics document decode failed: {error}"))
 }
 
-fn parse_page(query: &str) -> Result<(Option<u64>, Option<u64>, Option<String>), String> {
+type MetricsPage = (Option<u64>, Option<u64>, Option<String>);
+
+fn parse_page(query: &str) -> Result<MetricsPage, String> {
     let mut from_sequence = None;
     let mut requested = None;
     for (key, value) in pairs(query) {
