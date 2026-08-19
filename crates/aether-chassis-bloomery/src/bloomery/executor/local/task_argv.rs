@@ -20,6 +20,36 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+/// Flags the work-order argv producer emits that take a following value. The
+/// mock-lane argv consumer reads the same table, so a flag added here is skipped
+/// as a value-pair rather than leaking into the positional command.
+pub(super) const VALUE_TAKING_FLAGS: &[&str] = &[
+    "--out",
+    "--nonce",
+    "--diff-base",
+    "--subject",
+    "--harness",
+    "--model",
+    "--effort",
+    "--task",
+    "--resume",
+    "--seeded",
+];
+
+/// Whether `flag` is a work-order flag whose next argv word is its value.
+#[must_use]
+pub(super) fn takes_value(flag: &str) -> bool {
+    VALUE_TAKING_FLAGS.contains(&flag)
+}
+
+/// Append `flag` and `value` as one pair. The flag must be in
+/// [`VALUE_TAKING_FLAGS`] so the mock consumer stays able to skip it.
+pub(super) fn push_value_flag(args: &mut Vec<String>, flag: &'static str, value: impl Into<String>) {
+    debug_assert!(takes_value(flag), "{flag} takes a value but is not in VALUE_TAKING_FLAGS");
+    args.push(flag.to_owned());
+    args.push(value.into());
+}
+
 /// The largest task the spawn passes through argv untouched. Comfortably under
 /// the kernel's 128KiB per-argument cap, leaving room for the pointer suffix an
 /// over-budget task gains and for the rest of the argv/environment block.
