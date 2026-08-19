@@ -40,7 +40,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use aether_actor::{MailSender, runtime};
-use aether_bloomery::{ProjectedReceipt, Topic, ViewDocument};
+use aether_bloomery::{CommissionProjection, ProjectedReceipt, Topic, ViewDocument};
 use aether_bloomery_github::ReplicaError;
 use aether_data::wire::from_bytes;
 use aether_data::{Kind, MailboxId};
@@ -53,7 +53,10 @@ use serde::{Deserialize, Serialize};
 use super::MirrorReactorCapability;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::bloomery::{MirrorReactorSetup, ProjectionShell, SourceReplicaShell, SourceShell};
-use crate::store::{AckOutbox, AckOutboxResult, DrainOutbox, DrainOutboxResult, OutboxEntry, StoreCapability};
+use crate::store::{
+    AckOutbox, AckOutboxResult, DrainOutbox, DrainOutboxResult, OutboxEntry, RecordCommissionProjection,
+    RecordCommissionProjectionResult, StoreCapability,
+};
 
 /// The self-addressed wake the poll timer fires each interval; its handler
 /// drains the store outbox. Zero-field — the timer carries only the schedule.
@@ -193,6 +196,54 @@ fn project_batch(projection: &ProjectionShell, entries: &[OutboxEntry]) -> Vec<A
     delivered.into_iter().map(|(topic, through_sequence)| AckOutbox { topic: Some(topic), through_sequence }).collect()
 }
 
+/// Project commission replicas and persist newly created issue numbers.
+/// A stall stops this topic's ack prefix and leaves later entries queued,
+/// independently of receipts and source mirroring.
+fn project_commission_batch(
+    projection: &ProjectionShell,
+    entries: &[OutboxEntry],
+) -> (Vec<AckOutbox>, Vec<RecordCommissionProjection>) {
+    let mut through = None;
+    let mut persists = Vec::new();
+    for entry in entries {
+        match deliver_commission(projection, entry) {
+            Ok(persist) => {
+                through = Some(entry.sequence);
+                if let Some(persist) = persist {
+                    persists.push(persist);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::mirror",
+                    topic = %entry.topic,
+                    sequence = entry.sequence,
+                    %error,
+                    "commission projection not delivered; leaving it undelivered to re-drive",
+                );
+                break;
+            }
+        }
+    }
+    let acks = through
+        .map(|through_sequence| AckOutbox { topic: Some(Topic::Commission.as_str().to_owned()), through_sequence })
+        .into_iter()
+        .collect();
+    (acks, persists)
+}
+
+fn deliver_commission(
+    projection: &ProjectionShell,
+    entry: &OutboxEntry,
+) -> Result<Option<RecordCommissionProjection>, String> {
+    let document: CommissionProjection = from_bytes(&entry.payload).map_err(|error| error.to_string())?;
+    let number = projection.project_commission(&document).map_err(|error| error.to_string())?;
+    if document.recorded_issue == Some(number) {
+        return Ok(None);
+    }
+    Ok(Some(RecordCommissionProjection { id: document.workpiece.0, issue_number: number }))
+}
+
 /// Coalesce superseded replica requests to the latest sequence and push once.
 /// A transient failure leaves the whole prefix queued; a rejected force
 /// raises an operator-visible alert and still leaves the entry queued so an
@@ -323,6 +374,7 @@ impl NativeActor for MirrorReactorCapability {
         if state.projection.is_some() {
             drains.push(DrainOutbox::scoped(Topic::ViewDocument));
             drains.push(DrainOutbox::scoped(Topic::LandingReceipt));
+            drains.push(DrainOutbox::scoped(Topic::Commission));
         }
         if state.replica.is_some() {
             drains.push(DrainOutbox::scoped(Topic::SourceReplica));
@@ -362,11 +414,22 @@ impl NativeActor for MirrorReactorCapability {
         let slot = WorkerSlot::claim(&state.outstanding);
         ctx.spawn_detached::<MirrorReactorCapability, _>(move |mut root| {
             let _slot = slot; // released here, so the next tick can drain again.
-            let acks = if entries.first().is_some_and(|entry| entry.topic == Topic::SourceReplica) {
-                replica.as_ref().map_or_else(Vec::new, |replica| publish_replica_batch(replica, &entries))
+            let (acks, persists) = if entries.first().is_some_and(|entry| entry.topic == Topic::SourceReplica) {
+                (replica.as_ref().map_or_else(Vec::new, |replica| publish_replica_batch(replica, &entries)), Vec::new())
+            } else if entries.first().is_some_and(|entry| entry.topic == Topic::Commission) {
+                projection.as_ref().map_or_else(
+                    || (Vec::new(), Vec::new()),
+                    |projection| project_commission_batch(projection, &entries),
+                )
             } else {
-                projection.as_ref().map_or_else(Vec::new, |projection| project_batch(projection, &entries))
+                (
+                    projection.as_ref().map_or_else(Vec::new, |projection| project_batch(projection, &entries)),
+                    Vec::new(),
+                )
             };
+            for persist in persists {
+                root.send::<StoreCapability, RecordCommissionProjection>(&persist);
+            }
             for ack in acks {
                 root.send::<StoreCapability, AckOutbox>(&ack);
             }
@@ -379,6 +442,33 @@ impl NativeActor for MirrorReactorCapability {
     fn on_ack_result(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: AckOutboxResult) {
         if let AckOutboxResult::Err { error } = mail {
             tracing::warn!(target: "aether_chassis_bloomery::mirror", %error, "outbox ack failed; entries will re-drive");
+        }
+    }
+
+    /// Persist of a newly created replica-issue number. A failure leaves the
+    /// next enqueue without a recorded number; find-by-marker recovers.
+    #[handler::single]
+    fn on_record_commission_projection_result(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: RecordCommissionProjectionResult,
+    ) {
+        match mail {
+            RecordCommissionProjectionResult::Ok { .. } => {}
+            RecordCommissionProjectionResult::Missing { id } => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::mirror",
+                    commission = %id,
+                    "commission replica-issue number was not recorded; the next projection finds by marker"
+                );
+            }
+            RecordCommissionProjectionResult::Err { error } => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::mirror",
+                    %error,
+                    "commission replica-issue number was not recorded; the next projection finds by marker"
+                );
+            }
         }
     }
 }
@@ -413,7 +503,8 @@ mod tests {
 
     use super::{
         AckOutbox, DrainOutbox, DrainOutboxResult, DrainTick, Kind, MirrorReactorCapability, MirrorReactorState,
-        OutboxEntry, ProjectionShell, SourceReplicaShell, project_batch, publish_replica_batch,
+        OutboxEntry, ProjectionShell, SourceReplicaShell, project_batch, project_commission_batch,
+        publish_replica_batch,
     };
     use crate::bloomery::outbox::TopicOutbox;
     use crate::store::{SqliteStore, StoreBackend};
@@ -590,10 +681,13 @@ mod tests {
         }
         binding.flush_outbound();
         let mut drained_topics: Vec<Option<String>> =
-            collect_sends::<DrainOutbox>(&rx, 2).into_iter().map(|d| d.topic).collect();
+            collect_sends::<DrainOutbox>(&rx, 3).into_iter().map(|d| d.topic).collect();
         drained_topics.sort();
-        let mut expected =
-            vec![DrainOutbox::scoped(Topic::LandingReceipt).topic, DrainOutbox::scoped(Topic::ViewDocument).topic];
+        let mut expected = vec![
+            DrainOutbox::scoped(Topic::LandingReceipt).topic,
+            DrainOutbox::scoped(Topic::ViewDocument).topic,
+            DrainOutbox::scoped(Topic::Commission).topic,
+        ];
         expected.sort();
         assert_eq!(drained_topics, expected, "each owned projection topic is drained, scoped by topic");
 
@@ -659,27 +753,34 @@ mod tests {
 
         // The opening tick drains both owned topics.
         tick(&mut state);
-        assert_eq!(collect_sends::<DrainOutbox>(&rx, 2).len(), 2, "the opening tick drains both projection topics");
+        assert_eq!(collect_sends::<DrainOutbox>(&rx, 3).len(), 3, "the opening tick drains every projection topic");
 
         // A tick arriving while those drains are still owed replies must send
         // nothing — this is the window that re-drove the undelivered receipt.
         tick(&mut state);
-        assert_silent("a tick with both drains still owed replies");
+        assert_silent("a tick with every drain still owed replies");
+
+        settle_one_drain(&mut state);
+        tick(&mut state);
+        assert_silent("a tick with drains still owed a reply");
 
         settle_one_drain(&mut state);
         tick(&mut state);
         assert_silent("a tick with one drain still owed a reply");
 
-        // Both drains have now settled, so the cycle is complete and released.
+        // Every drain has now settled, so the cycle is complete and released.
         settle_one_drain(&mut state);
         tick(&mut state);
         let mut topics: Vec<Option<String>> =
-            collect_sends::<DrainOutbox>(&rx, 2).into_iter().map(|d| d.topic).collect();
+            collect_sends::<DrainOutbox>(&rx, 3).into_iter().map(|d| d.topic).collect();
         topics.sort();
-        let mut expected =
-            vec![DrainOutbox::scoped(Topic::LandingReceipt).topic, DrainOutbox::scoped(Topic::ViewDocument).topic];
+        let mut expected = vec![
+            DrainOutbox::scoped(Topic::LandingReceipt).topic,
+            DrainOutbox::scoped(Topic::ViewDocument).topic,
+            DrainOutbox::scoped(Topic::Commission).topic,
+        ];
         expected.sort();
-        assert_eq!(topics, expected, "a completed cycle releases, so the next tick drains both topics afresh");
+        assert_eq!(topics, expected, "a completed cycle releases, so the next tick drains every topic afresh");
     }
 
     struct FakeReplica {
@@ -819,5 +920,41 @@ mod tests {
         let view_acks = project_batch(&projection, &[view]);
         assert_eq!(view_acks.len(), 1, "the view topic still delivers beside a stalled replica");
         assert_eq!(fake.comments_on(MEMBER_ISSUE).len(), 1);
+    }
+
+    #[test]
+    fn a_stalled_commission_topic_does_not_stall_receipts_or_mirroring() {
+        // Independent topics and ack prefixes: one bad replica issue must not
+        // hold receipts or the view document, and a view stall must not hold
+        // a healthy commission projection.
+        let fake = FakeGithub::new();
+        fake.seed_issue(MEMBER_ISSUE, "the workpiece's own issue");
+        let projection = ProjectionShell::new(Arc::new(GithubProjection::new(fake.clone())));
+
+        let bad_commission = OutboxEntry {
+            sequence: 1,
+            topic: Topic::Commission.as_str().to_owned(),
+            payload: b"not-a-commission".to_vec(),
+        };
+        let (commission_acks, persists) = project_commission_batch(&projection, &[bad_commission]);
+        assert!(commission_acks.is_empty(), "an undecodable commission stalls its own topic");
+        assert!(persists.is_empty());
+
+        let receipt = OutboxEntry {
+            sequence: 2,
+            topic: Topic::LandingReceipt.as_str().to_owned(),
+            payload: to_vec(&ProjectedReceipt {
+                receipt: LandingReceipt { bloom: BloomId(digest(1)), previous_base: digest(10), new_head: digest(20) },
+                members: vec![WorkpieceId(format!("issue-{MEMBER_ISSUE}"))],
+            })
+            .unwrap(),
+        };
+        let receipt_acks = project_batch(&projection, &[receipt]);
+        assert_eq!(receipt_acks.len(), 1, "the receipt topic still delivers");
+
+        let view = OutboxEntry { sequence: 3, topic: Topic::ViewDocument.as_str().to_owned(), payload: encoded_view() };
+        let view_acks = project_batch(&projection, &[view]);
+        assert_eq!(view_acks.len(), 1, "the view topic still delivers beside a stalled commission");
+        assert_eq!(fake.comments_on(MEMBER_ISSUE).len(), 2, "receipt and view both wrote");
     }
 }

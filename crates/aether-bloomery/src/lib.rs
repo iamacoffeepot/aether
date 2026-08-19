@@ -105,10 +105,10 @@ pub use metrics::{
 };
 pub use port::{
     BloomView, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome,
-    CompositionCursorView, CompositionView, Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend,
-    ExecutorFaultView, HostFaultView, IntegrateOutcome, IntegrationPosition, LandOutcome, LandingBlock, MemberView,
-    PendingDecisionView, ProjectedReceipt, ProjectionBackend, ReviewParkView, SourceBackend, SourceSnapshot,
-    ViewDocument, WedgeCause, WorkHandle, WorkOrder,
+    CommissionProjection, CompositionCursorView, CompositionView, Conclusion, EvidenceRef, ExecutionStatus,
+    ExecutorBackend, ExecutorFaultView, HostFaultView, IntegrateOutcome, IntegrationPosition, LandOutcome,
+    LandingBlock, MemberView, PendingDecisionView, ProjectedReceipt, ProjectionBackend, ReviewParkView, SourceBackend,
+    SourceSnapshot, ViewDocument, WedgeCause, WorkHandle, WorkOrder,
 };
 pub use reduce::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,

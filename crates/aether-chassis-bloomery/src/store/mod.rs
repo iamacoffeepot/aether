@@ -82,8 +82,8 @@ mod commission;
 pub use commission::{
     CancelCommission, CancelCommissionResult, CommissionBackend, CommissionError, CommissionHead, CommissionView,
     CreateCommission, CreateCommissionResult, ListCommissions, ListCommissionsResult, ListedCommission, LoadCommission,
-    LoadCommissionResult, RecordCommissionApproval, RecordCommissionApprovalResult, WriteScopeRevision,
-    WriteScopeRevisionResult,
+    LoadCommissionResult, RecordCommissionApproval, RecordCommissionApprovalResult, RecordCommissionProjection,
+    RecordCommissionProjectionResult, WriteScopeRevision, WriteScopeRevisionResult,
 };
 
 #[cfg(feature = "runtime")]

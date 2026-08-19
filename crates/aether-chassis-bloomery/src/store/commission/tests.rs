@@ -3,14 +3,15 @@
 use std::collections::BTreeMap;
 
 use aether_bloomery::{
-    AuthorityDoor, CommissionStatus, Digest, Ed25519KeyProvider, FakeKeyProvider, KeyId, Observation, Provenance,
-    SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, SignatureEnvelope, Statement, WorkpieceId,
-    authorization_message, digest_of,
+    AuthorityDoor, CommissionProjection, CommissionStatus, Digest, Ed25519KeyProvider, FakeKeyProvider, KeyId,
+    Observation, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, SignatureEnvelope, Statement, Topic,
+    WorkpieceId, authorization_message, digest_of,
 };
 use aether_data::wire::to_vec;
 use ed25519_dalek::{Signer, SigningKey};
 
 use super::{CommissionBackend, CommissionError};
+use crate::bloomery::TopicOutbox;
 use crate::store::runtime::{SqliteStore, StoreBackend};
 use crate::store::{JournalWrite, now_unix_millis};
 
@@ -110,7 +111,11 @@ fn a_v6_store_gains_empty_commission_tables() {
     let mut store = SqliteStore::open(path).expect("a v6 store migrates");
     assert!(store.list(None).expect("list").is_empty(), "migration invents no commissions");
     let flags: i64 = store.conn.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("user_version");
-    assert_eq!(flags, 7, "the open stamps schema 7");
+    assert_eq!(flags, 8, "the open stamps the current schema");
+    assert!(
+        store.load_projection(&workpiece("wp-1")).expect("load").is_none(),
+        "migration invents no replica-issue numbers"
+    );
 }
 
 #[test]
@@ -423,6 +428,29 @@ fn cancel_closes_an_open_commission_and_refuses_a_second_close() {
     let view = store.load(&workpiece("wp-1")).expect("load").expect("exists");
     assert_eq!(view.head.status, CommissionStatus::Cancelled);
     assert_eq!(store.cancel(&workpiece("wp-1"), &statement), Err(CommissionError::NotOpen));
+}
+
+#[test]
+fn create_enqueues_a_commission_projection_and_record_round_trips() {
+    // The projector writes title/body only to a number stored here. A create
+    // that skipped the outbox would leave the replica never opened; a persist
+    // that adopted an unstored number would write a human-authored issue.
+    let mut store = memory();
+    seed(&mut store, "wp-1");
+    let entries = store.drain_topic(Topic::Commission).expect("drain");
+    assert_eq!(entries.len(), 1, "create enqueues one replica projection");
+    let payload: CommissionProjection = aether_data::wire::from_bytes(&entries[0].payload).expect("payload");
+    assert_eq!(payload.workpiece.0, "wp-1");
+    assert_eq!(payload.status, "open");
+    assert!(payload.recorded_issue.is_none(), "nothing has been created on GitHub yet");
+
+    store.record_projection(&workpiece("wp-1"), 9).expect("persist");
+    assert_eq!(store.load_projection(&workpiece("wp-1")).expect("load"), Some(9));
+    write(&mut store, "wp-1", None);
+    let after = store.drain_topic(Topic::Commission).expect("drain after scope");
+    let latest: CommissionProjection =
+        aether_data::wire::from_bytes(&after.last().expect("row").payload).expect("decode");
+    assert_eq!(latest.recorded_issue, Some(9), "later writes snapshot the recorded number");
 }
 
 #[test]

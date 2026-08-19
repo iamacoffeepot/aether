@@ -32,9 +32,10 @@ use aether_bloomery::{BackendObjectId, BloomId, Correspondence, CorrespondenceEr
 use sha2::{Digest as _, Sha256};
 
 use crate::client::{
-    ActionsApi, Artifact, ChecksState, Comment, GitCommit, GitDataApi, GitDataError, GitRef, GithubApi, GithubError,
-    IssueStateApi, MergeResult, NewComment, NewPullRequest, PullMergeResult, PullRequest, PullRequestApi,
-    PullRequestState, RefTxnOp, RunConclusion, RunStatus, WorkflowRun, strip_heads,
+    ActionsApi, Artifact, ChecksState, Comment, CommissionProjectionApi, GitCommit, GitDataApi, GitDataError, GitRef,
+    GithubApi, GithubError, IssueStateApi, MergeResult, NewComment, NewIssue, NewPullRequest, ProjectedIssue,
+    PullMergeResult, PullRequest, PullRequestApi, PullRequestState, RefTxnOp, RunConclusion, RunStatus, WorkflowRun,
+    strip_heads,
 };
 use crate::correspondence::GitObjectId;
 use crate::executor::INPUT_NONCE;
@@ -44,14 +45,14 @@ use crate::source::{EMPTY_TREE, digest_from_hex, render_claim_message, render_to
 #[derive(Clone)]
 struct StoredIssue {
     number: u64,
-    /// The object's own title — human-authored, and never written by anything
-    /// here. Read by the landing assembly as the fallback for a member whose
-    /// lane named no commit message.
+    /// The object's title. Seeded issues carry a human-authored title the
+    /// comment projection never writes; a commission projection overwrites
+    /// only numbers it created.
     title: String,
-    /// The object's own body — human-authored, and never written by the
-    /// projection. Held so a test can prove it comes back unchanged.
+    /// The object's body. Same ownership split as [`Self::title`].
     body: String,
-    /// Closed by the land reactor after a bloom lands. Seeded open.
+    /// Closed by the land reactor after a bloom lands, or by a commission
+    /// projection of a landed/cancelled replica. Seeded open.
     closed: bool,
 }
 
@@ -148,6 +149,10 @@ struct State {
     // for lookup by head branch the way the real list endpoint filters.
     next_pull_request: u64,
     pull_requests: Vec<StoredPullRequest>,
+    // The issue-number generator the commission projector's create uses.
+    // Kept ahead of anything seeded so a create cannot mint a number a test
+    // already placed.
+    next_issue: u64,
     // The git-object↔bloom-digest correspondence the source/executor ports
     // resolve real git shas through (ADR-0150), keyed forward by the 32-byte
     // digest; the reverse direction scans for the matching object (a test store
@@ -219,14 +224,34 @@ impl FakeGithub {
     /// `issue-<number>` addresses. The projection opens no object, so a test
     /// that wants one places it here.
     pub fn seed_issue(&self, number: u64, body: &str) {
-        self.lock().issues.push(StoredIssue { number, title: String::new(), body: body.to_owned(), closed: false });
+        let mut state = self.lock();
+        state.next_issue = state.next_issue.max(number);
+        state.issues.push(StoredIssue { number, title: String::new(), body: body.to_owned(), closed: false });
     }
 
     /// Present an issue carrying a human-authored `title` as well as its body —
     /// what the landing assembly falls back to when a member's lane named no
     /// commit message.
     pub fn seed_issue_with_title(&self, number: u64, title: &str, body: &str) {
-        self.lock().issues.push(StoredIssue { number, title: title.to_owned(), body: body.to_owned(), closed: false });
+        let mut state = self.lock();
+        state.next_issue = state.next_issue.max(number);
+        state.issues.push(StoredIssue { number, title: title.to_owned(), body: body.to_owned(), closed: false });
+    }
+
+    /// Overwrite issue `number`'s title and body — a human edit the next
+    /// commission projection must overwrite and never read as input.
+    pub fn edit_issue(&self, number: u64, title: &str, body: &str) {
+        let mut state = self.lock();
+        if let Some(issue) = state.issues.iter_mut().find(|issue| issue.number == number) {
+            title.clone_into(&mut issue.title);
+            body.clone_into(&mut issue.body);
+        }
+    }
+
+    /// The current title of issue `number`, if it exists.
+    #[must_use]
+    pub fn issue_title(&self, number: u64) -> Option<String> {
+        self.lock().issues.iter().find(|issue| issue.number == number).map(|issue| issue.title.clone())
     }
 
     /// Present a pull request the repository already holds, numbered `number`
@@ -1309,13 +1334,59 @@ impl GithubApi for FakeGithub {
 
 impl IssueStateApi for FakeGithub {
     fn close_issue(&self, number: u64) -> Result<(), GithubError> {
+        close_stored_issue(&mut self.lock(), number)
+    }
+}
+
+impl CommissionProjectionApi for FakeGithub {
+    fn create_issue(&self, new: &NewIssue) -> Result<ProjectedIssue, GithubError> {
+        let mut state = self.lock();
+        let max_existing = state.issues.iter().map(|issue| issue.number).max().unwrap_or(0);
+        let max_pull = state.pull_requests.iter().map(|pull| pull.number).max().unwrap_or(0);
+        state.next_issue = state.next_issue.max(max_existing).max(max_pull).max(state.next_pull_request);
+        state.next_issue += 1;
+        let number = state.next_issue;
+        state.issues.push(StoredIssue { number, title: new.title.clone(), body: new.body.clone(), closed: false });
+        Ok(projected_issue(number, &new.title, &new.body, false))
+    }
+
+    fn find_issue(&self, key: &str) -> Result<Option<ProjectedIssue>, GithubError> {
+        Ok(self.lock().issues.iter().find_map(|issue| {
+            let marker = parse_marker(&issue.body);
+            match &marker {
+                Some(found) if found.key == key => {
+                    Some(projected_issue(issue.number, &issue.title, &issue.body, issue.closed))
+                }
+                _ => None,
+            }
+        }))
+    }
+
+    fn update_issue(&self, number: u64, title: &str, body: &str) -> Result<(), GithubError> {
         let mut state = self.lock();
         let Some(issue) = state.issues.iter_mut().find(|issue| issue.number == number) else {
             return Err(absent_target(number));
         };
-        issue.closed = true;
+        title.clone_into(&mut issue.title);
+        body.clone_into(&mut issue.body);
         Ok(())
     }
+
+    fn close_issue(&self, number: u64) -> Result<(), GithubError> {
+        close_stored_issue(&mut self.lock(), number)
+    }
+}
+
+fn close_stored_issue(state: &mut State, number: u64) -> Result<(), GithubError> {
+    let Some(issue) = state.issues.iter_mut().find(|issue| issue.number == number) else {
+        return Err(absent_target(number));
+    };
+    issue.closed = true;
+    Ok(())
+}
+
+fn projected_issue(number: u64, title: &str, body: &str, closed: bool) -> ProjectedIssue {
+    ProjectedIssue { number, title: title.to_owned(), body: body.to_owned(), marker: parse_marker(body), closed }
 }
 
 /// Whether `number` names an object that can carry a comment. Issues and pull

@@ -12,8 +12,8 @@ use super::StoreCapability;
 use super::commission::{
     CancelCommission, CancelCommissionResult, CommissionBackend, CommissionError, CreateCommission,
     CreateCommissionResult, ListCommissions, ListCommissionsResult, ListedCommission, LoadCommission,
-    LoadCommissionResult, RecordCommissionApproval, RecordCommissionApprovalResult, WriteScopeRevision,
-    WriteScopeRevisionResult,
+    LoadCommissionResult, RecordCommissionApproval, RecordCommissionApprovalResult, RecordCommissionProjection,
+    RecordCommissionProjectionResult, WriteScopeRevision, WriteScopeRevisionResult,
 };
 use super::kinds::{
     AckOutbox, AckOutboxResult, AppendEvent, AppendEventResult, BloomDispatchLive, BloomDispatchRollup, ClaimSeal,
@@ -585,7 +585,10 @@ impl SqliteStore {
 /// on creation; nothing is backfilled — a GitHub issue body is not a signed
 /// commission. Foreign-key enforcement is switched on per connection after
 /// migrate, not by this version stamp.
-const SCHEMA_VERSION: i64 = 7;
+///
+/// `8` is the commission replica-issue number (`commission_projections`).
+/// Empty on creation; nothing is backfilled — a GitHub issue is not adopted.
+const SCHEMA_VERSION: i64 = 8;
 
 /// Bring a store opened at [`MIGRATIONS`] up to [`SCHEMA_VERSION`], or refuse it.
 ///
@@ -683,6 +686,12 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     // bodies.
     if !has_table(&migration, "commissions")? {
         migration.execute_batch(super::commission::COMMISSION_TABLES)?;
+    }
+
+    // Version 8 (ADR-0199): the persisted replica-issue number. Empty on
+    // creation; a pre-existing store has no owned issues to invent.
+    if !has_table(&migration, "commission_projections")? {
+        migration.execute_batch(super::commission::COMMISSION_PROJECTION_TABLE)?;
     }
 
     migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -2172,6 +2181,19 @@ impl NativeActor for StoreCapability {
             Err(CommissionError::NotOpen) => CancelCommissionResult::NotOpen,
             Err(CommissionError::WrongSubject) => CancelCommissionResult::WrongSubject,
             Err(error) => CancelCommissionResult::Err { error: error.to_string() },
+        }
+    }
+
+    #[handler::single]
+    fn on_record_commission_projection(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: RecordCommissionProjection,
+    ) -> RecordCommissionProjectionResult {
+        match state.backend.record_projection(&WorkpieceId(mail.id.clone()), mail.issue_number) {
+            Ok(()) => RecordCommissionProjectionResult::Ok { id: mail.id, issue_number: mail.issue_number },
+            Err(CommissionError::MissingCommission(id)) => RecordCommissionProjectionResult::Missing { id },
+            Err(error) => RecordCommissionProjectionResult::Err { error: error.to_string() },
         }
     }
 }

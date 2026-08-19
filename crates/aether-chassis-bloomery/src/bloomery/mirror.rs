@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use aether_bloomery::{ProjectedReceipt, ProjectionBackend, ViewDocument};
+use aether_bloomery::{CommissionProjection, ProjectedReceipt, ProjectionBackend, ViewDocument};
 use aether_bloomery_github::{GithubError, GithubProjection};
 
 use super::GithubConnectionConfig;
@@ -46,6 +46,14 @@ impl ProjectionShell {
     /// The projection surface is unreachable or returned an error status.
     pub fn project_receipt(&self, receipt: &ProjectedReceipt) -> Result<(), GithubError> {
         self.backend.project_receipt(receipt)
+    }
+
+    /// Project one commission as a Bloomery-owned issue.
+    ///
+    /// # Errors
+    /// The projection surface is unreachable or returned an error status.
+    pub fn project_commission(&self, projection: &CommissionProjection) -> Result<u64, GithubError> {
+        self.backend.project_commission(projection)
     }
 }
 
