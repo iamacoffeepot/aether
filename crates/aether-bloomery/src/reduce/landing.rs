@@ -27,7 +27,7 @@ use crate::values::Evidence;
 /// re-opened by a bloom-level outcome.
 pub(super) fn reduce_landing_rejected(snapshot: &Snapshot, bloom: &BloomId, evidence: &Evidence) -> Decisions {
     let Some(record) = snapshot.blooms.get(bloom) else {
-        return Decisions::rejected(Outcome::LandingRejectedRefused(LandingRejectedError::NotAwaitingLanding));
+        return Decisions::rejected(Outcome::LandingRejectedRefused(LandingRejectedError::UnknownBloom));
     };
     // Only a resolved bloom is awaiting a landing. A rejection against one that
     // already landed, was superseded, or is still working names a proposal that
@@ -36,7 +36,7 @@ pub(super) fn reduce_landing_rejected(snapshot: &Snapshot, bloom: &BloomId, evid
         return Decisions::rejected(Outcome::LandingRejectedRefused(LandingRejectedError::NotAwaitingLanding));
     }
     let Some(head) = record.resolved_head else {
-        return Decisions::rejected(Outcome::LandingRejectedRefused(LandingRejectedError::NotAwaitingLanding));
+        return Decisions::rejected(Outcome::LandingRejectedRefused(LandingRejectedError::NoResolvedHead));
     };
     if !evidence.validates(&head) {
         return Decisions::rejected(Outcome::LandingRejectedRefused(LandingRejectedError::SubjectMismatch {
