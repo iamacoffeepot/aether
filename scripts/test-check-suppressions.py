@@ -324,6 +324,179 @@ ignored = ["changed-but-unrelated"]
         self.assertEqual([item.line for item in findings], [1])
         self.assertEqual([item.token for item in findings], ["allow(dead_code)"])
 
+    def test_exact_unwrap_allow_is_exempt_only_in_recognized_test_context(self) -> None:
+        # Pre-fix, every accepted case below is a finding: the scanner treated
+        # the repository's test-only unwrap idiom as a new trust-policy exception.
+        unwrap = "#![allow(clippy::unwrap_used)]\nfn t() {}\n"
+        cases: list[tuple[str, dict[str, str], list[tuple[str, int]]]] = [
+            (
+                "tests/ directory inner unwrap allow",
+                {"crates/demo/tests/it.rs": unwrap},
+                [],
+            ),
+            (
+                "tests.rs basename inner unwrap allow",
+                {"src/tests.rs": unwrap},
+                [],
+            ),
+            (
+                "cfg(test) module attached unwrap allow",
+                {
+                    "src/lib.rs": (
+                        "#[cfg(test)]\n#[allow(clippy::unwrap_used)]\nmod tests {\n    fn t() {}\n}\n"
+                    )
+                },
+                [],
+            ),
+            (
+                "cfg(test) module inner unwrap allow",
+                {
+                    "src/lib.rs": (
+                        "#[cfg(test)]\nmod tests {\n    #![allow(clippy::unwrap_used)]\n    fn t() {}\n}\n"
+                    )
+                },
+                [],
+            ),
+            (
+                "cfg(test) module item unwrap allow",
+                {
+                    "src/lib.rs": (
+                        "#[cfg(test)]\nmod tests {\n    #[allow(clippy::unwrap_used)]\n    fn t() {}\n}\n"
+                    )
+                },
+                [],
+            ),
+            (
+                "cfg(test) module with reason named-arg",
+                {"src/tests.rs": '#![allow(clippy::unwrap_used, reason = "fixture")]\nfn t() {}\n'},
+                [],
+            ),
+            (
+                "multiline exact unwrap allow in tests.rs",
+                {"src/tests.rs": "#![allow(\n    clippy::unwrap_used,\n)]\nfn t() {}\n"},
+                [],
+            ),
+            (
+                "comments and strings do not close a cfg(test) module",
+                {
+                    "src/lib.rs": (
+                        "#[cfg(test)]\n"
+                        "mod tests {\n"
+                        '    const TEXT: &str = "} #[cfg(test)] mod fake {";\n'
+                        "    // }\n"
+                        "    /* { */\n"
+                        "    #[allow(clippy::unwrap_used)]\n"
+                        "    fn t() {}\n"
+                        "}\n"
+                    )
+                },
+                [],
+            ),
+            (
+                "production unwrap allow",
+                {"src/lib.rs": "#[allow(clippy::unwrap_used)]\nfn t() {}\n"},
+                [("src/lib.rs", 1)],
+            ),
+            (
+                "contest/ is not tests/",
+                {"src/contest/foo.rs": unwrap},
+                [("src/contest/foo.rs", 1)],
+            ),
+            (
+                "test_support.rs is not tests.rs",
+                {"src/test_support.rs": unwrap},
+                [("src/test_support.rs", 1)],
+            ),
+            (
+                "expect in tests/ is still a finding",
+                {"crates/demo/tests/it.rs": "#![expect(clippy::unwrap_used)]\nfn t() {}\n"},
+                [("crates/demo/tests/it.rs", 1)],
+            ),
+            (
+                "ignore in tests/ is still a finding",
+                {"crates/demo/tests/it.rs": "#[ignore]\nfn t() {}\n"},
+                [("crates/demo/tests/it.rs", 1)],
+            ),
+            (
+                "compound allow in tests/ is still a finding",
+                {"crates/demo/tests/it.rs": "#![allow(clippy::unwrap_used, dead_code)]\nfn t() {}\n"},
+                [("crates/demo/tests/it.rs", 1)],
+            ),
+            (
+                "other lint in tests/ is still a finding",
+                {"crates/demo/tests/it.rs": "#![allow(dead_code)]\nfn t() {}\n"},
+                [("crates/demo/tests/it.rs", 1)],
+            ),
+            (
+                "cfg(test) function is not a module",
+                {
+                    "src/lib.rs": (
+                        "#[cfg(test)]\n#[allow(clippy::unwrap_used)]\nfn helper() {}\n"
+                    )
+                },
+                [("src/lib.rs", 2)],
+            ),
+            (
+                "cfg(not(test)) module is not test context",
+                {
+                    "src/lib.rs": (
+                        "#[cfg(not(test))]\n#[allow(clippy::unwrap_used)]\nmod tests {}\n"
+                    )
+                },
+                [("src/lib.rs", 2)],
+            ),
+            (
+                "commented cfg(test) does not create a module",
+                {
+                    "src/lib.rs": (
+                        "fn production() {\n"
+                        "    // #[cfg(test)]\n"
+                        "    // mod tests {\n"
+                        "    #[allow(clippy::unwrap_used)]\n"
+                        "    fn inner() {}\n"
+                        "    // }\n"
+                        "}\n"
+                    )
+                },
+                [("src/lib.rs", 4)],
+            ),
+            (
+                "string cfg(test) does not create a module",
+                {
+                    "src/lib.rs": (
+                        "fn production() {\n"
+                        '    let _ = "#[cfg(test)] mod tests {";\n'
+                        "    #[allow(clippy::unwrap_used)]\n"
+                        "    fn inner() {}\n"
+                        "}\n"
+                    )
+                },
+                [("src/lib.rs", 3)],
+            ),
+            (
+                "test unwrap does not hide a sibling production unwrap",
+                {
+                    "crates/demo/tests/it.rs": unwrap,
+                    "src/lib.rs": "#[allow(clippy::unwrap_used)]\nfn t() {}\n",
+                },
+                [("src/lib.rs", 1)],
+            ),
+        ]
+
+        for name, files, expected in cases:
+            with self.subTest(name):
+                repo = Repository()
+                try:
+                    repo.write("src/baseline.rs", "fn baseline() {}\n")
+                    base = repo.commit("base")
+                    for path, source in files.items():
+                        repo.write(path, source)
+                    head = repo.commit("candidate")
+                    findings = repo.scan(base, head)
+                    self.assertEqual([(item.path, item.line) for item in findings], expected)
+                finally:
+                    repo.close()
+
 
 class SignoffTests(unittest.TestCase):
     base = "1" * 40
