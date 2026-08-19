@@ -373,6 +373,20 @@ pub trait StoreBackend: Send {
     /// member's lane wrote none — the landing assembly falls back rather than
     /// blocking on the absence.
     fn lookup_candidate_commit_message(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<String>>;
+    /// Record the construct lane's harness session id for (`bloom`, `workpiece`)
+    /// (#5177) — what a same-member Refine dispatch resumes. Last-writer-wins
+    /// on the key: a later construct capture supersedes the handle of the
+    /// session it replaces.
+    fn record_construct_session(
+        &mut self,
+        bloom: &[u8],
+        workpiece: &str,
+        session_id: &str,
+        context_tokens: u64,
+    ) -> rusqlite::Result<()>;
+    /// The construct session recorded for (`bloom`, `workpiece`), or `None`
+    /// when construct never journaled a handle — Refine then launches fresh.
+    fn lookup_construct_session(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<(String, u64)>>;
     /// Record the diff a lane's captured candidate carries, keyed by the nonce
     /// of the order that produced it (#4959) — what the repair-lap triage reads
     /// before a passing `Refine` result is admitted. Written by an executor
@@ -591,7 +605,11 @@ impl SqliteStore {
 ///
 /// `9` is the ADR store (ADR-0201): `adrs`, `adr_transitions`. Empty on
 /// creation; nothing is backfilled — a markdown file is not a signed ADR.
-const SCHEMA_VERSION: i64 = 9;
+///
+/// `10` is the per-member construct session handle (#5177):
+/// `construct_session`. Empty on creation; nothing is backfilled — a
+/// session id that was never captured is not invented.
+const SCHEMA_VERSION: i64 = 10;
 
 /// Bring a store opened at [`MIGRATIONS`] up to [`SCHEMA_VERSION`], or refuse it.
 ///
@@ -702,6 +720,12 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     // markdown files.
     if !has_table(&migration, "adrs")? {
         migration.execute_batch(super::adr::ADR_TABLES)?;
+    }
+
+    // Version 10 (#5177): the construct session a same-member refine resumes.
+    // Empty on creation; a pre-existing store has no captured handles to invent.
+    if !has_table(&migration, "construct_session")? {
+        migration.execute_batch(CONSTRUCT_SESSION_TABLE)?;
     }
 
     migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -899,6 +923,13 @@ CREATE TABLE IF NOT EXISTS metric_cursor (
     id INTEGER PRIMARY KEY CHECK (id = 0),
     through_sequence INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS construct_session (
+    bloom          BLOB NOT NULL,
+    workpiece      TEXT NOT NULL,
+    session_id     TEXT NOT NULL,
+    context_tokens INTEGER NOT NULL,
+    PRIMARY KEY (bloom, workpiece)
+);
 ";
 
 /// The ADR-0200 proof-fact ledger. Column order is load-bearing from row one.
@@ -911,6 +942,17 @@ CREATE TABLE IF NOT EXISTS proof_facts (
     host_class          TEXT NOT NULL,
     producing_dispatch  TEXT NOT NULL,
     producing_bloom     BLOB NOT NULL
+);
+";
+
+/// The per-member construct session a same-member refine resumes (#5177).
+const CONSTRUCT_SESSION_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS construct_session (
+    bloom          BLOB NOT NULL,
+    workpiece      TEXT NOT NULL,
+    session_id     TEXT NOT NULL,
+    context_tokens INTEGER NOT NULL,
+    PRIMARY KEY (bloom, workpiece)
 );
 ";
 
@@ -1236,6 +1278,32 @@ impl StoreBackend for SqliteStore {
             self.conn.prepare("SELECT message FROM candidate_commit_message WHERE bloom = ?1 AND workpiece = ?2")?;
         let mut rows = stmt.query_map(rusqlite::params![bloom, workpiece], |row| row.get::<_, String>(0))?;
         // The (bloom, workpiece) pair is the primary key, so at most one row.
+        rows.next().transpose()
+    }
+
+    fn record_construct_session(
+        &mut self,
+        bloom: &[u8],
+        workpiece: &str,
+        session_id: &str,
+        context_tokens: u64,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO construct_session (bloom, workpiece, session_id, context_tokens) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![bloom, workpiece, session_id, i64::try_from(context_tokens).unwrap_or(i64::MAX)],
+        )?;
+        Ok(())
+    }
+
+    fn lookup_construct_session(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<(String, u64)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT session_id, context_tokens FROM construct_session WHERE bloom = ?1 AND workpiece = ?2")?;
+        let mut rows = stmt.query_map(rusqlite::params![bloom, workpiece], |row| {
+            let session_id = row.get::<_, String>(0)?;
+            let context = row.get::<_, i64>(1)?;
+            Ok((session_id, u64::try_from(context).unwrap_or(0)))
+        })?;
         rows.next().transpose()
     }
 

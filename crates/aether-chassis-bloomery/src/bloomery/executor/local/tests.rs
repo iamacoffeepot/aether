@@ -1407,6 +1407,10 @@ fn open_store(dir: &TempDir, order: &OutstandingOrder) -> SqliteStore {
 // An outstanding order for `nonce` naming `workpiece` in bloom `[1; 32]` — the
 // (bloom, workpiece) pair the backend re-keys a captured message onto.
 fn member_order(nonce: &str, workpiece: &str) -> OutstandingOrder {
+    member_order_at(nonce, workpiece, StageId::Construct)
+}
+
+fn member_order_at(nonce: &str, workpiece: &str, stage: StageId) -> OutstandingOrder {
     OutstandingOrder {
         nonce: nonce.to_owned(),
         bloom: vec![1; 32],
@@ -1414,7 +1418,7 @@ fn member_order(nonce: &str, workpiece: &str) -> OutstandingOrder {
         scope_revision: vec![2; 32],
         candidate: vec![5; 32],
         displayed_digest: vec![5; 32],
-        stage: vec![9],
+        stage: aether_data::wire::to_vec(&stage).unwrap(),
         transformation: vec![7, 7],
         configs: vec![3, 3],
         profile: Vec::new(),
@@ -2075,7 +2079,7 @@ fn grok_order(subject: Digest, nonce: &str, task: &str) -> aether_bloomery::Work
 
 fn reuse_evidence(nonce: &str, session_id: &str, input_tokens: u64) -> String {
     format!(
-        r#"{{"command":"construct.implement","nonce":"{nonce}","produced_candidate":true,"result_record":{{"schema":1,"is_error":false,"session_id":"{session_id}","input":{input_tokens},"cache_read":0,"cache_write":4000,"output":200,"num_turns":3,"calls":[{{"input":{input_tokens},"cache_read":0,"cache_write":4000,"output":200}}],"result":{{"num_turns":3,"session_id":"{session_id}"}}}}}}"#
+        r#"{{"command":"construct.implement","nonce":"{nonce}","produced_candidate":true,"result_record":{{"schema":1,"is_error":false,"session_id":"{session_id}","input":{input_tokens},"cache_read":0,"cache_write":4000,"output":200,"num_turns":3,"duration_ms":1200,"calls":[{{"input":{input_tokens},"cache_read":0,"cache_write":4000,"output":200}}],"result":{{"num_turns":3,"session_id":"{session_id}"}}}}}}"#
     )
 }
 
@@ -2085,6 +2089,10 @@ struct ReuseRunner {
     seen: Arc<Mutex<Vec<SeenSpec>>>,
     /// Uncached input tokens stamped on the result record.
     input_tokens: u64,
+    /// Session id the result record claims this lap produced.
+    session_id: String,
+    /// A resume handle that fails `start` the way a missing harness session does.
+    reject_resume: Option<String>,
     /// A nonce that stays `Running` so its slot stays held — the fixture for
     /// forcing a predecessor into a non-lowest slot.
     hold: Option<String>,
@@ -2096,7 +2104,25 @@ struct ReuseRunner {
 
 impl ReuseRunner {
     fn new(seen: Arc<Mutex<Vec<SeenSpec>>>) -> Self {
-        Self { seen, input_tokens: 1_000, hold: None, parents: HashMap::new(), fail_parents: false }
+        Self {
+            seen,
+            input_tokens: 1_000,
+            session_id: "sess-1".to_owned(),
+            reject_resume: None,
+            hold: None,
+            parents: HashMap::new(),
+            fail_parents: false,
+        }
+    }
+
+    fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = session_id.into();
+        self
+    }
+
+    fn rejecting_resume(mut self, session_id: impl Into<String>) -> Self {
+        self.reject_resume = Some(session_id.into());
+        self
     }
 
     fn holding(mut self, nonce: impl Into<String>) -> Self {
@@ -2129,9 +2155,18 @@ impl TransformRunner for ReuseRunner {
             worktree: Some(spec.worktree_dir.to_owned()),
             task: spec.task.map(str::to_owned),
         });
+        if spec.resume.is_some() && spec.resume == self.reject_resume.as_deref() {
+            return Err(LocalExecutorError::Worktree(format!(
+                "No conversation found with session ID {}",
+                spec.resume.unwrap_or_default()
+            )));
+        }
         fs::create_dir_all(spec.evidence_dir).map_err(LocalExecutorError::Io)?;
-        fs::write(spec.evidence_dir.join("evidence.json"), reuse_evidence(spec.nonce, "sess-1", self.input_tokens))
-            .map_err(LocalExecutorError::Io)?;
+        fs::write(
+            spec.evidence_dir.join("evidence.json"),
+            reuse_evidence(spec.nonce, &self.session_id, self.input_tokens),
+        )
+        .map_err(LocalExecutorError::Io)?;
         let lifecycle = if self.hold.as_deref() == Some(spec.nonce) {
             RunLifecycle::Running
         } else {
@@ -2671,6 +2706,7 @@ fn dispatch_evidence_carries_fresh_or_resumed_and_token_figures() {
     assert_eq!(fresh["session_reuse"]["input_tokens"], 1_000);
     assert_eq!(fresh["session_reuse"]["cache_write_tokens"], 4_000);
     assert_eq!(fresh["session_reuse"]["output_tokens"], 200);
+    assert_eq!(fresh["session_reuse"]["duration_millis"], 1_200);
     assert_eq!(fresh["session_reuse"]["actual_turns"], 3);
 
     let second = exec.submit(&claude_order(digest(5), &test_nonce("A2"), "issue-A")).unwrap();
@@ -2709,4 +2745,108 @@ fn a_dependent_construct_resumes_the_predecessors_session_and_is_told_about_the_
         seen.lock().unwrap()[1].task.as_deref().is_some_and(|task| task.contains("spliced dependency candidate")),
         "the resumed prompt must state what was spliced, not only that the tree was reset"
     );
+}
+
+fn member_store(dir: &TempDir, orders: &[OutstandingOrder]) -> SqliteStore {
+    let mut store = SqliteStore::open(dir.path().join("bloomery.sqlite").to_str().unwrap()).unwrap();
+    for order in orders {
+        store.record_order(order).unwrap();
+    }
+    store
+}
+
+#[test]
+fn a_refine_resumes_the_journaled_construct_session_under_the_cliff() {
+    // Acceptance (#5177): a same-member refine whose construct session is
+    // journaled and under the pricing cliff threads that handle, even though
+    // the findings overlay would have been a different pool key.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let store = store_dir();
+    let construct = test_nonce("construct");
+    let refine = test_nonce("refine");
+    let exec = LocalExecutor::new(Arc::new(ReuseRunner::new(Arc::clone(&seen))), correspondence(), base.path())
+        .with_message_store(member_store(
+            &store,
+            &[
+                member_order_at(&construct, "issue-A", StageId::Construct),
+                member_order_at(&refine, "issue-A", StageId::Refine),
+            ],
+        ));
+
+    exec.stream_evidence(&exec.submit(&claude_order(digest(5), &construct, "issue-A")).unwrap()).unwrap();
+    exec.stream_evidence(&exec.submit(&claude_order(digest(5), &refine, "issue-A")).unwrap()).unwrap();
+
+    assert!(seen.lock().unwrap()[0].resume.is_none(), "construct launches cold");
+    assert_eq!(
+        seen.lock().unwrap()[1].resume.as_deref(),
+        Some("sess-1"),
+        "refine resumes the journaled construct session",
+    );
+    let stamped = stamped_evidence(&base, &refine);
+    assert_eq!(stamped["session_reuse"]["arm"], "resumed");
+    assert_eq!(stamped["session_reuse"]["output_tokens"], 200);
+    assert_eq!(stamped["session_reuse"]["duration_millis"], 1_200);
+}
+
+#[test]
+fn a_refine_over_the_pricing_cliff_launches_fresh() {
+    // Acceptance: a journaled handle whose projected context meets the cliff
+    // is not resumed — paying the long-context band is the cost the gate exists
+    // to avoid.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let store = store_dir();
+    let construct = test_nonce("construct");
+    let refine = test_nonce("refine");
+    let runner = ReuseRunner::new(Arc::clone(&seen));
+    let runner = ReuseRunner { input_tokens: 200_000, ..runner };
+    let exec = LocalExecutor::new(Arc::new(runner), correspondence(), base.path()).with_message_store(member_store(
+        &store,
+        &[
+            member_order_at(&construct, "issue-A", StageId::Construct),
+            member_order_at(&refine, "issue-A", StageId::Refine),
+        ],
+    ));
+
+    exec.stream_evidence(&exec.submit(&claude_order(digest(5), &construct, "issue-A")).unwrap()).unwrap();
+    exec.stream_evidence(&exec.submit(&claude_order(digest(5), &refine, "issue-A")).unwrap()).unwrap();
+
+    assert!(seen.lock().unwrap()[1].resume.is_none(), "an over-cliff session launches fresh");
+    let stamped = stamped_evidence(&base, &refine);
+    assert_eq!(stamped["session_reuse"]["arm"], "fresh");
+    assert_eq!(stamped["session_reuse"]["miss"], "pricing_cliff");
+}
+
+#[test]
+fn a_bad_construct_session_id_produces_a_fresh_dispatch_not_a_wedge() {
+    // Acceptance: resume is an optimization. A journaled handle the harness
+    // refuses must relaunch cold and still complete — not fail the dispatch.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let store = store_dir();
+    let construct = test_nonce("construct");
+    let refine = test_nonce("refine");
+    let runner = ReuseRunner::new(Arc::clone(&seen)).with_session_id("bad-id").rejecting_resume("bad-id");
+    let exec = LocalExecutor::new(Arc::new(runner), correspondence(), base.path()).with_message_store(member_store(
+        &store,
+        &[
+            member_order_at(&construct, "issue-A", StageId::Construct),
+            member_order_at(&refine, "issue-A", StageId::Refine),
+        ],
+    ));
+
+    exec.stream_evidence(&exec.submit(&claude_order(digest(5), &construct, "issue-A")).unwrap()).unwrap();
+    let refs = exec.stream_evidence(&exec.submit(&claude_order(digest(5), &refine, "issue-A")).unwrap()).unwrap();
+
+    assert_eq!(
+        seen.lock().unwrap()[1].resume.as_deref(),
+        Some("bad-id"),
+        "the first refine start names the journaled id"
+    );
+    assert!(seen.lock().unwrap()[2].resume.is_none(), "the refused handle relaunches cold");
+    assert_eq!(refs.len(), 1, "the dispatch still completes");
+    let stamped = stamped_evidence(&base, &refine);
+    assert_eq!(stamped["session_reuse"]["arm"], "fresh");
+    assert_eq!(stamped["session_reuse"]["miss"], "resume_refused");
 }

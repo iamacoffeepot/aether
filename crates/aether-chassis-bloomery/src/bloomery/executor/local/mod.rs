@@ -96,7 +96,7 @@ pub use lane_program::{DEFAULT_LANE_PROGRAM, LaneProgram};
 pub use orphan::OrphanedRun;
 pub use process_runner::{CaptureIdentity, ProcessTransformRunner};
 pub use runner::{CapturedObjects, RunLifecycle, RunProcess, RunSpec, TransformRunner};
-pub use session_reuse::{AcquireRequest, ReusePlan, SessionReuse};
+pub use session_reuse::{ReusePlan, SessionReuse};
 
 #[cfg(test)]
 pub mod testing;

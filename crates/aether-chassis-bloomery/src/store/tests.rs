@@ -1241,3 +1241,52 @@ fn list_bloom_dispatch_live_is_scoped_to_the_named_bloom() {
     assert_eq!(live[0].nonce, "dispatch-1");
     assert_eq!(store.list_bloom_dispatch_live(&[0xCC; 32]).unwrap().len(), 0);
 }
+
+#[test]
+fn construct_session_records_and_supersedes_per_member() {
+    // The handle a same-member refine resumes is keyed like findings, not like
+    // a nonce — a later construct capture must replace the previous session
+    // rather than accumulating handles the dispatcher cannot choose among.
+    let mut store = memory();
+    let bloom = [1u8; 32];
+    assert_eq!(store.lookup_construct_session(&bloom, "wp-a").unwrap(), None);
+
+    store.record_construct_session(&bloom, "wp-a", "sess-1", 8_000).unwrap();
+    assert_eq!(store.lookup_construct_session(&bloom, "wp-a").unwrap(), Some(("sess-1".to_owned(), 8_000)),);
+    assert_eq!(store.lookup_construct_session(&bloom, "wp-b").unwrap(), None, "a sibling member is not the same row");
+
+    store.record_construct_session(&bloom, "wp-a", "sess-2", 12_000).unwrap();
+    assert_eq!(
+        store.lookup_construct_session(&bloom, "wp-a").unwrap(),
+        Some(("sess-2".to_owned(), 12_000)),
+        "a later construct capture supersedes the handle it replaces",
+    );
+}
+
+#[test]
+fn a_v9_store_gains_the_construct_session_table() {
+    // Version 10 is the construct-session journal. Opening a schema-9 file must
+    // create the table empty rather than skip it because user_version was
+    // already "current" at 9.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v9.db").to_str().unwrap().to_owned();
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE journal (
+                 sequence        INTEGER PRIMARY KEY AUTOINCREMENT,
+                 idempotency_key TEXT NOT NULL UNIQUE,
+                 event           BLOB NOT NULL,
+                 decisions       BLOB,
+                 decider         TEXT,
+                 decisions_schema TEXT
+             );
+             PRAGMA user_version = 9;",
+        )
+        .unwrap();
+
+    let mut store = SqliteStore::open(&path).expect("a v9 store migrates");
+    assert_eq!(store.lookup_construct_session(&[1; 32], "wp").unwrap(), None, "migration invents no handles");
+    store.record_construct_session(&[1; 32], "wp", "sess-1", 8_000).unwrap();
+    assert_eq!(store.lookup_construct_session(&[1; 32], "wp").unwrap(), Some(("sess-1".to_owned(), 8_000)),);
+}
