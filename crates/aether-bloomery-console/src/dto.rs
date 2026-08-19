@@ -664,10 +664,6 @@ pub struct SpendWindowView {
     pub unpriced_records: u64,
 }
 
-fn encode(bytes: &[u8]) -> String {
-    aether_bloomery::encode_hex(bytes)
-}
-
 fn decode(hex: &str) -> Option<[u8; 32]> {
     aether_bloomery::Digest::from_hex(hex).map(|digest| *digest.as_bytes())
 }
@@ -692,12 +688,12 @@ fn from_json(value: &Value) -> Result<[u8; 32], String> {
 mod tests {
     use super::{
         BloomStatus, BloomView, DigestHex, MemberView, MetricDay, MetricsSeat, SpendQuiesce, SpendWindowView, StageId,
-        TimelineSpan, ViewDocument, WedgeCause, decode, encode,
+        TimelineSpan, ViewDocument, WedgeCause, decode,
     };
     use serde_json::json;
 
     fn hex(byte: u8) -> String {
-        encode(&[byte; 32])
+        aether_bloomery::encode_hex(&[byte; 32])
     }
 
     fn digest(byte: u8) -> DigestHex {
@@ -710,7 +706,7 @@ mod tests {
         // whose deserializer rejects the 64-hex /view rendering, so every
         // poll fails to decode a live coordinator.
         let bytes = [0x5c; 32];
-        let hex = encode(&bytes);
+        let hex = aether_bloomery::encode_hex(&bytes);
         let parsed: DigestHex = serde_json::from_value(json!(hex)).expect("hex digest");
         assert_eq!(parsed.as_bytes(), &bytes);
         let from_array: DigestHex = serde_json::from_value(json!(bytes.to_vec())).expect("byte-array digest");
