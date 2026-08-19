@@ -1456,6 +1456,23 @@ fn dispatch_error_is_permanent_classifies_github_status_by_code() {
     assert!(!github_status(399).is_permanent(), "below the 4xx range is transient");
 }
 
+// #5161 — an `E2BIG` spawn refusal is deterministic (the composed argv exceeds
+// a kernel constant, so the identical re-drive fails identically), and a
+// transient classification loops it silently forever while head-of-line
+// blocking the queue behind it. Other spawn IO faults (a missing binary, a
+// fork resource blip) stay transient — a re-drive genuinely can recover them.
+#[test]
+fn dispatch_error_is_permanent_parks_an_argument_list_too_long_spawn() {
+    use std::io::ErrorKind;
+
+    let spawn =
+        |kind: ErrorKind| DispatchError::Submit(ExecutorPortError::Local(LocalExecutorError::Spawn(kind.into())));
+
+    assert!(spawn(ErrorKind::ArgumentListTooLong).is_permanent(), "E2BIG re-drives identically");
+    assert!(!spawn(ErrorKind::NotFound).is_permanent(), "a missing binary can appear after a rebuild");
+    assert!(!spawn(ErrorKind::WouldBlock).is_permanent(), "a resource blip clears on retry");
+}
+
 #[test]
 fn dispatch_error_is_permanent_is_false_for_every_non_status_fault() {
     let transport = DispatchError::Submit(ExecutorPortError::Actions(ExecutorError::Github(GithubError::Transport(

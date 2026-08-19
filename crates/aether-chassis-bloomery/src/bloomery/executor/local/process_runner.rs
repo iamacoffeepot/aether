@@ -26,6 +26,7 @@ use super::error::LocalExecutorError;
 use super::lane_env::{inherited_keys, scrub_coordinator_env};
 use super::lane_program::LaneProgram;
 use super::runner::{CapturedObjects, RunLifecycle, RunProcess, RunSpec, TransformRunner};
+use super::task_argv;
 
 /// The operator a candidate capture is authored as (#4630), resolved from the
 /// `AETHER_BLOOMERY_OPERATOR_*` knobs.
@@ -191,7 +192,11 @@ impl TransformRunner for ProcessTransformRunner {
         // Command, `--out`, `--nonce`, and the optional `--diff-base` /
         // `--seeded` / model-lane flags. A Construct checkpoint is
         // `--seeded` only (#5052); Verify and Review still name a range.
-        append_work_order_args(&mut lane, spec, &checkout, diff_base.as_deref());
+        // The composed task routes through `task_argv` (#5161): one argv
+        // string caps at 128KiB (`E2BIG` past it) and the task is unbounded,
+        // so an over-budget task spills to the evidence dir and the argv
+        // carries its head plus a pointer line.
+        append_work_order_args(&mut lane, spec, &checkout, diff_base.as_deref()).map_err(LocalExecutorError::Io)?;
         // Own process group so a re-attached kill after a coordinator restart
         // can signal the lane *and* the harness it spawned, not just the head
         // pid this process recorded (issue #4999). `process_group(0)` is the
@@ -323,10 +328,16 @@ fn capture_diff(worktree_dir: &Path) -> Option<String> {
 }
 
 /// Append the work-order flags `cargo xtask transform` reads.
-fn append_work_order_args(lane: &mut Command, spec: &RunSpec<'_>, checkout: &str, diff_base: Option<&str>) {
-    for arg in work_order_args(spec, checkout, diff_base) {
+fn append_work_order_args(
+    lane: &mut Command,
+    spec: &RunSpec<'_>,
+    checkout: &str,
+    diff_base: Option<&str>,
+) -> io::Result<()> {
+    for arg in work_order_args(spec, checkout, diff_base)? {
         lane.arg(arg);
     }
+    Ok(())
 }
 
 /// The argv tail after the lane program: command, `--out`, `--nonce`, and the
@@ -335,7 +346,7 @@ fn append_work_order_args(lane: &mut Command, spec: &RunSpec<'_>, checkout: &str
 /// A Construct checkpoint is `--seeded <checkout>` and never `--diff-base`
 /// (#5052): the marker on the work order is provenance, not a range the
 /// lane judges. A clean Construct emits neither.
-fn work_order_args(spec: &RunSpec<'_>, checkout: &str, diff_base: Option<&str>) -> Vec<String> {
+fn work_order_args(spec: &RunSpec<'_>, checkout: &str, diff_base: Option<&str>) -> io::Result<Vec<String>> {
     let mut args = vec![
         spec.command.to_owned(),
         "--out".into(),
@@ -358,7 +369,8 @@ fn work_order_args(spec: &RunSpec<'_>, checkout: &str, diff_base: Option<&str>) 
             args.extend(["--effort".into(), effort.to_owned()]);
         }
         if let Some(task) = spec.task {
-            args.extend(["--task".into(), task.to_owned()]);
+            let task = task_argv::argv_safe_task(task, spec.evidence_dir)?;
+            args.extend(["--task".into(), task.into_owned()]);
         }
         if let Some(session) = spec.resume {
             args.extend(["--resume".into(), session.to_owned()]);
@@ -367,7 +379,7 @@ fn work_order_args(spec: &RunSpec<'_>, checkout: &str, diff_base: Option<&str>) 
             args.extend(["--seeded".into(), checkout.to_owned()]);
         }
     }
-    args
+    Ok(args)
 }
 
 /// Point a lane's build at its slot's own target directory and cap how much of
@@ -842,7 +854,8 @@ mod tests {
             &spec("construct.implement", checkout, None, None, evidence, worktree, target),
             checkout,
             None,
-        );
+        )
+        .expect("work-order args assemble");
         assert!(!clean.iter().any(|arg| arg == "--seeded"), "a clean Construct must not name a checkpoint: {clean:?}");
         assert!(
             !clean.iter().any(|arg| arg == "--diff-base"),
@@ -853,7 +866,8 @@ mod tests {
             &spec("construct.implement", checkout, None, Some(checkout), evidence, worktree, target),
             checkout,
             None,
-        );
+        )
+        .expect("work-order args assemble");
         let seeded_at =
             seeded.iter().position(|arg| arg == "--seeded").expect("a checkpoint Construct must emit --seeded");
         assert_eq!(
@@ -870,7 +884,8 @@ mod tests {
             &spec("verify.check", checkout, Some("base000"), None, evidence, worktree, target),
             checkout,
             Some("base000"),
-        );
+        )
+        .expect("work-order args assemble");
         assert!(
             verify.windows(2).any(|pair| pair == ["--diff-base", "base000"]),
             "verify still names its range: {verify:?}"
