@@ -10,8 +10,6 @@
 //! tests). This file pins the public mock-lane argv consumer: a novel
 //! `--flag value` pair must not steal the positional command.
 
-#![allow(clippy::unwrap_used, reason = "a parser test that cannot parse its own fixture reports it by panicking")]
-
 use std::path::Path;
 
 use aether_chassis_bloomery::bloomery::mock_lane::argv;
@@ -25,7 +23,7 @@ fn a_novel_flag_value_pair_does_not_steal_the_positional_command() {
     // Tripwire: the mock consumed values only for five enumerated flags. Any
     // other `--flag value` pair leaked `value` into the last-positional-wins
     // command, silently corrupting the parsed transform id.
-    let args = argv::parse(argv_words(&[
+    let args = match argv::parse(argv_words(&[
         "verify.check",
         "--out",
         "/tmp/e",
@@ -33,8 +31,10 @@ fn a_novel_flag_value_pair_does_not_steal_the_positional_command() {
         "n",
         "--brand-new-flag",
         "leaked-value",
-    ]))
-    .unwrap();
+    ])) {
+        Ok(args) => args,
+        Err(err) => panic!("a well-formed fixture must parse: {err}"),
+    };
 
     assert_eq!(args.command, "verify.check");
     assert_eq!(args.out, Path::new("/tmp/e"));
