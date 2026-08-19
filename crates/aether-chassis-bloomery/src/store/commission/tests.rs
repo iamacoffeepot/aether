@@ -44,6 +44,7 @@ fn revision(id: &str, predecessor: Option<Digest>) -> ScopeRevision {
         routing: ScopeRouting { size: "M".to_owned(), model: "construct: test".to_owned() },
         dependencies: Vec::new(),
         description: "advisory".to_owned(),
+        implements: Vec::new(),
     }
 }
 
@@ -111,7 +112,7 @@ fn a_v6_store_gains_empty_commission_tables() {
     let mut store = SqliteStore::open(path).expect("a v6 store migrates");
     assert!(store.list(None).expect("list").is_empty(), "migration invents no commissions");
     let flags: i64 = store.conn.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("user_version");
-    assert_eq!(flags, 8, "the open stamps the current schema");
+    assert_eq!(flags, 9, "the open stamps the current schema");
     assert!(
         store.load_projection(&workpiece("wp-1")).expect("load").is_none(),
         "migration invents no replica-issue numbers"
@@ -182,6 +183,20 @@ fn signed_and_auto_tier_checks_refuse_the_cross_labelled_row() {
             [digest.as_bytes().as_slice()],
         )
         .expect("signed with a signature satisfies the CHECK");
+}
+
+#[test]
+fn a_revision_round_trips_the_implemented_adr_list() {
+    // The trailing implements field is inside the canonical bytes. Dropping
+    // it on write would let a signed commission forget which ADRs it named.
+    let mut store = memory();
+    seed(&mut store, "wp-1");
+    let mut revision = revision("wp-1", None);
+    revision.implements = vec![Digest::from_bytes([9; 32])];
+    let digest = store.write_revision(&revision).expect("write");
+    let loaded = store.load_revision(digest).expect("load").expect("row");
+    assert_eq!(loaded.implements, revision.implements);
+    assert_eq!(digest_of(&loaded), digest);
 }
 
 #[test]

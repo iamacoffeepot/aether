@@ -100,6 +100,7 @@ fn seed_commission_with(port: u16, id: &str, surface: &[&str], problem: &str, ap
         routing: ScopeRouting { size: "M".to_owned(), model: "construct: test".to_owned() },
         dependencies: Vec::new(),
         description: format!("task for {id}"),
+        implements: Vec::new(),
     };
     let (status, written) =
         send_auth(port, "POST", &format!("/commissions/{id}/revisions"), &serde_json::to_value(&revision).unwrap());

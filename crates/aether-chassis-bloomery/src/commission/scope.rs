@@ -38,6 +38,7 @@ pub fn parse_revision(workpiece: &str, markdown: &str, predecessor: Option<Diges
         routing,
         dependencies,
         description: String::new(),
+        implements: Vec::new(),
     })
 }
 
