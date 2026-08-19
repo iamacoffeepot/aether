@@ -44,7 +44,9 @@
 use alloc::vec::Vec;
 
 use super::aggregate_verify::{owed_aggregate_review, owed_aggregate_verify};
-use super::attempt::{DispatchTargets, SealedLine, move_effects_with_candidate, reconcile_or_line_targets};
+use super::attempt::{
+    DispatchTargets, SealedLine, move_effects_with_candidate, move_effects_with_checkpoint, reconcile_or_line_targets,
+};
 use super::composition::composition_line;
 use super::{BloomRecord, BloomStatus, Decision, Decisions, OperatorHoldError, Outcome, Snapshot};
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -224,7 +226,7 @@ pub(super) fn owed_dispatch(
         ));
     }
     let member = record.spec.members().iter().find(|member| member.workpiece == *workpiece)?;
-    let targets = reconcile_or_line_targets(
+    let (targets, construct_checkpoint_base) = reconcile_or_line_targets(
         member.scope_revision,
         super::splice::member_construct_base(record, workpiece),
         candidate,
@@ -232,12 +234,12 @@ pub(super) fn owed_dispatch(
         member_checkpoint,
     );
 
-    Some(move_effects_with_candidate(
+    Some(move_effects_with_checkpoint(
         bloom,
         workpiece,
         member.scope_revision,
         cursor,
-        targets,
+        (targets, construct_checkpoint_base),
         candidate.map(|current| current.tree),
         SealedLine::of(record, member).released(),
     ))

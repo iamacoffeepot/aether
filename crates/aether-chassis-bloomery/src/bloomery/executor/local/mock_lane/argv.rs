@@ -73,7 +73,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<LaneArgs, ArgvEr
             "--task" => parsed.task = Some(value()?),
             // The axes the mock records but does not act on. Consuming their
             // values keeps them from being read as the positional command.
-            "--harness" | "--model" | "--effort" | "--resume" => {
+            "--harness" | "--model" | "--effort" | "--resume" | "--seeded" => {
                 value()?;
             }
             other if other.starts_with("--") => {}

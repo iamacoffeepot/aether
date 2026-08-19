@@ -20,6 +20,8 @@ use aether_substrate::config::ConfigError;
 use aether_substrate::{Chassis, SubstrateBoot};
 use aether_trace::TraceDispatchCapability;
 
+#[cfg(feature = "github")]
+use super::local_landing::LocalLanding;
 use crate::api::{ApiParams, BloomeryApiCapability};
 use crate::artifacts::{ArtifactsCapability, ArtifactsConfig};
 use crate::bloomery::CoordinatorConfig;
@@ -31,7 +33,8 @@ use crate::bloomery::{
     CandidatePush, ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, ExecutorReactorCapability,
     ExecutorReactorSetup, ExecutorShell, GithubConnectionConfig, IntegrateReactorCapability, IntegrateReactorSetup,
     JanitorReactorCapability, JanitorReactorSetup, LandReactorCapability, LandReactorSetup, LaneProgram,
-    MirrorReactorCapability, MirrorReactorSetup, ProjectionShell, SourceShell, default_candidate_push,
+    MirrorReactorCapability, MirrorReactorSetup, ProjectionShell, SourceReplicaShell, SourceShell, candidate_push_at,
+    github_push_url,
 };
 use crate::control::{ControlCore, ControlSetup};
 use crate::session::{SessionConfig, SessionPoolCapability};
@@ -136,7 +139,34 @@ fn source_shell(
         return Ok(github.fixture_source(coordinator.mainline(), correspondence));
     }
 
+    if coordinator.uses_local_authority() {
+        return SourceShell::connect_local(
+            &coordinator.authority_repo,
+            coordinator,
+            correspondence,
+            github.cas_land_enabled,
+        )
+        .map_err(|error| BootError::Other(Box::new(error)));
+    }
+
     SourceShell::connect(github, coordinator, correspondence).map_err(|error| BootError::Other(Box::new(error)))
+}
+
+#[cfg(feature = "github")]
+fn landing_source(
+    github: &GithubConnectionConfig,
+    coordinator: &CoordinatorConfig,
+    correspondence: SharedCorrespondence,
+) -> Result<Arc<dyn aether_bloomery_github::LandingSource>, BootError> {
+    #[cfg(any(test, feature = "testing"))]
+    if github.uses_fixture() {
+        return Ok(github.fixture_landing(coordinator.mainline(), correspondence));
+    }
+
+    let client = github.connect_client().map_err(|error| BootError::Other(Box::new(error)))?;
+    let source =
+        aether_bloomery_github::GitSource::new(client, correspondence, github.cas_land_enabled, coordinator.mainline());
+    Ok(Arc::new(aether_bloomery_github::GithubLanding::new(source)))
 }
 
 #[cfg(feature = "github")]
@@ -158,6 +188,11 @@ fn actor_setups(
     session: &SessionConfig,
 ) -> Result<BloomeryActorSetups, BootError> {
     let configured = github.uses_fixture() || github.missing_connection_knobs().is_empty();
+    let source_configured = configured || coordinator.uses_local_authority();
+    let replica_enabled = coordinator.source_replica_enabled(github);
+    if replica_enabled {
+        coordinator.require_single_writer_marker(github).map_err(|error| BootError::Other(Box::new(error)))?;
+    }
     let repository = configured.then(|| (github.owner.clone(), github.repo.clone()));
     let correspondence = correspondence_store(github, &coordinator.store_path)?;
     let source = source_shell(github, coordinator, Arc::clone(&correspondence))?;
@@ -166,12 +201,27 @@ fn actor_setups(
         .transpose()
         .map_err(|error| BootError::Other(Box::new(error)))?;
     let executor_correspondence = mounted_correspondence(executor.as_ref(), &correspondence);
-    let pusher = default_candidate_push(cfg!(any(test, feature = "testing")) || github.uses_fixture());
+    let repo = coordinator.lane_repository();
+    // A testing-featured binary must never `git push` to `origin` — cargo test
+    // forks exactly that binary with its cwd inside the live checkout (#4842).
+    // A local authority's remote is an absolute path, never origin, so the
+    // hermetic publication path is the one this refuse exists to protect.
+    let refuse_origin =
+        (cfg!(any(test, feature = "testing")) || github.uses_fixture()) && !coordinator.uses_local_authority();
+    let pusher = candidate_push_at(refuse_origin, repo.clone(), coordinator.candidate_remote());
 
     Ok(BloomeryActorSetups {
         mirror: MirrorReactorSetup {
             projection: projection_shell(github, configured)?,
             source: configured.then(|| source.clone()),
+            replica: replica_enabled.then(|| {
+                SourceReplicaShell::connect(
+                    &coordinator.authority_repo,
+                    &github_push_url(&github.api_base, &github.owner, &github.repo),
+                    coordinator.mainline(),
+                    &github.token,
+                )
+            }),
             poll_interval_secs: coordinator.poll_interval_secs,
             repository: repository.clone(),
         },
@@ -196,26 +246,31 @@ fn actor_setups(
             pusher: Arc::clone(&pusher),
         },
         land: LandReactorSetup {
-            source: configured.then(|| source.clone()),
+            source: if coordinator.uses_local_authority() {
+                Some(Arc::new(LocalLanding::new(source.clone())))
+            } else {
+                configured.then(|| landing_source(github, coordinator, Arc::clone(&correspondence))).transpose()?
+            },
             store_path: coordinator.store_path.clone(),
             poll_interval_secs: coordinator.poll_interval_secs,
             repository: repository.clone(),
             cas_land_enabled: github.cas_land_enabled,
+            emit_source_replica: replica_enabled,
         },
         integrate: IntegrateReactorSetup {
-            source: configured.then(|| source.clone()),
+            source: source_configured.then(|| source.clone()),
             store_path: coordinator.store_path.clone(),
             artifacts_root: coordinator.artifacts_root.clone(),
             poll_interval_secs: coordinator.poll_interval_secs,
             repository,
         },
         claim_release: ClaimReleaseReactorSetup {
-            source: configured.then(|| source.clone()),
+            source: source_configured.then(|| source.clone()),
             store_path: coordinator.store_path.clone(),
             poll_interval_secs: coordinator.poll_interval_secs,
         },
         janitor: JanitorReactorSetup {
-            source: configured.then(|| source.clone()),
+            source: source_configured.then(|| source.clone()),
             executor: executor.clone(),
             store_path: coordinator.store_path.clone(),
             worktree_base: coordinator.local_worktree_base.clone(),
@@ -223,8 +278,9 @@ fn actor_setups(
             lane_target_budget_bytes: coordinator.lane_target_budget_bytes,
             evidence_retention_days: coordinator.evidence_retention_days,
             poll_interval_secs: coordinator.poll_interval_secs,
+            repo: repo.display().to_string(),
         },
-        source: SourceSetup { shell: source, claims_enabled: configured, mainline: coordinator.mainline() },
+        source: SourceSetup { shell: source, claims_enabled: source_configured, mainline: coordinator.mainline() },
         correspondence,
         pusher,
     })
@@ -375,6 +431,8 @@ impl BootableChassis for BloomeryChassis {
         // Capture the tier-policy path before `github` is moved into the source
         // cap below; the api cap's pre-seal approve gate loads it at init (#3583).
         let approval_policy_file = coordinator.approval_policy_file.clone();
+        let worktree_base = coordinator.local_worktree_base.clone();
+        let artifacts_root = coordinator.artifacts_root.clone();
         let http_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), http_port);
         // The component host serves on-demand `aether.component.load` over RPC (the
         // MCP harness / fleet load components at runtime). Built from the same
@@ -466,6 +524,9 @@ impl BootableChassis for BloomeryChassis {
                 approval_policy_file,
                 correspondence: Some(setups.correspondence),
                 pusher: Some(setups.pusher),
+                worktree_base,
+                artifacts_root,
+                control_token: coordinator.http_control_token,
             }))
     }
     #[cfg(not(feature = "github"))]
@@ -473,6 +534,8 @@ impl BootableChassis for BloomeryChassis {
         KitReport::inspect().log_at_boot();
         let BloomeryEnv { rpc_port, http_port, store, artifacts, coordinator, session, signing } = env;
         let approval_policy_file = coordinator.approval_policy_file.clone();
+        let worktree_base = coordinator.local_worktree_base.clone();
+        let artifacts_root = coordinator.artifacts_root.clone();
         let http_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), http_port);
         let component_host = ComponentHostParams {
             engine: Arc::clone(&boot.engine),
@@ -506,7 +569,12 @@ impl BootableChassis for BloomeryChassis {
                 (),
                 HttpServerConfig { enabled: true, bind_addr: http_addr.to_string(), ..HttpServerConfig::default() },
             )
-            .with_actor::<BloomeryApiCapability>(ApiParams { approval_policy_file }))
+            .with_actor::<BloomeryApiCapability>(ApiParams {
+                approval_policy_file,
+                worktree_base,
+                artifacts_root,
+                control_token: coordinator.http_control_token,
+            }))
     }
 }
 

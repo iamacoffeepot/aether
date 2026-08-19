@@ -47,6 +47,9 @@
 //!   bloom lifecycle from `curl` — stage / shape / seal / supersede and read
 //!   the live blooms, view document, journal, and artifacts (ADR-0149
 //!   §Packaging, #3498).
+//! - [`commission`] — the `bloomery-commission` operator CLI (#5047): create /
+//!   scope / approve / show / list / cancel against that REST ingress. A
+//!   sibling of the `bloomery` daemon binary, never a subcommand of it.
 //! - [`bloomery`] — [`BloomeryChassis`], a
 //!   coordinator-shaped chassis (no render/audio surface) that registers the
 //!   store, artifacts, source, trace, RPC, HTTP (REST control api), and the
@@ -79,6 +82,8 @@ pub use control::ControlCore;
 pub mod api;
 #[cfg(feature = "runtime")]
 pub mod bloomery;
+#[cfg(feature = "runtime")]
+pub mod commission;
 
 #[cfg(feature = "runtime")]
 pub use api::BloomeryApiCapability;

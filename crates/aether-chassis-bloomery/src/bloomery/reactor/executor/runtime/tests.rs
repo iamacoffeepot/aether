@@ -4,7 +4,9 @@
 //! `init` / the timer / the ctx send are the thin glue the chassis-boot test and
 //! compilation cover; this pins the loop that actually dispatches and admits.
 
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::slice;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -13,7 +15,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use aether_bloomery::{
     Admit, AgentSelection, AggregateReviewPayload, BloomId, CandidateRef, Conclusion, ConfigKind, ConfigRegistry,
-    DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, Harness, LandOutcome, ModelOverride, Nonce,
+    DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, Harness, ModelOverride, Nonce,
     ReasoningEffort, RedispatchPayload, ReviewPass, SharedCorrespondence, StageCatalog, StageId, StageOverride,
     TimeoutRecord, Topic, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId,
     pin_workpiece_description,
@@ -31,10 +33,10 @@ use aether_substrate::mail::registry::Registry;
 use super::strand::readopt_stranded_dispatches;
 use super::{
     BACKOFF_CAP, COMPOSITION_REFINE_ORDER, CandidatePush, ExecutorReactorState, GitCandidatePush, NameEvidenceClaims,
-    Stores, TickClock, TrackedHandle, backoff_delay, default_candidate_push, dispatch_origin, drain_and_dispatch,
-    drain_and_dispatch_aggregate, drain_and_redispatch, is_disabled_mount, is_silent, is_stale, next_backoff,
-    observe_heartbeat, pull_and_admit, push_admitted_candidates, seed_dispatches, seed_tracked, select_stale_handles,
-    silence_from, timeout_verdict,
+    Stores, TickClock, TrackedHandle, backoff_delay, candidate_push_at, default_candidate_push, dispatch_origin,
+    drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_redispatch, is_disabled_mount, is_silent, is_stale,
+    next_backoff, observe_heartbeat, pull_and_admit, push_admitted_candidates, seed_dispatches, seed_tracked,
+    select_stale_handles, silence_from, timeout_verdict,
 };
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::bloomery::executor::local::testing::FixedRunner;
@@ -45,12 +47,11 @@ use crate::bloomery::intake::{
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::{CoordinatorConfig, GithubConnectionConfig};
 use crate::bloomery::{
-    ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle, SourceShell,
-    UnconfiguredActionsBackend,
+    ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle, UnconfiguredActionsBackend,
 };
 use crate::session::SessionConfig;
 use crate::store::{JournalWrite, OutstandingOrder, SqliteStore, StoreBackend};
-use aether_bloomery_github::{candidate_ref_name, member_checkpoint_ref_name};
+use aether_bloomery_github::{LandingSource, candidate_ref_name, member_checkpoint_ref_name};
 
 // A capturing executor backend: it records every submitted `WorkOrder` so a test
 // can assert exactly what `drain_and_dispatch` built — the advisory description it
@@ -589,6 +590,111 @@ fn drain_assembles_the_reconcile_work_order_from_the_fold_conflict_overlay() {
         !description.contains("ours") && !description.contains("theirs"),
         "textual merge strategies are not a work-order mechanism",
     );
+}
+
+/// The fold-conflict overlay integrate persists for a Reconcile work order.
+fn conflicting_overlay(paths: &[&str]) -> String {
+    let mut overlay = String::from(
+        "## Fold conflict\n\nReproduce this member's intent on top of what the fold now contains; stay inside the \
+         declared surface.\n\n## Conflicting paths\n\n",
+    );
+    for path in paths {
+        overlay.push_str("- ");
+        overlay.push_str(path);
+        overlay.push('\n');
+    }
+    overlay
+}
+
+fn record_conflict(store: &mut SqliteStore, bloom: BloomId, workpiece: &str, paths: &[&str]) {
+    store.record_fold_conflict(bloom.0.as_bytes(), workpiece, &conflicting_overlay(paths)).unwrap();
+}
+
+#[test]
+fn overlapping_reconciles_dispatch_one_at_a_time_against_the_live_fold() {
+    // Two members re-open at Reconcile on the same files. Dispatching both
+    // against one fold is the #5163 wedge: both verify, the first folds, the
+    // second was built for a checkpoint that no longer exists. The drain must
+    // run the head of the overlap group only, leave the sibling unacked, and
+    // compose that sibling's overlay later — after the head's order is gone —
+    // so the prompt names the fold it will actually build on.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    store.record_dispatch_description(bloom.0.as_bytes(), "wp-a", "repair the shared widget").unwrap();
+    store.record_dispatch_description(bloom.0.as_bytes(), "wp-b", "repair the shared widget").unwrap();
+    record_conflict(&mut store, bloom, "wp-a", &["crates/overlap.rs", "crates/nav.rs"]);
+    record_conflict(&mut store, bloom, "wp-b", &["crates/overlap.rs", "crates/fetch.rs"]);
+    let (first, _) = enqueue_dispatch_at(&mut store, bloom, "wp-a", 5, StageId::Reconcile);
+    let (_second, _) = enqueue_dispatch_at(&mut store, bloom, "wp-b", 6, StageId::Reconcile);
+    let (construct, _) = enqueue_dispatch_at(&mut store, bloom, "wp-other", 7, StageId::Construct);
+
+    let (handles, ack_through, transient) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+
+    assert!(transient.is_none(), "a hold is not a transient submit failure");
+    assert_eq!(handles.len(), 2, "the overlapping head and the disjoint construct dispatch");
+    assert_eq!(ack_through, Some(first), "the held sibling stops the ack prefix");
+    let orders = backend.orders();
+    assert_eq!(orders.len(), 2);
+    assert_eq!(orders[0].nonce.0, format!("dispatch-{first}"));
+    assert_eq!(orders[1].nonce.0, format!("dispatch-{construct}"));
+    assert!(
+        orders[0].transformation.description.as_deref().is_some_and(|task| task.contains("crates/overlap.rs")),
+        "the head assembles against the fold-conflict overlay it was queued with",
+    );
+
+    store.ack_topic(Topic::Dispatch, first).unwrap();
+    let (handles, ack_through, _) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+    assert!(handles.is_empty(), "the sibling stays held while the head's order is outstanding");
+    assert!(ack_through.is_none(), "nothing past the hold is acked");
+
+    store.consume_order(&format!("dispatch-{first}")).unwrap();
+    store
+        .record_fold_conflict(
+            bloom.0.as_bytes(),
+            "wp-b",
+            &(conflicting_overlay(&["crates/overlap.rs", "crates/fetch.rs"])
+                + "\n## Conflicted candidate\n\n```diff\n+folded onto the post-head checkpoint\n```\n"),
+        )
+        .unwrap();
+
+    let (handles, ack_through, _) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+    assert_eq!(handles.len(), 1, "the sibling dispatches once the head's resolution has folded");
+    assert_eq!(ack_through, Some(construct), "the prefix covers the held sibling and the already-submitted construct");
+    let orders = backend.orders();
+    assert_eq!(orders.len(), 3);
+    let description = orders[2].transformation.description.as_deref().unwrap();
+    assert!(description.contains("repair the shared widget"), "the original description is still the task");
+    assert!(
+        description.contains("folded onto the post-head checkpoint"),
+        "the overlay is the one composed after the head folded, not the stale predecessor: {description}",
+    );
+}
+
+#[test]
+fn disjoint_reconciles_dispatch_concurrently() {
+    // The plausible regression of the overlap hold: serializing every Reconcile
+    // in a bloom, even when the path sets do not touch. Disjoint members must
+    // keep today's parallel drain.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    record_conflict(&mut store, bloom, "wp-a", &["crates/alpha.rs"]);
+    record_conflict(&mut store, bloom, "wp-b", &["crates/beta.rs"]);
+    let (first, _) = enqueue_dispatch_at(&mut store, bloom, "wp-a", 5, StageId::Reconcile);
+    let (second, _) = enqueue_dispatch_at(&mut store, bloom, "wp-b", 6, StageId::Reconcile);
+
+    let (handles, ack_through, _) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+
+    assert_eq!(handles.len(), 2, "disjoint path sets dispatch together");
+    assert_eq!(ack_through, Some(second), "the ack prefix covers both");
+    store.ack_topic(Topic::Dispatch, second).unwrap();
+    assert!(store.drain_topic(Topic::Dispatch).unwrap().is_empty(), "neither disjoint reconcile was held");
+    let orders = backend.orders();
+    assert_eq!(orders[0].nonce.0, format!("dispatch-{first}"));
+    assert_eq!(orders[1].nonce.0, format!("dispatch-{second}"));
 }
 
 #[test]
@@ -1711,7 +1817,7 @@ fn the_real_pusher_refuses_gits_ref_delete_sentinels() {
     let target_ref = "refs/heads/aether-null-oid-tripwire-must-never-exist";
 
     for sentinel in ["0".repeat(40), "0".repeat(64), String::new()] {
-        let refusal = GitCandidatePush
+        let refusal = GitCandidatePush { repo: PathBuf::new(), remote: "origin".into() }
             .push(&sentinel, target_ref)
             .expect_err("the production pusher declines git's ref-delete sentinel");
 
@@ -1728,6 +1834,111 @@ fn the_real_pusher_refuses_gits_ref_delete_sentinels() {
     // in aether-bloomery-github). Asserting it here would mean letting the
     // shell-out run against `origin`, which is a network call this tier has no
     // business making.
+}
+
+fn run_git(dir: &Path, args: &[&str]) {
+    assert!(Command::new("git").current_dir(dir).args(args).status().unwrap().success(), "git {args:?} failed");
+}
+
+fn git_stdout(dir: &Path, args: &[&str]) -> String {
+    let output = Command::new("git").current_dir(dir).args(args).output().unwrap();
+    assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// Bare authority at a path that may contain spaces, plus one seed commit.
+fn local_authority(name: &str) -> (tempfile::TempDir, PathBuf, String) {
+    let root = tempfile::tempdir().unwrap();
+    let seed = root.path().join("seed");
+    fs::create_dir(&seed).unwrap();
+    run_git(&seed, &["init", "--quiet", "-b", "main"]);
+    run_git(&seed, &["config", "--local", "user.name", "test"]);
+    run_git(&seed, &["config", "--local", "user.email", "test@example.test"]);
+    run_git(&seed, &["commit", "--quiet", "--allow-empty", "--message", "root"]);
+    let head = git_stdout(&seed, &["rev-parse", "HEAD"]);
+    let authority = root.path().join(name);
+    assert!(
+        Command::new("git").args(["clone", "--bare", "--quiet"]).arg(&seed).arg(&authority).status().unwrap().success(),
+        "clone --bare into {authority:?}"
+    );
+    (root, authority, head)
+}
+
+fn mint_commit(repo: &Path, parent: &str, message: &str) -> String {
+    let tree = git_stdout(repo, &["rev-parse", &format!("{parent}^{{tree}}")]);
+    let output = Command::new("git")
+        .current_dir(repo)
+        .args(["commit-tree", &tree, "-p", parent, "-m", message])
+        .envs([
+            ("GIT_AUTHOR_NAME", "test"),
+            ("GIT_AUTHOR_EMAIL", "test@example.test"),
+            ("GIT_COMMITTER_NAME", "test"),
+            ("GIT_COMMITTER_EMAIL", "test@example.test"),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "commit-tree: {}", String::from_utf8_lossy(&output.stderr));
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+#[test]
+fn a_shared_object_database_publishes_by_updating_the_ref() {
+    // When the coordinator repository *is* the local authority, publication
+    // is a ref move. No remote, no object transfer, no network.
+    let (_root, authority, parent) = local_authority("authority.git");
+    let commit = mint_commit(&authority, &parent, "candidate");
+    let target_ref = "refs/heads/bloom/demo/candidate/wp";
+
+    GitCandidatePush { repo: authority.clone(), remote: authority.display().to_string() }
+        .push(&commit, target_ref)
+        .expect("shared-db publication updates the ref");
+
+    assert_eq!(
+        git_stdout(&authority, &["rev-parse", target_ref]),
+        commit,
+        "the authority now names the capture on the candidate ref",
+    );
+}
+
+#[test]
+fn a_clone_publishes_to_a_local_authority_path_with_spaces() {
+    // Tripwire (ADR-0199): a coordinator clone whose objects are not yet on
+    // the authority force-pushes over the filesystem path. A `file://`
+    // prefix is not required, and a space in the path is not a reason to
+    // invent one.
+    let (root, authority, parent) = local_authority("authority with spaces.git");
+    let clone = root.path().join("clone");
+    assert!(
+        Command::new("git").args(["clone", "--quiet"]).arg(&authority).arg(&clone).status().unwrap().success(),
+        "clone from {authority:?} without a file:// prefix"
+    );
+    run_git(&clone, &["remote", "remove", "origin"]);
+    let commit = mint_commit(&clone, &parent, "candidate");
+    assert!(
+        !Command::new("git").current_dir(&authority).args(["cat-file", "-e", &commit]).status().unwrap().success(),
+        "the capture must start absent from the authority, or the transfer is never exercised",
+    );
+    let target_ref = "refs/heads/bloom/demo/candidate/wp";
+
+    GitCandidatePush { repo: clone, remote: authority.display().to_string() }
+        .push(&commit, target_ref)
+        .expect("push to an absolute path with spaces, no file://");
+
+    assert_eq!(git_stdout(&authority, &["rev-parse", target_ref]), commit);
+    assert!(
+        Command::new("git").current_dir(&authority).args(["cat-file", "-e", &commit]).status().unwrap().success(),
+        "the capture object arrived at the authority",
+    );
+}
+
+#[test]
+fn candidate_push_at_keeps_the_refusing_arm() {
+    // Both boot-selected implementations stay coherent: a fixture/test boot
+    // still refuses even when it is handed a local-authority path.
+    let refusal = candidate_push_at(true, PathBuf::from("/tmp/authority.git"), "/tmp/authority.git")
+        .push("abc", "refs/heads/bloom/x/candidate/wp")
+        .expect_err("refuse wins over a live local path");
+    assert!(refusal.contains("refusing to push"), "{refusal}");
 }
 
 // Tripwire: a state built by `with_parts` — the fixture-shaped constructor
@@ -1920,6 +2131,9 @@ fn an_aggregate_verify_failure_can_produce_a_repair_candidate() {
             failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
             cost: None,
             calls: None,
+            session_reuse_arm: None,
+            session_reuse_saved_micro_usd: None,
+            peak_resident_bytes: None,
         },
     )
     .unwrap() else {
@@ -1954,6 +2168,9 @@ fn an_aggregate_verify_failure_can_produce_a_repair_candidate() {
             failed_verifiers: VerifyFailureSet::EMPTY,
             cost: None,
             calls: None,
+            session_reuse_arm: None,
+            session_reuse_saved_micro_usd: None,
+            peak_resident_bytes: None,
         },
     )
     .unwrap() else {
@@ -2011,6 +2228,9 @@ fn an_aggregate_verify_repair_candidate_reaches_landing_ref_creation() {
             failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
             cost: None,
             calls: None,
+            session_reuse_arm: None,
+            session_reuse_saved_micro_usd: None,
+            peak_resident_bytes: None,
         },
     )
     .unwrap() else {
@@ -2033,6 +2253,9 @@ fn an_aggregate_verify_repair_candidate_reaches_landing_ref_creation() {
             failed_verifiers: VerifyFailureSet::EMPTY,
             cost: None,
             calls: None,
+            session_reuse_arm: None,
+            session_reuse_saved_micro_usd: None,
+            peak_resident_bytes: None,
         },
     )
     .unwrap() else {
@@ -2056,13 +2279,15 @@ fn an_aggregate_verify_repair_candidate_reaches_landing_ref_creation() {
         "the published ref is the reserved composition candidate",
     );
 
-    let source = SourceShell::new(Arc::new(GitSource::new(
+    let landing = aether_bloomery_github::GithubLanding::new(GitSource::new(
         github.clone(),
         Arc::new(github.clone()),
         true,
         MainlineRef::default(),
-    )));
-    let LandOutcome::Proposed { .. } = source.land(&bloom, &base, &captured.checkout, None).unwrap() else {
+    ));
+    let aether_bloomery_github::ProposalOutcome::Proposed { .. } =
+        landing.land_proposal(&bloom, &base, &captured.checkout, None).unwrap()
+    else {
         panic!("landing creates its branch from the published repair head");
     };
     assert_eq!(
@@ -2099,6 +2324,9 @@ fn park_and_answer(
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     };
     assert!(matches!(admit_uploaded(store, &upload).unwrap(), AdmitDecision::Admitted(_)), "the parked upload admits");
 
@@ -2672,6 +2900,9 @@ fn a_dispatch_whose_fact_never_reached_the_journal_is_re_queued_at_boot() {
             failed_verifiers: VerifyFailureSet::EMPTY,
             cost: None,
             calls: None,
+            session_reuse_arm: None,
+            session_reuse_saved_micro_usd: None,
+            peak_resident_bytes: None,
         };
         // The admission is built and the order spent — and then the process
         // stops, so the `Admit` this returns never reaches the control core.
@@ -2866,6 +3097,9 @@ fn construct_attempt_ref(nonce: &Nonce, subject: u8) -> EvidenceRef {
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     }
 }
 

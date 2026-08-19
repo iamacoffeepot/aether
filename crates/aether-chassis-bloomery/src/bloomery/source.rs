@@ -1,11 +1,8 @@
 //! The git source-port cap shell ([#3465]).
 //!
-//! The host mounts the `aether-bloomery-github` [`GitSource`] backend behind a
-//! thin shell holding it as an `Arc<dyn LandingSource>`, exactly mirroring the
-//! [`ProjectionShell`](super::ProjectionShell) — no GitHub type crosses into a
-//! core module: the shell is the boundary, and only it and the adapter name a
-//! github-crate type (ADR-0149 §The boundary, the "no core module names a
-//! GitHub type" clause).
+//! The host mounts the repository-backed [`GitSource`] behind a thin shell
+//! holding it as an `Arc<dyn HostSource>`. GitHub landing helpers live on
+//! [`LandingSource`](aether_bloomery_github::LandingSource), not here.
 //!
 //! At the chassis edge, [`GithubConnectionConfig`] supplies the adapter values
 //! used to construct this shell. Consumers receive clones of the constructed
@@ -23,11 +20,11 @@ use std::sync::Arc;
 
 use aether_bloomery::{
     BackendObjectId, BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome,
-    CorrespondenceError, Digest, IntegrateOutcome, IntegrationPosition, LandOutcome, LandProposal,
-    SharedCorrespondence, Snapshot, SourceSnapshot, WorkpieceId,
+    CorrespondenceError, Digest, IntegrateOutcome, IntegrationPosition, LandOutcome, SharedCorrespondence, Snapshot,
+    SourceSnapshot, WorkpieceId,
 };
 use aether_bloomery_github::{
-    GitObjectId, GitSource, GithubError, LandAcceptance, LandingProposal, LandingSource, SourceError,
+    GitDataError, GitObjectId, GitSource, GithubError, HostSource, LocalGitData, SourceError,
 };
 
 use super::{CoordinatorConfig, GithubConnectionConfig};
@@ -38,13 +35,12 @@ use super::{CoordinatorConfig, GithubConnectionConfig};
 /// correspondence (ADR-0150); a fake-backed shell (`new`) seeds the double
 /// directly and carries none.
 ///
-/// The backend is held as the adapter's [`LandingSource`], which is an
-/// [`aether_bloomery::SourceBackend`] plus the landing-assembly face: the land reactor is what
-/// holds a shell and what assembles a proposal's prose, so widening the shell
-/// here is what keeps that prose out of the digest-only port contract.
+/// The backend is held as the repository [`HostSource`]: [`SourceBackend`](aether_bloomery::SourceBackend)
+/// plus prune. GitHub propose / poll / accept / close live on
+/// [`LandingSource`](aether_bloomery_github::LandingSource), not on this shell.
 #[derive(Clone)]
 pub struct SourceShell {
-    backend: Arc<dyn LandingSource + Send + Sync>,
+    backend: Arc<dyn HostSource + Send + Sync>,
     correspondence: Option<SharedCorrespondence>,
 }
 
@@ -54,14 +50,14 @@ impl SourceShell {
     /// handle (the fake-backed tests seed their double directly); use
     /// [`connect`](Self::connect) for a live shell that can [`seed_mainline`](Self::seed_mainline).
     #[must_use]
-    pub fn new(backend: Arc<dyn LandingSource + Send + Sync>) -> Self {
+    pub fn new(backend: Arc<dyn HostSource + Send + Sync>) -> Self {
         Self { backend, correspondence: None }
     }
 
     #[cfg(any(test, feature = "testing"))]
     #[must_use]
     pub fn new_with_correspondence(
-        backend: Arc<dyn LandingSource + Send + Sync>,
+        backend: Arc<dyn HostSource + Send + Sync>,
         correspondence: SharedCorrespondence,
     ) -> Self {
         Self { backend, correspondence: Some(correspondence) }
@@ -93,6 +89,23 @@ impl SourceShell {
             config.cas_land_enabled,
             coordinator.mainline(),
         ));
+        Ok(Self { backend, correspondence: Some(correspondence) })
+    }
+
+    /// Connect a fleet-local git-data source port over `repo` (ADR-0199).
+    ///
+    /// # Errors
+    /// The path is not an absolute git repository, or the installed git is
+    /// missing or older than 2.38.
+    pub fn connect_local(
+        repo: &str,
+        coordinator: &CoordinatorConfig,
+        correspondence: SharedCorrespondence,
+        cas_land_enabled: bool,
+    ) -> Result<Self, GitDataError> {
+        let client = LocalGitData::open(repo)?;
+        let backend =
+            Arc::new(GitSource::new(client, Arc::clone(&correspondence), cas_land_enabled, coordinator.mainline()));
         Ok(Self { backend, correspondence: Some(correspondence) })
     }
 
@@ -266,70 +279,15 @@ impl SourceShell {
         self.backend.adopt_candidate(predecessor, successor, workpiece)
     }
 
-    /// Propose landing `new_head` onto mainline, guarded by `expected_base`,
-    /// under the caller's assembled `proposal` prose. `None` opens the proposal
-    /// under the adapter's floor title and bare provenance body — what a caller
-    /// with no membership in view (the source cap's own surface) issues.
+    /// Land `new_head` onto mainline by compare-and-swap, guarded by
+    /// `expected_base`. A moved base is the clean [`LandOutcome::BaseMoved`];
+    /// a successful swap is [`LandOutcome::Landed`].
     ///
     /// # Errors
     /// [`SourceError::LandingDisabled`] while the land gate is off, or a
-    /// transport/backend fault (a moved base is the clean
-    /// [`LandOutcome::BaseMoved`], not an error).
-    pub fn land(
-        &self,
-        bloom: &BloomId,
-        expected_base: &Digest,
-        new_head: &Digest,
-        proposal: Option<&LandingProposal>,
-    ) -> Result<LandOutcome, SourceError> {
-        self.backend.land_proposal(bloom, expected_base, new_head, proposal)
-    }
-
-    /// The human-authored title of issue `number`, or `None` when the repository
-    /// holds no such object — the landing assembly's fallback for a member whose
-    /// lane named no commit message.
-    ///
-    /// # Errors
-    /// A transport or backend fault.
-    pub fn issue_title(&self, number: u64) -> Result<Option<String>, SourceError> {
-        self.backend.issue_title(number)
-    }
-
-    /// Close issue `number` after leaving `comment` on it — the land reactor's
-    /// human-facing close so GitHub agrees with a day-branch land.
-    ///
-    /// # Errors
-    /// The surface is unreachable, the issue is absent, or either write was refused.
-    pub fn close_issue(&self, number: u64, comment: &str) -> Result<(), SourceError> {
-        self.backend.close_issue(number, comment)
-    }
-
-    /// Read where a previously issued land proposal has got to.
-    ///
-    /// # Errors
-    /// A transport or backend fault.
-    pub fn poll_land(&self, bloom: &BloomId, expected_base: &Digest, number: u64) -> Result<LandProposal, SourceError> {
-        self.backend.poll_land(bloom, expected_base, number)
-    }
-
-    /// Merge the landing proposal this port opened for `bloom`, once the
-    /// structural gates hold and it still proposes the head the bloom proved
-    /// (issue #4953) — the button press the operator used to perform by hand,
-    /// under the same compare-and-swap the proposal was opened with. Check
-    /// state is not consulted (ADR-0186, #5110).
-    ///
-    /// # Errors
-    /// [`SourceError::LandingDisabled`] while the land gate is off, or a
-    /// transport/backend fault. A refusal is a clean
-    /// [`LandAcceptance::Refused`], not an error.
-    pub fn accept_land(
-        &self,
-        bloom: &BloomId,
-        expected_base: &Digest,
-        new_head: &Digest,
-        number: u64,
-    ) -> Result<LandAcceptance, SourceError> {
-        self.backend.accept_land(bloom, expected_base, new_head, number)
+    /// transport/backend fault.
+    pub fn land(&self, bloom: &BloomId, expected_base: &Digest, new_head: &Digest) -> Result<LandOutcome, SourceError> {
+        self.backend.land(bloom, expected_base, new_head)
     }
 
     /// Acquire `bloom`'s claim refs — one per member workpiece plus the
@@ -427,10 +385,7 @@ mod tests {
     use aether_bloomery_github::testing::FakeGithub;
     use aether_bloomery_github::{GitObjectId, GitSource, MainlineRef};
 
-    use super::{
-        Arc, BloomId, Digest, IntegrateOutcome, LandOutcome, LandProposal, LandingSource, Snapshot, SourceError,
-        SourceShell,
-    };
+    use super::{Arc, BloomId, Digest, IntegrateOutcome, LandOutcome, Snapshot, SourceError, SourceShell};
 
     #[test]
     fn seed_mainline_records_a_resolvable_base_correspondence() {
@@ -575,7 +530,7 @@ mod tests {
 
         let concrete =
             Arc::new(GitSource::new(fake.clone(), Arc::clone(&correspondence), true, MainlineRef::default()));
-        let backend: Arc<dyn LandingSource + Send + Sync> = concrete.clone();
+        let backend: Arc<dyn aether_bloomery_github::HostSource + Send + Sync> = concrete.clone();
         let bloom = BloomId(Digest::from_bytes([1; 32]));
         let shell = SourceShell { backend, correspondence: Some(Arc::clone(&correspondence)) };
 
@@ -609,28 +564,15 @@ mod tests {
             other => panic!("expected Integrated, got {other:?}"),
         };
 
-        // Propose landing the integrated head against the genesis base — the
-        // reverse-resolve of the real mainline object returns the genesis base,
-        // so the guard passes and a proposal is opened with no Malformed /
-        // UnresolvedCorrespondence fault.
-        let number = match shell.land(&bloom, &Snapshot::GENESIS_MAINLINE, &head, None).unwrap() {
-            LandOutcome::Proposed { number } => number,
+        // Compare-and-swap land the integrated head against the genesis base —
+        // the reverse-resolve of the real mainline object returns the genesis
+        // base, so the guard passes and mainline moves.
+        match shell.land(&bloom, &Snapshot::GENESIS_MAINLINE, &head).unwrap() {
+            LandOutcome::Landed { new_head } => assert_eq!(new_head, head),
             LandOutcome::BaseMoved { expected, actual } => {
-                panic!("expected Proposed, got BaseMoved {{ expected: {expected:?}, actual: {actual:?} }}")
+                panic!("expected Landed, got BaseMoved {{ expected: {expected:?}, actual: {actual:?} }}")
             }
-        };
-        assert_eq!(shell.poll_land(&bloom, &Snapshot::GENESIS_MAINLINE, number).unwrap(), LandProposal::Open);
-
-        // The operator merges it, and the receipt attests the commit mainline
-        // actually became — closing the whole genesis-to-receipt path the
-        // reactor drives.
-        fake.merge_pull_request(number, &"5c".repeat(20));
-        let landed = shell.poll_land(&bloom, &Snapshot::GENESIS_MAINLINE, number).unwrap();
-        let LandProposal::Landed(receipt) = landed else {
-            panic!("expected Landed, got {landed:?}")
-        };
-        assert_eq!(receipt.previous_base, Snapshot::GENESIS_MAINLINE);
-        assert_ne!(receipt.new_head, head, "the landed head is the merge commit, not the proposed head");
+        }
     }
 
     #[test]

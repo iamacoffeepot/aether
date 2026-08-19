@@ -26,29 +26,32 @@
 //!   aggregate that `GET /view` does not serve live; afterwards its landing
 //!   pull request *is* the aggregate (ADR-0149 §What each object is).
 //!
-//! # The write surface is comments only
+//! # The write surface
 //!
-//! A projection creates and updates only comments carrying its own marker, on
-//! objects it did not create. It writes no title and no body, and it never
-//! opens, closes, reopens, locks, labels, assigns, or merges. That bound holds
-//! by **absence**: [`GithubApi`] carries no verb that could address a
-//! human-authored title or body, so no method reachable from here can.
+//! Comments stay comments-only: [`GithubApi`] still carries no verb that
+//! could address a human-authored title or body. Replica issues a commission
+//! has no GitHub home for are a second class of object (ADR-0149 2026-08-16
+//! amendment, derived from ADR-0199). Those create / find / update / close
+//! verbs live on [`CommissionProjectionApi`], and a title or body write
+//! addresses only a number recorded from this projector's own create (or
+//! found by its own marker after a crash between create and persist).
 //!
 //! The projector reads only its own markers; free-form platform content is
-//! never interpreted as intent.
+//! never interpreted as intent. GitHub edits of a replica are overwritten
+//! on the next projection.
 //!
 //! [#4663]: https://github.com/iamacoffeepot/aether/issues/4663
 
 use std::fmt::Write as _;
 
 use aether_bloomery::{
-    BloomId, Digest, LandingReceipt, MemberView, PendingDecisionView, ProjectedReceipt, ProjectionBackend,
-    ViewDocument, WorkpieceId,
+    BloomId, CommissionProjection, Digest, LandingReceipt, MemberView, PendingDecisionView, ProjectedReceipt,
+    ProjectionBackend, ViewDocument, WorkpieceId,
 };
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
-use crate::client::{GithubApi, GithubError, NewComment, PullRequestApi};
+use crate::client::{CommissionProjectionApi, GithubApi, GithubError, NewComment, NewIssue, PullRequestApi};
 use crate::marker::{Marker, render_marker};
 use crate::short_hex;
 use crate::source::landing_branch;
@@ -121,7 +124,57 @@ impl<C: GithubApi> GithubProjection<C> {
     }
 }
 
-impl<C: GithubApi + PullRequestApi> ProjectionBackend for GithubProjection<C> {
+impl<C: GithubApi + CommissionProjectionApi> GithubProjection<C> {
+    /// Reconcile one commission onto a Bloomery-owned issue (ADR-0149
+    /// 2026-08-16 amendment). Returns the issue number this projector now
+    /// owns.
+    ///
+    /// Title and body are written only to `projection.recorded_issue` or to
+    /// a number [`CommissionProjectionApi::find_issue`] returns for this
+    /// commission's marker. A workpiece that looks like `issue-<N>` is not
+    /// an address — adopting that number would write a human-authored object.
+    pub fn project_owned_commission(&self, projection: &CommissionProjection) -> Result<u64, GithubError> {
+        let key = commission_key(&projection.workpiece.0);
+        let digest = content_digest("bloomery.commission", projection);
+        let title = render_commission_title(projection);
+        let body = format!(
+            "{}\n\n{}",
+            render_commission_body(projection),
+            render_marker(&Marker { key: key.clone(), digest })
+        );
+
+        let owned = match projection.recorded_issue {
+            Some(number) => Some(number),
+            None => self.client.find_issue(&key)?.map(|issue| issue.number),
+        };
+
+        if let Some(number) = owned {
+            if let Some(existing) = self.client.find_issue(&key)?
+                && existing.number == number
+                && existing.marker.as_ref().map(|marker| marker.digest) == Some(digest)
+            {
+                self.close_if_terminal(number, &projection.status)?;
+                return Ok(number);
+            }
+            self.client.update_issue(number, &title, &body)?;
+            self.close_if_terminal(number, &projection.status)?;
+            Ok(number)
+        } else {
+            let created = self.client.create_issue(&NewIssue { title, body })?;
+            self.close_if_terminal(created.number, &projection.status)?;
+            Ok(created.number)
+        }
+    }
+
+    fn close_if_terminal(&self, number: u64, status: &str) -> Result<(), GithubError> {
+        if status == "landed" || status == "cancelled" {
+            CommissionProjectionApi::close_issue(&self.client, number)?;
+        }
+        Ok(())
+    }
+}
+
+impl<C: GithubApi + PullRequestApi + CommissionProjectionApi> ProjectionBackend for GithubProjection<C> {
     type Error = GithubError;
 
     fn reconcile_view(&self, view: &ViewDocument) -> Result<(), Self::Error> {
@@ -165,6 +218,10 @@ impl<C: GithubApi + PullRequestApi> ProjectionBackend for GithubProjection<C> {
             self.comment_on(landing.number, &key, digest, &body)?;
         }
         Ok(())
+    }
+
+    fn project_commission(&self, projection: &CommissionProjection) -> Result<u64, Self::Error> {
+        self.project_owned_commission(projection)
     }
 }
 
@@ -215,6 +272,44 @@ pub fn canonical_issue_number(id: &str) -> Option<u64> {
 /// (403). Permanent for that target, so it is recorded and skipped.
 fn refuses_comment(error: &GithubError) -> bool {
     matches!(error, GithubError::Status { status: 403 | 404 | 410, .. })
+}
+
+fn commission_key(workpiece: &str) -> String {
+    format!("commission:{workpiece}")
+}
+
+fn render_commission_title(projection: &CommissionProjection) -> String {
+    format!("{} — {}", projection.workpiece.0, projection.status)
+}
+
+fn render_commission_body(projection: &CommissionProjection) -> String {
+    let mut body = String::from(
+        "**Bloomery replica** — do not edit this issue. It is an outbound projection of a local \
+         commission (ADR-0199). Edits here are overwritten and are never read as input.\n",
+    );
+    let _ = writeln!(body, "\n- Workpiece: `{}`", projection.workpiece.0);
+    let _ = writeln!(body, "- Intent: `{}`", short_hex(&projection.intent));
+    match projection.scope_revision {
+        Some(digest) => {
+            let _ = writeln!(body, "- Scope revision: `{}`", short_hex(&digest));
+        }
+        None => {
+            let _ = writeln!(body, "- Scope revision: _none_");
+        }
+    }
+    match (&projection.approval_signer, projection.approval_digest) {
+        (Some(signer), Some(digest)) => {
+            let _ = writeln!(body, "- Approval: signer `{signer}` digest `{}`.", short_hex(&digest));
+        }
+        (_, Some(digest)) => {
+            let _ = writeln!(body, "- Approval: digest `{}`.", short_hex(&digest));
+        }
+        _ => {
+            let _ = writeln!(body, "- Approval: _none_");
+        }
+    }
+    let _ = writeln!(body, "- State: {}", projection.status);
+    body
 }
 
 fn member_key(bloom: BloomId, workpiece: &str) -> String {

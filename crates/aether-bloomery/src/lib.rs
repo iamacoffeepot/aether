@@ -39,6 +39,9 @@
 //!   a versioned policy artifact rejects the attempt before dispatch.
 //! - [`mod@reduce`] — the pure control core: [`reduce`](reduce::reduce) owns
 //!   every state transition, with no I/O, no engine boot, no GitHub types.
+//! - [`metrics`] — the metrics ledger: [`MetricsLedger`] folds the
+//!   journal into dispatch / bloom / day rollups and seat rows. Cost stays a
+//!   study-artifact digest; `cost == 0` is unpriced, never free.
 //! - [`calibration`] — the capability ledger: [`CalibrationLedger`] folds the
 //!   journal into per-`(harness, model, effort) × stage` counts — attempts,
 //!   rolls, typed verifier failures, and study-measured cost — so which agent to
@@ -69,6 +72,7 @@ pub mod digest;
 pub mod ids;
 pub mod inward;
 pub mod manifest;
+pub mod metrics;
 pub mod port;
 pub mod reduce;
 pub mod sign;
@@ -83,8 +87,9 @@ pub use control::{
     Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, CONTROL_CORE_NAMESPACE, ClaimResult, ClaimSeal,
     Commit, CommitResult, CompleteRelease, CompleteReleaseResult, CompleteTransfer, ConfigRecord, DispatchPayload,
     EnumerateClaims, EnumerateClaimsResult, IntegratePayload, JournalRecord, LandPayload, LoadConfigs,
-    LoadConfigsResult, MembershipMutation, ObserveMainline, ObserveMainlineResult, OrphanClaimReleasePayload,
-    OutboxPayload, Query, QueryResult, RedispatchPayload, ReleaseSeal, ReplayJournal, ReplayJournalResult, ReviewPass,
+    LoadConfigsResult, MembershipMutation, MetricsQuery, MetricsQueryResult, MetricsView, ObserveMainline,
+    ObserveMainlineResult, OrphanClaimReleasePayload, OutboxPayload, Query, QueryResult, RedispatchPayload,
+    ReleaseSeal, ReplayJournal, ReplayJournalResult, ReviewPass, SourceReplicaPayload, SpendQuery, SpendQueryResult,
     SplicePayload, Topic, TransferSeal,
 };
 pub use correspondence::{BackendObjectId, Correspondence, CorrespondenceError, SharedCorrespondence};
@@ -94,11 +99,15 @@ pub use inward::{InwardError, StageResult, StageVerdict, StudyResult, normalize_
 pub use manifest::{
     ClosureViolation, MANIFEST_CLOSURE_BUDGET, PromptManifest, ProvenanceIndex, Slot, SlotRole, assemble_manifest,
 };
+pub use metrics::{
+    DAYS_CAP, METRICS_DEFAULT_LIMIT, METRICS_MAX_LIMIT, MetricBloom, MetricDay, MetricDispatch, MetricsLedger,
+    MetricsSeat, MetricsSummary, MetricsTimeline, RECONSTRUCTED_WINDOW, TIMELINE_SPAN_CAP, TimelineSpan, window_label,
+};
 pub use port::{
     BloomView, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome,
-    CompositionCursorView, CompositionView, Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend,
-    ExecutorFaultView, HostFaultView, IntegrateOutcome, IntegrationPosition, LandOutcome, LandProposal, LandingBlock,
-    MemberView, PendingDecisionView, ProjectedReceipt, ProjectionBackend, ReviewParkView, SourceBackend,
+    CommissionProjection, CompositionCursorView, CompositionView, Conclusion, EvidenceRef, ExecutionStatus,
+    ExecutorBackend, ExecutorFaultView, HostFaultView, IntegrateOutcome, IntegrationPosition, LandOutcome,
+    LandingBlock, MemberView, PendingDecisionView, ProjectedReceipt, ProjectionBackend, ReviewParkView, SourceBackend,
     SourceSnapshot, ViewDocument, WedgeCause, WorkHandle, WorkOrder,
 };
 pub use reduce::{
@@ -116,18 +125,20 @@ pub use sign::{AuthorityDoor, FakeKeyProvider, KeyProvider, SignatureEnvelope, a
 pub use spend::measure;
 pub use study_report::{BloomGrade, StudyReport, grade};
 pub use values::{
-    Adjudication, AgentProfile, AgentSelection, ApprovalPolicy, ApprovalRule, Artifact, Attempt, BloomDraft, BloomSpec,
-    CHECK_KEY, CONSTRUCT_IMPLEMENT_COMMAND, CRITICAL_KEY, CandidateRef, CatalogError, ClassifiedFinding,
-    ClassifiedFindings, CompositionFinding, ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes,
-    DependencyError, DispatchKey, Disposition, Evidence, EvidenceKind, ExecutionLimits, FindingClass, Forecast,
-    Harness, JUDGMENT_TAG, LANE_WORKPIECE_HEADER, LandingReceipt, LongContextBand, MECHANICAL_TAG, MemberCandidate,
-    MemberDependency, MemberSubject, Membership, ModelOverride, NetworkProfile, ORPHAN_CLAIM_RELEASE_WORDS,
-    Observation, OperatorHold, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion,
-    OrphanClaimReleaseRecord, OverrideError, PriceRates, PriceTable, Provenance, Question, REVIEW_CRITIC_COMMAND,
-    ReasoningEffort, ResolutionClaim, ResolvedBloom, ResolvedConfigs, ResolvedModel, SealedPriceTable, SpendCeiling,
-    SpendQuiesce, SpendWindow, StageBinding, StageCatalog, StageOverride, StageReceipt, Statement, StudyCall,
-    StudyCost, StudyRecord, SurfacePattern, Tier, TimeoutRecord, ToolPolicy, Transformation, Unproducible,
-    VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK, VerifiedTree, VerifyFailure, VerifyFailureSet,
-    VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Workpiece, classify_findings, config_address, decode_config,
-    is_model_lane, pin_workpiece_description, resolve_member_dependencies, split_lane_identity, surface_intersection,
+    ADR_SCHEMA, ADR_TRANSITION_SCHEMA, Adjudication, Adr, AdrStatus, AdrTransition, AdrValueError, AgentProfile,
+    AgentSelection, ApprovalPolicy, ApprovalRule, Artifact, Attempt, BloomDraft, BloomSpec, CHECK_KEY,
+    CONSTRUCT_IMPLEMENT_COMMAND, CRITICAL_KEY, CandidateRef, CatalogError, ClassifiedFinding, ClassifiedFindings,
+    CommissionApprovalTier, CommissionStatementRole, CommissionStatus, CommissionValueError, CompositionFinding,
+    ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, DependencyError, DispatchKey, Disposition, Evidence,
+    EvidenceKind, ExecutionLimits, FindingClass, Forecast, Harness, JUDGMENT_TAG, LANE_WORKPIECE_HEADER,
+    LandingReceipt, LongContextBand, MECHANICAL_TAG, MemberCandidate, MemberDependency, MemberSubject, Membership,
+    ModelOverride, NetworkProfile, ORPHAN_CLAIM_RELEASE_WORDS, Observation, OperatorHold, OperatorRepair,
+    OrphanClaimRelease, OrphanClaimReleaseCompletion, OrphanClaimReleaseRecord, OverrideError, PriceRates, PriceTable,
+    Provenance, Question, REVIEW_CRITIC_COMMAND, ReasoningEffort, ResolutionClaim, ResolvedBloom, ResolvedConfigs,
+    ResolvedModel, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, SealedPriceTable, SpendCeiling, SpendQuiesce,
+    SpendWindow, StageBinding, StageCatalog, StageOverride, StageReceipt, Statement, StudyCall, StudyCost, StudyRecord,
+    SurfacePattern, Tier, TimeoutRecord, ToolPolicy, Transformation, Unproducible, VERIFY_CHECK_COMMAND,
+    VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK, VerifiedTree, VerifyFailure, VerifyFailureSet, VerifyGateSet, VerifyProof,
+    VerifyReuse, Wedge, Workpiece, classify_findings, config_address, decode_config, is_model_lane,
+    pin_workpiece_description, resolve_member_dependencies, split_lane_identity, surface_intersection,
 };

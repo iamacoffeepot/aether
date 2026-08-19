@@ -30,10 +30,11 @@ mod source;
 
 pub use executor::{Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend, WorkHandle, WorkOrder};
 pub use projection::{
-    BloomView, CompositionCursorView, CompositionView, ExecutorFaultView, HostFaultView, LandingBlock, MemberView,
-    PendingDecisionView, ProjectedReceipt, ProjectionBackend, ReviewParkView, ViewDocument, WedgeCause,
+    BloomView, CommissionProjection, CompositionCursorView, CompositionView, ExecutorFaultView, HostFaultView,
+    LandingBlock, MemberView, PendingDecisionView, ProjectedReceipt, ProjectionBackend, ReviewParkView, ViewDocument,
+    WedgeCause,
 };
 pub use source::{
     Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome, IntegrateOutcome,
-    IntegrationPosition, LandOutcome, LandProposal, SourceBackend, SourceSnapshot,
+    IntegrationPosition, LandOutcome, SourceBackend, SourceSnapshot,
 };

@@ -40,7 +40,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use aether_actor::{MailSender, runtime};
-use aether_bloomery::{ProjectedReceipt, Topic, ViewDocument};
+use aether_bloomery::{CommissionProjection, ProjectedReceipt, Topic, ViewDocument};
+use aether_bloomery_github::ReplicaError;
 use aether_data::wire::from_bytes;
 use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
@@ -51,8 +52,11 @@ use serde::{Deserialize, Serialize};
 
 use super::MirrorReactorCapability;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
-use crate::bloomery::{MirrorReactorSetup, ProjectionShell, SourceShell};
-use crate::store::{AckOutbox, AckOutboxResult, DrainOutbox, DrainOutboxResult, OutboxEntry, StoreCapability};
+use crate::bloomery::{MirrorReactorSetup, ProjectionShell, SourceReplicaShell, SourceShell};
+use crate::store::{
+    AckOutbox, AckOutboxResult, DrainOutbox, DrainOutboxResult, OutboxEntry, RecordCommissionProjection,
+    RecordCommissionProjectionResult, StoreCapability,
+};
 
 /// The self-addressed wake the poll timer fires each interval; its handler
 /// drains the store outbox. Zero-field — the timer carries only the schedule.
@@ -69,6 +73,7 @@ pub struct MirrorReactorState {
     // Mounted for recovery-drill completeness; dormant until the step-2
     // executor bridge produces source-driven topics.
     _source: Option<SourceShell>,
+    replica: Option<SourceReplicaShell>,
     mailer: Arc<Mailer>,
     self_mailbox: MailboxId,
     // The poll timer sidecar; `None` when disabled. Held for its `Drop`, which
@@ -111,9 +116,23 @@ impl MirrorReactorState {
         mailer: Arc<Mailer>,
         self_mailbox: MailboxId,
     ) -> Self {
+        Self::with_replica(projection, source, None, mailer, self_mailbox)
+    }
+
+    /// Same as [`with_shells`](Self::with_shells) plus an optional source-replica
+    /// backend.
+    #[must_use]
+    pub fn with_replica(
+        projection: Option<ProjectionShell>,
+        source: Option<SourceShell>,
+        replica: Option<SourceReplicaShell>,
+        mailer: Arc<Mailer>,
+        self_mailbox: MailboxId,
+    ) -> Self {
         Self {
             projection,
             _source: source,
+            replica,
             mailer,
             self_mailbox,
             _timer: None,
@@ -177,6 +196,88 @@ fn project_batch(projection: &ProjectionShell, entries: &[OutboxEntry]) -> Vec<A
     delivered.into_iter().map(|(topic, through_sequence)| AckOutbox { topic: Some(topic), through_sequence }).collect()
 }
 
+/// Project commission replicas and persist newly created issue numbers.
+/// A stall stops this topic's ack prefix and leaves later entries queued,
+/// independently of receipts and source mirroring.
+fn project_commission_batch(
+    projection: &ProjectionShell,
+    entries: &[OutboxEntry],
+) -> (Vec<AckOutbox>, Vec<RecordCommissionProjection>) {
+    let mut through = None;
+    let mut persists = Vec::new();
+    for entry in entries {
+        match deliver_commission(projection, entry) {
+            Ok(persist) => {
+                through = Some(entry.sequence);
+                if let Some(persist) = persist {
+                    persists.push(persist);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::mirror",
+                    topic = %entry.topic,
+                    sequence = entry.sequence,
+                    %error,
+                    "commission projection not delivered; leaving it undelivered to re-drive",
+                );
+                break;
+            }
+        }
+    }
+    let acks = through
+        .map(|through_sequence| AckOutbox { topic: Some(Topic::Commission.as_str().to_owned()), through_sequence })
+        .into_iter()
+        .collect();
+    (acks, persists)
+}
+
+fn deliver_commission(
+    projection: &ProjectionShell,
+    entry: &OutboxEntry,
+) -> Result<Option<RecordCommissionProjection>, String> {
+    let document: CommissionProjection = from_bytes(&entry.payload).map_err(|error| error.to_string())?;
+    let number = projection.project_commission(&document).map_err(|error| error.to_string())?;
+    if document.recorded_issue == Some(number) {
+        return Ok(None);
+    }
+    Ok(Some(RecordCommissionProjection { id: document.workpiece.0, issue_number: number }))
+}
+
+/// Coalesce superseded replica requests to the latest sequence and push once.
+/// A transient failure leaves the whole prefix queued; a rejected force
+/// raises an operator-visible alert and still leaves the entry queued so an
+/// operator fix can redrive.
+fn publish_replica_batch(replica: &SourceReplicaShell, entries: &[OutboxEntry]) -> Vec<AckOutbox> {
+    let Some(latest) = entries.iter().rev().find(|entry| entry.topic == Topic::SourceReplica) else {
+        return Vec::new();
+    };
+    match replica.publish() {
+        Ok(()) => {
+            vec![AckOutbox { topic: Some(Topic::SourceReplica.as_str().to_owned()), through_sequence: latest.sequence }]
+        }
+        Err(ReplicaError::ForceRejected(detail)) => {
+            tracing::error!(
+                target: "aether_chassis_bloomery::mirror::alert",
+                sequence = latest.sequence,
+                error = %detail,
+                "source replica force-push was rejected; GitHub was not updated",
+            );
+            Vec::new()
+        }
+        Err(ReplicaError::Transient(detail)) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::mirror",
+                topic = %latest.topic,
+                sequence = latest.sequence,
+                error = %detail,
+                "source replica push failed; leaving it undelivered to re-drive",
+            );
+            Vec::new()
+        }
+    }
+}
+
 #[runtime]
 impl NativeActor for MirrorReactorCapability {
     type State = MirrorReactorState;
@@ -193,7 +294,7 @@ impl NativeActor for MirrorReactorCapability {
         // and republishes once a token/owner/repo is supplied, unless the
         // `fake` backend is selected (#4732) which mounts with an in-memory
         // double and needs no token.
-        let Some(projection) = config.projection else {
+        if config.projection.is_none() && config.replica.is_none() {
             tracing::info!(
                 target: "aether_chassis_bloomery::mirror",
                 "mirror reactor mounted disabled (unconfigured token/owner/repo); outbox will accumulate",
@@ -201,15 +302,15 @@ impl NativeActor for MirrorReactorCapability {
             return Ok(MirrorReactorState {
                 projection: None,
                 _source: None,
+                replica: None,
                 mailer,
                 self_mailbox,
                 _timer: None,
                 awaited_drains: 0,
                 outstanding: Arc::default(),
             });
-        };
+        }
 
-        let source = config.source.expect("enabled mirror setup carries its source shell");
         let interval = Duration::from_secs(config.poll_interval_secs.max(1));
         let timer = spawn_timer(
             Arc::clone(&mailer),
@@ -223,11 +324,13 @@ impl NativeActor for MirrorReactorCapability {
             target: "aether_chassis_bloomery::mirror",
             repository = ?config.repository,
             poll_interval_secs = config.poll_interval_secs,
-            "mirror reactor mounted; polling the store outbox for projection topics",
+            source_replica = config.replica.is_some(),
+            "mirror reactor mounted; polling the store outbox for projection and source-replica topics",
         );
         Ok(MirrorReactorState {
-            projection: Some(projection),
-            _source: Some(source),
+            projection: config.projection,
+            _source: config.source,
+            replica: config.replica,
             mailer,
             self_mailbox,
             _timer: Some(timer),
@@ -240,7 +343,7 @@ impl NativeActor for MirrorReactorCapability {
     /// everything left undelivered by a prior crash, so recovery does not wait a
     /// full poll interval. Disabled reactors push nothing.
     fn wire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
-        if state.projection.is_some() {
+        if state.projection.is_some() || state.replica.is_some() {
             state.mailer.push(Mail::new(
                 state.self_mailbox,
                 DrainTick::ID,
@@ -255,7 +358,7 @@ impl NativeActor for MirrorReactorCapability {
     /// [`Self::on_drain_result`].
     #[handler::single]
     fn on_drain_tick(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: DrainTick) {
-        if state.projection.is_none() {
+        if state.projection.is_none() && state.replica.is_none() {
             return;
         }
         // One cycle at a time. The drain is non-destructive — an entry stays
@@ -267,7 +370,15 @@ impl NativeActor for MirrorReactorCapability {
         if state.cycle_in_flight() {
             return;
         }
-        let drains = [DrainOutbox::scoped(Topic::ViewDocument), DrainOutbox::scoped(Topic::LandingReceipt)];
+        let mut drains = Vec::new();
+        if state.projection.is_some() {
+            drains.push(DrainOutbox::scoped(Topic::ViewDocument));
+            drains.push(DrainOutbox::scoped(Topic::LandingReceipt));
+            drains.push(DrainOutbox::scoped(Topic::Commission));
+        }
+        if state.replica.is_some() {
+            drains.push(DrainOutbox::scoped(Topic::SourceReplica));
+        }
         state.awaited_drains = drains.len();
         for drain in drains {
             ctx.send::<StoreCapability, DrainOutbox>(&drain);
@@ -286,9 +397,11 @@ impl NativeActor for MirrorReactorCapability {
         // that drains empty would leave the cycle owed a reply forever.
         state.awaited_drains = state.awaited_drains.saturating_sub(1);
 
-        let Some(projection) = state.projection.clone() else {
+        let projection = state.projection.clone();
+        let replica = state.replica.clone();
+        if projection.is_none() && replica.is_none() {
             return;
-        };
+        }
         let entries = match mail {
             DrainOutboxResult::Ok { entries } if !entries.is_empty() => entries,
             DrainOutboxResult::Ok { .. } => return,
@@ -301,7 +414,23 @@ impl NativeActor for MirrorReactorCapability {
         let slot = WorkerSlot::claim(&state.outstanding);
         ctx.spawn_detached::<MirrorReactorCapability, _>(move |mut root| {
             let _slot = slot; // released here, so the next tick can drain again.
-            for ack in project_batch(&projection, &entries) {
+            let (acks, persists) = if entries.first().is_some_and(|entry| entry.topic == Topic::SourceReplica) {
+                (replica.as_ref().map_or_else(Vec::new, |replica| publish_replica_batch(replica, &entries)), Vec::new())
+            } else if entries.first().is_some_and(|entry| entry.topic == Topic::Commission) {
+                projection.as_ref().map_or_else(
+                    || (Vec::new(), Vec::new()),
+                    |projection| project_commission_batch(projection, &entries),
+                )
+            } else {
+                (
+                    projection.as_ref().map_or_else(Vec::new, |projection| project_batch(projection, &entries)),
+                    Vec::new(),
+                )
+            };
+            for persist in persists {
+                root.send::<StoreCapability, RecordCommissionProjection>(&persist);
+            }
+            for ack in acks {
                 root.send::<StoreCapability, AckOutbox>(&ack);
             }
         });
@@ -315,6 +444,33 @@ impl NativeActor for MirrorReactorCapability {
             tracing::warn!(target: "aether_chassis_bloomery::mirror", %error, "outbox ack failed; entries will re-drive");
         }
     }
+
+    /// Persist of a newly created replica-issue number. A failure leaves the
+    /// next enqueue without a recorded number; find-by-marker recovers.
+    #[handler::single]
+    fn on_record_commission_projection_result(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: RecordCommissionProjectionResult,
+    ) {
+        match mail {
+            RecordCommissionProjectionResult::Ok { .. } => {}
+            RecordCommissionProjectionResult::Missing { id } => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::mirror",
+                    commission = %id,
+                    "commission replica-issue number was not recorded; the next projection finds by marker"
+                );
+            }
+            RecordCommissionProjectionResult::Err { error } => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::mirror",
+                    %error,
+                    "commission replica-issue number was not recorded; the next projection finds by marker"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -326,15 +482,17 @@ mod tests {
     //! the timer / `spawn_detached` are the thin glue the chassis-boot test and
     //! compilation cover; this pins the behavior that actually mirrors and acks.
 
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::Receiver;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use aether_bloomery::{
         BloomDraft, BloomId, ConfigRegistry, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey,
-        LandingReceipt, Membership, ProjectedReceipt, ResolvedConfigs, Snapshot, Topic, WorkpieceId, reduce, view_of,
+        LandingReceipt, Membership, ProjectedReceipt, ResolvedConfigs, Snapshot, SourceReplicaPayload, Topic,
+        WorkpieceId, reduce, view_of,
     };
-    use aether_bloomery_github::{GithubProjection, testing::FakeGithub};
+    use aether_bloomery_github::{GithubProjection, ReplicaError, SourceReplica, testing::FakeGithub};
     use aether_data::wire::{from_bytes, to_vec};
     use aether_data::{MailId, MailboxId, Source};
     use aether_substrate::actor::native::binding::NativeBinding;
@@ -345,7 +503,8 @@ mod tests {
 
     use super::{
         AckOutbox, DrainOutbox, DrainOutboxResult, DrainTick, Kind, MirrorReactorCapability, MirrorReactorState,
-        OutboxEntry, ProjectionShell, project_batch,
+        OutboxEntry, ProjectionShell, SourceReplicaShell, project_batch, project_commission_batch,
+        publish_replica_batch,
     };
     use crate::bloomery::outbox::TopicOutbox;
     use crate::store::{SqliteStore, StoreBackend};
@@ -522,10 +681,13 @@ mod tests {
         }
         binding.flush_outbound();
         let mut drained_topics: Vec<Option<String>> =
-            collect_sends::<DrainOutbox>(&rx, 2).into_iter().map(|d| d.topic).collect();
+            collect_sends::<DrainOutbox>(&rx, 3).into_iter().map(|d| d.topic).collect();
         drained_topics.sort();
-        let mut expected =
-            vec![DrainOutbox::scoped(Topic::LandingReceipt).topic, DrainOutbox::scoped(Topic::ViewDocument).topic];
+        let mut expected = vec![
+            DrainOutbox::scoped(Topic::LandingReceipt).topic,
+            DrainOutbox::scoped(Topic::ViewDocument).topic,
+            DrainOutbox::scoped(Topic::Commission).topic,
+        ];
         expected.sort();
         assert_eq!(drained_topics, expected, "each owned projection topic is drained, scoped by topic");
 
@@ -591,26 +753,208 @@ mod tests {
 
         // The opening tick drains both owned topics.
         tick(&mut state);
-        assert_eq!(collect_sends::<DrainOutbox>(&rx, 2).len(), 2, "the opening tick drains both projection topics");
+        assert_eq!(collect_sends::<DrainOutbox>(&rx, 3).len(), 3, "the opening tick drains every projection topic");
 
         // A tick arriving while those drains are still owed replies must send
         // nothing — this is the window that re-drove the undelivered receipt.
         tick(&mut state);
-        assert_silent("a tick with both drains still owed replies");
+        assert_silent("a tick with every drain still owed replies");
+
+        settle_one_drain(&mut state);
+        tick(&mut state);
+        assert_silent("a tick with drains still owed a reply");
 
         settle_one_drain(&mut state);
         tick(&mut state);
         assert_silent("a tick with one drain still owed a reply");
 
-        // Both drains have now settled, so the cycle is complete and released.
+        // Every drain has now settled, so the cycle is complete and released.
         settle_one_drain(&mut state);
         tick(&mut state);
         let mut topics: Vec<Option<String>> =
-            collect_sends::<DrainOutbox>(&rx, 2).into_iter().map(|d| d.topic).collect();
+            collect_sends::<DrainOutbox>(&rx, 3).into_iter().map(|d| d.topic).collect();
         topics.sort();
-        let mut expected =
-            vec![DrainOutbox::scoped(Topic::LandingReceipt).topic, DrainOutbox::scoped(Topic::ViewDocument).topic];
+        let mut expected = vec![
+            DrainOutbox::scoped(Topic::LandingReceipt).topic,
+            DrainOutbox::scoped(Topic::ViewDocument).topic,
+            DrainOutbox::scoped(Topic::Commission).topic,
+        ];
         expected.sort();
-        assert_eq!(topics, expected, "a completed cycle releases, so the next tick drains both topics afresh");
+        assert_eq!(topics, expected, "a completed cycle releases, so the next tick drains every topic afresh");
+    }
+
+    struct FakeReplica {
+        fail: bool,
+        reject_force: bool,
+        publishes: AtomicUsize,
+        alerts: Mutex<Vec<String>>,
+    }
+
+    impl FakeReplica {
+        fn ok() -> Arc<Self> {
+            Arc::new(Self {
+                fail: false,
+                reject_force: false,
+                publishes: AtomicUsize::new(0),
+                alerts: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn failing() -> Arc<Self> {
+            Arc::new(Self {
+                fail: true,
+                reject_force: false,
+                publishes: AtomicUsize::new(0),
+                alerts: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn rejecting() -> Arc<Self> {
+            Arc::new(Self {
+                fail: false,
+                reject_force: true,
+                publishes: AtomicUsize::new(0),
+                alerts: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn count(&self) -> usize {
+            self.publishes.load(Ordering::SeqCst)
+        }
+    }
+
+    impl SourceReplica for FakeReplica {
+        fn publish(&self) -> Result<(), ReplicaError> {
+            self.publishes.fetch_add(1, Ordering::SeqCst);
+            if self.reject_force {
+                let detail = "protected branch hook declined".to_owned();
+                self.alerts.lock().unwrap().push(detail.clone());
+                return Err(ReplicaError::ForceRejected(detail));
+            }
+            if self.fail {
+                return Err(ReplicaError::Transient("github unreachable".into()));
+            }
+            Ok(())
+        }
+    }
+
+    fn replica_entry(sequence: u64) -> OutboxEntry {
+        OutboxEntry {
+            sequence,
+            topic: Topic::SourceReplica.as_str().to_owned(),
+            payload: to_vec(&SourceReplicaPayload { new_head: digest(20) }).unwrap(),
+        }
+    }
+
+    #[test]
+    fn a_failing_replica_leaves_the_land_final_and_the_entry_queued() {
+        // The land is already admitted (the replica topic is host-minted after
+        // that). A push fault must not ack the replica row and must not invent
+        // a second land.
+        let fake = FakeReplica::failing();
+        let shell = SourceReplicaShell::new(fake.clone());
+        let mut store = SqliteStore::open(":memory:").unwrap();
+        store.enqueue_topic(Topic::SourceReplica, &replica_entry(1).payload).unwrap();
+
+        let entries = store.drain_topic(Topic::SourceReplica).unwrap();
+        let acks = publish_replica_batch(&shell, &entries);
+        assert!(acks.is_empty(), "a failed push is not acked");
+        assert_eq!(fake.count(), 1);
+        assert_eq!(store.drain_topic(Topic::SourceReplica).unwrap().len(), 1, "the entry stays queued for redrive");
+        assert!(store.drain_topic(Topic::LandingReceipt).unwrap().is_empty(), "the land receipt topic is untouched");
+    }
+
+    #[test]
+    fn a_rejected_force_surfaces_an_operator_visible_alert() {
+        let fake = FakeReplica::rejecting();
+        let shell = SourceReplicaShell::new(fake.clone());
+        let acks = publish_replica_batch(&shell, &[replica_entry(3)]);
+        assert!(acks.is_empty(), "a rejected force is not silently acked away");
+        assert_eq!(
+            fake.alerts.lock().unwrap().as_slice(),
+            ["protected branch hook declined"],
+            "the rejected force is raised as an operator-visible alert rather than retried silently",
+        );
+    }
+
+    #[test]
+    fn superseded_replica_requests_coalesce_to_the_latest_head() {
+        let fake = FakeReplica::ok();
+        let shell = SourceReplicaShell::new(fake.clone());
+        let entries = vec![replica_entry(1), replica_entry(2), replica_entry(3)];
+        let acks = publish_replica_batch(&shell, &entries);
+        assert_eq!(fake.count(), 1, "an outage must not replay every intermediate head");
+        assert_eq!(acks.len(), 1);
+        assert_eq!(acks[0].through_sequence, 3, "success acks through the latest sequence");
+    }
+
+    #[test]
+    fn a_stalled_projection_does_not_head_of_line_block_the_source_replica() {
+        // Independent topics and ack prefixes: a GitHub issue projection
+        // failure must not stall source refs, and a replica failure must not
+        // stall the view.
+        let fake = FakeGithub::new();
+        fake.seed_issue(MEMBER_ISSUE, "the workpiece's own issue");
+        let projection = ProjectionShell::new(Arc::new(GithubProjection::new(fake.clone())));
+        let replica = FakeReplica::ok();
+        let replica_shell = SourceReplicaShell::new(replica.clone());
+
+        let bad_view = OutboxEntry {
+            sequence: 1,
+            topic: Topic::ViewDocument.as_str().to_owned(),
+            payload: b"not-a-view".to_vec(),
+        };
+        let view_acks = project_batch(&projection, &[bad_view]);
+        assert!(view_acks.is_empty(), "an undecodable view stalls its own topic");
+
+        let replica_acks = publish_replica_batch(&replica_shell, &[replica_entry(2)]);
+        assert_eq!(replica_acks.len(), 1, "the replica topic still delivers");
+        assert_eq!(replica.count(), 1);
+
+        let replica = FakeReplica::failing();
+        let replica_shell = SourceReplicaShell::new(replica);
+        let replica_acks = publish_replica_batch(&replica_shell, &[replica_entry(4)]);
+        assert!(replica_acks.is_empty(), "a replica fault stalls only the replica topic");
+
+        let view = OutboxEntry { sequence: 5, topic: Topic::ViewDocument.as_str().to_owned(), payload: encoded_view() };
+        let view_acks = project_batch(&projection, &[view]);
+        assert_eq!(view_acks.len(), 1, "the view topic still delivers beside a stalled replica");
+        assert_eq!(fake.comments_on(MEMBER_ISSUE).len(), 1);
+    }
+
+    #[test]
+    fn a_stalled_commission_topic_does_not_stall_receipts_or_mirroring() {
+        // Independent topics and ack prefixes: one bad replica issue must not
+        // hold receipts or the view document, and a view stall must not hold
+        // a healthy commission projection.
+        let fake = FakeGithub::new();
+        fake.seed_issue(MEMBER_ISSUE, "the workpiece's own issue");
+        let projection = ProjectionShell::new(Arc::new(GithubProjection::new(fake.clone())));
+
+        let bad_commission = OutboxEntry {
+            sequence: 1,
+            topic: Topic::Commission.as_str().to_owned(),
+            payload: b"not-a-commission".to_vec(),
+        };
+        let (commission_acks, persists) = project_commission_batch(&projection, &[bad_commission]);
+        assert!(commission_acks.is_empty(), "an undecodable commission stalls its own topic");
+        assert!(persists.is_empty());
+
+        let receipt = OutboxEntry {
+            sequence: 2,
+            topic: Topic::LandingReceipt.as_str().to_owned(),
+            payload: to_vec(&ProjectedReceipt {
+                receipt: LandingReceipt { bloom: BloomId(digest(1)), previous_base: digest(10), new_head: digest(20) },
+                members: vec![WorkpieceId(format!("issue-{MEMBER_ISSUE}"))],
+            })
+            .unwrap(),
+        };
+        let receipt_acks = project_batch(&projection, &[receipt]);
+        assert_eq!(receipt_acks.len(), 1, "the receipt topic still delivers");
+
+        let view = OutboxEntry { sequence: 3, topic: Topic::ViewDocument.as_str().to_owned(), payload: encoded_view() };
+        let view_acks = project_batch(&projection, &[view]);
+        assert_eq!(view_acks.len(), 1, "the view topic still delivers beside a stalled commission");
+        assert_eq!(fake.comments_on(MEMBER_ISSUE).len(), 2, "receipt and view both wrote");
     }
 }

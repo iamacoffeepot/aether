@@ -36,7 +36,10 @@
 //! drain/ack through the store's `DrainOutbox`/`AckOutbox` mail (as the mirror
 //! reactor does) is a follow-up once the registry ops gain a mail surface.
 
+use std::collections::BTreeSet;
+use std::env;
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -464,6 +467,9 @@ fn terminate_live_order(
         failed_verifiers,
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     };
     match admit_uploaded(store, &upload) {
         Ok(AdmitDecision::Admitted(admission)) => {
@@ -931,6 +937,187 @@ fn park_composition_refine_without_findings(record: &DispatchRecord, sequence: u
     true
 }
 
+/// Paths listed under `## Conflicting paths` in a fold-conflict overlay.
+///
+/// The integrate reactor writes that section (ADR-0189); the drain reads it
+/// back so overlapping Reconcile re-entries can share one fold at a time.
+fn fold_conflict_paths(overlay: &str) -> BTreeSet<String> {
+    let Some((_, rest)) = overlay.split_once("## Conflicting paths\n") else {
+        return BTreeSet::new();
+    };
+    rest.split("\n## ")
+        .next()
+        .unwrap_or(rest)
+        .lines()
+        .filter_map(|line| line.strip_prefix("- ").map(str::to_owned))
+        .collect()
+}
+
+/// Whether this Reconcile's fold-conflict paths intersect an outstanding
+/// Reconcile in the same bloom — the sibling already building against the fold
+/// this member would also claim.
+fn reconcile_overlaps_outstanding(
+    store: &mut dyn StoreBackend,
+    bloom: &[u8],
+    workpiece: &str,
+) -> rusqlite::Result<bool> {
+    let Some(overlay) = store.lookup_fold_conflict(bloom, workpiece)? else {
+        return Ok(false);
+    };
+    let paths = fold_conflict_paths(&overlay);
+    if paths.is_empty() {
+        return Ok(false);
+    }
+    for live in store.list_bloom_dispatch_live(bloom)? {
+        if live.workpiece == workpiece {
+            continue;
+        }
+        let Ok(stage) = from_bytes::<StageId>(&live.stage) else {
+            continue;
+        };
+        if stage != StageId::Reconcile {
+            continue;
+        }
+        let Some(other) = store.lookup_fold_conflict(bloom, &live.workpiece)? else {
+            continue;
+        };
+        if fold_conflict_paths(&other).intersection(&paths).next().is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Hold this Reconcile when its fold-conflict paths intersect an outstanding
+/// sibling Reconcile in the same bloom. Held, not acked, so the overlay is
+/// composed later against the fold this member will actually build on.
+/// Disjoint path sets return false and dispatch in parallel as before.
+fn hold_overlapping_reconcile(
+    store: &mut dyn StoreBackend,
+    payload: &DispatchPayload,
+    sequence: u64,
+) -> rusqlite::Result<bool> {
+    if payload.stage != StageId::Reconcile {
+        return Ok(false);
+    }
+    if !reconcile_overlaps_outstanding(store, payload.bloom.as_bytes(), &payload.workpiece.0)? {
+        return Ok(false);
+    }
+    tracing::info!(
+        target: "aether_chassis_bloomery::executor",
+        sequence,
+        bloom = %short_hex(&payload.bloom),
+        workpiece = %payload.workpiece.0,
+        "reconcile overlaps an outstanding sibling; holding until that resolution folds",
+    );
+    Ok(true)
+}
+
+/// True when this outbox row already has an outstanding order — submitted on
+/// an earlier drain that could not ack past a held sibling. The nonce is the
+/// sequence, so the row is the proof this entry reached a worker; submitting
+/// again would start a second run for the same outbox row.
+fn dispatch_already_submitted(store: &mut dyn StoreBackend, sequence: u64) -> rusqlite::Result<bool> {
+    Ok(store.lookup_order(&dispatch_nonce(sequence).0)?.is_some())
+}
+
+/// Advance the contiguous ack prefix unless a held Reconcile earlier in this
+/// batch blocked it. Later successes past a hold stay unacked so the hold
+/// re-drains.
+fn ack_if_unblocked(held: bool, ack_through: &mut Option<u64>, sequence: u64) {
+    if !held {
+        *ack_through = Some(sequence);
+    }
+}
+
+/// Outcome of overlaying and submitting one decoded dispatch entry.
+enum DispatchSubmit {
+    Submitted(WorkHandle),
+    Parked,
+    Refused,
+    Transient,
+}
+
+/// Overlay the advisory, park a composition Refine that has no findings, and
+/// submit the order. The caller owns the ack-prefix / hold / stop policy.
+fn submit_dispatch_entry(
+    store: &mut dyn StoreBackend,
+    executor: &ExecutorShell,
+    payload: DispatchPayload,
+    sequence: u64,
+    now_unix_millis: u64,
+) -> rusqlite::Result<DispatchSubmit> {
+    // The record's axes come from the payload's explicit fields (ADR-0152):
+    // the true scope revision always, and the displayed digest — what the
+    // returning evidence must bind to — the candidate tree when the member
+    // has one, else the scope revision. `subject` (inputs[0]) agrees with
+    // the displayed digest by reducer construction.
+    let displayed = payload.candidate.unwrap_or(payload.scope_revision);
+    let mut record = DispatchRecord {
+        nonce: dispatch_nonce(sequence),
+        bloom: BloomId(payload.bloom),
+        workpiece: payload.workpiece,
+        scope_revision: payload.scope_revision,
+        profile: payload.profile,
+        candidate: displayed,
+        displayed_digest: displayed,
+        stage: payload.stage,
+        transformation: payload.transformation,
+        configs: payload.configs,
+    };
+
+    if let Err(error) = overlay_member_advisory(store, &mut record, sequence) {
+        if let StoreConfigError::Store(error) = error {
+            return Err(error);
+        }
+        // A sealed configuration that will not resolve never resolves on
+        // retry, so this parks like a permanent submit refusal: the entry
+        // leaves the outbox, the queue behind it unblocks, and the member
+        // stalls visibly rather than running under a configuration its
+        // receipt does not attest.
+        tracing::error!(
+            target: "aether_chassis_bloomery::executor",
+            sequence,
+            workpiece = %record.workpiece.0,
+            %error,
+            "sealed configuration did not resolve; parking the dispatch rather than running the default",
+        );
+        return Ok(DispatchSubmit::Parked);
+    }
+    if park_composition_refine_without_findings(&record, sequence) {
+        return Ok(DispatchSubmit::Parked);
+    }
+    match dispatch_and_record(executor, store, &record, now_unix_millis) {
+        Ok(handle) => Ok(DispatchSubmit::Submitted(handle)),
+        Err(error) if error.is_permanent() => {
+            // A permanent refusal never clears on retry, so parking (acking
+            // past it) is what "wedge the member" means here: the entry
+            // leaves the outbox, the queue behind it unblocks, and the error
+            // log is the visible reason (member context + HTTP fault).
+            tracing::error!(
+                target: "aether_chassis_bloomery::executor",
+                sequence,
+                bloom = ?record.bloom.0,
+                workpiece = %record.workpiece.0,
+                stage = ?record.stage,
+                nonce = %record.nonce.0,
+                %error,
+                "dispatch submit refused permanently; parking the entry instead of re-driving",
+            );
+            Ok(DispatchSubmit::Refused)
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                sequence,
+                %error,
+                "dispatch submit/record failed; stopping the ack prefix to re-drive",
+            );
+            Ok(DispatchSubmit::Transient)
+        }
+    }
+}
+
 /// Drain the dispatch topic and submit each entry through the executor, recording
 /// its intake context. Returns the newly-tracked handles and the highest
 /// contiguously-submitted outbox sequence to ack (`None` when nothing submitted).
@@ -951,6 +1138,9 @@ fn drain_and_dispatch(
     // drain reached the end of the batch clean, or stopped on a decode/subject
     // fault or a permanent-refusal park (neither re-drives on a timer).
     let mut transient_failure = None;
+    // A Reconcile held for an overlapping sibling is left unacked, so later
+    // successes in this batch must not extend the prefix past it.
+    let mut held = false;
     for entry in entries {
         let Ok(payload) = from_bytes::<DispatchPayload>(&entry.payload) else {
             tracing::warn!(
@@ -960,6 +1150,10 @@ fn drain_and_dispatch(
             );
             break;
         };
+        if dispatch_already_submitted(store, entry.sequence)? {
+            ack_if_unblocked(held, &mut ack_through, entry.sequence);
+            continue;
+        }
         // A retired plan's queued work is retired with it. The dispatch outbox is
         // durable and drains on its own timer, so a bloom superseded between seal
         // and drain leaves orders behind — and running one spends a full model
@@ -979,7 +1173,7 @@ fn drain_and_dispatch(
                 workpiece = %payload.workpiece.0,
                 "dispatch belongs to a bloom that holds no active membership; retiring it undispatched",
             );
-            ack_through = Some(entry.sequence);
+            ack_if_unblocked(held, &mut ack_through, entry.sequence);
             continue;
         }
 
@@ -995,78 +1189,21 @@ fn drain_and_dispatch(
             );
             break;
         }
-        // The record's axes come from the payload's explicit fields (ADR-0152):
-        // the true scope revision always, and the displayed digest — what the
-        // returning evidence must bind to — the candidate tree when the member
-        // has one, else the scope revision. `subject` (inputs[0]) agrees with
-        // the displayed digest by reducer construction.
-        let displayed = payload.candidate.unwrap_or(payload.scope_revision);
-        let mut record = DispatchRecord {
-            nonce: dispatch_nonce(entry.sequence),
-            bloom: BloomId(payload.bloom),
-            workpiece: payload.workpiece,
-            scope_revision: payload.scope_revision,
-            profile: payload.profile,
-            candidate: displayed,
-            displayed_digest: displayed,
-            stage: payload.stage,
-            transformation: payload.transformation,
-            configs: payload.configs,
-        };
-
-        if let Err(error) = overlay_member_advisory(store, &mut record, entry.sequence) {
-            if let StoreConfigError::Store(error) = error {
-                return Err(error);
-            }
-            // A sealed configuration that will not resolve never resolves on
-            // retry, so this parks like a permanent submit refusal: the entry
-            // leaves the outbox, the queue behind it unblocks, and the member
-            // stalls visibly rather than running under a configuration its
-            // receipt does not attest.
-            tracing::error!(
-                target: "aether_chassis_bloomery::executor",
-                sequence = entry.sequence,
-                workpiece = %record.workpiece.0,
-                %error,
-                "sealed configuration did not resolve; parking the dispatch rather than running the default",
-            );
-            ack_through = Some(entry.sequence);
+        if hold_overlapping_reconcile(store, &payload, entry.sequence)? {
+            held = true;
             continue;
         }
-        if park_composition_refine_without_findings(&record, entry.sequence) {
-            ack_through = Some(entry.sequence);
-            continue;
-        }
-        match dispatch_and_record(executor, store, &record, now_unix_millis) {
-            Ok(handle) => {
+        match submit_dispatch_entry(store, executor, payload, entry.sequence, now_unix_millis)? {
+            DispatchSubmit::Submitted(handle) => {
                 handles.push(handle);
-                ack_through = Some(entry.sequence);
+                ack_if_unblocked(held, &mut ack_through, entry.sequence);
             }
-            Err(error) if error.is_permanent() => {
-                // A permanent refusal never clears on retry, so parking (acking
-                // past it) is what "wedge the member" means here: the entry
-                // leaves the outbox, the queue behind it unblocks, and the error
-                // log is the visible reason (member context + HTTP fault).
-                tracing::error!(
-                    target: "aether_chassis_bloomery::executor",
-                    sequence = entry.sequence,
-                    bloom = ?record.bloom.0,
-                    workpiece = %record.workpiece.0,
-                    stage = ?record.stage,
-                    nonce = %record.nonce.0,
-                    %error,
-                    "dispatch submit refused permanently; parking the entry instead of re-driving",
-                );
-                ack_through = Some(entry.sequence);
+            DispatchSubmit::Parked => ack_if_unblocked(held, &mut ack_through, entry.sequence),
+            DispatchSubmit::Refused => {
+                ack_if_unblocked(held, &mut ack_through, entry.sequence);
                 break;
             }
-            Err(error) => {
-                tracing::warn!(
-                    target: "aether_chassis_bloomery::executor",
-                    sequence = entry.sequence,
-                    %error,
-                    "dispatch submit/record failed; stopping the ack prefix to re-drive",
-                );
+            DispatchSubmit::Transient => {
                 transient_failure = Some(entry.sequence);
                 break;
             }
@@ -1558,18 +1695,26 @@ fn drain_and_redispatch(
 /// out and the API-side integrate can resolve its tree. Production shells the
 /// operator's own authenticated clone; tests substitute a recorder.
 pub trait CandidatePush: Send + Sync {
-    /// Force-push `commit_hex` to `target_ref` on `origin`.
+    /// Publish `commit_hex` onto `target_ref` at the configured authority.
     ///
     /// # Errors
-    /// The push shell-out failed; the message is the diagnostic tail.
+    /// The publish shell-out failed; the message is the diagnostic tail.
     fn push(&self, commit_hex: &str, target_ref: &str) -> Result<(), String>;
 }
 
-/// The production push: `git push --force origin <sha>:<ref>` from the host
-/// process's own clone. The capture commit was created in a scratch worktree of
-/// this same repository, so its object is in the shared object store and
-/// pushable after the worktree is gone; the host's ambient credentials are the
-/// ADR-0150 trust domain (the worker itself never pushes).
+/// The production push: publish `commit_hex` onto `target_ref` at the
+/// configured authority.
+///
+/// GitHub still force-pushes to the `origin` remote from the coordinator
+/// clone. A local authority (ADR-0199) takes an absolute repository path:
+/// when the coordinator already shares that object database the ref is
+/// updated in place and no objects move; otherwise `git push --force`
+/// transfers them over the filesystem, never the network.
+///
+/// The capture commit was created in a scratch worktree of `repo`, so its
+/// object is in that object store and publishable after the worktree is
+/// gone; the host's ambient credentials are the ADR-0150 trust domain
+/// (the worker itself never pushes).
 ///
 /// # Warning to anyone extending the in-process fixture tier
 ///
@@ -1599,7 +1744,19 @@ pub trait CandidatePush: Send + Sync {
 /// having picked the refusing arm for you.
 ///
 /// [`on_dispatch_tick`]: ExecutorReactorCapability
-struct GitCandidatePush;
+struct GitCandidatePush {
+    /// Coordinator repository whose object database holds the capture.
+    repo: PathBuf,
+    /// `"origin"` when GitHub is authoritative; an absolute repository path
+    /// (no `file://`) when the fleet-local authority holds the refs.
+    remote: String,
+}
+
+impl GitCandidatePush {
+    fn github() -> Self {
+        Self { repo: env::current_dir().unwrap_or_else(|_| PathBuf::from(".")), remote: "origin".into() }
+    }
+}
 
 impl CandidatePush for GitCandidatePush {
     fn push(&self, commit_hex: &str, target_ref: &str) -> Result<(), String> {
@@ -1621,9 +1778,14 @@ impl CandidatePush for GitCandidatePush {
             ));
         }
 
+        if Path::new(&self.remote).is_absolute() && shares_object_database(&self.repo, Path::new(&self.remote)) {
+            return update_authority_ref(Path::new(&self.remote), commit_hex, target_ref);
+        }
+
         let refspec = format!("{commit_hex}:{target_ref}");
         let output = Command::new("git")
-            .args(["push", "--force", "origin"])
+            .current_dir(&self.repo)
+            .args(["push", "--force", &self.remote])
             .arg(&refspec)
             .output()
             .map_err(|error| error.to_string())?;
@@ -1633,6 +1795,46 @@ impl CandidatePush for GitCandidatePush {
             Err(String::from_utf8_lossy(&output.stderr).into_owned())
         }
     }
+}
+
+/// `git update-ref` on the authority: the capture is already in this object
+/// database, so publishing is a ref move and transfers nothing.
+fn update_authority_ref(authority: &Path, commit_hex: &str, target_ref: &str) -> Result<(), String> {
+    let output = Command::new("git")
+        .current_dir(authority)
+        .args(["update-ref", target_ref, commit_hex])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).into_owned())
+    }
+}
+
+fn shares_object_database(repo: &Path, authority: &Path) -> bool {
+    match (absolute_git_common_dir(repo), absolute_git_common_dir(authority)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn absolute_git_common_dir(repo: &Path) -> Option<PathBuf> {
+    // `--absolute-git-common-dir` is not on the git this host ships (2.43);
+    // the unknown flag is parsed as a revision name and every repository
+    // then appears to share one database.
+    let output = Command::new("git").current_dir(repo).args(["rev-parse", "--git-common-dir"]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let raw = raw.trim();
+    let path = if Path::new(raw).is_absolute() {
+        PathBuf::from(raw)
+    } else {
+        repo.join(raw)
+    };
+    path.canonicalize().ok()
 }
 
 /// The fixture-boot push: declines every push rather than no-opping. A no-op
@@ -1674,7 +1876,20 @@ pub fn default_candidate_push(refuse: bool) -> Arc<dyn CandidatePush> {
     if refuse {
         Arc::new(RefusingCandidatePush)
     } else {
-        Arc::new(GitCandidatePush)
+        let github = GitCandidatePush::github();
+        Arc::new(github)
+    }
+}
+
+/// Select the [`CandidatePush`] seam for a known coordinator repository and
+/// publish remote. `remote` is `"origin"` when GitHub is authoritative, or
+/// an absolute local-authority path (no `file://`).
+#[must_use]
+pub fn candidate_push_at(refuse: bool, repo: impl Into<PathBuf>, remote: impl Into<String>) -> Arc<dyn CandidatePush> {
+    if refuse {
+        Arc::new(RefusingCandidatePush)
+    } else {
+        Arc::new(GitCandidatePush { repo: repo.into(), remote: remote.into() })
     }
 }
 
@@ -2075,6 +2290,9 @@ fn admit_scripted(state: &mut ExecutorReactorState, encoded: &[u8]) -> (Scripted
                 subject: upload.subject,
                 cost,
                 calls: upload.calls.clone(),
+                session_reuse_arm: upload.session_reuse_arm.clone(),
+                session_reuse_saved_micro_usd: upload.session_reuse_saved_micro_usd,
+                peak_resident_bytes: upload.peak_resident_bytes,
             };
             match admit_study(store, artifacts, &record) {
                 Ok(StudyAdmitDecision::Admitted(admission)) => {

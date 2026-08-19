@@ -45,20 +45,10 @@ impl ApiCapabilityState {
             Ok(found) => found,
             Err(response) => return Routed::Reply(response),
         };
-        // Run the same approve gate the seal route runs, then admit through the
-        // supersede door (#4638). Sealing the draft directly here could never
-        // work: a proposal's `approval` is a placeholder the gate is expected to
-        // overwrite, so an ungated seal admits a member the reducer refuses as
-        // unapproved — which it did, for every draft an operator could build.
-        self.gate_and_admit(
-            ctx,
-            draft,
-            Some(predecessor),
-            &request.projections,
-            request.descriptions,
-            request.idempotency_key,
-            &request.edges,
-        )
+        // Same store-backed door the first seal uses (#5048 / #4638). A
+        // writable projection on this body would preserve the hole the
+        // commission store closes.
+        self.begin_store_seal(ctx, draft, Some(predecessor), request.idempotency_key, request.edges)
     }
 
     /// `POST /blooms/{id}/grant` — hand a wedged member more attempts on the
@@ -743,26 +733,16 @@ mod tests {
     }
 
     #[test]
-    fn a_supersede_body_without_descriptions_still_parses() {
-        // Tripwire on the operator contract (#4631): descriptions were added to
-        // this body after the route shipped, so every existing caller omits
-        // them. Making the field required would turn each of those into a `400`
-        // on the one route an operator reaches for when a bloom has already
-        // failed to land.
-        let body = br#"{"successor_draft":"1"}"#;
+    fn a_supersede_body_ignores_caller_projections_and_descriptions() {
+        // #5048: the same cut as `SealRequest`. A successor body that still
+        // carries the retired fields must parse, and those fields must not
+        // remain a writable override.
+        let body = br#"{"successor_draft":"1","projections":[],"descriptions":{"wp-a":"override"}}"#;
 
-        let parsed: SupersedeRequest = serde_json::from_slice(body).expect("a body predating descriptions parses");
+        let parsed: SupersedeRequest = serde_json::from_slice(body).expect("legacy fields are ignored");
 
-        assert!(parsed.descriptions.is_empty(), "an absent map defaults empty rather than erroring");
-    }
-
-    #[test]
-    fn a_supersede_body_carries_descriptions_per_workpiece() {
-        let body = br#"{"successor_draft":"1","descriptions":{"wp-a":"build the thing"}}"#;
-
-        let parsed: SupersedeRequest = serde_json::from_slice(body).unwrap();
-
-        assert_eq!(parsed.descriptions.get("wp-a").map(String::as_str), Some("build the thing"));
+        assert_eq!(parsed.successor_draft, "1");
+        assert!(parsed.edges.is_empty());
     }
 
     #[test]

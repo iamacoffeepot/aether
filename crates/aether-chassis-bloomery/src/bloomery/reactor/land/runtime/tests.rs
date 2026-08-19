@@ -1,5 +1,5 @@
 //! The drain → land core of the land reactor, over a real `SqliteStore` and a
-//! fake-GitHub-backed `SourceShell` — the network side the running capability
+//! fake-GitHub-backed landing face — the network side the running capability
 //! drives, without the mail harness. `init` / the timer / the ctx send are the
 //! thin glue the chassis-boot test and compilation cover; this pins the loop that
 //! turns a land decision into a landing proposal, merges that proposal once
@@ -8,14 +8,16 @@
 use std::sync::Arc;
 
 use aether_bloomery::{
-    Adjudication, Admit, BloomId, Correspondence, Digest, Disposition, Event, Fact, IdempotencyKey, LandPayload, Topic,
+    Adjudication, Admit, BloomId, Correspondence, Digest, Disposition, Event, Fact, IdempotencyKey, LandPayload,
+    SourceReplicaPayload, Topic,
 };
 use aether_bloomery_github::testing::FakeGithub;
-use aether_bloomery_github::{GitObjectId, GitSource, MainlineRef, PullRequestApi, short_hex, to_hex};
+use aether_bloomery_github::{
+    GitObjectId, GitSource, GithubLanding, LandingSource, MainlineRef, PullRequestApi, short_hex, to_hex,
+};
 use aether_data::wire::{from_bytes, to_vec};
 
-use super::drain_and_land;
-use crate::bloomery::SourceShell;
+use super::{drain_and_land, drain_and_land_emitting};
 use crate::bloomery::outbox::TopicOutbox;
 use crate::store::{AppendOutcome, JournalWrite, SqliteStore, StoreBackend};
 
@@ -25,8 +27,8 @@ fn digest(seed: u8) -> Digest {
 
 // A fake-GitHub-backed source shell with the land gate set explicitly, so a
 // test drives the same shell the running reactor holds.
-fn shell(fake: FakeGithub, cas_land_enabled: bool) -> SourceShell {
-    SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake), cas_land_enabled, MainlineRef::default())))
+fn shell(fake: FakeGithub, cas_land_enabled: bool) -> Arc<dyn LandingSource> {
+    Arc::new(GithubLanding::new(GitSource::new(fake.clone(), Arc::new(fake), cas_land_enabled, MainlineRef::default())))
 }
 
 // Seed a fake with a base commit and a mainline ref at it, returning the fake and
@@ -60,7 +62,9 @@ fn an_accepted_proposal_admits_a_fact_land_carrying_the_merge_commit() {
     // An operator squash-merges the proposal the reactor opened, before the
     // reactor's own accept fires. Opening first, then merging by hand, is
     // what keeps this the observation path rather than the reactor's merge.
-    let aether_bloomery::LandOutcome::Proposed { number } = source.land(&bloom, &base, &new_head, None).unwrap() else {
+    let aether_bloomery_github::ProposalOutcome::Proposed { number } =
+        source.land_proposal(&bloom, &base, &new_head, None).unwrap()
+    else {
         panic!("expected Proposed");
     };
     let squashed = "5c".repeat(20);
@@ -102,7 +106,9 @@ fn a_declined_proposal_admits_nothing_and_acks_the_definitive_refusal() {
     let bloom = BloomId(digest(1));
     let sequence = enqueue_land(&mut store, bloom, base, new_head);
 
-    let aether_bloomery::LandOutcome::Proposed { number } = source.land(&bloom, &base, &new_head, None).unwrap() else {
+    let aether_bloomery_github::ProposalOutcome::Proposed { number } =
+        source.land_proposal(&bloom, &base, &new_head, None).unwrap()
+    else {
         panic!("expected Proposed");
     };
     fake.close_pull_request(number);
@@ -273,7 +279,9 @@ fn an_open_proposal_does_not_close_member_issues() {
     // Propose without accepting — closing belongs to the merge, not the
     // open. A drain would accept immediately (#5110), so this calls `land`
     // itself.
-    let aether_bloomery::LandOutcome::Proposed { .. } = source.land(&bloom, &base, &new_head, None).unwrap() else {
+    let aether_bloomery_github::ProposalOutcome::Proposed { .. } =
+        source.land_proposal(&bloom, &base, &new_head, None).unwrap()
+    else {
         panic!("expected Proposed");
     };
 
@@ -282,11 +290,11 @@ fn an_open_proposal_does_not_close_member_issues() {
 }
 
 #[test]
-fn landing_closes_member_issues_best_effort() {
-    // GitHub closing keywords fire only on a default-branch merge, so the land
-    // reactor closes each member issue itself. A workpiece that names no issue
-    // is skipped; a named issue the repository does not hold is journaled and
-    // must not delay the land — the keyword at sync-back is the backstop.
+fn landing_does_not_close_human_source_issues() {
+    // After ADR-0199, GitHub issues Bloomery did not create stay human objects.
+    // Land marks the local commission landed and leaves close to the replica
+    // projector; treating `issue-11` as a close target would write a title
+    // Bloomery does not own.
     let (fake, base) = seeded();
     let new_head = digest(90);
     fake.seed_git_object(&new_head);
@@ -301,19 +309,51 @@ fn landing_closes_member_issues_best_effort() {
     enqueue_land(&mut store, bloom, base, new_head);
 
     let (admits, ack_through) = drain_and_land(&mut store, &source).unwrap();
-    let number = proposal_number(&fake, bloom);
-    assert_eq!(admits.len(), 1, "a failed close does not block the land");
-    assert_eq!(ack_through, None, "closure is not the receipt; the journal is");
+    assert_eq!(admits.len(), 1, "leaving human issues open does not block the land");
+    assert_eq!(ack_through, None, "the journal is still the receipt oracle");
 
-    assert_eq!(fake.issue_is_closed(11), Some(true), "the addressing member's issue is closed");
-    let comments = fake.comments_on(11);
-    assert_eq!(comments.len(), 1, "the close leaves one comment");
-    assert!(comments[0].contains(&format!("#{number}")), "the comment names the landing pull request: {}", comments[0]);
-    assert!(comments[0].contains(&short_hex(&bloom.0)), "the comment names the bloom: {}", comments[0]);
-
+    assert_eq!(fake.issue_is_closed(11), Some(false), "a human-authored member issue is not closed");
+    assert!(fake.comments_on(11).is_empty(), "a human-authored member issue is not commented by land");
     assert_eq!(fake.issue_is_closed(42), Some(false), "an issue that is not a member is left alone");
-    assert!(fake.comments_on(42).is_empty(), "an issue that is not a member is not commented");
     assert_eq!(fake.issue_is_closed(9999), None, "a workpiece naming no object does not fabricate one");
+}
+
+#[test]
+fn landing_marks_member_commissions_landed_before_any_replica_close() {
+    // Local status is the authority. A land that closed GitHub first and then
+    // failed to stamp the commission would leave the replica open as the
+    // record of a landed workpiece.
+    use crate::store::CommissionBackend;
+    use aether_bloomery::{CommissionStatus, Observation, Provenance, Statement, WorkpieceId};
+
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    let source = shell(fake, true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    store
+        .create(
+            &WorkpieceId("wp-1".to_owned()),
+            &Statement {
+                words: b"intent".to_vec(),
+                provenance: Provenance::ObservationAttestation(Observation { source: "test".to_owned() }),
+                parents: Vec::new(),
+            },
+        )
+        .unwrap();
+    seed_member(&mut store, bloom, "wp-1", Some("fix(crate): land the commission"));
+    enqueue_land(&mut store, bloom, base, new_head);
+
+    drain_and_land(&mut store, &source).unwrap();
+
+    let view = store.load(&WorkpieceId("wp-1".to_owned())).unwrap().expect("commission remains");
+    assert_eq!(view.head.status, CommissionStatus::Landed, "land stamps the local commission first");
+    let queued = store.drain_topic(Topic::Commission).unwrap();
+    assert!(queued.len() >= 2, "create and land each enqueue a replica projection");
+    let last: aether_bloomery::CommissionProjection =
+        from_bytes(&queued.last().unwrap().payload).expect("landed projection");
+    assert_eq!(last.status, "landed");
 }
 
 // The number of the proposal the drain opened for `bloom`.
@@ -373,7 +413,9 @@ fn a_landing_whose_proposal_drifted_is_refused_and_journaled_rather_than_merged(
     let bloom = BloomId(digest(1));
     let sequence = enqueue_land(&mut store, bloom, base, new_head);
 
-    let aether_bloomery::LandOutcome::Proposed { number } = source.land(&bloom, &base, &new_head, None).unwrap() else {
+    let aether_bloomery_github::ProposalOutcome::Proposed { number } =
+        source.land_proposal(&bloom, &base, &new_head, None).unwrap()
+    else {
         panic!("expected Proposed");
     };
     let pushed = "ee".repeat(20);
@@ -424,7 +466,8 @@ fn two_landings_refused_for_the_same_cause_admit_under_distinct_keys() {
     let bloom = BloomId(digest(1));
 
     enqueue_land(&mut store, bloom, base, first_head);
-    let aether_bloomery::LandOutcome::Proposed { number } = source.land(&bloom, &base, &first_head, None).unwrap()
+    let aether_bloomery_github::ProposalOutcome::Proposed { number } =
+        source.land_proposal(&bloom, &base, &first_head, None).unwrap()
     else {
         panic!("expected Proposed");
     };
@@ -479,7 +522,9 @@ fn a_base_that_moved_under_an_open_proposal_leaves_the_bloom_supersedable() {
     let bloom = BloomId(digest(1));
     let sequence = enqueue_land(&mut store, bloom, base, new_head);
 
-    let aether_bloomery::LandOutcome::Proposed { number } = source.land(&bloom, &base, &new_head, None).unwrap() else {
+    let aether_bloomery_github::ProposalOutcome::Proposed { number } =
+        source.land_proposal(&bloom, &base, &new_head, None).unwrap()
+    else {
         panic!("expected Proposed");
     };
     // Mainline moves between the proposal opening and the accept.
@@ -714,4 +759,34 @@ fn journal_confirmation_acknowledges_the_land_prefix() {
     assert_eq!(ack_through, None, "an empty prefix acknowledges nothing");
     assert_eq!(proposal_number(&fake, bloom), number);
     assert_eq!(fake.pull_request_merged(number), Some(true));
+}
+
+#[test]
+fn a_committed_land_emits_a_source_replica_row_only_after_the_receipt_is_admitted() {
+    // Host-minted: the replica topic is not part of the land commit. Before
+    // the journal holds the land key there is nothing to push; after it does,
+    // one source-replica row carries the admitted head.
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    let source = shell(fake, true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    enqueue_land(&mut store, bloom, base, new_head);
+
+    let (admits, _) = drain_and_land_emitting(&mut store, &source, true).unwrap();
+    assert!(
+        store.drain_topic(Topic::SourceReplica).unwrap().is_empty(),
+        "no replica row before the receipt is admitted"
+    );
+    assert!(!admits.is_empty(), "the land is observed before the replica is minted");
+
+    journal_event(&mut store, &land_admit(&admits));
+    let (_, ack) = drain_and_land_emitting(&mut store, &source, true).unwrap();
+    assert_eq!(ack, Some(1));
+
+    let entries = store.drain_topic(Topic::SourceReplica).unwrap();
+    assert_eq!(entries.len(), 1, "exactly one replica request after admit");
+    let payload: SourceReplicaPayload = from_bytes(&entries[0].payload).unwrap();
+    assert_eq!(payload.new_head, new_head, "the replica request carries the landed head the outbox named");
 }

@@ -13,13 +13,14 @@ use aether_bloomery::Topic;
 // `HandlesKind` markers must be in scope here (the store's `pub use kinds::*`
 // does the same): `DrainTick` from the runtime module, the two store reply
 // kinds from `crate::store`.
-use crate::bloomery::{ProjectionShell, SourceShell};
-use crate::store::{AckOutboxResult, DrainOutboxResult};
+use crate::bloomery::{ProjectionShell, SourceReplicaShell, SourceShell};
+use crate::store::{AckOutboxResult, DrainOutboxResult, RecordCommissionProjectionResult};
 pub use runtime::{DrainTick, MirrorReactorState};
 
 pub struct MirrorReactorSetup {
     pub projection: Option<ProjectionShell>,
     pub source: Option<SourceShell>,
+    pub replica: Option<SourceReplicaShell>,
     pub poll_interval_secs: u64,
     pub repository: Option<(String, String)>,
 }
@@ -34,7 +35,8 @@ impl MirrorReactorCapability {
     /// reducer-minted [`Topic::LandingReceipt`] and the host-minted
     /// [`Topic::ViewDocument`] (host-produced and host-drained — this reactor is
     /// both sides), both members of the closed set.
-    pub const DRAINED_TOPICS: &'static [Topic] = &[Topic::LandingReceipt, Topic::ViewDocument];
+    pub const DRAINED_TOPICS: &'static [Topic] =
+        &[Topic::LandingReceipt, Topic::ViewDocument, Topic::SourceReplica, Topic::Commission];
 }
 
 mod runtime;

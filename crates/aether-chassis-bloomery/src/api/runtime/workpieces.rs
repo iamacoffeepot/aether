@@ -1,12 +1,14 @@
-//! The workpiece staging route — `POST /workpieces`. Staging is pure in-memory
-//! shaping state (nothing durable is claimed until a draft seals), so the route
-//! answers synchronously.
+//! Workpiece routes. `POST /workpieces` still stages an in-memory handle for
+//! draft shaping; `GET /workpieces` lists durable open commissions (#5048).
 
 use aether_bloomery::Workpiece;
 
+use super::commission_reader::workpieces_from_list;
 use super::hex;
 use super::response::{error_response, json};
 use super::state::{ApiCapabilityState, MAX_STAGED_WORKPIECES, Routed};
+use crate::api::dto::WorkpiecesView;
+use crate::store::{ListCommissions, ListCommissionsResult};
 
 impl ApiCapabilityState {
     /// `POST /workpieces` — stage a workpiece for later draft membership.
@@ -23,5 +25,18 @@ impl ApiCapabilityState {
         }
         self.staged.insert(workpiece.id.0.clone(), workpiece.clone());
         Routed::Reply(json(201, &workpiece))
+    }
+
+    /// `GET /workpieces` — durable open commissions, not the in-memory staged map.
+    pub(super) fn list_open_workpieces() -> Routed {
+        Routed::ListOpenWorkpieces(ListCommissions { status: Some("open".to_owned()) })
+    }
+}
+
+/// Render the open-commission list as [`WorkpiecesView`].
+pub(super) fn list_response(result: ListCommissionsResult) -> aether_http::HttpServerResponse {
+    match workpieces_from_list(result) {
+        Ok(workpieces) => json(200, &WorkpiecesView { workpieces }),
+        Err(response) => response,
     }
 }

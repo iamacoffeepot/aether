@@ -42,22 +42,26 @@ mod executor {
 
 pub mod client;
 pub mod correspondence;
+pub mod local;
 pub mod mainline;
 pub mod marker;
+pub mod replica;
 pub mod source;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
 pub use client::{
-    ActionsApi, Artifact, ChecksState, Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError, IssueStateApi,
-    MergeResult, NewComment, NewPullRequest, PullMergeResult, PullRequest, PullRequestApi, PullRequestState,
-    RunConclusion, RunStatus, WorkflowRun, strip_heads,
+    ActionsApi, Artifact, ChecksState, Comment, CommissionProjectionApi, GitCommit, GitDataApi, GitDataError, GitRef,
+    GithubApi, GithubError, IssueStateApi, MergeResult, NewComment, NewIssue, NewPullRequest, ProjectedIssue,
+    PullMergeResult, PullRequest, PullRequestApi, PullRequestState, RefTxnOp, RunConclusion, RunStatus, WorkflowRun,
+    strip_heads,
 };
 pub use correspondence::{GitObjectFormat, GitObjectId};
+pub use local::LocalGitData;
 pub use mainline::MainlineRef;
 pub use marker::{Marker, check_run_external_id, parse_check_run_external_id, parse_marker, render_marker};
+pub use replica::{GitSourceReplica, PublishedRefspec, ReplicaError, SourceReplica, published_refspecs};
 pub use source::{
-    GitSource, LandAcceptance, LandingProposal, LandingRefusal, LandingSource, SourceError, candidate_ref_name,
-    landing_branch, landing_floor_title, member_checkpoint_ref_name, to_hex,
+    GitSource, HostSource, SourceError, candidate_ref_name, landing_branch, member_checkpoint_ref_name, to_hex,
 };

@@ -195,6 +195,21 @@ topic_vocabulary! {
     /// [`Fact::FoldConflict`](crate::Fact::FoldConflict). Appended so the prior
     /// topics' display spellings and ordering are unchanged.
     Splice,
+    /// A source-replica push (host-minted): after a local landing receipt is
+    /// admitted, the host enqueues a request to push the allowlisted refs to
+    /// the configured GitHub URL. Independent of [`Self::LandingReceipt`] so a
+    /// projection stall cannot hold source refs and vice versa (ADR-0199).
+    /// Appended so the prior topics' display spellings and ordering are
+    /// unchanged.
+    SourceReplica,
+    /// A commission replica projection (host-minted): the commission store
+    /// enqueues [`CommissionProjection`](crate::port::CommissionProjection)
+    /// payloads on create, scope, approve, and status changes, and the mirror
+    /// reactor drains them onto Bloomery-owned issues. Independent of
+    /// [`Self::ViewDocument`] and [`Self::LandingReceipt`] so one bad issue
+    /// does not stall receipts or source mirroring (ADR-0199). Appended so
+    /// the prior topics' display spellings and ordering are unchanged.
+    Commission,
 }
 
 impl Topic {
@@ -217,6 +232,8 @@ impl Topic {
             Self::ViewDocument => "topic:view_document",
             Self::OrphanClaimRelease => "topic:orphan_claim_release",
             Self::Splice => "topic:splice",
+            Self::SourceReplica => "topic:source_replica",
+            Self::Commission => "topic:commission",
         }
     }
 
@@ -557,6 +574,17 @@ pub struct LandPayload {
     pub new_head: Digest,
 }
 
+/// A source-replica outbox payload (ADR-0199): the mainline head the local
+/// authority just admitted. Host-minted under [`Topic::SourceReplica`] after
+/// the landing receipt is in the journal — the push is best-effort and never
+/// part of the land commit. The drain coalesces to the latest head so an
+/// outage does not replay every intermediate tip.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SourceReplicaPayload {
+    /// The admitted mainline head the replica should catch up to.
+    pub new_head: Digest,
+}
+
 /// The authorized orphan-claim release outbox payload (ADR-0179): the request
 /// digest the completion admits back under, plus the typed target the source
 /// port's expected-holder compare-and-swap runs against. The control core
@@ -674,6 +702,11 @@ pub struct JournalRecord {
     /// (ADR-0187). `None` is a pre-stamp row: implicit current-at-migration.
     #[serde(default)]
     pub decisions_schema: Option<String>,
+    /// Host-clock stamp written at admission (`recorded_unix_millis`). `None`
+    /// is a pre-column row: reconstruct, never invent a time. Trailing
+    /// optional so prior replay replies still decode.
+    #[serde(default)]
+    pub recorded_unix_millis: Option<u64>,
 }
 
 /// Reply to [`ReplayJournal`].
@@ -861,6 +894,79 @@ pub enum QueryResult {
         /// The wire-encoded `CalibrationDocument`.
         #[serde(with = "aether_data::bytes")]
         document: Vec<u8>,
+    },
+}
+
+/// Which metrics document a [`MetricsQuery`] asks for.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricsView {
+    /// Fixed-size fleet summary.
+    Summary,
+    /// Day rollups, newest last, clamped at 90.
+    Days,
+    /// Bloom rollups, cursor on seal sequence.
+    Blooms,
+    /// Per-member stage spans for one bloom.
+    Timeline,
+    /// Calibration seats plus token / cache columns.
+    Seats,
+    /// Dispatch rows, cursor on journal sequence.
+    Dispatches,
+}
+
+/// Read the metrics ledger the control core folded beside its snapshot.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.bloomery.metrics_query")]
+pub struct MetricsQuery {
+    /// Which document to render.
+    pub view: MetricsView,
+    /// Bloom id bytes; required for [`MetricsView::Timeline`].
+    pub bloom: Option<Vec<u8>>,
+    /// Exclusive cursor (seal sequence for blooms, journal sequence for
+    /// dispatches).
+    pub from_sequence: Option<u64>,
+    /// Requested page size; the edge clamps it.
+    pub limit: Option<u64>,
+}
+
+/// Reply to [`MetricsQuery`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.bloomery.metrics_result")]
+pub enum MetricsQueryResult {
+    /// Wire-encoded document for the requested view.
+    Ok {
+        /// The encoded document.
+        #[serde(with = "aether_data::bytes")]
+        document: Vec<u8>,
+    },
+    /// The named bloom is not in the ledger.
+    NotFound,
+    /// The document could not be encoded or the request was incomplete.
+    Err {
+        /// A human-readable failure reason.
+        error: String,
+    },
+}
+
+/// Read the window spend [`measure`](crate::measure) already computes.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[kind(name = "aether.bloomery.spend_query")]
+pub struct SpendQuery;
+
+/// Reply to [`SpendQuery`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.bloomery.spend_result")]
+pub enum SpendQueryResult {
+    /// Wire-encoded [`SpendWindow`](crate::SpendWindow).
+    Ok {
+        /// The encoded window.
+        #[serde(with = "aether_data::bytes")]
+        window: Vec<u8>,
+    },
+    /// The window could not be encoded.
+    Err {
+        /// A human-readable failure reason.
+        error: String,
     },
 }
 

@@ -78,3 +78,23 @@ pub struct BloomeryCli {
     #[arg(long = "doctor")]
     pub doctor: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::BloomeryCli;
+
+    #[test]
+    fn a_bare_invocation_is_the_daemon_not_a_subcommand() {
+        // Commission authoring is a sibling binary. A required subcommand
+        // would refuse argv that is only the binary name, and a `commission`
+        // verb would steal what today boots the chassis.
+        let cli = match BloomeryCli::try_parse_from(["bloomery"]) {
+            Ok(cli) => cli,
+            Err(error) => panic!("bare bloomery must still parse as the daemon: {error}"),
+        };
+        assert!(!cli.describe, "a bare invocation must not be --describe");
+        assert!(!cli.doctor, "a bare invocation must not be --doctor");
+    }
+}

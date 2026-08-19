@@ -26,71 +26,23 @@ use std::time::{Duration, Instant};
 use aether_bloomery::{
     AgentProfile, ApprovalPolicy, ApprovalRule, AuthorityDoor, BloomDraft, BloomId, ClaimRefKind, ConfigKind,
     ConfigRegistry, Digest, DispatchPayload, Evidence, EvidenceKind, Harness, KeyId, Membership,
-    ORPHAN_CLAIM_RELEASE_WORDS, OrphanClaimRelease, Provenance, ReasoningEffort, SignatureEnvelope, StageCatalog,
-    StageId, Statement, Tier, ToolPolicy, Topic, Workpiece, WorkpieceId, authorization_message,
+    ORPHAN_CLAIM_RELEASE_WORDS, Observation, OrphanClaimRelease, Provenance, ReasoningEffort, SCOPE_REVISION_SCHEMA,
+    ScopeRevision, ScopeRouting, SignatureEnvelope, StageCatalog, StageId, Statement, Tier, ToolPolicy, Topic,
+    WorkpieceId, authorization_message,
 };
-use aether_chassis_bloomery::api::{MemberProjection, SealRequest};
-use aether_chassis_bloomery::bloomery::{AdrTouch, Completeness, TopicOutbox};
+use aether_chassis_bloomery::bloomery::TopicOutbox;
 use aether_chassis_bloomery::store::SqliteStore;
 use aether_data::wire::from_bytes;
 use common::{Coordinator, free_port};
 use ed25519_dalek::{Signer, SigningKey};
 use serde_json::Value;
 
-/// The scope revision `valid_draft`'s single member pins — the seal projection
-/// must key its projection to this exact revision to match the proposal.
-fn member_revision() -> Digest {
-    Digest::from_bytes([7; 32])
-}
+/// Bearer the commission authoring routes require in this process.
+const CONTROL_TOKEN: &str = "test-control-token";
 
-/// A `Completeness` with every gate check satisfied — the base a negative case
-/// flips one field of.
-fn complete() -> Completeness {
-    Completeness {
-        has_problem_statement: true,
-        has_design_notes: true,
-        has_implementation_plan: true,
-        referenced_adr_prs_merged: true,
-        model_routing_count: 1,
-        blocked: false,
-        declared_surface_fresh: true,
-        dependencies_all_closed: true,
-        umbrella_integrity: true,
-    }
-}
-
-/// A member projection for `wp-1` over `surface` with a complete, non-ADR,
-/// non-pre-approved revision — the seal-time input the pre-seal gate decides.
-fn projection(surface: &[&str], completeness: Completeness) -> MemberProjection {
-    MemberProjection {
-        workpiece: WorkpieceId("wp-1".to_owned()),
-        scope_revision: member_revision(),
-        declared_surface: surface.iter().map(|glob| (*glob).to_owned()).collect(),
-        completeness,
-        adr_touch: AdrTouch::None,
-        pre_approved: false,
-        signed_statement: None,
-    }
-}
-
-/// A `wp` projection over `surface` at `revision`, complete and non-pre-approved,
-/// optionally carrying the above-auto `signed_statement` — the seal-time input
-/// the deferred-verify enforcement (#3599) decides.
-fn projection_at(
-    wp: &str,
-    revision: Digest,
-    surface: &[&str],
-    signed_statement: Option<Statement>,
-) -> MemberProjection {
-    MemberProjection {
-        workpiece: WorkpieceId(wp.to_owned()),
-        scope_revision: revision,
-        declared_surface: surface.iter().map(|glob| (*glob).to_owned()).collect(),
-        completeness: complete(),
-        adr_touch: AdrTouch::None,
-        pre_approved: false,
-        signed_statement,
-    }
+/// An empty seal / supersede body. Projections and descriptions are store-backed.
+fn seal_body() -> Value {
+    Value::Object(serde_json::Map::new())
 }
 
 /// A member built the way the draft fixtures build one, so its
@@ -107,14 +59,6 @@ fn member(workpiece: &str, revision: Digest, detail: Digest) -> Membership {
     member
 }
 
-/// An author-signed statement over `subject`'s bytes by the allowlisted `owner`
-/// — the above-auto member's owner approval the seal path verifies through the
-/// `aether.signing` capability. Signed at [`AuthorityDoor::Approve`] bound to
-/// the same scope revision the words name (ADR-0182).
-fn owner_signed_statement(subject: Digest) -> Statement {
-    owner_signed_at(AuthorityDoor::Approve, subject, subject.as_bytes().to_vec(), vec![])
-}
-
 /// An author-signed statement by the allowlisted `owner` over `words`, signed as
 /// authority for `door` bound to `binding`, naming `parents` (ADR-0182).
 fn owner_signed_at(door: AuthorityDoor, binding: Digest, words: Vec<u8>, parents: Vec<Digest>) -> Statement {
@@ -129,10 +73,58 @@ fn owner_signed_at(door: AuthorityDoor, binding: Digest, words: Vec<u8>, parents
     }
 }
 
-/// A `SealRequest` carrying `projections`, serialized to a JSON value for the
-/// seal route.
-fn seal_body(projections: Vec<MemberProjection>) -> Value {
-    serde_json::to_value(SealRequest { idempotency_key: None, projections, ..Default::default() }).unwrap()
+/// Persist an open commission with a complete revision and a signed approval.
+fn seed_commission(port: u16, id: &str, surface: &[&str]) -> Digest {
+    seed_commission_with(port, id, surface, "problem", true)
+}
+
+/// Persist a commission; `approve` submits the owner-signed approval.
+fn seed_commission_with(port: u16, id: &str, surface: &[&str], problem: &str, approve: bool) -> Digest {
+    let intent = Statement {
+        words: format!("intent {id}").into_bytes(),
+        provenance: Provenance::ObservationAttestation(Observation { source: "rest-api".to_owned() }),
+        parents: Vec::new(),
+    };
+    let (status, created) = send_auth(port, "POST", "/commissions", &serde_json::json!({ "id": id, "intent": intent }));
+    assert_eq!(status, 201, "create commission {id}: {created:?}");
+
+    let revision = ScopeRevision {
+        schema: SCOPE_REVISION_SCHEMA,
+        workpiece: WorkpieceId(id.to_owned()),
+        predecessor: None,
+        problem: problem.to_owned(),
+        design: "design".to_owned(),
+        plan: "plan".to_owned(),
+        declared_surface: surface.iter().map(|glob| (*glob).to_owned()).collect(),
+        dogfood_brief: "dogfood".to_owned(),
+        routing: ScopeRouting { size: "M".to_owned(), model: "construct: test".to_owned() },
+        dependencies: Vec::new(),
+        description: format!("task for {id}"),
+        implements: Vec::new(),
+    };
+    let (status, written) =
+        send_auth(port, "POST", &format!("/commissions/{id}/revisions"), &serde_json::to_value(&revision).unwrap());
+    assert_eq!(status, 201, "write revision {id}: {written:?}");
+    let digest = digest_at(&written["digest"]);
+
+    if approve {
+        let statement = owner_signed_at(AuthorityDoor::Approve, digest, digest.as_bytes().to_vec(), Vec::new());
+        let (status, approved) = send_auth(
+            port,
+            "POST",
+            &format!("/commissions/{id}/approvals"),
+            &serde_json::to_value(&statement).unwrap(),
+        );
+        assert_eq!(status, 201, "approve {id}: {approved:?}");
+    }
+    digest
+}
+
+/// Authenticated JSON write used by the commission authoring routes.
+fn send_auth(port: u16, method: &str, path: &str, body: &Value) -> (u16, Value) {
+    let bytes = serde_json::to_vec(body).unwrap();
+    let (status, response) = try_http_auth(port, method, path, Some(&bytes), Some(CONTROL_TOKEN)).unwrap();
+    (status, serde_json::from_slice(&response).unwrap_or(Value::Null))
 }
 
 /// Write a self-contained tier policy to a temp dir and return it plus the
@@ -182,6 +174,7 @@ fn spawn_with_store(http_port: u16, rpc_port: u16, policy_path: &str, store_path
             ("AETHER_STORE_PATH", store_path),
             ("AETHER_SIGNING_ALLOWLIST", &owner_allowlist()),
             ("AETHER_APPROVAL_POLICY_FILE", policy_path),
+            ("AETHER_HTTP_CONTROL_TOKEN", CONTROL_TOKEN),
         ],
     )
 }
@@ -190,7 +183,20 @@ fn spawn_with_store(http_port: u16, rpc_port: u16, policy_path: &str, store_path
 /// code and the response body bytes. `Err` when the socket cannot be reached
 /// yet (the bin is still binding).
 fn try_http(port: u16, method: &str, path: &str, body: Option<&[u8]>) -> Result<(u16, Vec<u8>), std::io::Error> {
+    try_http_auth(port, method, path, body, None)
+}
+
+fn try_http_auth(
+    port: u16,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+    token: Option<&str>,
+) -> Result<(u16, Vec<u8>), std::io::Error> {
     let mut head = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n");
+    if let Some(token) = token {
+        head.push_str(&format!("Authorization: Bearer {token}\r\n"));
+    }
     if let Some(bytes) = body {
         head.push_str(&format!("Content-Type: application/json\r\nContent-Length: {}\r\n", bytes.len()));
     }
@@ -278,8 +284,7 @@ fn hex_of(digest: &Digest) -> String {
 /// A valid single-workpiece draft the reducer admits: the member's approval
 /// evidence binds its own scope revision, and the stage catalog is the one line
 /// the reducer requires (`StageCatalog::line_digest`, not the zero default).
-fn valid_draft(workpiece: &str) -> BloomDraft {
-    let scope_revision = Digest::from_bytes([7; 32]);
+fn valid_draft(workpiece: &str, scope_revision: Digest) -> BloomDraft {
     BloomDraft {
         proposals: vec![member(workpiece, scope_revision, Digest::from_bytes([9; 32]))],
         base: Digest::from_bytes([1; 32]),
@@ -287,43 +292,46 @@ fn valid_draft(workpiece: &str) -> BloomDraft {
     }
 }
 
-/// A valid two-workpiece draft: `wp-1` at `member_revision()` and `wp-2` at a
-/// distinct revision, each approval binding its own scope revision. The seal
-/// gate re-forms both approvals from the request projections; the placeholder
-/// details here only have to be reducer-admissible before the gate replaces them.
-fn two_member_draft() -> BloomDraft {
+/// A valid two-workpiece draft. The seal gate re-forms both approvals from the
+/// store; the placeholder details only have to be reducer-admissible before
+/// the gate replaces them.
+fn two_member_draft(wp1: Digest, wp2: Digest) -> BloomDraft {
     let detail = Digest::from_bytes([9; 32]);
     BloomDraft {
-        proposals: vec![member("wp-1", member_revision(), detail), member("wp-2", Digest::from_bytes([8; 32]), detail)],
+        proposals: vec![member("wp-1", wp1, detail), member("wp-2", wp2, detail)],
         base: Digest::from_bytes([1; 32]),
         ..BloomDraft::default()
     }
 }
 
-/// Assert the pre-seal approve gate (#3583) refuses `seal_path` at every
-/// fail-closed branch: a missing projection, an incomplete one, and an
-/// above-auto surface each return `422` before admit, leaving the draft
-/// unchanged for the caller's subsequent successful seal.
-fn assert_gate_fails_closed(http_port: u16, seal_path: &str) {
-    // Missing projection: an empty seal body has no projection for the member —
-    // never admitted on the operator's unchecked approval.
-    let (status, _) = try_http(http_port, "POST", seal_path, None).unwrap();
-    assert_eq!(status, 422, "no projection fails closed");
+/// Assert the store-backed door refuses a seal that names a workpiece with
+/// no commission, an incomplete revision, and a current revision with no
+/// approval. Each message is a different closed door.
+fn assert_store_door_fails_closed(http_port: u16) {
+    let missing =
+        patch_draft(http_port, &serde_json::to_value(valid_draft("wp-missing", Digest::from_bytes([1; 32]))).unwrap());
+    let (status, body) = send_json(http_port, "POST", &format!("/drafts/{missing}/seal"), &seal_body());
+    assert_eq!(status, 422, "missing commission fails closed: {body:?}");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("no commission in the store"),
+        "missing commission: {body:?}"
+    );
 
-    // Incomplete projection: an otherwise-auto surface with a completeness check
-    // flipped false is refused.
-    let mut incomplete = complete();
-    incomplete.has_problem_statement = false;
-    let (status, _) =
-        send_json(http_port, "POST", seal_path, &seal_body(vec![projection(&["docs/guide/x.md"], incomplete)]));
-    assert_eq!(status, 422, "incomplete projection fails closed");
+    let incomplete = seed_commission_with(http_port, "wp-incomplete", &["docs/guide/**"], "", true);
+    let incomplete_id =
+        patch_draft(http_port, &serde_json::to_value(valid_draft("wp-incomplete", incomplete)).unwrap());
+    let (status, body) = send_json(http_port, "POST", &format!("/drafts/{incomplete_id}/seal"), &seal_body());
+    assert_eq!(status, 422, "incomplete revision fails closed: {body:?}");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("incomplete"),
+        "incomplete must name incompleteness: {body:?}"
+    );
 
-    // Above-auto surface with no signed statement: `crates/aether-data/**`
-    // resolves `human`, and `projection` carries no `signed_statement`, so the
-    // deferred-verify path (#3599) fails it closed before any signing dispatch.
-    let above_auto = seal_body(vec![projection(&["crates/aether-data/src/lib.rs"], complete())]);
-    let (status, _) = send_json(http_port, "POST", seal_path, &above_auto);
-    assert_eq!(status, 422, "above-auto with no signed statement fails closed");
+    let unsigned = seed_commission_with(http_port, "wp-unsigned", &["docs/guide/**"], "problem", false);
+    let unsigned_id = patch_draft(http_port, &serde_json::to_value(valid_draft("wp-unsigned", unsigned)).unwrap());
+    let (status, body) = send_json(http_port, "POST", &format!("/drafts/{unsigned_id}/seal"), &seal_body());
+    assert_eq!(status, 422, "absent approval fails closed: {body:?}");
+    assert!(body["error"].as_str().unwrap_or("").contains("no stored approval"), "absent approval: {body:?}");
 }
 
 #[test]
@@ -338,17 +346,15 @@ fn rest_api_drives_a_bloom_end_to_end() {
     // http-readiness signal.
     wait_for_200(http_port, "/drafts");
 
-    // In-memory shaping: stage a workpiece and read it back.
-    let staged = Workpiece {
-        id: WorkpieceId("wp-1".to_owned()),
-        intent: Digest::from_bytes([2; 32]),
-        scope_revision: Digest::from_bytes([3; 32]),
-    };
-    let (status, workpiece) = send_json(http_port, "POST", "/workpieces", &serde_json::to_value(&staged).unwrap());
-    assert_eq!(status, 201, "stage workpiece");
-    assert_eq!(workpiece["id"], "wp-1");
+    wait_for_200(http_port, "/view");
+    assert_store_door_fails_closed(http_port);
+
+    // Durable open commissions are the workpiece list, not the in-memory staged map.
+    let revision = seed_commission(http_port, "wp-1", &["docs/guide/**"]);
     let (_, listed) = get_json(http_port, "/workpieces");
-    assert_eq!(listed["workpieces"].as_array().unwrap().len(), 1);
+    let listed = listed["workpieces"].as_array().expect("workpieces list");
+    let wp1 = listed.iter().find(|row| row["id"] == "wp-1").expect("wp-1 is listed");
+    assert_eq!(wp1["scope_revision"], hex_of(&revision));
 
     // Open a draft, shape it into an admissible bloom, and read it back.
     let (status, opened) = send_json(http_port, "POST", "/drafts", &Value::Null);
@@ -357,7 +363,7 @@ fn rest_api_drives_a_bloom_end_to_end() {
     // The body spells `base` the way the paths do — 64 hex characters — while
     // the memberships beside it keep the canonical byte arrays, so one request
     // exercises both accepted forms. The echo renders every digest as hex.
-    let mut patch = serde_json::to_value(valid_draft("wp-1")).unwrap();
+    let mut patch = serde_json::to_value(valid_draft("wp-1", revision)).unwrap();
     let base = hex_of(&Digest::from_bytes([1; 32]));
     patch["base"] = Value::String(base.clone());
     let (status, patched) = send_json(http_port, "PATCH", &format!("/drafts/{draft_id}"), &patch);
@@ -365,7 +371,7 @@ fn rest_api_drives_a_bloom_end_to_end() {
     assert_eq!(patched["draft"]["base"], base, "a hex base is taken and rendered back as hex");
     assert_eq!(
         patched["draft"]["proposals"][0]["scope_revision"],
-        hex_of(&member_revision()),
+        hex_of(&revision),
         "a digest sent as a byte array renders back as hex too"
     );
     assert_eq!(patched["draft"]["proposals"].as_array().unwrap().len(), 1);
@@ -379,26 +385,11 @@ fn rest_api_drives_a_bloom_end_to_end() {
     assert_eq!(status, 400, "a malformed digest is refused: {refused:?}");
     assert!(refused["error"].as_str().unwrap().contains("base"), "the refusal names the field: {refused:?}");
 
-    // The control core answers queries once loaded + replayed — the write /
-    // live-read readiness signal.
-    wait_for_200(http_port, "/view");
-
-    // The pre-seal approve gate (#3583) fails closed at every branch — a
-    // missing projection, an incomplete one, and an above-auto surface each
-    // refuse the seal (422) before admit, so the draft is unchanged.
+    // Auto surface + stored complete revision: the gate forms the approval and
+    // the seal admits. A caller-supplied projection is not on the body.
     let seal_path = format!("/drafts/{draft_id}/seal");
-    assert_gate_fails_closed(http_port, &seal_path);
-
-    // Auto surface + complete projection: the gate forms the approval and the
-    // seal admits. The outcome names the sealed bloom id, rendered as the same
-    // hex the `{id}` route takes.
-    let (status, body) = try_http(
-        http_port,
-        "POST",
-        &seal_path,
-        Some(&serde_json::to_vec(&seal_body(vec![projection(&["docs/guide/x.md"], complete())])).unwrap()),
-    )
-    .unwrap();
+    let (status, body) =
+        try_http(http_port, "POST", &seal_path, Some(&serde_json::to_vec(&seal_body()).unwrap())).unwrap();
     let sealed: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(status, 200, "auto-tier seal admits: {sealed:?}");
     let bloom_id = bloom_hex(&sealed["outcome"]["Sealed"]);
@@ -440,9 +431,7 @@ fn above_auto_deferred_verify_gates_the_seal() {
 /// each case here seals its own.
 #[test]
 fn mixed_auto_and_above_auto_seal_admits_when_verified() {
-    run_with_bloomery("mixed_auto_and_above_auto_seal_admits_when_verified", |http_port| {
-        assert_mixed_above_auto_seal(http_port, member_revision());
-    });
+    run_with_bloomery("mixed_auto_and_above_auto_seal_admits_when_verified", assert_mixed_above_auto_seal);
 }
 
 /// Boot the `bloomery` bin, wait for both readiness signals (`/drafts` for the
@@ -466,61 +455,24 @@ fn run_with_bloomery(_label: &str, body: impl FnOnce(u16)) {
 /// closed (422); a valid owner-signed statement admits with a gate-formed
 /// approval the reducer accepts.
 fn assert_single_above_auto_seal(http_port: u16) {
-    let (_, opened) = send_json(http_port, "POST", "/drafts", &Value::Null);
-    let draft_id = opened["draft_id"].as_str().unwrap().to_owned();
-    let (status, _) = send_json(
-        http_port,
-        "PATCH",
-        &format!("/drafts/{draft_id}"),
-        &serde_json::to_value(valid_draft("wp-1")).unwrap(),
-    );
-    assert_eq!(status, 200, "patch above-auto draft");
-    let seal_path = format!("/drafts/{draft_id}/seal");
-    let surface = ["crates/aether-data/src/lib.rs"];
-    let revision = member_revision();
-    let subject = member("wp-1", revision, Digest::from_bytes([9; 32])).subject();
-    let seal = |statement| seal_body(vec![projection_at("wp-1", revision, &surface, statement)]);
+    let unsigned = seed_commission_with(http_port, "wp-1", &["crates/aether-data/**"], "problem", false);
+    let unsigned_id = patch_draft(http_port, &serde_json::to_value(valid_draft("wp-1", unsigned)).unwrap());
+    let (status, body) = send_json(http_port, "POST", &format!("/drafts/{unsigned_id}/seal"), &seal_body());
+    assert_eq!(status, 422, "above-auto with no stored approval fails closed: {body:?}");
+    assert!(body["error"].as_str().unwrap_or("").contains("no stored approval"), "{body:?}");
 
-    // (b) No signed statement → fail closed before any signing dispatch.
-    let (status, _) = send_json(http_port, "POST", &seal_path, &seal(None));
-    assert_eq!(status, 422, "above-auto with no signed statement fails closed");
-
-    // (c-subject) Signed over another revision → rejected at the synchronous
-    // pre-check, before any signing dispatch.
-    let wrong_subject = owner_signed_statement(Digest::from_bytes([1; 32]));
-    let (status, _) = send_json(http_port, "POST", &seal_path, &seal(Some(wrong_subject)));
-    assert_eq!(status, 422, "a wrong-subject statement fails closed at the pre-check");
-
-    // (c-signature) Correct subject + author signature that does NOT verify (an
-    // empty signature) → passes the pre-check, dispatched to `aether.signing`,
-    // refused there, failing the seal closed after the round trip.
-    let mis_signed = Statement {
-        words: subject.as_bytes().to_vec(),
-        provenance: Provenance::AuthorSignature(SignatureEnvelope {
-            signer: KeyId("owner".to_owned()),
-            signature: vec![],
-        }),
-        parents: vec![],
-    };
-    let (status, _) = send_json(http_port, "POST", &seal_path, &seal(Some(mis_signed)));
-    assert_eq!(status, 422, "a mis-signed statement fails closed after the signing round trip");
-
-    // (a) A valid owner-signed statement verifies and the seal admits with a
-    // gate-formed approval the reducer accepts.
-    let body = serde_json::to_vec(&seal(Some(owner_signed_statement(subject)))).unwrap();
-    let (status, body) = try_http(http_port, "POST", &seal_path, Some(&body)).unwrap();
-    let sealed: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(status, 200, "above-auto seal admits: {sealed:?}");
+    let revision = seed_commission(http_port, "wp-signed", &["crates/aether-data/**"]);
+    let draft_id = patch_draft(http_port, &serde_json::to_value(valid_draft("wp-signed", revision)).unwrap());
+    let (status, sealed) = send_json(http_port, "POST", &format!("/drafts/{draft_id}/seal"), &seal_body());
+    assert_eq!(status, 200, "above-auto seal admits from the stored statement: {sealed:?}");
     let bloom_id = bloom_hex(&sealed["outcome"]["Sealed"]);
     assert_eq!(bloom_id.len(), 64, "sealed bloom id is a 32-byte digest");
 
-    // The sealed above-auto member is live, its approval a gate-formed `Approval`
-    // bound to the revision (not the operator's placeholder).
     let (status, view) = get_json(http_port, &format!("/blooms/{bloom_id}"));
     assert_eq!(status, 200, "the sealed above-auto bloom is live");
     let members = view["members"].as_array().unwrap();
     assert_eq!(members.len(), 1, "one sealed member");
-    assert_eq!(members[0]["workpiece"], "wp-1");
+    assert_eq!(members[0]["workpiece"], "wp-signed");
     assert_eq!(members[0]["approval"]["kind"], "Approval", "the above-auto member carries a gate-formed approval");
 }
 
@@ -528,44 +480,19 @@ fn assert_single_above_auto_seal(http_port: u16) {
 /// (`wp-1`, `docs/guide`) and an above-auto member (`wp-2`, `crates/aether-data`)
 /// fails closed when the above-auto member is unsigned, and admits both members
 /// once its signature verifies.
-fn assert_mixed_above_auto_seal(http_port: u16, wp1_revision: Digest) {
-    let (_, opened) = send_json(http_port, "POST", "/drafts", &Value::Null);
-    let mixed_id = opened["draft_id"].as_str().unwrap().to_owned();
-    let (status, _) = send_json(
-        http_port,
-        "PATCH",
-        &format!("/drafts/{mixed_id}"),
-        &serde_json::to_value(two_member_draft()).unwrap(),
-    );
-    assert_eq!(status, 200, "patch mixed draft");
-    let mixed_seal = format!("/drafts/{mixed_id}/seal");
-    let wp2_revision = Digest::from_bytes([8; 32]);
-    let wp1_auto = projection_at("wp-1", wp1_revision, &["docs/guide/x.md"], None);
-    let wp2_above = |statement| projection_at("wp-2", wp2_revision, &["crates/aether-data/src/lib.rs"], statement);
+fn assert_mixed_above_auto_seal(http_port: u16) {
+    let wp1 = seed_commission(http_port, "wp-1", &["docs/guide/**"]);
+    let wp2_unsigned = seed_commission_with(http_port, "wp-2", &["crates/aether-data/**"], "problem", false);
+    let mixed_id = patch_draft(http_port, &serde_json::to_value(two_member_draft(wp1, wp2_unsigned)).unwrap());
+    let (status, body) = send_json(http_port, "POST", &format!("/drafts/{mixed_id}/seal"), &seal_body());
+    assert_eq!(status, 422, "a mixed draft with an unsigned above-auto member fails closed: {body:?}");
 
-    // wp-2's statement omitted → the whole mixed seal fails closed even though
-    // wp-1 resolves auto.
-    let (status, _) = send_json(http_port, "POST", &mixed_seal, &seal_body(vec![wp1_auto.clone(), wp2_above(None)]));
-    assert_eq!(status, 422, "a mixed draft with an unsigned above-auto member fails closed");
-
-    // wp-2 validly signed → the mixed seal admits once the verification passes.
-    let (status, body) = try_http(
-        http_port,
-        "POST",
-        &mixed_seal,
-        Some(
-            &serde_json::to_vec(&seal_body(vec![
-                wp1_auto,
-                wp2_above(Some(owner_signed_statement(
-                    member("wp-2", wp2_revision, Digest::from_bytes([9; 32])).subject(),
-                ))),
-            ]))
-            .unwrap(),
-        ),
-    )
-    .unwrap();
-    let sealed: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(status, 200, "mixed auto + above-auto seal admits when the above-auto member verifies: {sealed:?}");
+    let wp2 = seed_commission(http_port, "wp-2b", &["crates/aether-data/**"]);
+    let mut mixed = two_member_draft(wp1, wp2);
+    mixed.proposals[1].workpiece = WorkpieceId("wp-2b".to_owned());
+    let mixed_ok = patch_draft(http_port, &serde_json::to_value(&mixed).unwrap());
+    let (status, sealed) = send_json(http_port, "POST", &format!("/drafts/{mixed_ok}/seal"), &seal_body());
+    assert_eq!(status, 200, "mixed auto + above-auto seal admits when the above-auto member is stored: {sealed:?}");
     let mixed_bloom = bloom_hex(&sealed["outcome"]["Sealed"]);
     let (status, view) = get_json(http_port, &format!("/blooms/{mixed_bloom}"));
     assert_eq!(status, 200, "the mixed bloom is live");
@@ -653,18 +580,20 @@ fn a_sealed_approval_policy_decides_the_tier_the_file_policy_would_refuse() {
     wait_for_200(http_port, "/drafts");
     wait_for_200(http_port, "/view");
 
-    // The surface the file policy resolves `human`; the projection carries no
-    // signed statement, so an above-auto resolution refuses the seal.
-    let surface = ["crates/aether-data/src/lib.rs"];
-    let seal = || seal_body(vec![projection(&surface, complete())]);
+    // The surface the file policy resolves `human`. An auto-only stored
+    // approval (no signed statement) is signer-policy under that file, and
+    // auto under a sealed policy that names the same surface.
+    let revision = seed_commission_with(http_port, "wp-1", &["crates/aether-data/**"], "problem", false);
+    let seal = || seal_body();
 
-    let (status, _) = send_json(http_port, "POST", &format!("/drafts/{}/seal", draft_with(http_port, None)), &seal());
-    assert_eq!(status, 422, "under the file policy the surface is human and the seal fails closed");
+    let (status, body) =
+        send_json(http_port, "POST", &format!("/drafts/{}/seal", draft_with(http_port, revision, None)), &seal());
+    assert_eq!(status, 422, "under the file policy the surface is human and the seal fails closed: {body:?}");
 
     // A member that seals the policy deciding its own admission is refused
     // outright — neither resolved (self-authorization) nor ignored (a sealed
     // configuration nothing reads).
-    let mut member_scoped = valid_draft("wp-1");
+    let mut member_scoped = valid_draft("wp-1", revision);
     member_scoped.proposals[0].configs.insert::<ApprovalPolicy>(Digest::from_bytes([5; 32]));
     let (status, _) = send_json(
         http_port,
@@ -680,7 +609,7 @@ fn a_sealed_approval_policy_decides_the_tier_the_file_policy_would_refuse() {
     let (status, _) = send_json(
         http_port,
         "POST",
-        &format!("/drafts/{}/seal", draft_with(http_port, Some(registry_naming(dangling.address())))),
+        &format!("/drafts/{}/seal", draft_with(http_port, revision, Some(registry_naming(dangling.address())))),
         &seal(),
     );
     assert_eq!(status, 422, "a sealed policy address with no stored content fails the seal closed");
@@ -700,7 +629,12 @@ fn a_sealed_approval_policy_decides_the_tier_the_file_policy_would_refuse() {
     let address = digest_at(&stored["digest"]);
     assert_eq!(address, authored.address(), "the route addresses the policy exactly as a typed seal would");
 
-    let sealed_draft = draft_with(http_port, Some(registry_naming(address)));
+    let statement = owner_signed_at(AuthorityDoor::Approve, revision, revision.as_bytes().to_vec(), Vec::new());
+    let (status, approved) =
+        send_auth(http_port, "POST", "/commissions/wp-1/approvals", &serde_json::to_value(&statement).unwrap());
+    assert_eq!(status, 201, "store an approval so the auto path is not an absent-approval refuse: {approved:?}");
+
+    let sealed_draft = draft_with(http_port, revision, Some(registry_naming(address)));
     let (status, sealed) = send_json(http_port, "POST", &format!("/drafts/{sealed_draft}/seal"), &seal());
     assert_eq!(status, 200, "the sealed policy admits the surface the file policy refused: {sealed:?}");
     let bloom_id = bloom_hex(&sealed["outcome"]["Sealed"]);
@@ -718,8 +652,8 @@ fn registry_naming(address: Digest) -> ConfigRegistry {
 
 /// Open a draft shaped like [`valid_draft`] with `configs` as its bloom-wide
 /// registry, and return its handle.
-fn draft_with(http_port: u16, configs: Option<ConfigRegistry>) -> String {
-    let mut patch = serde_json::to_value(valid_draft("wp-1")).unwrap();
+fn draft_with(http_port: u16, revision: Digest, configs: Option<ConfigRegistry>) -> String {
+    let mut patch = serde_json::to_value(valid_draft("wp-1", revision)).unwrap();
     if let Some(configs) = configs {
         patch["configs"] = serde_json::to_value(&configs).unwrap();
     }
@@ -781,7 +715,8 @@ fn authored_stage_catalog_reaches_the_dispatch_profile() {
     let (status, opened) = send_json(http_port, "POST", "/drafts", &Value::Null);
     assert_eq!(status, 201, "open draft");
     let draft_id = opened["draft_id"].as_str().unwrap();
-    let mut patch = serde_json::to_value(valid_draft("wp-1")).unwrap();
+    let revision = seed_commission(http_port, "wp-1", &["docs/guide/**"]);
+    let mut patch = serde_json::to_value(valid_draft("wp-1", revision)).unwrap();
     patch["configs"] = serde_json::to_value(&configs).unwrap();
     // The registry goes up in canonical form and comes back with its address
     // spelled the way the `/artifacts/{digest}` path would spell it.
@@ -795,12 +730,7 @@ fn authored_stage_catalog_reaches_the_dispatch_profile() {
     assert_eq!(fetched["draft"]["configs"], rendered_registry);
 
     wait_for_200(http_port, "/view");
-    let (status, sealed) = send_json(
-        http_port,
-        "POST",
-        &format!("/drafts/{draft_id}/seal"),
-        &seal_body(vec![projection(&["docs/guide/x.md"], complete())]),
-    );
+    let (status, sealed) = send_json(http_port, "POST", &format!("/drafts/{draft_id}/seal"), &seal_body());
     assert_eq!(status, 200, "seal the draft carrying the authored catalog: {sealed:?}");
 
     let mut store = SqliteStore::open(store_path).unwrap();
@@ -983,13 +913,9 @@ fn assert_answer_door_binds_its_question(http_port: u16, bloom_id: &str) {
 #[test]
 fn grant_route_carries_the_selected_count_and_refuses_concurrent_work() {
     run_with_bloomery("grant_route_carries_the_selected_count_and_refuses_concurrent_work", |http_port| {
-        let draft_id = draft_with(http_port, None);
-        let (status, sealed) = send_json(
-            http_port,
-            "POST",
-            &format!("/drafts/{draft_id}/seal"),
-            &seal_body(vec![projection(&["docs/guide/x.md"], complete())]),
-        );
+        let revision = seed_commission(http_port, "wp-1", &["docs/guide/**"]);
+        let draft_id = draft_with(http_port, revision, None);
+        let (status, sealed) = send_json(http_port, "POST", &format!("/drafts/{draft_id}/seal"), &seal_body());
         assert_eq!(status, 200, "seal admits: {sealed:?}");
         let bloom_id = bloom_hex(&sealed["outcome"]["Sealed"]);
         let path = format!("/blooms/{bloom_id}/grant");

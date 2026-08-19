@@ -77,11 +77,26 @@ mod correspondence;
 pub use correspondence::SqliteCorrespondence;
 
 #[cfg(feature = "runtime")]
+mod adr;
+#[cfg(feature = "runtime")]
+pub use adr::{AdrBackend, AdrError, AdrView};
+
+#[cfg(feature = "runtime")]
+mod commission;
+#[cfg(feature = "runtime")]
+pub use commission::{
+    CancelCommission, CancelCommissionResult, CommissionBackend, CommissionError, CommissionHead, CommissionView,
+    CreateCommission, CreateCommissionResult, ListCommissions, ListCommissionsResult, ListedCommission, LoadCommission,
+    LoadCommissionResult, RecordCommissionApproval, RecordCommissionApprovalResult, RecordCommissionProjection,
+    RecordCommissionProjectionResult, WriteScopeRevision, WriteScopeRevisionResult,
+};
+
+#[cfg(feature = "runtime")]
 mod runtime;
 #[cfg(feature = "runtime")]
 pub use runtime::{
     AppendOutcome, CommitOutcome, JournalWrite, OutstandingOrder, ProofFactRow, ProofFactWrite, RecordOutcome,
-    SealOutcome, SqliteStore, StoreBackend, StoreCapabilityState, StudyRow,
+    SealOutcome, SqliteStore, StoreBackend, StoreCapabilityState, StudyRow, now_unix_millis,
 };
 
 #[cfg(all(test, feature = "runtime"))]

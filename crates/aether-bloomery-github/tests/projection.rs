@@ -7,8 +7,8 @@
 #![allow(clippy::unwrap_used)]
 
 use aether_bloomery::{
-    BloomId, BloomStatus, BloomView, Digest, Evidence, EvidenceKind, LandingReceipt, MemberView, PendingDecisionView,
-    ProjectedReceipt, ProjectionBackend, ResolutionClaim, StageId, ViewDocument, WorkpieceId,
+    BloomId, BloomStatus, BloomView, CommissionProjection, Digest, Evidence, EvidenceKind, LandingReceipt, MemberView,
+    PendingDecisionView, ProjectedReceipt, ProjectionBackend, ResolutionClaim, StageId, ViewDocument, WorkpieceId,
 };
 use aether_bloomery_github::{GithubProjection, landing_branch, testing::FakeGithub};
 
@@ -49,6 +49,7 @@ fn member(number: u64, revision: u8) -> MemberView {
         machinery_rolls: 0,
         machinery_budget: 0,
         wedge_cause: None,
+        cursor: None,
     }
 }
 
@@ -62,6 +63,7 @@ fn one_bloom(id: BloomId, members: Vec<MemberView>) -> ViewDocument {
         executor_fault: None,
         review_park: None,
         composition: None,
+        operator_hold: None,
     };
     ViewDocument { mainline: digest(0), observed: digest(0), spend_quiesce: None, blooms: vec![bloom] }
 }
@@ -272,4 +274,87 @@ fn a_deleted_comment_reappears_on_the_next_reconcile() {
     let rebuilt = projection.client().comment_ids_on(MEMBER_A);
     assert_eq!(rebuilt.len(), 1, "the deleted projection was rebuilt from the view document alone");
     assert_ne!(rebuilt[0], victim, "the rebuilt comment is a fresh object");
+}
+
+fn commission(workpiece: &str, recorded_issue: Option<u64>) -> CommissionProjection {
+    CommissionProjection {
+        workpiece: WorkpieceId(workpiece.to_owned()),
+        intent: digest(1),
+        scope_revision: Some(digest(2)),
+        approval_signer: Some("operator".to_owned()),
+        approval_digest: Some(digest(3)),
+        status: "open".to_owned(),
+        recorded_issue,
+    }
+}
+
+#[test]
+fn reconciling_a_commission_twice_creates_one_issue() {
+    // Idempotency is find-by-marker then recorded number. A second pass that
+    // created again would duplicate the replica; a pass that forgot the
+    // marker would do the same after a crash between create and persist.
+    let projection = GithubProjection::new(FakeGithub::new());
+    let first = projection.project_commission(&commission("wp-1", None)).expect("first create");
+    let second = projection.project_commission(&commission("wp-1", None)).expect("second reconcile");
+
+    assert_eq!(first, second, "the second pass must reuse the created number");
+    assert_eq!(projection.client().issue_count(), 1, "reconciling twice creates one issue");
+    let recorded = projection.project_commission(&commission("wp-1", Some(first))).expect("recorded reconcile");
+    assert_eq!(recorded, first);
+    assert_eq!(projection.client().issue_count(), 1);
+}
+
+#[test]
+fn a_human_edit_of_a_replica_is_overwritten_and_never_read() {
+    // The plausible bug: reading the live GitHub title/body as input, or
+    // skipping the overwrite when the marker still matches the pre-edit
+    // digest, would leave operator prose as the replica.
+    let projection = GithubProjection::new(FakeGithub::new());
+    let number = projection.project_commission(&commission("wp-1", None)).expect("create");
+    projection.client().edit_issue(number, "a person renamed this", "a person rewrote the body");
+
+    projection.project_commission(&commission("wp-1", Some(number))).expect("overwrite");
+
+    let title = projection.client().issue_title(number).expect("the replica still exists");
+    let body = projection.client().issue_body(number).expect("the replica still exists");
+    assert!(title.contains("wp-1"), "the title is rendered from the commission: {title}");
+    assert!(!title.contains("a person renamed this"), "the human title is not kept: {title}");
+    assert!(body.contains("do not edit"), "the replica notice is restored: {body}");
+    assert!(!body.contains("a person rewrote the body"), "the human body is not read: {body}");
+    assert!(body.contains("operator"), "the approval signer is rendered: {body}");
+}
+
+#[test]
+fn the_projector_will_not_write_title_or_body_to_an_issue_it_did_not_create() {
+    // Adoption is the hole the 2026-08-16 amendment closes. A workpiece that
+    // looks like issue-42 must not retitle the human object already numbered
+    // 42 — the projector creates its own replica instead.
+    let fake = FakeGithub::new();
+    fake.seed_issue_with_title(42, "human title", "human body");
+    let projection = GithubProjection::new(fake);
+
+    let created = projection.project_commission(&commission("issue-42", None)).expect("create a replica");
+
+    assert_ne!(created, 42, "the projector must not adopt the pre-existing number");
+    assert_eq!(projection.client().issue_title(42).as_deref(), Some("human title"));
+    assert_eq!(projection.client().issue_body(42).as_deref(), Some("human body"));
+    assert_eq!(projection.client().issue_count(), 2, "a new replica is created beside the human issue");
+    let replica = projection.client().issue_body(created).expect("the replica exists");
+    assert!(replica.contains("do not edit"), "the created object is the replica: {replica}");
+}
+
+#[test]
+fn a_landed_commission_closes_only_the_owned_replica() {
+    // Close is best-effort lifecycle of the replica, not of a human issue the
+    // workpiece id happens to resemble.
+    let fake = FakeGithub::new();
+    fake.seed_issue(7, "human");
+    let projection = GithubProjection::new(fake);
+    let mut landed = commission("issue-7", None);
+    landed.status = "landed".to_owned();
+    let created = projection.project_commission(&landed).expect("create and close");
+
+    assert_ne!(created, 7);
+    assert_eq!(projection.client().issue_is_closed(7), Some(false), "the human issue stays open");
+    assert_eq!(projection.client().issue_is_closed(created), Some(true), "the replica closes");
 }

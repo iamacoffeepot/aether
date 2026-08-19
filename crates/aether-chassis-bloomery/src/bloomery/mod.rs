@@ -17,8 +17,12 @@ mod intake;
 #[cfg(feature = "github")]
 mod mirror;
 mod outbox;
+#[cfg(feature = "github")]
+mod replica;
 // Crate-visible: the control core runs the same sidecar for its mainline
 // observer, and that cap lives outside this module.
+#[cfg(feature = "github")]
+mod local_landing;
 pub(crate) mod poll_timer;
 #[cfg(feature = "github")]
 mod reactor;
@@ -40,7 +44,7 @@ pub use approve::{
 };
 pub use chassis::{BloomeryChassis, BloomeryEnv, DEFAULT_RPC_PORT, RpcPortConfig};
 pub use cli::BloomeryCli;
-pub use config::{CoordinatorConfig, CoordinatorOverlay};
+pub use config::{CoordinatorConfig, CoordinatorOverlay, MissingWriterMarker};
 #[cfg(feature = "github")]
 pub use config::{GithubConnectionConfig, GithubConnectionOverlay};
 pub use construct::{CONSTRUCT_IMPLEMENT_COMMAND, dispatch_model};
@@ -63,7 +67,7 @@ pub use intake::{
 pub use mirror::ProjectionShell;
 pub use outbox::TopicOutbox;
 #[cfg(feature = "github")]
-pub(crate) use reactor::default_candidate_push;
+pub(crate) use reactor::candidate_push_at;
 #[cfg(feature = "github")]
 pub use reactor::{
     CandidatePush, ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, ClaimReleaseReactorState, ClaimReleaseTick,
@@ -77,6 +81,8 @@ pub use reactor::{
 pub use repair::{CandidateSource, PrepareError, prepare_candidate};
 pub use repair::{candidate_tree_digest, capture_commit_digest};
 #[cfg(feature = "github")]
+pub use replica::{SourceReplicaShell, github_push_url, writer_marker_present};
+#[cfg(feature = "github")]
 pub use source::SourceShell;
 #[cfg(feature = "github")]
 pub use study::{
@@ -87,8 +93,13 @@ pub use study::{
 pub use testing::{ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload, ScriptedVerdict};
 #[cfg(feature = "runtime")]
 pub use verify::{
-    Attribution, AttributionError, AttributionRequest, BaseProbe, BaseRepairWorkpiece, RepairBoard,
-    attribute_gate_failure, consult_proof_fact, record_proof_facts,
+    Accumulation, Attribution, AttributionError, AttributionRequest, BaseProbe, BaseRepairWorkpiece, BatchBisect,
+    BatchComposer, BatchContext, BatchFailure, BatchFailureHooks, BatchGate, BatchMember, BatchReport, BatchRestart,
+    BloomDisposition, CoverageEntry, CoverageMap, CoverageStatus, GateOutcome, Land, LandProbe, MemberFate,
+    MissingCoverage, RepairBoard, RollDecision, RollHold, RunningGate, SurfaceOverlap, SweepContext, SweepDecision,
+    SweepOutcome, TaintSet, TestClosure, UnknownFact, attribute_gate_failure, bisect_land_order, bloom_disposition,
+    consult_proof_fact, coverage_map, decide_accumulation, decide_roll, decide_sweep, record_proof_facts,
+    repair_landed, run_batch_gate, run_sweep, unknowns,
 };
 pub use verify::{
     ClosureKey, ClosureKeyError, DiscriminatedFact, DiscriminatedFacts, HostClass, ProofResult, ProofSource,

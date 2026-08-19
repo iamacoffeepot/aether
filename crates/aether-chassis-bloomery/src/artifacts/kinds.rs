@@ -78,3 +78,60 @@ pub enum GetResult {
         error: ArtifactsError,
     },
 }
+
+/// A REST artifact range. `decoded` asks the reply route to resolve a known
+/// kind from the full bytes; otherwise `bytes` is already the requested slice.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.artifacts.get_range")]
+pub struct GetRange {
+    /// Content digest, 64 hex characters.
+    pub digest: String,
+    /// Byte offset into the artifact.
+    pub offset: u64,
+    /// Applied length (already clamped by the HTTP edge).
+    pub limit: u64,
+    /// Resolve a known kind instead of returning raw bytes.
+    pub decoded: bool,
+    /// Clamp notice to echo onto the HTTP envelope.
+    pub notice: Option<String>,
+}
+
+/// Reply to [`GetRange`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.artifacts.get_range_result")]
+pub enum GetRangeResult {
+    /// The artifact was found.
+    Ok {
+        /// Echo of the requested digest.
+        digest: String,
+        /// Full bytes when [`GetRange::decoded`] is set, otherwise the slice.
+        #[serde(with = "aether_data::bytes")]
+        bytes: Vec<u8>,
+        /// Full artifact length.
+        total: u64,
+        /// Echo of [`GetRange::offset`].
+        offset: u64,
+        /// Echo of [`GetRange::limit`].
+        limit: u64,
+        /// Echo of [`GetRange::decoded`].
+        decoded: bool,
+        /// Echo of [`GetRange::notice`].
+        notice: Option<String>,
+        /// True when the returned slice is shorter than the artifact.
+        truncated: bool,
+    },
+    /// `offset` is at or past the end of the artifact.
+    Unsatisfiable {
+        /// Echo of the requested digest.
+        digest: String,
+        /// Full artifact length.
+        total: u64,
+    },
+    /// No artifact is stored under that digest.
+    Err {
+        /// Echo of the requested digest.
+        digest: String,
+        /// Why the get failed.
+        error: ArtifactsError,
+    },
+}

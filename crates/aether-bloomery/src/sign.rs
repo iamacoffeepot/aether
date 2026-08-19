@@ -70,6 +70,12 @@ pub enum AuthorityDoor {
     /// [`ground_instruction`](crate::manifest) enforces that by grounding only
     /// on a recorded authority whose door is this one.
     Ground,
+    /// Cancelling an open commission, bound to that commission's intent digest.
+    /// Appended past [`Self::Ground`] so existing door discriminants stay put.
+    Cancel,
+    /// Accepting an architecture decision record, bound to that ADR's digest.
+    /// Appended past [`Self::Cancel`] so existing door discriminants stay put.
+    Accept,
 }
 
 /// The subject an author signature actually covers (ADR-0182): the door, the

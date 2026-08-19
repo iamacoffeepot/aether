@@ -20,15 +20,13 @@
 //! array on the way in and render hex on the way out — so a body agrees with
 //! the path segments beside it without any type in this file saying so.
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "github")]
 use aether_bloomery::{BloomId, ClaimHolder, ClaimRefKind};
 use aether_bloomery::{
-    CandidateRef, ConfigRegistry, Digest, Disposition, Event, Forecast, MemberDependency, Membership, Outcome, StageId,
-    Statement, Workpiece, WorkpieceId,
+    CandidateRef, ConfigRegistry, Digest, Disposition, Event, Forecast, MemberDependency, Membership, Outcome,
+    ScopeRevision, StageId, Statement, Workpiece, WorkpieceId,
 };
 
 use crate::bloomery::{AdrTouch, Completeness};
@@ -43,10 +41,10 @@ pub struct DraftView {
     pub draft: aether_bloomery::BloomDraft,
 }
 
-/// `GET /workpieces` — every staged workpiece.
+/// `GET /workpieces` — every durable open commission that has a current revision.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkpiecesView {
-    /// The staged workpieces, in id order.
+    /// The open commissions, materialized as workpieces, in id order.
     pub workpieces: Vec<Workpiece>,
 }
 
@@ -75,14 +73,13 @@ pub struct DraftPatch {
     pub forecast: Option<Forecast>,
 }
 
-/// The seal-time scope projection an operator supplies per draft membership so
-/// the pre-seal approve gate (issue #3583, the enforcement half of #3571) can
-/// decide the member's admission. It mirrors the gate's
+/// The seal-time scope projection the store-backed commission reader
+/// materializes per draft membership so the pre-seal approve gate (issue
+/// #3583 / #5048) can decide the member's admission. It mirrors the gate's
 /// [`AdmissionRequest`](crate::bloomery::AdmissionRequest) inputs, keyed
 /// by `{workpiece, scope_revision}` so the host matches it to the exact draft
-/// proposal. These are seal-time-only inputs the gate consumes; they are never
-/// folded into the immutable sealed `BloomSpec` — the `SealRequest` is their only
-/// home (ADR-0150; the authenticated operator harness attests them).
+/// proposal. These are reconstructed from the frozen scope revision and
+/// stored approval — they are never taken from the seal request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemberProjection {
     /// The workpiece this projection describes — matches a draft proposal's
@@ -109,29 +106,20 @@ pub struct MemberProjection {
 
 /// `POST /drafts/{id}/seal` body — optional. The idempotency key defaults to
 /// the sealed bloom's own id, so re-POSTing the same seal is a no-op duplicate.
+///
+/// Scope, approval, description, and completeness are not fields here: the
+/// door loads them from the commission store (#5048). A body that still
+/// carries `projections` or `descriptions` is accepted and those fields are
+/// ignored, so a caller cannot override the signed revision.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SealRequest {
     /// Override the admit idempotency key; defaults to the sealed bloom id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
-    /// The per-member scope projections the pre-seal approve gate decides over
-    /// (issue #3583). Every draft proposal must resolve one, matched by
-    /// `{workpiece, scope_revision}`; a proposal with no projection fails closed
-    /// (the seal is refused), so an empty list refuses any non-empty draft.
-    #[serde(default)]
-    pub projections: Vec<MemberProjection>,
-    /// The operator-supplied, per-member work-order descriptions (#3595), keyed
-    /// by workpiece id. Advisory model context the coordinator persists at seal
-    /// so the construct lane's prompt can name a `## Task` — it binds no evidence
-    /// and never enters the content-addressed spec, so it rides the seal *request*
-    /// rather than the sealed draft. A member absent from the map dispatches with
-    /// no task (the subject-only prompt), never blocking the seal.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub descriptions: BTreeMap<String, String>,
     /// Declared member-dependency edges (ADR-0196): `member` depends on
     /// `depends_on`. The door unions these with derived overlap-ordering
-    /// edges and refuses a cycle or a non-member. Empty (the default) is
-    /// today's edgeless seal.
+    /// edges and with edges frozen on each member's scope revision. Empty
+    /// (the default) is today's edgeless seal plus whatever the store named.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edges: Vec<MemberDependency>,
 }
@@ -145,30 +133,12 @@ pub struct SupersedeRequest {
     /// Override the admit idempotency key; defaults to the successor bloom id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
-    /// One projection per successor member, the same shape [`SealRequest`]
-    /// carries. Supersession is a second door into `active` claiming a fresh
-    /// membership set, so it runs the same approve gate a first seal does and
-    /// takes the gate-authored approval from it (#4638) — a draft's own
-    /// `approval` is a placeholder either way.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub projections: Vec<MemberProjection>,
-    /// The successor's per-member work-order descriptions, keyed by workpiece id
-    /// — the same advisory model context [`SealRequest::descriptions`] carries,
-    /// and required here for the same reason (#4631).
-    ///
-    /// Descriptions are stored per `(bloom, workpiece)`, and a successor is a new
-    /// bloom id by construction, so the predecessor's rows do not resolve for it —
-    /// not even for the members the supersession carries unchanged. Omitting them
-    /// dispatches every member of the successor on a subject-only prompt, which
-    /// warns and continues rather than failing, so the run looks normal and only
-    /// its quality collapses.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub descriptions: BTreeMap<String, String>,
     /// Declared member-dependency edges — the same optional list [`SealRequest::edges`]
     /// carries. The door unions these with derived overlap-ordering edges and
+    /// with edges frozen on each successor member's scope revision, then
     /// refuses a cycle or a non-member. Empty (the default) is the edgeless
-    /// drop-a-subtree supersede: the reducer keeps the predecessor's remaining
-    /// member graph.
+    /// drop-a-subtree supersede plus whatever the store named: the reducer
+    /// keeps the predecessor's remaining member graph.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edges: Vec<MemberDependency>,
 }
@@ -303,11 +273,49 @@ pub struct JournalEntry {
     pub decider: String,
 }
 
-/// `GET /journal` — the whole journal, oldest first, decoded.
+/// `GET /journal` — one bounded page of decoded records.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JournalView {
-    /// Every journaled event, in sequence order.
+    /// The page of journaled events, in the requested order.
     pub records: Vec<JournalEntry>,
+    /// How many records match the filter (the whole journal, or one bloom).
+    pub total_matched: u64,
+    /// How many records this page carries.
+    pub shown: u64,
+    /// True when more matching records remain after this page.
+    pub truncated: bool,
+    /// Exclusive cursor for the next page. Absent when [`truncated`](Self::truncated)
+    /// is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_from_sequence: Option<u64>,
+    /// Set when the caller named a `limit` above the clamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
+}
+
+/// `GET /artifacts/{digest}/decoded` — a known kind, or a raw range.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecodedArtifactView {
+    /// The content-address domain of the resolved type, or `null`.
+    pub kind: Option<String>,
+    /// The decoded value, present only when [`kind`](Self::kind) is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+    /// A raw byte range, present only when no known type matched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<Vec<u8>>,
+    /// Offset of [`bytes`](Self::bytes) when this is a raw fallback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u64>,
+    /// Full artifact length when this is a raw fallback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    /// Whether the raw fallback was truncated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+    /// Set when the caller named a `limit` above the clamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 #[cfg(feature = "github")]
@@ -376,6 +384,211 @@ pub struct ReleaseAcceptedView {
 pub struct ErrorView {
     /// A human-readable failure reason.
     pub error: String,
+}
+
+/// `GET /blooms/{id}/dispatches` — rollup attempts plus live outstanding orders.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BloomDispatchesView {
+    /// One row per attempt, oldest first.
+    pub dispatches: Vec<BloomDispatchView>,
+}
+
+/// One attempt on a bloom: a completed rollup row and/or a still-live order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BloomDispatchView {
+    /// Host nonce (`dispatch-` / `redispatch-`) when known.
+    pub nonce: String,
+    /// Member workpiece, empty for a bloom-wide stage.
+    pub workpiece: String,
+    /// Stage this attempt ran.
+    pub stage: StageId,
+    /// 1-based rank among this workpiece+stage pair, oldest first.
+    pub attempt: u32,
+    /// Lane status when evidence is still on disk; absent while in flight or swept.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<String>,
+    /// Study cost in micro-USD. `None` when no study record exists — never a
+    /// synthesized zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<u64>,
+    /// Whether `{nonce}-evidence` is still on disk.
+    pub evidence_retained: bool,
+}
+
+/// `GET /dispatches/{nonce}` — one dispatch's evidence header.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DispatchEvidenceView {
+    /// The nonce that matched (may be the alternate prefix).
+    pub nonce: String,
+    /// Whether the evidence directory is still on disk.
+    pub retained: bool,
+    /// Set when the journal names the nonce but the directory is gone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
+    /// Public assistant prose, independently capped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assistant_text: Option<String>,
+    /// True when [`assistant_text`](Self::assistant_text) was truncated to the cap.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub assistant_text_truncated: bool,
+    /// Construct/refine commit message, independently capped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_message: Option<String>,
+    /// True when [`commit_message`](Self::commit_message) was truncated to the cap.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub commit_message_truncated: bool,
+    /// Process identity recorded beside the evidence, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process: Option<DispatchProcessView>,
+    /// File names in the evidence directory, sorted, bounded.
+    pub files: Vec<String>,
+}
+
+/// The pid / pgid / starttime / boot id a lane recorded at spawn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DispatchProcessView {
+    pub pid: u32,
+    pub pgid: u32,
+    pub starttime: u64,
+    pub boot_id: String,
+}
+
+/// A line-snapped page of `transcript.jsonl` or `prompt.md`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DispatchFilePage {
+    /// Complete lines in this page. A line longer than the per-line cap is
+    /// truncated here; the cursor still advances past the whole line.
+    pub lines: Vec<String>,
+    /// Byte offset this page starts at (snapped to a line boundary).
+    pub cursor: u64,
+    /// Byte offset to pass as the next `cursor`. Absent at the current end.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<u64>,
+    /// The file's length at the moment of the read — follow-tail compares this.
+    pub length: u64,
+    /// Set when the caller named a `limit` above the clamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
+}
+
+/// `GET /logs/coordinator` — one bounded page of journald output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoordinatorLogsView {
+    /// Filtered entries, oldest first.
+    pub entries: Vec<CoordinatorLogEntry>,
+    /// Cursor to thread as `cursor` on the next call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// True when more matching entries remain after this page.
+    pub truncated: bool,
+    /// Set when the caller named a `limit` above the clamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
+}
+
+/// `POST /commissions` body — the workpiece id plus its intent statement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateCommissionRequest {
+    /// The workpiece this commission is.
+    pub id: WorkpieceId,
+    /// The intent statement named by `commissions.intent`.
+    pub intent: Statement,
+}
+
+/// `POST /commissions` reply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommissionCreatedView {
+    /// The workpiece this commission is.
+    pub id: WorkpieceId,
+    /// Digest of the stored intent statement.
+    pub intent: Digest,
+}
+
+/// One commission head as the list and show routes render it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommissionHeadView {
+    /// The workpiece this commission is.
+    pub id: WorkpieceId,
+    /// Digest of the stored intent statement.
+    pub intent: Digest,
+    /// Digest of the current scope revision, when one has been written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_revision: Option<Digest>,
+    /// Store-side chain position of the current revision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_ordinal: Option<u64>,
+    /// Lifecycle flag. Not signed.
+    pub status: String,
+}
+
+/// `GET /commissions` — every matching commission head.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommissionsView {
+    /// Matching commissions, in workpiece-id order.
+    pub commissions: Vec<CommissionHeadView>,
+}
+
+/// `GET /commissions/{id}` — the head, current revision, and current approvals.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommissionShowView {
+    /// The workpiece this commission is.
+    pub id: WorkpieceId,
+    /// Digest of the stored intent statement.
+    pub intent: Digest,
+    /// Digest of the current scope revision, when one has been written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_revision: Option<Digest>,
+    /// Store-side chain position of the current revision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_ordinal: Option<u64>,
+    /// Lifecycle flag. Not signed.
+    pub status: String,
+    /// The current revision decoded from its canonical bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current: Option<ScopeRevision>,
+    /// Approval statements stored for the current revision, in insert order.
+    pub approvals: Vec<Statement>,
+}
+
+/// `POST /commissions/{id}/revisions` reply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopeRevisionWrittenView {
+    /// Digest of the stored revision.
+    pub digest: Digest,
+}
+
+/// `POST /commissions/{id}/approvals` reply — the stored statement plus the
+/// evidence form the seal path consumes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommissionApprovalView {
+    /// Digest of the stored approval statement.
+    pub digest: Digest,
+    /// The verified-statement evidence bound to the approved scope.
+    pub evidence: aether_bloomery::Evidence,
+}
+
+/// `POST /commissions/{id}/cancel` reply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommissionCancelledView {
+    /// Digest of the stored cancel statement.
+    pub digest: Digest,
+    /// The workpiece this commission is.
+    pub id: WorkpieceId,
+    /// Always `"cancelled"`.
+    pub status: String,
+}
+
+/// One journald entry as the coordinator log route renders it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoordinatorLogEntry {
+    /// Journal realtime timestamp, Unix microseconds when journald provides it.
+    pub timestamp_unix_micros: u64,
+    /// Canonical level string: `trace` / `debug` / `info` / `warn` / `error`.
+    pub level: String,
+    /// The MESSAGE field.
+    pub message: String,
+    /// journald `__CURSOR`, used as the page cursor.
+    pub cursor: String,
 }
 
 #[cfg(test)]

@@ -23,17 +23,18 @@ use aether_data::wire::to_vec;
 use aether_http::HttpServerResponse;
 use aether_substrate::actor::native::NativeCtx;
 
+use super::commission_reader::admit_member;
 use super::hex::{self, hex_encode};
 use super::response::error_response;
 use super::state::{
-    ApiCapabilityState, MAX_OPEN_SEALS, MAX_SEAL_MEMBERS, PendingSeal, PendingSealSetup, PendingVerify, Routed,
-    SealVerify, admit,
+    ApiCapabilityState, MAX_OPEN_SEALS, MAX_SEAL_MEMBERS, PendingCommissionSeal, PendingCommissionSealSetup,
+    PendingSeal, PendingSealSetup, PendingVerify, Routed, SealCommissionLoad, SealVerify, admit,
 };
 use crate::api::dto::{MemberProjection, SealRequest};
 use crate::bloomery::{AdmissionRequest, Decision, Gate, precheck_statement, verified_statement_approval};
 use crate::control::ControlCore;
 use crate::signing::{SigningCapability, Verify, VerifyResult, authority_bytes};
-use crate::store::{RecordDispatchDescription, StoreCapability};
+use crate::store::{LoadCommission, LoadCommissionResult, RecordDispatchDescription, StoreCapability};
 
 /// Which door a completed seal admits through (#4638): a first seal, or a
 /// supersession of `predecessor`. Both carry the identical [`BloomSpec`] — the
@@ -51,33 +52,15 @@ fn admission_fact(predecessor: Option<BloomId>, spec: BloomSpec, edges: Vec<Memb
 }
 
 impl ApiCapabilityState {
-    /// `POST /drafts/{id}/seal` — run the pre-seal approve gate over every
-    /// membership, then freeze the draft into a `BloomSpec` and admit `Fact::Seal`
-    /// through the control core (issue #3583, the enforcement half of #3571's gate
-    /// library).
+    /// `POST /drafts/{id}/seal` — load each member's commission from the store,
+    /// run the pre-seal approve gate, then freeze the draft into a `BloomSpec`
+    /// and admit `Fact::Seal` (issue #5048, over the #3583 gate).
     ///
-    /// For each draft proposal the operator supplies a
-    /// [`MemberProjection`] in the `SealRequest`,
-    /// matched by `{workpiece, scope_revision}`. The host builds a
-    /// [`Gate::AdmissionRequest`](crate::bloomery::AdmissionRequest) from it and
-    /// runs [`Gate::evaluate`], replacing the proposal's operator-set `approval`
-    /// with the gate-formed one so the seal-time `validate_member_admission`
-    /// admits a policy-authored approval rather than an unchecked assertion.
-    ///
-    /// The gate is fail-closed at every branch: an unresolvable tier policy
-    /// ([`gate_policy`](ApiCapabilityState::gate_policy)), a missing projection,
-    /// a declared-surface glob outside the grammar, or an `Incomplete` verdict
-    /// all **refuse the seal** (`422`) rather than admit. An above-`auto` member
-    /// takes the deferred
-    /// signature-verification path (issue #3599): its projection's
-    /// `signed_statement` is pre-checked synchronously (subject + author
-    /// signature), then its signature is verified through the `aether.signing`
-    /// capability's `Verify` round trip; the seal admits only once every
-    /// above-`auto` member verifies, and a missing / mis-subjected / non-author /
-    /// unverified statement refuses the whole seal (`422`, fail closed) — never
-    /// admitted on the operator's unverified assertion. A seal with any
-    /// above-`auto` member is therefore a deferred route ([`Routed::DeferredSeal`]);
-    /// an all-`auto` draft stays synchronous.
+    /// Draft membership still names the workpiece id and the exact scope
+    /// digest. Everything the gate used to take from the request —
+    /// declared surface, completeness, description, approval — is read from
+    /// the stored revision and its approval rows. A caller-supplied
+    /// projection of the same digest is ignored.
     pub(super) fn seal_draft(&self, ctx: &NativeCtx<'_, Manual>, id: &str, body: &[u8]) -> Routed {
         let (_, draft) = match self.lookup_draft(id) {
             Ok(found) => found,
@@ -87,16 +70,129 @@ impl ApiCapabilityState {
             Ok(request) => request,
             Err(response) => return Routed::Reply(response),
         };
+        self.begin_store_seal(ctx, draft, None, request.idempotency_key, request.edges)
+    }
 
-        self.gate_and_admit(
-            ctx,
+    /// Load every draft member's commission, then [`gate_and_admit`](ApiCapabilityState::gate_and_admit). Both
+    /// admission doors share this so a supersession cannot keep a writable
+    /// projection after seal lost one.
+    pub(super) fn begin_store_seal(
+        &self,
+        ctx: &NativeCtx<'_, Manual>,
+        draft: BloomDraft,
+        predecessor: Option<BloomId>,
+        idempotency_key: Option<String>,
+        edges: Vec<MemberDependency>,
+    ) -> Routed {
+        if draft.proposals.len() > MAX_SEAL_MEMBERS {
+            return Routed::Reply(error_response(
+                422,
+                &format!("draft has {} members; a seal is capped at {MAX_SEAL_MEMBERS}", draft.proposals.len()),
+            ));
+        }
+        if draft.proposals.is_empty() {
+            return self.gate_and_admit(ctx, draft, predecessor, &[], BTreeMap::new(), idempotency_key, &edges);
+        }
+        if self.commission_seals.len() >= MAX_OPEN_SEALS {
+            return Routed::Reply(error_response(429, "outstanding-seal budget exhausted"));
+        }
+        let mut loads = Vec::with_capacity(draft.proposals.len());
+        for proposal in &draft.proposals {
+            let correlation =
+                self.send_tracked(ctx.actor::<StoreCapability>(), &LoadCommission { id: proposal.workpiece.0.clone() });
+            loads.push((correlation, proposal.workpiece.clone()));
+        }
+        Routed::DeferredCommissionSeal(Box::new(PendingCommissionSealSetup {
             draft,
-            None,
-            &request.projections,
-            request.descriptions,
-            request.idempotency_key,
-            &request.edges,
-        )
+            predecessor,
+            idempotency_key,
+            edges,
+            loads,
+        }))
+    }
+
+    /// Join one member's `LoadCommission` into its held seal. The last load
+    /// materializes store projections and continues into the gate.
+    pub(super) fn resolve_seal_commission_load(&mut self, ctx: &NativeCtx<'_, Manual>, result: LoadCommissionResult) {
+        let correlation = ctx.reply_target().correlation_id;
+        let Some(SealCommissionLoad { seal, workpiece }) = self.seal_commission_loads.remove(&correlation) else {
+            return;
+        };
+        let Some(pending) = self.commission_seals.get_mut(&seal) else {
+            return;
+        };
+        pending.loaded.insert(workpiece.0, result);
+        pending.remaining -= 1;
+        if pending.remaining > 0 {
+            return;
+        }
+        let PendingCommissionSeal { inbound, draft, predecessor, idempotency_key, edges, mut loaded, .. } =
+            self.commission_seals.remove(&seal).expect("seal present; just mutated it");
+        match self.materialize_and_admit(ctx, draft, predecessor, idempotency_key, edges, &mut loaded) {
+            Routed::Reply(response) => {
+                inbound.reply(&response);
+            }
+            Routed::Admit(request) => {
+                let correlation = self.send_tracked(ctx.actor::<ControlCore>(), &request);
+                self.pending.insert(correlation, inbound);
+            }
+            Routed::DeferredSeal(setup) => self.begin_deferred_seal(inbound, *setup),
+            _ => {
+                inbound.reply(&error_response(500, "unexpected seal disposition after commission load"));
+            }
+        }
+    }
+
+    /// Tear down a store-backed seal whose commission load never answered.
+    pub(super) fn fail_commission_seal(&mut self, seal: u64, status: u16, message: &str) {
+        let Some(PendingCommissionSeal { inbound, .. }) = self.commission_seals.remove(&seal) else {
+            return;
+        };
+        self.seal_commission_loads.retain(|_, load| load.seal != seal);
+        inbound.reply(&error_response(status, message));
+    }
+
+    pub(super) fn begin_deferred_seal(&mut self, inbound: aether_substrate::InboundMail, setup: PendingSealSetup) {
+        let PendingSealSetup { gated, predecessor, descriptions, idempotency_key, edges, verifications } = setup;
+        let seal = self.next_seal;
+        self.next_seal += 1;
+        let remaining = verifications.len();
+        for verify in verifications {
+            let PendingVerify { correlation, member_index, statement, .. } = verify;
+            self.seal_verifications.insert(correlation, SealVerify { seal, member_index, statement });
+        }
+        self.seals
+            .insert(seal, PendingSeal { inbound, predecessor, gated, descriptions, idempotency_key, edges, remaining });
+    }
+
+    fn materialize_and_admit(
+        &self,
+        ctx: &NativeCtx<'_, Manual>,
+        draft: BloomDraft,
+        predecessor: Option<BloomId>,
+        idempotency_key: Option<String>,
+        mut edges: Vec<MemberDependency>,
+        loaded: &mut BTreeMap<String, LoadCommissionResult>,
+    ) -> Routed {
+        let mut projections = Vec::with_capacity(draft.proposals.len());
+        let mut descriptions = BTreeMap::new();
+        for proposal in &draft.proposals {
+            let Some(result) = loaded.remove(&proposal.workpiece.0) else {
+                return Routed::Reply(error_response(
+                    500,
+                    &format!("commission load for {} was not joined", proposal.workpiece.0),
+                ));
+            };
+            match admit_member(proposal.scope_revision, result) {
+                Ok(admitted) => {
+                    descriptions.insert(admitted.workpiece.id.0.clone(), admitted.description);
+                    edges.extend(admitted.edges);
+                    projections.push(admitted.projection);
+                }
+                Err(error) => return Routed::Reply(error.response()),
+            }
+        }
+        self.gate_and_admit(ctx, draft, predecessor, &projections, descriptions, idempotency_key, &edges)
     }
 
     /// The gate-then-admit core both doors share (#4638): resolve every
@@ -225,7 +321,7 @@ impl ApiCapabilityState {
                     authority: authority_bytes(AuthorityDoor::Approve, scope_revision),
                 },
             );
-            verifications.push(PendingVerify { correlation, member_index, scope_revision, statement });
+            verifications.push(PendingVerify { correlation, member_index, statement });
         }
         Routed::DeferredSeal(Box::new(PendingSealSetup {
             gated,
@@ -349,8 +445,7 @@ impl ApiCapabilityState {
     /// false` verdict or an `Err` refuses the whole seal (`422`, fail closed) and
     /// tears down its sibling correlations.
     pub(super) fn resolve_seal_verify(&mut self, ctx: &NativeCtx<'_, Manual>, correlation: u64, result: VerifyResult) {
-        let Some(SealVerify { seal, member_index, scope_revision, statement }) =
-            self.seal_verifications.remove(&correlation)
+        let Some(SealVerify { seal, member_index, statement, .. }) = self.seal_verifications.remove(&correlation)
         else {
             return;
         };
@@ -361,8 +456,8 @@ impl ApiCapabilityState {
                 let Some(pending) = self.seals.get_mut(&seal) else {
                     return;
                 };
-                pending.gated.proposals[member_index].approval =
-                    verified_statement_approval(scope_revision, &statement);
+                let subject = pending.gated.proposals[member_index].subject();
+                pending.gated.proposals[member_index].approval = verified_statement_approval(subject, &statement);
                 pending.remaining -= 1;
                 if pending.remaining > 0 {
                     return;
@@ -494,18 +589,20 @@ fn resolve_seal_memberships(
                     return Err(error_response(
                         422,
                         &format!(
-                            "member {member} resolves above auto but carries no signed statement; seal fails closed"
+                            "member {member} stored approval does not satisfy the signer policy; seal fails closed"
                         ),
                     ));
                 };
-                if let Err(rejected) = precheck_statement(proposal.subject(), statement) {
+                if let Err(rejected) = precheck_statement(proposal.scope_revision, statement) {
                     return Err(error_response(
                         422,
-                        &format!("member {member} signed statement rejected: {rejected:?}; seal fails closed"),
+                        &format!(
+                            "member {member} stored approval failed signer policy: {rejected:?}; seal fails closed"
+                        ),
                     ));
                 }
                 sealed_proposals.push(proposal.clone());
-                pending_verifications.push((index, proposal.subject(), statement.clone()));
+                pending_verifications.push((index, proposal.scope_revision, statement.clone()));
             }
         }
     }
@@ -514,11 +611,13 @@ fn resolve_seal_memberships(
 
 /// Resolve the seal's member-dependency graph (ADR-0196): declared edges
 /// unioned with one ordering edge per overlapping declared-surface pair, in
-/// seal-listed order. A cycle, an edge naming a non-member, or a member with
-/// no matching projection is a fail-closed `422` — the graph is decided here,
-/// before any admit. A missing projection is a malformed request, not an
+/// canonical workpiece order. A cycle, an edge naming a non-member, or a member
+/// with no matching projection is a fail-closed `422` — the graph is decided
+/// here, before any admit. A missing projection is a malformed request, not an
 /// edgeless member: dropping it would derive a graph that pretends the member
-/// was never there.
+/// was never there. The door matches projections by `{workpiece, scope_revision}`
+/// and leaves order independence to the resolver, so a permuted request of the
+/// same member set journals the graph its canonical [`BloomSpec`] implies.
 fn resolve_seal_graph(
     members: &[Membership],
     projections: &[MemberProjection],
@@ -765,20 +864,16 @@ mod tests {
     }
 
     #[test]
-    fn seal_request_descriptions_default_empty_and_parse_per_member() {
-        // The #3595 operator contract: `descriptions` is optional (a body without
-        // it still seals, not a 400 — the `#[serde(default)]` guard), and when
-        // present it maps each workpiece id to its work-order text. A regression
-        // dropping the default would break every description-less seal.
-        let none: SealRequest =
-            parse_optional_body(br#"{"idempotency_key":"k"}"#).expect("no descriptions still parses");
-        assert!(none.descriptions.is_empty(), "an absent descriptions map defaults empty rather than erroring");
-
-        let with: SealRequest =
-            parse_optional_body(br#"{"descriptions":{"wp-a":"build the thing","wp-b":"and the other"}}"#)
-                .expect("a descriptions map parses");
-        assert_eq!(with.descriptions.get("wp-a").map(String::as_str), Some("build the thing"));
-        assert_eq!(with.descriptions.get("wp-b").map(String::as_str), Some("and the other"));
+    fn seal_request_ignores_caller_projections_and_descriptions() {
+        // #5048: the compatibility boundary is one cut. A body that still
+        // carries the retired fields must parse, and those fields must not
+        // become a second writable representation of scope or approval.
+        let parsed: SealRequest = parse_optional_body(
+            br#"{"projections":[{"workpiece":"wp-a","scope_revision":[1,2,3]}],"descriptions":{"wp-a":"override"}}"#,
+        )
+        .expect("legacy fields are ignored, not required");
+        assert!(parsed.idempotency_key.is_none());
+        assert!(parsed.edges.is_empty());
     }
 
     #[test]
@@ -830,6 +925,45 @@ mod tests {
         assert_eq!(
             edges,
             [MemberDependency { member: WorkpieceId("wp-b".to_owned()), depends_on: WorkpieceId("wp-a".to_owned()) }]
+        );
+    }
+
+    #[test]
+    fn permuted_request_order_resolves_the_same_graph_as_the_canonical_spec() {
+        // The door matches projections by {workpiece, scope_revision} and
+        // hands the resolver the request's listing. BloomDraft::seal then
+        // sorts the same members into the spec. If derivation followed
+        // request order, two permutations would share a BloomId and
+        // journal opposite edges — the graph would not be a function of
+        // the sealed spec. Three overlapping members so a first/last-only
+        // swap cannot hide a leftover middle-order dependence.
+        let members = [member("wp-c", 3), member("wp-a", 1), member("wp-b", 2)];
+        let projections = [
+            projection("wp-c", 3, &["crates/aether-bloomery/src/values/price.rs"]),
+            projection("wp-a", 1, &["crates/aether-bloomery/**"]),
+            projection("wp-b", 2, &["crates/aether-bloomery/src/values/**"]),
+        ];
+        let reversed_members = [member("wp-b", 2), member("wp-a", 1), member("wp-c", 3)];
+        let reversed_projections = [
+            projection("wp-b", 2, &["crates/aether-bloomery/src/values/**"]),
+            projection("wp-a", 1, &["crates/aether-bloomery/**"]),
+            projection("wp-c", 3, &["crates/aether-bloomery/src/values/price.rs"]),
+        ];
+
+        let forward = resolve_seal_graph(&members, &projections, &[]).expect("acyclic");
+        let reversed = resolve_seal_graph(&reversed_members, &reversed_projections, &[]).expect("acyclic");
+        assert_eq!(forward, reversed, "request order must not change the derived graph");
+
+        let spec_forward = BloomDraft { proposals: members.to_vec(), ..BloomDraft::default() }.seal();
+        let spec_reversed = BloomDraft { proposals: reversed_members.to_vec(), ..BloomDraft::default() }.seal();
+        assert_eq!(spec_forward.id(), spec_reversed.id(), "the same member set seals to one BloomId");
+        assert_eq!(
+            forward,
+            [
+                MemberDependency { member: WorkpieceId("wp-b".to_owned()), depends_on: WorkpieceId("wp-a".to_owned()) },
+                MemberDependency { member: WorkpieceId("wp-c".to_owned()), depends_on: WorkpieceId("wp-a".to_owned()) },
+                MemberDependency { member: WorkpieceId("wp-c".to_owned()), depends_on: WorkpieceId("wp-b".to_owned()) },
+            ]
         );
     }
 
@@ -890,6 +1024,27 @@ mod tests {
             body.contains("crates/foo/**,crates/bar/**"),
             "refusal names the offending glob, not only its valid sibling: {body}"
         );
+    }
+
+    #[test]
+    fn an_above_auto_member_with_only_an_auto_approval_is_signer_policy() {
+        // The store has an approval row, so this is not "absent approval".
+        // The gate still needs a signed statement for a human surface, and
+        // the message must name signer policy so the two refusals stay
+        // distinguishable.
+        let policy = ApprovalPolicy { default: Tier::Human, rules: Vec::new() };
+        let gate = Gate::new(&policy);
+        let members = [member("wp-a", 1)];
+        let projections = [projection("wp-a", 1, &["crates/aether-data/src/lib.rs"])];
+
+        let error = resolve_seal_memberships(&gate, &members, &projections)
+            .expect_err("an auto-only above-auto member must refuse");
+        let body = String::from_utf8_lossy(&error.body);
+        assert_eq!(error.status, 422);
+        assert!(body.contains("signer policy"), "signer-policy refusal: {body}");
+        assert!(!body.contains("no stored approval"), "must not read as absent approval: {body}");
+        assert!(!body.contains("stale"), "must not read as stale: {body}");
+        assert!(!body.contains("malformed"), "must not read as malformed: {body}");
     }
 
     #[test]

@@ -164,6 +164,7 @@ struct PendingRun {
     command: String,
     checkout_hex: String,
     diff_base_hex: Option<String>,
+    seeded_hex: Option<String>,
     evidence_dir: PathBuf,
     profile: Option<ResolvedModel>,
     task: Option<String>,
@@ -189,6 +190,7 @@ impl PendingRun {
             command: &self.command,
             checkout_hex: &self.checkout_hex,
             diff_base_hex: self.diff_base_hex.as_deref(),
+            seeded: self.seeded_hex.as_deref(),
             worktree_dir,
             target_dir,
             build_jobs,
@@ -453,7 +455,10 @@ impl LocalExecutor {
         let lane_program = LaneProgram::parse(&config.local_lane_program);
 
         let backend = Self::new(
-            Arc::new(ProcessTransformRunner::new(identity, lane_program.clone())),
+            Arc::new(
+                ProcessTransformRunner::new(identity, lane_program.clone(), config.lane_repository())
+                    .with_fetch_remote(config.candidate_remote()),
+            ),
             correspondence,
             config.local_worktree_base.clone(),
         )
@@ -562,16 +567,26 @@ impl LocalExecutor {
         // that does not is judged over the working tree. Refused when it does not
         // resolve rather than silently omitted — the omission is invisible at the
         // lane, which then reads an empty working-tree diff as an empty candidate.
-        let diff_base_hex = order
-            .transformation
-            .diff_base
-            .map(|base| {
-                self.correspondence
-                    .resolve_backend_object(&base)?
-                    .ok_or_else(|| LocalExecutorError::UnresolvedDiffBase(order.nonce.clone()))
-                    .map(|object| render_object_hex(&object))
-            })
-            .transpose()?;
+        // A Construct `diff_base` is checkpoint provenance (#5052), not a
+        // range the lane judges. Name the already-resolved checkout as
+        // `--seeded` and withhold the marker from `--diff-base`, or the
+        // model would judge the sealed base's history and the prompt would
+        // stay silent about the untrusted tree.
+        let (diff_base_hex, seeded_hex) = match order.transformation.diff_base {
+            Some(_) if order.transformation.command == CONSTRUCT_IMPLEMENT_COMMAND => {
+                (None, Some(checkout_hex.clone()))
+            }
+            Some(base) => (
+                Some(
+                    self.correspondence
+                        .resolve_backend_object(&base)?
+                        .ok_or_else(|| LocalExecutorError::UnresolvedDiffBase(order.nonce.clone()))
+                        .map(|object| render_object_hex(&object))?,
+                ),
+                None,
+            ),
+            None => (None, None),
+        };
 
         // Harness/model/effort/task ride the model-driven lanes (construct and
         // the review critic), mirroring `transform-model.yml`'s argv; a verify
@@ -593,6 +608,7 @@ impl LocalExecutor {
             command: order.transformation.command.clone(),
             checkout_hex,
             diff_base_hex,
+            seeded_hex,
             evidence_dir,
             profile: profile.cloned(),
             // The work-order description rides the order's transformation (#3595),
@@ -1374,6 +1390,9 @@ impl LocalExecutor {
             failed_verifiers,
             cost: parse_cost(bytes),
             calls: parse_calls(bytes),
+            session_reuse_arm: parse_session_reuse_arm(bytes),
+            session_reuse_saved_micro_usd: parse_session_reuse_saved(bytes),
+            peak_resident_bytes: parse_peak_resident_bytes(bytes),
         }]
     }
 }
@@ -1488,6 +1507,9 @@ fn executor_fault_ref(
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost,
         calls,
+        session_reuse_arm: parse_session_reuse_arm(bytes),
+        session_reuse_saved_micro_usd: parse_session_reuse_saved(bytes),
+        peak_resident_bytes: parse_peak_resident_bytes(bytes),
     }
 }
 
@@ -1988,6 +2010,24 @@ fn parse_cost(bytes: &[u8]) -> Option<StudyCost> {
 
 fn parse_calls(bytes: &[u8]) -> Option<Vec<aether_bloomery::StudyCall>> {
     parse_measured(bytes).and_then(|(_, calls)| calls)
+}
+
+fn parse_session_reuse_arm(bytes: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    value.get("session_reuse")?.get("arm")?.as_str().map(ToOwned::to_owned)
+}
+
+fn parse_session_reuse_saved(bytes: &[u8]) -> Option<u64> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let reuse = value.get("session_reuse")?;
+    let priced = reuse.get("priced_micro_usd")?.as_u64()?;
+    let counterfactual = reuse.get("counterfactual_micro_usd")?.as_u64()?;
+    counterfactual.checked_sub(priced)
+}
+
+fn parse_peak_resident_bytes(bytes: &[u8]) -> Option<u64> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    value.get("peak_resident_bytes")?.as_u64()
 }
 
 /// Whether a construct lane's `evidence.json` byte string shows a **substantive

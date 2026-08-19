@@ -57,9 +57,13 @@ mod blooms;
 mod calibration;
 #[cfg(feature = "github")]
 mod claims;
+mod commission_reader;
+mod commissions;
 mod configs;
 mod drafts;
+mod evidence;
 mod hex;
+mod metrics;
 mod reads;
 mod response;
 mod seal;
@@ -67,14 +71,15 @@ mod state;
 mod workpieces;
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 #[cfg(feature = "github")]
 use std::sync::Arc;
 
+use crate::store::{ListBloomDispatchesResult, LookupDispatchResult};
 use aether_actor::{Manual, runtime};
 use aether_bloomery::{
-    AdmitResult, EnumerateClaimsResult, LoadConfigsResult, QueryResult, ReplayJournal, ReplayJournalResult,
-    ResolvedConfigs,
+    AdmitResult, EnumerateClaimsResult, LoadConfigsResult, MetricsQueryResult, QueryResult, ResolvedConfigs,
+    SpendQueryResult,
 };
 use aether_http as http;
 use aether_http::HttpServerResponse;
@@ -90,18 +95,23 @@ use calibration::calibration_response;
 #[cfg(feature = "github")]
 use claims::{claims_response, release_status_response};
 use configs::{config_response, load_configs};
-use reads::{artifact_response, journal_response};
+use reads::{ArtifactQuery, JournalQuery, artifact_response, journal_response};
 use response::{error_response, json};
 use state::{Routed, SealVerify, VerifyPending, finish};
 
 use super::BloomeryApiCapability;
-use super::dto::WorkpiecesView;
-use crate::artifacts::{Get, GetResult};
+
+use crate::artifacts::{ArtifactsCapabilityState, GetRange, GetRangeResult, resolve_root};
 #[cfg(feature = "github")]
 use crate::bloomery::CandidatePush;
 use crate::bloomery::load_policy;
 use crate::signing::VerifyResult;
-use crate::store::{RecordConfigResult, RecordDispatchDescriptionResult};
+use crate::store::{
+    CancelCommissionResult, CreateCommissionResult, ListCommissionsResult, LoadCommissionResult, PageJournal,
+    PageJournalResult, RecordCommissionApprovalResult, RecordConfigResult, RecordDispatchDescriptionResult,
+    WriteScopeRevisionResult,
+};
+use state::{CommissionHttp, CommissionHttpRender};
 
 /// The claim routes' bodies for a build with no GitHub source runtime: an
 /// immediate `503` rather than a deferral onto a `SourceCapability` mailbox that
@@ -175,6 +185,14 @@ pub struct ApiParams {
     /// then refuses).
     #[cfg(feature = "github")]
     pub pusher: Option<Arc<dyn CandidatePush>>,
+    /// Scratch-worktree base: `{nonce}-evidence` directories live here.
+    pub worktree_base: String,
+    /// Artifacts root used to resolve study cost on the dispatch list. `None`
+    /// leaves every cost `null`.
+    pub artifacts_root: Option<String>,
+    /// Bearer token commission routes require. Empty refuses every commission
+    /// request so an unconfigured host cannot approve work.
+    pub control_token: String,
 }
 
 #[http::router]
@@ -220,6 +238,8 @@ impl NativeActor for BloomeryApiCapability {
             correspondence: params.correspondence,
             #[cfg(feature = "github")]
             pusher: params.pusher,
+            worktree_base: PathBuf::from(params.worktree_base),
+            artifacts: open_api_artifacts(params.artifacts_root.as_deref()),
             staged: BTreeMap::new(),
             drafts: BTreeMap::new(),
             next_draft: 1,
@@ -228,6 +248,13 @@ impl NativeActor for BloomeryApiCapability {
             seals: HashMap::new(),
             next_seal: 1,
             seal_verifications: HashMap::new(),
+            control_token: params.control_token,
+            commission_verifying: HashMap::new(),
+            commission_writing: HashMap::new(),
+            commission_http: HashMap::new(),
+            commission_seals: HashMap::new(),
+            next_commission_seal: 1,
+            seal_commission_loads: HashMap::new(),
         })
     }
 
@@ -240,6 +267,68 @@ impl NativeActor for BloomeryApiCapability {
     /// registered on the HTTP ingress cap (ADR-0130) post-init (#3672).
     fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
         load_configs(ctx);
+    }
+
+    /// `POST /commissions` — persist a new open commission.
+    #[http::route(Post, "/commissions")]
+    fn on_post_commissions(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+        let routed = state.create_commission(ctx.request());
+        finish(state, ctx, routed)
+    }
+
+    /// `GET /commissions` — list commissions, optionally `?status=`.
+    #[http::route(Get, "/commissions")]
+    fn on_get_commissions(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+        let routed = state.list_commissions(ctx.request());
+        finish(state, ctx, routed)
+    }
+
+    /// `GET /commissions/{id}` — show one commission.
+    #[http::route(Get, "/commissions/{id}")]
+    fn on_get_commission(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = state.show_commission(ctx.request(), &id);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /commissions/{id}/revisions` — write a scope revision.
+    #[http::route(Post, "/commissions/{id}/revisions")]
+    fn on_post_commission_revision(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = state.write_commission_revision(ctx.request(), &id);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /commissions/{id}/approvals` — verify and insert an approval.
+    #[http::route(Post, "/commissions/{id}/approvals")]
+    fn on_post_commission_approval(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = state.submit_commission_approval(&ctx, ctx.request(), &id);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /commissions/{id}/cancel` — verify a cancel envelope and close.
+    #[http::route(Post, "/commissions/{id}/cancel")]
+    fn on_post_commission_cancel(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = state.cancel_commission(&ctx, ctx.request(), &id);
+        finish(state, ctx, routed)
     }
 
     /// `POST /workpieces` — stage a workpiece for later draft membership.
@@ -258,10 +347,10 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, routed)
     }
 
-    /// `GET /workpieces` — list the staged workpieces.
+    /// `GET /workpieces` — list durable open commissions as workpieces.
     #[http::route(Get, "/workpieces")]
     fn on_get_workpieces(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
-        let routed = Routed::Reply(json(200, &WorkpiecesView { workpieces: state.staged.values().cloned().collect() }));
+        let routed = ApiCapabilityState::list_open_workpieces();
         finish(state, ctx, routed)
     }
 
@@ -480,20 +569,201 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, calibration::read())
     }
 
-    /// `GET /journal` — read the durable event journal from the store.
-    #[http::route(Get, "/journal")]
-    fn on_get_journal(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
-        finish(state, ctx, Routed::ReplayJournal(ReplayJournal))
+    /// `GET /metrics/summary` — fixed-size fleet summary, joined with live
+    /// in-flight bloom count.
+    #[http::route(Get, "/metrics/summary")]
+    fn on_get_metrics_summary(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+    ) -> http::Outcome {
+        finish(state, ctx, metrics::summary())
     }
 
-    /// `GET /artifacts/{digest}` — fetch a content-addressed artifact.
+    /// `GET /metrics/days` — day rollups, clamped at 90.
+    #[http::route(Get, "/metrics/days")]
+    fn on_get_metrics_days(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+        finish(state, ctx, metrics::days())
+    }
+
+    /// `GET /metrics/blooms` — bloom rollups, cursor on seal sequence.
+    #[http::route(Get, "/metrics/blooms")]
+    fn on_get_metrics_blooms(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+    ) -> http::Outcome {
+        match metrics::blooms(&ctx.request().query) {
+            Ok(routed) => finish(state, ctx, routed),
+            Err(error) => http::Outcome::Reply(error_response(400, &error)),
+        }
+    }
+
+    /// `GET /metrics/blooms/{id}/timeline` — per-member stage spans.
+    #[http::route(Get, "/metrics/blooms/{id}/timeline")]
+    fn on_get_metrics_timeline(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        match metrics::timeline(&id) {
+            Ok(routed) => finish(state, ctx, routed),
+            Err(error) => http::Outcome::Reply(error_response(400, &error)),
+        }
+    }
+
+    /// `GET /metrics/seats` — calibration seats plus token and cache columns.
+    #[http::route(Get, "/metrics/seats")]
+    fn on_get_metrics_seats(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+    ) -> http::Outcome {
+        finish(state, ctx, metrics::seats())
+    }
+
+    /// `GET /metrics/dispatches` — dispatch rows, cursor on journal sequence.
+    #[http::route(Get, "/metrics/dispatches")]
+    fn on_get_metrics_dispatches(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+    ) -> http::Outcome {
+        match metrics::dispatches(&ctx.request().query) {
+            Ok(routed) => finish(state, ctx, routed),
+            Err(error) => http::Outcome::Reply(error_response(400, &error)),
+        }
+    }
+
+    /// `GET /spend` — window totals `spend::measure` already computes.
+    #[http::route(Get, "/spend")]
+    fn on_get_spend(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+        finish(state, ctx, metrics::spend())
+    }
+
+    /// `GET /blooms/{id}/dispatches` — rollup attempts plus live outstanding orders.
+    #[http::route(Get, "/blooms/{id}/dispatches")]
+    fn on_get_bloom_dispatches(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        match evidence::list_dispatches(&id) {
+            Ok(routed) => finish(state, ctx, routed),
+            Err(error) => http::Outcome::Reply(error_response(400, &error)),
+        }
+    }
+
+    /// `GET /dispatches/{nonce}` — one dispatch's evidence header.
+    #[http::route(Get, "/dispatches/{nonce}")]
+    fn on_get_dispatch(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        nonce: http::Path<String>,
+    ) -> http::Outcome {
+        let nonce = nonce.0;
+        finish(state, ctx, evidence::lookup_dispatch(&nonce))
+    }
+
+    /// `GET /dispatches/{nonce}/transcript` — line-snapped ranged read.
+    #[http::route(Get, "/dispatches/{nonce}/transcript")]
+    fn on_get_dispatch_transcript(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        nonce: http::Path<String>,
+    ) -> http::Outcome {
+        let nonce = nonce.0;
+        let response = evidence::file_page(&state.worktree_base, &nonce, "transcript.jsonl", &ctx.request().query);
+        finish(state, ctx, Routed::Reply(response))
+    }
+
+    /// `GET /dispatches/{nonce}/prompt` — the same ranged shape as the transcript.
+    #[http::route(Get, "/dispatches/{nonce}/prompt")]
+    fn on_get_dispatch_prompt(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        nonce: http::Path<String>,
+    ) -> http::Outcome {
+        let nonce = nonce.0;
+        let response = evidence::file_page(&state.worktree_base, &nonce, "prompt.md", &ctx.request().query);
+        finish(state, ctx, Routed::Reply(response))
+    }
+
+    /// `GET /logs/coordinator` — bounded journald proxy.
+    #[http::route(Get, "/logs/coordinator")]
+    fn on_get_coordinator_logs(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+    ) -> http::Outcome {
+        let response = evidence::coordinator_logs(&ctx.request().query);
+        finish(state, ctx, Routed::Reply(response))
+    }
+
+    /// `GET /journal` — one bounded page of the durable event journal.
+    #[http::route(Get, "/journal")]
+    fn on_get_journal(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+        let query = match JournalQuery::parse(&ctx.request().query) {
+            Ok(query) => query,
+            Err(error) => return http::Outcome::Reply(error_response(400, &error)),
+        };
+        finish(
+            state,
+            ctx,
+            Routed::ReplayJournal(PageJournal {
+                bloom: query.bloom.map(|digest| hex::hex_encode(digest.as_bytes())),
+                from_sequence: query.from_sequence,
+                limit: query.limit,
+                descending: query.descending,
+                notice: query.notice,
+            }),
+        )
+    }
+
+    /// `GET /artifacts/{digest}` — a bounded byte range of a stored artifact.
     #[http::route(Get, "/artifacts/{digest}")]
     fn on_get_artifact(
         state: &mut ApiCapabilityState,
         ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
         digest: http::Path<String>,
     ) -> http::Outcome {
-        finish(state, ctx, Routed::Get(Get { digest: digest.0 }))
+        let query = match ArtifactQuery::parse(&ctx.request().query) {
+            Ok(query) => query,
+            Err(error) => return http::Outcome::Reply(error_response(400, &error)),
+        };
+        finish(
+            state,
+            ctx,
+            Routed::GetRange(GetRange {
+                digest: digest.0,
+                offset: query.offset,
+                limit: query.limit,
+                decoded: false,
+                notice: query.notice,
+            }),
+        )
+    }
+
+    /// `GET /artifacts/{digest}/decoded` — resolve a known artifact kind, or
+    /// return a raw range when nothing matches.
+    #[http::route(Get, "/artifacts/{digest}/decoded")]
+    fn on_get_artifact_decoded(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        digest: http::Path<String>,
+    ) -> http::Outcome {
+        let query = match ArtifactQuery::parse(&ctx.request().query) {
+            Ok(query) => query,
+            Err(error) => return http::Outcome::Reply(error_response(400, &error)),
+        };
+        finish(
+            state,
+            ctx,
+            Routed::GetRange(GetRange {
+                digest: digest.0,
+                offset: query.offset,
+                limit: query.limit,
+                decoded: true,
+                notice: query.notice,
+            }),
+        )
     }
 
     /// The control core's reply to an admit — the reducer outcome, or an admit
@@ -535,6 +805,42 @@ impl NativeActor for BloomeryApiCapability {
         }
     }
 
+    #[http::reply]
+    fn on_metrics_result(
+        _state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: MetricsQueryResult,
+    ) -> HttpServerResponse {
+        metrics::metrics_response(mail)
+    }
+
+    #[http::reply]
+    fn on_spend_result(
+        _state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: SpendQueryResult,
+    ) -> HttpServerResponse {
+        metrics::spend_response(mail)
+    }
+
+    #[http::reply]
+    fn on_list_bloom_dispatches_result(
+        state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: ListBloomDispatchesResult,
+    ) -> HttpServerResponse {
+        evidence::list_response(&state.worktree_base, state.artifacts.as_mut(), mail)
+    }
+
+    #[http::reply]
+    fn on_lookup_dispatch_result(
+        state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: LookupDispatchResult,
+    ) -> HttpServerResponse {
+        evidence::header_response(&state.worktree_base, mail)
+    }
+
     /// The source cap's reply to a claim enumeration (ADR-0179).
     #[http::reply]
     fn on_enumerate_claims_result(
@@ -550,7 +856,7 @@ impl NativeActor for BloomeryApiCapability {
     fn on_replay_result(
         _state: &mut ApiCapabilityState,
         _ctx: &mut NativeCtx<'_, Manual>,
-        mail: ReplayJournalResult,
+        mail: PageJournalResult,
     ) -> HttpServerResponse {
         journal_response(mail)
     }
@@ -560,7 +866,7 @@ impl NativeActor for BloomeryApiCapability {
     fn on_get_result(
         _state: &mut ApiCapabilityState,
         _ctx: &mut NativeCtx<'_, Manual>,
-        mail: GetResult,
+        mail: GetRangeResult,
     ) -> HttpServerResponse {
         artifact_response(mail)
     }
@@ -578,6 +884,8 @@ impl NativeActor for BloomeryApiCapability {
         let correlation = ctx.reply_target().correlation_id;
         if state.seal_verifications.contains_key(&correlation) {
             state.resolve_seal_verify(ctx, correlation, mail);
+        } else if state.commission_verifying.contains_key(&correlation) {
+            state.resolve_commission_verify(ctx, mail);
         } else {
             state.resolve_verify(ctx, mail);
         }
@@ -599,6 +907,79 @@ impl NativeActor for BloomeryApiCapability {
         mail: RecordConfigResult,
     ) -> HttpServerResponse {
         config_response(state, mail)
+    }
+
+    #[http::reply]
+    fn on_create_commission_result(
+        _state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: CreateCommissionResult,
+    ) -> HttpServerResponse {
+        commissions::create_response(mail)
+    }
+
+    #[http::reply]
+    fn on_write_scope_revision_result(
+        _state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: WriteScopeRevisionResult,
+    ) -> HttpServerResponse {
+        commissions::revision_response(mail)
+    }
+
+    #[handler::manual]
+    fn on_record_commission_approval_result(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Manual>,
+        mail: RecordCommissionApprovalResult,
+    ) {
+        state.answer_commission_write(ctx, &commissions::approval_response(mail));
+    }
+
+    #[handler::manual]
+    fn on_load_commission_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: LoadCommissionResult) {
+        let correlation = ctx.reply_target().correlation_id;
+        if state.seal_commission_loads.contains_key(&correlation) {
+            state.resolve_seal_commission_load(ctx, mail);
+            return;
+        }
+        if let Some(CommissionHttp { inbound, render: CommissionHttpRender::Show }) =
+            state.commission_http.remove(&correlation)
+        {
+            inbound.reply(&commissions::show_response(mail));
+        }
+    }
+
+    #[handler::manual]
+    fn on_list_commissions_result(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Manual>,
+        mail: ListCommissionsResult,
+    ) {
+        let correlation = ctx.reply_target().correlation_id;
+        let Some(CommissionHttp { inbound, render }) = state.commission_http.remove(&correlation) else {
+            return;
+        };
+        match render {
+            CommissionHttpRender::List => {
+                inbound.reply(&commissions::list_response(mail));
+            }
+            CommissionHttpRender::Workpieces => {
+                inbound.reply(&workpieces::list_response(mail));
+            }
+            CommissionHttpRender::Show => {
+                inbound.reply(&error_response(500, "commission list answered a show read"));
+            }
+        }
+    }
+
+    #[handler::manual]
+    fn on_cancel_commission_result(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Manual>,
+        mail: CancelCommissionResult,
+    ) {
+        state.answer_commission_write(ctx, &commissions::cancel_response(mail));
     }
 
     /// The store's reply to the boot configuration read (#4616). Fills the
@@ -639,11 +1020,25 @@ impl NativeActor for BloomeryApiCapability {
             inbound.reply(&error_response(504, "control-plane request settled without a reply"));
         } else if let Some(VerifyPending { inbound, .. }) = state.verifying.remove(&mail.root.correlation_id) {
             inbound.reply(&error_response(504, "signature verification settled without a reply"));
+        } else if let Some(commissions::CommissionVerify { inbound, .. }) =
+            state.commission_verifying.remove(&mail.root.correlation_id)
+        {
+            inbound.reply(&error_response(504, "signature verification settled without a reply"));
+        } else if let Some(inbound) = state.commission_writing.remove(&mail.root.correlation_id) {
+            inbound.reply(&error_response(504, "commission store write settled without a reply"));
         } else if let Some(SealVerify { seal, .. }) = state.seal_verifications.remove(&mail.root.correlation_id) {
             // An above-auto member's verify chain settled without a reply — the
             // whole seal cannot complete, so fail it closed and tear down its
             // still-outstanding siblings (a dropped signing capability).
             state.fail_seal(seal, 504, "signature verification settled without a reply");
+        } else if let Some(CommissionHttp { inbound, .. }) = state.commission_http.remove(&mail.root.correlation_id) {
+            inbound.reply(&error_response(504, "commission store read settled without a reply"));
+        } else if let Some(load) = state.seal_commission_loads.remove(&mail.root.correlation_id) {
+            state.fail_commission_seal(load.seal, 504, "commission store read settled without a reply");
         }
     }
+}
+
+fn open_api_artifacts(configured: Option<&str>) -> Option<ArtifactsCapabilityState> {
+    ArtifactsCapabilityState::open(&resolve_root(configured)).ok()
 }

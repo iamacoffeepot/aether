@@ -1078,6 +1078,111 @@ fn a_v3_store_gains_the_proof_facts_table_empty() {
 }
 
 #[test]
+fn a_v4_store_opens_with_null_envelope_stamps_and_new_admissions_carry_one() {
+    // The journal envelope stamp is nullable and never backfilled. A store at
+    // schema 4 has decided rows and no column; opening it must add the column
+    // without inventing a time, and the next admission must write the host
+    // clock. Tripwire: a DEFAULT 0 or an UPDATE would make history look dated.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v4.db").to_str().unwrap().to_owned();
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch(&format!(
+            "CREATE TABLE journal (
+                 sequence        INTEGER PRIMARY KEY AUTOINCREMENT,
+                 idempotency_key TEXT NOT NULL UNIQUE,
+                 event           BLOB NOT NULL,
+                 decisions       BLOB,
+                 decider         TEXT,
+                 decisions_schema TEXT
+             );
+             INSERT INTO journal (idempotency_key, event, decisions, decider, decisions_schema)
+             VALUES ('legacy', x'01', x'02', 'old-build', '{schema}');
+             PRAGMA user_version = 4;",
+            schema = aether_bloomery::DECISIONS_SCHEMA,
+        ))
+        .unwrap();
+
+    let mut store = SqliteStore::open(&path).expect("a v4 store migrates");
+    assert_eq!(store.journal_recorded_unix_millis().unwrap(), vec![None], "a pre-column row stays NULL");
+    let journal = store.replay_journal().unwrap();
+    assert_eq!(journal.len(), 1);
+    assert_eq!(journal[0].event, b"\x01");
+    assert_eq!(journal[0].decisions, b"\x02");
+
+    let before = super::runtime::now_unix_millis();
+    assert_eq!(store.commit(&write("fresh", b"new", b"decided"), &[], &[], &[]).unwrap(), CommitOutcome::Applied(2),);
+    let after = super::runtime::now_unix_millis();
+    let stamps = store.journal_recorded_unix_millis().unwrap();
+    assert_eq!(stamps[0], None, "migration still invents no time on the old row");
+    let stamped = stamps[1].expect("a new admission carries the stamp");
+    assert!(
+        (before..=after).contains(&stamped),
+        "the stamp is the host clock at admission, not a default: {stamped} not in {before}..={after}"
+    );
+}
+
+#[test]
+fn replay_state_matches_whether_the_envelope_stamp_is_populated() {
+    // Replay folds event + recorded decisions only. A populated envelope stamp
+    // must not change reducer state: the column is host metadata, not a fact.
+    use aether_bloomery::{Event, Fact, IdempotencyKey, ResolvedConfigs, Snapshot, SpendWindow, reduce};
+    use aether_data::wire::to_vec;
+
+    let event = Event {
+        idempotency_key: IdempotencyKey("obs-1".to_owned()),
+        fact: Fact::ObserveMainline { head: aether_bloomery::Digest::from_bytes([9; 32]) },
+    };
+    let decisions = reduce(&Snapshot::default(), &event, &ResolvedConfigs::default(), &SpendWindow::default());
+    let event_bytes = to_vec(&event).unwrap();
+    let decision_bytes = to_vec(&decisions).unwrap();
+
+    let mut stamped = memory();
+    stamped.append_event(&write("obs-1", &event_bytes, &decision_bytes)).unwrap();
+    assert!(stamped.journal_recorded_unix_millis().unwrap()[0].is_some(), "the write path stamps the envelope");
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("unstamped.db").to_str().unwrap().to_owned();
+    {
+        let mut unstamped = SqliteStore::open(&path).unwrap();
+        unstamped.append_event(&write("obs-1", &event_bytes, &decision_bytes)).unwrap();
+    }
+    rusqlite::Connection::open(&path).unwrap().execute("UPDATE journal SET recorded_unix_millis = NULL", []).unwrap();
+    let mut unstamped = SqliteStore::open(&path).unwrap();
+    assert_eq!(unstamped.journal_recorded_unix_millis().unwrap(), vec![None], "the cleared row reads absent");
+
+    assert_eq!(fold_journal(&mut stamped), fold_journal(&mut unstamped));
+}
+
+#[test]
+fn metrics_rollups_refold_to_identical_payloads() {
+    // The tables are cache: delete and refold from the journal must reproduce
+    // the same dispatch payloads. The fold itself is proven in aether-bloomery;
+    // this pins the persist/clear/refold path the host uses.
+    let mut store = memory();
+    store.fold_metrics_from_journal().unwrap();
+    let first = store.metric_dispatch_payloads().unwrap();
+    store.clear_metrics().unwrap();
+    assert_eq!(store.metrics_cursor().unwrap(), 0, "clear drops the cursor");
+    store.fold_metrics_from_journal().unwrap();
+    assert_eq!(store.metric_dispatch_payloads().unwrap(), first);
+}
+
+fn fold_journal(store: &mut SqliteStore) -> aether_bloomery::Snapshot {
+    use aether_bloomery::{Decisions, Event, ResolvedConfigs, Snapshot};
+    use aether_data::wire::from_bytes;
+
+    let configs = ResolvedConfigs::default();
+    let mut snapshot = Snapshot::default();
+    for record in store.replay_journal().unwrap() {
+        let event: Event = from_bytes(&record.event).unwrap();
+        let decisions: Decisions = from_bytes(&record.decisions).unwrap();
+        snapshot = snapshot.apply(&event, &decisions, &configs);
+    }
+    snapshot
+}
+
+#[test]
 fn proof_facts_append_and_never_replace() {
     // The table is a ledger, not a cache keyed on (closure, test). Two writes
     // of the same address are two rows; a later slice consults, this one only
@@ -1100,4 +1205,39 @@ fn proof_facts_append_and_never_replace() {
     assert_eq!(rows[1].sequence, 2);
     assert_eq!(rows[0].test_id, "crate::once");
     assert_eq!(rows[1].producing_dispatch, "n-1");
+}
+
+#[test]
+fn lookup_named_dispatch_survives_consume_and_misses_an_unknown_nonce() {
+    // Only the coordinator can tell "swept" from "never existed". consume
+    // drops the outstanding row but dispatch_owners keeps the name.
+    let mut store = memory();
+    store.record_order(&order("dispatch-7")).unwrap();
+    assert_eq!(
+        store.lookup_named_dispatch("dispatch-7").unwrap().as_deref(),
+        Some(order("dispatch-7").bloom.as_slice()),
+    );
+    assert!(store.consume_order("dispatch-7").unwrap());
+    assert_eq!(
+        store.lookup_named_dispatch("dispatch-7").unwrap().as_deref(),
+        Some(order("dispatch-7").bloom.as_slice()),
+        "a consumed order is still a name the journal knows",
+    );
+    assert_eq!(store.lookup_named_dispatch("dispatch-missing").unwrap(), None);
+}
+
+#[test]
+fn list_bloom_dispatch_live_is_scoped_to_the_named_bloom() {
+    let mut store = memory();
+    let mut ours = order("dispatch-1");
+    ours.bloom = vec![0xAA; 32];
+    let mut theirs = order("dispatch-2");
+    theirs.bloom = vec![0xBB; 32];
+    store.record_order(&ours).unwrap();
+    store.record_order(&theirs).unwrap();
+
+    let live = store.list_bloom_dispatch_live(&[0xAA; 32]).unwrap();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].nonce, "dispatch-1");
+    assert_eq!(store.list_bloom_dispatch_live(&[0xCC; 32]).unwrap().len(), 0);
 }

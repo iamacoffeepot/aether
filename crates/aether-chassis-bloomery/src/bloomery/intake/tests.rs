@@ -249,6 +249,9 @@ fn a_matching_upload_admits_a_bound_integrate_fact() {
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching upload is admitted");
@@ -292,6 +295,9 @@ fn a_parked_upload_admits_a_question_evidence_fact_and_consumes_the_order() {
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching parked upload is admitted");
@@ -325,6 +331,9 @@ fn an_unknown_nonce_is_refused() {
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     };
     assert!(matches!(
         admit_uploaded(&mut store, &upload).unwrap(),
@@ -354,6 +363,9 @@ fn a_right_nonce_with_the_wrong_digest_is_refused_and_the_order_stays_live() {
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     };
     match admit_uploaded(&mut store, &lying).unwrap() {
         AdmitDecision::Refused(IntakeRefusal::DigestMismatch { displayed, claimed }) => {
@@ -459,6 +471,9 @@ fn intake_cycle_admits_a_matching_upload_and_the_reducer_integrates_it() {
             failed_verifiers: VerifyFailureSet::EMPTY,
             cost: None,
             calls: None,
+            session_reuse_arm: None,
+            session_reuse_saved_micro_usd: None,
+            peak_resident_bytes: None,
         },
     );
     let claims = SeededClaims(claims);
@@ -510,6 +525,9 @@ fn intake_cycle_refuses_a_mismatched_upload_and_the_reducer_is_untouched() {
             failed_verifiers: VerifyFailureSet::EMPTY,
             cost: None,
             calls: None,
+            session_reuse_arm: None,
+            session_reuse_saved_micro_usd: None,
+            peak_resident_bytes: None,
         },
     );
     let claims = SeededClaims(claims);
@@ -618,6 +636,9 @@ fn a_non_terminal_construct_result_admits_attempt_completed_and_the_reducer_adva
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching Construct upload is admitted");
@@ -677,6 +698,9 @@ fn a_reconcile_result_admits_attempt_completed_not_out_of_line() {
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching Reconcile upload is admitted");
@@ -713,6 +737,9 @@ fn a_failing_terminal_verify_admits_typed_verify_failed_not_integrate() {
         failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching failing-verify upload is admitted (the gate decides its fate, not the broker)");
@@ -755,6 +782,9 @@ fn an_unjudged_verify_naming_no_verifier_is_admitted_rather_than_refused() {
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("an unjudged failing-verify upload is admitted; the reducer decides what it means");
@@ -789,6 +819,9 @@ fn a_preflight_only_verify_admits_as_a_host_fault_not_a_candidate_failure() {
         failed_verifiers: VerifyFailureSet::one(VerifyFailure::Preflight),
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a preflight-only verify is admitted so the reducer can hold it");
@@ -834,6 +867,9 @@ fn invalid_verifier_sets_are_refused_without_consuming_the_order() {
             failed_verifiers,
             cost: None,
             calls: None,
+            session_reuse_arm: None,
+            session_reuse_saved_micro_usd: None,
+            peak_resident_bytes: None,
         };
 
         assert!(matches!(
@@ -867,6 +903,9 @@ fn a_failing_aggregate_verify_admits_its_typed_set_as_a_bloom_level_failure() {
         failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching failing AggregateVerify upload is admitted");
@@ -904,6 +943,9 @@ fn aggregate_verify_findings_persist_on_the_composition_and_clear_on_a_pass() {
         },
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     };
 
     let mut failing = dispatch_record("n-av-fail", bloom, &WorkpieceId(String::new()), tree, tree);
@@ -959,6 +1001,9 @@ fn an_aggregate_review_verdict_admits_a_bloom_level_completion() {
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &failing).unwrap() else {
         panic!("a matching aggregate verdict is admitted");
@@ -989,6 +1034,9 @@ fn an_aggregate_review_verdict_admits_a_bloom_level_completion() {
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &passing).unwrap() else {
         panic!("the passing aggregate verdict is admitted");
@@ -1025,6 +1073,9 @@ fn attributed_aggregate_findings_narrow_the_implication_and_slice_per_member() {
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &failing).unwrap() else {
         panic!("a matching aggregate verdict is admitted");
@@ -1062,6 +1113,9 @@ fn attributed_aggregate_findings_narrow_the_implication_and_slice_per_member() {
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     };
     assert!(matches!(admit_uploaded(&mut store, &delta_fail).unwrap(), AdmitDecision::Admitted(_)));
     assert_eq!(
@@ -1097,6 +1151,9 @@ fn an_aggregate_review_executor_fault_admits_its_own_fact_and_touches_no_finding
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &fault).unwrap() else {
         panic!("a matching aggregate fault is admitted");
@@ -1148,6 +1205,9 @@ fn a_member_executor_fault_admits_its_own_fact_and_consumes_the_order_once() {
             failed_verifiers: VerifyFailureSet::EMPTY,
             cost: None,
             calls: None,
+            session_reuse_arm: None,
+            session_reuse_saved_micro_usd: None,
+            peak_resident_bytes: None,
         };
         let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
             panic!("{stage:?} member fault should be admitted");
@@ -1200,6 +1260,9 @@ fn an_executor_fault_on_a_stage_without_a_lifecycle_is_refused_and_the_order_sta
             failed_verifiers: VerifyFailureSet::EMPTY,
             cost: None,
             calls: None,
+            session_reuse_arm: None,
+            session_reuse_saved_micro_usd: None,
+            peak_resident_bytes: None,
         };
         assert!(
             matches!(
@@ -1240,6 +1303,9 @@ fn an_out_of_line_stage_is_refused_and_the_order_stays_live() {
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     };
     match admit_uploaded(&mut store, &upload).unwrap() {
         AdmitDecision::Refused(IntakeRefusal::OutOfLineStage(stage)) => {
@@ -1287,6 +1353,9 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
             failed_verifiers: VerifyFailureSet::EMPTY,
             cost: None,
             calls: None,
+            session_reuse_arm: None,
+            session_reuse_saved_micro_usd: None,
+            peak_resident_bytes: None,
         };
 
         let decoded = claims.claim_for(&reference).expect("a well-formed attempt name decodes");
@@ -1318,6 +1387,9 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
         failed_verifiers: failures,
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     };
     assert_eq!(claims.claim_for(&reference).expect("typed mask decodes").failed_verifiers, failures);
 
@@ -1358,6 +1430,9 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     };
     assert!(claims.claim_for(&stray).is_none(), "a non-attempt name yields no claim");
 }
@@ -1451,6 +1526,9 @@ fn verify_findings_persist_on_a_failing_verify_and_clear_on_a_pass() {
         },
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     };
 
     record_dispatch(&mut store, &dispatch_record("n-f1", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate))
@@ -1542,22 +1620,7 @@ fn a_measured_attempt_writes_one_priced_study_row_and_an_unmeasured_one_writes_n
         output_tokens: 500_000,
         ..StudyCost::default()
     };
-    let mut claims = HashMap::new();
-    claims.insert(
-        "n-study".to_owned(),
-        UploadedEvidence {
-            nonce: Nonce("n-study".to_owned()),
-            subject: candidate,
-            verdict: StageVerdict::VerificationPassed,
-            detail: Digest::from_bytes([7; 32]),
-            candidate: None,
-            findings: None,
-            failed_verifiers: VerifyFailureSet::EMPTY,
-            cost: Some(cost),
-            calls: None,
-        },
-    );
-    let claims = SeededClaims(claims);
+    let claims = seeded_claim("n-study", candidate, Some(cost));
     let mut sink = Collector::default();
 
     let report = run_intake_cycle(&mut store, &shell, &[handle], &claims, Some(&mut artifacts), &mut sink).unwrap();
@@ -1643,6 +1706,10 @@ fn second_attempt(
     fake.seed_run_artifacts(run_id, vec![Artifact { id: 1, name: format!("evidence-{nonce}"), size_bytes: 10 }]);
 
     let (subject, cost) = claimed.map_or((candidate, None), |(subject, cost)| (subject, Some(cost)));
+    (handle, seeded_claim(nonce, subject, cost))
+}
+
+fn seeded_claim(nonce: &str, subject: Digest, cost: Option<aether_bloomery::StudyCost>) -> SeededClaims {
     let mut claims = HashMap::new();
     claims.insert(
         nonce.to_owned(),
@@ -1656,9 +1723,12 @@ fn second_attempt(
             failed_verifiers: VerifyFailureSet::EMPTY,
             cost,
             calls: None,
+            session_reuse_arm: None,
+            session_reuse_saved_micro_usd: None,
+            peak_resident_bytes: None,
         },
     );
-    (handle, SeededClaims(claims))
+    SeededClaims(claims)
 }
 
 /// The finding from bloom `10a1228c` (#4959): a coverage gap that fails no
@@ -1742,6 +1812,9 @@ fn repair_upload(nonce: &str, subject: Digest) -> UploadedEvidence {
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
         calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
     }
 }
 
@@ -1984,6 +2057,9 @@ fn a_passing_review_carrying_advisories_is_kinded_as_one() {
             failed_verifiers: VerifyFailureSet::EMPTY,
             cost: None,
             calls: None,
+            session_reuse_arm: None,
+            session_reuse_saved_micro_usd: None,
+            peak_resident_bytes: None,
         };
         let AdmitDecision::Admitted(admission) = admit_uploaded(store, &upload).unwrap() else {
             panic!("a matching passing aggregate verdict is admitted");
