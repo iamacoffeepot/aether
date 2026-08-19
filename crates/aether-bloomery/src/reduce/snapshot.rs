@@ -1067,8 +1067,8 @@ impl BloomRecord {
     /// An empty record over `spec`: compiled-line catalog, sealed status,
     /// empty collections, and zeroed counters.
     ///
-    /// The one 28-field literal. Production [`Self::sealed`] and every test
-    /// fixture fill from here, so a new field has a single home rather than
+    /// The one 28-field literal. Production sealed-record construction and every
+    /// test fixture fill from here, so a new field has a single home rather than
     /// steering placement across four test copies.
     #[must_use]
     pub fn empty(spec: BloomSpec) -> Self {
