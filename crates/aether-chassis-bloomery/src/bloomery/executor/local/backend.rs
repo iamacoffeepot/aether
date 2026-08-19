@@ -35,11 +35,12 @@ use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 use crate::bloomery::CoordinatorConfig;
 use crate::bloomery::KitReport;
 use crate::bloomery::executor::{LaneOccupancy, OutstandingDispatch, ReconcileLanes, ReconcileReport};
-use crate::bloomery::intake::NameEvidenceClaims;
+use crate::bloomery::intake::{DispatchRecord, NameEvidenceClaims};
 use crate::bloomery::triage::MAX_TRIAGED_DIFF_BYTES;
+use crate::bloomery::verify::{apply_containment, changed_paths, out_of_surface};
 use crate::bloomery::{candidate_tree_digest, capture_commit_digest};
 use crate::session::SessionConfig;
-use crate::store::{SqliteStore, StoreBackend};
+use crate::store::{CommissionBackend, SqliteStore, StoreBackend};
 
 /// The suffix distinguishing a run's evidence directory from the lane slot
 /// checkouts under the same base dir. Evidence stays per dispatch (nonce-keyed):
@@ -118,6 +119,10 @@ struct Run {
     // Why this run holds the slot it does — journaled even when no pool is
     // mounted, so slot affinity is auditable on its own.
     affinity: SlotAffinity,
+    // The commit the candidate's diff is taken against — member Verify's
+    // containment gate reads `base..HEAD` from the slot checkout. `None` when
+    // the order named none, or a re-adopted run whose base would not resolve.
+    diff_base_hex: Option<String>,
 }
 
 /// Snapshot of a tracked run taken under the registry lock so evidence
@@ -131,6 +136,7 @@ struct StreamedRun {
     reuse: Option<super::ReusePlan>,
     slot: Option<usize>,
     affinity: SlotAffinity,
+    diff_base_hex: Option<String>,
 }
 
 /// Which lane-specific evidence gates a command's run rides.
@@ -1003,6 +1009,7 @@ impl LocalExecutor {
                         gates: pending.gates,
                         reuse,
                         affinity,
+                        diff_base_hex: pending.diff_base_hex,
                     },
                 );
                 Ok(())
@@ -1112,6 +1119,13 @@ impl LocalExecutor {
                 gates: LaneGates::of(&dispatch.transformation.command),
                 reuse: None,
                 affinity: SlotAffinity::readopted(slot),
+                diff_base_hex: dispatch.transformation.diff_base.as_ref().and_then(|digest| {
+                    self.correspondence
+                        .resolve_backend_object(digest)
+                        .ok()
+                        .flatten()
+                        .map(|object| render_object_hex(&object))
+                }),
             },
         );
         true
@@ -1393,6 +1407,60 @@ impl LocalExecutor {
         }
     }
 
+    // Paths the candidate changed against the member's base that sit outside
+    // the declared surface, or `None` when the gate cannot run (no checkout,
+    // no base, no sealed surface). Missing inputs skip rather than fail open
+    // on a guessed empty set — a stub test has no surface to enforce, and a
+    // production Verify always has the order, the base, and the checkout.
+    fn surface_violations(&self, nonce: &str, worktree: Option<&Path>, diff_base: Option<&str>) -> Option<Vec<String>> {
+        let worktree = worktree?;
+        let diff_base = diff_base?;
+        let surface = self.member_declared_surface(nonce)?;
+        let changed = match changed_paths(worktree, diff_base) {
+            Ok(changed) => changed,
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::executor",
+                    %nonce,
+                    %error,
+                    "member verify: candidate changed-path set unreadable; skipping containment",
+                );
+                return None;
+            }
+        };
+        Some(out_of_surface(changed.iter().map(String::as_str), &surface))
+    }
+
+    fn member_declared_surface(&self, nonce: &str) -> Option<Vec<String>> {
+        let store = self.messages.as_ref()?;
+        let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
+        let order = store.lookup_order(nonce).ok().flatten()?;
+        let record = DispatchRecord::from_stored(&order)?;
+        if record.stage != StageId::Verify {
+            return None;
+        }
+        match store.load_revision(record.scope_revision) {
+            Ok(Some(revision)) => Some(revision.declared_surface),
+            Ok(None) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::executor",
+                    %nonce,
+                    "member verify: sealed scope revision is missing; skipping containment",
+                );
+                None
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::executor",
+                    %nonce,
+                    %error,
+                    "member verify: declared surface unreadable; skipping containment",
+                );
+                None
+            }
+        }
+    }
+
     fn unread_evidence(
         &self,
         handle: &WorkHandle,
@@ -1449,7 +1517,13 @@ impl LocalExecutor {
         bytes: &[u8],
     ) -> Vec<EvidenceRef> {
         let StreamedRun {
-            subject, lifecycle, gates: LaneGates { is_construct, is_verify }, worktree_dir, slot, ..
+            subject,
+            lifecycle,
+            gates: LaneGates { is_construct, is_verify },
+            worktree_dir,
+            slot,
+            diff_base_hex,
+            ..
         } = run;
         let failed_verifiers = if is_verify {
             parse_failed_verifiers(bytes)
@@ -1535,7 +1609,7 @@ impl LocalExecutor {
         // claim for a later retry, so nothing resets the checkout the retry reads.)
         self.retire(&handle.nonce.0);
         self.pump();
-        let verdict = if passed {
+        let mut verdict = if passed {
             StageVerdict::VerificationPassed
         } else {
             StageVerdict::VerificationFailed
@@ -1543,7 +1617,17 @@ impl LocalExecutor {
         // The detail digest is the content address of the evidence bytes — the
         // supporting artifact the verdict points at.
         let detail = Digest::of_wire_bytes(bytes);
-        let failed_verifiers = failed_verifiers.unwrap_or_default();
+        let mut failed_verifiers = failed_verifiers.unwrap_or_default();
+        let mut findings = parse_findings(bytes);
+        if is_verify
+            && let Some(violations) =
+                self.surface_violations(&handle.nonce.0, worktree_dir.as_deref(), diff_base_hex.as_deref())
+        {
+            let overlay = apply_containment(verdict, failed_verifiers, findings, &violations);
+            verdict = overlay.verdict;
+            failed_verifiers = overlay.failed_verifiers;
+            findings = overlay.findings;
+        }
         let name =
             NameEvidenceClaims::attempt_artifact_name(&handle.nonce, &subject, verdict, failed_verifiers, &detail);
         vec![EvidenceRef {
@@ -1555,7 +1639,7 @@ impl LocalExecutor {
             artifact_id: 0,
             size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
             candidate,
-            findings: parse_findings(bytes),
+            findings,
             failed_verifiers,
             cost: parse_cost(bytes),
             calls: parse_calls(bytes),
@@ -1866,6 +1950,7 @@ impl ExecutorBackend for LocalExecutor {
                 reuse: run.reuse.clone(),
                 slot: run.slot,
                 affinity: run.affinity.clone(),
+                diff_base_hex: run.diff_base_hex.clone(),
             }
         };
         let host_fault = HostFaultCause::from_lifecycle(run.lifecycle);
