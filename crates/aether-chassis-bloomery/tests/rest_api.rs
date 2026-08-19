@@ -24,11 +24,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_bloomery::{
-    AgentProfile, ApprovalPolicy, ApprovalRule, AuthorityDoor, BloomDraft, BloomId, ClaimRefKind, ConfigKind,
-    ConfigRegistry, Digest, DispatchPayload, Evidence, EvidenceKind, Harness, KeyId, Membership,
-    ORPHAN_CLAIM_RELEASE_WORDS, Observation, OrphanClaimRelease, Provenance, ReasoningEffort, SCOPE_REVISION_SCHEMA,
-    ScopeRevision, ScopeRouting, SignatureEnvelope, StageCatalog, StageId, Statement, Tier, ToolPolicy, Topic,
-    WorkpieceId, authorization_message,
+    AgentProfile, ApprovalPolicy, ApprovalRule, AuthorityDoor, BloomDraft, BloomId, CapabilityLedger, ClaimRefKind,
+    ConfigKind, ConfigRegistry, Digest, DispatchPayload, Evidence, EvidenceKind, Harness, KeyId, Membership,
+    MetricsSeat, ORPHAN_CLAIM_RELEASE_WORDS, Observation, OrphanClaimRelease, Provenance, ReasoningEffort,
+    SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, SignatureEnvelope, StageCatalog, StageId, Statement, Tier,
+    ToolPolicy, Topic, WorkpieceId, authorization_message,
 };
 use aether_chassis_bloomery::bloomery::TopicOutbox;
 use aether_chassis_bloomery::store::SqliteStore;
@@ -197,13 +197,15 @@ fn try_http_auth(
     Ok((status, body))
 }
 
+type HttpExchange = (u16, Vec<(String, String)>, Vec<u8>);
+
 fn request(
     port: u16,
     method: &str,
     path: &str,
     body: Option<&[u8]>,
     token: Option<&str>,
-) -> Result<(u16, Vec<(String, String)>, Vec<u8>), std::io::Error> {
+) -> Result<HttpExchange, std::io::Error> {
     let mut head = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n");
     if let Some(token) = token {
         head.push_str(&format!("Authorization: Bearer {token}\r\n"));
@@ -227,7 +229,7 @@ fn request(
 }
 
 /// Split an HTTP response into its status code, headers, and body bytes.
-fn parse_response(response: &[u8]) -> (u16, Vec<(String, String)>, Vec<u8>) {
+fn parse_response(response: &[u8]) -> HttpExchange {
     let separator = b"\r\n\r\n";
     let head_end = response.windows(separator.len()).position(|w| w == separator).expect("response has a head");
     let head = &response[..head_end];
@@ -1035,14 +1037,12 @@ fn rest_endpoint_laws_clamp_decode_and_unify_refusals() {
     });
 }
 
-/// Both seat ledgers fold the same dispatch and price the same way: a mechanical
-/// Verify does not mint a seat, and an unpriced study record is counted as
-/// unpriced rather than averaged in as free.
-#[test]
-fn seat_ledgers_share_the_model_lane_gate_and_unpriced_cost() {
+/// Fold a Construct → mechanical-Verify → unpriced-study → integrate journal
+/// through both seat ledgers. The test asserts the two tables agree.
+fn fold_unpriced_construct_seats() -> (Vec<MetricsSeat>, CapabilityLedger) {
     use aether_bloomery::{
-        AgentSelection, CalibrationLedger, CandidateRef, Decision, EvidenceKind, Fact, Harness, MetricsLedger,
-        ModelOverride, ResolvedConfigs, Snapshot, SpendWindow, StageId, StudyCost, StudyRecord, reduce,
+        AgentSelection, CalibrationLedger, CandidateRef, Decision, Fact, MetricsLedger, ModelOverride, ResolvedConfigs,
+        Snapshot, SpendWindow, StudyCost, StudyRecord, reduce,
     };
     use aether_data::Kind;
     use aether_data::wire::to_vec;
@@ -1134,8 +1134,15 @@ fn seat_ledgers_share_the_model_lane_gate_and_unpriced_cost() {
         },
     )]);
     let source = |asked: &Digest| records.get(asked).copied();
+    (metrics.seats(source), calibration.report(source))
+}
 
-    let seats = metrics.seats(source);
+/// Both seat ledgers fold the same dispatch and price the same way: a mechanical
+/// Verify does not mint a seat, and an unpriced study record is counted as
+/// unpriced rather than averaged in as free.
+#[test]
+fn seat_ledgers_share_the_model_lane_gate_and_unpriced_cost() {
+    let (seats, ledger) = fold_unpriced_construct_seats();
     assert!(
         seats.iter().all(|seat| seat.stage != StageId::Verify),
         "a mechanical Verify must not mint a metrics seat: {seats:?}"
@@ -1145,7 +1152,6 @@ fn seat_ledgers_share_the_model_lane_gate_and_unpriced_cost() {
     assert_eq!(construct.priced_samples, 0);
     assert_eq!(construct.mean_cost_micro_usd(), None, "unpriced must not flatten to a zero mean");
 
-    let ledger = calibration.report(source);
     assert!(
         ledger.cells.iter().all(|cell| cell.stage != StageId::Verify),
         "a mechanical Verify must not mint a calibration cell: {:?}",
