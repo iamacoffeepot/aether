@@ -32,6 +32,8 @@ use crate::screen::Board;
 
 const ENTER_HINT: KeyHint = KeyHint { keys: "Enter", action: "jump" };
 const ARTIFACT_HINT: KeyHint = KeyHint { keys: "a", action: "artifact" };
+const ENTER_BAND_HINT: KeyHint = KeyHint { keys: "i", action: "queue" };
+const LEAVE_BAND_HINT: KeyHint = KeyHint { keys: "Esc", action: "board" };
 
 /// The running console: one stack, one store, two fetch lanes.
 pub struct Shell {
@@ -74,18 +76,35 @@ impl Shell {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return Outcome::Quit;
         }
-        if key.code == KeyCode::Esc && self.stack.len() > 1 {
-            self.stack.pop();
-            return Outcome::Handled;
+        if key.code == KeyCode::Esc {
+            if self.chrome.selected().is_some() {
+                self.chrome.select(None);
+                return Outcome::Handled;
+            }
+            if self.stack.len() > 1 {
+                self.stack.pop();
+                return Outcome::Handled;
+            }
         }
 
         let ids = self.chrome_ids();
         match key.code {
-            KeyCode::Char('j') | KeyCode::Down if self.chrome.selected().is_some() => {
+            KeyCode::Char('i') if !ids.is_empty() && self.chrome.selected().is_none() => {
+                self.chrome.select(ids.first().cloned());
+                Outcome::Handled
+            }
+            KeyCode::Char('j') if self.chrome.selected().is_some() => {
                 self.chrome_next(&ids);
                 Outcome::Handled
             }
-            KeyCode::Char('k') | KeyCode::Up => self.handle_up(&ids, key),
+            KeyCode::Char('k') if self.chrome.selected().is_some() => {
+                self.chrome.select_prev(&ids, Clone::clone);
+                Outcome::Handled
+            }
+            KeyCode::Down | KeyCode::Up => {
+                self.chrome.select(None);
+                self.delegate_key(key)
+            }
             KeyCode::Enter => self.handle_enter(key),
             KeyCode::Char('a') => self.handle_artifact(),
             _ => self.delegate_key(key),
@@ -99,7 +118,9 @@ impl Shell {
         let status_height = self.status_height();
         let today_height = u16::from(!dashboard.today.is_empty());
         let alert_height = u16::from(!alerts.is_empty());
-        let interrupt_height = u16::try_from(interrupts.len().min(8)).unwrap_or(0);
+        let interrupt_selected = self.selected_interrupt_index(&interrupts);
+        let (interrupt_window, interrupt_highlight) = chrome::interrupt_window(&interrupts, interrupt_selected);
+        let interrupt_height = u16::try_from(interrupt_window.len()).unwrap_or(0);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -128,10 +149,7 @@ impl Shell {
             frame.render_widget(chrome::alert_band(&alerts, self.selected_alert_index(&alerts)), chunks[4]);
         }
         if interrupt_height > 0 {
-            frame.render_widget(
-                chrome::interrupt_band(&interrupts, self.selected_interrupt_index(&interrupts)),
-                chunks[5],
-            );
+            frame.render_widget(chrome::interrupt_band(interrupt_window, interrupt_highlight), chunks[5]);
         }
         if let Some(screen) = self.stack.last_mut() {
             screen.render(frame, chunks[6], &self.store);
@@ -293,21 +311,10 @@ impl Shell {
         }
     }
 
-    fn handle_up(&mut self, ids: &[ChromeId], key: KeyEvent) -> Outcome {
-        if self.chrome.selected().is_some() {
-            self.chrome.select_prev(ids, Clone::clone);
-            return Outcome::Handled;
-        }
-        if !ids.is_empty() && self.stack.last().is_some_and(|screen| screen.selected_is_first(&self.store)) {
-            self.chrome.select(ids.last().cloned());
-            return Outcome::Handled;
-        }
-        self.delegate_key(key)
-    }
-
     fn handle_enter(&mut self, key: KeyEvent) -> Outcome {
-        if let Some(id) = self.chrome.selected() {
-            self.push_nav(Nav::focus(id.focus().clone()));
+        if let Some(focus) = self.chrome.selected().map(|id| id.focus().clone()) {
+            self.chrome.select(None);
+            self.push_nav(Nav::focus(focus));
             return Outcome::Handled;
         }
         self.delegate_key(key)
@@ -329,10 +336,10 @@ impl Shell {
     }
 
     fn chrome_next(&mut self, ids: &[ChromeId]) {
-        match self.chrome.selected().and_then(|id| ids.iter().position(|item| item == id)) {
-            Some(index) if index + 1 < ids.len() => self.chrome.select(Some(ids[index + 1].clone())),
-            Some(_) => self.chrome.select(None),
-            None => self.chrome.select(ids.first().cloned()),
+        if let Some(index) = self.chrome.selected().and_then(|id| ids.iter().position(|item| item == id))
+            && index + 1 < ids.len()
+        {
+            self.chrome.select(Some(ids[index + 1].clone()));
         }
     }
 
@@ -358,7 +365,11 @@ impl Shell {
 
     fn reseat_chrome(&mut self) {
         let ids = self.chrome_ids();
-        self.chrome.reseat(&ids, Clone::clone, |_, ids| ids.first().cloned());
+        if let Some(id) = self.chrome.selected()
+            && !ids.iter().any(|item| item == id)
+        {
+            self.chrome.select(None);
+        }
     }
 
     fn status_height(&self) -> u16 {
@@ -409,6 +420,9 @@ impl Shell {
         let mut hints = Vec::new();
         if self.chrome.selected().is_some() {
             hints.push(ENTER_HINT);
+            hints.push(LEAVE_BAND_HINT);
+        } else if !self.chrome_ids().is_empty() {
+            hints.push(ENTER_BAND_HINT);
         }
         if self.stack.last().and_then(Screen::digest_under_cursor).is_some() {
             hints.push(ARTIFACT_HINT);
@@ -469,6 +483,10 @@ impl Shell {
             _ => panic!("the stack starts with the board"),
         }
     }
+
+    fn chrome_selected(&self) -> Option<&ChromeId> {
+        self.chrome.selected()
+    }
 }
 
 #[cfg(test)]
@@ -481,7 +499,7 @@ mod tests {
     };
     use crate::fetch::{FetchReply, ResourceBody};
     use crate::http::Endpoint;
-    use crate::keys::Outcome;
+    use crate::keys::{Outcome, assert_footer_honest};
     use crate::nav::Nav;
     use crate::screen::RowId;
     use crate::store::ResourceKey;
@@ -658,6 +676,7 @@ mod tests {
         let mut shell = Shell::showing(view, None);
         let text = draw(&mut shell);
         assert!(text.contains(label), "interrupt {label} missing from:\n{text}");
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('i'))), Outcome::Handled);
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
         assert_eq!(shell.top_focus().as_ref(), Some(focus), "Enter on {label} jumped to the wrong subject");
     }
@@ -864,6 +883,7 @@ mod tests {
             });
         });
         let mut shell = Shell::showing(&view, None);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('i'))), Outcome::Handled);
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
         assert_eq!(shell.top_focus(), Some(Focus::composition(digest(0xab))));
 
@@ -912,5 +932,123 @@ mod tests {
         while probe.take_bulk().is_some() {}
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('r'))), Outcome::Handled);
         assert_eq!(probe.take_live().map(|request| request.key), Some(ResourceKey::View));
+    }
+
+    fn parked_blooms(count: u8) -> ViewDocument {
+        ViewDocument {
+            blooms: (1..=count)
+                .map(|n| BloomView {
+                    id: digest(n),
+                    review_park: Some(ReviewParkView::default()),
+                    members: vec![MemberView { workpiece: format!("wp-{n}"), ..MemberView::default() }],
+                    ..BloomView::default()
+                })
+                .collect(),
+            ..ViewDocument::default()
+        }
+    }
+
+    #[test]
+    fn holding_arrow_down_never_walks_chrome() {
+        // The plausible bug: the band auto-selects on load, so holding Down
+        // walks every interrupt and alert id before the table cursor moves.
+        let mut shell = Shell::showing(&parked_blooms(10), None);
+        assert_eq!(shell.chrome_selected(), None);
+        let start = shell.top_selected();
+        for _ in 0..5 {
+            assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Down)), Outcome::Handled);
+            assert_eq!(shell.chrome_selected(), None);
+        }
+        assert_ne!(shell.top_selected(), start);
+
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('i'))), Outcome::Handled);
+        assert!(shell.chrome_selected().is_some());
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Down)), Outcome::Handled);
+        assert_eq!(shell.chrome_selected(), None);
+    }
+
+    #[test]
+    fn arrow_up_from_the_first_row_does_not_enter_the_band() {
+        // The plausible bug: Up from the first table row silently selects the
+        // last chrome id, most of which have no visible representation.
+        let mut shell = Shell::showing(&parked_blooms(2), None);
+        let start = shell.top_selected();
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Up)), Outcome::Handled);
+        assert_eq!(shell.chrome_selected(), None);
+        assert_eq!(shell.top_selected(), start);
+    }
+
+    #[test]
+    fn band_entry_and_exit_are_footer_advertised() {
+        // The plausible bug: band entry is a silent wrap, and leaving it means
+        // walking every remaining chrome id, so the footer never names either.
+        let view = parked_blooms(2);
+        let mut shell = Shell::showing(&view, None);
+        let outside = shell.footer_hints();
+        assert!(
+            outside.iter().any(|hint| hint.keys == "i" && hint.action == "queue"),
+            "missing enter hint in {}",
+            crate::keys::footer_line(&outside)
+        );
+        assert_footer_honest(&outside, |code| {
+            let mut probe = Shell::showing(&view, None);
+            probe.handle_key(KeyEvent::from(code)) != Outcome::Ignored
+        });
+
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('i'))), Outcome::Handled);
+        assert!(shell.chrome_selected().is_some());
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('j'))), Outcome::Handled);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Esc)), Outcome::Handled);
+        assert_eq!(shell.chrome_selected(), None);
+
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('i'))), Outcome::Handled);
+        let inside = shell.footer_hints();
+        assert!(
+            inside.iter().any(|hint| hint.keys == "Esc" && hint.action == "board"),
+            "missing exit hint in {}",
+            crate::keys::footer_line(&inside)
+        );
+        assert!(
+            inside.iter().any(|hint| hint.keys == "Enter" && hint.action == "jump"),
+            "missing jump hint in {}",
+            crate::keys::footer_line(&inside)
+        );
+        assert_footer_honest(&inside, |code| {
+            let mut probe = Shell::showing(&view, None);
+            assert_eq!(probe.handle_key(KeyEvent::from(KeyCode::Char('i'))), Outcome::Handled);
+            probe.handle_key(KeyEvent::from(code)) != Outcome::Ignored
+        });
+    }
+
+    #[test]
+    fn chrome_selection_stays_on_a_visible_interrupt() {
+        // The plausible bug: j walks ids past the 8-row band, so the highlight
+        // sits on a clipped row and the cursor looks gone.
+        let mut shell = Shell::showing(&parked_blooms(10), None);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('i'))), Outcome::Handled);
+        for _ in 0..9 {
+            assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('j'))), Outcome::Handled);
+        }
+        assert!(shell.chrome_selected().is_some());
+        let text = draw(&mut shell);
+        let lines: Vec<&str> = text.lines().collect();
+        let alert_at = lines.iter().position(|line| line.contains("PARK")).expect("alert line");
+        let table_at = lines.iter().position(|line| line.contains("BLOOM / MEMBER")).expect("table header");
+        let band = lines[alert_at + 1..table_at].join("\n");
+        assert!(band.contains(&digest(10).prefix()), "selected interrupt missing from band:\n{band}");
+        assert!(!band.contains(&digest(1).prefix()), "scrolled-off interrupt still painted:\n{band}");
+    }
+
+    #[test]
+    fn a_vanished_chrome_id_leaves_the_band() {
+        // The plausible bug: a refresh that drops the selected id reseats onto
+        // another chrome row, stealing focus the operator never asked for.
+        let mut shell = Shell::showing(&parked_blooms(1), None);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('i'))), Outcome::Handled);
+        assert!(shell.chrome_selected().is_some());
+        let mut next = parked_blooms(1);
+        next.blooms[0].id = digest(9);
+        shell.apply_view(next);
+        assert_eq!(shell.chrome_selected(), None);
     }
 }

@@ -112,6 +112,28 @@ pub fn alert_band(alerts: &[Alert], selected: Option<usize>) -> Paragraph<'stati
     Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Black))
 }
 
+/// Interrupt rows the band can paint. Extra queue entries stay reachable by
+/// scrolling the selection onto this window.
+pub const INTERRUPT_BAND_ROWS: usize = 8;
+
+/// Visible slice of the interrupt queue and the selection index inside it.
+#[must_use]
+pub fn interrupt_window(entries: &[Interrupt], selected: Option<usize>) -> (&[Interrupt], Option<usize>) {
+    let start = interrupt_window_start(entries.len(), selected);
+    let end = (start + INTERRUPT_BAND_ROWS).min(entries.len());
+    let window = &entries[start..end];
+    let relative = selected.and_then(|index| index.checked_sub(start).filter(|&rel| rel < window.len()));
+    (window, relative)
+}
+
+fn interrupt_window_start(len: usize, selected: Option<usize>) -> usize {
+    if len <= INTERRUPT_BAND_ROWS {
+        return 0;
+    }
+    let max_start = len - INTERRUPT_BAND_ROWS;
+    selected.map_or(0, |index| index.saturating_sub(INTERRUPT_BAND_ROWS.saturating_sub(1)).min(max_start))
+}
+
 #[must_use]
 pub fn interrupt_band(entries: &[Interrupt], selected: Option<usize>) -> Paragraph<'static> {
     let lines: Vec<Line<'static>> = entries
@@ -155,12 +177,17 @@ pub fn footer(hints: &[KeyHint], metrics: Option<&str>) -> Paragraph<'static> {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_age, format_seal, format_status};
+    use super::{format_age, format_seal, format_status, interrupt_window};
     use crate::dto::{DigestHex, SpendQuiesce, ViewDocument};
+    use crate::warroom::{Focus, Interrupt, InterruptKind};
     use std::time::Duration;
 
     fn digest(byte: u8) -> DigestHex {
         DigestHex::from_bytes([byte; 32])
+    }
+
+    fn park_row(n: u8) -> Interrupt {
+        Interrupt { kind: InterruptKind::Park, detail: format!("row-{n}"), focus: Focus::bloom(digest(n)) }
     }
 
     #[test]
@@ -194,5 +221,27 @@ mod tests {
             }),
             "SEAL CLOSED  bloomery/daily/2026-08-17  12/10"
         );
+    }
+
+    #[test]
+    fn interrupt_window_scrolls_the_selected_row_into_view() {
+        // The plausible bug: a queue longer than the band keeps the highlight
+        // on a clipped row, so j/k looks like the cursor vanished.
+        let entries: Vec<Interrupt> = (0..10).map(park_row).collect();
+
+        let (window, selected) = interrupt_window(&entries, None);
+        assert_eq!(window.len(), 8);
+        assert_eq!(window[0].detail, "row-0");
+        assert_eq!(selected, None);
+
+        let (window, selected) = interrupt_window(&entries, Some(0));
+        assert_eq!(window[0].detail, "row-0");
+        assert_eq!(selected, Some(0));
+
+        let (window, selected) = interrupt_window(&entries, Some(9));
+        assert_eq!(window.len(), 8);
+        assert_eq!(window[0].detail, "row-2");
+        assert_eq!(window[7].detail, "row-9");
+        assert_eq!(selected, Some(7));
     }
 }
