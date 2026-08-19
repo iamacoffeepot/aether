@@ -35,10 +35,10 @@ use std::time::{Duration, Instant};
 
 use aether_bloomery::{
     Admit, AdmitResult, BloomDraft, BloomId, CONTROL_CORE_NAMESPACE, CalibrationDocument, CandidateRef, ConfigKind,
-    ConfigRegistry, Decisions, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, ModelOverride,
-    OperatorHold, OperatorRepair, OperatorRepairError, Outcome, Query, QueryResult, ResolvedConfigs, SealError,
-    Snapshot, SpendWindow, StageCatalog, StageId, StudyCost, StudyRecord, Unproducible, ViewDocument, WorkpieceId,
-    digest_of, reduce,
+    ConfigRegistry, Decision, Decisions, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership,
+    ModelOverride, OperatorHold, OperatorRepair, OperatorRepairError, Outcome, Query, QueryResult, ResolutionClaim,
+    ResolvedConfigs, SealError, Snapshot, SpendWindow, StageCatalog, StageId, StudyCost, StudyRecord, Unproducible,
+    ViewDocument, WorkpieceId, decode_recorded_decisions, digest_of, reduce,
 };
 use aether_chassis_bloomery::artifacts::{ArtifactsCapabilityState, PutResult};
 use aether_chassis_bloomery::store::{JournalWrite, RecordConfig, RecordConfigResult, SqliteStore, StoreBackend};
@@ -638,6 +638,132 @@ fn concurrent_same_key_admits_each_get_a_coherent_ok() {
     // second admit opened no second commit and forced no double-apply.
     let document = query_until_blooms(&mut stream, 10, control, 1);
     assert_eq!(document.blooms.len(), 1, "one bloom from the deduped same-key admit pair: {:?}", document.blooms);
+}
+
+#[test]
+fn two_set_completing_claims_in_one_batch_dispatch_integration_once() {
+    // Tripwire (#5168): two members whose terminal verifies land in the same
+    // poll batch each reduce against a snapshot that does not yet contain the
+    // other. Both see an incomplete set, DispatchIntegration is never decided,
+    // and replay reconstructs the stall — ADR-0190 folds recorded decisions.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("bloomery.db");
+    let db = db.to_str().unwrap();
+
+    let (coordinator, mut stream) = spawn_with_store(db, "control-loop-test");
+    let control = control_mailbox();
+
+    let sealed = admit(&mut stream, 2, control, &two_member_seal_event("seal-pair", 0, "wp-a", "wp-b"));
+    let Outcome::Sealed(bloom) = sealed else {
+        panic!("the two-member seal admits: {sealed:?}");
+    };
+
+    let first = integrate_event("integrate-a", bloom, "wp-a", 21);
+    let second = integrate_event("integrate-b", bloom, "wp-b", 22);
+    let (first_result, second_result): (AdmitResult, AdmitResult) = call_pair(
+        &mut stream,
+        (3, 4),
+        control,
+        (&Admit { event: to_vec(&first).unwrap() }, &Admit { event: to_vec(&second).unwrap() }),
+    );
+    for (label, result) in [("first", &first_result), ("second", &second_result)] {
+        match result {
+            AdmitResult::Ok { outcome } => {
+                let outcome: Outcome = from_bytes(outcome).expect("outcome decodes");
+                assert!(
+                    matches!(outcome, Outcome::Integrated { .. }),
+                    "the {label} completing claim integrates: {outcome:?}"
+                );
+            }
+            AdmitResult::Err { error } => panic!("the {label} completing claim got a spurious error: {error}"),
+        }
+    }
+
+    let document = query_until_blooms(&mut stream, 10, control, 1);
+    let members = &document.blooms[0].members;
+    assert!(members.iter().all(|member| member.resolution.is_some()), "both members carry a resolution: {members:?}");
+    drop(stream);
+    coordinator.kill9();
+
+    assert_eq!(
+        integration_dispatch_count(db),
+        1,
+        "exactly one fold order is journaled when both completing claims race the apply",
+    );
+
+    let (_coordinator, mut stream) = spawn_with_store(db, "control-loop-test");
+    let control = control_mailbox();
+    let replayed = query_until_blooms(&mut stream, 20, control, 1);
+    let members = &replayed.blooms[0].members;
+    assert!(members.iter().all(|member| member.resolution.is_some()), "replay keeps both resolutions: {members:?}");
+    drop(stream);
+
+    assert_eq!(
+        integration_dispatch_count(db),
+        1,
+        "replay folds the recorded fold order rather than reconstructing a stall",
+    );
+}
+
+fn approved_member(workpiece: &str) -> Membership {
+    let mut member = Membership {
+        workpiece: WorkpieceId(workpiece.to_owned()),
+        scope_revision: Digest::from_bytes([1; 32]),
+        configs: ConfigRegistry::default(),
+        approval: Evidence {
+            subject: Digest::default(),
+            kind: EvidenceKind::Approval,
+            detail: Digest::from_bytes([200; 32]),
+        },
+    };
+    member.approval.subject = member.subject();
+    member
+}
+
+fn two_member_seal_event(key: &str, base: u8, wp_a: &str, wp_b: &str) -> Event {
+    let spec = BloomDraft {
+        proposals: vec![approved_member(wp_a), approved_member(wp_b)],
+        base: Digest::from_bytes([base; 32]),
+        ..BloomDraft::default()
+    }
+    .seal();
+    Event { idempotency_key: IdempotencyKey(key.to_owned()), fact: Fact::Seal(spec) }
+}
+
+fn integrate_event(key: &str, bloom: BloomId, workpiece: &str, candidate: u8) -> Event {
+    let candidate = Digest::from_bytes([candidate; 32]);
+    Event {
+        idempotency_key: IdempotencyKey(key.to_owned()),
+        fact: Fact::Integrate {
+            bloom,
+            claim: ResolutionClaim {
+                workpiece: WorkpieceId(workpiece.to_owned()),
+                scope_revision: Digest::from_bytes([1; 32]),
+                candidate,
+                evidence: Evidence {
+                    subject: candidate,
+                    kind: EvidenceKind::ResolutionClaim,
+                    detail: Digest::from_bytes([201; 32]),
+                },
+            },
+        },
+    }
+}
+
+fn integration_dispatch_count(db: &str) -> usize {
+    let mut store = SqliteStore::open(db).unwrap();
+    store
+        .replay_journal()
+        .unwrap()
+        .iter()
+        .map(|record| {
+            decode_recorded_decisions(&record.decisions, record.decisions_schema.as_deref())
+                .expect("journaled decisions decode")
+        })
+        .map(|decisions| {
+            decisions.effects.iter().filter(|effect| matches!(effect, Decision::DispatchIntegration { .. })).count()
+        })
+        .sum()
 }
 
 /// Author a configuration straight to the store, exactly as the api cap's
