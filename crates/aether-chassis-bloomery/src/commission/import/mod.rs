@@ -201,7 +201,7 @@ fn format_report(report: &ImportReport) -> String {
         match &entry.parse {
             ParseStatus::Clean { scope } => {
                 out.push_str("clean unsigned scope ");
-                out.push_str(&hex(scope.as_bytes()));
+                out.push_str(&scope.to_hex());
             }
             ParseStatus::Ambiguous { reason } => {
                 out.push_str("ambiguous (");
@@ -234,16 +234,6 @@ pub enum ParseStatus {
         /// Why the managed headings did not become a revision.
         reason: String,
     },
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(DIGITS[usize::from(byte >> 4)] as char);
-        out.push(DIGITS[usize::from(byte & 0x0f)] as char);
-    }
-    out
 }
 
 #[cfg(test)]

@@ -143,12 +143,9 @@ impl LandReactorState {
 /// so a re-drain (before the ack lands, or after a crash-and-replay) reduces to a
 /// duplicate rather than a second land. A bloom lands exactly once.
 fn land_key(bloom: &Digest) -> IdempotencyKey {
-    use core::fmt::Write;
     let mut key = String::with_capacity(21 + 64);
     key.push_str("aether.bloomery.land:");
-    for byte in bloom.as_bytes() {
-        let _ = write!(key, "{byte:02x}");
-    }
+    key.push_str(&bloom.to_hex());
     IdempotencyKey(key)
 }
 
@@ -194,16 +191,12 @@ fn enqueue_source_replica(store: &mut dyn StoreBackend, new_head: &Digest) -> bo
 /// discarded as a replay and the bloom sat `Resolved` with its land entry
 /// acked (#5106).
 fn rejected_key(bloom: &Digest, head: &Digest, cause: &str) -> IdempotencyKey {
-    use core::fmt::Write;
     let mut key = String::from("aether.bloomery.landing_rejected:");
-    for byte in bloom.as_bytes() {
-        let _ = write!(key, "{byte:02x}");
-    }
+    key.push_str(&bloom.to_hex());
     key.push(':');
-    for byte in head.as_bytes() {
-        let _ = write!(key, "{byte:02x}");
-    }
-    let _ = write!(key, ":{cause}");
+    key.push_str(&head.to_hex());
+    key.push(':');
+    key.push_str(cause);
     IdempotencyKey(key)
 }
 

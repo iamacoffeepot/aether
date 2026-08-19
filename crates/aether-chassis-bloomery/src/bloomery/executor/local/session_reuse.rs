@@ -715,11 +715,7 @@ pub fn static_prefix_hash(worktree: &Path) -> String {
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {
-    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {
-        use std::fmt::Write;
-        let _ = write!(out, "{byte:02x}");
-        out
-    })
+    aether_bloomery::encode_hex(bytes)
 }
 
 /// Stamp the acquire plan (and the result record's actuals) onto the

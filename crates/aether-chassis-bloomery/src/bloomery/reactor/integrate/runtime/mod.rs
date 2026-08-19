@@ -130,26 +130,17 @@ fn fold_conflict_key(
     candidate: &Digest,
     attempted: &Digest,
 ) -> IdempotencyKey {
-    use core::fmt::Write;
     let mut key = String::with_capacity(32 + 64 + 1 + workpiece.len() + 1 + 64 + 1 + 64 + 1 + 64);
     key.push_str("aether.bloomery.fold-conflict:");
-    for byte in bloom.as_bytes() {
-        let _ = write!(key, "{byte:02x}");
-    }
+    key.push_str(&bloom.to_hex());
     key.push(':');
     key.push_str(workpiece);
     key.push(':');
-    for byte in checkpoint.as_bytes() {
-        let _ = write!(key, "{byte:02x}");
-    }
+    key.push_str(&checkpoint.to_hex());
     key.push(':');
-    for byte in candidate.as_bytes() {
-        let _ = write!(key, "{byte:02x}");
-    }
+    key.push_str(&candidate.to_hex());
     key.push(':');
-    for byte in attempted.as_bytes() {
-        let _ = write!(key, "{byte:02x}");
-    }
+    key.push_str(&attempted.to_hex());
     IdempotencyKey(key)
 }
 
@@ -192,16 +183,11 @@ fn fold_conflict_overlay(paths: &[String], diff: &str) -> String {
 /// (#4722). Under the bloom-only key that second resolve was swallowed as a
 /// replay and the run stopped dead.
 fn resolve_key(bloom: &Digest, tree: &Digest) -> IdempotencyKey {
-    use core::fmt::Write;
     let mut key = String::with_capacity(24 + 64 + 1 + 64);
     key.push_str("aether.bloomery.resolve:");
-    for byte in bloom.as_bytes() {
-        let _ = write!(key, "{byte:02x}");
-    }
+    key.push_str(&bloom.to_hex());
     key.push(':');
-    for byte in tree.as_bytes() {
-        let _ = write!(key, "{byte:02x}");
-    }
+    key.push_str(&tree.to_hex());
     IdempotencyKey(key)
 }
 
@@ -420,22 +406,15 @@ fn splice_namespace(bloom: &BloomId, workpiece: &WorkpieceId) -> BloomId {
 }
 
 fn splice_assembled_key(bloom: &Digest, workpiece: &str, tree: &Digest, head: &Digest) -> IdempotencyKey {
-    use core::fmt::Write;
     let mut key = String::with_capacity(32 + 64 + 1 + workpiece.len() + 1 + 64 + 1 + 64);
     key.push_str("aether.bloomery.splice-assembled:");
-    for byte in bloom.as_bytes() {
-        let _ = write!(key, "{byte:02x}");
-    }
+    key.push_str(&bloom.to_hex());
     key.push(':');
     key.push_str(workpiece);
     key.push(':');
-    for byte in tree.as_bytes() {
-        let _ = write!(key, "{byte:02x}");
-    }
+    key.push_str(&tree.to_hex());
     key.push(':');
-    for byte in head.as_bytes() {
-        let _ = write!(key, "{byte:02x}");
-    }
+    key.push_str(&head.to_hex());
     IdempotencyKey(key)
 }
 
@@ -727,12 +706,7 @@ fn drain_and_splice(
 }
 
 fn digest_hex(digest: &Digest) -> String {
-    use core::fmt::Write;
-    let mut out = String::with_capacity(64);
-    for byte in digest.as_bytes() {
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
+    digest.to_hex()
 }
 
 /// File the overlay under the same sha256 `detail` the fold-conflict evidence

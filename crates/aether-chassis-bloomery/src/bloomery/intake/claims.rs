@@ -59,8 +59,8 @@ impl NameEvidenceClaims {
             "{ATTEMPT_ARTIFACT_PREFIX}.{}.{}.{}.{}.{}",
             verdict_token(verdict),
             failed_verifiers.to_mask(),
-            hex_of(subject),
-            hex_of(detail),
+            subject.to_hex(),
+            detail.to_hex(),
             nonce.0,
         )
     }
@@ -81,8 +81,8 @@ impl EvidenceClaims for NameEvidenceClaims {
             // name and buys no upload.
             (
                 VerifyFailureSet::from_mask(mask_or_subject)?,
-                digest_from_hex(fields.next()?)?,
-                digest_from_hex(fields.next()?)?,
+                Digest::from_hex(fields.next()?)?,
+                Digest::from_hex(fields.next()?)?,
                 fields.next()?,
             )
         } else {
@@ -92,8 +92,8 @@ impl EvidenceClaims for NameEvidenceClaims {
             // short mask cannot take this path because a subject is 64 hex.
             (
                 VerifyFailureSet::EMPTY,
-                digest_from_hex(mask_or_subject)?,
-                digest_from_hex(fields.next()?)?,
+                Digest::from_hex(mask_or_subject)?,
+                Digest::from_hex(fields.next()?)?,
                 fields.next()?,
             )
         };
@@ -149,30 +149,4 @@ fn verdict_from_token(token: &str) -> Option<StageVerdict> {
         "fault" => StageVerdict::ExecutorFault,
         _ => return None,
     })
-}
-
-/// Lowercase-hex a digest's 32 bytes.
-fn hex_of(digest: &Digest) -> String {
-    let mut hex = String::with_capacity(64);
-    for byte in digest.as_bytes() {
-        // Two lowercase hex nibbles per byte.
-        hex.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
-        hex.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
-    }
-    hex
-}
-
-/// Decode a 64-char lowercase-hex string into a [`Digest`]; `None` on any
-/// non-hex character or a wrong length (a malformed / non-attempt name).
-fn digest_from_hex(hex: &str) -> Option<Digest> {
-    if hex.len() != 64 {
-        return None;
-    }
-    let mut bytes = [0u8; 32];
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        let high = hex.as_bytes()[index * 2] as char;
-        let low = hex.as_bytes()[index * 2 + 1] as char;
-        *byte = (u8::try_from(high.to_digit(16)?).ok()? << 4) | u8::try_from(low.to_digit(16)?).ok()?;
-    }
-    Some(Digest::from_bytes(bytes))
 }

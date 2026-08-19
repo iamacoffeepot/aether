@@ -8,7 +8,6 @@
 //! [`SignatureEnvelope`]; this crate does not hold private keys.
 
 mod client;
-mod hex;
 pub(crate) mod import;
 pub(crate) mod scope;
 
@@ -267,10 +266,7 @@ fn signed_statement(path: &Path, words: &[u8]) -> Result<Statement> {
 }
 
 fn digest_from_hex(hex: &str) -> Result<Digest> {
-    let Some(bytes) = hex::decode_digest(hex) else {
-        bail!("expected a 64-character hex digest, got {hex:?}");
-    };
-    Ok(Digest::from_bytes(bytes))
+    Digest::from_hex(hex).ok_or_else(|| anyhow!("expected a 64-character hex digest, got {hex:?}"))
 }
 
 #[cfg(test)]

@@ -10,6 +10,8 @@ use serde::de::{Error as DeError, SeqAccess, Visitor};
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::hex_nibble;
+
 /// One member of the closed V1 verifier-failure vocabulary, in canonical order.
 ///
 /// The order is append-only and independent of the umbrella's run order: each
@@ -212,18 +214,10 @@ impl VerifyFailureSet {
     #[must_use]
     pub fn from_mask(mask: &str) -> Option<Self> {
         let bytes = mask.as_bytes();
-        if bytes.len() != 2 || !bytes.iter().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)) {
+        if bytes.len() != 2 {
             return None;
         }
         Some(Self((hex_nibble(bytes[0])? << 4) | hex_nibble(bytes[1])?))
-    }
-}
-
-const fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        _ => None,
     }
 }
 

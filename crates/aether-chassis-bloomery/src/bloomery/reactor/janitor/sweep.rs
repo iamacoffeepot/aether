@@ -581,13 +581,7 @@ fn remove_abandoned(path: &Path) -> bool {
 }
 
 fn hex_of(digest: &Digest) -> String {
-    let bytes = digest.as_bytes();
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(char::from_digit(u32::from(*byte >> 4), 16).unwrap_or('0'));
-        out.push(char::from_digit(u32::from(*byte & 0x0f), 16).unwrap_or('0'));
-    }
-    out
+    digest.to_hex()
 }
 
 /// Retention window as a [`Duration`], for tests that age a directory.

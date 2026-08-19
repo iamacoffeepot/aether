@@ -7,7 +7,6 @@
 //! this design — the report is what `/view` and the operator channel post.
 
 use std::collections::{BTreeSet, HashSet};
-use std::fmt::Write as _;
 use std::time::Duration;
 
 use aether_bloomery::{
@@ -542,11 +541,7 @@ fn status_name(status: BloomStatus) -> &'static str {
 }
 
 fn hex_of(digest: &Digest) -> String {
-    let mut out = String::with_capacity(64);
-    for byte in digest.as_bytes() {
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
+    digest.to_hex()
 }
 
 #[cfg(test)]

@@ -52,7 +52,7 @@ fn signed(signer: &str, key: &SigningKey, words: &[u8], door: AuthorityDoor, bou
 
 /// The 64-char hex of a signing key's public half — the allowlist config form.
 fn key_hex(key: &SigningKey) -> String {
-    key.verifying_key().to_bytes().iter().map(|b| format!("{b:02x}")).collect()
+    aether_bloomery::encode_hex(&key.verifying_key().to_bytes())
 }
 
 #[test]

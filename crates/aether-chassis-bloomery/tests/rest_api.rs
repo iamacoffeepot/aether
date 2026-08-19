@@ -166,8 +166,7 @@ fn owner_signing_key() -> SigningKey {
 /// The `AETHER_SIGNING_ALLOWLIST` value trusting `owner` at [`owner_signing_key`]'s
 /// public half (`key-id:hex-public-key`).
 fn owner_allowlist() -> String {
-    let hex: String = owner_signing_key().verifying_key().to_bytes().iter().map(|b| format!("{b:02x}")).collect();
-    format!("owner:{hex}")
+    format!("owner:{}", aether_bloomery::encode_hex(&owner_signing_key().verifying_key().to_bytes()))
 }
 
 /// Fork the `bloomery` bin with the HTTP ingress and control core autoloaded,
@@ -309,16 +308,13 @@ fn bloom_hex(bloom_id: &Value) -> String {
 /// Read a rendered digest back into a [`Digest`] — the inverse of [`hex_of`].
 fn digest_at(rendered: &Value) -> Digest {
     let hex = rendered.as_str().expect("a rendered digest is a hex string");
-    let bytes: Vec<u8> = (0..hex.len() / 2)
-        .map(|pair| u8::from_str_radix(&hex[pair * 2..pair * 2 + 2], 16).expect("a rendered digest is hex"))
-        .collect();
-    Digest::from_slice(&bytes).expect("a rendered digest is 32 bytes")
+    Digest::from_hex(hex).expect("a rendered digest is 32 lowercase hex characters")
 }
 
 /// Hex-encode a [`Digest`] for a path segment that names one — the answer
 /// route's `{question}` and the release route's `{digest}`.
 fn hex_of(digest: &Digest) -> String {
-    digest.as_bytes().iter().map(|byte| format!("{byte:02x}")).collect()
+    digest.to_hex()
 }
 
 /// A valid single-workpiece draft the reducer admits: the member's approval

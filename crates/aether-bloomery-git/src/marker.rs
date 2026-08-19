@@ -17,7 +17,7 @@
 //!
 //! [`WorkpieceId`]: aether_bloomery::WorkpieceId
 
-use aether_bloomery::Digest;
+use aether_bloomery::{Digest, decode_hex, encode_hex};
 
 /// The internal metadata a projection embeds: the stable find-by key and the
 /// content digest the reconcile compares.
@@ -38,7 +38,7 @@ const CLOSE: &str = " -->";
 /// Render `marker` as an HTML comment for embedding in an issue/comment body.
 #[must_use]
 pub fn render_marker(marker: &Marker) -> String {
-    format!("{OPEN}{}{MID}{}{CLOSE}", to_hex(marker.key.as_bytes()), digest_hex(&marker.digest))
+    format!("{OPEN}{}{MID}{}{CLOSE}", encode_hex(marker.key.as_bytes()), marker.digest.to_hex())
 }
 
 /// Parse the first well-formed marker out of `body`, if present. A body with
@@ -54,8 +54,8 @@ pub fn parse_marker(body: &str) -> Option<Marker> {
     let end = after_mid.find(CLOSE)?;
     let digest_hex = &after_mid[..end];
 
-    let key = String::from_utf8(from_hex(key_hex)?).ok()?;
-    let digest = digest_from_hex(digest_hex)?;
+    let key = String::from_utf8(decode_hex(key_hex)?).ok()?;
+    let digest = Digest::from_hex(digest_hex)?;
     Some(Marker { key, digest })
 }
 
@@ -64,60 +64,27 @@ pub fn parse_marker(body: &str) -> Option<Marker> {
 /// a marker could hide in.
 #[must_use]
 pub fn check_run_external_id(marker: &Marker) -> String {
-    format!("{}@{}", to_hex(marker.key.as_bytes()), digest_hex(&marker.digest))
+    format!("{}@{}", encode_hex(marker.key.as_bytes()), marker.digest.to_hex())
 }
 
 /// Parse a check-run `external_id` back into a marker.
 #[must_use]
 pub fn parse_check_run_external_id(external_id: &str) -> Option<Marker> {
     let (key_hex, digest_hex) = external_id.split_once('@')?;
-    let key = String::from_utf8(from_hex(key_hex)?).ok()?;
-    let digest = digest_from_hex(digest_hex)?;
+    let key = String::from_utf8(decode_hex(key_hex)?).ok()?;
+    let digest = Digest::from_hex(digest_hex)?;
     Some(Marker { key, digest })
-}
-
-fn digest_hex(digest: &Digest) -> String {
-    to_hex(digest.as_bytes())
-}
-
-fn digest_from_hex(hex: &str) -> Option<Digest> {
-    let bytes = from_hex(hex)?;
-    let arr: [u8; 32] = bytes.try_into().ok()?;
-    Some(Digest::from_bytes(arr))
-}
-
-fn to_hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
-        out.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
-    }
-    out
-}
-
-fn from_hex(hex: &str) -> Option<Vec<u8>> {
-    if !hex.len().is_multiple_of(2) {
-        return None;
-    }
-    let bytes = hex.as_bytes();
-    let mut out = Vec::with_capacity(hex.len() / 2);
-    let mut i = 0;
-    while i < bytes.len() {
-        let hi = (bytes[i] as char).to_digit(16)?;
-        let lo = (bytes[i + 1] as char).to_digit(16)?;
-        out.push(u8::try_from((hi << 4) | lo).ok()?);
-        i += 2;
-    }
-    Some(out)
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use aether_bloomery::Digest;
+    use aether_bloomery::{Digest, encode_hex};
     use sha2::{Digest as _, Sha256};
 
-    use super::{Marker, check_run_external_id, parse_check_run_external_id, parse_marker, render_marker};
+    use super::{
+        CLOSE, MID, Marker, OPEN, check_run_external_id, parse_check_run_external_id, parse_marker, render_marker,
+    };
 
     // A digest *computed* from spec bytes, not a literal — so the roundtrip
     // tripwire fails if the embed/parse hex logic drifts, rather than
@@ -165,5 +132,20 @@ mod tests {
     fn check_run_external_id_roundtrips() {
         let marker = Marker { key: "bloom:aggregate".into(), digest: digest_of_bytes(b"view") };
         assert_eq!(parse_check_run_external_id(&check_run_external_id(&marker)), Some(marker));
+    }
+
+    #[test]
+    fn an_uppercase_marker_does_not_parse() {
+        // Tripwire: the encoder emits lowercase; a distinct uppercase hex
+        // payload used to parse as the same idempotency key.
+        let marker = Marker { key: "wp:x".into(), digest: digest_of_bytes(b"y") };
+        let lower = render_marker(&marker);
+        assert_eq!(parse_marker(&lower), Some(marker.clone()));
+        let upper = format!(
+            "{OPEN}{}{MID}{}{CLOSE}",
+            encode_hex(marker.key.as_bytes()).to_ascii_uppercase(),
+            marker.digest.to_hex().to_ascii_uppercase(),
+        );
+        assert_eq!(parse_marker(&upper), None);
     }
 }
