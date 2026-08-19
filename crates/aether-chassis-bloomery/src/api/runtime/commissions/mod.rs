@@ -311,6 +311,7 @@ pub(super) fn revision_response(result: WriteScopeRevisionResult) -> HttpServerR
         WriteScopeRevisionResult::Err { error } => {
             error_response(500, &format!("scope revision write failed: {error}"))
         }
+        WriteScopeRevisionResult::NotOpen => error_response(409, "commission is not open"),
     }
 }
 
@@ -338,6 +339,7 @@ pub(super) fn approval_response(result: RecordCommissionApprovalResult) -> HttpS
         RecordCommissionApprovalResult::Err { error } => {
             error_response(500, &format!("commission approval write failed: {error}"))
         }
+        RecordCommissionApprovalResult::NotOpen => error_response(409, "commission is not open"),
     }
 }
 

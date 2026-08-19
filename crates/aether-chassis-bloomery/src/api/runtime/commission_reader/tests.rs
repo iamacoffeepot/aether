@@ -83,21 +83,41 @@ fn a_verified_row_materializes_the_workpiece_and_the_frozen_projection() {
 }
 
 #[test]
-fn an_empty_description_renders_the_signed_work_order() {
-    // The CLI stores structured fields and leaves description empty. Seal
-    // must still persist a construct task; falling back to a GitHub issue
-    // body would be the inbound surface this door closed.
+fn an_empty_description_is_refused_not_dispatched() {
+    // Tripwire: an empty description used to miss the door and dispatch an
+    // empty ## Task. Structured fields are not a substitute once the verb
+    // stores the rendered work order on the revision.
     let mut revision = revision("wp-local", "Need a CLI.");
     revision.description.clear();
-    revision.design = "Separate binary.".to_owned();
-    revision.plan = "Ship bloomery-commission.".to_owned();
     let digest = digest_of(&revision);
-    let admitted = admit(digest, loaded("wp-local", &revision, vec![auto_approval(digest)])).expect("admitted");
+    let error = admit(digest, loaded("wp-local", &revision, vec![auto_approval(digest)]))
+        .expect_err("empty description must not admit");
+    match error {
+        AdmitError::Refused(refusal @ AdmissionRefusal::EmptyDescription { .. }) => {
+            assert!(refusal.message().contains("empty description"), "{}", refusal.message());
+        }
+        other => panic!("expected empty description, got {other:?}"),
+    }
+}
 
-    assert!(admitted.description.contains("Need a CLI."), "problem is the task: {}", admitted.description);
-    assert!(admitted.description.contains("## Design notes"), "{}", admitted.description);
-    assert!(admitted.description.contains("Ship bloomery-commission."), "{}", admitted.description);
-    assert!(!admitted.description.contains("advisory"), "empty description must not keep a placeholder");
+#[test]
+fn a_draft_naming_a_cancelled_commission_is_not_stale() {
+    // Tripwire: a cancelled tip used to fail as StaleScope, sending the
+    // operator to write a new revision instead of naming the closed status.
+    let revision = revision("wp-1", "problem");
+    let digest = digest_of(&revision);
+    let mut result = loaded("wp-1", &revision, vec![auto_approval(digest)]);
+    if let LoadCommissionResult::Ok { status, .. } = &mut result {
+        *status = "cancelled".to_owned();
+    }
+    let error = admit(digest, result).expect_err("cancelled commission must not admit");
+    match error {
+        AdmitError::Refused(refusal @ AdmissionRefusal::NotOpen { .. }) => {
+            assert!(refusal.message().contains("not open"), "{}", refusal.message());
+            assert!(!refusal.message().contains("stale"), "status must not read as stale: {}", refusal.message());
+        }
+        other => panic!("expected not open, got {other:?}"),
+    }
 }
 
 #[test]
