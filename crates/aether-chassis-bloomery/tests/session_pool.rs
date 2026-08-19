@@ -20,6 +20,7 @@
 
 mod common;
 
+use std::net::TcpStream;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_chassis_bloomery::session::{Acquire, AcquireResult, Release, ReleaseResult, SessionKey, SessionManifest};
@@ -45,7 +46,7 @@ fn session_mailbox() -> MailboxId {
     mailbox_id_from_path("aether.session")
 }
 
-fn call_session<Req, Reply>(stream: &mut std::net::TcpStream, cid: u64, request: &Req) -> Reply
+fn call_session<Req, Reply>(stream: &mut TcpStream, cid: u64, request: &Req) -> Reply
 where
     Req: Kind + Serialize,
     Reply: Kind,
