@@ -187,6 +187,16 @@ impl SourceShell {
         self.backend.observe_mainline_head()
     }
 
+    /// Read the repository's live mainline head as a raw git object sha,
+    /// resolving no correspondence — the doctor uses this to compare `/view`
+    /// against the actual daily ref without minting a digest.
+    ///
+    /// # Errors
+    /// The mainline ref is unreachable.
+    pub fn mainline_head_sha(&self) -> Result<String, SourceError> {
+        self.backend.mainline_head_sha()
+    }
+
     /// Whether `to` is `from` or a descendant of it — git ancestry, not the
     /// observation follow policy. The observe path asks this both ways
     /// (#4938): a rewrite is followable; only a strict ancestor is refused.

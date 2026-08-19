@@ -139,6 +139,26 @@ impl Correspondence for SqliteCorrespondence {
             })
             .transpose()
     }
+
+    #[allow(clippy::significant_drop_tightening, reason = "the guard must outlive the borrowed statement and rows")]
+    fn pairs(&self) -> Result<Vec<(Digest, BackendObjectId)>, CorrespondenceError> {
+        let rows: Vec<(Vec<u8>, Vec<u8>)> = {
+            let conn = self.lock();
+            let mut stmt =
+                conn.prepare("SELECT digest, backend_object FROM backend_correspondence").map_err(map_err)?;
+            let mapped = stmt
+                .query_map([], |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)))
+                .map_err(map_err)?;
+            mapped.collect::<Result<Vec<_>, _>>().map_err(map_err)?
+        };
+        rows.into_iter()
+            .map(|(digest, object)| {
+                let array: [u8; 32] =
+                    digest.try_into().map_err(|_| CorrespondenceError::new("stored digest is not 32 bytes"))?;
+                Ok((Digest::from_bytes(array), BackendObjectId::new(object)))
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
