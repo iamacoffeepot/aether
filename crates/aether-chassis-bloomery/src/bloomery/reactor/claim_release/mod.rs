@@ -12,7 +12,7 @@
 //! addressing identity; the state-bearing logic is [`runtime`].
 
 use aether_actor::actor;
-use aether_bloomery::Topic;
+use aether_bloomery::{AdmitResult, Topic};
 
 use crate::bloomery::SourceShell;
 
