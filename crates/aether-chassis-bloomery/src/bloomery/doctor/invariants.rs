@@ -391,8 +391,8 @@ fn landed_resolution_is_ancestor(live: &LiveState<'_>) -> Vec<String> {
 /// is not an ancestor of the current daily head sits on a previous day's
 /// chain. The day roll rewrites history across the cut: those resolutions are
 /// structurally never ancestors of the new head, and their ancestry was
-/// notarized by that day's sync-back. [`ViewMainlineCorresponds`] and
-/// [`ObservedHeadEqualsDailyHead`] compare live pointers, not historical lands
+/// notarized by that day's sync-back. [`Invariant::ViewMainlineCorresponds`] and
+/// [`Invariant::ObservedHeadEqualsDailyHead`] compare live pointers, not historical lands
 /// — a post-roll mismatch there is a missed observation, not rewritten
 /// history, and stays in scope. Unknown era (missing record, ancestry that
 /// does not resolve) stays in the check so a current-era defect cannot hide.
