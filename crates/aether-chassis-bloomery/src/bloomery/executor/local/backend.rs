@@ -802,6 +802,7 @@ impl LocalExecutor {
         let messages = self.messages.as_ref()?;
         let mut store = messages.lock().unwrap_or_else(PoisonError::into_inner);
         let order = store.lookup_order(nonce).ok().flatten()?;
+        drop(store);
         let stage = from_bytes::<StageId>(&order.stage).ok()?;
         Some((order.bloom, order.workpiece, stage))
     }
