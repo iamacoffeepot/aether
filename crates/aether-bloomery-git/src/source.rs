@@ -799,11 +799,14 @@ impl<C: GitDataApi> GitSource<C> {
 
     // Release each of `targets` the named `owner` holds by a fast-forward CAS to a
     // tombstone child commit (the linearization point) then a name-only cleanup
-    // delete. An absent ref is skipped (idempotent); a ref already at the tombstone
-    // commit is *already released* — an interrupted release's CAS linearized but its
-    // cleanup delete did not run — so the cleanup delete is finished (behind the
-    // same CAS reassertion, so a fresh claim that reused the name in the read→delete
-    // window is spared rather than clobbered) and the walk continues (ADR-0150 §The
+    // delete. Those steps are two `transact_refs` calls: git's `update-ref --stdin`
+    // refuses two ops on the same name in one transaction, and the interruption
+    // window between them is a state this walk already heals. An absent ref is
+    // skipped (idempotent); a ref already at the tombstone commit is *already
+    // released* — an interrupted release's CAS linearized but its cleanup delete
+    // did not run — so the cleanup delete is finished (behind the same CAS
+    // reassertion, so a fresh claim that reused the name in the read→delete window
+    // is spared rather than clobbered) and the walk continues (ADR-0150 §The
     // claim registry, amended PR #3556: the release path is idempotent over its own
     // tombstone). A ref a *different* bloom holds is spared and reported as `Held` —
     // the CAS read-guard that retires the check-then-delete TOCTOU.
@@ -818,31 +821,48 @@ impl<C: GitDataApi> GitSource<C> {
         owner: Option<&BloomId>,
         targets: &[(ClaimRefKind, String)],
     ) -> Result<ClaimOutcome, SourceError> {
-        let mut ops = Vec::new();
+        let mut tombstones = Vec::new();
+        let mut deletes = Vec::new();
         for (kind, name) in targets {
             let Some(current) = self.client.get_ref(name)? else {
                 continue;
             };
             match self.classify_holder(&current.sha)? {
                 ClaimHolder::Tombstoned => {
-                    ops.push(RefTxnOp::Delete { name: name.clone(), expected: current.sha });
+                    deletes.push(RefTxnOp::Delete { name: name.clone(), expected: current.sha });
                 }
                 ClaimHolder::Held(holder) if owner == Some(&holder) => {
                     let tombstone =
                         self.client.create_commit(&render_tombstone_message(), EMPTY_TREE, from_ref(&current.sha))?;
-                    ops.push(RefTxnOp::Update {
+                    tombstones.push(RefTxnOp::Update {
                         name: name.clone(),
                         sha: tombstone.sha.clone(),
                         expected: current.sha,
                     });
-                    ops.push(RefTxnOp::Delete { name: name.clone(), expected: tombstone.sha });
+                    deletes.push(RefTxnOp::Delete { name: name.clone(), expected: tombstone.sha });
                 }
                 ClaimHolder::Held(holder) => {
                     return Ok(ClaimOutcome::Held { ref_kind: kind.clone(), held_by: holder });
                 }
             }
         }
-        match self.client.transact_refs(&ops) {
+        match self.transact_release(owner, targets, &tombstones)? {
+            ClaimOutcome::Held { ref_kind, held_by } => Ok(ClaimOutcome::Held { ref_kind, held_by }),
+            ClaimOutcome::Acquired => self.transact_release(owner, targets, &deletes),
+        }
+    }
+
+    // Apply one release batch and map a lost CAS onto a foreign `Held` when one
+    // is still visible, otherwise the generic lost-release fault. Shared by the
+    // tombstone Updates and the follow-on Deletes so the two transactions
+    // classify a conflict the same way.
+    fn transact_release(
+        &self,
+        owner: Option<&BloomId>,
+        targets: &[(ClaimRefKind, String)],
+        ops: &[RefTxnOp],
+    ) -> Result<ClaimOutcome, SourceError> {
+        match self.client.transact_refs(ops) {
             Ok(()) => Ok(ClaimOutcome::Acquired),
             Err(GitDataError::RefConflict(_)) => {
                 for (kind, name) in targets {
