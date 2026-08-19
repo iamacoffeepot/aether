@@ -470,7 +470,21 @@ fn a_seal_reads_commission_task_text_without_a_github_issue() {
     wait_for_200(http_port, "/drafts");
     wait_for_200(http_port, "/view");
 
-    let revision = seed_commission_described(http_port, "wp-local", &["docs/guide/**"], "Need a CLI.", "", true);
+    // The scope verb persists this rendered order; an empty description is refused.
+    let order = "\
+## Problem statement
+
+Need a CLI.
+
+## Design notes
+
+design
+
+## Implementation plan
+
+plan
+";
+    let revision = seed_commission_described(http_port, "wp-local", &["docs/guide/**"], "Need a CLI.", order, true);
     let draft_id = patch_draft(http_port, &serde_json::to_value(valid_draft("wp-local", revision)).unwrap());
     let (status, sealed) = send_json(http_port, "POST", &format!("/drafts/{draft_id}/seal"), &seal_body());
     assert_eq!(status, 200, "a commission with no GitHub issue seals: {sealed:?}");
