@@ -10,8 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_bloomery::{
     BackendObjectId, CandidateRef, Conclusion, ConfigRegistry, ConfigScopes, Digest, EvidenceRef, ExecutionStatus,
-    ExecutorBackend, Nonce, PriceTable, ResolvedModel, SharedCorrespondence, StageVerdict, StudyCost, Transformation,
-    VerifyFailureSet, WorkHandle, WorkOrder, is_model_lane,
+    ExecutorBackend, Nonce, PriceTable, ResolvedModel, SharedCorrespondence, StageId, StageVerdict, StudyCost,
+    Transformation, VerifyFailureSet, WorkHandle, WorkOrder, is_model_lane,
 };
 use aether_bloomery_github::parse_study;
 use aether_data::Kind;
@@ -26,7 +26,10 @@ use super::orphan::OrphanedRun;
 use super::process_runner::{CaptureIdentity, ProcessTransformRunner};
 use super::quarantine;
 use super::runner::{RunLifecycle, RunProcess, RunSpec, TransformRunner};
-use super::session_reuse::SPLICED_RESET_NOTE;
+use super::session_reuse::{
+    AcquireRequest, DEFAULT_PRICING_CLIFF_TOKENS, MissReason, RefineResume, ReuseArm, SPLICED_RESET_NOTE,
+    decide_refine_resume, plan_for, usable_session_id,
+};
 use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 use crate::bloomery::CoordinatorConfig;
 use crate::bloomery::KitReport;
@@ -703,6 +706,7 @@ impl LocalExecutor {
         if let Some(plan) = reuse {
             bytes = self.record_session_reuse(evidence_path, &bytes, plan, lifecycle, nonce);
         }
+        self.file_construct_session(nonce, &bytes);
         if affinity.preferred.is_some() {
             bytes = stamp_slot_affinity(&bytes, affinity);
             let _ = fs::write(evidence_path, &bytes);
@@ -747,6 +751,9 @@ impl LocalExecutor {
     }
 
     fn acquire_reuse(&self, pending: &PendingRun, worktree_dir: &Path) -> Option<super::ReusePlan> {
+        if let Some(plan) = self.journaled_refine_plan(pending, worktree_dir) {
+            return Some(plan);
+        }
         let sessions = self.sessions.as_ref()?;
         // Every harness keys into the pool the same way — the arm comes from
         // the two static rules and the pool, never from the harness name.
@@ -754,13 +761,88 @@ impl LocalExecutor {
         // Command + description: a critic that shares the construct lap's
         // model, effort, and work-order text must not resume the constructor.
         let task = super::session_reuse::pool_task(&pending.command, pending.task.as_deref());
-        Some(sessions.acquire(&super::AcquireRequest {
+        Some(sessions.acquire(&AcquireRequest {
             model: &profile.model,
             effort: profile.effort.as_str(),
             task: &task,
             worktree: worktree_dir,
             command: &pending.command,
         }))
+    }
+
+    /// Same-member Refine resume from the construct session journaled on this
+    /// workpiece. Missing handles fall through to the pool; an over-threshold
+    /// or unparseable handle launches fresh.
+    fn journaled_refine_plan(&self, pending: &PendingRun, worktree_dir: &Path) -> Option<super::ReusePlan> {
+        let (bloom, workpiece, stage) = self.order_identity(&pending.nonce)?;
+        if stage != StageId::Refine {
+            return None;
+        }
+        let (session_id, context) = self.lookup_construct_session(&bloom, &workpiece)?;
+        let profile = pending.profile.as_ref()?;
+        let cliff = self
+            .sessions
+            .as_ref()
+            .map_or(DEFAULT_PRICING_CLIFF_TOKENS, super::session_reuse::SessionReuse::pricing_cliff_tokens);
+        let task = super::session_reuse::pool_task(&pending.command, pending.task.as_deref());
+        let request = AcquireRequest {
+            model: &profile.model,
+            effort: profile.effort.as_str(),
+            task: &task,
+            worktree: worktree_dir,
+            command: &pending.command,
+        };
+        Some(match decide_refine_resume(&session_id, context, cliff) {
+            RefineResume::Resumed(id) => plan_for(&request, ReuseArm::Resumed, None, Some(id)),
+            RefineResume::Fresh { miss } => plan_for(&request, ReuseArm::Fresh, miss, None),
+        })
+    }
+
+    fn order_identity(&self, nonce: &str) -> Option<(Vec<u8>, String, StageId)> {
+        let messages = self.messages.as_ref()?;
+        let mut store = messages.lock().unwrap_or_else(PoisonError::into_inner);
+        let order = store.lookup_order(nonce).ok().flatten()?;
+        let stage = from_bytes::<StageId>(&order.stage).ok()?;
+        Some((order.bloom, order.workpiece, stage))
+    }
+
+    fn lookup_construct_session(&self, bloom: &[u8], workpiece: &str) -> Option<(String, u64)> {
+        let messages = self.messages.as_ref()?;
+        let mut store = messages.lock().unwrap_or_else(PoisonError::into_inner);
+        store.lookup_construct_session(bloom, workpiece).ok().flatten()
+    }
+
+    fn file_construct_session(&self, nonce: &str, bytes: &[u8]) {
+        let Some(session_id) = super::session_reuse::parse_session_id(bytes).filter(|id| usable_session_id(id)) else {
+            return;
+        };
+        let Some(context) = super::session_reuse::parse_context_tokens(bytes) else {
+            return;
+        };
+        let Some(messages) = self.messages.as_ref() else {
+            return;
+        };
+        let filed = {
+            let mut store = messages.lock().unwrap_or_else(PoisonError::into_inner);
+            store.lookup_order(nonce).and_then(|order| {
+                order.map_or(Ok(()), |order| {
+                    let Ok(stage) = from_bytes::<StageId>(&order.stage) else {
+                        return Ok(());
+                    };
+                    if stage != StageId::Construct {
+                        return Ok(());
+                    }
+                    store.record_construct_session(&order.bloom, &order.workpiece, &session_id, context)
+                })
+            })
+        };
+        if let Err(error) = filed {
+            tracing::warn!(
+                nonce,
+                %error,
+                "local executor backend: construct session journal failed; refine will launch fresh",
+            );
+        }
     }
 
     // The bloom's sealed price table, looked up from the outstanding order
@@ -815,9 +897,22 @@ impl LocalExecutor {
                     .map_or_else(|| SPLICED_RESET_NOTE.to_owned(), |task| format!("{task}\n\n{SPLICED_RESET_NOTE}")),
             );
         }
-        let resume = reuse.as_ref().and_then(|plan| plan.resume.as_deref());
+        let resume = reuse.as_ref().and_then(|plan| plan.resume.clone());
         let affinity = SlotAffinity { preferred: pending.preferred, assigned: slot, reason };
-        let started = self.runner.start(&pending.spec(&worktree_dir, &target_dir, self.build_jobs, resume));
+        let started = self.runner.start(&pending.spec(&worktree_dir, &target_dir, self.build_jobs, resume.as_deref()));
+        let (started, reuse) = match (started, resume.as_deref()) {
+            (Err(error), Some(_)) if start_failed_as_resume_reject(&error) => {
+                let mut reuse = reuse;
+                if let Some(plan) = reuse.as_mut() {
+                    plan.arm = ReuseArm::Fresh;
+                    plan.resume = None;
+                    plan.lease = None;
+                    plan.miss = Some(MissReason::ResumeRefused);
+                }
+                (self.runner.start(&pending.spec(&worktree_dir, &target_dir, self.build_jobs, None)), reuse)
+            }
+            (started, _) => (started, reuse),
+        };
 
         let mut registry = self.lock();
         registry.starting -= 1;
@@ -2015,6 +2110,19 @@ fn parse_calls(bytes: &[u8]) -> Option<Vec<aether_bloomery::StudyCall>> {
 fn parse_session_reuse_arm(bytes: &[u8]) -> Option<String> {
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     value.get("session_reuse")?.get("arm")?.as_str().map(ToOwned::to_owned)
+}
+
+/// Did spawn refuse the resume handle before a billed turn — the same
+/// conservative shape the harness uses, so a bad journaled id relaunches
+/// cold instead of wedging the member.
+fn start_failed_as_resume_reject(error: &LocalExecutorError) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    let names_the_handle = text.contains("session") || text.contains("resume") || text.contains("conversation");
+    let rejected = text.contains("not found")
+        || text.contains("unknown")
+        || text.contains("invalid")
+        || text.contains("no conversation");
+    names_the_handle && rejected
 }
 
 fn parse_session_reuse_saved(bytes: &[u8]) -> Option<u64> {

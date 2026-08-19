@@ -7,9 +7,12 @@
 /// prompt-cache TTL), and `context_cap_tokens` is the
 /// `AGENT_POOL_CONTEXT_CAP_TOKENS = 150000` context ceiling. `lease_ttl_mins`
 /// bounds how long one `acquire` holds a session before lazy expiry reclaims it
-/// (a crashed holder never wedges a key). `db_path` is the pool table's `SQLite`
-/// file; the sentinel `":memory:"` opens a private non-durable store — the
-/// default, so an unconfigured chassis boots without touching the filesystem.
+/// (a crashed holder never wedges a key). `pricing_cliff_tokens` is the
+/// prompt-size cut a same-member refine resume must project under (#5177);
+/// `200_000` is grok-4.6's measured long-context band. `db_path` is the pool
+/// table's `SQLite` file; the sentinel `":memory:"` opens a private non-durable
+/// store — the default, so an unconfigured chassis boots without touching the
+/// filesystem.
 #[derive(Clone, Debug, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_SESSION", cli_prefix = "session")]
 pub struct SessionConfig {
@@ -28,6 +31,10 @@ pub struct SessionConfig {
     /// is ineligible (`AGENT_POOL_CONTEXT_CAP_TOKENS`).
     #[config(default = 150_000)]
     pub context_cap_tokens: u64,
+    /// Prompt-token threshold a resumed refine must project under, or it launches
+    /// fresh. Default `200_000` is grok-4.6's measured long-context pricing cliff.
+    #[config(default = 200_000)]
+    pub pricing_cliff_tokens: u64,
 }
 
 impl Default for SessionConfig {
@@ -37,6 +44,7 @@ impl Default for SessionConfig {
             cache_ttl_cutoff_mins: 55,
             lease_ttl_mins: 15,
             context_cap_tokens: 150_000,
+            pricing_cliff_tokens: 200_000,
         }
     }
 }
