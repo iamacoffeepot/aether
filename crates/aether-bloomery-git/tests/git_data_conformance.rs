@@ -16,7 +16,7 @@ use aether_bloomery_git::testing::FakeGithub;
 
 fn init_bare(path: &Path) {
     let status = Command::new("git").args(["init", "--bare", "-b", "main"]).arg(path).status().expect("git init");
-    assert!(status.success(), "git init --bare {path:?}");
+    assert!(status.success(), "git init --bare {}", path.display());
 }
 
 fn with_each_backend(test: impl Fn(&str, &dyn GitDataApi)) {
