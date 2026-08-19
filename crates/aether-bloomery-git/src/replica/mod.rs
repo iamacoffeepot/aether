@@ -161,27 +161,30 @@ impl GitSourceReplica {
     }
 
     fn record_push(&self, result: Result<(), ReplicaError>) -> Result<(), ReplicaError> {
-        let mut slot = self.transient_redrives.lock().expect("replica redrive mutex");
         match result {
-            Ok(()) => {
-                *slot = None;
-                Ok(())
-            }
             Err(ReplicaError::Transient(detail)) => {
-                let count = match slot.as_ref() {
-                    Some(prior) if prior.detail == detail => prior.count.saturating_add(1),
-                    _ => 1,
+                let count = {
+                    let mut slot = self.transient_redrives.lock().expect("replica redrive mutex");
+                    match slot.as_mut() {
+                        Some(prior) if prior.detail == detail => {
+                            prior.count = prior.count.saturating_add(1);
+                            prior.count
+                        }
+                        _ => {
+                            *slot = Some(TransientRedrive { detail: detail.clone(), count: 1 });
+                            1
+                        }
+                    }
                 };
-                *slot = Some(TransientRedrive { detail: detail.clone(), count });
                 if count > self.transient_redrive_limit {
                     Err(ReplicaError::Deterministic(format!("transient failure repeated {count} times: {detail}")))
                 } else {
                     Err(ReplicaError::Transient(detail))
                 }
             }
-            Err(other) => {
-                *slot = None;
-                Err(other)
+            result => {
+                *self.transient_redrives.lock().expect("replica redrive mutex") = None;
+                result
             }
         }
     }
