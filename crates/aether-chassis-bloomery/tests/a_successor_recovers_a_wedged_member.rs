@@ -18,7 +18,7 @@
 
 mod common;
 pub mod fixture;
-mod harness;
+pub mod harness;
 
 use aether_bloomery::{BloomId, BloomStatus, Digest, Fact, Outcome, StageId};
 use aether_chassis_bloomery::bloomery::{ScriptedUpload, ScriptedVerdict};

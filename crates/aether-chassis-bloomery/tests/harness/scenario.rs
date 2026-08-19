@@ -1,17 +1,21 @@
 //! Boot construction for [`ScenarioHarness`]: env, coordinator, handshake, wait.
 
-use std::path::PathBuf;
+use std::fs::{self, OpenOptions};
+use std::io::Write as _;
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_actor::Addressable;
 use aether_bloomery::{
-    BackendObjectId, BloomId, BloomStatus, BloomView, ConfigKind, ConfigRegistry, Correspondence, Digest, Evidence,
-    EvidenceKind, Fact, Membership, Outcome, Snapshot, StageCatalog, ViewDocument, WorkpieceId,
+    BackendObjectId, BloomDraft, BloomId, BloomStatus, BloomView, CandidateRef, ConfigKind, ConfigRegistry,
+    Correspondence, Digest, Evidence, EvidenceKind, Fact, Membership, Outcome, Snapshot, StageCatalog, ViewDocument,
+    WorkpieceId,
 };
 use aether_bloomery_github::testing::FakeGithub;
-use aether_bloomery_github::{PullRequestApi, candidate_ref_name, landing_branch, short_hex};
+use aether_bloomery_github::{GitDataApi, PullRequestApi, candidate_ref_name, landing_branch, short_hex, to_hex};
 use aether_chassis_bloomery::artifacts::{ArtifactsCapabilityState, ArtifactsConfig, GetResult};
 use aether_chassis_bloomery::bloomery::mock_lane::{LaneRun, read_ledger};
 use aether_chassis_bloomery::bloomery::{
@@ -33,7 +37,7 @@ use super::drive::member;
 use super::{BOOT_BUDGET, Backend, CoordinatorKind, HARNESS_STARTED, HarnessBuilder, Lane, POLL, liveness};
 use crate::common::client::connect_and_handshake;
 use crate::common::repo::Repo;
-use crate::common::wire::Wire;
+use crate::common::wire::{Wire, control_mailbox};
 use crate::common::{Coordinator, free_port};
 
 /// How long the world must hold still, with nothing in flight, before a settle
@@ -98,7 +102,7 @@ impl ScenarioHarness {
         }
 
         if let Some(script) = &builder.script {
-            script.write_to(std::path::Path::new(&worktree_base)).expect("the mock-lane script writes");
+            script.write_to(Path::new(&worktree_base)).expect("the mock-lane script writes");
         }
 
         let repo = match builder.backend {
@@ -111,7 +115,10 @@ impl ScenarioHarness {
             && let Some(repo) = &repo
         {
             let base = Snapshot::GENESIS_MAINLINE;
-            SqliteCorrespondence::open(&store_path).unwrap().record(&base, &backend_object(repo.head())).unwrap();
+            SqliteCorrespondence::open(&store_path)
+                .expect("the correspondence store opens")
+                .record(&base, &backend_object(repo.head()))
+                .expect("genesis correspondence records");
         }
 
         let configs =
@@ -177,6 +184,9 @@ impl ScenarioHarness {
 
     /// The scratch repository the coordinator runs in, when the backend is a
     /// local working clone.
+    ///
+    /// # Panics
+    /// This is a local-repo cell method and the backend is not a working clone.
     #[must_use]
     pub const fn repo(&self) -> &Repo {
         self.repo.as_ref().expect("repo() is a local-repo cell method")
@@ -237,17 +247,15 @@ impl ScenarioHarness {
     /// # Panics
     /// The evidence directory could not be created or the file written.
     pub fn write_transcript(&self, nonce: &str, line: &str) {
-        use std::io::Write as _;
-
-        let dir = std::path::Path::new(&self.worktree_base).join(format!("{nonce}-evidence"));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::OpenOptions::new()
+        let dir = Path::new(&self.worktree_base).join(format!("{nonce}-evidence"));
+        fs::create_dir_all(&dir).expect("the evidence directory creates");
+        OpenOptions::new()
             .create(true)
             .append(true)
             .open(dir.join("transcript.jsonl"))
-            .unwrap()
+            .expect("the transcript opens")
             .write_all(line.as_bytes())
-            .unwrap();
+            .expect("the transcript writes");
     }
 
     /// Every evidence directory under the run root whose name ends in `-evidence`.
@@ -256,8 +264,8 @@ impl ScenarioHarness {
     /// The run root could not be read.
     #[must_use]
     pub fn evidence_nonces(&self) -> Vec<String> {
-        std::fs::read_dir(&self.worktree_base)
-            .unwrap()
+        fs::read_dir(&self.worktree_base)
+            .expect("the run root reads")
             .filter_map(|entry| {
                 let name = entry.ok()?.file_name().into_string().ok()?;
                 name.strip_suffix("-evidence").map(str::to_owned)
@@ -288,7 +296,7 @@ impl ScenarioHarness {
     /// The ledger exists but could not be read.
     #[must_use]
     pub fn ledger(&self) -> Vec<LaneRun> {
-        read_ledger(std::path::Path::new(&self.worktree_base)).unwrap()
+        read_ledger(Path::new(&self.worktree_base)).expect("the mock ledger reads")
     }
 
     /// The nonces the store still holds as outstanding orders.
@@ -297,7 +305,10 @@ impl ScenarioHarness {
     /// The store could not be opened or read.
     #[must_use]
     pub fn outstanding(&self) -> Vec<String> {
-        SqliteStore::open(&self.store_path).unwrap().list_outstanding_nonces().unwrap()
+        SqliteStore::open(&self.store_path)
+            .expect("the coordinator's journal opens for reading")
+            .list_outstanding_nonces()
+            .expect("the outstanding-order registry reads")
     }
 
     /// Poll until `want` holds of the (single) bloom, checking both liveness
@@ -372,13 +383,7 @@ impl ScenarioHarness {
             },
         };
         membership.approval.subject = membership.subject();
-        let spec = aether_bloomery::BloomDraft {
-            proposals: vec![membership],
-            base: self.base,
-            configs,
-            ..aether_bloomery::BloomDraft::default()
-        }
-        .seal();
+        let spec = BloomDraft { proposals: vec![membership], base: self.base, configs, ..BloomDraft::default() }.seal();
         match self.admit("lane-seal", Fact::Seal(spec)) {
             Outcome::Sealed(_) => {}
             other => panic!("the harness seal must seal: {other:?}"),
@@ -441,24 +446,49 @@ fn in_process_env(
         GithubConnectionConfig { cas_land_enabled: builder.cas_land_enabled, ..GithubConnectionConfig::default() }
     };
 
-    let mut coordinator = CoordinatorConfig {
+    let defaults = CoordinatorConfig::default();
+    let scripted = builder.lane == Lane::Scripted;
+    let coordinator = CoordinatorConfig {
         store_path: store_path.to_owned(),
         artifacts_root: Some(artifacts_root.to_owned()),
         poll_interval_secs: builder.poll_interval_secs,
-        local_lane_enabled: builder.lane == Lane::Scripted,
-        ..CoordinatorConfig::default()
+        local_lane_enabled: scripted,
+        local_lane_commands: if scripted {
+            "construct.,review.,verify.".to_owned()
+        } else {
+            defaults.local_lane_commands
+        },
+        local_lane_program: if scripted {
+            env!("CARGO_BIN_EXE_bloomery-mock-lane").to_owned()
+        } else {
+            defaults.local_lane_program
+        },
+        local_worktree_base: if scripted {
+            worktree_base.to_owned()
+        } else {
+            defaults.local_worktree_base
+        },
+        operator_name: if scripted {
+            builder.operator_name.clone()
+        } else {
+            defaults.operator_name
+        },
+        operator_email: if scripted {
+            builder.operator_email.clone()
+        } else {
+            defaults.operator_email
+        },
+        authority_backend: if builder.authority_path.is_some() {
+            "local".to_owned()
+        } else {
+            defaults.authority_backend
+        },
+        authority_repo: builder
+            .authority_path
+            .as_ref()
+            .map_or(defaults.authority_repo, |path| path.to_string_lossy().into_owned()),
+        ..defaults
     };
-    if builder.lane == Lane::Scripted {
-        coordinator.local_lane_commands = "construct.,review.,verify.".to_owned();
-        coordinator.local_lane_program = env!("CARGO_BIN_EXE_bloomery-mock-lane").to_owned();
-        coordinator.local_worktree_base = worktree_base.to_owned();
-        coordinator.operator_name = builder.operator_name.clone();
-        coordinator.operator_email = builder.operator_email.clone();
-    }
-    if let Some(path) = &builder.authority_path {
-        coordinator.authority_backend = "local".to_owned();
-        coordinator.authority_repo = path.to_string_lossy().into_owned();
-    }
 
     BloomeryEnv {
         rpc_port: 0,
@@ -478,7 +508,7 @@ fn spawn_listening_coordinator(
     store_path: &str,
     artifacts_root: &str,
     heartbeat_silence_secs: Option<u64>,
-) -> (Coordinator, std::net::TcpStream) {
+) -> (Coordinator, TcpStream) {
     let heartbeat = heartbeat_silence_secs.map(|secs| secs.to_string());
     for _ in 0..8 {
         let rpc_port = free_port();
@@ -514,9 +544,12 @@ fn author_catalog(store_path: &str, wall_clock_secs: u64) -> ConfigRegistry {
     for binding in &mut catalog.bindings {
         binding.wall_clock_secs = wall_clock_secs;
     }
-    let bytes = to_vec(&catalog).unwrap();
+    let bytes = to_vec(&catalog).expect("a stage catalog encodes");
     let address = catalog.address();
-    SqliteStore::open(store_path).unwrap().record_config(address.as_bytes(), StageCatalog::NAME, &bytes).unwrap();
+    SqliteStore::open(store_path)
+        .expect("the coordinator's journal opens for writing")
+        .record_config(address.as_bytes(), StageCatalog::NAME, &bytes)
+        .expect("the authored catalog records");
 
     let mut configs = ConfigRegistry::default();
     configs.insert::<StageCatalog>(address);
@@ -545,6 +578,9 @@ impl ScenarioHarness {
 
     /// Wake the executor reactor until the coordinator holds exactly `count`
     /// outstanding orders.
+    ///
+    /// # Panics
+    /// The coordinator dispatched more than `count` orders, or nothing inside the step budget.
     pub fn await_orders(&mut self, count: usize) -> Vec<OutstandingOrder> {
         let deadline = Instant::now() + self.step_budget;
         loop {
@@ -578,6 +614,9 @@ impl ScenarioHarness {
 
     /// Persist the work-order description the host threads onto a construct
     /// (or reconcile) dispatch.
+    ///
+    /// # Panics
+    /// The journal could not be opened or the description could not be written.
     pub fn record_description(&self, bloom: BloomId, workpiece: &str, description: &str) {
         SqliteStore::open(&self.store_path)
             .expect("the coordinator's journal opens for writing")
@@ -586,6 +625,9 @@ impl ScenarioHarness {
     }
 
     /// Wake the land reactor until `bloom` reaches `want`.
+    ///
+    /// # Panics
+    /// The bloom did not reach `want` inside the step budget.
     pub fn await_landing(&mut self, bloom: BloomId, want: BloomStatus) {
         let deadline = Instant::now() + self.step_budget;
         loop {
@@ -606,6 +648,9 @@ impl ScenarioHarness {
     }
 
     /// Wake the executor, integrate, and observe until `pred` holds.
+    ///
+    /// # Panics
+    /// `pred` did not hold inside the step budget.
     pub fn pump_until(&mut self, what: &str, pred: impl Fn(&mut Self) -> bool) {
         let deadline = Instant::now() + self.step_budget;
         loop {
@@ -664,7 +709,7 @@ impl ScenarioHarness {
 
     /// Wake the control core's mainline observer once.
     pub fn observe_tick(&mut self) {
-        self.wire.tick(crate::common::wire::control_mailbox(), &ObserveTick::default());
+        self.wire.tick(control_mailbox(), &ObserveTick::default());
     }
 
     /// Move the repository's mainline to `head` as a fast-forward.
@@ -683,6 +728,9 @@ impl ScenarioHarness {
     }
 
     /// Wake the observer until the coordinator's mainline reads `want`.
+    ///
+    /// # Panics
+    /// Mainline did not reach `want` inside the step budget.
     pub fn await_mainline(&mut self, want: Digest) {
         let deadline = Instant::now() + self.step_budget;
         loop {
@@ -705,6 +753,9 @@ impl ScenarioHarness {
     }
 
     /// The same tail up to the landing proposal being open.
+    ///
+    /// # Panics
+    /// The dispatched order was not bloom-level, the critic's gate did not run, or no landing was proposed.
     pub fn resolve_and_propose(&mut self, bloom: BloomId) -> (bool, u64) {
         self.integrate_tick();
 
@@ -725,12 +776,18 @@ impl ScenarioHarness {
     }
 
     /// Whether landing proposal `number` has merged.
+    ///
+    /// # Panics
+    /// The fixture does not hold the proposal.
     #[must_use]
     pub fn landing_merged(&self, number: u64) -> bool {
         self.fake().pull_request_merged(number).expect("the fixture holds the proposal")
     }
 
     /// Every order the coordinator currently holds outstanding.
+    ///
+    /// # Panics
+    /// The journal could not be opened or an outstanding nonce did not resolve.
     #[must_use]
     pub fn orders(&self) -> Vec<OutstandingOrder> {
         let mut store = SqliteStore::open(&self.store_path).expect("the coordinator's journal opens for reading");
@@ -743,6 +800,9 @@ impl ScenarioHarness {
     }
 
     /// Upload one scripted verdict against an order the coordinator dispatched.
+    ///
+    /// # Panics
+    /// The scripted upload could not be encoded.
     pub fn upload(&mut self, upload: &ScriptedUpload) -> ScriptedEvidenceResult {
         let evidence = ScriptedEvidence { upload: to_vec(upload).expect("a scripted upload encodes") };
         let mailbox = <ExecutorReactorCapability as Addressable>::resolve(0, ());
@@ -750,6 +810,9 @@ impl ScenarioHarness {
     }
 
     /// Upload a scripted verdict and assert the broker admitted it.
+    ///
+    /// # Panics
+    /// The broker did not admit the verdict.
     pub fn upload_admitted(&mut self, upload: &ScriptedUpload) -> String {
         match self.upload(upload) {
             ScriptedEvidenceResult::Admitted { idempotency_key } => idempotency_key,
@@ -758,16 +821,11 @@ impl ScenarioHarness {
     }
 
     /// Stage the capture a construct lane would have produced.
+    ///
+    /// # Panics
+    /// The fixture could not mint the capture commit.
     #[must_use]
-    pub fn seed_capture(
-        &self,
-        bloom: BloomId,
-        workpiece: &str,
-        tree: Digest,
-        checkout: Digest,
-    ) -> aether_bloomery::CandidateRef {
-        use aether_bloomery_github::{GitDataApi, to_hex};
-
+    pub fn seed_capture(&self, bloom: BloomId, workpiece: &str, tree: Digest, checkout: Digest) -> CandidateRef {
         let tree_sha = to_hex(&tree);
         let commit = self
             .fake()
@@ -777,10 +835,13 @@ impl ScenarioHarness {
         self.fake().seed_ref(candidate_ref_name(&bloom, workpiece).trim_start_matches("refs/"), &commit.sha);
         self.fake().seed_correspondence(&tree, &tree_sha);
         self.fake().seed_correspondence(&checkout, &commit.sha);
-        aether_bloomery::CandidateRef { tree, checkout }
+        CandidateRef { tree, checkout }
     }
 
     /// The study artifact the executor reactor filed for `(bloom, attempt)`.
+    ///
+    /// # Panics
+    /// The journal could not be opened or the study index could not be read.
     #[must_use]
     pub fn study_index_row(&self, bloom: BloomId, attempt: Digest) -> Option<String> {
         SqliteStore::open(&self.store_path)
@@ -790,6 +851,9 @@ impl ScenarioHarness {
     }
 
     /// Fetch one artifact from the store root the chassis was configured with.
+    ///
+    /// # Panics
+    /// The configured artifacts root could not be opened.
     #[must_use]
     pub fn artifact(&self, digest: &str) -> GetResult {
         ArtifactsCapabilityState::open(&self.artifacts_root)
@@ -798,6 +862,9 @@ impl ScenarioHarness {
     }
 
     /// The number of the landing proposal open for `bloom`.
+    ///
+    /// # Panics
+    /// The fixture pull-request surface did not answer.
     #[must_use]
     pub fn landing_proposal(&self, bloom: BloomId) -> Option<u64> {
         self.fake()

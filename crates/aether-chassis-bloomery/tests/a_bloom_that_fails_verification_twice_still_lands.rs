@@ -18,7 +18,7 @@
 
 mod common;
 pub mod fixture;
-mod harness;
+pub mod harness;
 
 use core::iter::once;
 

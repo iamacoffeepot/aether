@@ -6,9 +6,6 @@
 //! that retried TCP only and Hello'd once is how a bind-race stranger used to
 //! look like a coordinator bug.
 
-#![allow(dead_code, reason = "each test binary compiles the whole module and uses only the fixtures it needs")]
-#![allow(clippy::unwrap_used, reason = "a fixture that cannot reach its process reports it by panicking")]
-
 use std::net::TcpStream;
 use std::time::Duration;
 

@@ -6,9 +6,6 @@
 //! Chassis-local helpers fold in here; bloomery-git's own test helpers stay
 //! that crate's business.
 
-#![allow(dead_code, reason = "each test binary compiles the whole module and uses only the fixtures it needs")]
-#![allow(clippy::unwrap_used, reason = "a fixture that cannot set up its repository reports it by panicking")]
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;

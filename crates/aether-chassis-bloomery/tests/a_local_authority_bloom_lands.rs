@@ -11,7 +11,7 @@
 //! lane scripted — not a fourth copy of the boot loop.
 
 mod common;
-mod harness;
+pub mod harness;
 
 use std::sync::Arc;
 use std::sync::Mutex;
