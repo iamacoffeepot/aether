@@ -21,6 +21,7 @@ use crate::store::PageJournalResult;
 pub use artifacts::{ArtifactRange, range_bytes, resolve_kind};
 pub use journal::{JournalPageError, page_journal};
 pub use query::{ArtifactQuery, JournalQuery};
+pub(in crate::api::runtime) use query::{clamp_limit, pairs, parse_u64};
 
 /// Render the store's journal page as one bounded HTTP body.
 pub fn journal_response(result: PageJournalResult) -> HttpServerResponse {

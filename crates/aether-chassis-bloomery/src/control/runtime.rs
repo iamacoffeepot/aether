@@ -1065,7 +1065,7 @@ fn calibration_response(
 }
 
 fn metrics_response(state: &mut ControlCoreState, query: MetricsQuery) -> MetricsQueryResult {
-    let MetricsQuery { view, bloom, from_sequence, limit } = query;
+    let MetricsQuery { view, bloom, from_sequence, limit, notice } = query;
     let clamp = |requested: Option<u64>| match requested {
         None => METRICS_DEFAULT_LIMIT,
         Some(limit) if limit > METRICS_MAX_LIMIT => METRICS_MAX_LIMIT,
@@ -1078,7 +1078,7 @@ fn metrics_response(state: &mut ControlCoreState, query: MetricsQuery) -> Metric
                 state.snapshot.blooms.values().filter(|record| is_active_unlanded(record.status)).count(),
             )
             .unwrap_or(u64::MAX);
-            encode_metrics(state.metrics.summary(active, |digest| records.get(digest).copied()))
+            encode_metrics(state.metrics.summary(active, |digest| records.get(digest).copied()), notice)
         }
         MetricsView::Days => {
             let mut rows = state.metrics.day_rows();
@@ -1087,14 +1087,14 @@ fn metrics_response(state: &mut ControlCoreState, query: MetricsQuery) -> Metric
                 let start = rows.len() - cap;
                 rows = rows.split_off(start);
             }
-            encode_metrics(rows)
+            encode_metrics(rows, notice)
         }
         MetricsView::Blooms => {
             let limit = usize::try_from(clamp(limit)).unwrap_or(usize::MAX);
             let from = from_sequence.unwrap_or(0);
             let rows: Vec<_> =
                 state.metrics.bloom_rows().into_iter().filter(|row| row.seal_sequence > from).take(limit).collect();
-            encode_metrics(rows)
+            encode_metrics(rows, notice)
         }
         MetricsView::Timeline => {
             let Some(bytes) = bloom.as_deref() else {
@@ -1106,25 +1106,25 @@ fn metrics_response(state: &mut ControlCoreState, query: MetricsQuery) -> Metric
             if !state.snapshot.blooms.contains_key(&bloom) && state.metrics.timeline(bloom).spans.is_empty() {
                 return MetricsQueryResult::NotFound;
             }
-            encode_metrics(state.metrics.timeline(bloom))
+            encode_metrics(state.metrics.timeline(bloom), notice)
         }
         MetricsView::Seats => {
             let records = load_study_records(state.artifacts.as_mut(), &state.snapshot);
-            encode_metrics(state.metrics.seats(|digest| records.get(digest).copied()))
+            encode_metrics(state.metrics.seats(|digest| records.get(digest).copied()), notice)
         }
         MetricsView::Dispatches => {
             let limit = usize::try_from(clamp(limit)).unwrap_or(usize::MAX);
             let from = from_sequence.unwrap_or(0);
             let rows: Vec<_> =
                 state.metrics.dispatch_rows().into_iter().filter(|row| row.sequence > from).take(limit).collect();
-            encode_metrics(rows)
+            encode_metrics(rows, notice)
         }
     }
 }
 
-fn encode_metrics<T: serde::Serialize>(document: T) -> MetricsQueryResult {
+fn encode_metrics<T: serde::Serialize>(document: T, notice: Option<String>) -> MetricsQueryResult {
     match to_vec(&document) {
-        Ok(document) => MetricsQueryResult::Ok { document },
+        Ok(document) => MetricsQueryResult::Ok { document, notice },
         Err(error) => MetricsQueryResult::Err { error: format!("metrics document encode failed: {error}") },
     }
 }

@@ -193,6 +193,17 @@ fn try_http_auth(
     body: Option<&[u8]>,
     token: Option<&str>,
 ) -> Result<(u16, Vec<u8>), std::io::Error> {
+    let (status, _, body) = request(port, method, path, body, token)?;
+    Ok((status, body))
+}
+
+fn request(
+    port: u16,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+    token: Option<&str>,
+) -> Result<(u16, Vec<(String, String)>, Vec<u8>), std::io::Error> {
     let mut head = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n");
     if let Some(token) = token {
         head.push_str(&format!("Authorization: Bearer {token}\r\n"));
@@ -215,13 +226,14 @@ fn try_http_auth(
     Ok(parse_response(&response))
 }
 
-/// Split an HTTP response into its status code and body bytes.
-fn parse_response(response: &[u8]) -> (u16, Vec<u8>) {
+/// Split an HTTP response into its status code, headers, and body bytes.
+fn parse_response(response: &[u8]) -> (u16, Vec<(String, String)>, Vec<u8>) {
     let separator = b"\r\n\r\n";
     let head_end = response.windows(separator.len()).position(|w| w == separator).expect("response has a head");
     let head = &response[..head_end];
     let body = response[head_end + separator.len()..].to_vec();
-    let status_line = head.split(|&b| b == b'\r').next().unwrap();
+    let mut lines = head.split(|&b| b == b'\r');
+    let status_line = lines.next().unwrap();
     let status = std::str::from_utf8(status_line)
         .unwrap()
         .split_whitespace()
@@ -229,7 +241,20 @@ fn parse_response(response: &[u8]) -> (u16, Vec<u8>) {
         .expect("status line has a code")
         .parse()
         .expect("status code parses");
-    (status, body)
+    let mut headers = Vec::new();
+    for line in lines {
+        let line = line.strip_prefix(b"\n").unwrap_or(line);
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(line) = std::str::from_utf8(line) else {
+            continue;
+        };
+        if let Some((name, value)) = line.split_once(':') {
+            headers.push((name.trim().to_ascii_lowercase(), value.trim().to_owned()));
+        }
+    }
+    (status, headers, body)
 }
 
 /// Poll `path` until it answers `200` (routes register asynchronously in `wire`,
@@ -925,6 +950,8 @@ fn grant_route_carries_the_selected_count_and_refuses_concurrent_work() {
                 "workpiece": "wp-1",
                 "stage": "Construct",
                 "attempts": attempts,
+                "reason": "sandbox recovered",
+                "operator": "eve",
             });
             if let Some(key) = key {
                 body["idempotency_key"] = Value::String(key.to_owned());
@@ -935,7 +962,7 @@ fn grant_route_carries_the_selected_count_and_refuses_concurrent_work() {
         // A just-sealed member is mid-flight. The grant is admitted so the
         // reducer can refuse it; the route does not predict NotWedged.
         let (status, refused) = send_json(http_port, "POST", &path, &grant(2, None));
-        assert_eq!(status, 200, "a reducer refusal is still 200: {refused:?}");
+        assert_eq!(status, 422, "a reducer refusal is 422 like the other operator doors: {refused:?}");
         assert_eq!(
             refused["outcome"]["GrantAttemptsRejected"]["NotWedged"], "wp-1",
             "the refusal stays visible: {refused:?}"
@@ -960,17 +987,182 @@ fn grant_route_carries_the_selected_count_and_refuses_concurrent_work() {
         assert_eq!(again["outcome"], "Duplicate", "a repeated POST of the same key is a no-op: {again:?}");
 
         let (status, other_count) = send_json(http_port, "POST", &path, &grant(1, None));
-        assert_eq!(status, 200, "{other_count:?}");
+        assert_eq!(status, 422, "{other_count:?}");
         assert_eq!(
             other_count["outcome"]["GrantAttemptsRejected"]["NotWedged"], "wp-1",
             "a different count is a new admission, not a duplicate: {other_count:?}"
         );
 
         let (status, fresh) = send_json(http_port, "POST", &path, &grant(2, Some("grant-fresh")));
-        assert_eq!(status, 200, "{fresh:?}");
+        assert_eq!(status, 422, "{fresh:?}");
         assert_eq!(
             fresh["outcome"]["GrantAttemptsRejected"]["NotWedged"], "wp-1",
             "a fresh key still cannot put two workers on one member: {fresh:?}"
         );
     });
+}
+
+/// Endpoint laws the REST surface documents: a limit above the clamp is applied
+/// and named, percent-decoding is over the whole byte string, and a grant
+/// carries audit fields whose reducer refusal is `422`.
+#[test]
+fn rest_endpoint_laws_clamp_decode_and_unify_refusals() {
+    run_with_bloomery("rest_endpoint_laws_clamp_decode_and_unify_refusals", |http_port| {
+        wait_for_200(http_port, "/view");
+
+        // Percent-decode the query, then clamp: `1001` encoded as `%31%30%30%31`.
+        // Per-byte decode would still parse as ASCII here; a missing decode is
+        // a `400` because the raw escapes are not an integer.
+        let (status, journal, _) = get_json_and_notice(http_port, "/journal?limit=%31%30%30%31");
+        assert_eq!(status, 200, "a percent-encoded over-cap limit is applied, not refused: {journal:?}");
+        assert!(
+            journal["notice"].as_str().is_some_and(|text| text.contains("clamped") && text.contains("1001")),
+            "the journal names the clamp: {journal:?}"
+        );
+
+        let (status, _, notice) = get_json_and_notice(http_port, "/metrics/blooms?limit=1001");
+        assert_eq!(status, 200, "metrics pages clamp rather than refuse");
+        assert!(
+            notice.as_deref().is_some_and(|text| text.contains("clamped") && text.contains("1001")),
+            "metrics names the clamp on x-aether-notice (the body is a bare array): {notice:?}"
+        );
+
+        // `%C3%A9` is UTF-8 `é`. Decoding each escaped byte as a char would
+        // produce Latin-1 mojibake; either way the query parses, so a `400` is
+        // the missing-decode failure. Unavailable journald is `501`.
+        let (status, body) = try_http(http_port, "GET", "/logs/coordinator?contains=%C3%A9", None).unwrap();
+        assert_ne!(status, 400, "a UTF-8 percent-encoded contains must parse: {status} {body:?}");
+    });
+}
+
+/// Both seat ledgers fold the same dispatch and price the same way: a mechanical
+/// Verify does not mint a seat, and an unpriced study record is counted as
+/// unpriced rather than averaged in as free.
+#[test]
+fn seat_ledgers_share_the_model_lane_gate_and_unpriced_cost() {
+    use aether_bloomery::{
+        AgentSelection, CalibrationLedger, CandidateRef, Decision, EvidenceKind, Fact, Harness, MetricsLedger,
+        ModelOverride, ResolvedConfigs, Snapshot, SpendWindow, StageId, StudyCost, StudyRecord, reduce,
+    };
+    use aether_data::Kind;
+    use aether_data::wire::to_vec;
+
+    const MEMBER: &str = "wp-a";
+    const REVISION: u8 = 10;
+    const TREE: u8 = 100;
+
+    let digest = |seed: u8| Digest::from_bytes([seed; 32]);
+    let event = |key: &str, fact: Fact| aether_bloomery::Event {
+        idempotency_key: aether_bloomery::IdempotencyKey(key.into()),
+        fact,
+    };
+
+    let override_ = ModelOverride {
+        agent: Some(AgentSelection { harness: Harness::Claude, model: "claude-opus-5".into() }),
+        ..ModelOverride::default()
+    };
+    let mut member = member(MEMBER, digest(REVISION), digest(200));
+    member.configs.insert::<ModelOverride>(override_.address());
+    member.approval.subject = member.subject();
+
+    let mut configs = ResolvedConfigs::default();
+    configs.insert(override_.address(), ModelOverride::NAME, to_vec(&override_).expect("override encodes"));
+
+    let spec = BloomDraft { proposals: vec![member], base: digest(1), ..BloomDraft::default() }.seal();
+    let bloom = spec.id();
+
+    let mut snapshot = Snapshot::new(digest(1));
+    let mut metrics = MetricsLedger::default();
+    let mut calibration = CalibrationLedger::default();
+    let mut sequence = 0_u64;
+    let mut admit = |event: &aether_bloomery::Event| {
+        sequence = sequence.saturating_add(1);
+        let decisions = reduce(&snapshot, event, &configs, &SpendWindow::default());
+        metrics.observe(sequence, event, &decisions, &configs, Some(1_000));
+        calibration.observe(event, &decisions, &configs);
+        snapshot = snapshot.apply(event, &decisions, &configs);
+        decisions
+    };
+
+    admit(&event("seal", Fact::Seal(spec)));
+    let captured = CandidateRef { tree: digest(TREE), checkout: digest(TREE + 1) };
+    let completed = admit(&event(
+        "construct",
+        Fact::AttemptCompleted {
+            bloom,
+            workpiece: WorkpieceId(MEMBER.to_owned()),
+            stage: StageId::Construct,
+            passed: true,
+            evidence: Evidence { subject: digest(TREE), kind: EvidenceKind::VerificationResult, detail: digest(90) },
+            candidate: Some(captured),
+        },
+    ));
+    assert!(
+        completed
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Decision::DispatchAttempt { stage: StageId::Verify, .. })),
+        "passing Construct dispatches the mechanical Verify fan-out: {completed:?}"
+    );
+
+    admit(&event(
+        "study",
+        Fact::AdmitEvidence {
+            bloom,
+            evidence: Evidence { subject: digest(REVISION), kind: EvidenceKind::StudyRecord, detail: digest(40) },
+        },
+    ));
+    admit(&event(
+        "integrate",
+        Fact::Integrate {
+            bloom,
+            claim: aether_bloomery::ResolutionClaim {
+                workpiece: WorkpieceId(MEMBER.to_owned()),
+                scope_revision: digest(REVISION),
+                candidate: digest(TREE),
+                evidence: Evidence { subject: digest(TREE), kind: EvidenceKind::ResolutionClaim, detail: digest(201) },
+            },
+        },
+    ));
+
+    let records = std::collections::BTreeMap::from([(
+        digest(40),
+        StudyRecord {
+            bloom,
+            subject: digest(REVISION),
+            cost: StudyCost { cost_micro_usd: 0, input_tokens: 10, output_tokens: 2, ..StudyCost::default() },
+        },
+    )]);
+    let source = |asked: &Digest| records.get(asked).copied();
+
+    let seats = metrics.seats(source);
+    assert!(
+        seats.iter().all(|seat| seat.stage != StageId::Verify),
+        "a mechanical Verify must not mint a metrics seat: {seats:?}"
+    );
+    let construct = seats.iter().find(|seat| seat.stage == StageId::Construct).expect("Construct is a model-lane seat");
+    assert_eq!(construct.unpriced, 1, "the zero-priced record is unpriced, not a free sample");
+    assert_eq!(construct.priced_samples, 0);
+    assert_eq!(construct.mean_cost_micro_usd(), None, "unpriced must not flatten to a zero mean");
+
+    let ledger = calibration.report(source);
+    assert!(
+        ledger.cells.iter().all(|cell| cell.stage != StageId::Verify),
+        "a mechanical Verify must not mint a calibration cell: {:?}",
+        ledger.cells
+    );
+    let construct = ledger.cells.iter().find(|cell| cell.stage == StageId::Construct).expect("Construct is measured");
+    assert_eq!(construct.unpriced, 1, "calibration surfaces the missing price row");
+    assert_eq!(construct.samples, 0, "an unpriced record is not a priced sample");
+    assert_eq!(
+        construct.cost_per_resolved_member(),
+        None,
+        "cost-per-member is unmeasured when a price row is missing, never Some(0)"
+    );
+}
+
+fn get_json_and_notice(port: u16, path: &str) -> (u16, Value, Option<String>) {
+    let (status, headers, body) = request(port, "GET", path, None, None).unwrap();
+    let notice = headers.iter().find(|(name, _)| name == "x-aether-notice").map(|(_, value)| value.clone());
+    (status, serde_json::from_slice(&body).unwrap_or(Value::Null), notice)
 }

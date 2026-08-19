@@ -151,6 +151,14 @@ fn live_outstanding_joins_the_rollup_and_keeps_its_nonce() {
 }
 
 #[test]
+fn percent_decode_is_utf8_over_the_whole_byte_string() {
+    // The plausible bug: decoding each `%HH` as a char (Latin-1) turns
+    // `%C3%A9` (UTF-8 é) into U+00C3 U+00A9.
+    let query = LogQuery::parse("contains=%C3%A9").expect("a valid escape parses");
+    assert_eq!(query.contains.as_deref(), Some("é"));
+}
+
+#[test]
 fn coordinator_logs_clamp_filter_and_page() {
     let query = LogQuery::parse(&format!("limit={}&contains=keep&level=info", COORDINATOR_LOG_MAX + 50))
         .expect("a numeric over-cap limit parses");

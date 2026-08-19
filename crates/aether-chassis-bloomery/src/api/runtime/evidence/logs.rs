@@ -4,6 +4,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::process::{Command, Output};
 
+use super::super::reads::{clamp_limit, pairs, parse_u64};
 use crate::api::dto::{CoordinatorLogEntry, CoordinatorLogsView};
 
 /// Default page size.
@@ -43,29 +44,20 @@ impl LogQuery {
         let mut contains = None;
         let mut cursor = None;
         let mut requested = None;
-        for pair in query.split('&').filter(|pair| !pair.is_empty()) {
-            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-            match key {
-                "since" => since = Some(percent_decode(value)),
+        for (key, value) in pairs(query) {
+            match key.as_str() {
+                "since" => since = Some(value),
                 "level" => level = Some(value.to_ascii_lowercase()),
-                "contains" => contains = Some(percent_decode(value)),
-                "cursor" => cursor = Some(percent_decode(value)),
-                "limit" => {
-                    requested = Some(value.parse::<u64>().map_err(|_| format!("limit is not an integer: {value}"))?);
-                }
+                "contains" => contains = Some(value),
+                "cursor" => cursor = Some(value),
+                "limit" => requested = Some(parse_u64("limit", &value)?),
                 _ => {}
             }
         }
         if let Some(level) = &level {
             parse_level(level)?;
         }
-        let (limit, notice) = match requested {
-            None => (COORDINATOR_LOG_DEFAULT, None),
-            Some(limit) if limit > COORDINATOR_LOG_MAX => {
-                (COORDINATOR_LOG_MAX, Some(format!("limit clamped from {limit} to {COORDINATOR_LOG_MAX}")))
-            }
-            Some(limit) => (limit, None),
-        };
+        let (limit, notice) = clamp_limit(requested, COORDINATOR_LOG_DEFAULT, COORDINATOR_LOG_MAX);
         Ok(Self { since, level, contains, cursor, limit, notice })
     }
 }
@@ -206,37 +198,5 @@ fn priority_level(priority: u8) -> &'static str {
         4 => "warn",
         7 => "debug",
         _ => "info",
-    }
-}
-
-fn percent_decode(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    let bytes = value.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%'
-            && index + 2 < bytes.len()
-            && let (Some(high), Some(low)) = (hex_nibble(bytes[index + 1]), hex_nibble(bytes[index + 2]))
-        {
-            out.push(char::from((high << 4) | low));
-            index += 3;
-            continue;
-        }
-        if bytes[index] == b'+' {
-            out.push(' ');
-        } else {
-            out.push(char::from(bytes[index]));
-        }
-        index += 1;
-    }
-    out
-}
-
-fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
     }
 }
