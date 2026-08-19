@@ -554,13 +554,20 @@ fn resolved_git_common_dir(repo: &Path) -> Option<PathBuf> {
 /// directory git will not reset cannot wedge every future dispatch that slot
 /// takes.
 ///
+/// Reuse is also ownership-sensitive (#5167). [`reset_checkout`] runs git
+/// inside the slot, so it resolves against whatever repository the slot was
+/// created from, not `repo_dir`. A slot whose [`resolved_git_common_dir`] is
+/// not this repository's is reclaimed and re-created from `repo_dir` — the
+/// same path as an absent directory — rather than reset against the wrong
+/// object database.
+///
 /// The subject may name a bare tree rather than a commit — a spliced
 /// dependency claim that resolved without a capture commit (ADR-0196) — so
 /// [`commitish_for`] resolves it first; both the reset and the re-create
 /// paths then stand on a subject git accepts.
 fn materialize_checkout(repo_dir: &Path, worktree_dir: &Path, checkout_hex: &str) -> Result<(), LocalExecutorError> {
     let commitish = commitish_for(repo_dir, checkout_hex)?;
-    if worktree_dir.exists() {
+    if worktree_dir.exists() && slot_belongs_to_repo(worktree_dir, repo_dir) {
         match reset_checkout(worktree_dir, &commitish) {
             Ok(()) => return Ok(()),
             Err(error) => tracing::warn!(
@@ -573,6 +580,20 @@ fn materialize_checkout(repo_dir: &Path, worktree_dir: &Path, checkout_hex: &str
     }
     reclaim_worktree_path(worktree_dir)?;
     add_worktree(repo_dir, worktree_dir, &commitish)
+}
+
+/// Whether the slot at `worktree_dir` is a worktree of `repo_dir`.
+///
+/// Compared by canonical common-dir, not by path string: a linked worktree
+/// reports the parent clone, a bare `repo_dir` reports itself, and those two
+/// renderings only agree after [`resolved_git_common_dir`] joins and
+/// canonicalizes. A slot that is not a checkout, or whose common dir cannot
+/// be resolved, is treated as foreign so the from-scratch fallback runs.
+fn slot_belongs_to_repo(worktree_dir: &Path, repo_dir: &Path) -> bool {
+    match (resolved_git_common_dir(worktree_dir), resolved_git_common_dir(repo_dir)) {
+        (Some(slot), Some(repo)) => slot == repo,
+        _ => false,
+    }
 }
 
 /// A subject git's checkout verbs accept: the order's own hex when it names a
@@ -825,7 +846,7 @@ mod tests {
         CaptureIdentity, FALLBACK_CAPTURE_SUBJECT, FALLBACK_IDENTITY, ProcessTransformRunner, SETTINGS_PATH,
         TransformRunner, capture_subject, commit_parents, commitish_for, decode_object_hex, fetch_order_identities,
         fetch_subject_if_absent, git_in, materialize_checkout, neutralize_hooks, reclaim_worktree_path, reset_checkout,
-        strip_hooks, work_order_args,
+        resolved_git_common_dir, strip_hooks, work_order_args,
     };
 
     #[test]
@@ -1194,8 +1215,28 @@ mod tests {
         fs::write(slot.join("target/build.log"), "a previous dispatch's build output").unwrap();
         run_git(&slot, &["add", "--all"]);
 
+        #[cfg(unix)]
+        let inode = {
+            use std::os::unix::fs::MetadataExt;
+            fs::metadata(&slot).unwrap().ino()
+        };
+
         materialize_checkout(repo.path(), &slot, &second).unwrap();
 
+        assert_eq!(
+            resolved_git_common_dir(&slot),
+            resolved_git_common_dir(repo.path()),
+            "a same-repository slot stays a worktree of this repository",
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                fs::metadata(&slot).unwrap().ino(),
+                inode,
+                "reuse resets the existing checkout rather than tearing the directory down",
+            );
+        }
         assert_eq!(git_in(&slot, &["rev-parse", "HEAD"]).unwrap().trim(), second, "the slot holds this dispatch's sha");
         assert_eq!(
             fs::read_to_string(slot.join("tracked.txt")).unwrap(),
@@ -1208,6 +1249,53 @@ mod tests {
             git_in(&slot, &["status", "--porcelain"]).unwrap().trim(),
             "",
             "a reused slot presents exactly as a freshly created checkout, which is what the lane assumes",
+        );
+    }
+
+    #[test]
+    fn a_slot_backed_by_another_repository_is_recreated_from_repo_dir() {
+        // Tripwire (#5167): reset_checkout runs git inside the slot, so a slot
+        // left as a worktree of another repository still resets when the sealed
+        // subject exists in both histories, and the capture commit lands in the
+        // wrong object database. After the ADR-0199 authority cutover that was
+        // the pre-cutover clone vs the fleet authority — Verify then
+        // retry-looped on a subject the authority did not hold, with no wedge.
+        let (root, authority, stale, head) = authority_and_clone("authority.git");
+        let slot = root.path().join("slot-0");
+
+        materialize_checkout(&stale, &slot, &head).unwrap();
+        assert_eq!(
+            resolved_git_common_dir(&slot),
+            resolved_git_common_dir(&stale),
+            "precondition: the slot starts as a worktree of the other repository",
+        );
+
+        materialize_checkout(&authority, &slot, &head).unwrap();
+        assert_eq!(
+            resolved_git_common_dir(&slot),
+            resolved_git_common_dir(&authority),
+            "the slot is re-created as a worktree of repo_dir",
+        );
+        assert_eq!(
+            git_in(&slot, &["rev-parse", "HEAD"]).unwrap().trim(),
+            head,
+            "the re-created slot stands on the shared subject",
+        );
+
+        fs::write(slot.join("candidate.txt"), "the change\n").unwrap();
+        let runner = ProcessTransformRunner::new(
+            CaptureIdentity { name: "test".to_owned(), email: "test@example.test".to_owned() },
+            LaneProgram::default(),
+            &authority,
+        );
+        runner.capture(&slot, Some("fix: candidate")).unwrap().expect("a dirty worktree captures");
+        let captured = git_in(&slot, &["rev-parse", "HEAD"]).unwrap();
+        let captured = captured.trim();
+
+        git_in(&authority, &["cat-file", "-e", captured]).expect("the capture must land in repo_dir's object database");
+        assert!(
+            git_in(&stale, &["cat-file", "-e", captured]).is_err(),
+            "a capture in the re-created slot must not write into the repository the slot used to belong to",
         );
     }
 
