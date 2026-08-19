@@ -5,9 +5,6 @@
 //! the one they reach for. A wrapper that faults `record` still belongs next
 //! to the test that injects the fault — that is not a second store.
 
-#![allow(dead_code, reason = "each test binary compiles the whole module and uses only the fixtures it needs")]
-#![allow(clippy::unwrap_used, reason = "a fixture that cannot lock its map reports it by panicking")]
-
 use std::collections::HashMap;
 use std::sync::Mutex;
 

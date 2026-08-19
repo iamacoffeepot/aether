@@ -16,7 +16,7 @@
 
 mod common;
 pub mod fixture;
-mod harness;
+pub mod harness;
 
 use aether_bloomery::{BloomStatus, Nonce, StudyCost, StudyRecord};
 use aether_chassis_bloomery::artifacts::GetResult;

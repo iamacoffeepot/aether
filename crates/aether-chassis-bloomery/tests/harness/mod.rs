@@ -27,13 +27,10 @@
 //! repository, [`Wire`](crate::common::wire::Wire) for handshake-retry / `call` /
 //! view, [`MapCorrespondence`](crate::common::correspondence::MapCorrespondence)
 //! for an in-memory correspondence store.
-
-#![allow(dead_code, reason = "each test binary compiles the whole module and uses only the fixtures it needs")]
-#![allow(clippy::unwrap_used, reason = "a fixture that cannot set up its coordinator reports it by panicking")]
-#![allow(
-    clippy::disallowed_methods,
-    reason = "cross-process fixtures address root caps by their rendered runtime name — the RPC Call surface under test"
-)]
+//!
+//! Consumers declare `pub mod harness` so the cell surface stays reachable in
+//! every binary that compiles it — the same load-bearing visibility as
+//! `pub mod fixture`.
 
 pub mod drive;
 pub mod liveness;
@@ -42,6 +39,7 @@ mod scenario;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time::Duration;
 
 use aether_chassis_bloomery::bloomery::mock_lane::LaneScript;
@@ -472,11 +470,11 @@ pub fn while_pumping<T>(mut tick: impl FnMut() + Send, body: impl FnOnce() -> T)
     }
 
     let stop = AtomicBool::new(false);
-    std::thread::scope(|scope| {
+    thread::scope(|scope| {
         scope.spawn(|| {
             while !stop.load(Ordering::Relaxed) {
                 tick();
-                std::thread::sleep(Duration::from_millis(200));
+                thread::sleep(Duration::from_millis(200));
             }
         });
         let _stop = StopOnDrop(&stop);
