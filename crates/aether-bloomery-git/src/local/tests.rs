@@ -330,9 +330,54 @@ fn transact_refs_refuses_two_ops_on_the_same_ref() {
             RefTxnOp::Delete { name: ADMISSION_REF.into(), expected: tombstone.sha },
         ])
         .expect_err("git refuses two ops on one ref in one transaction");
+    assert!(matches!(error, GitDataError::Command(_)), "same-ref batches are Command, not a lost CAS; got {error:?}");
     let text = error.to_string();
     assert!(text.contains("multiple updates"), "{text}");
     assert_eq!(ref_sha(&local, ADMISSION_REF), live.sha, "the refused transaction left the ref in place");
+}
+
+#[test]
+fn create_ref_with_a_nonexistent_object_is_missing_object() {
+    let (_root, local) = open_temp();
+    let missing = "a".repeat(40);
+    match local.create_ref("heads/ghost", &missing) {
+        Err(GitDataError::MissingObject(detail)) => {
+            assert!(detail.to_ascii_lowercase().contains("nonexistent object"), "{detail}");
+        }
+        other => panic!("a missing sha is MissingObject, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_ref_with_a_bad_name_is_a_command_fault() {
+    let (_root, local) = open_temp();
+    let commit = local.create_commit("seed", EMPTY_TREE, &[]).expect("commit");
+    match local.create_ref("heads/bad name", &commit.sha) {
+        Err(GitDataError::Command(detail)) => {
+            assert!(detail.to_ascii_lowercase().contains("bad name"), "{detail}");
+        }
+        other => panic!("a bad ref name is Command, got {other:?}"),
+    }
+}
+
+#[test]
+fn is_ancestor_reports_missing_object_for_an_unknown_sha() {
+    let (_root, local) = open_temp();
+    let commit = local.create_commit("seed", EMPTY_TREE, &[]).expect("commit");
+    let missing = "a".repeat(40);
+    match local.is_ancestor(&missing, &commit.sha) {
+        Err(GitDataError::MissingObject(_)) => {}
+        other => panic!("an unknown sha is MissingObject, got {other:?}"),
+    }
+}
+
+#[test]
+fn is_ancestor_is_false_for_unrelated_commits() {
+    let (_root, local) = open_temp();
+    let a = local.create_commit("a", EMPTY_TREE, &[]).expect("a");
+    let b = local.create_commit("b", EMPTY_TREE, &[]).expect("b");
+    assert!(!local.is_ancestor(&a.sha, &b.sha).expect("both objects exist"));
+    assert!(local.is_ancestor(&a.sha, &a.sha).expect("equal shas are ancestors of themselves"));
 }
 
 #[test]

@@ -32,7 +32,8 @@ impl SourceReplicaShell {
     /// Push the current allowlisted refs.
     ///
     /// # Errors
-    /// Transient transport failure or a rejected mainline force-push.
+    /// Transient transport failure, a rejected mainline force-push, or a
+    /// deterministic refusal.
     pub fn publish(&self) -> Result<(), ReplicaError> {
         self.backend.publish()
     }

@@ -140,19 +140,17 @@ pub fn classify_update(output: &Output, name: &str) -> GitDataError {
     } else if lower.contains("unable to resolve")
         || lower.contains("not a valid object")
         || lower.contains("bad object")
+        || lower.contains("nonexistent object")
         || lower.contains("missing")
     {
         GitDataError::MissingObject(format!("{name}: {detail}"))
+    } else if lower.contains("multiple updates") {
+        GitDataError::Command(format!("multiple updates for {name}: {detail}"))
+    } else if lower.contains("bad name") {
+        GitDataError::Command(format!("bad name {name}: {detail}"))
     } else {
         GitDataError::Command(format!("git update-ref {name}: {detail}"))
     }
-}
-
-/// Whether `stderr` from `update-ref -d` means the name was already gone.
-#[must_use]
-pub fn is_absent_delete(stderr: &str) -> bool {
-    let lower = stderr.to_ascii_lowercase();
-    lower.contains("unable to resolve") || (lower.contains("cannot lock ref") && lower.contains("unable to delete"))
 }
 
 #[cfg(test)]
