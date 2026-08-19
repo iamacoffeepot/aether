@@ -1,9 +1,9 @@
 //! The external programs the roll drives.
 //!
-//! `git` and `gh` behind one seam, following the precedent that xtask shells to
-//! `git` rather than linking a git implementation. The seam is what lets the
-//! roll's ordering — screen before mutate, fetch before cut, rebase never
-//! squash — be exercised without a repository, a remote, or a GitHub session.
+//! `git` behind one seam, following the precedent that xtask shells to `git`
+//! rather than linking a git implementation. The seam is what lets the roll's
+//! ordering — screen before mutate, compare-and-swap before cut, replica push
+//! after the advance — be exercised without a repository or a remote.
 
 use std::process::Command;
 
@@ -48,9 +48,9 @@ impl Shell for Host {
 
 /// Run, and fail with the program's own diagnosis when it exits non-zero.
 ///
-/// A roll step that fails has already said why — `gh` names the pull request it
-/// could not open, `git` names the ref it could not resolve — so the failure is
-/// forwarded rather than restated in this crate's words.
+/// A roll step that fails has already said why — `git` names the ref it could
+/// not resolve or the compare-and-swap it lost — so the failure is forwarded
+/// rather than restated in this crate's words.
 pub fn checked(shell: &impl Shell, program: &str, args: &[&str]) -> Result<String> {
     let run = shell.capture(program, args)?;
     if !run.success {

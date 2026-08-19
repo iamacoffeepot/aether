@@ -1,4 +1,4 @@
-//! Tomorrow's branch, cut from post-sync main (ADR-0186).
+//! Tomorrow's branch, cut from post-advance fleet main (ADR-0203).
 
 use anyhow::Result;
 
@@ -6,22 +6,18 @@ use super::MAIN;
 use super::day::Day;
 use super::shell::{Shell, checked};
 
-/// Cut the day branch from the main the sync-back just merged onto, and push
-/// it so the coordinator can be repointed at a ref that exists.
+/// Cut the day branch from the fleet main the sync-back just advanced, and
+/// push it so the coordinator can be repointed at a ref that exists.
 pub fn create(shell: &impl Shell, remote: &str, day: &Day) -> Result<()> {
     let branch = day.branch();
 
-    // Fetch first, and cut from `FETCH_HEAD` rather than a local `main` or a
-    // remote-tracking ref: the cut has to be the main the sync-back produced
-    // minutes ago, and `FETCH_HEAD` is by construction the commit this fetch
-    // resolved. A local branch is whatever the operator's checkout last pulled,
-    // which is a day of blooms short and fails silently — the branch is cut, it
-    // just carries yesterday.
-    checked(shell, "git", &["fetch", remote, MAIN])?;
-    checked(shell, "git", &["branch", "--no-track", &branch, "FETCH_HEAD"])?;
+    // Cut from `refs/heads/main` rather than a fetch of GitHub: the advance
+    // just compare-and-swapped that ref in the fleet repository, and a GitHub
+    // fetch would silently restore the pre-advance replica.
+    checked(shell, "git", &["branch", "--no-track", &branch, &format!("refs/heads/{MAIN}")])?;
     checked(shell, "git", &["push", remote, &branch])?;
 
-    println!("cut {branch} from post-sync {remote}/{MAIN} and pushed it");
+    println!("cut {branch} from post-advance {MAIN} and pushed it");
     Ok(())
 }
 
@@ -32,12 +28,12 @@ mod tests {
     use crate::bloom::roll::shell::Run;
     use crate::bloom::roll::shell::fake::Fake;
 
-    // Tripwire: the cut is taken from the main the sync-back just merged onto.
-    // Cutting from a local ref that a fetch never refreshed produces a branch
-    // that looks right, pushes cleanly, and silently drops the day that was just
-    // synced back — the failure has no symptom until someone reads the log.
+    // Tripwire: the cut is taken from the fleet main the sync-back just
+    // advanced. Fetching GitHub first, or cutting from FETCH_HEAD, produces a
+    // branch that looks right, pushes cleanly, and silently drops the day that
+    // was just advanced — the failure has no symptom until someone reads the log.
     #[test]
-    fn the_cut_is_taken_from_freshly_fetched_main() {
+    fn the_cut_is_taken_from_fleet_main() {
         let shell = Fake::new(|_| Run::ok(""));
         let day = Day::parse("2026-08-15").expect("a well-formed day");
 
@@ -47,11 +43,14 @@ mod tests {
         assert_eq!(
             calls,
             [
-                "git fetch origin main",
-                "git branch --no-track bloomery/daily/2026-08-15 FETCH_HEAD",
+                "git branch --no-track bloomery/daily/2026-08-15 refs/heads/main",
                 "git push origin bloomery/daily/2026-08-15",
             ],
-            "the fetch precedes a cut taken from what it resolved, and the branch is pushed"
+            "the cut is taken from the fleet main the advance wrote, with no GitHub fetch"
+        );
+        assert!(
+            !calls.iter().any(|line| line.contains("fetch") || line.contains("FETCH_HEAD")),
+            "the cut does not fetch GitHub: {calls:?}"
         );
     }
 }

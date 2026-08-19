@@ -69,8 +69,9 @@ enum BloomCommand {
     Seal(SealArgs),
     /// Seal a successor on the current observed head and transfer the claim.
     Supersede(SupersedeArgs),
-    /// Drive the ADR-0186 day roll: quiesce, sync the day back to main,
-    /// cut tomorrow from post-sync main, and hand over the repoint.
+    /// Drive the ADR-0186 day roll: quiesce, advance fleet main under the
+    /// coverage-map barrier, cut tomorrow from that main, and hand over the
+    /// repoint.
     Roll(RollArgs),
     /// Fold-test a candidate coordinator and replace the running binary if it holds.
     Upgrade(UpgradeArgs),
