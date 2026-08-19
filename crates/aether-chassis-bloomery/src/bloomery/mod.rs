@@ -49,8 +49,8 @@ pub use config::{CoordinatorConfig, CoordinatorOverlay, MissingWriterMarker};
 pub use config::{GithubConnectionConfig, GithubConnectionOverlay};
 pub use construct::{CONSTRUCT_IMPLEMENT_COMMAND, dispatch_model};
 pub use doctor::{
-    CheckResult, DETERMINISTIC_RETRY_BOUND, DoctorReport, Invariant, KitReport, KitTool, LiveState, OpenDispatch,
-    REPLICA_AGE_BOUND, REQUIRED_KIT, ReplicaObservation, ResolvedTool, ToolStatus, evaluate,
+    Ancestry, CheckResult, DETERMINISTIC_RETRY_BOUND, DoctorReport, Invariant, KitReport, KitTool, LiveState,
+    OpenDispatch, REPLICA_AGE_BOUND, REQUIRED_KIT, ReplicaObservation, ResolvedTool, ToolStatus, evaluate,
 };
 #[cfg(feature = "github")]
 pub use doctor::{DoctorBoard, DoctorReactorCapability, DoctorReactorSetup, DoctorReactorState, DoctorTick};

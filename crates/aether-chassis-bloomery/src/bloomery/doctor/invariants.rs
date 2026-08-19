@@ -181,9 +181,11 @@ impl DoctorReport {
     #[must_use]
     pub fn fingerprint(&self) -> String {
         self.violations()
-            .map(|check| match check.divergences.first() {
-                Some(first) => format!("{}:{first}", check.name),
-                None => check.name.to_owned(),
+            .map(|check| {
+                check
+                    .divergences
+                    .first()
+                    .map_or_else(|| check.name.to_owned(), |first| format!("{}:{first}", check.name))
             })
             .collect::<Vec<_>>()
             .join("|")
@@ -210,6 +212,9 @@ pub struct OpenDispatch<'a> {
     pub workpiece: &'a str,
 }
 
+/// Whether `to` is `from` or a descendant. `None` when the source cannot answer.
+pub type Ancestry<'a> = dyn Fn(&Digest, &Digest) -> Option<bool> + 'a;
+
 /// The live seams one doctor pass reads. Pure: evaluate allocates a report
 /// and mutates nothing.
 pub struct LiveState<'a> {
@@ -228,7 +233,7 @@ pub struct LiveState<'a> {
     pub landed_heads: &'a [(BloomId, Digest)],
     /// Whether `to` is `from` or a descendant. `None` when the source cannot
     /// answer ancestry (unconfigured, or a digest has no correspondence).
-    pub ancestry: Option<&'a dyn Fn(&Digest, &Digest) -> Option<bool>>,
+    pub ancestry: Option<&'a Ancestry<'a>>,
     /// Undelivered source-replica topics this process has been watching.
     pub replica: &'a [ReplicaObservation],
     /// Outstanding journal dispatches.
@@ -596,8 +601,7 @@ mod tests {
     fn an_observed_head_mismatch_is_named_with_both_digests() {
         // Tripwire: the observed head drifted from the daily ref and nothing
         // was loud until a later seal or land tripped over the split.
-        let mut snapshot = Snapshot::default();
-        snapshot.observed = digest(1);
+        let snapshot = Snapshot { observed: digest(1), ..Snapshot::default() };
         let actual = digest(2);
         let mut state = live(&snapshot, &[]);
         state.actual_head = Some(actual);

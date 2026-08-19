@@ -4,8 +4,8 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use aether_actor::runtime;
@@ -26,7 +26,7 @@ use super::invariants::{DoctorReport, LiveState, OpenDispatch, ReplicaObservatio
 use super::{DoctorReactorCapability, DoctorReactorSetup};
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::bloomery::{ExecutorShell, SourceShell};
-use crate::store::{SqliteStore, StoreBackend};
+use crate::store::{OutboxEntry, SqliteStore, StoreBackend};
 
 /// The self-addressed wake the poll timer fires each interval.
 #[derive(Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
@@ -78,7 +78,7 @@ impl DoctorBoard {
         inner.report = Some(report);
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, BoardInner> {
+    fn lock(&self) -> MutexGuard<'_, BoardInner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -152,7 +152,7 @@ impl NativeActor for DoctorReactorCapability {
         let Some(store) = state.store.as_mut() else {
             return;
         };
-        match collect_and_evaluate(CollectRequest {
+        match collect_and_evaluate(&mut CollectRequest {
             store,
             source: state.source.as_ref(),
             correspondence: state.correspondence.as_ref(),
@@ -176,14 +176,14 @@ struct CollectRequest<'a> {
     store: &'a mut dyn StoreBackend,
     source: Option<&'a SourceShell>,
     correspondence: Option<&'a SharedCorrespondence>,
-    worktree_base: &'a PathBuf,
+    worktree_base: &'a Path,
     lanes_running: bool,
     replica_seen: &'a mut BTreeMap<u64, Instant>,
     replica_passes: &'a mut BTreeMap<u64, u32>,
     now: Instant,
 }
 
-fn collect_and_evaluate(request: CollectRequest<'_>) -> rusqlite::Result<DoctorReport> {
+fn collect_and_evaluate(request: &mut CollectRequest<'_>) -> rusqlite::Result<DoctorReport> {
     let (snapshot, landed_heads) = replay(request.store)?;
     let outstanding_rows = outstanding(request.store)?;
     let outstanding: Vec<OpenDispatch<'_>> = outstanding_rows
@@ -287,7 +287,7 @@ fn outstanding(store: &mut dyn StoreBackend) -> rusqlite::Result<Vec<Outstanding
     Ok(rows)
 }
 
-fn evidence_nonces(worktree_base: &PathBuf) -> Vec<String> {
+fn evidence_nonces(worktree_base: &Path) -> Vec<String> {
     let Ok(entries) = fs::read_dir(worktree_base) else {
         return Vec::new();
     };
@@ -336,7 +336,7 @@ fn actual_daily_head(
 }
 
 fn observe_replica(
-    entries: &[crate::store::OutboxEntry],
+    entries: &[OutboxEntry],
     seen: &mut BTreeMap<u64, Instant>,
     passes: &mut BTreeMap<u64, u32>,
     now: Instant,
@@ -360,8 +360,8 @@ fn observe_replica(
 
 #[cfg(test)]
 mod tests {
+    use super::super::{CheckResult, DoctorReport};
     use super::DoctorBoard;
-    use crate::bloomery::doctor::{CheckResult, DoctorReport};
 
     #[test]
     fn publish_keeps_the_latest_report_for_view() {

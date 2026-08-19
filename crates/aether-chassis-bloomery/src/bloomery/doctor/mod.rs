@@ -9,8 +9,8 @@ mod invariants;
 mod runtime;
 
 pub use invariants::{
-    CheckResult, DETERMINISTIC_RETRY_BOUND, DoctorReport, Invariant, LiveState, OpenDispatch, REPLICA_AGE_BOUND,
-    ReplicaObservation, evaluate,
+    Ancestry, CheckResult, DETERMINISTIC_RETRY_BOUND, DoctorReport, Invariant, LiveState, OpenDispatch,
+    REPLICA_AGE_BOUND, ReplicaObservation, evaluate,
 };
 #[cfg(feature = "github")]
 pub use runtime::{DoctorBoard, DoctorReactorState, DoctorTick};

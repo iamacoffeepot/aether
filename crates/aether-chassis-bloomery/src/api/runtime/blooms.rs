@@ -21,6 +21,7 @@ use super::state::{ApiCapabilityState, Routed, VerifyPending, admit};
 use crate::api::dto::{
     AdjudicateRequest, GrantRequest, HoldRequest, OutcomeView, ReleaseAcceptedView, RepairRequest, SupersedeRequest,
 };
+use crate::bloomery::DoctorReport;
 use crate::control::ControlCore;
 use crate::signing::{SigningCapability, Verify, VerifyResult, authority_bytes};
 
@@ -534,10 +535,7 @@ fn admitted_response(outcome: Outcome) -> HttpServerResponse {
 /// Render a live-read route's [`QueryResult`] into its HTTP response: the whole
 /// view document (with the doctor's latest report overlaid when one has run),
 /// one bloom view, a `404`, or the error.
-pub(super) fn query_response(
-    result: QueryResult,
-    doctor: Option<&crate::bloomery::DoctorReport>,
-) -> HttpServerResponse {
+pub(super) fn query_response(result: QueryResult, doctor: Option<&DoctorReport>) -> HttpServerResponse {
     match result {
         QueryResult::Document { document } => match from_bytes::<ViewDocument>(&document) {
             Ok(document) => json(200, &ViewWithDoctor { document: &document, doctor }),
@@ -568,7 +566,7 @@ struct ViewWithDoctor<'a> {
     #[serde(flatten)]
     document: &'a ViewDocument,
     #[serde(skip_serializing_if = "Option::is_none")]
-    doctor: Option<&'a crate::bloomery::DoctorReport>,
+    doctor: Option<&'a DoctorReport>,
 }
 
 #[cfg(test)]
@@ -585,6 +583,7 @@ mod tests {
         repair_source,
     };
     use crate::api::dto::RepairRequest;
+    use crate::bloomery::{CheckResult, DoctorReport};
 
     /// A bloom id in the spelling the routes take.
     const BLOOM: &str = "1111111111111111111111111111111111111111111111111111111111111111";
@@ -623,8 +622,8 @@ mod tests {
             spend_quiesce: None,
             blooms: Vec::new(),
         };
-        let report = crate::bloomery::DoctorReport {
-            checks: vec![crate::bloomery::CheckResult {
+        let report = DoctorReport {
+            checks: vec![CheckResult {
                 name: "claim_refs_name_active_blooms",
                 statement: "every ref under refs/bloomery/claims/ names a bloom currently Sealed or Resolved — never Landed, never unknown",
                 passed: false,
