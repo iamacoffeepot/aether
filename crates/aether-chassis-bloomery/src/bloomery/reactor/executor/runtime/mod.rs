@@ -47,9 +47,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
-    Admit, AggregateReviewPayload, AggregateVerifyPayload, BloomId, CandidateRef, ConfigRegistry, ConfigScopes, Digest,
-    DispatchPayload, ExecutionStatus, Fact, ModelOverride, Nonce, RedispatchPayload, ReviewPass, SharedCorrespondence,
-    StageId, StageVerdict, TimeoutRecord, Topic, VerifyFailureSet, WorkHandle, WorkpieceId, pin_workpiece_description,
+    Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, BloomId, CandidateRef, ConfigRegistry,
+    ConfigScopes, Digest, DispatchPayload, ExecutionStatus, Fact, ModelOverride, Nonce, RedispatchPayload, ReviewPass,
+    SharedCorrespondence, StageId, StageVerdict, TimeoutRecord, Topic, VerifyFailureSet, WorkHandle, WorkpieceId,
+    pin_workpiece_description,
 };
 use aether_bloomery_github::{GitObjectId, candidate_ref_name, member_checkpoint_ref_name, short_hex};
 use aether_data::wire::{from_bytes, to_vec};
@@ -2613,6 +2614,15 @@ impl NativeActor for ExecutorReactorCapability {
             let _ = ctx.send_envelope_tracked(control_mailbox, Admit::ID, &admit.encode_into_bytes());
         }
         result
+    }
+
+    /// Control's reply to a fire-and-forget admit. Ok is a no-op; Err is the
+    /// refused-admission event that used to miss dispatch.
+    #[handler::single]
+    fn on_admit_result(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: AdmitResult) {
+        if let AdmitResult::Err { error } = mail {
+            tracing::error!(target: "aether_chassis_bloomery::executor", %error, "admit refused");
+        }
     }
 }
 

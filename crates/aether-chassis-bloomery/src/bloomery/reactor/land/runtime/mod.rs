@@ -67,8 +67,8 @@ use std::time::Duration;
 use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
-    Admit, BloomId, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, LandPayload, SourceReplicaPayload,
-    WorkpieceId,
+    Admit, AdmitResult, BloomId, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, LandPayload,
+    SourceReplicaPayload, WorkpieceId,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId};
@@ -615,6 +615,15 @@ impl NativeActor for LandReactorCapability {
             Err(error) => {
                 tracing::warn!(target: "aether_chassis_bloomery::land", %error, "land drain failed");
             }
+        }
+    }
+
+    /// Control's reply to a fire-and-forget admit. Ok is a no-op; Err is the
+    /// refused-admission event that used to miss dispatch.
+    #[handler::single]
+    fn on_admit_result(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: AdmitResult) {
+        if let AdmitResult::Err { error } = mail {
+            tracing::error!(target: "aether_chassis_bloomery::land", %error, "admit refused");
         }
     }
 }

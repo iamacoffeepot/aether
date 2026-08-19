@@ -28,6 +28,7 @@ use crate::bloomery::ExecutorShell;
 #[cfg(any(test, feature = "testing"))]
 use crate::bloomery::testing::{ScriptedEvidence, ScriptedEvidenceResult};
 use aether_actor::actor;
+use aether_bloomery::AdmitResult;
 use aether_bloomery::SharedCorrespondence;
 use aether_bloomery::Topic;
 

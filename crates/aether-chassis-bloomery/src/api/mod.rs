@@ -26,6 +26,7 @@ use aether_actor::actor;
 // so neither is named here. The boot configuration read answers no route at all,
 // so its reply is hand-written and named here (#4616).
 use aether_bloomery::{AdmitResult, LoadConfigsResult};
+use aether_http::RegisterRouteResult;
 use aether_kinds::trace::Settled;
 
 use crate::signing::VerifyResult;
