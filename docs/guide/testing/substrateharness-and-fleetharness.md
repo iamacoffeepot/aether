@@ -341,8 +341,13 @@ journal, reducer, projection, all reactors, outbox drain, polling timers, and
 intake path. A dispatch uses the production `ProcessTransformRunner`: it
 materializes the sealed checkout with `git worktree add`, scrubs the child
 environment, spawns a subprocess, reads its exit status and `evidence.json`,
-and captures a candidate worktree. The [LaneHarness module](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis-bloomery/tests/lane/mod.rs)
-documents the live boundary and provides the scenario API.
+and captures a candidate worktree. LaneHarness is one cell of the
+[scenario harness](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis-bloomery/tests/harness/mod.rs)
+— backend local, coordinator forked, lane scripted. The same builder also
+exposes the in-process fixture cell (reactor-to-reactor handoff) and the
+local-authority cell (bare repo, in-process, mock-lane). The
+[LaneHarness module](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis-bloomery/tests/lane/mod.rs)
+is the thin alias that cell's scenarios import.
 
 The substitutions are deliberately narrow. Tests set the lane-program
 configuration to the repository's mock-lane binary, which accepts the real
@@ -382,7 +387,8 @@ stop short of it.
 - FleetHarness harness: `crates/aether-harness-fleet/src/lib.rs`
 - Fleet scenarios: the per-cap `fleetharness_*.rs` suites (e.g. `crates/aether-component/tests/`, `crates/aether-fleet/tests/`)
 - Fixtures: `crates/aether-test-fixtures-*/`
-- LaneHarness: `crates/aether-chassis-bloomery/tests/lane/mod.rs`
-- Lane liveness invariant: `crates/aether-chassis-bloomery/tests/lane/liveness.rs`
+- Scenario harness (builder axes and named cells): `crates/aether-chassis-bloomery/tests/harness/mod.rs`
+- LaneHarness alias: `crates/aether-chassis-bloomery/tests/lane/mod.rs`
+- Lane liveness invariant: `crates/aether-chassis-bloomery/tests/harness/liveness.rs`
 - Lane boundary scenarios: `crates/aether-chassis-bloomery/tests/lane_boundary.rs`
 - Decisions: ADR-0067 and the subsystem ADR for the behavior under test

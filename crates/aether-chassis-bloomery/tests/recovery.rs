@@ -33,7 +33,7 @@ use aether_chassis_bloomery::store::{
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, mailbox_id_from_path};
-use common::client::{self, connect_and_handshake};
+use common::client::{call, connect_and_handshake};
 use common::{Coordinator, free_port};
 use serde::Serialize;
 
@@ -43,13 +43,12 @@ fn spawn(port: u16, db: &str) -> Coordinator {
     Coordinator::spawn(port, &[("AETHER_STORE_PATH", db)])
 }
 
-/// Issue one typed `Call` to the `aether.store` mailbox and decode its reply.
-fn call<Req, Reply>(stream: &mut TcpStream, cid: u64, request: &Req) -> Reply
+fn store_call<Req, Reply>(stream: &mut TcpStream, cid: u64, request: &Req) -> Reply
 where
     Req: Kind + Serialize,
     Reply: Kind,
 {
-    client::call(stream, cid, mailbox_id_from_path("aether.store"), request)
+    call(stream, cid, mailbox_id_from_path("aether.store"), request)
 }
 
 #[test]
@@ -80,7 +79,7 @@ fn kill_and_restart_converges_over_rpc() {
     let decisions = reduce(&Snapshot::default(), &event, &ResolvedConfigs::default(), &SpendWindow::default());
     let decision_bytes = to_vec(&decisions).unwrap();
 
-    let append: AppendEventResult = call(
+    let append: AppendEventResult = store_call(
         &mut stream,
         1,
         &AppendEvent {
@@ -92,11 +91,12 @@ fn kill_and_restart_converges_over_rpc() {
     );
     assert_eq!(append, AppendEventResult::Applied { sequence: 1 });
 
-    let seal: ClaimSealResult = call(&mut stream, 2, &ClaimSeal { bloom: vec![1; 32], members: vec!["wp".into()] });
+    let seal: ClaimSealResult =
+        store_call(&mut stream, 2, &ClaimSeal { bloom: vec![1; 32], members: vec!["wp".into()] });
     assert_eq!(seal, ClaimSealResult::Sealed);
 
     let enqueued: EnqueueOutboxResult =
-        call(&mut stream, 3, &EnqueueOutbox { topic: "landing_receipt".into(), payload: b"receipt".to_vec() });
+        store_call(&mut stream, 3, &EnqueueOutbox { topic: "landing_receipt".into(), payload: b"receipt".to_vec() });
     assert_eq!(enqueued, EnqueueOutboxResult::Ok { sequence: 1 });
 
     // Crash: SIGKILL mid-service, after the committed transactions.
@@ -109,7 +109,7 @@ fn kill_and_restart_converges_over_rpc() {
     let mut stream = connect_and_handshake(port, "recovery-test");
 
     // Journal replay: the sealed event survived the crash.
-    let replay: ReplayJournalResult = call(&mut stream, 1, &ReplayJournal);
+    let replay: ReplayJournalResult = store_call(&mut stream, 1, &ReplayJournal);
     match replay {
         ReplayJournalResult::Ok { records } => {
             assert_eq!(records.len(), 1);
@@ -123,11 +123,11 @@ fn kill_and_restart_converges_over_rpc() {
 
     // The membership survived: a second overlapping seal loses cleanly.
     let seal_again: ClaimSealResult =
-        call(&mut stream, 2, &ClaimSeal { bloom: vec![2; 32], members: vec!["wp".into()] });
+        store_call(&mut stream, 2, &ClaimSeal { bloom: vec![2; 32], members: vec!["wp".into()] });
     assert_eq!(seal_again, ClaimSealResult::Conflict { workpiece: "wp".into() });
 
     // Outbox republish: the undelivered landing receipt is still drainable.
-    let drained: DrainOutboxResult = call(&mut stream, 3, &DrainOutbox { topic: None });
+    let drained: DrainOutboxResult = store_call(&mut stream, 3, &DrainOutbox { topic: None });
     match drained {
         DrainOutboxResult::Ok { entries } => {
             assert_eq!(entries.len(), 1);
@@ -207,7 +207,7 @@ fn wait_for_attempt(stream: &mut TcpStream, cid_base: u64) -> (Event, Decisions)
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut cid = cid_base;
     loop {
-        let replay: ReplayJournalResult = call(stream, cid, &ReplayJournal);
+        let replay: ReplayJournalResult = store_call(stream, cid, &ReplayJournal);
         let records = match replay {
             ReplayJournalResult::Ok { records } => records,
             ReplayJournalResult::Err { error } => panic!("journal replay failed: {error}"),

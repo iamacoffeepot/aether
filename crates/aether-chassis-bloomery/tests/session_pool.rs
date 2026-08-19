@@ -20,14 +20,11 @@
 
 mod common;
 
-use std::net::TcpStream;
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_chassis_bloomery::session::{Acquire, AcquireResult, Release, ReleaseResult, SessionKey, SessionManifest};
-use aether_codec::frame::{read_frame, write_frame};
-use aether_data::{Kind, mailbox_id_from_path};
-use aether_rpc::{Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, WIRE_VERSION, WireFrame};
+use aether_data::{Kind, MailboxId, mailbox_id_from_path};
+use common::client::{call, connect_and_handshake};
 use common::{Coordinator, free_port};
 use serde::Serialize;
 
@@ -44,70 +41,16 @@ fn spawn(port: u16) -> Coordinator {
     Coordinator::spawn(port, &[("AETHER_STORE_PATH", ":memory:"), ("AETHER_SESSION_LEASE_TTL_MINS", "0")])
 }
 
-/// Connect to the bin, retrying until it has bound its RPC port.
-fn connect(port: u16) -> TcpStream {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        match TcpStream::connect(("127.0.0.1", port)) {
-            Ok(stream) => {
-                stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
-                return stream;
-            }
-            Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(100)),
-            Err(error) => panic!("could not reach the bloomery bin on port {port}: {error}"),
-        }
-    }
+fn session_mailbox() -> MailboxId {
+    mailbox_id_from_path("aether.session")
 }
 
-/// Handshake as a client peer.
-fn handshake(stream: &mut TcpStream) {
-    let hello = WireFrame::Hello(Hello {
-        wire_version: WIRE_VERSION,
-        peer: PeerKind::Client { client_name: "session-pool-test".into(), client_version: "0.0.1".into() },
-    });
-    write_frame(stream, &hello).unwrap();
-    match read_frame(stream).unwrap() {
-        WireFrame::HelloAck(HelloAck { wire_version, .. }) => assert_eq!(wire_version, WIRE_VERSION),
-        other => panic!("expected HelloAck, got {other:?}"),
-    }
-}
-
-/// Issue one typed `Call` to the `aether.session` mailbox and decode the reply of
-/// the expected kind (collected from the `ReplyEvent` stream, closed by `ReplyEnd`).
-fn call<Req, Reply>(stream: &mut TcpStream, cid: u64, request: &Req) -> Reply
+fn call_session<Req, Reply>(stream: &mut std::net::TcpStream, cid: u64, request: &Req) -> Reply
 where
     Req: Kind + Serialize,
     Reply: Kind,
 {
-    let frame = WireFrame::Call {
-        cid: Some(cid),
-        envelope: MailEnvelope {
-            to: MailboxAddress { engine: None, mailbox: mailbox_id_from_path("aether.session") },
-            from: None,
-            kind: Req::ID,
-            correlation_id: None,
-            payload: request.encode_into_bytes(),
-        },
-    };
-    write_frame(stream, &frame).unwrap();
-
-    let mut reply: Option<Reply> = None;
-    loop {
-        match read_frame(stream).unwrap() {
-            WireFrame::ReplyEvent { cid: got, envelope } => {
-                assert_eq!(got, cid, "ReplyEvent cid mismatch");
-                if envelope.kind == Reply::ID {
-                    reply = Reply::decode_from_bytes(&envelope.payload);
-                }
-            }
-            WireFrame::ReplyEnd { cid: got, result } => {
-                assert_eq!(got, cid, "ReplyEnd cid mismatch");
-                result.unwrap();
-                return reply.expect("a reply of the expected kind arrived before ReplyEnd");
-            }
-            other => panic!("unexpected frame for call {cid}: {other:?}"),
-        }
-    }
+    call(stream, cid, session_mailbox(), request)
 }
 
 fn now_secs() -> u64 {
@@ -122,8 +65,7 @@ fn key() -> SessionKey {
 fn acquire_release_resume_over_rpc() {
     let port = free_port();
     let _coordinator = spawn(port);
-    let mut stream = connect(port);
-    handshake(&mut stream);
+    let mut stream = connect_and_handshake(port, "session-pool-test");
 
     let now = now_secs();
 
@@ -142,11 +84,12 @@ fn acquire_release_resume_over_rpc() {
             deposited_at: now,
         },
     };
-    assert_eq!(call::<_, ReleaseResult>(&mut stream, 1, &cold), ReleaseResult::Ok);
+    assert_eq!(call_session::<_, ReleaseResult>(&mut stream, 1, &cold), ReleaseResult::Ok);
 
     // Acquire with the matching head → leased back with the transcript digest and
     // the acquired session's own receipt as the resume's parent.
-    let leased: AcquireResult = call(&mut stream, 2, &Acquire { key: key(), current_head_hash: "HEAD-A".to_owned() });
+    let leased: AcquireResult =
+        call_session(&mut stream, 2, &Acquire { key: key(), current_head_hash: "HEAD-A".to_owned() });
     let AcquireResult::Leased { session_bytes, parent_receipt, lease, .. } = leased else {
         panic!("expected a leased session, got {leased:?}");
     };
@@ -155,7 +98,7 @@ fn acquire_release_resume_over_rpc() {
 
     // A drifted static-prefix head is a real cache miss (#3422) → None.
     let drifted: AcquireResult =
-        call(&mut stream, 3, &Acquire { key: key(), current_head_hash: "HEAD-MOVED".to_owned() });
+        call_session(&mut stream, 3, &Acquire { key: key(), current_head_hash: "HEAD-MOVED".to_owned() });
     assert_eq!(drifted, AcquireResult::None, "a drifted head must miss");
 
     // Resumed release: deposit the next attempt's session, naming R1 as parent
@@ -177,12 +120,12 @@ fn acquire_release_resume_over_rpc() {
             deposited_at: now,
         },
     };
-    assert_eq!(call::<_, ReleaseResult>(&mut stream, 4, &resumed), ReleaseResult::Ok);
+    assert_eq!(call_session::<_, ReleaseResult>(&mut stream, 4, &resumed), ReleaseResult::Ok);
 
     // Re-acquire (the prior lease expired immediately, lease TTL 0): the changed
     // tree did NOT block reuse, and the chain advanced R1 → R2.
     let reacquired: AcquireResult =
-        call(&mut stream, 5, &Acquire { key: key(), current_head_hash: "HEAD-A".to_owned() });
+        call_session(&mut stream, 5, &Acquire { key: key(), current_head_hash: "HEAD-A".to_owned() });
     match reacquired {
         AcquireResult::Leased { session_bytes, parent_receipt, .. } => {
             assert_eq!(session_bytes, "digest-2", "a changed workpiece tree must not retire the session (#3341)");
@@ -194,6 +137,6 @@ fn acquire_release_resume_over_rpc() {
     // A mismatched effort (a distinct prompt-cache identity, #3264) → None.
     let other_effort = SessionKey { effort: "low".to_owned(), ..key() };
     let mismatch: AcquireResult =
-        call(&mut stream, 6, &Acquire { key: other_effort, current_head_hash: "HEAD-A".to_owned() });
+        call_session(&mut stream, 6, &Acquire { key: other_effort, current_head_hash: "HEAD-A".to_owned() });
     assert_eq!(mismatch, AcquireResult::None, "a mismatched effort must miss");
 }
