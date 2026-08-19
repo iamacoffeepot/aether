@@ -1,6 +1,6 @@
 # ADR-0203: Main Advances in the Fleet Repository
 
-- **Status:** Proposed
+- **Status:** Accepted (ratified by owner 2026-08-19; implementation landed via #5173)
 - **Date:** 2026-08-19
 
 ## Context
