@@ -1290,3 +1290,102 @@ fn a_v9_store_gains_the_construct_session_table() {
     store.record_construct_session(&[1; 32], "wp", "sess-1", 8_000).unwrap();
     assert_eq!(store.lookup_construct_session(&[1; 32], "wp").unwrap(), Some(("sess-1".to_owned(), 8_000)),);
 }
+
+#[test]
+fn construct_session_meta_records_deposit_time() {
+    // Warmth compares the stamped deposit, not "the row exists". A handle
+    // recorded without a clock must not look warm.
+    let mut store = memory();
+    let bloom = [1u8; 32];
+    store.record_construct_session_at(&bloom, "wp-a", "sess-1", 8_000, 1_700).unwrap();
+    assert_eq!(
+        store.lookup_construct_session_meta(&bloom, "wp-a").unwrap(),
+        Some(("sess-1".to_owned(), 8_000, Some(1_700))),
+    );
+}
+
+#[test]
+fn member_dependencies_replace_per_bloom() {
+    // The sealed graph is last-writer-wins per bloom: a supersede restamps
+    // the successor's edges rather than accumulating the predecessor's.
+    let mut store = memory();
+    let bloom = [1u8; 32];
+    store
+        .record_member_dependencies(
+            &bloom,
+            &[("wp-b".to_owned(), "wp-a".to_owned()), ("wp-c".to_owned(), "wp-a".to_owned())],
+        )
+        .unwrap();
+    assert_eq!(store.lookup_predecessors(&bloom, "wp-b").unwrap(), vec!["wp-a".to_owned()]);
+    assert!(store.lookup_predecessors(&bloom, "wp-a").unwrap().is_empty());
+
+    store.record_member_dependencies(&bloom, &[("wp-b".to_owned(), "wp-c".to_owned())]).unwrap();
+    assert_eq!(store.lookup_predecessors(&bloom, "wp-b").unwrap(), vec!["wp-c".to_owned()]);
+    assert!(
+        store.lookup_predecessors(&bloom, "wp-c").unwrap().is_empty(),
+        "replaced edges must not leave the prior parent in place",
+    );
+}
+
+#[test]
+fn a_journaled_member_graph_is_persisted_from_recorded_decisions() {
+    // At unblock the executor looks the graph up from the store, not the
+    // snapshot. A seal that journals RecordMemberDependencies must leave
+    // those edges readable after the write.
+    use aether_bloomery::{BloomId, Decision, Decisions, Digest, MemberDependency, Outcome};
+    use aether_data::wire::to_vec;
+
+    let mut store = memory();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let decisions = Decisions {
+        outcome: Outcome::Sealed(bloom),
+        effects: vec![Decision::RecordMemberDependencies {
+            bloom,
+            edges: vec![MemberDependency {
+                member: WorkpieceId("wp-b".into()),
+                depends_on: WorkpieceId("wp-a".into()),
+            }],
+        }],
+    };
+    store.append_event(&write("seal-graph", b"event", &to_vec(&decisions).unwrap())).unwrap();
+    assert_eq!(store.lookup_predecessors(bloom.0.as_bytes(), "wp-b").unwrap(), vec!["wp-a".to_owned()]);
+}
+
+#[test]
+fn a_v10_store_gains_deposit_time_and_member_dependency() {
+    // Version 11 is warmth + the sealed graph. Opening a schema-10 file must
+    // add the column and table empty rather than skip them because user_version
+    // was already "current" at 10.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v10.db").to_str().unwrap().to_owned();
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE journal (
+                 sequence        INTEGER PRIMARY KEY AUTOINCREMENT,
+                 idempotency_key TEXT NOT NULL UNIQUE,
+                 event           BLOB NOT NULL,
+                 decisions       BLOB,
+                 decider         TEXT,
+                 decisions_schema TEXT
+             );
+             CREATE TABLE construct_session (
+                 bloom          BLOB NOT NULL,
+                 workpiece      TEXT NOT NULL,
+                 session_id     TEXT NOT NULL,
+                 context_tokens INTEGER NOT NULL,
+                 PRIMARY KEY (bloom, workpiece)
+             );
+             PRAGMA user_version = 10;",
+        )
+        .unwrap();
+
+    let mut store = SqliteStore::open(&path).expect("a v10 store migrates");
+    assert_eq!(store.lookup_construct_session_meta(&[1; 32], "wp").unwrap(), None, "migration invents no handles");
+    assert!(store.lookup_predecessors(&[1; 32], "wp").unwrap().is_empty(), "migration invents no edges");
+    store.record_construct_session_at(&[1; 32], "wp", "sess-1", 8_000, 9).unwrap();
+    assert_eq!(
+        store.lookup_construct_session_meta(&[1; 32], "wp").unwrap(),
+        Some(("sess-1".to_owned(), 8_000, Some(9))),
+    );
+}

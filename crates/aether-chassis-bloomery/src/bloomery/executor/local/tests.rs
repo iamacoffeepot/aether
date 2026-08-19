@@ -2851,3 +2851,146 @@ fn a_bad_construct_session_id_produces_a_fresh_dispatch_not_a_wedge() {
     assert_eq!(stamped["session_reuse"]["arm"], "fresh");
     assert_eq!(stamped["session_reuse"]["miss"], "resume_refused");
 }
+
+fn dependent_store(dir: &TempDir, orders: &[OutstandingOrder], member: &str, depends_on: &str) -> SqliteStore {
+    let mut store = member_store(dir, orders);
+    store.record_member_dependencies(&[1; 32], &[(member.to_owned(), depends_on.to_owned())]).unwrap();
+    store
+}
+
+#[test]
+fn a_dependent_construct_resumes_the_journaled_predecessor_session() {
+    // Acceptance (#5178): at unblock, B's construct is handed A's journaled
+    // handle even when B does not land in A's slot — the pool's slot-edge
+    // would miss.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let store = store_dir();
+    let predecessor = test_nonce("A");
+    let dependent = test_nonce("B");
+    let holder = test_nonce("hold");
+    let occupier = test_nonce("occupy");
+    let sessions = super::SessionReuse::memory();
+    sessions.set_head_hash("head-A");
+    sessions.set_now(1_000);
+    let exec = LocalExecutor::new(
+        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(holder.clone())),
+        correspondence(),
+        base.path(),
+    )
+    .with_session_reuse(sessions)
+    .with_message_store(dependent_store(
+        &store,
+        &[
+            member_order_at(&predecessor, "issue-A", StageId::Construct),
+            member_order_at(&dependent, "issue-B", StageId::Construct),
+        ],
+        "issue-B",
+        "issue-A",
+    ));
+
+    let holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
+    let first = exec.submit(&claude_order(digest(5), &predecessor, "issue-A")).unwrap();
+    let refs = exec.stream_evidence(&first).unwrap();
+    let checkout = refs[0].candidate.expect("A captured").checkout;
+    let occupying = exec.submit(&construct_order(digest(5), &occupier)).unwrap();
+    let _ = occupying;
+
+    exec.stream_evidence(&exec.submit(&order_on(claude_order(digest(5), &dependent, "issue-B"), checkout)).unwrap())
+        .unwrap();
+    exec.cancel(&holding).unwrap();
+
+    assert_eq!(
+        seen.lock().unwrap().last().and_then(|seen| seen.resume.as_deref()),
+        Some("sess-1"),
+        "B resumes A's journaled session even off A's slot",
+    );
+    let stamped = stamped_evidence(&base, &dependent);
+    assert_eq!(stamped["session_reuse"]["arm"], "resumed");
+    assert_eq!(stamped["session_reuse"]["edge"], true);
+    assert_eq!(stamped["session_reuse"]["output_tokens"], 200);
+    assert_eq!(stamped["session_reuse"]["duration_millis"], 1_200);
+    assert!(
+        seen.lock().unwrap().last().is_some_and(|seen| seen
+            .task
+            .as_deref()
+            .is_some_and(|task| { task.contains("spliced dependency candidate") })),
+        "the resumed prompt must state the splice",
+    );
+}
+
+#[test]
+fn a_missing_predecessor_session_does_not_fall_through_to_the_pool() {
+    // Acceptance: a graph with no journaled handle launches fresh. Falling
+    // through to the slot-edge pool would still resume A and hide the miss.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let store = store_dir();
+    let predecessor = test_nonce("A");
+    let dependent = test_nonce("B");
+    let sessions = super::SessionReuse::memory();
+    sessions.set_head_hash("head-A");
+    sessions.set_now(1_000);
+    let exec = LocalExecutor::new(Arc::new(ReuseRunner::new(Arc::clone(&seen))), correspondence(), base.path())
+        .with_session_reuse(sessions)
+        .with_message_store(dependent_store(
+            &store,
+            &[member_order_at(&dependent, "issue-B", StageId::Construct)],
+            "issue-B",
+            "issue-A",
+        ));
+
+    let first = exec.submit(&claude_order(digest(5), &predecessor, "issue-A")).unwrap();
+    let refs = exec.stream_evidence(&first).unwrap();
+    let checkout = refs[0].candidate.expect("A captured").checkout;
+
+    exec.stream_evidence(&exec.submit(&order_on(claude_order(digest(5), &dependent, "issue-B"), checkout)).unwrap())
+        .unwrap();
+
+    assert!(
+        seen.lock().unwrap().last().is_some_and(|seen| seen.resume.is_none()),
+        "a missing journaled handle must not resume the pooled predecessor",
+    );
+    let stamped = stamped_evidence(&base, &dependent);
+    assert_eq!(stamped["session_reuse"]["arm"], "fresh");
+}
+
+#[test]
+fn a_refused_predecessor_session_falls_back_to_a_fresh_dispatch() {
+    // Acceptance: resume is an optimization. A journaled predecessor the
+    // harness refuses must relaunch cold and still complete.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let store = store_dir();
+    let predecessor = test_nonce("A");
+    let dependent = test_nonce("B");
+    let sessions = super::SessionReuse::memory();
+    sessions.set_head_hash("head-A");
+    sessions.set_now(1_000);
+    let runner = ReuseRunner::new(Arc::clone(&seen)).rejecting_resume("sess-1");
+    let exec = LocalExecutor::new(Arc::new(runner), correspondence(), base.path())
+        .with_session_reuse(sessions)
+        .with_message_store(dependent_store(
+            &store,
+            &[
+                member_order_at(&predecessor, "issue-A", StageId::Construct),
+                member_order_at(&dependent, "issue-B", StageId::Construct),
+            ],
+            "issue-B",
+            "issue-A",
+        ));
+
+    exec.stream_evidence(&exec.submit(&claude_order(digest(5), &predecessor, "issue-A")).unwrap()).unwrap();
+    let refs = exec.stream_evidence(&exec.submit(&claude_order(digest(5), &dependent, "issue-B")).unwrap()).unwrap();
+
+    assert_eq!(
+        seen.lock().unwrap()[1].resume.as_deref(),
+        Some("sess-1"),
+        "the first dependent start names the journaled predecessor",
+    );
+    assert!(seen.lock().unwrap()[2].resume.is_none(), "the refused handle relaunches cold");
+    assert_eq!(refs.len(), 1, "the dispatch still completes");
+    let stamped = stamped_evidence(&base, &dependent);
+    assert_eq!(stamped["session_reuse"]["arm"], "fresh");
+    assert_eq!(stamped["session_reuse"]["miss"], "resume_refused");
+}
