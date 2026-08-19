@@ -7,7 +7,7 @@ use aether_bloomery::{
     Observation, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, SignatureEnvelope, Statement, Topic,
     WorkpieceId, authorization_message, digest_of,
 };
-use aether_data::wire::to_vec;
+use aether_data::wire::{from_bytes, to_vec};
 use ed25519_dalek::{Signer, SigningKey};
 
 use super::{CommissionBackend, CommissionError};
@@ -439,7 +439,7 @@ fn create_enqueues_a_commission_projection_and_record_round_trips() {
     seed(&mut store, "wp-1");
     let entries = store.drain_topic(Topic::Commission).expect("drain");
     assert_eq!(entries.len(), 1, "create enqueues one replica projection");
-    let payload: CommissionProjection = aether_data::wire::from_bytes(&entries[0].payload).expect("payload");
+    let payload: CommissionProjection = from_bytes(&entries[0].payload).expect("payload");
     assert_eq!(payload.workpiece.0, "wp-1");
     assert_eq!(payload.status, "open");
     assert!(payload.recorded_issue.is_none(), "nothing has been created on GitHub yet");
@@ -448,8 +448,7 @@ fn create_enqueues_a_commission_projection_and_record_round_trips() {
     assert_eq!(store.load_projection(&workpiece("wp-1")).expect("load"), Some(9));
     write(&mut store, "wp-1", None);
     let after = store.drain_topic(Topic::Commission).expect("drain after scope");
-    let latest: CommissionProjection =
-        aether_data::wire::from_bytes(&after.last().expect("row").payload).expect("decode");
+    let latest: CommissionProjection = from_bytes(&after.last().expect("row").payload).expect("decode");
     assert_eq!(latest.recorded_issue, Some(9), "later writes snapshot the recorded number");
 }
 
