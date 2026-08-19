@@ -61,5 +61,4 @@ pub use land::{LandReactorCapability, LandReactorSetup, LandReactorState, LandTi
 pub use mirror::{DrainTick, MirrorReactorCapability, MirrorReactorSetup, MirrorReactorState};
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests;

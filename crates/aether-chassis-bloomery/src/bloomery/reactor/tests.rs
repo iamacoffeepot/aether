@@ -48,7 +48,7 @@ struct RecordedEvents(Mutex<Vec<String>>);
 
 impl RecordedEvents {
     fn rendered(&self) -> String {
-        self.0.lock().unwrap().join("\n")
+        self.0.lock().expect("recorded events are not poisoned").join("\n")
     }
 }
 
@@ -78,7 +78,7 @@ impl Subscriber for EventRecorder {
     fn event(&self, event: &TracingEvent<'_>) {
         let mut rendered = RenderedEvent(event.metadata().level().to_string());
         event.record(&mut rendered);
-        self.0.0.lock().unwrap().push(rendered.0);
+        self.0.0.lock().expect("recorded events are not poisoned").push(rendered.0);
     }
 
     fn enter(&self, _span: &Id) {}
