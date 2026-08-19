@@ -64,7 +64,7 @@ fn reconstruct(store: &mut impl CommissionBackend, sealed: &SealedWorkpiece) -> 
     let intent = Statement {
         words: id.0.as_bytes().to_vec(),
         provenance: Provenance::ObservationAttestation(Observation {
-            source: format!("migration:sealed-bloom:{}", super::hex(sealed.spec.id().0.as_bytes())),
+            source: format!("migration:sealed-bloom:{}", sealed.spec.id().0.to_hex()),
         }),
         parents: Vec::new(),
     };

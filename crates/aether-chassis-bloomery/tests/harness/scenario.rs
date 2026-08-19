@@ -558,14 +558,7 @@ fn author_catalog(store_path: &str, wall_clock_secs: u64) -> ConfigRegistry {
 
 fn backend_object(sha: &str) -> BackendObjectId {
     assert!(sha.len().is_multiple_of(2) && !sha.is_empty(), "git printed a sha that is not whole bytes: {sha}");
-    BackendObjectId::new(
-        sha.as_bytes()
-            .chunks_exact(2)
-            .map(|pair| {
-                u8::from_str_radix(str::from_utf8(pair).expect("a git sha is ASCII"), 16).expect("a git sha is hex")
-            })
-            .collect(),
-    )
+    BackendObjectId::new(aether_bloomery::decode_hex(sha).expect("a git sha is lowercase hex"))
 }
 
 impl ScenarioHarness {

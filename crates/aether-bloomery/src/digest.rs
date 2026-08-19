@@ -20,9 +20,59 @@
 //! never change once a digest is persisted, or the address of every value of
 //! that type moves.
 
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use aether_data::wire::to_vec;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+
+const HEX_DIGIT: &[u8; 16] = b"0123456789abcdef";
+
+/// Encode `bytes` as lowercase hex.
+///
+/// Encoders emit lowercase; [`decode_hex`] and [`Digest::from_hex`] refuse
+/// uppercase. The case rule is the one the estate's strictest existing
+/// decoder already enforced.
+#[must_use]
+pub fn encode_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(char::from(HEX_DIGIT[usize::from(byte >> 4)]));
+        out.push(char::from(HEX_DIGIT[usize::from(byte & 0x0f)]));
+    }
+    out
+}
+
+/// One lowercase hex digit to its nibble.
+///
+/// Refuses uppercase and non-hex, including sign characters (`+`, `-`) that
+/// `from_str_radix` would accept as part of a number.
+#[must_use]
+pub const fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
+/// Decode even-length lowercase hex into bytes.
+///
+/// Refuses uppercase, odd length, and non-hex. There is no sign: a leading
+/// `+` or `-` is a non-hex character, not a radix prefix.
+#[must_use]
+pub fn decode_hex(hex: &str) -> Option<Vec<u8>> {
+    if !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    let raw = hex.as_bytes();
+    let mut out = Vec::with_capacity(raw.len() / 2);
+    for pair in raw.chunks_exact(2) {
+        out.push((hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?);
+    }
+    Some(out)
+}
 
 /// A sha256 digest over a value's canonical aether-wire bytes.
 ///
@@ -58,6 +108,30 @@ impl Digest {
     #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+
+    /// Render as 64 lowercase hex characters.
+    ///
+    /// Encoders emit lowercase; [`Self::from_hex`] refuses uppercase. The
+    /// case rule is the one the estate's strictest existing decoder already
+    /// enforced.
+    #[must_use]
+    pub fn to_hex(&self) -> String {
+        encode_hex(self.as_bytes())
+    }
+
+    /// Parse exactly 64 lowercase hex characters into a digest.
+    ///
+    /// Refuses uppercase, the wrong length, and non-hex characters — including
+    /// a signed prefix such as `+a` that `from_str_radix` would accept. There
+    /// is no second spelling.
+    #[must_use]
+    pub fn from_hex(hex: &str) -> Option<Self> {
+        if hex.len() != 64 {
+            return None;
+        }
+        let bytes = decode_hex(hex)?;
+        Self::from_slice(&bytes)
     }
 
     /// sha256 of an already-encoded byte string.
@@ -138,7 +212,7 @@ pub fn digest_of<T: ContentAddressed + ?Sized>(value: &T) -> Digest {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContentAddressed, digest_of};
+    use super::{ContentAddressed, Digest, decode_hex, digest_of, encode_hex};
 
     // Two ContentAddressed impls sharing one byte payload but differing in
     // DOMAIN, so the domain tag is the only thing that can distinguish them.
@@ -173,5 +247,21 @@ mod tests {
     #[test]
     fn same_value_yields_stable_digest() {
         assert_eq!(digest_of(&Alpha(7)), digest_of(&Alpha(7)));
+    }
+
+    #[test]
+    fn hex_round_trips_lowercase_and_refuses_uppercase_and_signed_prefix() {
+        let digest = Digest::from_bytes([0x5c; 32]);
+        let hex = digest.to_hex();
+        assert_eq!(hex, "5c".repeat(32));
+        assert_eq!(Digest::from_hex(&hex), Some(digest));
+        assert_eq!(Digest::from_hex(&hex.to_ascii_uppercase()), None);
+        assert_eq!(Digest::from_hex(&"a".repeat(63)), None);
+
+        let mut signed = String::from("+a");
+        signed.push_str(&"0".repeat(62));
+        assert_eq!(Digest::from_hex(&signed), None);
+        assert_eq!(decode_hex("+a"), None);
+        assert_eq!(encode_hex(&[0x00, 0x0f, 0xa0, 0xff]), "000fa0ff");
     }
 }

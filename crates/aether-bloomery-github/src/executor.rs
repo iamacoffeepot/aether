@@ -263,12 +263,7 @@ impl<C: ActionsApi> ActionsExecutor<C> {
 // Lowercase-hex a digest's 32 bytes — the evidence-binding form the wrapper's
 // `displayed` input carries and the intake's name decode reverses.
 fn digest_hex(digest: &Digest) -> String {
-    let mut hex = String::with_capacity(64);
-    for byte in digest.as_bytes() {
-        hex.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
-        hex.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
-    }
-    hex
+    digest.to_hex()
 }
 
 // Decode ADR-0178's exact mask token from a canonical attempt artifact name.

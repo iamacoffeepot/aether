@@ -1,27 +1,16 @@
 //! 32-byte digest spelling the REST edge already speaks: 64 hex characters.
 
+use aether_bloomery::Digest;
 use anyhow::{Result, bail};
 
 /// Lowercase-hex-encode bytes.
 pub fn encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(char::from_digit(u32::from(byte >> 4), 16).expect("high nibble is 0..16"));
-        out.push(char::from_digit(u32::from(byte & 0x0f), 16).expect("low nibble is 0..16"));
-    }
-    out
+    aether_bloomery::encode_hex(bytes)
 }
 
-/// Decode a 64-character hex string into 32 bytes.
+/// Decode a 64-character lowercase hex string into 32 bytes.
 pub fn decode(hex: &str) -> Option<[u8; 32]> {
-    if hex.len() != 64 {
-        return None;
-    }
-    let mut bytes = [0u8; 32];
-    for (index, slot) in bytes.iter_mut().enumerate() {
-        *slot = u8::from_str_radix(hex.get(index * 2..index * 2 + 2)?, 16).ok()?;
-    }
-    Some(bytes)
+    Digest::from_hex(hex).map(|digest| *digest.as_bytes())
 }
 
 /// Decode or refuse with a named field.
@@ -55,7 +44,7 @@ mod tests {
         let hex = encode(&bytes);
         assert_eq!(hex.len(), 64);
         assert_eq!(decode(&hex), Some(bytes));
-        assert_eq!(decode(&hex.to_ascii_uppercase()), Some(bytes));
+        assert_eq!(decode(&hex.to_ascii_uppercase()), None);
     }
 
     #[test]
@@ -63,5 +52,14 @@ mod tests {
         assert_eq!(decode(&"a".repeat(63)), None);
         assert_eq!(decode(&"a".repeat(65)), None);
         assert_eq!(decode(&"g".repeat(64)), None);
+    }
+
+    #[test]
+    fn decode_refuses_a_signed_prefix() {
+        // Tripwire: `from_str_radix("+a", 16)` is 10. A digest id must not
+        // admit that spelling onto `--base`.
+        let mut hex = String::from("+a");
+        hex.push_str(&"0".repeat(62));
+        assert_eq!(decode(&hex), None);
     }
 }

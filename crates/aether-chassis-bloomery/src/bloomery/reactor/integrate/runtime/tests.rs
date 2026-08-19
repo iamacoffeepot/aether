@@ -500,14 +500,7 @@ fn a_fold_conflict_files_its_overlay_under_the_evidence_detail() {
     let Fact::FoldConflict { evidence, .. } = event.fact else {
         panic!("expected FoldConflict, got {:?}", event.fact);
     };
-    let hex = {
-        let mut out = String::new();
-        for byte in evidence.detail.as_bytes() {
-            use core::fmt::Write;
-            let _ = write!(out, "{byte:02x}");
-        }
-        out
-    };
+    let hex = evidence.detail.to_hex();
     match artifacts.get(hex) {
         GetResult::Ok { bytes, .. } => {
             let overlay = String::from_utf8(bytes).unwrap();

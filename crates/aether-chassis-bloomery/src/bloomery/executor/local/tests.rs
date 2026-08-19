@@ -365,11 +365,7 @@ fn an_unrecognized_or_absent_status_still_fails_closed_on_the_exit() {
 }
 
 fn subject_hex(digest: Digest) -> String {
-    digest.as_bytes().iter().fold(String::new(), |mut hex, byte| {
-        hex.push(char::from_digit(u32::from(*byte >> 4), 16).unwrap_or('0'));
-        hex.push(char::from_digit(u32::from(*byte & 0x0f), 16).unwrap_or('0'));
-        hex
-    })
+    digest.to_hex()
 }
 
 fn synthesized_fault_bytes(nonce: &str, subject: Digest, cause: &str, signal: Option<i32>) -> Vec<u8> {

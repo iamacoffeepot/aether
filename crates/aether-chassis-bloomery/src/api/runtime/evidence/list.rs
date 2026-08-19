@@ -121,10 +121,5 @@ fn resolve_cost(artifacts: &mut ArtifactsCapabilityState, digest: &[u8]) -> Opti
 }
 
 fn lowercase_hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
-        out.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
-    }
-    out
+    aether_bloomery::encode_hex(bytes)
 }

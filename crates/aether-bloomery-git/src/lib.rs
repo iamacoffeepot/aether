@@ -10,7 +10,7 @@
 //! The control core (`aether-bloomery`) stays adapter-neutral: it does not
 //! depend on this crate (ADR-0149 §The boundary).
 
-use aether_bloomery::Digest;
+use aether_bloomery::{Digest, encode_hex};
 
 /// A digest's first six bytes as hex — the short form every human-facing
 /// surface names a bloom by: projected comment bodies, the branch namespace,
@@ -24,13 +24,7 @@ use aether_bloomery::Digest;
 /// namespace is addressed by construction rather than parsed back.
 #[must_use]
 pub fn short_hex(digest: &Digest) -> String {
-    let bytes = digest.as_bytes();
-    let mut out = String::with_capacity(12);
-    for byte in &bytes[..6] {
-        out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
-        out.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
-    }
-    out
+    encode_hex(&digest.as_bytes()[..6])
 }
 
 // The workflow-dispatch input key the in-process fake reads. Kept as a module
