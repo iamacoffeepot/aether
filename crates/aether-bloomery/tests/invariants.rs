@@ -1049,6 +1049,54 @@ fn a_failing_aggregate_verify_repairs_the_weave_then_parks_at_the_ceiling() {
     );
 }
 
+// The park ceiling is inclusive at both gates that share AggregateVerify's
+// budget. A roll count equal to the catalog budget parks a failing verdict
+// and refuses a new fold — the same comparison, so the last allowed roll
+// cannot be a dispatch at one door and a park at the other. Pre-fix the
+// resolve door used `>` and admitted that last roll.
+#[test]
+fn the_park_ceiling_parks_a_failing_verify_at_the_budget() {
+    let (snapshot, bloom) = ready_to_fold();
+    let (mut snapshot, _) = step(&snapshot, &folded(bloom, "r1", 40));
+    let budget = snapshot.blooms.get(&bloom).unwrap().stage_catalog.retry_budget_of(StageId::AggregateVerify).unwrap();
+    snapshot.blooms.get_mut(&bloom).unwrap().aggregate_verify_rolls = budget - 1;
+
+    let (_, decided) = step(
+        &snapshot,
+        &event(
+            "fail-at-budget",
+            Fact::AggregateVerifyCompleted {
+                bloom,
+                passed: false,
+                evidence: Evidence { subject: digest(40), kind: EvidenceKind::VerificationResult, detail: digest(53) },
+            },
+        ),
+    );
+    assert!(
+        matches!(decided.outcome, Outcome::AggregateVerifyParked { rolls, .. } if rolls == budget),
+        "a failing verdict at the budget parks, not repairs: {:?}",
+        decided.outcome,
+    );
+}
+
+#[test]
+fn the_park_ceiling_refuses_a_fold_at_the_budget() {
+    let (mut snapshot, bloom) = ready_to_fold();
+    let budget = snapshot.blooms.get(&bloom).unwrap().stage_catalog.retry_budget_of(StageId::AggregateVerify).unwrap();
+    snapshot.blooms.get_mut(&bloom).unwrap().aggregate_verify_rolls = budget - 1;
+
+    let decided =
+        reduce(&snapshot, &folded(bloom, "r-ceiling", 40), &ResolvedConfigs::default(), &SpendWindow::default());
+    assert!(
+        matches!(
+            decided.outcome,
+            Outcome::ResolveRejected(ResolveError::ReviewCeiling { rolls }) if rolls == budget - 1
+        ),
+        "a fold whose next roll is the budget is refused, not dispatched: {:?}",
+        decided.outcome,
+    );
+}
+
 // ADR-0191 §3/§4/§5 — a failing composition review repairs the weave and never
 // re-opens a member. The implicated set is a *label on the finding* (it files
 // follow-up work and points a reader at the right code), not a routing table:
@@ -1323,8 +1371,8 @@ fn a_fault_series_resets_when_a_different_fold_arrives() {
     let (snapshot, _) = step(&snapshot, &fault("f1", 40));
     assert_eq!(snapshot.blooms.get(&bloom).unwrap().aggregate_fault.unwrap().rolls, 1);
 
-    // A failing review clears the fold and re-opens the member; the repaired
-    // member re-integrates onto a fresh tree.
+    // A failing review repairs the weave; the composition hands back a
+    // different fold rather than re-opening the member through Resolve.
     let (snapshot, _) = step(
         &snapshot,
         &event(
@@ -1337,9 +1385,7 @@ fn a_fault_series_resets_when_a_different_fold_arrives() {
             },
         ),
     );
-    let (snapshot, _) = step(&snapshot, &event("i2", Fact::Integrate { bloom, claim: claim("wp", 10, 101) }));
-    let (snapshot, _) =
-        step(&snapshot, &event("r2", Fact::Resolve { bloom, tree: digest(44), head: digest(45), lineage: vec![] }));
+    let (snapshot, _) = step(&snapshot, &weave_repaired(bloom, "weave-1", 40, 44, 45));
     let (snapshot, _) = step(&snapshot, &verify_passed(bloom, "v2", 44));
 
     let (after, decisions) = step(&snapshot, &fault("f2", 44));
@@ -1893,6 +1939,41 @@ fn land_refusals_name_their_own_reason() {
         &SpendWindow::default(),
     );
     assert!(matches!(not_resolved.outcome, Outcome::LandRejected(LandError::NotResolved(_))));
+}
+
+// A landing rejection's three admission guards each name their own miss —
+// unknown bloom, not awaiting a landing, and a resolved record with no head —
+// rather than collapsing into one NotAwaitingLanding.
+#[test]
+fn landing_rejection_refusals_name_their_own_reason() {
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let rejected = |head: u8| {
+        event(
+            "rej",
+            Fact::LandingRejected {
+                bloom,
+                evidence: Evidence {
+                    subject: digest(head),
+                    kind: EvidenceKind::VerificationResult,
+                    detail: digest(60),
+                },
+            },
+        )
+    };
+
+    let unknown =
+        reduce(&Snapshot::new(digest(1)), &rejected(40), &ResolvedConfigs::default(), &SpendWindow::default());
+    assert!(matches!(unknown.outcome, Outcome::LandingRejectedRefused(LandingRejectedError::UnknownBloom)));
+
+    let (sealed, _) = step(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(spec.clone())));
+    let not_awaiting = reduce(&sealed, &rejected(40), &ResolvedConfigs::default(), &SpendWindow::default());
+    assert!(matches!(not_awaiting.outcome, Outcome::LandingRejectedRefused(LandingRejectedError::NotAwaitingLanding),));
+
+    let mut headless = Snapshot::new(digest(1));
+    splice_bloom(&mut headless, &spec, BloomStatus::Resolved);
+    let no_head = reduce(&headless, &rejected(40), &ResolvedConfigs::default(), &SpendWindow::default());
+    assert!(matches!(no_head.outcome, Outcome::LandingRejectedRefused(LandingRejectedError::NoResolvedHead)));
 }
 
 // m5 — a land releases the bloom's memberships from `active`, so the workpieces
@@ -3268,9 +3349,7 @@ fn a_rearmed_review_cycle_counts_a_retry_though_the_roll_cursor_resets() {
         step(&snapshot, &event("r1", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }));
     let (snapshot, _) = step(&snapshot, &verify_passed(bloom, "v1", 40));
     let (snapshot, _) = step(&snapshot, &verdict("f1", 40, 50));
-    let (snapshot, _) = step(&snapshot, &event("i2", Fact::Integrate { bloom, claim: claim("wp", 10, 101) }));
-    let (snapshot, _) =
-        step(&snapshot, &event("r2", Fact::Resolve { bloom, tree: digest(42), head: digest(43), lineage: vec![] }));
+    let (snapshot, _) = step(&snapshot, &weave_repaired(bloom, "weave-1", 40, 42, 43));
     let (snapshot, _) = step(&snapshot, &verify_passed(bloom, "v2", 42));
     let (parked, decided) = step(&snapshot, &verdict("f2", 42, 51));
     assert!(matches!(decided.outcome, Outcome::AggregateReviewParked { rolls: 2, .. }));

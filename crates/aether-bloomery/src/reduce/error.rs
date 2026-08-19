@@ -32,8 +32,8 @@ pub enum AggregateReviewError {
 /// Why a landing rejection was refused (#4689).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum LandingRejectedError {
-    /// No bloom with this id, or it is not awaiting a landing — a rejection
-    /// against a bloom that already landed, or never resolved, changes nothing.
+    /// The bloom exists but is not awaiting a landing — a rejection against a
+    /// bloom that already landed, was superseded, or is still working.
     NotAwaitingLanding,
     /// The rejection's evidence binds a head other than the one the bloom is
     /// landing — a stale rejection from a superseded landing, never acted on.
@@ -43,6 +43,13 @@ pub enum LandingRejectedError {
         /// The head the rejection's evidence binds.
         got: Digest,
     },
+    /// No bloom with this id. Appended so the prior variants' wire
+    /// discriminants are unchanged.
+    UnknownBloom,
+    /// The bloom is `Resolved` but names no head — a record that cannot be a
+    /// landing proposal. Appended so the prior variants' wire discriminants
+    /// are unchanged.
+    NoResolvedHead,
 }
 
 /// Why an aggregate-verify completion was refused.
@@ -246,10 +253,10 @@ pub enum ResolveError {
         /// An open question digest holding the bloom.
         question: Digest,
     },
-    /// The bloom has consumed its aggregate-review ceiling (ADR-0153): a fold
-    /// arriving past the two-pass budget is refused fail-closed rather than
-    /// buying a roll the vocabulary forbids. Appended so the prior variants'
-    /// wire discriminants are unchanged.
+    /// The bloom has consumed its aggregate-verify ceiling: a fold arriving
+    /// at or past the catalog budget is refused fail-closed rather than buying
+    /// a roll the vocabulary forbids. Appended so the prior variants' wire
+    /// discriminants are unchanged.
     ReviewCeiling {
         /// The verdicts already consumed.
         rolls: u32,

@@ -3,7 +3,7 @@
 
 use alloc::vec::Vec;
 
-use super::aggregate_verify::{aggregate_review_dispatch, aggregate_verify_dispatch};
+use super::aggregate_verify::{aggregate_review_dispatch, aggregate_verify_dispatch, at_park_ceiling};
 use super::readiness::newly_ready_entries;
 use super::verify_memo::{proof_of, reuse_of};
 use super::{
@@ -190,13 +190,13 @@ pub(super) fn reduce_resolve(
     // the judgment gate that a passing verify hands off to. Verify runs first
     // because it is the cheaper and more decisive of the two, and there is
     // nothing for a critic to judge in a fold that does not build. The ceiling
-    // is AggregateVerify's catalog retry budget over the record's
-    // consumed-verdict count; a fold arriving past it is refused fail-closed
-    // (unreachable through this reducer — a wedged bloom's members stay
-    // closed, so no re-fold dispatches — but a buggy reactor must not buy a
-    // roll the vocabulary forbids).
+    // is the same inclusive park comparison the verify completion gate uses:
+    // a fold whose next roll is at or past AggregateVerify's catalog budget
+    // is refused fail-closed (unreachable through this reducer — a wedged
+    // bloom's members stay closed, so no re-fold dispatches — but a buggy
+    // reactor must not buy a roll the vocabulary forbids).
     let roll = record.aggregate_verify_rolls + 1;
-    if roll > record.stage_catalog.retry_budget_of(StageId::AggregateVerify).unwrap_or(1) {
+    if at_park_ceiling(record, StageId::AggregateVerify, roll) {
         return Decisions::rejected(Outcome::ResolveRejected(ResolveError::ReviewCeiling {
             rolls: record.aggregate_verify_rolls,
         }));
