@@ -69,11 +69,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
+use crate::ledger::{SeatDispatch, priced_micro_usd};
 use crate::reduce::{Decision, Decisions, Event, Fact, Outcome};
 use crate::study_report::StudyReport;
 use crate::values::{
-    AgentProfile, ConfigRegistry, ConfigScopes, DispatchKey, EvidenceKind, ModelOverride, ReasoningEffort,
-    ResolvedConfigs, ResolvedModel, StudyRecord, VerifyFailure, VerifyFailureSet, is_model_lane,
+    DispatchKey, EvidenceKind, ReasoningEffort, ResolvedConfigs, ResolvedModel, StudyRecord, VerifyFailure,
+    VerifyFailureSet,
 };
 
 /// The honesty boundary every rendered ledger carries (ADR-0184).
@@ -137,32 +138,36 @@ pub struct CapabilityCell {
     /// verifier identity, in [`VerifyFailure::ALL`] order. An identity that never
     /// failed is omitted rather than carried as a zero.
     pub failures: Vec<VerifierFailures>,
-    /// What this cell's measured attempts cost, in micro-USD, summed off their
+    /// What this cell's priced attempts cost, in micro-USD, summed off their
     /// study records — already priced against the bloom's sealed
     /// [`PriceTable`](crate::PriceTable), which is where a measured token count
-    /// becomes a dollar figure.
+    /// becomes a dollar figure. Unpriced records do not enter this sum.
     pub cost_micro_usd: u64,
     /// Worker time in whole seconds, summed over the same study records. Not
     /// elapsed wall-clock: concurrent members make that a different quantity.
     pub worker_secs: u64,
-    /// How many of this cell's attempts a study record actually resolved for —
-    /// the sample count behind [`cost_micro_usd`](Self::cost_micro_usd) and
-    /// [`worker_secs`](Self::worker_secs), which falls below
-    /// [`attempts`](Self::attempts) whenever an artifact could not be read.
+    /// How many of this cell's attempts a *priced* study record actually
+    /// resolved for — the sample count behind
+    /// [`cost_micro_usd`](Self::cost_micro_usd), which falls below
+    /// [`attempts`](Self::attempts) whenever an artifact could not be read or
+    /// was unpriced.
     pub samples: u64,
+    /// Study records whose priced column is zero — counted, never averaged, and
+    /// never treated as free.
+    pub unpriced: u64,
 }
 
 impl CapabilityCell {
     /// What one resolved member cost under this agent, or `None` when the cell
-    /// resolved none.
+    /// resolved none or any of its study records were unpriced.
     ///
     /// `None` is *unmeasured*, never zero — the same distinction
     /// [`PriceTable::price`](crate::PriceTable::price) draws between unpriced and
-    /// free. A caller that flattens it makes a cell that has never finished a
-    /// member look like the cheapest one in the table.
+    /// free. Dividing a sum that includes a missing price row as zero would
+    /// bias the per-member figure low exactly when the rates are unknown.
     #[must_use]
     pub fn cost_per_resolved_member(&self) -> Option<u64> {
-        (self.resolved_members > 0).then(|| self.cost_micro_usd / self.resolved_members)
+        (self.resolved_members > 0 && self.unpriced == 0).then(|| self.cost_micro_usd / self.resolved_members)
     }
 }
 
@@ -244,25 +249,6 @@ struct Study {
     detail: Digest,
 }
 
-/// One dispatch as the fold reads it — the axes every model lane's slot is
-/// derived from, gathered so the per-decision arms hand over one value instead
-/// of an eight-argument call.
-struct Dispatched<'a> {
-    bloom: BloomId,
-    key: DispatchKey,
-    stage: StageId,
-    /// The dispatched [`Transformation::command`](crate::Transformation::command)
-    /// — the sealed content [`is_model_lane`] judges, so a mechanical lane can
-    /// never acquire a cell through a host-side overlay.
-    command: &'a str,
-    profile: &'a AgentProfile,
-    registry: &'a ConfigRegistry,
-    /// The digest the attempt's evidence binds and its study record grades —
-    /// `transformation.inputs[0]` by reducer construction, which is the member's
-    /// candidate tree once one exists and its scope revision before that.
-    displayed: Digest,
-}
-
 impl CalibrationLedger {
     /// Fold one admitted event and its recorded decisions.
     ///
@@ -332,9 +318,13 @@ impl CalibrationLedger {
             };
             // The loop above gave every slot a cell, so this only ever finds one.
             let cell = cells.entry(CellKey::of(slot)).or_insert_with(|| Accumulator::of(slot));
-            cell.cost_micro_usd = cell.cost_micro_usd.saturating_add(record.cost.cost_micro_usd);
             cell.worker_millis = cell.worker_millis.saturating_add(record.cost.duration_millis);
-            cell.samples = cell.samples.saturating_add(1);
+            if let Some(cost) = priced_micro_usd(record.cost.cost_micro_usd) {
+                cell.cost_micro_usd = cell.cost_micro_usd.saturating_add(cost);
+                cell.samples = cell.samples.saturating_add(1);
+            } else {
+                cell.unpriced = cell.unpriced.saturating_add(1);
+            }
         }
 
         CapabilityLedger {
@@ -358,47 +348,19 @@ impl CalibrationLedger {
 
     /// Fold one recorded decision.
     fn observe_effect(&mut self, effect: &Decision, configs: &ResolvedConfigs) {
+        if let Some(dispatched) = SeatDispatch::from_effect(effect) {
+            let lane = match &dispatched.key {
+                DispatchKey::Member { workpiece, .. } => Some((dispatched.bloom, workpiece.clone())),
+                DispatchKey::Bloom { .. } => None,
+            };
+            if let Some(slot) = self.dispatch(dispatched, configs)
+                && let Some(lane) = lane
+            {
+                self.lanes.insert(lane, slot);
+            }
+            return;
+        }
         match effect {
-            Decision::DispatchAttempt {
-                bloom,
-                workpiece,
-                stage,
-                transformation,
-                scope_revision,
-                candidate,
-                profile,
-                configs: registry,
-            } => {
-                let dispatched = Dispatched {
-                    bloom: *bloom,
-                    key: DispatchKey::Member { workpiece: workpiece.clone(), stage: *stage },
-                    stage: *stage,
-                    command: &transformation.command,
-                    profile,
-                    registry,
-                    displayed: candidate.unwrap_or(*scope_revision),
-                };
-                if let Some(slot) = self.dispatch(dispatched, configs) {
-                    self.lanes.insert((*bloom, workpiece.clone()), slot);
-                }
-            }
-            Decision::DispatchAggregateReview { bloom, transformation, profile, configs: registry, .. } => {
-                let Some(displayed) = transformation.inputs.first().copied() else {
-                    return;
-                };
-                self.dispatch(
-                    Dispatched {
-                        bloom: *bloom,
-                        key: DispatchKey::Bloom { stage: StageId::AggregateReview },
-                        stage: StageId::AggregateReview,
-                        command: &transformation.command,
-                        profile,
-                        registry,
-                        displayed,
-                    },
-                    configs,
-                );
-            }
             Decision::RecordEvidence { bloom, evidence } if evidence.kind == EvidenceKind::StudyRecord => {
                 self.studies.push(Study { bloom: *bloom, subject: evidence.subject, detail: evidence.detail });
             }
@@ -417,21 +379,16 @@ impl CalibrationLedger {
     ///
     /// A mechanical lane returns `None` and leaves no slot behind: its catalog
     /// binding still names a profile, and that profile never ran anything.
-    fn dispatch(&mut self, dispatched: Dispatched<'_>, configs: &ResolvedConfigs) -> Option<SlotId> {
-        let Dispatched { bloom, key, stage, command, profile, registry, displayed } = dispatched;
-        if !is_model_lane(command) {
+    fn dispatch(&mut self, dispatched: SeatDispatch<'_>, configs: &ResolvedConfigs) -> Option<SlotId> {
+        if !dispatched.is_model_lane() {
             return None;
         }
         // The dispatch's registry is already the member's layered over the
         // bloom's (`ConfigRegistry::layered_over`), so a bloom-wide lookup over it
         // is the member-scoped answer — the same resolution the executor reactor
         // runs at dispatch time.
-        let agent = configs
-            .resolve::<ModelOverride>(ConfigScopes::bloom_wide(registry))
-            .ok()
-            .flatten()
-            .unwrap_or_default()
-            .resolve(stage, profile);
+        let agent = dispatched.agent(configs);
+        let SeatDispatch { bloom, key, stage, displayed, .. } = dispatched;
 
         let id = (bloom, key);
         let slot = self.slots.entry(id.clone()).or_insert_with(|| Slot {
@@ -501,6 +458,7 @@ struct Accumulator {
     cost_micro_usd: u64,
     worker_millis: u64,
     samples: u64,
+    unpriced: u64,
 }
 
 impl Accumulator {
@@ -515,6 +473,7 @@ impl Accumulator {
             cost_micro_usd: 0,
             worker_millis: 0,
             samples: 0,
+            unpriced: 0,
         }
     }
 
@@ -534,6 +493,7 @@ impl Accumulator {
             cost_micro_usd: self.cost_micro_usd,
             worker_secs: self.worker_millis / 1000,
             samples: self.samples,
+            unpriced: self.unpriced,
         }
     }
 }

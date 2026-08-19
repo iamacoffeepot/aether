@@ -1,6 +1,9 @@
-//! Query-string parse for the journal and artifact read routes.
+//! Query-string parse for the journal and artifact read routes, and the
+//! shared clamp / percent-decode helpers the other REST reads use.
 //!
 //! A limit above the clamp is applied and named in `notice`, never refused.
+//! Percent-decoding runs over the whole byte string, then UTF-8, so a
+//! multi-byte value does not become Latin-1 mojibake.
 
 use aether_bloomery::Digest;
 use aether_http::{FromRequest, HttpServerRequest, HttpServerResponse};
@@ -56,16 +59,16 @@ impl JournalQuery {
         let mut requested_limit = None;
         let mut descending = true;
         for (key, value) in pairs(query) {
-            match key {
+            match key.as_str() {
                 "bloom" => {
                     bloom = Some(
-                        digest_from_hex(value)
+                        digest_from_hex(&value)
                             .ok_or_else(|| format!("bloom is not a 64-character hex digest: {value}"))?,
                     );
                 }
-                "from_sequence" => from_sequence = Some(parse_u64("from_sequence", value)?),
-                "limit" => requested_limit = Some(parse_u64("limit", value)?),
-                "order" => descending = parse_order(value)?,
+                "from_sequence" => from_sequence = Some(parse_u64("from_sequence", &value)?),
+                "limit" => requested_limit = Some(parse_u64("limit", &value)?),
+                "order" => descending = parse_order(&value)?,
                 _ => {}
             }
         }
@@ -84,9 +87,9 @@ impl ArtifactQuery {
         let mut offset = 0;
         let mut requested_limit = None;
         for (key, value) in pairs(query) {
-            match key {
-                "offset" => offset = parse_u64("offset", value)?,
-                "limit" => requested_limit = Some(parse_u64("limit", value)?),
+            match key.as_str() {
+                "offset" => offset = parse_u64("offset", &value)?,
+                "limit" => requested_limit = Some(parse_u64("limit", &value)?),
                 _ => {}
             }
         }
@@ -107,11 +110,51 @@ impl FromRequest for ArtifactQuery {
     }
 }
 
-fn pairs(query: &str) -> impl Iterator<Item = (&str, &str)> {
-    query.split('&').filter(|pair| !pair.is_empty()).map(|pair| pair.split_once('=').unwrap_or((pair, "")))
+/// Split `query` into decoded `(key, value)` pairs. `+` is a space.
+pub(in crate::api::runtime) fn pairs(query: &str) -> impl Iterator<Item = (String, String)> + '_ {
+    query.split('&').filter(|pair| !pair.is_empty()).map(|pair| {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        (percent_decode(key), percent_decode(value))
+    })
 }
 
-fn parse_u64(name: &str, value: &str) -> Result<u64, String> {
+/// Decode percent-encoding over the whole byte string, then UTF-8.
+///
+/// Decoding one escaped byte at a time as a `char` turns a UTF-8 sequence
+/// such as `%C3%A9` (`é`) into Latin-1 mojibake. Collect the bytes first.
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) = (hex_nibble(bytes[index + 1]), hex_nibble(bytes[index + 2]))
+        {
+            out.push((high << 4) | low);
+            index += 3;
+            continue;
+        }
+        if bytes[index] == b'+' {
+            out.push(b' ');
+        } else {
+            out.push(bytes[index]);
+        }
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+pub(in crate::api::runtime) fn parse_u64(name: &str, value: &str) -> Result<u64, String> {
     value.parse::<u64>().map_err(|_| format!("{name} is not an integer: {value}"))
 }
 
@@ -123,7 +166,7 @@ fn parse_order(value: &str) -> Result<bool, String> {
     }
 }
 
-fn clamp_limit(requested: Option<u64>, default: u64, max: u64) -> (u64, Option<String>) {
+pub(in crate::api::runtime) fn clamp_limit(requested: Option<u64>, default: u64, max: u64) -> (u64, Option<String>) {
     match requested {
         None => (default, None),
         Some(limit) if limit > max => (max, Some(format!("limit clamped from {limit} to {max}"))),

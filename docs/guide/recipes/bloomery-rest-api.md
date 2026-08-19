@@ -295,15 +295,19 @@ belongs to instead:
 ```bash
 curl -s -X POST localhost:8910/blooms/<bloom-hex>/grant \
   -H 'content-type: application/json' \
-  -d '{"workpiece":"4708","stage":"Verify","attempts":2}'
+  -d '{"workpiece":"4708","stage":"Verify","attempts":2,"reason":"sandbox recovered","operator":"eve"}'
                                                # → {"outcome":{"AttemptsGranted":{…}}}
 ```
 
 `attempts` is how many more dispatched attempts the member may spend before it
 wedges again, bounded by the stage's own retry budget in the sealed stage
 catalog — the whole retry authority, with no second bloom-wide cap layered over
-it. A `Verify` grant resumes the member at `Refine`, since re-running the
-mechanical gate on an unchanged candidate cannot change its verdict.
+it. `reason` and `operator` are required, as on the other operator doors: a
+grant is an act no verdict produced, so a blank audit trail is `422` rather
+than defaulted. A reducer refusal of the grant (not wedged, wrong stage, past
+the cap) is `422` too. A `Verify` grant resumes the member at `Refine`, since
+re-running the mechanical gate on an unchanged candidate cannot change its
+verdict.
 
 The sealed `base` is what divides the two verbs. A base that has not moved, with
 scope, membership, and configuration unchanged, is an execution decision — a
