@@ -25,6 +25,8 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
 use std::mem;
+#[cfg(test)]
+use std::sync::Arc;
 use std::time::Duration;
 
 use aether_actor::{Manual, runtime};
@@ -33,6 +35,8 @@ use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 use aether_substrate::InboundMail;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
+#[cfg(test)]
+use aether_substrate::mail::mailer::Mailer;
 
 use aether_bloomery::control::{
     Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, ClaimResult, ClaimSeal, Commit, CommitResult,
@@ -846,7 +850,7 @@ impl ControlCoreState {
     /// Inert snapshot owner for dispatch-table tests. The timer sidecar is an
     /// hour-long no-op dropped with the state.
     #[cfg(test)]
-    pub(crate) fn inert(mailer: std::sync::Arc<aether_substrate::mail::mailer::Mailer>) -> Self {
+    pub(crate) fn inert(mailer: Arc<Mailer>) -> Self {
         Self {
             snapshot: Snapshot::default(),
             calibration: CalibrationLedger::default(),
