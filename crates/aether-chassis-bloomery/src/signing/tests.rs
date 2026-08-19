@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 
+use aether_bloomery::testing::digest as binding;
 use aether_bloomery::{
     AuthorityDoor, Digest, Ed25519KeyProvider, KeyId, Provenance, SignatureEnvelope, Statement, authorization_message,
 };
@@ -32,11 +33,6 @@ fn signing_key(seed: u8) -> SigningKey {
 fn state(signer: &str, key: &SigningKey) -> SigningCapabilityState {
     let allowlist = BTreeMap::from([(KeyId(signer.to_owned()), key.verifying_key())]);
     SigningCapabilityState::new(Ed25519KeyProvider::new(allowlist))
-}
-
-/// A distinct binding digest per seed — a request to sign for.
-fn binding(seed: u8) -> Digest {
-    Digest::from_bytes([seed; 32])
 }
 
 /// The wire-encoded author-signed statement over `words` by `signer` using

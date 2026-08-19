@@ -144,14 +144,11 @@ impl Correspondence for SqliteCorrespondence {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use aether_bloomery::{BackendObjectId, Correspondence, Digest};
+    use aether_bloomery::testing::digest;
+    use aether_bloomery::{BackendObjectId, Correspondence};
     use rusqlite::Connection;
 
     use super::SqliteCorrespondence;
-
-    fn digest(seed: u8) -> Digest {
-        Digest::from_bytes([seed; 32])
-    }
 
     fn object(seed: u8, bytes: usize) -> BackendObjectId {
         BackendObjectId::new(vec![seed; bytes])

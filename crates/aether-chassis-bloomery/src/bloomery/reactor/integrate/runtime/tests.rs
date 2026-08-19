@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use aether_bloomery::testing::digest;
 use aether_bloomery::{
     BloomId, Digest, Event, Fact, IdempotencyKey, IntegratePayload, MemberCandidate, SplicePayload, Topic, WorkpieceId,
 };
@@ -20,10 +21,6 @@ use crate::bloomery::SourceShell;
 use crate::bloomery::outbox::TopicOutbox;
 use crate::store::{SqliteStore, StoreBackend};
 use aether_bloomery_github::candidate_ref_name;
-
-fn digest(seed: u8) -> Digest {
-    Digest::from_bytes([seed; 32])
-}
 
 fn shell(fake: FakeGithub) -> SourceShell {
     SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake), false, MainlineRef::default())))

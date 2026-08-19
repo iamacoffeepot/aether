@@ -1606,12 +1606,11 @@ fn observation_already_admitted(snapshot: &Snapshot, head: &Digest) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
-
+    use aether_bloomery::testing::digest;
     use aether_bloomery::{
-        BloomDraft, BloomId, BloomRecord, BloomStatus, CandidateRef, Decisions, Digest, Event, Evidence, EvidenceKind,
-        Fact, IdempotencyKey, OperatorRepair, OperatorRepairError, Outcome, QueryResult, Snapshot, StageCatalog,
-        StudyCost, StudyRecord, WorkpieceId,
+        BloomDraft, BloomId, BloomRecord, CandidateRef, Decisions, Digest, Event, Evidence, EvidenceKind, Fact,
+        IdempotencyKey, OperatorRepair, OperatorRepairError, Outcome, QueryResult, Snapshot, StudyCost, StudyRecord,
+        WorkpieceId,
     };
     use aether_data::wire::to_vec;
 
@@ -1621,40 +1620,10 @@ mod tests {
     };
     use crate::artifacts::{ArtifactsCapabilityState, PutResult};
 
-    fn digest(seed: u8) -> Digest {
-        Digest::from_bytes([seed; 32])
-    }
-
     fn snapshot_with_study(subject: Digest, detail: Digest) -> Snapshot {
         let record = BloomRecord {
-            spec: BloomDraft::default().seal(),
-            stage_catalog: StageCatalog::line(),
-            status: BloomStatus::Sealed,
-            claims: BTreeMap::new(),
             evidence: vec![Evidence { subject, kind: EvidenceKind::StudyRecord, detail }],
-            holds: BTreeSet::new(),
-            progress: BTreeMap::new(),
-            wedged: BTreeMap::new(),
-            dispatches: BTreeMap::new(),
-            integration: None,
-            aggregate_rolls: 0,
-            aggregate_verify_rolls: 0,
-            landing_rolls: 0,
-            resolved_head: None,
-            review_park: None,
-            verify_proofs: BTreeMap::new(),
-            verify_reuses: Vec::new(),
-            aggregate_fault: None,
-            composition_findings: Vec::new(),
-            adjudications: Vec::new(),
-            operator_repairs: Vec::new(),
-            operator_hold: None,
-            deferred_dispatches: BTreeSet::new(),
-            deferred_aggregates: BTreeSet::new(),
-            dependencies: Vec::new(),
-            host_faults: BTreeMap::new(),
-            vehicles: BTreeMap::new(),
-            superseded_by: None,
+            ..BloomRecord::empty(BloomDraft::default().seal())
         };
         let mut snapshot = Snapshot::default();
         snapshot.blooms.insert(BloomId(digest(1)), record);

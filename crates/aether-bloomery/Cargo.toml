@@ -13,6 +13,14 @@ license.workspace = true
 # emits a wasm component or depends on the guest SDK.
 crate-type = ["rlib"]
 
+[features]
+# Exposes the domain fixture set (`digest`, memberships, drafts, view
+# `Default`s) so a downstream crate's tests share one vocabulary instead of
+# re-deriving it. Adds no dependencies. Consumers enable it from their
+# `[dev-dependencies]` stanza (or their own `testing` feature), so
+# feature unification keeps it out of every production graph.
+testing = []
+
 [dependencies]
 # The canonical wire format (ADR-0118) backs content-addressing: a
 # `Digest` is sha256 over a value's `aether_data::wire` bytes, so digests
@@ -41,6 +49,11 @@ inventory = { workspace = true }
 ed25519-dalek = { workspace = true }
 
 [dev-dependencies]
+# Self-dependency with `testing` on, so this crate's integration tests
+# (`tests/`) see the fixture module the feature exposes — an integration
+# test links the lib without the `test` cfg, so the feature is the only
+# way to reach a test-only module from `tests/`.
+aether-bloomery = { path = ".", features = ["testing"] }
 # The seven named invariants ride property tests (ADR-0149 migration
 # step 1). Dev-only — the pure core never links a test dependency.
 proptest = { workspace = true }

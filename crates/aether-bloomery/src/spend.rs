@@ -53,20 +53,16 @@ pub fn measure(snapshot: &Snapshot, source: impl Fn(&Digest) -> Option<StudyReco
 
 #[cfg(test)]
 mod tests {
-    use alloc::collections::{BTreeMap, BTreeSet};
+    use alloc::collections::BTreeMap;
 
     use super::measure;
     use crate::digest::Digest;
     use crate::ids::BloomId;
-    use crate::reduce::{BloomRecord, BloomStatus, Snapshot};
+    use crate::reduce::{BloomRecord, Snapshot};
+    use crate::testing::digest;
     use crate::values::{
-        BloomDraft, Evidence, EvidenceKind, SpendCeiling, SpendQuiesce, SpendWindow, StageCatalog, StudyCost,
-        StudyRecord,
+        BloomDraft, Evidence, EvidenceKind, SpendCeiling, SpendQuiesce, SpendWindow, StudyCost, StudyRecord,
     };
-
-    fn digest(seed: u8) -> Digest {
-        Digest::from_bytes([seed; 32])
-    }
 
     fn bloom_id(seed: u8) -> BloomId {
         BloomId(digest(seed))
@@ -77,36 +73,7 @@ mod tests {
     }
 
     fn snapshot_with(bloom: BloomId, evidence: Vec<Evidence>) -> Snapshot {
-        let record = BloomRecord {
-            spec: BloomDraft::default().seal(),
-            stage_catalog: StageCatalog::line(),
-            status: BloomStatus::Sealed,
-            claims: BTreeMap::new(),
-            evidence,
-            holds: BTreeSet::new(),
-            progress: BTreeMap::new(),
-            wedged: BTreeMap::new(),
-            dispatches: BTreeMap::new(),
-            integration: None,
-            aggregate_rolls: 0,
-            aggregate_verify_rolls: 0,
-            landing_rolls: 0,
-            resolved_head: None,
-            review_park: None,
-            verify_proofs: BTreeMap::new(),
-            verify_reuses: Vec::new(),
-            aggregate_fault: None,
-            composition_findings: Vec::new(),
-            adjudications: Vec::new(),
-            operator_repairs: Vec::new(),
-            operator_hold: None,
-            deferred_dispatches: BTreeSet::new(),
-            deferred_aggregates: BTreeSet::new(),
-            dependencies: Vec::new(),
-            host_faults: BTreeMap::new(),
-            vehicles: BTreeMap::new(),
-            superseded_by: None,
-        };
+        let record = BloomRecord { evidence, ..BloomRecord::empty(BloomDraft::default().seal()) };
         let mut snapshot = Snapshot::default();
         snapshot.blooms.insert(bloom, record);
         snapshot

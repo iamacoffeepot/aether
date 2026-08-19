@@ -141,6 +141,7 @@ pub fn classify(document: &ViewDocument, outstanding: &[String]) -> Quiescence {
 
 #[cfg(test)]
 mod tests {
+    use aether_bloomery::testing::digest;
     use aether_bloomery::{
         BloomId, BloomStatus, BloomView, Digest, Evidence, EvidenceKind, ExecutorFaultView, MemberView, ViewDocument,
         Wedge, WorkpieceId,
@@ -151,45 +152,27 @@ mod tests {
     fn member(resolved: bool, wedge: Option<Wedge>) -> MemberView {
         MemberView {
             workpiece: WorkpieceId("wp".to_owned()),
-            scope_revision: Digest::from_bytes([1; 32]),
+            scope_revision: digest(1),
             approval: Evidence { subject: Digest::default(), kind: EvidenceKind::Approval, detail: Digest::default() },
             resolution: resolved.then(|| aether_bloomery::ResolutionClaim {
                 workpiece: WorkpieceId("wp".to_owned()),
-                scope_revision: Digest::from_bytes([1; 32]),
-                candidate: Digest::from_bytes([2; 32]),
+                scope_revision: digest(1),
+                candidate: digest(2),
                 evidence: Evidence {
                     subject: Digest::default(),
                     kind: EvidenceKind::ResolutionClaim,
                     detail: Digest::default(),
                 },
             }),
-            pending_decision: None,
             wedge,
-            blocked_by: None,
-            host_fault: None,
-            machinery_rolls: 0,
-            machinery_budget: 0,
-            wedge_cause: None,
-            cursor: None,
+            ..MemberView::default()
         }
     }
 
     fn document(status: BloomStatus, members: Vec<MemberView>) -> ViewDocument {
         ViewDocument {
-            mainline: Digest::default(),
-            observed: Digest::default(),
-            spend_quiesce: None,
-            blooms: vec![BloomView {
-                id: BloomId(Digest::from_bytes([7; 32])),
-                status,
-                superseded_by: None,
-                members,
-                landing_blocked: None,
-                executor_fault: None,
-                review_park: None,
-                composition: None,
-                operator_hold: None,
-            }],
+            blooms: vec![BloomView { id: BloomId(digest(7)), status, members, ..BloomView::default() }],
+            ..ViewDocument::default()
         }
     }
 
@@ -222,26 +205,20 @@ mod tests {
         // above all pass on it. Classifying that as `Terminal` would let a bloom
         // stopped dead on a broken host read as one that finished its work.
         let faulted = ViewDocument {
-            mainline: Digest::default(),
-            observed: Digest::default(),
-            spend_quiesce: None,
             blooms: vec![BloomView {
-                id: BloomId(Digest::from_bytes([7; 32])),
+                id: BloomId(digest(7)),
                 status: BloomStatus::Sealed,
-                superseded_by: None,
                 members: vec![member(true, None)],
-                landing_blocked: None,
                 executor_fault: Some(ExecutorFaultView {
-                    subject: Digest::from_bytes([3; 32]),
+                    subject: digest(3),
                     rolls: 2,
                     budget: 2,
-                    evidence: Digest::from_bytes([9; 32]),
+                    evidence: digest(9),
                     terminal: true,
                 }),
-                review_park: None,
-                composition: None,
-                operator_hold: None,
+                ..BloomView::default()
             }],
+            ..ViewDocument::default()
         };
 
         assert!(matches!(classify(&faulted, &[]), Quiescence::Wedged(_)));
@@ -251,7 +228,7 @@ mod tests {
     fn a_wedge_is_a_legitimate_stop_and_a_resolution_is_a_terminal_one() {
         let wedge = Wedge {
             stage: aether_bloomery::StageId::Verify,
-            evidence: Digest::from_bytes([9; 32]),
+            evidence: digest(9),
             repeated_verifiers: aether_bloomery::VerifyFailureSet::EMPTY,
         };
 

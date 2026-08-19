@@ -21,6 +21,7 @@ use tracing::span::{Attributes, Id, Record};
 use tracing::subscriber::with_default;
 use tracing::{Event, Metadata, Subscriber};
 
+use aether_bloomery::testing::digest;
 use aether_bloomery::{
     BackendObjectId, Conclusion, Correspondence, CorrespondenceError, Digest, ExecutionStatus, ExecutorBackend,
     Harness, Nonce, ReasoningEffort, ResolvedModel, StageCatalog, StageId, StageVerdict, Transformation, VerifyFailure,
@@ -44,10 +45,6 @@ use crate::bloomery::executor::{OutstandingDispatch, ReconcileLanes};
 use crate::bloomery::intake::{EvidenceClaims, NameEvidenceClaims};
 use crate::session::{SessionKey, SessionManifest};
 use crate::store::{OutstandingOrder, SqliteStore, StoreBackend};
-
-fn digest(seed: u8) -> Digest {
-    Digest::from_bytes([seed; 32])
-}
 
 // A correspondence seeded with the two commits these orders carry — the
 // checkout target (`for_member_stage`'s third arg, `digest(0xC0)`) and the

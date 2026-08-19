@@ -19,9 +19,9 @@
 
 use std::sync::Arc;
 
+use aether_bloomery::testing::{digest, membership};
 use aether_bloomery::{
-    BloomDraft, ConfigRegistry, Decisions, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership,
-    ResolvedConfigs, Snapshot, SpendWindow, WorkpieceId, reduce, view_of,
+    BloomDraft, Decisions, Event, Fact, IdempotencyKey, ResolvedConfigs, Snapshot, SpendWindow, reduce, view_of,
 };
 use aether_bloomery_github::{GithubProjection, testing::FakeGithub};
 use aether_chassis_bloomery::bloomery::ProjectionShell;
@@ -31,23 +31,6 @@ use aether_data::wire::{from_bytes, to_vec};
 /// The two issues the synthetic bloom's members address — objects the
 /// repository already holds. The projection opens none of its own.
 const MEMBER_ISSUES: [u64; 2] = [4628, 4629];
-
-fn digest(seed: u8) -> Digest {
-    Digest::from_bytes([seed; 32])
-}
-
-fn membership(name: &str, revision: u8) -> Membership {
-    // The approval binds the member's subject (ADR-0174), which is only
-    // computable once the rest of the member is built.
-    let mut member = Membership {
-        workpiece: WorkpieceId(name.into()),
-        scope_revision: digest(revision),
-        configs: ConfigRegistry::default(),
-        approval: Evidence { subject: digest(0), kind: EvidenceKind::Approval, detail: digest(200) },
-    };
-    member.approval.subject = member.subject();
-    member
-}
 
 /// Seal a two-member synthetic bloom, journal the seal event, then replay the
 /// journal through the reducer to rebuild the snapshot — the real

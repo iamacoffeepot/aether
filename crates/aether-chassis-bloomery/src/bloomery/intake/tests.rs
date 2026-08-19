@@ -2,16 +2,16 @@
 //! consume-once), the dispatch-record write, and the pull-loop cycle driven
 //! end-to-end with the reducer as the oracle.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Debug, Write as _};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use aether_bloomery::{
-    BloomDraft, BloomId, BloomRecord, BloomStatus, ConfigRegistry, Decision, Digest, Event, Evidence, EvidenceKind,
-    EvidenceRef, ExecutionLimits, ExecutionStatus, Fact, Forecast, IdempotencyKey, Membership, NetworkProfile, Nonce,
-    Outcome, ResolvedConfigs, Snapshot, SpendWindow, StageCatalog, StageId, StageVerdict, Transformation,
-    VerifyFailure, VerifyFailureSet, WorkHandle, WorkpieceId, reduce,
+    BloomDraft, BloomId, BloomRecord, ConfigRegistry, Decision, Digest, Event, Evidence, EvidenceKind, EvidenceRef,
+    ExecutionLimits, ExecutionStatus, Fact, Forecast, IdempotencyKey, Membership, NetworkProfile, Nonce, Outcome,
+    ResolvedConfigs, Snapshot, SpendWindow, StageCatalog, StageId, StageVerdict, Transformation, VerifyFailure,
+    VerifyFailureSet, WorkHandle, WorkpieceId, reduce,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -119,39 +119,7 @@ fn sealed_snapshot(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snapshot
     let bloom = spec.id();
     let mut snapshot = Snapshot::new(Digest::default());
     snapshot.active.insert(workpiece.clone(), bloom);
-    snapshot.blooms.insert(
-        bloom,
-        BloomRecord {
-            stage_catalog: StageCatalog::line(),
-            spec,
-            status: BloomStatus::Sealed,
-            claims: BTreeMap::new(),
-            evidence: Vec::new(),
-            holds: BTreeSet::new(),
-            progress: BTreeMap::new(),
-            wedged: BTreeMap::new(),
-            dispatches: BTreeMap::new(),
-            integration: None,
-            aggregate_rolls: 0,
-            aggregate_verify_rolls: 0,
-            landing_rolls: 0,
-            resolved_head: None,
-            review_park: None,
-            verify_proofs: BTreeMap::new(),
-            verify_reuses: Vec::new(),
-            aggregate_fault: None,
-            composition_findings: Vec::new(),
-            adjudications: Vec::new(),
-            operator_repairs: Vec::new(),
-            operator_hold: None,
-            deferred_dispatches: BTreeSet::new(),
-            deferred_aggregates: BTreeSet::new(),
-            dependencies: Vec::new(),
-            host_faults: BTreeMap::new(),
-            vehicles: BTreeMap::new(),
-            superseded_by: None,
-        },
-    );
+    snapshot.blooms.insert(bloom, BloomRecord::empty(spec));
     (snapshot, bloom)
 }
 
