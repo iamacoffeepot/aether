@@ -927,6 +927,9 @@ pub struct MetricsQuery {
     pub from_sequence: Option<u64>,
     /// Requested page size; the edge clamps it.
     pub limit: Option<u64>,
+    /// Set when the caller named a `limit` above the clamp. The HTTP edge
+    /// names it on `x-aether-notice` because these views are a bare array.
+    pub notice: Option<String>,
 }
 
 /// Reply to [`MetricsQuery`].
@@ -938,6 +941,8 @@ pub enum MetricsQueryResult {
         /// The encoded document.
         #[serde(with = "aether_data::bytes")]
         document: Vec<u8>,
+        /// Echo of the request's clamp notice, so the HTTP edge can name it.
+        notice: Option<String>,
     },
     /// The named bloom is not in the ledger.
     NotFound,

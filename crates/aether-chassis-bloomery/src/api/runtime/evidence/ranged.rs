@@ -8,6 +8,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::str;
 
+use super::super::reads::{clamp_limit, pairs, parse_u64};
 use crate::api::dto::DispatchFilePage;
 
 /// Default page size for transcript / prompt reads.
@@ -33,21 +34,14 @@ impl FileQuery {
     pub fn parse(query: &str) -> Result<Self, String> {
         let mut cursor = None;
         let mut requested = None;
-        for pair in query.split('&').filter(|pair| !pair.is_empty()) {
-            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-            match key {
-                "cursor" => cursor = Some(parse_u64("cursor", value)?),
-                "limit" => requested = Some(parse_u64("limit", value)?),
+        for (key, value) in pairs(query) {
+            match key.as_str() {
+                "cursor" => cursor = Some(parse_u64("cursor", &value)?),
+                "limit" => requested = Some(parse_u64("limit", &value)?),
                 _ => {}
             }
         }
-        let (limit, notice) = match requested {
-            None => (TRANSCRIPT_DEFAULT_LIMIT, None),
-            Some(limit) if limit > TRANSCRIPT_MAX_LIMIT => {
-                (TRANSCRIPT_MAX_LIMIT, Some(format!("limit clamped from {limit} to {TRANSCRIPT_MAX_LIMIT}")))
-            }
-            Some(limit) => (limit, None),
-        };
+        let (limit, notice) = clamp_limit(requested, TRANSCRIPT_DEFAULT_LIMIT, TRANSCRIPT_MAX_LIMIT);
         Ok(Self { cursor, limit, notice })
     }
 }
@@ -156,8 +150,4 @@ fn cap_line(raw: &[u8]) -> String {
         end -= 1;
     }
     String::from_utf8_lossy(&without_cr[..end]).into_owned()
-}
-
-fn parse_u64(name: &str, value: &str) -> Result<u64, String> {
-    value.parse::<u64>().map_err(|_| format!("{name} is not an integer: {value}"))
 }

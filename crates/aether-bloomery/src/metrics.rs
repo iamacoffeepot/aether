@@ -13,7 +13,9 @@
 //! The seat is recomputed from the sealed catalog profile with the member's
 //! override resolved over it — never read from
 //! [`Transformation::model`](crate::Transformation::model), which the reducer
-//! authors as `None` (the trap [`crate::calibration`] documents).
+//! authors as `None` (the trap [`crate::calibration`] documents). Only a model
+//! lane mints a seat: the mechanical verify fan-out stays on the dispatch
+//! rollup.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -23,11 +25,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId};
+use crate::ledger::{SeatDispatch, priced_micro_usd};
 use crate::reduce::{Decision, Decisions, Event, Fact};
-use crate::values::{
-    AgentProfile, ConfigRegistry, ConfigScopes, DispatchKey, EvidenceKind, ModelOverride, ReasoningEffort,
-    ResolvedConfigs, ResolvedModel, StudyRecord,
-};
+use crate::values::{DispatchKey, EvidenceKind, ReasoningEffort, ResolvedConfigs, ResolvedModel, StudyRecord};
 
 /// How many timeline spans one bloom read returns before it truncates.
 pub const TIMELINE_SPAN_CAP: u64 = 256;
@@ -87,6 +87,9 @@ struct DispatchAcc {
     recorded_unix_millis: Option<u64>,
     reconstructed: bool,
     agent: ResolvedModel,
+    /// Whether the sealed command is a model lane. Mechanical dispatches stay
+    /// on the dispatch rollup; they do not mint a seat.
+    model_lane: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
@@ -306,7 +309,7 @@ impl MetricsLedger {
     #[must_use]
     pub fn seats(&self, source: impl Fn(&Digest) -> Option<StudyRecord>) -> Vec<MetricsSeat> {
         let mut cells: BTreeMap<SeatKey, MetricsSeat> = BTreeMap::new();
-        for acc in self.dispatches.values() {
+        for acc in self.dispatches.values().filter(|acc| acc.model_lane) {
             let key = SeatKey::of(&acc.agent, acc.stage);
             let cell = cells.entry(key).or_insert_with(|| MetricsSeat {
                 agent: acc.agent.clone(),
@@ -323,8 +326,10 @@ impl MetricsLedger {
             cell.attempts = cell.attempts.saturating_add(1);
         }
         for study in &self.studies {
-            let Some(acc) =
-                self.dispatches.values().find(|row| (row.bloom, row.displayed) == (study.bloom, study.subject))
+            let Some(acc) = self
+                .dispatches
+                .values()
+                .find(|row| row.model_lane && (row.bloom, row.displayed) == (study.bloom, study.subject))
             else {
                 continue;
             };
@@ -350,11 +355,11 @@ impl MetricsLedger {
             cell.cache_read_tokens = cell.cache_read_tokens.saturating_add(record.cost.cache_read_tokens);
             cell.cache_write_tokens = cell.cache_write_tokens.saturating_add(record.cost.cache_write_tokens);
             cell.output_tokens = cell.output_tokens.saturating_add(record.cost.output_tokens);
-            if record.cost.cost_micro_usd == 0 {
-                cell.unpriced = cell.unpriced.saturating_add(1);
-            } else {
-                cell.cost_micro_usd = cell.cost_micro_usd.saturating_add(record.cost.cost_micro_usd);
+            if let Some(cost) = priced_micro_usd(record.cost.cost_micro_usd) {
+                cell.cost_micro_usd = cell.cost_micro_usd.saturating_add(cost);
                 cell.priced_samples = cell.priced_samples.saturating_add(1);
+            } else {
+                cell.unpriced = cell.unpriced.saturating_add(1);
             }
         }
         cells.into_values().collect()
@@ -383,73 +388,27 @@ impl MetricsLedger {
     }
 
     fn observe_effect(&mut self, sequence: u64, effect: &Decision, configs: &ResolvedConfigs, envelope: Option<u64>) {
-        match effect {
-            Decision::DispatchAttempt {
-                bloom,
-                workpiece,
-                stage,
-                transformation: _,
-                scope_revision,
-                candidate,
-                profile,
-                configs: registry,
-            } => {
-                let displayed = candidate.unwrap_or(*scope_revision);
-                self.dispatch(
-                    sequence,
-                    Dispatched {
-                        bloom: *bloom,
-                        key: DispatchKey::Member { workpiece: workpiece.clone(), stage: *stage },
-                        stage: *stage,
-                        workpiece: workpiece.0.clone(),
-                        profile,
-                        registry,
-                        displayed,
-                    },
-                    configs,
-                    envelope,
-                );
-            }
-            Decision::DispatchAggregateReview { bloom, transformation, profile, configs: registry, .. } => {
-                let Some(displayed) = transformation.inputs.first().copied() else {
-                    return;
-                };
-                self.dispatch(
-                    sequence,
-                    Dispatched {
-                        bloom: *bloom,
-                        key: DispatchKey::Bloom { stage: StageId::AggregateReview },
-                        stage: StageId::AggregateReview,
-                        workpiece: String::new(),
-                        profile,
-                        registry,
-                        displayed,
-                    },
-                    configs,
-                    envelope,
-                );
-            }
-            Decision::RecordEvidence { bloom, evidence } if evidence.kind == EvidenceKind::StudyRecord => {
-                self.studies.push(Study { bloom: *bloom, subject: evidence.subject, detail: evidence.detail });
-            }
-            _ => {}
+        if let Some(dispatched) = SeatDispatch::from_effect(effect) {
+            self.dispatch(sequence, dispatched, configs, envelope);
+            return;
+        }
+        if let Decision::RecordEvidence { bloom, evidence } = effect
+            && evidence.kind == EvidenceKind::StudyRecord
+        {
+            self.studies.push(Study { bloom: *bloom, subject: evidence.subject, detail: evidence.detail });
         }
     }
 
     fn dispatch(
         &mut self,
         sequence: u64,
-        dispatched: Dispatched<'_>,
+        dispatched: SeatDispatch<'_>,
         configs: &ResolvedConfigs,
         envelope: Option<u64>,
     ) {
-        let Dispatched { bloom, key, stage, workpiece, profile, registry, displayed } = dispatched;
-        let agent = configs
-            .resolve::<ModelOverride>(ConfigScopes::bloom_wide(registry))
-            .ok()
-            .flatten()
-            .unwrap_or_default()
-            .resolve(stage, profile);
+        let agent = dispatched.agent(configs);
+        let model_lane = dispatched.is_model_lane();
+        let SeatDispatch { bloom, key, stage, workpiece, displayed, .. } = dispatched;
 
         let id = (bloom, key, displayed);
         let is_new = !self.dispatches.contains_key(&id);
@@ -462,6 +421,7 @@ impl MetricsLedger {
             recorded_unix_millis: envelope,
             reconstructed: envelope.is_none(),
             agent,
+            model_lane,
         });
         if is_new {
             let bloom_acc = self.blooms.entry(bloom).or_default();
@@ -491,16 +451,6 @@ impl MetricsLedger {
             study,
         }
     }
-}
-
-struct Dispatched<'a> {
-    bloom: BloomId,
-    key: DispatchKey,
-    stage: StageId,
-    workpiece: String,
-    profile: &'a AgentProfile,
-    registry: &'a ConfigRegistry,
-    displayed: Digest,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]

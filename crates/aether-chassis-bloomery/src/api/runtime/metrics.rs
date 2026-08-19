@@ -6,50 +6,62 @@ use aether_bloomery::{
     SpendWindow,
 };
 use aether_data::wire::from_bytes;
-use aether_http::HttpServerResponse;
+use aether_http::{HttpHeader, HttpServerResponse};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::hex::digest_from_hex;
+use super::reads::{clamp_limit, pairs, parse_u64};
 use super::response::{error_response, json};
 use super::state::Routed;
 
 /// `GET /metrics/summary`
 pub(super) fn summary() -> Routed {
-    Routed::Metrics(MetricsQuery { view: MetricsView::Summary, bloom: None, from_sequence: None, limit: None })
+    Routed::Metrics(metrics_query(MetricsView::Summary, None, None, None, None))
 }
 
 /// `GET /metrics/days`
 pub(super) fn days() -> Routed {
-    Routed::Metrics(MetricsQuery { view: MetricsView::Days, bloom: None, from_sequence: None, limit: Some(DAYS_CAP) })
+    Routed::Metrics(metrics_query(MetricsView::Days, None, None, Some(DAYS_CAP), None))
 }
 
 /// `GET /metrics/blooms`
 pub(super) fn blooms(query: &str) -> Result<Routed, String> {
-    let (from_sequence, limit) = parse_page(query)?;
-    Ok(Routed::Metrics(MetricsQuery { view: MetricsView::Blooms, bloom: None, from_sequence, limit }))
+    let (from_sequence, limit, notice) = parse_page(query)?;
+    Ok(Routed::Metrics(metrics_query(MetricsView::Blooms, None, from_sequence, limit, notice)))
 }
 
 /// `GET /metrics/blooms/{id}/timeline`
 pub(super) fn timeline(id: &str) -> Result<Routed, String> {
     let bloom = digest_from_hex(id).ok_or_else(|| format!("bloom is not a 64-character hex digest: {id}"))?;
-    Ok(Routed::Metrics(MetricsQuery {
-        view: MetricsView::Timeline,
-        bloom: Some(BloomId(bloom).0.as_bytes().to_vec()),
-        from_sequence: None,
-        limit: None,
-    }))
+    Ok(Routed::Metrics(metrics_query(
+        MetricsView::Timeline,
+        Some(BloomId(bloom).0.as_bytes().to_vec()),
+        None,
+        None,
+        None,
+    )))
 }
 
 /// `GET /metrics/seats`
 pub(super) fn seats() -> Routed {
-    Routed::Metrics(MetricsQuery { view: MetricsView::Seats, bloom: None, from_sequence: None, limit: None })
+    Routed::Metrics(metrics_query(MetricsView::Seats, None, None, None, None))
 }
 
 /// `GET /metrics/dispatches`
 pub(super) fn dispatches(query: &str) -> Result<Routed, String> {
-    let (from_sequence, limit) = parse_page(query)?;
-    Ok(Routed::Metrics(MetricsQuery { view: MetricsView::Dispatches, bloom: None, from_sequence, limit }))
+    let (from_sequence, limit, notice) = parse_page(query)?;
+    Ok(Routed::Metrics(metrics_query(MetricsView::Dispatches, None, from_sequence, limit, notice)))
+}
+
+fn metrics_query(
+    view: MetricsView,
+    bloom: Option<Vec<u8>>,
+    from_sequence: Option<u64>,
+    limit: Option<u64>,
+    notice: Option<String>,
+) -> MetricsQuery {
+    MetricsQuery { view, bloom, from_sequence, limit, notice }
 }
 
 /// `GET /spend`
@@ -59,9 +71,18 @@ pub(super) fn spend() -> Routed {
 
 pub(super) fn metrics_response(result: MetricsQueryResult) -> HttpServerResponse {
     match result {
-        MetricsQueryResult::Ok { document } => render(&document),
+        MetricsQueryResult::Ok { document, notice } => {
+            let mut response = render(&document);
+            if let Some(notice) = notice {
+                response.headers.push(HttpHeader { name: "x-aether-notice".to_owned(), value: notice });
+            }
+            response
+        }
         MetricsQueryResult::NotFound => error_response(404, "no such bloom"),
-        MetricsQueryResult::Err { error } => error_response(400, &error),
+        // Encode failures and incomplete reads are peer-cap errors, the same
+        // class spend and projection reads answer `500`. Parse errors stay
+        // `400` at the HTTP edge.
+        MetricsQueryResult::Err { error } => error_response(500, &error),
     }
 }
 
@@ -101,26 +122,16 @@ fn decode<T: DeserializeOwned + Serialize>(bytes: &[u8]) -> Result<T, String> {
     from_bytes::<T>(bytes).map_err(|error| format!("metrics document decode failed: {error}"))
 }
 
-fn parse_page(query: &str) -> Result<(Option<u64>, Option<u64>), String> {
+fn parse_page(query: &str) -> Result<(Option<u64>, Option<u64>, Option<String>), String> {
     let mut from_sequence = None;
     let mut requested = None;
-    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
-        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        match key {
-            "from_sequence" => {
-                from_sequence =
-                    Some(value.parse::<u64>().map_err(|_| format!("from_sequence is not an integer: {value}"))?);
-            }
-            "limit" => {
-                requested = Some(value.parse::<u64>().map_err(|_| format!("limit is not an integer: {value}"))?);
-            }
+    for (key, value) in pairs(query) {
+        match key.as_str() {
+            "from_sequence" => from_sequence = Some(parse_u64("from_sequence", &value)?),
+            "limit" => requested = Some(parse_u64("limit", &value)?),
             _ => {}
         }
     }
-    let limit = match requested {
-        None => Some(METRICS_DEFAULT_LIMIT),
-        Some(limit) if limit > METRICS_MAX_LIMIT => Some(METRICS_MAX_LIMIT),
-        Some(limit) => Some(limit),
-    };
-    Ok((from_sequence, limit))
+    let (limit, notice) = clamp_limit(requested, METRICS_DEFAULT_LIMIT, METRICS_MAX_LIMIT);
+    Ok((from_sequence, Some(limit), notice))
 }

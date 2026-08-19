@@ -94,6 +94,16 @@ fn following_next_from_sequence_yields_every_record_once() {
 }
 
 #[test]
+fn a_percent_encoded_limit_decodes_then_clamps() {
+    // The plausible bug: the query is not decoded, so `%31%30%30%31` is not an
+    // integer and the read is a `400` instead of a named clamp.
+    let query = JournalQuery::parse("limit=%31%30%30%31&order=%64%65%73%63").expect("encoded integers decode");
+    assert_eq!(query.limit, JOURNAL_MAX_LIMIT);
+    assert!(query.descending);
+    assert!(query.notice.as_deref().is_some_and(|notice| notice.contains("1001")));
+}
+
+#[test]
 fn a_limit_above_the_journal_clamp_is_applied_and_named() {
     let query = JournalQuery::parse(&format!("limit={}", JOURNAL_MAX_LIMIT + 50)).expect("numeric limit parses");
     assert_eq!(query.limit, JOURNAL_MAX_LIMIT);

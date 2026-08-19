@@ -145,6 +145,9 @@ pub struct SupersedeRequest {
 
 /// `POST /blooms/{id}/grant` body — hand a wedged member more attempts on the
 /// bloom it already belongs to (#4708), instead of superseding an unchanged one.
+///
+/// `reason` and `operator` are the audit trail of an act no verdict produced,
+/// the same two fields the other operator doors require. Blank is `422`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrantRequest {
     /// The wedged member to resume.
@@ -155,6 +158,10 @@ pub struct GrantRequest {
     /// How many more dispatched attempts the member may spend before it wedges
     /// again.
     pub attempts: u32,
+    /// Why the operator is buying another round. Required and non-blank.
+    pub reason: String,
+    /// Who is asking. Recorded as the decider; required and non-blank.
+    pub operator: String,
     /// Override the admit idempotency key.
     ///
     /// The default is derived from the grant's own content, so re-POSTing the
