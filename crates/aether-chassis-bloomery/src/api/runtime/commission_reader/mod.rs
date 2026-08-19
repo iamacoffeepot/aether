@@ -143,22 +143,27 @@ pub(super) fn admit_member(
         LoadCommissionResult::Missing { id } => Err(AdmitError::Refused(AdmissionRefusal::MissingCommission { id })),
         LoadCommissionResult::Err { error } => Err(AdmitError::Store(error)),
         LoadCommissionResult::Ok { id, intent, current_revision, status, current, approvals, .. } => {
-            admit_loaded(expected, id, &intent, current_revision, &status, current, approvals, maturity)
+            admit_loaded(expected, LoadedRow { id, intent, current_revision, status, current, approvals }, maturity)
                 .map_err(AdmitError::Refused)
         }
     }
 }
 
-fn admit_loaded(
-    expected: Digest,
+struct LoadedRow {
     id: String,
-    intent: &[u8],
+    intent: Vec<u8>,
     current_revision: Option<Vec<u8>>,
-    status: &str,
+    status: String,
     current: Option<Vec<u8>>,
     approvals: Vec<Vec<u8>>,
+}
+
+fn admit_loaded(
+    expected: Digest,
+    loaded: LoadedRow,
     maturity: &impl AdrMaturity,
 ) -> Result<AdmittedMember, AdmissionRefusal> {
+    let LoadedRow { id, intent, current_revision, status, current, approvals } = loaded;
     if status != CommissionStatus::Open.as_str() {
         return Err(AdmissionRefusal::StaleScope { id });
     }
@@ -196,7 +201,8 @@ fn admit_loaded(
 
     let signed_statement =
         decoded.into_iter().find(|statement| matches!(statement.provenance, Provenance::AuthorSignature(_)));
-    let workpiece = Workpiece { id: WorkpieceId(id.clone()), intent: digest32(intent, &id)?, scope_revision: expected };
+    let workpiece =
+        Workpiece { id: WorkpieceId(id.clone()), intent: digest32(&intent, &id)?, scope_revision: expected };
     let edges = revision
         .dependencies
         .iter()
@@ -206,7 +212,7 @@ fn admit_loaded(
         workpiece: workpiece.id.clone(),
         scope_revision: expected,
         declared_surface: revision.declared_surface.clone(),
-        completeness: completeness_from(&revision, status, current_digest == expected),
+        completeness: completeness_from(&revision, &status, current_digest == expected),
         adr_touch: adr_touch(&revision.declared_surface, maturity),
         pre_approved: false,
         signed_statement,
