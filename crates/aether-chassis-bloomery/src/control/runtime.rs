@@ -356,12 +356,22 @@ impl NativeActor for ControlCore {
     /// matching `SealError`/`SupersedeError` (never committing, so a transient
     /// foreign hold is retryable under a fresh key); a [`ClaimResult::Err`] fails
     /// it. An uncorrelated reply — a fire-and-forget release or a boot-reconcile
-    /// re-assertion — has no pending entry and is ignored.
+    /// re-assertion — has no pending entry: `Acquired` / `Held` is ignored, and
+    /// [`ClaimResult::Err`] is logged at warn so a silent land-time or boot
+    /// release failure is visible (the next boot re-plans from a fresh
+    /// enumeration).
     #[handler::manual]
     fn on_claim_result(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, mail: ClaimResult) {
         let correlation = ctx.reply_target().correlation_id;
         let Some(PendingClaim { inbound, raw, event, decisions, kind }) = state.pending_claims.remove(&correlation)
         else {
+            if let ClaimResult::Err { error } = mail {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::control",
+                    %error,
+                    "uncorrelated claim result failed; a fire-and-forget land release or boot-reconcile op did not apply",
+                );
+            }
             return;
         };
         match mail {
