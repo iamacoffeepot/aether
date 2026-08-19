@@ -141,7 +141,7 @@ pub enum CommissionError {
     WrongProvenance,
     /// A store-level failure, including a CHECK or FOREIGN KEY backstop.
     Store(String),
-    /// The commission is not open, so a cancel cannot land.
+    /// The commission is not open, so a revision, approval, or cancel cannot land.
     NotOpen,
 }
 
@@ -228,8 +228,8 @@ pub trait CommissionBackend {
     /// transaction. Index columns are filled from the decoded bytes.
     ///
     /// # Errors
-    /// Missing commission, stale predecessor, ordinal skip, malformed bytes,
-    /// or a duplicate digest that is not already the current tip.
+    /// Missing commission, not open, stale predecessor, ordinal skip, malformed
+    /// bytes, or a duplicate digest that is not already the current tip.
     fn write_revision(&mut self, revision: &ScopeRevision) -> Result<Digest, CommissionError>;
 
     /// Verify (when signed) and insert an approval for the current revision,
@@ -239,8 +239,8 @@ pub trait CommissionBackend {
     /// `(Approve, scope, scope.as_bytes())`.
     ///
     /// # Errors
-    /// Missing or non-current revision, wrong words, failed signature, or
-    /// wrong provenance.
+    /// Missing or non-current revision, not open, wrong words, failed signature,
+    /// or wrong provenance.
     fn insert_approval(&mut self, statement: &Statement, keys: &dyn KeyProvider) -> Result<Digest, CommissionError>;
 
     /// Load a commission and recompute its current revision from canonical
@@ -262,7 +262,7 @@ pub trait CommissionBackend {
     /// after confirming the referenced revision is current and belongs to `id`.
     ///
     /// # Errors
-    /// Missing or non-current revision, wrong words, or wrong provenance.
+    /// Missing or non-current revision, not open, wrong words, or wrong provenance.
     fn record_verified_approval(&mut self, id: &WorkpieceId, statement: &Statement) -> Result<Digest, CommissionError>;
 
     /// Store a signed cancel and close the commission in one transaction.
@@ -377,6 +377,9 @@ fn write_revision(conn: &mut Connection, revision: &ScopeRevision) -> Result<Dig
     let Some(head) = load_head(&txn, &decoded.workpiece.0)? else {
         return Err(CommissionError::MissingCommission(decoded.workpiece.0));
     };
+    if head.status != CommissionStatus::Open {
+        return Err(CommissionError::NotOpen);
+    }
 
     if revision_exists(&txn, digest)? {
         if head.current_revision == Some(digest) {
@@ -446,6 +449,9 @@ fn persist_approval(
     };
     if expected.is_some_and(|id| id.0 != revision.workpiece.0) {
         return Err(CommissionError::WrongSubject);
+    }
+    if head.status != CommissionStatus::Open {
+        return Err(CommissionError::NotOpen);
     }
     if head.current_revision != Some(scope) {
         return Err(CommissionError::StaleRevision);

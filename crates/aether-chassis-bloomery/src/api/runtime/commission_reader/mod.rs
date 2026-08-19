@@ -38,6 +38,10 @@ pub(super) enum AdmissionRefusal {
     StaleScope { id: String },
     /// The current revision has no stored approval.
     AbsentApproval { id: String },
+    /// The current revision carries no work-order text.
+    EmptyDescription { id: String },
+    /// The commission is cancelled or landed, so it cannot be sealed.
+    NotOpen { id: String },
 }
 
 impl AdmissionRefusal {
@@ -61,6 +65,12 @@ impl AdmissionRefusal {
             }
             Self::AbsentApproval { id } => {
                 format!("member {id} has no stored approval; seal fails closed")
+            }
+            Self::EmptyDescription { id } => {
+                format!("member {id} has an empty description; seal fails closed")
+            }
+            Self::NotOpen { id } => {
+                format!("member {id} commission is not open; seal fails closed")
             }
         }
     }
@@ -165,7 +175,7 @@ fn admit_loaded(
 ) -> Result<AdmittedMember, AdmissionRefusal> {
     let LoadedRow { id, intent, current_revision, status, current, approvals } = loaded;
     if status != CommissionStatus::Open.as_str() {
-        return Err(AdmissionRefusal::StaleScope { id });
+        return Err(AdmissionRefusal::NotOpen { id });
     }
     let Some(current_bytes) = current_revision else {
         return Err(AdmissionRefusal::StaleScope { id });
@@ -187,6 +197,9 @@ fn admit_loaded(
     }
     if revision.workpiece.0 != id {
         return Err(AdmissionRefusal::DigestMismatch { id });
+    }
+    if revision.description.trim().is_empty() {
+        return Err(AdmissionRefusal::EmptyDescription { id });
     }
 
     let mut decoded = Vec::new();
