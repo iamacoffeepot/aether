@@ -8,7 +8,7 @@
 
 mod common;
 pub mod fixture;
-mod harness;
+pub mod harness;
 
 use aether_bloomery::{BloomStatus, StageId, Transformation};
 use aether_chassis_bloomery::store::OutstandingOrder;

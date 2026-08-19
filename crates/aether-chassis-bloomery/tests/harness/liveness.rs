@@ -21,8 +21,6 @@
 //! are checked on every poll of every scenario's settle loop, so a scenario does
 //! not opt in and cannot forget.
 
-#![allow(dead_code, reason = "each test binary compiles the whole module and uses only the fixtures it needs")]
-
 use std::fmt::Write as _;
 
 use aether_bloomery::{BloomStatus, ViewDocument};

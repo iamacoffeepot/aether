@@ -16,7 +16,7 @@
 #![allow(clippy::unwrap_used, reason = "a scenario that cannot set up its coordinator reports it by panicking")]
 
 mod common;
-mod harness;
+pub mod harness;
 mod lane;
 
 use std::fs;
