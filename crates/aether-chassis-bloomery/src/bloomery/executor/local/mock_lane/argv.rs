@@ -61,7 +61,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<LaneArgs, ArgvEr
     let mut parsed = LaneArgs::default();
     let mut command = None;
     let mut out = None;
-    let mut args = args.into_iter();
+    let mut args = args.into_iter().peekable();
 
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or_else(|| ArgvError::DanglingValue(arg.clone()));
@@ -71,12 +71,19 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<LaneArgs, ArgvEr
             "--subject" => parsed.subject = Some(value()?),
             "--diff-base" => parsed.diff_base = Some(value()?),
             "--task" => parsed.task = Some(value()?),
-            // The axes the mock records but does not act on. Consuming their
-            // values keeps them from being read as the positional command.
-            "--harness" | "--model" | "--effort" | "--resume" | "--seeded" => {
+            other if super::super::task_argv::takes_value(other) => {
                 value()?;
             }
-            other if other.starts_with("--") => {}
+            other if other.starts_with("--") => {
+                // A flag the producer has not named yet still takes a value when
+                // one follows, so a novel `--flag value` pair cannot steal the
+                // positional command. A bare unknown flag (no following word, or
+                // another `--` next) stays ignored so argv growth does not abort
+                // the mock.
+                if args.peek().is_some_and(|next| !next.starts_with("--")) {
+                    args.next();
+                }
+            }
             _ => command = Some(arg),
         }
     }
@@ -146,6 +153,18 @@ mod tests {
         // grows, or every new flag lands as a harness outage instead of a
         // scenario that still executes and records what arrived.
         let args = parse(argv(&["verify.check", "--out", "/tmp/e", "--nonce", "n", "--brand-new-flag"])).unwrap();
+
+        assert_eq!(args.command, "verify.check");
+    }
+
+    #[test]
+    fn a_novel_flag_value_pair_does_not_steal_the_positional_command() {
+        // Tripwire: value-taking flags used to be a five-name match arm. A
+        // producer flag (or a future argv addition) that was not in that list
+        // leaked its value into the last-positional-wins command slot.
+        let args =
+            parse(argv(&["verify.check", "--out", "/tmp/e", "--nonce", "n", "--brand-new-flag", "leaked-value"]))
+                .unwrap();
 
         assert_eq!(args.command, "verify.check");
     }

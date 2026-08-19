@@ -347,36 +347,35 @@ fn append_work_order_args(
 /// (#5052): the marker on the work order is provenance, not a range the
 /// lane judges. A clean Construct emits neither.
 fn work_order_args(spec: &RunSpec<'_>, checkout: &str, diff_base: Option<&str>) -> io::Result<Vec<String>> {
-    let mut args = vec![
-        spec.command.to_owned(),
-        "--out".into(),
-        spec.evidence_dir.display().to_string(),
-        "--nonce".into(),
-        spec.nonce.to_owned(),
-    ];
+    let mut args = vec![spec.command.to_owned()];
+    task_argv::push_value_flag(&mut args, "--out", spec.evidence_dir.display().to_string());
+    task_argv::push_value_flag(&mut args, "--nonce", spec.nonce);
     if let Some(diff_base) = diff_base {
-        args.extend(["--diff-base".into(), diff_base.to_owned()]);
+        task_argv::push_value_flag(&mut args, "--diff-base", diff_base);
     }
     if is_model_lane(spec.command) {
-        args.extend(["--subject".into(), checkout.to_owned()]);
+        task_argv::push_value_flag(&mut args, "--subject", checkout);
         if let Some(harness) = spec.harness {
-            args.extend(["--harness".into(), harness.to_owned()]);
+            task_argv::push_value_flag(&mut args, "--harness", harness);
         }
         if let Some(model) = spec.model {
-            args.extend(["--model".into(), model.to_owned()]);
+            task_argv::push_value_flag(&mut args, "--model", model);
         }
         if let Some(effort) = spec.effort {
-            args.extend(["--effort".into(), effort.to_owned()]);
+            task_argv::push_value_flag(&mut args, "--effort", effort);
         }
         if let Some(task) = spec.task {
-            let task = task_argv::argv_safe_task(task, spec.evidence_dir)?;
-            args.extend(["--task".into(), task.into_owned()]);
+            task_argv::push_value_flag(
+                &mut args,
+                "--task",
+                task_argv::argv_safe_task(task, spec.evidence_dir)?.into_owned(),
+            );
         }
         if let Some(session) = spec.resume {
-            args.extend(["--resume".into(), session.to_owned()]);
+            task_argv::push_value_flag(&mut args, "--resume", session);
         }
         if spec.seeded.is_some() {
-            args.extend(["--seeded".into(), checkout.to_owned()]);
+            task_argv::push_value_flag(&mut args, "--seeded", checkout);
         }
     }
     Ok(args)
@@ -759,6 +758,15 @@ impl RunProcess for ChildProcess {
     }
 
     fn kill(&mut self) -> Result<(), LocalExecutorError> {
+        // The spawn put this child in its own process group so teardown can
+        // signal the lane *and* the harness grandchildren it forked. Signalling
+        // the head pid alone leaves those grandchildren reparented to init.
+        #[cfg(unix)]
+        if let Some(identity) = super::identity::ProcessIdentity::observe(self.child.id()) {
+            identity.terminate_group()?;
+            self.child.wait().map_err(LocalExecutorError::Io)?;
+            return Ok(());
+        }
         self.child.kill().map_err(LocalExecutorError::Io)?;
         // Reap so the killed child does not linger as a zombie; a reap fault is a
         // real failure folded into the returned error, not silently swallowed.
@@ -832,15 +840,21 @@ mod tests {
     use std::io;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    #[cfg(target_os = "linux")]
+    use std::process::Stdio;
     use std::slice;
     #[cfg(unix)]
     use std::thread;
     #[cfg(unix)]
     use std::time::Duration;
+    #[cfg(target_os = "linux")]
+    use std::time::Instant;
 
     use tempfile::TempDir;
 
     use super::super::lane_program::LaneProgram;
+    #[cfg(target_os = "linux")]
+    use super::super::runner::RunProcess;
     use super::super::runner::{RunLifecycle, RunSpec};
     use super::{
         CaptureIdentity, FALLBACK_CAPTURE_SUBJECT, FALLBACK_IDENTITY, ProcessTransformRunner, SETTINGS_PATH,
@@ -1504,6 +1518,61 @@ mod tests {
         assert_eq!(identity.pgid, child.id(), "process_group(0) makes the child its own group leader");
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    // Live identity observation and group membership read `/proc`. Off Linux
+    // those return none, the grandchild never appears, and the sleeps leak.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn killing_a_lane_child_terminates_its_grandchildren() {
+        // Tripwire: spawn isolates the lane in its own process group, but
+        // teardown used to signal only the head pid. A harness grandchild
+        // inherits the group and survives `Child::kill`, reparented to init.
+        let child = super::spawn_isolated(Command::new("sh").args(["-c", "sleep 60 & exec sleep 60"])).unwrap();
+        let identity = super::super::identity::ProcessIdentity::observe(child.id()).expect("the head is live");
+        let pgid = identity.pgid;
+        struct GroupGuard(u32);
+        impl Drop for GroupGuard {
+            fn drop(&mut self) {
+                let _ = Command::new("kill")
+                    .args(["-KILL", "--", &format!("-{}", self.0)])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+        }
+        let _guard = GroupGuard(pgid);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut members = 0;
+        while Instant::now() < deadline {
+            members = count_group(pgid);
+            if members >= 2 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(members >= 2, "the head must have spawned a grandchild in its group, found {members}");
+
+        let mut process = super::ChildProcess { child };
+        process.kill().expect("group terminate reports success");
+        assert_eq!(count_group(pgid), 0, "no member of the lane group survives teardown");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn count_group(pgid: u32) -> usize {
+        fs::read_dir("/proc")
+            .expect("/proc")
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.parse::<u32>().ok())
+                    .and_then(super::super::identity::ProcessIdentity::observe)
+                    .is_some_and(|live| live.pgid == pgid)
+            })
+            .count()
     }
 
     #[test]
