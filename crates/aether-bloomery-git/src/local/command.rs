@@ -4,7 +4,21 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
-use crate::client::GitDataError;
+use crate::client::{GitCommit, GitDataError};
+
+/// The identity every locally minted commit carries. Pinned so a retry of
+/// `create_commit` with the same `(message, tree, parents)` hashes to the same
+/// object — `GitSource::integrate` recovers from a fault between commit and
+/// ref update only because of that. Shared with the object-repo fake so the
+/// two backends mint the same sha for the same inputs.
+pub const BLOOMERY_IDENTITY: [(&str, &str); 6] = [
+    ("GIT_AUTHOR_NAME", "bloomery"),
+    ("GIT_AUTHOR_EMAIL", "bloomery@aether.invalid"),
+    ("GIT_AUTHOR_DATE", "@0 +0000"),
+    ("GIT_COMMITTER_NAME", "bloomery"),
+    ("GIT_COMMITTER_EMAIL", "bloomery@aether.invalid"),
+    ("GIT_COMMITTER_DATE", "@0 +0000"),
+];
 
 /// The oldest git that ships `merge-tree --write-tree`. Fail boot below this
 /// rather than building a temporary-index fallback.
@@ -126,6 +140,85 @@ pub fn run_stdin(repo: &Path, args: &[&str], stdin: &str) -> Result<Output, GitD
     child
         .wait_with_output()
         .map_err(|error| GitDataError::Command(format!("git {args:?} in {}: {error}", repo.display())))
+}
+
+/// Read commit object `sha` (`cat-file`). A missing or non-commit object is
+/// [`GitDataError::MissingObject`].
+///
+/// # Errors
+/// Spawn failed, or `sha` does not name a commit in `repo`.
+pub fn read_commit(repo: &Path, sha: &str) -> Result<GitCommit, GitDataError> {
+    let kind = run(repo, &["cat-file", "-t", sha])?;
+    if !kind.status.success() || String::from_utf8_lossy(&kind.stdout).trim() != "commit" {
+        return Err(GitDataError::MissingObject(format!("no commit {sha}")));
+    }
+    let body = run_ok(repo, &["cat-file", "commit", sha])
+        .map_err(|_| GitDataError::MissingObject(format!("no commit {sha}")))?;
+    parse_commit(sha, &body)
+}
+
+/// Whether `ancestor` is reachable from `commit`. Equal shas are ancestors of
+/// themselves without asking git — matching the trait, including when the sha
+/// names no object.
+///
+/// # Errors
+/// [`GitDataError::MissingObject`] when git exits 128 with a not-a-valid-commit
+/// wording; any other execution failure is [`GitDataError::Command`].
+pub fn is_ancestor(repo: &Path, ancestor: &str, commit: &str) -> Result<bool, GitDataError> {
+    if ancestor == commit {
+        return Ok(true);
+    }
+    let output = run(repo, &["merge-base", "--is-ancestor", ancestor, commit])?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        Some(128) if not_a_valid_commit(&stderr) => {
+            Err(GitDataError::MissingObject(format!("missing ancestor {ancestor} or commit {commit}")))
+        }
+        _ => Err(GitDataError::Command(format!("git merge-base --is-ancestor {ancestor} {commit}: {}", stderr.trim()))),
+    }
+}
+
+/// Paths `git merge-tree --name-only` names as colliding. Spawn failure or a
+/// missing object yields an empty list — the caller already classified the
+/// merge itself.
+#[must_use]
+pub fn conflicted_paths(repo: &Path, base: &str, head: &str) -> Vec<String> {
+    let Ok(output) = run(repo, &["merge-tree", "--write-tree", "--name-only", base, head]) else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !is_git_oid(line))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn is_git_oid(line: &str) -> bool {
+    (line.len() == 40 || line.len() == 64) && line.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn not_a_valid_commit(stderr: &str) -> bool {
+    stderr.to_ascii_lowercase().contains("not a valid commit")
+}
+
+fn parse_commit(sha: &str, body: &str) -> Result<GitCommit, GitDataError> {
+    let mut tree = None;
+    let mut message_start = None;
+    for (index, line) in body.lines().enumerate() {
+        if let Some(value) = line.strip_prefix("tree ") {
+            tree = Some(value.trim().to_owned());
+        } else if line.is_empty() {
+            message_start = Some(index + 1);
+            break;
+        }
+    }
+    let tree = tree.ok_or_else(|| GitDataError::Command(format!("commit {sha} has no tree header")))?;
+    let message =
+        message_start.map_or_else(String::new, |start| body.lines().skip(start).collect::<Vec<_>>().join("\n"));
+    Ok(GitCommit { sha: sha.to_owned(), tree, message })
 }
 
 /// Classify a failed `update-ref` (single or `--stdin`) onto the git-data
