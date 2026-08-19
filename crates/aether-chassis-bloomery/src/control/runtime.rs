@@ -271,6 +271,16 @@ impl NativeActor for ControlCore {
         Self::on_admit_event(state, ctx, inbound, mail.event);
     }
 
+    /// Reply to a fire-and-forget [`Admit`] this core sent to itself (mainline
+    /// observation, host-fault resume). Ok is a no-op; Err is the refused-admission
+    /// event that used to miss dispatch.
+    #[handler::single]
+    fn on_admit_result(_state: &mut ControlCoreState, _ctx: &mut NativeCtx<'_>, mail: AdmitResult) {
+        if let AdmitResult::Err { error } = mail {
+            tracing::error!(target: "aether_chassis_bloomery::control", %error, "admit refused");
+        }
+    }
+
     /// The ordinary admission path: decode, reduce against the live snapshot,
     /// and commit. Shared by a live [`on_admit`](Self::on_admit) and by the
     /// post-replay drain, so a held arrival is decided exactly as one that
@@ -833,6 +843,34 @@ impl NativeActor for ControlCore {
 }
 
 impl ControlCoreState {
+    /// Inert snapshot owner for dispatch-table tests. The timer sidecar is an
+    /// hour-long no-op dropped with the state.
+    #[cfg(test)]
+    pub(crate) fn inert(mailer: std::sync::Arc<aether_substrate::mail::mailer::Mailer>) -> Self {
+        Self {
+            snapshot: Snapshot::default(),
+            calibration: CalibrationLedger::default(),
+            metrics: MetricsLedger::default(),
+            configs: ResolvedConfigs::default(),
+            spend: SpendWindow::default(),
+            artifacts: None,
+            pending: BTreeMap::new(),
+            pending_claims: BTreeMap::new(),
+            pending_configs: BTreeMap::new(),
+            held_admissions: VecDeque::new(),
+            held_for_bloom: BTreeMap::new(),
+            replayed: true,
+            _timer: spawn_timer(
+                mailer,
+                aether_data::MailboxId(0),
+                ObserveTick::ID,
+                ObserveTick::default().encode_into_bytes(),
+                "test-control-admit-result",
+                Duration::from_hours(1),
+            ),
+        }
+    }
+
     /// The same-key admits in flight across both stages — the committed queue plus
     /// the accepted seals/supersessions still awaiting their claim reply — so the
     /// [`MAX_INFLIGHT_PER_KEY`] back-pressure cannot be dodged by piling up

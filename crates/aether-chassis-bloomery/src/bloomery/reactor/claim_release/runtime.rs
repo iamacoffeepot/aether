@@ -35,8 +35,8 @@ use std::time::Duration;
 use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
-    Admit, ClaimReleaseOutcome, Digest, Event, Fact, IdempotencyKey, OrphanClaimRelease, OrphanClaimReleaseCompletion,
-    OrphanClaimReleasePayload, Topic,
+    Admit, AdmitResult, ClaimReleaseOutcome, Digest, Event, Fact, IdempotencyKey, OrphanClaimRelease,
+    OrphanClaimReleaseCompletion, OrphanClaimReleasePayload, Topic,
 };
 use aether_bloomery_github::SourceError;
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
@@ -305,6 +305,15 @@ impl NativeActor for ClaimReleaseReactorCapability {
                     "orphan claim release drain failed",
                 );
             }
+        }
+    }
+
+    /// Control's reply to a fire-and-forget admit. Ok is a no-op; Err is the
+    /// refused-admission event that used to miss dispatch.
+    #[handler::single]
+    fn on_admit_result(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: AdmitResult) {
+        if let AdmitResult::Err { error } = mail {
+            tracing::error!(target: "aether_chassis_bloomery::claim_release", %error, "admit refused");
         }
     }
 }

@@ -82,7 +82,7 @@ use aether_bloomery::{
     SpendQueryResult,
 };
 use aether_http as http;
-use aether_http::HttpServerResponse;
+use aether_http::{HttpServerResponse, RegisterRouteResult};
 use aether_kinds::trace::Settled;
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -1003,6 +1003,19 @@ impl NativeActor for BloomeryApiCapability {
     ) {
         if let RecordDispatchDescriptionResult::Err { error } = mail {
             tracing::warn!(target: "aether_chassis_bloomery::api", %error, "dispatch-description write failed at seal");
+        }
+    }
+
+    /// The HTTP server's reply to boot-time `RegisterRouteSelf` claims. Ok is
+    /// the expected path; Err is a failed mount that used to miss dispatch.
+    #[handler::single]
+    fn on_register_route_result(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: RegisterRouteResult) {
+        if let RegisterRouteResult::Err { error } = mail {
+            tracing::error!(
+                target: "aether_chassis_bloomery::api",
+                %error,
+                "http route registration failed",
+            );
         }
     }
 
