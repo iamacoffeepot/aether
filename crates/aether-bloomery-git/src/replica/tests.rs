@@ -2,10 +2,11 @@
 
 use std::fs;
 use std::io::{self, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use tempfile::TempDir;
@@ -148,12 +149,19 @@ fn an_absent_mainline_classifies_as_deterministic() {
 #[test]
 fn an_authentication_failure_classifies_as_deterministic() {
     let (_root, authority, _replica) = paired_repos();
-    let port = spawn_http_401();
-    let error =
-        GitSourceReplica::new(&authority, format!("http://127.0.0.1:{port}/repo.git"), MainlineRef::default(), "")
-            .publish()
-            .expect_err("HTTP 401 is an auth failure");
-    assert!(matches!(error, ReplicaError::Deterministic(_)), "auth must not redrive as Transient, got {error}");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind 401 server");
+    let port = listener.local_addr().expect("401 addr").port();
+    let stop = AtomicBool::new(false);
+    thread::scope(|scope| {
+        scope.spawn(|| serve_unauthorized(&listener, &stop));
+        let error =
+            GitSourceReplica::new(&authority, format!("http://127.0.0.1:{port}/repo.git"), MainlineRef::default(), "")
+                .publish()
+                .expect_err("HTTP 401 is an auth failure");
+        assert!(matches!(error, ReplicaError::Deterministic(_)), "auth must not redrive as Transient, got {error}");
+        stop.store(true, Ordering::Relaxed);
+        let _ = TcpStream::connect(("127.0.0.1", port));
+    });
 }
 
 #[test]
@@ -304,20 +312,15 @@ fn write_executable_hook(replica: &Path, name: &str, body: &str) {
     fs::set_permissions(&hook, perms).expect("chmod hook");
 }
 
-fn spawn_http_401() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind 401 server");
-    let port = listener.local_addr().expect("401 addr").port();
-    thread::spawn(move || {
-        for _ in 0..32 {
-            let Ok((mut stream, _)) = listener.accept() else {
-                break;
-            };
-            let _ = stream.write_all(
-                b"HTTP/1.0 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"git\"\r\nContent-Length: 22\r\nConnection: close\r\n\r\ninvalid credentials\n",
-            );
-        }
-    });
-    port
+fn serve_unauthorized(listener: &TcpListener, stop: &AtomicBool) {
+    while !stop.load(Ordering::Relaxed) {
+        let Ok((mut stream, _)) = listener.accept() else {
+            break;
+        };
+        let _ = stream.write_all(
+            b"HTTP/1.0 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"git\"\r\nContent-Length: 22\r\nConnection: close\r\n\r\ninvalid credentials\n",
+        );
+    }
 }
 
 fn run_git(repo: &Path, args: &[&str]) {
