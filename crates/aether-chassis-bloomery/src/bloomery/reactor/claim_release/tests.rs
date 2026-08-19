@@ -10,9 +10,10 @@
 
 use std::sync::Arc;
 
+use aether_bloomery::testing::{digest, workpiece};
 use aether_bloomery::{
     BloomId, ClaimHolder, ClaimOutcome, ClaimRefKind, Digest, Event, Fact, OrphanClaimRelease,
-    OrphanClaimReleaseCompletion, OrphanClaimReleasePayload, Topic, WorkpieceId,
+    OrphanClaimReleaseCompletion, OrphanClaimReleasePayload, Topic,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{GitSource, MainlineRef};
@@ -24,11 +25,7 @@ use crate::bloomery::outbox::TopicOutbox;
 use crate::store::SqliteStore;
 
 fn bloom(seed: u8) -> BloomId {
-    BloomId(Digest::from_bytes([seed; 32]))
-}
-
-fn workpiece(name: &str) -> WorkpieceId {
-    WorkpieceId(name.to_owned())
+    BloomId(digest(seed))
 }
 
 fn shell() -> SourceShell {

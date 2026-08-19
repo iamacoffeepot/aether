@@ -33,6 +33,7 @@ use crate::values::{
 /// adapter renders entirely from this value and never queries back into the
 /// store.
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[cfg_attr(any(test, feature = "testing"), derive(Default))]
 pub struct ViewDocument {
     /// The current mainline head.
     pub mainline: Digest,
@@ -118,6 +119,7 @@ pub struct BloomView {
 /// slot shifts the next bloom's bytes into it. `#[serde(default)]` is only
 /// for a human-readable reader that predates a field.
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[cfg_attr(any(test, feature = "testing"), derive(Default))]
 pub struct CompositionView {
     /// The composition's stage cursor, when a weave repair (or its follow-on
     /// gate) has written one. `None` when the composition has findings or a
@@ -163,6 +165,7 @@ pub struct CompositionCursorView {
 /// slot shifts the next bloom's bytes into it. `#[serde(default)]` is only
 /// for a human-readable reader that predates a field.
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[cfg_attr(any(test, feature = "testing"), derive(Default))]
 pub struct ReviewParkView {
     /// The parked [`crate::Question`]'s content-addressed digest — or, for a
     /// ceiling park, the failing review's record artifact. Either way this is
@@ -293,6 +296,7 @@ pub enum WedgeCause {
 /// A member's host-fault hold, rendered so an operator can see that Verify
 /// is waiting on the executor host rather than on the candidate (#5020).
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[cfg_attr(any(test, feature = "testing"), derive(Default))]
 pub struct HostFaultView {
     /// The preflight findings — the missing tools, listed verbatim.
     pub findings: String,

@@ -23,6 +23,7 @@ use std::net::TcpStream;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use aether_bloomery::testing::{digest, event};
 use aether_bloomery::{
     AgentProfile, ApprovalPolicy, ApprovalRule, AuthorityDoor, BloomDraft, BloomId, CapabilityLedger, ClaimRefKind,
     ConfigKind, ConfigRegistry, Digest, DispatchPayload, Evidence, EvidenceKind, Harness, KeyId, Membership,
@@ -1050,12 +1051,6 @@ fn fold_unpriced_construct_seats() -> (Vec<MetricsSeat>, CapabilityLedger) {
     const MEMBER: &str = "wp-a";
     const REVISION: u8 = 10;
     const TREE: u8 = 100;
-
-    let digest = |seed: u8| Digest::from_bytes([seed; 32]);
-    let event = |key: &str, fact: Fact| aether_bloomery::Event {
-        idempotency_key: aether_bloomery::IdempotencyKey(key.into()),
-        fact,
-    };
 
     let override_ = ModelOverride {
         agent: Some(AgentSelection { harness: Harness::Claude, model: "claude-opus-5".into() }),

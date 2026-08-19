@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use aether_bloomery::testing::digest;
 use aether_bloomery::{
     Adjudication, Admit, BloomId, Correspondence, Digest, Disposition, Event, Fact, IdempotencyKey, LandPayload,
     SourceReplicaPayload, Topic,
@@ -20,10 +21,6 @@ use aether_data::wire::{from_bytes, to_vec};
 use super::{drain_and_land, drain_and_land_emitting};
 use crate::bloomery::outbox::TopicOutbox;
 use crate::store::{AppendOutcome, JournalWrite, SqliteStore, StoreBackend};
-
-fn digest(seed: u8) -> Digest {
-    Digest::from_bytes([seed; 32])
-}
 
 // A fake-GitHub-backed source shell with the land gate set explicitly, so a
 // test drives the same shell the running reactor holds.

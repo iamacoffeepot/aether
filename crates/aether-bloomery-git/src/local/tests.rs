@@ -1,6 +1,6 @@
 //! `LocalGitData` against temporary bare repositories.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 use std::slice::from_ref;
@@ -8,10 +8,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use aether_bloomery::control::{ReconcileOp, reconcile_op};
+use aether_bloomery::testing::{digest, membership};
 use aether_bloomery::{
-    BackendObjectId, BloomDraft, BloomId, BloomRecord, BloomSpec, BloomStatus, ClaimOutcome, ConfigRegistry,
-    Correspondence, CorrespondenceError, Digest, Evidence, EvidenceKind, IntegrateOutcome, LandOutcome, Membership,
-    SharedCorrespondence, Snapshot, SourceBackend, StageCatalog, WorkpieceId,
+    BackendObjectId, BloomDraft, BloomId, BloomRecord, BloomStatus, ClaimOutcome, Correspondence, CorrespondenceError,
+    Digest, IntegrateOutcome, LandOutcome, SharedCorrespondence, Snapshot, SourceBackend, WorkpieceId,
 };
 
 use super::LocalGitData;
@@ -48,10 +48,6 @@ impl Correspondence for MapCorrespondence {
             .iter()
             .find_map(|(digest, stored)| (stored == object).then_some(*digest)))
     }
-}
-
-fn digest(seed: u8) -> Digest {
-    Digest::from_bytes([seed; 32])
 }
 
 fn init_bare(path: &Path) {
@@ -319,50 +315,6 @@ fn git_source(local: LocalGitData) -> GitSource<LocalGitData> {
     GitSource::new(local, MapCorrespondence::new(), true, MainlineRef::default())
 }
 
-fn membership(name: &str) -> Membership {
-    let mut member = Membership {
-        workpiece: WorkpieceId(name.into()),
-        scope_revision: digest(11),
-        configs: ConfigRegistry::default(),
-        approval: Evidence { subject: digest(0), kind: EvidenceKind::Approval, detail: digest(200) },
-    };
-    member.approval.subject = member.subject();
-    member
-}
-
-fn landed_record(spec: BloomSpec) -> BloomRecord {
-    BloomRecord {
-        stage_catalog: StageCatalog::line(),
-        spec,
-        status: BloomStatus::Landed,
-        claims: BTreeMap::new(),
-        evidence: Vec::new(),
-        holds: BTreeSet::new(),
-        progress: BTreeMap::new(),
-        wedged: BTreeMap::new(),
-        dispatches: BTreeMap::new(),
-        integration: None,
-        aggregate_rolls: 0,
-        aggregate_verify_rolls: 0,
-        landing_rolls: 0,
-        resolved_head: None,
-        review_park: None,
-        verify_proofs: BTreeMap::new(),
-        verify_reuses: Vec::new(),
-        aggregate_fault: None,
-        composition_findings: Vec::new(),
-        adjudications: Vec::new(),
-        operator_repairs: Vec::new(),
-        operator_hold: None,
-        deferred_dispatches: BTreeSet::new(),
-        deferred_aggregates: BTreeSet::new(),
-        dependencies: Vec::new(),
-        host_faults: BTreeMap::new(),
-        vehicles: BTreeMap::new(),
-        superseded_by: None,
-    }
-}
-
 #[test]
 fn transact_refs_refuses_two_ops_on_the_same_ref() {
     // Tripwire: git's `update-ref --stdin` refuses two ops on one name, which
@@ -403,7 +355,7 @@ fn release_seal_tombstones_then_deletes_the_owned_refs() {
 fn boot_reconcile_re_releases_a_landed_blooms_stranded_refs() {
     let (_root, local) = open_temp();
     let source = git_source(local.clone());
-    let spec = BloomDraft { proposals: vec![membership("wp-1")], ..Default::default() }.seal();
+    let spec = BloomDraft { proposals: vec![membership("wp-1", 11)], ..Default::default() }.seal();
     let bloom = spec.id();
     let workpiece = WorkpieceId("wp-1".into());
     assert_eq!(source.claim_seal(&bloom, from_ref(&workpiece)).expect("acquire"), ClaimOutcome::Acquired);
@@ -413,7 +365,7 @@ fn boot_reconcile_re_releases_a_landed_blooms_stranded_refs() {
     );
 
     let mut snapshot = Snapshot::default();
-    snapshot.blooms.insert(bloom, landed_record(spec));
+    snapshot.blooms.insert(bloom, BloomRecord { status: BloomStatus::Landed, ..BloomRecord::empty(spec) });
     let ReconcileOp::Release(_) =
         reconcile_op(snapshot.blooms.get(&bloom).expect("landed")).expect("plans").expect("encodes")
     else {

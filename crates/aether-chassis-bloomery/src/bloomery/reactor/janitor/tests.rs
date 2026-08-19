@@ -15,9 +15,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use aether_bloomery::{
-    BloomDraft, BloomId, Digest, Event, Evidence, EvidenceKind, Fact, Forecast, IdempotencyKey, Membership, WorkpieceId,
-};
+use aether_bloomery::testing::{draft, event, membership};
+use aether_bloomery::{BloomId, Fact, Forecast};
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{GitSource, MainlineRef, candidate_ref_name};
 use aether_data::wire::to_vec;
@@ -28,29 +27,6 @@ use crate::bloomery::{
     CapturedObjects, LaneOccupancy, LocalExecutorError, RunLifecycle, RunProcess, RunSpec, TransformRunner,
 };
 use crate::store::{JournalWrite, OutstandingOrder, SqliteStore, StoreBackend};
-
-fn digest(seed: u8) -> Digest {
-    Digest::from_bytes([seed; 32])
-}
-
-fn membership(name: &str, revision: u8) -> Membership {
-    let mut member = Membership {
-        workpiece: WorkpieceId(name.into()),
-        scope_revision: digest(revision),
-        configs: aether_bloomery::ConfigRegistry::default(),
-        approval: Evidence { subject: digest(0), kind: EvidenceKind::Approval, detail: digest(200) },
-    };
-    member.approval = Evidence { subject: member.subject(), kind: EvidenceKind::Approval, detail: digest(200) };
-    member
-}
-
-fn draft(base: u8, members: Vec<Membership>) -> BloomDraft {
-    BloomDraft { proposals: members, base: digest(base), ..BloomDraft::default() }
-}
-
-fn event(key: &str, fact: Fact) -> Event {
-    Event { idempotency_key: IdempotencyKey(key.into()), fact }
-}
 
 fn journal(store: &mut SqliteStore, key: &str, fact: Fact) {
     let bytes = to_vec(&event(key, fact)).expect("the event encodes");

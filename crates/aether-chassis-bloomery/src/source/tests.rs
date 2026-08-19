@@ -11,7 +11,8 @@
 
 use std::sync::Arc;
 
-use aether_bloomery::{BloomId, ClaimHolder, ClaimRefKind, ClaimRefState, Digest, WorkpieceId};
+use aether_bloomery::testing::{digest, workpiece};
+use aether_bloomery::{BloomId, ClaimHolder, ClaimRefKind, ClaimRefState, Digest};
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{GitSource, MainlineRef};
 use aether_data::wire::{from_bytes, to_vec};
@@ -21,14 +22,6 @@ use super::kinds::{
 };
 use super::runtime::SourceCapabilityState;
 use crate::bloomery::SourceShell;
-
-fn digest(seed: u8) -> Digest {
-    Digest::from_bytes([seed; 32])
-}
-
-fn workpiece(id: &str) -> WorkpieceId {
-    WorkpieceId(id.to_owned())
-}
 
 /// State over a plain `cas_land_enabled = false` [`GitSource`] with no seeded
 /// namespace — the claim ops act on their own claim refs, not the integration

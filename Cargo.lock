@@ -140,6 +140,7 @@ dependencies = [
 name = "aether-bloomery"
 version = "0.3.0-alpha"
 dependencies = [
+ "aether-bloomery",
  "aether-codec",
  "aether-data",
  "ed25519-dalek",
