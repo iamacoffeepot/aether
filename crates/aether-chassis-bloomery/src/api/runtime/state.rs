@@ -153,6 +153,9 @@ pub struct ApiCapabilityState {
     /// Bearer token commission routes require. Empty refuses every commission
     /// request.
     pub(super) control_token: String,
+    /// The doctor's latest report, overlaid on `GET /view`.
+    #[cfg(feature = "github")]
+    pub(super) doctor: Option<crate::bloomery::DoctorBoard>,
     /// Commission approval / cancel requests awaiting a signature verification.
     pub(super) commission_verifying: HashMap<u64, super::commissions::CommissionVerify>,
     /// Commission writes dispatched after a verified signature, awaiting store.

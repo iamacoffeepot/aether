@@ -13,6 +13,8 @@ use aether_data::wire::{from_bytes, to_vec};
 use aether_http::HttpServerResponse;
 use aether_substrate::actor::native::NativeCtx;
 
+use serde::Serialize;
+
 use super::hex::{self, digest_from_hex, hex_encode};
 use super::response::{error_response, json};
 use super::state::{ApiCapabilityState, Routed, VerifyPending, admit};
@@ -530,11 +532,15 @@ fn admitted_response(outcome: Outcome) -> HttpServerResponse {
 }
 
 /// Render a live-read route's [`QueryResult`] into its HTTP response: the whole
-/// view document, one bloom view, a `404`, or the error.
-pub(super) fn query_response(result: QueryResult) -> HttpServerResponse {
+/// view document (with the doctor's latest report overlaid when one has run),
+/// one bloom view, a `404`, or the error.
+pub(super) fn query_response(
+    result: QueryResult,
+    doctor: Option<&crate::bloomery::DoctorReport>,
+) -> HttpServerResponse {
     match result {
         QueryResult::Document { document } => match from_bytes::<ViewDocument>(&document) {
-            Ok(document) => json(200, &document),
+            Ok(document) => json(200, &ViewWithDoctor { document: &document, doctor }),
             Err(error) => error_response(500, &format!("view document decode failed: {error}")),
         },
         QueryResult::Bloom { view } => match from_bytes::<BloomView>(&view) {
@@ -552,6 +558,17 @@ pub(super) fn query_response(result: QueryResult) -> HttpServerResponse {
         }
         QueryResult::Calibration { .. } => error_response(500, "projection read answered with a calibration document"),
     }
+}
+
+/// `GET /view` is the journal projection plus the doctor's latest pass. The
+/// doctor is not a [`ViewDocument`] field: that document is wire-encoded in
+/// the outbox, and a trailing optional there would break queued payloads.
+#[derive(Serialize)]
+struct ViewWithDoctor<'a> {
+    #[serde(flatten)]
+    document: &'a ViewDocument,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    doctor: Option<&'a crate::bloomery::DoctorReport>,
 }
 
 #[cfg(test)]
@@ -587,13 +604,40 @@ mod tests {
             blooms: Vec::new(),
         };
         let result = QueryResult::Document { document: to_vec(&document).unwrap() };
-        let response = query_response(result);
+        let response = query_response(result, None);
         assert_eq!(response.status, 200);
         let body = String::from_utf8(response.body).unwrap();
         assert!(body.contains("Window"), "the axis is named: {body}");
         assert!(body.contains("bloomery/daily/2026-08-14"), "the window is named: {body}");
         assert!(body.contains("12") && body.contains("10"), "spend and ceiling are named: {body}");
         assert!(body.contains("spent_micro_usd") && body.contains("ceiling_micro_usd"), "the fields are named: {body}");
+    }
+
+    // The plausible bug: GET /view renders the journal projection and drops
+    // the doctor, so a Landed claim-ref violation is only a log line.
+    #[test]
+    fn query_response_overlays_doctor_violations() {
+        let document = ViewDocument {
+            mainline: Digest::from_bytes([1; 32]),
+            observed: Digest::from_bytes([2; 32]),
+            spend_quiesce: None,
+            blooms: Vec::new(),
+        };
+        let report = crate::bloomery::DoctorReport {
+            checks: vec![crate::bloomery::CheckResult {
+                name: "claim_refs_name_active_blooms",
+                statement: "every ref under refs/bloomery/claims/ names a bloom currently Sealed or Resolved — never Landed, never unknown",
+                passed: false,
+                divergences: vec!["refs/bloomery/claims/issue-5175 held by Landed bloom ab".into()],
+            }],
+        };
+        let result = QueryResult::Document { document: to_vec(&document).unwrap() };
+        let response = query_response(result, Some(&report));
+        assert_eq!(response.status, 200);
+        let body = String::from_utf8(response.body).unwrap();
+        assert!(body.contains("claim_refs_name_active_blooms"), "the invariant is named: {body}");
+        assert!(body.contains("refs/bloomery/claims/issue-5175"), "the claim ref is named: {body}");
+        assert!(body.contains("Landed"), "the holder status is named: {body}");
     }
     /// A finding digest in the same spelling.
     const FINDING: &str = "2222222222222222222222222222222222222222222222222222222222222222";

@@ -37,4 +37,8 @@ impl Correspondence for MapCorrespondence {
     fn resolve_digest(&self, object: &BackendObjectId) -> Result<Option<Digest>, CorrespondenceError> {
         Ok(self.pairs.lock().unwrap().iter().find_map(|(digest, stored)| (stored == object).then_some(*digest)))
     }
+
+    fn pairs(&self) -> Result<Vec<(Digest, BackendObjectId)>, CorrespondenceError> {
+        Ok(self.pairs.lock().unwrap().iter().map(|(digest, object)| (*digest, object.clone())).collect())
+    }
 }

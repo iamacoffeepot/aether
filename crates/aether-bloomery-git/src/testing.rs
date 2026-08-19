@@ -1159,6 +1159,15 @@ impl Correspondence for FakeGithub {
             .iter()
             .find_map(|(digest, stored)| (stored == object).then(|| Digest::from_bytes(*digest))))
     }
+
+    fn pairs(&self) -> Result<Vec<(Digest, BackendObjectId)>, CorrespondenceError> {
+        Ok(self
+            .lock()
+            .correspondence
+            .iter()
+            .map(|(digest, object)| (Digest::from_bytes(*digest), object.clone()))
+            .collect())
+    }
 }
 
 // The nonce a run's stored `StoredRun` carries mirrors the wrapper's contract:
