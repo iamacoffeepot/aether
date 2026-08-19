@@ -4,7 +4,9 @@
 
 use std::io::{self, Write as _};
 
+use aether_chassis_bloomery::commission;
+
 fn main() -> anyhow::Result<()> {
-    io::stdout().write_all(aether_chassis_bloomery::commission::main_output()?.as_bytes())?;
+    io::stdout().write_all(commission::main_output()?.as_bytes())?;
     Ok(())
 }
