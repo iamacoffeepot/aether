@@ -199,17 +199,24 @@ fn project_batch(projection: &ProjectionShell, entries: &[OutboxEntry]) -> Vec<A
 /// Project commission replicas and persist newly created issue numbers.
 /// A stall stops this topic's ack prefix and leaves later entries queued,
 /// independently of receipts and source mirroring.
+///
+/// Create is single-flight per commission inside this batch: the store
+/// row (overlaid onto the drained payload) is the authority, and a number
+/// minted here is recorded before the next sibling is projected so a
+/// lagging `find_issue` cannot open a second replica.
 fn project_commission_batch(
     projection: &ProjectionShell,
     entries: &[OutboxEntry],
 ) -> (Vec<AckOutbox>, Vec<RecordCommissionProjection>) {
     let mut through = None;
     let mut persists = Vec::new();
+    let mut recorded = BTreeMap::new();
     for entry in entries {
-        match deliver_commission(projection, entry) {
+        match deliver_commission(projection, entry, &recorded) {
             Ok(persist) => {
                 through = Some(entry.sequence);
                 if let Some(persist) = persist {
+                    recorded.insert(persist.id.clone(), persist.issue_number);
                     persists.push(persist);
                 }
             }
@@ -235,8 +242,12 @@ fn project_commission_batch(
 fn deliver_commission(
     projection: &ProjectionShell,
     entry: &OutboxEntry,
+    recorded: &BTreeMap<String, u64>,
 ) -> Result<Option<RecordCommissionProjection>, String> {
-    let document: CommissionProjection = from_bytes(&entry.payload).map_err(|error| error.to_string())?;
+    let mut document: CommissionProjection = from_bytes(&entry.payload).map_err(|error| error.to_string())?;
+    if let Some(&number) = recorded.get(&document.workpiece.0) {
+        document.recorded_issue = Some(number);
+    }
     let number = projection.project_commission(&document).map_err(|error| error.to_string())?;
     if document.recorded_issue == Some(number) {
         return Ok(None);
@@ -917,6 +928,60 @@ mod tests {
         let view_acks = project_batch(&projection, &[view]);
         assert_eq!(view_acks.len(), 1, "the view topic still delivers beside a stalled replica");
         assert_eq!(fake.comments_on(MEMBER_ISSUE).len(), 1);
+    }
+
+    fn commission_entry(sequence: u64, workpiece: &str, recorded_issue: Option<u64>) -> OutboxEntry {
+        OutboxEntry {
+            sequence,
+            topic: Topic::Commission.as_str().to_owned(),
+            payload: to_vec(&aether_bloomery::CommissionProjection {
+                workpiece: WorkpieceId(workpiece.to_owned()),
+                intent: digest(1),
+                scope_revision: Some(digest(2)),
+                approval_signer: None,
+                approval_digest: None,
+                status: "open".to_owned(),
+                recorded_issue,
+            })
+            .unwrap(),
+        }
+    }
+
+    #[test]
+    fn two_commission_entries_for_one_workpiece_create_once_then_update() {
+        // Pre-fix: both payloads freeze recorded_issue=None, and find_issue
+        // lags the first create, so the second entry opens a sibling. The
+        // batch must record the created number before the next project so
+        // the second write is an update.
+        let fake = FakeGithub::new();
+        fake.lag_next_find_after_create();
+        let projection = ProjectionShell::new(Arc::new(GithubProjection::new(fake.clone())));
+
+        let first = commission_entry(1, "wp-1", None);
+        let second = {
+            let mut entry = commission_entry(2, "wp-1", None);
+            let mut document: aether_bloomery::CommissionProjection = from_bytes(&entry.payload).unwrap();
+            document.approval_signer = Some("operator".to_owned());
+            document.approval_digest = Some(digest(3));
+            entry.payload = to_vec(&document).unwrap();
+            entry
+        };
+
+        let (acks, persists) = project_commission_batch(&projection, &[first, second]);
+
+        assert_eq!(fake.created_issue_count(), 1, "the first entry creates the replica");
+        assert_eq!(fake.updated_issue_count(), 1, "the second entry updates that replica");
+        assert_eq!(fake.issue_count(), 1, "one commission owns one issue");
+        assert_eq!(persists.len(), 1, "only the create is persisted; the update already has the number");
+        assert_eq!(persists[0].id, "wp-1");
+        assert_eq!(persists[0].issue_number, fake.issue_numbers()[0]);
+        assert_eq!(acks.len(), 1);
+        assert_eq!(acks[0].through_sequence, 2, "both entries deliver on the same topic prefix");
+        let title = fake.issue_title(fake.issue_numbers()[0]).expect("replica");
+        assert!(
+            title.starts_with("Bloomery replica"),
+            "the replica title must not collide with human issue numbering: {title}"
+        );
     }
 
     #[test]

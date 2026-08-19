@@ -341,9 +341,9 @@ pub struct CommissionProjection {
     /// Lifecycle spelling (`open`, `cancelled`, `landed`).
     pub status: String,
     /// The issue number recorded from this projector's own create, if any.
-    /// Absent until the first successful create persists. The adapter may
-    /// write title and body only to this number, or to a number `find_issue`
-    /// returns for its own marker.
+    /// Frozen at enqueue time — later creates persist into the store row, not
+    /// this snapshot. The reactor overlays the store's recorded number before
+    /// projecting; `find_issue` is advisory crash-recovery only.
     #[serde(default)]
     pub recorded_issue: Option<u64>,
 }

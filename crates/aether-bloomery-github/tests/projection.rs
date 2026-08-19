@@ -317,7 +317,7 @@ fn a_human_edit_of_a_replica_is_overwritten_and_never_read() {
 
     let title = projection.client().issue_title(number).expect("the replica still exists");
     let body = projection.client().issue_body(number).expect("the replica still exists");
-    assert!(title.contains("wp-1"), "the title is rendered from the commission: {title}");
+    assert!(title.contains("Bloomery replica"), "the title names the replica, not the workpiece: {title}");
     assert!(!title.contains("a person renamed this"), "the human title is not kept: {title}");
     assert!(body.contains("do not edit"), "the replica notice is restored: {body}");
     assert!(!body.contains("a person rewrote the body"), "the human body is not read: {body}");
@@ -341,6 +341,12 @@ fn the_projector_will_not_write_title_or_body_to_an_issue_it_did_not_create() {
     assert_eq!(projection.client().issue_count(), 2, "a new replica is created beside the human issue");
     let replica = projection.client().issue_body(created).expect("the replica exists");
     assert!(replica.contains("do not edit"), "the created object is the replica: {replica}");
+    let replica_title = projection.client().issue_title(created).expect("the replica exists");
+    assert!(
+        replica_title.starts_with("Bloomery replica"),
+        "the replica title must not collide with the human board's numbering: {replica_title}"
+    );
+    assert!(!replica_title.contains("issue-42"), "the workpiece id is not the title: {replica_title}");
 }
 
 #[test]

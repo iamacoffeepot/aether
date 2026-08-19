@@ -30,7 +30,7 @@ use aether_actor::runtime;
 use aether_bloomery::{
     Commit, CommitResult, ConfigRecord, DECISIONS_SCHEMA, Decision, Event, JournalRecord, LoadConfigs,
     LoadConfigsResult, MembershipMutation, MetricDispatch, MetricsLedger, OutboxPayload, ReplayJournal,
-    ReplayJournalResult, ScopeRevision, Statement, WorkpieceId, decode_recorded_decisions,
+    ReplayJournalResult, ScopeRevision, Statement, Topic, WorkpieceId, decode_recorded_decisions,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use std::iter::repeat_n;
@@ -1619,7 +1619,6 @@ impl StoreBackend for SqliteStore {
             }
             None => "SELECT sequence, topic, payload FROM outbox WHERE delivered = 0 ORDER BY sequence",
         };
-        let mut stmt = self.conn.prepare(sql)?;
         let map_row = |row: &rusqlite::Row<'_>| {
             Ok(OutboxEntry {
                 sequence: u64::try_from(row.get::<_, i64>(0)?).unwrap_or_default(),
@@ -1627,10 +1626,19 @@ impl StoreBackend for SqliteStore {
                 payload: row.get(2)?,
             })
         };
-        match topic {
-            Some(topic) => stmt.query_map(rusqlite::params![topic], map_row)?.collect(),
-            None => stmt.query_map([], map_row)?.collect(),
+        let mut entries: Vec<OutboxEntry> = {
+            let mut stmt = self.conn.prepare(sql)?;
+            match topic {
+                Some(topic) => stmt.query_map(rusqlite::params![topic], map_row)?.collect::<Result<_, _>>()?,
+                None => stmt.query_map([], map_row)?.collect::<Result<_, _>>()?,
+            }
+        };
+        for entry in &mut entries {
+            if entry.topic == Topic::Commission.as_str() {
+                super::commission::overlay_recorded_projection(&self.conn, &mut entry.payload);
+            }
         }
+        Ok(entries)
     }
 
     fn ack_outbox(&mut self, topic: Option<&str>, through_sequence: u64) -> rusqlite::Result<u32> {

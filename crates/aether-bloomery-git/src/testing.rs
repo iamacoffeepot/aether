@@ -168,6 +168,13 @@ struct State {
     unread_creates: HashSet<String>,
     next_get_ref_fault: Option<String>,
     next_create_ref_fault: Option<String>,
+    // When set, each `create_issue` hides that number from the next
+    // `find_issue` once — GitHub's search index lags a just-created replica
+    // (#5215). `seed_issue` is not a create.
+    lag_created_issues: bool,
+    unread_issue_creates: HashSet<u64>,
+    created_issues: usize,
+    updated_issues: usize,
 }
 
 /// An in-memory GitHub double implementing [`GithubApi`].
@@ -433,6 +440,26 @@ impl FakeGithub {
     /// is not a create and is not lagged.
     pub fn lag_next_read_after_create(&self) {
         self.lock().lag_created_refs = true;
+    }
+
+    /// After each [`CommissionProjectionApi::create_issue`], the next
+    /// [`CommissionProjectionApi::find_issue`] that would match that replica
+    /// returns `Ok(None)` once — GitHub's search index has not yet listed it.
+    /// [`Self::seed_issue`] is not a create and is not lagged.
+    pub fn lag_next_find_after_create(&self) {
+        self.lock().lag_created_issues = true;
+    }
+
+    /// How many replica issues [`CommissionProjectionApi::create_issue`] opened.
+    #[must_use]
+    pub fn created_issue_count(&self) -> usize {
+        self.lock().created_issues
+    }
+
+    /// How many title/body writes [`CommissionProjectionApi::update_issue`] applied.
+    #[must_use]
+    pub fn updated_issue_count(&self) -> usize {
+        self.lock().updated_issues
     }
 
     /// The next [`GitDataApi::get_ref`] fails as a transport/`Command` fault
@@ -1347,11 +1374,16 @@ impl CommissionProjectionApi for FakeGithub {
         state.next_issue += 1;
         let number = state.next_issue;
         state.issues.push(StoredIssue { number, title: new.title.clone(), body: new.body.clone(), closed: false });
+        state.created_issues += 1;
+        if state.lag_created_issues {
+            state.unread_issue_creates.insert(number);
+        }
         Ok(projected_issue(number, &new.title, &new.body, false))
     }
 
     fn find_issue(&self, key: &str) -> Result<Option<ProjectedIssue>, GithubError> {
-        Ok(self.lock().issues.iter().find_map(|issue| {
+        let mut state = self.lock();
+        let found = state.issues.iter().find_map(|issue| {
             let marker = parse_marker(&issue.body);
             match &marker {
                 Some(found) if found.key == key => {
@@ -1359,7 +1391,14 @@ impl CommissionProjectionApi for FakeGithub {
                 }
                 _ => None,
             }
-        }))
+        });
+        let Some(issue) = found else {
+            return Ok(None);
+        };
+        if state.unread_issue_creates.remove(&issue.number) {
+            return Ok(None);
+        }
+        Ok(Some(issue))
     }
 
     fn update_issue(&self, number: u64, title: &str, body: &str) -> Result<(), GithubError> {
@@ -1369,6 +1408,7 @@ impl CommissionProjectionApi for FakeGithub {
         };
         title.clone_into(&mut issue.title);
         body.clone_into(&mut issue.body);
+        state.updated_issues += 1;
         Ok(())
     }
 
