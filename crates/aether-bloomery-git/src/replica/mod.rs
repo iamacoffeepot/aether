@@ -2,9 +2,9 @@
 //! to a configured GitHub URL (ADR-0199).
 //!
 //! Never `git push --mirror` — that would publish claim, attempt, candidate,
-//! and checkpoint refs. Credentials stay on the caller: a bearer token is
-//! passed in-process as an `http.extraHeader` and is never written to disk
-//! or to a remote URL.
+//! and checkpoint refs. Credentials stay on the caller: a token is passed
+//! in-process as an `http.extraHeader` (`Authorization: Basic` of
+//! `x-access-token:<token>`) and is never written to disk or to a remote URL.
 
 use std::error::Error;
 use std::fmt;
@@ -112,17 +112,48 @@ impl GitSourceReplica {
     /// The remote was unreachable, git failed, or the replica rejected a
     /// mainline force-push.
     pub fn push(&self) -> Result<(), ReplicaError> {
-        let refs = Self::list_refs(&self.authority)?;
-        let specs = published_refspecs(&self.mainline, &refs);
-        let args = Self::push_args(&self.remote, &specs);
+        let specs = published_refspecs(&self.mainline, &Self::list_refs(&self.authority)?);
+        classify_push(&self.git_push_command(&specs).output()?)
+    }
+
+    fn git_push_command(&self, specs: &[PublishedRefspec]) -> Command {
         let mut command = Command::new("git");
         command.arg("-C").arg(&self.authority).env("GIT_TERMINAL_PROMPT", "0");
         if !self.token.is_empty() {
-            command.arg("-c").arg(format!("http.extraHeader=Authorization: Bearer {}", self.token));
+            command.arg("-c").arg(authorization_extra_header(&self.token));
         }
-        let output = command.args(&args).output()?;
-        classify_push(&output)
+        command.args(Self::push_args(&self.remote, specs));
+        command
     }
+}
+
+/// GitHub's git-over-HTTPS header. `Authorization: Bearer` is rejected for
+/// `gh`-keyring OAuth tokens; Basic of `x-access-token:<token>` is accepted.
+fn authorization_extra_header(token: &str) -> String {
+    format!("http.extraHeader=Authorization: Basic {}", encode_std_base64(format!("x-access-token:{token}").as_bytes()))
+}
+
+fn encode_std_base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = (u32::from(chunk[0]) << 16)
+            | (chunk.get(1).copied().map_or(0, u32::from) << 8)
+            | chunk.get(2).copied().map_or(0, u32::from);
+        out.push(char::from(TABLE[((n >> 18) & 0x3f) as usize]));
+        out.push(char::from(TABLE[((n >> 12) & 0x3f) as usize]));
+        out.push(if chunk.len() > 1 {
+            char::from(TABLE[((n >> 6) & 0x3f) as usize])
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            char::from(TABLE[(n & 0x3f) as usize])
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 /// The source-replica publish surface the host reactor drives.
