@@ -1,15 +1,17 @@
 //! `LocalGitData` against temporary bare repositories.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::process::Command;
 use std::slice::from_ref;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use aether_bloomery::control::{ReconcileOp, reconcile_op};
 use aether_bloomery::{
-    BackendObjectId, BloomId, ClaimOutcome, Correspondence, CorrespondenceError, Digest, IntegrateOutcome, LandOutcome,
-    SharedCorrespondence, SourceBackend, WorkpieceId,
+    BackendObjectId, BloomDraft, BloomId, BloomRecord, BloomSpec, BloomStatus, ClaimOutcome, ConfigRegistry,
+    Correspondence, CorrespondenceError, Digest, Evidence, EvidenceKind, IntegrateOutcome, LandOutcome, Membership,
+    SharedCorrespondence, Snapshot, SourceBackend, StageCatalog, WorkpieceId,
 };
 
 use super::LocalGitData;
@@ -305,4 +307,127 @@ fn git_source_snapshot_land_and_claim_run_against_the_local_backend() {
         ClaimOutcome::Held { held_by, .. } => assert_eq!(held_by, claimant),
         other @ ClaimOutcome::Acquired => panic!("expected Held, got {other:?}"),
     }
+}
+
+const ADMISSION_REF: &str = "bloomery/admission/mainline";
+
+fn claim_ref(workpiece: &str) -> String {
+    format!("bloomery/claims/{workpiece}")
+}
+
+fn git_source(local: LocalGitData) -> GitSource<LocalGitData> {
+    GitSource::new(local, MapCorrespondence::new(), true, MainlineRef::default())
+}
+
+fn membership(name: &str) -> Membership {
+    let mut member = Membership {
+        workpiece: WorkpieceId(name.into()),
+        scope_revision: digest(11),
+        configs: ConfigRegistry::default(),
+        approval: Evidence { subject: digest(0), kind: EvidenceKind::Approval, detail: digest(200) },
+    };
+    member.approval.subject = member.subject();
+    member
+}
+
+fn landed_record(spec: BloomSpec) -> BloomRecord {
+    BloomRecord {
+        stage_catalog: StageCatalog::line(),
+        spec,
+        status: BloomStatus::Landed,
+        claims: BTreeMap::new(),
+        evidence: Vec::new(),
+        holds: BTreeSet::new(),
+        progress: BTreeMap::new(),
+        wedged: BTreeMap::new(),
+        dispatches: BTreeMap::new(),
+        integration: None,
+        aggregate_rolls: 0,
+        aggregate_verify_rolls: 0,
+        landing_rolls: 0,
+        resolved_head: None,
+        review_park: None,
+        verify_proofs: BTreeMap::new(),
+        verify_reuses: Vec::new(),
+        aggregate_fault: None,
+        composition_findings: Vec::new(),
+        adjudications: Vec::new(),
+        operator_repairs: Vec::new(),
+        operator_hold: None,
+        deferred_dispatches: BTreeSet::new(),
+        deferred_aggregates: BTreeSet::new(),
+        dependencies: Vec::new(),
+        host_faults: BTreeMap::new(),
+        vehicles: BTreeMap::new(),
+        superseded_by: None,
+    }
+}
+
+#[test]
+fn transact_refs_refuses_two_ops_on_the_same_ref() {
+    // Tripwire: git's `update-ref --stdin` refuses two ops on one name, which
+    // is the pre-fix `release_targets` batch (Update-to-tombstone then Delete).
+    let (_root, local) = open_temp();
+    let live = local.create_commit("claim", EMPTY_TREE, &[]).expect("live");
+    local.create_ref(ADMISSION_REF, &live.sha).expect("point admission");
+    let tombstone = local.create_commit("tombstone", EMPTY_TREE, from_ref(&live.sha)).expect("tombstone");
+
+    let error = local
+        .transact_refs(&[
+            RefTxnOp::Update { name: ADMISSION_REF.into(), sha: tombstone.sha.clone(), expected: live.sha.clone() },
+            RefTxnOp::Delete { name: ADMISSION_REF.into(), expected: tombstone.sha },
+        ])
+        .expect_err("git refuses two ops on one ref in one transaction");
+    let text = error.to_string();
+    assert!(text.contains("multiple updates"), "{text}");
+    assert_eq!(ref_sha(&local, ADMISSION_REF), live.sha, "the refused transaction left the ref in place");
+}
+
+#[test]
+fn release_seal_tombstones_then_deletes_the_owned_refs() {
+    let (_root, local) = open_temp();
+    let source = git_source(local.clone());
+    let owner = BloomId(digest(1));
+    let workpiece = WorkpieceId("wp-1".into());
+    assert_eq!(source.claim_seal(&owner, from_ref(&workpiece)).expect("acquire"), ClaimOutcome::Acquired);
+
+    assert_eq!(source.release_seal(&owner, from_ref(&workpiece)).expect("release"), ClaimOutcome::Acquired);
+    assert!(ref_absent(&local, &claim_ref("wp-1")), "owned member released");
+    assert!(ref_absent(&local, ADMISSION_REF), "owned admission released");
+
+    let next = BloomId(digest(2));
+    assert_eq!(source.claim_seal(&next, from_ref(&workpiece)).expect("next seal"), ClaimOutcome::Acquired);
+}
+
+#[test]
+fn boot_reconcile_re_releases_a_landed_blooms_stranded_refs() {
+    let (_root, local) = open_temp();
+    let source = git_source(local.clone());
+    let spec = BloomDraft { proposals: vec![membership("wp-1")], ..Default::default() }.seal();
+    let bloom = spec.id();
+    let workpiece = WorkpieceId("wp-1".into());
+    assert_eq!(source.claim_seal(&bloom, from_ref(&workpiece)).expect("acquire"), ClaimOutcome::Acquired);
+    assert!(
+        !ref_absent(&local, &claim_ref("wp-1")) && !ref_absent(&local, ADMISSION_REF),
+        "the land stranded the refs"
+    );
+
+    let mut snapshot = Snapshot::default();
+    snapshot.blooms.insert(bloom, landed_record(spec));
+    let ReconcileOp::Release(_) =
+        reconcile_op(snapshot.blooms.get(&bloom).expect("landed")).expect("plans").expect("encodes")
+    else {
+        panic!("a Landed journal record must re-release");
+    };
+
+    assert_eq!(source.release_seal(&bloom, from_ref(&workpiece)).expect("boot release"), ClaimOutcome::Acquired);
+    assert!(ref_absent(&local, &claim_ref("wp-1")), "member was re-released at boot");
+    assert!(ref_absent(&local, ADMISSION_REF), "admission was re-released at boot");
+
+    assert_eq!(
+        source.release_seal(&bloom, from_ref(&workpiece)).expect("repeat"),
+        ClaimOutcome::Acquired,
+        "a repeated reconcile over now-absent refs is the idempotent no-op"
+    );
+    assert!(ref_absent(&local, &claim_ref("wp-1")), "a repeated reconcile re-creates nothing");
 }
