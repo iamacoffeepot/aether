@@ -1523,6 +1523,20 @@ mod tests {
     // Live identity observation and group membership read `/proc`. Off Linux
     // those return none, the grandchild never appears, and the sleeps leak.
     #[cfg(target_os = "linux")]
+    struct GroupGuard(u32);
+
+    #[cfg(target_os = "linux")]
+    impl Drop for GroupGuard {
+        fn drop(&mut self) {
+            let _ = Command::new("kill")
+                .args(["-KILL", "--", &format!("-{}", self.0)])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn killing_a_lane_child_terminates_its_grandchildren() {
         // Tripwire: spawn isolates the lane in its own process group, but
@@ -1531,16 +1545,6 @@ mod tests {
         let child = super::spawn_isolated(Command::new("sh").args(["-c", "sleep 60 & exec sleep 60"])).unwrap();
         let identity = super::super::identity::ProcessIdentity::observe(child.id()).expect("the head is live");
         let pgid = identity.pgid;
-        struct GroupGuard(u32);
-        impl Drop for GroupGuard {
-            fn drop(&mut self) {
-                let _ = Command::new("kill")
-                    .args(["-KILL", "--", &format!("-{}", self.0)])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-            }
-        }
         let _guard = GroupGuard(pgid);
 
         let deadline = Instant::now() + Duration::from_secs(2);
