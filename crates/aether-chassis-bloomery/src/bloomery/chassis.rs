@@ -351,14 +351,13 @@ impl BloomeryEnv {
         let session = SessionConfig::try_from_argv_then_env(cli.session.clone().into_layer())?;
         let signing = SigningConfig::try_from_argv_then_env(cli.signing.clone().into_layer())?;
 
-        let journal = one_journal_path(
+        store.path = one_journal_path(
             cli.store.path.as_deref(),
             cli.coordinator.store_path.as_deref(),
             &store.path,
             &coordinator.store_path,
         )?;
-        store.path = journal.clone();
-        coordinator.store_path = journal;
+        coordinator.store_path.clone_from(&store.path);
 
         Ok(Self {
             rpc_port,
