@@ -6,6 +6,7 @@
 /// private in-memory database (a fresh non-durable store per boot) — the
 /// default, so an unconfigured chassis boots without touching the filesystem;
 /// a durable deployment sets `AETHER_STORE_PATH` (or `--store-path`) to a file.
+/// `--github-store-path` is the same knob: both spellings resolve to this path.
 #[derive(Clone, Debug, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_STORE", cli_prefix = "store")]
 pub struct StoreConfig {
