@@ -36,6 +36,7 @@
 //! drain/ack through the store's `DrainOutbox`/`AckOutbox` mail (as the mirror
 //! reactor does) is a follow-up once the registry ops gain a mail surface.
 
+use std::collections::BTreeSet;
 use std::env;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -936,6 +937,57 @@ fn park_composition_refine_without_findings(record: &DispatchRecord, sequence: u
     true
 }
 
+/// Paths listed under `## Conflicting paths` in a fold-conflict overlay.
+///
+/// The integrate reactor writes that section (ADR-0189); the drain reads it
+/// back so overlapping Reconcile re-entries can share one fold at a time.
+fn fold_conflict_paths(overlay: &str) -> BTreeSet<String> {
+    let Some((_, rest)) = overlay.split_once("## Conflicting paths\n") else {
+        return BTreeSet::new();
+    };
+    rest.split("\n## ")
+        .next()
+        .unwrap_or(rest)
+        .lines()
+        .filter_map(|line| line.strip_prefix("- ").map(str::to_owned))
+        .collect()
+}
+
+/// Whether this Reconcile's fold-conflict paths intersect an outstanding
+/// Reconcile in the same bloom — the sibling already building against the fold
+/// this member would also claim.
+fn reconcile_overlaps_outstanding(
+    store: &mut dyn StoreBackend,
+    bloom: &[u8],
+    workpiece: &str,
+) -> rusqlite::Result<bool> {
+    let Some(overlay) = store.lookup_fold_conflict(bloom, workpiece)? else {
+        return Ok(false);
+    };
+    let paths = fold_conflict_paths(&overlay);
+    if paths.is_empty() {
+        return Ok(false);
+    }
+    for live in store.list_bloom_dispatch_live(bloom)? {
+        if live.workpiece == workpiece {
+            continue;
+        }
+        let Ok(stage) = from_bytes::<StageId>(&live.stage) else {
+            continue;
+        };
+        if stage != StageId::Reconcile {
+            continue;
+        }
+        let Some(other) = store.lookup_fold_conflict(bloom, &live.workpiece)? else {
+            continue;
+        };
+        if fold_conflict_paths(&other).intersection(&paths).next().is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Drain the dispatch topic and submit each entry through the executor, recording
 /// its intake context. Returns the newly-tracked handles and the highest
 /// contiguously-submitted outbox sequence to ack (`None` when nothing submitted).
@@ -956,6 +1008,9 @@ fn drain_and_dispatch(
     // drain reached the end of the batch clean, or stopped on a decode/subject
     // fault or a permanent-refusal park (neither re-drives on a timer).
     let mut transient_failure = None;
+    // A Reconcile held for an overlapping sibling is left unacked, so later
+    // successes in this batch must not extend the prefix past it.
+    let mut held = false;
     for entry in entries {
         let Ok(payload) = from_bytes::<DispatchPayload>(&entry.payload) else {
             tracing::warn!(
@@ -965,6 +1020,16 @@ fn drain_and_dispatch(
             );
             break;
         };
+        // Submitted on an earlier drain that could not ack past a held sibling.
+        // The nonce is the sequence, so the outstanding row is the proof this
+        // entry already reached the worker; submitting again would start a
+        // second run for the same outbox row.
+        if store.lookup_order(&dispatch_nonce(entry.sequence).0)?.is_some() {
+            if !held {
+                ack_through = Some(entry.sequence);
+            }
+            continue;
+        }
         // A retired plan's queued work is retired with it. The dispatch outbox is
         // durable and drains on its own timer, so a bloom superseded between seal
         // and drain leaves orders behind — and running one spends a full model
@@ -984,7 +1049,9 @@ fn drain_and_dispatch(
                 workpiece = %payload.workpiece.0,
                 "dispatch belongs to a bloom that holds no active membership; retiring it undispatched",
             );
-            ack_through = Some(entry.sequence);
+            if !held {
+                ack_through = Some(entry.sequence);
+            }
             continue;
         }
 
@@ -999,6 +1066,26 @@ fn drain_and_dispatch(
                 "dispatch transformation carries no subject input; stopping the ack prefix to re-drain",
             );
             break;
+        }
+        // Overlapping Reconcile re-entries against one fold must not run
+        // together: both would verify, the first fold would move the
+        // checkpoint, and the second candidate — built for a fold that no
+        // longer exists — would re-conflict and wedge both. Held, not
+        // acked, so the overlay is composed later against the fold this
+        // member will actually build on. Disjoint path sets do not take
+        // this arm and dispatch in parallel as before.
+        if payload.stage == StageId::Reconcile
+            && reconcile_overlaps_outstanding(store, payload.bloom.as_bytes(), &payload.workpiece.0)?
+        {
+            tracing::info!(
+                target: "aether_chassis_bloomery::executor",
+                sequence = entry.sequence,
+                bloom = %short_hex(&payload.bloom),
+                workpiece = %payload.workpiece.0,
+                "reconcile overlaps an outstanding sibling; holding until that resolution folds",
+            );
+            held = true;
+            continue;
         }
         // The record's axes come from the payload's explicit fields (ADR-0152):
         // the true scope revision always, and the displayed digest — what the
@@ -1035,17 +1122,23 @@ fn drain_and_dispatch(
                 %error,
                 "sealed configuration did not resolve; parking the dispatch rather than running the default",
             );
-            ack_through = Some(entry.sequence);
+            if !held {
+                ack_through = Some(entry.sequence);
+            }
             continue;
         }
         if park_composition_refine_without_findings(&record, entry.sequence) {
-            ack_through = Some(entry.sequence);
+            if !held {
+                ack_through = Some(entry.sequence);
+            }
             continue;
         }
         match dispatch_and_record(executor, store, &record, now_unix_millis) {
             Ok(handle) => {
                 handles.push(handle);
-                ack_through = Some(entry.sequence);
+                if !held {
+                    ack_through = Some(entry.sequence);
+                }
             }
             Err(error) if error.is_permanent() => {
                 // A permanent refusal never clears on retry, so parking (acking
@@ -1062,7 +1155,9 @@ fn drain_and_dispatch(
                     %error,
                     "dispatch submit refused permanently; parking the entry instead of re-driving",
                 );
-                ack_through = Some(entry.sequence);
+                if !held {
+                    ack_through = Some(entry.sequence);
+                }
                 break;
             }
             Err(error) => {

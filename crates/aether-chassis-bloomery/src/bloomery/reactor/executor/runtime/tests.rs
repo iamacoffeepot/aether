@@ -592,6 +592,111 @@ fn drain_assembles_the_reconcile_work_order_from_the_fold_conflict_overlay() {
     );
 }
 
+/// The fold-conflict overlay integrate persists for a Reconcile work order.
+fn conflicting_overlay(paths: &[&str]) -> String {
+    let mut overlay = String::from(
+        "## Fold conflict\n\nReproduce this member's intent on top of what the fold now contains; stay inside the \
+         declared surface.\n\n## Conflicting paths\n\n",
+    );
+    for path in paths {
+        overlay.push_str("- ");
+        overlay.push_str(path);
+        overlay.push('\n');
+    }
+    overlay
+}
+
+fn record_conflict(store: &mut SqliteStore, bloom: BloomId, workpiece: &str, paths: &[&str]) {
+    store.record_fold_conflict(bloom.0.as_bytes(), workpiece, &conflicting_overlay(paths)).unwrap();
+}
+
+#[test]
+fn overlapping_reconciles_dispatch_one_at_a_time_against_the_live_fold() {
+    // Two members re-open at Reconcile on the same files. Dispatching both
+    // against one fold is the #5163 wedge: both verify, the first folds, the
+    // second was built for a checkpoint that no longer exists. The drain must
+    // run the head of the overlap group only, leave the sibling unacked, and
+    // compose that sibling's overlay later — after the head's order is gone —
+    // so the prompt names the fold it will actually build on.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    store.record_dispatch_description(bloom.0.as_bytes(), "wp-a", "repair the shared widget").unwrap();
+    store.record_dispatch_description(bloom.0.as_bytes(), "wp-b", "repair the shared widget").unwrap();
+    record_conflict(&mut store, bloom, "wp-a", &["crates/overlap.rs", "crates/nav.rs"]);
+    record_conflict(&mut store, bloom, "wp-b", &["crates/overlap.rs", "crates/fetch.rs"]);
+    let (first, _) = enqueue_dispatch_at(&mut store, bloom, "wp-a", 5, StageId::Reconcile);
+    let (_second, _) = enqueue_dispatch_at(&mut store, bloom, "wp-b", 6, StageId::Reconcile);
+    let (construct, _) = enqueue_dispatch_at(&mut store, bloom, "wp-other", 7, StageId::Construct);
+
+    let (handles, ack_through, transient) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+
+    assert!(transient.is_none(), "a hold is not a transient submit failure");
+    assert_eq!(handles.len(), 2, "the overlapping head and the disjoint construct dispatch");
+    assert_eq!(ack_through, Some(first), "the held sibling stops the ack prefix");
+    let orders = backend.orders();
+    assert_eq!(orders.len(), 2);
+    assert_eq!(orders[0].nonce.0, format!("dispatch-{first}"));
+    assert_eq!(orders[1].nonce.0, format!("dispatch-{construct}"));
+    assert!(
+        orders[0].transformation.description.as_deref().is_some_and(|task| task.contains("crates/overlap.rs")),
+        "the head assembles against the fold-conflict overlay it was queued with",
+    );
+
+    store.ack_topic(Topic::Dispatch, first).unwrap();
+    let (handles, ack_through, _) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+    assert!(handles.is_empty(), "the sibling stays held while the head's order is outstanding");
+    assert!(ack_through.is_none(), "nothing past the hold is acked");
+
+    store.consume_order(&format!("dispatch-{first}")).unwrap();
+    store
+        .record_fold_conflict(
+            bloom.0.as_bytes(),
+            "wp-b",
+            &(conflicting_overlay(&["crates/overlap.rs", "crates/fetch.rs"])
+                + "\n## Conflicted candidate\n\n```diff\n+folded onto the post-head checkpoint\n```\n"),
+        )
+        .unwrap();
+
+    let (handles, ack_through, _) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+    assert_eq!(handles.len(), 1, "the sibling dispatches once the head's resolution has folded");
+    assert_eq!(ack_through, Some(construct), "the prefix covers the held sibling and the already-submitted construct");
+    let orders = backend.orders();
+    assert_eq!(orders.len(), 3);
+    let description = orders[2].transformation.description.as_deref().unwrap();
+    assert!(description.contains("repair the shared widget"), "the original description is still the task");
+    assert!(
+        description.contains("folded onto the post-head checkpoint"),
+        "the overlay is the one composed after the head folded, not the stale predecessor: {description}",
+    );
+}
+
+#[test]
+fn disjoint_reconciles_dispatch_concurrently() {
+    // The plausible regression of the overlap hold: serializing every Reconcile
+    // in a bloom, even when the path sets do not touch. Disjoint members must
+    // keep today's parallel drain.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    record_conflict(&mut store, bloom, "wp-a", &["crates/alpha.rs"]);
+    record_conflict(&mut store, bloom, "wp-b", &["crates/beta.rs"]);
+    let (first, _) = enqueue_dispatch_at(&mut store, bloom, "wp-a", 5, StageId::Reconcile);
+    let (second, _) = enqueue_dispatch_at(&mut store, bloom, "wp-b", 6, StageId::Reconcile);
+
+    let (handles, ack_through, _) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+
+    assert_eq!(handles.len(), 2, "disjoint path sets dispatch together");
+    assert_eq!(ack_through, Some(second), "the ack prefix covers both");
+    store.ack_topic(Topic::Dispatch, second).unwrap();
+    assert!(store.drain_topic(Topic::Dispatch).unwrap().is_empty(), "neither disjoint reconcile was held");
+    let orders = backend.orders();
+    assert_eq!(orders[0].nonce.0, format!("dispatch-{first}"));
+    assert_eq!(orders[1].nonce.0, format!("dispatch-{second}"));
+}
+
 #[test]
 fn drain_threads_the_persisted_description_onto_the_construct_order() {
     // The #3595 seal → dispatch seam over a real store + executor shell: the
