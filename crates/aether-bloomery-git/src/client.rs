@@ -276,6 +276,16 @@ pub trait CommissionProjectionApi {
 /// Ref names are the short `heads/…` form (no leading `refs/`); the client
 /// prepends `refs/` only where the create endpoint requires the full form.
 ///
+/// The decided semantics below are the contract `LocalGitData` and `FakeGithub`
+/// share (the crate's `tests/` conformance suite). The GitHub REST adapter is
+/// not a third target: it speaks HTTP status codes rather than git's wordings,
+/// its [`transact_refs`](Self::transact_refs) is a sequential best-effort
+/// rollback (same-ref batches are not refused; a batch delete of an absent ref
+/// is `Ok`), and a missing compare object is a transport/`Command` status
+/// rather than [`GitDataError::MissingObject`]. Those divergences are the
+/// reason the fleet-local backend exists (ADR-0199); they are not silently
+/// papered over here.
+///
 /// [#3465]: https://github.com/iamacoffeepot/aether/issues/3465
 pub trait GitDataApi {
     /// Read the ref named `name` (`heads/…` form), or `None` if it does not
@@ -288,19 +298,27 @@ pub trait GitDataApi {
 
     /// Create ref `name` at `sha`.
     ///
+    /// `sha` must name an object the store holds. A name git would refuse
+    /// (`heads/bad name`) is [`GitDataError::Command`].
+    ///
     /// # Errors
-    /// [`GitDataError::RefConflict`] when the ref already exists; any other
-    /// adapter execution failure.
+    /// [`GitDataError::RefConflict`] when the ref already exists;
+    /// [`GitDataError::MissingObject`] when `sha` names no object;
+    /// [`GitDataError::Command`] when `name` is not a legal ref.
     fn create_ref(&self, name: &str, sha: &str) -> Result<GitRef, GitDataError>;
 
     /// Move ref `name` to `sha`. With `force` false the update is
-    /// compare-and-swap: a lost swap is [`GitDataError::RefConflict`], the
-    /// guard the source port's `land` and `integrate` rely on.
+    /// compare-and-swap against the live value: a missing ref is
+    /// [`GitDataError::MissingObject`], a lost swap is
+    /// [`GitDataError::RefConflict`]. With `force` true the write is
+    /// unconditional and a missing ref is created, matching `git update-ref`
+    /// without an expected-old.
     ///
     /// # Errors
     /// [`GitDataError::RefConflict`] when the compare-and-swap lost;
-    /// [`GitDataError::MissingObject`] when the ref is gone; any other adapter
-    /// execution failure.
+    /// [`GitDataError::MissingObject`] when `force` is false and the ref is
+    /// gone, or when `sha` names no object; [`GitDataError::Command`] when
+    /// `name` is not a legal ref.
     fn update_ref(&self, name: &str, sha: &str, force: bool) -> Result<GitRef, GitDataError>;
 
     /// Delete ref `name` (`heads/…` short form). A ref that is already gone is
@@ -319,7 +337,10 @@ pub trait GitDataApi {
     /// An adapter execution failure.
     fn list_matching_refs(&self, prefix: &str) -> Result<Vec<GitRef>, GitDataError>;
 
-    /// Read commit object `sha` (for its tree).
+    /// Read commit object `sha` (for its tree and message).
+    ///
+    /// The returned [`GitCommit::message`] is the commit's full message,
+    /// including for a commit this adapter did not mint.
     ///
     /// # Errors
     /// [`GitDataError::MissingObject`] when `sha` is unknown; any other adapter
@@ -382,10 +403,18 @@ pub trait GitDataApi {
     /// leaves every name as it was — the local primitive `claim_seal` relies
     /// on so a partial acquire cannot survive.
     ///
+    /// Two ops naming the same ref in one batch are [`GitDataError::Command`]
+    /// (`multiple updates for ref` — git's `update-ref --stdin` refusal, the
+    /// #5175 `release_targets` shape). A [`RefTxnOp::Delete`] of a name that is
+    /// not there is [`GitDataError::MissingObject`], unlike the name-only
+    /// [`delete_ref`](Self::delete_ref) which is the idempotent `Ok`.
+    ///
     /// # Errors
     /// [`GitDataError::RefConflict`] when a create hits an existing name or an
     /// update/delete loses its expected-old compare; [`GitDataError::MissingObject`]
-    /// when an update names a missing ref; any other adapter execution failure.
+    /// when an update or delete names a missing ref, or a create/update names
+    /// a missing object; [`GitDataError::Command`] when two ops share a name
+    /// or a name is not a legal ref.
     fn transact_refs(&self, ops: &[RefTxnOp]) -> Result<(), GitDataError>;
 }
 
