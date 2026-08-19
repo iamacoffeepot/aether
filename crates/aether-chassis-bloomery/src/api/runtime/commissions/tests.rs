@@ -49,9 +49,11 @@ fn a_tampered_or_stale_write_is_not_a_transport_error() {
     // client that treats every non-200 as a retryable transport error would
     // replay a stale or tampered statement.
     assert_eq!(revision_response(WriteScopeRevisionResult::Stale).status, 409);
+    assert_eq!(revision_response(WriteScopeRevisionResult::NotOpen).status, 409);
     assert_eq!(revision_response(WriteScopeRevisionResult::Malformed).status, 400);
     assert_eq!(revision_response(WriteScopeRevisionResult::Err { error: "disk".to_owned() }).status, 500);
     assert_eq!(approval_response(RecordCommissionApprovalResult::Stale).status, 409);
+    assert_eq!(approval_response(RecordCommissionApprovalResult::NotOpen).status, 409);
     assert_eq!(approval_response(RecordCommissionApprovalResult::MissingRevision).status, 404);
     assert_eq!(approval_response(RecordCommissionApprovalResult::Refused { error: "wrong".to_owned() }).status, 400);
     assert_eq!(approval_response(RecordCommissionApprovalResult::Err { error: "disk".to_owned() }).status, 500);
