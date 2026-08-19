@@ -8,8 +8,10 @@
 /// `AGENT_POOL_CONTEXT_CAP_TOKENS = 150000` context ceiling. `lease_ttl_mins`
 /// bounds how long one `acquire` holds a session before lazy expiry reclaims it
 /// (a crashed holder never wedges a key). `pricing_cliff_tokens` is the
-/// prompt-size cut a same-member refine resume must project under (#5177);
-/// `200_000` is grok-4.6's measured long-context band. `db_path` is the pool
+/// prompt-size cut a same-member refine or dependent construct resume must
+/// project under (#5177, #5178); `200_000` is grok-4.6's measured long-context
+/// band. `dependency_increment_tokens` is the per-link addend that projection
+/// uses on a predecessor resume. `db_path` is the pool
 /// table's `SQLite` file; the sentinel `":memory:"` opens a private non-durable
 /// store — the default, so an unconfigured chassis boots without touching the
 /// filesystem.
@@ -20,7 +22,9 @@ pub struct SessionConfig {
     #[config(default = ":memory:")]
     pub db_path: String,
     /// Age bound in minutes — a session deposited longer ago than this is
-    /// ineligible (the prompt-cache-TTL cutoff, `AGENT_POOL_CUTOFF_MINS`).
+    /// ineligible (the prompt-cache-TTL cutoff, `AGENT_POOL_CUTOFF_MINS`). The
+    /// same bound is the provider-cache warmth gate on a journaled predecessor
+    /// resume (#5178).
     #[config(default = 55)]
     pub cache_ttl_cutoff_mins: u64,
     /// Lease lifetime in minutes — a lease older than this is treated as free
@@ -31,10 +35,16 @@ pub struct SessionConfig {
     /// is ineligible (`AGENT_POOL_CONTEXT_CAP_TOKENS`).
     #[config(default = 150_000)]
     pub context_cap_tokens: u64,
-    /// Prompt-token threshold a resumed refine must project under, or it launches
-    /// fresh. Default `200_000` is grok-4.6's measured long-context pricing cliff.
+    /// Prompt-token threshold a resumed refine or dependent construct must
+    /// project under, or it launches fresh. Default `200_000` is grok-4.6's
+    /// measured long-context pricing cliff.
     #[config(default = 200_000)]
     pub pricing_cliff_tokens: u64,
+    /// Tokens a dependent construct is projected to add on top of a predecessor's
+    /// stored context — one graph link. Default `56_000` is the measured
+    /// successor increment (#5178).
+    #[config(default = 56_000)]
+    pub dependency_increment_tokens: u64,
 }
 
 impl Default for SessionConfig {
@@ -45,6 +55,7 @@ impl Default for SessionConfig {
             lease_ttl_mins: 15,
             context_cap_tokens: 150_000,
             pricing_cliff_tokens: 200_000,
+            dependency_increment_tokens: 56_000,
         }
     }
 }

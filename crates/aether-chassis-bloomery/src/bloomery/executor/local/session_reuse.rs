@@ -19,6 +19,11 @@
 //! projects under the harness pricing-cliff threshold (#5177). That path is
 //! keyed by (bloom, workpiece), not the pool task text, so a findings overlay
 //! cannot hide the handle.
+//!
+//! A dependent Construct at unblock offers a predecessor's journaled session
+//! the same way (#5178): projection adds a per-link increment, warmth reuses
+//! the pool's cache-TTL cutoff, and a join picks the largest stored context.
+//! Missing, stale, over-cliff, or refused handles launch fresh.
 
 use std::collections::HashMap;
 use std::fs;
@@ -53,6 +58,11 @@ const SUCCESSOR_INCREMENT_TOKENS: u64 = 8_000;
 /// Default prompt-token threshold a resumed refine must project under.
 /// Matches grok-4.6's measured long-context pricing cliff.
 pub(super) const DEFAULT_PRICING_CLIFF_TOKENS: u64 = 200_000;
+/// Tokens one dependency link is projected to add on top of a predecessor's
+/// stored context. Measured successor increment (#5178).
+pub(super) const DEFAULT_DEPENDENCY_INCREMENT_TOKENS: u64 = 56_000;
+/// Default provider-cache warmth, matching [`SessionConfig::cache_ttl_cutoff_mins`].
+pub(super) const DEFAULT_CACHE_TTL_SECS: u64 = 55 * 60;
 
 /// Which way a lap actually went.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,7 +118,7 @@ impl MissReason {
     }
 }
 
-/// Whether a same-member refine should resume the journaled construct session.
+/// Whether a journaled construct session should be resumed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefineResume {
     /// Resume this harness session id.
@@ -118,6 +128,18 @@ pub enum RefineResume {
         /// Why a journaled handle was not resumed, when one existed.
         miss: Option<MissReason>,
     },
+}
+
+/// One predecessor's journaled construct session, as the dependent-construct
+/// resume gate judges it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PredecessorCandidate {
+    /// The harness session id construct journaled.
+    pub session_id: String,
+    /// Terminal context stored with the handle.
+    pub context_tokens: u64,
+    /// Deposit time in unix seconds, when the row recorded one.
+    pub deposited_unix: Option<u64>,
 }
 
 /// Decide whether a journaled construct session is worth resuming.
@@ -134,6 +156,53 @@ pub fn decide_refine_resume(session_id: &str, context_tokens: u64, pricing_cliff
         return RefineResume::Fresh { miss: Some(MissReason::PricingCliff) };
     }
     RefineResume::Resumed(session_id.to_owned())
+}
+
+/// Decide whether a dependent construct should resume a predecessor session.
+///
+/// Empty or unusable ids, a missing deposit time, a deposit older than
+/// `warmth_secs`, and a projection of `context + increment` at or over the
+/// cliff all launch fresh. Among handles that pass, the largest stored
+/// context wins — the session that already carries the most shared prefix.
+#[must_use]
+pub fn decide_predecessor_resume(
+    candidates: &[PredecessorCandidate],
+    now_unix: u64,
+    warmth_secs: u64,
+    increment_tokens: u64,
+    pricing_cliff_tokens: u64,
+) -> RefineResume {
+    let mut eligible: Vec<&PredecessorCandidate> = Vec::new();
+    let mut saw_stale = false;
+    let mut saw_cliff = false;
+    for candidate in candidates {
+        if !usable_session_id(&candidate.session_id) {
+            continue;
+        }
+        let Some(deposited) = candidate.deposited_unix else {
+            saw_stale = true;
+            continue;
+        };
+        if now_unix.saturating_sub(deposited) > warmth_secs {
+            saw_stale = true;
+            continue;
+        }
+        if candidate.context_tokens.saturating_add(increment_tokens) >= pricing_cliff_tokens {
+            saw_cliff = true;
+            continue;
+        }
+        eligible.push(candidate);
+    }
+    if let Some(best) = eligible.iter().max_by_key(|candidate| candidate.context_tokens) {
+        return RefineResume::Resumed(best.session_id.clone());
+    }
+    if saw_cliff {
+        RefineResume::Fresh { miss: Some(MissReason::PricingCliff) }
+    } else if saw_stale {
+        RefineResume::Fresh { miss: Some(MissReason::Age) }
+    } else {
+        RefineResume::Fresh { miss: None }
+    }
 }
 
 /// A session id the harness can be asked to resume — non-empty after trim.
@@ -175,6 +244,8 @@ pub struct SessionReuse {
     head_hash: Mutex<Option<String>>,
     state: Mutex<ReuseState>,
     pricing_cliff_tokens: Mutex<u64>,
+    dependency_increment_tokens: Mutex<u64>,
+    cache_ttl_secs: Mutex<u64>,
 }
 
 #[derive(Default)]
@@ -201,6 +272,8 @@ impl SessionReuse {
             head_hash: Mutex::new(None),
             state: Mutex::new(ReuseState::default()),
             pricing_cliff_tokens: Mutex::new(DEFAULT_PRICING_CLIFF_TOKENS),
+            dependency_increment_tokens: Mutex::new(DEFAULT_DEPENDENCY_INCREMENT_TOKENS),
+            cache_ttl_secs: Mutex::new(DEFAULT_CACHE_TTL_SECS),
         }
     }
 
@@ -240,6 +313,8 @@ impl SessionReuse {
         let snapshot = pool.routing_snapshot()?;
         let reuse = Self::new(Box::new(pool));
         *lock(&reuse.pricing_cliff_tokens) = session.pricing_cliff_tokens;
+        *lock(&reuse.dependency_increment_tokens) = session.dependency_increment_tokens;
+        *lock(&reuse.cache_ttl_secs) = session.cache_ttl_cutoff_mins.saturating_mul(60);
         reuse.restore_snapshot(snapshot);
         Ok(reuse)
     }
@@ -275,6 +350,24 @@ impl SessionReuse {
     #[must_use]
     pub fn pricing_cliff_tokens(&self) -> u64 {
         *lock(&self.pricing_cliff_tokens)
+    }
+
+    /// Tokens one dependency link is projected to add on a predecessor resume.
+    #[must_use]
+    pub fn dependency_increment_tokens(&self) -> u64 {
+        *lock(&self.dependency_increment_tokens)
+    }
+
+    /// Provider-cache warmth, in seconds, a predecessor resume must sit inside.
+    #[must_use]
+    pub fn cache_ttl_secs(&self) -> u64 {
+        *lock(&self.cache_ttl_secs)
+    }
+
+    /// The clock acquire/deposit and journaled resume gates share — tests pin it.
+    #[must_use]
+    pub fn unix_now(&self) -> u64 {
+        self.now()
     }
 
     /// Seed a deposited session so a later acquire can hit or miss it.
@@ -997,6 +1090,54 @@ mod tests {
             "whitespace is an unparseable handle, not a session to resume",
         );
         assert_eq!(super::decide_refine_resume("", 8_000, 200_000), super::RefineResume::Fresh { miss: None });
+    }
+
+    fn predecessor(session_id: &str, context_tokens: u64, deposited_unix: Option<u64>) -> super::PredecessorCandidate {
+        super::PredecessorCandidate { session_id: session_id.to_owned(), context_tokens, deposited_unix }
+    }
+
+    #[test]
+    fn a_predecessor_session_resumes_only_when_warm_and_under_the_cliff() {
+        // Plausible bug: resuming a stale or over-cliff predecessor, or picking
+        // the first named parent at a join instead of the largest stored context.
+        let now = 10_000;
+        let warmth = 55 * 60;
+        let increment = 56_000;
+        let cliff = 200_000;
+        let decide = |candidates: &[super::PredecessorCandidate]| {
+            super::decide_predecessor_resume(candidates, now, warmth, increment, cliff)
+        };
+
+        assert_eq!(
+            decide(&[predecessor("sess-a", 8_000, Some(now))]),
+            super::RefineResume::Resumed("sess-a".to_owned()),
+        );
+        assert_eq!(
+            decide(&[predecessor("sess-a", 144_000, Some(now))]),
+            super::RefineResume::Fresh { miss: Some(MissReason::PricingCliff) },
+            "144k + the 56k link increment is the cliff, not under it",
+        );
+        assert_eq!(
+            decide(&[predecessor("sess-a", 8_000, Some(now - warmth - 1))]),
+            super::RefineResume::Fresh { miss: Some(MissReason::Age) },
+            "a deposit older than the cache TTL is stale",
+        );
+        assert_eq!(
+            decide(&[predecessor("sess-a", 8_000, None)]),
+            super::RefineResume::Fresh { miss: Some(MissReason::Age) },
+            "a row that never stamped a deposit time is not assumed warm",
+        );
+        assert_eq!(
+            decide(&[predecessor("   ", 8_000, Some(now))]),
+            super::RefineResume::Fresh { miss: None },
+            "whitespace is an unparseable handle, not a session to resume",
+        );
+        assert_eq!(decide(&[]), super::RefineResume::Fresh { miss: None }, "missing sessions launch fresh");
+        assert_eq!(
+            decide(&[predecessor("sess-small", 8_000, Some(now)), predecessor("sess-large", 40_000, Some(now))]),
+            super::RefineResume::Resumed("sess-large".to_owned()),
+            "a join resumes the largest stored context",
+        );
     }
 
     #[test]
