@@ -102,9 +102,9 @@ use state::{Routed, SealVerify, VerifyPending, finish};
 use super::BloomeryApiCapability;
 
 use crate::artifacts::{ArtifactsCapabilityState, GetRange, GetRangeResult, resolve_root};
-#[cfg(feature = "github")]
-use crate::bloomery::CandidatePush;
 use crate::bloomery::load_policy;
+#[cfg(feature = "github")]
+use crate::bloomery::{CandidatePush, DoctorBoard};
 use crate::signing::VerifyResult;
 use crate::store::{
     CancelCommissionResult, CreateCommissionResult, ListCommissionsResult, LoadCommissionResult, PageJournal,
@@ -196,7 +196,7 @@ pub struct ApiParams {
     /// The doctor's latest invariant report, overlaid on `GET /view`. `None`
     /// when the doctor reactor is not mounted.
     #[cfg(feature = "github")]
-    pub doctor: Option<crate::bloomery::DoctorBoard>,
+    pub doctor: Option<DoctorBoard>,
 }
 
 #[http::router]
@@ -810,7 +810,7 @@ impl NativeActor for BloomeryApiCapability {
             mail => {
                 #[cfg(feature = "github")]
                 {
-                    let doctor = state.doctor.as_ref().and_then(crate::bloomery::DoctorBoard::latest);
+                    let doctor = state.doctor.as_ref().and_then(DoctorBoard::latest);
                     query_response(mail, doctor.as_ref())
                 }
                 #[cfg(not(feature = "github"))]
