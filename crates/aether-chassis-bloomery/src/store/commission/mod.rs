@@ -600,6 +600,25 @@ fn load_recorded_issue(conn: &Connection, id: &str) -> Result<Option<u64>, Commi
     }
 }
 
+/// Overlay the store's recorded replica-issue number onto a drained
+/// commission payload. The outbox row is a frozen snapshot; this table is
+/// the create-vs-update authority for a later entry of the same commission.
+pub fn overlay_recorded_projection(conn: &Connection, payload: &mut Vec<u8>) {
+    let Ok(mut document) = from_bytes::<CommissionProjection>(payload) else {
+        return;
+    };
+    let Ok(Some(number)) = load_recorded_issue(conn, &document.workpiece.0) else {
+        return;
+    };
+    if document.recorded_issue == Some(number) {
+        return;
+    }
+    document.recorded_issue = Some(number);
+    if let Ok(bytes) = to_vec(&document) {
+        *payload = bytes;
+    }
+}
+
 fn load_commission(conn: &mut Connection, id: &WorkpieceId) -> Result<Option<CommissionView>, CommissionError> {
     let Some(head) = load_head(conn, &id.0)? else {
         return Ok(None);

@@ -468,6 +468,24 @@ fn create_enqueues_a_commission_projection_and_record_round_trips() {
 }
 
 #[test]
+fn drain_overlays_the_recorded_number_onto_a_frozen_payload() {
+    // Two events enqueue before the first create persists. The later row's
+    // payload still says recorded_issue=None. Drain must consult the store
+    // row, or the projector treats search as authority and opens a sibling.
+    let mut store = memory();
+    seed(&mut store, "wp-1");
+    write(&mut store, "wp-1", None);
+    store.record_projection(&workpiece("wp-1"), 9).expect("persist");
+
+    let entries = store.drain_topic(Topic::Commission).expect("drain");
+    assert_eq!(entries.len(), 2, "create and scope each enqueued one row");
+    for entry in &entries {
+        let payload: CommissionProjection = from_bytes(&entry.payload).expect("payload");
+        assert_eq!(payload.recorded_issue, Some(9), "drain overlays the store row onto a frozen snapshot");
+    }
+}
+
+#[test]
 fn cancel_refuses_words_that_are_not_the_intent() {
     let mut store = memory();
     seed(&mut store, "wp-1");
