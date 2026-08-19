@@ -135,6 +135,17 @@ fn next_backoff(current: Option<&BackoffCursor>, transient_failure: Option<u64>)
     Some(BackoffCursor { sequence, failures, retry_after: Instant::now() + backoff_delay(failures) })
 }
 
+/// Fold one drain's outcome into the shared backoff window. A transient failure
+/// advances [`next_backoff`]; a clean drain — nothing to submit, a success, or a
+/// permanent park — leaves a live window in place so a sibling topic's pacing
+/// survives the common empty-dispatch path (#3593).
+fn fold_drain_backoff(current: Option<BackoffCursor>, transient_failure: Option<u64>) -> Option<BackoffCursor> {
+    match transient_failure {
+        Some(sequence) => next_backoff(current.as_ref(), Some(sequence)),
+        None => current,
+    }
+}
+
 /// A tracked dispatch handle plus its staleness bookkeeping (#3635): `first_seen`
 /// marks when the handle was added to `tracked`, and `stale_warned` guards the
 /// tick's stale-sweep so a still-wedged handle warns once per crossing rather
@@ -1030,6 +1041,38 @@ fn ack_if_unblocked(held: bool, ack_through: &mut Option<u64>, sequence: u64) {
     }
 }
 
+/// Whether `bloom` still holds a membership this drain should run. A retired
+/// plan's queued work is acked rather than dispatched (#4640): the outbox is
+/// durable and drains on its own timer, so a bloom superseded between seal and
+/// drain must not spend a lane on a plan the operator replaced.
+fn bloom_still_live(store: &mut dyn StoreBackend, bloom: &Digest, sequence: u64, what: &str) -> rusqlite::Result<bool> {
+    if store.holds_active_membership(bloom.as_bytes())? {
+        return Ok(true);
+    }
+    tracing::info!(
+        target: "aether_chassis_bloomery::executor",
+        sequence,
+        bloom = %short_hex(bloom),
+        "{what} belongs to a bloom that holds no active membership; retiring it undispatched",
+    );
+    Ok(false)
+}
+
+/// The transformation pins the subject as its first input; a well-formed
+/// dispatch always carries one. Missing it stops the ack prefix so the entry
+/// re-drains rather than being submitted half-built.
+fn transformation_has_subject(inputs: &[Digest], sequence: u64, what: &str) -> bool {
+    if !inputs.is_empty() {
+        return true;
+    }
+    tracing::warn!(
+        target: "aether_chassis_bloomery::executor",
+        sequence,
+        "{what} transformation carries no subject input; stopping the ack prefix to re-drain",
+    );
+    false
+}
+
 /// Outcome of overlaying and submitting one decoded dispatch entry.
 enum DispatchSubmit {
     Submitted(WorkHandle),
@@ -1154,39 +1197,11 @@ fn drain_and_dispatch(
             ack_if_unblocked(held, &mut ack_through, entry.sequence);
             continue;
         }
-        // A retired plan's queued work is retired with it. The dispatch outbox is
-        // durable and drains on its own timer, so a bloom superseded between seal
-        // and drain leaves orders behind — and running one spends a full model
-        // dispatch on a plan the operator explicitly replaced, then returns a
-        // candidate for a bloom that can no longer admit it (#4640). A
-        // supersession releases every one of the predecessor's memberships in the
-        // decision set that marks it superseded, so holding none is the reducer's
-        // own statement that this bloom is no longer live. Acked rather than
-        // stopped: the entry is disposed of, not deferred, so the queue drains
-        // instead of accumulating dead work — and this self-heals a queue
-        // stranded by any path to the same state, not just supersession.
-        if !store.holds_active_membership(payload.bloom.as_bytes())? {
-            tracing::info!(
-                target: "aether_chassis_bloomery::executor",
-                sequence = entry.sequence,
-                bloom = %short_hex(&payload.bloom),
-                workpiece = %payload.workpiece.0,
-                "dispatch belongs to a bloom that holds no active membership; retiring it undispatched",
-            );
+        if !bloom_still_live(store, &payload.bloom, entry.sequence, "dispatch")? {
             ack_if_unblocked(held, &mut ack_through, entry.sequence);
             continue;
         }
-
-        // The transformation pins the subject as its first input; a well-formed
-        // per-member dispatch always carries one. The record's axes come from the
-        // payload's explicit fields (ADR-0152), so the input is only checked for
-        // well-formedness here — the executor backends re-derive it themselves.
-        if payload.transformation.inputs.is_empty() {
-            tracing::warn!(
-                target: "aether_chassis_bloomery::executor",
-                sequence = entry.sequence,
-                "dispatch transformation carries no subject input; stopping the ack prefix to re-drain",
-            );
+        if !transformation_has_subject(&payload.transformation.inputs, entry.sequence, "dispatch") {
             break;
         }
         if hold_overlapping_reconcile(store, &payload, entry.sequence)? {
@@ -1306,25 +1321,10 @@ fn drain_and_dispatch_aggregate(
             );
             break;
         };
-        if payload.transformation.inputs.is_empty() {
-            tracing::warn!(
-                target: "aether_chassis_bloomery::executor",
-                sequence = entry.sequence,
-                "aggregate-review transformation carries no subject input; stopping the ack prefix to re-drain",
-            );
+        if !transformation_has_subject(&payload.transformation.inputs, entry.sequence, "aggregate-review") {
             break;
         }
-        // A retired plan's queued review is retired with it, on the same reading
-        // as the member lane above: a critic run is a full model dispatch, and
-        // one judging a superseded bloom's integrated diff is spent on a plan
-        // that no longer exists.
-        if !store.holds_active_membership(payload.bloom.as_bytes())? {
-            tracing::info!(
-                target: "aether_chassis_bloomery::executor",
-                sequence = entry.sequence,
-                bloom = %short_hex(&payload.bloom),
-                "aggregate review belongs to a bloom that holds no active membership; retiring it undispatched",
-            );
+        if !bloom_still_live(store, &payload.bloom, entry.sequence, "aggregate review")? {
             ack_through = Some(entry.sequence);
             continue;
         }
@@ -1443,24 +1443,10 @@ fn drain_and_dispatch_aggregate_verify(
             );
             break;
         };
-        if payload.transformation.inputs.is_empty() {
-            tracing::warn!(
-                target: "aether_chassis_bloomery::executor",
-                sequence = entry.sequence,
-                "aggregate-verify transformation carries no subject input; stopping the ack prefix to re-drain",
-            );
+        if !transformation_has_subject(&payload.transformation.inputs, entry.sequence, "aggregate-verify") {
             break;
         }
-        // A retired plan's queued verify is retired with it, like the member and
-        // review lanes: the fold it would build belongs to a plan that no longer
-        // exists.
-        if !store.holds_active_membership(payload.bloom.as_bytes())? {
-            tracing::info!(
-                target: "aether_chassis_bloomery::executor",
-                sequence = entry.sequence,
-                bloom = %short_hex(&payload.bloom),
-                "aggregate verify belongs to a bloom that holds no active membership; retiring it undispatched",
-            );
+        if !bloom_still_live(store, &payload.bloom, entry.sequence, "aggregate verify")? {
             ack_through = Some(entry.sequence);
             continue;
         }
@@ -1643,6 +1629,13 @@ fn drain_and_redispatch(
             ack_through = Some(entry.sequence);
             continue;
         };
+        if !bloom_still_live(store, &record.bloom.0, entry.sequence, "redispatch")? {
+            ack_through = Some(entry.sequence);
+            continue;
+        }
+        if !transformation_has_subject(&record.transformation.inputs, entry.sequence, "redispatch") {
+            break;
+        }
 
         match dispatch_and_record(executor, store, &record, now_unix_millis) {
             Ok(handle) => {
@@ -2501,7 +2494,7 @@ impl NativeActor for ExecutorReactorCapability {
                     }
                     let now = Instant::now();
                     state.tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, now)));
-                    state.backoff = next_backoff(state.backoff.as_ref(), transient_failure);
+                    state.backoff = fold_drain_backoff(state.backoff.take(), transient_failure);
                 }
                 Err(error) => {
                     tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "dispatch drain failed");
@@ -2519,9 +2512,7 @@ impl NativeActor for ExecutorReactorCapability {
                     }
                     let now = Instant::now();
                     state.tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, now)));
-                    if transient_failure.is_some() {
-                        state.backoff = next_backoff(state.backoff.as_ref(), transient_failure);
-                    }
+                    state.backoff = fold_drain_backoff(state.backoff.take(), transient_failure);
                 }
                 Err(error) => {
                     tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "aggregate-review drain failed");
@@ -2538,9 +2529,7 @@ impl NativeActor for ExecutorReactorCapability {
                     }
                     let now = Instant::now();
                     state.tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, now)));
-                    if transient_failure.is_some() {
-                        state.backoff = next_backoff(state.backoff.as_ref(), transient_failure);
-                    }
+                    state.backoff = fold_drain_backoff(state.backoff.take(), transient_failure);
                 }
                 Err(error) => {
                     tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "aggregate-verify drain failed");
@@ -2557,9 +2546,7 @@ impl NativeActor for ExecutorReactorCapability {
                     }
                     let now = Instant::now();
                     state.tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, now)));
-                    if transient_failure.is_some() {
-                        state.backoff = next_backoff(state.backoff.as_ref(), transient_failure);
-                    }
+                    state.backoff = fold_drain_backoff(state.backoff.take(), transient_failure);
                 }
                 Err(error) => {
                     tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "redispatch drain failed");
