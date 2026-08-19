@@ -30,6 +30,7 @@ use tempfile::TempDir;
 
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::to_hex;
+use aether_data::wire::to_vec;
 
 #[cfg(target_os = "linux")]
 use super::identity::ProcessIdentity;
@@ -1418,7 +1419,7 @@ fn member_order_at(nonce: &str, workpiece: &str, stage: StageId) -> OutstandingO
         scope_revision: vec![2; 32],
         candidate: vec![5; 32],
         displayed_digest: vec![5; 32],
-        stage: aether_data::wire::to_vec(&stage).unwrap(),
+        stage: to_vec(&stage).unwrap(),
         transformation: vec![7, 7],
         configs: vec![3, 3],
         profile: Vec::new(),
