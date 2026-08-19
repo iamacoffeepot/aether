@@ -6,6 +6,7 @@
 //! is structurally shared and machine-maintained, so a dependency-graph-neutral
 //! rebuild that touches it is not a violation.
 
+use std::error::Error;
 use std::fmt;
 use std::io;
 use std::path::Path;
@@ -85,8 +86,8 @@ impl fmt::Display for ChangedPathsError {
     }
 }
 
-impl std::error::Error for ChangedPathsError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl Error for ChangedPathsError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Spawn(error) => Some(error),
             Self::Git(_) | Self::Encoding => None,
