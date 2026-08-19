@@ -72,13 +72,13 @@ pub use aether_bloomery_git::testing;
 pub use aether_bloomery_git::{correspondence, mainline, marker, source};
 
 pub use aether_bloomery_git::{
-    ActionsApi, Artifact, ChecksState, Comment, CommissionProjectionApi, GitCommit, GitDataApi, GitDataError,
-    GitObjectFormat, GitObjectId, GitRef, GitSource, GitSourceReplica, GithubApi, GithubError, HostSource,
-    IssueStateApi, LocalGitData, MainlineRef, Marker, MergeResult, NewComment, NewIssue, NewPullRequest,
+    ActionsApi, Artifact, ChecksState, Comment, CommissionProjectionApi, DayCoverage, GitCommit, GitDataApi,
+    GitDataError, GitObjectFormat, GitObjectId, GitRef, GitSource, GitSourceReplica, GithubApi, GithubError,
+    HostSource, IssueStateApi, LocalGitData, MainlineRef, Marker, MergeResult, NewComment, NewIssue, NewPullRequest,
     ProjectedIssue, PublishedRefspec, PullMergeResult, PullRequest, PullRequestApi, PullRequestState, RefTxnOp,
-    ReplicaError, RunConclusion, RunStatus, SourceError, SourceReplica, WorkflowRun, candidate_ref_name,
-    check_run_external_id, landing_branch, member_checkpoint_ref_name, parse_check_run_external_id, parse_marker,
-    published_refspecs, render_marker, short_hex, strip_heads, to_hex,
+    ReplicaError, RollError, RunConclusion, RunStatus, SourceError, SourceReplica, WorkflowRun, advance_main,
+    candidate_ref_name, check_run_external_id, cut_daily, landing_branch, member_checkpoint_ref_name,
+    parse_check_run_external_id, parse_marker, published_refspecs, render_marker, short_hex, strip_heads, to_hex,
 };
 pub use app_auth::{AppTokenSource, InstallationTokenExchange};
 pub use client::{

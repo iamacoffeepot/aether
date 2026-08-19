@@ -3,9 +3,9 @@
 //! Every check runs and every failure is named, rather than stopping at the
 //! first: an operator who drains the train, re-runs, and is only then told the
 //! working tree is dirty has been handed a drip-feed. All of it happens before
-//! the sync-back pull request exists, so a refusal costs nothing to recover
-//! from — the alternative is a roll that merged the day back and then stopped
-//! short of cutting tomorrow.
+//! fleet main is compare-and-swapped, so a refusal costs nothing to recover
+//! from — the alternative is a roll that advanced the day onto main and then
+//! stopped short of cutting tomorrow.
 
 use aether_bloomery::BloomStatus;
 use anyhow::{Result, bail};
@@ -17,10 +17,7 @@ use crate::bloom::dto::ViewDocument;
 /// Refuse unless every precondition of the day roll holds.
 pub fn screen(view: &ViewDocument, shell: &impl Shell, day: &Day, remote: &str) -> Result<()> {
     let refusals: Vec<String> =
-        [undrained(view), dirty_tree(shell)?, squash_only(shell)?, already_cut(shell, day, remote)?]
-            .into_iter()
-            .flatten()
-            .collect();
+        [undrained(view), dirty_tree(shell)?, already_cut(shell, day, remote)?].into_iter().flatten().collect();
     if refusals.is_empty() {
         return Ok(());
     }
@@ -46,16 +43,6 @@ fn dirty_tree(shell: &impl Shell) -> Result<Option<String>> {
     let porcelain = checked(shell, "git", &["status", "--porcelain"])?;
     Ok((!porcelain.is_empty())
         .then(|| format!("the working tree is dirty:\n      {}", porcelain.replace('\n', "\n      "))))
-}
-
-/// The repository refusing rebase merges, which is the one merge method the
-/// sync-back may use: a squash here flattens the day into one blob and undoes
-/// every bloom's authored subject and closing lines (ADR-0186).
-fn squash_only(shell: &impl Shell) -> Result<Option<String>> {
-    let allowed = checked(shell, "gh", &["api", "repos/{owner}/{repo}", "--jq", ".allow_rebase_merge"])?;
-    Ok((allowed != "true").then(|| {
-        "the repository forbids rebase merges (allow_rebase_merge is not true); the sync-back may not squash".to_owned()
-    }))
 }
 
 /// Tomorrow's branch already on the remote, which means this day was rolled
@@ -102,10 +89,7 @@ mod tests {
 
     #[test]
     fn a_drained_day_with_a_clean_tree_passes_the_screen() {
-        let shell = Fake::new(|line| match line {
-            line if line.starts_with("gh api") => Run::ok("true"),
-            _ => Run::ok(""),
-        });
+        let shell = Fake::new(|_| Run::ok(""));
 
         screen(&view(&[BloomStatus::Landed, BloomStatus::Superseded]), &shell, &day(), "origin")
             .expect("a drained day rolls");
@@ -113,24 +97,23 @@ mod tests {
 
     // Tripwire: every precondition is reported from one screen, and the screen
     // is the whole of what a refusal costs. A first-failure return drip-feeds an
-    // operator through four separate rolls, and a check moved after the
-    // sync-back leaves the day merged onto main with tomorrow uncut.
+    // operator through separate rolls, and a check moved after the advance
+    // leaves the day on main with tomorrow uncut.
     #[test]
     fn every_failing_precondition_is_named_at_once() {
         let shell = Fake::new(|line| match line {
             line if line.starts_with("git status") => Run::ok(" M crates/aether-bloomery/src/lib.rs"),
-            line if line.starts_with("gh api") => Run::ok("false"),
             line if line.starts_with("git ls-remote") => Run::ok("cafe\trefs/heads/bloomery/daily/2026-08-15"),
             _ => Run::ok(""),
         });
 
         let refusal = screen(&view(&[BloomStatus::Sealed, BloomStatus::Resolved]), &shell, &day(), "origin")
-            .expect_err("an undrained, dirty, squash-only, already-cut day is refused")
+            .expect_err("an undrained, dirty, already-cut day is refused")
             .to_string();
 
         assert!(refusal.contains("2 bloom(s) undrained"), "undrained blooms are named: {refusal}");
         assert!(refusal.contains("working tree is dirty"), "the dirty tree is named: {refusal}");
-        assert!(refusal.contains("allow_rebase_merge"), "the merge-method setting is named: {refusal}");
         assert!(refusal.contains("already exists on origin"), "the existing cut is named: {refusal}");
+        assert!(!refusal.contains("allow_rebase_merge"), "GitHub merge settings are not a roll gate: {refusal}");
     }
 }
