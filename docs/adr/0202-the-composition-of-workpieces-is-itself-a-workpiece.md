@@ -1,4 +1,4 @@
-# ADR-0201: The composition of workpieces is itself a workpiece
+# ADR-0202: The composition of workpieces is itself a workpiece
 
 - **Status:** Proposed
 - **Date:** 2026-08-18
