@@ -15,6 +15,18 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, StageId};
 use crate::values::{Evidence, Transformation};
 
+/// Fallback when a sealed catalog binds no retry budget: one attempt, then the ceiling.
+pub(super) const DEFAULT_RETRY_BUDGET: u32 = 1;
+
+/// Whether `rolls` has reached the stage's park ceiling.
+///
+/// Inclusive: a roll count equal to the catalog budget parks (or refuses a new
+/// fold) rather than buying another attempt. One comparison so the budget means
+/// the same thing at the verify completion gate and the resolve dispatch gate.
+pub(super) fn at_park_ceiling(record: &BloomRecord, stage: StageId, rolls: u32) -> bool {
+    rolls >= record.stage_catalog.retry_budget_of(stage).unwrap_or(DEFAULT_RETRY_BUDGET)
+}
+
 /// The dispatch that hands a tree to the composition's `Verify` — the composite
 /// gate run over `tree` / `head`.
 ///
@@ -150,7 +162,7 @@ pub(super) fn reduce_aggregate_verify_completed(
         return Decisions { outcome: Outcome::AggregateVerifyPassed { bloom: *bloom, rolls }, effects };
     }
 
-    if rolls >= record.stage_catalog.retry_budget_of(StageId::AggregateVerify).unwrap_or(1) {
+    if at_park_ceiling(record, StageId::AggregateVerify, rolls) {
         // The budget is spent on a fold that still does not build. The fold
         // stays held as the owner's decision context — the same bloom-scope park
         // the review's ceiling raises, so an adopting answer that names the
