@@ -688,8 +688,8 @@ fn authored_stage_catalog_reaches_the_dispatch_profile() {
     wait_for_200(http_port, "/drafts");
 
     let authored_profile = AgentProfile {
-        harness: Harness::Codex,
-        model: "gpt-5.6".to_owned(),
+        harness: Harness::Grok,
+        model: "grok-4.6-authored".to_owned(),
         effort: ReasoningEffort::Max,
         tools: ToolPolicy::ReadOnly,
     };

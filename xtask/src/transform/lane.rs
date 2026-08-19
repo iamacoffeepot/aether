@@ -51,7 +51,7 @@ pub(super) struct Usage {
 /// `no_result` record when the run died before reporting one.
 ///
 /// `session` is the handle a later lap resumes this run's conversation with —
-/// the codex arm's `thread_id`, the muse arm's session uuid — under the
+/// the muse arm's session uuid, the grok arm's session id — under the
 /// `session_id` key the Anthropic-Messages derivation already writes, because
 /// the session pool reads one key whichever arm produced the record.
 ///
@@ -312,10 +312,7 @@ pub(super) fn resume_handle_rejected(status: ExitStatus, stdout: &[u8], stderr: 
         return false;
     }
     let stderr = String::from_utf8_lossy(stderr).to_ascii_lowercase();
-    let names_the_handle = stderr.contains("session")
-        || stderr.contains("resume")
-        || stderr.contains("conversation")
-        || stderr.contains("thread");
+    let names_the_handle = stderr.contains("session") || stderr.contains("resume") || stderr.contains("conversation");
     let rejected = stderr.contains("not found")
         || stderr.contains("unknown")
         || stderr.contains("invalid")
@@ -419,10 +416,6 @@ mod tests {
         let failed = ExitStatus::from_raw(1 << 8);
         assert!(resume_handle_rejected(failed, b"", b"No conversation found with session ID sess-1"));
         assert!(resume_handle_rejected(failed, b"", b"error: unknown session"));
-        assert!(
-            resume_handle_rejected(failed, b"", b"thread 019f not found"),
-            "codex addresses its session as a thread"
-        );
         assert!(
             !resume_handle_rejected(failed, br#"{"type":"result"}"#, b"No conversation found"),
             "a transcript means the CLI ran — do not double-spend"

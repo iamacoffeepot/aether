@@ -191,7 +191,7 @@ mod tests {
         // null unconditionally outside the Claude arm. A `#[serde(default)]`
         // over a non-`Option` column fills only a *missing* field, so pinning
         // this shape is what keeps the study lane from failing every parse on
-        // every muse and codex attempt (the two arms it exists to measure).
+        // every muse and grok attempt (the two arms it exists to measure).
         let nulled = br#"{
             "schema": 1, "num_turns": null, "cost_usd": null, "duration_ms": null,
             "is_error": false, "input": 1000, "cache_write": null, "cache_write_1h": null,

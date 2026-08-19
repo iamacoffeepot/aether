@@ -5,7 +5,7 @@
 //!
 //! The Claude harness injects append-only report tools and the status is
 //! derived from the findings file. Harnesses without tool injection
-//! (codex / muse / grok) keep the terminal `VERDICT:` parse.
+//! (muse / grok) keep the terminal `VERDICT:` parse.
 
 use aether_bloomery::Harness;
 use anyhow::Result;
@@ -43,7 +43,7 @@ enum ReviewVerdict {
 /// instructions demand it stand alone at the end, but a stray earlier occurrence
 /// must not shadow the real one). `None` for a message with no well-formed
 /// verdict line — the caller fails closed. Used only on harnesses that cannot
-/// inject the report tools (codex / muse / grok). Pure so the parse is testable
+/// inject the report tools (muse / grok). Pure so the parse is testable
 /// without spawning the critic.
 fn parse_review_verdict(final_text: &str) -> Option<ReviewVerdict> {
     final_text.lines().rev().find_map(verdict_line)
@@ -506,7 +506,7 @@ pub(super) fn run_review(args: &TransformArgs) -> Result<()> {
     );
     let run = run_model_lane(&prompt, args)?;
     // Claude injects the report tools and the findings file is the verdict
-    // channel. Codex / muse / grok have no injection and keep the text parse.
+    // channel. Muse / grok have no injection and keep the text parse.
     let evidence = if matches!(resolve_harness(args.harness.as_deref())?, Harness::Claude) {
         stamp_reports_evidence(
             args.nonce.as_deref(),

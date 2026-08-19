@@ -65,7 +65,9 @@ impl AgentProfile {
 pub enum Harness {
     /// The Claude Code CLI, headless.
     Claude,
-    /// The Codex CLI, headless.
+    /// Retired. Occupies the wire discriminant so Muse and Grok stay where
+    /// journals already wrote them; [`from_name`](Self::from_name) does not
+    /// parse it (#5171).
     Codex,
     /// The Muse Code CLI, headless.
     Muse,
@@ -98,7 +100,6 @@ impl Harness {
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "claude" => Some(Self::Claude),
-            "codex" => Some(Self::Codex),
             "muse" => Some(Self::Muse),
             "grok" => Some(Self::Grok),
             _ => None,
@@ -189,10 +190,10 @@ mod tests {
     // matches, so an arm added to one and forgotten in the other renders a
     // harness the transform entrypoint then refuses to parse — a dispatch that
     // fails at the child rather than at the calibration. Round-tripping every
-    // variant is what catches the half-added arm.
+    // live arm is what catches the half-added one.
     #[test]
     fn every_harness_round_trips_through_its_runner_facing_name() {
-        for harness in [Harness::Claude, Harness::Codex, Harness::Muse, Harness::Grok] {
+        for harness in [Harness::Claude, Harness::Muse, Harness::Grok] {
             assert_eq!(
                 Harness::from_name(harness.as_str()),
                 Some(harness),
@@ -200,5 +201,6 @@ mod tests {
             );
         }
         assert_eq!(Harness::from_name("gpt"), None, "an unrecognized name is a legible refusal, not a fallback");
+        assert_eq!(Harness::from_name("codex"), None, "the retired arm is not selectable");
     }
 }
