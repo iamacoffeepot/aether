@@ -17,6 +17,21 @@ use crate::transform::sccache::{self, CompilerCache};
 use crate::transform::scratch::Scratch;
 use crate::transform::{TransformArgs, conventions};
 
+/// Absolute path to the construct lane's Claude permission policy (#5172).
+/// Resolved against this crate's manifest so the child reads the copy that
+/// rode into the scratch worktree with the sealed base, not a cwd-relative
+/// guess.
+const CONSTRUCT_SETTINGS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/transform/claude-construct.settings.json");
+
+/// Absolute path to the review critic's read-only Claude permission policy
+/// (#5172). Same argv shape as construct; no Edit, Write, or cargo.
+const REVIEW_SETTINGS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/transform/claude-review.settings.json");
+
+// Compile-time presence: a missing policy is a build error, not a headless
+// session that cannot write.
+const _: &str = include_str!("claude-construct.settings.json");
+const _: &str = include_str!("claude-review.settings.json");
+
 /// The headless-Claude argv the `construct.implement` lane runs (#3511): `-p`
 /// non-interactive, emitting the stream-json transcript the in-repo
 /// result-record derivation reads. `--model` and `--effort` are the CLI's own
@@ -26,19 +41,28 @@ use crate::transform::{TransformArgs, conventions};
 /// so the profile wiring is testable without spawning Claude; the assembled
 /// prompt is piped on the child's stdin (not an argv positional).
 fn construct_argv(model: Option<&str>, effort: Option<&str>, resume: Option<&str>) -> Vec<String> {
-    // `--dangerously-skip-permissions` is what makes the lane actually run
-    // headless: `claude -p` under the default permission mode denies every
-    // `Edit`/`Write`, and a non-interactive session has no way to grant one, so
-    // the lane investigates for dozens of turns and leaves a clean worktree —
-    // `produced_candidate: false` twice wedged the first live Claude member
-    // (bloom `73d025b42e0a`, 2026-08-12). The sibling arms already carry their
-    // headless equivalents (`--disable-approval` on muse, `--permission-mode
-    // bypassPermissions` on grok); Claude's flag is broader because its
-    // bash-running lane needs more than auto-accepted edits, and the lane is
-    // already the trust boundary's narrow side (ADR-0152): a scrubbed
-    // environment, no credentials, a scratch worktree, and every capture,
-    // commit, and push host-side.
-    let mut argv = vec!["-p".to_owned(), "--dangerously-skip-permissions".to_owned()];
+    claude_argv(model, effort, resume, CONSTRUCT_SETTINGS)
+}
+
+/// The review critic's argv: identical to construct except it names the
+/// read-only settings file. The critic shares this arm and used to inherit
+/// the blanket write gate; it must not keep it.
+fn review_argv(model: Option<&str>, effort: Option<&str>, resume: Option<&str>) -> Vec<String> {
+    claude_argv(model, effort, resume, REVIEW_SETTINGS)
+}
+
+/// Shared headless-Claude argv. `--settings` is the write gate: the named
+/// file's allow rules are what make `claude -p` accept the tools the lane
+/// actually runs. Under the default permission mode a non-interactive session
+/// denies every unlisted tool and has no human to grant one, so a missing or
+/// empty policy reproduces the #4874 wedge (bloom `73d025b42e0a`,
+/// `produced_candidate: false`). The sibling arms carry their own headless
+/// equivalents (`--disable-approval` on muse, `--permission-mode
+/// bypassPermissions` on grok); this arm used to pass
+/// `--dangerously-skip-permissions`, which opened every path the operator can
+/// reach. The checked-in file is the narrow form of the same gate.
+fn claude_argv(model: Option<&str>, effort: Option<&str>, resume: Option<&str>, settings: &str) -> Vec<String> {
+    let mut argv = vec!["-p".to_owned(), "--settings".to_owned(), settings.to_owned()];
     if let Some(model) = model {
         argv.push("--model".to_owned());
         argv.push(model.to_owned());
@@ -157,7 +181,11 @@ pub(super) fn run_headless_claude(
     // construct lane costs in RAM is the builds its agent drives, and the
     // wrapper's reading covers the whole reaped tree rather than this process.
     let mut claude = peak.command("claude");
-    let mut flags = construct_argv(args.model.as_deref(), args.effort.as_deref(), args.resume.as_deref());
+    let mut flags = if args.command == REVIEW_CRITIC {
+        review_argv(args.model.as_deref(), args.effort.as_deref(), args.resume.as_deref())
+    } else {
+        construct_argv(args.model.as_deref(), args.effort.as_deref(), args.resume.as_deref())
+    };
     // Tool injection is Claude-only. Muse / grok review paths have no MCP hook
     // and keep the terminal `VERDICT:` parse.
     if args.command == REVIEW_CRITIC {
@@ -208,7 +236,7 @@ mod tests {
     use std::process::Command;
     use std::{env, fs, process};
 
-    use super::{construct_argv, tail};
+    use super::{CONSTRUCT_SETTINGS, REVIEW_SETTINGS, construct_argv, review_argv, tail};
     use crate::transform::lane::{execute, resume_handle_rejected};
     use crate::transform::peak_memory;
 
@@ -236,12 +264,62 @@ mod tests {
         assert_eq!(argv[effort_at + 1], "high", "the resolved effort rides argv, not an unread env var");
         // The stream-json transcript is what the result-record derivation reads.
         assert!(argv.windows(2).any(|w| w == ["--output-format", "stream-json"]), "emits the stream-json transcript");
-        // Tripwire: without the permission bypass, headless `claude -p` denies
-        // every write and the lane wedges on `produced_candidate: false`
+        // Tripwire: the checked-in settings file is the write gate. The blanket
+        // `--dangerously-skip-permissions` is what #4874 used to open every path
+        // the operator can reach; without a settings flag, headless `claude -p`
+        // denies every write and the lane wedges on `produced_candidate: false`
         // (bloom `73d025b42e0a`).
-        assert!(argv.iter().any(|a| a == "--dangerously-skip-permissions"), "headless needs the write gate open");
+        let settings_at = argv.iter().position(|a| a == "--settings").expect("argv pins the lane settings file");
+        assert_eq!(argv[settings_at + 1], CONSTRUCT_SETTINGS, "the construct policy rides argv as a path");
+        assert!(
+            !argv.iter().any(|a| a == "--dangerously-skip-permissions"),
+            "the blanket bypass is gone; the settings file is the write gate"
+        );
         assert!(!argv.iter().any(|a| a == "--resume"), "a cold launch names no session");
         assert!(!argv.iter().any(|a| a == "--mcp-config"), "construct does not inject the review report server");
+    }
+
+    #[test]
+    fn review_argv_pins_the_read_only_settings_and_not_the_bypass() {
+        let argv = review_argv(Some("claude-opus-4-8"), Some("high"), None);
+        let settings_at = argv.iter().position(|a| a == "--settings").expect("review pins its settings file");
+        assert_eq!(argv[settings_at + 1], REVIEW_SETTINGS, "the critic rides the read-only policy, not construct's");
+        assert!(
+            !argv.iter().any(|a| a == "--dangerously-skip-permissions"),
+            "the critic must not inherit the blanket bypass it used to share"
+        );
+    }
+
+    // Tripwire: a rule mistake that drops Edit/Write from construct recreates
+    // the #4874 wedge; one that leaves them on the critic lets review mutate
+    // the tree. The allow lists are the policy, so the files are the source
+    // and this assertion is the inversion of "construct can write, review cannot."
+    #[test]
+    fn construct_settings_allow_worktree_writes_and_review_settings_do_not() {
+        let construct = settings_allow(include_str!("claude-construct.settings.json"));
+        let review = settings_allow(include_str!("claude-review.settings.json"));
+        for rule in ["Edit(./**)", "Bash(cargo:*)"] {
+            assert!(construct.iter().any(|entry| entry == rule), "construct must allow {rule}");
+            assert!(review.iter().all(|entry| entry != rule), "review must not allow {rule}");
+        }
+        // Claude's file-permission check only matches Edit(path); a Write(...)
+        // rule is ignored and warns on every launch. Edit(./**) is the write
+        // gate for both the Edit and Write tools.
+        assert!(
+            construct.iter().all(|entry| !entry.starts_with("Write(")),
+            "Write(...) rules are not file-permission checks; Edit(./**) covers both tools"
+        );
+    }
+
+    fn settings_allow(body: &str) -> Vec<String> {
+        let parsed: serde_json::Value = serde_json::from_str(body).expect("lane settings must be JSON");
+        parsed
+            .pointer("/permissions/allow")
+            .and_then(serde_json::Value::as_array)
+            .expect("lane settings must have permissions.allow")
+            .iter()
+            .map(|entry| entry.as_str().expect("allow entries are strings").to_owned())
+            .collect()
     }
 
     #[test]
