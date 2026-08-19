@@ -1,6 +1,7 @@
 //! Proof-fact addressing, recording, attribution, the batch gate, daily
-//! sweeps, and the roll barrier (ADR-0200 §The fact, §"Attribution through
-//! the ledger", §"The batch gate", §"The gate ladder").
+//! sweeps, the roll barrier (ADR-0200 §The fact, §"Attribution through
+//! the ledger", §"The batch gate", §"The gate ladder"), and member-Verify
+//! declared-surface containment.
 //!
 //! A proof fact is addressed by `(closure_key, test, result, host_class)`.
 //! [`closure_key`] hashes a package's git-addressed dependency closure;
@@ -11,12 +12,15 @@
 //! members into one prove; [`run_sweep`] converts unknown facts on idle
 //! prover time and taints a closure on red; [`decide_roll`] holds the day
 //! on main until the coverage map is fully green.
+//! [`apply_containment`] fails a member Verify whose candidate edited a path
+//! no declared-surface glob covers.
 
 #[cfg(feature = "runtime")]
 mod attribution;
 #[cfg(feature = "runtime")]
 mod batch;
 mod closure;
+mod containment;
 mod facts;
 #[cfg(feature = "runtime")]
 mod roll;
@@ -35,6 +39,7 @@ pub use batch::{
     run_batch_gate,
 };
 pub use closure::{ClosureKey, ClosureKeyError, closure_key};
+pub use containment::{apply_containment, changed_paths, out_of_surface, path_in_surface};
 #[cfg(feature = "runtime")]
 pub use facts::record_proof_facts;
 pub use facts::{DiscriminatedFact, DiscriminatedFacts, ProofResult, ProofSource, RunnerReport, discriminate};

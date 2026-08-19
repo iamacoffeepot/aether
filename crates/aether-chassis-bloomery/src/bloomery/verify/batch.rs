@@ -9,7 +9,7 @@
 
 use std::mem::take;
 
-use aether_bloomery::{SurfacePattern, WorkpieceId, surface_intersection};
+use aether_bloomery::{WorkpieceId, surface_intersection};
 
 use super::{
     Attribution, AttributionError, AttributionRequest, BaseProbe, ClosureKey, DiscriminatedFacts, HostClass,
@@ -354,16 +354,7 @@ fn isolate_unowned<'a>(members: &'a [BatchMember], bisect: &mut dyn BatchBisect)
 }
 
 fn owner_of_path<'a>(members: &'a [BatchMember], path: &str) -> Option<&'a BatchMember> {
-    members.iter().find(|member| surface_owns(&member.declared_surface, path))
-}
-
-fn surface_owns(surface: &[String], path: &str) -> bool {
-    surface.iter().filter_map(|glob| SurfacePattern::parse(glob)).any(|pattern| match pattern {
-        SurfacePattern::Exact(exact) => path == exact,
-        SurfacePattern::Subtree(prefix) => {
-            path == prefix || path.starts_with(&prefix) && path.as_bytes().get(prefix.len()) == Some(&b'/')
-        }
-    })
+    members.iter().find(|member| super::path_in_surface(&member.declared_surface, path))
 }
 
 fn all_fates(members: &[BatchMember], fate: MemberFate) -> Vec<(WorkpieceId, MemberFate)> {
