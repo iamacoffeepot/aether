@@ -789,12 +789,7 @@ fn commit_sha(message: &str, tree: &str, parents: &[String]) -> String {
 
 // 64 lowercase hex — the sha form the port's `digest_from_hex` round-trips.
 fn hex_of(bytes: &[u8; 32]) -> String {
-    let mut out = String::with_capacity(64);
-    for byte in bytes {
-        out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
-        out.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
-    }
-    out
+    aether_bloomery::encode_hex(bytes)
 }
 
 impl GitDataApi for FakeGithub {

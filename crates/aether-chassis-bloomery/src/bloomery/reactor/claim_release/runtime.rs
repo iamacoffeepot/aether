@@ -104,12 +104,9 @@ impl ClaimReleaseReactorState {
 /// to a duplicate rather than a second completion. An authorized release
 /// completes exactly once.
 fn completion_key(request: &Digest) -> IdempotencyKey {
-    use core::fmt::Write;
     let mut key = String::with_capacity(45 + 64);
     key.push_str("aether.bloomery.orphan_claim_release_completed:");
-    for byte in request.as_bytes() {
-        let _ = write!(key, "{byte:02x}");
-    }
+    key.push_str(&request.to_hex());
     IdempotencyKey(key)
 }
 

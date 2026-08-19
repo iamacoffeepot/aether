@@ -853,11 +853,7 @@ fn repair_event(bloom: BloomId) -> Event {
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {
-    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut text, byte| {
-        use std::fmt::Write;
-        write!(&mut text, "{byte:02x}").expect("writing to String cannot fail");
-        text
-    })
+    aether_bloomery::encode_hex(bytes)
 }
 
 fn fail_construct(key: &str, bloom: BloomId) -> Event {

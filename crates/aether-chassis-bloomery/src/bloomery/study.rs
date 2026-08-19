@@ -42,7 +42,6 @@
 
 use std::error::Error;
 use std::fmt;
-use std::fmt::Write as _;
 
 use aether_bloomery::{
     BloomId, ConfigResolveError, ConfigScopes, Digest, Event, Evidence, EvidenceKind, Fact, Nonce, PriceTable,
@@ -372,34 +371,13 @@ pub fn rebuild_study_index(
 /// Render a digest as the lowercase-hex parent string the artifact store records
 /// — the derivation edge from a study record to the attempt it grades.
 fn digest_to_parent(digest: &Digest) -> String {
-    let mut out = String::with_capacity(64);
-    for byte in digest.as_bytes() {
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
+    digest.to_hex()
 }
 
 /// Inverse of [`digest_to_parent`] over a content-store hash: 64 hex
 /// characters, or `None` when the string is not a 32-byte digest.
 fn digest_from_hex(hex: &str) -> Option<Digest> {
-    if hex.len() != 64 {
-        return None;
-    }
-    let mut bytes = [0u8; 32];
-    let raw = hex.as_bytes();
-    for (i, slot) in bytes.iter_mut().enumerate() {
-        *slot = (hex_nibble(raw[i * 2])? << 4) | hex_nibble(raw[i * 2 + 1])?;
-    }
-    Some(Digest::from_bytes(bytes))
-}
-
-const fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
+    Digest::from_hex(hex)
 }
 
 #[cfg(test)]

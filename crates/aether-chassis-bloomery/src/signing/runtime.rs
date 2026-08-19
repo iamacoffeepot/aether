@@ -92,8 +92,9 @@ pub fn parse_allowlist(allowlist: Option<&str>) -> Result<BTreeMap<KeyId, Verify
         }
         let (id, hex) =
             entry.split_once(':').ok_or_else(|| format!("allowlist entry `{entry}` is not `key-id:hex-public-key`"))?;
-        let bytes =
-            decode_key_hex(hex.trim()).ok_or_else(|| format!("allowlist entry `{id}` has a malformed hex key"))?;
+        let bytes = aether_bloomery::decode_hex(hex.trim())
+            .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+            .ok_or_else(|| format!("allowlist entry `{id}` has a malformed hex key"))?;
         let key = VerifyingKey::from_bytes(&bytes)
             .map_err(|error| format!("allowlist entry `{id}` is not a valid ed25519 key: {error}"))?;
         // A duplicate key-id is ambiguous — silently keeping the last would let a
@@ -104,31 +105,6 @@ pub fn parse_allowlist(allowlist: Option<&str>) -> Result<BTreeMap<KeyId, Verify
         }
     }
     Ok(parsed)
-}
-
-/// Decode a 64-char hex string into the 32 raw bytes of an ed25519 public key,
-/// or `None` on a wrong length or a non-hex character.
-fn decode_key_hex(hex: &str) -> Option<[u8; 32]> {
-    if hex.len() != 64 {
-        return None;
-    }
-    let mut bytes = [0u8; 32];
-    for (index, slot) in bytes.iter_mut().enumerate() {
-        let high = hex_nibble(hex.as_bytes()[index * 2])?;
-        let low = hex_nibble(hex.as_bytes()[index * 2 + 1])?;
-        *slot = (high << 4) | low;
-    }
-    Some(bytes)
-}
-
-/// One hex digit (0-9, a-f, A-F) → its nibble value, or `None`.
-fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 #[runtime]

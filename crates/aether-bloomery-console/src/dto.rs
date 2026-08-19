@@ -36,13 +36,13 @@ impl DigestHex {
 
     #[must_use]
     pub fn as_hex(&self) -> String {
-        encode(&self.0)
+        aether_bloomery::encode_hex(&self.0)
     }
 
     /// The short id the board prints for a bloom.
     #[must_use]
     pub fn prefix(&self) -> String {
-        let hex = encode(&self.0);
+        let hex = aether_bloomery::encode_hex(&self.0);
         hex.get(..8).unwrap_or(&hex).to_owned()
     }
 }
@@ -665,24 +665,11 @@ pub struct SpendWindowView {
 }
 
 fn encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(char::from(HEX[usize::from(byte >> 4)]));
-        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    out
+    aether_bloomery::encode_hex(bytes)
 }
 
 fn decode(hex: &str) -> Option<[u8; 32]> {
-    if hex.len() != 64 {
-        return None;
-    }
-    let mut bytes = [0u8; 32];
-    for (index, slot) in bytes.iter_mut().enumerate() {
-        *slot = u8::from_str_radix(hex.get(index * 2..index * 2 + 2)?, 16).ok()?;
-    }
-    Some(bytes)
+    aether_bloomery::Digest::from_hex(hex).map(|digest| *digest.as_bytes())
 }
 
 /// Accept the REST edge's two spellings: 64 hex characters, or a 32-byte array.
@@ -728,7 +715,7 @@ mod tests {
         assert_eq!(parsed.as_bytes(), &bytes);
         let from_array: DigestHex = serde_json::from_value(json!(bytes.to_vec())).expect("byte-array digest");
         assert_eq!(from_array.as_bytes(), &bytes);
-        assert_eq!(decode(&hex.to_ascii_uppercase()), Some(bytes));
+        assert_eq!(decode(&hex.to_ascii_uppercase()), None);
         assert_eq!(parsed.prefix().len(), 8);
     }
 

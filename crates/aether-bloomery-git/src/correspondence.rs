@@ -14,7 +14,7 @@
 //! [#3590]: https://github.com/iamacoffeepot/aether/issues/3590
 //! [#3603]: https://github.com/iamacoffeepot/aether/issues/3603
 
-use aether_bloomery::{BackendObjectId, CorrespondenceError};
+use aether_bloomery::{BackendObjectId, CorrespondenceError, decode_hex, encode_hex};
 
 /// The object format a [`GitObjectId`]'s bytes are in — the format tag ADR-0150
 /// requires so the correspondence schema survives a SHA-256 object-format
@@ -68,9 +68,9 @@ impl GitObjectId {
         resolvable.then_some(Self { format, bytes })
     }
 
-    /// Parse a git object sha rendered as lowercase (or uppercase) hex, inferring
+    /// Parse a git object sha rendered as lowercase hex, inferring
     /// the format from its length: 40 hex → `sha1`, 64 hex → `sha256`. Any other
-    /// length, a non-hex character, or the all-zero null oid is `None` (git never
+    /// length, uppercase, a non-hex character, or the all-zero null oid is `None` (git never
     /// hands back such a string as an object, so a `None` here is a malformed
     /// sha, not an expected miss).
     ///
@@ -84,24 +84,14 @@ impl GitObjectId {
             64 => GitObjectFormat::Sha256,
             _ => return None,
         };
-        let raw = sha.as_bytes();
-        let mut bytes = vec![0u8; format.byte_len()];
-        for (i, byte) in bytes.iter_mut().enumerate() {
-            *byte = (hex_nibble(raw[i * 2])? << 4) | hex_nibble(raw[i * 2 + 1])?;
-        }
-        Self::new(format, bytes)
+        Self::new(format, decode_hex(sha)?)
     }
 
     /// Render the object id as the lowercase-hex git object sha — the form the
     /// Git Data / Actions / worktree surfaces take.
     #[must_use]
     pub fn to_hex(&self) -> String {
-        let mut out = String::with_capacity(self.bytes.len() * 2);
-        for byte in &self.bytes {
-            out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
-            out.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
-        }
-        out
+        encode_hex(&self.bytes)
     }
 
     /// The object format tag.
@@ -152,16 +142,6 @@ impl TryFrom<&BackendObjectId> for GitObjectId {
 
     fn try_from(object: &BackendObjectId) -> Result<Self, Self::Error> {
         Self::try_from(object.clone())
-    }
-}
-
-// One hex character to its 0..=15 nibble, or `None` for a non-hex byte.
-fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
     }
 }
 

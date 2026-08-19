@@ -224,10 +224,5 @@ fn git_in(dir: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {
-    let mut hex = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        hex.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
-        hex.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
-    }
-    hex
+    aether_bloomery::encode_hex(bytes)
 }
