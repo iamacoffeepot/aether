@@ -664,10 +664,7 @@ impl FakeGithub {
         if in_map {
             return true;
         }
-        match repo {
-            Some(repo) => command::run(&repo, &["cat-file", "-e", sha]).is_ok_and(|out| out.status.success()),
-            None => true,
-        }
+        repo.is_none_or(|repo| command::run(&repo, &["cat-file", "-e", sha]).is_ok_and(|out| out.status.success()))
     }
 
     fn require_object(&self, sha: &str) -> Result<(), GitDataError> {
@@ -882,10 +879,8 @@ impl GitDataApi for FakeGithub {
         if ancestor == commit {
             return Ok(true);
         }
-        match self.object_repo() {
-            Some(repo) => command::is_ancestor(&repo, ancestor, commit),
-            None => Ok(self.contains(commit, ancestor)),
-        }
+        self.object_repo()
+            .map_or_else(|| Ok(self.contains(commit, ancestor)), |repo| command::is_ancestor(&repo, ancestor, commit))
     }
 
     fn create_commit(&self, message: &str, tree: &str, parents: &[String]) -> Result<GitCommit, GitDataError> {
@@ -1042,7 +1037,7 @@ fn reject_bad_name(name: &str) -> Result<(), GitDataError> {
         || name.starts_with('/')
         || name.ends_with('/')
         || name.ends_with('.')
-        || name.ends_with(".lock")
+        || Path::new(name).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("lock"))
     {
         return Err(GitDataError::Command(format!("bad name {name}")));
     }
