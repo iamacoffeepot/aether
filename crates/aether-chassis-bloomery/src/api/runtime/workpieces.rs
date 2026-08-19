@@ -28,7 +28,7 @@ impl ApiCapabilityState {
     }
 
     /// `GET /workpieces` — durable open commissions, not the in-memory staged map.
-    pub(super) fn list_open_workpieces(&self) -> Routed {
+    pub(super) fn list_open_workpieces() -> Routed {
         Routed::ListOpenWorkpieces(ListCommissions { status: Some("open".to_owned()) })
     }
 }

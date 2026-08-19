@@ -350,7 +350,7 @@ impl NativeActor for BloomeryApiCapability {
     /// `GET /workpieces` — list durable open commissions as workpieces.
     #[http::route(Get, "/workpieces")]
     fn on_get_workpieces(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
-        let routed = state.list_open_workpieces();
+        let routed = ApiCapabilityState::list_open_workpieces();
         finish(state, ctx, routed)
     }
 

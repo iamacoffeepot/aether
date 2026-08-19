@@ -134,7 +134,7 @@ pub(super) fn admit_member(expected: Digest, result: LoadCommissionResult) -> Re
         LoadCommissionResult::Missing { id } => Err(AdmitError::Refused(AdmissionRefusal::MissingCommission { id })),
         LoadCommissionResult::Err { error } => Err(AdmitError::Store(error)),
         LoadCommissionResult::Ok { id, intent, current_revision, status, current, approvals, .. } => {
-            admit_loaded(expected, id, intent, current_revision, status, current, approvals)
+            admit_loaded(expected, id, &intent, current_revision, &status, current, approvals)
                 .map_err(AdmitError::Refused)
         }
     }
@@ -143,9 +143,9 @@ pub(super) fn admit_member(expected: Digest, result: LoadCommissionResult) -> Re
 fn admit_loaded(
     expected: Digest,
     id: String,
-    intent: Vec<u8>,
+    intent: &[u8],
     current_revision: Option<Vec<u8>>,
-    status: String,
+    status: &str,
     current: Option<Vec<u8>>,
     approvals: Vec<Vec<u8>>,
 ) -> Result<AdmittedMember, AdmissionRefusal> {
@@ -186,8 +186,7 @@ fn admit_loaded(
 
     let signed_statement =
         decoded.into_iter().find(|statement| matches!(statement.provenance, Provenance::AuthorSignature(_)));
-    let workpiece =
-        Workpiece { id: WorkpieceId(id.clone()), intent: digest32(&intent, &id)?, scope_revision: expected };
+    let workpiece = Workpiece { id: WorkpieceId(id.clone()), intent: digest32(intent, &id)?, scope_revision: expected };
     let edges = revision
         .dependencies
         .iter()
@@ -197,7 +196,7 @@ fn admit_loaded(
         workpiece: workpiece.id.clone(),
         scope_revision: expected,
         declared_surface: revision.declared_surface.clone(),
-        completeness: completeness_from(&revision, &status, current_digest == expected),
+        completeness: completeness_from(&revision, status, current_digest == expected),
         adr_touch: adr_touch(&revision.declared_surface),
         pre_approved: false,
         signed_statement,

@@ -73,7 +73,7 @@ impl ApiCapabilityState {
         self.begin_store_seal(ctx, draft, None, request.idempotency_key, request.edges)
     }
 
-    /// Load every draft member's commission, then [`gate_and_admit`]. Both
+    /// Load every draft member's commission, then [`gate_and_admit`](ApiCapabilityState::gate_and_admit). Both
     /// admission doors share this so a supersession cannot keep a writable
     /// projection after seal lost one.
     pub(super) fn begin_store_seal(
