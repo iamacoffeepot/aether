@@ -146,12 +146,13 @@ impl Adr {
     /// [`AdrStatus::Superseded`].
     #[must_use]
     pub fn render(&self, status: AdrStatus, successor_number: Option<u32>) -> String {
-        let mut out = String::new();
-        out.push_str(&alloc::format!("# ADR-{:04}: {}\n", self.number, self.title));
-        out.push('\n');
-        out.push_str(&alloc::format!("- **Status:** {}\n", status.render_line(successor_number)));
-        out.push_str(&alloc::format!("- **Date:** {}\n", self.date));
-        out.push('\n');
+        let mut out = alloc::format!(
+            "# ADR-{:04}: {}\n\n- **Status:** {}\n- **Date:** {}\n\n",
+            self.number,
+            self.title,
+            status.render_line(successor_number),
+            self.date,
+        );
         push_section(&mut out, "Context", &self.context);
         push_section(&mut out, "Decision", &self.decision);
         push_section(&mut out, "Consequences", &self.consequences);

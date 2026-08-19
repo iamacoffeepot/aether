@@ -418,9 +418,8 @@ fn load_view(conn: &Connection, digest: Digest) -> Result<Option<AdrView>, AdrEr
 }
 
 fn load_by_number(conn: &Connection, number: u32) -> Result<Option<AdrView>, AdrError> {
-    let digest = match load_digest_for_number(conn, number)? {
-        Some(digest) => digest,
-        None => return Ok(None),
+    let Some(digest) = load_digest_for_number(conn, number)? else {
+        return Ok(None);
     };
     load_view(conn, digest)
 }
