@@ -24,14 +24,11 @@
 
 use std::sync::Arc;
 
+use aether_bloomery::testing::digest;
 use aether_bloomery::{BloomId, Digest, IntegrateOutcome};
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{GitSource, GithubLanding, LandingSource, MainlineRef, ProposalOutcome, SourceError};
 use aether_chassis_bloomery::bloomery::SourceShell;
-
-fn digest(seed: u8) -> Digest {
-    Digest::from_bytes([seed; 32])
-}
 
 // Seed a fake with a base commit and a mainline ref at it, create the bloom's
 // integration namespace on a gated (`cas_land_enabled = false`) backend, and

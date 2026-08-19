@@ -118,6 +118,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_actor::Addressable;
+use aether_bloomery::testing::approved;
 use aether_bloomery::{
     Admit, AdmitResult, BloomDraft, BloomId, BloomSpec, BloomStatus, BloomView, CandidateRef, ConfigRegistry,
     Correspondence, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, Nonce, Outcome, Query,
@@ -786,10 +787,8 @@ fn nonces(orders: &[OutstandingOrder]) -> Vec<&str> {
 
 /// A digest whose every byte is `seed` — the scenario shorthand for a distinct,
 /// recognizable value.
-#[must_use]
-pub fn digest(seed: u8) -> Digest {
-    Digest::from_bytes([seed; 32])
-}
+#[doc(inline)]
+pub use aether_bloomery::testing::digest;
 
 /// One member, approved. The approval has to bind the member's own subject or
 /// the seal door refuses it as an unapproved member (ADR-0149), and the subject
@@ -798,14 +797,12 @@ pub fn digest(seed: u8) -> Digest {
 /// otherwise built.
 #[must_use]
 pub fn member(workpiece: &str, scope_revision: Digest) -> Membership {
-    let mut member = Membership {
+    approved(Membership {
         workpiece: WorkpieceId(workpiece.to_owned()),
         scope_revision,
         configs: ConfigRegistry::default(),
         approval: Evidence { subject: Digest::default(), kind: EvidenceKind::Approval, detail: digest(200) },
-    };
-    member.approval.subject = member.subject();
-    member
+    })
 }
 
 /// Freeze `members` into a spec sealing on `base`.

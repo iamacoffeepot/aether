@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use std::collections::{BTreeMap, HashMap};
 
+use aether_bloomery::testing::digest;
 use aether_bloomery::{
     Admit, AgentSelection, AggregateReviewPayload, BloomId, CandidateRef, Conclusion, ConfigKind, ConfigRegistry,
     DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, Harness, ModelOverride, Nonce,
@@ -165,10 +166,6 @@ impl ExecutorBackend for FailingExecutor {
 
 fn failing_shell(status: u16) -> ExecutorShell {
     ExecutorShell::new(Arc::new(FailingExecutor { status }))
-}
-
-fn digest(seed: u8) -> aether_bloomery::Digest {
-    aether_bloomery::Digest::from_bytes([seed; 32])
 }
 
 // Wrap freshly-dispatched handles into `TrackedHandle`s the way `on_dispatch_tick`

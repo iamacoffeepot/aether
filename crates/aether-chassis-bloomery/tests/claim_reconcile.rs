@@ -40,11 +40,11 @@ use aether_bloomery::control::{
     HealOp, ReconcileOp, held_to_seal_error, held_to_supersede_error, plan_heals, reconcile_op, release_reclaim_mail,
     release_seal_mail, seal_claim_mail, transfer_seal_mail,
 };
+use aether_bloomery::testing::{digest, event, membership, step, workpiece};
 use aether_bloomery::{
-    BloomDraft, BloomId, BloomSpec, ClaimRefKind, ClaimRefState, ClaimSeal, ConfigRegistry, Decisions, Digest,
-    EnumerateClaimsResult, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, ReleaseSeal,
-    ResolutionClaim, ResolvedConfigs, SealConflict, SealError, Snapshot, SpendWindow, SupersedeError, TransferSeal,
-    WorkpieceId, reduce,
+    BloomId, BloomSpec, ClaimRefKind, ClaimRefState, ClaimSeal, Decisions, EnumerateClaimsResult, Evidence,
+    EvidenceKind, Fact, Membership, ReleaseSeal, ResolutionClaim, SealConflict, SealError, Snapshot, SupersedeError,
+    TransferSeal,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{GitSource, MainlineRef};
@@ -53,44 +53,10 @@ use aether_chassis_bloomery::source::SourceCapabilityState;
 use aether_chassis_bloomery::source::kinds::{ClaimResult, CompleteReleaseResult};
 use aether_data::wire::from_bytes;
 
-fn digest(seed: u8) -> Digest {
-    Digest::from_bytes([seed; 32])
-}
-
-fn workpiece(name: &str) -> WorkpieceId {
-    WorkpieceId(name.into())
-}
-
-/// A membership whose approval evidence is bound to its subject — the workpiece,
-/// scope revision, and sealed configuration together (ADR-0174) — so it seals
-/// admissibly through `reduce`. Built in two steps because the subject covers
-/// everything but the approval itself.
-fn membership(name: &str, revision: u8) -> Membership {
-    let mut member = Membership {
-        workpiece: workpiece(name),
-        scope_revision: digest(revision),
-        configs: ConfigRegistry::default(),
-        approval: Evidence { subject: digest(0), kind: EvidenceKind::Approval, detail: digest(200) },
-    };
-    member.approval.subject = member.subject();
-    member
-}
-
 /// A draft sealing on `base` with the given memberships, stamped with the line
 /// catalog digest the reducer admits.
 fn spec(base: u8, members: Vec<Membership>) -> BloomSpec {
-    BloomDraft { proposals: members, base: digest(base), ..Default::default() }.seal()
-}
-
-fn event(key: &str, fact: Fact) -> Event {
-    Event { idempotency_key: IdempotencyKey(key.into()), fact }
-}
-
-/// Reduce and evolve in one step — the same fold boot journal replay runs, so a
-/// snapshot built this way IS the replay-rebuilt snapshot a restart sees.
-fn step(snapshot: &Snapshot, event: &Event) -> (Snapshot, Decisions) {
-    let decisions = reduce(snapshot, event, &ResolvedConfigs::default(), &SpendWindow::default());
-    (snapshot.apply(event, &decisions, &ResolvedConfigs::default()), decisions)
+    aether_bloomery::testing::draft(base, members).seal()
 }
 
 /// Seal `spec` into a fresh snapshot on its base mainline.

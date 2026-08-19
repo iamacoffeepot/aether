@@ -69,7 +69,7 @@ runtime = [
 # advertise `AETHER_GITHUB_BACKEND` and prod binaries never link
 # `FakeGithub` unless the `testing` feature is enabled.
 github = ["dep:aether-bloomery-github"]
-testing = ["github", "aether-bloomery-github/testing"]
+testing = ["github", "aether-bloomery-github/testing", "aether-bloomery/testing"]
 
 [dependencies]
 # Always-on (wasm-safe) — the `#[actor]` identity markers and the

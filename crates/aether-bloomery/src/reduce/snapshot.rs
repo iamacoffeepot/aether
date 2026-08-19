@@ -1064,19 +1064,17 @@ impl Snapshot {
 }
 
 impl BloomRecord {
-    /// The record a sealed spec opens with.
+    /// An empty record over `spec`: compiled-line catalog, sealed status,
+    /// empty collections, and zeroed counters.
     ///
-    /// A newly sealed bloom overwrites [`stage_catalog`](Self::stage_catalog)
-    /// from [`Decision::RecordStageCatalog`]. Pre-existing rows without that
-    /// effect keep this compiled-line fallback: [`StageCatalog::sealed_in`],
-    /// which is [`StageCatalog::line`] when the spec sealed no catalog. Stated
-    /// here because a later binary's edited line must not rewrite a no-catalog
-    /// bloom that never recorded one.
-    fn sealed(spec: BloomSpec, configs: &ResolvedConfigs) -> Self {
-        let stage_catalog = StageCatalog::sealed_in(ConfigScopes::bloom_wide(spec.configs()), configs);
+    /// The one 28-field literal. Production [`Self::sealed`] and every test
+    /// fixture fill from here, so a new field has a single home rather than
+    /// steering placement across four test copies.
+    #[must_use]
+    pub fn empty(spec: BloomSpec) -> Self {
         Self {
             spec,
-            stage_catalog,
+            stage_catalog: StageCatalog::line(),
             status: BloomStatus::Sealed,
             claims: BTreeMap::new(),
             evidence: Vec::new(),
@@ -1103,6 +1101,21 @@ impl BloomRecord {
             host_faults: BTreeMap::new(),
             vehicles: BTreeMap::new(),
             superseded_by: None,
+        }
+    }
+
+    /// The record a sealed spec opens with.
+    ///
+    /// A newly sealed bloom overwrites [`stage_catalog`](Self::stage_catalog)
+    /// from [`Decision::RecordStageCatalog`]. Pre-existing rows without that
+    /// effect keep this compiled-line fallback: [`StageCatalog::sealed_in`],
+    /// which is [`StageCatalog::line`] when the spec sealed no catalog. Stated
+    /// here because a later binary's edited line must not rewrite a no-catalog
+    /// bloom that never recorded one.
+    fn sealed(spec: BloomSpec, configs: &ResolvedConfigs) -> Self {
+        Self {
+            stage_catalog: StageCatalog::sealed_in(ConfigScopes::bloom_wide(spec.configs()), configs),
+            ..Self::empty(spec)
         }
     }
 
