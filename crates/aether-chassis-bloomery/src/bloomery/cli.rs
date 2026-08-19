@@ -31,7 +31,8 @@ pub struct BloomeryCli {
     pub http: HttpPortOverlay,
 
     /// `--store-path` shadows `AETHER_STORE_PATH` — the `SQLite` journal file
-    /// (`:memory:` for a non-durable store).
+    /// (`:memory:` for a non-durable store). `--github-store-path` is the same
+    /// knob; both spellings resolve to one path.
     #[command(flatten)]
     pub store: StoreOverlay,
 

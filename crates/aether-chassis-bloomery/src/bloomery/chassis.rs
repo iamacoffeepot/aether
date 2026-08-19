@@ -5,6 +5,8 @@
 //! dispatch), the `SQLite`-backed `StoreCapability`, `RpcServerCapability` (the
 //! external typed-mail ingress the Demo dials), and a signal-blocking driver.
 
+use std::error::Error;
+use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
@@ -327,24 +329,37 @@ impl BloomeryEnv {
     /// ADR-0090 unit d: resolve every knob argv > `AETHER_*` env > default.
     /// `--rpc-port` shadows `AETHER_RPC_PORT` and `--store-path` shadows
     /// `AETHER_STORE_PATH`, each riding the derive-`Config` argv-then-env path
-    /// (no naked env reads). Like the other chassis it resolves off the source
-    /// stack; takes `&BloomeryCli` by reference so the bin keeps `cli` for its
-    /// `--describe` branch.
+    /// (no naked env reads). `--github-store-path` is the same journal knob as
+    /// `--store-path`: both overlays collapse onto one path so the store
+    /// capability and every reactor open the same file. Like the other chassis
+    /// it resolves off the source stack; takes `&BloomeryCli` by reference so
+    /// the bin keeps `cli` for its `--describe` branch.
     ///
     /// # Errors
     ///
     /// Returns [`ConfigError`] when a known env value (or argv overlay value)
-    /// fails its parser.
+    /// fails its parser, or when `--store-path` and `--github-store-path` name
+    /// different files.
     pub fn resolve(cli: &BloomeryCli) -> Result<Self, ConfigError> {
         let rpc_port = RpcPortConfig::try_from_argv_then_env(cli.rpc.clone().into_layer())?.port;
         let http_port = HttpPortConfig::try_from_argv_then_env(cli.http.clone().into_layer())?.port;
-        let store = StoreConfig::try_from_argv_then_env(cli.store.clone().into_layer())?;
+        let mut store = StoreConfig::try_from_argv_then_env(cli.store.clone().into_layer())?;
         let artifacts = ArtifactsConfig::try_from_argv_then_env(cli.artifacts.clone().into_layer())?;
         #[cfg(feature = "github")]
         let github = GithubConnectionConfig::try_from_argv_then_env(cli.github.clone().into_layer())?;
-        let coordinator = CoordinatorConfig::try_from_argv_then_env(cli.coordinator.clone().into_layer())?;
+        let mut coordinator = CoordinatorConfig::try_from_argv_then_env(cli.coordinator.clone().into_layer())?;
         let session = SessionConfig::try_from_argv_then_env(cli.session.clone().into_layer())?;
         let signing = SigningConfig::try_from_argv_then_env(cli.signing.clone().into_layer())?;
+
+        let journal = one_journal_path(
+            cli.store.path.as_deref(),
+            cli.coordinator.store_path.as_deref(),
+            &store.path,
+            &coordinator.store_path,
+        )?;
+        store.path = journal.clone();
+        coordinator.store_path = journal;
+
         Ok(Self {
             rpc_port,
             http_port,
@@ -358,6 +373,47 @@ impl BloomeryEnv {
         })
     }
 }
+
+/// `--store-path` and `--github-store-path` name one journal. Either spelling
+/// (or the shared `AETHER_STORE_PATH` env) is the path both the store
+/// capability and every reactor that opens its own connection use. Distinct
+/// values are a boot fault rather than a silent split.
+fn one_journal_path(
+    store_flag: Option<&str>,
+    github_flag: Option<&str>,
+    store_resolved: &str,
+    github_resolved: &str,
+) -> Result<String, ConfigError> {
+    match (store_flag, github_flag) {
+        (Some(store), Some(github)) if store != github => Err(ConfigError::unparseable(
+            "--store-path/--github-store-path",
+            format!("{store} vs {github}"),
+            SplitJournalPath { store: store.to_owned(), github: github.to_owned() },
+        )),
+        (_, Some(_)) if store_flag.is_none() => Ok(github_resolved.to_owned()),
+        _ => Ok(store_resolved.to_owned()),
+    }
+}
+
+/// Why two journal-path flags that disagree are refused rather than opening
+/// two stores.
+#[derive(Debug)]
+struct SplitJournalPath {
+    store: String,
+    github: String,
+}
+
+impl fmt::Display for SplitJournalPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "--store-path ({}) and --github-store-path ({}) name one journal; pass one spelling or the same path on both",
+            self.store, self.github
+        )
+    }
+}
+
+impl Error for SplitJournalPath {}
 
 impl Chassis for BloomeryChassis {
     const PROFILE: &'static str = "bloomery";
