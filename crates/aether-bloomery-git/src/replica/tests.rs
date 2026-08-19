@@ -45,6 +45,23 @@ fn published_refspecs_are_exactly_mainline_plus_tags() {
 }
 
 #[test]
+fn a_replica_push_sends_basic_x_access_token_and_keeps_the_token_out_of_argv() {
+    // Tripwire: GitHub's git-over-HTTPS rejects `Authorization: Bearer` for
+    // gh-keyring OAuth tokens. The same token succeeds as Basic of
+    // `x-access-token:<token>`. The raw token must not appear in git's argv.
+    const TOKEN: &str = "secret-token";
+    let replica =
+        GitSourceReplica::new("/authority", "https://github.com/octo/shadow.git", MainlineRef::default(), TOKEN);
+    let command = replica.git_push_command(&published_refspecs(&MainlineRef::default(), ["refs/heads/main"]));
+    let argv: Vec<String> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
+
+    assert!(argv.iter().all(|arg| !arg.contains(TOKEN)), "the raw token must stay out of argv: {argv:?}");
+    let header =
+        argv.iter().find(|arg| arg.starts_with("http.extraHeader=")).expect("the token rides http.extraHeader");
+    assert_eq!(header, "http.extraHeader=Authorization: Basic eC1hY2Nlc3MtdG9rZW46c2VjcmV0LXRva2Vu");
+}
+
+#[test]
 fn push_args_never_include_mirror_and_force_only_the_mainline() {
     let mainline = MainlineRef::new("refs/heads/main");
     let specs = published_refspecs(&mainline, ["refs/heads/main", "refs/tags/v1"]);
