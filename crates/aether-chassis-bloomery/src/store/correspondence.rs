@@ -87,11 +87,14 @@ fn map_err(error: rusqlite::Error) -> CorrespondenceError {
     CorrespondenceError::new(error.to_string())
 }
 
-fn load_pairs(conn: &Connection) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CorrespondenceError> {
+/// Un-decoded correspondence rows: digest bytes and backend-object bytes.
+type RawPairs = Vec<(Vec<u8>, Vec<u8>)>;
+
+fn load_pairs(conn: &Connection) -> Result<RawPairs, CorrespondenceError> {
     let mut stmt = conn.prepare("SELECT digest, backend_object FROM backend_correspondence").map_err(map_err)?;
     stmt.query_map([], |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)))
         .map_err(map_err)?
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<Result<RawPairs, _>>()
         .map_err(map_err)
 }
 
