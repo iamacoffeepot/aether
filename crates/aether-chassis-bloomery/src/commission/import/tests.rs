@@ -1,5 +1,7 @@
 //! Rehearsal fixtures for the GitHub-to-commission import.
 
+use std::fs;
+
 use aether_bloomery::{
     AuthorityDoor, BloomDraft, CommissionStatus, ConfigRegistry, Digest, Evidence, EvidenceKind, Forecast, KeyId,
     Membership, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, SignatureEnvelope, Statement,
@@ -168,7 +170,7 @@ fn a_sealed_bloom_reconstruction_matches_the_pinned_digests() {
         &mut store,
         &ImportRequest {
             issues: Vec::new(),
-            sealed: vec![SealedWorkpiece { spec: spec.clone(), revision: revision.clone(), approval: approval }],
+            sealed: vec![SealedWorkpiece { spec: spec.clone(), revision: revision.clone(), approval }],
         },
     )
     .expect("reconstruct");
@@ -204,9 +206,9 @@ fn import_paths_reads_only_the_named_bodies() {
     let extra = dir.path().join("999.md");
     let manifest = dir.path().join("manifest.json");
     let store_path = dir.path().join("journal.sqlite");
-    std::fs::write(&named, clean_body()).expect("write named body");
-    std::fs::write(&extra, "not in the explicit set\n").expect("write extra body");
-    std::fs::write(&manifest, r#"{"issues":[{"number":10,"id":"issue-10","body":"10.md"}]}"#).expect("write manifest");
+    fs::write(&named, clean_body()).expect("write named body");
+    fs::write(&extra, "not in the explicit set\n").expect("write extra body");
+    fs::write(&manifest, r#"{"issues":[{"number":10,"id":"issue-10","body":"10.md"}]}"#).expect("write manifest");
 
     let report = super::import_paths(&manifest, &store_path, None).expect("import paths");
     assert!(report.contains("issue-10"), "{report}");

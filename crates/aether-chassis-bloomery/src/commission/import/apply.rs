@@ -35,8 +35,7 @@ fn create_if_absent(
     intent: &Statement,
 ) -> Result<(), ImportError> {
     match store.create(id, intent) {
-        Ok(_) => Ok(()),
-        Err(CommissionError::DuplicateCommission(_)) => Ok(()),
+        Ok(_) | Err(CommissionError::DuplicateCommission(_)) => Ok(()),
         Err(error) => Err(error.into()),
     }
 }

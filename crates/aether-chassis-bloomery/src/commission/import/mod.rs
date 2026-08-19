@@ -8,12 +8,14 @@
 //!
 //! Sealed blooms are reconstructed as exact store rows for their pinned
 //! [`Membership::scope_revision`](aether_bloomery::Membership::scope_revision)
-//! and approval evidence. The [`BloomSpec`](aether_bloomery::BloomSpec) is an
-//! input checked against, never a value this module writes.
+//! and approval evidence. The [`BloomSpec`] is an input checked against, never
+//! a value this module writes.
 
 mod apply;
 mod manifest;
 
+use std::error::Error;
+use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::path::Path;
 
@@ -99,8 +101,8 @@ pub enum ImportError {
     Store(String),
 }
 
-impl std::fmt::Display for ImportError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for ImportError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptySet => {
                 write!(f, "import names no workpieces; the explicit set is required")
@@ -122,7 +124,7 @@ impl std::fmt::Display for ImportError {
     }
 }
 
-impl std::error::Error for ImportError {}
+impl Error for ImportError {}
 
 impl From<CommissionError> for ImportError {
     fn from(error: CommissionError) -> Self {
