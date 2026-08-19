@@ -499,7 +499,7 @@ mod tests {
     };
     use crate::fetch::{FetchReply, ResourceBody};
     use crate::http::Endpoint;
-    use crate::keys::{Outcome, assert_footer_honest};
+    use crate::keys::{Outcome, assert_footer_honest, footer_line};
     use crate::nav::Nav;
     use crate::screen::RowId;
     use crate::store::ResourceKey;
@@ -988,7 +988,7 @@ mod tests {
         assert!(
             outside.iter().any(|hint| hint.keys == "i" && hint.action == "queue"),
             "missing enter hint in {}",
-            crate::keys::footer_line(&outside)
+            footer_line(&outside)
         );
         assert_footer_honest(&outside, |code| {
             let mut probe = Shell::showing(&view, None);
@@ -1006,12 +1006,12 @@ mod tests {
         assert!(
             inside.iter().any(|hint| hint.keys == "Esc" && hint.action == "board"),
             "missing exit hint in {}",
-            crate::keys::footer_line(&inside)
+            footer_line(&inside)
         );
         assert!(
             inside.iter().any(|hint| hint.keys == "Enter" && hint.action == "jump"),
             "missing jump hint in {}",
-            crate::keys::footer_line(&inside)
+            footer_line(&inside)
         );
         assert_footer_honest(&inside, |code| {
             let mut probe = Shell::showing(&view, None);
