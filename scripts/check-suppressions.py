@@ -28,7 +28,11 @@ HEX_SHA_RE = re.compile(r"[0-9a-f]{40}")
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 RUST_ATTRIBUTE_RE = re.compile(r"^\s*#!?\[\s*(allow|expect)\s*\(")
 RUST_IGNORE_RE = re.compile(r'^\s*#\[\s*ignore(?:\s*=\s*"(?:\\.|[^"\\])*")?\s*\]\s*$')
+IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*")
+CFG_TEST_ATTR_RE = re.compile(r"#\[\s*cfg\s*\(\s*test\s*\)\s*\]")
+MOD_ITEM_RE = re.compile(r"(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*")
 TOML_STRING_RE = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:[^\']|\'\')*\'')
+TEST_UNWRAP_LINT = "clippy::unwrap_used"
 
 
 class OperationalError(RuntimeError):
@@ -272,8 +276,8 @@ def sanitize_rust(source: str) -> list[str]:
     return output
 
 
-def rust_attribute_spans(sanitized: list[str]) -> list[tuple[int, int, str]]:
-    spans: list[tuple[int, int, str]] = []
+def rust_attribute_spans(sanitized: list[str]) -> list[tuple[int, int, str, tuple[str, ...]]]:
+    spans: list[tuple[int, int, str, tuple[str, ...]]] = []
     line = 0
     while line < len(sanitized):
         match = RUST_ATTRIBUTE_RE.match(sanitized[line])
@@ -281,21 +285,168 @@ def rust_attribute_spans(sanitized: list[str]) -> list[tuple[int, int, str]]:
             line += 1
             continue
         start = line + 1
+        kind = match.group(1)
         bracket_depth = sanitized[line].count("[") - sanitized[line].count("]")
         while bracket_depth > 0 and line + 1 < len(sanitized):
             line += 1
             bracket_depth += sanitized[line].count("[") - sanitized[line].count("]")
         if bracket_depth != 0:
             raise OperationalError(f"unterminated Rust suppression attribute at line {start}")
-        spans.append((start, line + 1, match.group(1)))
+        end = line + 1
+        spans.append((start, end, kind, tuple(attribute_lints(sanitized, start, end, kind))))
         line += 1
     return spans
 
 
+def attribute_lints(sanitized: list[str], start: int, end: int, kind: str) -> list[str]:
+    text = "\n".join(sanitized[start - 1 : end])
+    match = re.search(rf"{re.escape(kind)}\s*\(", text)
+    if match is None:
+        return []
+    body_start = match.end()
+    depth = 1
+    index = body_start
+    while index < len(text) and depth:
+        char = text[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                break
+        index += 1
+    body = text[body_start:index]
+    lints: list[str] = []
+    for ident in IDENT_RE.finditer(body):
+        if ident.group(0) in {"allow", "expect"}:
+            continue
+        rest = body[ident.end() :].lstrip()
+        if rest.startswith("="):
+            continue
+        lints.append(ident.group(0))
+    return lints
+
+
 def lint_token(kind: str, sanitized_line: str) -> str:
-    identifiers = re.findall(r"[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*", sanitized_line)
+    identifiers = IDENT_RE.findall(sanitized_line)
     lint = next((identifier for identifier in identifiers if identifier not in {"allow", "expect"}), None)
     return f"{kind}({lint})" if lint else f"{kind}(...)"
+
+
+def is_test_path(path: str) -> bool:
+    parts = path.split("/")
+    return "tests" in parts[:-1] or parts[-1] == "tests.rs"
+
+
+def _skip_ws(text: str, index: int) -> int:
+    while index < len(text) and text[index].isspace():
+        index += 1
+    return index
+
+
+def _line_of(text: str, offset: int) -> int:
+    return text.count("\n", 0, offset) + 1
+
+
+def _attribute_end(text: str, start: int) -> int | None:
+    if text.startswith("#![", start):
+        index = start + 3
+    elif text.startswith("#[", start):
+        index = start + 2
+    else:
+        return None
+    depth = 1
+    while index < len(text) and depth:
+        if text[index] == "[":
+            depth += 1
+        elif text[index] == "]":
+            depth -= 1
+        index += 1
+    return index if depth == 0 else None
+
+
+def _balanced_end(text: str, open_at: int, opening: str, closing: str) -> int | None:
+    if open_at >= len(text) or text[open_at] != opening:
+        return None
+    depth = 1
+    index = open_at + 1
+    while index < len(text) and depth:
+        char = text[index]
+        if char == opening:
+            depth += 1
+        elif char == closing:
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    return None
+
+
+def _add_line_range(lines: set[int], text: str, start: int, end: int) -> None:
+    if end <= start:
+        return
+    lines.update(range(_line_of(text, start), _line_of(text, end - 1) + 1))
+
+
+def cfg_test_module_lines(sanitized: list[str]) -> set[int]:
+    """Lines of `#[cfg(test)] mod` items: attached outer attributes and brace bodies."""
+
+    text = "\n".join(sanitized)
+    lines: set[int] = set()
+    index = 0
+    while index < len(text):
+        skipped = _skip_ws(text, index)
+        if skipped >= len(text):
+            break
+        if not text.startswith("#[", skipped) or text.startswith("#![", skipped):
+            index = skipped + 1
+            continue
+        cluster_start = skipped
+        cluster_end = skipped
+        attrs: list[str] = []
+        cursor = skipped
+        while True:
+            cursor = _skip_ws(text, cursor)
+            if not text.startswith("#[", cursor) or text.startswith("#![", cursor):
+                break
+            end = _attribute_end(text, cursor)
+            if end is None:
+                break
+            attrs.append(text[cursor:end])
+            cluster_end = end
+            cursor = end
+        if not attrs:
+            index = skipped + 1
+            continue
+        item_at = _skip_ws(text, cluster_end)
+        mod_match = MOD_ITEM_RE.match(text, item_at)
+        if mod_match is not None and any(CFG_TEST_ATTR_RE.fullmatch(attr) for attr in attrs):
+            _add_line_range(lines, text, cluster_start, cluster_end)
+            body_at = _skip_ws(text, mod_match.end())
+            closed = _balanced_end(text, body_at, "{", "}")
+            if closed is not None:
+                _add_line_range(lines, text, body_at, closed)
+                index = closed
+            else:
+                index = cluster_end
+            continue
+        first_end = _attribute_end(text, cluster_start)
+        index = skipped + 1 if first_end is None else first_end
+    return lines
+
+
+def is_test_only_unwrap_allow(
+    item: Suppression,
+    spans: list[tuple[int, int, str, tuple[str, ...]]],
+    test_lines: set[int] | None,
+) -> bool:
+    for start, end, kind, lints in spans:
+        if not start <= item.line <= end:
+            continue
+        if kind != "allow" or lints != (TEST_UNWRAP_LINT,):
+            return False
+        return test_lines is None or item.line in test_lines
+    return False
 
 
 def rust_suppressions(path: str, added: dict[int, str], head_source: str) -> list[Suppression]:
@@ -308,17 +459,20 @@ def rust_suppressions(path: str, added: dict[int, str], head_source: str) -> lis
         if RUST_IGNORE_RE.match(masked):
             findings.append(Suppression(path, line, "ignore", source))
             continue
-        for start, end, kind in spans:
+        for start, end, kind, _lints in spans:
             if not start <= line <= end:
                 continue
             if start in added:
                 if line == start:
                     findings.append(Suppression(path, line, lint_token(kind, masked), source))
                 break
-            if re.search(r"[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*", masked):
+            if IDENT_RE.search(masked):
                 findings.append(Suppression(path, line, lint_token(kind, masked), source))
             break
-    return findings
+
+    # Keep every detection above; drop only the test-only exact unwrap idiom.
+    test_lines = None if is_test_path(path) else cfg_test_module_lines(sanitized)
+    return [item for item in findings if not is_test_only_unwrap_allow(item, spans, test_lines)]
 
 
 @dataclass(frozen=True)

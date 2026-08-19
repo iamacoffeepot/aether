@@ -49,9 +49,13 @@ after the shared work order so sibling lanes share a prompt-cache prefix.
    verdicts and will run them after this lane returns. Do not run workspace- or package-wide
    clippy, nextest, rustdoc, suppression, dependency, or duplicate-code gates: those
    findings are not consumed from Construct evidence, and volunteering them occupies
-   the lane on work Verify will repeat. Ship no new `#[allow]`, `#[expect]`, or `#[ignore]`, test files
-   included; state one you genuinely need in your final message as a request
-   carrying its reason, and leave it out of the diff.
+   the lane on work Verify will repeat. Ship no new `#[allow]`, `#[expect]`, or `#[ignore]`,
+   test files included — except the exact inner attribute `#![allow(clippy::unwrap_used)]`
+   (that lint alone) on a `tests.rs` file, a file under a `tests/` directory, or a
+   `#[cfg(test)]` module. Any other lint, `expect`, `ignore`, a mixed allow list, or
+   the same allow in production code remains a finding; state one you genuinely need
+   in your final message as a request carrying its reason, and leave it out of the
+   diff.
 5. **Build scratch where the host put it.** If you do reach for a check that wants
    a `CARGO_TARGET_DIR` of its own, put it under the path the `AETHER_LANE_SCRATCH`
    environment variable names — never under `/tmp` or another default temp
