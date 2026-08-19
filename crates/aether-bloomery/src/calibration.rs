@@ -34,15 +34,15 @@
 //! reducer authors it that way — it holds digests, not the catalog's resolution
 //! — and the host fills it at dispatch, downstream of the journal. So the cell
 //! key is recomputed here exactly as the host computes it: the sealed catalog's
-//! [`AgentProfile`] for the stage, which the dispatch carries, with the member's
-//! sealed [`ModelOverride`] resolved over it. Joining on the dispatch's own
+//! [`AgentProfile`](crate::AgentProfile) for the stage, which the dispatch carries, with the member's
+//! sealed [`ModelOverride`](crate::ModelOverride) resolved over it. Joining on the dispatch's own
 //! `model` field would join on `None` for every row and yield an empty table
 //! that still passes a naive test.
 //!
 //! # Only a lane that ran an agent is a cell
 //!
 //! A cell answers "how did this agent do here", so only the **model lanes**
-//! ([`is_model_lane`]) enter one: Construct, its Refine repair re-entry, the
+//! ([`is_model_lane`](crate::is_model_lane)) enter one: Construct, its Refine repair re-entry, the
 //! Reconcile lane, and the whole-bloom aggregate review. The mechanical verify
 //! fan-out runs a compiler and the integrate / land positions are host-native,
 //! so the profile their catalog binding names never ran anything and a row for
@@ -120,7 +120,7 @@ pub struct VerifierFailures {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct CapabilityCell {
     /// The agent this cell measures: the sealed catalog's profile for
-    /// [`stage`](Self::stage) with the sealed [`ModelOverride`] resolved over it.
+    /// [`stage`](Self::stage) with the sealed [`ModelOverride`](crate::ModelOverride) resolved over it.
     pub agent: ResolvedModel,
     /// The stage it ran.
     pub stage: StageId,
@@ -260,7 +260,7 @@ impl CalibrationLedger {
     ///
     /// `configs` is the configuration content behind the addresses the sealed
     /// registries name, exactly as [`reduce`](crate::reduce::reduce) takes it. A
-    /// [`ModelOverride`] a caller has not fetched leaves that dispatch on its
+    /// [`ModelOverride`](crate::ModelOverride) a caller has not fetched leaves that dispatch on its
     /// catalog profile rather than dropping the row: the cell would otherwise
     /// vanish for the blooms most worth measuring, which are the ones that sealed
     /// an override.
