@@ -93,6 +93,19 @@ pub trait Correspondence {
     /// # Errors
     /// The durable store could not be read.
     fn resolve_digest(&self, backend_object: &BackendObjectId) -> Result<Option<Digest>, CorrespondenceError>;
+
+    /// Every recorded pair, in an unspecified order.
+    ///
+    /// The doctor uses this to check the table is a bijection and that every
+    /// journal digest resolves. A store that cannot list returns empty, which
+    /// the doctor treats as an empty bijection and reports unresolved journal
+    /// digests as violations.
+    ///
+    /// # Errors
+    /// The durable store could not be read.
+    fn pairs(&self) -> Result<Vec<(Digest, BackendObjectId)>, CorrespondenceError> {
+        Ok(Vec::new())
+    }
 }
 
 /// A correspondence shared by source and executor ports.

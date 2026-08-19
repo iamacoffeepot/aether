@@ -193,6 +193,10 @@ pub struct ApiParams {
     /// Bearer token commission routes require. Empty refuses every commission
     /// request so an unconfigured host cannot approve work.
     pub control_token: String,
+    /// The doctor's latest invariant report, overlaid on `GET /view`. `None`
+    /// when the doctor reactor is not mounted.
+    #[cfg(feature = "github")]
+    pub doctor: Option<crate::bloomery::DoctorBoard>,
 }
 
 #[http::router]
@@ -249,6 +253,8 @@ impl NativeActor for BloomeryApiCapability {
             next_seal: 1,
             seal_verifications: HashMap::new(),
             control_token: params.control_token,
+            #[cfg(feature = "github")]
+            doctor: params.doctor,
             commission_verifying: HashMap::new(),
             commission_writing: HashMap::new(),
             commission_http: HashMap::new(),
@@ -794,14 +800,25 @@ impl NativeActor for BloomeryApiCapability {
     /// — the relay surfaces no correlation to key a second table on.
     #[http::reply]
     fn on_query_result(
-        _state: &mut ApiCapabilityState,
+        state: &mut ApiCapabilityState,
         _ctx: &mut NativeCtx<'_, Manual>,
         mail: QueryResult,
     ) -> HttpServerResponse {
         match mail {
             QueryResult::Release { .. } | QueryResult::ReleaseNotFound => release_status_response(mail),
             QueryResult::Calibration { document } => calibration_response(&document),
-            mail => query_response(mail),
+            mail => {
+                #[cfg(feature = "github")]
+                {
+                    let doctor = state.doctor.as_ref().and_then(crate::bloomery::DoctorBoard::latest);
+                    query_response(mail, doctor.as_ref())
+                }
+                #[cfg(not(feature = "github"))]
+                {
+                    let _ = state;
+                    query_response(mail, None)
+                }
+            }
         }
     }
 
