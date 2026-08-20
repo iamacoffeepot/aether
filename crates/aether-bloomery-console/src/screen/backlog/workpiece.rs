@@ -104,7 +104,6 @@ impl Workpiece {
             KeyCode::Enter => {
                 self.selected_line().and_then(|line| line.enter.clone()).map_or(Outcome::Handled, Outcome::Push)
             }
-            KeyCode::Esc => Outcome::Handled,
             KeyCode::Char('r') => Outcome::Refresh,
             KeyCode::Char('q') => Outcome::Quit,
             _ => Outcome::Ignored,
@@ -241,16 +240,16 @@ fn digest_line(key: RowKey, title: &str, digest: DigestHex) -> Line {
 mod tests {
     use super::Workpiece;
     use crate::keys::{Outcome, assert_footer_honest};
-    use crate::store::Store;
+    use crate::nav::Nav;
+    use crate::shell::Shell;
+    use crate::warroom::Focus;
     use crossterm::event::KeyEvent;
-    use std::time::Duration;
 
     #[test]
     fn workpiece_footer_keys_are_handled() {
-        let store = Store::new(Duration::from_secs(1));
-        let mut workpiece = Workpiece::new("wp-local");
+        let nav = Nav::focus(Focus::workpiece("wp-local"));
         assert_footer_honest(Workpiece::key_hints(), |code| {
-            workpiece.handle_key(KeyEvent::from(code), &store) != Outcome::Ignored
+            Shell::probe(nav.clone()).handle_key(KeyEvent::from(code)) != Outcome::Ignored
         });
     }
 }

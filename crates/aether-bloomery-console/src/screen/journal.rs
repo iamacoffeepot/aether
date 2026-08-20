@@ -87,7 +87,6 @@ impl Journal {
                 self.editing = true;
                 Outcome::Handled
             }
-            KeyCode::Esc => Outcome::Handled,
             KeyCode::Char('r') => Outcome::Refresh,
             KeyCode::Char('q') => Outcome::Quit,
             _ => Outcome::Ignored,
@@ -224,7 +223,6 @@ impl Record {
                 self.offset = self.offset.saturating_sub(1);
                 Outcome::Handled
             }
-            KeyCode::Esc => Outcome::Handled,
             KeyCode::Char('r') => Outcome::Refresh,
             KeyCode::Char('q') => Outcome::Quit,
             _ => Outcome::Ignored,
@@ -295,25 +293,23 @@ fn parse_bloom_filter(filter: &str) -> Option<DigestHex> {
 mod tests {
     use super::{Journal, Record};
     use crate::keys::{Outcome, assert_footer_honest};
-    use crate::store::Store;
+    use crate::nav::Nav;
+    use crate::shell::Shell;
+    use crate::warroom::Focus;
     use crossterm::event::KeyEvent;
-    use std::time::Duration;
 
     #[test]
     fn journal_footer_keys_are_handled() {
-        let store = Store::new(Duration::from_secs(1));
-        let mut journal = Journal::new(None);
         assert_footer_honest(Journal::key_hints(), |code| {
-            journal.handle_key(KeyEvent::from(code), &store) != Outcome::Ignored
+            Shell::probe(Nav::journal(None)).handle_key(KeyEvent::from(code)) != Outcome::Ignored
         });
     }
 
     #[test]
     fn record_footer_keys_are_handled() {
-        let store = Store::new(Duration::from_secs(1));
-        let mut record = Record::new(1);
+        let nav = Nav::focus(Focus::record(1));
         assert_footer_honest(Record::key_hints(), |code| {
-            record.handle_key(KeyEvent::from(code), &store) != Outcome::Ignored
+            Shell::probe(nav.clone()).handle_key(KeyEvent::from(code)) != Outcome::Ignored
         });
     }
 }
