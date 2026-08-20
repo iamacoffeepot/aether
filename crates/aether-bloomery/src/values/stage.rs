@@ -34,6 +34,12 @@ pub const CONSTRUCT_IMPLEMENT_COMMAND: &str = "construct.implement";
 /// [`CONSTRUCT_IMPLEMENT_COMMAND`] (#3668).
 pub const REVIEW_CRITIC_COMMAND: &str = "review.critic";
 
+/// The scoping lane's typed command — the one spelling shared by the
+/// catalog binding's `process`, the dispatched [`Transformation::command`], and
+/// the host executors that route on it (ADR-0208). A drifted copy would dispatch
+/// a lane no executor recognizes.
+pub const SCOPE_FILL_COMMAND: &str = "scope.fill";
+
 /// The mechanical verify lane's typed command — the fan-out that runs fmt,
 /// clippy and docs in CI-parity order. Named once because two stages dispatch
 /// it: the member `Verify` over one candidate, and `AggregateVerify` over the
@@ -68,7 +74,7 @@ pub const VERIFY_LANE_NETWORK: NetworkProfile = NetworkProfile::None;
 /// (ADR-0149 §Execution on Actions).
 #[must_use]
 pub fn is_model_lane(command: &str) -> bool {
-    command == CONSTRUCT_IMPLEMENT_COMMAND || command == REVIEW_CRITIC_COMMAND
+    command == CONSTRUCT_IMPLEMENT_COMMAND || command == REVIEW_CRITIC_COMMAND || command == SCOPE_FILL_COMMAND
 }
 
 /// The typed command this stage's dispatch constructs, if it dispatches a
@@ -79,6 +85,11 @@ pub fn is_model_lane(command: &str) -> bool {
 /// the executor routes (`review.critic`). [`is_model_lane`] judges the latter,
 /// and so does [`ModelOverride::validate`](crate::values::ModelOverride::validate)
 /// — a key the seal door admits is a key some dispatch resolves.
+///
+/// [`StageId::Scope`] stays `None`: scoping runs before a workpiece qualifies
+/// for a bloom, so a sealed per-member override can never reach it, and
+/// admitting the key would let an operator author a pin that silently never
+/// applies.
 #[must_use]
 pub(super) fn dispatched_command(stage: StageId) -> Option<&'static str> {
     match stage {
@@ -416,14 +427,18 @@ impl StageCatalog {
             u64,
         ) = match stage {
             StageId::Sketch => (&["bloom.intent"], &["bloom.sketch"], "sketch", "issue-well-formed", 1, 3_600),
-            // Scope is a pre-seal operator-harness process (ADR-0149 §The
-            // line, ADR-0150): the operator's own developer-side Bloomery
-            // session authors the scope revision and stages it through the
-            // REST control API (`aether.bloomery.api`'s `POST /workpieces`,
-            // `PATCH /drafts/{id}`, `POST /drafts/{id}/seal`) — never a
-            // dispatched worker lane. `process` names that api cap's
-            // `NAMESPACE`, not a skill slug.
-            StageId::Scope => (&["bloom.sketch"], &["bloom.scope"], "aether.bloomery.api", "plan-present", 1, 3_600),
+            // Scope is a dispatched model lane (ADR-0208): a worker fills the
+            // workpiece's fields against a named seat before freeze. The REST
+            // control API stays as the manual recovery path so an operator can
+            // still author a revision by hand when the lane is unrepaired.
+            //
+            // Two scoping attempts, not one: a run that fails once has usually
+            // failed on something a second pass fixes; a run that fails twice
+            // is not converging, and a third lap buys another full hour
+            // (`wall_clock_secs` is `3_600` across the line) against a sketch
+            // that is probably the actual problem — wedging puts it in front
+            // of an operator, where an unscopeable sketch belongs.
+            StageId::Scope => (&["bloom.sketch"], &["bloom.scope"], SCOPE_FILL_COMMAND, "scope-filled", 2, 3_600),
             // Approve is a pre-seal host-side admission gate (ADR-0149 §The
             // line, ADR-0151): the coordinator's own host resolves the
             // workpiece's declared surface to an approval tier and forms the
@@ -530,18 +545,23 @@ impl StageCatalog {
     /// private repository. Naming it in the catalog is what makes that choice
     /// attestable rather than an operator's ambient default.
     const MUSE_MODEL: &'static str = "muse-spark-1.2-contributor";
+    /// The model id the grok-harness stages resolve to. Named once so a
+    /// generation refresh is one edit rather than a sweep over the arms — the
+    /// same reason as [`Self::OPUS_MODEL`].
+    const GROK_MODEL: &'static str = "grok-4.6";
 
     #[must_use]
     pub fn profile_of(stage: StageId) -> AgentProfile {
-        // The four **dispatched model lanes** — the ones that actually fork an
-        // agent CLI — run muse: Construct and its Refine repair re-entry, and
-        // the two review positions. That is the whole set `is_model_lane`
+        // The **dispatched model lanes** — the ones that actually fork an
+        // agent CLI — are Construct and its Refine/Reconcile repair re-entries,
+        // the two review positions, and Scope. Construct and review run muse;
+        // Scope runs grok (ADR-0208). That is the whole set `is_model_lane`
         // recognizes, so this is the calibration that decides what writes the
-        // code and what judges it.
+        // code, what judges it, and what fills a workpiece before freeze.
         //
         // The remaining stages keep their Claude calibration and it is inert:
-        // Scope and Approve are pre-seal operator/host processes, Study is not
-        // dispatched as a worker lane, and the mechanical stages run a compiler.
+        // Approve is a pre-seal host process, Study is not dispatched as a
+        // worker lane, and the mechanical stages run a compiler.
         // `is_model_lane` keeps the resolved harness off every one of their
         // argvs, so their harness names a CLI none of them forks.
         //
@@ -561,7 +581,15 @@ impl StageCatalog {
             StageId::Construct | StageId::Refine | StageId::Reconcile | StageId::Review | StageId::AggregateReview => {
                 (Harness::Muse, Self::MUSE_MODEL, ReasoningEffort::High)
             }
-            StageId::Scope | StageId::Study => (Harness::Claude, Self::OPUS_MODEL, ReasoningEffort::High),
+            StageId::Scope => {
+                // Cost-bound deferral from opus (ADR-0208 §The seat): ADR-0146
+                // still holds that scoping is the ladder's most judgement-heavy
+                // task, but the compiled seat is grok-4.6 at high effort rather
+                // than opus so a future reader finds a decision rather than a
+                // discrepancy with that ADR.
+                (Harness::Grok, Self::GROK_MODEL, ReasoningEffort::High)
+            }
+            StageId::Study => (Harness::Claude, Self::OPUS_MODEL, ReasoningEffort::High),
             StageId::Sketch
             | StageId::Approve
             | StageId::Verify
@@ -750,7 +778,7 @@ impl Transformation {
             StageId::Verify => (VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK),
             StageId::Review => (REVIEW_CRITIC_COMMAND, "iama/review-claude:1", NetworkProfile::Restricted),
             StageId::Scope => unreachable!(
-                "Scope is a pre-seal operator-harness process staged via the REST control API, never a dispatched member transformation"
+                "Scope is a pre-seal dispatched lane built by Transformation::for_scoping_run, never a member-stage transformation"
             ),
             StageId::Land => unreachable!(
                 "Land is a host-native source-port CAS (LandReactorCapability, #3559), never a dispatched member transformation"
@@ -902,6 +930,49 @@ impl Transformation {
             model: None,
         }
     }
+
+    /// The pre-seal scoping transformation (ADR-0208): the `scope.fill` lane
+    /// dispatched against a named seat to fill a workpiece's fields before
+    /// freeze. `subject` binds the evidence — the commission's stored intent,
+    /// the sketch the run is about — and `checkout` names the tree the work
+    /// reads code at. A scoping run judges no diff, so it names no
+    /// [`diff_base`](Self::diff_base).
+    ///
+    /// Restricted egress like the other model lanes: the worker forks an
+    /// agent CLI and reaches the model API, never full network.
+    ///
+    /// `binding` is the catalog's `Scope` binding, carrying the authored
+    /// wall-clock limit this run executes under. That pairing is checked
+    /// rather than assumed, but only in a debug build: the sibling
+    /// `for_member_stage` derives its whole lane from an exhaustive
+    /// `match binding.stage`, so cross-pairing is impossible there in every
+    /// profile, while here a debug-only assertion is a test-and-CI tripwire that
+    /// keeps release behavior total.
+    ///
+    /// # Panics
+    ///
+    /// In a debug build, when `binding` is not the `Scope` binding.
+    #[must_use]
+    pub fn for_scoping_run(binding: &StageBinding, subject: Digest, checkout: Digest) -> Self {
+        debug_assert_eq!(
+            binding.stage,
+            StageId::Scope,
+            "the dispatched limit must come from the stage being dispatched",
+        );
+
+        Self {
+            command: String::from(SCOPE_FILL_COMMAND),
+            inputs: alloc::vec![subject],
+            checkout,
+            diff_base: None,
+            outputs: alloc::vec![String::from(RESULT_RECORD_OUTPUT)],
+            image: String::from("iama/scope-grok:1"),
+            limits: ExecutionLimits { wall_clock_secs: binding.wall_clock_secs },
+            network: NetworkProfile::Restricted,
+            description: None,
+            model: None,
+        }
+    }
 }
 
 /// A captured candidate — the source tree a model-lane attempt produced, as the
@@ -1009,18 +1080,27 @@ mod tests {
                 continue;
             }
             let profile = StageCatalog::profile_of(binding.stage);
-            assert_eq!(
-                profile.harness,
-                Harness::Muse,
-                "{:?} is a dispatched model lane, so it must name the calibrated model harness",
-                binding.stage,
-            );
-            assert_eq!(
-                profile.model,
-                StageCatalog::MUSE_MODEL,
-                "{:?} runs under muse, so its model id must be a muse id",
-                binding.stage,
-            );
+            match profile.harness {
+                Harness::Muse => assert_eq!(
+                    profile.model,
+                    StageCatalog::MUSE_MODEL,
+                    "{:?} runs under muse, so its model id must be a muse id",
+                    binding.stage,
+                ),
+                Harness::Grok => assert_eq!(
+                    profile.model,
+                    StageCatalog::GROK_MODEL,
+                    "{:?} runs under grok, so its model id must be a grok id",
+                    binding.stage,
+                ),
+                Harness::Claude => assert!(
+                    profile.model == StageCatalog::OPUS_MODEL || profile.model == StageCatalog::SONNET_MODEL,
+                    "{:?} runs under claude, so its model id must be an opus or sonnet id, got {}",
+                    binding.stage,
+                    profile.model,
+                ),
+                Harness::Codex => panic!("{:?} is a dispatched model lane on the retired Codex harness", binding.stage),
+            }
         }
     }
 
@@ -1077,9 +1157,14 @@ mod tests {
     // Repinned again for ADR-0189: `Reconcile` is appended to the closed
     // vocabulary and bound in the compiled line, so the catalog's bytes gain
     // a thirteenth binding — an intended catalog edit.
+    // Repinned again for ADR-0208: the Scope binding's process, gate and retry
+    // budget re-point onto `scope.fill` / `scope-filled` / 2, and its profile
+    // recalibrates from Claude/opus onto Grok/`grok-4.6`. An intended catalog
+    // edit — see `profile_of`, whose harness/model/effort values are refinable
+    // without an ADR.
     const GOLDEN_LINE_DIGEST: [u8; 32] = [
-        0xe4, 0x97, 0x03, 0x43, 0x12, 0x86, 0x08, 0xf4, 0x56, 0x25, 0xb8, 0x83, 0x75, 0x1a, 0xfb, 0x0b, 0x29, 0x51,
-        0x00, 0x60, 0x60, 0xf3, 0x94, 0x5a, 0x72, 0xee, 0x92, 0xe5, 0x55, 0xd2, 0xf1, 0x7e,
+        0x76, 0x03, 0x98, 0x15, 0x21, 0xd2, 0x6c, 0x09, 0xbc, 0x9d, 0xdd, 0x07, 0x14, 0x28, 0x69, 0xff, 0x22, 0x6f,
+        0xff, 0x39, 0x80, 0x6f, 0x2d, 0xb0, 0x5e, 0x28, 0x7f, 0x3b, 0x69, 0x99, 0xc9, 0x15,
     ];
 
     // Tripwire: the compiled line passes the same validation an authored catalog
@@ -1140,10 +1225,11 @@ mod tests {
         assert_eq!(StageCatalog::next_member_stage(StageId::Integrate), None);
     }
 
-    // Scope is a pre-seal operator-harness process, never a dispatched member
-    // transformation — `for_member_stage` must not build a lane for it.
+    // Scope is dispatched by `for_scoping_run` before a workpiece qualifies
+    // for a bloom, never as a member-stage transformation —
+    // `for_member_stage` must not build a lane for it.
     #[test]
-    #[should_panic(expected = "operator-harness process")]
+    #[should_panic(expected = "for_scoping_run")]
     fn for_member_stage_panics_on_scope() {
         let subject = Digest::from_bytes([7; 32]);
         let checkout = Digest::from_bytes([9; 32]);
@@ -1343,6 +1429,27 @@ mod tests {
         let checkout = Digest::from_bytes([9; 32]);
         let base = Digest::from_bytes([3; 32]);
         let _ = Transformation::for_aggregate_review(&binding(StageId::Review), subject, checkout, base);
+    }
+
+    // Tripwire: `for_scoping_run` is the only constructor that builds a
+    // `Transformation` for `StageId::Scope`. A drifted command would route
+    // the order to Actions or an unmapped construct path; a named `diff_base`
+    // would make the lane judge a git range instead of the sketch; a limit
+    // copied from another stage would bound a scoping hour to someone else's
+    // clock.
+    #[test]
+    fn for_scoping_run_names_the_scope_lane_without_a_diff_base() {
+        let mut binding = binding(StageId::Scope);
+        binding.wall_clock_secs = 900;
+        let subject = Digest::from_bytes([7; 32]);
+        let checkout = Digest::from_bytes([9; 32]);
+        let transformation = Transformation::for_scoping_run(&binding, subject, checkout);
+
+        assert_eq!(transformation.command, SCOPE_FILL_COMMAND);
+        assert_eq!(transformation.network, NetworkProfile::Restricted);
+        assert_eq!(transformation.outputs, alloc::vec![String::from(RESULT_RECORD_OUTPUT)]);
+        assert_eq!(transformation.limits.wall_clock_secs, 900);
+        assert_eq!(transformation.diff_base, None);
     }
 
     // Step-6 tripwire (#3572): the Construct and Refine bindings name the native
