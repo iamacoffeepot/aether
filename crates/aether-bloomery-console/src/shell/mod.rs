@@ -382,9 +382,9 @@ mod tests {
     use super::PaneId;
     use super::Shell;
     use crate::dto::{
-        BloomDispatchView, BloomDispatchesView, BloomStatus, BloomView, CompositionFinding, CompositionView, DigestHex,
-        ExecutorFaultView, HostFaultView, LandingBlock, MemberView, OperatorHoldView, PendingDecisionView, Present,
-        ReviewParkView, SpendQuiesce, StageId, ViewDocument,
+        BloomDispatchView, BloomDispatchesView, BloomStatus, BloomView, CompositionCursorView, CompositionFinding,
+        CompositionView, DigestHex, ExecutorFaultView, HostFaultView, LandingBlock, MemberView, OperatorHoldView,
+        PendingDecisionView, Present, ReviewParkView, SpendQuiesce, StageId, ViewDocument,
     };
     use crate::fetch::{FetchReply, ResourceBody};
     use crate::http::Endpoint;
@@ -464,7 +464,15 @@ mod tests {
         let view = ViewDocument {
             blooms: vec![BloomView {
                 id: digest(1),
-                members: vec![MemberView { workpiece: "issue-keep".to_owned(), ..MemberView::default() }],
+                members: vec![MemberView {
+                    workpiece: "issue-keep".to_owned(),
+                    cursor: Some(CompositionCursorView {
+                        stage: Some(StageId::Construct),
+                        attempts: 1,
+                        candidate: None,
+                    }),
+                    ..MemberView::default()
+                }],
                 ..BloomView::default()
             }],
             ..ViewDocument::default()
@@ -523,7 +531,15 @@ mod tests {
         let view = ViewDocument {
             blooms: vec![BloomView {
                 id: digest(1),
-                members: vec![MemberView { workpiece: "wp-a".to_owned(), ..MemberView::default() }],
+                members: vec![MemberView {
+                    workpiece: "wp-a".to_owned(),
+                    cursor: Some(CompositionCursorView {
+                        stage: Some(StageId::Construct),
+                        attempts: 1,
+                        candidate: None,
+                    }),
+                    ..MemberView::default()
+                }],
                 ..BloomView::default()
             }],
             ..ViewDocument::default()
@@ -677,6 +693,36 @@ mod tests {
             "release",
             &Focus::bloom(digest(0xab)),
         );
+    }
+
+    #[test]
+    fn a_resolved_member_leaves_the_board_for_quiet() {
+        // The plausible bug: a finished member still occupies a live board
+        // row, with machinery rolls under ELAPSED and a blocker id under COST,
+        // while quiet says nothing about it.
+        let view = ViewDocument {
+            blooms: vec![BloomView {
+                id: digest(1),
+                status: Some(BloomStatus::Sealed),
+                members: vec![MemberView {
+                    workpiece: "wp-done".to_owned(),
+                    resolution: Some(Present {}),
+                    machinery_rolls: 2,
+                    machinery_budget: 3,
+                    blocked_by: Some("wp-a".to_owned()),
+                    ..MemberView::default()
+                }],
+                ..BloomView::default()
+            }],
+            ..ViewDocument::default()
+        };
+        let mut shell = Shell::showing(&view, None);
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let board = left_column(&terminal);
+        let quiet = right_column(&terminal);
+        assert!(!board.contains("wp-done"), "resolved member stayed on the board:\n{board}");
+        assert!(quiet.contains("resolved, awaiting land"), "quiet dropped the resolved count:\n{quiet}");
     }
 
     #[test]
@@ -845,7 +891,14 @@ mod tests {
         // The plausible bug: a 404 on /commissions is treated as a store
         // failure that dims /view, so opening the backlog takes every other
         // pane down with it.
-        let view = bloom_with(vec![MemberView { workpiece: "wp-keep".to_owned(), ..MemberView::default() }], |_| {});
+        let view = bloom_with(
+            vec![MemberView {
+                workpiece: "wp-keep".to_owned(),
+                cursor: Some(CompositionCursorView { stage: Some(StageId::Construct), attempts: 1, candidate: None }),
+                ..MemberView::default()
+            }],
+            |_| {},
+        );
         let (mut shell, probe) = Shell::harness(Duration::from_secs(1));
         probe.reply(FetchReply { key: ResourceKey::View, outcome: Ok(ResourceBody::View(view)) });
         shell.pump();
@@ -872,7 +925,15 @@ mod tests {
                 .map(|n| BloomView {
                     id: digest(n),
                     review_park: Some(ReviewParkView::default()),
-                    members: vec![MemberView { workpiece: format!("wp-{n}"), ..MemberView::default() }],
+                    members: vec![MemberView {
+                        workpiece: format!("wp-{n}"),
+                        cursor: Some(CompositionCursorView {
+                            stage: Some(StageId::Construct),
+                            attempts: 1,
+                            candidate: None,
+                        }),
+                        ..MemberView::default()
+                    }],
                     ..BloomView::default()
                 })
                 .collect(),
@@ -1069,13 +1130,21 @@ mod tests {
         text.lines().position(|line| line.contains(title)).unwrap_or_else(|| panic!("missing {title} in:\n{text}"))
     }
 
+    fn left_column(terminal: &Terminal<TestBackend>) -> String {
+        column_text(terminal, 0, terminal.backend().buffer().area().width / 2)
+    }
+
     fn right_column(terminal: &Terminal<TestBackend>) -> String {
+        let width = terminal.backend().buffer().area().width;
+        column_text(terminal, width / 2, width)
+    }
+
+    fn column_text(terminal: &Terminal<TestBackend>, start: u16, end: u16) -> String {
         let buffer = terminal.backend().buffer();
         let area = buffer.area();
-        let mid = area.width / 2;
         let mut out = String::new();
         for y in area.y..area.y + area.height {
-            for x in mid..area.x + area.width {
+            for x in start..end {
                 out.push_str(buffer[(x, y)].symbol());
             }
             out.push('\n');
