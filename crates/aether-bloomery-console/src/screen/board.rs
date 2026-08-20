@@ -417,8 +417,12 @@ mod tests {
         BloomStatus, BloomView, DigestHex, MemberView, PendingDecisionView, Present, ViewDocument, WedgeCause,
     };
     use crate::keys::{Outcome, assert_footer_honest};
+    use crate::palette::{Depth, with_depth};
     use crate::store::Store;
     use crossterm::event::KeyEvent;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Cell;
     use std::time::Duration;
 
     fn digest(byte: u8) -> DigestHex {
@@ -546,7 +550,7 @@ mod tests {
     fn fallback_board_row_keeps_the_severity_glyph() {
         // The plausible bug: 256-color fallback paints severity by color
         // alone and drops the WEDGED token the operator has to read.
-        crate::palette::with_depth(crate::palette::Depth::Indexed, || {
+        with_depth(Depth::Indexed, || {
             let mut store = Store::new(Duration::from_secs(1));
             store.apply_view(Ok(ViewDocument {
                 blooms: vec![BloomView {
@@ -557,11 +561,9 @@ mod tests {
                 ..ViewDocument::default()
             }));
             let mut board = Board::new();
-            let mut terminal =
-                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 10)).expect("test backend");
+            let mut terminal = Terminal::new(TestBackend::new(80, 10)).expect("test backend");
             terminal.draw(|frame| board.render(frame, frame.area(), &store)).expect("draw");
-            let text: String =
-                terminal.backend().buffer().content().iter().map(ratatui::buffer::Cell::symbol).collect();
+            let text: String = terminal.backend().buffer().content().iter().map(Cell::symbol).collect();
             assert!(text.contains("WEDGED"), "{text}");
         });
     }

@@ -45,6 +45,14 @@ struct Args {
     /// Paint the 256-color approximations even when the terminal reports truecolor.
     #[arg(long)]
     indexed_color: bool,
+
+    /// `COLORTERM` — `truecolor` / `24bit` opt in to the native table.
+    #[arg(long, env = "COLORTERM", hide = true)]
+    colorterm: Option<String>,
+
+    /// `TERM` — `-direct` / `truecolor` / `24bit` also opt in.
+    #[arg(long, env = "TERM", hide = true)]
+    term: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -52,7 +60,7 @@ fn main() -> Result<()> {
     let depth = if args.indexed_color {
         Depth::Indexed
     } else {
-        Depth::detect()
+        Depth::from_env(args.colorterm.as_deref(), args.term.as_deref())
     };
     palette::install(depth);
     let endpoint = Endpoint { host: args.host, port: args.port };
