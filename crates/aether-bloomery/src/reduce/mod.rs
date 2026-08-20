@@ -27,6 +27,8 @@ mod error;
 mod event;
 mod evidence;
 mod fold_conflict;
+mod fold_refusal;
+pub mod gate;
 mod grant;
 mod integrate;
 mod land;
@@ -53,6 +55,7 @@ pub use error::{
     OrphanClaimReleaseError, ResolveError, SealConflict, SealError, SpliceError, SupersedeError, VerifyFailedError,
 };
 pub use event::{Event, Fact};
+pub use gate::{Gate, Read, RecordedRead, RecordedRefusal, Refusal};
 pub use outcome::{DECISIONS_SCHEMA, Decisions, DecisionsSchemaError, Outcome, decode_recorded_decisions};
 pub use seal::is_active_unlanded;
 pub use snapshot::{
@@ -67,6 +70,7 @@ use aggregate_verify::reduce_aggregate_verify_completed;
 use attempt::{reduce_attempt_completed, reduce_member_executor_fault};
 use evidence::{reduce_admit_evidence, reduce_adopt_answer};
 use fold_conflict::reduce_fold_conflict;
+use fold_refusal::reduce_fold_refused;
 use grant::reduce_grant_attempts;
 use integrate::{reduce_integrate, reduce_resolve};
 use land::reduce_land;
@@ -166,5 +170,6 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         Fact::MemberExecutorFault { bloom, workpiece, stage, evidence } => {
             reduce_member_executor_fault(snapshot, bloom, workpiece, *stage, evidence)
         }
+        Fact::FoldRefused { bloom, refusal } => reduce_fold_refused(snapshot, bloom, refusal),
     }
 }
