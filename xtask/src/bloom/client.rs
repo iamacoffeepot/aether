@@ -27,6 +27,10 @@ impl<'a> Client<'a> {
         self.get("/view")
     }
 
+    pub fn journal(&self) -> Result<JournalView> {
+        self.get("/journal")
+    }
+
     pub fn open_draft(&self) -> Result<DraftView> {
         http::json(self.endpoint, "POST", "/drafts", None::<&()>)
     }
@@ -52,7 +56,7 @@ impl<'a> Client<'a> {
     /// The live projection names members and status but not the bloom-wide
     /// registry, so supersede reads the journal to reuse configs by digest.
     pub fn spec_for(&self, bloom_id: &str) -> Result<BloomSpec> {
-        let journal: JournalView = self.get("/journal")?;
+        let journal = self.journal()?;
         for record in journal.records.into_iter().rev() {
             if let Some(spec) = spec_in_fact(&record.event.fact)
                 && spec_id(&spec).as_hex() == bloom_id
