@@ -90,7 +90,9 @@ pub(super) fn member_construct_base(record: &BloomRecord, member: &WorkpieceId) 
 /// The ancestor capture commits of `member` in journaled topological order.
 ///
 /// Empty for a root. Replay of the same claims produces the same vec, which
-/// is the digest-pinned identity of the splice.
+/// is the digest-pinned identity of the splice. Workpieces absent from
+/// `members` are not walked, even when `edges` or `checkout_of` still name
+/// them — an ejected predecessor must not contribute to a survivor's base.
 pub(super) fn splice_lineage<F: Fn(&WorkpieceId) -> Option<Digest>>(
     members: &[WorkpieceId],
     edges: &[MemberDependency],
@@ -124,21 +126,30 @@ pub(super) fn spliced_base<F: Fn(&WorkpieceId) -> Option<Digest>>(
     }
 }
 
-fn ancestor_set(edges: &[MemberDependency], member: &WorkpieceId) -> BTreeSet<WorkpieceId> {
-    let mut stack: Vec<&WorkpieceId> =
-        edges.iter().filter(|edge| edge.member == *member).map(|edge| &edge.depends_on).collect();
+fn ancestor_set(members: &[WorkpieceId], edges: &[MemberDependency], member: &WorkpieceId) -> BTreeSet<WorkpieceId> {
+    let live: BTreeSet<&WorkpieceId> = members.iter().collect();
+    let mut stack: Vec<&WorkpieceId> = edges
+        .iter()
+        .filter(|edge| edge.member == *member && live.contains(&edge.depends_on))
+        .map(|edge| &edge.depends_on)
+        .collect();
     let mut seen = BTreeSet::new();
     while let Some(dep) = stack.pop() {
         if !seen.insert(dep.clone()) {
             continue;
         }
-        stack.extend(edges.iter().filter(|edge| edge.member == *dep).map(|edge| &edge.depends_on));
+        stack.extend(
+            edges
+                .iter()
+                .filter(|edge| edge.member == *dep && live.contains(&edge.depends_on))
+                .map(|edge| &edge.depends_on),
+        );
     }
     seen
 }
 
 fn topo_ancestors(members: &[WorkpieceId], edges: &[MemberDependency], member: &WorkpieceId) -> Vec<WorkpieceId> {
-    let ancestors = ancestor_set(edges, member);
+    let ancestors = ancestor_set(members, edges, member);
     if ancestors.is_empty() {
         return Vec::new();
     }
@@ -192,7 +203,7 @@ fn member_index(members: &[WorkpieceId], id: &WorkpieceId) -> usize {
 mod tests {
     use aether_data::wire::{from_bytes, to_vec};
 
-    use super::{SplicedBase, member_construct_base, splice_lineage, spliced_base};
+    use super::{SplicedBase, checkout_from, member_construct_base, splice_lineage, spliced_base};
     use crate::digest::Digest;
     use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
     use crate::reduce::{
@@ -200,7 +211,7 @@ mod tests {
     };
     use crate::values::{
         BloomDraft, BloomSpec, CandidateRef, ConfigRegistry, Evidence, EvidenceKind, Forecast, MemberDependency,
-        Membership, ResolutionClaim, ResolvedConfigs, SpendWindow, StageCatalog,
+        Membership, ResolutionClaim, ResolvedConfigs, SpendWindow, StageCatalog, Transformation,
     };
 
     fn digest(seed: u8) -> Digest {
@@ -285,6 +296,17 @@ mod tests {
                 if workpiece.0 == name && *stage == StageCatalog::entry_stage() =>
             {
                 Some(transformation.checkout)
+            }
+            _ => None,
+        })
+    }
+
+    fn verify_dispatch<'a>(decisions: &'a Decisions, name: &str) -> Option<&'a Transformation> {
+        decisions.effects.iter().find_map(|effect| match effect {
+            Decision::DispatchAttempt { workpiece, stage, transformation, .. }
+                if workpiece.0 == name && *stage == StageId::Verify =>
+            {
+                Some(transformation)
             }
             _ => None,
         })
@@ -778,6 +800,117 @@ mod tests {
         assert_eq!(
             after.blooms.get(&successor.id()).expect("successor").vehicles.get(&wp("wp-b")).copied(),
             Some(CandidateRef { tree: digest(20), checkout: digest(120) }),
+        );
+    }
+
+    // The plausible bug: B's Verify diffs sealed-base..checkout, so the
+    // containment gate names every path A introduced as B's violation.
+    #[test]
+    fn a_dependent_verify_diffs_against_its_construct_base() {
+        let spec = spec(&[("wp-a", 1), ("wp-b", 2)]);
+        let seal =
+            event("seal", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges: vec![edge("wp-b", "wp-a")] });
+        let (after_seal, _) = step(&Snapshot::new(digest(0)), &seal);
+        let after_build = pass_construct(&after_seal, spec.id(), "wp-a", 10, 110, "a-build");
+        let (after_a, _) =
+            step(&after_build, &event("a-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-a", 1, 10) }));
+        let (_, decided) = step(&after_a, &construct_pass(spec.id(), "wp-b", 20, 120, "b-build"));
+
+        let verify = verify_dispatch(&decided, "wp-b").expect("B advances onto Verify");
+        assert_eq!(
+            verify.diff_base,
+            Some(digest(110)),
+            "B's Verify range is A..B, not sealed-base..B — A's capture is the construct base",
+        );
+        assert_eq!(verify.checkout, digest(120));
+        assert_ne!(
+            verify.diff_base,
+            Some(digest(0)),
+            "the bloom sealed base is the aggregate range, not a spliced member's",
+        );
+    }
+
+    // The plausible bug: ancestor_set walks every depends_on, so a workpiece
+    // the live bloom has ejected still appears in a survivor's splice and
+    // would land with the surviving set.
+    #[test]
+    fn splice_lineage_skips_workpieces_absent_from_membership() {
+        let members = ids(&["wp-b", "wp-c"]);
+        let edges = vec![edge("wp-c", "wp-a"), edge("wp-c", "wp-b")];
+        let checkout_of = |id: &WorkpieceId| match id.0.as_str() {
+            "wp-a" => Some(digest(10)),
+            "wp-b" => Some(digest(20)),
+            _ => None,
+        };
+
+        assert_eq!(
+            splice_lineage(&members, &edges, &wp("wp-c"), &checkout_of),
+            vec![digest(20)],
+            "A is named by the predecessor graph but is not a live member",
+        );
+        assert_eq!(
+            spliced_base(digest(0), &members, &edges, &wp("wp-c"), &checkout_of),
+            SplicedBase::Ready(digest(20)),
+            "excluding A collapses the join to B; pre-fix this was Join {{A, B}}",
+        );
+        assert!(
+            !splice_lineage(&members, &edges, &wp("wp-c"), &checkout_of).contains(&digest(10)),
+            "the ejected candidate is unreachable from the composed lineage",
+        );
+    }
+
+    // The plausible bug: two supersedes after ejecting a join tip still
+    // splice that tip into a survivor's base, so the bloom lands code it
+    // never verified as part of the surviving set.
+    #[test]
+    fn a_survivor_does_not_splice_an_ejected_predecessors_candidate() {
+        let predecessor = spec(&[("wp-a", 1), ("wp-b", 2), ("wp-c", 3)]);
+        let pred_edges = vec![edge("wp-c", "wp-a"), edge("wp-c", "wp-b")];
+        let (snapshot, _) = step(
+            &Snapshot::new(digest(0)),
+            &event("seal", Fact::GraphSeal { predecessor: None, spec: predecessor.clone(), edges: pred_edges.clone() }),
+        );
+        let snapshot = pass_construct(&snapshot, predecessor.id(), "wp-a", 10, 110, "a-build");
+        let (snapshot, _) =
+            step(&snapshot, &event("a-done", Fact::Integrate { bloom: predecessor.id(), claim: claim("wp-a", 1, 10) }));
+        let snapshot = pass_construct(&snapshot, predecessor.id(), "wp-b", 20, 120, "b-build");
+        let (snapshot, _) =
+            step(&snapshot, &event("b-done", Fact::Integrate { bloom: predecessor.id(), claim: claim("wp-b", 2, 20) }));
+
+        let successor = spec_at(&[("wp-b", 2), ("wp-c", 3)], 1);
+        let (after, decided) = step(
+            &snapshot,
+            &event("sup", Fact::Supersede { predecessor: predecessor.id(), successor: successor.clone() }),
+        );
+
+        assert!(
+            splice_of(&decided, "wp-c").is_none_or(|(_, tips)| !tips.contains(&wp("wp-a"))),
+            "C's join must not name the ejected tip: {:?}",
+            decided.effects,
+        );
+        assert_ne!(
+            construct_checkout(&decided, "wp-c"),
+            Some(digest(110)),
+            "C must not construct on A's ejected capture",
+        );
+
+        let pred = snapshot.blooms.get(&predecessor.id()).expect("predecessor");
+        let live = ids(&["wp-b", "wp-c"]);
+        let checkout_of = |id: &WorkpieceId| checkout_from(pred, id);
+        let lineage = splice_lineage(&live, &pred_edges, &wp("wp-c"), &checkout_of);
+        assert!(
+            !lineage.contains(&digest(110)) && !lineage.contains(&digest(10)),
+            "composing C from the predecessor graph and the successor membership must drop A, got {lineage:?}",
+        );
+        assert_eq!(
+            spliced_base(digest(0), &live, &pred_edges, &wp("wp-c"), &checkout_of),
+            SplicedBase::Ready(digest(120)),
+            "the surviving parent is the unique remaining tip",
+        );
+        assert_eq!(
+            member_construct_base(record(&after, &successor), &wp("wp-c")),
+            digest(120),
+            "the live successor constructs C on B, not on a join that still carries A",
         );
     }
 }
