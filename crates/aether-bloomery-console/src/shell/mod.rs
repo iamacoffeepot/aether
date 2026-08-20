@@ -392,13 +392,15 @@ mod tests {
     use crate::http::Endpoint;
     use crate::keys::{Outcome, assert_footer_honest, footer_line};
     use crate::nav::Nav;
-    use crate::palette::Role;
+    use crate::palette::{Role, depth};
     use crate::screen::RowId;
     use crate::store::ResourceKey;
     use crate::warroom::Focus;
     use crossterm::event::{KeyCode, KeyEvent};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::style::Color;
     use std::net::TcpListener;
     use std::thread;
     use std::time::{Duration, Instant};
@@ -1074,7 +1076,7 @@ mod tests {
         out
     }
 
-    fn title_role(buffer: &ratatui::buffer::Buffer, title: &str) -> Role {
+    fn title_role(buffer: &Buffer, title: &str) -> Role {
         let area = buffer.area();
         for y in area.y..area.y + area.height {
             for x in area.x..area.x + area.width {
@@ -1088,7 +1090,7 @@ mod tests {
         panic!("title {title:?} not found");
     }
 
-    fn title_starts_at(buffer: &ratatui::buffer::Buffer, x: u16, y: u16, title: &str) -> bool {
+    fn title_starts_at(buffer: &Buffer, x: u16, y: u16, title: &str) -> bool {
         let area = buffer.area();
         let mut cursor = x;
         for ch in title.chars() {
@@ -1104,10 +1106,10 @@ mod tests {
         true
     }
 
-    fn role_of(color: ratatui::style::Color) -> Role {
+    fn role_of(color: Color) -> Role {
         Role::ALL
             .into_iter()
-            .find(|role| role.color(crate::palette::depth()) == color)
+            .find(|role| role.color(depth()) == color)
             .unwrap_or_else(|| panic!("unrecognized {color:?}"))
     }
 }

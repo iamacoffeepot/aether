@@ -100,7 +100,7 @@ impl Workspace {
 
     pub fn reseat(&mut self, store: &Store) {
         self.board.reseat(store);
-        let ids = self.chrome_ids(store);
+        let ids = chrome_ids(store);
         if let Some(id) = self.chrome.selected()
             && !ids.iter().any(|item| item == id)
         {
@@ -111,14 +111,14 @@ impl Workspace {
     pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, store: &Store, endpoint_label: &str) {
         let dashboard = compose(store);
         let areas = split_panes(area);
-        self.render_fleet(frame, areas.fleet, store, endpoint_label, &dashboard);
+        render_fleet(frame, areas.fleet, store, endpoint_label, &dashboard);
         self.render_board(frame, areas.board, store);
         self.render_needs_you(frame, areas.needs_you, store);
         self.render_quiet(frame, areas.quiet, store, &dashboard);
     }
 
     fn handle_needs_you(&mut self, key: KeyEvent, store: &Store) -> Outcome {
-        let ids = self.chrome_ids(store);
+        let ids = chrome_ids(store);
         match key.code {
             KeyCode::Char('i') if !ids.is_empty() && self.chrome.selected().is_none() => {
                 self.chrome.select(ids.first().cloned());
@@ -149,7 +149,7 @@ impl Workspace {
 
     fn needs_you_hints(&self, store: &Store) -> Vec<KeyHint> {
         let mut hints = Vec::new();
-        let ids = self.chrome_ids(store);
+        let ids = chrome_ids(store);
         if self.chrome.selected().is_some() {
             hints.push(ENTER_HINT);
             hints.push(LEAVE_BAND_HINT);
@@ -161,11 +161,6 @@ impl Workspace {
         hints.push(REFRESH_HINT);
         hints.push(QUIT_HINT);
         hints
-    }
-
-    fn chrome_ids(&self, store: &Store) -> Vec<ChromeId> {
-        let (alerts, interrupts) = bands(store);
-        warroom::chrome_ids(&interrupts, &alerts)
     }
 
     fn selected_interrupt_index(&self, interrupts: &[Interrupt]) -> Option<usize> {
@@ -184,20 +179,6 @@ impl Workspace {
             }
             _ => None,
         }
-    }
-
-    fn render_fleet(
-        &self,
-        frame: &mut Frame<'_>,
-        area: Rect,
-        store: &Store,
-        endpoint_label: &str,
-        dashboard: &Dashboard,
-    ) {
-        let block = pane_block("fleet", false);
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        frame.render_widget(chrome::header(endpoint_label, store.view(), Some(dashboard)), inner);
     }
 
     fn render_board(&mut self, frame: &mut Frame<'_>, area: Rect, store: &Store) {
@@ -286,4 +267,16 @@ fn bands(store: &Store) -> (Vec<Alert>, Vec<Interrupt>) {
         .value
         .as_ref()
         .map_or_else(|| (Vec::new(), Vec::new()), |view| (warroom::alerts(view), warroom::interrupts(view)))
+}
+
+fn chrome_ids(store: &Store) -> Vec<ChromeId> {
+    let (alerts, interrupts) = bands(store);
+    warroom::chrome_ids(&interrupts, &alerts)
+}
+
+fn render_fleet(frame: &mut Frame<'_>, area: Rect, store: &Store, endpoint_label: &str, dashboard: &Dashboard) {
+    let block = pane_block("fleet", false);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_widget(chrome::header(endpoint_label, store.view(), Some(dashboard)), inner);
 }
