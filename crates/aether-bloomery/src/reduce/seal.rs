@@ -96,8 +96,9 @@ pub(super) fn reduce_seal(
         };
     }
     // Claim each member, then seed the ready ones at the entry stage and
-    // dispatch their first attempt. Roots (no incoming edges) enter at
-    // `Construct` exactly as today; dependents wait for a resolution claim
+    // dispatch their first attempt. Roots (no incoming *declared* edges)
+    // enter at `Construct` exactly as today; a surface-derived overlap is
+    // not a gate (ADR-0204). Dependents wait for a resolution claim
     // (ADR-0196). The claims come first so the dispatch effects attach to a
     // member already in `active`.
     let mut effects = Vec::with_capacity(spec.members().len() * 3 + 2);

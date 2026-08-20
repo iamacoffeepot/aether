@@ -1,9 +1,11 @@
 //! Readiness scheduling over a sealed member-dependency graph (ADR-0196 slice two).
 //!
-//! A member's construct dispatches when every dependency carries a resolution
-//! claim — the journaled fact that its candidate verified (ADR-0191's
-//! immutability point in today's `Construct → Verify` line) — and not before.
-//! Roots have no incoming edges, so they dispatch at seal exactly as an
+//! A member's construct dispatches when every **declared** dependency carries
+//! a resolution claim — the journaled fact that its candidate verified
+//! (ADR-0191's immutability point in today's `Construct → Verify` line) —
+//! and not before. A surface-derived overlap is not a gate (ADR-0204): two
+//! members that share a glob and name no edge both dispatch at seal. Roots
+//! have no incoming declared edges, so they dispatch at seal exactly as an
 //! edgeless bloom does today. Dependents stay out of the line until that
 //! claim lands; a wedged ancestor therefore never starts them.
 //!
@@ -27,9 +29,12 @@ use crate::values::{
     BloomSpec, ConfigRegistry, MemberCandidate, MemberDependency, Membership, StageCatalog, VerifyFailureSet,
 };
 
-/// Whether every incoming edge of `member` names a workpiece `resolved` accepts.
+/// Whether every incoming **declared** edge of `member` names a workpiece
+/// `resolved` accepts.
 ///
-/// Vacuous when `member` has no incoming edges — that is a root, ready at seal.
+/// Vacuous when `member` has no incoming declared edges — that is a root,
+/// ready at seal. The `edges` slice the caller passes is the journaled
+/// declared set (ADR-0204).
 pub(super) fn dependencies_resolved<F: Fn(&WorkpieceId) -> bool>(
     resolved: &F,
     edges: &[MemberDependency],
@@ -374,7 +379,7 @@ mod tests {
     };
     use crate::values::{
         BloomDraft, BloomSpec, ConfigRegistry, Evidence, EvidenceKind, MemberDependency, Membership, ResolutionClaim,
-        ResolvedConfigs, SpendWindow, StageCatalog,
+        ResolvedConfigs, SpendWindow, StageCatalog, resolve_member_dependencies,
     };
 
     fn digest(seed: u8) -> Digest {
@@ -418,6 +423,38 @@ mod tests {
         let spec = spec(members);
         let event = event("seal", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges });
         (step(&Snapshot::new(digest(0)), &event).0, spec)
+    }
+
+    fn fold_member_order(members: &[(&str, u8)], edges: Vec<MemberDependency>) -> Vec<WorkpieceId> {
+        let spec = spec(members);
+        let fact = if edges.is_empty() {
+            Fact::Seal(spec.clone())
+        } else {
+            Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges }
+        };
+        let (mut snapshot, _) = step(&Snapshot::new(digest(0)), &event("seal", fact));
+        let mut fold = None;
+        for (index, (name, revision)) in members.iter().enumerate() {
+            let integrate = event(
+                &format!("{name}-done"),
+                Fact::Integrate { bloom: spec.id(), claim: claim(name, *revision, 10 + index as u8) },
+            );
+            let (next, decided) = step(&snapshot, &integrate);
+            snapshot = next;
+            if let Some(order) = integration_members(&decided) {
+                fold = Some(order);
+            }
+        }
+        fold.expect("the last claim dispatches integration")
+    }
+
+    fn integration_members(decisions: &Decisions) -> Option<Vec<WorkpieceId>> {
+        decisions.effects.iter().find_map(|effect| match effect {
+            Decision::DispatchIntegration { members, .. } => {
+                Some(members.iter().map(|member| member.workpiece.clone()).collect())
+            }
+            _ => None,
+        })
     }
 
     fn construct_dispatches(decisions: &Decisions) -> Vec<WorkpieceId> {
@@ -511,6 +548,68 @@ mod tests {
         let seal = event("seal", Fact::GraphSeal { predecessor: None, spec, edges: Vec::new() });
         let (_, sealed) = step(&Snapshot::new(digest(0)), &seal);
         assert_eq!(construct_dispatches(&sealed), vec![WorkpieceId("wp-a".into()), WorkpieceId("wp-c".into())],);
+    }
+
+    // The plausible bug: a derived overlap is still treated as a dispatch
+    // gate, so the later-canonical member waits for a conflict that 60% of
+    // the time never exists (ADR-0204). Pre-fix: GraphSeal carried the
+    // derived edge and only wp-a entered Construct.
+    #[test]
+    fn overlapping_members_without_a_declared_edge_both_dispatch_at_seal() {
+        let bloom = ["crates/aether-bloomery/**".to_owned()];
+        let file = ["crates/aether-bloomery/src/lib.rs".to_owned()];
+        let listed = [(WorkpieceId("wp-a".into()), bloom.as_slice()), (WorkpieceId("wp-b".into()), file.as_slice())];
+        let resolved = resolve_member_dependencies(&listed, &[]).expect("acyclic overlap");
+        assert_eq!(resolved.edges, [edge("wp-b", "wp-a")], "the union still names the overlap");
+        assert!(resolved.declared.is_empty(), "overlap is not a declared gate");
+
+        let spec = spec(&[("wp-a", 1), ("wp-b", 2)]);
+        let seal = event("seal", Fact::Seal(spec.clone()));
+        let (after, sealed) = step(&Snapshot::new(digest(0)), &seal);
+        assert_eq!(
+            construct_dispatches(&sealed),
+            vec![WorkpieceId("wp-a".into()), WorkpieceId("wp-b".into())],
+            "both members enter Construct: the derived edge is not a gate",
+        );
+        assert_eq!(
+            blocking_ancestor(record(&after, &spec), &WorkpieceId("wp-b".into())),
+            None,
+            "a derived-only wait is not blocked_by",
+        );
+    }
+
+    // The plausible bug: dropping derived edges from the dispatch graph also
+    // reorders the fold, so a mixed-provenance bloom weaves in a different
+    // member sequence than today's union graph.
+    #[test]
+    fn mixed_provenance_integration_order_matches_the_union_graph() {
+        let members = [("wp-a", 1), ("wp-b", 2), ("wp-c", 3)];
+        let declared = vec![edge("wp-c", "wp-a")];
+        let union = vec![edge("wp-b", "wp-a"), edge("wp-c", "wp-a")];
+
+        let spec = spec(&members);
+        let (after_declared, declared_seal) = step(
+            &Snapshot::new(digest(0)),
+            &event("seal-declared", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges: declared.clone() }),
+        );
+        assert_eq!(
+            construct_dispatches(&declared_seal),
+            vec![WorkpieceId("wp-a".into()), WorkpieceId("wp-b".into())],
+            "overlap-only B dispatches; declared-dependent C waits",
+        );
+        assert_eq!(
+            blocking_ancestor(record(&after_declared, &spec), &WorkpieceId("wp-c".into())),
+            Some(WorkpieceId("wp-a".into())),
+        );
+        assert_eq!(blocking_ancestor(record(&after_declared, &spec), &WorkpieceId("wp-b".into())), None);
+
+        let declared_fold = fold_member_order(&members, declared);
+        let union_fold = fold_member_order(&members, union);
+        assert_eq!(declared_fold, union_fold, "fold member sequence is sealed membership order, not dispatch order");
+        assert_eq!(
+            declared_fold,
+            vec![WorkpieceId("wp-a".into()), WorkpieceId("wp-b".into()), WorkpieceId("wp-c".into())],
+        );
     }
 
     // The plausible bug: a restarted coordinator re-decides readiness against
