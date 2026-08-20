@@ -5,11 +5,12 @@ use std::fmt::Write;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::widgets::{BarChart, Block, Borders, Paragraph};
 
 use crate::dto::{MetricDay, SpendQuiesce};
 use crate::keys::{KeyHint, Outcome};
+use crate::palette::{self, Role};
 use crate::store::{ResourceKey, Store};
 
 use super::bucket::format_duration;
@@ -84,10 +85,13 @@ fn render_spend(frame: &mut Frame<'_>, area: Rect, days: &[MetricDay], ceiling: 
     let title =
         ceiling.map_or_else(|| "SPEND".to_owned(), |ceiling| format!("SPEND  ceiling {}", format_micro_usd(ceiling)));
     let chart = BarChart::default()
-        .block(Block::default().borders(Borders::ALL).title(title))
+        .block(
+            Block::default().borders(Borders::ALL).border_style(palette::border()).style(palette::body()).title(title),
+        )
         .data(&data)
         .bar_width(3)
-        .bar_gap(1);
+        .bar_gap(1)
+        .bar_style(palette::paint(Role::Working));
     frame.render_widget(chart, area);
 }
 
@@ -97,10 +101,17 @@ fn render_landed(frame: &mut Frame<'_>, area: Rect, days: &[MetricDay]) {
     let data: Vec<(&str, u64)> =
         labels.iter().zip(window.iter()).map(|(label, day)| (label.as_str(), day.landed)).collect();
     let chart = BarChart::default()
-        .block(Block::default().borders(Borders::ALL).title("LANDED"))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(palette::border())
+                .style(palette::body())
+                .title("LANDED"),
+        )
         .data(&data)
         .bar_width(3)
-        .bar_gap(1);
+        .bar_gap(1)
+        .bar_style(palette::paint(Role::Settled));
     frame.render_widget(chart, area);
 }
 
@@ -122,8 +133,14 @@ fn render_cycle(frame: &mut Frame<'_>, area: Rect, days: &[MetricDay]) {
     }
     frame.render_widget(
         Paragraph::new(line)
-            .block(Block::default().borders(Borders::ALL).title("CYCLE TIME"))
-            .style(Style::default().add_modifier(Modifier::DIM)),
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(palette::border())
+                    .style(palette::body())
+                    .title("CYCLE TIME"),
+            )
+            .style(palette::body().add_modifier(Modifier::DIM)),
         area,
     );
 }

@@ -5,12 +5,13 @@
 
 use std::time::Duration;
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::dto::{SpendQuiesce, ViewDocument};
 use crate::keys::{KeyHint, footer_line};
+use crate::palette::{self, Role};
 use crate::screen::Dashboard;
 use crate::store::Cell;
 use crate::warroom::{Alert, AlertKind, Interrupt, InterruptKind};
@@ -36,11 +37,11 @@ pub fn format_age(age: Option<Duration>) -> String {
 pub fn header(endpoint_label: &str, view: &Cell<ViewDocument>, dashboard: Option<&Dashboard>) -> Paragraph<'static> {
     let age = format_age(view.sample_age());
     let mut spans = vec![
-        Span::styled("bloomery-console", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("bloomery-console", palette::body().add_modifier(Modifier::BOLD)),
         Span::raw(format!("  {endpoint_label}  sample {age}")),
     ];
     if view.is_stale() {
-        spans.push(Span::styled("  STALE", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled("  STALE", palette::paint(Role::Loud).add_modifier(Modifier::BOLD)));
         if let Some(error) = &view.error {
             spans.push(Span::raw(format!("  {error}")));
         }
@@ -51,17 +52,17 @@ pub fn header(endpoint_label: &str, view: &Cell<ViewDocument>, dashboard: Option
             dashboard.spend_spark, dashboard.landed_spark, dashboard.wedge_spark
         )));
     }
-    Paragraph::new(Line::from(spans))
+    Paragraph::new(Line::from(spans)).style(palette::body())
 }
 
 #[must_use]
 pub fn today(dashboard: &Dashboard) -> Paragraph<'static> {
-    Paragraph::new(dashboard.today.clone())
+    Paragraph::new(dashboard.today.clone()).style(palette::body())
 }
 
 #[must_use]
 pub fn filter_line(filter: &str) -> Paragraph<'static> {
-    Paragraph::new(filter.to_owned())
+    Paragraph::new(filter.to_owned()).style(palette::body())
 }
 
 /// `mainline` / `observed` prefixes, plus a divergence token when they differ.
@@ -86,14 +87,15 @@ pub fn status(view: &ViewDocument) -> Paragraph<'static> {
     let mut spans =
         vec![Span::raw(format!("mainline {}  observed {}", view.mainline.prefix(), view.observed.prefix()))];
     if view.mainline != view.observed {
-        spans.push(Span::styled("  diverged", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled("  diverged", palette::paint(Role::Attention).add_modifier(Modifier::BOLD)));
     }
-    Paragraph::new(Line::from(spans))
+    Paragraph::new(Line::from(spans)).style(palette::body())
 }
 
 #[must_use]
 pub fn seal(quiesce: &SpendQuiesce) -> Paragraph<'static> {
-    Paragraph::new(Span::styled(format_seal(quiesce), Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)))
+    Paragraph::new(Span::styled(format_seal(quiesce), palette::paint(Role::Loud).add_modifier(Modifier::BOLD)))
+        .style(palette::body())
 }
 
 #[must_use]
@@ -102,14 +104,14 @@ pub fn alert_band(alerts: &[Alert], selected: Option<usize>) -> Paragraph<'stati
         .iter()
         .enumerate()
         .flat_map(|(index, alert)| {
-            let mut style = Style::default().fg(alert_color(alert.kind)).add_modifier(Modifier::BOLD);
+            let mut style = palette::paint(alert_role(alert.kind)).add_modifier(Modifier::BOLD);
             if selected == Some(index) {
                 style = style.add_modifier(Modifier::REVERSED);
             }
             [Span::styled(alert.token.clone(), style), Span::raw(format!(" {}  ", alert.detail))]
         })
         .collect();
-    Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Black))
+    Paragraph::new(Line::from(spans)).style(palette::body())
 }
 
 /// Interrupt rows the band can paint. Extra queue entries stay reachable by
@@ -140,7 +142,7 @@ pub fn interrupt_band(entries: &[Interrupt], selected: Option<usize>) -> Paragra
         .iter()
         .enumerate()
         .map(|(index, entry)| {
-            let mut style = Style::default().fg(interrupt_color(entry.kind)).add_modifier(Modifier::BOLD);
+            let mut style = palette::paint(interrupt_role(entry.kind)).add_modifier(Modifier::BOLD);
             if selected == Some(index) {
                 style = style.add_modifier(Modifier::REVERSED);
             }
@@ -150,28 +152,32 @@ pub fn interrupt_band(entries: &[Interrupt], selected: Option<usize>) -> Paragra
             ])
         })
         .collect();
-    Paragraph::new(lines)
+    Paragraph::new(lines).style(palette::body())
 }
 
-fn alert_color(kind: AlertKind) -> Color {
+fn alert_role(kind: AlertKind) -> Role {
     match kind {
-        AlertKind::Park | AlertKind::HostFault => Color::Yellow,
-        AlertKind::Landing | AlertKind::Fault | AlertKind::Wedge => Color::Red,
+        AlertKind::Park | AlertKind::HostFault => Role::Attention,
+        AlertKind::Landing | AlertKind::Fault | AlertKind::Wedge => Role::Loud,
     }
 }
 
-fn interrupt_color(kind: InterruptKind) -> Color {
+fn interrupt_role(kind: InterruptKind) -> Role {
     match kind {
-        InterruptKind::Park | InterruptKind::Decision | InterruptKind::Hold | InterruptKind::Findings => Color::Yellow,
-        InterruptKind::Terminal | InterruptKind::Wedge | InterruptKind::Landing | InterruptKind::Quiesce => Color::Red,
+        InterruptKind::Park | InterruptKind::Decision | InterruptKind::Hold | InterruptKind::Findings => {
+            Role::Attention
+        }
+        InterruptKind::Terminal | InterruptKind::Wedge | InterruptKind::Landing | InterruptKind::Quiesce => Role::Loud,
     }
 }
 
 #[must_use]
 pub fn footer(hints: &[KeyHint], metrics: Option<&str>) -> Paragraph<'static> {
     match metrics {
-        Some(metrics) if !metrics.is_empty() => Paragraph::new(format!("{metrics}   {}", footer_line(hints))),
-        _ => Paragraph::new(footer_line(hints)),
+        Some(metrics) if !metrics.is_empty() => {
+            Paragraph::new(format!("{metrics}   {}", footer_line(hints))).style(palette::body())
+        }
+        _ => Paragraph::new(footer_line(hints)).style(palette::body()),
     }
 }
 
