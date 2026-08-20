@@ -84,8 +84,11 @@ pub(super) fn move_effects_with_candidate(
 /// `construct_checkpoint_base` is the member's clean or spliced base. It
 /// becomes [`Transformation::diff_base`] only on Construct — the local
 /// backend turns that marker into `--seeded` and withholds it from
-/// `--diff-base` (#5052). Every other stage stays unmarked here; Verify
-/// still names its range through [`Transformation::for_member_stage`].
+/// `--diff-base` (#5052). Verify names its range through
+/// [`Transformation::for_member_stage`] as [`SealedLine::base`], which is
+/// the member's own construct base — a dependent spliced onto an ancestor
+/// is judged only on the files it changed. Aggregate verify still diffs
+/// the woven tree against the bloom's sealed base.
 pub(super) fn move_effects_with_checkpoint(
     bloom: BloomId,
     workpiece: &WorkpieceId,
