@@ -32,7 +32,7 @@ use aether_bloomery::{
     ToolPolicy, Topic, WorkpieceId, authorization_message,
 };
 use aether_chassis_bloomery::bloomery::TopicOutbox;
-use aether_chassis_bloomery::store::{SqliteStore, StoreBackend};
+use aether_chassis_bloomery::store::{CommissionBackend, SqliteStore, StoreBackend};
 use aether_data::wire::from_bytes;
 use common::{Coordinator, free_port};
 use ed25519_dalek::{Signer, SigningKey};
@@ -93,6 +93,23 @@ fn seed_commission_described(
     description: &str,
     approve: bool,
 ) -> Digest {
+    seed_commission_revision(port, id, surface, problem, description, approve, &[])
+}
+
+/// Persist a complete approved commission whose frozen revision depends on `depends_on`.
+fn seed_depending(port: u16, id: &str, depends_on: &[&str]) -> Digest {
+    seed_commission_revision(port, id, &["docs/guide/**"], "problem", &format!("task for {id}"), true, depends_on)
+}
+
+fn seed_commission_revision(
+    port: u16,
+    id: &str,
+    surface: &[&str],
+    problem: &str,
+    description: &str,
+    approve: bool,
+    dependencies: &[&str],
+) -> Digest {
     let intent = Statement {
         words: format!("intent {id}").into_bytes(),
         provenance: Provenance::ObservationAttestation(Observation { source: "rest-api".to_owned() }),
@@ -111,7 +128,7 @@ fn seed_commission_described(
         declared_surface: surface.iter().map(|glob| (*glob).to_owned()).collect(),
         dogfood_brief: "dogfood".to_owned(),
         routing: ScopeRouting { size: "M".to_owned(), model: "construct: test".to_owned() },
-        dependencies: Vec::new(),
+        dependencies: dependencies.iter().map(|dep| WorkpieceId((*dep).to_owned())).collect(),
         description: description.to_owned(),
         implements: Vec::new(),
     };
@@ -508,6 +525,86 @@ fn wait_for_dispatch_description(store_path: &str, bloom: &[u8], workpiece: &str
         }
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// Pre-fix, `dependencies_all_closed` was the literal `true`, so this seal was
+/// refused later by `resolve_seal_graph` as an unknown workpiece, never as
+/// `OpenDependency`.
+#[test]
+fn an_open_non_member_dependency_is_refused_as_open_dependency() {
+    run_with_bloomery("an_open_non_member_dependency_is_refused_as_open_dependency", |http_port| {
+        seed_commission(http_port, "wp-dep", &["docs/guide/**"]);
+        let revision = seed_depending(http_port, "wp-a", &["wp-dep"]);
+        let draft_id = patch_draft(http_port, &serde_json::to_value(valid_draft("wp-a", revision)).unwrap());
+        let (status, body) = send_json(http_port, "POST", &format!("/drafts/{draft_id}/seal"), &seal_body());
+        assert_eq!(status, 422, "open non-member dependency fails closed: {body:?}");
+        let error = body["error"].as_str().unwrap_or("");
+        assert!(error.contains("OpenDependency"), "gate names OpenDependency: {body:?}");
+        assert!(
+            !error.contains("which is not a member of this bloom"),
+            "must not be the graph-resolver unknown-workpiece door: {body:?}"
+        );
+    });
+}
+
+/// A landed prerequisite is not a bloom member. Pre-fix, the graph resolver
+/// refused it as an unknown workpiece; the gate must admit it.
+#[test]
+fn a_member_depending_on_a_landed_commission_seals() {
+    let http_port = free_port();
+    let rpc_port = free_port();
+    let (_policy_dir, policy_path) = test_policy();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store_path = store_dir.path().join("bloomery.db");
+    let store_path = store_path.to_str().unwrap();
+    let _coordinator = spawn_with_store(http_port, rpc_port, &policy_path, store_path);
+
+    wait_for_200(http_port, "/drafts");
+    wait_for_200(http_port, "/view");
+
+    seed_commission(http_port, "wp-dep", &["docs/guide/**"]);
+    let mut store = SqliteStore::open(store_path).unwrap();
+    store.mark_landed(&WorkpieceId("wp-dep".to_owned())).expect("land the prerequisite");
+    drop(store);
+
+    let revision = seed_depending(http_port, "wp-a", &["wp-dep"]);
+    let draft_id = patch_draft(http_port, &serde_json::to_value(valid_draft("wp-a", revision)).unwrap());
+    let (status, sealed) = send_json(http_port, "POST", &format!("/drafts/{draft_id}/seal"), &seal_body());
+    assert_eq!(status, 200, "a landed prerequisite must not refuse the seal: {sealed:?}");
+}
+
+/// Two co-sealed members, one depending on the other, still seal and still
+/// journal the ordering edge. The naive "not open" reading of completeness
+/// would refuse the dependent member, because a co-sealed sibling is Open.
+#[test]
+fn co_sealed_members_still_journal_the_declared_ordering_edge() {
+    run_with_bloomery("co_sealed_members_still_journal_the_declared_ordering_edge", |http_port| {
+        let wp_a = seed_commission(http_port, "wp-a", &["docs/guide/**"]);
+        let wp_b = seed_depending(http_port, "wp-b", &["wp-a"]);
+        let detail = Digest::from_bytes([9; 32]);
+        let draft = BloomDraft {
+            proposals: vec![member("wp-a", wp_a, detail), member("wp-b", wp_b, detail)],
+            base: Digest::from_bytes([1; 32]),
+            ..BloomDraft::default()
+        };
+        let draft_id = patch_draft(http_port, &serde_json::to_value(&draft).unwrap());
+        let (status, sealed) = send_json(http_port, "POST", &format!("/drafts/{draft_id}/seal"), &seal_body());
+        assert_eq!(status, 200, "co-sealed dependency must still seal: {sealed:?}");
+
+        let (status, journal) = get_json(http_port, "/journal");
+        assert_eq!(status, 200, "journal");
+        let graph = journal["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|record| record["event"]["fact"]["GraphSeal"].as_object())
+            .expect("a declared in-bloom edge journals GraphSeal");
+        let edges = graph["edges"].as_array().expect("GraphSeal carries edges");
+        assert!(
+            edges.iter().any(|edge| edge["member"] == "wp-b" && edge["depends_on"] == "wp-a"),
+            "the co-sealed ordering edge is journaled: {graph:?}"
+        );
+    });
 }
 
 /// The above-auto deferred-verify seal path (#3599): an above-auto member whose

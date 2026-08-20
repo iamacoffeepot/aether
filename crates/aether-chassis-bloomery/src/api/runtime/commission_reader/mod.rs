@@ -5,6 +5,8 @@
 //! projection of the same digest is not an input — the canonical bytes the
 //! operator signed are.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use aether_bloomery::{
     CommissionStatus, Digest, MemberDependency, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision, Statement, Workpiece,
     WorkpieceId, digest_of,
@@ -141,21 +143,51 @@ impl AdmitError {
     }
 }
 
+/// How a declared `## Depends on` id resolves at this seal: a co-sealed member
+/// of the wave, or the loaded status of a non-member commission.
+#[derive(Clone, Debug, Default)]
+pub(super) struct DependencyResolution {
+    members: BTreeSet<WorkpieceId>,
+    statuses: BTreeMap<WorkpieceId, CommissionStatus>,
+}
+
+impl DependencyResolution {
+    pub(super) fn new(
+        members: impl IntoIterator<Item = WorkpieceId>,
+        statuses: impl IntoIterator<Item = (WorkpieceId, CommissionStatus)>,
+    ) -> Self {
+        Self { members: members.into_iter().collect(), statuses: statuses.into_iter().collect() }
+    }
+
+    fn is_member(&self, id: &WorkpieceId) -> bool {
+        self.members.contains(id)
+    }
+
+    fn is_satisfied(&self, id: &WorkpieceId) -> bool {
+        self.members.contains(id) || self.statuses.get(id) == Some(&CommissionStatus::Landed)
+    }
+}
+
 /// Materialize one draft member from a store load, failing closed on each
 /// named refusal. `expected` is the exact scope digest the draft membership
-/// pinned.
+/// pinned. `resolution` answers whether each of the revision's declared
+/// dependencies is a co-sealed member or a landed commission.
 pub(super) fn admit_member(
     expected: Digest,
     result: LoadCommissionResult,
     maturity: &impl AdrMaturity,
+    resolution: &DependencyResolution,
 ) -> Result<AdmittedMember, AdmitError> {
     match result {
         LoadCommissionResult::Missing { id } => Err(AdmitError::Refused(AdmissionRefusal::MissingCommission { id })),
         LoadCommissionResult::Err { error } => Err(AdmitError::Store(error)),
-        LoadCommissionResult::Ok { id, intent, current_revision, status, current, approvals, .. } => {
-            admit_loaded(expected, LoadedRow { id, intent, current_revision, status, current, approvals }, maturity)
-                .map_err(AdmitError::Refused)
-        }
+        LoadCommissionResult::Ok { id, intent, current_revision, status, current, approvals, .. } => admit_loaded(
+            expected,
+            LoadedRow { id, intent, current_revision, status, current, approvals },
+            maturity,
+            resolution,
+        )
+        .map_err(AdmitError::Refused),
     }
 }
 
@@ -172,6 +204,7 @@ fn admit_loaded(
     expected: Digest,
     loaded: LoadedRow,
     maturity: &impl AdrMaturity,
+    resolution: &DependencyResolution,
 ) -> Result<AdmittedMember, AdmissionRefusal> {
     let LoadedRow { id, intent, current_revision, status, current, approvals } = loaded;
     if status != CommissionStatus::Open.as_str() {
@@ -219,13 +252,14 @@ fn admit_loaded(
     let edges = revision
         .dependencies
         .iter()
+        .filter(|depends_on| resolution.is_member(depends_on))
         .map(|depends_on| MemberDependency { member: workpiece.id.clone(), depends_on: depends_on.clone() })
         .collect();
     let projection = MemberProjection {
         workpiece: workpiece.id.clone(),
         scope_revision: expected,
         declared_surface: revision.declared_surface.clone(),
-        completeness: completeness_from(&revision, &status, current_digest == expected),
+        completeness: completeness_from(&revision, &status, current_digest == expected, resolution),
         adr_touch: adr_touch(&revision.declared_surface, maturity),
         pre_approved: false,
         signed_statement,
@@ -233,7 +267,12 @@ fn admit_loaded(
     Ok(AdmittedMember { workpiece, projection, description: task_text(&revision), edges })
 }
 
-fn completeness_from(revision: &ScopeRevision, status: &str, surface_fresh: bool) -> Completeness {
+fn completeness_from(
+    revision: &ScopeRevision,
+    status: &str,
+    surface_fresh: bool,
+    resolution: &DependencyResolution,
+) -> Completeness {
     Completeness {
         has_problem_statement: !revision.problem.trim().is_empty(),
         has_design_notes: !revision.design.trim().is_empty(),
@@ -242,7 +281,7 @@ fn completeness_from(revision: &ScopeRevision, status: &str, surface_fresh: bool
         model_routing_count: usize::from(!revision.routing.model.trim().is_empty()),
         blocked: status != CommissionStatus::Open.as_str(),
         declared_surface_fresh: surface_fresh,
-        dependencies_all_closed: true,
+        dependencies_all_closed: revision.dependencies.iter().all(|id| resolution.is_satisfied(id)),
         umbrella_integrity: true,
     }
 }

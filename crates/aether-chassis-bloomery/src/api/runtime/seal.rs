@@ -9,26 +9,27 @@
 //! admits only once every signature verifies, and a fail-closed teardown the
 //! moment one does not.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::de::DeserializeOwned;
 
 use aether_actor::Manual;
 use aether_bloomery::{
-    Admit, ApprovalPolicy, AuthorityDoor, BloomDraft, BloomId, BloomSpec, ConfigScopes, DependencyError, Digest, Event,
-    Fact, IdempotencyKey, MemberDependency, Membership, SpendCeiling, Statement, SurfacePattern, WorkpieceId,
-    resolve_member_dependencies, surface_intersection,
+    Admit, ApprovalPolicy, AuthorityDoor, BloomDraft, BloomId, BloomSpec, CommissionStatus, ConfigScopes,
+    DependencyError, Digest, Event, Fact, IdempotencyKey, MemberDependency, Membership, ScopeRevision, SpendCeiling,
+    Statement, SurfacePattern, WorkpieceId, resolve_member_dependencies, surface_intersection,
 };
 use aether_data::wire::to_vec;
 use aether_http::HttpServerResponse;
 use aether_substrate::actor::native::NativeCtx;
 
-use super::commission_reader::{TreeAdrs, admit_member};
+use super::commission_reader::{DependencyResolution, TreeAdrs, admit_member};
 use super::hex::{self, hex_encode};
 use super::response::error_response;
 use super::state::{
-    ApiCapabilityState, MAX_OPEN_SEALS, MAX_SEAL_MEMBERS, PendingCommissionSeal, PendingCommissionSealSetup,
-    PendingSeal, PendingSealSetup, PendingVerify, Routed, SealCommissionLoad, SealVerify, admit,
+    ApiCapabilityState, MAX_OPEN_SEALS, MAX_SEAL_DEPENDENCY_LOADS, MAX_SEAL_MEMBERS, PendingCommissionSeal,
+    PendingCommissionSealSetup, PendingSeal, PendingSealSetup, PendingVerify, Routed, SealCommissionLoad, SealVerify,
+    admit,
 };
 use crate::api::dto::{MemberProjection, SealRequest};
 use crate::bloomery::{AdmissionRequest, Decision, Gate, precheck_statement, verified_statement_approval};
@@ -111,8 +112,10 @@ impl ApiCapabilityState {
         }))
     }
 
-    /// Join one member's `LoadCommission` into its held seal. The last load
-    /// materializes store projections and continues into the gate.
+    /// Join one `LoadCommission` into its held seal. When the member round
+    /// completes, a second round loads any declared non-member dependencies;
+    /// the last load of that round materializes store projections and continues
+    /// into the gate.
     pub(super) fn resolve_seal_commission_load(&mut self, ctx: &NativeCtx<'_, Manual>, result: LoadCommissionResult) {
         let correlation = ctx.reply_target().correlation_id;
         let Some(SealCommissionLoad { seal, workpiece }) = self.seal_commission_loads.remove(&correlation) else {
@@ -125,6 +128,10 @@ impl ApiCapabilityState {
         pending.remaining -= 1;
         if pending.remaining > 0 {
             return;
+        }
+        match self.enqueue_seal_dependency_loads(ctx, seal) {
+            DependencyLoadRound::Dispatched | DependencyLoadRound::Refused => return,
+            DependencyLoadRound::Ready => {}
         }
         let PendingCommissionSeal { inbound, draft, predecessor, idempotency_key, edges, mut loaded, .. } =
             self.commission_seals.remove(&seal).expect("seal present; just mutated it");
@@ -141,6 +148,47 @@ impl ApiCapabilityState {
                 inbound.reply(&error_response(500, "unexpected seal disposition after commission load"));
             }
         }
+    }
+
+    /// When every member load has joined, dispatch one `LoadCommission` per
+    /// distinct declared dependency that is not already a loaded key. Empty
+    /// needed-set means the second round is done (or was never needed). Over
+    /// the ceiling is a fail-closed `422`.
+    fn enqueue_seal_dependency_loads(&mut self, ctx: &NativeCtx<'_, Manual>, seal: u64) -> DependencyLoadRound {
+        let collected = {
+            let Some(pending) = self.commission_seals.get(&seal) else {
+                return DependencyLoadRound::Ready;
+            };
+            unloaded_dependency_ids(&pending.draft, &pending.loaded)
+        };
+        let needed = match collected {
+            UnloadedDependencies::OverCap => {
+                self.fail_commission_seal(
+                    seal,
+                    422,
+                    &format!(
+                        "seal names more than {MAX_SEAL_DEPENDENCY_LOADS} distinct non-member dependencies; a seal is capped at {MAX_SEAL_DEPENDENCY_LOADS}"
+                    ),
+                );
+                return DependencyLoadRound::Refused;
+            }
+            UnloadedDependencies::Ids(needed) => needed,
+        };
+        if needed.is_empty() {
+            return DependencyLoadRound::Ready;
+        }
+        let mut loads = Vec::with_capacity(needed.len());
+        for id in needed {
+            let correlation = self.send_tracked(ctx.actor::<StoreCapability>(), &LoadCommission { id: id.clone() });
+            loads.push((correlation, WorkpieceId(id)));
+        }
+        let remaining = loads.len();
+        let pending = self.commission_seals.get_mut(&seal).expect("seal present; just read it");
+        pending.remaining = remaining;
+        for (correlation, workpiece) in loads {
+            self.seal_commission_loads.insert(correlation, SealCommissionLoad { seal, workpiece });
+        }
+        DependencyLoadRound::Dispatched
     }
 
     /// Tear down a store-backed seal whose commission load never answered.
@@ -174,6 +222,7 @@ impl ApiCapabilityState {
         mut edges: Vec<MemberDependency>,
         loaded: &mut BTreeMap<String, LoadCommissionResult>,
     ) -> Routed {
+        let resolution = seal_dependency_resolution(&draft, loaded);
         let mut projections = Vec::with_capacity(draft.proposals.len());
         let mut descriptions = BTreeMap::new();
         for proposal in &draft.proposals {
@@ -183,7 +232,7 @@ impl ApiCapabilityState {
                     &format!("commission load for {} was not joined", proposal.workpiece.0),
                 ));
             };
-            match admit_member(proposal.scope_revision, result, &TreeAdrs::working_tree()) {
+            match admit_member(proposal.scope_revision, result, &TreeAdrs::working_tree(), &resolution) {
                 Ok(admitted) => {
                     descriptions.insert(admitted.workpiece.id.0.clone(), admitted.description);
                     edges.extend(admitted.edges);
@@ -725,6 +774,71 @@ fn parse_optional_body<T: DeserializeOwned + Default>(body: &[u8]) -> Result<T, 
         return Ok(T::default());
     }
     hex::from_slice(body).map_err(|error| error_response(400, &format!("invalid request body: {error}")))
+}
+
+enum DependencyLoadRound {
+    Dispatched,
+    Ready,
+    Refused,
+}
+
+enum UnloadedDependencies {
+    Ids(Vec<String>),
+    OverCap,
+}
+
+/// Distinct declared dependency ids across this seal's members that have not
+/// already joined `loaded`. Best-effort: a member whose current bytes will not
+/// decode contributes no ids and is refused later by `admit_loaded`. Over the
+/// ceiling is `OverCap` so the door can refuse `422` without feeding a
+/// half-decoded revision into the resolution.
+fn unloaded_dependency_ids(
+    draft: &BloomDraft,
+    loaded: &BTreeMap<String, LoadCommissionResult>,
+) -> UnloadedDependencies {
+    let mut needed = BTreeSet::new();
+    for proposal in &draft.proposals {
+        let Some(LoadCommissionResult::Ok { current: Some(bytes), .. }) = loaded.get(&proposal.workpiece.0) else {
+            continue;
+        };
+        let Ok(revision) = ScopeRevision::from_canonical(bytes) else {
+            continue;
+        };
+        for depends_on in revision.dependencies {
+            if loaded.contains_key(&depends_on.0) {
+                continue;
+            }
+            needed.insert(depends_on.0);
+            if needed.len() > MAX_SEAL_DEPENDENCY_LOADS {
+                return UnloadedDependencies::OverCap;
+            }
+        }
+    }
+    UnloadedDependencies::Ids(needed.into_iter().collect())
+}
+
+/// Co-sealed member ids plus the parsed status of each loaded non-member.
+fn seal_dependency_resolution(
+    draft: &BloomDraft,
+    loaded: &BTreeMap<String, LoadCommissionResult>,
+) -> DependencyResolution {
+    let members: BTreeSet<WorkpieceId> = draft.proposals.iter().map(|proposal| proposal.workpiece.clone()).collect();
+    let statuses: Vec<(WorkpieceId, CommissionStatus)> = loaded
+        .iter()
+        .filter_map(|(id, result)| {
+            let workpiece = WorkpieceId(id.clone());
+            if members.contains(&workpiece) {
+                return None;
+            }
+            match result {
+                LoadCommissionResult::Ok { status, .. } => {
+                    CommissionStatus::parse(status).map(|parsed| (workpiece, parsed))
+                }
+                _ => None,
+            }
+        })
+        .collect();
+    DependencyResolution::new(members, statuses)
 }
 
 #[cfg(test)]
