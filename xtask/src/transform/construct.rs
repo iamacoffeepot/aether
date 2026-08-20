@@ -416,6 +416,29 @@ mod tests {
         assert!(prompt.contains("Tests must earn their place"), "testing doctrine stays");
         assert!(prompt.contains("spell units out in identifiers"), "code conventions stay");
 
+        // Tripwire (#5254): construct used to learn the lint regime by failing
+        // verify. The syllabus has to ride lane_context, after Commands and
+        // before the testing surface, and name the measured shapes.
+        let commands_at = LANE_CONTEXT.find("## Commands").expect("build/task framing stays");
+        let lint_at = LANE_CONTEXT.find("## Lint expectations").expect("lint expectations are a named block");
+        let harnesses_at = LANE_CONTEXT.find("## Test harnesses").expect("testing surface rules stay");
+        assert!(
+            commands_at < lint_at && lint_at < harnesses_at,
+            "lint expectations sit after the build/task framing and before the surface rules",
+        );
+        assert!(
+            LANE_CONTEXT.contains("disallowed-methods"),
+            "lint expectations name the clippy methods that bite on the first pass",
+        );
+        assert!(
+            LANE_CONTEXT.contains("wrong_self_convention"),
+            "lint expectations name the measured function-length split knock-on",
+        );
+        assert!(
+            LANE_CONTEXT.contains("#![allow(clippy::unwrap_used)]"),
+            "lint expectations name the test-file unwrap header the suppression gate already permits",
+        );
+
         for heading in [
             "## MCP harness",
             "## Runtime & subsystems",
