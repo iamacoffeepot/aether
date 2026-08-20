@@ -262,7 +262,7 @@ fn git_object(checkout: &Path, spec: &str) -> Result<Option<String>, ClosureKeyE
     match command::run(checkout, &["rev-parse", "--verify", "--quiet", spec]) {
         Ok(output) if output.status.success() => Ok(Some(command::trim_bytes(&output.stdout))),
         Ok(_) => Ok(None),
-        Err(error) => Err(git_read(spec, error)),
+        Err(error) => Err(git_read(spec, &error)),
     }
 }
 
@@ -274,11 +274,11 @@ fn git_root_names(checkout: &Path) -> Result<Vec<String>, ClosureKeyError> {
         Ok(output) => {
             Err(ClosureKeyError::Git { spec: "HEAD".to_owned(), stderr: command::trim_bytes(&output.stderr) })
         }
-        Err(error) => Err(git_read("HEAD", error)),
+        Err(error) => Err(git_read("HEAD", &error)),
     }
 }
 
-fn git_read(spec: &str, error: GitCommandError) -> ClosureKeyError {
+fn git_read(spec: &str, error: &GitCommandError) -> ClosureKeyError {
     ClosureKeyError::Git { spec: spec.to_owned(), stderr: error.to_string() }
 }
 
