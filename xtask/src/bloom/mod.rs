@@ -111,6 +111,11 @@ struct SealArgs {
     #[arg(long = "surface", value_parser = plan::parse_surface_flag)]
     surfaces: Vec<(String, String)>,
 
+    /// Per-member scope revision (`workpiece=64-hex`). Repeatable. A member
+    /// with no `--revision` entry receives the `--task-file` digest.
+    #[arg(long = "revision", value_parser = plan::parse_revision_flag)]
+    revisions: Vec<(String, dto::DigestHex)>,
+
     #[command(flatten)]
     projection: ProjectionArgs,
 }
@@ -146,6 +151,11 @@ struct SupersedeArgs {
     /// Predecessor member to drop from the successor. Repeatable.
     #[arg(long = "eject")]
     eject: Vec<String>,
+
+    /// Per-member scope revision (`workpiece=64-hex`). Repeatable. A member
+    /// with no `--revision` entry keeps the predecessor's revision.
+    #[arg(long = "revision", value_parser = plan::parse_revision_flag)]
+    revisions: Vec<(String, dto::DigestHex)>,
 
     #[command(flatten)]
     projection: ProjectionArgs,
@@ -205,8 +215,14 @@ fn run_seal(client: &Client<'_>, args: &SealArgs) -> Result<String> {
     let base = plan::resolve_base(&args.base, &view);
     let authored = plan::author_profile_and_flags(client, args.profile.as_deref(), &args.configs)?;
     let scope_revision = plan::file_digest(&args.task_file)?;
-    let patch =
-        plan::seal_patch(&workpieces, scope_revision, base, authored.configs, authored.forecast.unwrap_or_default());
+    let patch = plan::seal_patch(
+        &workpieces,
+        scope_revision,
+        &args.revisions,
+        base,
+        authored.configs,
+        authored.forecast.unwrap_or_default(),
+    )?;
     let draft = client.open_draft()?;
     client.patch_draft(&draft.draft_id, &patch)?;
     let members = patch.proposals.unwrap_or_default();
@@ -231,7 +247,9 @@ fn run_supersede(client: &Client<'_>, args: &SupersedeArgs) -> Result<String> {
     if let Some(forecast) = authored.forecast {
         patch.forecast = Some(forecast);
     }
-    plan::eject_members(patch.proposals.get_or_insert_with(Vec::new), &args.eject)?;
+    let proposals = patch.proposals.get_or_insert_with(Vec::new);
+    plan::eject_members(proposals, &args.eject)?;
+    plan::pin_revisions(proposals, &args.revisions)?;
     let draft = client.open_draft()?;
     client.patch_draft(&draft.draft_id, &patch)?;
     let members = patch.proposals.unwrap_or_default();
@@ -265,7 +283,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{BloomCommand, Endpoint, SealArgs, SupersedeArgs, run_on};
-    use crate::bloom::dto::AdrTouch;
+    use crate::bloom::dto::{AdrTouch, DigestHex};
     use crate::bloom::hex;
     use crate::bloom::plan::BaseChoice;
 
@@ -345,6 +363,7 @@ mod tests {
         task: PathBuf,
         edges: Vec<(String, String)>,
         eject: Vec<String>,
+        revisions: Vec<(String, DigestHex)>,
     ) -> BloomCommand {
         BloomCommand::Supersede(SupersedeArgs {
             bloom_id,
@@ -354,6 +373,7 @@ mod tests {
             base: BaseChoice::Observed,
             edges,
             eject,
+            revisions,
             projection: projection_args(),
         })
     }
@@ -503,6 +523,7 @@ mod tests {
                         base: BaseChoice::Observed,
                         edges: Vec::new(),
                         eject: Vec::new(),
+                        revisions: Vec::new(),
                         projection: projection_args(),
                     }),
                 )
@@ -577,6 +598,7 @@ mod tests {
                         task.clone(),
                         vec![("issue-B".to_owned(), "issue-A".to_owned())],
                         Vec::new(),
+                        Vec::new(),
                     ),
                 )
                 .expect("supersede --edge against the fake coordinator")
@@ -631,7 +653,7 @@ mod tests {
             |port| {
                 run_on(
                     &Endpoint { host: "127.0.0.1".to_owned(), port },
-                    &supersede_args(bloom_id.clone(), task.clone(), Vec::new(), vec!["wp-2".to_owned()]),
+                    &supersede_args(bloom_id.clone(), task.clone(), Vec::new(), vec!["wp-2".to_owned()], Vec::new()),
                 )
                 .expect("supersede --eject against the fake coordinator")
             },
@@ -683,12 +705,12 @@ mod tests {
                 let endpoint = Endpoint { host: "127.0.0.1".to_owned(), port };
                 let unknown = run_on(
                     &endpoint,
-                    &supersede_args(bloom_id.clone(), task.clone(), Vec::new(), vec!["wp-z".to_owned()]),
+                    &supersede_args(bloom_id.clone(), task.clone(), Vec::new(), vec!["wp-z".to_owned()], Vec::new()),
                 )
                 .expect_err("unknown eject");
                 let emptying = run_on(
                     &endpoint,
-                    &supersede_args(bloom_id.clone(), task.clone(), Vec::new(), vec!["wp-1".to_owned()]),
+                    &supersede_args(bloom_id.clone(), task.clone(), Vec::new(), vec!["wp-1".to_owned()], Vec::new()),
                 )
                 .expect_err("emptying eject");
                 (unknown, emptying)
@@ -697,6 +719,76 @@ mod tests {
         fs::remove_file(&task).ok();
         assert!(unknown.to_string().contains("wp-z"), "unknown eject names the workpiece: {unknown}");
         assert!(emptying.to_string().contains("no members"), "emptying eject names the empty membership: {emptying}");
+    }
+
+    #[test]
+    fn supersede_pins_a_rescoped_member() {
+        // `--revision wp-2=<digest>` must overwrite that member's successor
+        // scope revision and approval subject so a re-scoped member can pass
+        // the admission door. The unnamed sibling keeps the predecessor's
+        // revision.
+        let (bloom_id, spec_wire) = predecessor_spec_of(&[("wp-1", 7), ("wp-2", 8)]);
+        let bloom_id_for_view = bloom_id.clone();
+        let spec_for_journal = spec_wire;
+        let pinned = hex_of(digest(0x99));
+        let task = temp_task("supersede-revision", "recover a re-scoped member");
+        let (_, log) = with_fake(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/view") => (
+                    200,
+                    json!({
+                        "mainline": hex_of(digest(1)),
+                        "observed": hex_of(digest(2)),
+                        "blooms": [{
+                            "id": bloom_id_for_view.clone(),
+                            "status": "Sealed",
+                            "superseded_by": null,
+                            "members": [
+                                { "workpiece": "wp-1", "scope_revision": hex_of(digest(7)) },
+                                { "workpiece": "wp-2", "scope_revision": hex_of(digest(8)) }
+                            ]
+                        }]
+                    }),
+                ),
+                ("GET", "/journal") => (
+                    200,
+                    json!({ "records": [{ "sequence": 1, "idempotency_key": "k", "event": { "idempotency_key": "k", "fact": { "Seal": spec_for_journal } } }] }),
+                ),
+                ("POST", "/drafts") => (201, json!({ "draft_id": "1", "draft": {} })),
+                ("PATCH", "/drafts/1") => (200, json!({ "draft_id": "1", "draft": {} })),
+                (method, path) if method == "POST" && path.ends_with("/supersede") => (
+                    200,
+                    json!({ "outcome": { "Superseded": { "predecessor": bloom_id_for_view.clone(), "successor": hex_of(digest(3)) } } }),
+                ),
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                run_on(
+                    &Endpoint { host: "127.0.0.1".to_owned(), port },
+                    &supersede_args(
+                        bloom_id.clone(),
+                        task.clone(),
+                        Vec::new(),
+                        Vec::new(),
+                        vec![("wp-2".to_owned(), DigestHex::from_bytes([0x99; 32]))],
+                    ),
+                )
+                .expect("supersede --revision against the fake coordinator")
+            },
+        );
+        fs::remove_file(&task).ok();
+        let patch = find(&log, "PATCH", "/drafts/1").body.as_ref().expect("patch body");
+        assert_eq!(patch["proposals"][0]["workpiece"], "wp-1");
+        assert_eq!(patch["proposals"][0]["scope_revision"], hex_of(digest(7)));
+        assert_eq!(patch["proposals"][0]["approval"]["subject"], hex_of(digest(7)));
+        assert_eq!(patch["proposals"][1]["workpiece"], "wp-2");
+        assert_eq!(patch["proposals"][1]["scope_revision"], pinned);
+        assert_eq!(patch["proposals"][1]["approval"]["subject"], pinned);
+
+        let supersede =
+            find(&log, "POST", &format!("/blooms/{bloom_id}/supersede")).body.as_ref().expect("supersede body");
+        assert_eq!(supersede["projections"][0]["scope_revision"], hex_of(digest(7)));
+        assert_eq!(supersede["projections"][1]["scope_revision"], pinned);
     }
 
     #[test]
@@ -768,6 +860,7 @@ mod tests {
                         workpiece: vec!["wp-seal".to_owned()],
                         edges: Vec::new(),
                         surfaces: Vec::new(),
+                        revisions: Vec::new(),
                         projection: projection_args(),
                     }),
                 )
@@ -815,6 +908,7 @@ mod tests {
                         workpiece: vec!["issue-A".to_owned(), "issue-B".to_owned()],
                         edges: vec![("issue-B".to_owned(), "issue-A".to_owned())],
                         surfaces: Vec::new(),
+                        revisions: Vec::new(),
                         projection: projection_args(),
                     }),
                 )
@@ -857,6 +951,7 @@ mod tests {
                             ("issue-A".to_owned(), "crates/foo/**".to_owned()),
                             ("issue-B".to_owned(), "xtask/**".to_owned()),
                         ],
+                        revisions: Vec::new(),
                         projection: projection_args(),
                     }),
                 )
@@ -869,6 +964,65 @@ mod tests {
         assert_eq!(seal["projections"][0]["declared_surface"], json!(["crates/foo/**"]));
         assert_eq!(seal["projections"][1]["workpiece"], "issue-B");
         assert_eq!(seal["projections"][1]["declared_surface"], json!(["xtask/**"]));
+    }
+
+    #[test]
+    fn seal_sends_per_member_scope_revisions_on_the_patch() {
+        // Two workpieces with distinct `--revision` flags must reach the
+        // draft as two scope revisions, not a cloned task-file digest. The
+        // cloned digest is what the admission door rejects. A member the
+        // flag does not name keeps the file digest.
+        let task = temp_task("seal-revisions", "build A and B");
+        let file_digest = crate::bloom::plan::file_digest(&task).expect("task digest").as_hex();
+        let rev_a = hex_of(digest(0x11));
+        let rev_b = hex_of(digest(0x22));
+        let (_, log) = with_fake(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/view") => {
+                    (200, json!({ "mainline": hex_of(digest(1)), "observed": hex_of(digest(2)), "blooms": [] }))
+                }
+                ("POST", "/drafts") => (201, json!({ "draft_id": "8", "draft": {} })),
+                ("PATCH", "/drafts/8") => (200, json!({ "draft_id": "8", "draft": {} })),
+                ("POST", "/drafts/8/seal") => (200, json!({ "outcome": { "Sealed": hex_of(digest(4)) } })),
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                run_on(
+                    &Endpoint { host: "127.0.0.1".to_owned(), port },
+                    &BloomCommand::Seal(SealArgs {
+                        task_file: task.clone(),
+                        configs: Vec::new(),
+                        profile: None,
+                        base: BaseChoice::Observed,
+                        workpiece: vec!["issue-A".to_owned(), "issue-B".to_owned(), "issue-C".to_owned()],
+                        edges: Vec::new(),
+                        surfaces: Vec::new(),
+                        revisions: vec![
+                            ("issue-A".to_owned(), DigestHex::from_bytes([0x11; 32])),
+                            ("issue-B".to_owned(), DigestHex::from_bytes([0x22; 32])),
+                        ],
+                        projection: projection_args(),
+                    }),
+                )
+                .expect("seal --revision against the fake coordinator")
+            },
+        );
+        fs::remove_file(&task).ok();
+        let patch = find(&log, "PATCH", "/drafts/8").body.as_ref().expect("patch body");
+        assert_eq!(patch["proposals"][0]["workpiece"], "issue-A");
+        assert_eq!(patch["proposals"][0]["scope_revision"], rev_a);
+        assert_eq!(patch["proposals"][0]["approval"]["subject"], rev_a);
+        assert_eq!(patch["proposals"][1]["workpiece"], "issue-B");
+        assert_eq!(patch["proposals"][1]["scope_revision"], rev_b);
+        assert_eq!(patch["proposals"][1]["approval"]["subject"], rev_b);
+        assert_eq!(patch["proposals"][2]["workpiece"], "issue-C");
+        assert_eq!(patch["proposals"][2]["scope_revision"], file_digest);
+        assert_eq!(patch["proposals"][2]["approval"]["subject"], file_digest);
+
+        let seal = find(&log, "POST", "/drafts/8/seal").body.as_ref().expect("seal body");
+        assert_eq!(seal["projections"][0]["scope_revision"], rev_a);
+        assert_eq!(seal["projections"][1]["scope_revision"], rev_b);
+        assert_eq!(seal["projections"][2]["scope_revision"], file_digest);
     }
 
     #[test]
@@ -914,6 +1068,7 @@ mod tests {
                         workpiece: vec!["wp-profile".to_owned()],
                         edges: Vec::new(),
                         surfaces: Vec::new(),
+                        revisions: Vec::new(),
                         projection: projection_args(),
                     }),
                 )
