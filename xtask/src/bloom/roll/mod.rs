@@ -15,6 +15,7 @@
 mod cut;
 mod day;
 mod preconditions;
+mod replica;
 mod shell;
 mod sync;
 
@@ -188,7 +189,9 @@ mod tests {
 
     // Tripwire: a refused roll has moved nothing. The screen runs against the
     // live view and the host before fleet main is swapped, so an undrained day
-    // costs a re-run rather than a half-rolled repository.
+    // costs a re-run rather than a half-rolled repository. The screen's own
+    // `--dry-run` replica probe is exempt because it writes nothing; every other
+    // push is a write and must not appear.
     #[test]
     fn a_refused_roll_touches_neither_main_nor_the_branch() {
         let mut view = drained_view();
@@ -201,7 +204,10 @@ mod tests {
         let calls = shell.calls();
         assert!(!calls.iter().any(|line| line.contains("update-ref")), "fleet main is not swapped: {calls:?}");
         assert!(!calls.iter().any(|line| line.starts_with("git branch")), "tomorrow is not cut: {calls:?}");
-        assert!(!calls.iter().any(|line| line.starts_with("git push")), "nothing is pushed: {calls:?}");
+        assert!(
+            !calls.iter().any(|line| line.starts_with("git push") && !line.contains("--dry-run")),
+            "nothing is pushed: {calls:?}"
+        );
     }
 
     #[test]
