@@ -1616,49 +1616,28 @@ impl LocalExecutor {
         // claim for a later retry, so nothing resets the checkout the retry reads.)
         self.retire(&handle.nonce.0);
         self.pump();
-        let mut verdict = if matches!(construct, Some(ConstructConclusion::Declined)) {
+        let verdict = if matches!(construct, Some(ConstructConclusion::Declined)) {
             StageVerdict::Parked
         } else if passed {
             StageVerdict::VerificationPassed
         } else {
             StageVerdict::VerificationFailed
         };
-        // The detail digest is the content address of the evidence bytes — the
-        // supporting artifact the verdict points at.
-        let detail = Digest::of_wire_bytes(bytes);
-        let mut failed_verifiers = failed_verifiers.unwrap_or_default();
-        let mut findings = parse_findings(bytes);
-        let mut violating_paths = Vec::new();
-        if is_verify
-            && let Some(violations) =
-                self.surface_violations(&handle.nonce.0, worktree_dir.as_deref(), diff_base_hex.as_deref())
-        {
-            let overlay = apply_containment(verdict, failed_verifiers, findings, &violations);
-            verdict = overlay.verdict;
-            failed_verifiers = overlay.failed_verifiers;
-            findings = overlay.findings;
-            violating_paths = violations;
-        }
-        let name =
-            NameEvidenceClaims::attempt_artifact_name(&handle.nonce, &subject, verdict, failed_verifiers, &detail);
-        vec![EvidenceRef {
-            name,
-            nonce: handle.nonce.clone(),
-            // The local lane holds evidence on disk, not in a numbered artifact
-            // store, so there is no backend artifact id; the name carries the whole
-            // claim and the size is the file's length.
-            artifact_id: 0,
-            size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        let violating_paths = if is_verify {
+            self.surface_violations(&handle.nonce.0, worktree_dir.as_deref(), diff_base_hex.as_deref())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        vec![judged_evidence_ref(
+            handle,
+            &subject,
+            bytes,
             candidate,
-            findings,
-            failed_verifiers,
-            cost: parse_cost(bytes),
-            calls: parse_calls(bytes),
-            session_reuse_arm: parse_session_reuse_arm(bytes),
-            session_reuse_saved_micro_usd: parse_session_reuse_saved(bytes),
-            peak_resident_bytes: parse_peak_resident_bytes(bytes),
+            verdict,
+            failed_verifiers.unwrap_or_default(),
             violating_paths,
-        }]
+        )]
     }
 }
 
@@ -1744,6 +1723,43 @@ fn synthesized_executor_fault(
     let bytes = serde_json::to_vec(&body)
         .unwrap_or_else(|_| br#"{"status":"environment","cause":"unparseable-evidence"}"#.to_vec());
     vec![executor_fault_ref(handle, subject, &bytes, candidate, None, None, None)]
+}
+
+fn judged_evidence_ref(
+    handle: &WorkHandle,
+    subject: &Digest,
+    bytes: &[u8],
+    candidate: Option<CandidateRef>,
+    verdict: StageVerdict,
+    failed_verifiers: VerifyFailureSet,
+    violating_paths: Vec<String>,
+) -> EvidenceRef {
+    let overlay = apply_containment(verdict, failed_verifiers, parse_findings(bytes), &violating_paths);
+    let detail = Digest::of_wire_bytes(bytes);
+    EvidenceRef {
+        name: NameEvidenceClaims::attempt_artifact_name(
+            &handle.nonce,
+            subject,
+            overlay.verdict,
+            overlay.failed_verifiers,
+            &detail,
+        ),
+        nonce: handle.nonce.clone(),
+        // The local lane holds evidence on disk, not in a numbered artifact
+        // store, so there is no backend artifact id; the name carries the whole
+        // claim and the size is the file's length.
+        artifact_id: 0,
+        size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        candidate,
+        findings: overlay.findings,
+        failed_verifiers: overlay.failed_verifiers,
+        cost: parse_cost(bytes),
+        calls: parse_calls(bytes),
+        session_reuse_arm: parse_session_reuse_arm(bytes),
+        session_reuse_saved_micro_usd: parse_session_reuse_saved(bytes),
+        peak_resident_bytes: parse_peak_resident_bytes(bytes),
+        violating_paths,
+    }
 }
 
 fn executor_fault_ref(
