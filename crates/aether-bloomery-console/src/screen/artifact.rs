@@ -10,6 +10,7 @@ use ratatui::widgets::{List, ListItem, ListState};
 
 use crate::dto::{DecodedArtifact, DigestHex};
 use crate::keys::{KeyHint, Outcome};
+use crate::palette;
 use crate::store::{ResourceKey, Store};
 use crate::warroom::Focus;
 
@@ -87,7 +88,7 @@ impl Artifact {
             }
         }
         let items: Vec<ListItem> = lines.into_iter().map(ListItem::new).collect();
-        let list = List::new(items).highlight_symbol("");
+        let list = List::new(items).style(palette::body()).highlight_symbol("");
         let mut state = ListState::default().with_offset(self.offset);
         frame.render_stateful_widget(list, area, &mut state);
         self.offset = state.offset();

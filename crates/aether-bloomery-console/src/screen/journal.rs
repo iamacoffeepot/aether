@@ -3,7 +3,6 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{List, ListItem, ListState};
 use serde_json::Value;
 
@@ -11,6 +10,7 @@ use crate::cursor::Cursor;
 use crate::dto::{DigestHex, JournalRecordView};
 use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
+use crate::palette;
 use crate::store::{JournalQuery, ResourceKey, Store};
 use crate::warroom::Focus;
 
@@ -128,8 +128,7 @@ impl Journal {
         if items.is_empty() {
             items.push(ListItem::new("journal  (empty)"));
         }
-        let list =
-            List::new(items).highlight_style(Style::default().add_modifier(Modifier::REVERSED)).highlight_symbol("> ");
+        let list = List::new(items).style(palette::body()).highlight_style(palette::cursor()).highlight_symbol("> ");
         let selected = self
             .cursor
             .selected_index(&rows, |row| row.sequence)
@@ -253,7 +252,7 @@ impl Record {
         }
         let items: Vec<ListItem> = lines.into_iter().map(ListItem::new).collect();
         let mut state = ListState::default().with_offset(self.offset);
-        frame.render_stateful_widget(List::new(items), area, &mut state);
+        frame.render_stateful_widget(List::new(items).style(palette::body()), area, &mut state);
         self.offset = state.offset();
     }
 }

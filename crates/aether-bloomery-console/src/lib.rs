@@ -13,6 +13,7 @@ pub mod fetch;
 pub mod http;
 pub mod keys;
 pub mod nav;
+pub mod palette;
 pub mod screen;
 pub mod shell;
 pub mod store;

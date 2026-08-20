@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use aether_bloomery_console::http::Endpoint;
 use aether_bloomery_console::keys::Outcome;
+use aether_bloomery_console::palette::{self, Depth};
 use aether_bloomery_console::shell::Shell;
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -40,10 +41,20 @@ struct Args {
     /// How often to poll `GET /view`, in milliseconds.
     #[arg(long, default_value_t = DEFAULT_POLL_MILLIS)]
     poll_millis: u64,
+
+    /// Paint the 256-color approximations even when the terminal reports truecolor.
+    #[arg(long)]
+    indexed_color: bool,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let depth = if args.indexed_color {
+        Depth::Indexed
+    } else {
+        Depth::detect()
+    };
+    palette::install(depth);
     let endpoint = Endpoint { host: args.host, port: args.port };
     let poll = Duration::from_millis(args.poll_millis);
     run(endpoint, poll)
