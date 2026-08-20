@@ -56,12 +56,6 @@ impl Timeline {
         HINTS
     }
 
-    #[must_use]
-    pub fn selected_is_first(&self, store: &Store) -> bool {
-        let rows = self.rows(store);
-        matches!(self.cursor.selected_index(&rows, |row| row.workpiece.clone()), Some(0) | None)
-    }
-
     pub fn handle_key(&mut self, key: KeyEvent, store: &Store) -> Outcome {
         let rows = self.rows(store);
         match key.code {

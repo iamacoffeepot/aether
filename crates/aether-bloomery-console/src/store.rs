@@ -5,8 +5,9 @@ use std::fmt::Display;
 use std::time::{Duration, Instant};
 
 use crate::dto::{
-    CommissionShowView, CommissionsView, DecodedArtifact, DigestHex, DispatchFilePage, JournalPage, JournalRecordView,
-    MetricDay, MetricDispatch, MetricsSeat, MetricsSummary, MetricsTimeline, SpendWindowView, ViewDocument,
+    BloomDispatchesView, CommissionShowView, CommissionsView, DecodedArtifact, DigestHex, DispatchFilePage,
+    JournalPage, JournalRecordView, MetricDay, MetricDispatch, MetricsSeat, MetricsSummary, MetricsTimeline,
+    SpendWindowView, ViewDocument,
 };
 
 /// Which coordinator resource a screen can subscribe to.
@@ -21,6 +22,7 @@ pub enum ResourceKey {
     MetricsTimeline(DigestHex),
     MetricsSeats,
     MetricsDispatches,
+    BloomDispatches(DigestHex),
     Spend,
     Commissions,
     Commission(String),
@@ -89,6 +91,7 @@ impl ResourceKey {
             | Self::MetricsTimeline(_)
             | Self::MetricsSeats
             | Self::MetricsDispatches
+            | Self::BloomDispatches(_)
             | Self::Spend
             | Self::Commissions
             | Self::Commission(_) => Lane::Bulk,
@@ -107,6 +110,7 @@ impl ResourceKey {
             Self::MetricsTimeline(bloom) => format!("/metrics/blooms/{}/timeline", bloom.as_hex()),
             Self::MetricsSeats => "/metrics/seats".to_owned(),
             Self::MetricsDispatches => "/metrics/dispatches".to_owned(),
+            Self::BloomDispatches(bloom) => format!("/blooms/{}/dispatches", bloom.as_hex()),
             Self::Spend => "/spend".to_owned(),
             Self::Commissions => "/commissions".to_owned(),
             Self::Commission(id) => format!("/commissions/{}", path_segment(id)),
@@ -202,6 +206,7 @@ pub struct Store {
     timelines: HashMap<DigestHex, Cell<MetricsTimeline>>,
     seats: Cell<Vec<MetricsSeat>>,
     dispatches: Cell<Vec<MetricDispatch>>,
+    bloom_dispatches: HashMap<DigestHex, Cell<BloomDispatchesView>>,
     spend: Cell<SpendWindowView>,
     commission_capability: Option<CommissionCapability>,
     commissions: Cell<CommissionsView>,
@@ -222,6 +227,7 @@ impl Store {
             timelines: HashMap::new(),
             seats: Cell::default(),
             dispatches: Cell::default(),
+            bloom_dispatches: HashMap::new(),
             spend: Cell::default(),
             commission_capability: None,
             commissions: Cell::default(),
@@ -275,6 +281,11 @@ impl Store {
     }
 
     #[must_use]
+    pub fn bloom_dispatches(&self, bloom: DigestHex) -> Option<&Cell<BloomDispatchesView>> {
+        self.bloom_dispatches.get(&bloom)
+    }
+
+    #[must_use]
     pub fn spend(&self) -> &Cell<SpendWindowView> {
         &self.spend
     }
@@ -316,6 +327,7 @@ impl Store {
             | ResourceKey::MetricsTimeline(_)
             | ResourceKey::MetricsSeats
             | ResourceKey::MetricsDispatches
+            | ResourceKey::BloomDispatches(_)
             | ResourceKey::Commission(_) => Duration::ZERO,
         }
     }
@@ -343,6 +355,7 @@ impl Store {
             ResourceKey::Spend => self.polled_due(&self.spend),
             ResourceKey::MetricsSeats => self.seats.on_demand_due(),
             ResourceKey::MetricsDispatches => self.dispatches.on_demand_due(),
+            ResourceKey::BloomDispatches(bloom) => self.bloom_dispatches.get(bloom).is_none_or(Cell::on_demand_due),
             ResourceKey::MetricsTimeline(bloom) => self.timelines.get(bloom).is_none_or(Cell::on_demand_due),
             ResourceKey::Commissions => {
                 if self.commission_capability == Some(CommissionCapability::Absent) {
@@ -375,6 +388,7 @@ impl Store {
             ResourceKey::MetricsTimeline(bloom) => self.timelines.get(bloom).is_some_and(|cell| cell.inflight),
             ResourceKey::MetricsSeats => self.seats.inflight,
             ResourceKey::MetricsDispatches => self.dispatches.inflight,
+            ResourceKey::BloomDispatches(bloom) => self.bloom_dispatches.get(bloom).is_some_and(|cell| cell.inflight),
             ResourceKey::Spend => self.spend.inflight,
             ResourceKey::Commissions => self.commissions.inflight,
             ResourceKey::Commission(id) => self.commission_shows.get(id).is_some_and(|cell| cell.inflight),
@@ -392,6 +406,7 @@ impl Store {
             ResourceKey::MetricsTimeline(bloom) => self.timelines.entry(*bloom).or_default().inflight = true,
             ResourceKey::MetricsSeats => self.seats.inflight = true,
             ResourceKey::MetricsDispatches => self.dispatches.inflight = true,
+            ResourceKey::BloomDispatches(bloom) => self.bloom_dispatches.entry(*bloom).or_default().inflight = true,
             ResourceKey::Spend => self.spend.inflight = true,
             ResourceKey::Commissions => self.commissions.inflight = true,
             ResourceKey::Commission(id) => self.commission_shows.entry(id.clone()).or_default().inflight = true,
@@ -449,6 +464,10 @@ impl Store {
         apply(&mut self.dispatches, result);
     }
 
+    pub fn apply_bloom_dispatches(&mut self, bloom: DigestHex, result: Result<BloomDispatchesView, String>) {
+        apply(self.bloom_dispatches.entry(bloom).or_default(), result);
+    }
+
     pub fn apply_spend(&mut self, result: Result<SpendWindowView, String>) {
         apply(&mut self.spend, result);
     }
@@ -483,6 +502,7 @@ impl Store {
             ResourceKey::MetricsTimeline(bloom) => self.timelines.entry(*bloom).or_default().apply_err(error),
             ResourceKey::MetricsSeats => self.seats.apply_err(error),
             ResourceKey::MetricsDispatches => self.dispatches.apply_err(error),
+            ResourceKey::BloomDispatches(bloom) => self.bloom_dispatches.entry(*bloom).or_default().apply_err(error),
             ResourceKey::Spend => self.spend.apply_err(error),
             ResourceKey::Commissions => self.commissions.apply_err(error),
             ResourceKey::Commission(id) => self.commission_shows.entry(id.clone()).or_default().apply_err(error),

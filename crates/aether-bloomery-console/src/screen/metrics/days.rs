@@ -42,11 +42,6 @@ impl Days {
         HINTS
     }
 
-    #[must_use]
-    pub fn selected_is_first(&self) -> bool {
-        true
-    }
-
     pub fn handle_key(&mut self, key: KeyEvent, _store: &Store) -> Outcome {
         match key.code {
             KeyCode::Esc => Outcome::Handled,
