@@ -167,16 +167,15 @@ pub fn seal_workpieces(explicit: &[String], task_file: &Path) -> Result<Vec<Stri
 pub fn seal_patch(
     workpieces: &[String],
     scope_revision: DigestHex,
+    revisions: &[(String, DigestHex)],
     base: DigestHex,
     configs: ConfigRegistry,
     forecast: Forecast,
-) -> DraftPatch {
-    DraftPatch {
-        proposals: Some(workpieces.iter().map(|workpiece| placeholder_member(workpiece, scope_revision)).collect()),
-        configs: Some(configs),
-        base: Some(base),
-        forecast: Some(forecast),
-    }
+) -> Result<DraftPatch> {
+    let mut proposals: Vec<_> =
+        workpieces.iter().map(|workpiece| placeholder_member(workpiece, scope_revision)).collect();
+    pin_revisions(&mut proposals, revisions)?;
+    Ok(DraftPatch { proposals: Some(proposals), configs: Some(configs), base: Some(base), forecast: Some(forecast) })
 }
 
 pub fn successor_patch(spec: &BloomSpec, base: DigestHex, configs: ConfigRegistry) -> DraftPatch {
@@ -203,6 +202,26 @@ pub fn eject_members(proposals: &mut Vec<WireMembership>, eject: &[String]) -> R
     proposals.retain(|member| !eject.contains(&member.workpiece));
     if proposals.is_empty() {
         bail!("--eject would leave the successor with no members");
+    }
+    Ok(())
+}
+
+/// Override named members' scope revision and matching approval subject.
+/// A member the flag does not name keeps its current revision. Refuses a
+/// workpiece that is not in `proposals` — a typo would otherwise seal the
+/// default digest and fail at the admission door with nothing pointing at
+/// the flag.
+pub fn pin_revisions(proposals: &mut [WireMembership], revisions: &[(String, DigestHex)]) -> Result<()> {
+    for (workpiece, _) in revisions {
+        if proposals.iter().all(|member| member.workpiece != *workpiece) {
+            bail!("--revision names {workpiece}, which is not in the sealed membership");
+        }
+    }
+    for member in proposals.iter_mut() {
+        if let Some((_, digest)) = revisions.iter().rfind(|(workpiece, _)| workpiece == &member.workpiece) {
+            member.scope_revision = *digest;
+            member.approval.subject = *digest;
+        }
     }
     Ok(())
 }
@@ -358,6 +377,32 @@ mod surface_flag_tests {
     }
 }
 
+#[cfg(test)]
+mod revision_flag_tests {
+    use crate::bloom::dto::DigestHex;
+
+    #[test]
+    fn parse_revision_flag_reads_workpiece_equals_digest() {
+        // `--revision issue-A=<64 hex>` is that member's approved scope
+        // revision. Accepting a missing half or a non-digest would stamp
+        // the wrong claim, or none at all.
+        let digest = DigestHex::from_bytes([0xab; 32]);
+        let hex = digest.as_hex();
+        assert_eq!(
+            super::parse_revision_flag(&format!("issue-A={hex}")).expect("well-formed"),
+            ("issue-A".to_owned(), digest),
+        );
+        let no_pair = super::parse_revision_flag("issue-A").expect_err("no pair");
+        assert!(no_pair.contains("issue-A"), "error names the offending value: {no_pair}");
+        let empty_member = super::parse_revision_flag(&format!("={hex}")).expect_err("empty member");
+        assert!(empty_member.contains(&format!("={hex}")), "error names the offending value: {empty_member}");
+        let empty_digest = super::parse_revision_flag("issue-A=").expect_err("empty digest");
+        assert!(empty_digest.contains("issue-A="), "error names the offending value: {empty_digest}");
+        let bad_hex = super::parse_revision_flag("issue-A=not-a-digest").expect_err("malformed digest");
+        assert!(bad_hex.contains("not-a-digest"), "error names the offending value: {bad_hex}");
+    }
+}
+
 pub fn parse_edge_flag(raw: &str) -> Result<(String, String), String> {
     let (member, depends_on) = raw.split_once('=').ok_or_else(|| "expected dependent=dependency".to_owned())?;
     if member.is_empty() || depends_on.is_empty() {
@@ -372,6 +417,17 @@ pub fn parse_surface_flag(raw: &str) -> Result<(String, String), String> {
         return Err("expected member=glob".to_owned());
     }
     Ok((member.to_owned(), glob.to_owned()))
+}
+
+pub fn parse_revision_flag(raw: &str) -> Result<(String, DigestHex), String> {
+    let Some((member, hex)) = raw.split_once('=') else {
+        return Err(format!("expected workpiece=64-hex digest, got {raw}"));
+    };
+    if member.is_empty() || hex.is_empty() {
+        return Err(format!("expected workpiece=64-hex digest, got {raw}"));
+    }
+    let bytes = super::hex::decode(hex).ok_or_else(|| format!("{hex} is not a 32-byte hex digest"))?;
+    Ok((member.to_owned(), DigestHex::from_bytes(bytes)))
 }
 
 pub fn parse_bloom_id(raw: &str) -> Result<String, String> {
@@ -391,7 +447,10 @@ pub fn require_task(text: &str, path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BaseChoice, ProjectionInput, eject_members, projections, resolve_base, seal_patch, successor_patch};
+    use super::{
+        BaseChoice, ProjectionInput, eject_members, pin_revisions, projections, resolve_base, seal_patch,
+        successor_patch,
+    };
     use crate::bloom::dto::{
         AdrTouch, Approval, BloomSpec, Completeness, ConfigRegistry, DigestHex, Membership, ViewDocument,
     };
@@ -477,14 +536,87 @@ mod tests {
         let patch = seal_patch(
             &["wp-a".to_owned(), "wp-b".to_owned()],
             digest(4),
+            &[],
             digest(2),
             ConfigRegistry::default(),
             Forecast::default(),
-        );
+        )
+        .expect("no revision flags");
         let proposals = patch.proposals.expect("seal names its members");
         assert_eq!(proposals.len(), 2);
         assert!(proposals.iter().all(|member| member.scope_revision == digest(4)));
         assert_eq!(patch.base, Some(digest(2)));
+    }
+
+    #[test]
+    fn seal_patch_pins_flagged_members_at_their_own_revisions() {
+        // Pre-fix: every member received the task-file digest, which the
+        // commission-admission door rejects for any wave whose approved
+        // revisions differ. Distinct `--revision` flags must reach the patch
+        // as distinct scope revisions and matching approval subjects.
+        let patch = seal_patch(
+            &["issue-A".to_owned(), "issue-B".to_owned()],
+            digest(4),
+            &[("issue-A".to_owned(), digest(1)), ("issue-B".to_owned(), digest(9))],
+            digest(2),
+            ConfigRegistry::default(),
+            Forecast::default(),
+        )
+        .expect("known members");
+        let proposals = patch.proposals.expect("seal names its members");
+        assert_eq!(proposals[0].workpiece, "issue-A");
+        assert_eq!(proposals[0].scope_revision, digest(1));
+        assert_eq!(proposals[0].approval.subject, digest(1));
+        assert_eq!(proposals[1].workpiece, "issue-B");
+        assert_eq!(proposals[1].scope_revision, digest(9));
+        assert_eq!(proposals[1].approval.subject, digest(9));
+    }
+
+    #[test]
+    fn seal_patch_unnamed_member_keeps_the_task_digest() {
+        let patch = seal_patch(
+            &["issue-A".to_owned(), "issue-B".to_owned()],
+            digest(4),
+            &[("issue-A".to_owned(), digest(1))],
+            digest(2),
+            ConfigRegistry::default(),
+            Forecast::default(),
+        )
+        .expect("known member");
+        let proposals = patch.proposals.expect("seal names its members");
+        assert_eq!(proposals[0].scope_revision, digest(1));
+        assert_eq!(proposals[0].approval.subject, digest(1));
+        assert_eq!(proposals[1].scope_revision, digest(4));
+        assert_eq!(proposals[1].approval.subject, digest(4));
+    }
+
+    #[test]
+    fn seal_patch_refuses_a_revision_for_an_unknown_member() {
+        // Silently dropping `--revision issue-Z=…` would seal the default
+        // digest and fail at the admission door, presenting as a door
+        // problem rather than a typo.
+        let err = seal_patch(
+            &["issue-A".to_owned()],
+            digest(4),
+            &[("issue-Z".to_owned(), digest(1))],
+            digest(2),
+            ConfigRegistry::default(),
+            Forecast::default(),
+        )
+        .expect_err("unknown member");
+        assert!(err.to_string().contains("issue-Z"), "error names the absent workpiece: {err}");
+    }
+
+    #[test]
+    fn pin_revisions_overrides_a_named_successor_member() {
+        // The supersede recovery path: pin a re-scoped member at the new
+        // digest and leave its sibling on the predecessor's revision.
+        let mut members = vec![member("wp-1", 7), member("wp-2", 8)];
+        pin_revisions(&mut members, &[("wp-2".to_owned(), digest(9))]).expect("known member");
+        assert_eq!(members[0].scope_revision, digest(7));
+        assert_eq!(members[0].approval.subject, digest(7));
+        assert_eq!(members[1].scope_revision, digest(9));
+        assert_eq!(members[1].approval.subject, digest(9));
     }
 
     #[test]
