@@ -113,7 +113,6 @@ impl WorkpieceFields {
     ///
     /// Empty when [`carries`](Self::carries) returns `false`. A kind emitted
     /// three times yields three items, in the order they were recorded.
-    #[must_use]
     pub fn records(&self, kind: FieldKind) -> impl Iterator<Item = &WorkpieceFact> {
         self.facts.iter().filter(move |fact| fact.kind == kind)
     }
