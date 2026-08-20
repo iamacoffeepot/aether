@@ -10,12 +10,17 @@
 use aether_bloomery::BloomStatus;
 use anyhow::{Result, bail};
 
+use super::MAIN;
 use super::day::Day;
 use super::shell::{Shell, checked};
 use crate::bloom::dto::ViewDocument;
 
 /// Refuse unless every precondition of the day roll holds.
 pub fn screen(view: &ViewDocument, shell: &impl Shell, day: &Day, remote: &str) -> Result<()> {
+    if let Some(notice) = unwritable_replica(shell, remote)? {
+        println!("{notice}");
+    }
+
     let refusals: Vec<String> =
         [undrained(view), dirty_tree(shell)?, already_cut(shell, day, remote)?].into_iter().flatten().collect();
     if refusals.is_empty() {
@@ -51,6 +56,22 @@ fn already_cut(shell: &impl Shell, day: &Day, remote: &str) -> Result<Option<Str
     let branch = day.branch();
     let listed = checked(shell, "git", &["ls-remote", "--heads", remote, &branch])?;
     Ok((!listed.is_empty()).then(|| format!("{branch} already exists on {remote}")))
+}
+
+/// A replica that will not take a refspec push. This is a notice rather than a
+/// refusal — ADR-0203 makes GitHub an output of the roll, never a gate — but an
+/// operator should learn the mirror will lag here, before the advance runs,
+/// rather than from a line in the middle of the log.
+fn unwritable_replica(shell: &impl Shell, remote: &str) -> Result<Option<String>> {
+    let run = shell.capture("git", &["push", "--dry-run", remote, MAIN])?;
+    Ok((!run.success).then(|| {
+        let reason = if run.stderr.is_empty() {
+            &run.stdout
+        } else {
+            &run.stderr
+        };
+        format!("notice: {remote} will not take a refspec push, so the replica lags this roll: {reason}")
+    }))
 }
 
 #[cfg(test)]
