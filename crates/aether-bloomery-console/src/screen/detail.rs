@@ -254,7 +254,7 @@ fn bloom_lines(view: &ViewDocument, id: DigestHex) -> Vec<Line> {
         push_composition_section(&mut lines, composition);
     }
     for member in &bloom.members {
-        let state = member_status_state(member, false);
+        let state = member_status_state(member);
         lines.push(Line {
             key: RowKey::Member(member.workpiece.clone()),
             text: format!("  {}  {state}", member.workpiece),
@@ -336,7 +336,7 @@ fn member_lines(view: &ViewDocument, bloom: DigestHex, workpiece: &str) -> Vec<L
         enter: Some(Nav::focus(Focus::dispatch(bloom.id, member.workpiece.clone()))),
         digest: None,
     }];
-    lines.push(label(RowKey::Other(0), format!("state  {}", member_status_state(member, false))));
+    lines.push(label(RowKey::Other(0), format!("state  {}", member_status_state(member))));
     if let Some(blocked) = member.blocked_by.as_deref().filter(|name| !name.is_empty()) {
         lines.push(Line {
             key: RowKey::BlockedBy,
