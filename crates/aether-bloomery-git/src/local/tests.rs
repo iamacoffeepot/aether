@@ -71,7 +71,7 @@ fn commit_tree(local: &LocalGitData, message: &str, payload: &str) -> (String, S
 }
 
 fn git(local: &LocalGitData, args: &[&str], stdin: &str) -> String {
-    let output = super::command::run_stdin(local.repo(), args, stdin).expect("git");
+    let output = crate::command::run_stdin(local.repo(), args, stdin).expect("git");
     assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }

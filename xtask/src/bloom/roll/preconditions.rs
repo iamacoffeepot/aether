@@ -8,6 +8,7 @@
 //! stopped short of cutting tomorrow.
 
 use aether_bloomery::BloomStatus;
+use aether_bloomery_git::command::{self, PORCELAIN_STATUS};
 use anyhow::{Result, bail};
 
 use super::MAIN;
@@ -45,9 +46,9 @@ fn undrained(view: &ViewDocument) -> Option<String> {
 /// A dirty working tree, which the cut would carry into tomorrow's branch or
 /// lose to a checkout.
 fn dirty_tree(shell: &impl Shell) -> Result<Option<String>> {
-    let porcelain = checked(shell, "git", &["status", "--porcelain"])?;
-    Ok((!porcelain.is_empty())
-        .then(|| format!("the working tree is dirty:\n      {}", porcelain.replace('\n', "\n      "))))
+    let porcelain = checked(shell, "git", PORCELAIN_STATUS)?;
+    let entries = command::split_nul(&porcelain);
+    Ok((!entries.is_empty()).then(|| format!("the working tree is dirty:\n      {}", entries.join("\n      "))))
 }
 
 /// Tomorrow's branch already on the remote, which means this day was rolled

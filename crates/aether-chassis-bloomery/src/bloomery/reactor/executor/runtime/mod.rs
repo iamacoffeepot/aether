@@ -39,7 +39,6 @@
 use std::collections::BTreeSet;
 use std::env;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -51,6 +50,7 @@ use aether_bloomery::{
     SharedCorrespondence, StageId, StageVerdict, TimeoutRecord, Topic, VerifyFailureSet, WorkHandle, WorkpieceId,
     pin_workpiece_description,
 };
+use aether_bloomery_git::command;
 use aether_bloomery_github::{GitObjectId, candidate_ref_name, member_checkpoint_ref_name, short_hex};
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId};
@@ -1767,63 +1767,28 @@ impl CandidatePush for GitCandidatePush {
             ));
         }
 
-        if Path::new(&self.remote).is_absolute() && shares_object_database(&self.repo, Path::new(&self.remote)) {
+        if command::shares_object_database(&self.repo, Path::new(&self.remote)) {
             return update_authority_ref(Path::new(&self.remote), commit_hex, target_ref);
         }
 
         let refspec = format!("{commit_hex}:{target_ref}");
-        let output = Command::new("git")
-            .current_dir(&self.repo)
-            .args(["push", "--force", &self.remote])
-            .arg(&refspec)
-            .output()
-            .map_err(|error| error.to_string())?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(String::from_utf8_lossy(&output.stderr).into_owned())
-        }
+        git_on(&self.repo, &["push", "--force", &self.remote, &refspec])
     }
 }
 
 /// `git update-ref` on the authority: the capture is already in this object
 /// database, so publishing is a ref move and transfers nothing.
 fn update_authority_ref(authority: &Path, commit_hex: &str, target_ref: &str) -> Result<(), String> {
-    let output = Command::new("git")
-        .current_dir(authority)
-        .args(["update-ref", target_ref, commit_hex])
-        .output()
-        .map_err(|error| error.to_string())?;
+    git_on(authority, &["update-ref", target_ref, commit_hex])
+}
+
+fn git_on(repo: &Path, args: &[&str]) -> Result<(), String> {
+    let output = command::run(repo, args).map_err(|error| error.to_string())?;
     if output.status.success() {
         Ok(())
     } else {
         Err(String::from_utf8_lossy(&output.stderr).into_owned())
     }
-}
-
-fn shares_object_database(repo: &Path, authority: &Path) -> bool {
-    match (absolute_git_common_dir(repo), absolute_git_common_dir(authority)) {
-        (Some(left), Some(right)) => left == right,
-        _ => false,
-    }
-}
-
-fn absolute_git_common_dir(repo: &Path) -> Option<PathBuf> {
-    // `--absolute-git-common-dir` is not on the git this host ships (2.43);
-    // the unknown flag is parsed as a revision name and every repository
-    // then appears to share one database.
-    let output = Command::new("git").current_dir(repo).args(["rev-parse", "--git-common-dir"]).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let raw = String::from_utf8_lossy(&output.stdout);
-    let raw = raw.trim();
-    let path = if Path::new(raw).is_absolute() {
-        PathBuf::from(raw)
-    } else {
-        repo.join(raw)
-    };
-    path.canonicalize().ok()
 }
 
 /// The fixture-boot push: declines every push rather than no-opping. A no-op

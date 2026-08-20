@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use aether_bloomery::digest::{ContentAddressed, Digest, digest_of};
+use aether_bloomery_git::command::{self, GitCommandError};
 use serde::{Deserialize, Serialize};
 
 /// Paths cargo folds into every build that sit outside any one package tree.
@@ -258,32 +259,27 @@ fn cargo_metadata(checkout: &Path) -> Result<Metadata, ClosureKeyError> {
 }
 
 fn git_object(checkout: &Path, spec: &str) -> Result<Option<String>, ClosureKeyError> {
-    let output = Command::new("git")
-        .args(["-C"])
-        .arg(checkout)
-        .args(["rev-parse", "--verify", "--quiet", spec])
-        .output()
-        .map_err(|error| ClosureKeyError::Git { spec: spec.to_owned(), stderr: error.to_string() })?;
-    if !output.status.success() {
-        return Ok(None);
+    match command::run(checkout, &["rev-parse", "--verify", "--quiet", spec]) {
+        Ok(output) if output.status.success() => Ok(Some(command::trim_bytes(&output.stdout))),
+        Ok(_) => Ok(None),
+        Err(error) => Err(git_read(spec, error)),
     }
-    Ok(Some(String::from_utf8_lossy(&output.stdout).trim().to_owned()))
 }
 
 fn git_root_names(checkout: &Path) -> Result<Vec<String>, ClosureKeyError> {
-    let output = Command::new("git")
-        .args(["-C"])
-        .arg(checkout)
-        .args(["ls-tree", "--name-only", "HEAD"])
-        .output()
-        .map_err(|error| ClosureKeyError::Git { spec: "HEAD".to_owned(), stderr: error.to_string() })?;
-    if !output.status.success() {
-        return Err(ClosureKeyError::Git {
-            spec: "HEAD".to_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        });
+    match command::run(checkout, &["ls-tree", "--name-only", "HEAD"]) {
+        Ok(output) if output.status.success() => {
+            Ok(String::from_utf8_lossy(&output.stdout).lines().map(str::to_owned).collect())
+        }
+        Ok(output) => {
+            Err(ClosureKeyError::Git { spec: "HEAD".to_owned(), stderr: command::trim_bytes(&output.stderr) })
+        }
+        Err(error) => Err(git_read("HEAD", error)),
     }
-    Ok(String::from_utf8_lossy(&output.stdout).lines().map(str::to_owned).collect())
+}
+
+fn git_read(spec: &str, error: GitCommandError) -> ClosureKeyError {
+    ClosureKeyError::Git { spec: spec.to_owned(), stderr: error.to_string() }
 }
 
 fn repo_relative(checkout: &Path, path: &Path) -> Result<String, ClosureKeyError> {

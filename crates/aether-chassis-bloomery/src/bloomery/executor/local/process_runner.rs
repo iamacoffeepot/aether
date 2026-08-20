@@ -21,6 +21,7 @@ use std::process::{Child, Command};
 use std::{fs, io};
 
 use aether_bloomery::{BackendObjectId, is_model_lane};
+use aether_bloomery_git::command::{self, GitCommandError};
 
 use super::error::LocalExecutorError;
 use super::lane_env::{inherited_keys, scrub_coordinator_env};
@@ -211,16 +212,8 @@ impl TransformRunner for ProcessTransformRunner {
         // discards the run's working-tree changes (the candidate has already been
         // captured and read) and drops the admin entry `git worktree add` registered,
         // so a long-lived backend does not leak one worktree per order.
-        let removed = Command::new("git")
-            .current_dir(&self.repo)
-            .args(["worktree", "remove", "--force"])
-            .arg(worktree_dir)
-            .output()
-            .map_err(LocalExecutorError::Spawn)?;
-        if !removed.status.success() {
-            return Err(LocalExecutorError::Worktree(tail(&String::from_utf8_lossy(&removed.stderr), 1000)));
-        }
-        Ok(())
+        let path = worktree_dir.to_string_lossy();
+        git_in(&self.repo, &["worktree", "remove", "--force", path.as_ref()]).map(|_| ())
     }
 
     fn registered_worktrees(&self) -> Result<Vec<PathBuf>, LocalExecutorError> {
@@ -242,7 +235,7 @@ impl TransformRunner for ProcessTransformRunner {
     ) -> Result<Option<CapturedObjects>, LocalExecutorError> {
         // A clean worktree has nothing to capture — the caller fails the run
         // closed rather than minting an empty candidate.
-        if git_in(worktree_dir, &["status", "--porcelain"])?.trim().is_empty() {
+        if command::porcelain_entries(worktree_dir).map_err(git_error)?.is_empty() {
             return Ok(None);
         }
         // Normalize formatting before the candidate is minted (#4627). `Verify`
@@ -314,8 +307,16 @@ fn commit_parents(repo_dir: &Path, checkout_hex: &str) -> Result<Vec<String>, Lo
 /// never a captured candidate. `--no-ext-diff` and `--no-color` keep a
 /// developer's own git configuration out of text the host is going to parse.
 fn capture_diff(worktree_dir: &Path) -> Option<String> {
-    match git_in(worktree_dir, &["diff", "--no-ext-diff", "--no-color", "HEAD~1", "HEAD"]) {
-        Ok(diff) => Some(diff),
+    match command::run(worktree_dir, &["diff", "--no-ext-diff", "--no-color", "HEAD~1", "HEAD"]) {
+        Ok(output) if output.status.success() => Some(String::from_utf8_lossy(&output.stdout).into_owned()),
+        Ok(output) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                stderr = %tail(&String::from_utf8_lossy(&output.stderr), 500),
+                "could not read the capture commit's diff; this lap's repair will not be triaged",
+            );
+            None
+        }
         Err(error) => {
             tracing::warn!(
                 target: "aether_chassis_bloomery::executor",
@@ -469,7 +470,7 @@ fn fetch_subject_if_absent(repo_dir: &Path, hex: &str, remote: &str) -> Result<(
     }
     // The coordinator repository *is* the authority: a missing object is
     // not on another host, so reaching for a network remote would be a lie.
-    if same_object_database(repo_dir, remote) {
+    if command::shares_object_database(repo_dir, Path::new(remote)) {
         return Err(LocalExecutorError::Worktree(format!(
             "fetching order subject {hex}: object is not in {}",
             repo_dir.display()
@@ -486,36 +487,10 @@ fn fetch_subject_if_absent(repo_dir: &Path, hex: &str, remote: &str) -> Result<(
     Ok(())
 }
 
-/// Whether `remote` names the same object database as `repo_dir`.
-///
-/// A named remote (`origin`) never does. An absolute path does when it is the
-/// coordinator repository itself, or a worktree that shares its common dir —
-/// the local-authority case, where a fetch would be a self-fetch.
-fn same_object_database(repo_dir: &Path, remote: &str) -> bool {
-    let remote = Path::new(remote);
-    if !remote.is_absolute() {
-        return false;
-    }
-    match (resolved_git_common_dir(repo_dir), resolved_git_common_dir(remote)) {
-        (Some(left), Some(right)) => left == right,
-        _ => false,
-    }
-}
-
-/// Canonical path of `repo`'s object database (`rev-parse --git-common-dir`).
-///
-/// `--absolute-git-common-dir` is not on the git this host ships (2.43),
-/// which treats the unknown flag as a revision name and prints it back —
-/// every repository then "shares" the same database.
+/// Canonical path of `repo`'s object database. Alias for the command-layer
+/// predicate so comments and tests keep the name they already use.
 fn resolved_git_common_dir(repo: &Path) -> Option<PathBuf> {
-    let raw = git_in(repo, &["rev-parse", "--git-common-dir"]).ok()?;
-    let raw = raw.trim();
-    let path = if Path::new(raw).is_absolute() {
-        PathBuf::from(raw)
-    } else {
-        repo.join(raw)
-    };
-    path.canonicalize().ok()
+    command::git_common_dir(repo)
 }
 
 /// Bring the checkout at `worktree_dir` to `checkout_hex`, reusing the directory
@@ -594,17 +569,13 @@ fn commitish_for(repo_dir: &Path, checkout_hex: &str) -> Result<String, LocalExe
     if git_in(repo_dir, &["cat-file", "-t", checkout_hex])?.trim() != "tree" {
         return Ok(checkout_hex.to_owned());
     }
-    let wrap = Command::new("git")
-        .current_dir(repo_dir)
-        .args(["commit-tree", checkout_hex, "-m"])
-        .arg(format!("bloomery: checkout of bare tree {checkout_hex}"))
-        .envs(WRAPPER_IDENTITY)
-        .output()
-        .map_err(LocalExecutorError::Spawn)?;
+    let message = format!("bloomery: checkout of bare tree {checkout_hex}");
+    let wrap = command::run_env(repo_dir, &["commit-tree", checkout_hex, "-m", &message], &WRAPPER_IDENTITY)
+        .map_err(git_error)?;
     if !wrap.status.success() {
         return Err(LocalExecutorError::Worktree(tail(&String::from_utf8_lossy(&wrap.stderr), 1000)));
     }
-    Ok(String::from_utf8_lossy(&wrap.stdout).trim().to_owned())
+    Ok(command::trim_bytes(&wrap.stdout))
 }
 
 /// The fixed author and committer a tree wrapper commit carries, timestamp
@@ -648,17 +619,8 @@ fn reset_checkout(worktree_dir: &Path, checkout_hex: &str) -> Result<(), LocalEx
 /// `<commit-ish>` already checked out by another worktree, and a path assigned to
 /// a worktree but missing from disk (what a `reclaim_worktree_path` above leaves).
 fn add_worktree(repo_dir: &Path, worktree_dir: &Path, checkout_hex: &str) -> Result<(), LocalExecutorError> {
-    let checkout = Command::new("git")
-        .current_dir(repo_dir)
-        .args(["worktree", "add", "--force", "--detach"])
-        .arg(worktree_dir)
-        .arg(checkout_hex)
-        .output()
-        .map_err(LocalExecutorError::Spawn)?;
-    if !checkout.status.success() {
-        return Err(LocalExecutorError::Worktree(tail(&String::from_utf8_lossy(&checkout.stderr), 1000)));
-    }
-    Ok(())
+    let path = worktree_dir.to_string_lossy();
+    git_in(repo_dir, &["worktree", "add", "--force", "--detach", path.as_ref(), checkout_hex]).map(|_| ())
 }
 
 /// Clear a leftover scratch worktree directory so `git worktree add` cannot
@@ -706,14 +668,18 @@ fn format_worktree(worktree_dir: &Path) {
     }
 }
 
-// Run one git command inside `dir`, returning its stdout — the capture path's
-// shell helper, error-shaped like the worktree add/remove shell-outs above.
+// Run one git command inside `dir`, returning its trimmed stdout — domain
+// error mapping over the crate-wide command layer.
 fn git_in(dir: &Path, args: &[&str]) -> Result<String, LocalExecutorError> {
-    let output = Command::new("git").current_dir(dir).args(args).output().map_err(LocalExecutorError::Spawn)?;
-    if !output.status.success() {
-        return Err(LocalExecutorError::Worktree(tail(&String::from_utf8_lossy(&output.stderr), 1000)));
+    command::run_ok(dir, args).map_err(git_error)
+}
+
+fn git_error(error: GitCommandError) -> LocalExecutorError {
+    match error {
+        GitCommandError::Spawn { source, .. } => LocalExecutorError::Spawn(source),
+        GitCommandError::Failed { stderr, .. } => LocalExecutorError::Worktree(tail(&stderr, 1000)),
+        GitCommandError::Encoding => LocalExecutorError::Worktree("git produced non-UTF-8 output".into()),
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Spawn `command` in its own process group on Unix, so a later re-attached
@@ -805,16 +771,7 @@ fn neutralize_hooks(worktree_dir: &Path) -> Result<(), LocalExecutorError> {
     // Mark the stripped file skip-worktree so it stays out of the scratch-root
     // `git status --porcelain` the candidate detection reads (#3632) and can never
     // be committed as part of a candidate.
-    let marked = Command::new("git")
-        .arg("-C")
-        .arg(worktree_dir)
-        .args(["update-index", "--skip-worktree", SETTINGS_PATH])
-        .output()
-        .map_err(LocalExecutorError::Spawn)?;
-    if !marked.status.success() {
-        return Err(LocalExecutorError::Worktree(tail(&String::from_utf8_lossy(&marked.stderr), 1000)));
-    }
-    Ok(())
+    git_in(worktree_dir, &["update-index", "--skip-worktree", SETTINGS_PATH]).map(|_| ())
 }
 
 #[cfg(test)]

@@ -36,9 +36,9 @@ use crate::client::{
     PullMergeResult, PullRequest, PullRequestApi, PullRequestState, RefTxnOp, RunConclusion, RunStatus, WorkflowRun,
     strip_heads,
 };
+use crate::command;
 use crate::correspondence::GitObjectId;
 use crate::executor::INPUT_NONCE;
-use crate::local::command;
 use crate::marker::parse_marker;
 use crate::source::{EMPTY_TREE, digest_from_hex, render_claim_message, render_tombstone_message, to_hex};
 
