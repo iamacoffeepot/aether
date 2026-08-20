@@ -285,7 +285,7 @@ mod tests {
     use super::{BloomCommand, Endpoint, SealArgs, SupersedeArgs, run_on};
     use crate::bloom::dto::{AdrTouch, DigestHex};
     use crate::bloom::hex;
-    use crate::bloom::plan::BaseChoice;
+    use crate::bloom::plan::{self, BaseChoice};
 
     #[derive(Clone, Debug)]
     struct Recorded {
@@ -973,7 +973,7 @@ mod tests {
         // cloned digest is what the admission door rejects. A member the
         // flag does not name keeps the file digest.
         let task = temp_task("seal-revisions", "build A and B");
-        let file_digest = crate::bloom::plan::file_digest(&task).expect("task digest").as_hex();
+        let file_digest = plan::file_digest(&task).expect("task digest").as_hex();
         let rev_a = hex_of(digest(0x11));
         let rev_b = hex_of(digest(0x22));
         let (_, log) = with_fake(
