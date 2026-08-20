@@ -63,11 +63,11 @@ impl DispatchList {
         let rows = self.rows(store);
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
-                self.cursor.select_next(&rows, row_id);
+                self.cursor.select_next(&rows, |row| row.nonce.clone());
                 Outcome::Handled
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.cursor.select_prev(&rows, row_id);
+                self.cursor.select_prev(&rows, |row| row.nonce.clone());
                 Outcome::Handled
             }
             KeyCode::Enter => self
@@ -85,7 +85,7 @@ impl DispatchList {
 
     pub fn reseat(&mut self, store: &Store) {
         let rows = self.rows(store);
-        self.cursor.reseat(&rows, row_id, |_, rows| rows.first().map(row_id));
+        self.cursor.reseat(&rows, |row| row.nonce.clone(), |_, rows| rows.first().map(|row| row.nonce.clone()));
     }
 
     pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, store: &Store) {
@@ -137,22 +137,19 @@ impl DispatchList {
         .header(header)
         .row_highlight_style(palette::cursor())
         .highlight_symbol("> ");
-        let mut state =
-            TableState::default().with_selected(self.cursor.selected_index(&rows, row_id)).with_offset(self.scroll);
+        let mut state = TableState::default()
+            .with_selected(self.cursor.selected_index(&rows, |row| row.nonce.clone()))
+            .with_offset(self.scroll);
         frame.render_stateful_widget(table, area, &mut state);
         self.scroll = state.offset();
     }
 
-    fn rows<'a>(&self, store: &'a Store) -> Vec<&'a BloomDispatchView> {
+    fn rows(&self, store: &Store) -> Vec<BloomDispatchView> {
         let Some(page) = store.bloom_dispatches(self.bloom).and_then(|cell| cell.value.as_ref()) else {
             return Vec::new();
         };
-        page.dispatches.iter().filter(|row| row.workpiece == self.workpiece).collect()
+        page.dispatches.iter().filter(|row| row.workpiece == self.workpiece).cloned().collect()
     }
-}
-
-fn row_id(row: &&BloomDispatchView) -> String {
-    row.nonce.clone()
 }
 
 #[cfg(test)]
