@@ -679,9 +679,7 @@ fn load_revision(conn: &Connection, digest: Digest) -> Result<Option<ScopeRevisi
 }
 
 fn unresolved_dependencies(conn: &Connection, scope: Digest) -> Result<Vec<WorkpieceId>, CommissionError> {
-    let Some(revision) = load_revision(conn, scope)? else {
-        return Err(CommissionError::MissingRevision);
-    };
+    let revision = load_revision(conn, scope)?.ok_or(CommissionError::MissingRevision)?;
     let mut unresolved = Vec::new();
     for id in &revision.dependencies {
         if unresolved.contains(id) {
