@@ -1,20 +1,20 @@
-//! Application chrome: header, status, alert band, interrupt queue, footer.
+//! Application chrome: header, status, needs-you band, footer.
 //!
 //! Owned by the workspace panes: fleet paints the header, needs-you the
-//! alert and interrupt bands, quiet the status and today lines.
+//! merged queue, quiet the status and today lines.
 
 use std::time::Duration;
 
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::Paragraph;
 
 use crate::dto::{SpendQuiesce, ViewDocument};
 use crate::keys::{KeyHint, footer_line};
 use crate::palette::{self, Role};
 use crate::screen::Dashboard;
 use crate::store::Cell;
-use crate::warroom::{Alert, AlertKind, Interrupt, InterruptKind};
+use crate::warroom::{NeedsYouRow, Severity};
 
 /// Age of the last successful sample, for the header.
 #[must_use]
@@ -91,37 +91,34 @@ pub fn seal(quiesce: &SpendQuiesce) -> Paragraph<'static> {
         .style(palette::body())
 }
 
+/// Visible slice of the needs-you queue, the selection index inside it, and
+/// how many rows sit outside the window. `height` is the pane's inner height.
+/// When the queue overflows, the last line is reserved for `+N more`.
 #[must_use]
-pub fn alert_band(alerts: &[Alert], selected: Option<usize>) -> Paragraph<'static> {
-    let spans: Vec<Span<'static>> = alerts
-        .iter()
-        .enumerate()
-        .flat_map(|(index, alert)| {
-            let mut style = palette::paint(alert_role(alert.kind)).add_modifier(Modifier::BOLD);
-            if selected == Some(index) {
-                style = style.add_modifier(Modifier::REVERSED);
-            }
-            [Span::styled(alert.token.clone(), style), Span::raw(format!(" {}  ", alert.detail))]
-        })
-        .collect();
-    Paragraph::new(Line::from(spans)).style(palette::body()).wrap(Wrap { trim: true })
-}
-
-/// Visible slice of the interrupt queue and the selection index inside it.
-/// `rows` is the pane's inner height, not a property of the queue.
-#[must_use]
-pub fn interrupt_window(entries: &[Interrupt], selected: Option<usize>, rows: usize) -> (&[Interrupt], Option<usize>) {
-    if rows == 0 || entries.is_empty() {
-        return (&[], None);
+pub fn needs_you_window(
+    rows: &[NeedsYouRow],
+    selected: Option<usize>,
+    height: usize,
+) -> (&[NeedsYouRow], Option<usize>, usize) {
+    if height == 0 || rows.is_empty() {
+        return (&[], None, 0);
     }
-    let start = interrupt_window_start(entries.len(), selected, rows);
-    let end = (start + rows).min(entries.len());
-    let window = &entries[start..end];
+    let visible = if rows.len() > height {
+        height.saturating_sub(1)
+    } else {
+        height
+    };
+    if visible == 0 {
+        return (&[], None, rows.len());
+    }
+    let start = needs_you_window_start(rows.len(), selected, visible);
+    let end = (start + visible).min(rows.len());
+    let window = &rows[start..end];
     let relative = selected.and_then(|index| index.checked_sub(start).filter(|&rel| rel < window.len()));
-    (window, relative)
+    (window, relative, rows.len() - window.len())
 }
 
-fn interrupt_window_start(len: usize, selected: Option<usize>, rows: usize) -> usize {
+fn needs_you_window_start(len: usize, selected: Option<usize>, rows: usize) -> usize {
     if len <= rows {
         return 0;
     }
@@ -130,37 +127,28 @@ fn interrupt_window_start(len: usize, selected: Option<usize>, rows: usize) -> u
 }
 
 #[must_use]
-pub fn interrupt_band(entries: &[Interrupt], selected: Option<usize>) -> Paragraph<'static> {
-    let lines: Vec<Line<'static>> = entries
+pub fn needs_you_band(window: &[NeedsYouRow], selected: Option<usize>, hidden: usize) -> Paragraph<'static> {
+    let mut lines: Vec<Line<'static>> = window
         .iter()
         .enumerate()
-        .map(|(index, entry)| {
-            let mut style = palette::paint(interrupt_role(entry.kind)).add_modifier(Modifier::BOLD);
+        .map(|(index, row)| {
+            let mut style = palette::paint(severity_role(row.severity)).add_modifier(Modifier::BOLD);
             if selected == Some(index) {
                 style = style.add_modifier(Modifier::REVERSED);
             }
-            Line::from(vec![
-                Span::styled(entry.kind.label().to_owned(), style),
-                Span::raw(format!("  {}", entry.detail)),
-            ])
+            Line::from(Span::styled(format!("{} · {} · {}", row.subject, row.happened, row.action), style))
         })
         .collect();
+    if hidden > 0 {
+        lines.push(Line::from(Span::raw(format!("+{hidden} more"))));
+    }
     Paragraph::new(lines).style(palette::body())
 }
 
-fn alert_role(kind: AlertKind) -> Role {
-    match kind {
-        AlertKind::Park | AlertKind::HostFault => Role::Attention,
-        AlertKind::Landing | AlertKind::Fault | AlertKind::Wedge => Role::Loud,
-    }
-}
-
-fn interrupt_role(kind: InterruptKind) -> Role {
-    match kind {
-        InterruptKind::Park | InterruptKind::Decision | InterruptKind::Hold | InterruptKind::Findings => {
-            Role::Attention
-        }
-        InterruptKind::Terminal | InterruptKind::Wedge | InterruptKind::Landing | InterruptKind::Quiesce => Role::Loud,
+fn severity_role(severity: Severity) -> Role {
+    match severity {
+        Severity::Attention => Role::Attention,
+        Severity::Loud => Role::Loud,
     }
 }
 
@@ -176,17 +164,23 @@ pub fn footer(hints: &[KeyHint], metrics: Option<&str>) -> Paragraph<'static> {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_age, format_seal, format_status, interrupt_window};
+    use super::{format_age, format_seal, format_status, needs_you_window};
     use crate::dto::{DigestHex, SpendQuiesce, ViewDocument};
-    use crate::warroom::{Focus, Interrupt, InterruptKind};
+    use crate::warroom::{Focus, NeedsYouRow, Severity};
     use std::time::Duration;
 
     fn digest(byte: u8) -> DigestHex {
         DigestHex::from_bytes([byte; 32])
     }
 
-    fn park_row(n: u8) -> Interrupt {
-        Interrupt { kind: InterruptKind::Park, detail: format!("row-{n}"), focus: Focus::bloom(digest(n)) }
+    fn park_row(n: u8) -> NeedsYouRow {
+        NeedsYouRow {
+            focus: Focus::bloom(digest(n)),
+            subject: digest(n).prefix(),
+            happened: "park".to_owned(),
+            action: "accept or defer".to_owned(),
+            severity: Severity::Attention,
+        }
     }
 
     #[test]
@@ -223,24 +217,21 @@ mod tests {
     }
 
     #[test]
-    fn interrupt_window_scrolls_the_selected_row_into_view() {
-        // The plausible bug: a queue longer than the band keeps the highlight
-        // on a clipped row, so j/k looks like the cursor vanished.
-        let entries: Vec<Interrupt> = (0..10).map(park_row).collect();
+    fn needs_you_window_reserves_a_line_for_the_overflow_marker() {
+        // The plausible bug: a queue longer than the pane paints only the
+        // visible slice, so the operator cannot tell rows exist outside it;
+        // or the marker overwrites a real row because the window was not shrunk.
+        let rows: Vec<NeedsYouRow> = (0..11).map(park_row).collect();
 
-        let (window, selected) = interrupt_window(&entries, None, 8);
-        assert_eq!(window.len(), 8);
-        assert_eq!(window[0].detail, "row-0");
+        let (window, selected, hidden) = needs_you_window(&rows, None, 8);
+        assert_eq!(window.len(), 7);
+        assert_eq!(hidden, 4);
         assert_eq!(selected, None);
 
-        let (window, selected) = interrupt_window(&entries, Some(0), 8);
-        assert_eq!(window[0].detail, "row-0");
-        assert_eq!(selected, Some(0));
-
-        let (window, selected) = interrupt_window(&entries, Some(9), 8);
-        assert_eq!(window.len(), 8);
-        assert_eq!(window[0].detail, "row-2");
-        assert_eq!(window[7].detail, "row-9");
-        assert_eq!(selected, Some(7));
+        let (window, selected, hidden) = needs_you_window(&rows, Some(10), 8);
+        assert_eq!(window.len(), 7);
+        assert_eq!(hidden, 4);
+        assert_eq!(window[6].focus, Focus::bloom(digest(10)));
+        assert_eq!(selected, Some(6));
     }
 }
