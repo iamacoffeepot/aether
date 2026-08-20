@@ -1092,41 +1092,97 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
 /// / clippy / rustdoc errors and warnings, their `-->` source locations, and
 /// rustfmt's per-file diff header. Suppression findings use their own
 /// `path:line — token — source` shape and are recognized separately below.
+/// A block starts only at column zero; an indented `-->` rides inside the
+/// diagnostic it locates rather than opening a second one.
 const DIAGNOSTIC_OPENERS: [&str; 4] = ["error", "warning:", "-->", "Diff in "];
 
-/// How much distilled output one failing member may contribute to the findings.
-/// A `Refine` prompt is read by a model with a finite budget, and a verify log
-/// is mostly progress chatter, so the cap bounds the noise rather than the
-/// signal.
+/// How many rendered lines of distilled output one failing member may contribute
+/// to the findings. A `Refine` prompt is read by a model with a finite budget,
+/// and a verify log is mostly progress chatter, so the cap bounds the noise
+/// rather than the signal. Whole diagnostics are admitted; a block that does
+/// not fit is dropped rather than truncated mid-message.
 const MAX_FINDING_LINES: usize = 40;
 
-/// Distil one member's log down to the lines that carry a verdict.
+/// Distil one member's log down to the diagnostics that carry a verdict.
 ///
 /// A verify log is overwhelmingly `Compiling …` / `Checking …` progress with a
 /// handful of diagnostics buried in it. Handing the whole thing to a `Refine`
 /// re-entry would bury the finding it exists to deliver, which is the failure
-/// mode #4628 describes for the boot log. So keep the diagnostic lines, and
-/// fall back to the tail when nothing matches — an unrecognized failure shape
-/// still says more than silence.
+/// mode #4628 describes for the boot log. rustc already blocks a rendering from
+/// one opener to the next at column zero, so keep each matched block entire —
+/// the `help:` line, the source snippet, the `note:` — and fall back to the tail
+/// when nothing matches. An unrecognized failure shape still says more than
+/// silence.
 fn distil_diagnostics(log: &str) -> Option<String> {
-    let matched: Vec<&str> = log.lines().filter(|line| opens_a_diagnostic(line)).collect();
-    let selected = if matched.is_empty() {
-        tail_lines(log)
+    let blocks = diagnostic_blocks(log);
+    let selected = if blocks.is_empty() {
+        let tail = tail_lines(log);
+        if tail.is_empty() {
+            return None;
+        }
+        vec![tail]
     } else {
-        matched
+        blocks
     };
-    if selected.is_empty() {
-        return None;
-    }
+    Some(render_finding_blocks(&selected))
+}
 
-    let kept = selected.len().min(MAX_FINDING_LINES);
-    let rendered = selected[..kept].join("\n");
-    let omitted = selected.len() - kept;
+/// Group `log` into diagnostic blocks: a column-zero opener opens a block, the
+/// next such opener closes it, and everything between rides with the opener.
+fn diagnostic_blocks(log: &str) -> Vec<Vec<&str>> {
+    let mut blocks = Vec::new();
+    let mut current: Option<Vec<&str>> = None;
+    for line in log.lines() {
+        if opens_a_block(line) {
+            if let Some(block) = current.take() {
+                blocks.push(block);
+            }
+            current = Some(vec![line]);
+            continue;
+        }
+        if let Some(block) = current.as_mut() {
+            block.push(line);
+        }
+    }
+    if let Some(block) = current {
+        blocks.push(block);
+    }
+    blocks
+}
+
+/// Render `blocks` inside the findings line budget, dropping a block that does
+/// not fit rather than truncating it mid-diagnostic. The first block is kept
+/// whole even when it alone overruns, so a single oversized diagnostic is still
+/// a finding rather than a silence. The omission notice counts diagnostics.
+fn render_finding_blocks(blocks: &[Vec<&str>]) -> String {
+    let mut kept = Vec::new();
+    let mut used = 0;
+    let mut omitted = 0;
+    for (index, block) in blocks.iter().enumerate() {
+        if !kept.is_empty() && used + block.len() > MAX_FINDING_LINES {
+            omitted = blocks.len() - index;
+            break;
+        }
+        used += block.len();
+        kept.push(block.join("\n"));
+    }
+    let rendered = kept.join("\n");
     if omitted == 0 {
-        return Some(rendered);
+        return rendered;
     }
 
-    Some(format!("{rendered}\n… {omitted} further diagnostic lines omitted"))
+    let noun = if omitted == 1 {
+        "diagnostic"
+    } else {
+        "diagnostics"
+    };
+    format!("{rendered}\n… {omitted} further {noun} omitted")
+}
+
+/// Whether `line` starts a diagnostic block: an opener at column zero. Indented
+/// `-->` locations and snippet lines are continuations of the current block.
+fn opens_a_block(line: &str) -> bool {
+    !line.starts_with(char::is_whitespace) && opens_a_diagnostic(line)
 }
 
 /// Distil one member's log the way *that* member's failures are written.
@@ -1153,8 +1209,9 @@ fn distil_member(id: &str, log: &str) -> Option<String> {
     distil_diagnostics(log)
 }
 
-/// Whether a log line opens (or locates) a diagnostic rather than reporting
-/// progress. Leading whitespace is ignored — rustc indents its `-->` locations.
+/// Whether a log line is a diagnostic opener rather than progress. Leading
+/// whitespace is ignored so an indented `-->` still *is* an opener; [`opens_a_block`]
+/// is what requires column zero before starting a new diagnostic.
 fn opens_a_diagnostic(line: &str) -> bool {
     let trimmed = line.trim_start();
     DIAGNOSTIC_OPENERS.iter().any(|opener| trimmed.starts_with(opener)) || opens_a_suppression_finding(trimmed)
@@ -1820,16 +1877,19 @@ mod tests {
     fn diagnostics_survive_a_log_that_is_mostly_progress() {
         // The whole point of distilling (#4641): a clippy log is thousands of
         // `Compiling …` lines around a handful of diagnostics. Handing the raw
-        // log to a Refine buries the finding it exists to deliver.
+        // log to a Refine buries the finding it exists to deliver. #5268: the
+        // body under the opener — help, snippet — has to survive too.
         let log = format!(
-            "{}error[E0308]: mismatched types\n  --> crates/a/src/lib.rs:4:9\n{}",
+            "{}error[E0308]: mismatched types\n  --> crates/a/src/lib.rs:4:9\n   |\n 4 |     x\n   |     ^ expected `i32`, found `&str`\n   |\n   = help: consider using `into()`\n",
             "   Compiling aether-data v0.3.0\n".repeat(200),
-            "   Compiling aether-http v0.3.0\n".repeat(200),
         );
 
         let distilled = distil_diagnostics(&log).expect("a log with diagnostics distils");
 
-        assert_eq!(distilled, "error[E0308]: mismatched types\n  --> crates/a/src/lib.rs:4:9");
+        assert!(distilled.contains("error[E0308]: mismatched types"));
+        assert!(distilled.contains("--> crates/a/src/lib.rs:4:9"));
+        assert!(distilled.contains("4 |     x"), "the source snippet survives");
+        assert!(distilled.contains("help: consider using `into()`"), "the help line survives");
         assert!(!distilled.contains("Compiling"), "progress chatter must not survive");
     }
 
@@ -1852,7 +1912,56 @@ mod tests {
         let distilled = distil_diagnostics(&log).expect("distils");
 
         assert_eq!(distilled.lines().count(), MAX_FINDING_LINES + 1, "the cap plus its own notice");
-        assert!(distilled.ends_with("… 10 further diagnostic lines omitted"), "truncation is stated, not silent");
+        assert!(distilled.ends_with("… 10 further diagnostics omitted"), "truncation is stated, not silent");
+    }
+
+    /// One clippy `needless_pass_by_value` rendering, the shape `render_diagnostics`
+    /// concatenates from rustc's `rendered` field. Leading spaces are load-bearing:
+    /// they are why `-->` and `help:` ride inside the opener's block.
+    fn clippy_needless_pass(package: &str) -> String {
+        let location = format!("  --> crates/{package}/src/lib.rs:12:22");
+        [
+            "error: this argument is passed by value, but not consumed in the body of the function",
+            location.as_str(),
+            "   |",
+            "12 | pub fn new(name: String) -> Self {",
+            "   |                      ^^^^^^ help: consider taking a reference instead: `&String`",
+            "   |",
+            "   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_pass_by_value",
+            "   = note: `-D clippy::needless-pass-by-value` implied by `-D warnings`",
+            "   = help: to override `-D warnings` add `#[allow(clippy::needless_pass_by_value)]`",
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn a_kept_clippy_diagnostic_retains_help_and_the_budget_drops_whole_diagnostics() {
+        // Tripwire (#5268): the distiller used to keep opener lines and throw
+        // away the help, snippet, and note under them. A Refine then paid for a
+        // lap on a finding it could not act on. The unit of selection is the
+        // whole diagnostic; the budget drops a block rather than cutting one.
+        let packages = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
+        let log = packages.map(clippy_needless_pass).join("\n");
+
+        let distilled = distil_diagnostics(&log).expect("distils");
+
+        assert!(distilled.contains("crates/alpha/src/lib.rs:12:22"), "the first diagnostic is kept");
+        assert!(distilled.contains("12 | pub fn new(name: String) -> Self {"), "its source snippet survives");
+        assert!(distilled.contains("help: consider taking a reference instead: `&String`"), "its help line survives");
+        let last_kept = distilled
+            .find("crates/delta/src/lib.rs:12:22")
+            .map(|at| &distilled[at..])
+            .expect("the last diagnostic the budget admits is present");
+        assert!(
+            last_kept.contains("to override `-D warnings` add `#[allow(clippy::needless_pass_by_value)]`"),
+            "the last kept diagnostic is complete, not truncated mid-block",
+        );
+        assert!(!distilled.contains("crates/echo/src/lib.rs"), "a diagnostic the budget cannot admit is dropped whole");
+        assert!(!distilled.contains("crates/foxtrot/src/lib.rs"), "later diagnostics do not sneak in after a drop");
+        assert!(
+            distilled.ends_with("… 2 further diagnostics omitted"),
+            "the notice counts diagnostics, not lines: {distilled}"
+        );
     }
 
     #[test]
