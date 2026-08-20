@@ -1281,7 +1281,8 @@ fn event_bloom(event: &Event) -> Option<BloomId> {
         | Fact::ResumeHostFault { bloom, .. }
         | Fact::SpliceAssembled { bloom, .. }
         | Fact::MemberExecutorFault { bloom, .. }
-        | Fact::FoldRefused { bloom, .. } => Some(*bloom),
+        | Fact::FoldRefused { bloom, .. }
+        | Fact::ContainmentRefused { bloom, .. } => Some(*bloom),
         Fact::ObserveMainline { .. }
         | Fact::ObserveMainlineDiverged { .. }
         | Fact::RequestOrphanClaimRelease { .. }

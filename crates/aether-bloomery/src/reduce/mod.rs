@@ -171,5 +171,8 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
             reduce_member_executor_fault(snapshot, bloom, workpiece, *stage, evidence)
         }
         Fact::FoldRefused { bloom, refusal } => reduce_fold_refused(snapshot, bloom, refusal),
+        Fact::ContainmentRefused { bloom, workpiece, evidence, failed_verifiers, violating_paths: _ } => {
+            reduce_verify_failed(snapshot, bloom, workpiece, evidence, *failed_verifiers)
+        }
     }
 }

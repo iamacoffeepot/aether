@@ -73,6 +73,10 @@ pub struct UploadedEvidence {
     pub session_reuse_saved_micro_usd: Option<u64>,
     /// Peak resident bytes from `evidence.json`.
     pub peak_resident_bytes: Option<u64>,
+    /// Paths the candidate changed that no declared-surface glob covers
+    /// (ADR-0209). Host-recorded state copied off the port reference, like
+    /// `findings`. Empty unless the containment overlay named a violation.
+    pub violating_paths: Vec<String>,
 }
 
 /// Why the broker refused an upload without touching the reducer.
@@ -475,8 +479,9 @@ fn thread_triage_note(
 /// and the off-line Refine / Reconcile repairs. Reconcile has no successor in
 /// `MEMBER_LINE`; naming it here is what stops a passing candidate being
 /// refused as [`IntakeRefusal::OutOfLineStage`].
-/// The three terminal-Verify facts: a pass integrates, a preflight-only
-/// miss is a host fault (#5020), and every other failing set is a
+/// The terminal-Verify facts: a pass integrates, a preflight-only miss is
+/// a host fault (#5020), a set carrying containment is
+/// `ContainmentRefused` (ADR-0209), and every other failing set is a
 /// candidate `VerifyFailed`.
 fn verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Evidence) -> Event {
     if verdict_passed(upload.verdict) {
@@ -501,6 +506,14 @@ fn verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Ev
                 workpiece: record.workpiece.clone(),
                 evidence,
                 findings: upload.findings.clone().unwrap_or_default(),
+            }
+        } else if upload.failed_verifiers.contains(VerifyFailure::Containment) {
+            Fact::ContainmentRefused {
+                bloom: record.bloom,
+                workpiece: record.workpiece.clone(),
+                evidence,
+                failed_verifiers: upload.failed_verifiers,
+                violating_paths: upload.violating_paths.clone(),
             }
         } else {
             Fact::VerifyFailed {
