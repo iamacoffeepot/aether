@@ -57,7 +57,8 @@ pub struct Completeness {
     pub blocked: bool,
     /// The declared surface is fresh against the current base.
     pub declared_surface_fresh: bool,
-    /// Every `## Depends on` dependency is closed.
+    /// Every `## Depends on` dependency is satisfied: a co-sealed member of this
+    /// seal, or a commission whose status is `Landed`.
     pub dependencies_all_closed: bool,
     /// Umbrella integrity holds (not a decomposition umbrella whose children fail
     /// to back-reference).
@@ -95,7 +96,8 @@ pub enum Incompleteness {
     Blocked,
     /// The declared surface is stale against the current base.
     StaleDeclaredSurface,
-    /// A `## Depends on` dependency is still open.
+    /// A `## Depends on` dependency is neither a co-sealed member nor a landed
+    /// commission.
     OpenDependency,
     /// Umbrella integrity does not hold.
     UmbrellaIntegrity,

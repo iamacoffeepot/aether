@@ -83,6 +83,13 @@ pub(super) const MAX_OPEN_SEALS: usize = 1024;
 /// membership is a handful; the ceiling is generous headroom over that.
 pub(super) const MAX_SEAL_MEMBERS: usize = 256;
 
+/// Ceiling on one seal's extra `LoadCommission` fan-out for declared non-member
+/// dependencies. Member count is already capped at [`MAX_SEAL_MEMBERS`]; each
+/// member's `## Depends on` list is operator-authored and otherwise unbounded,
+/// so a second load round without a ceiling could amplify one seal into an
+/// unbounded number of store reads (issue #5305).
+pub(super) const MAX_SEAL_DEPENDENCY_LOADS: usize = 256;
+
 /// The control-plane REST router state: the pre-seal shaping maps plus the
 /// multi-hop join tables. A direct one-request/one-reply route holds nothing
 /// here — the ADR-0154 relay carries it.
@@ -280,7 +287,8 @@ pub(super) struct CommissionHttp {
 }
 
 /// A seal held across N commission loads (#5048). Each member's store row
-/// lands here; the last load materializes projections and continues into
+/// lands here; a second round then loads any declared non-member dependencies.
+/// The last load materializes projections and continues into
 /// [`gate_and_admit`](ApiCapabilityState::gate_and_admit).
 pub(super) struct PendingCommissionSeal {
     /// The held HTTP reply obligation.
