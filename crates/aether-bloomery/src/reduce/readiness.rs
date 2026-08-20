@@ -434,10 +434,10 @@ mod tests {
         };
         let (mut snapshot, _) = step(&Snapshot::new(digest(0)), &event("seal", fact));
         let mut fold = None;
-        for (index, (name, revision)) in members.iter().enumerate() {
+        for ((name, revision), candidate) in members.iter().zip(10u8..) {
             let integrate = event(
                 &format!("{name}-done"),
-                Fact::Integrate { bloom: spec.id(), claim: claim(name, *revision, 10 + index as u8) },
+                Fact::Integrate { bloom: spec.id(), claim: claim(name, *revision, candidate) },
             );
             let (next, decided) = step(&snapshot, &integrate);
             snapshot = next;
