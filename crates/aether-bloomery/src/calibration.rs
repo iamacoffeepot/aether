@@ -273,7 +273,8 @@ impl CalibrationLedger {
     /// not run when the candidate was written, and Construct's column reads
     /// empty however badly it did.
     pub fn observe(&mut self, event: &Event, decisions: &Decisions, configs: &ResolvedConfigs) {
-        if let Fact::VerifyFailed { bloom, workpiece, failed_verifiers, .. } = &event.fact
+        if let Fact::VerifyFailed { bloom, workpiece, failed_verifiers, .. }
+        | Fact::ContainmentRefused { bloom, workpiece, failed_verifiers, .. } = &event.fact
             && !matches!(decisions.outcome, Outcome::VerifyFailedRejected(_))
         {
             self.observe_failure(*bloom, workpiece, *failed_verifiers);

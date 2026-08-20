@@ -1628,6 +1628,7 @@ impl LocalExecutor {
         let detail = Digest::of_wire_bytes(bytes);
         let mut failed_verifiers = failed_verifiers.unwrap_or_default();
         let mut findings = parse_findings(bytes);
+        let mut violating_paths = Vec::new();
         if is_verify
             && let Some(violations) =
                 self.surface_violations(&handle.nonce.0, worktree_dir.as_deref(), diff_base_hex.as_deref())
@@ -1636,6 +1637,7 @@ impl LocalExecutor {
             verdict = overlay.verdict;
             failed_verifiers = overlay.failed_verifiers;
             findings = overlay.findings;
+            violating_paths = violations;
         }
         let name =
             NameEvidenceClaims::attempt_artifact_name(&handle.nonce, &subject, verdict, failed_verifiers, &detail);
@@ -1655,6 +1657,7 @@ impl LocalExecutor {
             session_reuse_arm: parse_session_reuse_arm(bytes),
             session_reuse_saved_micro_usd: parse_session_reuse_saved(bytes),
             peak_resident_bytes: parse_peak_resident_bytes(bytes),
+            violating_paths,
         }]
     }
 }
@@ -1772,6 +1775,7 @@ fn executor_fault_ref(
         session_reuse_arm: parse_session_reuse_arm(bytes),
         session_reuse_saved_micro_usd: parse_session_reuse_saved(bytes),
         peak_resident_bytes: parse_peak_resident_bytes(bytes),
+        violating_paths: Vec::new(),
     }
 }
 

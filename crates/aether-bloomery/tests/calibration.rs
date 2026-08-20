@@ -17,7 +17,7 @@ use aether_bloomery::{
     AgentSelection, BloomId, CalibrationLedger, CandidateRef, CapabilityCell, CapabilityLedger, ConfigKind, Decision,
     Decisions, Digest, Event, Evidence, EvidenceKind, Fact, Harness, ModelOverride, Outcome, ReasoningEffort,
     ResolvedConfigs, SealError, Snapshot, SpendWindow, StageCatalog, StageId, StageOverride, StudyCost, StudyRecord,
-    Unproducible, VerifyFailure, reduce,
+    Unproducible, VerifyFailure, VerifyFailureSet, reduce,
 };
 use common::{claim, digest, draft_with_member_override, event, membership, workpiece};
 
@@ -227,6 +227,29 @@ fn a_failing_verify_charges_verdicts_to_the_lane_that_wrote_the_candidate() {
     assert_eq!(verdicts(repair, VerifyFailure::Suppress), 1, "suppression pressure is its own count, not a flag");
     assert_eq!(verdicts(construct, VerifyFailure::Suppress), 0, "and it is not smeared across the member's lanes");
     assert!(cell(&ledger, StageId::Verify).is_none(), "the mechanical fan-out ran a compiler, so it calibrates nobody");
+}
+
+#[test]
+fn a_containment_refusal_lands_in_the_ledger() {
+    // ADR-0209: without an arm for the appended fact the ninth identity is
+    // never counted — which is the entire point of journaling it.
+    let mut journal = Journal::sealed(&escalating());
+    let captured = CandidateRef { tree: digest(TREE), checkout: digest(TREE + 1) };
+    journal.completed("construct", StageId::Construct, Some(captured));
+    journal.admit(&event(
+        "containment",
+        Fact::ContainmentRefused {
+            bloom: journal.bloom,
+            workpiece: workpiece(MEMBER),
+            evidence: Evidence { subject: digest(TREE), kind: EvidenceKind::VerificationResult, detail: digest(91) },
+            failed_verifiers: VerifyFailureSet::one(VerifyFailure::Containment),
+            violating_paths: vec!["crates/other/src/lib.rs".into()],
+        },
+    ));
+
+    let ledger = journal.ledger.report(|_| None);
+    let construct = cell(&ledger, StageId::Construct).expect("the Construct lane is measured");
+    assert_eq!(verdicts(construct, VerifyFailure::Containment), 1);
 }
 
 // Tripwire (ADR-0184): a study record reaches the stage that spent it, through

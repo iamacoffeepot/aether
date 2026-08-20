@@ -16,8 +16,9 @@ use crate::hex_nibble;
 ///
 /// The order is append-only and independent of the umbrella's run order: each
 /// identity's bit is its position, so a new identity goes on the end or every
-/// deployed mask shifts. Every bit of the mask byte carries an identity, so a
-/// ninth one needs a `u16` set and a four-hex-digit token (ADR-0181).
+/// deployed mask shifts. The set is a `u16` and the artifact token is four
+/// lowercase hex digits; a two-digit token still decodes as the same eight
+/// identities it already named, zero-extended (ADR-0209).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum VerifyFailure {
     /// The umbrella could not satisfy its tool/target prerequisites.
@@ -36,12 +37,23 @@ pub enum VerifyFailure {
     Deps,
     /// `verify.suppress` failed (ADR-0181).
     Suppress,
+    /// The candidate edited a path no declared-surface glob covers (ADR-0209).
+    Containment,
 }
 
 impl VerifyFailure {
     /// Every V1 identity, in canonical wire order.
-    pub const ALL: [Self; 8] =
-        [Self::Preflight, Self::Fmt, Self::Clippy, Self::Docs, Self::Test, Self::Dup, Self::Deps, Self::Suppress];
+    pub const ALL: [Self; 9] = [
+        Self::Preflight,
+        Self::Fmt,
+        Self::Clippy,
+        Self::Docs,
+        Self::Test,
+        Self::Dup,
+        Self::Deps,
+        Self::Suppress,
+        Self::Containment,
+    ];
 
     /// The canonical identity string.
     #[must_use]
@@ -55,6 +67,7 @@ impl VerifyFailure {
             Self::Dup => "verify.dup",
             Self::Deps => "verify.deps",
             Self::Suppress => "verify.suppress",
+            Self::Containment => "verify.containment",
         }
     }
 
@@ -70,12 +83,13 @@ impl VerifyFailure {
             b"verify.dup" => Some(Self::Dup),
             b"verify.deps" => Some(Self::Deps),
             b"verify.suppress" => Some(Self::Suppress),
+            b"verify.containment" => Some(Self::Containment),
             _ => None,
         }
     }
 
-    const fn bit(self) -> u8 {
-        1 << (self as u8)
+    const fn bit(self) -> u16 {
+        1 << (self as u16)
     }
 }
 
@@ -97,8 +111,8 @@ impl Serialize for VerifyFailure {
 // The serde impls above and below are hand-written, so the schema has to be
 // hand-written with them: an identity travels as its canonical name, not as an
 // enum discriminant, and a set travels as the ordered sequence of those names
-// rather than as the mask byte it is in memory. A derive here would describe a
-// unit enum and a newtype over `u8` — a shape the wire never carries. The
+// rather than as the mask it is in memory. A derive here would describe a
+// unit enum and a newtype over `u16` — a shape the wire never carries. The
 // schema-versus-serde equivalence is asserted over the whole decisions graph in
 // `tests/golden_decisions`, so a drift between these two descriptions fails
 // there rather than silently mis-describing the column.
@@ -140,7 +154,7 @@ impl<'de> Deserialize<'de> for VerifyFailure {
     }
 }
 
-const VERIFY_FAILURE_NAMES: [&str; 8] = [
+const VERIFY_FAILURE_NAMES: [&str; 9] = [
     "verify.preflight",
     "verify.fmt",
     "verify.clippy",
@@ -149,6 +163,7 @@ const VERIFY_FAILURE_NAMES: [&str; 8] = [
     "verify.dup",
     "verify.deps",
     "verify.suppress",
+    "verify.containment",
 ];
 
 /// A deduplicated verifier-failure set with one canonical order and mask.
@@ -157,7 +172,7 @@ const VERIFY_FAILURE_NAMES: [&str; 8] = [
 /// Whether a failed member Verify may be empty is an intake-boundary invariant,
 /// not a property of this reusable value.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug)]
-pub struct VerifyFailureSet(u8);
+pub struct VerifyFailureSet(u16);
 
 impl VerifyFailureSet {
     /// The empty set.
@@ -198,26 +213,32 @@ impl VerifyFailureSet {
         VerifyFailure::ALL.into_iter().filter(move |failure| self.contains(*failure))
     }
 
-    /// Encode the canonical artifact token: exactly two lowercase hex digits.
+    /// Encode the canonical artifact token: exactly four lowercase hex digits.
     #[must_use]
     pub fn to_mask(self) -> String {
-        format!("{:02x}", self.0)
+        format!("{:04x}", self.0)
     }
 
-    /// Decode an exact two-lowercase-hex-digit artifact token.
+    /// Decode a two- or four-lowercase-hex-digit artifact token.
     ///
-    /// Refuses wrong length, uppercase, and non-hex text. Every bit of the byte
-    /// carries an identity, so any well-formed token names a valid set and the
+    /// A two-digit token zero-extends to the same eight identities it already
+    /// named. Refuses every other length, uppercase, and non-hex text. The
     /// decode makes no unknown-bit refusal (ADR-0181); the workflow's own
     /// canonical-order and duplicate checks, plus the evidence digest, carry the
     /// semantic validation on the Actions path.
     #[must_use]
     pub fn from_mask(mask: &str) -> Option<Self> {
-        let bytes = mask.as_bytes();
-        if bytes.len() != 2 {
-            return None;
-        }
-        Some(Self((hex_nibble(bytes[0])? << 4) | hex_nibble(bytes[1])?))
+        let value = match *mask.as_bytes() {
+            [hi, lo] => u16::from((hex_nibble(hi)? << 4) | hex_nibble(lo)?),
+            [a, b, c, d] => {
+                (u16::from(hex_nibble(a)?) << 12)
+                    | (u16::from(hex_nibble(b)?) << 8)
+                    | (u16::from(hex_nibble(c)?) << 4)
+                    | u16::from(hex_nibble(d)?)
+            }
+            _ => return None,
+        };
+        Some(Self(value))
     }
 }
 
@@ -332,26 +353,44 @@ mod tests {
     #[test]
     fn exact_lowercase_mask_round_trips_and_rejects_invalid_tokens() {
         let failures = set(&[VerifyFailure::Preflight, VerifyFailure::Clippy, VerifyFailure::Deps]);
-        assert_eq!(failures.to_mask(), "45");
-        assert_eq!(VerifyFailureSet::from_mask("45"), Some(failures));
-        assert_eq!(VerifyFailureSet::from_mask("7f").map(VerifyFailureSet::to_mask).as_deref(), Some("7f"));
+        assert_eq!(failures.to_mask(), "0045");
+        assert_eq!(VerifyFailureSet::from_mask("0045"), Some(failures));
+        assert_eq!(VerifyFailureSet::from_mask("7f").map(VerifyFailureSet::to_mask).as_deref(), Some("007f"));
 
-        // Tripwire: the whole vocabulary must still fit the two-hex-digit token
-        // the attempt-artifact grammar reserves for it. A ninth identity shifts
-        // `bit()` by 8, and with overflow checks on — the profile `cargo test`
-        // and CI run — that panics here before the comparison is reached. The
-        // panic is the signal, not the compared mask: with overflow checks off
-        // the shift wraps to bit 0, the mask still reads `ff`, and this line
-        // passes, so a release-profile run does not catch the ninth identity.
-        assert_eq!(VerifyFailure::ALL.into_iter().collect::<VerifyFailureSet>().to_mask(), "ff");
-        assert_eq!(VerifyFailureSet::one(VerifyFailure::Suppress).to_mask(), "80");
+        // Tripwire: the whole vocabulary must still fit the four-hex-digit token
+        // the attempt-artifact grammar reserves for it. A tenth identity shifts
+        // `bit()` by 9 without widening the set, and with overflow checks on —
+        // the profile `cargo test` and CI run — that panics here before the
+        // comparison is reached.
+        assert_eq!(VerifyFailure::ALL.into_iter().collect::<VerifyFailureSet>().to_mask(), "01ff");
+        assert_eq!(VerifyFailureSet::one(VerifyFailure::Suppress).to_mask(), "0080");
         assert_eq!(VerifyFailureSet::from_mask("80"), Some(VerifyFailureSet::one(VerifyFailure::Suppress)));
+        assert_eq!(VerifyFailureSet::from_mask("0080"), Some(VerifyFailureSet::one(VerifyFailure::Suppress)));
         assert_eq!(
-            VerifyFailureSet::from_mask("ff"),
+            VerifyFailureSet::from_mask("01ff"),
             Some(VerifyFailure::ALL.into_iter().collect::<VerifyFailureSet>())
         );
 
-        for invalid in ["0", "000", "0A", "GG", "g0", "-1"] {
+        // Tripwire: a legacy two-digit token zero-extends to the same set as
+        // its four-digit form, so already-journaled and already-named masks
+        // keep their meaning after the token widens (ADR-0209).
+        let eight: VerifyFailureSet = [
+            VerifyFailure::Preflight,
+            VerifyFailure::Fmt,
+            VerifyFailure::Clippy,
+            VerifyFailure::Docs,
+            VerifyFailure::Test,
+            VerifyFailure::Dup,
+            VerifyFailure::Deps,
+            VerifyFailure::Suppress,
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(VerifyFailureSet::from_mask("ff"), VerifyFailureSet::from_mask("00ff"));
+        assert_eq!(VerifyFailureSet::from_mask("00ff"), Some(eight));
+        assert_eq!(VerifyFailureSet::from_mask("45"), Some(failures));
+
+        for invalid in ["0", "000", "00000", "0A", "GG", "g0", "-1"] {
             assert!(VerifyFailureSet::from_mask(invalid).is_none(), "`{invalid}` must be refused");
         }
     }

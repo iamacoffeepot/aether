@@ -72,10 +72,28 @@ impl VerifyGateSet {
     /// is the ordinary consequence of keying on identity, not a migration step.
     /// When the gate set becomes an explicitly declared value it lands in this
     /// type and the memo keeps keying on exactly the same digest.
+    ///
+    /// The verifier set is the eight identities the compiled `verify.check`
+    /// fan-out runs, listed by hand rather than derived from
+    /// [`VerifyFailure::ALL`]. Containment is coordinator-side and never a lane
+    /// member; picking it up from the vocabulary would re-key every stored
+    /// [`VerifiedTree`] proof memo. A future identity the lane *does* run must
+    /// be added here by hand.
     #[must_use]
     pub fn lane() -> Self {
         Self {
-            verifiers: VerifyFailure::ALL.into_iter().collect(),
+            verifiers: [
+                VerifyFailure::Preflight,
+                VerifyFailure::Fmt,
+                VerifyFailure::Clippy,
+                VerifyFailure::Docs,
+                VerifyFailure::Test,
+                VerifyFailure::Dup,
+                VerifyFailure::Deps,
+                VerifyFailure::Suppress,
+            ]
+            .into_iter()
+            .collect(),
             command: String::from(VERIFY_CHECK_COMMAND),
             image: String::from(VERIFY_LANE_IMAGE),
             network: VERIFY_LANE_NETWORK,
@@ -191,5 +209,19 @@ mod tests {
 
         assert_eq!(proof.verified().tree, digest(7));
         assert_eq!(proof.verified().gate_set, VerifyGateSet::lane().digest());
+    }
+
+    #[test]
+    fn the_compiled_lane_does_not_run_containment() {
+        // Tripwire: `VerifyGateSet::lane().digest()` is half of every
+        // `VerifiedTree` memo key. Containment is not a `verify.check` member;
+        // collecting it from `VerifyFailure::ALL` would re-key and re-prove the
+        // verification ledger for a gate the lane never runs.
+        let lane = VerifyGateSet::lane();
+        assert!(
+            !lane.verifiers.contains(VerifyFailure::Containment),
+            "containment must not sit in the compiled lane's gate set"
+        );
+        assert_eq!(lane.verifiers.to_mask(), "00ff");
     }
 }

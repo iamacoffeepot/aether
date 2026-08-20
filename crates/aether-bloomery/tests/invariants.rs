@@ -2256,6 +2256,27 @@ fn verify_failed(
     )
 }
 
+fn containment_refused(
+    key: &str,
+    bloom: BloomId,
+    member: &str,
+    subject: Digest,
+    detail: u8,
+    failed_verifiers: VerifyFailureSet,
+    violating_paths: Vec<String>,
+) -> Event {
+    event(
+        key,
+        Fact::ContainmentRefused {
+            bloom,
+            workpiece: workpiece(member),
+            evidence: Evidence { subject, kind: EvidenceKind::VerificationResult, detail: digest(detail) },
+            failed_verifiers,
+            violating_paths,
+        },
+    )
+}
+
 fn at_verify(member: &str) -> (Snapshot, BloomId) {
     let base = Snapshot::new(digest(1));
     let spec = draft(1, vec![membership(member, 10)]).seal();
@@ -2276,6 +2297,31 @@ fn at_verify(member: &str) -> (Snapshot, BloomId) {
         ),
     );
     (snapshot, bloom)
+}
+
+#[test]
+fn containment_refused_reduces_like_the_equivalent_verify_failed() {
+    // ADR-0209: the paths are journal payload the reducer never reads, so the
+    // outcome, effects, and roll accounting stay those of the equivalent
+    // VerifyFailed.
+    let (snapshot, bloom) = at_verify("wp");
+    let failed = VerifyFailureSet::one(VerifyFailure::Containment);
+    let named = verify_failed("as-verify", bloom, "wp", digest(10), 81, failed);
+    let refused = containment_refused(
+        "as-containment",
+        bloom,
+        "wp",
+        digest(10),
+        81,
+        failed,
+        vec!["crates/other/src/lib.rs".into()],
+    );
+    let configs = ResolvedConfigs::default();
+    let spend = SpendWindow::default();
+    let named = reduce(&snapshot, &named, &configs, &spend);
+    let refused = reduce(&snapshot, &refused, &configs, &spend);
+    assert_eq!(named.outcome, refused.outcome);
+    assert_eq!(named.effects, refused.effects);
 }
 
 // The plausible bug: a missing gate tool is a VerifyFailed that re-enters

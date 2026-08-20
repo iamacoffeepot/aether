@@ -2172,6 +2172,7 @@ fn an_aggregate_verify_failure_can_produce_a_repair_candidate() {
             session_reuse_arm: None,
             session_reuse_saved_micro_usd: None,
             peak_resident_bytes: None,
+            violating_paths: Vec::new(),
         },
     )
     .unwrap() else {
@@ -2209,6 +2210,7 @@ fn an_aggregate_verify_failure_can_produce_a_repair_candidate() {
             session_reuse_arm: None,
             session_reuse_saved_micro_usd: None,
             peak_resident_bytes: None,
+            violating_paths: Vec::new(),
         },
     )
     .unwrap() else {
@@ -2269,6 +2271,7 @@ fn an_aggregate_verify_repair_candidate_reaches_landing_ref_creation() {
             session_reuse_arm: None,
             session_reuse_saved_micro_usd: None,
             peak_resident_bytes: None,
+            violating_paths: Vec::new(),
         },
     )
     .unwrap() else {
@@ -2294,6 +2297,7 @@ fn an_aggregate_verify_repair_candidate_reaches_landing_ref_creation() {
             session_reuse_arm: None,
             session_reuse_saved_micro_usd: None,
             peak_resident_bytes: None,
+            violating_paths: Vec::new(),
         },
     )
     .unwrap() else {
@@ -2365,6 +2369,7 @@ fn park_and_answer(
         session_reuse_arm: None,
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
+        violating_paths: Vec::new(),
     };
     assert!(matches!(admit_uploaded(store, &upload).unwrap(), AdmitDecision::Admitted(_)), "the parked upload admits");
 
@@ -2941,6 +2946,7 @@ fn a_dispatch_whose_fact_never_reached_the_journal_is_re_queued_at_boot() {
             session_reuse_arm: None,
             session_reuse_saved_micro_usd: None,
             peak_resident_bytes: None,
+            violating_paths: Vec::new(),
         };
         // The admission is built and the order spent — and then the process
         // stops, so the `Admit` this returns never reaches the control core.
@@ -3138,6 +3144,7 @@ fn construct_attempt_ref(nonce: &Nonce, subject: u8) -> EvidenceRef {
         session_reuse_arm: None,
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
+        violating_paths: Vec::new(),
     }
 }
 
