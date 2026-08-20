@@ -64,9 +64,9 @@ pub struct WorkpieceFact { workpiece: WorkpieceId, kind: FieldKind, detail: Dige
 
 pub enum FieldKind {
     Problem, Evidence, Success,
-    Approach, RejectedOption, AffectedSurface,
+    Approach, RejectedOption,
     PlanStep, Acceptance, DeclaredSurface,
-    InverseSearch, Edge, RoutingHint,
+    InverseSearch, Edge, RoutingHint, Implements,
     // append only — never reorder, never remove a variant
 }
 ```
@@ -81,11 +81,15 @@ Adding a field is appending a variant. Removing one is ceasing to produce it; ev
 
 **Routing is a hint, not a pin.** A frozen artifact must not carry a model name; seats change, and this ADR changes one. The workpiece declares properties of the work — size, remaining judgement, risk class — and the profile catalog maps those to a seat at dispatch.
 
-**The workpiece is verified before it is frozen.** A candidate can be wrong in ways only execution reveals; a workpiece can be wrong in ways only search reveals, and that search is mechanical. Resolve the symbols the plan names against the symbol inventory — `xtask/src/symbols/` already builds it, and every row carries its defining path — and report any whose file no glob in the declared surface admits, reusing `containment::path_in_surface` rather than a second matcher.
+**The workpiece is verified before it is frozen.** A candidate can be wrong in ways only execution reveals; a workpiece can be wrong in ways only search reveals, and that search is mechanical. Resolve the symbols the plan names, and report any whose file no glob in the declared surface admits, reusing `containment::path_in_surface` rather than a second matcher.
 
-**Widening is reported, never silent.** `resolve_member_dependencies` derives a dependency edge between any two members whose declared surfaces intersect, so a builder that quietly widens a surface manufactures splice edges — more serialization, and more of the lineage contamination described above. A derived field that would widen the surface reports the sibling intersections it creates and leaves the widening to the author. Auto-completion that hides a scheduling consequence is worse than the omission it fixes.
+The resolver is not free. `xtask/src/symbols/` exists but is a *definition* index and cannot answer the question this needs: its walk records only `Fn`/`Struct`/`Trait`/`Impl`/`Mod` items, so call sites and type mentions have no rows at all, it never iterates trait items, and it discards the trait an impl block implements — so an impl cannot be filtered to the trait it belongs to. Measured against the `adopt_candidate` case below, it finds two of the four relevant files and misses the trait declaration and the call site, which are the two a signature change is guaranteed to touch. It also walks the working tree rather than a commit, and a field frozen into a signed workpiece cannot rest on a search that was not pinned to a revision. Building a rev-pinned reference search is therefore part of this decision's cost, not a dependency it inherits.
 
-One check refuses rather than reports: **the declared surface must cover the paths the workpiece's own plan steps and inverse searches name.** That is internal consistency of the artifact with itself, not the reverse-dependency closure, and it is decidable. #5256 and both 2026-08-20 refusals were violations of it. Everything else reports three outcomes — resolved inside, resolved outside, unresolvable — and never refuses, because requiring a surface to cover every symbol its prose mentions inflates surfaces until containment constrains nothing.
+**Widening is reported, never silent.** `resolve_member_dependencies` derives a dependency edge between any two members whose declared surfaces intersect, so a builder that quietly widens a surface manufactures edges the author never wrote. Those derived edges order integration and do not gate dispatch — the seal journals only the authored half, and a test pins that overlap is not a declared gate — so the cost is not the serialization an earlier reading assumed. It is two other things: a surface-derived cycle is a seal-time refusal, and every path added to a surface is a path containment stops constraining. A derived field that would widen the surface reports the intersections it creates and leaves the widening to the author. Auto-completion that hides either consequence is worse than the omission it fixes.
+
+One check refuses rather than reports: **the declared surface must cover the paths the workpiece's own plan steps and inverse searches name.** That is internal consistency of the artifact with itself, not the reverse-dependency closure, and it is decidable. #5256 and both 2026-08-20 refusals were violations of it.
+
+Read too broadly that check becomes the closure it is meant to avoid, so the line is drawn at what a symbol resolves to. A path that *defines* a symbol the plan names is a path the work will edit, and its absence from the surface refuses. A path that merely *references* one is reported, not refused — a plan step may legitimately name a symbol it only reads. On the `adopt_candidate` case that split refuses exactly the three files the hand-written scope missed and leaves the call site as a report. Everything else reports three outcomes — resolved inside, resolved outside, unresolvable — and never refuses, because requiring a surface to cover every symbol its prose mentions inflates surfaces until containment constrains nothing.
 
 **A gate is a verdict, not a name.** No `completion_gate` string is read anywhere in the workspace — `pr-open` and `ci-green` included; the field is inert vocabulary. The mechanism is `verdict_passed` over a `StageVerdict` at intake. The scope stage's gate is therefore a lane emitting a verdict, an intake arm routing it, and a retry budget.
 
@@ -97,7 +101,9 @@ One check refuses rather than reports: **the declared surface must cover the pat
 
 ### The one genuinely missing piece
 
-Every dispatch today originates from the reducer acting on a bloom. Scoping runs before a workpiece qualifies for a bloom, so it needs a producer for `Topic::Dispatch` that is not the bloom reducer, plus journaled state tracking a scoping run. The executor drains that topic and does not care who enqueued. That seam is where this decision lands, and it is the only new dispatch machinery required.
+Every dispatch today originates from the reducer acting on a bloom. Scoping runs before a workpiece qualifies for a bloom, so it needs a producer for `Topic::Dispatch` that is not the bloom reducer, plus journaled state tracking a scoping run.
+
+The producer half of that is smaller than it sounds and the consumer half is larger. Three other outbox topics are already minted by the host with no decision behind them, and the commission store already writes to the outbox inside its own transaction, so enqueuing without a reducer is a shipped idiom rather than a new one. The weight is on the draining side, which is not in fact indifferent to who enqueued: the payload decode is fail-stop, liveness is checked through bloom membership, the outstanding-order row requires a bloom, intake refuses this stage as out-of-line, and it has no timeout verdict. Those are the five places the seam actually costs something, and the last two are observable as failures today.
 
 ## Consequences
 
