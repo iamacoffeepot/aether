@@ -82,12 +82,6 @@ impl Backlog {
     }
 
     #[must_use]
-    pub fn selected_is_first(&self, store: &Store) -> bool {
-        let rows = rows_from(store);
-        matches!(self.cursor.selected_index(&rows, |row| row.id.clone()), Some(0) | None)
-    }
-
-    #[must_use]
     pub fn selected_key(&self) -> Option<&String> {
         self.cursor.selected()
     }

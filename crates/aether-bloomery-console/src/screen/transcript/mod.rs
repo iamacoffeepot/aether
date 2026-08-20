@@ -106,17 +106,6 @@ impl Transcript {
         HINTS
     }
 
-    #[must_use]
-    pub fn selected_is_first(&self) -> bool {
-        if self.follow {
-            return false;
-        }
-        match self.selected.and_then(|id| self.buffer.index_of(id)) {
-            Some(0) | None => true,
-            Some(_) => false,
-        }
-    }
-
     pub fn handle_key(&mut self, key: KeyEvent, _store: &Store) -> Outcome {
         if self.search.editing {
             return self.handle_search_edit(key);

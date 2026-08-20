@@ -81,11 +81,6 @@ impl Workpiece {
     }
 
     #[must_use]
-    pub fn selected_is_first(&self) -> bool {
-        matches!(self.cursor.selected_index(&self.lines, |line| line.key.clone()), Some(0) | None)
-    }
-
-    #[must_use]
     pub fn selected_key(&self) -> Option<&RowKey> {
         self.cursor.selected()
     }

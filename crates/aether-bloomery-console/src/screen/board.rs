@@ -209,13 +209,6 @@ impl Board {
         });
     }
 
-    /// True when k should leave the table for the chrome above it.
-    #[must_use]
-    pub fn selected_is_first(&self, store: &Store) -> bool {
-        let rows = rows_from(store, self.lane);
-        matches!(self.cursor.selected_index(&rows, BoardRow::id), Some(0) | None)
-    }
-
     pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, store: &Store) {
         let rows = rows_from(store, self.lane);
         let dimmed = store.view().is_stale();
