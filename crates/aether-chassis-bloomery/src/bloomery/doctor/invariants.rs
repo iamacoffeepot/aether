@@ -408,10 +408,11 @@ fn landed_resolution_is_ancestor(live: &LiveState<'_>) -> Vec<String> {
 /// Land is pre-roll by record even when its objects no longer resolve; no such
 /// record evidence stays fail-closed.
 fn landed_in_current_era(live: &LiveState<'_>, bloom: &BloomId, daily: Digest, ancestry: &Ancestry<'_>) -> bool {
-    match live.snapshot.blooms.get(bloom).and_then(|record| ancestry(&record.spec.base(), &daily)) {
-        Some(in_era) => in_era,
-        None => !land_is_pre_cut(live, bloom, daily, ancestry),
-    }
+    live.snapshot
+        .blooms
+        .get(bloom)
+        .and_then(|record| ancestry(&record.spec.base(), &daily))
+        .unwrap_or_else(|| !land_is_pre_cut(live, bloom, daily, ancestry))
 }
 
 /// A Land journaled before the current daily's cut is pre-roll by record.
