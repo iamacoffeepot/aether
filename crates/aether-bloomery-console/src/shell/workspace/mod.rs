@@ -12,7 +12,7 @@ use crate::cursor::Cursor;
 use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
 use crate::palette;
-use crate::screen::{Board, Dashboard, compose};
+use crate::screen::{Board, Dashboard, compose, quiet_lines};
 use crate::store::{ResourceKey, Store};
 use crate::warroom::{self, Focus, NeedsYouRow};
 
@@ -192,9 +192,15 @@ impl Workspace {
         };
         let seal = u16::from(view.spend_quiesce.is_some());
         let today = u16::from(!dashboard.today.is_empty());
+        let rest = quiet_lines(view);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Length(seal), Constraint::Length(today)])
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(seal),
+                Constraint::Length(today),
+                Constraint::Min(0),
+            ])
             .split(inner);
         frame.render_widget(chrome::status(view), chunks[0]);
         if let Some(quiesce) = &view.spend_quiesce {
@@ -203,6 +209,7 @@ impl Workspace {
         if today > 0 {
             frame.render_widget(chrome::today(dashboard), chunks[2]);
         }
+        frame.render_widget(chrome::quiet(&rest), chunks[3]);
     }
 }
 

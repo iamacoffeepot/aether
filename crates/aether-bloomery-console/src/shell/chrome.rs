@@ -1,7 +1,7 @@
 //! Application chrome: header, status, needs-you band, footer.
 //!
 //! Owned by the workspace panes: fleet paints the header, needs-you the
-//! merged queue, quiet the status and today lines.
+//! merged queue, quiet the status, today, and rest-count lines.
 
 use std::time::Duration;
 
@@ -12,7 +12,7 @@ use ratatui::widgets::Paragraph;
 use crate::dto::{SpendQuiesce, ViewDocument};
 use crate::keys::{KeyHint, footer_line};
 use crate::palette::{self, Role};
-use crate::screen::Dashboard;
+use crate::screen::{Dashboard, QuietLine};
 use crate::store::Cell;
 use crate::warroom::{NeedsYouRow, Severity};
 
@@ -88,6 +88,13 @@ pub fn status(view: &ViewDocument) -> Paragraph<'static> {
 #[must_use]
 pub fn seal(quiesce: &SpendQuiesce) -> Paragraph<'static> {
     Paragraph::new(Span::styled(format_seal(quiesce), palette::paint(Role::Loud).add_modifier(Modifier::BOLD)))
+        .style(palette::body())
+}
+
+#[must_use]
+pub fn quiet(lines: &[QuietLine]) -> Paragraph<'static> {
+    let dim = palette::body().add_modifier(Modifier::DIM);
+    Paragraph::new(lines.iter().map(|line| Line::from(Span::styled(line.text(), dim))).collect::<Vec<_>>())
         .style(palette::body())
 }
 

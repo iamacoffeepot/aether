@@ -7,17 +7,15 @@ use ratatui::style::Modifier;
 use ratatui::widgets::{Cell, Row, Table, TableState};
 
 use crate::cursor::Cursor;
-use crate::dto::{BloomStatus, DigestHex, MemberView, TimelineSpan, ViewDocument};
+use crate::dto::{BloomStatus, DigestHex, MemberView, MetricDispatch, ViewDocument};
 use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
 use crate::palette;
 use crate::store::{ResourceKey, Store};
 use crate::warroom::Focus;
 
-use super::metrics::{
-    Silence, axis_range, format_duration, format_micro_usd, paint_member_line, reconstructed_range, reconstructed_start,
-};
-use super::partition::{history_blooms, live_blooms};
+use super::metrics::format_duration;
+use super::partition::{MemberState, history_blooms, live_blooms};
 
 /// Stable identity of one selectable row. Refreshes look this up so the
 /// cursor does not walk out from under the operator when `/view` reorders.
@@ -49,9 +47,8 @@ pub struct MemberRow {
     pub bloom: DigestHex,
     pub workpiece: String,
     pub state: String,
-    pub machinery: String,
-    pub blocked_by: String,
-    pub wedge_cause: String,
+    pub stage: String,
+    pub age: String,
 }
 
 impl BoardRow {
@@ -224,39 +221,31 @@ impl Board {
             BoardLane::Live => "BLOOM / MEMBER",
             BoardLane::History => "HISTORY (landed · superseded)",
         };
-        let header = Row::new([title, "STATE", "ELAPSED", "COST", "LANE"])
-            .style(palette::body().add_modifier(Modifier::BOLD).patch(muted));
+        let header =
+            Row::new([title, "STATE", "STAGE", "AGE"]).style(palette::body().add_modifier(Modifier::BOLD).patch(muted));
         let extras = metrics_of(store);
         let table_rows = rows.iter().map(|row| match row {
             BoardRow::Bloom(bloom) => {
-                let extra = extras.iter().find(|extra| extra.bloom == bloom.id);
+                let extra = extras.iter().find(|extra| extra.bloom == bloom.id && extra.workpiece.is_none());
                 Row::new([
                     Cell::from(bloom.id_prefix.clone()),
                     Cell::from(format!("{}  {} mem", bloom.status, bloom.member_count)),
-                    Cell::from(extra.map_or("", |extra| extra.elapsed.as_str())),
-                    Cell::from(extra.map_or("", |extra| extra.cost.as_str())),
-                    Cell::from(extra.map_or("", |extra| extra.lane.as_str())),
+                    Cell::from(""),
+                    Cell::from(extra.map_or("—", |extra| extra.elapsed.as_str())),
                 ])
                 .style(palette::body().add_modifier(Modifier::BOLD).patch(muted))
             }
             BoardRow::Member(member) => Row::new([
                 Cell::from(format!("  {}", member.workpiece)),
                 Cell::from(member.state.clone()),
-                Cell::from(member.machinery.clone()),
-                Cell::from(member.blocked_by.clone()),
-                Cell::from(member.wedge_cause.clone()),
+                Cell::from(member.stage.clone()),
+                Cell::from(member.age.clone()),
             ])
             .style(muted),
         });
         let table = Table::new(
             table_rows,
-            [
-                Constraint::Length(14),
-                Constraint::Length(10),
-                Constraint::Length(8),
-                Constraint::Length(8),
-                Constraint::Min(4),
-            ],
+            [Constraint::Min(14), Constraint::Length(10), Constraint::Length(16), Constraint::Length(8)],
         )
         .style(palette::body())
         .header(header)
@@ -276,40 +265,32 @@ impl Board {
 /// a stage with an attempt underway on a member the host is not holding.
 #[must_use]
 pub fn member_status_state(member: &MemberView) -> &'static str {
-    if member.wedge.is_some() {
-        return "WEDGED";
-    }
-    if member.pending_decision.is_some() {
-        return "held";
-    }
-    if member.resolution.is_some() {
-        return "integrated";
-    }
-    if attempt_in_flight(member) {
-        return "running";
-    }
-    if member.blocked_by.as_deref().is_some_and(|name| !name.is_empty()) {
-        return "blocked";
-    }
-    "idle"
-}
-
-fn attempt_in_flight(member: &MemberView) -> bool {
-    member.host_fault.is_none()
-        && member.cursor.as_ref().is_some_and(|cursor| cursor.stage.is_some() && cursor.attempts > 0)
+    MemberState::of(member).label()
 }
 
 fn rows_from(store: &Store, lane: BoardLane) -> Vec<BoardRow> {
-    store.view().value.as_ref().map(|view| rows_of(view, lane)).unwrap_or_default()
+    store
+        .view()
+        .value
+        .as_ref()
+        .map(|view| rows_of(view, lane, store.dispatches().value.as_ref().map_or(&[][..], Vec::as_slice)))
+        .unwrap_or_default()
 }
 
-fn rows_of(view: &ViewDocument, lane: BoardLane) -> Vec<BoardRow> {
+fn rows_of(view: &ViewDocument, lane: BoardLane, dispatches: &[MetricDispatch]) -> Vec<BoardRow> {
     let blooms = match lane {
         BoardLane::Live => live_blooms(view).collect::<Vec<_>>(),
         BoardLane::History => history_blooms(view).collect::<Vec<_>>(),
     };
     let mut rows = Vec::new();
     for bloom in blooms {
+        let members: Vec<&MemberView> = match lane {
+            BoardLane::Live => bloom.members.iter().filter(|member| MemberState::of(member).walks()).collect(),
+            BoardLane::History => bloom.members.iter().collect(),
+        };
+        if lane == BoardLane::Live && members.is_empty() {
+            continue;
+        }
         let status = match (lane, bloom.superseded_by) {
             (BoardLane::History, Some(successor)) => {
                 format!("{} → {}", bloom_status_label(bloom.status), successor.prefix())
@@ -322,97 +303,93 @@ fn rows_of(view: &ViewDocument, lane: BoardLane) -> Vec<BoardRow> {
             status,
             member_count: bloom.members.len(),
         }));
-        for member in &bloom.members {
-            rows.push(BoardRow::Member(MemberRow {
-                bloom: bloom.id,
-                workpiece: member.workpiece.clone(),
-                state: member_status_state(member).to_owned(),
-                machinery: format!("{}/{}", member.machinery_rolls, member.machinery_budget),
-                blocked_by: member.blocked_by.clone().filter(|name| !name.is_empty()).unwrap_or_default(),
-                wedge_cause: member.wedge_cause.map_or_else(String::new, |cause| cause.to_string()),
-            }));
+        for member in members {
+            rows.push(BoardRow::Member(member_row(bloom.id, member, dispatches)));
         }
     }
     rows
+}
+
+fn member_row(bloom: DigestHex, member: &MemberView, dispatches: &[MetricDispatch]) -> MemberRow {
+    MemberRow {
+        bloom,
+        workpiece: member.workpiece.clone(),
+        state: member_status_state(member).to_owned(),
+        stage: member_stage(member, bloom, dispatches),
+        age: elapsed_of(dispatches, bloom, Some(&member.workpiece)),
+    }
+}
+
+fn member_stage(member: &MemberView, bloom: DigestHex, dispatches: &[MetricDispatch]) -> String {
+    if let Some(stage) = member.cursor.as_ref().and_then(|cursor| cursor.stage) {
+        return stage.label().to_owned();
+    }
+    dispatches
+        .iter()
+        .filter(|row| row.bloom == bloom && row.workpiece == member.workpiece)
+        .max_by_key(|row| (row.recorded_unix_millis.unwrap_or(0), row.sequence))
+        .map(|row| row.stage.label().to_owned())
+        .unwrap_or_default()
 }
 
 fn bloom_status_label(status: Option<BloomStatus>) -> String {
     status.map_or_else(|| "?".to_owned(), |status| status.to_string())
 }
 
-struct BloomMetrics {
+struct SubjectMetrics {
     bloom: DigestHex,
+    workpiece: Option<String>,
     elapsed: String,
-    cost: String,
-    lane: String,
 }
 
-fn metrics_of(store: &Store) -> Vec<BloomMetrics> {
+fn metrics_of(store: &Store) -> Vec<SubjectMetrics> {
     let dispatches = store.dispatches().value.as_ref().map_or(&[][..], Vec::as_slice);
-    let spend = store.spend().value.as_ref();
-    let mut blooms: Vec<DigestHex> = Vec::new();
+    let mut keys: Vec<(DigestHex, Option<String>)> = Vec::new();
     for row in dispatches {
-        if !blooms.contains(&row.bloom) {
-            blooms.push(row.bloom);
-        }
+        push_subject(&mut keys, row.bloom, None);
+        push_subject(&mut keys, row.bloom, Some(row.workpiece.clone()));
     }
     if let Some(view) = store.view().value.as_ref() {
         for bloom in &view.blooms {
-            if !blooms.contains(&bloom.id) {
-                blooms.push(bloom.id);
+            push_subject(&mut keys, bloom.id, None);
+            for member in &bloom.members {
+                push_subject(&mut keys, bloom.id, Some(member.workpiece.clone()));
             }
         }
     }
-    blooms
-        .into_iter()
-        .map(|bloom| {
-            let rows: Vec<_> = dispatches.iter().filter(|row| row.bloom == bloom).collect();
-            let stamps: Vec<u64> = rows.iter().filter_map(|row| row.recorded_unix_millis).collect();
-            let elapsed = match (stamps.iter().copied().min(), stamps.iter().copied().max()) {
-                (Some(first), Some(last)) if last > first => format_duration(last - first),
-                _ => "—".to_owned(),
-            };
-            let cost = spend
-                .and_then(|window| window.per_bloom.get(&bloom.as_hex()).copied())
-                .filter(|micro| *micro > 0)
-                .map_or_else(|| "—".to_owned(), format_micro_usd);
-            let spans: Vec<TimelineSpan> = rows
-                .iter()
-                .map(|row| TimelineSpan {
-                    workpiece: row.workpiece.clone(),
-                    stage: row.stage,
-                    sequence: row.sequence,
-                    started_unix_millis: row.recorded_unix_millis,
-                    reconstructed: row.reconstructed,
-                })
-                .collect();
-            let reconstructed = spans.iter().any(|span| span.reconstructed || span.started_unix_millis.is_none());
-            let (start, end) = if reconstructed {
-                reconstructed_range(&spans)
-            } else {
-                axis_range(&spans, stamps.iter().copied().max().unwrap_or(1))
-                    .map_or((0, 1), |(start, end, _)| (start, end))
-            };
-            let paint = if reconstructed {
-                spans
-                    .iter()
-                    .map(|span| TimelineSpan { started_unix_millis: Some(reconstructed_start(span)), ..span.clone() })
-                    .collect::<Vec<_>>()
-            } else {
-                spans
-            };
-            let lane = paint_member_line(&paint, start, end, 12, Silence::Queued, false, false);
-            BloomMetrics { bloom, elapsed, cost, lane }
+    keys.into_iter()
+        .map(|(bloom, workpiece)| SubjectMetrics {
+            elapsed: elapsed_of(dispatches, bloom, workpiece.as_deref()),
+            bloom,
+            workpiece,
         })
         .collect()
+}
+
+fn push_subject(keys: &mut Vec<(DigestHex, Option<String>)>, bloom: DigestHex, workpiece: Option<String>) {
+    if !keys.iter().any(|(existing, existing_workpiece)| *existing == bloom && *existing_workpiece == workpiece) {
+        keys.push((bloom, workpiece));
+    }
+}
+
+fn elapsed_of(dispatches: &[MetricDispatch], bloom: DigestHex, workpiece: Option<&str>) -> String {
+    let stamps: Vec<u64> = dispatches
+        .iter()
+        .filter(|row| row.bloom == bloom && workpiece.is_none_or(|name| row.workpiece == name))
+        .filter_map(|row| row.recorded_unix_millis)
+        .collect();
+    match (stamps.iter().copied().min(), stamps.iter().copied().max()) {
+        (Some(first), Some(last)) if last > first => format_duration(last - first),
+        _ => "—".to_owned(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Board, BoardLane, BoardRow, member_status_state, rows_of};
     use crate::dto::{
-        BloomStatus, BloomView, CompositionCursorView, DigestHex, MemberView, PendingDecisionView, Present, StageId,
-        ViewDocument, WedgeCause,
+        BloomStatus, BloomView, CompositionCursorView, DigestHex, MemberView, MetricDispatch, PendingDecisionView,
+        Present, StageId, ViewDocument,
     };
     use crate::keys::{Outcome, assert_footer_honest};
     use crate::nav::Nav;
@@ -485,7 +462,7 @@ mod tests {
             }],
             ..ViewDocument::default()
         };
-        let rows = rows_of(&view, BoardLane::Live);
+        let rows = rows_of(&view, BoardLane::Live, &[]);
         let BoardRow::Member(member) = &rows[1] else {
             panic!("second row is the member");
         };
@@ -493,35 +470,117 @@ mod tests {
     }
 
     #[test]
-    fn rows_carry_machinery_blocker_and_wedge_cause() {
-        // The plausible bug: the table prints bloom status and workpiece
-        // only, so a machinery wedge and its blocked_by ancestor never reach
-        // the operator.
+    fn live_rows_keep_walking_members_and_drop_the_rest() {
+        // The plausible bug: a resolved member still occupies a live row at
+        // the same weight as a Construct attempt, or a bloom whose members
+        // all rest keeps its header.
+        let view = ViewDocument {
+            blooms: vec![
+                BloomView {
+                    id: digest(1),
+                    status: Some(BloomStatus::Sealed),
+                    members: vec![MemberView { resolution: Some(Present {}), ..member("wp-done") }],
+                    ..BloomView::default()
+                },
+                BloomView {
+                    id: digest(2),
+                    status: Some(BloomStatus::Sealed),
+                    members: vec![in_flight_construct("wp-run")],
+                    ..BloomView::default()
+                },
+            ],
+            ..ViewDocument::default()
+        };
+        let live = rows_of(&view, BoardLane::Live, &[]);
+        let live_ids: Vec<_> = live
+            .iter()
+            .filter_map(|row| match row {
+                BoardRow::Bloom(bloom) => Some(bloom.id),
+                BoardRow::Member(_) => None,
+            })
+            .collect();
+        assert_eq!(live_ids, vec![digest(2)]);
+        let BoardRow::Member(member) = &live[1] else {
+            panic!("second live row is the walking member");
+        };
+        assert_eq!(member.workpiece, "wp-run");
+        assert!(live.iter().all(|row| match row {
+            BoardRow::Member(member) => member.workpiece != "wp-done",
+            BoardRow::Bloom(_) => true,
+        }));
+    }
+
+    #[test]
+    fn history_keeps_every_member_of_a_landed_bloom() {
+        // The plausible bug: the walking filter also empties History, whose
+        // members are all integrated.
         let view = ViewDocument {
             blooms: vec![BloomView {
-                id: digest(1),
-                status: Some(BloomStatus::Sealed),
-                members: vec![MemberView {
-                    machinery_rolls: 2,
-                    machinery_budget: 3,
-                    blocked_by: Some("wp-a".to_owned()),
-                    wedge: Some(Present {}),
-                    wedge_cause: Some(WedgeCause::Machinery),
-                    ..member("wp-b")
-                }],
+                id: digest(2),
+                status: Some(BloomStatus::Landed),
+                members: vec![MemberView { resolution: Some(Present {}), ..member("wp-landed") }],
                 ..BloomView::default()
             }],
             ..ViewDocument::default()
         };
-        let rows = rows_of(&view, BoardLane::Live);
-        assert_eq!(rows.len(), 2);
+        let history = rows_of(&view, BoardLane::History, &[]);
+        assert_eq!(history.len(), 2);
+        let BoardRow::Member(member) = &history[1] else {
+            panic!("second history row is the member");
+        };
+        assert_eq!(member.workpiece, "wp-landed");
+        assert_eq!(member.state, "integrated");
+    }
+
+    #[test]
+    fn member_row_stage_and_age_match_the_column_headers() {
+        // The plausible bug: STAGE/AGE cells still carry machinery rolls and
+        // a blocked_by id, so a column header is only true of bloom rows.
+        let view = ViewDocument {
+            blooms: vec![BloomView {
+                id: digest(1),
+                status: Some(BloomStatus::Sealed),
+                members: vec![in_flight_construct("wp")],
+                ..BloomView::default()
+            }],
+            ..ViewDocument::default()
+        };
+        let dispatches = [
+            MetricDispatch {
+                bloom: digest(1),
+                workpiece: "wp".to_owned(),
+                recorded_unix_millis: Some(1_000),
+                sequence: 1,
+                ..MetricDispatch::default()
+            },
+            MetricDispatch {
+                bloom: digest(1),
+                workpiece: "wp".to_owned(),
+                recorded_unix_millis: Some(4_000),
+                sequence: 2,
+                ..MetricDispatch::default()
+            },
+            MetricDispatch {
+                bloom: digest(1),
+                workpiece: "wp-other".to_owned(),
+                recorded_unix_millis: Some(1_000),
+                sequence: 3,
+                ..MetricDispatch::default()
+            },
+            MetricDispatch {
+                bloom: digest(1),
+                workpiece: "wp-other".to_owned(),
+                recorded_unix_millis: Some(100_000),
+                sequence: 4,
+                ..MetricDispatch::default()
+            },
+        ];
+        let rows = rows_of(&view, BoardLane::Live, &dispatches);
         let BoardRow::Member(member) = &rows[1] else {
             panic!("second row is the member");
         };
-        assert_eq!(member.state, "WEDGED");
-        assert_eq!(member.machinery, "2/3");
-        assert_eq!(member.blocked_by, "wp-a");
-        assert_eq!(member.wedge_cause, "Machinery");
+        assert_eq!(member.stage, "Construct");
+        assert_eq!(member.age, "3s");
     }
 
     #[test]
@@ -530,7 +589,12 @@ mod tests {
         // the history complement is not a partition of the document.
         let view = ViewDocument {
             blooms: vec![
-                BloomView { id: digest(1), status: Some(BloomStatus::Sealed), ..BloomView::default() },
+                BloomView {
+                    id: digest(1),
+                    status: Some(BloomStatus::Sealed),
+                    members: vec![in_flight_construct("wp")],
+                    ..BloomView::default()
+                },
                 BloomView { id: digest(2), status: Some(BloomStatus::Landed), ..BloomView::default() },
                 BloomView {
                     id: digest(3),
@@ -541,14 +605,14 @@ mod tests {
             ],
             ..ViewDocument::default()
         };
-        let live: Vec<_> = rows_of(&view, BoardLane::Live)
+        let live: Vec<_> = rows_of(&view, BoardLane::Live, &[])
             .into_iter()
             .filter_map(|row| match row {
                 BoardRow::Bloom(bloom) => Some(bloom.id),
                 BoardRow::Member(_) => None,
             })
             .collect();
-        let history: Vec<_> = rows_of(&view, BoardLane::History)
+        let history: Vec<_> = rows_of(&view, BoardLane::History, &[])
             .into_iter()
             .filter_map(|row| match row {
                 BoardRow::Bloom(bloom) => Some(bloom.id),
