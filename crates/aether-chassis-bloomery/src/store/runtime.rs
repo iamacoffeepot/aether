@@ -28,7 +28,7 @@ use aether_actor::runtime;
 // package cycle (the actor lives there; host depends on it). Host imports them
 // inward for its `StoreCapability` handlers (issue #3497).
 use aether_bloomery::{
-    Commit, CommitResult, ConfigRecord, DECISIONS_SCHEMA, Decision, Event, JournalRecord, LoadConfigs,
+    Commit, CommitResult, ConfigRecord, DECISIONS_SCHEMA, Decision, Digest, Event, JournalRecord, LoadConfigs,
     LoadConfigsResult, MembershipMutation, MetricDispatch, MetricsLedger, OutboxPayload, ReplayJournal,
     ReplayJournalResult, ScopeRevision, Statement, Topic, WorkpieceId, decode_recorded_decisions,
 };
@@ -2054,7 +2054,7 @@ fn encode_metric<T: serde::Serialize>(value: &T) -> rusqlite::Result<Vec<u8>> {
 fn resolved_configs(store: &mut SqliteStore) -> rusqlite::Result<aether_bloomery::ResolvedConfigs> {
     let mut configs = aether_bloomery::ResolvedConfigs::default();
     for record in store.load_configs()? {
-        let Some(address) = aether_bloomery::Digest::from_slice(&record.digest) else {
+        let Some(address) = Digest::from_slice(&record.digest) else {
             continue;
         };
         configs.insert(address, record.kind, record.bytes);
@@ -2073,6 +2073,30 @@ impl StoreCapabilityState {
     #[must_use]
     pub fn new(backend: SqliteStore) -> Self {
         Self { backend }
+    }
+
+    /// Persist a verified approval, refusing a scope that names a workpiece
+    /// with no commission.
+    pub fn record_commission_approval(&mut self, mail: RecordCommissionApproval) -> RecordCommissionApprovalResult {
+        let statement: Statement = match from_bytes(&mail.statement) {
+            Ok(statement) => statement,
+            Err(error) => return RecordCommissionApprovalResult::Err { error: error.to_string() },
+        };
+        if let Some(scope) = Digest::from_slice(&statement.words) {
+            match self.backend.unresolved_dependencies(scope) {
+                Ok(unresolved) if !unresolved.is_empty() => {
+                    return RecordCommissionApprovalResult::Refused {
+                        error: format_unresolved_dependencies(&unresolved),
+                    };
+                }
+                Ok(_) => {}
+                Err(error) => return record_approval_result(Err(error), mail.statement),
+            }
+        }
+        record_approval_result(
+            self.backend.record_verified_approval(&WorkpieceId(mail.id.clone()), &statement),
+            mail.statement,
+        )
     }
 }
 
@@ -2307,22 +2331,7 @@ impl NativeActor for StoreCapability {
         _ctx: &mut NativeCtx<'_>,
         mail: RecordCommissionApproval,
     ) -> RecordCommissionApprovalResult {
-        let statement: Statement = match from_bytes(&mail.statement) {
-            Ok(statement) => statement,
-            Err(error) => return RecordCommissionApprovalResult::Err { error: error.to_string() },
-        };
-        match state.backend.record_verified_approval(&WorkpieceId(mail.id.clone()), &statement) {
-            Ok(digest) => {
-                RecordCommissionApprovalResult::Ok { digest: digest.as_bytes().to_vec(), statement: mail.statement }
-            }
-            Err(CommissionError::MissingRevision) => RecordCommissionApprovalResult::MissingRevision,
-            Err(CommissionError::StaleRevision) => RecordCommissionApprovalResult::Stale,
-            Err(CommissionError::NotOpen) => RecordCommissionApprovalResult::NotOpen,
-            Err(error @ (CommissionError::WrongSubject | CommissionError::WrongProvenance)) => {
-                RecordCommissionApprovalResult::Refused { error: error.to_string() }
-            }
-            Err(error) => RecordCommissionApprovalResult::Err { error: error.to_string() },
-        }
+        state.record_commission_approval(mail)
     }
 
     #[handler::single]
@@ -2434,6 +2443,29 @@ fn write_revision_error(error: CommissionError) -> WriteScopeRevisionResult {
         CommissionError::NotOpen => WriteScopeRevisionResult::NotOpen,
         error => WriteScopeRevisionResult::Err { error: error.to_string() },
     }
+}
+
+fn record_approval_result(
+    result: Result<Digest, CommissionError>,
+    statement: Vec<u8>,
+) -> RecordCommissionApprovalResult {
+    match result {
+        Ok(digest) => RecordCommissionApprovalResult::Ok { digest: digest.as_bytes().to_vec(), statement },
+        Err(CommissionError::MissingRevision) => RecordCommissionApprovalResult::MissingRevision,
+        Err(CommissionError::StaleRevision) => RecordCommissionApprovalResult::Stale,
+        Err(CommissionError::NotOpen) => RecordCommissionApprovalResult::NotOpen,
+        Err(error @ (CommissionError::WrongSubject | CommissionError::WrongProvenance)) => {
+            RecordCommissionApprovalResult::Refused { error: error.to_string() }
+        }
+        Err(error) => RecordCommissionApprovalResult::Err { error: error.to_string() },
+    }
+}
+
+fn format_unresolved_dependencies(ids: &[WorkpieceId]) -> String {
+    format!(
+        "scope depends on workpieces with no commission: {}",
+        ids.iter().map(|id| id.0.as_str()).collect::<Vec<_>>().join(", ")
+    )
 }
 
 fn encode_statements(statements: &[Statement]) -> Result<Vec<Vec<u8>>, String> {

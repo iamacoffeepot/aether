@@ -254,6 +254,14 @@ pub trait CommissionBackend {
     /// decoded from the exact bytes that were written.
     fn load_approvals(&mut self, scope: Digest) -> Result<Vec<Statement>, CommissionError>;
 
+    /// Dependency ids named by this revision that have no row in `commissions`.
+    /// Declaration order, each id once.
+    ///
+    /// # Errors
+    /// [`CommissionError::MissingRevision`] when `scope` is not in the store.
+    /// A store-level failure when a row cannot be read.
+    fn unresolved_dependencies(&mut self, scope: Digest) -> Result<Vec<WorkpieceId>, CommissionError>;
+
     /// Every commission matching `status`, or every commission when `None`,
     /// in workpiece-id order.
     fn list(&mut self, status: Option<CommissionStatus>) -> Result<Vec<CommissionHead>, CommissionError>;
@@ -312,6 +320,10 @@ impl CommissionBackend for SqliteStore {
 
     fn load_approvals(&mut self, scope: Digest) -> Result<Vec<Statement>, CommissionError> {
         load_approvals(&self.conn, scope)
+    }
+
+    fn unresolved_dependencies(&mut self, scope: Digest) -> Result<Vec<WorkpieceId>, CommissionError> {
+        unresolved_dependencies(&self.conn, scope)
     }
 
     fn list(&mut self, status: Option<CommissionStatus>) -> Result<Vec<CommissionHead>, CommissionError> {
@@ -664,6 +676,24 @@ fn load_revision(conn: &Connection, digest: Digest) -> Result<Option<ScopeRevisi
         return Err(CommissionError::MalformedCanonical);
     }
     Ok(Some(decoded))
+}
+
+fn unresolved_dependencies(conn: &Connection, scope: Digest) -> Result<Vec<WorkpieceId>, CommissionError> {
+    let Some(revision) = load_revision(conn, scope)? else {
+        return Err(CommissionError::MissingRevision);
+    };
+    let mut unresolved = Vec::new();
+    for id in &revision.dependencies {
+        if unresolved.contains(id) {
+            continue;
+        }
+        let found: Option<i64> =
+            conn.query_row("SELECT 1 FROM commissions WHERE id = ?1", [&id.0], |row| row.get(0)).optional()?;
+        if found.is_none() {
+            unresolved.push(id.clone());
+        }
+    }
+    Ok(unresolved)
 }
 
 fn load_approvals(conn: &Connection, scope: Digest) -> Result<Vec<Statement>, CommissionError> {
