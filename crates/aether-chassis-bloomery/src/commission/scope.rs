@@ -238,12 +238,7 @@ fn parse_workpieces(span: &str) -> Vec<WorkpieceId> {
         .filter_map(|line| {
             let trimmed = line.trim();
             let entry = trimmed.strip_prefix("- ").unwrap_or(trimmed);
-            if entry.is_empty() {
-                return None;
-            }
-            let Some(token) = entry.split_whitespace().next() else {
-                return None;
-            };
+            let token = entry.split_whitespace().next()?;
             let sentinel = token.strip_suffix('.').unwrap_or(token).to_ascii_lowercase();
             if sentinel == "n/a" || sentinel == "none" {
                 return None;
