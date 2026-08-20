@@ -67,7 +67,6 @@ impl Breakdown {
                 self.cursor = Cursor::new();
                 Outcome::Handled
             }
-            KeyCode::Esc => Outcome::Handled,
             KeyCode::Char('r') => Outcome::Refresh,
             KeyCode::Char('q') => Outcome::Quit,
             _ => Outcome::Ignored,
@@ -143,16 +142,14 @@ impl Breakdown {
 mod tests {
     use super::Breakdown;
     use crate::keys::{Outcome, assert_footer_honest};
-    use crate::store::Store;
+    use crate::nav::Nav;
+    use crate::shell::Shell;
     use crossterm::event::KeyEvent;
-    use std::time::Duration;
 
     #[test]
     fn breakdown_footer_keys_are_handled() {
-        let store = Store::new(Duration::from_secs(1));
-        let mut view = Breakdown::new();
         assert_footer_honest(Breakdown::key_hints(), |code| {
-            view.handle_key(KeyEvent::from(code), &store) != Outcome::Ignored
+            Shell::probe(Nav::cost()).handle_key(KeyEvent::from(code)) != Outcome::Ignored
         });
     }
 }

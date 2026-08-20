@@ -64,7 +64,6 @@ impl Artifact {
                 self.offset = self.offset.saturating_sub(1);
                 Outcome::Handled
             }
-            KeyCode::Esc => Outcome::Handled,
             KeyCode::Char('r') => Outcome::Refresh,
             KeyCode::Char('q') => Outcome::Quit,
             _ => Outcome::Ignored,
@@ -146,10 +145,11 @@ mod tests {
     use super::{Artifact, present_artifact};
     use crate::dto::{DecodedArtifact, DigestHex};
     use crate::keys::{Outcome, assert_footer_honest};
-    use crate::store::Store;
+    use crate::nav::Nav;
+    use crate::shell::Shell;
+    use crate::warroom::Focus;
     use crossterm::event::KeyEvent;
     use serde_json::json;
-    use std::time::Duration;
 
     #[test]
     fn present_artifact_picks_json_then_text_then_hex() {
@@ -169,10 +169,9 @@ mod tests {
 
     #[test]
     fn artifact_footer_keys_are_handled() {
-        let store = Store::new(Duration::from_secs(1));
-        let mut artifact = Artifact::new(DigestHex::from_bytes([1; 32]));
+        let nav = Nav::focus(Focus::artifact(DigestHex::from_bytes([1; 32])));
         assert_footer_honest(Artifact::key_hints(), |code| {
-            artifact.handle_key(KeyEvent::from(code), &store) != Outcome::Ignored
+            Shell::probe(nav.clone()).handle_key(KeyEvent::from(code)) != Outcome::Ignored
         });
     }
 }

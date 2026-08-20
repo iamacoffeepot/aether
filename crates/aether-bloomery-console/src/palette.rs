@@ -162,6 +162,12 @@ pub fn border() -> Style {
     paint(Role::Frames)
 }
 
+/// Focused pane border — blossom, the one saturated ring.
+#[must_use]
+pub fn border_focused() -> Style {
+    paint(Role::Focus)
+}
+
 fn is_truecolor_label(value: &str) -> bool {
     value.eq_ignore_ascii_case("truecolor") || value.eq_ignore_ascii_case("24bit")
 }

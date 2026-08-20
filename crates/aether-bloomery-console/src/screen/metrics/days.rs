@@ -44,7 +44,6 @@ impl Days {
 
     pub fn handle_key(&mut self, key: KeyEvent, _store: &Store) -> Outcome {
         match key.code {
-            KeyCode::Esc => Outcome::Handled,
             KeyCode::Char('r') => Outcome::Refresh,
             KeyCode::Char('q') => Outcome::Quit,
             _ => Outcome::Ignored,
@@ -153,16 +152,14 @@ fn bar_label(day: &MetricDay) -> String {
 mod tests {
     use super::Days;
     use crate::keys::{Outcome, assert_footer_honest};
-    use crate::store::Store;
+    use crate::nav::Nav;
+    use crate::shell::Shell;
     use crossterm::event::KeyEvent;
-    use std::time::Duration;
 
     #[test]
     fn days_footer_keys_are_handled() {
-        let store = Store::new(Duration::from_secs(1));
-        let mut view = Days::new();
         assert_footer_honest(Days::key_hints(), |code| {
-            view.handle_key(KeyEvent::from(code), &store) != Outcome::Ignored
+            Shell::probe(Nav::days()).handle_key(KeyEvent::from(code)) != Outcome::Ignored
         });
     }
 }
