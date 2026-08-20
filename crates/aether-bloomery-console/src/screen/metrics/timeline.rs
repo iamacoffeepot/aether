@@ -206,7 +206,7 @@ fn rows_of(doc: &MetricsTimeline, store: &Store, width: usize) -> Vec<LaneRow> {
                 },
             );
             let stage = last.map_or_else(
-                || member.map(|member| member_status_state(member, false).to_owned()).unwrap_or_default(),
+                || member.map(|member| member_status_state(member).to_owned()).unwrap_or_default(),
                 |span| span.stage.to_string(),
             );
             LaneRow {
