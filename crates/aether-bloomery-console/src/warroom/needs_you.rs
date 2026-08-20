@@ -58,10 +58,7 @@ fn fold_row(focus: Focus, group: &[Interrupt], alerts: &[Alert]) -> Option<Needs
 
 fn compose_happened(interrupt: &Interrupt) -> String {
     let kind = interrupt.kind.label();
-    match interrupt.stage {
-        Some(stage) => format!("{kind} {stage}"),
-        None => kind.to_owned(),
-    }
+    interrupt.stage.map_or_else(|| kind.to_owned(), |stage| format!("{kind} {stage}"))
 }
 
 fn action_clause(kind: InterruptKind) -> &'static str {
