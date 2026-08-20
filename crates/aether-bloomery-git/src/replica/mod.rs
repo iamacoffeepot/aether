@@ -10,9 +10,10 @@ use std::error::Error;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::Output;
 use std::sync::Mutex;
 
+use crate::command::{self, GitCommandError};
 use crate::mainline::MainlineRef;
 
 mod allowlist;
@@ -55,12 +56,15 @@ impl fmt::Display for ReplicaError {
 
 impl Error for ReplicaError {}
 
-impl From<io::Error> for ReplicaError {
-    fn from(error: io::Error) -> Self {
-        if error.kind() == io::ErrorKind::NotFound {
-            Self::Deterministic(format!("git binary not found: {error}"))
-        } else {
-            Self::Transient(error.to_string())
+impl From<GitCommandError> for ReplicaError {
+    fn from(error: GitCommandError) -> Self {
+        match error {
+            GitCommandError::Spawn { source, .. } if source.kind() == io::ErrorKind::NotFound => {
+                Self::Deterministic(format!("git binary not found: {source}"))
+            }
+            GitCommandError::Spawn { source, .. } => Self::Transient(source.to_string()),
+            GitCommandError::Failed { stderr, .. } => Self::Transient(stderr),
+            GitCommandError::Encoding => Self::Transient("git produced non-UTF-8 output".into()),
         }
     }
 }
@@ -128,13 +132,9 @@ impl GitSourceReplica {
     /// # Errors
     /// `git for-each-ref` could not be spawned or exited non-zero.
     pub fn list_refs(authority: &Path) -> Result<Vec<String>, ReplicaError> {
-        let output =
-            Command::new("git").arg("-C").arg(authority).args(["for-each-ref", "--format=%(refname)"]).output()?;
+        let output = command::run(authority, &["for-each-ref", "--format=%(refname)"])?;
         if !output.status.success() {
-            return Err(ReplicaError::Transient(format!(
-                "git for-each-ref: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
+            return Err(ReplicaError::Transient(format!("git for-each-ref: {}", command::trim_bytes(&output.stderr))));
         }
         Ok(String::from_utf8_lossy(&output.stdout)
             .lines()
@@ -157,7 +157,7 @@ impl GitSourceReplica {
             return Err(ReplicaError::Deterministic(format!("authority has no mainline ref {mainline}")));
         }
         let specs = published_refspecs(&self.mainline, &refs);
-        self.record_push(classify::classify_push(&self.git_push_command(&specs).output()?, &mainline))
+        self.record_push(classify::classify_push(&self.git_push(&specs)?, &mainline))
     }
 
     fn record_push(&self, result: Result<(), ReplicaError>) -> Result<(), ReplicaError> {
@@ -189,14 +189,20 @@ impl GitSourceReplica {
         }
     }
 
-    fn git_push_command(&self, specs: &[PublishedRefspec]) -> Command {
-        let mut command = Command::new("git");
-        command.arg("-C").arg(&self.authority).env("GIT_TERMINAL_PROMPT", "0");
+    fn push_invocation_args(&self, specs: &[PublishedRefspec]) -> Vec<String> {
+        let mut args = Vec::new();
         if !self.token.is_empty() {
-            command.arg("-c").arg(authorization_extra_header(&self.token));
+            args.push("-c".into());
+            args.push(authorization_extra_header(&self.token));
         }
-        command.args(Self::push_args(&self.remote, specs));
-        command
+        args.extend(Self::push_args(&self.remote, specs));
+        args
+    }
+
+    fn git_push(&self, specs: &[PublishedRefspec]) -> Result<Output, ReplicaError> {
+        let args = self.push_invocation_args(specs);
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        command::run_env(&self.authority, &borrowed, &[("GIT_TERMINAL_PROMPT", "0")]).map_err(Into::into)
     }
 }
 
