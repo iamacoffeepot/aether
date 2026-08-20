@@ -8,6 +8,7 @@ use aether_bloomery_git::DayCoverage;
 use anyhow::{Context, Result, bail};
 
 use super::MAIN;
+use super::replica;
 use super::shell::{Shell, checked};
 
 /// Linearize `from` onto fleet main, refuse unless `coverage` is fully green,
@@ -27,7 +28,7 @@ pub fn merge(shell: &impl Shell, remote: &str, from: &str, coverage: &DayCoverag
 
     advance(shell, &linearized, &expected)?;
     println!("advanced {MAIN} to {linearized} under compare-and-swap");
-    replicate(shell, remote);
+    replica::push(shell, remote, MAIN);
     Ok(linearized)
 }
 
@@ -82,29 +83,6 @@ fn linearize(shell: &impl Shell, from: &str, sync: &str) -> Result<(String, Stri
 fn advance(shell: &impl Shell, linearized: &str, expected: &str) -> Result<()> {
     checked(shell, "git", &["update-ref", &format!("refs/heads/{MAIN}"), linearized, expected])?;
     Ok(())
-}
-
-/// Push fleet main to GitHub the same one-way, best-effort way as the daily
-/// refs. A rejected or unreachable replica does not unwind the advance: GitHub
-/// is an output, never a gate.
-fn replicate(shell: &impl Shell, remote: &str) {
-    let run = match shell.capture("git", &["push", remote, MAIN]) {
-        Ok(run) => run,
-        Err(error) => {
-            println!("best-effort GitHub replica push of {MAIN} failed: {error}");
-            return;
-        }
-    };
-    if run.success {
-        println!("replicated {MAIN} to {remote}");
-        return;
-    }
-    let reason = if run.stderr.is_empty() {
-        &run.stdout
-    } else {
-        &run.stderr
-    };
-    println!("best-effort GitHub replica push of {MAIN} failed: {reason}");
 }
 
 fn tree_of(shell: &impl Shell, rev: &str) -> Result<String> {
