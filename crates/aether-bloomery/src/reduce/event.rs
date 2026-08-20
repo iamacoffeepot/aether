@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
+use super::gate::RecordedRefusal;
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
@@ -586,6 +587,18 @@ pub enum Fact {
         /// reducer refuses a fault naming any other subject, so a report from
         /// a superseded candidate cannot spend a newer one's retries.
         evidence: Evidence,
+    },
+    /// The integrate fold refused at a named guard (ADR-0206).
+    ///
+    /// The reactor admits this instead of acking the integrate row in silence,
+    /// so the served view can name the guard, the member, and the values the
+    /// guard read. Appended past [`Fact::MemberExecutorFault`] so every prior
+    /// fact keeps its wire discriminant.
+    FoldRefused {
+        /// The bloom whose fold refused.
+        bloom: BloomId,
+        /// The gate, guard, and values that stopped it.
+        refusal: RecordedRefusal,
     },
 }
 
