@@ -90,13 +90,9 @@ pub enum Depth {
 }
 
 impl Depth {
-    /// Read `COLORTERM` / `TERM` once. Truecolor is opt-in; anything else is the 256-color table.
+    /// Truecolor is opt-in from `COLORTERM` / `TERM`; anything else is the 256-color table.
     #[must_use]
-    pub fn detect() -> Self {
-        Self::from_env(env_var("COLORTERM").as_deref(), env_var("TERM").as_deref())
-    }
-
-    fn from_env(colorterm: Option<&str>, term: Option<&str>) -> Self {
+    pub fn from_env(colorterm: Option<&str>, term: Option<&str>) -> Self {
         if colorterm.is_some_and(is_truecolor_label) || term.is_some_and(term_reports_truecolor) {
             Self::Truecolor
         } else {
@@ -116,10 +112,10 @@ pub fn install(depth: Depth) {
     let _ = INSTALLED.set(depth);
 }
 
-/// Depth the next paint will use: test override, then install, then detect.
+/// Depth the next paint will use: test override, then install, then indexed.
 #[must_use]
 pub fn depth() -> Depth {
-    OVERRIDE.with(Cell::get).or_else(|| INSTALLED.get().copied()).unwrap_or_else(Depth::detect)
+    OVERRIDE.with(Cell::get).or_else(|| INSTALLED.get().copied()).unwrap_or(Depth::Indexed)
 }
 
 /// Run `f` with `depth` in this thread, restoring the previous override afterward.
@@ -173,12 +169,6 @@ fn is_truecolor_label(value: &str) -> bool {
 fn term_reports_truecolor(term: &str) -> bool {
     let term = term.to_ascii_lowercase();
     term.contains("truecolor") || term.contains("-direct") || term.contains("24bit")
-}
-
-/// Terminal color depth is a process-level capability, not cap config.
-#[allow(clippy::disallowed_methods, reason = "terminal color depth is a process-level capability, not cap config")]
-fn env_var(name: &str) -> Option<String> {
-    std::env::var(name).ok()
 }
 
 #[cfg(test)]
