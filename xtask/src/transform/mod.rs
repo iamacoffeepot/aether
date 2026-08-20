@@ -23,6 +23,8 @@ mod construct;
 mod conventions;
 mod fixers;
 mod grok;
+#[cfg(test)]
+mod harness_stub;
 mod lane;
 mod messages;
 mod muse;

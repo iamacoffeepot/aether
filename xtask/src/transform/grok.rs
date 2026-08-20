@@ -107,10 +107,23 @@ pub(super) fn run(
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
 ) -> Result<serde_json::Value> {
-    let Some(transcript) = launch(prompt, args, scratch, cache, peak)? else {
+    run_at(GROK, prompt, args, scratch, cache, peak)
+}
+
+/// [`run`] against an explicit `program` — production passes [`GROK`]; tests
+/// pass a grammar-recording stand-in.
+fn run_at(
+    program: &str,
+    prompt: &str,
+    args: &TransformArgs,
+    scratch: &Scratch,
+    cache: Option<&CompilerCache>,
+    peak: &PeakMemory,
+) -> Result<serde_json::Value> {
+    let Some(transcript) = launch(program, prompt, args, scratch, cache, peak)? else {
         // Grok refused the handle before starting a billed turn — the session is
         // gone, so this lap is a cold one.
-        return run(prompt, &without_resume(args), scratch, cache, peak);
+        return run_at(program, prompt, &without_resume(args), scratch, cache, peak);
     };
     Ok(derive_result_record(&transcript))
 }
@@ -118,6 +131,7 @@ pub(super) fn run(
 /// Fork Grok once and hand back its transcript, or `None` when a resumed launch
 /// was refused its handle before spending anything.
 fn launch(
+    program: &str,
     prompt: &str,
     args: &TransformArgs,
     scratch: &Scratch,
@@ -125,7 +139,7 @@ fn launch(
     peak: &PeakMemory,
 ) -> Result<Option<String>> {
     let prompt_file = write_prompt(&args.out, &resumed_prompt(prompt, args.resume.as_deref()))?;
-    let mut command = peak.command(GROK);
+    let mut command = peak.command(program);
     command
         .args(grok_argv(
             &prompt_file.to_string_lossy(),
@@ -147,8 +161,16 @@ fn launch(
 
 #[cfg(test)]
 mod tests {
-    use super::{grok_argv, grok_effort};
+    use std::fs;
+
+    use super::{grok_argv, grok_effort, run_at};
+    use crate::transform::TransformArgs;
+    use crate::transform::construct::CONSTRUCT_IMPLEMENT;
+    use crate::transform::harness_stub::{self, Stub};
+    use crate::transform::lane::resumed_prompt;
     use crate::transform::messages::derive_result_record;
+    use crate::transform::peak_memory;
+    use crate::transform::scratch::Scratch;
 
     #[test]
     fn argv_runs_headless_and_carries_the_resolved_profile() {
@@ -250,5 +272,68 @@ mod tests {
         // price table over the columns above, never from this figure.
         assert_eq!(record["cost_usd"], 0.027_376);
         assert_eq!(record["first_call_model"], "grok-4.6", "no model here is filtered as a side model");
+    }
+
+    fn drive(stub: &Stub, args: &TransformArgs, prompt: &str) -> anyhow::Result<serde_json::Value> {
+        let scratch = Scratch::prepare(&args.out, args.nonce.as_deref()).expect("scratch");
+        run_at(stub.program(), prompt, args, &scratch, None, &peak_memory::detect())
+    }
+
+    // Tripwire: `--prompt-file` is the prompt channel. An argv test that only
+    // checks the flag names a path still passes when `write_prompt` is handed
+    // an empty string, and every Grok lane then runs an empty turn.
+    #[test]
+    fn a_cold_launch_puts_the_prompt_in_the_file_not_on_argv_or_stdin() {
+        let stub = Stub::succeed();
+        let args = harness_stub::args(CONSTRUCT_IMPLEMENT, stub.out());
+        let prompt = "assembled grok prompt";
+        let record = drive(&stub, &args, prompt).expect("cold grok");
+
+        let launches = stub.launches();
+        assert_eq!(launches.len(), 1, "a cold launch forks once");
+        let path = launches[0].flag("--prompt-file").expect("headless grok names a prompt file");
+        assert_eq!(fs::read_to_string(path).expect("read prompt file"), prompt);
+        assert!(
+            launches[0].argv.iter().all(|arg| !arg.contains(prompt)),
+            "the assembled prompt must not leak onto argv"
+        );
+        assert!(launches[0].stdin.is_empty(), "grok reads the prompt from the file, with stdin closed");
+        assert!(!launches[0].has("--resume"), "a cold launch names no session");
+        assert_eq!(record["session_id"], "stub-session-1");
+    }
+
+    // Tripwire: `--resume` continues the conversation; it does not replace the
+    // turn. An argv that dropped `--prompt-file` on a warm lap would resume and
+    // then hand the child nothing to do.
+    #[test]
+    fn a_resumed_launch_keeps_the_prompt_file_alongside_the_handle() {
+        let stub = Stub::succeed();
+        let mut args = harness_stub::args(CONSTRUCT_IMPLEMENT, stub.out());
+        args.resume = Some("sess-1".to_owned());
+        let prompt = "assembled grok prompt";
+        drive(&stub, &args, prompt).expect("resumed grok");
+
+        let launches = stub.launches();
+        assert_eq!(launches.len(), 1, "a live handle forks once");
+        assert_eq!(launches[0].flag("--resume"), Some("sess-1"));
+        let path = launches[0].flag("--prompt-file").expect("a resumed lap still has a turn");
+        assert_eq!(fs::read_to_string(path).expect("read prompt file"), resumed_prompt(prompt, Some("sess-1")));
+        assert!(launches[0].stdin.is_empty(), "the prompt still rides the file");
+    }
+
+    #[test]
+    fn a_refused_handle_relaunches_once_without_resume() {
+        let stub = Stub::first_launch_refuses();
+        let mut args = harness_stub::args(CONSTRUCT_IMPLEMENT, stub.out());
+        args.resume = Some("sess-1".to_owned());
+        let record = drive(&stub, &args, "assembled grok prompt").expect("refused resume falls back cold");
+
+        let launches = stub.launches();
+        assert_eq!(launches.len(), 2, "the refused handle is one extra fork, not a loop");
+        assert_eq!(launches[0].flag("--resume"), Some("sess-1"));
+        assert!(launches[0].has("--prompt-file"), "the refused lap still named a turn");
+        assert!(!launches[1].has("--resume"), "the fallback is a cold launch");
+        assert!(launches[1].has("--prompt-file"));
+        assert_eq!(record["session_id"], "stub-session-2");
     }
 }
