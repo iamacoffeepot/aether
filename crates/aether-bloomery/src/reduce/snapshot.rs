@@ -376,12 +376,14 @@ pub struct BloomRecord {
     /// out. Journal-derived and replay-rebuilt; defaulted like its sibling.
     #[serde(default)]
     pub deferred_aggregates: BTreeSet<StageId>,
-    /// The door-resolved member-dependency graph (ADR-0196).
+    /// The door-resolved member-dependency graph (ADR-0196 / ADR-0204).
     ///
     /// Journal-derived: a seal records it as
     /// [`Decision::RecordMemberDependencies`] and the fold copies that value.
-    /// Empty is the edgeless degenerate case — today's bloom. Defaulted so a
-    /// journal written before the graph existed still decodes.
+    /// Dispatch and `blocked_by` read this set, which is the **declared**
+    /// edges — a surface-derived overlap is not a gate. Empty is the
+    /// edgeless degenerate case — today's bloom. Defaulted so a journal
+    /// written before the graph existed still decodes.
     #[serde(default)]
     pub dependencies: Vec<MemberDependency>,
     /// Members held at Verify because the host could not run the gates
