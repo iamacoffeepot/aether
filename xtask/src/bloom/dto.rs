@@ -262,6 +262,19 @@ pub struct JournalEvent {
     pub fact: Value,
 }
 
+/// A journal `Integrate` claim, as coverage reads it: workpiece plus evidence kind.
+#[derive(Debug, Deserialize)]
+pub struct IntegrateClaimView {
+    pub workpiece: String,
+    pub evidence: IntegrateEvidenceView,
+}
+
+/// Evidence bound to an integrate claim. Coverage keys on `kind`.
+#[derive(Debug, Deserialize)]
+pub struct IntegrateEvidenceView {
+    pub kind: EvidenceKind,
+}
+
 /// Write-route reply. The outcome payload is left as JSON so this crate does
 /// not have to hex-decode every `Outcome` variant just to print it.
 #[derive(Debug, Deserialize)]

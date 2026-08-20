@@ -154,12 +154,15 @@ mod tests {
     #[test]
     fn a_non_green_map_refuses_without_touching_main() {
         let shell = green_linear();
-        let coverage = DayCoverage::hold("red test crate::day_head");
+        let coverage = DayCoverage::hold("issue-a\nissue-b");
 
         let refusal = merge(&shell, ORIGIN, DAY, &coverage).expect_err("a held map is refused").to_string();
 
         assert!(refusal.contains("not green"), "the refusal names the coverage bar: {refusal}");
-        assert!(refusal.contains("crate::day_head"), "the refusal forwards the hold: {refusal}");
+        assert!(
+            refusal.contains("issue-a") && refusal.contains("issue-b"),
+            "the refusal names every uncovered workpiece: {refusal}"
+        );
         assert!(refusal.contains(DAY), "the refusal names the branch that stays mainline: {refusal}");
         let calls = shell.calls();
         assert!(calls.is_empty(), "a held roll is a no-op: {calls:?}");
