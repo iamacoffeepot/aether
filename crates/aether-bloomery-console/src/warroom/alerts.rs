@@ -7,18 +7,16 @@
 use super::Focus;
 use crate::dto::{BloomView, MemberView, ViewDocument};
 
-/// One loud token in the alert band.
+/// One loud condition. Display text lives on the folded needs-you row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Alert {
     pub kind: AlertKind,
-    pub token: String,
     pub detail: String,
     pub focus: Focus,
 }
 
-/// Discriminator for a selectable alert token. Display text lives on
-/// [`Alert::token`] so a formatted landing/fault string can change without
-/// losing the selection.
+/// Discriminator for a loud condition. Severity is matched onto a
+/// [`super::NeedsYouRow`] by [`Focus`]; this kind never selects on its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AlertKind {
     Park,
@@ -35,28 +33,13 @@ pub fn alerts(view: &ViewDocument) -> Vec<Alert> {
     for bloom in &view.blooms {
         let prefix = bloom.id.prefix();
         if bloom.review_park.is_some() {
-            alerts.push(Alert {
-                kind: AlertKind::Park,
-                token: "PARK".to_owned(),
-                detail: prefix.clone(),
-                focus: Focus::bloom(bloom.id),
-            });
+            alerts.push(Alert { kind: AlertKind::Park, detail: prefix.clone(), focus: Focus::bloom(bloom.id) });
         }
-        if let Some(block) = &bloom.landing_blocked {
-            alerts.push(Alert {
-                kind: AlertKind::Landing,
-                token: format!("land: blocked {}/{}", block.rolls, block.budget),
-                detail: prefix.clone(),
-                focus: Focus::bloom(bloom.id),
-            });
+        if bloom.landing_blocked.is_some() {
+            alerts.push(Alert { kind: AlertKind::Landing, detail: prefix.clone(), focus: Focus::bloom(bloom.id) });
         }
-        if let Some(fault) = &bloom.executor_fault {
-            alerts.push(Alert {
-                kind: AlertKind::Fault,
-                token: executor_fault_token(fault.rolls, fault.budget, fault.terminal),
-                detail: prefix,
-                focus: Focus::bloom(bloom.id),
-            });
+        if bloom.executor_fault.is_some() {
+            alerts.push(Alert { kind: AlertKind::Fault, detail: prefix, focus: Focus::bloom(bloom.id) });
         }
         for member in &bloom.members {
             push_member_alerts(&mut alerts, bloom, member);
@@ -72,24 +55,11 @@ fn push_member_alerts(alerts: &mut Vec<Alert>, bloom: &BloomView, member: &Membe
         _ => bloom.id.prefix(),
     };
     if member.wedge.is_some() {
-        alerts.push(Alert {
-            kind: AlertKind::Wedge,
-            token: "WEDGED".to_owned(),
-            detail: detail.clone(),
-            focus: focus.clone(),
-        });
+        alerts.push(Alert { kind: AlertKind::Wedge, detail: detail.clone(), focus: focus.clone() });
     }
     if member.host_fault.is_some() {
-        alerts.push(Alert { kind: AlertKind::HostFault, token: "hostfault".to_owned(), detail, focus });
+        alerts.push(Alert { kind: AlertKind::HostFault, detail, focus });
     }
-}
-
-fn executor_fault_token(rolls: u32, budget: u32, terminal: bool) -> String {
-    let mut token = format!("FAULT {rolls}/{budget}");
-    if terminal {
-        token.push_str(" TERMINAL");
-    }
-    token
 }
 
 #[cfg(test)]
@@ -110,8 +80,8 @@ mod tests {
 
     #[test]
     fn alerts_name_every_loud_state() {
-        // The plausible bug: the band only looks at bloom-level fields, so a
-        // wedged or host-faulted member stays quiet; or TERMINAL is dropped.
+        // The plausible bug: the walk only looks at bloom-level fields, so a
+        // wedged or host-faulted member stays quiet.
         let view = ViewDocument {
             blooms: vec![BloomView {
                 id: digest(0xab),
@@ -126,16 +96,10 @@ mod tests {
             }],
             ..ViewDocument::default()
         };
-        let tokens: Vec<_> = alerts(&view).into_iter().map(|alert| (alert.kind, alert.token)).collect();
+        let kinds: Vec<_> = alerts(&view).into_iter().map(|alert| alert.kind).collect();
         assert_eq!(
-            tokens,
-            [
-                (AlertKind::Park, "PARK".to_owned()),
-                (AlertKind::Landing, "land: blocked 2/3".to_owned()),
-                (AlertKind::Fault, "FAULT 3/3 TERMINAL".to_owned()),
-                (AlertKind::Wedge, "WEDGED".to_owned()),
-                (AlertKind::HostFault, "hostfault".to_owned()),
-            ]
+            kinds,
+            [AlertKind::Park, AlertKind::Landing, AlertKind::Fault, AlertKind::Wedge, AlertKind::HostFault,]
         );
     }
 }

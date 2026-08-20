@@ -32,8 +32,6 @@ use crate::fetch::FetchProbe;
 #[cfg(test)]
 use crate::screen::Board;
 #[cfg(test)]
-use crate::warroom::ChromeId;
-#[cfg(test)]
 use workspace::PaneId;
 
 const ARTIFACT_HINT: KeyHint = KeyHint { keys: "a", action: "artifact" };
@@ -370,7 +368,7 @@ impl Shell {
         self.workspace.board()
     }
 
-    fn chrome_selected(&self) -> Option<&ChromeId> {
+    fn chrome_selected(&self) -> Option<&Focus> {
         self.workspace.chrome_selected()
     }
 
@@ -445,11 +443,18 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 16)).expect("test backend");
         terminal.draw(|frame| shell.render(frame)).expect("draw");
         let text = buffer_text(&terminal);
-        assert!(text.contains("PARK"), "{text}");
-        assert!(text.contains("land: blocked 1/2"), "{text}");
-        assert!(text.contains("WEDGED"), "{text}");
-        assert!(text.contains("hostfault"), "{text}");
-        assert!(text.contains("issue-1"), "{text}");
+        let prefix = digest(0xab).prefix();
+        assert!(
+            text.lines()
+                .any(|line| line.contains(&prefix) && line.contains("park") && line.contains("accept or defer")),
+            "park row grammar missing from:\n{text}"
+        );
+        assert!(
+            text.lines().any(|line| {
+                line.contains("issue-1") && line.contains("wedge") && line.contains("widen the surface or eject")
+            }),
+            "wedge row grammar missing from:\n{text}"
+        );
     }
 
     #[test]
@@ -564,23 +569,23 @@ mod tests {
         buffer_text(&terminal)
     }
 
-    fn assert_interrupt_jumps(view: &ViewDocument, label: &str, focus: &Focus) {
+    fn assert_interrupt_jumps(view: &ViewDocument, action: &str, focus: &Focus) {
         // The plausible bug: the source is an alert only, so the queue has no
         // row and Enter cannot jump to the subject that is stopped.
         let mut shell = Shell::showing(view, None);
         let text = draw(&mut shell);
-        assert!(text.contains(label), "interrupt {label} missing from:\n{text}");
+        assert!(text.contains(action), "interrupt action {action} missing from:\n{text}");
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Tab)), Outcome::Handled);
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('i'))), Outcome::Handled);
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
-        assert_eq!(shell.top_focus().as_ref(), Some(focus), "Enter on {label} jumped to the wrong subject");
+        assert_eq!(shell.top_focus().as_ref(), Some(focus), "Enter on {action} jumped to the wrong subject");
     }
 
     #[test]
     fn park_interrupt_renders_and_enter_jumps() {
         assert_interrupt_jumps(
             &bloom_with(Vec::new(), |bloom| bloom.review_park = Some(ReviewParkView::default())),
-            "park",
+            "accept or defer",
             &Focus::bloom(digest(0xab)),
         );
     }
@@ -596,7 +601,7 @@ mod tests {
                 }],
                 |_| {},
             ),
-            "decision",
+            "answer",
             &Focus::member(digest(0xab), "issue-1"),
         );
     }
@@ -610,7 +615,7 @@ mod tests {
                     ..CompositionView::default()
                 });
             }),
-            "findings",
+            "accept or defer",
             &Focus::composition(digest(0xab)),
         );
     }
@@ -621,7 +626,7 @@ mod tests {
             &bloom_with(Vec::new(), |bloom| {
                 bloom.executor_fault = Some(ExecutorFaultView { rolls: 3, budget: 3, terminal: true });
             }),
-            "terminal",
+            "eject or re-approve",
             &Focus::bloom(digest(0xab)),
         );
     }
@@ -633,7 +638,7 @@ mod tests {
                 vec![MemberView { workpiece: "issue-1".to_owned(), wedge: Some(Present {}), ..MemberView::default() }],
                 |_| {},
             ),
-            "wedge",
+            "widen the surface or eject",
             &Focus::member(digest(0xab), "issue-1"),
         );
     }
@@ -644,7 +649,7 @@ mod tests {
             &bloom_with(Vec::new(), |bloom| {
                 bloom.landing_blocked = Some(LandingBlock { rolls: 2, budget: 2 });
             }),
-            "landing",
+            "eject or re-approve",
             &Focus::bloom(digest(0xab)),
         );
     }
@@ -659,7 +664,7 @@ mod tests {
             }),
             ..ViewDocument::default()
         };
-        assert_interrupt_jumps(&view, "quiesce", &Focus::Seal);
+        assert_interrupt_jumps(&view, "raise the ceiling or stand down", &Focus::Seal);
     }
 
     #[test]
@@ -669,7 +674,7 @@ mod tests {
                 bloom.operator_hold =
                     Some(OperatorHoldView { reason: "wait".to_owned(), operator: "owner".to_owned() });
             }),
-            "hold",
+            "release",
             &Focus::bloom(digest(0xab)),
         );
     }
@@ -705,8 +710,8 @@ mod tests {
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Esc)), Outcome::Handled);
         let text = draw(&mut shell);
         assert!(text.contains("needs you"), "pop did not restore the workspace:\n{text}");
-        assert!(text.contains("PARK"), "{text}");
-        assert!(text.contains("WEDGED"), "{text}");
+        assert!(text.contains("accept or defer"), "{text}");
+        assert!(text.contains("widen the surface or eject"), "{text}");
     }
 
     #[test]
@@ -959,7 +964,8 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 16)).expect("test backend");
         terminal.draw(|frame| shell.render(frame)).expect("draw");
         let text = right_column(&terminal);
-        let park_lines: Vec<&str> = text.lines().filter(|line| line.contains("park  ")).collect();
+        let park_lines: Vec<&str> =
+            text.lines().filter(|line| line.contains(" · ") && line.contains("accept or defer")).collect();
         let last = digest(10).prefix();
         let first = digest(1).prefix();
         assert!(
@@ -972,6 +978,7 @@ mod tests {
             "scrolled-off interrupt still painted:\n{}",
             park_lines.join("\n")
         );
+        assert!(text.lines().any(|line| line.contains('+') && line.contains("more")), "+N more missing from:\n{text}");
     }
 
     #[test]

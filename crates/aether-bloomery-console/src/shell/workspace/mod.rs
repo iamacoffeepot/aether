@@ -14,7 +14,7 @@ use crate::nav::Nav;
 use crate::palette;
 use crate::screen::{Board, Dashboard, compose};
 use crate::store::{ResourceKey, Store};
-use crate::warroom::{self, Alert, ChromeId, Interrupt};
+use crate::warroom::{self, Focus, NeedsYouRow};
 
 pub use pane::PaneId;
 use pane::pane_block;
@@ -32,7 +32,7 @@ const QUIT_HINT: KeyHint = KeyHint { keys: "q", action: "quit" };
 /// The rest root: fleet over board on the left, needs-you over quiet on the right.
 pub struct Workspace {
     board: Board,
-    chrome: Cursor<ChromeId>,
+    chrome: Cursor<Focus>,
     focus: PaneId,
 }
 
@@ -59,7 +59,7 @@ impl Workspace {
 
     #[cfg(test)]
     #[must_use]
-    pub fn chrome_selected(&self) -> Option<&ChromeId> {
+    pub fn chrome_selected(&self) -> Option<&Focus> {
         self.chrome.selected()
     }
 
@@ -100,9 +100,9 @@ impl Workspace {
 
     pub fn reseat(&mut self, store: &Store) {
         self.board.reseat(store);
-        let ids = chrome_ids(store);
+        let rows = needs_you_rows(store);
         if let Some(id) = self.chrome.selected()
-            && !ids.iter().any(|item| item == id)
+            && !rows.iter().any(|row| row.focus == *id)
         {
             self.chrome.select(None);
         }
@@ -118,22 +118,22 @@ impl Workspace {
     }
 
     fn handle_needs_you(&mut self, key: KeyEvent, store: &Store) -> Outcome {
-        let ids = chrome_ids(store);
+        let rows = needs_you_rows(store);
         match key.code {
-            KeyCode::Char('i') if !ids.is_empty() && self.chrome.selected().is_none() => {
-                self.chrome.select(ids.first().cloned());
+            KeyCode::Char('i') if !rows.is_empty() && self.chrome.selected().is_none() => {
+                self.chrome.select(rows.first().map(|row| row.focus.clone()));
                 Outcome::Handled
             }
-            KeyCode::Char('j') if !ids.is_empty() => {
-                self.chrome.select_next(&ids, Clone::clone);
+            KeyCode::Char('j') if !rows.is_empty() => {
+                self.chrome.select_next(&rows, |row| row.focus.clone());
                 Outcome::Handled
             }
-            KeyCode::Char('k') if !ids.is_empty() => {
-                self.chrome.select_prev(&ids, Clone::clone);
+            KeyCode::Char('k') if !rows.is_empty() => {
+                self.chrome.select_prev(&rows, |row| row.focus.clone());
                 Outcome::Handled
             }
             KeyCode::Enter => {
-                let Some(focus) = self.chrome.selected().map(|id| id.focus().clone()) else {
+                let Some(focus) = self.chrome.selected().cloned() else {
                     return Outcome::Ignored;
                 };
                 self.chrome.select(None);
@@ -149,36 +149,17 @@ impl Workspace {
 
     fn needs_you_hints(&self, store: &Store) -> Vec<KeyHint> {
         let mut hints = Vec::new();
-        let ids = chrome_ids(store);
         if self.chrome.selected().is_some() {
             hints.push(ENTER_HINT);
             hints.push(LEAVE_BAND_HINT);
             hints.push(WALK_HINT);
-        } else if !ids.is_empty() {
+        } else if !needs_you_rows(store).is_empty() {
             hints.push(ENTER_BAND_HINT);
             hints.push(WALK_HINT);
         }
         hints.push(REFRESH_HINT);
         hints.push(QUIT_HINT);
         hints
-    }
-
-    fn selected_interrupt_index(&self, interrupts: &[Interrupt]) -> Option<usize> {
-        match self.chrome.selected() {
-            Some(ChromeId::Interrupt { kind, focus }) => {
-                interrupts.iter().position(|entry| entry.kind == *kind && entry.focus == *focus)
-            }
-            _ => None,
-        }
-    }
-
-    fn selected_alert_index(&self, alerts: &[Alert]) -> Option<usize> {
-        match self.chrome.selected() {
-            Some(ChromeId::Alert { kind, focus }) => {
-                alerts.iter().position(|alert| alert.kind == *kind && alert.focus == *focus)
-            }
-            _ => None,
-        }
     }
 
     fn render_board(&mut self, frame: &mut Frame<'_>, area: Rect, store: &Store) {
@@ -192,27 +173,14 @@ impl Workspace {
         let block = pane_block(PaneId::NeedsYou.title(), self.focus == PaneId::NeedsYou);
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        let (alerts, interrupts) = bands(store);
-        if alerts.is_empty() && interrupts.is_empty() {
+        let rows = needs_you_rows(store);
+        if rows.is_empty() {
             frame.render_widget(Paragraph::new("empty").style(palette::body()), inner);
             return;
         }
-        let alert_height = if alerts.is_empty() {
-            0
-        } else {
-            2
-        };
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(alert_height), Constraint::Min(1)])
-            .split(inner);
-        if alert_height > 0 {
-            frame.render_widget(chrome::alert_band(&alerts, self.selected_alert_index(&alerts)), chunks[0]);
-        }
-        let rows = usize::from(chunks[1].height);
-        let selected = self.selected_interrupt_index(&interrupts);
-        let (window, highlight) = chrome::interrupt_window(&interrupts, selected, rows);
-        frame.render_widget(chrome::interrupt_band(window, highlight), chunks[1]);
+        let selected = self.chrome.selected_index(&rows, |row| row.focus.clone());
+        let (window, highlight, hidden) = chrome::needs_you_window(&rows, selected, usize::from(inner.height));
+        frame.render_widget(chrome::needs_you_band(window, highlight, hidden), inner);
     }
 
     fn render_quiet(&self, frame: &mut Frame<'_>, area: Rect, store: &Store, dashboard: &Dashboard) {
@@ -261,17 +229,8 @@ fn split_panes(area: Rect) -> PaneAreas {
     PaneAreas { fleet: left[0], board: left[1], needs_you: right[0], quiet: right[1] }
 }
 
-fn bands(store: &Store) -> (Vec<Alert>, Vec<Interrupt>) {
-    store
-        .view()
-        .value
-        .as_ref()
-        .map_or_else(|| (Vec::new(), Vec::new()), |view| (warroom::alerts(view), warroom::interrupts(view)))
-}
-
-fn chrome_ids(store: &Store) -> Vec<ChromeId> {
-    let (alerts, interrupts) = bands(store);
-    warroom::chrome_ids(&interrupts, &alerts)
+fn needs_you_rows(store: &Store) -> Vec<NeedsYouRow> {
+    store.view().value.as_ref().map(warroom::rows).unwrap_or_default()
 }
 
 fn render_fleet(frame: &mut Frame<'_>, area: Rect, store: &Store, endpoint_label: &str, dashboard: &Dashboard) {
