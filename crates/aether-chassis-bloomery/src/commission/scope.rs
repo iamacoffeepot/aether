@@ -238,7 +238,14 @@ fn parse_workpieces(span: &str) -> Vec<WorkpieceId> {
         .filter_map(|line| {
             let trimmed = line.trim();
             let entry = trimmed.strip_prefix("- ").unwrap_or(trimmed);
-            if entry.is_empty() || entry.starts_with("N/A") {
+            if entry.is_empty() {
+                return None;
+            }
+            let Some(token) = entry.split_whitespace().next() else {
+                return None;
+            };
+            let sentinel = token.strip_suffix('.').unwrap_or(token).to_ascii_lowercase();
+            if sentinel == "n/a" || sentinel == "none" {
                 return None;
             }
             Some(WorkpieceId(entry.to_owned()))
@@ -248,7 +255,9 @@ fn parse_workpieces(span: &str) -> Vec<WorkpieceId> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_revision, task_text};
+    use aether_bloomery::WorkpieceId;
+
+    use super::{parse_revision, parse_workpieces, task_text};
 
     fn fixture() -> &'static str {
         "\
@@ -330,5 +339,26 @@ Create then show.\n"
                 assert!(message.contains("Problem statement"), "got {message}");
             }
         }
+    }
+
+    #[test]
+    fn none_and_n_a_sentinels_are_absent_dependencies() {
+        // The line authors write is `- None.`. A prefix-only `N/A` test
+        // treated that as a workpiece id, and the first reader was seal.
+        for line in ["- None.", "None", "none", "N/A", "N/A — pure umbrella; no implementation PR"] {
+            let span = format!("## Depends on\n\n{line}\n");
+            assert!(parse_workpieces(&span).is_empty(), "{line:?} must parse to zero dependencies");
+        }
+
+        assert_eq!(
+            parse_workpieces("## Depends on\n\n- issue-5286\n"),
+            [WorkpieceId("issue-5286".to_owned())],
+            "a real workpiece id is still a dependency"
+        );
+        assert_eq!(
+            parse_workpieces("## Depends on\n\n- nonexistent-thing\n"),
+            [WorkpieceId("nonexistent-thing".to_owned())],
+            "a token that merely begins with none is still a dependency"
+        );
     }
 }
