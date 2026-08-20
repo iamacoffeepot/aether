@@ -218,8 +218,61 @@ fn an_inherited_member_with_no_predecessor_ref_refuses_rather_than_folding_a_par
 
     let (admits, ack_through) = drain_and_integrate(&mut store, &source, None).unwrap();
 
-    assert!(admits.is_empty(), "a set missing a member's work resolves nothing");
+    assert_eq!(admits.len(), 1, "a set missing a member's work admits the refusal rather than resolving");
     assert_eq!(ack_through, Some(sequence), "the refusal is definitive — acked, never re-driven");
+    let event: Event = from_bytes(&admits[0].event).unwrap();
+    match event.fact {
+        Fact::FoldRefused { bloom: refused, refusal } => {
+            assert_eq!(refused, successor);
+            assert_eq!(refusal.gate, "fold");
+            assert_eq!(refusal.guard, "candidate_ref_present");
+            assert_eq!(
+                refusal.reads.iter().find(|read| read.field == "member").map(|read| read.value.as_str()),
+                Some("wp-0")
+            );
+        }
+        other => panic!("expected Fact::FoldRefused, got {other:?}"),
+    }
+}
+
+// A bloom superseded twice still has the inherited candidate under the
+// grandparent. Looking only at the parent refuses a set that has the work.
+#[test]
+fn a_twice_superseded_bloom_adopts_the_grandparent_candidate_ref() {
+    let candidate = digest(0xAB);
+    let (fake, base) = seeded(&candidate);
+    let (grandparent, parent, successor) = (BloomId(digest(1)), BloomId(digest(2)), BloomId(digest(3)));
+    seed_candidate_branch(&fake, &grandparent, "wp-0", "tree-a");
+    let source = shell(fake.clone());
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let sequence = enqueue_integration_adopting(&mut store, successor, base, vec![candidate], Some(parent.0));
+
+    let (admits, ack_through) = drain_and_integrate(&mut store, &source, None).unwrap();
+
+    assert_eq!(admits.len(), 1, "the inherited work folds under the successor");
+    assert_eq!(ack_through, Some(sequence));
+    let _ = decoded_resolve(&admits[0]);
+    assert!(
+        fake.ref_exists(candidate_ref_name(&successor, "wp-0").trim_start_matches("refs/")),
+        "the grandparent's candidate ref now lives in the successor's namespace",
+    );
+}
+
+// A fold that succeeds records no refusal — the resolve is the only admit.
+#[test]
+fn a_successful_fold_records_no_refusal() {
+    let candidate = digest(0xAB);
+    let (fake, base) = seeded(&candidate);
+    let source = shell(fake);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    let _ = enqueue_integration(&mut store, bloom, base, vec![candidate]);
+
+    let (admits, _) = drain_and_integrate(&mut store, &source, None).unwrap();
+
+    assert_eq!(admits.len(), 1);
+    let event: Event = from_bytes(&admits[0].event).unwrap();
+    assert!(matches!(event.fact, Fact::Resolve { .. }), "a successful fold admits a resolve, not a refusal");
 }
 
 // #4903 — the mixed supersession: one member arrived on an inherited claim and

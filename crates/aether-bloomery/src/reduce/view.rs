@@ -65,6 +65,7 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
                 review_park: review_park_view(record, &resolve_question),
                 composition: composition_view(record),
                 operator_hold: record.operator_hold.clone(),
+                blocker: snapshot.fold_refusal(&record.spec.id()).cloned(),
             }
         })
         .collect();
@@ -214,7 +215,7 @@ mod tests {
     use crate::digest::Digest;
     use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
     use crate::port::{BloomView, ViewDocument, WedgeCause};
-    use crate::reduce::{BloomStatus, Event, Fact, Outcome, Snapshot, reduce};
+    use crate::reduce::{BloomStatus, Event, Fact, Outcome, RecordedRead, RecordedRefusal, Snapshot, reduce};
     use crate::values::{
         BloomDraft, CandidateRef, ConfigRegistry, Evidence, EvidenceKind, MemberDependency, Membership, OperatorHold,
         Question, ResolutionClaim, ResolvedConfigs, SpendWindow, VerifyFailureSet, Wedge,
@@ -405,7 +406,46 @@ mod tests {
             review_park: None,
             composition: None,
             operator_hold: None,
+            blocker: None,
         }
+    }
+
+    // The plausible bug: a fold that refuses leaves the bloom Sealed with every
+    // member resolved and every blocker field null, so `/view` cannot say why
+    // the bloom is not landing (ADR-0206).
+    #[test]
+    fn a_fold_that_refuses_surfaces_the_guard_and_the_member() {
+        let spec =
+            BloomDraft { proposals: vec![membership("wp-0", 1)], base: digest(0), ..BloomDraft::default() }.seal();
+        let bloom = spec.id();
+        let configs = ResolvedConfigs::default();
+        let spend = SpendWindow::default();
+        let mut snapshot = Snapshot::new(digest(0));
+        let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
+        snapshot = snapshot.apply(&seal, &reduce(&snapshot, &seal, &configs, &spend), &configs);
+
+        let refusal = RecordedRefusal {
+            gate: "fold".into(),
+            guard: "candidate_ref_present".into(),
+            reads: vec![
+                RecordedRead { field: "member".into(), value: "wp-0".into() },
+                RecordedRead { field: "predecessor".into(), value: "aa".into() },
+            ],
+        };
+        let refused = Event {
+            idempotency_key: IdempotencyKey("fold-refused".into()),
+            fact: Fact::FoldRefused { bloom, refusal: refusal },
+        };
+        snapshot = snapshot.apply(&refused, &reduce(&snapshot, &refused, &configs, &spend), &configs);
+
+        let view = view_of(&snapshot, |_| None);
+        let blocker = view.blooms[0].blocker.as_ref().expect("the served view carries the refusal");
+        assert_eq!(blocker.guard, "candidate_ref_present");
+        assert_eq!(blocker.reads[0].field, "member");
+        assert_eq!(blocker.reads[0].value, "wp-0");
+        assert_eq!(view.blooms[0].status, BloomStatus::Sealed);
+        assert!(view.blooms[0].landing_blocked.is_none());
+        assert!(view.blooms[0].members[0].blocked_by.is_none());
     }
 
     fn with_following_bloom(mut view: ViewDocument) -> ViewDocument {

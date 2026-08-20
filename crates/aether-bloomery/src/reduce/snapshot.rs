@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
+use super::gate::RecordedRefusal;
 use super::{Decision, Decisions, Event, Fact, Outcome};
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
@@ -88,6 +89,16 @@ pub struct Snapshot {
     /// JSON-reader rescue.
     #[serde(default)]
     pub member_machinery: BTreeMap<BloomId, BTreeMap<WorkpieceId, MemberMachineryFault>>,
+    /// Why a sealed bloom's fold refused (ADR-0206), keyed by bloom.
+    ///
+    /// Folded from [`Fact::FoldRefused`] the way construct checkpoints are
+    /// folded from a failing attempt — the fact carries the refusal, so no
+    /// new [`Decision`] enters the frozen graph. Snapshot-level rather than a
+    /// [`BloomRecord`] field so every existing `BloomRecord { … }` literal
+    /// stays compiling. `#[serde(default)]` is the `member_checkpoints`
+    /// precedent.
+    #[serde(default)]
+    pub fold_refusals: BTreeMap<BloomId, RecordedRefusal>,
 }
 
 impl Snapshot {
@@ -110,6 +121,12 @@ impl Snapshot {
     #[must_use]
     pub fn member_machinery(&self, bloom: &BloomId, workpiece: &WorkpieceId) -> Option<MemberMachineryFault> {
         self.member_machinery.get(bloom)?.get(workpiece).copied()
+    }
+
+    /// Why `bloom`'s fold refused, once it has (ADR-0206).
+    #[must_use]
+    pub fn fold_refusal(&self, bloom: &BloomId) -> Option<&RecordedRefusal> {
+        self.fold_refusals.get(bloom)
     }
 }
 
@@ -575,6 +592,7 @@ impl Snapshot {
             next.apply_effect(effect);
         }
         next.record_construct_checkpoint(event, decisions);
+        next.record_fold_refusal(event, decisions);
         next
     }
 
@@ -602,6 +620,24 @@ impl Snapshot {
             return;
         };
         self.member_checkpoints.entry(*bloom).or_default().insert(workpiece.clone(), *checkpoint);
+    }
+
+    /// Record (or clear) a fold refusal from the admitted fact (ADR-0206).
+    ///
+    /// Gated on the matching outcome so a refused admission — unknown or
+    /// inactive bloom — cannot plant a blocker the reducer rejected. A later
+    /// resolve, fold-conflict, or splice-assembly means the fold ran, so a
+    /// stale refusal is dropped.
+    fn record_fold_refusal(&mut self, event: &Event, decisions: &Decisions) {
+        match &event.fact {
+            Fact::FoldRefused { bloom, refusal } if matches!(decisions.outcome, Outcome::FoldRefused { .. }) => {
+                self.fold_refusals.insert(*bloom, refusal.clone());
+            }
+            Fact::Resolve { bloom, .. } | Fact::FoldConflict { bloom, .. } | Fact::SpliceAssembled { bloom, .. } => {
+                self.fold_refusals.remove(bloom);
+            }
+            _ => {}
+        }
     }
 
     fn apply_graph_effect(&mut self, effect: &Decision) {

@@ -38,8 +38,8 @@ use std::time::Duration;
 use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
-    Admit, AdmitResult, BloomId, Checkpoint, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey,
-    IntegrateOutcome, IntegratePayload, MemberCandidate, SplicePayload, Topic, WorkpieceId,
+    Admit, AdmitResult, BloomId, Checkpoint, Digest, Event, Evidence, EvidenceKind, Fact, Gate, IdempotencyKey,
+    IntegrateOutcome, IntegratePayload, MemberCandidate, Read, Refusal, SplicePayload, Topic, WorkpieceId,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId};
@@ -227,13 +227,75 @@ enum FoldOutcome {
     /// One or more cross-member collisions (ADR-0189): admit a `FoldConflict`
     /// per conflicted member so each reconciles against the settled checkpoint.
     Conflicted(Vec<Conflicted>),
-    /// A definitive refusal — the branch carries a tree that matches neither
-    /// the bootstrap position nor any candidate (a foreign advance). Acked with
-    /// the carried reason, never re-driven.
-    Refused(String),
+    /// A definitive refusal — a named guard stopped the fold, or the branch
+    /// carries a tree that matches neither the bootstrap position nor any
+    /// candidate (a foreign advance). Acked with the carried reason, never
+    /// re-driven; a named-guard refusal is admitted so the served view can
+    /// show it (ADR-0206).
+    Refused(Refusal),
     /// A transient stop — a stale checkpoint mid-fold or a transport fault; the
     /// entry re-drains next tick and the bootstrap checkpoint re-resumes it.
     Stopped(String),
+}
+
+fn fold_refusal(gate: &'static str, guard: &'static str, reads: Vec<Read>) -> Refusal {
+    Gate::new(gate)
+        .require(guard, || false, move || reads)
+        .decide(|| ())
+        .into_result()
+        .err()
+        .unwrap_or_else(|| Refusal { gate, guard, reads: Vec::new() })
+}
+
+fn require_members(gate: &'static str, count: usize) -> Result<(), FoldOutcome> {
+    Gate::new(gate)
+        .require("members_present", || count > 0, || aether_bloomery::reads![members: count])
+        .decide(|| ())
+        .into_result()
+        .map_err(FoldOutcome::Refused)
+}
+
+fn adopt_inherited(
+    source: &SourceShell,
+    bloom: &BloomId,
+    predecessor: BloomId,
+    members: &[MemberCandidate],
+    gate: &'static str,
+    transport: &str,
+) -> Result<(), FoldOutcome> {
+    for member in members {
+        match source.adopt_candidate(&predecessor, bloom, &member.workpiece.0) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(FoldOutcome::Refused(fold_refusal(
+                    gate,
+                    "candidate_ref_present",
+                    aether_bloomery::reads![member: member.workpiece.0, predecessor: predecessor.0.to_hex()],
+                )));
+            }
+            Err(error) => return Err(FoldOutcome::Stopped(format!("{transport}: {error}"))),
+        }
+    }
+    Ok(())
+}
+
+fn fold_refused_key(bloom: &Digest, guard: &str, member: &str) -> IdempotencyKey {
+    let mut key = String::with_capacity(32 + 64 + 1 + guard.len() + 1 + member.len());
+    key.push_str("aether.bloomery.fold-refused:");
+    key.push_str(&bloom.to_hex());
+    key.push(':');
+    key.push_str(guard);
+    key.push(':');
+    key.push_str(member);
+    IdempotencyKey(key)
+}
+
+fn fold_refused_event(bloom: BloomId, refusal: &Refusal) -> Event {
+    let member = refusal.reads.iter().find(|read| read.field == "member").map_or("", |read| read.value.as_str());
+    Event {
+        idempotency_key: fold_refused_key(&bloom.0, refusal.guard, member),
+        fact: Fact::FoldRefused { bloom, refusal: refusal.recorded() },
+    }
 }
 
 /// Fold one payload's candidates onto the bloom's integration branch and build
@@ -242,8 +304,8 @@ enum FoldOutcome {
 /// it; anywhere else → refuse (a foreign advance on the single-writer branch).
 fn fold_integration(source: &SourceShell, payload: &IntegratePayload) -> FoldOutcome {
     let bloom = BloomId(payload.bloom);
-    if payload.members.is_empty() {
-        return FoldOutcome::Refused("integration dispatched with zero candidates".to_owned());
+    if let Err(outcome) = require_members("fold", payload.members.len()) {
+        return outcome;
     }
     // How to fold. One member's candidate was built against the bloom's own
     // base, which is where the branch starts, so stating its tree is exact —
@@ -265,21 +327,10 @@ fn fold_integration(source: &SourceShell, payload: &IntegratePayload) -> FoldOut
     // beside it — keeps the capture it produced.
     if let Some(predecessor) = payload.adopt_from {
         let predecessor = BloomId(predecessor);
-        for member in &payload.members {
-            match source.adopt_candidate(&predecessor, &bloom, &member.workpiece.0) {
-                // A member with a ref in neither namespace has no work to fold.
-                // Refuse rather than fold a partial set: the resolve would claim
-                // an artifact that never carried that member's changes.
-                Ok(false) => {
-                    return FoldOutcome::Refused(format!(
-                        "member `{}` carries a claim but no candidate ref under this bloom or its predecessor; \
-                         refusing to fold a set missing a member's work",
-                        member.workpiece.0
-                    ));
-                }
-                Ok(true) => {}
-                Err(error) => return FoldOutcome::Stopped(format!("adopting a candidate ref failed: {error}")),
-            }
+        if let Err(outcome) =
+            adopt_inherited(source, &bloom, predecessor, &payload.members, "fold", "adopting a candidate ref failed")
+        {
+            return outcome;
         }
     }
 
@@ -376,11 +427,11 @@ fn fold_integration(source: &SourceShell, payload: &IntegratePayload) -> FoldOut
         // the branch sits at a candidate tree but its commit has no recorded
         // head correspondence (a corrupt or externally-written branch). Refuse
         // loudly rather than admit a resolve with a fabricated head.
-        return FoldOutcome::Refused(
-            "integration branch already at a candidate tree but its commit reverse-resolves no landable head; \
-             refusing to fabricate one"
-                .to_owned(),
-        );
+        return FoldOutcome::Refused(fold_refusal(
+            "fold",
+            "landable_head",
+            aether_bloomery::reads![branch_head: "absent"],
+        ));
     };
     let tree = expected.tree;
     let event = Event {
@@ -426,23 +477,15 @@ fn splice_assembled_key(bloom: &Digest, workpiece: &str, tree: &Digest, head: &D
 /// [`Fact::FoldConflict`], not a tip's — the tips are already resolved.
 fn fold_splice(source: &SourceShell, payload: &SplicePayload) -> FoldOutcome {
     let bloom = BloomId(payload.bloom);
-    if payload.members.is_empty() {
-        return FoldOutcome::Refused("splice dispatched with zero tips".to_owned());
+    if let Err(outcome) = require_members("splice", payload.members.len()) {
+        return outcome;
     }
     if let Some(predecessor) = payload.adopt_from {
         let predecessor = BloomId(predecessor);
-        for member in &payload.members {
-            match source.adopt_candidate(&predecessor, &bloom, &member.workpiece.0) {
-                Ok(false) => {
-                    return FoldOutcome::Refused(format!(
-                        "tip `{}` carries a claim but no candidate ref under this bloom or its predecessor; \
-                         refusing to assemble a join missing a tip's work",
-                        member.workpiece.0
-                    ));
-                }
-                Ok(true) => {}
-                Err(error) => return FoldOutcome::Stopped(format!("adopting a splice tip failed: {error}")),
-            }
+        if let Err(outcome) =
+            adopt_inherited(source, &bloom, predecessor, &payload.members, "splice", "adopting a splice tip failed")
+        {
+            return outcome;
         }
     }
 
@@ -482,7 +525,11 @@ fn fold_splice(source: &SourceShell, payload: &SplicePayload) -> FoldOutcome {
     }
 
     let Some(head) = head else {
-        return FoldOutcome::Refused("splice branch produced no landable head; refusing to fabricate one".to_owned());
+        return FoldOutcome::Refused(fold_refusal(
+            "splice",
+            "landable_head",
+            aether_bloomery::reads![branch_head: "absent"],
+        ));
     };
     let tree = expected.tree;
     let event = Event {
@@ -620,13 +667,22 @@ fn drain_and_integrate(
                 admits.extend(conflicted);
                 ack_through = Some(entry.sequence);
             }
-            FoldOutcome::Refused(reason) => {
+            FoldOutcome::Refused(refusal) => {
                 tracing::warn!(
                     target: "aether_chassis_bloomery::integrate",
                     sequence = entry.sequence,
-                    %reason,
-                    "integration refused definitively; acking the entry instead of re-driving",
+                    %refusal,
+                    "integration refused definitively; admitting the refusal and acking the entry instead of re-driving",
                 );
+                let Ok(bytes) = to_vec(&fold_refused_event(BloomId(payload.bloom), &refusal)) else {
+                    tracing::warn!(
+                        target: "aether_chassis_bloomery::integrate",
+                        sequence = entry.sequence,
+                        "fold-refused event did not encode; stopping the ack prefix to re-drive",
+                    );
+                    break;
+                };
+                admits.push(Admit { event: bytes });
                 ack_through = Some(entry.sequence);
             }
             FoldOutcome::Stopped(reason) => {
@@ -682,13 +738,22 @@ fn drain_and_splice(
                 admits.extend(conflicted);
                 ack_through = Some(entry.sequence);
             }
-            FoldOutcome::Refused(reason) => {
+            FoldOutcome::Refused(refusal) => {
                 tracing::warn!(
                     target: "aether_chassis_bloomery::integrate",
                     sequence = entry.sequence,
-                    %reason,
-                    "splice refused definitively; acking the entry instead of re-driving",
+                    %refusal,
+                    "splice refused definitively; admitting the refusal and acking the entry instead of re-driving",
                 );
+                let Ok(bytes) = to_vec(&fold_refused_event(BloomId(payload.bloom), &refusal)) else {
+                    tracing::warn!(
+                        target: "aether_chassis_bloomery::integrate",
+                        sequence = entry.sequence,
+                        "fold-refused event did not encode; stopping the ack prefix to re-drive",
+                    );
+                    break;
+                };
+                admits.push(Admit { event: bytes });
                 ack_through = Some(entry.sequence);
             }
             FoldOutcome::Stopped(reason) => {

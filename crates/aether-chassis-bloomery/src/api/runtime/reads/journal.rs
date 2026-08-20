@@ -122,7 +122,8 @@ fn fact_blooms(fact: &Fact) -> Vec<BloomId> {
         | Fact::VerifyHostFault { bloom, .. }
         | Fact::ResumeHostFault { bloom, .. }
         | Fact::SpliceAssembled { bloom, .. }
-        | Fact::MemberExecutorFault { bloom, .. } => vec![*bloom],
+        | Fact::MemberExecutorFault { bloom, .. }
+        | Fact::FoldRefused { bloom, .. } => vec![*bloom],
         Fact::ObserveMainline { .. }
         | Fact::ObserveMainlineDiverged { .. }
         | Fact::SurfaceOverlap { .. }

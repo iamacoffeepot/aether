@@ -21,7 +21,7 @@ use alloc::string::String;
 
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::reduce::BloomStatus;
+use crate::reduce::{BloomStatus, RecordedRefusal};
 use crate::values::{
     CandidateRef, CompositionFinding, Evidence, LandingReceipt, OperatorHold, ResolutionClaim, SpendQuiesce, Wedge,
 };
@@ -109,6 +109,11 @@ pub struct BloomView {
     /// the field still decodes.
     #[serde(default)]
     pub operator_hold: Option<OperatorHold>,
+    /// Why the bloom's fold refused, once it has (ADR-0206). `None` while the
+    /// fold has not refused — an ordinary bloom stays unchanged. Trailing and
+    /// `#[serde(default)]` so a reader that predates the field still decodes.
+    #[serde(default)]
+    pub blocker: Option<RecordedRefusal>,
 }
 
 /// The composition workpiece's outward line: the cursor a weave repair sits

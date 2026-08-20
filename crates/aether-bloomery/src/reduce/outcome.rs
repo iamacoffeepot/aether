@@ -633,6 +633,14 @@ pub enum Outcome {
     },
     /// A member machinery-fault admission was refused.
     MemberExecutorFaultRejected(MemberExecutorFaultError),
+    /// The integrate fold refused at a named guard (ADR-0206). Appended so
+    /// every prior outcome keeps its wire discriminant.
+    FoldRefused {
+        /// The bloom whose fold refused.
+        bloom: BloomId,
+    },
+    /// A fold-refusal admission was refused — no sealed bloom with that id.
+    FoldRefusalRejected,
 }
 
 impl Outcome {

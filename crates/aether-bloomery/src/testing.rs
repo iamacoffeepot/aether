@@ -219,6 +219,7 @@ impl Default for BloomView {
             review_park: None,
             composition: None,
             operator_hold: None,
+            blocker: None,
         }
     }
 }
