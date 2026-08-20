@@ -208,3 +208,65 @@ Create then show.\n",
         }
     }
 }
+
+#[test]
+fn approve_refuses_an_uncommissioned_dependency() {
+    let dir = temp_dir();
+    let policy = dir.path().join("policy.toml");
+    write_file(&policy, b"default = \"judge\"\n");
+    let (http_port, _coordinator) = spawn_ready(utf8_path(&policy));
+
+    let intent = dir.path().join("intent.txt");
+    write_file(&intent, b"ship a scoped workpiece");
+    cli(http_port, &["create", "--id", "issue-5286", "--intent-file", utf8_path(&intent)])
+        .unwrap_or_else(|error| panic!("create: {error}"));
+
+    let scope = dir.path().join("scope.md");
+    write_file(
+        &scope,
+        b"\
+## Problem statement\n\
+\n\
+Need a dependency check.\n\
+\n\
+## Design notes\n\
+\n\
+Refuse at approve.\n\
+\n\
+## Implementation plan\n\
+\n\
+Gate the live approve door.\n\
+\n\
+**Size:** m\n\
+**Implementation model:** grok-4.6\n\
+**Routing reason:** focused store check\n\
+\n\
+## Depends on\n\
+\n\
+- issue-ghost\n\
+\n\
+## Declared surface\n\
+\n\
+```text\n\
+crates/aether-chassis-bloomery/src/store/commission/**\n\
+```\n",
+    );
+    let scope_out = cli(http_port, &["scope", "issue-5286", "--file", utf8_path(&scope)])
+        .unwrap_or_else(|error| panic!("scope: {error}"));
+    let digest = first_token(&scope_out).to_owned();
+    assert_eq!(digest.len(), 64, "scope prints a hex digest: {scope_out}");
+
+    let envelope = dir.path().join("approve.json");
+    write_file(&envelope, &envelope_for(AuthorityDoor::Approve, &digest));
+    match cli(http_port, &["approve", "issue-5286", "--scope", &digest, "--envelope", utf8_path(&envelope)]) {
+        Ok(output) => panic!("uncommissioned dependency must be refused, got {output}"),
+        Err(error) => {
+            let message = error.to_string();
+            assert!(
+                message.contains("400:"),
+                "an uncommissioned dependency is a 400, not a transport error: {message}"
+            );
+            assert!(message.contains("issue-ghost"), "refusal names the missing workpiece: {message}");
+        }
+    }
+}
