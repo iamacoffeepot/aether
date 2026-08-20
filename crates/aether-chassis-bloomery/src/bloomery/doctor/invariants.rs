@@ -230,6 +230,13 @@ pub struct LiveState<'a> {
     pub correspondence: &'a [(Digest, BackendObjectId)],
     /// Landed bloom → the head `Fact::Land` recorded for it.
     pub landed_heads: &'a [(BloomId, Digest)],
+    /// Journal sequence of each bloom's Land fact. A missing entry is no
+    /// record evidence — unknown-era stays fail-closed.
+    pub land_sequences: &'a [(BloomId, u64)],
+    /// Journaled `Fact::ObserveMainline` and `Fact::Land` heads, with the
+    /// sequence they were recorded at. The current-era cut is the earliest
+    /// of these whose head is an ancestor of the live daily.
+    pub journaled_heads: &'a [(Digest, u64)],
     /// Whether `to` is `from` or a descendant. `None` when the source cannot
     /// answer ancestry (unconfigured, or a digest has no correspondence).
     pub ancestry: Option<&'a Ancestry<'a>>,
@@ -395,9 +402,32 @@ fn landed_resolution_is_ancestor(live: &LiveState<'_>) -> Vec<String> {
 /// [`Invariant::ObservedHeadEqualsDailyHead`] compare live pointers, not historical lands
 /// — a post-roll mismatch there is a missed observation, not rewritten
 /// history, and stays in scope. Unknown era (missing record, ancestry that
-/// does not resolve) stays in the check so a current-era defect cannot hide.
+/// does not resolve) stays in the check so a current-era defect cannot hide,
+/// unless the Land fact itself was journaled before the current daily's cut —
+/// the earliest journaled head that is an ancestor of the live daily. A pre-cut
+/// Land is pre-roll by record even when its objects no longer resolve; no such
+/// record evidence stays fail-closed.
 fn landed_in_current_era(live: &LiveState<'_>, bloom: &BloomId, daily: Digest, ancestry: &Ancestry<'_>) -> bool {
-    live.snapshot.blooms.get(bloom).and_then(|record| ancestry(&record.spec.base(), &daily)).unwrap_or(true)
+    match live.snapshot.blooms.get(bloom).and_then(|record| ancestry(&record.spec.base(), &daily)) {
+        Some(in_era) => in_era,
+        None => !land_is_pre_cut(live, bloom, daily, ancestry),
+    }
+}
+
+/// A Land journaled before the current daily's cut is pre-roll by record.
+/// No Land sequence, or no current-era journaled head, is not evidence.
+fn land_is_pre_cut(live: &LiveState<'_>, bloom: &BloomId, daily: Digest, ancestry: &Ancestry<'_>) -> bool {
+    let Some(cut) = current_era_cut(live, daily, ancestry) else {
+        return false;
+    };
+    live.land_sequences.iter().find(|(id, _)| id == bloom).is_some_and(|(_, sequence)| *sequence < cut)
+}
+
+fn current_era_cut(live: &LiveState<'_>, daily: Digest, ancestry: &Ancestry<'_>) -> Option<u64> {
+    live.journaled_heads
+        .iter()
+        .filter_map(|(head, sequence)| (ancestry(head, &daily) == Some(true)).then_some(*sequence))
+        .min()
 }
 
 fn observed_head_equals_daily_head(live: &LiveState<'_>) -> Vec<String> {
@@ -577,6 +607,8 @@ mod tests {
             actual_head_sha: None,
             correspondence: &[],
             landed_heads: &[],
+            land_sequences: &[],
+            journaled_heads: &[],
             ancestry: None,
             replica: &[],
             outstanding: &[],
@@ -726,10 +758,76 @@ mod tests {
         assert!(!named.contains(&hex_of(&pre.id().0)), "a previous day's land is not named: {named}");
     }
 
+    #[test]
+    fn an_unresolvable_pre_cut_land_is_out_of_jurisdiction() {
+        // Tripwire: pre-flip blooms landed via the retired GitHub pull-request
+        // flow have resolution objects that no longer resolve anywhere. Their
+        // era is permanently unknowable, so fail-closed on unknown era stays
+        // red on dead history. A Land journaled before the current daily's
+        // cut is pre-roll by record even when ancestry cannot answer.
+        let pre = draft(1, vec![membership("issue-pre-flip", 1)]).seal();
+        let mut snapshot = Snapshot::default();
+        splice_bloom(&mut snapshot, &pre, BloomStatus::Landed);
+        let landed = [(pre.id(), digest(2))];
+        let land_sequences = [(pre.id(), 3)];
+        let journaled_heads = [(digest(1), 1), (digest(10), 50)];
+        let ancestry = unresolvable_except_identity();
+        let mut state = live(&snapshot, &[]);
+        state.actual_head = Some(digest(10));
+        state.landed_heads = &landed;
+        state.land_sequences = &land_sequences;
+        state.journaled_heads = &journaled_heads;
+        state.ancestry = Some(&ancestry);
+
+        let report = evaluate(&state);
+        let check =
+            report.named(Invariant::LandedResolutionIsAncestor.name()).expect("the seed list includes landed ancestry");
+        assert!(check.passed, "a pre-cut unresolvable land is out of jurisdiction: {check:?}");
+    }
+
+    #[test]
+    fn an_unresolvable_land_without_pre_cut_evidence_is_named() {
+        // Unknown era stays fail-closed unless the Land itself is pre-cut.
+        // No journal sequence, or a sequence at/after the cut, is a current-era
+        // defect hiding behind an unresolvable object.
+        let missing = draft(1, vec![membership("issue-missing-record", 1)]).seal();
+        let post = draft(3, vec![membership("issue-post-cut", 1)]).seal();
+        let pre = draft(5, vec![membership("issue-pre-cut", 1)]).seal();
+        let mut snapshot = Snapshot::default();
+        splice_bloom(&mut snapshot, &missing, BloomStatus::Landed);
+        splice_bloom(&mut snapshot, &post, BloomStatus::Landed);
+        splice_bloom(&mut snapshot, &pre, BloomStatus::Landed);
+        let landed = [(missing.id(), digest(2)), (post.id(), digest(4)), (pre.id(), digest(6))];
+        let land_sequences = [(post.id(), 80), (pre.id(), 3)];
+        let journaled_heads = [(digest(10), 50)];
+        let ancestry = unresolvable_except_identity();
+        let mut state = live(&snapshot, &[]);
+        state.actual_head = Some(digest(10));
+        state.landed_heads = &landed;
+        state.land_sequences = &land_sequences;
+        state.journaled_heads = &journaled_heads;
+        state.ancestry = Some(&ancestry);
+
+        let report = evaluate(&state);
+        let check =
+            report.named(Invariant::LandedResolutionIsAncestor.name()).expect("the seed list includes landed ancestry");
+        assert!(!check.passed, "unknown era without pre-cut evidence is a violation: {check:?}");
+        let named = check.divergences.join(" ");
+        assert!(named.contains(&hex_of(&missing.id().0)), "no land-record evidence stays in scope: {named}");
+        assert!(named.contains(&hex_of(&post.id().0)), "a post-cut record stays in scope: {named}");
+        assert!(!named.contains(&hex_of(&pre.id().0)), "a pre-cut land is not named: {named}");
+    }
+
     /// Today's daily ref is `9 → 10`. Yesterday's `1 → 2` is a parallel history
     /// the roll rewrote out from under.
     fn current_era_chain() -> impl Fn(&aether_bloomery::Digest, &aether_bloomery::Digest) -> Option<bool> {
         |from, to| Some(*from == *to || (*from == digest(9) && *to == digest(10)))
+    }
+
+    /// Ancestry answers only identity. Anything else is the unknown-era arm —
+    /// the four pre-flip blooms whose resolution objects no longer resolve.
+    fn unresolvable_except_identity() -> impl Fn(&aether_bloomery::Digest, &aether_bloomery::Digest) -> Option<bool> {
+        |from, to| (*from == *to).then_some(true)
     }
 
     fn hex_of(digest: &aether_bloomery::Digest) -> String {
