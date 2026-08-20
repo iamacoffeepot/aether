@@ -75,28 +75,30 @@ impl EvidenceClaims for NameEvidenceClaims {
         let mut fields = rest.splitn(5, '.');
         let verdict = verdict_from_token(fields.next()?)?;
         let mask_or_subject = fields.next()?;
-        let (failed_verifiers, subject, detail, _named_nonce) = if mask_or_subject.len() == 2 {
-            // A two-character token sits in the mask position, so it must be a
-            // canonical ADR-0178 mask; anything else is a malformed attempt
-            // name and buys no upload.
-            (
-                VerifyFailureSet::from_mask(mask_or_subject)?,
-                Digest::from_hex(fields.next()?)?,
-                Digest::from_hex(fields.next()?)?,
-                fields.next()?,
-            )
-        } else {
-            // The credential-bearing model wrapper is outside the mechanical
-            // ADR-0178 lane and still emits the pre-mask name shape. Preserve
-            // that non-Verify transport as an empty failure set; a malformed
-            // short mask cannot take this path because a subject is 64 hex.
-            (
-                VerifyFailureSet::EMPTY,
-                Digest::from_hex(mask_or_subject)?,
-                Digest::from_hex(fields.next()?)?,
-                fields.next()?,
-            )
-        };
+        let (failed_verifiers, subject, detail, _named_nonce) =
+            if mask_or_subject.len() == 2 || mask_or_subject.len() == 4 {
+                // A two- or four-character token sits in the mask position, so it
+                // must be a canonical ADR-0178/ADR-0209 mask; anything else is a
+                // malformed attempt name and buys no upload. A subject is 64 hex,
+                // so neither width is ambiguous against it.
+                (
+                    VerifyFailureSet::from_mask(mask_or_subject)?,
+                    Digest::from_hex(fields.next()?)?,
+                    Digest::from_hex(fields.next()?)?,
+                    fields.next()?,
+                )
+            } else {
+                // The credential-bearing model wrapper is outside the mechanical
+                // ADR-0178 lane and still emits the pre-mask name shape. Preserve
+                // that non-Verify transport as an empty failure set; a malformed
+                // short mask cannot take this path because a subject is 64 hex.
+                (
+                    VerifyFailureSet::EMPTY,
+                    Digest::from_hex(mask_or_subject)?,
+                    Digest::from_hex(fields.next()?)?,
+                    fields.next()?,
+                )
+            };
         // The nonce, candidate, findings, and cost are authoritative from the
         // reference (what the port matched the run by / what the backend read
         // out of the run's own evidence), not the name. The failure set is the
@@ -122,6 +124,7 @@ impl EvidenceClaims for NameEvidenceClaims {
             session_reuse_arm: reference.session_reuse_arm.clone(),
             session_reuse_saved_micro_usd: reference.session_reuse_saved_micro_usd,
             peak_resident_bytes: reference.peak_resident_bytes,
+            violating_paths: reference.violating_paths.clone(),
         })
     }
 }

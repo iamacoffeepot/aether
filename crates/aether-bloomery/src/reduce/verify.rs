@@ -88,7 +88,7 @@ pub(super) fn reduce_verify_failed(
     let seen_verify_failures = cursor.seen_verify_failures.union(failed_verifiers);
     let rolls = cursor.repair_rolls + u32::from(!repeated_verifiers.is_empty());
 
-    // The loop is bounded by N + B: V1 has N = 8 identities, so at most eight
+    // The loop is bounded by N + B: V1 has N = 9 identities, so at most nine
     // failed verdicts can add a new identity without spending a roll; at most B
     // later verdicts can spend the sealed Verify budget before this member wedges.
     if !repeated_verifiers.is_empty() && rolls >= record.stage_catalog.retry_budget_of(StageId::Verify).unwrap_or(1) {

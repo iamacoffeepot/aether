@@ -2523,7 +2523,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
     #[test]
     fn preflight_has_its_own_synthetic_failure_identity() {
         let failures = VerifyFailureSet::one(VerifyFailure::Preflight);
-        assert_eq!(failures.to_mask(), "01");
+        assert_eq!(failures.to_mask(), "0001");
         assert!(!failures.contains(VerifyFailure::Fmt), "missing tools are not attributed to a member");
     }
 

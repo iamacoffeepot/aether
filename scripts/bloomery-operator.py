@@ -178,6 +178,7 @@ VERIFY_FAILURE_NAMES = (
     "verify.dup",
     "verify.deps",
     "verify.suppress",
+    "verify.containment",
 )
 
 # Typed machinery facts/outcomes. The aggregate-review pair already exists in
