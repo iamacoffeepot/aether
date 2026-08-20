@@ -103,10 +103,10 @@ impl<T> Outcome<T> {
     }
 }
 
-/// An empty vector the [`reads!`](crate::reads) macro fills.
+/// Collect a guard's named reads.
 #[must_use]
-pub fn reads_vec() -> Vec<Read> {
-    Vec::new()
+pub fn reads_of<const N: usize>(reads: [Read; N]) -> Vec<Read> {
+    Vec::from(reads)
 }
 
 /// Render a guard's consulted value.
@@ -151,10 +151,7 @@ impl Gate {
     ///
     /// `effect` runs only when every guard held.
     pub fn decide<T>(self, effect: impl FnOnce() -> T) -> Outcome<T> {
-        match self.refusal {
-            Some(refusal) => Outcome(Err(refusal)),
-            None => Outcome(Ok(effect())),
-        }
+        Outcome(self.refusal.map_or_else(|| Ok(effect()), Err))
     }
 }
 
@@ -165,17 +162,14 @@ impl Gate {
 /// ```
 #[macro_export]
 macro_rules! reads {
-    ($($field:ident: $value:expr),* $(,)?) => {{
-        #[allow(unused_mut)]
-        let mut reads = $crate::reduce::gate::reads_vec();
-        $(
-            reads.push($crate::reduce::gate::Read {
+    ($($field:ident: $value:expr),* $(,)?) => {
+        $crate::reduce::gate::reads_of([
+            $($crate::reduce::gate::Read {
                 field: stringify!($field),
                 value: $crate::reduce::gate::render(&$value),
-            });
-        )*
-        reads
-    }};
+            },)*
+        ])
+    };
 }
 
 #[cfg(test)]

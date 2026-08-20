@@ -434,7 +434,7 @@ mod tests {
         };
         let refused = Event {
             idempotency_key: IdempotencyKey("fold-refused".into()),
-            fact: Fact::FoldRefused { bloom, refusal: refusal },
+            fact: Fact::FoldRefused { bloom, refusal },
         };
         snapshot = snapshot.apply(&refused, &reduce(&snapshot, &refused, &configs, &spend), &configs);
 
