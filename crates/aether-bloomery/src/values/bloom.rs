@@ -77,12 +77,34 @@ impl Membership {
 /// One directed member-dependency edge (ADR-0196): `member` cannot start until
 /// `depends_on` has resolved. The pair is the wire value the seal's effect
 /// vocabulary journals — `Membership` does not carry it.
+///
+/// Dispatch gates on **declared** edges only (ADR-0204). A surface-derived
+/// overlap edge still appears in [`ResolvedDependencies::edges`] so a
+/// declared edge against that ordering is still a named cycle, but it does
+/// not hold a member out of Construct.
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub struct MemberDependency {
     /// The dependent workpiece.
     pub member: WorkpieceId,
     /// The workpiece it waits for.
     pub depends_on: WorkpieceId,
+}
+
+/// The door-resolved member graph, split by provenance (ADR-0204).
+///
+/// [`edges`](Self::edges) is the union: declared edges plus one ordering
+/// edge per overlapping surface pair, in canonical workpiece order. Cycle
+/// detection walks this set. [`declared`](Self::declared) is the authored
+/// subset — the only edges the door journals and the reducer uses to gate
+/// construct dispatch. Derived overlap edges are not dispatch gates;
+/// integration and fold still read sealed member order, which is the same
+/// later-depends-on-earlier sequence the derived edges named.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ResolvedDependencies {
+    /// Declared ∪ derived, sorted and de-duplicated. Cycle-checked.
+    pub edges: Vec<MemberDependency>,
+    /// Authored edges only, sorted and de-duplicated. Dispatch gates.
+    pub declared: Vec<MemberDependency>,
 }
 
 /// Why a seal's member-dependency graph was refused (ADR-0196).
@@ -102,15 +124,16 @@ pub enum DependencyError {
 /// The later-canonical member of an overlapping pair depends on the earlier
 /// one — the same leading key [`BloomDraft::seal`] sorts memberships on — so
 /// two listings of the same set produce the same graph. Declared-edge
-/// endpoints are still validated against the unsorted member set. The
-/// returned set is sorted and de-duplicated so two seals that decide the
-/// same graph journal the same bytes.
+/// endpoints are still validated against the unsorted member set. Both
+/// returned sets are sorted and de-duplicated so two seals that decide the
+/// same graph journal the same bytes. Cycle detection walks the union:
+/// a declared edge against the grain of a derived overlap is still a loop.
 pub fn resolve_member_dependencies(
     members: &[(WorkpieceId, &[String])],
     declared: &[MemberDependency],
-) -> Result<Vec<MemberDependency>, DependencyError> {
+) -> Result<ResolvedDependencies, DependencyError> {
     let ids: BTreeSet<&WorkpieceId> = members.iter().map(|(id, _)| id).collect();
-    let mut edges = BTreeSet::new();
+    let mut authored = BTreeSet::new();
     for edge in declared {
         if !ids.contains(&edge.member) {
             return Err(DependencyError::UnknownWorkpiece(edge.member.clone()));
@@ -118,8 +141,9 @@ pub fn resolve_member_dependencies(
         if !ids.contains(&edge.depends_on) {
             return Err(DependencyError::UnknownWorkpiece(edge.depends_on.clone()));
         }
-        edges.insert(edge.clone());
+        authored.insert(edge.clone());
     }
+    let mut edges = authored.clone();
     let mut ordered: Vec<_> = members.iter().collect();
     ordered.sort_by(|left, right| left.0.cmp(&right.0));
     for (index, (workpiece, surface)) in ordered.iter().enumerate() {
@@ -129,8 +153,11 @@ pub fn resolve_member_dependencies(
             }
         }
     }
-    let resolved: Vec<MemberDependency> = edges.into_iter().collect();
-    dependency_cycle(&resolved).map_or(Ok(resolved), |cycle| Err(DependencyError::Cycle(cycle)))
+    let edges: Vec<MemberDependency> = edges.into_iter().collect();
+    if let Some(cycle) = dependency_cycle(&edges) {
+        return Err(DependencyError::Cycle(cycle));
+    }
+    Ok(ResolvedDependencies { edges, declared: authored.into_iter().collect() })
 }
 
 const WHITE: u8 = 0;
@@ -397,7 +424,8 @@ mod tests {
 
         let resolved = resolve_member_dependencies(&members, &[]).expect("acyclic");
 
-        assert_eq!(resolved, [edge("wp-b", "wp-a")], "one overlapping pair is one later-depends-on-earlier edge");
+        assert_eq!(resolved.edges, [edge("wp-b", "wp-a")], "one overlapping pair is one later-depends-on-earlier edge");
+        assert!(resolved.declared.is_empty(), "an overlap is not a declared dispatch gate");
     }
 
     #[test]
@@ -415,7 +443,8 @@ mod tests {
         for order in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
             let members = [named[order[0]].clone(), named[order[1]].clone(), named[order[2]].clone()];
             let resolved = resolve_member_dependencies(&members, &[]).expect("acyclic");
-            assert_eq!(resolved, expected, "permutation must match the canonical edge list");
+            assert_eq!(resolved.edges, expected, "permutation must match the canonical edge list");
+            assert!(resolved.declared.is_empty(), "overlap-only permutation journals no declared gate");
         }
     }
 
@@ -434,7 +463,8 @@ mod tests {
         for order in [[0, 1, 2], [2, 1, 0], [1, 2, 0]] {
             let members = [named[order[0]].clone(), named[order[1]].clone(), named[order[2]].clone()];
             let resolved = resolve_member_dependencies(&members, &declared).expect("acyclic");
-            assert_eq!(resolved, expected);
+            assert_eq!(resolved.edges, expected);
+            assert_eq!(resolved.declared, declared, "a disjoint declared edge is not dropped by overlap derivation");
         }
     }
 
@@ -452,7 +482,32 @@ mod tests {
         let resolved =
             resolve_member_dependencies(&members, &[edge("wp-b", "wp-a"), edge("wp-c", "wp-a")]).expect("acyclic");
 
-        assert_eq!(resolved, [edge("wp-b", "wp-a"), edge("wp-c", "wp-a")]);
+        assert_eq!(resolved.edges, [edge("wp-b", "wp-a"), edge("wp-c", "wp-a")]);
+        assert_eq!(
+            resolved.declared,
+            [edge("wp-b", "wp-a"), edge("wp-c", "wp-a")],
+            "a declared edge that surfaces also derive stays declared"
+        );
+    }
+
+    #[test]
+    fn a_declared_edge_against_a_derived_overlap_is_still_a_cycle() {
+        // Derived B→A (canonical overlap order) plus declared A→B is a loop.
+        // Checking only the declared subset would admit it, then journal a
+        // graph no scheduler can fire.
+        let bloom = ["crates/aether-bloomery/**".to_owned()];
+        let file = ["crates/aether-bloomery/src/lib.rs".to_owned()];
+        let members = [(wp("wp-a"), bloom.as_slice()), (wp("wp-b"), file.as_slice())];
+
+        match resolve_member_dependencies(&members, &[edge("wp-a", "wp-b")]) {
+            Err(DependencyError::Cycle(cycle)) => {
+                assert!(
+                    cycle.contains(&wp("wp-a")) && cycle.contains(&wp("wp-b")),
+                    "cycle names both members: {cycle:?}"
+                );
+            }
+            other => panic!("expected a named cycle, got {other:?}"),
+        }
     }
 
     #[test]

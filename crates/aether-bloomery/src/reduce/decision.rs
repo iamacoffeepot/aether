@@ -599,15 +599,16 @@ pub enum Decision {
     /// Record the door-resolved member-dependency graph (ADR-0196) — see
     /// [`BloomRecord::dependencies`](crate::BloomRecord::dependencies).
     ///
-    /// The edge set the seal door decided: declared edges unioned with derived
-    /// overlap-ordering edges. Empty is the edgeless degenerate case — today's
-    /// bloom, with this value appended. Snapshot-folding and journal-derived
-    /// like every other `Record*`. Appended so the prior decisions' wire
-    /// discriminants are unchanged.
+    /// The edge set the seal door decided. Dispatch gates on declared edges
+    /// only (ADR-0204); a surface-derived overlap is not in this list. Empty
+    /// is the edgeless degenerate case — today's bloom, with this value
+    /// appended. Snapshot-folding and journal-derived like every other
+    /// `Record*`. Appended so the prior decisions' wire discriminants are
+    /// unchanged.
     RecordMemberDependencies {
         /// The bloom the graph was sealed on.
         bloom: BloomId,
-        /// The resolved `(member, depends_on)` pairs, sorted and de-duplicated.
+        /// The declared `(member, depends_on)` pairs, sorted and de-duplicated.
         edges: Vec<MemberDependency>,
     },
     /// Record that `workpiece` is held at Verify because the host could not

@@ -32,7 +32,7 @@ pub use adr::{ADR_SCHEMA, ADR_TRANSITION_SCHEMA, Adr, AdrStatus, AdrTransition, 
 pub use approval::{ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, surface_intersection};
 pub use bloom::{
     BloomDraft, BloomSpec, DependencyError, LandingReceipt, MemberCandidate, MemberDependency, MemberSubject,
-    Membership, ResolutionClaim, ResolvedBloom, resolve_member_dependencies,
+    Membership, ResolutionClaim, ResolvedBloom, ResolvedDependencies, resolve_member_dependencies,
 };
 pub use commission::{
     CommissionApprovalTier, CommissionStatementRole, CommissionStatus, CommissionValueError, SCOPE_REVISION_SCHEMA,
