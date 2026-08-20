@@ -17,6 +17,9 @@ use crate::transform::sccache::{self, CompilerCache};
 use crate::transform::scratch::Scratch;
 use crate::transform::{TransformArgs, conventions};
 
+/// The harness's runner-facing name, for the binary and for error text.
+const CLAUDE: &str = "claude";
+
 /// Absolute path to the construct lane's Claude permission policy (#5172).
 /// Resolved against this crate's manifest so the child reads the copy that
 /// rode into the scratch worktree with the sealed base, not a cwd-relative
@@ -171,6 +174,19 @@ pub(super) fn run_headless_claude(
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
 ) -> Result<serde_json::Value> {
+    run_headless_claude_at(CLAUDE, prompt, args, scratch, cache, peak)
+}
+
+/// [`run_headless_claude`] against an explicit `program` — production passes
+/// [`CLAUDE`]; tests pass a grammar-recording stand-in.
+fn run_headless_claude_at(
+    program: &str,
+    prompt: &str,
+    args: &TransformArgs,
+    scratch: &Scratch,
+    cache: Option<&CompilerCache>,
+    peak: &PeakMemory,
+) -> Result<serde_json::Value> {
     fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
 
     // Run headless Claude at the resolved model and reasoning effort — both the
@@ -180,7 +196,7 @@ pub(super) fn run_headless_claude(
     // Under the host's peak-memory wrapper when it has one (#4912): what a
     // construct lane costs in RAM is the builds its agent drives, and the
     // wrapper's reading covers the whole reaped tree rather than this process.
-    let mut claude = peak.command("claude");
+    let mut claude = peak.command(program);
     let mut flags = if args.command == REVIEW_CRITIC {
         review_argv(args.model.as_deref(), args.effort.as_deref(), args.resume.as_deref())
     } else {
@@ -215,7 +231,7 @@ pub(super) fn run_headless_claude(
         // the operational failure the comment above names; retrying that
         // cold would double the spend this pool exists to cut. Any streamed
         // byte is already a transcript, so this degrade stays empty-only.
-        return run_headless_claude(prompt, &without_resume(args), scratch, cache, peak);
+        return run_headless_claude_at(program, prompt, &without_resume(args), scratch, cache, peak);
     }
     if !run.status.success() {
         bail!(
@@ -234,11 +250,17 @@ pub(super) fn run_headless_claude(
 mod tests {
     use std::path::PathBuf;
     use std::process::Command;
+    use std::str;
     use std::{env, fs, process};
 
-    use super::{CONSTRUCT_SETTINGS, REVIEW_SETTINGS, construct_argv, review_argv, tail};
+    use super::{CONSTRUCT_SETTINGS, REVIEW_SETTINGS, construct_argv, review_argv, run_headless_claude_at, tail};
+    use crate::transform::TransformArgs;
+    use crate::transform::construct::CONSTRUCT_IMPLEMENT;
+    use crate::transform::harness_stub::{self, Stub};
     use crate::transform::lane::{execute, resume_handle_rejected};
     use crate::transform::peak_memory;
+    use crate::transform::review::REVIEW_CRITIC;
+    use crate::transform::scratch::Scratch;
 
     #[test]
     fn tail_snaps_to_a_char_boundary_without_panicking() {
@@ -401,5 +423,80 @@ mod tests {
             "streamed output must not relaunch cold"
         );
         assert_eq!(run.stdout, b"{\"type\":\"result\"}\n");
+    }
+
+    fn drive(stub: &Stub, args: &TransformArgs, prompt: &str) -> anyhow::Result<serde_json::Value> {
+        let scratch = Scratch::prepare(&args.out, args.nonce.as_deref()).expect("scratch");
+        run_headless_claude_at(stub.program(), prompt, args, &scratch, None, &peak_memory::detect())
+    }
+
+    fn assert_headless_claude(launch: &harness_stub::Launch, settings: &str) {
+        assert_eq!(launch.argv.first().map(String::as_str), Some("-p"), "headless, non-interactive");
+        assert_eq!(launch.flag("--settings"), Some(settings), "the lane policy rides argv as a path");
+        assert!(
+            launch.argv.windows(2).any(|w| w == ["--output-format", "stream-json"]),
+            "emits the stream-json transcript"
+        );
+    }
+
+    // Tripwire: the critic's MCP flags are appended after `review_argv` returns,
+    // so a vector assertion over that helper cannot see them. Deleting the
+    // `review_mcp::prepare` call leaves the suite green while every critic
+    // silently loses `report_finding` and its findings file.
+    #[test]
+    fn a_cold_construct_launch_pipes_the_prompt_and_does_not_inject_mcp() {
+        let stub = Stub::succeed();
+        let args = harness_stub::args(CONSTRUCT_IMPLEMENT, stub.out());
+        let prompt = "assembled construct prompt";
+        let record = drive(&stub, &args, prompt).expect("cold construct");
+
+        let launches = stub.launches();
+        assert_eq!(launches.len(), 1, "a cold launch forks once");
+        assert_headless_claude(&launches[0], CONSTRUCT_SETTINGS);
+        assert!(!launches[0].has("--mcp-config"), "construct does not inject the review report server");
+        assert_eq!(launches[0].stdin, prompt.as_bytes(), "the assembled prompt reaches stdin byte-for-byte");
+        assert_eq!(record["session_id"], "stub-session-1");
+    }
+
+    #[test]
+    fn a_review_launch_injects_mcp_config_and_the_read_only_settings() {
+        let stub = Stub::succeed();
+        let args = harness_stub::args(REVIEW_CRITIC, stub.out());
+        let record = drive(&stub, &args, "assembled review prompt").expect("review critic");
+
+        let launches = stub.launches();
+        assert_eq!(launches.len(), 1, "a cold critic forks once");
+        assert_headless_claude(&launches[0], REVIEW_SETTINGS);
+        let config = launches[0].flag("--mcp-config").expect("the critic names its MCP config");
+        assert!(launches[0].has("--strict-mcp-config"), "the critic refuses an unreadable MCP config");
+        let path = PathBuf::from(config);
+        assert!(path.exists(), "the named MCP config must exist on disk");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("read mcp config")).expect("mcp config is JSON");
+        assert!(parsed.get("mcpServers").is_some(), "the config is the Claude MCP object");
+        assert_eq!(record["session_id"], "stub-session-1");
+    }
+
+    // Tripwire: a refused resume handle must fall back to one cold relaunch of
+    // the same stand-in, not a second billed turn under the dead session.
+    #[test]
+    fn a_refused_resume_relaunches_cold_without_the_handle() {
+        let stub = Stub::first_launch_refuses();
+        let mut args = harness_stub::args(CONSTRUCT_IMPLEMENT, stub.out());
+        args.resume = Some("sess-1".to_owned());
+        let prompt = "assembled construct prompt";
+        let record = drive(&stub, &args, prompt).expect("refused resume falls back cold");
+
+        let launches = stub.launches();
+        assert_eq!(launches.len(), 2, "the refused handle is one extra fork, not a loop");
+        assert_eq!(launches[0].flag("--resume"), Some("sess-1"), "the first fork names the handle");
+        assert!(!launches[1].has("--resume"), "the fallback is a cold launch");
+        let resumed = str::from_utf8(&launches[0].stdin).expect("stdin utf-8");
+        assert!(
+            resumed.contains("The working tree was reset since the previous attempt"),
+            "the resumed lap tells the model the tree was reset"
+        );
+        assert_eq!(launches[1].stdin, prompt.as_bytes(), "the cold fallback pipes the assembled prompt");
+        assert_eq!(record["session_id"], "stub-session-2", "the record is derived from the second transcript");
     }
 }
