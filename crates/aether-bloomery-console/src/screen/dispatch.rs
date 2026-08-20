@@ -76,7 +76,6 @@ impl DispatchList {
                 .filter(|nonce| !nonce.is_empty())
                 .cloned()
                 .map_or(Outcome::Handled, |nonce| Outcome::Push(Nav::transcript(nonce))),
-            KeyCode::Esc => Outcome::Handled,
             KeyCode::Char('r') => Outcome::Refresh,
             KeyCode::Char('q') => Outcome::Quit,
             _ => Outcome::Ignored,
@@ -158,7 +157,9 @@ mod tests {
     use crate::dto::{BloomDispatchView, BloomDispatchesView, DigestHex, StageId};
     use crate::keys::{Outcome, assert_footer_honest};
     use crate::nav::Nav;
+    use crate::shell::Shell;
     use crate::store::Store;
+    use crate::warroom::Focus;
     use crossterm::event::{KeyCode, KeyEvent};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -222,10 +223,9 @@ mod tests {
     fn dispatch_list_footer_keys_are_handled() {
         // The plausible bug: the footer paints Enter while the match still
         // routes to the titled detail frame, so the advertised key is a no-op.
-        let store = Store::new(Duration::from_secs(1));
-        let mut list = DispatchList::new(digest(1), "wp-a");
+        let nav = Nav::focus(Focus::dispatch(digest(1), "wp-a"));
         assert_footer_honest(DispatchList::key_hints(), |code| {
-            list.handle_key(KeyEvent::from(code), &store) != Outcome::Ignored
+            Shell::probe(nav.clone()).handle_key(KeyEvent::from(code)) != Outcome::Ignored
         });
     }
 

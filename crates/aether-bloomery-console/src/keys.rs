@@ -58,6 +58,7 @@ fn parse_key_token(token: &str) -> KeyCode {
     match token.trim() {
         "Esc" | "esc" => KeyCode::Esc,
         "Enter" | "enter" => KeyCode::Enter,
+        "Tab" | "tab" => KeyCode::Tab,
         "Up" => KeyCode::Up,
         "Down" => KeyCode::Down,
         other => {

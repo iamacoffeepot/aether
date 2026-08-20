@@ -1,21 +1,20 @@
-//! Shell: endpoint, store, fetch lanes, chrome, filter, and the screen stack.
+//! Shell: endpoint, store, fetch lanes, a four-pane workspace, and pushed frames.
 //!
 //! Screens receive the store read-only and cannot fetch or mutate it.
-//! Alert band, interrupt queue, and status line are chrome — they render
-//! at every stack depth.
+//! At rest the workspace owns the operator's seat; a drill-in replaces it
+//! with the top pushed frame. The one-line footer stays in both cases.
 
 pub mod chrome;
+mod workspace;
 
 use std::thread;
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::widgets::Block;
 
-use crate::cursor::Cursor;
-use crate::dto::ViewDocument;
 use crate::fetch::{FetchLanes, FetchReply, ResourceBody};
 use crate::http::Endpoint;
 use crate::keys::{KeyHint, Outcome};
@@ -23,28 +22,29 @@ use crate::nav::Nav;
 use crate::palette;
 use crate::screen::{Screen, compose};
 use crate::store::{ResourceKey, Store};
-use crate::warroom::{self, Alert, ChromeId, Focus, Interrupt};
+use crate::warroom::Focus;
+use workspace::Workspace;
 
 #[cfg(test)]
-use crate::dto::{BloomDispatchesView, DigestHex};
+use crate::dto::{BloomDispatchesView, DigestHex, ViewDocument};
 #[cfg(test)]
 use crate::fetch::FetchProbe;
 #[cfg(test)]
 use crate::screen::Board;
+#[cfg(test)]
+use crate::warroom::ChromeId;
+#[cfg(test)]
+use workspace::PaneId;
 
-const ENTER_HINT: KeyHint = KeyHint { keys: "Enter", action: "jump" };
 const ARTIFACT_HINT: KeyHint = KeyHint { keys: "a", action: "artifact" };
-const ENTER_BAND_HINT: KeyHint = KeyHint { keys: "i", action: "queue" };
-const LEAVE_BAND_HINT: KeyHint = KeyHint { keys: "Esc", action: "board" };
 
-/// The running console: one stack, one store, two fetch lanes.
+/// The running console: one workspace, one store, two fetch lanes.
 pub struct Shell {
     endpoint_label: String,
     store: Store,
     fetch: Option<FetchLanes>,
+    workspace: Workspace,
     stack: Vec<Screen>,
-    filter: String,
-    chrome: Cursor<ChromeId>,
 }
 
 impl Shell {
@@ -55,14 +55,7 @@ impl Shell {
     }
 
     fn assemble(endpoint_label: String, store: Store, fetch: Option<FetchLanes>) -> Self {
-        Self {
-            endpoint_label,
-            store,
-            fetch,
-            stack: vec![Screen::board()],
-            filter: String::new(),
-            chrome: Cursor::new(),
-        }
+        Self { endpoint_label, store, fetch, workspace: Workspace::new(), stack: Vec::new() }
     }
 
     /// Drain finished fetches and issue any due subscriptions. No HTTP.
@@ -78,86 +71,37 @@ impl Shell {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return Outcome::Quit;
         }
-        if key.code == KeyCode::Esc {
-            if self.chrome.selected().is_some() {
-                self.chrome.select(None);
-                return Outcome::Handled;
-            }
-            if self.stack.len() > 1 {
-                self.stack.pop();
-                return Outcome::Handled;
-            }
+        if key.code == KeyCode::Tab && self.stack.is_empty() {
+            self.workspace.cycle();
+            return Outcome::Handled;
         }
-
-        let ids = self.chrome_ids();
+        let outcome = self.delegate_key(key);
+        if outcome != Outcome::Ignored {
+            return outcome;
+        }
         match key.code {
-            KeyCode::Char('i') if !ids.is_empty() && self.chrome.selected().is_none() => {
-                self.chrome.select(ids.first().cloned());
+            KeyCode::Esc if !self.stack.is_empty() => {
+                self.stack.pop();
                 Outcome::Handled
             }
-            KeyCode::Char('j') if self.chrome.selected().is_some() => {
-                self.chrome_next(&ids);
-                Outcome::Handled
-            }
-            KeyCode::Char('k') if self.chrome.selected().is_some() => {
-                self.chrome.select_prev(&ids, Clone::clone);
-                Outcome::Handled
-            }
-            KeyCode::Down | KeyCode::Up => {
-                self.chrome.select(None);
-                self.delegate_key(key)
-            }
-            KeyCode::Enter => self.handle_enter(key),
             KeyCode::Char('a') => self.handle_artifact(),
-            _ => self.delegate_key(key),
+            _ => Outcome::Ignored,
         }
     }
 
     pub fn render(&mut self, frame: &mut Frame<'_>) {
         frame.render_widget(Block::default().style(palette::body()), frame.area());
-        let (alerts, interrupts) = self.bands();
-        let dashboard = compose(&self.store);
-        let filter_height = u16::from(!self.filter.is_empty());
-        let status_height = self.status_height();
-        let today_height = u16::from(!dashboard.today.is_empty());
-        let alert_height = u16::from(!alerts.is_empty());
-        let interrupt_selected = self.selected_interrupt_index(&interrupts);
-        let (interrupt_window, interrupt_highlight) = chrome::interrupt_window(&interrupts, interrupt_selected);
-        let interrupt_height = u16::try_from(interrupt_window.len()).unwrap_or(0);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(status_height),
-                Constraint::Length(today_height),
-                Constraint::Length(filter_height),
-                Constraint::Length(alert_height),
-                Constraint::Length(interrupt_height),
-                Constraint::Min(3),
-                Constraint::Length(1),
-            ])
+            .constraints([Constraint::Min(3), Constraint::Length(1)])
             .split(frame.area());
-
-        frame.render_widget(chrome::header(&self.endpoint_label, self.store.view(), Some(&dashboard)), chunks[0]);
-        if let Some(view) = self.store.view().value.as_ref() {
-            Self::render_status(frame, chunks[1], view, status_height);
+        if self.stack.is_empty() {
+            self.workspace.render(frame, chunks[0], &self.store, &self.endpoint_label);
+        } else if let Some(screen) = self.stack.last_mut() {
+            screen.render(frame, chunks[0], &self.store);
         }
-        if today_height > 0 {
-            frame.render_widget(chrome::today(&dashboard), chunks[2]);
-        }
-        if filter_height > 0 {
-            frame.render_widget(chrome::filter_line(&self.filter), chunks[3]);
-        }
-        if alert_height > 0 {
-            frame.render_widget(chrome::alert_band(&alerts, self.selected_alert_index(&alerts)), chunks[4]);
-        }
-        if interrupt_height > 0 {
-            frame.render_widget(chrome::interrupt_band(interrupt_window, interrupt_highlight), chunks[5]);
-        }
-        if let Some(screen) = self.stack.last_mut() {
-            screen.render(frame, chunks[6], &self.store);
-        }
-        frame.render_widget(chrome::footer(&self.footer_hints(), Some(&dashboard.footer)), chunks[7]);
+        let dashboard = compose(&self.store);
+        frame.render_widget(chrome::footer(&self.footer_hints(), Some(&dashboard.footer)), chunks[1]);
     }
 
     fn drain_replies(&mut self) {
@@ -296,7 +240,7 @@ impl Shell {
     }
 
     fn subscribed(&self) -> Vec<ResourceKey> {
-        let mut keys = Vec::new();
+        let mut keys = self.workspace.subscriptions();
         for screen in &self.stack {
             for key in screen.subscriptions() {
                 if !keys.contains(&key) {
@@ -308,10 +252,11 @@ impl Shell {
     }
 
     fn delegate_key(&mut self, key: KeyEvent) -> Outcome {
-        let Some(top) = self.stack.last_mut() else {
-            return Outcome::Ignored;
+        let outcome = match self.stack.last_mut() {
+            Some(top) => top.handle_key(key, &self.store),
+            None => self.workspace.handle_key(key, &self.store),
         };
-        match top.handle_key(key, &self.store) {
+        match outcome {
             Outcome::Refresh => {
                 self.refresh();
                 Outcome::Handled
@@ -324,18 +269,13 @@ impl Shell {
         }
     }
 
-    fn handle_enter(&mut self, key: KeyEvent) -> Outcome {
-        if let Some(focus) = self.chrome.selected().map(|id| id.focus().clone()) {
-            self.chrome.select(None);
-            self.push_nav(Nav::focus(focus));
-            return Outcome::Handled;
-        }
-        self.delegate_key(key)
-    }
-
     fn handle_artifact(&mut self) -> Outcome {
-        let Some(digest) = self.stack.last().and_then(Screen::digest_under_cursor) else {
-            return self.delegate_key(KeyEvent::from(KeyCode::Char('a')));
+        let digest = match self.stack.last() {
+            Some(screen) => screen.digest_under_cursor(),
+            None => self.workspace.board().digest_under_cursor(),
+        };
+        let Some(digest) = digest else {
+            return Outcome::Ignored;
         };
         self.push_nav(Nav::focus(Focus::artifact(digest)));
         Outcome::Handled
@@ -348,100 +288,25 @@ impl Shell {
         }
     }
 
-    fn chrome_next(&mut self, ids: &[ChromeId]) {
-        if let Some(index) = self.chrome.selected().and_then(|id| ids.iter().position(|item| item == id))
-            && index + 1 < ids.len()
-        {
-            self.chrome.select(Some(ids[index + 1].clone()));
-        }
-    }
-
-    fn chrome_ids(&self) -> Vec<ChromeId> {
-        let (alerts, interrupts) = self.bands();
-        warroom::chrome_ids(&interrupts, &alerts)
-    }
-
-    fn bands(&self) -> (Vec<Alert>, Vec<Interrupt>) {
-        self.store
-            .view()
-            .value
-            .as_ref()
-            .map_or_else(|| (Vec::new(), Vec::new()), |view| (warroom::alerts(view), warroom::interrupts(view)))
-    }
-
     fn reseat_top(&mut self) {
+        self.workspace.reseat(&self.store);
         if let Some(top) = self.stack.last_mut() {
             top.reseat(&self.store);
-        }
-        self.reseat_chrome();
-    }
-
-    fn reseat_chrome(&mut self) {
-        let ids = self.chrome_ids();
-        if let Some(id) = self.chrome.selected()
-            && !ids.iter().any(|item| item == id)
-        {
-            self.chrome.select(None);
-        }
-    }
-
-    fn status_height(&self) -> u16 {
-        match self.store.view().value.as_ref() {
-            Some(view) if view.spend_quiesce.is_some() => 2,
-            Some(_) => 1,
-            None => 0,
-        }
-    }
-
-    fn render_status(frame: &mut Frame<'_>, area: Rect, view: &ViewDocument, height: u16) {
-        if height == 0 {
-            return;
-        }
-        if height == 1 {
-            frame.render_widget(chrome::status(view), area);
-            return;
-        }
-        let lines = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Length(1)])
-            .split(area);
-        frame.render_widget(chrome::status(view), lines[0]);
-        if let Some(quiesce) = &view.spend_quiesce {
-            frame.render_widget(chrome::seal(quiesce), lines[1]);
-        }
-    }
-
-    fn selected_interrupt_index(&self, interrupts: &[Interrupt]) -> Option<usize> {
-        match self.chrome.selected() {
-            Some(ChromeId::Interrupt { kind, focus }) => {
-                interrupts.iter().position(|entry| entry.kind == *kind && entry.focus == *focus)
-            }
-            _ => None,
-        }
-    }
-
-    fn selected_alert_index(&self, alerts: &[Alert]) -> Option<usize> {
-        match self.chrome.selected() {
-            Some(ChromeId::Alert { kind, focus }) => {
-                alerts.iter().position(|alert| alert.kind == *kind && alert.focus == *focus)
-            }
-            _ => None,
         }
     }
 
     fn footer_hints(&self) -> Vec<KeyHint> {
         let mut hints = Vec::new();
-        if self.chrome.selected().is_some() {
-            hints.push(ENTER_HINT);
-            hints.push(LEAVE_BAND_HINT);
-        } else if !self.chrome_ids().is_empty() {
-            hints.push(ENTER_BAND_HINT);
-        }
-        if self.stack.last().and_then(Screen::digest_under_cursor).is_some() {
-            hints.push(ARTIFACT_HINT);
-        }
         if let Some(screen) = self.stack.last() {
+            if screen.digest_under_cursor().is_some() {
+                hints.push(ARTIFACT_HINT);
+            }
             hints.extend_from_slice(screen.key_hints());
+            return hints;
+        }
+        hints.extend(self.workspace.key_hints(&self.store));
+        if self.workspace.board().digest_under_cursor().is_some() {
+            hints.push(ARTIFACT_HINT);
         }
         hints
     }
@@ -454,7 +319,7 @@ impl Shell {
         (Self::assemble("127.0.0.1:8910".to_owned(), Store::new(view_cadence), Some(fetch)), probe)
     }
 
-    fn showing(view: &ViewDocument, error: Option<&str>) -> Self {
+    pub(crate) fn showing(view: &ViewDocument, error: Option<&str>) -> Self {
         let mut store = Store::new(Duration::from_secs(1));
         store.apply_view(Ok(view.clone()));
         if let Some(error) = error {
@@ -495,20 +360,28 @@ impl Shell {
         self.stack.last().and_then(Screen::digest_under_cursor)
     }
 
+    pub(crate) fn probe(nav: Nav) -> Self {
+        let mut shell = Self::assemble("127.0.0.1:8910".to_owned(), Store::new(Duration::from_secs(1)), None);
+        shell.push_nav(nav);
+        shell
+    }
+
     fn board(&self) -> &Board {
-        match self.stack.first() {
-            Some(Screen::Board(board)) => board,
-            _ => panic!("the stack starts with the board"),
-        }
+        self.workspace.board()
     }
 
     fn chrome_selected(&self) -> Option<&ChromeId> {
-        self.chrome.selected()
+        self.workspace.chrome_selected()
+    }
+
+    fn focused_pane(&self) -> PaneId {
+        self.workspace.focus()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::PaneId;
     use super::Shell;
     use crate::dto::{
         BloomDispatchView, BloomDispatchesView, BloomStatus, BloomView, CompositionFinding, CompositionView, DigestHex,
@@ -519,6 +392,7 @@ mod tests {
     use crate::http::Endpoint;
     use crate::keys::{Outcome, assert_footer_honest, footer_line};
     use crate::nav::Nav;
+    use crate::palette::Role;
     use crate::screen::RowId;
     use crate::store::ResourceKey;
     use crate::warroom::Focus;
@@ -694,6 +568,7 @@ mod tests {
         let mut shell = Shell::showing(view, None);
         let text = draw(&mut shell);
         assert!(text.contains(label), "interrupt {label} missing from:\n{text}");
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Tab)), Outcome::Handled);
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('i'))), Outcome::Handled);
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
         assert_eq!(shell.top_focus().as_ref(), Some(focus), "Enter on {label} jumped to the wrong subject");
@@ -798,46 +673,38 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_interrupt_queue_contributes_no_rows() {
-        // The plausible bug: the band reserves a row for an empty queue, so a
-        // quiet document still paints a blank interrupt strip.
-        let view = bloom_with(
-            vec![MemberView {
-                workpiece: "issue-1".to_owned(),
-                host_fault: Some(HostFaultView::default()),
-                ..MemberView::default()
-            }],
-            |bloom| bloom.landing_blocked = Some(LandingBlock { rolls: 1, budget: 3 }),
+    fn pane_geometry_does_not_read_pane_content() {
+        // Tripwire: pane geometry not reading pane content — an empty needs-you
+        // used to collapse its rows and slide the board up under the cursor.
+        let empty_text = draw(&mut Shell::showing(&ViewDocument::default(), None));
+        let parked_text = draw(&mut Shell::showing(&parked_blooms(10), None));
+        assert_eq!(
+            title_y(&empty_text, "board"),
+            title_y(&parked_text, "board"),
+            "empty:\n{empty_text}\nparked:\n{parked_text}"
         );
-        let mut shell = Shell::showing(&view, None);
-        let text = draw(&mut shell);
-        assert!(text.contains("hostfault"), "{text}");
-        assert!(text.contains("land: blocked 1/3"), "{text}");
-        for label in ["park", "decision", "findings", "terminal", "wedge", "landing", "quiesce", "hold"] {
-            assert!(!text.contains(&format!("{label}  ")), "empty queue painted {label} in:\n{text}");
-        }
-
-        let lines: Vec<&str> = text.lines().collect();
-        let alert_at = lines.iter().position(|line| line.contains("hostfault")).expect("alert line");
-        let table_at = lines.iter().position(|line| line.contains("BLOOM / MEMBER")).expect("table header");
-        assert_eq!(table_at, alert_at + 1, "a collapsed queue leaves no row between alerts and the table:\n{text}");
+        assert!(empty_text.contains("needs you"), "empty workspace dropped needs you:\n{empty_text}");
+        assert!(empty_text.contains("quiet"), "empty workspace dropped quiet:\n{empty_text}");
     }
 
     #[test]
-    fn alerts_render_while_a_pushed_frame_is_on_top() {
-        // The plausible bug: the alert band still lives on the board, so a
-        // drill-in blanks PARK / WEDGED even though chrome should keep them.
+    fn a_pushed_frame_replaces_the_workspace() {
+        // The plausible bug: a drill-in still paints workspace chrome, or
+        // popping it fails to restore the four panes.
         let view = bloom_with(
             vec![MemberView { workpiece: "issue-1".to_owned(), wedge: Some(Present {}), ..MemberView::default() }],
             |bloom| bloom.review_park = Some(ReviewParkView::default()),
         );
         let mut shell = Shell::showing(&view, None);
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
-        assert!(shell.top_focus().is_some(), "Enter must push a frame over the board");
+        assert!(shell.top_focus().is_some(), "Enter must push a frame over the workspace");
         let text = draw(&mut shell);
+        assert!(!text.contains("needs you"), "workspace stayed on screen under the frame:\n{text}");
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Esc)), Outcome::Handled);
+        let text = draw(&mut shell);
+        assert!(text.contains("needs you"), "pop did not restore the workspace:\n{text}");
         assert!(text.contains("PARK"), "{text}");
         assert!(text.contains("WEDGED"), "{text}");
-        assert!(text.contains("bloom"), "{text}");
     }
 
     #[test]
@@ -940,6 +807,7 @@ mod tests {
             });
         });
         let mut shell = Shell::showing(&view, None);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Tab)), Outcome::Handled);
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('i'))), Outcome::Handled);
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
         assert_eq!(shell.top_focus(), Some(Focus::composition(digest(0xab))));
@@ -1011,17 +879,12 @@ mod tests {
         // walks every interrupt and alert id before the table cursor moves.
         let mut shell = Shell::showing(&parked_blooms(10), None);
         assert_eq!(shell.chrome_selected(), None);
-        let start = shell.top_selected();
+        let start = shell.board().cursor().selected().cloned();
         for _ in 0..5 {
             assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Down)), Outcome::Handled);
             assert_eq!(shell.chrome_selected(), None);
         }
-        assert_ne!(shell.top_selected(), start);
-
-        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('i'))), Outcome::Handled);
-        assert!(shell.chrome_selected().is_some());
-        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Down)), Outcome::Handled);
-        assert_eq!(shell.chrome_selected(), None);
+        assert_ne!(shell.board().cursor().selected().cloned(), start);
     }
 
     #[test]
@@ -1029,10 +892,10 @@ mod tests {
         // The plausible bug: Up from the first table row silently selects the
         // last chrome id, most of which have no visible representation.
         let mut shell = Shell::showing(&parked_blooms(2), None);
-        let start = shell.top_selected();
+        let start = shell.board().cursor().selected().cloned();
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Up)), Outcome::Handled);
         assert_eq!(shell.chrome_selected(), None);
-        assert_eq!(shell.top_selected(), start);
+        assert_eq!(shell.board().cursor().selected().cloned(), start);
     }
 
     #[test]
@@ -1041,6 +904,7 @@ mod tests {
         // walking every remaining chrome id, so the footer never names either.
         let view = parked_blooms(2);
         let mut shell = Shell::showing(&view, None);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Tab)), Outcome::Handled);
         let outside = shell.footer_hints();
         assert!(
             outside.iter().any(|hint| hint.keys == "i" && hint.action == "queue"),
@@ -1049,6 +913,7 @@ mod tests {
         );
         assert_footer_honest(&outside, |code| {
             let mut probe = Shell::showing(&view, None);
+            assert_eq!(probe.handle_key(KeyEvent::from(KeyCode::Tab)), Outcome::Handled);
             probe.handle_key(KeyEvent::from(code)) != Outcome::Ignored
         });
 
@@ -1072,6 +937,7 @@ mod tests {
         );
         assert_footer_honest(&inside, |code| {
             let mut probe = Shell::showing(&view, None);
+            assert_eq!(probe.handle_key(KeyEvent::from(KeyCode::Tab)), Outcome::Handled);
             assert_eq!(probe.handle_key(KeyEvent::from(KeyCode::Char('i'))), Outcome::Handled);
             probe.handle_key(KeyEvent::from(code)) != Outcome::Ignored
         });
@@ -1079,21 +945,31 @@ mod tests {
 
     #[test]
     fn chrome_selection_stays_on_a_visible_interrupt() {
-        // The plausible bug: j walks ids past the 8-row band, so the highlight
-        // sits on a clipped row and the cursor looks gone.
+        // The plausible bug: j walks ids past the pane's inner rows, so the
+        // highlight sits on a clipped row and the cursor looks gone.
         let mut shell = Shell::showing(&parked_blooms(10), None);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Tab)), Outcome::Handled);
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('i'))), Outcome::Handled);
         for _ in 0..9 {
             assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('j'))), Outcome::Handled);
         }
         assert!(shell.chrome_selected().is_some());
-        let text = draw(&mut shell);
-        let lines: Vec<&str> = text.lines().collect();
-        let alert_at = lines.iter().position(|line| line.contains("PARK")).expect("alert line");
-        let table_at = lines.iter().position(|line| line.contains("BLOOM / MEMBER")).expect("table header");
-        let band = lines[alert_at + 1..table_at].join("\n");
-        assert!(band.contains(&digest(10).prefix()), "selected interrupt missing from band:\n{band}");
-        assert!(!band.contains(&digest(1).prefix()), "scrolled-off interrupt still painted:\n{band}");
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let text = right_column(&terminal);
+        let park_lines: Vec<&str> = text.lines().filter(|line| line.contains("park  ")).collect();
+        let last = digest(10).prefix();
+        let first = digest(1).prefix();
+        assert!(
+            park_lines.iter().any(|line| line.contains(&last)),
+            "selected interrupt missing from band:\n{}",
+            park_lines.join("\n")
+        );
+        assert!(
+            park_lines.iter().all(|line| !line.contains(&first)),
+            "scrolled-off interrupt still painted:\n{}",
+            park_lines.join("\n")
+        );
     }
 
     #[test]
@@ -1101,11 +977,137 @@ mod tests {
         // The plausible bug: a refresh that drops the selected id reseats onto
         // another chrome row, stealing focus the operator never asked for.
         let mut shell = Shell::showing(&parked_blooms(1), None);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Tab)), Outcome::Handled);
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('i'))), Outcome::Handled);
         assert!(shell.chrome_selected().is_some());
         let mut next = parked_blooms(1);
         next.blooms[0].id = digest(9);
         shell.apply_view(next);
         assert_eq!(shell.chrome_selected(), None);
+    }
+
+    #[test]
+    fn tab_walks_the_focus_ring_and_routes_j() {
+        // The plausible bug: Tab is ignored, or j always hits the board, so
+        // the needs-you cursor cannot move without stealing the table selection.
+        let mut shell = Shell::showing(&parked_blooms(10), None);
+        assert_eq!(shell.focused_pane(), PaneId::Board);
+        let board_start = shell.board().cursor().selected().cloned();
+
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Tab)), Outcome::Handled);
+        assert_eq!(shell.focused_pane(), PaneId::NeedsYou);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('j'))), Outcome::Handled);
+        assert!(shell.chrome_selected().is_some());
+        assert_eq!(shell.board().cursor().selected().cloned(), board_start);
+        let chrome = shell.chrome_selected().cloned();
+
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Tab)), Outcome::Handled);
+        assert_eq!(shell.focused_pane(), PaneId::Quiet);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Tab)), Outcome::Handled);
+        assert_eq!(shell.focused_pane(), PaneId::Board);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('j'))), Outcome::Handled);
+        assert_ne!(shell.board().cursor().selected().cloned(), board_start);
+        assert_eq!(shell.chrome_selected().cloned(), chrome);
+    }
+
+    #[test]
+    fn the_focused_pane_border_uses_the_focus_role() {
+        // The plausible bug: every pane paints the unfocused frame color, so
+        // Tab moves an invisible ring.
+        let mut shell = Shell::showing(&ViewDocument::default(), None);
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        assert_eq!(title_role(buffer, "board"), Role::Focus);
+        assert_eq!(title_role(buffer, "needs you"), Role::Frames);
+        assert_eq!(title_role(buffer, "quiet"), Role::Frames);
+
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Tab)), Outcome::Handled);
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        assert_eq!(title_role(buffer, "board"), Role::Frames);
+        assert_eq!(title_role(buffer, "needs you"), Role::Focus);
+        assert_eq!(title_role(buffer, "quiet"), Role::Frames);
+    }
+
+    #[test]
+    fn journal_filter_esc_leaves_edit_not_the_frame() {
+        // The plausible bug: Esc is taken by the shell before the journal, so
+        // a filter edit cannot be cancelled without popping the frame.
+        let mut shell = Shell::showing(&ViewDocument::default(), None);
+        shell.push_nav(Nav::journal(None));
+        assert_eq!(shell.stack_depth(), 1);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('f'))), Outcome::Handled);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Esc)), Outcome::Handled);
+        assert_eq!(shell.stack_depth(), 1);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Esc)), Outcome::Handled);
+        assert_eq!(shell.stack_depth(), 0);
+    }
+
+    #[test]
+    fn journal_filter_types_i_while_the_queue_is_loud() {
+        // The plausible bug: i is taken by the interrupt band before the
+        // journal, so the letter cannot be typed into a filter.
+        let mut shell = Shell::showing(&parked_blooms(3), None);
+        shell.push_nav(Nav::journal(None));
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('f'))), Outcome::Handled);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('i'))), Outcome::Handled);
+        let text = draw(&mut shell);
+        assert!(text.contains("filter  i"), "typed i missing from filter:\n{text}");
+    }
+
+    fn title_y(text: &str, title: &str) -> usize {
+        text.lines().position(|line| line.contains(title)).unwrap_or_else(|| panic!("missing {title} in:\n{text}"))
+    }
+
+    fn right_column(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        let area = buffer.area();
+        let mid = area.width / 2;
+        let mut out = String::new();
+        for y in area.y..area.y + area.height {
+            for x in mid..area.x + area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn title_role(buffer: &ratatui::buffer::Buffer, title: &str) -> Role {
+        let area = buffer.area();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                if !title_starts_at(buffer, x, y, title) {
+                    continue;
+                }
+                let border_x = x.saturating_sub(1);
+                return role_of(buffer[(border_x, y)].fg);
+            }
+        }
+        panic!("title {title:?} not found");
+    }
+
+    fn title_starts_at(buffer: &ratatui::buffer::Buffer, x: u16, y: u16, title: &str) -> bool {
+        let area = buffer.area();
+        let mut cursor = x;
+        for ch in title.chars() {
+            if cursor >= area.x + area.width {
+                return false;
+            }
+            let symbol = buffer[(cursor, y)].symbol();
+            if !symbol.starts_with(ch) {
+                return false;
+            }
+            cursor = cursor.saturating_add(1);
+        }
+        true
+    }
+
+    fn role_of(color: ratatui::style::Color) -> Role {
+        Role::ALL
+            .into_iter()
+            .find(|role| role.color(crate::palette::depth()) == color)
+            .unwrap_or_else(|| panic!("unrecognized {color:?}"))
     }
 }

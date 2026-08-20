@@ -116,7 +116,6 @@ impl Detail {
             KeyCode::Char('t') => self.bloom_id().map_or(Outcome::Handled, |id| Outcome::Push(Nav::timeline(id))),
             KeyCode::Char('d') => Outcome::Push(Nav::days()),
             KeyCode::Char('c') => Outcome::Push(Nav::cost()),
-            KeyCode::Esc => Outcome::Handled,
             KeyCode::Char('r') => Outcome::Refresh,
             KeyCode::Char('q') => Outcome::Quit,
             _ => Outcome::Ignored,
@@ -426,19 +425,18 @@ mod tests {
     use super::Detail;
     use crate::dto::DigestHex;
     use crate::keys::{Outcome, assert_footer_honest};
-    use crate::store::Store;
+    use crate::nav::Nav;
+    use crate::shell::Shell;
     use crate::warroom::Focus;
     use crossterm::event::KeyEvent;
-    use std::time::Duration;
 
     #[test]
     fn detail_footer_keys_are_handled() {
         // The plausible bug: Esc is painted and only the shell pops, so a
         // later caller that asks the screen itself sees Ignored.
-        let store = Store::new(Duration::from_secs(1));
-        let mut detail = Detail::new(Focus::bloom(DigestHex::from_bytes([1; 32])));
-        assert_footer_honest(detail.key_hints(), |code| {
-            detail.handle_key(KeyEvent::from(code), &store) != Outcome::Ignored
+        let nav = Nav::focus(Focus::bloom(DigestHex::from_bytes([1; 32])));
+        assert_footer_honest(Detail::new(Focus::bloom(DigestHex::from_bytes([1; 32]))).key_hints(), |code| {
+            Shell::probe(nav.clone()).handle_key(KeyEvent::from(code)) != Outcome::Ignored
         });
     }
 }

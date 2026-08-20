@@ -96,9 +96,7 @@ impl Backlog {
     pub fn handle_key(&mut self, key: KeyEvent, store: &Store) -> Outcome {
         if store.commission_capability() == Some(CommissionCapability::Absent) {
             return match key.code {
-                KeyCode::Char('j' | 'k') | KeyCode::Down | KeyCode::Up | KeyCode::Enter | KeyCode::Esc => {
-                    Outcome::Handled
-                }
+                KeyCode::Char('j' | 'k') | KeyCode::Down | KeyCode::Up | KeyCode::Enter => Outcome::Handled,
                 KeyCode::Char('r') => Outcome::Refresh,
                 KeyCode::Char('q') => Outcome::Quit,
                 _ => Outcome::Ignored,
@@ -119,7 +117,6 @@ impl Backlog {
                 .selected()
                 .cloned()
                 .map_or(Outcome::Handled, |id| Outcome::Push(Nav::focus(Focus::workpiece(id)))),
-            KeyCode::Esc => Outcome::Handled,
             KeyCode::Char('r') => Outcome::Refresh,
             KeyCode::Char('q') => Outcome::Quit,
             _ => Outcome::Ignored,
@@ -251,6 +248,8 @@ mod tests {
     use super::{Backlog, COORDINATOR_PATHS, PREDATING, cycle_line, forest_from};
     use crate::dto::{CommissionHeadView, CommissionShowView, CommissionsView, DigestHex, ScopeRevisionView};
     use crate::keys::{Outcome, assert_footer_honest};
+    use crate::nav::Nav;
+    use crate::shell::Shell;
     use crate::store::{CommissionCapability, ResourceKey, Store};
     use crossterm::event::KeyEvent;
     use ratatui::Terminal;
@@ -335,10 +334,8 @@ mod tests {
 
     #[test]
     fn backlog_footer_keys_are_handled() {
-        let store = Store::new(Duration::from_secs(1));
-        let mut backlog = Backlog::new();
         assert_footer_honest(Backlog::key_hints(), |code| {
-            backlog.handle_key(KeyEvent::from(code), &store) != Outcome::Ignored
+            Shell::probe(Nav::backlog()).handle_key(KeyEvent::from(code)) != Outcome::Ignored
         });
     }
 

@@ -1,13 +1,13 @@
 //! Application chrome: header, status, alert band, interrupt queue, footer.
 //!
-//! Owned by the shell so a drill-in keeps the endpoint, sample age, alerts,
-//! and owner-authority queue on screen.
+//! Owned by the workspace panes: fleet paints the header, needs-you the
+//! alert and interrupt bands, quiet the status and today lines.
 
 use std::time::Duration;
 
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::dto::{SpendQuiesce, ViewDocument};
 use crate::keys::{KeyHint, footer_line};
@@ -36,16 +36,14 @@ pub fn format_age(age: Option<Duration>) -> String {
 #[must_use]
 pub fn header(endpoint_label: &str, view: &Cell<ViewDocument>, dashboard: Option<&Dashboard>) -> Paragraph<'static> {
     let age = format_age(view.sample_age());
-    let mut spans = vec![
-        Span::styled("bloomery-console", palette::body().add_modifier(Modifier::BOLD)),
-        Span::raw(format!("  {endpoint_label}  sample {age}")),
-    ];
+    let mut spans = vec![Span::styled("bloomery-console", palette::body().add_modifier(Modifier::BOLD))];
     if view.is_stale() {
         spans.push(Span::styled("  STALE", palette::paint(Role::Loud).add_modifier(Modifier::BOLD)));
         if let Some(error) = &view.error {
             spans.push(Span::raw(format!("  {error}")));
         }
     }
+    spans.push(Span::raw(format!("  {endpoint_label}  sample {age}")));
     if let Some(dashboard) = dashboard {
         spans.push(Span::raw(format!(
             "  ${}  L{}  W{}",
@@ -58,11 +56,6 @@ pub fn header(endpoint_label: &str, view: &Cell<ViewDocument>, dashboard: Option
 #[must_use]
 pub fn today(dashboard: &Dashboard) -> Paragraph<'static> {
     Paragraph::new(dashboard.today.clone()).style(palette::body())
-}
-
-#[must_use]
-pub fn filter_line(filter: &str) -> Paragraph<'static> {
-    Paragraph::new(filter.to_owned()).style(palette::body())
 }
 
 /// `mainline` / `observed` prefixes, plus a divergence token when they differ.
@@ -111,29 +104,29 @@ pub fn alert_band(alerts: &[Alert], selected: Option<usize>) -> Paragraph<'stati
             [Span::styled(alert.token.clone(), style), Span::raw(format!(" {}  ", alert.detail))]
         })
         .collect();
-    Paragraph::new(Line::from(spans)).style(palette::body())
+    Paragraph::new(Line::from(spans)).style(palette::body()).wrap(Wrap { trim: true })
 }
 
-/// Interrupt rows the band can paint. Extra queue entries stay reachable by
-/// scrolling the selection onto this window.
-pub const INTERRUPT_BAND_ROWS: usize = 8;
-
 /// Visible slice of the interrupt queue and the selection index inside it.
+/// `rows` is the pane's inner height, not a property of the queue.
 #[must_use]
-pub fn interrupt_window(entries: &[Interrupt], selected: Option<usize>) -> (&[Interrupt], Option<usize>) {
-    let start = interrupt_window_start(entries.len(), selected);
-    let end = (start + INTERRUPT_BAND_ROWS).min(entries.len());
+pub fn interrupt_window(entries: &[Interrupt], selected: Option<usize>, rows: usize) -> (&[Interrupt], Option<usize>) {
+    if rows == 0 || entries.is_empty() {
+        return (&[], None);
+    }
+    let start = interrupt_window_start(entries.len(), selected, rows);
+    let end = (start + rows).min(entries.len());
     let window = &entries[start..end];
     let relative = selected.and_then(|index| index.checked_sub(start).filter(|&rel| rel < window.len()));
     (window, relative)
 }
 
-fn interrupt_window_start(len: usize, selected: Option<usize>) -> usize {
-    if len <= INTERRUPT_BAND_ROWS {
+fn interrupt_window_start(len: usize, selected: Option<usize>, rows: usize) -> usize {
+    if len <= rows {
         return 0;
     }
-    let max_start = len - INTERRUPT_BAND_ROWS;
-    selected.map_or(0, |index| index.saturating_sub(INTERRUPT_BAND_ROWS.saturating_sub(1)).min(max_start))
+    let max_start = len - rows;
+    selected.map_or(0, |index| index.saturating_sub(rows.saturating_sub(1)).min(max_start))
 }
 
 #[must_use]
@@ -235,16 +228,16 @@ mod tests {
         // on a clipped row, so j/k looks like the cursor vanished.
         let entries: Vec<Interrupt> = (0..10).map(park_row).collect();
 
-        let (window, selected) = interrupt_window(&entries, None);
+        let (window, selected) = interrupt_window(&entries, None, 8);
         assert_eq!(window.len(), 8);
         assert_eq!(window[0].detail, "row-0");
         assert_eq!(selected, None);
 
-        let (window, selected) = interrupt_window(&entries, Some(0));
+        let (window, selected) = interrupt_window(&entries, Some(0), 8);
         assert_eq!(window[0].detail, "row-0");
         assert_eq!(selected, Some(0));
 
-        let (window, selected) = interrupt_window(&entries, Some(9));
+        let (window, selected) = interrupt_window(&entries, Some(9), 8);
         assert_eq!(window.len(), 8);
         assert_eq!(window[0].detail, "row-2");
         assert_eq!(window[7].detail, "row-9");

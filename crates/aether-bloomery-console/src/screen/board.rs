@@ -1,4 +1,4 @@
-//! The Board: bloom/member table. Alert and interrupt bands live on the shell.
+//! The Board: bloom/member table. The live table sits in the workspace board pane.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
@@ -182,7 +182,6 @@ impl Board {
             }
             KeyCode::Enter => self.selected_focus().map_or(Outcome::Handled, |focus| Outcome::Push(Nav::focus(focus))),
             KeyCode::Char('h') if self.lane == BoardLane::Live => Outcome::Push(Nav::History),
-            KeyCode::Esc if self.lane == BoardLane::History => Outcome::Handled,
             KeyCode::Char('l') => Outcome::Push(Nav::journal(None)),
             KeyCode::Char('t') => {
                 self.digest_under_cursor().map_or(Outcome::Handled, |bloom| Outcome::Push(Nav::timeline(bloom)))
@@ -252,11 +251,11 @@ impl Board {
         let table = Table::new(
             table_rows,
             [
-                Constraint::Length(16),
-                Constraint::Length(16),
+                Constraint::Length(14),
+                Constraint::Length(10),
                 Constraint::Length(8),
                 Constraint::Length(8),
-                Constraint::Min(10),
+                Constraint::Min(4),
             ],
         )
         .style(palette::body())
@@ -416,7 +415,9 @@ mod tests {
         ViewDocument, WedgeCause,
     };
     use crate::keys::{Outcome, assert_footer_honest};
+    use crate::nav::Nav;
     use crate::palette::{Depth, with_depth};
+    use crate::shell::Shell;
     use crate::store::Store;
     use crossterm::event::KeyEvent;
     use ratatui::Terminal;
@@ -562,10 +563,12 @@ mod tests {
     fn board_footer_keys_are_handled() {
         // The plausible bug: the footer paints `r` / `q` / `j/k` while the
         // match dropped one of them, so an advertised key does nothing.
-        let store = Store::new(Duration::from_secs(1));
-        let mut board = Board::new();
-        assert_footer_honest(board.key_hints(), |code| {
-            board.handle_key(KeyEvent::from(code), &store) != Outcome::Ignored
+        let view = ViewDocument::default();
+        assert_footer_honest(Board::new().key_hints(), |code| {
+            Shell::showing(&view, None).handle_key(KeyEvent::from(code)) != Outcome::Ignored
+        });
+        assert_footer_honest(Board::history().key_hints(), |code| {
+            Shell::probe(Nav::History).handle_key(KeyEvent::from(code)) != Outcome::Ignored
         });
     }
 
