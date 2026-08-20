@@ -4,6 +4,7 @@ mod artifact;
 mod backlog;
 mod board;
 mod detail;
+mod dispatch;
 mod journal;
 mod metrics;
 mod partition;
@@ -28,12 +29,14 @@ pub use transcript::{LineBuffer, Transcript};
 
 use artifact::Artifact;
 use backlog::Workpiece;
+use dispatch::DispatchList;
 use journal::{Journal, Record};
 
 /// One frame on the shell's stack.
 pub enum Screen {
     Board(Board),
     Detail(Detail),
+    DispatchList(DispatchList),
     Journal(Journal),
     Record(Record),
     Artifact(Artifact),
@@ -67,6 +70,7 @@ impl Screen {
             Nav::Focus(Focus::Record { sequence }) => Self::Record(Record::new(sequence)),
             Nav::Focus(Focus::Artifact { digest }) => Self::Artifact(Artifact::new(digest)),
             Nav::Focus(Focus::Transcript { nonce }) => Self::Transcript(Transcript::new(nonce)),
+            Nav::Focus(Focus::Dispatch { bloom, workpiece }) => Self::DispatchList(DispatchList::new(bloom, workpiece)),
             Nav::Focus(Focus::Workpiece { id }) => Self::Workpiece(Workpiece::new(id)),
             Nav::Focus(focus) => Self::Detail(Detail::new(focus)),
             Nav::History => Self::history(),
@@ -82,6 +86,7 @@ impl Screen {
     pub fn focus(&self) -> Option<Focus> {
         match self {
             Self::Detail(detail) => Some(detail.focus().clone()),
+            Self::DispatchList(list) => Some(list.focus()),
             Self::Record(record) => Some(record.focus()),
             Self::Artifact(artifact) => Some(artifact.focus()),
             Self::Transcript(transcript) => Some(transcript.focus()),
@@ -101,6 +106,7 @@ impl Screen {
             Self::Board(board) => board.scroll(),
             Self::Detail(detail) => detail.scroll(),
             Self::Journal(_)
+            | Self::DispatchList(_)
             | Self::Record(_)
             | Self::Artifact(_)
             | Self::Transcript(_)
@@ -119,6 +125,7 @@ impl Screen {
             Self::Detail(detail) => detail.selected_key().map(|key| format!("{key:?}")),
             Self::Backlog(backlog) => backlog.selected_key().cloned(),
             Self::Workpiece(workpiece) => workpiece.selected_key().map(|key| format!("{key:?}")),
+            Self::DispatchList(list) => list.selected_key().cloned(),
             Self::Journal(_)
             | Self::Record(_)
             | Self::Artifact(_)
@@ -134,6 +141,7 @@ impl Screen {
         match self {
             Self::Board(board) => board.subscriptions(),
             Self::Detail(detail) => detail.subscriptions(),
+            Self::DispatchList(list) => list.subscriptions(),
             Self::Journal(journal) => journal.subscriptions(),
             Self::Record(_) => Record::subscriptions(),
             Self::Artifact(artifact) => artifact.subscriptions(),
@@ -151,6 +159,7 @@ impl Screen {
         match self {
             Self::Board(board) => board.key_hints(),
             Self::Detail(detail) => detail.key_hints(),
+            Self::DispatchList(_) => DispatchList::key_hints(),
             Self::Journal(_) => Journal::key_hints(),
             Self::Record(_) => Record::key_hints(),
             Self::Artifact(_) => Artifact::key_hints(),
@@ -168,7 +177,12 @@ impl Screen {
         match self {
             Self::Board(board) => board.digest_under_cursor(),
             Self::Detail(detail) => detail.digest_under_cursor(),
-            Self::Journal(_) | Self::Record(_) | Self::Transcript(_) | Self::Days(_) | Self::Cost(_) => None,
+            Self::Journal(_)
+            | Self::DispatchList(_)
+            | Self::Record(_)
+            | Self::Transcript(_)
+            | Self::Days(_)
+            | Self::Cost(_) => None,
             Self::Artifact(artifact) => Some(artifact.digest_under_cursor()),
             Self::Timeline(timeline) => Some(timeline.bloom()),
             Self::Backlog(backlog) => backlog.digest_under_cursor(),
@@ -180,6 +194,7 @@ impl Screen {
         match self {
             Self::Board(board) => board.handle_key(key, store),
             Self::Detail(detail) => detail.handle_key(key, store),
+            Self::DispatchList(list) => list.handle_key(key, store),
             Self::Journal(journal) => journal.handle_key(key, store),
             Self::Record(record) => record.handle_key(key, store),
             Self::Artifact(artifact) => artifact.handle_key(key, store),
@@ -196,6 +211,7 @@ impl Screen {
         match self {
             Self::Board(board) => board.reseat(store),
             Self::Detail(detail) => detail.reseat(store),
+            Self::DispatchList(list) => list.reseat(store),
             Self::Journal(journal) => journal.reseat(store),
             Self::Transcript(transcript) => transcript.reseat(store),
             Self::Timeline(timeline) => timeline.reseat(store),
@@ -210,6 +226,7 @@ impl Screen {
         match self {
             Self::Board(board) => board.render(frame, area, store),
             Self::Detail(detail) => detail.render(frame, area, store),
+            Self::DispatchList(list) => list.render(frame, area, store),
             Self::Journal(journal) => journal.render(frame, area, store),
             Self::Record(record) => record.render(frame, area, store),
             Self::Artifact(artifact) => artifact.render(frame, area, store),
@@ -219,23 +236,6 @@ impl Screen {
             Self::Cost(cost) => cost.render(frame, area, store),
             Self::Backlog(backlog) => backlog.render(frame, area, store),
             Self::Workpiece(workpiece) => workpiece.render(frame, area, store),
-        }
-    }
-
-    /// True when k should leave this frame for the chrome above it.
-    #[must_use]
-    pub fn selected_is_first(&self, store: &Store) -> bool {
-        match self {
-            Self::Board(board) => board.selected_is_first(store),
-            Self::Detail(detail) => detail.selected_is_first(),
-            Self::Journal(journal) => journal.selected_is_first(store),
-            Self::Transcript(transcript) => transcript.selected_is_first(),
-            Self::Timeline(timeline) => timeline.selected_is_first(store),
-            Self::Cost(cost) => cost.selected_is_first(store),
-            Self::Days(days) => days.selected_is_first(),
-            Self::Backlog(backlog) => backlog.selected_is_first(store),
-            Self::Workpiece(workpiece) => workpiece.selected_is_first(),
-            Self::Record(_) | Self::Artifact(_) => true,
         }
     }
 }

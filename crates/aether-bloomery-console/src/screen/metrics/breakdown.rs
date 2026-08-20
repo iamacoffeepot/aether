@@ -51,12 +51,6 @@ impl Breakdown {
         HINTS
     }
 
-    #[must_use]
-    pub fn selected_is_first(&self, store: &Store) -> bool {
-        let rows = self.groups(store);
-        matches!(self.cursor.selected_index(&rows, |row| row.label.clone()), Some(0) | None)
-    }
-
     pub fn handle_key(&mut self, key: KeyEvent, store: &Store) -> Outcome {
         let rows = self.groups(store);
         match key.code {
