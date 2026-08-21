@@ -32,7 +32,10 @@ mod verify;
 mod workpiece_builder;
 
 pub use adr::{ADR_SCHEMA, ADR_TRANSITION_SCHEMA, Adr, AdrStatus, AdrTransition, AdrValueError};
-pub use approval::{ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, surface_intersection};
+pub use approval::{
+    ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, TierVerdict, gate_widening, surface_additions,
+    surface_intersection, tier_verdict,
+};
 pub use bloom::{
     BloomDraft, BloomSpec, DependencyError, LandingReceipt, MemberCandidate, MemberDependency, MemberSubject,
     Membership, ResolutionClaim, ResolvedBloom, ResolvedDependencies, resolve_member_dependencies,
@@ -67,6 +70,8 @@ pub use stage::{
     REVIEW_CRITIC_COMMAND, SCOPE_FILL_COMMAND, StageBinding, StageCatalog, Transformation, VERIFY_CHECK_COMMAND,
     VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK, is_model_lane,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use statement::signed_approval;
 pub use statement::{Observation, Provenance, StageReceipt, Statement};
 pub use study::{StudyCall, StudyCost, StudyRecord};
 pub use surface::{SurfacePathRequest, SurfaceRequest};

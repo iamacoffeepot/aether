@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use aether_bloomery::{BloomStatus, EvidenceKind, Forecast};
+use aether_bloomery::{BloomStatus, Digest, EvidenceKind, Forecast, ScopeRevision, ScopeRouting, WorkpieceId};
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -74,6 +74,125 @@ pub struct BloomView {
 pub struct MemberView {
     pub workpiece: String,
     pub scope_revision: DigestHex,
+    /// The surface amendment this member is waiting on (ADR-0207). Absent from
+    /// a coordinator that predates the field, so `#[serde(default)]`.
+    #[serde(default)]
+    pub awaiting_surface: Option<AwaitingSurfaceView>,
+}
+
+/// A member's journaled surface request, as `/view` renders it (ADR-0207).
+#[derive(Debug, Clone, Deserialize)]
+pub struct AwaitingSurfaceView {
+    pub scope_revision: DigestHex,
+    pub paths: Vec<SurfacePathRequest>,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub requests: u32,
+}
+
+/// One path a declining lane asked for, and the line justifying it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SurfacePathRequest {
+    pub path: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// `GET /commissions/{id}` — the tip, typed, plus the approvals stored against
+/// it. Digests arrive as hex, which is why this mirrors rather than reuses
+/// `aether_bloomery`'s own type.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommissionShowView {
+    pub id: String,
+    pub current_revision: Option<DigestHex>,
+    pub status: String,
+    pub current: Option<ScopeRevisionView>,
+    #[serde(default)]
+    pub approvals: Vec<StatementView>,
+}
+
+/// A stored scope revision as the REST edge renders it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScopeRevisionView {
+    pub schema: u32,
+    pub workpiece: String,
+    pub predecessor: Option<DigestHex>,
+    pub problem: String,
+    pub design: String,
+    pub plan: String,
+    pub declared_surface: Vec<String>,
+    #[serde(default)]
+    pub dogfood_brief: String,
+    pub routing: ScopeRoutingView,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub implements: Vec<DigestHex>,
+}
+
+/// The size and model-routing lines a revision seals.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScopeRoutingView {
+    pub size: String,
+    pub model: String,
+}
+
+impl ScopeRevisionView {
+    /// The typed revision these rendered fields describe.
+    ///
+    /// The command widens and re-posts the *typed* value rather than the
+    /// rendering, so the successor's bytes are the tip's bytes with one field
+    /// changed — anything this conversion dropped would silently rewrite a
+    /// field the existing approval was read against.
+    pub fn to_revision(&self) -> ScopeRevision {
+        ScopeRevision {
+            schema: self.schema,
+            workpiece: WorkpieceId(self.workpiece.clone()),
+            predecessor: self.predecessor.map(|digest| Digest::from_bytes(*digest.as_bytes())),
+            problem: self.problem.clone(),
+            design: self.design.clone(),
+            plan: self.plan.clone(),
+            declared_surface: self.declared_surface.clone(),
+            dogfood_brief: self.dogfood_brief.clone(),
+            routing: ScopeRouting { size: self.routing.size.clone(), model: self.routing.model.clone() },
+            dependencies: self.dependencies.iter().map(|id| WorkpieceId(id.clone())).collect(),
+            description: self.description.clone(),
+            implements: self.implements.iter().map(|digest| Digest::from_bytes(*digest.as_bytes())).collect(),
+        }
+    }
+}
+
+/// A stored statement, as much of it as the command reads: the words are the
+/// scope digest an approval binds.
+#[derive(Debug, Clone, Deserialize)]
+pub struct StatementView {
+    #[serde(default)]
+    pub words: Vec<u8>,
+}
+
+/// `POST /commissions/{id}/revisions` — the written revision's address.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScopeRevisionWrittenView {
+    pub digest: DigestHex,
+}
+
+/// `POST /commissions/{id}/approvals` — the stored approval's address.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApprovalStoredView {
+    #[serde(default)]
+    pub digest: Option<DigestHex>,
+}
+
+/// `GET /configs/{digest}` — a stored configuration, decoded through its kind's
+/// schema.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConfigValueView {
+    pub digest: DigestHex,
+    pub kind: String,
+    pub value: Value,
 }
 
 /// `POST /drafts` / `GET /drafts/{id}` envelope.

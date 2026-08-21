@@ -128,6 +128,10 @@ pub use reduce::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use sign::Ed25519KeyProvider;
 pub use sign::{AuthorityDoor, FakeKeyProvider, KeyProvider, SignatureEnvelope, authorization_message};
+#[cfg(not(target_arch = "wasm32"))]
+pub use sign::sign_authorization;
+#[cfg(not(target_arch = "wasm32"))]
+pub use values::signed_approval;
 pub use spend::measure;
 pub use study_report::{BloomGrade, StudyReport, grade};
 pub use values::{
@@ -144,9 +148,11 @@ pub use values::{
     ReasoningEffort, ResolutionClaim, ResolvedBloom, ResolvedConfigs, ResolvedDependencies, ResolvedModel,
     SCOPE_FILL_COMMAND, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, SealedPriceTable, SpendCeiling,
     SpendQuiesce, SpendWindow, StageBinding, StageCatalog, StageOverride, StageReceipt, Statement, StudyCall,
-    StudyCost, StudyRecord, SurfacePathRequest, SurfacePattern, SurfaceRequest, Tier, TimeoutRecord, ToolPolicy,
+    StudyCost, StudyRecord, SurfacePathRequest, SurfacePattern, SurfaceRequest, Tier, TierVerdict, TimeoutRecord,
+    ToolPolicy,
     Transformation, Unproducible, VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK, VerifiedTree,
     VerifyFailure, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Workpiece, WorkpieceBuilder,
     WorkpieceFact, WorkpieceFields, WorkpieceRefusal, classify_findings, config_address, decode_config,
-    is_model_lane, pin_workpiece_description, resolve_member_dependencies, split_lane_identity, surface_intersection,
+    gate_widening, is_model_lane, pin_workpiece_description, resolve_member_dependencies, split_lane_identity,
+    surface_additions, surface_intersection, tier_verdict,
 };

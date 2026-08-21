@@ -42,11 +42,16 @@ struct ErrorBody {
 }
 
 fn exchange(endpoint: &Endpoint, method: &str, path: &str, body: Option<&[u8]>) -> Result<(u16, Vec<u8>)> {
+    // The commission routes are bearer-gated; every other route ignores the
+    // header, so sending it whenever a token is configured costs nothing and
+    // keeps the caller from having to know which routes need it.
+    let authorization =
+        endpoint.token.as_deref().map_or_else(String::new, |token| format!("Authorization: Bearer {token}\r\n"));
     let header = body.map_or_else(
-        || format!("{method} {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", endpoint.host),
+        || format!("{method} {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n{authorization}\r\n", endpoint.host),
         |bytes| {
             format!(
-                "{method} {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                "{method} {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n{authorization}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
                 endpoint.host,
                 bytes.len()
             )

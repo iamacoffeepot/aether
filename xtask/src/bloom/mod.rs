@@ -5,6 +5,7 @@
 //! current observed head, reuses the predecessor's sealed configs by digest,
 //! and carries each member's scope revision so the workpiece claim transfers.
 
+mod amend;
 mod client;
 mod dto;
 mod hex;
@@ -23,6 +24,7 @@ use clap::{Args, Subcommand};
 
 use crate::bloom::client::{Client, bloom_in};
 use crate::bloom::plan::{BaseChoice, ProjectionInput};
+use crate::bloom::amend::AmendArgs;
 use crate::bloom::roll::RollArgs;
 use crate::bloom::upgrade::UpgradeArgs;
 
@@ -35,12 +37,28 @@ const DEFAULT_HTTP_PORT: u16 = 8910;
 pub struct Endpoint {
     pub host: String,
     pub port: u16,
+    /// Bearer token for the commission routes, when one is configured. `None`
+    /// sends no `Authorization` header at all, which is what every route
+    /// outside `/commissions` expects.
+    pub token: Option<String>,
 }
 
 impl Endpoint {
-    fn resolve(port: Option<u16>) -> Self {
-        Self { host: "127.0.0.1".to_owned(), port: port.unwrap_or_else(coordinator_port) }
+    fn resolve(port: Option<u16>, token: Option<&str>) -> Self {
+        Self {
+            host: "127.0.0.1".to_owned(),
+            port: port.unwrap_or_else(coordinator_port),
+            token: token.map(ToOwned::to_owned).or_else(control_token),
+        }
     }
+}
+
+/// `AETHER_HTTP_CONTROL_TOKEN`, or nothing.
+fn control_token() -> Option<String> {
+    // Operator tooling reading the coordinator's control-route bearer token —
+    // not cap config.
+    #[allow(clippy::disallowed_methods)]
+    env::var("AETHER_HTTP_CONTROL_TOKEN").ok().filter(|token| !token.is_empty())
 }
 
 /// `AETHER_HTTP_PORT`, then the coordinator's compiled default.
@@ -56,6 +74,11 @@ pub struct BloomArgs {
     /// Coordinator REST port. Defaults to `AETHER_HTTP_PORT`, then 8910.
     #[arg(long, global = true)]
     port: Option<u16>,
+
+    /// Bearer token for the control routes. Defaults to
+    /// `AETHER_HTTP_CONTROL_TOKEN`.
+    #[arg(long, global = true)]
+    token: Option<String>,
 
     #[command(subcommand)]
     command: BloomCommand,
@@ -75,6 +98,9 @@ enum BloomCommand {
     Roll(RollArgs),
     /// Fold-test a candidate coordinator and replace the running binary if it holds.
     Upgrade(UpgradeArgs),
+    /// Answer a parked member's surface request: widen its scope revision,
+    /// approve the widening, and seal the successor (ADR-0207).
+    Amend(AmendArgs),
 }
 
 #[derive(Args, Debug)]
@@ -162,7 +188,7 @@ struct SupersedeArgs {
 }
 
 #[derive(Args, Debug)]
-struct ProjectionArgs {
+pub(super) struct ProjectionArgs {
     /// Declared-surface globs. Defaults to the shipped auto-tier surface.
     #[arg(long = "declared-surface")]
     declared_surface: Vec<String>,
@@ -181,7 +207,7 @@ struct ProjectionArgs {
 }
 
 impl ProjectionArgs {
-    fn input(&self) -> Result<ProjectionInput> {
+    pub(super) fn input(&self) -> Result<ProjectionInput> {
         ProjectionInput::resolve(
             self.declared_surface.clone(),
             self.completeness_file.as_deref(),
@@ -192,7 +218,7 @@ impl ProjectionArgs {
 }
 
 pub fn run(args: &BloomArgs) -> Result<()> {
-    print!("{}", run_on(&Endpoint::resolve(args.port), &args.command)?);
+    print!("{}", run_on(&Endpoint::resolve(args.port, args.token.as_deref()), &args.command)?);
     Ok(())
 }
 
@@ -204,6 +230,7 @@ fn run_on(endpoint: &Endpoint, command: &BloomCommand) -> Result<String> {
         BloomCommand::Supersede(args) => run_supersede(&client, args),
         BloomCommand::Roll(args) => roll::run(&client, args),
         BloomCommand::Upgrade(args) => upgrade::run(&client, args),
+        BloomCommand::Amend(args) => amend::run(&client, args),
     }
 }
 
@@ -255,12 +282,12 @@ fn run_supersede(client: &Client<'_>, args: &SupersedeArgs) -> Result<String> {
     let members = patch.proposals.unwrap_or_default();
     let outcome = client.supersede(
         &args.bloom_id,
-        &plan::supersede_request(&draft.draft_id, &members, &task, &args.projection.input()?, &args.edges)?,
+        &plan::supersede_request(&draft.draft_id, &members, &task, &args.projection.input()?, &args.edges, &[])?,
     )?;
     Ok(render_outcome(&outcome.outcome))
 }
 
-fn render_outcome(outcome: &serde_json::Value) -> String {
+pub(super) fn render_outcome(outcome: &serde_json::Value) -> String {
     format!("{}\n", serde_json::to_string_pretty(outcome).unwrap_or_else(|_| outcome.to_string()))
 }
 
@@ -514,7 +541,7 @@ mod tests {
             },
             |port| {
                 run_on(
-                    &Endpoint { host: "127.0.0.1".to_owned(), port },
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
                     &BloomCommand::Supersede(SupersedeArgs {
                         bloom_id: bloom_id.clone(),
                         task_file: task.clone(),
@@ -592,7 +619,7 @@ mod tests {
             },
             |port| {
                 run_on(
-                    &Endpoint { host: "127.0.0.1".to_owned(), port },
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
                     &supersede_args(
                         bloom_id.clone(),
                         task.clone(),
@@ -652,7 +679,7 @@ mod tests {
             },
             |port| {
                 run_on(
-                    &Endpoint { host: "127.0.0.1".to_owned(), port },
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
                     &supersede_args(bloom_id.clone(), task.clone(), Vec::new(), vec!["wp-2".to_owned()], Vec::new()),
                 )
                 .expect("supersede --eject against the fake coordinator")
@@ -702,7 +729,7 @@ mod tests {
                 _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
             },
             |port| {
-                let endpoint = Endpoint { host: "127.0.0.1".to_owned(), port };
+                let endpoint = Endpoint { host: "127.0.0.1".to_owned(), port, token: None };
                 let unknown = run_on(
                     &endpoint,
                     &supersede_args(bloom_id.clone(), task.clone(), Vec::new(), vec!["wp-z".to_owned()], Vec::new()),
@@ -764,7 +791,7 @@ mod tests {
             },
             |port| {
                 run_on(
-                    &Endpoint { host: "127.0.0.1".to_owned(), port },
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
                     &supersede_args(
                         bloom_id.clone(),
                         task.clone(),
@@ -820,7 +847,10 @@ mod tests {
                 ),
                 _ => (404, json!({ "error": "unexpected" })),
             },
-            |port| run_on(&Endpoint { host: "127.0.0.1".to_owned(), port }, &BloomCommand::Status).expect("status"),
+            |port| {
+                run_on(&Endpoint { host: "127.0.0.1".to_owned(), port, token: None }, &BloomCommand::Status)
+                    .expect("status")
+            },
         );
         assert!(text.contains("superseded by"), "supersession is linked: {text}");
         assert!(text.contains("sealed"), "successor status is named: {text}");
@@ -851,7 +881,7 @@ mod tests {
             },
             |port| {
                 run_on(
-                    &Endpoint { host: "127.0.0.1".to_owned(), port },
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
                     &BloomCommand::Seal(SealArgs {
                         task_file: task.clone(),
                         configs: vec![("aether.bloomery.stage_catalog".to_owned(), config.clone())],
@@ -899,7 +929,7 @@ mod tests {
             },
             |port| {
                 run_on(
-                    &Endpoint { host: "127.0.0.1".to_owned(), port },
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
                     &BloomCommand::Seal(SealArgs {
                         task_file: task.clone(),
                         configs: Vec::new(),
@@ -939,7 +969,7 @@ mod tests {
             },
             |port| {
                 run_on(
-                    &Endpoint { host: "127.0.0.1".to_owned(), port },
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
                     &BloomCommand::Seal(SealArgs {
                         task_file: task.clone(),
                         configs: Vec::new(),
@@ -988,7 +1018,7 @@ mod tests {
             },
             |port| {
                 run_on(
-                    &Endpoint { host: "127.0.0.1".to_owned(), port },
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
                     &BloomCommand::Seal(SealArgs {
                         task_file: task.clone(),
                         configs: Vec::new(),
@@ -1059,7 +1089,7 @@ mod tests {
             },
             |port| {
                 run_on(
-                    &Endpoint { host: "127.0.0.1".to_owned(), port },
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
                     &BloomCommand::Seal(SealArgs {
                         task_file: task.clone(),
                         configs: Vec::new(),

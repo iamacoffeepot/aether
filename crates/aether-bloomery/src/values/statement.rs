@@ -96,6 +96,29 @@ pub enum Provenance {
     StageReceipt(StageReceipt),
 }
 
+/// The Approve door's exact statement shape, in one place (ADR-0182,
+/// ADR-0207): an author signature over `scope`'s raw bytes, bound to `scope`.
+///
+/// `words` is the revision digest itself, which is what
+/// [`Statement::verify_authority`] re-checks against the binding and what the
+/// coordinator's approval reader matches an approval to its revision by.
+/// `parents` is empty: authorization lives inside the signed bytes, not in the
+/// derivation edge.
+///
+/// Deterministic, so re-running an amendment re-mints a byte-identical
+/// statement with a byte-identical address and the store's duplicate check
+/// makes the re-submit a no-op.
+///
+/// Native-only, like [`sign_authorization`] — the private half of key custody
+/// is the operator's.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn signed_approval(signer: crate::ids::KeyId, seed: &[u8; 32], scope: Digest) -> Statement {
+    let words = scope.as_bytes().to_vec();
+    let envelope = crate::sign::sign_authorization(signer, seed, AuthorityDoor::Approve, scope, &words);
+    Statement { words, provenance: Provenance::AuthorSignature(envelope), parents: Vec::new() }
+}
+
 /// Where an adapter saw the observed bytes. An observation carries no
 /// authority — it becomes intent only when a person adopts its exact digest
 /// in a native signed statement (ADR-0149 §The boundary, second amendment).

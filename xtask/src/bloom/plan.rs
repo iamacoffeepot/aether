@@ -278,10 +278,11 @@ pub fn supersede_request(
     task: &str,
     input: &ProjectionInput,
     edges: &[(String, String)],
+    surfaces: &[(String, String)],
 ) -> Result<SupersedeRequest> {
     Ok(SupersedeRequest {
         successor_draft: draft_id.to_owned(),
-        projections: projections(members, input, &[])?,
+        projections: projections(members, input, surfaces)?,
         descriptions: descriptions(task, members.iter().map(|member| member.workpiece.as_str())),
         edges: edges
             .iter()

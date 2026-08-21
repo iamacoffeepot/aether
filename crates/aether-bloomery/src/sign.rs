@@ -34,7 +34,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 #[cfg(not(target_arch = "wasm32"))]
-use ed25519_dalek::{Signature, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use crate::digest::{ContentAddressed, Digest, digest_of};
@@ -188,13 +188,45 @@ impl KeyProvider for Ed25519KeyProvider {
     }
 }
 
+/// Mint an author signature at `door`, bound to `binding`, over `words` — the
+/// inverse of [`authorization_message`] plus [`KeyProvider::verify`].
+///
+/// The private half of key custody is the operator's, not this crate's: the
+/// coordinator holds no signing keys, so nothing on the host calls this. It is
+/// here because it must not drift from [`authorization_message`], and a signer
+/// that lives outside the tree is a signer that can disagree with the verifier
+/// without anything failing to compile — which is how an unreproducible
+/// approval recipe happens.
+///
+/// ed25519 signing is deterministic (RFC 8032), so the same seed over the same
+/// message re-mints byte-identical bytes. Every caller's idempotency rests on
+/// that: a re-run produces the same statement digest and the store no-ops.
+///
+/// Native-only for the same reason [`Ed25519KeyProvider`] is: the wasm control
+/// actor holds no key material.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn sign_authorization(
+    signer: KeyId,
+    seed: &[u8; 32],
+    door: AuthorityDoor,
+    binding: Digest,
+    words: &[u8],
+) -> SignatureEnvelope {
+    let key = SigningKey::from_bytes(seed);
+    let signature = key.sign(authorization_message(door, binding, words).as_bytes()).to_bytes().to_vec();
+    SignatureEnvelope { signer, signature }
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use alloc::collections::BTreeMap;
 
     use ed25519_dalek::{Signer, SigningKey};
 
-    use super::{AuthorityDoor, Ed25519KeyProvider, KeyProvider, SignatureEnvelope, authorization_message};
+    use super::{
+        AuthorityDoor, Ed25519KeyProvider, KeyProvider, SignatureEnvelope, authorization_message, sign_authorization,
+    };
     use crate::digest::Digest;
     use crate::ids::KeyId;
 
@@ -299,5 +331,39 @@ mod tests {
         let message = b"do the thing";
         let malformed = SignatureEnvelope { signer: KeyId("owner".into()), signature: vec![1, 2, 3] };
         assert!(!provider("owner", &key).verify(&malformed, message));
+    }
+
+    // Tripwire: the in-tree signer and the in-tree verifier have to agree on
+    // the ADR-0182 message. A signer that composed the subject even slightly
+    // differently would mint approvals no coordinator accepts, with nothing
+    // failing to compile to announce it — the exact hazard an out-of-tree
+    // signing tool carries.
+    #[test]
+    fn a_minted_authorization_verifies_at_its_own_door_and_nowhere_else() {
+        let seed = [7_u8; 32];
+        let key = SigningKey::from_bytes(&seed);
+        let words = b"the scope revision";
+        let envelope = sign_authorization(KeyId("operator".into()), &seed, AuthorityDoor::Approve, binding(1), words);
+
+        let keys = Ed25519KeyProvider::new(BTreeMap::from([(KeyId("operator".into()), key.verifying_key())]));
+        assert!(keys.verify(&envelope, authorization_message(AuthorityDoor::Approve, binding(1), words).as_bytes()));
+        assert!(
+            !keys.verify(&envelope, authorization_message(AuthorityDoor::Answer, binding(1), words).as_bytes()),
+            "an Approve envelope must not open the Answer door",
+        );
+        assert!(
+            !keys.verify(&envelope, authorization_message(AuthorityDoor::Approve, binding(2), words).as_bytes()),
+            "an envelope authorizes one binding and nothing else",
+        );
+    }
+
+    // Tripwire: every caller's idempotency rests on ed25519 determinism — a
+    // re-run has to re-mint the same statement digest so the store no-ops
+    // rather than writing a second approval.
+    #[test]
+    fn signing_the_same_subject_twice_produces_identical_bytes() {
+        let seed = [9_u8; 32];
+        let mint = || sign_authorization(KeyId("operator".into()), &seed, AuthorityDoor::Approve, binding(3), b"w");
+        assert_eq!(mint(), mint());
     }
 }

@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 use aether_data::wire::{from_bytes, to_vec};
 use serde::{Deserialize, Serialize};
 
-use crate::digest::{ContentAddressed, Digest};
+use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::WorkpieceId;
 
 /// The schema number a version-1 [`ScopeRevision`] writes into its first field.
@@ -105,6 +105,33 @@ impl ScopeRevision {
     #[must_use]
     pub fn to_canonical(&self) -> Vec<u8> {
         to_vec(self).expect("commission values never exceed the ADR-0118 u32 wire-length ceiling")
+    }
+
+    /// The next revision of `self` whose declared surface is `self`'s unioned
+    /// with `added`, chained by `predecessor` to `self`'s own digest
+    /// (ADR-0207).
+    ///
+    /// Every other field is carried byte-identically: an amendment widens the
+    /// surface and nothing else, so the successor's problem, design, plan,
+    /// routing, dependencies and ADR bindings are the ones the approval that
+    /// already exists was read against. Additions are appended in the order
+    /// they were requested, and a glob the surface already carries verbatim is
+    /// skipped — the caller has usually run
+    /// [`surface_additions`](super::surface_additions) first, and this is the
+    /// backstop that keeps a duplicate out of the signed bytes either way.
+    ///
+    /// `predecessor: Some(digest_of(self))` is what makes the store's ordinal
+    /// check accept this as revision *n+1* rather than refusing it as a stale
+    /// or duplicate write.
+    #[must_use]
+    pub fn with_widened_surface(&self, added: &[String]) -> Self {
+        let mut declared_surface = self.declared_surface.clone();
+        for glob in added {
+            if !declared_surface.contains(glob) {
+                declared_surface.push(glob.clone());
+            }
+        }
+        Self { predecessor: Some(digest_of(self)), declared_surface, ..self.clone() }
     }
 }
 
@@ -362,5 +389,33 @@ mod tests {
             Err(super::CommissionValueError::Malformed),
             "garbage must refuse rather than panic in the wire decoder"
         );
+    }
+
+    // Tripwire: an amendment widens the surface and nothing else. A carry that
+    // dropped or rewrote any other field would produce a successor the existing
+    // approval was never read against — the reader would still accept it,
+    // because the approval binds the digest, not the prose.
+    #[test]
+    fn widening_carries_every_other_field_and_chains_to_its_predecessor() {
+        let base = fixture();
+        let widened = base.with_widened_surface(&[String::from("crates/other/**")]);
+
+        assert_eq!(widened.predecessor, Some(digest_of(&base)), "the chain is what makes it revision n+1");
+        assert_eq!(
+            widened.declared_surface,
+            vec![String::from("crates/aether-bloomery/**"), String::from("crates/other/**")],
+        );
+        assert_eq!(
+            ScopeRevision { predecessor: None, declared_surface: base.declared_surface.clone(), ..widened.clone() },
+            base,
+            "every field but the surface and the chain is carried byte-identically",
+        );
+    }
+
+    #[test]
+    fn widening_by_a_glob_the_surface_already_carries_does_not_duplicate_it() {
+        let base = fixture();
+        let widened = base.with_widened_surface(&[String::from("crates/aether-bloomery/**")]);
+        assert_eq!(widened.declared_surface, base.declared_surface);
     }
 }

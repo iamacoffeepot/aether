@@ -353,6 +353,19 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, routed)
     }
 
+    /// `GET /configs/{digest}` — read a stored configuration back as JSON
+    /// (ADR-0174). The inverse of `POST /configs`, and the route an operator
+    /// deciding against a bloom's *sealed* policy has to read through.
+    #[http::route(Get, "/configs/{digest}")]
+    fn on_get_config(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        digest: http::Path<String>,
+    ) -> http::Outcome {
+        let routed = configs::read_config(state, &digest.0);
+        finish(state, ctx, routed)
+    }
+
     /// `GET /workpieces` — list durable open commissions as workpieces.
     #[http::route(Get, "/workpieces")]
     fn on_get_workpieces(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {

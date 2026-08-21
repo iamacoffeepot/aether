@@ -190,6 +190,18 @@ impl ResolvedConfigs {
         decode_config::<K>(&stored.kind, &stored.bytes).map(Some)
     }
 
+    /// The kind and raw bytes stored at `address`, when this set holds them.
+    ///
+    /// The read-back half of [`Self::insert`], for a caller that must hand the
+    /// stored content to someone who names the kind at runtime rather than as
+    /// a type parameter — the REST reader, which renders the bytes back through
+    /// the descriptor inventory's schema. [`Self::resolve`] stays the typed
+    /// path every gate uses.
+    #[must_use]
+    pub fn stored(&self, address: Digest) -> Option<(&str, &[u8])> {
+        self.entries.get(&address).map(|stored| (stored.kind.as_str(), stored.bytes.as_slice()))
+    }
+
     /// How many addresses have content available.
     #[must_use]
     pub fn len(&self) -> usize {

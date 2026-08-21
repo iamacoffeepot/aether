@@ -142,11 +142,109 @@ impl SurfacePattern {
         }
     }
 
+    /// Whether every path `other` permits is a path `self` permits.
+    ///
+    /// Inside this grammar an intersecting pair nests, so the narrower side
+    /// *is* the overlap — `self` covers `other` exactly when the intersection
+    /// is `other` itself.
+    #[must_use]
+    pub fn covers(&self, other: &Self) -> bool {
+        self.intersection(other).is_some_and(|narrower| narrower == other)
+    }
+
     fn as_prefix(&self) -> &str {
         match self {
             Self::Exact(path) | Self::Subtree(path) => path,
         }
     }
+}
+
+/// The globs in `requested` that `existing` does not already permit — the
+/// delta a surface amendment actually widens (ADR-0207).
+///
+/// Deduplicated, in request order: the operator reads the list back, and
+/// sorting it would separate a requested path from the reason that arrived
+/// with it. An empty result is the "the lane could have finished where it was"
+/// answer, and a caller that gets one should widen nothing.
+///
+/// # Errors
+/// The first requested glob outside the declared-surface grammar, by name. The
+/// request comes from an untrusted lane, so an unparseable glob is refused
+/// rather than skipped: skipping it would silently narrow the amendment the
+/// operator thinks they granted.
+pub fn surface_additions(existing: &[String], requested: &[String]) -> Result<Vec<String>, String> {
+    let held: Vec<SurfacePattern> = existing.iter().filter_map(|glob| SurfacePattern::parse(glob)).collect();
+
+    let mut added: Vec<String> = Vec::new();
+    for glob in requested {
+        let Some(pattern) = SurfacePattern::parse(glob) else {
+            return Err(glob.clone());
+        };
+        if held.iter().any(|owned| owned.covers(&pattern)) || added.contains(glob) {
+            continue;
+        }
+        added.push(glob.clone());
+    }
+    Ok(added)
+}
+
+/// What the tier ladder says about a widening: where the member stands now,
+/// where it would stand after, and what each added path resolved on its own.
+///
+/// The per-path breakdown is the load-bearing half of a refusal. `widened` on
+/// its own says an amendment was refused; `per_added` says *which* path cost
+/// it, which is the only form an operator can act on.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TierVerdict {
+    /// The tier the member's current declared surface resolves at.
+    pub existing: Tier,
+    /// The tier the union of the current surface and the additions resolves at.
+    pub widened: Tier,
+    /// Each added glob and the tier it resolves at alone, in request order.
+    pub per_added: Vec<(String, Tier)>,
+}
+
+/// Resolve `policy` over the widened surface and over each added glob alone
+/// (ADR-0207 §the tier ladder decides who grants it).
+#[must_use]
+pub fn tier_verdict(policy: &ApprovalPolicy, existing: &[String], added: &[String]) -> TierVerdict {
+    let mut widened_surface: Vec<String> = existing.to_vec();
+    widened_surface.extend(added.iter().cloned());
+
+    TierVerdict {
+        existing: policy.resolve_surface(existing),
+        widened: policy.resolve_surface(&widened_surface),
+        per_added: added
+            .iter()
+            .map(|glob| (glob.clone(), policy.resolve_surface(core::slice::from_ref(glob))))
+            .collect(),
+    }
+}
+
+/// Whether an amendment may be granted unattended at `ceiling`.
+///
+/// The one place the ladder is applied to the *delta*, and the only point in
+/// the amendment chain that can refuse before a signature exists — everything
+/// downstream of a signature treats the signature as the decision.
+///
+/// # Errors
+/// Every added glob whose own tier exceeds `ceiling`, paired with that tier.
+/// A refusal that named only the resolved maximum would leave the operator
+/// guessing which path to drop.
+pub fn gate_widening(verdict: &TierVerdict, ceiling: Tier) -> Result<(), Vec<(String, Tier)>> {
+    if verdict.widened <= ceiling {
+        return Ok(());
+    }
+    let offending: Vec<(String, Tier)> =
+        verdict.per_added.iter().filter(|(_, tier)| *tier > ceiling).cloned().collect();
+    // A widening can cross the ceiling with no single added path crossing it
+    // only if the existing surface already did, which is a member that was
+    // sealed above the ceiling — report the whole delta rather than nothing.
+    Err(if offending.is_empty() {
+        verdict.per_added.clone()
+    } else {
+        offending
+    })
 }
 
 /// Every glob two declared surfaces both permit — the seal door's cross-member
@@ -509,7 +607,10 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use super::{ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, surface_intersection};
+    use super::{
+        ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, gate_widening, surface_additions, surface_intersection,
+        tier_verdict,
+    };
 
     /// The reference tier policy — the same rules `test-surface-match.py`'s
     /// `POLICY` used, so the resolver is checked against the same cases.
@@ -699,5 +800,73 @@ mod tests {
         let over_cap =
             ApprovalPolicy { default: Tier::Judge, rules: vec![rule(&vec!["a"; 4000].join("/"), Tier::Auto)] };
         assert!(!over_cap.rules_in_grammar(), "an over-cap policy glob must fail the grammar");
+    }
+
+    mod amendment {
+        use alloc::string::{String, ToString as _};
+        use alloc::vec;
+        use alloc::vec::Vec;
+
+        use super::super::{Tier, gate_widening, surface_additions, tier_verdict};
+        use super::policy;
+
+        fn globs(items: &[&str]) -> Vec<String> {
+            items.iter().map(|item| (*item).to_string()).collect()
+        }
+
+        #[test]
+        fn a_path_the_surface_already_permits_is_not_an_addition() {
+            // The "the lane could have finished where it was" answer. Widening
+            // on it would advance the commission tip and cost an approval for
+            // a delta of nothing.
+            assert_eq!(
+                surface_additions(
+                    &globs(&["crates/aether-bloomery/**"]),
+                    &globs(&["crates/aether-bloomery/src/lib.rs", "crates/aether-bloomery/**"]),
+                ),
+                Ok(Vec::new()),
+            );
+        }
+
+        #[test]
+        fn additions_keep_request_order_and_collapse_duplicates() {
+            assert_eq!(
+                surface_additions(&globs(&["crates/a/**"]), &globs(&["crates/z/**", "crates/b/**", "crates/z/**"])),
+                Ok(globs(&["crates/z/**", "crates/b/**"])),
+                "the operator reads this list back beside the reasons it arrived with",
+            );
+        }
+
+        #[test]
+        fn an_out_of_grammar_glob_is_refused_by_name_rather_than_skipped() {
+            // The request comes from an untrusted lane. Skipping the entry
+            // would silently narrow the amendment the operator believes they
+            // granted.
+            assert_eq!(
+                surface_additions(&globs(&["crates/a/**"]), &globs(&["crates/*/src/lib.rs"])),
+                Err("crates/*/src/lib.rs".to_string()),
+            );
+        }
+
+        #[test]
+        fn the_gate_names_the_added_path_that_cost_the_amendment() {
+            // The load-bearing half of a refusal: "widened to human" is not
+            // actionable, "`/Cargo.toml` resolved human" is.
+            let verdict = tier_verdict(&policy(), &globs(&["crates/aether-bloomery/**"]), &globs(&["/Cargo.toml"]));
+
+            assert_eq!(verdict.existing, Tier::Judge);
+            assert_eq!(verdict.widened, Tier::Human);
+            assert_eq!(
+                gate_widening(&verdict, Tier::Auto),
+                Err(vec![("/Cargo.toml".to_string(), Tier::Human)]),
+                "the refusal names the path and the tier it resolved",
+            );
+        }
+
+        #[test]
+        fn a_widening_inside_the_ceiling_is_granted() {
+            let verdict = tier_verdict(&policy(), &globs(&["crates/aether-bloomery/**"]), &globs(&["crates/other/**"]));
+            assert_eq!(gate_widening(&verdict, verdict.existing), Ok(()));
+        }
     }
 }
