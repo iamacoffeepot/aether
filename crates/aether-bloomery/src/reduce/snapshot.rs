@@ -846,8 +846,14 @@ impl Snapshot {
             // structurally — the ledger never sees it. Its hold release rides
             // ReleaseHold. An orphan-claim release is inert for a different
             // reason: it dispatches no member work at all, so it counts against
-            // no bloom's retry ledger — its whole state is the record below.
-            Decision::RedispatchStage { .. } | Decision::DispatchOrphanClaimRelease { .. } => {}
+            // no bloom's retry ledger — its whole state is the record below. A
+            // cancel and a single-ref release are inert for a third: what they
+            // do happens at the source and the executor, and the record of it
+            // is the withdrawal row `apply_withdrawal_effect` writes.
+            Decision::RedispatchStage { .. }
+            | Decision::DispatchOrphanClaimRelease { .. }
+            | Decision::CancelDispatch { .. }
+            | Decision::ReleaseMemberClaimRef { .. } => {}
             Decision::RecordOrphanClaimRelease { request, target, completion } => {
                 // Opening the record and completing it write the same entry, so
                 // the completion overwrites rather than inserting beside — a
@@ -910,29 +916,9 @@ impl Snapshot {
             Decision::RecordHostFault { .. } | Decision::ClearHostFault { .. } => self.apply_host_fault_effect(effect),
             Decision::RecordCandidateVehicle { .. } => self.apply_vehicle_effect(effect),
             Decision::RecordMemberMachinery { .. } => self.apply_machinery_effect(effect),
-            Decision::RecordWithdrawal { bloom, withdrawal } => {
-                if let Some(record) = self.blooms.get_mut(bloom) {
-                    // Dropping the cursor is what keeps the doctor's
-                    // "non-terminal member has a lane or a dispatch" invariant
-                    // correct with no special case for withdrawal: the member
-                    // is no longer at a stage at all. The deferred dispatch
-                    // goes for the wedge's reason — a workpiece that stops
-                    // dispatching is owed nothing, and a later release must not
-                    // hand it a lap.
-                    record.progress.remove(&withdrawal.workpiece);
-                    record.deferred_dispatches.remove(&withdrawal.workpiece);
-                    record.withdrawn.insert(withdrawal.workpiece.clone(), withdrawal.clone());
-                }
+            Decision::RecordWithdrawal { .. } | Decision::MarkBloomWithdrawn { .. } => {
+                self.apply_withdrawal_effect(effect);
             }
-            Decision::MarkBloomWithdrawn { bloom } => {
-                if let Some(record) = self.blooms.get_mut(bloom) {
-                    record.status = BloomStatus::Withdrawn;
-                }
-            }
-            // Snapshot-inert outbox, like `DispatchOrphanClaimRelease`: what a
-            // cancel and a single-ref release do happens at the source and the
-            // executor, and the record of it is the withdrawal row above.
-            Decision::CancelDispatch { .. } | Decision::ReleaseMemberClaimRef { .. } => {}
             Decision::EmitReceipt(projected) => {
                 if let Some(record) = self.blooms.get_mut(&projected.receipt.bloom) {
                     record.status = BloomStatus::Landed;
@@ -1139,6 +1125,35 @@ impl Snapshot {
             Decision::ClearHostFault { bloom, workpiece } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.host_faults.remove(workpiece);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Fold the two decisions that withdraw work (#5327): one member leaving
+    /// the line, and the bloom going terminal once the last one has. Split out
+    /// of [`apply_effect`](Self::apply_effect) so adding the arms does not blow
+    /// the parent match's line budget.
+    fn apply_withdrawal_effect(&mut self, effect: &Decision) {
+        match effect {
+            Decision::RecordWithdrawal { bloom, withdrawal } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    // Dropping the cursor is what keeps the doctor's
+                    // "non-terminal member has a lane or a dispatch" invariant
+                    // correct with no special case for withdrawal: the member
+                    // is no longer at a stage at all. The deferred dispatch
+                    // goes for the wedge's reason — a workpiece that stops
+                    // dispatching is owed nothing, and a later release must not
+                    // hand it a lap.
+                    record.progress.remove(&withdrawal.workpiece);
+                    record.deferred_dispatches.remove(&withdrawal.workpiece);
+                    record.withdrawn.insert(withdrawal.workpiece.clone(), withdrawal.clone());
+                }
+            }
+            Decision::MarkBloomWithdrawn { bloom } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.status = BloomStatus::Withdrawn;
                 }
             }
             _ => {}

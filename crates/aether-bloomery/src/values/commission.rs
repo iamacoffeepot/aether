@@ -406,7 +406,7 @@ mod tests {
             vec![String::from("crates/aether-bloomery/**"), String::from("crates/other/**")],
         );
         assert_eq!(
-            ScopeRevision { predecessor: None, declared_surface: base.declared_surface.clone(), ..widened.clone() },
+            ScopeRevision { predecessor: None, declared_surface: base.declared_surface.clone(), ..widened },
             base,
             "every field but the surface and the chain is carried byte-identically",
         );

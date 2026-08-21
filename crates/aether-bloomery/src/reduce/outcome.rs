@@ -869,7 +869,7 @@ mod tests {
                 assert_eq!(found, "aether.bloomery.decisions.v3");
                 assert_eq!(current, DECISIONS_SCHEMA);
             }
-            other => panic!("expected Unknown, got {other:?}"),
+            other @ DecisionsSchemaError::Decode(_) => panic!("expected Unknown, got {other:?}"),
         }
     }
 }

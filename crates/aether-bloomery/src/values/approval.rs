@@ -19,6 +19,7 @@
 use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::slice;
 
 use serde::{Deserialize, Serialize};
 
@@ -214,10 +215,7 @@ pub fn tier_verdict(policy: &ApprovalPolicy, existing: &[String], added: &[Strin
     TierVerdict {
         existing: policy.resolve_surface(existing),
         widened: policy.resolve_surface(&widened_surface),
-        per_added: added
-            .iter()
-            .map(|glob| (glob.clone(), policy.resolve_surface(core::slice::from_ref(glob))))
-            .collect(),
+        per_added: added.iter().map(|glob| (glob.clone(), policy.resolve_surface(slice::from_ref(glob)))).collect(),
     }
 }
 
@@ -744,10 +742,7 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use super::{
-        ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, gate_widening, surface_additions, surface_intersection,
-        tier_verdict,
-    };
+    use super::{ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, surface_intersection};
 
     /// The reference tier policy — the same rules `test-surface-match.py`'s
     /// `POLICY` used, so the resolver is checked against the same cases.

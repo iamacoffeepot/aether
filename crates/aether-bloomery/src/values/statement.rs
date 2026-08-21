@@ -12,8 +12,8 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 use crate::digest::{ContentAddressed, Digest};
-use crate::ids::StageId;
-use crate::sign::{AuthorityDoor, KeyProvider, SignatureEnvelope, authorization_message};
+use crate::ids::{KeyId, StageId};
+use crate::sign::{AuthorityDoor, KeyProvider, SignatureEnvelope, authorization_message, sign_authorization};
 
 /// An artifact carrying words plus exactly one provenance claim.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -113,9 +113,9 @@ pub enum Provenance {
 /// is the operator's.
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
-pub fn signed_approval(signer: crate::ids::KeyId, seed: &[u8; 32], scope: Digest) -> Statement {
+pub fn signed_approval(signer: KeyId, seed: &[u8; 32], scope: Digest) -> Statement {
     let words = scope.as_bytes().to_vec();
-    let envelope = crate::sign::sign_authorization(signer, seed, AuthorityDoor::Approve, scope, &words);
+    let envelope = sign_authorization(signer, seed, AuthorityDoor::Approve, scope, &words);
     Statement { words, provenance: Provenance::AuthorSignature(envelope), parents: Vec::new() }
 }
 

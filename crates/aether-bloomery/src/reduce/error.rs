@@ -2,6 +2,7 @@
 //! the violated rule rather than a bare failure.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
@@ -685,5 +686,5 @@ pub enum WithdrawError {
     /// parking them, because a parked dependent still pins the bloom the
     /// withdrawal was meant to free; re-send with the cascade to withdraw them
     /// too.
-    DependentsWouldStrand(alloc::vec::Vec<WorkpieceId>),
+    DependentsWouldStrand(Vec<WorkpieceId>),
 }
