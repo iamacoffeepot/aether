@@ -160,28 +160,24 @@ pub(super) fn reduce_operator_release(snapshot: &Snapshot, bloom: &BloomId, rele
 /// The aggregate work orders a release owes, re-derived from the fold the
 /// record is holding now.
 ///
-/// Verify before review when both were swallowed: the critic judges a tree
-/// the compiler has already passed, and launching both would spend the paid
-/// lane on a fold that has not built yet. The leftover review deferral stays
-/// on the record until the verify that just went out completes and dispatches
-/// the critic itself — the same implicit clear a member dispatch uses.
+/// Every gate the hold swallowed goes back out, because the two composite gates
+/// run concurrently against one fold: neither reads the other's verdict, and
+/// the landing waits on the join of their passes. Releasing only one would
+/// leave the bloom waiting on a gate nothing re-dispatches. A gate whose work
+/// order actually goes out clears its own deferral in the fold — the same
+/// implicit clear a member dispatch uses.
 fn owed_aggregates(record: &BloomRecord, bloom: BloomId) -> Vec<Decision> {
     let Some(integration) = record.integration.as_ref() else {
         return Vec::new();
     };
+    let mut owed = Vec::new();
     if record.deferred_aggregates.contains(&StageId::AggregateVerify) {
-        return alloc::vec![owed_aggregate_verify(record, bloom, integration.tree, integration.head)];
+        owed.push(owed_aggregate_verify(record, bloom, integration.tree, integration.head, record.aggregate_verify_rolls + 1));
     }
     if record.deferred_aggregates.contains(&StageId::AggregateReview) {
-        return alloc::vec![owed_aggregate_review(
-            record,
-            bloom,
-            integration.tree,
-            integration.head,
-            record.aggregate_rolls + 1,
-        )];
+        owed.push(owed_aggregate_review(record, bloom, integration.tree, integration.head, record.aggregate_rolls + 1));
     }
-    Vec::new()
+    owed
 }
 
 /// The advance-and-dispatch pair one owed workpiece is due, aimed from the

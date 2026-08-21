@@ -370,7 +370,12 @@ impl Topic {
             // effects emitted beside it, and a terminal bloom's status move
             // dispatches nothing at all.
             | Decision::RecordWithdrawal { .. }
-            | Decision::MarkBloomWithdrawn { .. } => None,
+            | Decision::MarkBloomWithdrawn { .. }
+            // Snapshot-only: the composite-gate join is read off the record by
+            // the sibling verdict that arrives second. The landing it leads to
+            // reaches the reactor through the `DispatchLand` emitted beside it,
+            // so a topic here would enqueue a row nothing drains.
+            | Decision::RecordAggregateGatePass { .. } => None,
         }
     }
 }

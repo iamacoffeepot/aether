@@ -3,7 +3,7 @@
 
 use alloc::vec::Vec;
 
-use super::aggregate_verify::{aggregate_review_dispatch, aggregate_verify_dispatch, at_park_ceiling};
+use super::aggregate_verify::{aggregate_gate_dispatches, aggregate_review_dispatch, at_park_ceiling};
 use super::readiness::newly_ready_entries;
 use super::verify_memo::{proof_of, reuse_of};
 use super::{
@@ -196,17 +196,19 @@ pub(super) fn reduce_resolve(
         }));
     }
     // The claim set checked out, so the fold's head is gated before the bloom
-    // may resolve (ADR-0153): hold the fold on the record and dispatch the
-    // whole-bloom aggregate *verify* against it — the claim scan above stays
-    // the integrity gate, the compiler is the mechanical gate, and the critic
-    // the judgment gate that a passing verify hands off to. Verify runs first
-    // because it is the cheaper and more decisive of the two, and there is
-    // nothing for a critic to judge in a fold that does not build. The ceiling
-    // is the same inclusive park comparison the verify completion gate uses:
-    // a fold whose next roll is at or past AggregateVerify's catalog budget
-    // is refused fail-closed (unreachable through this reducer — a wedged
-    // bloom's members stay closed, so no re-fold dispatches — but a buggy
-    // reactor must not buy a roll the vocabulary forbids).
+    // may resolve (ADR-0153): hold the fold on the record and dispatch *both*
+    // whole-bloom gates against it — the claim scan above stays the integrity
+    // gate, the compiler is the mechanical gate, and the critic the judgment
+    // gate. They run together rather than in series because neither reads the
+    // other's verdict, so the bloom pays the larger of the two latencies
+    // instead of their sum; the landing waits on the join of the two passes
+    // (`BloomRecord::aggregate_passed`), and a refusal from either re-weaves
+    // the composition once. The ceiling is the same inclusive park comparison
+    // the verify completion gate uses: a fold whose next roll is at or past
+    // AggregateVerify's catalog budget is refused fail-closed (unreachable
+    // through this reducer — a wedged bloom's members stay closed, so no
+    // re-fold dispatches — but a buggy reactor must not buy a roll the
+    // vocabulary forbids).
     let roll = record.aggregate_verify_rolls + 1;
     if at_park_ceiling(record, StageId::AggregateVerify, roll) {
         return Decisions::rejected(Outcome::ResolveRejected(ResolveError::ReviewCeiling {
@@ -219,9 +221,13 @@ pub(super) fn reduce_resolve(
     // The fold may be a tree this bloom has already proven (#4891): a
     // single-member fold is byte-identical to the candidate its member verified,
     // so the mechanical gate would re-run for a verdict the journal holds. Pass
-    // by identity and hand the same fold straight to the critic, exactly as a
-    // returning green verdict would. A multi-member fold is a tree that never
-    // existed before this moment, so it misses and the gates run.
+    // by identity — the mechanical half of the join is recorded straight away,
+    // exactly as a returning green verdict would record it — and dispatch only
+    // the critic. A multi-member fold is a tree that never existed before this
+    // moment, so it misses and both gates run.
+    //
+    // The gate-pass row sits after the `hold`, which clears the join: the fold
+    // being recorded here is the subject this pass is about.
     if let Some(proof) = record.verify_proof_for(*tree) {
         return Decisions {
             outcome: Outcome::AggregateVerifyReused { bloom: *bloom, rolls: roll, proof: proof.evidence.detail },
@@ -229,13 +235,14 @@ pub(super) fn reduce_resolve(
                 hold,
                 reuse_of(*bloom, StageId::AggregateVerify, proof),
                 Decision::RecordAggregateVerifyRoll { bloom: *bloom, rolls: roll },
+                Decision::RecordAggregateGatePass { bloom: *bloom, stage: StageId::AggregateVerify },
                 aggregate_review_dispatch(record, *bloom, *tree, *head),
             ],
         };
     }
 
-    Decisions {
-        outcome: Outcome::AggregateVerifyDispatched { bloom: *bloom, roll },
-        effects: alloc::vec![hold, aggregate_verify_dispatch(record, *bloom, *tree, *head)],
-    }
+    let mut effects = alloc::vec![hold];
+    effects.extend(aggregate_gate_dispatches(record, *bloom, *tree, *head));
+
+    Decisions { outcome: Outcome::AggregateVerifyDispatched { bloom: *bloom, roll }, effects }
 }
