@@ -481,7 +481,7 @@ mod tests {
         let rows = names(source, false);
         assert!(
             rows.iter().any(|(name, kind, _, vis)| {
-                name == "SourceBackend::adopt_candidate" && *kind == SymbolKind::TraitMethod && vis == "pub"
+                name == "SourceBackend::adopt_candidate" && *kind == SymbolKind::TraitMethod && vis == "public"
             }),
             "the declared method is a row of its own, named Trait::method: {rows:?}"
         );
