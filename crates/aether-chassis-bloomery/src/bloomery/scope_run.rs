@@ -1,10 +1,10 @@
 //! Opening a pre-bloom scoping run (ADR-0208, #5304) — the non-reducer
-//! producer for [`Topic::ScopeDispatch`].
+//! producer for [`Topic::ScopeDispatch`](aether_bloomery::Topic::ScopeDispatch).
 //!
 //! ADR-0208 names this as missing machinery, and half of that is right: for
-//! [`Topic::Dispatch`] the reducer really is the only producer. But a
-//! *host-minted* topic is not new — [`Topic::ViewDocument`],
-//! [`Topic::SourceReplica`], and [`Topic::Commission`] are all produced and
+//! [`Topic::Dispatch`](aether_bloomery::Topic::Dispatch) the reducer really is the only producer. But a
+//! *host-minted* topic is not new — [`Topic::ViewDocument`](aether_bloomery::Topic::ViewDocument),
+//! [`Topic::SourceReplica`](aether_bloomery::Topic::SourceReplica), and [`Topic::Commission`](aether_bloomery::Topic::Commission) are all produced and
 //! drained by the host with no [`Decision`](aether_bloomery::Decision) behind
 //! them, and the last one is this module's exact template: the commission
 //! store writes a raw outbox row inside its own transaction.

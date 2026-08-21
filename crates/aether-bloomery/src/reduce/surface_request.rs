@@ -9,7 +9,7 @@
 //! Empty effects beyond recording the evidence: the snapshot folds the request
 //! straight off [`Fact::SurfaceRequested`](crate::Fact::SurfaceRequested), the
 //! way a fold refusal is folded from its own fact, so no new
-//! [`Decision`](crate::Decision) enters the wire-frozen decisions graph.
+//! [`Decision`] enters the wire-frozen decisions graph.
 
 use alloc::vec;
 

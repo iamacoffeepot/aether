@@ -22,10 +22,10 @@
 //! other bucket. Collapsing unresolvable into clean produces a check that looks
 //! green because it found nothing to look at.
 //!
-//! # The matcher is [`path_in_surface`], never [`SurfacePattern::intersects`]
+//! # The matcher is [`path_in_surface`], never [`super::SurfacePattern::intersects`]
 //!
-//! [`path_in_surface`](super::path_in_surface) is asymmetric — a concrete path
-//! against a surface. [`SurfacePattern::intersects`](super::SurfacePattern::intersects)
+//! [`path_in_surface`] is asymmetric — a concrete path against a surface.
+//! [`SurfacePattern::intersects`](super::SurfacePattern::intersects)
 //! is symmetric — pattern against pattern — and answers `true` whenever either
 //! prefix nests inside the other. Fed a concrete path as if it were a pattern,
 //! it would make a surface naming one file admit that file's whole ancestor
@@ -229,7 +229,7 @@ impl ScopeVerifyReport {
 
 /// Check a workpiece against its own declared surface (ADR-0208).
 ///
-/// Every named path is tested with [`path_in_surface`](super::path_in_surface)
+/// Every named path is tested with [`path_in_surface`]
 /// — the same asymmetric matcher Member-Verify containment uses, so a refusal
 /// here and a containment failure hours later cannot disagree about what a glob
 /// covers.

@@ -11,7 +11,7 @@
 //!
 //! [`EventBoundary`] refuses a whole admitted event ([`super::land`],
 //! [`super::integrate`]'s resolve). Its guards carry the typed
-//! [`Outcome`](super::Outcome) the admitter has always matched on, declared on
+//! [`Outcome`] the admitter has always matched on, declared on
 //! the guard rather than recovered from the guard's name at the call site — a
 //! `match` over guard strings would be the second description of the guard set
 //! ADR-0206 exists to prevent, and it would keep compiling after a rename.

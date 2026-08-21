@@ -3,7 +3,7 @@
 //! Two handlers and one ledger:
 //!
 //! 1. **Ask.** The poll tick sends a detached
-//!    [`Query`](aether_bloomery::Query) to the control core — the same live
+//!    [`Query`] to the control core — the same live
 //!    read `GET /view` serves — and returns. Nothing is computed on the tick
 //!    itself, so a slow endpoint cannot hold the dispatcher through a store
 //!    read as well.

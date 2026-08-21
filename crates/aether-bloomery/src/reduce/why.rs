@@ -12,7 +12,7 @@
 //! below is a projection of record fields the reducer already wrote, plus the
 //! two pure predicates the rest of the projection already calls —
 //! [`blocking_ancestor`] for a declared edge and
-//! [`at_park_ceiling`](super::aggregate_verify::at_park_ceiling) for a spent
+//! [`at_park_ceiling`] for a spent
 //! aggregate budget. Nothing here evaluates a guard, and nothing here restates
 //! one.
 //!
@@ -185,7 +185,7 @@ fn dispatch_rung(record: &BloomRecord, members: &[MemberWhy]) -> TransitionWhy {
 /// The fold: done once an integration is recorded, refused when the fold's own
 /// ADR-0206 gate stopped it, otherwise waiting on member dispatch.
 ///
-/// This is the one rung that can carry a real [`RecordedRefusal`] today, and it
+/// This is the one rung that can carry a real [`super::RecordedRefusal`] today, and it
 /// is the exact answer the 2026-08-19 hour was spent recovering by hand.
 fn fold_rung(snapshot: &Snapshot, record: &BloomRecord, bloom: BloomId, dispatch: &TransitionWhy) -> TransitionWhy {
     if record.integration.is_some() {
