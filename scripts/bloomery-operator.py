@@ -931,7 +931,13 @@ def member_status_state(member: dict[str, Any], *, has_order: bool) -> str:
     A member awaiting a surface amendment (ADR-0207) gets its own word rather
     than `held`: a hold is a question an answer settles, and this one is a
     boundary only an authored successor moves.
+
+    A withdrawn member (#5327) outranks all of them: an operator took it out of
+    the bloom, so whatever it was doing on the way out is history and it is not
+    coming back into the line.
     """
+    if member.get("withdrawn"):
+        return "withdrawn"
     if member.get("wedge"):
         return "WEDGED"
     if member.get("awaiting_surface"):

@@ -6,8 +6,8 @@
 use aether_actor::Manual;
 use aether_bloomery::{
     Adjudication, Admit, AdmitResult, AuthorityDoor, BloomId, BloomView, CandidateRef, Disposition, Event, Fact,
-    IdempotencyKey, OperatorHold, OperatorRepair, Outcome, Query, QueryResult, Statement, ViewDocument, WorkpieceId,
-    digest_of,
+    IdempotencyKey, OperatorHold, OperatorRepair, Outcome, Query, QueryResult, Statement, ViewDocument, Withdrawal,
+    WithdrawalCause, WorkpieceId, digest_of,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_http::HttpServerResponse;
@@ -20,6 +20,7 @@ use super::response::{error_response, json};
 use super::state::{ApiCapabilityState, Routed, VerifyPending, admit};
 use crate::api::dto::{
     AdjudicateRequest, GrantRequest, HoldRequest, OutcomeView, ReleaseAcceptedView, RepairRequest, SupersedeRequest,
+    WithdrawRequest,
 };
 use crate::bloomery::DoctorReport;
 use crate::control::ControlCore;
@@ -257,6 +258,63 @@ impl ApiCapabilityState {
         });
 
         admit(&Event { idempotency_key: IdempotencyKey(key), fact: edge(bloom, hold) })
+    }
+
+    /// `POST /blooms/{id}/members/{workpiece}/withdraw` — take one member out
+    /// of the `{id}` bloom without superseding it (#5327).
+    ///
+    /// Journal-first like its siblings: the route appends one `Fact::Withdraw`
+    /// and nothing else. From there the reducer drops the member's cursor,
+    /// skips it in the three folds that are otherwise total over the sealed
+    /// member list, cancels its lane, and frees its claim ref alone — never the
+    /// bloom's admission ref, because the bloom keeps walking.
+    ///
+    /// The cascade is opt-in and the refusal is fail-closed: a withdrawal that
+    /// would strand dependents answers `422` naming them, because a parked
+    /// dependent still pins the bloom this was meant to free. A cascaded
+    /// dependent leaves with a derived `WithdrawalCause::Dependency`, which is
+    /// its visible reason.
+    ///
+    /// One-way. A member wrongly withdrawn is re-scoped and sealed into a
+    /// later bloom — which is exactly what freeing its claim ref makes
+    /// possible.
+    pub(super) fn withdraw(id: &str, workpiece: &str, body: &[u8]) -> Routed {
+        let bloom = match digest_from_hex(id) {
+            Some(digest) => BloomId(digest),
+            None => return Routed::Reply(error_response(400, "bloom id is not a 32-byte hex bloom id")),
+        };
+        let request: WithdrawRequest = match hex::from_slice(body) {
+            Ok(request) => request,
+            Err(error) => return Routed::Reply(error_response(400, &format!("invalid withdraw body: {error}"))),
+        };
+        let WithdrawRequest { reason, operator, cascade, idempotency_key } = request;
+        if let Some(refusal) = unstated(&reason, &operator) {
+            return Routed::Reply(refusal);
+        }
+
+        let withdrawal = Withdrawal {
+            workpiece: WorkpieceId(workpiece.to_owned()),
+            cause: WithdrawalCause::Operator,
+            reason,
+            operator,
+        };
+        // Content-addressed like the brake's: a resent request is one act, and
+        // a genuinely different reason is its own. The cascade flag rides the
+        // key because withdrawing one member and withdrawing its whole subtree
+        // are different acts stating identical words.
+        let key = idempotency_key.unwrap_or_else(|| {
+            format!(
+                "aether.bloomery.withdraw:{}:{}:{}",
+                hex_encode(bloom.0.as_bytes()),
+                hex_encode(digest_of(&withdrawal).as_bytes()),
+                u8::from(cascade)
+            )
+        });
+
+        admit(&Event {
+            idempotency_key: IdempotencyKey(key),
+            fact: Fact::Withdraw { bloom, withdrawals: vec![withdrawal], cascade },
+        })
     }
 
     /// `POST /blooms/{id}/answer/{question}` — adopt an answer to the parked

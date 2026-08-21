@@ -506,6 +506,23 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, routed)
     }
 
+    /// `POST /blooms/{id}/members/{workpiece}/withdraw` — take one member out
+    /// of a walking bloom without superseding it (#5327). Its lane is
+    /// cancelled, its claim ref freed, and the folds stop waiting on it; the
+    /// bloom keeps its id, its base, and every sibling's finished work.
+    #[http::route(Post, "/blooms/{id}/members/{workpiece}/withdraw")]
+    fn on_withdraw(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+        workpiece: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let workpiece = workpiece.0;
+        let routed = ApiCapabilityState::withdraw(&id, &workpiece, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
     /// `POST /blooms/{id}/hold` — freeze the bloom's dispatch — member laps and
     /// the two aggregate gates — while the laps already running finish and
     /// journal normally (#4976 / #5100).

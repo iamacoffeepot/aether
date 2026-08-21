@@ -39,7 +39,8 @@ use aether_substrate::mail::mailer::Mailer;
 
 use aether_bloomery::control::{
     Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, ClaimResult, ClaimSeal, Commit, CommitResult,
-    CompleteReleaseResult, DispatchPayload, EnumerateClaims, EnumerateClaimsResult, HealOp, IntegratePayload,
+    CancelDispatchPayload, CompleteReleaseResult, DispatchPayload, EnumerateClaims, EnumerateClaimsResult, HealOp,
+    IntegratePayload, MemberClaimReleasePayload,
     LandPayload, LoadConfigs, LoadConfigsResult, MembershipMutation, MetricsQuery, MetricsQueryResult, MetricsView,
     ObserveMainline, ObserveMainlineResult, OrphanClaimReleasePayload, OutboxPayload, Query, QueryResult, ReconcileOp,
     RedispatchPayload, ReplayJournal, ReplayJournalResult, ReviewPass, SpendQuery, SpendQueryResult, SplicePayload,
@@ -461,8 +462,17 @@ impl NativeActor for ControlCore {
                 // A durably-landed bloom frees its member + admission claim refs
                 // (ADR-0150) — release with the local release, fire-and-forget: the
                 // boot reconcile re-releases any ref an interrupted release stranded.
-                if matches!(decisions.outcome, Outcome::Landed(_))
-                    && let Some(Ok(release)) = release_seal_mail(&decisions)
+                // A *fully*-withdrawn bloom frees the same set (#5327): its
+                // withdrawals carry a `ReleaseMembership` per member, so the
+                // seal-wide mail is exactly right and is the only path that
+                // carries the admission ref. A partial withdrawal must never
+                // reach here — its members' refs go one at a time through
+                // `Topic::MemberClaimRelease`, because the bloom is still
+                // walking and still needs its admission ref.
+                if matches!(
+                    decisions.outcome,
+                    Outcome::Landed(_) | Outcome::MembersWithdrawn { terminal: true, .. }
+                ) && let Some(Ok(release)) = release_seal_mail(&decisions)
                 {
                     ctx.actor::<SourceCapability>().send_detached(&release);
                 }
@@ -1282,7 +1292,9 @@ fn event_bloom(event: &Event) -> Option<BloomId> {
         | Fact::SpliceAssembled { bloom, .. }
         | Fact::MemberExecutorFault { bloom, .. }
         | Fact::FoldRefused { bloom, .. }
-        | Fact::ContainmentRefused { bloom, .. } => Some(*bloom),
+        | Fact::ContainmentRefused { bloom, .. }
+        | Fact::SurfaceRequested { bloom, .. }
+        | Fact::Withdraw { bloom, .. } => Some(*bloom),
         Fact::ObserveMainline { .. }
         | Fact::ObserveMainlineDiverged { .. }
         | Fact::RequestOrphanClaimRelease { .. }
@@ -1387,6 +1399,14 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
             let payload = OrphanClaimReleasePayload { request: *request, target: target.clone() };
             Some(OutboxPayload::new(Topic::OrphanClaimRelease, to_vec(&payload)?))
         }
+        Decision::CancelDispatch { bloom, workpiece } => {
+            let payload = CancelDispatchPayload { bloom: bloom.0, workpiece: workpiece.clone() };
+            Some(OutboxPayload::new(Topic::CancelDispatch, to_vec(&payload)?))
+        }
+        Decision::ReleaseMemberClaimRef { bloom, workpiece } => {
+            let payload = MemberClaimReleasePayload { bloom: bloom.0, workpiece: workpiece.clone() };
+            Some(OutboxPayload::new(Topic::MemberClaimRelease, to_vec(&payload)?))
+        }
         Decision::ClaimMembership { .. }
         | Decision::ReleaseMembership { .. }
         | Decision::RecordOrphanClaimRelease { .. }
@@ -1422,7 +1442,9 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
         | Decision::RecordHostFault { .. }
         | Decision::ClearHostFault { .. }
         | Decision::RecordCandidateVehicle { .. }
-        | Decision::RecordMemberMachinery { .. } => None,
+        | Decision::RecordMemberMachinery { .. }
+        | Decision::RecordWithdrawal { .. }
+        | Decision::MarkBloomWithdrawn { .. } => None,
     })
 }
 

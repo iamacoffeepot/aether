@@ -48,6 +48,7 @@ mod surface_request;
 mod verify;
 mod verify_memo;
 mod view;
+mod withdraw;
 
 pub use decision::Decision;
 pub use error::{
@@ -55,7 +56,7 @@ pub use error::{
     AttemptCompletedError, BaseMismatch, FoldConflictError, GrantAttemptsError, HostFaultError, IntegrateError,
     LandError, LandingRejectedError, MemberExecutorFaultError, OperatorHoldError, OperatorRepairError,
     OrphanClaimReleaseError, ResolveError, SealConflict, SealError, SpliceError, SupersedeError,
-    SurfaceRequestedError, VerifyFailedError,
+    SurfaceRequestedError, VerifyFailedError, WithdrawError,
 };
 pub use event::{Event, Fact};
 pub use gate::{Gate, Read, RecordedRead, RecordedRefusal, Refusal};
@@ -89,6 +90,7 @@ use review::{reduce_aggregate_review_completed, reduce_aggregate_review_executor
 use seal::{reduce_seal, reduce_supersede, reduce_surface_overlap};
 use surface_request::reduce_surface_requested;
 use verify::{reduce_resume_host_fault, reduce_verify_failed, reduce_verify_host_fault};
+use withdraw::reduce_withdraw;
 
 /// Reduce one event against a snapshot into decisions. Pure: reads the
 /// snapshot, returns decisions, mutates nothing (ADR-0149 §The control core).
@@ -181,5 +183,6 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         Fact::SurfaceRequested { bloom, workpiece, stage, evidence, request } => {
             reduce_surface_requested(snapshot, bloom, workpiece, *stage, evidence, request)
         }
+        Fact::Withdraw { bloom, withdrawals, cascade } => reduce_withdraw(snapshot, bloom, withdrawals, *cascade),
     }
 }

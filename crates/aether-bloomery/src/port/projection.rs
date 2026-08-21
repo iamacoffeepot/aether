@@ -301,6 +301,31 @@ pub struct MemberView {
     /// predates the field still decodes.
     #[serde(default)]
     pub awaiting_surface: Option<AwaitingSurfaceView>,
+    /// Why the member left the line, when an operator withdrew it or its
+    /// dependency was withdrawn (#5327). `None` for every member still in the
+    /// line. Distinct from [`Self::wedge`], which a member earns by exhausting
+    /// a budget and which a grant can undo: a withdrawal is a person's
+    /// decision and is one-way. Trailing and `#[serde(default)]` so a reader
+    /// that predates the field still decodes.
+    #[serde(default)]
+    pub withdrawn: Option<WithdrawnView>,
+}
+
+/// A member withdrawn from a walking bloom (#5327), rendered so the board can
+/// tell it from a member still working without opening the journal.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct WithdrawnView {
+    /// `"operator"` when an operator named this member, `"dependency"` when an
+    /// ancestor's withdrawal stranded it. A stable string rather than the
+    /// value enum because this is the outward wire an absent-tolerant console
+    /// reads.
+    pub cause: String,
+    /// The withdrawn ancestor, for a `"dependency"` cause; `None` otherwise.
+    pub depends_on: Option<WorkpieceId>,
+    /// Why, in the operator's own words.
+    pub reason: String,
+    /// Who decided.
+    pub operator: String,
 }
 
 /// A member awaiting a surface amendment (ADR-0207), rendered so an operator

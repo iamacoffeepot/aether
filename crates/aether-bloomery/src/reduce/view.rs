@@ -7,9 +7,9 @@ use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
 use crate::port::{
     AwaitingSurfaceView, BloomView, CompositionCursorView, CompositionView, ExecutorFaultView, HostFaultView,
-    LandingBlock, MemberView, PendingDecisionView, ReviewParkView, ViewDocument, WedgeCause,
+    LandingBlock, MemberView, PendingDecisionView, ReviewParkView, ViewDocument, WedgeCause, WithdrawnView,
 };
-use crate::values::Question;
+use crate::values::{Question, Withdrawal, WithdrawalCause};
 
 /// Assemble a self-contained [`ViewDocument`] from a snapshot — the pure
 /// `Snapshot -> ViewDocument` projection the reconcile port pushes outward
@@ -149,6 +149,7 @@ fn member_views(
             awaiting_surface: snapshot
                 .awaiting_surface(&record.spec.id(), &member.workpiece)
                 .map(awaiting_surface_view),
+            withdrawn: record.withdrawn.get(&member.workpiece).map(withdrawn_view),
         })
         .collect()
 }
@@ -163,6 +164,21 @@ fn awaiting_surface_view(awaiting: &AwaitingSurface) -> AwaitingSurfaceView {
         paths: awaiting.request.paths.clone(),
         summary: awaiting.request.summary.clone(),
         requests: awaiting.requests,
+    }
+}
+
+/// Render a withdrawn member so the board can tell it from one still working
+/// without opening the journal (#5327).
+fn withdrawn_view(withdrawal: &Withdrawal) -> WithdrawnView {
+    let (cause, depends_on) = match &withdrawal.cause {
+        WithdrawalCause::Operator => ("operator", None),
+        WithdrawalCause::Dependency { on } => ("dependency", Some(on.clone())),
+    };
+    WithdrawnView {
+        cause: cause.into(),
+        depends_on,
+        reason: withdrawal.reason.clone(),
+        operator: withdrawal.operator.clone(),
     }
 }
 

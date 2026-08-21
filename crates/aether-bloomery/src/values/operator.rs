@@ -150,3 +150,55 @@ pub struct OperatorHold {
 impl ContentAddressed for OperatorHold {
     const DOMAIN: &'static str = "aether.bloomery.operator_hold";
 }
+
+/// Why a member left the line without resolving (#5327).
+///
+/// The two causes are kept apart because they answer different questions for
+/// whoever reads the record later. An operator withdrawal is a decision, and
+/// its reason is the operator's own words; a dependency withdrawal is a
+/// consequence, and its reason is the ancestor that made the member
+/// unreachable. Flattening them would lose which of the two a reader is
+/// looking at.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum WithdrawalCause {
+    /// An operator named this member directly.
+    Operator,
+    /// This member's construct base was withdrawn, so it can never enter the
+    /// line: the ancestor it depends on will never carry a claim.
+    Dependency {
+        /// The withdrawn ancestor.
+        on: WorkpieceId,
+    },
+}
+
+/// One member's terminal departure from a walking bloom (#5327).
+///
+/// Modelled on [`OperatorHold`] rather than on a wedge: a wedge is something a
+/// member *earns* by exhausting a budget, and this is an act no verdict
+/// produced. So [`reason`](Self::reason) and [`operator`](Self::operator) are
+/// fields for the reason they are fields there — the audit trail is the whole
+/// product — and both doors refuse a blank one rather than defaulting it.
+///
+/// Withdrawal is one-way. There is no un-withdraw, deliberately: a member
+/// wrongly withdrawn is re-scoped and sealed into a later bloom, which is
+/// exactly what releasing its claim ref makes possible. It buys no attempt,
+/// revokes no sibling's claim, and does not un-resolve the bloom.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Withdrawal {
+    /// The member leaving the line.
+    pub workpiece: WorkpieceId,
+    /// Whether an operator named it, or an ancestor's withdrawal stranded it.
+    pub cause: WithdrawalCause,
+    /// In the operator's own words. Blank is refused at both doors.
+    pub reason: String,
+    /// Who decided. Unsigned, exactly as [`OperatorHold::operator`] is: it
+    /// records the decider, and a withdrawal authorizes nothing.
+    pub operator: String,
+}
+
+/// Content-addressed for the reason [`OperatorHold`] is: the default
+/// idempotency key is the withdrawal set's own digest, so a resent request is
+/// one act rather than two.
+impl ContentAddressed for Withdrawal {
+    const DOMAIN: &'static str = "aether.bloomery.withdrawal";
+}

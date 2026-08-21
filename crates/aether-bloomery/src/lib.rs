@@ -87,11 +87,12 @@ pub use calibration::{
     CalibrationDocument, CalibrationLedger, CapabilityCell, CapabilityLedger, LEDGER_CAVEAT, VerifierFailures,
 };
 pub use control::{
-    Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, CONTROL_CORE_NAMESPACE, ClaimResult, ClaimSeal,
-    Commit, CommitResult, CompleteRelease, CompleteReleaseResult, CompleteTransfer, ConfigRecord, DispatchPayload,
-    EnumerateClaims, EnumerateClaimsResult, IntegratePayload, JournalRecord, LandPayload, LoadConfigs,
-    LoadConfigsResult, MembershipMutation, MetricsQuery, MetricsQueryResult, MetricsView, ObserveMainline,
-    ObserveMainlineResult, OrphanClaimReleasePayload, OutboxPayload, Query, QueryResult, RedispatchPayload,
+    Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, CONTROL_CORE_NAMESPACE, CancelDispatchPayload,
+    ClaimResult, ClaimSeal, Commit, CommitResult, CompleteRelease, CompleteReleaseResult, CompleteTransfer,
+    ConfigRecord, DispatchPayload, EnumerateClaims, EnumerateClaimsResult, IntegratePayload, JournalRecord,
+    LandPayload, LoadConfigs, LoadConfigsResult, MemberClaimReleasePayload, MembershipMutation, MetricsQuery,
+    MetricsQueryResult, MetricsView, ObserveMainline, ObserveMainlineResult, OrphanClaimReleasePayload, OutboxPayload,
+    Query, QueryResult, RedispatchPayload,
     ReleaseSeal, ReplayJournal, ReplayJournalResult, ReviewPass, SourceReplicaPayload, SpendQuery, SpendQueryResult,
     SplicePayload, Topic, TransferSeal,
 };
@@ -112,7 +113,7 @@ pub use port::{
     ExecutionStatus, ExecutorBackend, ExecutorFaultView, HostFaultView, IntegrateOutcome, IntegrationPosition,
     LandOutcome, LandingBlock, MemberView, PendingDecisionView, ProjectedReceipt, ProjectionBackend, ReviewParkView,
     SourceBackend,
-    SourceSnapshot, ViewDocument, WedgeCause, WorkHandle, WorkOrder,
+    SourceSnapshot, ViewDocument, WedgeCause, WithdrawnView, WorkHandle, WorkOrder,
 };
 pub use reduce::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,
@@ -123,7 +124,7 @@ pub use reduce::{
     OperatorRepairError,
     OrphanClaimReleaseError, Outcome, Read, RecordedRead, RecordedRefusal, Refusal, ResolveError, SealConflict,
     SealError, Snapshot, SpliceError, StageProgress, SupersedeError, SurfaceRequestedError, VerifyFailedError,
-    decode_recorded_decisions, is_active_unlanded, reduce, view_of,
+    WithdrawError, decode_recorded_decisions, is_active_unlanded, reduce, view_of,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use sign::Ed25519KeyProvider;
@@ -152,7 +153,7 @@ pub use values::{
     ToolPolicy,
     Transformation, Unproducible, VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK, VerifiedTree,
     VerifyFailure, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Workpiece, WorkpieceBuilder,
-    WorkpieceFact, WorkpieceFields, WorkpieceRefusal, classify_findings, config_address, decode_config,
-    gate_widening, is_model_lane, pin_workpiece_description, resolve_member_dependencies, split_lane_identity,
-    surface_additions, surface_intersection, tier_verdict,
+    Withdrawal, WithdrawalCause, WorkpieceFact, WorkpieceFields, WorkpieceRefusal, classify_findings,
+    config_address, decode_config, gate_widening, is_model_lane, pin_workpiece_description,
+    resolve_member_dependencies, split_lane_identity, surface_additions, surface_intersection, tier_verdict,
 };

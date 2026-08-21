@@ -87,22 +87,32 @@ fn termination(document: &ViewDocument, outstanding: &[String]) -> Result<(), Vi
         return Ok(());
     }
     for bloom in &document.blooms {
-        if matches!(bloom.status, BloomStatus::Landed | BloomStatus::Superseded | BloomStatus::Resolved) {
+        if matches!(
+            bloom.status,
+            BloomStatus::Landed | BloomStatus::Superseded | BloomStatus::Resolved | BloomStatus::Withdrawn
+        ) {
             continue;
         }
         if bloom.operator_hold.is_some() || bloom.review_park.is_some() {
             continue;
         }
         for member in &bloom.members {
+            // Each of these is an accountable stop with a name on it: a
+            // resolution, a wedge, a sick host, a construct that declined, a
+            // surface amendment a person owes (ADR-0207), or an operator's
+            // withdrawal (#5327). A member with none of them and no lane is
+            // the nameless wait this oracle exists to catch.
             let named = member.resolution.is_some()
                 || member.wedge.is_some()
                 || member.host_fault.is_some()
-                || member.park.is_some();
+                || member.park.is_some()
+                || member.awaiting_surface.is_some()
+                || member.withdrawn.is_some();
             if !named {
                 return Err(Violation {
                     bloom: Some(bloom.id.0.to_hex()),
                     member: Some(member.workpiece.0.clone()),
-                    state: "no lane, no outstanding order, no wedge, and no named park".into(),
+                    state: "no lane, no outstanding order, no wedge, and no named stop".into(),
                     reader: "termination",
                 });
             }

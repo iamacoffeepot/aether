@@ -13,7 +13,7 @@ use crate::port::ProjectedReceipt;
 use crate::values::{
     Adjudication, AgentProfile, CandidateRef, CompositionFinding, ConfigRegistry, Evidence, MemberCandidate,
     MemberDependency, OperatorHold, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim,
-    ResolvedBloom, SpendQuiesce, StageCatalog, Transformation, VerifyProof, VerifyReuse, Wedge,
+    ResolvedBloom, SpendQuiesce, StageCatalog, Transformation, VerifyProof, VerifyReuse, Wedge, Withdrawal,
 };
 
 /// The ordered effects a decision applies to the projection (and, in
@@ -724,5 +724,64 @@ pub enum Decision {
         rolls: u32,
         /// The latest fault report's artifact digest.
         evidence: Digest,
+    },
+    /// Record one member's terminal withdrawal from a walking bloom (#5327) —
+    /// see [`BloomRecord::withdrawn`](crate::BloomRecord::withdrawn).
+    ///
+    /// Recorded rather than derived for the reason [`Decision::RecordWedge`]
+    /// is: a member with no cursor and no claim because it was withdrawn and
+    /// one that simply never entered the line look identical from the record,
+    /// and only this row says which. The fold also drops the member's cursor
+    /// and its deferred dispatch, on the wedge's own argument — a workpiece
+    /// that stops dispatching is owed nothing. Appended so the prior
+    /// decisions' wire discriminants are unchanged.
+    RecordWithdrawal {
+        /// The bloom the member is leaving.
+        bloom: BloomId,
+        /// Who is leaving, why, and on whose word.
+        withdrawal: Withdrawal,
+    },
+    /// Kill the withdrawn member's live lane, if it has one (#5327) — the
+    /// transactional-outbox intent the executor reactor drains under
+    /// [`Topic::CancelDispatch`](crate::Topic::CancelDispatch).
+    ///
+    /// Deliberately *not* the timeout path: that synthesises a `TimeoutRecord`
+    /// and admits a failed attempt, which would spend the member's budget and
+    /// route it into repair. A withdrawn member's lane is cancelled and its
+    /// order consumed; no evidence is admitted, because there is no longer
+    /// anything for evidence to be about. Snapshot-inert like
+    /// [`Decision::DispatchLand`]. Appended so the prior decisions' wire
+    /// discriminants are unchanged.
+    CancelDispatch {
+        /// The bloom the cancelled lane was dispatched under.
+        bloom: BloomId,
+        /// The withdrawn member whose orders are cancelled and consumed.
+        workpiece: WorkpieceId,
+    },
+    /// Free `refs/bloomery/claims/<workpiece>` without touching the bloom's
+    /// admission ref (#5327) — the intent the claim-release reactor drains
+    /// under [`Topic::MemberClaimRelease`](crate::Topic::MemberClaimRelease).
+    ///
+    /// The single-ref door rather than the seal-wide one: the seal-wide
+    /// release folds in the mainline admission ref, which a bloom that is
+    /// still walking must keep. Snapshot-inert; the authority is the journaled
+    /// withdrawal itself, so no completion fact is admitted back. Appended so
+    /// the prior decisions' wire discriminants are unchanged.
+    ReleaseMemberClaimRef {
+        /// The bloom holding the ref.
+        bloom: BloomId,
+        /// The withdrawn member whose ref is freed.
+        workpiece: WorkpieceId,
+    },
+    /// Move a bloom whose every member has been withdrawn to
+    /// [`BloomStatus::Withdrawn`](crate::BloomStatus::Withdrawn) (#5327).
+    ///
+    /// Terminal: a bloom with no remaining member has no artifact to land, so
+    /// it stops holding the one-active-bloom-per-mainline slot and a fresh
+    /// bloom can seal. Appended so the prior decisions' wire discriminants are
+    /// unchanged.
+    MarkBloomWithdrawn {
+        /// The bloom that has nothing left to run.
+        bloom: BloomId,
     },
 }

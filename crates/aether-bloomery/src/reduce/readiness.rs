@@ -274,6 +274,9 @@ pub(super) fn newly_ready_entries(
         if record.claims.contains_key(&member.workpiece)
             || record.progress.contains_key(&member.workpiece)
             || record.wedged.contains_key(&member.workpiece)
+            // A withdrawn member has left the line for good (#5327): it is
+            // owed no entry however its dependencies resolve.
+            || record.withdrawn.contains_key(&member.workpiece)
         {
             continue;
         }
@@ -316,7 +319,12 @@ pub(super) fn newly_ready_entries(
 /// — and a tie (two wedged ancestors, or two unfinished reasons) breaks in
 /// sealed member order so the view is deterministic.
 pub(super) fn blocking_ancestor(record: &BloomRecord, member: &WorkpieceId) -> Option<WorkpieceId> {
-    if record.claims.contains_key(member) || record.progress.contains_key(member) {
+    if record.claims.contains_key(member)
+        || record.progress.contains_key(member)
+        // A withdrawn member is not held out of the line by anything: it has
+        // left it, and `MemberView::withdrawn` says so in its own words.
+        || record.withdrawn.contains_key(member)
+    {
         return None;
     }
 
@@ -326,10 +334,18 @@ pub(super) fn blocking_ancestor(record: &BloomRecord, member: &WorkpieceId) -> O
     }
 
     let mut seen = BTreeSet::new();
+    let mut withdrawn: Option<WorkpieceId> = None;
     let mut wedged: Option<WorkpieceId> = None;
     let mut unfinished: Option<WorkpieceId> = None;
     while let Some(dep) = stack.pop() {
         if !seen.insert(dep) {
+            continue;
+        }
+        // Ranked above a wedge for the reason a wedge is ranked above an
+        // unfinished parent: it is the most terminal reason the subtree is
+        // held, and the only one no retry budget can change (#5327).
+        if record.withdrawn.contains_key(dep) {
+            keep_earlier(record, &mut withdrawn, dep);
             continue;
         }
         if record.wedged.contains_key(dep) {
@@ -349,7 +365,44 @@ pub(super) fn blocking_ancestor(record: &BloomRecord, member: &WorkpieceId) -> O
             stack.extend(next);
         }
     }
-    wedged.or(unfinished)
+    withdrawn.or(wedged).or(unfinished)
+}
+
+/// Every member transitively downstream of `roots` over the declared graph,
+/// paired with the withdrawn ancestor that stranded it, in sealed member
+/// order (#5327).
+///
+/// The set a withdrawal has to decide about: each of these depends — directly
+/// or through a chain — on a member that is leaving, so its construct base
+/// will never exist. Members that already carry a claim are excluded because
+/// their work is finished and no longer needs the ancestor, and members
+/// already withdrawn because they have already left.
+///
+/// Iterative over [`BloomRecord::dependencies`] with a `BTreeSet` seen-guard,
+/// the shape [`blocking_ancestor`] uses — the graph is operator-declared, so
+/// recursion here would put its depth in an operator's hands.
+pub(super) fn dependents_of(record: &BloomRecord, roots: &[WorkpieceId]) -> Vec<(WorkpieceId, WorkpieceId)> {
+    let mut seen: BTreeSet<&WorkpieceId> = roots.iter().collect();
+    let mut frontier: Vec<WorkpieceId> = roots.to_vec();
+    let mut found: Vec<(WorkpieceId, WorkpieceId)> = Vec::new();
+    while let Some(ancestor) = frontier.pop() {
+        for member in record.spec.members() {
+            let workpiece = &member.workpiece;
+            if !record.dependencies.iter().any(|edge| edge.member == *workpiece && edge.depends_on == ancestor) {
+                continue;
+            }
+            if record.claims.contains_key(workpiece) || record.withdrawn.contains_key(workpiece) {
+                continue;
+            }
+            if !seen.insert(workpiece) {
+                continue;
+            }
+            found.push((workpiece.clone(), ancestor.clone()));
+            frontier.push(workpiece.clone());
+        }
+    }
+    found.sort_by_key(|(workpiece, _)| member_index(record, workpiece));
+    found
 }
 
 fn incoming<'a>(record: &'a BloomRecord, member: &'a WorkpieceId) -> impl Iterator<Item = &'a WorkpieceId> {

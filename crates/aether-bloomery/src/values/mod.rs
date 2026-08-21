@@ -56,7 +56,7 @@ pub use finding::{
 };
 pub use lane::{LANE_WORKPIECE_HEADER, pin_workpiece_description, split_lane_identity};
 pub use model_override::{AgentSelection, ModelOverride, OverrideError, ResolvedModel, StageOverride};
-pub use operator::{Adjudication, Disposition, OperatorHold, OperatorRepair};
+pub use operator::{Adjudication, Disposition, OperatorHold, OperatorRepair, Withdrawal, WithdrawalCause};
 pub use orphan_claim::{
     ORPHAN_CLAIM_RELEASE_WORDS, OrphanClaimRelease, OrphanClaimReleaseCompletion, OrphanClaimReleaseRecord,
 };

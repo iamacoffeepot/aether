@@ -67,6 +67,7 @@ pub enum BloomStatus {
     Resolved,
     Landed,
     Superseded,
+    Withdrawn,
     #[default]
     #[serde(other)]
     Unknown,
@@ -82,6 +83,7 @@ impl BloomStatus {
             Self::Resolved => "Resolved",
             Self::Landed => "Landed",
             Self::Superseded => "Superseded",
+            Self::Withdrawn => "Withdrawn",
             Self::Unknown => "unknown",
         }
     }
@@ -281,6 +283,24 @@ pub struct MemberView {
     /// Absent-tolerant.
     #[serde(default)]
     pub awaiting_surface: Option<AwaitingSurfaceView>,
+    /// An operator's withdrawal (#5327). Absent-tolerant.
+    #[serde(default)]
+    pub withdrawn: Option<WithdrawnView>,
+}
+
+/// A member an operator withdrew (#5327): why it left, and on whose word.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WithdrawnView {
+    /// `"operator"` or `"dependency"`; empty when the coordinator predates it.
+    #[serde(default)]
+    pub cause: String,
+    /// The withdrawn ancestor, for a `"dependency"` cause.
+    #[serde(default)]
+    pub depends_on: Option<String>,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub operator: String,
 }
 
 /// A member awaiting a surface amendment (ADR-0207): the paths a declining

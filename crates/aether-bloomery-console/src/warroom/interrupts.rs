@@ -132,6 +132,11 @@ fn push_bloom_interrupts(entries: &mut Vec<Interrupt>, bloom: &BloomView) {
         }
     }
     for member in &bloom.members {
+        // A withdrawn member interrupts nobody (#5327): an operator already
+        // decided it, and it is not coming back into the line.
+        if member.withdrawn.is_some() {
+            continue;
+        }
         if let Some(pending) = &member.pending_decision {
             entries.push(Interrupt {
                 kind: InterruptKind::Decision,

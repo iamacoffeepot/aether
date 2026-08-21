@@ -56,16 +56,22 @@ pub(super) fn claim_effects(
         vehicle.map_or(claim.candidate, |candidate| candidate.checkout),
     ));
 
+    // A withdrawn member never produces a claim and contributes no candidate
+    // (#5327), so the three folds that are otherwise total over the sealed
+    // member list skip it. Without the skip one withdrawn member pins the
+    // bloom, its siblings' finished work, and the mainline behind it.
     let complete = record
         .spec
         .members()
         .iter()
+        .filter(|member| !record.withdrawn.contains_key(&member.workpiece))
         .all(|member| member.workpiece == claim.workpiece || record.claims.contains_key(&member.workpiece));
     if complete {
         let members: Vec<MemberCandidate> = record
             .spec
             .members()
             .iter()
+            .filter(|member| !record.withdrawn.contains_key(&member.workpiece))
             .filter_map(|member| {
                 let candidate = if member.workpiece == claim.workpiece {
                     Some(claim.candidate)
@@ -122,7 +128,7 @@ fn matching_vehicle(record: &BloomRecord, claim: &ResolutionClaim) -> Option<Can
         .filter(|candidate| candidate.tree == claim.candidate)
 }
 
-fn adoption_source(snapshot: &Snapshot, bloom: BloomId, members: &[MemberCandidate]) -> Option<BloomId> {
+pub(super) fn adoption_source(snapshot: &Snapshot, bloom: BloomId, members: &[MemberCandidate]) -> Option<BloomId> {
     let (predecessor, record) = snapshot.blooms.iter().find(|(_, record)| record.superseded_by == Some(bloom))?;
     let inherited = members
         .iter()
@@ -178,7 +184,13 @@ pub(super) fn reduce_resolve(
     // Every frozen member must carry a resolution claim before the bloom can
     // resolve — a resolved bloom carries a claim for every member (ADR-0149
     // §The bloom).
-    if let Some(member) = record.spec.members().iter().find(|member| !record.claims.contains_key(&member.workpiece)) {
+    if let Some(member) = record
+        .spec
+        .members()
+        .iter()
+        .filter(|member| !record.withdrawn.contains_key(&member.workpiece))
+        .find(|member| !record.claims.contains_key(&member.workpiece))
+    {
         return Decisions::rejected(Outcome::ResolveRejected(ResolveError::MemberNotIntegrated {
             workpiece: member.workpiece.clone(),
         }));

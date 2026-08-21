@@ -45,8 +45,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
-    Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, BloomId, CandidateRef, ConfigRegistry,
-    ConfigScopes, Digest, DispatchPayload, ExecutionStatus, Fact, ModelOverride, Nonce, RedispatchPayload, ReviewPass,
+    Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, BloomId, CancelDispatchPayload, CandidateRef,
+    ConfigRegistry, ConfigScopes, Digest, DispatchPayload, ExecutionStatus, Fact, ModelOverride, Nonce,
+    RedispatchPayload, ReviewPass,
     SharedCorrespondence, StageId, StageVerdict, TimeoutRecord, Topic, VerifyFailureSet, WorkHandle, WorkpieceId,
     pin_workpiece_description,
 };
@@ -1056,6 +1057,120 @@ fn bloom_still_live(store: &mut dyn StoreBackend, bloom: &Digest, sequence: u64,
     Ok(false)
 }
 
+/// Whether `workpiece` is still a live member of `bloom` — false once a
+/// withdrawal released its membership (#5327).
+///
+/// Read off the same `active_membership` table [`bloom_still_live`] reads,
+/// because that is where a withdrawal's `ReleaseMembership` effect lands: the
+/// row is the durable authority, and it is gone the moment the withdrawal
+/// commits.
+fn member_still_live(
+    store: &mut dyn StoreBackend,
+    bloom: &Digest,
+    workpiece: &WorkpieceId,
+    sequence: u64,
+) -> rusqlite::Result<bool> {
+    if store.holds_member_membership(bloom.as_bytes(), &workpiece.0)? {
+        return Ok(true);
+    }
+    tracing::info!(
+        target: "aether_chassis_bloomery::executor",
+        sequence,
+        bloom = %short_hex(bloom),
+        workpiece = %workpiece.0,
+        "dispatch names a member that no longer holds an active membership; retiring it undispatched",
+    );
+    Ok(false)
+}
+
+/// Drain the cancel topic and kill each withdrawn member's live lane (#5327).
+///
+/// Deliberately not routed through `terminate_live_order`: that path
+/// synthesises a `TimeoutRecord` and admits a failed attempt, which would
+/// spend the member's budget and route it into repair. A withdrawn member's
+/// lane is cancelled and its order consumed, and no evidence is admitted —
+/// there is no longer anything for evidence to be about.
+///
+/// Returns the highest contiguously-processed outbox sequence to ack (`None`
+/// when nothing processed). A decode failure or a cancel fault stops the ack
+/// prefix at the last success, so the entry re-drains — the same policy
+/// `terminate_live_order` applies to a cancel it could not reach.
+fn drain_and_cancel(store: &mut dyn StoreBackend, executor: &ExecutorShell) -> rusqlite::Result<Option<u64>> {
+    let entries = store.drain_topic(Topic::CancelDispatch)?;
+    let mut ack_through = None;
+    for entry in entries {
+        let Ok(payload) = from_bytes::<CancelDispatchPayload>(&entry.payload) else {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                sequence = entry.sequence,
+                "cancel outbox entry did not decode; stopping the ack prefix to re-drain",
+            );
+            break;
+        };
+        match cancel_member_orders(store, executor, &payload, entry.sequence) {
+            Ok(()) => ack_through = Some(entry.sequence),
+            Err(CancelStop::Store(error)) => return Err(error),
+            Err(CancelStop::Unreached) => break,
+        }
+    }
+    Ok(ack_through)
+}
+
+/// Why a cancel drain stopped its ack prefix.
+enum CancelStop {
+    /// The store faulted — the drain itself cannot continue.
+    Store(rusqlite::Error),
+    /// The executor could not be reached for one order, so the entry stays
+    /// unacked and re-drives rather than leaving a lane burning.
+    Unreached,
+}
+
+/// Cancel and consume every outstanding order naming this bloom and workpiece.
+///
+/// The scan is over `list_outstanding_nonces` because an order is keyed by its
+/// nonce, not by its member: the reducer knows which member left, and only the
+/// stored `DispatchRecord` says which member a nonce belongs to. An order that
+/// no longer decodes is consumed anyway — its run is already cancelled, and
+/// leaving the row outstanding would keep the deadline reaper probing a run
+/// nobody is waiting for.
+fn cancel_member_orders(
+    store: &mut dyn StoreBackend,
+    executor: &ExecutorShell,
+    payload: &CancelDispatchPayload,
+    sequence: u64,
+) -> Result<(), CancelStop> {
+    let nonces = store.list_outstanding_nonces().map_err(CancelStop::Store)?;
+    for nonce in nonces {
+        let Some(order) = store.lookup_order(&nonce).map_err(CancelStop::Store)? else {
+            continue;
+        };
+        let names_member = DispatchRecord::from_stored(&order)
+            .is_some_and(|record| record.bloom.0 == payload.bloom && record.workpiece == payload.workpiece);
+        if !names_member {
+            continue;
+        }
+        if let Err(error) = executor.cancel(&WorkHandle::new(Nonce(nonce.clone()))) {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                sequence,
+                nonce = %nonce,
+                %error,
+                "withdrawn member's cancel failed; leaving the entry unacked to re-drive",
+            );
+            return Err(CancelStop::Unreached);
+        }
+        store.consume_order(&nonce).map_err(CancelStop::Store)?;
+        tracing::info!(
+            target: "aether_chassis_bloomery::executor",
+            sequence,
+            nonce = %nonce,
+            workpiece = %payload.workpiece.0,
+            "withdrawn member's lane cancelled and its order consumed",
+        );
+    }
+    Ok(())
+}
+
 /// The transformation pins the subject as its first input; a well-formed
 /// dispatch always carries one. Missing it stops the ack prefix so the entry
 /// re-drains rather than being submitted half-built.
@@ -1196,6 +1311,15 @@ fn drain_and_dispatch(
             continue;
         }
         if !bloom_still_live(store, &payload.bloom, entry.sequence, "dispatch")? {
+            ack_if_unblocked(held, &mut ack_through, entry.sequence);
+            continue;
+        }
+        // A withdrawal that landed between the decision and this drain must not
+        // race a pending outbox row into a lane it just killed (#5327): the
+        // member holds no active membership of its own once its withdrawal
+        // released it, so an entry naming it is retired undispatched the way an
+        // entry for a retired bloom is.
+        if !member_still_live(store, &payload.bloom, &payload.workpiece, entry.sequence)? {
             ack_if_unblocked(held, &mut ack_through, entry.sequence);
             continue;
         }
@@ -2496,6 +2620,20 @@ impl NativeActor for ExecutorReactorCapability {
                 }
                 Err(error) => {
                     tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "aggregate-verify drain failed");
+                }
+            }
+            // Cancel the lanes of members an operator withdrew (#5327), on the
+            // same tick and the same ack-prefix discipline. No handles are
+            // tracked and no backoff is folded: a cancel starts nothing.
+            match drain_and_cancel(store, &executor) {
+                Ok(Some(sequence)) => {
+                    if let Err(error) = store.ack_topic(Topic::CancelDispatch, sequence) {
+                        tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "cancel ack failed; entries re-drive");
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "cancel drain failed");
                 }
             }
             // Replay the attempts whose parked questions were answered (#3664),

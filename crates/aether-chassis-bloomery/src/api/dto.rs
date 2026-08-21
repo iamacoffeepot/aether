@@ -255,6 +255,31 @@ pub struct HoldRequest {
     pub idempotency_key: Option<String>,
 }
 
+/// `POST /blooms/{id}/members/{workpiece}/withdraw` body — take one member out
+/// of a walking bloom without superseding it (#5327).
+///
+/// Unauthenticated on the host-local bind like every other bloom operator
+/// route, and gated by the same mandatory non-blank `reason` + `operator`: the
+/// audit trail is the whole product of an act no verdict produced.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WithdrawRequest {
+    /// Why this member is leaving, in the operator's own words. Required and
+    /// non-blank; a blank one is `422`.
+    pub reason: String,
+    /// Who is deciding. Recorded as the decider; required and non-blank.
+    pub operator: String,
+    /// Also withdraw every member that transitively depends on this one.
+    /// Without it, a withdrawal that would strand a dependent is refused
+    /// `422`, naming them — a dependent left behind pins the bloom the
+    /// withdrawal was meant to free.
+    #[serde(default)]
+    pub cascade: bool,
+    /// Override the admit idempotency key; defaults to the withdrawal's own
+    /// content, so a resend is a duplicate rather than a second act.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
 /// The reply to a write route: the reducer outcome the admitted event resolved
 /// to (decoded from the control core's wire bytes).
 #[derive(Debug, Clone, Serialize, Deserialize)]

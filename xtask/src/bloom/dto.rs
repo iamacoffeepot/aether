@@ -365,6 +365,14 @@ pub struct SupersedeRequest {
     pub edges: Vec<DependencyEdge>,
 }
 
+/// `POST /blooms/{id}/members/{workpiece}/withdraw` body (#5327).
+#[derive(Debug, Serialize)]
+pub struct WithdrawRequest {
+    pub reason: String,
+    pub operator: String,
+    pub cascade: bool,
+}
+
 /// `GET /journal`.
 #[derive(Debug, Deserialize)]
 pub struct JournalView {

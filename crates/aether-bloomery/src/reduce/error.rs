@@ -649,3 +649,41 @@ pub enum SurfaceRequestedError {
     /// surface.
     NotAConstructFamilyStage(StageId),
 }
+
+/// Why a member withdrawal was refused (#5327).
+///
+/// The ladder is checked in declaration order, so the first thing wrong with a
+/// request is the thing the operator is told about.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum WithdrawError {
+    /// No bloom with this id, or one past withdrawing. Only a `Sealed` bloom
+    /// is still running a line a member can leave: a resolved bloom's members
+    /// all carry claims, so every withdrawal against one is already
+    /// [`AlreadyResolved`](Self::AlreadyResolved).
+    UnknownOrInactiveBloom,
+    /// The request names no member at all. Refused rather than treated as a
+    /// no-op, so the journal never carries a fact that changed nothing.
+    NoMembersNamed,
+    /// The request names a workpiece that is not a member of the bloom.
+    NotAMember(WorkpieceId),
+    /// The request states no reason. Refused rather than defaulted: a member
+    /// removed from a running bloom is an act no verdict produced, so a record
+    /// of it that says nothing is the whole failure.
+    BlankReason,
+    /// The request names no operator, so the record would not say who decided.
+    BlankOperator,
+    /// The member has already been withdrawn. Refused for the reason a second
+    /// operator hold is: it would journal a fact that changed nothing, and it
+    /// would overwrite the reason the first one recorded.
+    AlreadyWithdrawn(WorkpieceId),
+    /// The member carries a resolution claim. A reviewed member is immutable
+    /// (ADR-0191 §4): withdrawing it would pull finished, verified work out
+    /// from under a fold that has already counted it.
+    AlreadyResolved(WorkpieceId),
+    /// Withdrawing the named members would strand these dependents on a
+    /// construct base that will never exist. Refused fail-closed rather than
+    /// parking them, because a parked dependent still pins the bloom the
+    /// withdrawal was meant to free; re-send with the cascade to withdraw them
+    /// too.
+    DependentsWouldStrand(alloc::vec::Vec<WorkpieceId>),
+}

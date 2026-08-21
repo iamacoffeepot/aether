@@ -12,6 +12,7 @@ use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
     Adjudication, BloomSpec, CandidateRef, ConfigRegistry, Evidence, MemberDependency, OperatorHold, OperatorRepair,
     OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim, Statement, SurfaceRequest, VerifyFailureSet,
+    Withdrawal,
 };
 
 /// An admitted fact plus its idempotency key (ADR-0149 §The control core).
@@ -645,6 +646,34 @@ pub enum Fact {
         evidence: Evidence,
         /// The normalized request the lane returned.
         request: SurfaceRequest,
+    },
+    /// An operator withdrew one or more members from a walking bloom (#5327).
+    ///
+    /// The narrow member-removal move `supersede --eject` never was: the bloom
+    /// keeps its id, its sealed base, and every sibling's finished work, and
+    /// only the named members leave — their lanes cancelled, their claim refs
+    /// freed one at a time, their cursors dropped. A withdrawal buys no
+    /// attempt, revokes no sibling's claim, and is one-way.
+    ///
+    /// Appended past [`Fact::SurfaceRequested`] so every prior fact keeps its
+    /// wire discriminant.
+    Withdraw {
+        /// The walking bloom the members belong to.
+        bloom: BloomId,
+        /// The operator-named members, in the order the request listed them.
+        /// Nonempty; each carries [`WithdrawalCause::Operator`](crate::WithdrawalCause::Operator).
+        withdrawals: Vec<Withdrawal>,
+        /// Also withdraw every member transitively downstream of the named
+        /// ones. Without it a withdrawal that would strand a dependent is
+        /// refused, naming them — a dependent left behind pins the bloom the
+        /// withdrawal was meant to free.
+        ///
+        /// The cascade set is *derived by the reducer* rather than carried
+        /// here, because journal replay folds recorded decisions rather than
+        /// re-reducing facts (ADR-0190): the derived withdrawals ride the same
+        /// atomic decision set as the named ones, so a replay can never land a
+        /// dependent's withdrawal without its cause.
+        cascade: bool,
     },
 }
 

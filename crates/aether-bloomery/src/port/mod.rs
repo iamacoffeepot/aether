@@ -32,7 +32,7 @@ pub use executor::{Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend, Wo
 pub use projection::{
     AwaitingSurfaceView, BloomView, CommissionProjection, CompositionCursorView, CompositionView,
     ExecutorFaultView, HostFaultView, LandingBlock, MemberView, PendingDecisionView, ProjectedReceipt,
-    ProjectionBackend, ReviewParkView, ViewDocument, WedgeCause,
+    ProjectionBackend, ReviewParkView, ViewDocument, WedgeCause, WithdrawnView,
 };
 pub use source::{
     Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome, IntegrateOutcome,

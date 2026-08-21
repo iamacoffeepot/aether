@@ -589,6 +589,10 @@ fn status_name(status: BloomStatus) -> &'static str {
         BloomStatus::Resolved => "Resolved",
         BloomStatus::Landed => "Landed",
         BloomStatus::Superseded => "Superseded",
+        // A fully-withdrawn bloom is terminal like a landed one: it holds no
+        // active membership, so a surviving ref under it is a genuine
+        // divergence and is reported as one (#5327).
+        BloomStatus::Withdrawn => "Withdrawn",
     }
 }
 

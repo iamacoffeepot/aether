@@ -241,6 +241,7 @@ impl Default for MemberView {
             cursor: None,
             park: None,
             awaiting_surface: None,
+            withdrawn: None,
         }
     }
 }

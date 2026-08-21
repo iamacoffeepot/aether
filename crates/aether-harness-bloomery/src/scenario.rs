@@ -108,6 +108,22 @@ pub enum OperatorMove {
         /// Who.
         operator: String,
     },
+    /// [`aether_bloomery::Fact::Withdraw`] — take one member out of the
+    /// walking bloom without superseding it (#5327). Appended for the reason
+    /// the wire additions are appended.
+    Withdraw {
+        /// Tick index.
+        at_tick: u32,
+        /// Member the withdrawal names.
+        workpiece: WorkpieceId,
+        /// Why.
+        reason: String,
+        /// Who.
+        operator: String,
+        /// Also withdraw every member that depends on this one. Without it, a
+        /// withdrawal that would strand a dependent is refused, naming them.
+        cascade: bool,
+    },
 }
 
 impl Scenario {

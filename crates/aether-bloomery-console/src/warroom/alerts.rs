@@ -49,6 +49,12 @@ pub fn alerts(view: &ViewDocument) -> Vec<Alert> {
 }
 
 fn push_member_alerts(alerts: &mut Vec<Alert>, bloom: &BloomView, member: &MemberView) {
+    // A withdrawn member raises nothing (#5327): an operator decided it, so
+    // there is no unanswered condition for the war room to shout about, and a
+    // wedge it carried on the way out is history rather than a live stop.
+    if member.withdrawn.is_some() {
+        return;
+    }
     let focus = Focus::member(bloom.id, member.workpiece.clone());
     let detail = match &focus {
         Focus::Member { workpiece, .. } => workpiece.clone(),

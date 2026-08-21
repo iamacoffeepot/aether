@@ -210,6 +210,20 @@ topic_vocabulary! {
     /// does not stall receipts or source mirroring (ADR-0199). Appended so
     /// the prior topics' display spellings and ordering are unchanged.
     Commission,
+    /// A withdrawn member's live-lane cancel (reducer-minted, from
+    /// [`Decision::CancelDispatch`]), drained by the executor reactor, which
+    /// cancels every outstanding order naming that bloom and workpiece and
+    /// consumes it. No evidence is admitted: the member has left the line, so
+    /// there is nothing for a verdict to be about (#5327). Appended so the
+    /// prior topics' display spellings and ordering are unchanged.
+    CancelDispatch,
+    /// A withdrawn member's single claim-ref release (reducer-minted, from
+    /// [`Decision::ReleaseMemberClaimRef`]), drained by the claim-release
+    /// reactor through the same expected-holder compare-and-swap the orphan
+    /// door uses — one workpiece ref, never the bloom's admission ref, because
+    /// the bloom is still walking (#5327). Appended so the prior topics'
+    /// display spellings and ordering are unchanged.
+    MemberClaimRelease,
 }
 
 impl Topic {
@@ -234,6 +248,8 @@ impl Topic {
             Self::Splice => "topic:splice",
             Self::SourceReplica => "topic:source_replica",
             Self::Commission => "topic:commission",
+            Self::CancelDispatch => "topic:cancel_dispatch",
+            Self::MemberClaimRelease => "topic:member_claim_release",
         }
     }
 
@@ -257,6 +273,8 @@ impl Topic {
             Decision::DispatchAggregateReview { .. } => Some(Self::AggregateReview),
             Decision::DispatchAggregateVerify { .. } => Some(Self::AggregateVerify),
             Decision::DispatchOrphanClaimRelease { .. } => Some(Self::OrphanClaimRelease),
+            Decision::CancelDispatch { .. } => Some(Self::CancelDispatch),
+            Decision::ReleaseMemberClaimRef { .. } => Some(Self::MemberClaimRelease),
             Decision::ClaimMembership { .. }
             | Decision::ReleaseMembership { .. }
             | Decision::InheritClaim { .. }
@@ -345,7 +363,14 @@ impl Topic {
             // Snapshot-only: the member machinery series is what `/view` reads
             // to tell a sick host from rejected work. The retry it owes rides
             // as an ordinary `DispatchAttempt` beside this row.
-            | Decision::RecordMemberMachinery { .. } => None,
+            | Decision::RecordMemberMachinery { .. }
+            // Snapshot-only: the withdrawal record is what `/view` and the
+            // folds read. The two things a withdrawal actually *does* reach
+            // the host through the `CancelDispatch` and `ReleaseMemberClaimRef`
+            // effects emitted beside it, and a terminal bloom's status move
+            // dispatches nothing at all.
+            | Decision::RecordWithdrawal { .. }
+            | Decision::MarkBloomWithdrawn { .. } => None,
         }
     }
 }
@@ -598,6 +623,35 @@ pub struct OrphanClaimReleasePayload {
     pub request: Digest,
     /// The signed target: which typed ref, and the holder the CAS expects.
     pub target: OrphanClaimRelease,
+}
+
+/// The withdrawn-member cancel outbox payload (#5327): the bloom and the
+/// member whose live lane the executor reactor must kill. The control core
+/// enqueues it under [`Topic::CancelDispatch`] from a
+/// [`Decision::CancelDispatch`]. Defined here (always compiled) so the host
+/// reactor can decode it inward, cycle-free — like [`OutboxPayload`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CancelDispatchPayload {
+    /// The bloom the cancelled orders were dispatched under.
+    pub bloom: Digest,
+    /// The withdrawn member whose outstanding orders are cancelled and consumed.
+    pub workpiece: WorkpieceId,
+}
+
+/// The withdrawn-member claim-ref release outbox payload (#5327): the bloom
+/// that holds `refs/bloomery/claims/<workpiece>` and the member it names. The
+/// control core enqueues it under [`Topic::MemberClaimRelease`] from a
+/// [`Decision::ReleaseMemberClaimRef`]; the claim-release reactor drains it
+/// through the same expected-holder compare-and-swap the orphan door uses.
+/// Carries one workpiece and never the mainline admission ref, because the
+/// bloom is still walking. Defined here (always compiled) so the host reactor
+/// can decode it inward, cycle-free — like [`OutboxPayload`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MemberClaimReleasePayload {
+    /// The bloom expected to be holding the ref.
+    pub bloom: Digest,
+    /// The withdrawn member whose ref is freed.
+    pub workpiece: WorkpieceId,
 }
 
 /// The combined atomic store commit (ADR-0149 §The control core). One

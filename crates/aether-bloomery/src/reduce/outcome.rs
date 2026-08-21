@@ -15,7 +15,7 @@ use super::{
     AggregateVerifyError, AttemptCompletedError, Decision, FoldConflictError, GrantAttemptsError, HostFaultError,
     IntegrateError, LandError, LandingRejectedError, MemberExecutorFaultError, OperatorHoldError, OperatorRepairError,
     OrphanClaimReleaseError, ResolveError, SealError, SpliceError, SupersedeError, SurfaceRequestedError,
-    VerifyFailedError,
+    VerifyFailedError, WithdrawError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -685,6 +685,22 @@ pub enum Outcome {
     },
     /// A surface-request admission was refused.
     SurfaceRequestRejected(SurfaceRequestedError),
+    /// An operator withdrew members from a walking bloom (#5327). Appended
+    /// last so every prior outcome keeps its wire discriminant.
+    MembersWithdrawn {
+        /// The bloom the members left.
+        bloom: BloomId,
+        /// Every member withdrawn by this act, the operator-named ones first
+        /// and each cascaded dependent after, in sealed member order.
+        withdrawn: Vec<WorkpieceId>,
+        /// Whether that emptied the bloom, moving it to
+        /// [`BloomStatus::Withdrawn`](crate::BloomStatus::Withdrawn).
+        terminal: bool,
+    },
+    /// A withdrawal was refused. An operator-door refusal: the REST edge
+    /// answers it `422`, so a script that only checks the status cannot read a
+    /// refused withdrawal as an applied one.
+    WithdrawRejected(WithdrawError),
 }
 
 impl Outcome {
@@ -704,6 +720,7 @@ impl Outcome {
                 | Self::AdjudicationRejected(_)
                 | Self::OperatorRepairRejected(_)
                 | Self::OperatorHoldRejected(_)
+                | Self::WithdrawRejected(_)
         )
     }
 }

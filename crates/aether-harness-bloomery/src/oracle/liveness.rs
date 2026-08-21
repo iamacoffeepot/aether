@@ -100,7 +100,10 @@ pub fn classify(document: &ViewDocument, outstanding: &[String]) -> Quiescence {
             // Resolved is terminal for the lane boundary: every member has
             // passed its stages. Landing is the integrate/land reactors' step
             // and needs the GitHub side this tier deliberately does not mount.
-            BloomStatus::Resolved | BloomStatus::Landed | BloomStatus::Superseded => continue,
+            // A fully-withdrawn bloom is terminal too: every member left the
+            // line by an operator's decision, so there is nothing waiting on
+            // a lane (#5327).
+            BloomStatus::Resolved | BloomStatus::Landed | BloomStatus::Superseded | BloomStatus::Withdrawn => continue,
             BloomStatus::Sealed => {}
         }
         for member in &bloom.members {
@@ -109,6 +112,9 @@ pub fn classify(document: &ViewDocument, outstanding: &[String]) -> Quiescence {
                 && member.host_fault.is_none()
                 && member.park.is_none()
                 && member.awaiting_surface.is_none()
+                // A withdrawn member is an accountable stop with a named
+                // decider, not a member the machinery lost (#5327).
+                && member.withdrawn.is_none()
             {
                 unresolved.push(format!("{:?}/{}", bloom.id, member.workpiece.0));
             }

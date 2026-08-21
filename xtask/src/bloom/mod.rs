@@ -19,7 +19,7 @@ mod upgrade;
 use std::env;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
 
 use crate::bloom::client::{Client, bloom_in};
@@ -111,6 +111,31 @@ enum BloomCommand {
     /// Answer a parked member's surface request: widen its scope revision,
     /// approve the widening, and seal the successor (ADR-0207).
     Amend(AmendArgs),
+    /// Take one member out of a walking bloom without superseding it (#5327).
+    Withdraw(WithdrawArgs),
+}
+
+#[derive(Args, Debug)]
+struct WithdrawArgs {
+    /// The bloom the member belongs to (64 hex characters).
+    #[arg(value_parser = plan::parse_bloom_id)]
+    bloom_id: String,
+
+    /// The member to withdraw.
+    workpiece: String,
+
+    /// Why, in your own words. Required; a blank one is refused at the door.
+    #[arg(long)]
+    reason: String,
+
+    /// Who is deciding. Recorded as the decider.
+    #[arg(long, default_value = "operator")]
+    operator: String,
+
+    /// Also withdraw every member that depends on this one. Without it, a
+    /// withdrawal that would strand a dependent is refused, naming them.
+    #[arg(long)]
+    cascade: bool,
 }
 
 #[derive(Args, Debug)]
@@ -252,7 +277,25 @@ fn run_on_with_policy(endpoint: &Endpoint, command: &BloomCommand, approval_poli
         BloomCommand::Roll(args) => roll::run(&client, args),
         BloomCommand::Upgrade(args) => upgrade::run(&client, args),
         BloomCommand::Amend(args) => amend::run(&client, args, approval_policy),
+        BloomCommand::Withdraw(args) => run_withdraw(&client, args),
     }
+}
+
+/// Withdraw one member, naming an unknown bloom or workpiece locally before
+/// any write — the same read-first shape `run_supersede` uses.
+fn run_withdraw(client: &Client<'_>, args: &WithdrawArgs) -> Result<String> {
+    let view = client.view()?;
+    let bloom = bloom_in(&view, &args.bloom_id)?;
+    if !bloom.members.iter().any(|member| member.workpiece == args.workpiece) {
+        bail!("bloom {} has no member {}", args.bloom_id, args.workpiece);
+    }
+
+    let request = dto::WithdrawRequest {
+        reason: args.reason.clone(),
+        operator: args.operator.clone(),
+        cascade: args.cascade,
+    };
+    Ok(render_outcome(&client.withdraw(&args.bloom_id, &args.workpiece, &request)?.outcome))
 }
 
 fn run_seal(client: &Client<'_>, args: &SealArgs, approval_policy: &Path) -> Result<String> {

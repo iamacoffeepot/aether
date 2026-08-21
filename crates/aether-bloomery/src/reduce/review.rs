@@ -80,9 +80,12 @@ pub(super) fn reduce_aggregate_review_completed(
     // An empty implication is never expanded to every member: under ADR-0191 there
     // is nothing to over-route *to*, and a verdict about the weave as a whole is
     // exactly a finding that names nobody.
-    if let Some(stranger) =
-        implicated.iter().find(|wp| !record.spec.members().iter().any(|member| member.workpiece == **wp))
-    {
+    // A withdrawn member is refused here for the reason a non-member is (#5327):
+    // the finding cannot be routed anywhere. There is no cursor to re-open and
+    // no claim the verdict could revoke.
+    if let Some(stranger) = implicated.iter().find(|wp| {
+        record.withdrawn.contains_key(wp) || !record.spec.members().iter().any(|member| member.workpiece == **wp)
+    }) {
         return Decisions::rejected(Outcome::AggregateReviewRejected(AggregateReviewError::NotAMember(
             stranger.clone(),
         )));

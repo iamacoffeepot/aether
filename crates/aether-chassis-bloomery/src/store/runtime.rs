@@ -343,6 +343,14 @@ pub trait StoreBackend: Send {
     /// superseded, so a bloom with none left is retired, and the executor reactor
     /// reads this to retire its already-queued dispatches with it (#4640).
     fn holds_active_membership(&mut self, bloom: &[u8]) -> rusqlite::Result<bool>;
+    /// Whether `bloom` still holds `workpiece`'s active membership — the
+    /// per-member counterpart of [`Self::holds_active_membership`].
+    ///
+    /// A withdrawal releases exactly one member's row while the bloom keeps
+    /// walking (#5327), so the whole-bloom answer stays `true` and cannot tell
+    /// a withdrawn member from a live one. The executor reactor reads this to
+    /// retire a queued dispatch for a member that has left.
+    fn holds_member_membership(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<bool>;
     /// Every persisted *member* work-order description for one bloom as
     /// (`workpiece`, `description`) pairs in workpiece order — the aggregate
     /// review composes its task context from the whole membership's orders
@@ -1283,6 +1291,12 @@ impl StoreBackend for SqliteStore {
     fn holds_active_membership(&mut self, bloom: &[u8]) -> rusqlite::Result<bool> {
         let mut stmt = self.conn.prepare("SELECT 1 FROM active_membership WHERE bloom = ?1 LIMIT 1")?;
         Ok(stmt.query_map(rusqlite::params![bloom], |_| Ok(()))?.next().transpose()?.is_some())
+    }
+
+    fn holds_member_membership(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<bool> {
+        let mut stmt =
+            self.conn.prepare("SELECT 1 FROM active_membership WHERE bloom = ?1 AND workpiece = ?2 LIMIT 1")?;
+        Ok(stmt.query_map(rusqlite::params![bloom, workpiece], |_| Ok(()))?.next().transpose()?.is_some())
     }
 
     fn list_dispatch_descriptions(&mut self, bloom: &[u8]) -> rusqlite::Result<Vec<(String, String)>> {

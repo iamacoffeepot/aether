@@ -67,9 +67,16 @@ impl ExecutorReactorCapability {
     /// whole-bloom [`Topic::AggregateReview`] (ADR-0153), and the
     /// [`Topic::Redispatch`] replay of an answered parked question (ADR-0151,
     /// #3664) — all three submit through the same executor shell and ride the
-    /// same intake cycle.
-    pub const DRAINED_TOPICS: &'static [Topic] =
-        &[Topic::Dispatch, Topic::AggregateReview, Topic::AggregateVerify, Topic::Redispatch];
+    /// same intake cycle. It also drains [`Topic::CancelDispatch`] (#5327),
+    /// which is the same shell in the other direction: a withdrawn member's
+    /// running lane is killed and its order consumed.
+    pub const DRAINED_TOPICS: &'static [Topic] = &[
+        Topic::Dispatch,
+        Topic::AggregateReview,
+        Topic::AggregateVerify,
+        Topic::Redispatch,
+        Topic::CancelDispatch,
+    ];
 }
 
 mod runtime;

@@ -19,7 +19,7 @@ use crate::values::{
     Adjudication, BloomSpec, CandidateRef, CompositionFinding, ConfigScopes, DispatchKey, Evidence, EvidenceKind,
     MemberDependency, OperatorHold, OperatorRepair, OrphanClaimReleaseRecord, ResolutionClaim, ResolvedConfigs,
     SpendQuiesce, StageCatalog, SurfaceRequest, VerifiedTree, VerifyFailureSet, VerifyGateSet, VerifyProof,
-    VerifyReuse, Wedge,
+    VerifyReuse, Wedge, Withdrawal,
 };
 
 /// The rebuildable projection state the reducer reads (ADR-0149 §The control
@@ -450,6 +450,20 @@ pub struct BloomRecord {
     /// for a JSON reader that predates the field.
     #[serde(default)]
     pub vehicles: BTreeMap<WorkpieceId, CandidateRef>,
+    /// Members an operator withdrew from this walking bloom (#5327) — keyed by
+    /// workpiece, carrying who decided and why.
+    ///
+    /// A withdrawn member is terminal: it produces no claim, contributes no
+    /// candidate to the fold, and is skipped by the three completeness folds
+    /// that are otherwise total over [`spec`](Self::spec)'s members. Distinct
+    /// from [`wedged`](Self::wedged), which a member *earns* by exhausting a
+    /// budget and which a grant or an operator repair can put back in the line;
+    /// a withdrawal is one-way. Journal-derived from
+    /// [`Decision::RecordWithdrawal`] and replay-rebuilt. `#[serde(default)]`
+    /// is the [`host_faults`](Self::host_faults) precedent for a JSON reader
+    /// that predates the field.
+    #[serde(default)]
+    pub withdrawn: BTreeMap<WorkpieceId, Withdrawal>,
     /// If superseded, the successor that replaced this bloom.
     pub superseded_by: Option<BloomId>,
 }
@@ -622,6 +636,12 @@ pub enum BloomStatus {
     Landed,
     /// Superseded by a successor that inherited its claims.
     Superseded,
+    /// Every member was withdrawn (#5327), so the bloom has no artifact left to
+    /// produce and nothing to land. Terminal, and outside
+    /// [`is_active_unlanded`](super::is_active_unlanded), so the
+    /// one-active-bloom-per-mainline slot is freed for a fresh seal. Appended
+    /// last so the prior statuses keep their wire discriminants.
+    Withdrawn,
 }
 
 /// The spec a successful seal or supersede just admitted, so the fold can
@@ -890,6 +910,29 @@ impl Snapshot {
             Decision::RecordHostFault { .. } | Decision::ClearHostFault { .. } => self.apply_host_fault_effect(effect),
             Decision::RecordCandidateVehicle { .. } => self.apply_vehicle_effect(effect),
             Decision::RecordMemberMachinery { .. } => self.apply_machinery_effect(effect),
+            Decision::RecordWithdrawal { bloom, withdrawal } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    // Dropping the cursor is what keeps the doctor's
+                    // "non-terminal member has a lane or a dispatch" invariant
+                    // correct with no special case for withdrawal: the member
+                    // is no longer at a stage at all. The deferred dispatch
+                    // goes for the wedge's reason — a workpiece that stops
+                    // dispatching is owed nothing, and a later release must not
+                    // hand it a lap.
+                    record.progress.remove(&withdrawal.workpiece);
+                    record.deferred_dispatches.remove(&withdrawal.workpiece);
+                    record.withdrawn.insert(withdrawal.workpiece.clone(), withdrawal.clone());
+                }
+            }
+            Decision::MarkBloomWithdrawn { bloom } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.status = BloomStatus::Withdrawn;
+                }
+            }
+            // Snapshot-inert outbox, like `DispatchOrphanClaimRelease`: what a
+            // cancel and a single-ref release do happens at the source and the
+            // executor, and the record of it is the withdrawal row above.
+            Decision::CancelDispatch { .. } | Decision::ReleaseMemberClaimRef { .. } => {}
             Decision::EmitReceipt(projected) => {
                 if let Some(record) = self.blooms.get_mut(&projected.receipt.bloom) {
                     record.status = BloomStatus::Landed;
@@ -1239,7 +1282,7 @@ impl BloomRecord {
     /// An empty record over `spec`: compiled-line catalog, sealed status,
     /// empty collections, and zeroed counters.
     ///
-    /// The one 28-field literal. Production sealed-record construction and every
+    /// The one 29-field literal. Production sealed-record construction and every
     /// test fixture fill from here, so a new field has a single home rather than
     /// steering placement across four test copies.
     #[must_use]
@@ -1272,6 +1315,7 @@ impl BloomRecord {
             dependencies: Vec::new(),
             host_faults: BTreeMap::new(),
             vehicles: BTreeMap::new(),
+            withdrawn: BTreeMap::new(),
             superseded_by: None,
         }
     }

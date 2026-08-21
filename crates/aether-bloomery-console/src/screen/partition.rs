@@ -3,10 +3,11 @@
 
 use crate::dto::{BloomStatus, BloomView, MemberView, ViewDocument};
 
-/// `Landed` and `Superseded` belong on history, everything else on the board.
+/// `Landed`, `Superseded`, and a fully-`Withdrawn` bloom belong on history —
+/// each is terminal and dispatches nothing. Everything else is on the board.
 #[must_use]
 pub fn is_history_status(status: Option<BloomStatus>) -> bool {
-    matches!(status, Some(BloomStatus::Landed | BloomStatus::Superseded))
+    matches!(status, Some(BloomStatus::Landed | BloomStatus::Superseded | BloomStatus::Withdrawn))
 }
 
 #[must_use]
@@ -27,6 +28,10 @@ pub fn history_blooms(view: &ViewDocument) -> impl Iterator<Item = &BloomView> {
 /// request, hold, resolution, in-flight attempt, blocked, idle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemberState {
+    /// An operator took this member out of the bloom (#5327). Ranked first
+    /// because it is the one terminal a person decided: it outranks a wedge
+    /// the member earned, and the member is not coming back.
+    Withdrawn,
     Wedged,
     /// Waiting on a person to widen the declared surface (ADR-0207). Its own
     /// rung rather than folded into `Held`: a hold is an ADR-0151 question an
@@ -42,6 +47,9 @@ pub enum MemberState {
 impl MemberState {
     #[must_use]
     pub fn of(member: &MemberView) -> Self {
+        if member.withdrawn.is_some() {
+            return Self::Withdrawn;
+        }
         if member.wedge.is_some() {
             return Self::Wedged;
         }
@@ -66,6 +74,7 @@ impl MemberState {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
+            Self::Withdrawn => "withdrawn",
             Self::Wedged => "WEDGED",
             Self::AwaitingSurface => "surface",
             Self::Held => "held",
@@ -76,7 +85,9 @@ impl MemberState {
         }
     }
 
-    /// Needs a decision or is actively moving: the live board keeps these.
+    /// Needs a decision or is actively moving: the live board keeps these. A
+    /// withdrawn member is neither — it has left the line and no decision is
+    /// owed on it.
     #[must_use]
     pub fn walks(self) -> bool {
         matches!(self, Self::Running | Self::Wedged | Self::AwaitingSurface | Self::Held)

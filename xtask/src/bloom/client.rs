@@ -10,7 +10,7 @@ use super::Endpoint;
 use super::dto::{
     ApprovalStoredView, BloomSpec, BloomView, CommissionShowView, ConfigRequest, ConfigValueView, ConfigView,
     DraftPatch, DraftView, JournalEntry, JournalView, OutcomeView, ScopeRevisionWrittenView, SealRequest,
-    SupersedeRequest, ViewDocument,
+    SupersedeRequest, ViewDocument, WithdrawRequest,
 };
 use super::http;
 use super::plan::spec_id;
@@ -77,6 +77,11 @@ impl<'a> Client<'a> {
 
     pub fn supersede(&self, bloom_id: &str, request: &SupersedeRequest) -> Result<OutcomeView> {
         self.send("POST", &format!("/blooms/{bloom_id}/supersede"), request)
+    }
+
+    /// Take one member out of a walking bloom without superseding it (#5327).
+    pub fn withdraw(&self, bloom_id: &str, workpiece: &str, request: &WithdrawRequest) -> Result<OutcomeView> {
+        self.send("POST", &format!("/blooms/{bloom_id}/members/{workpiece}/withdraw"), request)
     }
 
     /// One commission's tip, typed, plus the approvals stored against it.

@@ -387,6 +387,14 @@ fn member_lines(view: &ViewDocument, bloom: DigestHex, workpiece: &str) -> Vec<L
             lines.push(label(RowKey::Other(9 + index), format!("  {}  {}", request.path, request.reason)));
         }
     }
+    if let Some(withdrawn) = &member.withdrawn {
+        let cause = match withdrawn.depends_on.as_deref() {
+            Some(ancestor) if !ancestor.is_empty() => format!("{} ({ancestor})", withdrawn.cause),
+            _ => withdrawn.cause.clone(),
+        };
+        lines.push(label(RowKey::Other(100), format!("withdrawn  {cause}  by {}", withdrawn.operator)));
+        lines.push(label(RowKey::Other(101), format!("  reason  {}", withdrawn.reason)));
+    }
     if member.resolution.is_some() {
         lines.push(label(RowKey::Other(7), "resolution  integrated".to_owned()));
     }
