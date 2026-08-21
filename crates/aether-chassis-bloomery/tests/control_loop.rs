@@ -177,7 +177,7 @@ fn query_until_blooms(stream: &mut TcpStream, cid_base: u64, control: MailboxId,
             stream,
             cid,
             control,
-            &Query { bloom: None, release: None, calibration: false },
+            &Query { bloom: None, release: None, calibration: false, why: false },
         ) {
             QueryResult::Document { document } => from_bytes::<ViewDocument>(&document).expect("document decodes"),
             other => panic!("expected a document reply, got {other:?}"),
@@ -295,7 +295,7 @@ fn calibration_until_measured(stream: &mut TcpStream, cid_base: u64, control: Ma
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut cid = cid_base;
     loop {
-        let read = Query { bloom: None, release: None, calibration: true };
+        let read = Query { bloom: None, release: None, calibration: true, why: false };
         let document = match call::<_, QueryResult>(stream, cid, control, &read) {
             QueryResult::Calibration { document } => {
                 from_bytes::<CalibrationDocument>(&document).expect("calibration document decodes")
@@ -429,7 +429,7 @@ fn a_calibration_read_fills_cost_columns_from_a_resolved_study_artifact() {
             &mut stream,
             cid,
             control,
-            &Query { bloom: None, release: None, calibration: true },
+            &Query { bloom: None, release: None, calibration: true, why: false },
         ) {
             QueryResult::Calibration { document } => {
                 from_bytes::<CalibrationDocument>(&document).expect("calibration document decodes")

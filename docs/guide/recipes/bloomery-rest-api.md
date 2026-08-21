@@ -54,6 +54,7 @@ refused with `approval policy unavailable; seal fails closed`.
 | `POST /blooms/{id}/members/{workpiece}/withdraw` | Take one member out of the walking `{id}` bloom: cancel its lane, free its claim ref, and stop the folds waiting on it. |
 | `GET /blooms` · `GET /view` | The whole live view document. |
 | `GET /blooms/{id}` | One bloom's live view (`{id}` is the bloom's hex digest). |
+| `GET /blooms/{id}/why` | Why the `{id}` bloom is not advancing: a chain from the land down to member dispatch, each rung naming the one below it, plus one answer per member. |
 | `GET /claims` | Every live claim ref and the bloom holding it. |
 | `POST /claims/releases` | Authorize releasing one orphaned claim ref with an author signature; returns `202` and the request digest. |
 | `GET /claims/releases/{digest}` | One authorized release's state — pending, or its terminal result. |

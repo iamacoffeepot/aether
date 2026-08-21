@@ -50,7 +50,7 @@ use aether_bloomery::{
     BloomId, CalibrationDocument, CalibrationLedger, ClaimRefKind, ClaimRefState, DAYS_CAP, Decision, Decisions,
     Digest, Event, EvidenceKind, Fact, IdempotencyKey, METRICS_DEFAULT_LIMIT, METRICS_MAX_LIMIT, MetricsLedger,
     OperatorRepairError, Outcome, ResolvedConfigs, Snapshot, SpendWindow, StudyRecord, Unproducible,
-    decode_recorded_decisions, grade, is_active_unlanded, measure, reduce, view_of, window_label,
+    decode_recorded_decisions, grade, is_active_unlanded, measure, reduce, view_of, why_of, window_label,
 };
 
 use super::{ControlCore, ControlSetup, ObserveTick};
@@ -814,6 +814,14 @@ impl NativeActor for ControlCore {
             inbound.reply(&calibration_response(&state.calibration, &state.snapshot, state.artifacts.as_mut()));
             return;
         }
+        // The why chain answers before the view document is projected for the
+        // same reason calibration does: it reads the snapshot directly, so
+        // building the document first would build one and throw it away
+        // (#5281).
+        if mail.why {
+            inbound.reply(&why_response(&state.snapshot, mail.bloom.as_deref()));
+            return;
+        }
         // The live-read path holds no artifact access, so it resolves no question
         // bytes: a held member surfaces its pending decision only on the outward
         // mirror path. The digest-only hold still gates resolution in the reducer.
@@ -1242,6 +1250,23 @@ fn open_artifacts(configured: Option<&str>) -> Option<ArtifactsCapabilityState> 
 
 /// Answer an orphan-claim release-status read from the snapshot's record map
 /// (ADR-0179). A digest that is not 32 bytes, or names no admitted request, is
+/// Why one bloom is not advancing (#5281), or the bloom-shaped miss.
+///
+/// A `why` with no bloom named is the same miss: the question is about one
+/// bloom, and answering it for the whole fleet would be a different route.
+fn why_response(snapshot: &Snapshot, bloom: Option<&[u8]>) -> QueryResult {
+    let Some(bloom) = bloom.and_then(Digest::from_slice).map(BloomId) else {
+        return QueryResult::NotFound;
+    };
+    let Some(document) = why_of(snapshot, &bloom) else {
+        return QueryResult::NotFound;
+    };
+    match to_vec(&document) {
+        Ok(document) => QueryResult::Why { document },
+        Err(error) => QueryResult::Err { error: format!("why document encode failed: {error}") },
+    }
+}
+
 /// [`QueryResult::ReleaseNotFound`] — a release-shaped miss, not the bloom-shaped
 /// [`QueryResult::NotFound`], so the reader can name the resource the caller
 /// actually asked for.

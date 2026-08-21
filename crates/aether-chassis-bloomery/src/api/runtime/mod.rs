@@ -451,6 +451,23 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, routed)
     }
 
+    /// `GET /blooms/{id}/why` — why the `{id}` bloom is not advancing (#5281).
+    ///
+    /// The stored-fact chain from the land down to member dispatch, each rung
+    /// naming the one below it, plus one answer per member. A bloom that is
+    /// advancing normally reports the transition in flight; a bloom whose fold
+    /// refused reports that refusal with the values its guard read.
+    #[http::route(Get, "/blooms/{id}/why")]
+    fn on_get_bloom_why(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = ApiCapabilityState::query_why(&id);
+        finish(state, ctx, routed)
+    }
+
     /// `POST /blooms/{id}/supersede` — seal the successor draft and admit
     /// `Fact::Supersede` against the `{id}` predecessor bloom.
     #[http::route(Post, "/blooms/{id}/supersede")]

@@ -327,6 +327,79 @@ pub struct MemberView {
     pub evicted_by: Option<LeaseEvictionView>,
 }
 
+/// One transition's answer to "why is this not happening" (#5281).
+///
+/// Read off stored facts, never re-derived: the state comes from record fields
+/// the reducer already wrote and `refusal` carries the ADR-0206 refusal the
+/// boundary recorded when it stopped. A boundary whose guards have not been
+/// converted to gates yet reports its state with `refusal: None` rather than a
+/// hand-written account of its reasoning — a second description of the decision
+/// path is exactly what would drift and then lie.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct TransitionWhy {
+    /// The transition, by the name the machinery uses for it: `dispatch_member`,
+    /// `fold`, `aggregate_verify`, `aggregate_review`, or `land`.
+    pub transition: String,
+    /// Where the transition stands.
+    pub state: WhyState,
+    /// One sentence naming the stored values behind [`Self::state`].
+    pub because: String,
+    /// The recorded refusal this boundary stopped on, when it recorded one
+    /// (ADR-0206).
+    pub refusal: Option<RecordedRefusal>,
+    /// The transition further down the chain this one waits on; `None` when
+    /// nothing below it is the reason. This is what makes the answer a chain
+    /// rather than a flat list — not landing because no integration is
+    /// recorded, no integration because the fold refused.
+    pub waiting_on: Option<String>,
+}
+
+/// Where one transition or member stands (#5281).
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum WhyState {
+    /// It has already happened.
+    Done,
+    /// It is happening now — a lane is out, or the dispatch is decided.
+    InFlight,
+    /// It has not happened and something named is why.
+    Blocked,
+    /// It ran and refused, and the refusal is recorded.
+    Refused,
+}
+
+/// One member's answer to "why is this member not moving" (#5281).
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct MemberWhy {
+    /// The member.
+    pub workpiece: WorkpieceId,
+    /// Where it stands.
+    pub state: WhyState,
+    /// One sentence naming the stored values behind [`Self::state`].
+    pub because: String,
+    /// The ancestor holding it out of the line, when a declared edge is why
+    /// (ADR-0196) — the same answer [`MemberView::blocked_by`] carries, from
+    /// the same function.
+    pub blocked_by: Option<WorkpieceId>,
+}
+
+/// Why one bloom is not advancing (#5281).
+///
+/// A stalled member and a stalled composition have different causes, so both
+/// are reported: [`Self::chain`] runs from the land down to member dispatch,
+/// each rung naming the one below it, and [`Self::members`] answers per member.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct WhyDocument {
+    /// The bloom asked about.
+    pub bloom: BloomId,
+    /// Its status, so the answer is readable without a second request.
+    pub status: BloomStatus,
+    /// The transitions, outermost first: land, aggregate review, aggregate
+    /// verify, fold, member dispatch.
+    pub chain: Vec<TransitionWhy>,
+    /// One answer per sealed member, in sealed order.
+    pub members: Vec<MemberWhy>,
+}
+
 /// Why a member's lane stopped for a file another member took (ADR-0204),
 /// rendered so the board can tell it from a member still working.
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]

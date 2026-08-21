@@ -6,8 +6,8 @@
 use aether_actor::Manual;
 use aether_bloomery::{
     Adjudication, Admit, AdmitResult, AuthorityDoor, BloomId, BloomView, CandidateRef, Disposition, Event, Fact,
-    IdempotencyKey, OperatorHold, OperatorRepair, Outcome, Query, QueryResult, Statement, ViewDocument, Withdrawal,
-    WithdrawalCause, WorkpieceId, digest_of,
+    IdempotencyKey, OperatorHold, OperatorRepair, Outcome, Query, QueryResult, Statement, ViewDocument,
+    WhyDocument, Withdrawal, WithdrawalCause, WorkpieceId, digest_of,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_http::HttpServerResponse;
@@ -424,7 +424,7 @@ impl ApiCapabilityState {
 
     /// `GET /blooms` and `GET /view` — read the whole live projection.
     pub(super) fn query(bloom: Option<Vec<u8>>) -> Routed {
-        Routed::Query(Query { bloom, release: None, calibration: false })
+        Routed::Query(Query { bloom, release: None, calibration: false, why: false })
     }
 
     /// `GET /blooms/{id}` — read one bloom's live view by hex id.
@@ -432,6 +432,26 @@ impl ApiCapabilityState {
         digest_from_hex(id).map_or_else(
             || Routed::Reply(error_response(400, "bloom id is not a 32-byte hex digest")),
             |digest| Self::query(Some(digest.as_bytes().to_vec())),
+        )
+    }
+
+    /// `GET /blooms/{id}/why` — why the `{id}` bloom is not advancing (#5281).
+    ///
+    /// The same subject `query_bloom` names, rendered as the stored-fact chain
+    /// instead of the projection: not landing because no integration is
+    /// recorded, no integration because the fold refused, the fold refused
+    /// because adoption found no candidate ref for this member.
+    pub(super) fn query_why(id: &str) -> Routed {
+        digest_from_hex(id).map_or_else(
+            || Routed::Reply(error_response(400, "bloom id is not a 32-byte hex digest")),
+            |digest| {
+                Routed::Query(Query {
+                    bloom: Some(digest.as_bytes().to_vec()),
+                    release: None,
+                    calibration: false,
+                    why: true,
+                })
+            },
         )
     }
 }
@@ -613,6 +633,10 @@ pub(super) fn query_response(result: QueryResult, doctor: Option<&DoctorReport>)
             error_response(500, "projection read answered with a release record")
         }
         QueryResult::Calibration { .. } => error_response(500, "projection read answered with a calibration document"),
+        QueryResult::Why { document } => match from_bytes::<WhyDocument>(&document) {
+            Ok(document) => json(200, &document),
+            Err(error) => error_response(500, &format!("why document decode failed: {error}")),
+        },
     }
 }
 

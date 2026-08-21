@@ -49,6 +49,7 @@ mod surface_request;
 mod verify;
 mod verify_memo;
 mod view;
+mod why;
 mod withdraw;
 
 pub use decision::Decision;
@@ -70,6 +71,7 @@ pub use snapshot::{
     LeaseEviction, MemberMachineryFault, MemberPark, Snapshot, StageProgress,
 };
 pub use view::view_of;
+pub use why::why_of;
 
 use crate::values::{ResolvedConfigs, SpendWindow};
 

@@ -83,7 +83,7 @@ impl Wire {
     /// # Panics
     /// The query was refused or its reply did not decode.
     pub fn view(&mut self) -> ViewDocument {
-        let query = Query { bloom: None, release: None, calibration: false };
+        let query = Query { bloom: None, release: None, calibration: false, why: false };
         match self.call::<_, QueryResult>(control_mailbox(), &query) {
             QueryResult::Document { document } => from_bytes(&document).expect("the projection decodes"),
             other => panic!("expected a document reply, got {other:?}"),

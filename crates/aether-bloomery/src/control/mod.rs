@@ -894,6 +894,20 @@ pub struct Query {
     /// the same most-specific-first order those two already resolve in.
     #[serde(default)]
     pub calibration: bool,
+    /// Answer "why is this bloom not advancing" instead of projecting its view
+    /// (#5281): the stored-fact chain from the land down to member dispatch,
+    /// plus one answer per member.
+    ///
+    /// A flag paired with [`bloom`](Self::bloom) rather than a fourth digest
+    /// field, because it selects a different *rendering* of the same subject
+    /// the bloom id already names. It yields to [`release`](Self::release) and
+    /// [`calibration`](Self::calibration), which name whole other subjects, and
+    /// is answered before the view document is projected — that document would
+    /// be built and thrown away. Without a `bloom` it has nothing to explain
+    /// and is ignored. Trailing and `#[serde(default)]` so a reader that
+    /// predates the field still decodes.
+    #[serde(default)]
+    pub why: bool,
 }
 
 /// Reply to [`Query`]: the requested projection as canonical
@@ -951,6 +965,14 @@ pub enum QueryResult {
     /// unchanged.
     Calibration {
         /// The wire-encoded `CalibrationDocument`.
+        #[serde(with = "aether_data::bytes")]
+        document: Vec<u8>,
+    },
+    /// Why one bloom is not advancing, wire-encoded
+    /// [`WhyDocument`](crate::port::WhyDocument) (#5281). Appended so the prior
+    /// variants' wire discriminants are unchanged.
+    Why {
+        /// The wire-encoded `WhyDocument`.
         #[serde(with = "aether_data::bytes")]
         document: Vec<u8>,
     },
