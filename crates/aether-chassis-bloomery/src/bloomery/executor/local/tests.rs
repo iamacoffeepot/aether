@@ -2165,6 +2165,56 @@ fn a_run_that_fails_without_evidence_frees_its_slot() {
     assert_ne!(exec.inspect(&waiting).unwrap(), ExecutionStatus::Queued, "the waiting dispatch is now a live run");
 }
 
+#[test]
+fn a_refine_takes_the_next_lane_slot_ahead_of_the_verify_and_construct_that_queued_first() {
+    // Tripwire for bloom f063ff066e83, where three members reached Refine while
+    // every slot was held and none of the three dispatched for minutes: the
+    // queue was strict FIFO, so a lane that only had to resume a live session
+    // against a tree it had just built waited behind constructs that had not
+    // started. What it loses while it waits is the thing that made it cheap —
+    // its session ages, and the slot holding its warm target directory is handed
+    // to a stranger.
+    let base = TempDir::new().unwrap();
+    let store = store_dir();
+    let started = Arc::new(Mutex::new(Vec::new()));
+    let runner = ThrottleRunner { started: Arc::clone(&started), writes_evidence: true };
+    let exec = LocalExecutor::new(Arc::new(runner), correspondence(), base.path())
+        .with_max_concurrent_lanes(1)
+        .with_message_store(member_store(
+            &store,
+            &[
+                member_order_at(&test_nonce("holder"), "issue-A", StageId::Construct),
+                member_order_at(&test_nonce("construct"), "issue-B", StageId::Construct),
+                member_order_at(&test_nonce("verify"), "issue-C", StageId::Verify),
+                member_order_at(&test_nonce("refine"), "issue-A", StageId::Refine),
+            ],
+        ));
+
+    let holder = exec.submit(&construct_order(digest(5), &test_nonce("holder"))).unwrap();
+    let construct = exec.submit(&construct_order(digest(5), &test_nonce("construct"))).unwrap();
+    let verify = exec.submit(&verify_order(digest(5), &test_nonce("verify"))).unwrap();
+    let refine = exec.submit(&construct_order(digest(5), &test_nonce("refine"))).unwrap();
+    assert_eq!(spawned(&started), ["wo-holder"], "the ceiling of one admits one child");
+
+    exec.stream_evidence(&holder).unwrap();
+    assert_eq!(
+        spawned(&started),
+        ["wo-holder", "wo-refine"],
+        "the freed slot goes to the refine, however late it queued",
+    );
+
+    exec.stream_evidence(&refine).unwrap();
+    assert_eq!(spawned(&started), ["wo-holder", "wo-refine", "wo-verify"], "then to the stage judging a candidate");
+
+    exec.stream_evidence(&verify).unwrap();
+    assert_eq!(
+        spawned(&started),
+        ["wo-holder", "wo-refine", "wo-verify", "wo-construct"],
+        "and last to the construct that has nothing waiting on it yet",
+    );
+    assert_eq!(exec.stream_evidence(&construct).unwrap().len(), 1, "every dispatch still resolves");
+}
+
 fn claude_order(subject: Digest, nonce: &str, task: &str) -> aether_bloomery::WorkOrder {
     let mut order = construct_order(subject, nonce);
     order.transformation.model = Some(ResolvedModel {

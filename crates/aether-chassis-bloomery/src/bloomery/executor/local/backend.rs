@@ -25,6 +25,7 @@ use super::error::LocalExecutorError;
 use super::identity::ProcessIdentity;
 use super::lane_program::LaneProgram;
 use super::orphan::OrphanedRun;
+use super::priority::{DispatchPriority, must_wait_behind, next_waiting, priority_of};
 use super::process_runner::{CaptureIdentity, ProcessTransformRunner};
 use super::quarantine;
 use super::runner::{RunLifecycle, RunProcess, RunSpec, TransformRunner};
@@ -190,6 +191,8 @@ struct PendingRun {
     gates: LaneGates,
     // The slot the predecessor that produced this checkout ran in, when known.
     preferred: Option<usize>,
+    // Which band this dispatch queues in, from the stage its order names.
+    priority: DispatchPriority,
 }
 
 impl PendingRun {
@@ -271,6 +274,19 @@ impl Registry {
         let (slot, reason) = choose_slot(preferred, &self.slots, quarantined);
         self.slots.insert(slot);
         (slot, reason)
+    }
+
+    // The waiting dispatch the next free slot goes to: the highest band, and
+    // within it the one that has waited longest.
+    fn take_waiting(&mut self) -> Option<PendingRun> {
+        let bands: Vec<DispatchPriority> = self.waiting.iter().map(|pending| pending.priority).collect();
+        self.waiting.remove(next_waiting(&bands)?)
+    }
+
+    // Whether a dispatch of `priority` has to queue rather than take a free slot
+    // now, because something already waiting would be handed that slot first.
+    fn waits_behind(&self, priority: DispatchPriority) -> bool {
+        must_wait_behind(priority, &self.waiting.iter().map(|pending| pending.priority).collect::<Vec<_>>())
     }
 
     // Claim one named slot, reporting whether it was free. Boot reconciliation's
@@ -614,6 +630,11 @@ impl LocalExecutor {
         let gates = LaneGates::of(&order.transformation.command);
         let is_model_lane = is_model_lane(&order.transformation.command);
         let preferred = self.preferred_builder_slot(&checkout_hex);
+        // Resolved here, once, rather than at every pump: the stage lives in the
+        // outstanding-order row this nonce resolves, and reading it under the
+        // registry lock would put a database query inside the decision every
+        // freed slot makes.
+        let priority = priority_of(self.order_identity(&nonce).map(|(_, _, stage)| stage));
         // The stage's resolved agent profile, overlaid onto the order by the
         // dispatching host (ADR-0149 §The line) — never a backend-local config
         // knob, which would let a run's model diverge from the profile its bloom
@@ -637,6 +658,7 @@ impl LocalExecutor {
             subject: evidence_subject(&order.transformation),
             gates,
             preferred,
+            priority,
         })
     }
 
@@ -671,13 +693,16 @@ impl LocalExecutor {
     // Claim a lane slot for a dispatch that may start right now, or report that it
     // has to wait.
     //
-    // A dispatch already waiting has the prior claim on a free slot, so a fresh one
-    // never overtakes it — the submission order the queue promises holds even in
-    // the window between a slot freeing and the pump handing it out.
-    fn reserve_slot(&self, preferred: Option<usize>) -> Option<(usize, SlotChoice)> {
+    // A dispatch already waiting in this one's band or better has the prior claim
+    // on a free slot, so a fresh one never overtakes a peer — the order the queue
+    // promises holds even in the window between a slot freeing and the pump
+    // handing it out. A dispatch that outranks everything waiting does start
+    // inline, or the band ordering would apply only to slots that free after it
+    // has already parked (#5410).
+    fn reserve_slot(&self, priority: DispatchPriority, preferred: Option<usize>) -> Option<(usize, SlotChoice)> {
         let quarantined = quarantine::slots_on_disk(&self.base_dir);
         let mut registry = self.lock();
-        if !registry.waiting.is_empty() || registry.occupied(&quarantined) >= self.max_concurrent_lanes {
+        if registry.waits_behind(priority) || registry.occupied(&quarantined) >= self.max_concurrent_lanes {
             return None;
         }
         registry.starting += 1;
@@ -1053,9 +1078,9 @@ impl LocalExecutor {
         outcome
     }
 
-    // Hand every free lane slot to the dispatches waiting for one, in submission
-    // order. Called wherever a run leaves the registry, which is the only place a
-    // slot frees.
+    // Hand every free lane slot to the dispatches waiting for one, in band order
+    // (#5410). Called wherever a run leaves the registry, which is the only place
+    // a slot frees.
     //
     // A queued start that fails has no caller left to refuse it — its dispatch
     // acked as submitted cycles ago — so it is logged and dropped rather than
@@ -1086,7 +1111,7 @@ impl LocalExecutor {
         }
         // Reserved as it is taken: the slot is spent from here, not from whenever
         // the spawn it is handed to returns.
-        let pending = registry.waiting.pop_front()?;
+        let pending = registry.take_waiting()?;
         registry.starting += 1;
         let (slot, reason) = registry.claim_for(pending.preferred, &quarantined);
         drop(registry);
@@ -1927,7 +1952,7 @@ impl ExecutorBackend for LocalExecutor {
         // the ceiling existed. Otherwise the dispatch waits its turn — and is acked
         // as submitted either way, so the reducer's view of it never depends on how
         // busy this host happened to be.
-        if let Some((slot, reason)) = self.reserve_slot(pending.preferred) {
+        if let Some((slot, reason)) = self.reserve_slot(pending.priority, pending.preferred) {
             self.start_reserved(pending, slot, reason)?;
         } else {
             self.enqueue(pending);
