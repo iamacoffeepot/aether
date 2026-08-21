@@ -1420,7 +1420,7 @@ fn an_executor_fault_on_a_stage_without_a_lifecycle_is_refused_and_the_order_sta
     let bloom = BloomId(Digest::from_bytes([1; 32]));
     let subject = Digest::from_bytes([30; 32]);
 
-    for (nonce, stage) in [("n-f-av", StageId::AggregateVerify), ("n-f-scope", StageId::Scope)] {
+    for (nonce, stage) in [("n-f-av", StageId::AggregateVerify), ("n-f-review", StageId::Review)] {
         let mut record = dispatch_record(nonce, bloom, &WorkpieceId("wp".to_owned()), subject, subject);
         record.stage = stage;
         record_dispatch(&mut store, &record).unwrap();
@@ -1463,7 +1463,7 @@ fn a_surface_request_on_a_non_construct_stage_is_refused_and_the_order_stays_liv
     let bloom = BloomId(Digest::from_bytes([1; 32]));
     let subject = Digest::from_bytes([31; 32]);
 
-    for (nonce, stage) in [("n-s-av", StageId::AggregateVerify), ("n-s-scope", StageId::Scope)] {
+    for (nonce, stage) in [("n-s-av", StageId::AggregateVerify), ("n-s-review", StageId::Review)] {
         let mut record = dispatch_record(nonce, bloom, &WorkpieceId("wp".to_owned()), subject, subject);
         record.stage = stage;
         record_dispatch(&mut store, &record).unwrap();
@@ -1501,18 +1501,17 @@ fn a_surface_request_on_a_non_construct_stage_is_refused_and_the_order_stays_liv
 fn an_out_of_line_stage_is_refused_and_the_order_stays_live() {
     // A well-formed dispatch only ever carries a dispatched member stage
     // (Construct / Verify / the repair-only Refine / the fold-conflict
-    // Reconcile) or a bloom-level aggregate gate; an order at any other
-    // stage — the retired member Review included (ADR-0153), and the pre-seal
-    // Scope, which is an operator-harness process and never a dispatched lane
-    // — is corrupt. It is refused as OutOfLineStage rather than folded into
-    // the member's resolution, and (like a digest mismatch) the order is NOT
-    // consumed.
+    // Reconcile), a bloom-level aggregate gate, or the pre-bloom Scope run
+    // that lands on its own ledger (ADR-0208); an order at any other stage —
+    // the retired member Review (ADR-0153) — is corrupt. It is refused as
+    // OutOfLineStage rather than folded into the member's resolution, and
+    // (like a digest mismatch) the order is NOT consumed.
     let mut store = store();
     let bloom = BloomId(Digest::from_bytes([1; 32]));
     let workpiece = WorkpieceId("wp-off".to_owned());
     let candidate = Digest::from_bytes([5; 32]);
     let mut record = dispatch_record("n-off", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate);
-    record.stage = StageId::Scope;
+    record.stage = StageId::Review;
     record_dispatch(&mut store, &record).unwrap();
 
     let upload = UploadedEvidence {
@@ -1534,7 +1533,7 @@ fn an_out_of_line_stage_is_refused_and_the_order_stays_live() {
     };
     match admit_uploaded(&mut store, &upload).unwrap() {
         AdmitDecision::Refused(IntakeRefusal::OutOfLineStage(stage)) => {
-            assert_eq!(stage, StageId::Scope);
+            assert_eq!(stage, StageId::Review);
         }
         other => panic!("expected OutOfLineStage refusal, got {other:?}"),
     }

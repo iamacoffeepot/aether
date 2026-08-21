@@ -731,9 +731,15 @@ fn the_projection_snapshot_carries_the_intents_own_heading() {
     assert_eq!(payload.title, "Refuse a contradictory workpiece");
 
     seed(&mut store, "wp-untitled");
+    // A drain acks nothing, so the titled commission above is still at the head
+    // of the topic: the seeded one is found by the workpiece it names.
     let entries = store.drain_topic(Topic::Commission).expect("drain");
-    let payload: CommissionProjection = from_bytes(&entries[0].payload).expect("payload");
-    assert_eq!(payload.title, "", "an intent with no heading carries no title");
+    let untitled = entries
+        .iter()
+        .filter_map(|entry| from_bytes::<CommissionProjection>(&entry.payload).ok())
+        .find(|payload| payload.workpiece == workpiece("wp-untitled"))
+        .expect("the seeded commission projects");
+    assert_eq!(untitled.title, "", "an intent with no heading carries no title");
 }
 
 #[test]
