@@ -2566,6 +2566,7 @@ fn a_failing_attempt_retries_within_budget_then_wedges() {
                 seen_verify_failures: VerifyFailureSet::EMPTY,
                 fold_checkpoint: None,
                 fold_conflict_evidence: None,
+                reconcile_assembles_base: false,
             },
         }],
     };
