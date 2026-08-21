@@ -1829,8 +1829,44 @@ fn an_orphan_does_not_invent_a_signal_or_a_wait_fault() {
     assert_eq!(landed.poll(), RunLifecycle::Exited { success: false });
 
     fs::remove_file(evidence_dir.join("evidence.json")).unwrap();
-    let mut unfinished = OrphanedRun::new(Nonce(nonce), &evidence_dir);
-    assert_eq!(unfinished.poll(), RunLifecycle::Running);
+    let mut unfinished = OrphanedRun::new(Nonce(nonce.clone()), &evidence_dir);
+    assert_eq!(unfinished.poll(), RunLifecycle::Running, "with no identity recorded, nothing here can tell");
+
+    // #5382: the identity record is the second observable, and a pid that is
+    // gone is a child that died with the previous coordinator. Reading it as
+    // running held the slot and the member until the dispatch deadline — an
+    // hour for a construct lane — with no process on the host at all.
+    ProcessIdentity { pid: u32::MAX, pgid: u32::MAX, starttime: 1, boot_id: "recorded".to_owned() }
+        .write(&evidence_dir)
+        .unwrap();
+    let mut departed = OrphanedRun::new(Nonce(nonce.clone()), &evidence_dir);
+    assert_eq!(
+        departed.poll(),
+        RunLifecycle::Exited { success: false },
+        "a recorded pid with no process behind it is an exit, so the executor host-faults and re-dispatches",
+    );
+
+    // And the discrimination that keeps the dangerous direction closed: a
+    // recorded identity that still names its live process is a lane that is
+    // simply still working, and reading that as exited would destroy in-flight
+    // work on every restart.
+    #[cfg(target_os = "linux")]
+    {
+        let (mut child, identity) = spawn_isolated_sleep();
+        identity.write(&evidence_dir).unwrap();
+        let mut live = OrphanedRun::new(Nonce(nonce.clone()), &evidence_dir);
+        assert_eq!(live.poll(), RunLifecycle::Running, "a re-attachable child is still working");
+
+        // And the order the two are asked in: the evidence is read first, so a
+        // child that wrote its evidence and is still winding down is a
+        // completed run to consume, never a host fault.
+        fs::write(evidence_dir.join("evidence.json"), "{}").unwrap();
+        let mut finished = OrphanedRun::new(Nonce(nonce), &evidence_dir);
+        assert_eq!(finished.poll(), RunLifecycle::Exited { success: false }, "written evidence outranks a live pid");
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
 
 #[cfg(target_os = "linux")]
