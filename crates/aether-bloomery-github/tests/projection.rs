@@ -53,6 +53,8 @@ fn member(number: u64, revision: u8) -> MemberView {
         park: None,
         awaiting_surface: None,
         withdrawn: None,
+        leases: Vec::new(),
+        evicted_by: None,
     }
 }
 
@@ -68,6 +70,7 @@ fn one_bloom(id: BloomId, members: Vec<MemberView>) -> ViewDocument {
         composition: None,
         operator_hold: None,
         blocker: None,
+        leases: Vec::new(),
     };
     ViewDocument { mainline: digest(0), observed: digest(0), spend_quiesce: None, blooms: vec![bloom] }
 }
