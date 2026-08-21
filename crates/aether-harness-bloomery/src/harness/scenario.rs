@@ -11,16 +11,16 @@ use std::time::{Duration, Instant};
 use aether_actor::Addressable;
 use aether_bloomery::{
     BackendObjectId, BloomDraft, BloomId, BloomStatus, BloomView, CandidateRef, ConfigKind, ConfigRegistry,
-    Correspondence, Digest, Evidence, EvidenceKind, Fact, Membership, Outcome, Snapshot, StageCatalog, ViewDocument,
-    WorkpieceId,
+    Correspondence, Digest, Evidence, EvidenceKind, Fact, Membership, Outcome, Snapshot, StageCatalog, StageId,
+    ViewDocument, WorkpieceId,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{GitDataApi, PullRequestApi, candidate_ref_name, landing_branch, short_hex, to_hex};
 use aether_chassis_bloomery::artifacts::{ArtifactsCapabilityState, ArtifactsConfig, GetResult};
-use aether_chassis_bloomery::bloomery::mock_lane::{LaneRun, read_ledger};
+use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneRun, LaneScript as MockLaneScript, read_ledger};
 use aether_chassis_bloomery::bloomery::{
-    BloomeryChassis, BloomeryEnv, Chassis, CoordinatorConfig, DispatchTick, DoctorReactorCapability, DoctorTick,
-    ExecutorReactorCapability, GithubConnectionConfig, IntegrateReactorCapability, IntegrateTick,
+    BloomeryChassis, BloomeryEnv, Chassis, CoordinatorConfig, DispatchTick, DoctorReactorCapability, DoctorReport,
+    DoctorTick, ExecutorReactorCapability, GithubConnectionConfig, IntegrateReactorCapability, IntegrateTick,
     LandReactorCapability, LandTick, ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload,
 };
 use aether_chassis_bloomery::control::ObserveTick;
@@ -34,9 +34,11 @@ use aether_rpc::RpcServerHandle;
 use aether_substrate::chassis::builder::BuiltChassis;
 use tempfile::TempDir;
 
+use super::digest;
 use super::drive::member;
 use super::{BOOT_BUDGET, Backend, CoordinatorKind, HARNESS_STARTED, HarnessBuilder, Lane, POLL};
-use crate::oracle::liveness;
+use crate::oracle::{Oracle, liveness};
+use crate::scenario::{LaneScript, Scenario};
 use crate::support::client::connect_and_handshake;
 use crate::support::repo::Repo;
 use crate::support::wire::{Wire, control_mailbox};
@@ -209,7 +211,7 @@ impl ScenarioHarness {
     }
 
     /// The doctor's latest pass, as `GET /view` overlays it.
-    pub fn doctor(&mut self) -> Option<aether_chassis_bloomery::bloomery::DoctorReport> {
+    pub fn doctor(&mut self) -> Option<DoctorReport> {
         self.wire.doctor()
     }
 
@@ -224,18 +226,24 @@ impl ScenarioHarness {
     }
 
     /// Local-authority cell over the three-crate example project.
+    #[must_use]
     pub fn start() -> Self {
         let repo = Repo::with_example_project();
         HarnessBuilder::local_authority(&repo).hold_repo(repo).start("bloomery-harness")
     }
 
     /// Seal `scenario`'s members on the observed mainline.
-    pub fn seal_scenario(&mut self, scenario: &crate::scenario::Scenario) -> BloomId {
+    ///
+    /// # Panics
+    /// The seal was refused, or the scenario named more members than a digest seed can index.
+    pub fn seal_scenario(&mut self, scenario: &Scenario) -> BloomId {
         let members: Vec<(&str, Digest)> = scenario
             .members
             .iter()
             .enumerate()
-            .map(|(index, spec)| (spec.workpiece.0.as_str(), crate::digest((index + 1) as u8)))
+            .map(|(index, spec)| {
+                (spec.workpiece.0.as_str(), digest(u8::try_from(index + 1).expect("a scenario has at most 4 members")))
+            })
             .collect();
         let pairs: Vec<(String, Digest)> =
             members.iter().map(|(workpiece, digest)| ((*workpiece).to_owned(), *digest)).collect();
@@ -244,14 +252,12 @@ impl ScenarioHarness {
     }
 
     /// Write `scripts` for `workpiece`'s `stage` as a mock-lane script.
-    pub fn script_lane(
-        &self,
-        workpiece: &WorkpieceId,
-        stage: aether_bloomery::StageId,
-        scripts: &[crate::scenario::LaneScript],
-    ) {
+    ///
+    /// # Panics
+    /// The mock-lane script could not be written.
+    pub fn script_lane(&self, workpiece: &WorkpieceId, stage: StageId, scripts: &[LaneScript]) {
         let command = stage_command(stage);
-        let mut script = aether_chassis_bloomery::bloomery::mock_lane::LaneScript::all_passing();
+        let mut script = MockLaneScript::all_passing();
         for item in scripts {
             script = script.then(command, lower_lane_script(item));
         }
@@ -260,7 +266,10 @@ impl ScenarioHarness {
     }
 
     /// Tick until `predicate` holds or `ticks` is exhausted, checking
-    /// [`crate::Oracle`] whenever the world has gone still.
+    /// [`Oracle`] whenever the world has gone still.
+    ///
+    /// # Panics
+    /// The oracle objected, or `ticks` elapsed before the predicate held.
     pub fn run_until(&mut self, predicate: impl Fn(&mut Self) -> bool, ticks: u32) {
         let mut last: Option<(String, Vec<String>, usize)> = None;
         let mut still = 0_u32;
@@ -276,16 +285,16 @@ impl ScenarioHarness {
                 still = 0;
             }
             if still >= 2 {
-                crate::Oracle::check(&document, self.doctor().as_ref(), &outstanding)
+                Oracle::check(&document, self.doctor().as_ref(), &outstanding)
                     .unwrap_or_else(|violation| panic!("{violation}"));
             }
             if predicate(self) {
-                crate::Oracle::check(&self.view(), self.doctor().as_ref(), &self.outstanding())
+                Oracle::check(&self.view(), self.doctor().as_ref(), &self.outstanding())
                     .unwrap_or_else(|violation| panic!("{violation}"));
                 return;
             }
         }
-        crate::Oracle::check(&self.view(), self.doctor().as_ref(), &self.outstanding())
+        Oracle::check(&self.view(), self.doctor().as_ref(), &self.outstanding())
             .unwrap_or_else(|violation| panic!("tick budget exhausted: {violation}"));
         panic!("predicate not reached inside {ticks} ticks");
     }
@@ -963,24 +972,20 @@ fn nonces(orders: &[OutstandingOrder]) -> Vec<&str> {
     orders.iter().map(|order| order.nonce.as_str()).collect()
 }
 
-fn stage_command(stage: aether_bloomery::StageId) -> &'static str {
+fn stage_command(stage: StageId) -> &'static str {
     match stage {
-        aether_bloomery::StageId::Verify | aether_bloomery::StageId::AggregateVerify => {
-            aether_bloomery::VERIFY_CHECK_COMMAND
-        }
-        aether_bloomery::StageId::AggregateReview => aether_bloomery::REVIEW_CRITIC_COMMAND,
+        StageId::Verify | StageId::AggregateVerify => aether_bloomery::VERIFY_CHECK_COMMAND,
+        StageId::AggregateReview => aether_bloomery::REVIEW_CRITIC_COMMAND,
         _ => aether_bloomery::CONSTRUCT_IMPLEMENT_COMMAND,
     }
 }
 
-fn lower_lane_script(script: &crate::scenario::LaneScript) -> aether_chassis_bloomery::bloomery::mock_lane::LaneMode {
-    use aether_chassis_bloomery::bloomery::mock_lane::LaneMode;
+fn lower_lane_script(script: &LaneScript) -> LaneMode {
     match script {
-        crate::scenario::LaneScript::Candidate => LaneMode::Pass,
-        crate::scenario::LaneScript::Decline => LaneMode::Declines,
-        crate::scenario::LaneScript::OutsideSurface(_) => LaneMode::Fail,
-        crate::scenario::LaneScript::Die => LaneMode::ExitsNonZero,
-        crate::scenario::LaneScript::WrongSubject => LaneMode::WrongSubject,
-        crate::scenario::LaneScript::VerifyFail(_) => LaneMode::Fail,
+        LaneScript::Candidate => LaneMode::Pass,
+        LaneScript::Decline => LaneMode::Declines,
+        LaneScript::OutsideSurface(_) | LaneScript::VerifyFail(_) => LaneMode::Fail,
+        LaneScript::Die => LaneMode::ExitsNonZero,
+        LaneScript::WrongSubject => LaneMode::WrongSubject,
     }
 }

@@ -1618,7 +1618,7 @@ impl LocalExecutor {
         self.retire(&handle.nonce.0);
         self.pump();
         let verdict = if matches!(construct, Some(ConstructConclusion::Declined)) {
-            StageVerdict::Parked
+            StageVerdict::Declined
         } else if passed {
             StageVerdict::VerificationPassed
         } else {
@@ -2360,8 +2360,8 @@ fn construct_conclusion(bytes: &[u8]) -> ConstructConclusion {
     }
 }
 
-/// A mock-lane [`LaneMode::WrongSubject`] stamps this so the artifact name
-/// binds a digest the order did not display.
+/// A mock-lane [`super::mock_lane::LaneMode::WrongSubject`] stamps this so the
+/// artifact name binds a digest the order did not display.
 fn parse_claimed_subject(bytes: &[u8]) -> Option<Digest> {
     let value = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
     Digest::from_hex(value.get("claimed_subject")?.as_str()?)

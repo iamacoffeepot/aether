@@ -94,6 +94,7 @@ impl Wire {
     ///
     /// `None` when the REST port was never bound, the ingress has not
     /// answered yet, or this pass has not published a report.
+    #[must_use]
     pub fn doctor(&self) -> Option<DoctorReport> {
         let port = self.http_port?;
         let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
@@ -157,6 +158,7 @@ impl Wire {
 
 /// The native control core's mailbox, resolved through its own addressing
 /// identity — the same way the reactors resolve it.
+#[must_use]
 pub fn control_mailbox() -> MailboxId {
     <ControlCore as Addressable>::resolve(0, ())
 }

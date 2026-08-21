@@ -602,14 +602,12 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     // detail, per the reducer's `RecordEvidence` fold) — the key the held order is
     // filed under below, captured before the evidence moves into the fact.
     let mut parked_under = None;
-    // A construct that concluded without a candidate is not an ADR-0151
-    // question and is not a failed attempt: mint ConstructDeclined so the
-    // reducer's park arm is reachable (#5292 / #5332). The local backend
-    // currently stamps StageVerdict::Parked for that case, which used to
-    // route into AdmitEvidence and never produce a member_parks entry.
-    let declined_construct =
-        record.stage == StageId::Construct && upload.candidate.is_none() && !verdict_passed(upload.verdict);
-    let event = if declined_construct {
+    // A construct/refine lane that concluded without a candidate is not an
+    // ADR-0151 question and is not a failed attempt: `StageVerdict::Declined`
+    // normalizes to ConstructDeclined so the reducer's park arm is reachable
+    // (#5292 / #5332). `Parked` stays the question path; a failing construct
+    // with no capture, and an executor fault, keep their own arms.
+    let event = if evidence.kind == EvidenceKind::ConstructDeclined && admits_as_attempt_completed(record.stage) {
         Event {
             idempotency_key: AdmissionKey::Attempt.of(&record.nonce.0),
             fact: Fact::AttemptCompleted {
@@ -617,7 +615,7 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
                 workpiece: record.workpiece.clone(),
                 stage: record.stage,
                 passed: false,
-                evidence: Evidence { kind: EvidenceKind::ConstructDeclined, ..evidence },
+                evidence,
                 candidate: None,
             },
         }

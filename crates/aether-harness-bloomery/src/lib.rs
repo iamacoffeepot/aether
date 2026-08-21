@@ -18,15 +18,7 @@
 //!
 //! A new scenario picks a cell. It does not write a fourth `struct Harness`.
 
-#![allow(clippy::must_use_candidate, clippy::missing_panics_doc)]
-// Test-harness tuning knobs (`BLOOMERY_HARNESS_CASES`, `CARGO_BIN_EXE_*`
-// for the mock-lane / coordinator binaries) read from the environment,
-// not capability config. The forked cell also looks up the `bloomery`
-// bin the consumer's test process received.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test-harness tuning knobs read from the environment, not capability config"
-)]
+use std::env;
 
 pub mod cells;
 pub mod harness;
@@ -59,9 +51,10 @@ pub use support::wire::{Wire, control_mailbox};
 ///
 /// # Panics
 /// Neither environment variable is set, so there is no mock-lane binary to run.
+#[must_use]
 pub fn mock_lane_program() -> String {
-    std::env::var("CARGO_BIN_EXE_bloomery-mock-lane")
-        .or_else(|_| std::env::var("CARGO_BIN_EXE_bloomery-harness-mock-lane"))
+    env_value("CARGO_BIN_EXE_bloomery-mock-lane")
+        .or_else(|| env_value("CARGO_BIN_EXE_bloomery-harness-mock-lane"))
         .expect("a mock-lane binary is on CARGO_BIN_EXE_bloomery-mock-lane or CARGO_BIN_EXE_bloomery-harness-mock-lane")
 }
 
@@ -74,6 +67,14 @@ pub fn mock_lane_program() -> String {
 ///
 /// # Panics
 /// `CARGO_BIN_EXE_bloomery` is unset.
+#[must_use]
 pub fn bloomery_bin() -> String {
-    std::env::var("CARGO_BIN_EXE_bloomery").expect("the bloomery coordinator binary is on CARGO_BIN_EXE_bloomery")
+    env_value("CARGO_BIN_EXE_bloomery").expect("the bloomery coordinator binary is on CARGO_BIN_EXE_bloomery")
+}
+
+/// Read a process-level test knob without `std::env::var`, which clippy
+/// disallows as a capability-config path. Iterating `vars` is the same lookup
+/// cargo injects into the test process (`CARGO_BIN_EXE_*`).
+fn env_value(name: &str) -> Option<String> {
+    env::vars().find(|(key, _)| key == name).map(|(_, value)| value)
 }

@@ -86,6 +86,7 @@ fn connect_and_hello(port: u16, client_name: &str, timeout: Duration) -> Result<
 ///
 /// # Panics
 /// No coordinator answered a handshake on `port` inside the deadline.
+#[must_use]
 pub fn connect_and_handshake(port: u16, client_name: &str) -> TcpStream {
     let deadline = Instant::now() + Duration::from_secs(30);
     match handshake_while_alive(port, client_name, deadline, || true) {
@@ -100,6 +101,9 @@ pub fn connect_and_handshake(port: u16, client_name: &str) -> TcpStream {
 /// `free_port` reservation window — and this helper discovers the OS-assigned
 /// listen. Returns the live guard beside the stream so the caller cannot keep
 /// a connection to a stranger.
+///
+/// # Panics
+/// No child completed a handshake inside `budget`.
 pub fn spawn_and_connect(
     client_name: &str,
     budget: Duration,

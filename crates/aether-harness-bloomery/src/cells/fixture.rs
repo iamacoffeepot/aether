@@ -29,7 +29,7 @@
 //! pull path ends by resolving an admitted capture's checkout through
 //! correspondence and force-pushing that commit to the bloom's candidate ref
 //! (ADR-0152); the scripted admit path omits that step, and
-//! [`seed_capture`](FixtureHarness::seed_capture) plants the same ref itself
+//! [`seed_capture`](crate::ScenarioHarness::seed_capture) plants the same ref itself
 //! through the same `candidate_ref_name` helper. The omission is forced — the
 //! production pusher shells a real `git push --force origin` — but the cost is
 //! real: a wrong ref name, a dropped push, or a mis-resolved correspondence is

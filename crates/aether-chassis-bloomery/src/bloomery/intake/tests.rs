@@ -469,8 +469,9 @@ fn intake_cycle_admits_a_matching_upload_and_the_reducer_integrates_it() {
 #[test]
 fn intake_cycle_refuses_a_mismatched_upload_and_the_reducer_is_untouched() {
     // The refuse path end-to-end: a completed run's upload whose bound digest is
-    // not the displayed one is refused; nothing reaches the sink (so nothing
-    // reaches the reducer), and the order stays live.
+    // not the displayed one is refused (the mismatched pass never reaches the
+    // reducer). The lane has already exited, so intake then recovers the live
+    // order as a machinery fault rather than waiting forever for a retry (#5332).
     let workpiece = WorkpieceId("wp-return".to_owned());
     let scope_revision = Digest::from_bytes([2; 32]);
     let candidate = Digest::from_bytes([5; 32]);
@@ -511,14 +512,20 @@ fn intake_cycle_refuses_a_mismatched_upload_and_the_reducer_is_untouched() {
     let report = with_default(CapturingSubscriber::new(events.clone()), || {
         run_intake_cycle(&mut store, &shell, &[handle], &claims, None, &mut sink).unwrap()
     });
-    assert_eq!((report.completed, report.admitted, report.refused), (1, 0, 1));
-    assert!(sink.0.is_empty(), "a refused upload never reaches the reducer");
+    assert_eq!((report.completed, report.admitted, report.refused), (1, 1, 1));
+    assert_eq!(sink.0.len(), 1, "the mismatched pass itself never reaches the reducer");
+    assert!(
+        matches!(sink.0[0].event.fact, Fact::MemberExecutorFault { .. }),
+        "a completed mismatch recovers as a machinery fault, not the refused pass: {:?}",
+        sink.0[0].event.fact,
+    );
     let events = events.lock().unwrap().join("\n");
     assert!(events.contains("aether_chassis_bloomery::intake"), "the refusal uses the intake target: {events}");
     assert!(events.contains("nonce=n-bad"), "the refusal names the stranded order: {events}");
     assert!(events.contains("DigestMismatch"), "the refusal explains why intake rejected the upload: {events}");
-    // The order stayed live — the mismatch did not consume it.
-    assert!(store.lookup_order("n-bad").unwrap().is_some());
+    // The lane has already exited, so leaving the order live is a stall.
+    // Recovery spends it as a machinery fault (#5332).
+    assert!(store.lookup_order("n-bad").unwrap().is_none(), "the completed mismatch spends the order");
 }
 
 #[test]

@@ -58,6 +58,8 @@ pub enum ScriptedVerdict {
     ReviewFinding,
     /// The lane raised a question instead of a verdict (ADR-0151).
     Parked,
+    /// The lane concluded without a candidate (#5292 / #5332).
+    Declined,
 }
 
 impl ScriptedVerdict {
@@ -70,6 +72,7 @@ impl ScriptedVerdict {
             Self::VerificationFailed => StageVerdict::VerificationFailed,
             Self::ReviewFinding => StageVerdict::ReviewFinding,
             Self::Parked => StageVerdict::Parked,
+            Self::Declined => StageVerdict::Declined,
         }
     }
 }

@@ -6,8 +6,13 @@
 //! the pieces remaining binaries still need after the promotion (issue 5332).
 
 #![allow(dead_code, reason = "each test binary compiles the whole module and uses only the fixtures it needs")]
-#![allow(unused_imports, reason = "each test binary compiles the whole module and uses only the fixtures it needs")]
 #![allow(clippy::unwrap_used, reason = "a fixture that cannot set up its process reports it by panicking")]
 
 pub use aether_harness_bloomery::client;
 pub use aether_harness_bloomery::{Coordinator, free_port};
+
+fn _every_binary_names_the_fixtures() {
+    let _: fn() -> u16 = free_port;
+    let _: fn(u16, &[(&str, &str)]) -> Coordinator = Coordinator::spawn;
+    let _ = client::connect_and_handshake;
+}

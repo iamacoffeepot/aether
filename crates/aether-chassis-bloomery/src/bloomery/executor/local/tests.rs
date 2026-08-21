@@ -649,7 +649,7 @@ fn construct_gate_parks_an_empty_candidate_run_despite_a_clean_exit() {
     // diagnosis. The 2026-07-17 bloom-trial bug (advancing on exit-zero) stays
     // covered: this still must not pass.
     let ev = r#"{"command":"construct.implement","nonce":"n-g","produced_candidate":false,"result_record":{"is_error":false,"result":{"num_turns":6}}}"#;
-    assert_eq!(construct_verdict(ev), StageVerdict::Parked);
+    assert_eq!(construct_verdict(ev), StageVerdict::Declined);
 }
 
 #[test]
@@ -660,7 +660,7 @@ fn a_declined_construct_keeps_the_lane_findings_on_the_evidence_ref() {
     let handle = exec.submit(&construct_order(digest(5), "n-g")).unwrap();
     let refs = exec.stream_evidence(&handle).unwrap();
     let upload = NameEvidenceClaims.claim_for(&refs[0]).expect("the synthesized ref decodes");
-    assert_eq!(upload.verdict, StageVerdict::Parked);
+    assert_eq!(upload.verdict, StageVerdict::Declined);
     assert_eq!(
         refs[0].findings.as_deref(),
         Some("the work lies outside the declared surface"),

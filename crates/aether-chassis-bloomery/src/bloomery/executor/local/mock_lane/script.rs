@@ -76,8 +76,9 @@ pub enum LaneMode {
     /// so the member parks rather than burning retry budget (#5292 / #5332).
     Declines,
     /// Write otherwise-valid evidence bound to a digest other than the one
-    /// the order displayed. Intake refuses `DigestMismatch` and leaves the
-    /// order live — the case that used to stall the coordinator forever.
+    /// the order displayed. Intake refuses `DigestMismatch` so an in-flight
+    /// worker can still deliver; a completed run is recovered as a machinery
+    /// fault so the order cannot outlive the lane.
     WrongSubject,
 }
 

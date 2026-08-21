@@ -3,9 +3,9 @@
 //! no outstanding order, no wedge, and no named park.
 
 #![allow(clippy::unwrap_used)]
-#![allow(clippy::disallowed_methods, reason = "a test-suite case-count knob, not capability config")]
 
 use std::collections::BTreeMap;
+use std::env;
 
 use aether_bloomery::{StageId, WorkpieceId};
 use aether_harness_bloomery::{BloomeryHarness, LaneScript, MemberSpec, Scenario};
@@ -39,7 +39,7 @@ fn scenario_strategy() -> impl Strategy<Value = Scenario> {
 }
 
 fn case_count() -> u32 {
-    std::env::var("BLOOMERY_HARNESS_CASES").ok().and_then(|value| value.parse().ok()).unwrap_or(4)
+    env::vars().find(|(key, _)| key == "BLOOMERY_HARNESS_CASES").and_then(|(_, value)| value.parse().ok()).unwrap_or(4)
 }
 
 proptest! {

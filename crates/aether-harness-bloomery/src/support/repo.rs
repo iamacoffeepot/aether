@@ -113,7 +113,7 @@ impl RepoBuilder {
     /// Any git step failed.
     #[must_use]
     pub fn create(self) -> Repo {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().expect("a temporary repository root");
         match self.layout {
             Layout::Origin => create_origin(root, &self),
             Layout::Bare => create_bare(root, &self),
@@ -207,7 +207,7 @@ impl Repo {
     pub fn commit_another(&self, name: &str) -> String {
         assert!(self.layout == Layout::Origin, "commit_another needs a working clone");
         let work = self.work_dir();
-        fs::write(work.join(name), format!("{name}\n")).unwrap();
+        fs::write(work.join(name), format!("{name}\n")).expect("a second commit's file writes");
         git(&work, &["add", "--all"]);
         git(&work, &["commit", "--quiet", "--message", name]);
         git(&work, &["push", "--quiet", "origin", "HEAD:refs/heads/main"]);
@@ -257,7 +257,7 @@ fn create_origin(root: TempDir, spec: &RepoBuilder) -> Repo {
 
 fn create_bare(root: TempDir, spec: &RepoBuilder) -> Repo {
     let seed = root.path().join("seed");
-    fs::create_dir(&seed).unwrap();
+    fs::create_dir(&seed).expect("the seed working tree creates");
     git(&seed, &["init", "--quiet", "-b", &spec.branch]);
     configure_identity(&seed, spec);
     write_seed(&seed, spec);
@@ -266,7 +266,12 @@ fn create_bare(root: TempDir, spec: &RepoBuilder) -> Repo {
 
     let head = git_capture(&seed, &["rev-parse", "HEAD"]);
     let bare = root.path().join("authority.git");
-    let status = Command::new("git").args(["clone", "--bare", "--quiet"]).arg(&seed).arg(&bare).status().unwrap();
+    let status = Command::new("git")
+        .args(["clone", "--bare", "--quiet"])
+        .arg(&seed)
+        .arg(&bare)
+        .status()
+        .expect("git clone --bare starts");
     assert!(status.success(), "clone --bare into {}", bare.display());
 
     Repo { _root: root, work: seed, bare, head, layout: Layout::Bare }
@@ -286,9 +291,9 @@ fn write_seed(dir: &Path, spec: &RepoBuilder) {
     for (relative, contents) in files {
         let path = dir.join(&relative);
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).unwrap();
+            fs::create_dir_all(parent).expect("a seed file's parent creates");
         }
-        fs::write(path, contents).unwrap();
+        fs::write(path, contents).expect("a seed file writes");
     }
 }
 
@@ -318,12 +323,12 @@ fn example_project_files() -> Vec<(String, String)> {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let output = Command::new("git").current_dir(dir).args(args).output().unwrap();
+    let output = Command::new("git").current_dir(dir).args(args).output().expect("git starts");
     assert!(output.status.success(), "git {args:?} in {}: {}", dir.display(), String::from_utf8_lossy(&output.stderr));
 }
 
 fn git_capture(dir: &Path, args: &[&str]) -> String {
-    let output = Command::new("git").current_dir(dir).args(args).output().unwrap();
+    let output = Command::new("git").current_dir(dir).args(args).output().expect("git starts");
     assert!(output.status.success(), "git {args:?} in {}: {}", dir.display(), String::from_utf8_lossy(&output.stderr));
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }

@@ -5,8 +5,8 @@
 
 use aether_bloomery::testing::digest;
 use aether_bloomery::{
-    BloomId, BloomStatus, BloomView, Digest, Evidence, EvidenceKind, ExecutorFaultView, MemberView, ViewDocument,
-    Wedge, WorkpieceId,
+    BloomId, BloomStatus, BloomView, Digest, Evidence, EvidenceKind, ExecutorFaultView, MemberPark, MemberView,
+    StageId, VerifyFailureSet, ViewDocument, Wedge, WorkpieceId,
 };
 use aether_harness_bloomery::{Quiescence, classify};
 
@@ -87,11 +87,7 @@ fn a_terminal_executor_fault_is_an_accountable_stop_not_a_finished_bloom() {
 
 #[test]
 fn a_wedge_is_a_legitimate_stop_and_a_resolution_is_a_terminal_one() {
-    let wedge = Wedge {
-        stage: aether_bloomery::StageId::Verify,
-        evidence: digest(9),
-        repeated_verifiers: aether_bloomery::VerifyFailureSet::EMPTY,
-    };
+    let wedge = Wedge { stage: StageId::Verify, evidence: digest(9), repeated_verifiers: VerifyFailureSet::EMPTY };
 
     assert!(matches!(
         classify(&document(BloomStatus::Sealed, vec![member(false, Some(wedge))]), &[]),
@@ -108,10 +104,8 @@ fn a_construct_park_is_an_accountable_stop() {
     // Tripwire (#5332): a parked member used to look like a stall because
     // neither oracle read `Snapshot::member_parks`. A named park is a
     // stop with an operator exit — the declared surface — not work owed.
-    let parked = MemberView {
-        park: Some(aether_bloomery::MemberPark { stage: aether_bloomery::StageId::Construct, evidence: digest(9) }),
-        ..member(false, None)
-    };
+    let parked =
+        MemberView { park: Some(MemberPark { stage: StageId::Construct, evidence: digest(9) }), ..member(false, None) };
 
     assert!(matches!(classify(&document(BloomStatus::Sealed, vec![parked]), &[]), Quiescence::Wedged(_)));
 }

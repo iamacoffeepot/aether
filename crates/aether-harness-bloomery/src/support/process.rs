@@ -5,8 +5,6 @@
 //! or a timeout unwinds straight past it and leaves a fully booted coordinator
 //! running (#4724). Killing and reaping in `Drop` instead runs on both paths.
 
-#![allow(clippy::unwrap_used, reason = "a fixture that cannot set up its process reports it by panicking")]
-
 use std::collections::HashSet;
 use std::fs;
 use std::net::TcpListener;
@@ -15,9 +13,13 @@ use std::process::{Child, Command, Stdio};
 
 /// Reserve a free localhost port by binding `:0`, then release it for the bin to
 /// claim. A small race window, tolerated by the callers' connect retry loops.
+///
+/// # Panics
+/// Binding `:0` or reading the bound address failed.
+#[must_use]
 pub fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a free localhost port binds");
+    listener.local_addr().expect("the bound listener has a local address").port()
 }
 
 /// A forked `bloomery` coordinator, killed and reaped when the guard drops.
@@ -40,6 +42,10 @@ impl Coordinator {
     /// (#3498 gave the bin a fixed default, which collides across the suite's
     /// concurrently spawned bins) and closed standard streams. An entry in `env`
     /// overrides a default of the same name.
+    ///
+    /// # Panics
+    /// The coordinator binary could not be forked.
+    #[must_use]
     pub fn spawn(rpc_port: u16, env: &[(&str, &str)]) -> Self {
         Self::spawn_in(rpc_port, None, env)
     }
@@ -53,6 +59,10 @@ impl Coordinator {
     /// scenario that wants those to hit a scratch repository rather than the
     /// developer's own has to say so here — and because it is per-process, each
     /// scenario gets its own and they still run concurrently.
+    ///
+    /// # Panics
+    /// The coordinator binary could not be forked.
+    #[must_use]
     pub fn spawn_in(rpc_port: u16, cwd: Option<&Path>, env: &[(&str, &str)]) -> Self {
         let mut command = Command::new(crate::bloomery_bin());
         command
@@ -68,12 +78,13 @@ impl Coordinator {
         if let Some(cwd) = cwd {
             command.current_dir(cwd);
         }
-        let child = command.spawn().unwrap();
+        let child = command.spawn().expect("the bloomery coordinator forks");
 
         Self { pid: child.id(), child: Some(child) }
     }
 
     /// The forked process id.
+    #[must_use]
     pub const fn pid(&self) -> u32 {
         self.pid
     }
@@ -95,6 +106,7 @@ impl Coordinator {
     /// Used by the handshake helper so a connect only targets a socket the
     /// child we forked actually owns — a reserved port another suite process
     /// claimed in the `free_port` window is skipped rather than Hello'd.
+    #[must_use]
     pub fn listening_ports_for(pid: u32) -> Vec<u16> {
         let ours = socket_inodes(pid);
         if ours.is_empty() {
@@ -109,11 +121,13 @@ impl Coordinator {
     }
 
     /// [`listening_ports_for`](Self::listening_ports_for) for this child.
+    #[must_use]
     pub fn listening_ports(&self) -> Vec<u16> {
         Self::listening_ports_for(self.pid)
     }
 
     /// Whether this child owns a `LISTEN` socket on `port`.
+    #[must_use]
     pub fn listens_on(&self, port: u16) -> bool {
         self.listening_ports().contains(&port)
     }
