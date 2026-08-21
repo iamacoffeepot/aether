@@ -115,12 +115,13 @@ pub use port::{
 };
 pub use reduce::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,
-    AggregateVerifyError, AttemptCompletedError, BaseMismatch, BloomRecord, BloomStatus, DECISIONS_SCHEMA, Decision,
-    Decisions, DecisionsSchemaError, Event, Fact, FoldConflictError, FoldedIntegration, Gate, GrantAttemptsError,
-    HostFaultError, HostFaultHold, IntegrateError, LandError, LandingRejectedError, MemberExecutorFaultError,
-    MemberMachineryFault, MemberPark, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, Outcome, Read,
-    RecordedRead, RecordedRefusal, Refusal, ResolveError, SealConflict, SealError, Snapshot, SpliceError,
-    StageProgress, SupersedeError, VerifyFailedError, decode_recorded_decisions, is_active_unlanded, reduce, view_of,
+    AggregateVerifyError, AttemptCompletedError, BaseMismatch, BloomRecord, BloomStatus, DECISIONS_SCHEMA,
+    DECISIONS_SCHEMA_V1, Decision, Decisions, DecisionsSchemaError, Event, Fact, FoldConflictError, FoldedIntegration,
+    Gate, GrantAttemptsError, HostFaultError, HostFaultHold, IntegrateError, LandError, LandingRejectedError,
+    MemberExecutorFaultError, MemberMachineryFault, MemberPark, OperatorHoldError, OperatorRepairError,
+    OrphanClaimReleaseError, Outcome, Read, RecordedRead, RecordedRefusal, Refusal, ResolveError, SealConflict,
+    SealError, Snapshot, SpliceError, StageProgress, SupersedeError, VerifyFailedError, decode_recorded_decisions,
+    is_active_unlanded, reduce, view_of,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use sign::Ed25519KeyProvider;

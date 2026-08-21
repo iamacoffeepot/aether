@@ -376,8 +376,8 @@ mod tests {
     use crate::digest::Digest;
     use crate::ids::{IdempotencyKey, StageId, WorkpieceId};
     use crate::reduce::{
-        BloomRecord, Decision, Decisions, Event, Fact, Outcome, Snapshot, StageProgress, decode_recorded_decisions,
-        reduce,
+        BloomRecord, DECISIONS_SCHEMA, Decision, Decisions, Event, Fact, Outcome, Snapshot, StageProgress,
+        decode_recorded_decisions, reduce,
     };
     use crate::values::{
         BloomDraft, BloomSpec, ConfigRegistry, Evidence, EvidenceKind, MemberDependency, Membership, ResolutionClaim,
@@ -632,9 +632,10 @@ mod tests {
         let live = after_seal.apply(&integrate, &integrated, &ResolvedConfigs::default());
 
         let replayed_seal: Decisions =
-            decode_recorded_decisions(&to_vec(&sealed).expect("seal encodes"), None).expect("seal decodes");
+            decode_recorded_decisions(&to_vec(&sealed).expect("seal encodes"), Some(DECISIONS_SCHEMA))
+                .expect("seal decodes");
         let replayed_integrate: Decisions =
-            decode_recorded_decisions(&to_vec(&integrated).expect("integrate encodes"), None)
+            decode_recorded_decisions(&to_vec(&integrated).expect("integrate encodes"), Some(DECISIONS_SCHEMA))
                 .expect("integrate decodes");
         let replayed = base
             .apply(

@@ -735,7 +735,8 @@ mod tests {
     use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
     use crate::reduce::SealError;
     use crate::reduce::{
-        BloomStatus, Decision, Decisions, Event, Fact, Outcome, Snapshot, decode_recorded_decisions, reduce,
+        BloomStatus, DECISIONS_SCHEMA, Decision, Decisions, Event, Fact, Outcome, Snapshot, decode_recorded_decisions,
+        reduce,
     };
     use crate::values::{
         BloomDraft, BloomSpec, CandidateRef, ConfigKind, ConfigRegistry, Evidence, EvidenceKind, Forecast,
@@ -1089,8 +1090,9 @@ mod tests {
 
         let live = base.apply(&event, &decided, &ResolvedConfigs::default());
         let journaled: Event = from_bytes(&to_vec(&event).expect("event encodes")).expect("event decodes");
-        let recorded: Decisions = decode_recorded_decisions(&to_vec(&decided).expect("decisions encode"), None)
-            .expect("journaled decisions decode");
+        let recorded: Decisions =
+            decode_recorded_decisions(&to_vec(&decided).expect("decisions encode"), Some(DECISIONS_SCHEMA))
+                .expect("journaled decisions decode");
         let replayed = base.apply(&journaled, &recorded, &ResolvedConfigs::default());
 
         assert_eq!(
@@ -1462,22 +1464,26 @@ mod tests {
         let replayed = base
             .apply(
                 &from_bytes(&to_vec(&seal).expect("event encodes")).expect("event decodes"),
-                &decode_recorded_decisions(&to_vec(&sealed).expect("seal encodes"), None).expect("seal decodes"),
+                &decode_recorded_decisions(&to_vec(&sealed).expect("seal encodes"), Some(DECISIONS_SCHEMA))
+                    .expect("seal decodes"),
                 &ResolvedConfigs::default(),
             )
             .apply(
                 &from_bytes(&to_vec(&a_done).expect("event encodes")).expect("event decodes"),
-                &decode_recorded_decisions(&to_vec(&decided_a).expect("a encodes"), None).expect("a decodes"),
+                &decode_recorded_decisions(&to_vec(&decided_a).expect("a encodes"), Some(DECISIONS_SCHEMA))
+                    .expect("a decodes"),
                 &ResolvedConfigs::default(),
             )
             .apply(
                 &from_bytes(&to_vec(&c_done).expect("event encodes")).expect("event decodes"),
-                &decode_recorded_decisions(&to_vec(&decided_c).expect("c encodes"), None).expect("c decodes"),
+                &decode_recorded_decisions(&to_vec(&decided_c).expect("c encodes"), Some(DECISIONS_SCHEMA))
+                    .expect("c decodes"),
                 &ResolvedConfigs::default(),
             )
             .apply(
                 &from_bytes(&to_vec(&supersede).expect("event encodes")).expect("event decodes"),
-                &decode_recorded_decisions(&to_vec(&decided_sup).expect("sup encodes"), None).expect("sup decodes"),
+                &decode_recorded_decisions(&to_vec(&decided_sup).expect("sup encodes"), Some(DECISIONS_SCHEMA))
+                    .expect("sup decodes"),
                 &ResolvedConfigs::default(),
             );
 

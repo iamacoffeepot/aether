@@ -9,6 +9,7 @@ use core::fmt;
 use aether_data::wire::{Error as WireError, from_bytes};
 use serde::{Deserialize, Serialize};
 
+use super::decisions_v1::DecisionsV1;
 use super::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,
     AggregateVerifyError, AttemptCompletedError, Decision, FoldConflictError, GrantAttemptsError, HostFaultError,
@@ -37,9 +38,14 @@ impl Decisions {
 }
 
 /// The writing-schema identity this binary stamps beside every journaled
-/// [`Decisions`] blob (ADR-0187). A row whose stamp is not this value has no
-/// upcast here and refuses replay by name.
-pub const DECISIONS_SCHEMA: &str = "aether.bloomery.decisions.v1";
+/// [`Decisions`] blob (ADR-0187). A row whose stamp is not this value and not
+/// a known prior identity is refused by name.
+pub const DECISIONS_SCHEMA: &str = "aether.bloomery.decisions.v2";
+
+/// The writing-schema identity of rows encoded before #5330 appended
+/// `reconcile_assembles_base` to [`StageProgress`](super::StageProgress). An
+/// unstamped row is this identity too — it predates the column.
+pub const DECISIONS_SCHEMA_V1: &str = "aether.bloomery.decisions.v1";
 
 /// Why recorded decisions could not be folded (ADR-0187).
 #[derive(Debug)]
@@ -69,14 +75,18 @@ impl fmt::Display for DecisionsSchemaError {
 /// Decode journaled [`Decisions`] under the writing-schema identity stamped
 /// beside them (ADR-0187).
 ///
-/// The current identity decodes as today. A missing stamp is the implicit
-/// current-at-migration identity — rows written before the column existed,
-/// named here rather than treated as a zero-effect table or a fatal abort of
-/// an otherwise healthy shape. Any other identity is a named refusal: this
-/// binary has no upcast for it.
+/// The current identity decodes as today. A missing stamp is the implicit v1
+/// identity — rows written before the column existed, named here rather than
+/// treated as a zero-effect table or a fatal abort of an otherwise healthy
+/// shape. v1 (stamped or unstamped) upcasts by filling
+/// `StageProgress::reconcile_assembles_base` as `false`. Any other identity
+/// is a named refusal: this binary has no upcast for it.
 pub fn decode_recorded_decisions(bytes: &[u8], schema: Option<&str>) -> Result<Decisions, DecisionsSchemaError> {
     match schema {
-        None | Some(DECISIONS_SCHEMA) => from_bytes(bytes).map_err(DecisionsSchemaError::Decode),
+        None | Some(DECISIONS_SCHEMA_V1) => {
+            from_bytes::<DecisionsV1>(bytes).map(Decisions::from).map_err(DecisionsSchemaError::Decode)
+        }
+        Some(DECISIONS_SCHEMA) => from_bytes(bytes).map_err(DecisionsSchemaError::Decode),
         Some(found) => Err(DecisionsSchemaError::Unknown { found: String::from(found), current: DECISIONS_SCHEMA }),
     }
 }
@@ -682,31 +692,147 @@ impl Outcome {
 mod tests {
     use super::*;
     use crate::digest::Digest;
-    use crate::ids::BloomId;
-    use aether_data::wire::to_vec;
+    use crate::ids::{BloomId, StageId, WorkpieceId};
+    use crate::values::{
+        AgentProfile, ConfigRegistry, ExecutionLimits, Harness, NetworkProfile, ReasoningEffort, ToolPolicy,
+        Transformation, VerifyFailureSet,
+    };
+    use aether_data::wire::{from_bytes, to_vec};
 
-    fn sealed() -> Decisions {
-        Decisions { outcome: Outcome::Sealed(BloomId(Digest::from_bytes([1; 32]))), effects: Vec::new() }
+    // Tripwire: wire bytes of a DecisionsV1 whose effects are DispatchAttempt,
+    // AdvanceStage with StageProgressV1, then RecordObservation — so the bool
+    // #5330 added sits mid-stream. Decoding these as current Decisions returns
+    // InvalidBool; the v1 upcast must keep the trailing observation intact.
+    const V1_ROW: &[u8] = &[
+        1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3,
+        0, 0, 0, 11, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 2, 0, 0, 0, 119, 112, 3, 0, 0, 0, 19, 0, 0, 0, 99, 111, 110, 115, 116, 114, 117, 99, 116, 46, 105, 109,
+        112, 108, 101, 109, 101, 110, 116, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+        2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 16, 0, 0, 0, 105, 97, 109, 97, 47, 99, 111, 110, 115, 116, 114,
+        117, 99, 116, 58, 49, 60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+        3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 0, 3, 0, 0, 0, 4, 0, 0, 0, 103, 114, 111, 107, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 119, 112, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 25, 0, 0,
+        0, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9,
+    ];
+
+    fn digest(seed: u8) -> Digest {
+        Digest::from_bytes([seed; 32])
+    }
+
+    fn bloom() -> BloomId {
+        BloomId(digest(1))
+    }
+
+    fn workpiece() -> WorkpieceId {
+        WorkpieceId(String::from("wp"))
+    }
+
+    fn transformation() -> Transformation {
+        Transformation {
+            command: String::from("construct.implement"),
+            inputs: Vec::new(),
+            checkout: digest(2),
+            diff_base: None,
+            outputs: Vec::new(),
+            image: String::from("iama/construct:1"),
+            limits: ExecutionLimits { wall_clock_secs: 60 },
+            network: NetworkProfile::None,
+            description: None,
+            model: None,
+        }
+    }
+
+    fn profile() -> AgentProfile {
+        AgentProfile {
+            harness: Harness::Grok,
+            model: String::from("grok"),
+            effort: ReasoningEffort::Low,
+            tools: ToolPolicy::None,
+        }
+    }
+
+    fn dispatch() -> Decision {
+        Decision::DispatchAttempt {
+            bloom: bloom(),
+            workpiece: workpiece(),
+            stage: StageId::Construct,
+            transformation: transformation(),
+            scope_revision: digest(3),
+            candidate: None,
+            profile: profile(),
+            configs: ConfigRegistry::default(),
+        }
     }
 
     #[test]
-    fn current_and_missing_schema_decode() {
-        // A missing stamp is the implicit current-at-migration identity — the
-        // posture that lets a v2 store fold after the column appears.
-        let bytes = to_vec(&sealed()).expect("decisions encode");
-        decode_recorded_decisions(&bytes, Some(DECISIONS_SCHEMA)).expect("current identity decodes");
-        decode_recorded_decisions(&bytes, None).expect("missing stamp decodes as implicit current");
+    fn a_v1_row_carrying_a_dispatch_decodes_and_upcasts() {
+        let stamped = decode_recorded_decisions(V1_ROW, Some(DECISIONS_SCHEMA_V1)).expect("stamped v1 decodes");
+        let unstamped = decode_recorded_decisions(V1_ROW, None).expect("unstamped row is v1");
+        assert_eq!(stamped, unstamped);
+
+        match &stamped.effects[..] {
+            [
+                Decision::DispatchAttempt { .. },
+                Decision::AdvanceStage { progress, .. },
+                Decision::RecordObservation { head },
+            ] => {
+                assert!(!progress.reconcile_assembles_base, "pre-#5330 Reconcile never recorded an assembly");
+                assert_eq!(*head, digest(9), "the trailing effect survives the missing mid-stream bool");
+            }
+            other => panic!("expected dispatch, advance, observation; got {other:?}"),
+        }
+
+        assert!(
+            matches!(from_bytes::<Decisions>(V1_ROW), Err(WireError::InvalidBool(_))),
+            "v1 bytes are not the current shape: the missing bool sits mid-stream"
+        );
     }
 
     #[test]
-    fn unknown_schema_refuses_by_name() {
-        // The incident this names: a reshape without an upcast must refuse
-        // replay by the identities involved, never silently invent a value.
-        let error = decode_recorded_decisions(b"x", Some("aether.bloomery.decisions.v0"))
+    fn a_v2_row_decodes_as_current() {
+        let recorded = Decisions {
+            outcome: Outcome::Sealed(bloom()),
+            effects: vec![
+                dispatch(),
+                Decision::AdvanceStage {
+                    bloom: bloom(),
+                    workpiece: workpiece(),
+                    progress: crate::StageProgress {
+                        stage: StageId::Construct,
+                        attempts: 1,
+                        candidate: None,
+                        repair_rolls: 0,
+                        seen_verify_failures: VerifyFailureSet::EMPTY,
+                        fold_checkpoint: None,
+                        fold_conflict_evidence: None,
+                        reconcile_assembles_base: true,
+                    },
+                },
+                Decision::RecordObservation { head: digest(9) },
+            ],
+        };
+        let bytes = to_vec(&recorded).expect("v2 encodes");
+        let decoded = decode_recorded_decisions(&bytes, Some(DECISIONS_SCHEMA)).expect("current identity decodes");
+        assert_eq!(decoded, recorded);
+    }
+
+    #[test]
+    fn an_unknown_stamp_is_refused_by_name() {
+        // A reshape without an upcast must refuse replay by the identities
+        // involved, never silently invent a value.
+        let error = decode_recorded_decisions(b"x", Some("aether.bloomery.decisions.v3"))
             .expect_err("an unknown identity must refuse");
         let text = format!("{error}");
-        assert!(text.contains("no migration from schema `aether.bloomery.decisions.v0`"), "{text}");
+        assert!(text.contains("no migration from schema `aether.bloomery.decisions.v3`"), "{text}");
         assert!(text.contains(DECISIONS_SCHEMA), "{text}");
         assert!(text.contains("kind decisions"), "{text}");
+        match error {
+            DecisionsSchemaError::Unknown { found, current } => {
+                assert_eq!(found, "aether.bloomery.decisions.v3");
+                assert_eq!(current, DECISIONS_SCHEMA);
+            }
+            other => panic!("expected Unknown, got {other:?}"),
+        }
     }
 }

@@ -23,6 +23,7 @@ mod aggregate_verify;
 mod attempt;
 mod composition;
 mod decision;
+mod decisions_v1;
 mod error;
 mod event;
 mod evidence;
@@ -56,7 +57,9 @@ pub use error::{
 };
 pub use event::{Event, Fact};
 pub use gate::{Gate, Read, RecordedRead, RecordedRefusal, Refusal};
-pub use outcome::{DECISIONS_SCHEMA, Decisions, DecisionsSchemaError, Outcome, decode_recorded_decisions};
+pub use outcome::{
+    DECISIONS_SCHEMA, DECISIONS_SCHEMA_V1, Decisions, DecisionsSchemaError, Outcome, decode_recorded_decisions,
+};
 pub use seal::is_active_unlanded;
 pub use snapshot::{
     AggregateReviewFault, BloomRecord, BloomStatus, FoldedIntegration, HostFaultHold, MemberMachineryFault, MemberPark,
