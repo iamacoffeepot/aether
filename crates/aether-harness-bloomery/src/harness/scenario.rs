@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use aether_actor::Addressable;
 use aether_bloomery::{
-    BackendObjectId, BloomDraft, BloomId, BloomStatus, BloomView, CandidateRef, ConfigKind, ConfigRegistry,
+    BackendObjectId, BloomDraft, BloomId, BloomSpec, BloomStatus, BloomView, CandidateRef, ConfigKind, ConfigRegistry,
     Correspondence, Digest, Evidence, EvidenceKind, Fact, Membership, Outcome, Snapshot, StageCatalog, StageId,
     ViewDocument, WorkpieceId,
 };
@@ -66,6 +66,13 @@ pub struct ScenarioHarness {
     artifacts_root: PathBuf,
     worktree_base: String,
     base: Digest,
+    /// The spec of the last bloom sealed through this harness.
+    ///
+    /// Held because an amendment is a supersession (see
+    /// [`ScenarioHarness::apply_operator`]) and a successor has to carry the
+    /// predecessor's members across at the revisions they already hold — which
+    /// the projection does not report, and which only the sealer knows.
+    pub(super) sealed: Option<BloomSpec>,
     step_budget: Duration,
 }
 
@@ -168,6 +175,7 @@ impl ScenarioHarness {
             artifacts_root: PathBuf::from(artifacts_root),
             worktree_base,
             base: Digest::default(),
+            sealed: None,
             step_budget: builder.step_budget,
         };
 
@@ -312,6 +320,25 @@ impl ScenarioHarness {
     /// # Panics
     /// The seal was refused.
     pub fn seal_members(&mut self, members: &[(&str, Digest)]) -> BloomId {
+        let (bloom, outcome) = self.try_seal(members);
+        match outcome {
+            Outcome::Sealed(sealed) => assert_eq!(sealed, bloom, "the sealed id is the spec's content address"),
+            other => panic!("the fixture seal must seal: {other:?}"),
+        }
+        bloom
+    }
+
+    /// Attempt the same seal [`seal_members`](Self::seal_members) makes, and
+    /// hand back the spec's id alongside whatever the door answered.
+    ///
+    /// The id is returned even on a refusal: it is the content address of the
+    /// spec that was offered, so a scenario asserting a refusal can still say
+    /// which bloom was refused and check that nothing by that id exists.
+    ///
+    /// Kept beside the asserting form rather than replacing it, because a
+    /// scenario that seals as a *precondition* wants the panic — a fixture seal
+    /// that quietly failed would surface later as an unrelated missing bloom.
+    pub fn try_seal(&mut self, members: &[(&str, Digest)]) -> (BloomId, Outcome) {
         let base = if self.base == Digest::default() {
             self.view().mainline
         } else {
@@ -321,11 +348,15 @@ impl ScenarioHarness {
             super::draft(base, &members.iter().map(|(workpiece, scope)| member(workpiece, *scope)).collect::<Vec<_>>());
         let bloom = spec.id();
         let key = members.iter().map(|(workpiece, _)| *workpiece).collect::<Vec<_>>().join("+");
-        match self.admit(&format!("fixture-seal-{key}"), Fact::Seal(spec)) {
-            Outcome::Sealed(sealed) => assert_eq!(sealed, bloom, "the sealed id is the spec's content address"),
-            other => panic!("the fixture seal must seal: {other:?}"),
+        let outcome = self.admit(&format!("fixture-seal-{key}"), Fact::Seal(spec.clone()));
+        // Remembered only on success: a refused spec never became this
+        // harness's bloom, and an amendment against it would supersede
+        // something that does not exist.
+        if matches!(outcome, Outcome::Sealed(_)) {
+            self.sealed = Some(spec);
         }
-        bloom
+
+        (bloom, outcome)
     }
 
     /// Append a line to the named run's streamed transcript.

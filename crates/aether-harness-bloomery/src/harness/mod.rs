@@ -33,6 +33,7 @@
 //! `pub mod fixture`.
 
 pub mod drive;
+mod operator;
 mod scenario;
 
 use std::ops::{Deref, DerefMut};
