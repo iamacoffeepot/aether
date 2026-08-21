@@ -104,8 +104,22 @@ pub(super) fn reduce_withdraw(
         effects.push(Decision::ReleaseMembership { workpiece, bloom: *bloom });
     }
 
-    let remaining: Vec<&Membership> =
-        record.spec.members().iter().filter(|member| !departed.contains(&member.workpiece)).collect();
+    // What is still in the line: the sealed list minus the members leaving in
+    // this event, and minus the ones the record already shows gone. Both
+    // subtractions, because a withdrawal is one member's exit and an operator
+    // shedding a bloom sends them one request at a time. Filtering by
+    // `departed` alone meant such a bloom never saw an empty remainder: it was
+    // never marked terminal, kept reading `Sealed` with every member gone, and
+    // went on holding the one-active-bloom-per-mainline slot — refusing the
+    // next seal with `ActiveBloomExists` on behalf of a bloom with nothing left
+    // in it (#5409). `record.withdrawn` is the same field `named_refusal`
+    // reads to recognize an already-withdrawn member.
+    let remaining: Vec<&Membership> = record
+        .spec
+        .members()
+        .iter()
+        .filter(|member| !departed.contains(&member.workpiece) && !record.withdrawn.contains_key(&member.workpiece))
+        .collect();
     let terminal = remaining.is_empty();
     if terminal {
         // A bloom with no remaining member has no artifact to land, so it
@@ -234,6 +248,12 @@ mod tests {
     /// Land a resolution claim on `name`, the way a passing terminal Verify does.
     fn integrate(snapshot: &Snapshot, bloom: BloomId, name: &str, revision: u8, candidate: u8) -> Snapshot {
         step(snapshot, &event(name, Fact::Integrate { bloom, claim: claim(name, revision, candidate) })).0
+    }
+
+    /// One member's withdrawal as its own fact — the shape an operator
+    /// shedding a bloom a member at a time produces.
+    fn withdraw(bloom: BloomId, name: &str) -> Fact {
+        Fact::Withdraw { bloom, withdrawals: vec![withdrawal(name)], cascade: false }
     }
 
     fn withdrawal(name: &str) -> Withdrawal {
@@ -391,6 +411,45 @@ mod tests {
         assert!(
             next.blooms[&bloom].progress.is_empty(),
             "every withdrawn member's cursor is dropped, so the doctor's non-terminal walk skips it"
+        );
+    }
+
+    #[test]
+    fn a_bloom_withdrawn_one_member_at_a_time_still_reaches_terminal() {
+        // The plausible bug, and the one that was live: `remaining` filtered
+        // the sealed member list by the withdrawals in *this* event alone, so a
+        // bloom emptied one member per request never saw an empty remainder. It
+        // never got `MarkBloomWithdrawn`, kept reading `Sealed` with every
+        // member gone, and went on holding the one-active-bloom-per-mainline
+        // slot — refusing the next seal with `ActiveBloomExists` on behalf of a
+        // bloom with nothing left in it. Live on bloom 4360e7e4a081: all six
+        // members withdrawn, still reading `Sealed` (#5409).
+        let (mut snapshot, bloom) = sealed(&[]);
+
+        for name in ["wp-a", "wp-b"] {
+            let (next, decided) = step(&snapshot, &event(name, withdraw(bloom, name)));
+            assert!(
+                matches!(decided.outcome, Outcome::MembersWithdrawn { terminal: false, .. }),
+                "{name} leaves siblings behind: {:?}",
+                decided.outcome
+            );
+            snapshot = next;
+        }
+
+        let (next, decided) = step(&snapshot, &event("wp-c", withdraw(bloom, "wp-c")));
+        assert!(
+            matches!(decided.outcome, Outcome::MembersWithdrawn { terminal: true, .. }),
+            "the last member out empties the bloom: {:?}",
+            decided.outcome
+        );
+        assert!(
+            decided.effects.iter().any(|effect| matches!(effect, Decision::MarkBloomWithdrawn { .. })),
+            "an emptied bloom is marked terminal however many events emptied it"
+        );
+        assert_eq!(integration_members(&decided), None, "there is no artifact left to fold");
+        assert!(
+            !is_active_unlanded(next.blooms[&bloom].status),
+            "and the slot is freed, so the next seal is not refused by a bloom with no members"
         );
     }
 
