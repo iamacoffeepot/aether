@@ -108,6 +108,7 @@ pub fn classify(document: &ViewDocument, outstanding: &[String]) -> Quiescence {
                 && member.wedge.is_none()
                 && member.host_fault.is_none()
                 && member.park.is_none()
+                && member.awaiting_surface.is_none()
             {
                 unresolved.push(format!("{:?}/{}", bloom.id, member.workpiece.0));
             }
@@ -126,7 +127,12 @@ pub fn classify(document: &ViewDocument, outstanding: &[String]) -> Quiescence {
             bloom
                 .members
                 .iter()
-                .any(|member| member.wedge.is_some() || member.host_fault.is_some() || member.park.is_some())
+                .any(|member| {
+                    member.wedge.is_some()
+                        || member.host_fault.is_some()
+                        || member.park.is_some()
+                        || member.awaiting_surface.is_some()
+                })
                 || bloom.executor_fault.is_some_and(|fault| fault.terminal)
                 || bloom.operator_hold.is_some()
                 || bloom.review_park.is_some()

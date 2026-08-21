@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use aether_bloomery::{
     BackendObjectId, CandidateRef, Conclusion, ConfigRegistry, ConfigScopes, Digest, EvidenceRef, ExecutionStatus,
     ExecutorBackend, Nonce, PriceTable, ResolvedModel, SharedCorrespondence, StageId, StageVerdict, StudyCost,
-    Transformation, VerifyFailureSet, WorkHandle, WorkOrder, is_model_lane,
+    SurfaceRequest, Transformation, VerifyFailureSet, WorkHandle, WorkOrder, is_model_lane,
 };
 use aether_bloomery_github::parse_study;
 use aether_data::Kind;
@@ -1437,7 +1437,15 @@ impl LocalExecutor {
     fn surface_violations(&self, nonce: &str, worktree: Option<&Path>, diff_base: Option<&str>) -> Option<Vec<String>> {
         let worktree = worktree?;
         let diff_base = diff_base?;
-        let surface = self.member_declared_surface(nonce)?;
+        // Containment is a terminal-Verify gate: only that stage judges a
+        // finished candidate against the declared surface. The guard lives
+        // here rather than inside `order_scope`, which a declining
+        // construct-family lane also reads (ADR-0207).
+        if self.order_stage(nonce) != Some(StageId::Verify) {
+            return None;
+        }
+        let (_, surface) = self.order_scope(nonce)?;
+        let surface = surface?;
         let changed = match changed_paths(worktree, diff_base) {
             Ok(changed) => changed,
             Err(error) => {
@@ -1453,21 +1461,35 @@ impl LocalExecutor {
         Some(out_of_surface(changed.iter().map(String::as_str), &surface))
     }
 
-    fn member_declared_surface(&self, nonce: &str) -> Option<Vec<String>> {
+    /// The stage the order under `nonce` was dispatched for.
+    fn order_stage(&self, nonce: &str) -> Option<StageId> {
+        let store = self.messages.as_ref()?;
+        let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
+        Some(DispatchRecord::from_stored(&store.lookup_order(nonce).ok().flatten()?)?.stage)
+    }
+
+    /// The order's sealed scope revision, and that revision's declared surface
+    /// when the row can be read.
+    ///
+    /// The digest is the order's own column, so it is available whether or not
+    /// the revision resolves; the surface is `None` when it does not, because
+    /// the two callers want different things from that miss. Containment skips
+    /// rather than fail open on a surface it cannot read. A declining lane's
+    /// surface request only reads the surface to drop paths the member already
+    /// has, so an unreadable one keeps a superset the granting half resolves
+    /// against the real surface — far better than losing the park entirely.
+    fn order_scope(&self, nonce: &str) -> Option<(Digest, Option<Vec<String>>)> {
         let store = self.messages.as_ref()?;
         let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
         let order = store.lookup_order(nonce).ok().flatten()?;
         let record = DispatchRecord::from_stored(&order)?;
-        if record.stage != StageId::Verify {
-            return None;
-        }
-        match store.load_revision(record.scope_revision) {
+        let surface = match store.load_revision(record.scope_revision) {
             Ok(Some(revision)) => Some(revision.declared_surface),
             Ok(None) => {
                 tracing::warn!(
                     target: "aether_chassis_bloomery::executor",
                     %nonce,
-                    "member verify: sealed scope revision is missing; skipping containment",
+                    "member lane: the sealed scope revision is missing",
                 );
                 None
             }
@@ -1476,11 +1498,21 @@ impl LocalExecutor {
                     target: "aether_chassis_bloomery::executor",
                     %nonce,
                     %error,
-                    "member verify: declared surface unreadable; skipping containment",
+                    "member lane: the declared surface is unreadable",
                 );
                 None
             }
-        }
+        };
+        Some((record.scope_revision, surface))
+    }
+
+    /// The normalized surface request a declining construct-family lane left in
+    /// its evidence, or `None` when it left none, the claim did not survive
+    /// normalization, or the order cannot be resolved (ADR-0207).
+    fn surface_request(&self, nonce: &str, bytes: &[u8]) -> Option<SurfaceRequest> {
+        let (summary, claimed) = parse_surface_request(bytes)?;
+        let (scope_revision, surface) = self.order_scope(nonce)?;
+        SurfaceRequest::normalize(scope_revision, surface.as_deref().unwrap_or_default(), &summary, claimed)
     }
 
     fn unread_evidence(
@@ -1639,7 +1671,17 @@ impl LocalExecutor {
         // claim for a later retry, so nothing resets the checkout the retry reads.)
         self.retire(&handle.nonce.0);
         self.pump();
-        let verdict = if matches!(construct, Some(ConstructConclusion::Declined)) {
+        // A declining construct-family lane that named the paths its work
+        // requires asks for surface (ADR-0207); one whose claim does not
+        // survive normalization degrades to a plain declined park rather than
+        // to nothing, because losing the park is the failure that whole path
+        // exists to remove.
+        let surface_request = matches!(construct, Some(ConstructConclusion::Declined))
+            .then(|| self.surface_request(&handle.nonce.0, bytes))
+            .flatten();
+        let verdict = if surface_request.is_some() {
+            StageVerdict::SurfaceRequested
+        } else if matches!(construct, Some(ConstructConclusion::Declined)) {
             StageVerdict::Declined
         } else if passed {
             StageVerdict::VerificationPassed
@@ -1660,6 +1702,7 @@ impl LocalExecutor {
             verdict,
             failed_verifiers.unwrap_or_default(),
             violating_paths,
+            surface_request,
         )]
     }
 }
@@ -1756,6 +1799,7 @@ fn judged_evidence_ref(
     verdict: StageVerdict,
     failed_verifiers: VerifyFailureSet,
     violating_paths: Vec<String>,
+    surface_request: Option<SurfaceRequest>,
 ) -> EvidenceRef {
     let overlay = apply_containment(verdict, failed_verifiers, parse_findings(bytes), &violating_paths);
     let detail = Digest::of_wire_bytes(bytes);
@@ -1782,6 +1826,7 @@ fn judged_evidence_ref(
         session_reuse_saved_micro_usd: parse_session_reuse_saved(bytes),
         peak_resident_bytes: parse_peak_resident_bytes(bytes),
         violating_paths,
+        surface_request,
     }
 }
 
@@ -1815,6 +1860,7 @@ fn executor_fault_ref(
         session_reuse_saved_micro_usd: parse_session_reuse_saved(bytes),
         peak_resident_bytes: parse_peak_resident_bytes(bytes),
         violating_paths: Vec::new(),
+        surface_request: None,
     }
 }
 
@@ -2286,6 +2332,32 @@ fn parse_commit_message(bytes: &[u8]) -> Option<String> {
         .and_then(serde_json::Value::as_str)
         .map(|message| message.trim().to_owned())
         .filter(|message| !message.is_empty())
+}
+
+/// The evidence's top-level `surface_request` object — what a declining
+/// construct-family lane wrote into `.bloomery-surface-request` (ADR-0207),
+/// returned as the lane's raw claim for [`SurfaceRequest::normalize`] to judge.
+///
+/// Presence-driven and tolerant like [`parse_findings`]: bytes that do not
+/// decode, an absent object, a missing `paths` array, and an entry missing
+/// either string all yield nothing rather than failing the lane. The lane is an
+/// untrusted worker; the trust boundary is `normalize`, not this reader.
+fn parse_surface_request(bytes: &[u8]) -> Option<(String, Vec<(String, String)>)> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let request = value.get("surface_request")?;
+    let summary = request.get("summary").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+    let claimed: Vec<(String, String)> = request
+        .get("paths")?
+        .as_array()?
+        .iter()
+        .filter_map(|entry| {
+            Some((
+                entry.get("path")?.as_str()?.to_owned(),
+                entry.get("reason").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+            ))
+        })
+        .collect();
+    (!claimed.is_empty()).then_some((summary, claimed))
 }
 
 /// What the attempt cost, from the `result_record` the lane nested in its

@@ -11,7 +11,7 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
     Adjudication, BloomSpec, CandidateRef, ConfigRegistry, Evidence, MemberDependency, OperatorHold, OperatorRepair,
-    OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim, Statement, VerifyFailureSet,
+    OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim, Statement, SurfaceRequest, VerifyFailureSet,
 };
 
 /// An admitted fact plus its idempotency key (ADR-0149 §The control core).
@@ -622,6 +622,29 @@ pub enum Fact {
         /// Every repository-relative path the candidate changed that no glob
         /// in the member's sealed surface covers.
         violating_paths: Vec<String>,
+    },
+    /// A dispatched member stage declined and named the declared-surface paths
+    /// its work requires (ADR-0207).
+    ///
+    /// Distinct from a declining [`Fact::AttemptCompleted`] because the remedy
+    /// is a person rather than a lane: the reducer parks the member awaiting a
+    /// surface amendment, spends no attempt and no repair roll, and never
+    /// dispatches the same stage again against the same revision. Appended past
+    /// [`Fact::ContainmentRefused`] so every prior fact keeps its wire
+    /// discriminant.
+    SurfaceRequested {
+        /// The bloom whose member declined.
+        bloom: BloomId,
+        /// The member awaiting the amendment.
+        workpiece: WorkpieceId,
+        /// The stage that declined — the member's current cursor stage, or the
+        /// report is stale.
+        stage: StageId,
+        /// The decline evidence, bound to the member's current subject and
+        /// carrying [`crate::EvidenceKind::ConstructDeclined`].
+        evidence: Evidence,
+        /// The normalized request the lane returned.
+        request: SurfaceRequest,
     },
 }
 

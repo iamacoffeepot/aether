@@ -2,12 +2,12 @@
 //! render without querying back into the store (ADR-0149 §The boundary).
 
 use super::readiness::blocking_ancestor;
-use super::{BloomRecord, Snapshot};
+use super::{AwaitingSurface, BloomRecord, Snapshot};
 use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
 use crate::port::{
-    BloomView, CompositionCursorView, CompositionView, ExecutorFaultView, HostFaultView, LandingBlock, MemberView,
-    PendingDecisionView, ReviewParkView, ViewDocument, WedgeCause,
+    AwaitingSurfaceView, BloomView, CompositionCursorView, CompositionView, ExecutorFaultView, HostFaultView,
+    LandingBlock, MemberView, PendingDecisionView, ReviewParkView, ViewDocument, WedgeCause,
 };
 use crate::values::Question;
 
@@ -146,8 +146,24 @@ fn member_views(
             }),
             cursor: stage_cursor(record, &member.workpiece),
             park: snapshot.member_park(&record.spec.id(), &member.workpiece).copied(),
+            awaiting_surface: snapshot
+                .awaiting_surface(&record.spec.id(), &member.workpiece)
+                .map(awaiting_surface_view),
         })
         .collect()
+}
+
+/// Render a member's surface request so an operator reads which paths are
+/// needed without opening the evidence file (ADR-0207).
+fn awaiting_surface_view(awaiting: &AwaitingSurface) -> AwaitingSurfaceView {
+    AwaitingSurfaceView {
+        stage: awaiting.stage,
+        scope_revision: awaiting.request.scope_revision,
+        evidence: awaiting.evidence,
+        paths: awaiting.request.paths.clone(),
+        summary: awaiting.request.summary.clone(),
+        requests: awaiting.requests,
+    }
 }
 
 /// Rendered only once a landing has actually been refused, so an ordinary

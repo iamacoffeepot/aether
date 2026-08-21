@@ -107,21 +107,23 @@ pub use metrics::{
     MetricsSeat, MetricsSummary, MetricsTimeline, RECONSTRUCTED_WINDOW, TIMELINE_SPAN_CAP, TimelineSpan, window_label,
 };
 pub use port::{
-    BloomView, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome,
-    CommissionProjection, CompositionCursorView, CompositionView, Conclusion, EvidenceRef, ExecutionStatus,
-    ExecutorBackend, ExecutorFaultView, HostFaultView, IntegrateOutcome, IntegrationPosition, LandOutcome,
-    LandingBlock, MemberView, PendingDecisionView, ProjectedReceipt, ProjectionBackend, ReviewParkView, SourceBackend,
+    AwaitingSurfaceView, BloomView, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState,
+    ClaimReleaseOutcome, CommissionProjection, CompositionCursorView, CompositionView, Conclusion, EvidenceRef,
+    ExecutionStatus, ExecutorBackend, ExecutorFaultView, HostFaultView, IntegrateOutcome, IntegrationPosition,
+    LandOutcome, LandingBlock, MemberView, PendingDecisionView, ProjectedReceipt, ProjectionBackend, ReviewParkView,
+    SourceBackend,
     SourceSnapshot, ViewDocument, WedgeCause, WorkHandle, WorkOrder,
 };
 pub use reduce::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,
-    AggregateVerifyError, AttemptCompletedError, BaseMismatch, BloomRecord, BloomStatus, DECISIONS_SCHEMA,
-    DECISIONS_SCHEMA_V1, Decision, Decisions, DecisionsSchemaError, Event, Fact, FoldConflictError, FoldedIntegration,
-    Gate, GrantAttemptsError, HostFaultError, HostFaultHold, IntegrateError, LandError, LandingRejectedError,
-    MemberExecutorFaultError, MemberMachineryFault, MemberPark, OperatorHoldError, OperatorRepairError,
+    AggregateVerifyError, AttemptCompletedError, AwaitingSurface, BaseMismatch, BloomRecord, BloomStatus,
+    DECISIONS_SCHEMA, DECISIONS_SCHEMA_V1, Decision, Decisions, DecisionsSchemaError, Event, Fact,
+    FoldConflictError, FoldedIntegration, Gate, GrantAttemptsError, HostFaultError, HostFaultHold, IntegrateError,
+    LandError, LandingRejectedError, MemberExecutorFaultError, MemberMachineryFault, MemberPark, OperatorHoldError,
+    OperatorRepairError,
     OrphanClaimReleaseError, Outcome, Read, RecordedRead, RecordedRefusal, Refusal, ResolveError, SealConflict,
-    SealError, Snapshot, SpliceError, StageProgress, SupersedeError, VerifyFailedError, decode_recorded_decisions,
-    is_active_unlanded, reduce, view_of,
+    SealError, Snapshot, SpliceError, StageProgress, SupersedeError, SurfaceRequestedError, VerifyFailedError,
+    decode_recorded_decisions, is_active_unlanded, reduce, view_of,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use sign::Ed25519KeyProvider;
@@ -142,9 +144,9 @@ pub use values::{
     ReasoningEffort, ResolutionClaim, ResolvedBloom, ResolvedConfigs, ResolvedDependencies, ResolvedModel,
     SCOPE_FILL_COMMAND, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, SealedPriceTable, SpendCeiling,
     SpendQuiesce, SpendWindow, StageBinding, StageCatalog, StageOverride, StageReceipt, Statement, StudyCall,
-    StudyCost, StudyRecord, SurfacePattern, Tier, TimeoutRecord, ToolPolicy, Transformation, Unproducible,
-    VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK, VerifiedTree, VerifyFailure, VerifyFailureSet,
-    VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Workpiece, WorkpieceBuilder, WorkpieceFact, WorkpieceFields,
-    WorkpieceRefusal, classify_findings, config_address, decode_config, is_model_lane, pin_workpiece_description,
-    resolve_member_dependencies, split_lane_identity, surface_intersection,
+    StudyCost, StudyRecord, SurfacePathRequest, SurfacePattern, SurfaceRequest, Tier, TimeoutRecord, ToolPolicy,
+    Transformation, Unproducible, VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK, VerifiedTree,
+    VerifyFailure, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Workpiece, WorkpieceBuilder,
+    WorkpieceFact, WorkpieceFields, WorkpieceRefusal, classify_findings, config_address, decode_config,
+    is_model_lane, pin_workpiece_description, resolve_member_dependencies, split_lane_identity, surface_intersection,
 };

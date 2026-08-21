@@ -44,6 +44,7 @@ mod review;
 mod seal;
 mod snapshot;
 mod splice;
+mod surface_request;
 mod verify;
 mod verify_memo;
 mod view;
@@ -53,7 +54,8 @@ pub use error::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError,
     AttemptCompletedError, BaseMismatch, FoldConflictError, GrantAttemptsError, HostFaultError, IntegrateError,
     LandError, LandingRejectedError, MemberExecutorFaultError, OperatorHoldError, OperatorRepairError,
-    OrphanClaimReleaseError, ResolveError, SealConflict, SealError, SpliceError, SupersedeError, VerifyFailedError,
+    OrphanClaimReleaseError, ResolveError, SealConflict, SealError, SpliceError, SupersedeError,
+    SurfaceRequestedError, VerifyFailedError,
 };
 pub use event::{Event, Fact};
 pub use gate::{Gate, Read, RecordedRead, RecordedRefusal, Refusal};
@@ -62,8 +64,8 @@ pub use outcome::{
 };
 pub use seal::is_active_unlanded;
 pub use snapshot::{
-    AggregateReviewFault, BloomRecord, BloomStatus, FoldedIntegration, HostFaultHold, MemberMachineryFault, MemberPark,
-    Snapshot, StageProgress,
+    AggregateReviewFault, AwaitingSurface, BloomRecord, BloomStatus, FoldedIntegration, HostFaultHold,
+    MemberMachineryFault, MemberPark, Snapshot, StageProgress,
 };
 pub use view::view_of;
 
@@ -85,6 +87,7 @@ use orphan_claim::{reduce_complete_orphan_claim_release, reduce_request_orphan_c
 use readiness::reduce_splice_assembled;
 use review::{reduce_aggregate_review_completed, reduce_aggregate_review_executor_fault};
 use seal::{reduce_seal, reduce_supersede, reduce_surface_overlap};
+use surface_request::reduce_surface_requested;
 use verify::{reduce_resume_host_fault, reduce_verify_failed, reduce_verify_host_fault};
 
 /// Reduce one event against a snapshot into decisions. Pure: reads the
@@ -175,5 +178,8 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
             reduce_member_executor_fault(snapshot, bloom, workpiece, *stage, evidence)
         }
         Fact::FoldRefused { bloom, refusal } => reduce_fold_refused(snapshot, bloom, refusal),
+        Fact::SurfaceRequested { bloom, workpiece, stage, evidence, request } => {
+            reduce_surface_requested(snapshot, bloom, workpiece, *stage, evidence, request)
+        }
     }
 }

@@ -75,6 +75,16 @@ pub enum LaneMode {
     /// `is_error: false` result. Intake mints [`aether_bloomery::EvidenceKind::ConstructDeclined`]
     /// so the member parks rather than burning retry budget (#5292 / #5332).
     Declines,
+    /// The same clean refusal as [`Self::Declines`], plus the machine-readable
+    /// surface request a lane writes when it cannot finish inside its declared
+    /// surface (ADR-0207). Intake mints `Fact::SurfaceRequested` so the member
+    /// parks awaiting a person rather than a lane.
+    ///
+    /// The requested path is canned ([`super::evidence::REQUESTED_PATH`])
+    /// rather than scripted, because a [`LaneMode`] is `Copy` and every
+    /// scenario that needs one wants the same thing: one literal path the
+    /// fixture project's member surface does not cover.
+    DeclinesRequestingSurface,
     /// Write otherwise-valid evidence bound to a digest other than the one
     /// the order displayed. Intake refuses `DigestMismatch` so an in-flight
     /// worker can still deliver; a completed run is recovered as a machinery

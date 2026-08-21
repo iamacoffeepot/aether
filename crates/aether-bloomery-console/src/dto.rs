@@ -277,6 +277,32 @@ pub struct MemberView {
     /// Construct-declined park (#5292 / #5332). Absent-tolerant.
     #[serde(default)]
     pub park: Option<Present>,
+    /// The surface amendment this member is waiting on (ADR-0207).
+    /// Absent-tolerant.
+    #[serde(default)]
+    pub awaiting_surface: Option<AwaitingSurfaceView>,
+}
+
+/// A member awaiting a surface amendment (ADR-0207): the paths a declining
+/// lane asked for, and the one line justifying each.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AwaitingSurfaceView {
+    #[serde(default)]
+    pub paths: Vec<SurfacePathRequest>,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub requests: u32,
+}
+
+/// One repo-relative path a declining lane asked to have added to its
+/// declared surface.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SurfacePathRequest {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub reason: String,
 }
 
 /// Host-fault findings, listed verbatim when the coordinator serves them.

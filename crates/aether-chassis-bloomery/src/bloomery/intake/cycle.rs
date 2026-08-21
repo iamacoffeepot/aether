@@ -188,6 +188,7 @@ fn recover_completed_mismatch(
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
     };
     match admit_uploaded(store, &fault).map_err(CycleError::Intake)? {
         AdmitDecision::Admitted(admission) => Ok(Some(admission)),

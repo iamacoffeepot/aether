@@ -23,11 +23,15 @@ pub fn history_blooms(view: &ViewDocument) -> impl Iterator<Item = &BloomView> {
 }
 
 /// One member's standing on the operator ladder. Precedence matches
-/// `scripts/bloomery-operator.py`'s `member_status_state`: wedge, hold,
-/// resolution, in-flight attempt, blocked, idle.
+/// `scripts/bloomery-operator.py`'s `member_status_state`: wedge, surface
+/// request, hold, resolution, in-flight attempt, blocked, idle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemberState {
     Wedged,
+    /// Waiting on a person to widen the declared surface (ADR-0207). Its own
+    /// rung rather than folded into `Held`: a hold is an ADR-0151 question an
+    /// answer settles, and this is a boundary only an amendment moves.
+    AwaitingSurface,
     Held,
     Integrated,
     Running,
@@ -40,6 +44,9 @@ impl MemberState {
     pub fn of(member: &MemberView) -> Self {
         if member.wedge.is_some() {
             return Self::Wedged;
+        }
+        if member.awaiting_surface.is_some() {
+            return Self::AwaitingSurface;
         }
         if member.pending_decision.is_some() {
             return Self::Held;
@@ -60,6 +67,7 @@ impl MemberState {
     pub fn label(self) -> &'static str {
         match self {
             Self::Wedged => "WEDGED",
+            Self::AwaitingSurface => "surface",
             Self::Held => "held",
             Self::Integrated => "integrated",
             Self::Running => "running",
@@ -71,7 +79,7 @@ impl MemberState {
     /// Needs a decision or is actively moving: the live board keeps these.
     #[must_use]
     pub fn walks(self) -> bool {
-        matches!(self, Self::Running | Self::Wedged | Self::Held)
+        matches!(self, Self::Running | Self::Wedged | Self::AwaitingSurface | Self::Held)
     }
 }
 

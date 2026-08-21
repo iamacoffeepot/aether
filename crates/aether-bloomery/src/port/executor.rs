@@ -17,7 +17,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::ids::Nonce;
-use crate::values::{CandidateRef, StudyCall, StudyCost, Transformation, VerifyFailureSet};
+use crate::values::{CandidateRef, StudyCall, StudyCost, SurfaceRequest, Transformation, VerifyFailureSet};
 
 /// A fully-resolved unit of work to dispatch. The [`Transformation`] already
 /// carries the typed command id, digest-pinned inputs, declared outputs,
@@ -162,6 +162,13 @@ pub struct EvidenceRef {
     /// never part of the artifact-name contract. Empty unless the containment
     /// overlay named a violation.
     pub violating_paths: Vec<String>,
+    /// The declining lane's normalized surface request (ADR-0207), when it
+    /// returned one and the host could bind it to the order's sealed revision.
+    /// Host-recorded state riding the reference like `candidate` and
+    /// `findings` — never part of the artifact-name contract, because a
+    /// request is a list of paths and prose and a name is not a data channel.
+    /// The name-only Actions backend reports `None`.
+    pub surface_request: Option<SurfaceRequest>,
 }
 
 /// The disposable-worker boundary (ADR-0149 §The boundary). Exactly the four

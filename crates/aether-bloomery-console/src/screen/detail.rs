@@ -381,6 +381,12 @@ fn member_lines(view: &ViewDocument, bloom: DigestHex, workpiece: &str) -> Vec<L
             lines.push(label(RowKey::Other(6), format!("  blocked  {}", pending.blocked)));
         }
     }
+    if let Some(awaiting) = &member.awaiting_surface {
+        lines.push(label(RowKey::Other(8), format!("surface  {} ({} asked)", awaiting.summary, awaiting.requests)));
+        for (index, request) in awaiting.paths.iter().enumerate() {
+            lines.push(label(RowKey::Other(9 + index), format!("  {}  {}", request.path, request.reason)));
+        }
+    }
     if member.resolution.is_some() {
         lines.push(label(RowKey::Other(7), "resolution  integrated".to_owned()));
     }

@@ -669,6 +669,28 @@ fn a_declined_construct_keeps_the_lane_findings_on_the_evidence_ref() {
 }
 
 #[test]
+fn a_decline_whose_request_cannot_be_bound_degrades_to_a_plain_park() {
+    // Tripwire for ADR-0207's degrade rule. A surface request has to bind the
+    // order's sealed scope revision, and this executor has no message store to
+    // resolve one from. Failing the whole verdict there would lose the park —
+    // the exact invisibility this path exists to remove — so the decline must
+    // still land, just without the request riding it.
+    let ev = r#"{"command":"construct.implement","nonce":"n-g","produced_candidate":false,"surface_request":{"summary":"outside","paths":[{"path":"crates/example-b/src/lib.rs","reason":"the caller"}]},"result_record":{"is_error":false,"result":{"num_turns":4}}}"#;
+    let base = TempDir::new().unwrap();
+    let exec = executor(&base, ev, RunLifecycle::Exited { success: true });
+    let handle = exec.submit(&construct_order(digest(5), "n-g")).unwrap();
+
+    let refs = exec.stream_evidence(&handle).unwrap();
+
+    assert!(refs[0].surface_request.is_none(), "an unbindable request rides nothing");
+    assert_eq!(
+        NameEvidenceClaims.claim_for(&refs[0]).expect("the synthesized ref decodes").verdict,
+        StageVerdict::Declined,
+        "the park survives the request that could not be bound",
+    );
+}
+
+#[test]
 fn construct_gate_fails_an_errored_run_even_with_a_candidate() {
     let ev = r#"{"command":"construct.implement","nonce":"n-g","produced_candidate":true,"result_record":{"is_error":true,"result":{}}}"#;
     assert_eq!(construct_verdict(ev), StageVerdict::VerificationFailed);

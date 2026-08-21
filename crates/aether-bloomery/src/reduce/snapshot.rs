@@ -18,7 +18,8 @@ use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
     Adjudication, BloomSpec, CandidateRef, CompositionFinding, ConfigScopes, DispatchKey, Evidence, EvidenceKind,
     MemberDependency, OperatorHold, OperatorRepair, OrphanClaimReleaseRecord, ResolutionClaim, ResolvedConfigs,
-    SpendQuiesce, StageCatalog, VerifiedTree, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge,
+    SpendQuiesce, StageCatalog, SurfaceRequest, VerifiedTree, VerifyFailureSet, VerifyGateSet, VerifyProof,
+    VerifyReuse, Wedge,
 };
 
 /// The rebuildable projection state the reducer reads (ADR-0149 §The control
@@ -107,6 +108,12 @@ pub struct Snapshot {
     /// field so every existing `BloomRecord { … }` literal stays compiling.
     #[serde(default)]
     pub member_parks: BTreeMap<BloomId, BTreeMap<WorkpieceId, MemberPark>>,
+    /// Members awaiting a surface amendment (ADR-0207), keyed by bloom then
+    /// workpiece. Folded from [`Fact::SurfaceRequested`] the way a fold
+    /// refusal is folded from its fact, so no new [`Decision`] enters the
+    /// frozen graph. `#[serde(default)]` is the `member_parks` precedent.
+    #[serde(default)]
+    pub surface_requests: BTreeMap<BloomId, BTreeMap<WorkpieceId, AwaitingSurface>>,
 }
 
 impl Snapshot {
@@ -141,6 +148,12 @@ impl Snapshot {
     #[must_use]
     pub fn member_park(&self, bloom: &BloomId, workpiece: &WorkpieceId) -> Option<&MemberPark> {
         self.member_parks.get(bloom)?.get(workpiece)
+    }
+
+    /// The surface amendment `workpiece` is waiting on in `bloom` (ADR-0207).
+    #[must_use]
+    pub fn awaiting_surface(&self, bloom: &BloomId, workpiece: &WorkpieceId) -> Option<&AwaitingSurface> {
+        self.surface_requests.get(bloom)?.get(workpiece)
     }
 }
 
@@ -450,10 +463,32 @@ pub struct BloomRecord {
 /// same value [`Outcome::AttemptParked`] carries as `reason`.
 #[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct MemberPark {
-    /// The stage that declined — Construct.
+    /// The stage that declined — Construct, or the Refine / Reconcile repair
+    /// lap that runs the same construct-family lane.
     pub stage: StageId,
     /// The lane's evidence artifact — the diagnosis an operator reads.
     pub evidence: Digest,
+}
+
+/// A member parked awaiting a surface amendment (ADR-0207) — not wedged: no
+/// attempt or repair roll moved, and the remedy is a person, not a grant.
+///
+/// Projection state, not a journal row: the durable write is
+/// [`Fact::SurfaceRequested`]. Kept apart from [`MemberPark`], which is `Copy`
+/// and whose every literal would break, and distinguishable from it on the
+/// served view: a decline *with* a request lights this, a decline without one
+/// stays a plain park.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct AwaitingSurface {
+    /// The stage that declined.
+    pub stage: StageId,
+    /// The lane's evidence artifact — the diagnosis an operator reads.
+    pub evidence: Digest,
+    /// The newest request. A later request supersedes rather than appends: the
+    /// lane restates its whole need each lap.
+    pub request: SurfaceRequest,
+    /// How many requests this member has made in this bloom.
+    pub requests: u32,
 }
 
 /// A member held at Verify because the host could not run the gates (#5020).
@@ -630,6 +665,7 @@ impl Snapshot {
         next.record_construct_checkpoint(event, decisions);
         next.record_construct_park(event, decisions);
         next.record_fold_refusal(event, decisions);
+        next.record_surface_request(event, decisions);
         next
     }
 
@@ -669,7 +705,11 @@ impl Snapshot {
         let Outcome::AttemptParked { bloom, workpiece, stage, reason } = &decisions.outcome else {
             return;
         };
-        let Fact::AttemptCompleted { stage: StageId::Construct, passed: false, evidence, .. } = &event.fact else {
+        // No stage gate here: the declining lane is `construct.implement`,
+        // which `StageCatalog` maps from Construct, Refine and Reconcile
+        // alike, so a declining repair lap parks the same way a first
+        // construct does. The outcome carries the stage the reducer accepted.
+        let Fact::AttemptCompleted { passed: false, evidence, .. } = &event.fact else {
             return;
         };
         if evidence.kind != EvidenceKind::ConstructDeclined {
@@ -694,6 +734,41 @@ impl Snapshot {
             }
             Fact::Resolve { bloom, .. } | Fact::FoldConflict { bloom, .. } | Fact::SpliceAssembled { bloom, .. } => {
                 self.fold_refusals.remove(bloom);
+            }
+            _ => {}
+        }
+    }
+
+    /// Record (or clear) a member's surface request from the admitted fact
+    /// (ADR-0207).
+    ///
+    /// Gated on [`Outcome::SurfaceRequested`] so a refused admission cannot
+    /// plant a park the reducer rejected. A later passing attempt, integration,
+    /// or verify failure means the member moved, so the request has been
+    /// answered or overtaken and the entry is dropped — the `requests` counter
+    /// resets with the bloom, which is what ADR-0207's per-bloom budget says.
+    fn record_surface_request(&mut self, event: &Event, decisions: &Decisions) {
+        match &event.fact {
+            Fact::SurfaceRequested { bloom, workpiece, stage, evidence, request } => {
+                let Outcome::SurfaceRequested { requests, .. } = &decisions.outcome else {
+                    return;
+                };
+                self.surface_requests.entry(*bloom).or_default().insert(
+                    workpiece.clone(),
+                    AwaitingSurface {
+                        stage: *stage,
+                        evidence: evidence.detail,
+                        request: request.clone(),
+                        requests: *requests,
+                    },
+                );
+            }
+            Fact::AttemptCompleted { bloom, workpiece, passed: true, .. }
+            | Fact::Integrate { bloom, claim: ResolutionClaim { workpiece, .. } }
+            | Fact::VerifyFailed { bloom, workpiece, .. } => {
+                if let Some(members) = self.surface_requests.get_mut(bloom) {
+                    members.remove(workpiece);
+                }
             }
             _ => {}
         }

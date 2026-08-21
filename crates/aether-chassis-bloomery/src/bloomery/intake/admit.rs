@@ -7,8 +7,8 @@ use std::fmt;
 
 use aether_bloomery::{
     Admit, BloomId, CandidateRef, Digest, Event, Evidence, EvidenceKind, Fact, InwardError, Nonce, ResolutionClaim,
-    StageCatalog, StageId, StageResult, StageVerdict, StudyCall, StudyCost, VerifyFailure, VerifyFailureSet,
-    WorkpieceId, classify_findings, normalize_stage_result,
+    StageCatalog, StageId, StageResult, StageVerdict, StudyCall, StudyCost, SurfaceRequest, VerifyFailure,
+    VerifyFailureSet, WorkpieceId, classify_findings, normalize_stage_result,
 };
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 
@@ -77,6 +77,11 @@ pub struct UploadedEvidence {
     /// (ADR-0209). Host-recorded state copied off the port reference, like
     /// `findings`. Empty unless the containment overlay named a violation.
     pub violating_paths: Vec<String>,
+    /// The declining lane's normalized surface request (ADR-0207),
+    /// authoritative from the port reference like `candidate` / `findings`.
+    /// `None` from a lane that named nothing, from a claim that did not
+    /// survive normalization, and from the name-only Actions transport.
+    pub surface_request: Option<SurfaceRequest>,
 }
 
 /// Why the broker refused an upload without touching the reducer.
@@ -116,6 +121,13 @@ pub enum IntakeRefusal {
     /// (ADR-0195 / ADR-0176); every other stage refuses rather than being
     /// given unratified semantics by admission.
     ExecutorFaultOutOfStage(StageId),
+    /// A surface-request or plain-decline verdict arrived against a stage that
+    /// runs no construct-family lane (ADR-0207). Only Construct / Refine /
+    /// Reconcile dispatch `construct.implement`, so only they can decline for
+    /// want of surface; every other stage refuses rather than being given
+    /// unratified semantics by admission. The refusal precedes the consume, so
+    /// the order stays live.
+    SurfaceRequestOutOfStage(StageId),
 }
 
 /// An accepted attempt result: the reducer [`Event`] the upload normalized to
@@ -551,6 +563,14 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     {
         return Ok(AdmitDecision::Refused(IntakeRefusal::ExecutorFaultOutOfStage(record.stage)));
     }
+    // ADR-0207's two decline verdicts belong to the construct family alone.
+    // Refused here, ahead of the consume, so the order stays live and an
+    // honest result on it can still land.
+    if matches!(upload.verdict, StageVerdict::Declined | StageVerdict::SurfaceRequested)
+        && !admits_as_attempt_completed(record.stage)
+    {
+        return Ok(AdmitDecision::Refused(IntakeRefusal::SurfaceRequestOutOfStage(record.stage)));
+    }
     let observed = StageResult { subject: upload.subject, verdict: upload.verdict, detail: upload.detail };
     let evidence = match normalize_stage_result(&record.displayed_digest, &observed) {
         Ok(evidence) => evidence,
@@ -607,7 +627,27 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     // normalizes to ConstructDeclined so the reducer's park arm is reachable
     // (#5292 / #5332). `Parked` stays the question path; a failing construct
     // with no capture, and an executor fault, keep their own arms.
-    let event = if evidence.kind == EvidenceKind::ConstructDeclined && admits_as_attempt_completed(record.stage) {
+    // A decline that named the paths its work requires is a first-class fact
+    // (ADR-0207): the reducer parks the member awaiting a surface amendment
+    // rather than spending an attempt on a lap that would reproduce the same
+    // refusal. A decline whose request did not survive normalization falls
+    // through to the plain park below — losing the park is the failure this
+    // whole path exists to remove.
+    let event = if upload.verdict == StageVerdict::SurfaceRequested
+        && let Some(request) = upload.surface_request.clone()
+        && admits_as_attempt_completed(record.stage)
+    {
+        Event {
+            idempotency_key: AdmissionKey::SurfaceRequest.of(&record.nonce.0),
+            fact: Fact::SurfaceRequested {
+                bloom: record.bloom,
+                workpiece: record.workpiece.clone(),
+                stage: record.stage,
+                evidence,
+                request,
+            },
+        }
+    } else if evidence.kind == EvidenceKind::ConstructDeclined && admits_as_attempt_completed(record.stage) {
         Event {
             idempotency_key: AdmissionKey::Attempt.of(&record.nonce.0),
             fact: Fact::AttemptCompleted {

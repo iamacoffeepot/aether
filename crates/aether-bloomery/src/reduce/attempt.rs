@@ -294,10 +294,18 @@ pub(super) fn reduce_attempt_completed(
     // same inputs (#5292). A dead construct keeps `VerificationResult` and
     // still takes `retry_or_wedge` below — that is the case a second attempt
     // can recover.
-    if !passed && stage == StageId::Construct && evidence.kind == EvidenceKind::ConstructDeclined {
+    // The declining lane is `construct.implement`, which `StageCatalog` maps
+    // from Construct, Refine and Reconcile alike (`LaneGates::of` keys
+    // `is_construct` on the command), so a declining repair lap parks the same
+    // way a first construct does rather than falling into `retry_or_wedge`.
+    if !passed
+        && matches!(stage, StageId::Construct | StageId::Refine | StageId::Reconcile)
+        && evidence.kind == EvidenceKind::ConstructDeclined
+    {
         return park_declined_construct(
             *bloom,
             workpiece,
+            stage,
             evidence,
             alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }],
         );
@@ -592,16 +600,12 @@ fn retry_or_wedge(
 fn park_declined_construct(
     bloom: BloomId,
     workpiece: &WorkpieceId,
+    stage: StageId,
     evidence: &Evidence,
     effects: Vec<Decision>,
 ) -> Decisions {
     Decisions {
-        outcome: Outcome::AttemptParked {
-            bloom,
-            workpiece: workpiece.clone(),
-            stage: StageId::Construct,
-            reason: evidence.detail,
-        },
+        outcome: Outcome::AttemptParked { bloom, workpiece: workpiece.clone(), stage, reason: evidence.detail },
         effects,
     }
 }

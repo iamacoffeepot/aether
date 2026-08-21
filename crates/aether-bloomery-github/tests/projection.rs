@@ -51,6 +51,7 @@ fn member(number: u64, revision: u8) -> MemberView {
         wedge_cause: None,
         cursor: None,
         park: None,
+        awaiting_surface: None,
     }
 }
 

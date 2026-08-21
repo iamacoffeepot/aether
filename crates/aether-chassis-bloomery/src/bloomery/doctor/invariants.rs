@@ -503,6 +503,11 @@ fn nonterminal_member_has_lane_or_dispatch(live: &LiveState<'_>) -> Vec<String> 
                 || record.claims.contains_key(workpiece)
                 || record.host_faults.contains_key(workpiece)
                 || live.snapshot.member_park(bloom, workpiece).is_some()
+                // Awaiting a surface amendment is an accountable stop with an
+                // operator exit (ADR-0207), not a member the machinery lost:
+                // no lane can move it and dispatching one would reproduce the
+                // same refusal.
+                || live.snapshot.awaiting_surface(bloom, workpiece).is_some()
             {
                 continue;
             }

@@ -122,6 +122,7 @@ impl ScriptedUpload {
             session_reuse_saved_micro_usd: None,
             peak_resident_bytes: None,
             violating_paths: Vec::new(),
+            surface_request: None,
         }
     }
 }

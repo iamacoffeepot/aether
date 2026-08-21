@@ -36,6 +36,12 @@ pub enum LaneScript {
     Candidate,
     /// Concluded, no candidate — the `ConstructDeclined` route.
     Decline,
+    /// Concluded, no candidate, and named the declared-surface path its work
+    /// requires (ADR-0207) — the `Fact::SurfaceRequested` route. The path is
+    /// the mock lane's canned one
+    /// ([`aether_chassis_bloomery::bloomery::mock_lane::REQUESTED_PATH`]), a
+    /// crate the fixture project has and no member surface covers.
+    DeclineRequestingSurface,
     /// A candidate touching a path no glob covers.
     OutsideSurface(String),
     /// The lane process exits without evidence.

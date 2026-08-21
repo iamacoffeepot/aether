@@ -26,6 +26,7 @@ mod spend;
 mod stage;
 mod statement;
 mod study;
+mod surface;
 mod timeout;
 mod verify;
 mod workpiece_builder;
@@ -68,6 +69,7 @@ pub use stage::{
 };
 pub use statement::{Observation, Provenance, StageReceipt, Statement};
 pub use study::{StudyCall, StudyCost, StudyRecord};
+pub use surface::{SurfacePathRequest, SurfaceRequest};
 pub use timeout::TimeoutRecord;
 pub use verify::{VerifyFailure, VerifyFailureSet};
 pub use workpiece_builder::{FIELD_ENTRY_SCHEMA, FieldEntry, WorkpieceBuilder, WorkpieceRefusal};

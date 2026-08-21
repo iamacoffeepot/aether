@@ -221,6 +221,7 @@ fn a_matching_upload_admits_a_bound_integrate_fact() {
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching upload is admitted");
@@ -268,6 +269,7 @@ fn a_parked_upload_admits_a_question_evidence_fact_and_consumes_the_order() {
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching parked upload is admitted");
@@ -305,6 +307,7 @@ fn an_unknown_nonce_is_refused() {
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
     };
     assert!(matches!(
         admit_uploaded(&mut store, &upload).unwrap(),
@@ -338,6 +341,7 @@ fn a_right_nonce_with_the_wrong_digest_is_refused_and_the_order_stays_live() {
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
     };
     match admit_uploaded(&mut store, &lying).unwrap() {
         AdmitDecision::Refused(IntakeRefusal::DigestMismatch { displayed, claimed }) => {
@@ -546,6 +550,7 @@ fn intake_cycle_admits_a_matching_upload_and_the_reducer_integrates_it() {
             session_reuse_saved_micro_usd: None,
             peak_resident_bytes: None,
             violating_paths: Vec::new(),
+            surface_request: None,
         },
     );
     let claims = SeededClaims(claims);
@@ -602,6 +607,7 @@ fn intake_cycle_refuses_a_mismatched_upload_and_the_reducer_is_untouched() {
             session_reuse_saved_micro_usd: None,
             peak_resident_bytes: None,
             violating_paths: Vec::new(),
+            surface_request: None,
         },
     );
     let claims = SeededClaims(claims);
@@ -720,6 +726,7 @@ fn a_non_terminal_construct_result_admits_attempt_completed_and_the_reducer_adva
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching Construct upload is admitted");
@@ -783,6 +790,7 @@ fn a_reconcile_result_admits_attempt_completed_not_out_of_line() {
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching Reconcile upload is admitted");
@@ -823,6 +831,7 @@ fn a_failing_terminal_verify_admits_typed_verify_failed_not_integrate() {
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching failing-verify upload is admitted (the gate decides its fate, not the broker)");
@@ -866,6 +875,7 @@ fn a_containment_refusal_admits_as_containment_refused_with_the_violating_paths(
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: paths.clone(),
+        surface_request: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching containment-carrying upload is admitted");
@@ -907,6 +917,7 @@ fn an_unjudged_verify_naming_no_verifier_is_admitted_rather_than_refused() {
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("an unjudged failing-verify upload is admitted; the reducer decides what it means");
@@ -945,6 +956,7 @@ fn a_preflight_only_verify_admits_as_a_host_fault_not_a_candidate_failure() {
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a preflight-only verify is admitted so the reducer can hold it");
@@ -994,6 +1006,7 @@ fn invalid_verifier_sets_are_refused_without_consuming_the_order() {
             session_reuse_saved_micro_usd: None,
             peak_resident_bytes: None,
             violating_paths: Vec::new(),
+            surface_request: None,
         };
 
         assert!(matches!(
@@ -1031,6 +1044,7 @@ fn a_failing_aggregate_verify_admits_its_typed_set_as_a_bloom_level_failure() {
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching failing AggregateVerify upload is admitted");
@@ -1072,6 +1086,7 @@ fn aggregate_verify_findings_persist_on_the_composition_and_clear_on_a_pass() {
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
     };
 
     let mut failing = dispatch_record("n-av-fail", bloom, &WorkpieceId(String::new()), tree, tree);
@@ -1131,6 +1146,7 @@ fn an_aggregate_review_verdict_admits_a_bloom_level_completion() {
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &failing).unwrap() else {
         panic!("a matching aggregate verdict is admitted");
@@ -1165,6 +1181,7 @@ fn an_aggregate_review_verdict_admits_a_bloom_level_completion() {
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &passing).unwrap() else {
         panic!("the passing aggregate verdict is admitted");
@@ -1205,6 +1222,7 @@ fn attributed_aggregate_findings_narrow_the_implication_and_slice_per_member() {
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &failing).unwrap() else {
         panic!("a matching aggregate verdict is admitted");
@@ -1246,6 +1264,7 @@ fn attributed_aggregate_findings_narrow_the_implication_and_slice_per_member() {
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
     };
     assert!(matches!(admit_uploaded(&mut store, &delta_fail).unwrap(), AdmitDecision::Admitted(_)));
     assert_eq!(
@@ -1285,6 +1304,7 @@ fn an_aggregate_review_executor_fault_admits_its_own_fact_and_touches_no_finding
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &fault).unwrap() else {
         panic!("a matching aggregate fault is admitted");
@@ -1340,6 +1360,7 @@ fn a_member_executor_fault_admits_its_own_fact_and_consumes_the_order_once() {
             session_reuse_saved_micro_usd: None,
             peak_resident_bytes: None,
             violating_paths: Vec::new(),
+            surface_request: None,
         };
         let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
             panic!("{stage:?} member fault should be admitted");
@@ -1396,6 +1417,7 @@ fn an_executor_fault_on_a_stage_without_a_lifecycle_is_refused_and_the_order_sta
             session_reuse_saved_micro_usd: None,
             peak_resident_bytes: None,
             violating_paths: Vec::new(),
+            surface_request: None,
         };
         assert!(
             matches!(
@@ -1403,6 +1425,49 @@ fn an_executor_fault_on_a_stage_without_a_lifecycle_is_refused_and_the_order_sta
                 AdmitDecision::Refused(IntakeRefusal::ExecutorFaultOutOfStage(refused)) if refused == stage
             ),
             "{stage:?} has no ratified fault lifecycle",
+        );
+        assert!(store.lookup_order(nonce).unwrap().is_some(), "`{nonce}` remains live after refusal");
+    }
+}
+
+// ADR-0207 gives only the construct family a decline lifecycle: those three
+// stages run `construct.implement`, and nothing else can refuse for want of
+// surface. Tripwire: admitting the verdict anywhere else would park a member
+// at a stage whose reducer arm refuses it, spending the order for nothing.
+#[test]
+fn a_surface_request_on_a_non_construct_stage_is_refused_and_the_order_stays_live() {
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let subject = Digest::from_bytes([31; 32]);
+
+    for (nonce, stage) in [("n-s-av", StageId::AggregateVerify), ("n-s-scope", StageId::Scope)] {
+        let mut record = dispatch_record(nonce, bloom, &WorkpieceId("wp".to_owned()), subject, subject);
+        record.stage = stage;
+        record_dispatch(&mut store, &record).unwrap();
+
+        let upload = UploadedEvidence {
+            nonce: Nonce(nonce.to_owned()),
+            subject,
+            verdict: StageVerdict::SurfaceRequested,
+            detail: Digest::from_bytes([9; 32]),
+            candidate: None,
+            findings: None,
+            failed_verifiers: VerifyFailureSet::EMPTY,
+            cost: None,
+            calls: None,
+            session_reuse_arm: None,
+            session_reuse_saved_micro_usd: None,
+            peak_resident_bytes: None,
+            violating_paths: Vec::new(),
+            surface_request: None,
+        };
+
+        assert!(
+            matches!(
+                admit_uploaded(&mut store, &upload).unwrap(),
+                AdmitDecision::Refused(IntakeRefusal::SurfaceRequestOutOfStage(refused)) if refused == stage
+            ),
+            "{stage:?} runs no construct-family lane and cannot decline for want of surface",
         );
         assert!(store.lookup_order(nonce).unwrap().is_some(), "`{nonce}` remains live after refusal");
     }
@@ -1440,6 +1505,7 @@ fn an_out_of_line_stage_is_refused_and_the_order_stays_live() {
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
     };
     match admit_uploaded(&mut store, &upload).unwrap() {
         AdmitDecision::Refused(IntakeRefusal::OutOfLineStage(stage)) => {
@@ -1491,6 +1557,7 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
             session_reuse_saved_micro_usd: None,
             peak_resident_bytes: None,
             violating_paths: Vec::new(),
+            surface_request: None,
         };
 
         let decoded = claims.claim_for(&reference).expect("a well-formed attempt name decodes");
@@ -1526,6 +1593,7 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
     };
     assert_eq!(claims.claim_for(&reference).expect("typed mask decodes").failed_verifiers, failures);
 
@@ -1571,6 +1639,7 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
     };
     assert!(claims.claim_for(&stray).is_none(), "a non-attempt name yields no claim");
 }
@@ -1608,6 +1677,7 @@ fn a_four_digit_mask_attempt_name_claims_an_upload() {
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
     };
     let decoded = NameEvidenceClaims.claim_for(&reference).expect("a four-digit mask claims an upload");
     assert_eq!(decoded.failed_verifiers, failures);
@@ -1708,6 +1778,7 @@ fn verify_findings_persist_on_a_failing_verify_and_clear_on_a_pass() {
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
     };
 
     record_dispatch(&mut store, &dispatch_record("n-f1", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate))
@@ -1906,6 +1977,7 @@ fn seeded_claim(nonce: &str, subject: Digest, cost: Option<aether_bloomery::Stud
             session_reuse_saved_micro_usd: None,
             peak_resident_bytes: None,
             violating_paths: Vec::new(),
+            surface_request: None,
         },
     );
     SeededClaims(claims)
@@ -1997,6 +2069,7 @@ fn repair_upload(nonce: &str, subject: Digest) -> UploadedEvidence {
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
     }
 }
 
@@ -2243,6 +2316,7 @@ fn a_passing_review_carrying_advisories_is_kinded_as_one() {
             session_reuse_saved_micro_usd: None,
             peak_resident_bytes: None,
             violating_paths: Vec::new(),
+            surface_request: None,
         };
         let AdmitDecision::Admitted(admission) = admit_uploaded(store, &upload).unwrap() else {
             panic!("a matching passing aggregate verdict is admitted");

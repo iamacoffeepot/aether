@@ -23,7 +23,8 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::reduce::{BloomStatus, RecordedRefusal};
 use crate::values::{
-    CandidateRef, CompositionFinding, Evidence, LandingReceipt, OperatorHold, ResolutionClaim, SpendQuiesce, Wedge,
+    CandidateRef, CompositionFinding, Evidence, LandingReceipt, OperatorHold, ResolutionClaim, SpendQuiesce,
+    SurfacePathRequest, Wedge,
 };
 
 /// The self-contained render input a reconcile pushes outward: the current
@@ -291,6 +292,33 @@ pub struct MemberView {
     /// predates the field still decodes.
     #[serde(default)]
     pub park: Option<crate::MemberPark>,
+    /// The surface amendment this member is waiting on (ADR-0207). `None`
+    /// while it is working, wedged, or resolved. Distinct from [`Self::wedge`]
+    /// (the machinery could not push it through) and from
+    /// [`Self::pending_decision`] (an ADR-0151 question an answer settles):
+    /// this member is waiting on a person to widen a boundary, and more
+    /// attempts cannot help. Trailing and `#[serde(default)]` so a reader that
+    /// predates the field still decodes.
+    #[serde(default)]
+    pub awaiting_surface: Option<AwaitingSurfaceView>,
+}
+
+/// A member awaiting a surface amendment (ADR-0207), rendered so an operator
+/// reads which paths are needed without opening an evidence file.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct AwaitingSurfaceView {
+    /// The stage that declined.
+    pub stage: StageId,
+    /// The sealed revision the requested paths are additions to.
+    pub scope_revision: Digest,
+    /// The lane's evidence artifact.
+    pub evidence: Digest,
+    /// The requested paths and their one-line reasons.
+    pub paths: Vec<SurfacePathRequest>,
+    /// The lane's one-line summary.
+    pub summary: String,
+    /// Requests this member has made in this bloom.
+    pub requests: u32,
 }
 
 /// Why a member stopped dispatching (ADR-0195).

@@ -616,3 +616,36 @@ pub enum MemberExecutorFaultError {
         got: Digest,
     },
 }
+
+/// Why a surface-request admission was refused (ADR-0207).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum SurfaceRequestedError {
+    /// No active bloom with this id.
+    UnknownOrInactiveBloom,
+    /// The request names a workpiece that is not a member of the bloom. The
+    /// composition workpiece lands here too: it declares no surface, so there
+    /// is nothing for a request to amend.
+    NotAMember(WorkpieceId),
+    /// The member holds no dispatched cursor.
+    NotDispatched(WorkpieceId),
+    /// The named stage is not the member's current cursor stage — a stale
+    /// report from an attempt the member has already left.
+    StageMismatch {
+        /// The stage the member is actually waiting at.
+        expected: StageId,
+        /// The stage the request named.
+        got: StageId,
+    },
+    /// The request names a revision other than the member's sealed one. A
+    /// request never widens a revision it does not name.
+    RevisionMismatch {
+        /// The member's sealed scope revision.
+        expected: Digest,
+        /// The revision the request actually named.
+        got: Digest,
+    },
+    /// The declining stage is outside the construct family (Construct, Refine,
+    /// Reconcile) — the only stages whose lane can decline for want of
+    /// surface.
+    NotAConstructFamilyStage(StageId),
+}

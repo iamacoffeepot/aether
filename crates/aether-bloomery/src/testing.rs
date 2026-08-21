@@ -240,6 +240,7 @@ impl Default for MemberView {
             wedge_cause: None,
             cursor: None,
             park: None,
+            awaiting_surface: None,
         }
     }
 }

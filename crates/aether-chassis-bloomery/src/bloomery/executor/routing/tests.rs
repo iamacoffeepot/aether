@@ -185,6 +185,7 @@ fn stream_preserves_the_backend_failure_set_unchanged() {
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
     };
     let (actions, _actions_seen) = Recorder::<ExecutorError>::new();
     let (local, _local_seen) = Recorder::<LocalExecutorError>::returning(vec![reference.clone()]);

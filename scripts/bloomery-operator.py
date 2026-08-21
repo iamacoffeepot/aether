@@ -927,9 +927,15 @@ def member_status_state(member: dict[str, Any], *, has_order: bool) -> str:
     bloom view (ADR-0196). Painting that as `idle` is the mysterious
     idleness the readiness scheduler exists to name: the member is held,
     not forgotten.
+
+    A member awaiting a surface amendment (ADR-0207) gets its own word rather
+    than `held`: a hold is a question an answer settles, and this one is a
+    boundary only an authored successor moves.
     """
     if member.get("wedge"):
         return "WEDGED"
+    if member.get("awaiting_surface"):
+        return "surface"
     if member.get("pending_decision"):
         return "held"
     if member.get("resolution"):
@@ -1657,6 +1663,7 @@ def composition_as_member(bloom: dict[str, Any]) -> dict[str, Any]:
         "wedge": composition.get("wedge") if isinstance(composition.get("wedge"), dict) else None,
         "resolution": None,
         "pending_decision": None,
+        "awaiting_surface": None,
         "blocked_by": None,
         "wedge_cause": None,
         "cursor": cursor.get("stage"),

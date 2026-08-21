@@ -148,6 +148,17 @@ fn push_bloom_interrupts(entries: &mut Vec<Interrupt>, bloom: &BloomView) {
                 stage: None,
             });
         }
+        // A member waiting on a surface amendment is blocked on a *person*
+        // (ADR-0207), so it belongs on the same list as a pending decision:
+        // more attempts cannot move it.
+        if member.awaiting_surface.is_some() {
+            entries.push(Interrupt {
+                kind: InterruptKind::Decision,
+                detail: member_detail(bloom, &member.workpiece),
+                focus: Focus::member(bloom.id, member.workpiece.clone()),
+                stage: None,
+            });
+        }
     }
 }
 

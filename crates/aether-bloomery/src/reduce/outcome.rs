@@ -14,7 +14,8 @@ use super::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,
     AggregateVerifyError, AttemptCompletedError, Decision, FoldConflictError, GrantAttemptsError, HostFaultError,
     IntegrateError, LandError, LandingRejectedError, MemberExecutorFaultError, OperatorHoldError, OperatorRepairError,
-    OrphanClaimReleaseError, ResolveError, SealError, SpliceError, SupersedeError, VerifyFailedError,
+    OrphanClaimReleaseError, ResolveError, SealError, SpliceError, SupersedeError, SurfaceRequestedError,
+    VerifyFailedError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -665,6 +666,25 @@ pub enum Outcome {
         /// The lane's evidence artifact — the diagnosis an operator reads.
         reason: Digest,
     },
+    /// A member declined and asked for the surface its work requires
+    /// (ADR-0207). Appended last so every prior outcome keeps its wire
+    /// discriminant.
+    SurfaceRequested {
+        /// The bloom.
+        bloom: BloomId,
+        /// The member now awaiting a surface amendment.
+        workpiece: WorkpieceId,
+        /// The stage it declined at.
+        stage: StageId,
+        /// The request's content-addressed id — the digest the granting half's
+        /// authorization names.
+        request: Digest,
+        /// How many times this member has requested in this bloom, including
+        /// this one (ADR-0207 §Amendments are budgeted).
+        requests: u32,
+    },
+    /// A surface-request admission was refused.
+    SurfaceRequestRejected(SurfaceRequestedError),
 }
 
 impl Outcome {

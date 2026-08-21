@@ -984,6 +984,7 @@ fn lower_lane_script(script: &LaneScript) -> LaneMode {
     match script {
         LaneScript::Candidate => LaneMode::Pass,
         LaneScript::Decline => LaneMode::Declines,
+        LaneScript::DeclineRequestingSurface => LaneMode::DeclinesRequestingSurface,
         LaneScript::OutsideSurface(_) | LaneScript::VerifyFail(_) => LaneMode::Fail,
         LaneScript::Die => LaneMode::ExitsNonZero,
         LaneScript::WrongSubject => LaneMode::WrongSubject,

@@ -40,6 +40,15 @@ const MAX_PRECHECK_LAPS: u32 = 3;
 /// the file invisible to `git status` instead of visibly wrong.
 const COMMIT_MESSAGE_DELIVERABLE: &str = ".bloomery-commit-message";
 
+/// The file a *declining* run writes its surface request to (ADR-0207),
+/// relative to the run worktree's root.
+///
+/// A sibling of [`COMMIT_MESSAGE_DELIVERABLE`], deliberately not gitignored for
+/// the same reason: the lane reads it back and deletes it, so a regression that
+/// left it behind is visible in `git status` rather than silently folded into
+/// the captured candidate.
+const SURFACE_REQUEST_DELIVERABLE: &str = ".bloomery-surface-request";
+
 /// The lane-owned in-repo instruction source (#3572). Embedded at build time so
 /// the construct lane owns its process natively — the prompt is assembled from
 /// this text, never from `.claude/skills/implement` in the worker's checkout.
@@ -63,6 +72,7 @@ fn stamp_construct_evidence(
     nonce: Option<&str>,
     produced_candidate: bool,
     commit_message: Option<&str>,
+    surface_request: Option<&serde_json::Value>,
     record: &serde_json::Value,
     measured: Measurements,
     fixers: FixerReport,
@@ -85,6 +95,15 @@ fn stamp_construct_evidence(
     {
         object.insert("commit_message".to_owned(), serde_json::Value::String(message.to_owned()));
     }
+    // Same presence rule for the decline's surface request (ADR-0207): a run
+    // that named nothing stamps no key, so the host reads absence as "this run
+    // asked for nothing" rather than as an empty request it would have to
+    // interpret.
+    if let Some(request) = surface_request
+        && let Some(object) = evidence.as_object_mut()
+    {
+        object.insert("surface_request".to_owned(), request.clone());
+    }
     evidence
 }
 
@@ -106,6 +125,27 @@ fn take_commit_message(worktree: &Path) -> Option<String> {
         Err(error) => eprintln!("construct lane: could not remove {}: {error}", path.display()),
     }
     read.ok().map(|message| message.trim().to_owned()).filter(|message| !message.is_empty())
+}
+
+/// Read the run's surface-request deliverable out of `worktree` and remove it,
+/// returning the claim when the agent left a well-formed one (ADR-0207).
+///
+/// Removal runs whether or not the read succeeded, exactly as
+/// [`take_commit_message`] does and for the same reason: the host stages the
+/// whole worktree once this process exits.
+///
+/// Tolerant on the way in — bytes that do not decode as a JSON object yield
+/// nothing rather than failing the lane. The claim is judged at the host's
+/// trust boundary (`SurfaceRequest::normalize`), not here.
+fn take_surface_request(worktree: &Path) -> Option<serde_json::Value> {
+    let path = worktree.join(SURFACE_REQUEST_DELIVERABLE);
+    let read = fs::read_to_string(&path);
+    match fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => eprintln!("construct lane: could not remove {}: {error}", path.display()),
+    }
+    serde_json::from_str::<serde_json::Value>(&read.ok()?).ok().filter(serde_json::Value::is_object)
 }
 
 /// Whether `git status --porcelain` stdout signals a candidate change in the
@@ -205,6 +245,9 @@ pub(super) fn run_construct(args: &TransformArgs) -> Result<()> {
     // the worktree, and a run whose only change *was* the deliverable does not
     // read as having produced a candidate.
     let commit_message = take_commit_message(Path::new("."));
+    // The decline's surface request is the same kind of deliverable and is
+    // taken in the same window, for the same two reasons.
+    let surface_request = take_surface_request(Path::new("."));
     // Inspect the worktree (cwd) for the candidate change the run's whole job is
     // to leave (#3596): the gate demands a substantive conclusion, and an empty
     // diff is nothing to review. Captured after the child is reaped so it reflects
@@ -217,6 +260,7 @@ pub(super) fn run_construct(args: &TransformArgs) -> Result<()> {
             args.nonce.as_deref(),
             produced_candidate,
             commit_message.as_deref(),
+            surface_request.as_ref(),
             &run.record,
             run.measured,
             fixers,
@@ -263,7 +307,8 @@ mod tests {
 
     use super::{
         COMMIT_MESSAGE_DELIVERABLE, CONSTRUCT_IMPLEMENT, CONSTRUCT_INSTRUCTIONS, FixerReport, Measurements,
-        porcelain_signals_candidate, stamp_construct_evidence, take_commit_message,
+        SURFACE_REQUEST_DELIVERABLE, porcelain_signals_candidate, stamp_construct_evidence, take_commit_message,
+        take_surface_request,
     };
     use crate::transform::claude::assemble_construct_prompt;
     use crate::transform::conventions::LANE_CONTEXT;
@@ -274,6 +319,7 @@ mod tests {
         let evidence = stamp_construct_evidence(
             Some("nonce-7"),
             true,
+            None,
             None,
             &record,
             Measurements::default(),
@@ -303,6 +349,7 @@ mod tests {
             None,
             false,
             None,
+            None,
             &serde_json::json!({ "no_result": true }),
             Measurements::default(),
             FixerReport::default(),
@@ -328,6 +375,7 @@ mod tests {
             Some("n-1"),
             true,
             Some(message),
+            None,
             &serde_json::json!({}),
             Measurements::default(),
             FixerReport::default(),
@@ -346,6 +394,7 @@ mod tests {
             Some("n-1"),
             true,
             None,
+            None,
             &serde_json::json!({}),
             Measurements::default(),
             FixerReport { ran: true, changed: true },
@@ -353,6 +402,53 @@ mod tests {
         );
         assert_eq!(evidence["fixers"]["ran"], true);
         assert_eq!(evidence["fixers"]["changed"], true);
+    }
+
+    // Tripwire: the host stages the whole worktree the moment this process
+    // exits, so a deliverable the lane read but did not remove lands inside
+    // the captured candidate — and a run whose only change was the request
+    // would read as having produced work.
+    #[test]
+    fn the_surface_request_deliverable_is_taken_and_removed() {
+        let worktree = scratch_dir("surface-request-taken");
+        let path = worktree.join(SURFACE_REQUEST_DELIVERABLE);
+        fs::write(&path, r#"{"summary": "outside", "paths": [{"path": "crates/b/src/lib.rs", "reason": "caller"}]}"#)
+            .expect("write");
+
+        let claim = take_surface_request(&worktree).expect("a well-formed object is a claim");
+
+        assert_eq!(claim["paths"][0]["path"], "crates/b/src/lib.rs");
+        assert!(!path.exists(), "the deliverable must not survive into the captured tree");
+    }
+
+    // Tripwire: bytes the agent mangled must not fail the lane — the whole
+    // model attempt would be lost over a stray file, and the decline it was
+    // reporting would vanish with it.
+    #[test]
+    fn a_malformed_or_absent_surface_request_is_no_claim_rather_than_a_failure() {
+        let worktree = scratch_dir("surface-request-malformed");
+        assert_eq!(take_surface_request(&worktree), None, "no deliverable is no claim");
+
+        fs::write(worktree.join(SURFACE_REQUEST_DELIVERABLE), "{not json").expect("write");
+        assert_eq!(take_surface_request(&worktree), None, "bytes that do not decode are no claim");
+    }
+
+    // Tripwire: an always-present key would make "this run asked for nothing"
+    // indistinguishable from an empty request the host has to interpret, and
+    // every ordinary construct would look like a decline that named no paths.
+    #[test]
+    fn a_run_that_wrote_no_surface_request_stamps_no_key() {
+        let evidence = stamp_construct_evidence(
+            Some("n-1"),
+            true,
+            None,
+            None,
+            &serde_json::json!({}),
+            Measurements::default(),
+            FixerReport::default(),
+            0,
+        );
+        assert!(evidence.get("surface_request").is_none());
     }
 
     #[test]

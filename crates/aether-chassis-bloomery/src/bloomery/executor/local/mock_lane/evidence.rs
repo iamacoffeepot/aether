@@ -28,6 +28,14 @@ use super::script::LaneMode;
 /// coordinator's `git status --porcelain` sees a candidate to capture.
 pub const CANDIDATE_FILE: &str = "mock-lane-candidate.txt";
 
+/// The path a [`LaneMode::DeclinesRequestingSurface`] run asks for (ADR-0207).
+///
+/// A crate the fixture project has and no scenario's member surface covers, so
+/// `SurfaceRequest::normalize` keeps it rather than dropping it as
+/// already-covered noise — the one property a scenario asserting the request
+/// depends on.
+pub const REQUESTED_PATH: &str = "crates/example-b/src/lib.rs";
+
 /// What a run does once its mode is chosen: the bytes to write (or not), and the
 /// status to exit with.
 pub struct Outcome {
@@ -116,6 +124,7 @@ pub fn outcome_for(command: &str, nonce: &str, mode: LaneMode, subject: Option<&
         | LaneMode::MismatchedNonce
         | LaneMode::NeverExits
         | LaneMode::Declines
+        | LaneMode::DeclinesRequestingSurface
         | LaneMode::WrongSubject => {}
     }
 
@@ -167,10 +176,21 @@ fn construct_outcome(
         "produced_candidate": produced,
         "result_record": result_record(false, Some("wrote the candidate.")),
     });
-    if mode == LaneMode::Declines
+    if matches!(mode, LaneMode::Declines | LaneMode::DeclinesRequestingSurface)
         && let Some(object) = evidence.as_object_mut()
     {
         object.insert("findings".to_owned(), Value::String("the work lies outside the declared surface".to_owned()));
+    }
+    if mode == LaneMode::DeclinesRequestingSurface
+        && let Some(object) = evidence.as_object_mut()
+    {
+        object.insert(
+            "surface_request".to_owned(),
+            json!({
+                "summary": "the caller this change must update lives outside the sealed surface",
+                "paths": [{ "path": REQUESTED_PATH, "reason": "the caller this change must update lives here" }],
+            }),
+        );
     }
     stamp_claimed_subject(&mut evidence, mode, subject);
     Outcome {

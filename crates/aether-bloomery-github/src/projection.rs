@@ -45,8 +45,8 @@
 use std::fmt::Write as _;
 
 use aether_bloomery::{
-    BloomId, CommissionProjection, Digest, LandingReceipt, MemberView, PendingDecisionView, ProjectedReceipt,
-    ProjectionBackend, ViewDocument, WorkpieceId,
+    AwaitingSurfaceView, BloomId, CommissionProjection, Digest, LandingReceipt, MemberView, PendingDecisionView,
+    ProjectedReceipt, ProjectionBackend, ViewDocument, WorkpieceId,
 };
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
@@ -389,6 +389,10 @@ fn render_member_body(bloom: BloomId, member: &MemberView) -> String {
         push_pending_decision(&mut body, pending);
     }
 
+    if let Some(awaiting) = &member.awaiting_surface {
+        push_awaiting_surface(&mut body, awaiting);
+    }
+
     body
 }
 
@@ -422,6 +426,28 @@ fn push_pending_decision(body: &mut String, pending: &PendingDecisionView) {
         body,
         "\nAnswer natively — a signed statement adopting question `{}`; a comment never becomes a command.",
         short_hex(&pending.question)
+    );
+}
+
+/// The surface-amendment section of a member's comment (ADR-0207): the paths a
+/// declining lane asked for, named where a person already looks so the remedy
+/// is readable without opening an evidence file. An outward mirror only —
+/// widening the surface is an authored successor, never a comment.
+fn push_awaiting_surface(body: &mut String, awaiting: &AwaitingSurfaceView) {
+    let _ = writeln!(
+        body,
+        "\n**Surface needed** — the lane declined at {:?} against scope revision `{}`.\n",
+        awaiting.stage,
+        short_hex(&awaiting.scope_revision)
+    );
+    let _ = writeln!(body, "{}\n", awaiting.summary);
+    for request in &awaiting.paths {
+        let _ = writeln!(body, "- `{}` — {}", request.path, request.reason);
+    }
+    let _ = writeln!(
+        body,
+        "\nRequests so far: {}. Widening the surface is an authored successor scope revision.",
+        awaiting.requests
     );
 }
 
