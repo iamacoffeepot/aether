@@ -24,7 +24,9 @@
 //! drain, and a wedged endpoint costs one request per poll interval rather
 //! than blocking the line.
 
+use std::error::Error;
 use std::fmt;
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use reqwest::blocking::Client as BlockingClient;
@@ -56,7 +58,7 @@ impl fmt::Display for WebhookError {
     }
 }
 
-impl std::error::Error for WebhookError {}
+impl Error for WebhookError {}
 
 /// The seam a notification is posted through. `Send + Sync` because it lives
 /// in a capability's runtime state behind an `Arc` and is driven from the
@@ -189,7 +191,9 @@ fn escape_json_string(value: &str, out: &mut String) {
             '\t' => out.push_str("\\t"),
             '\u{8}' => out.push_str("\\b"),
             '\u{c}' => out.push_str("\\f"),
-            control if control < ' ' => out.push_str(&format!("\\u{:04x}", control as u32)),
+            control if control < ' ' => {
+                let _ = write!(out, "\\u{:04x}", control as u32);
+            }
             other => out.push(other),
         }
     }
