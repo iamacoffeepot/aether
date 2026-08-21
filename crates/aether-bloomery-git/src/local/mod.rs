@@ -13,6 +13,24 @@ use crate::command;
 #[cfg(test)]
 mod tests;
 
+/// The checked-in merge driver, embedded so the script that ships in the binary
+/// is the same one review reads. `include_str!` registers it as a build input,
+/// so editing the script rebuilds this crate.
+const MERGE_DRIVER_SOURCE: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/merge-sorted-reexports.py"));
+
+/// The file name the driver is materialized under inside the git directory.
+const MERGE_DRIVER_SCRIPT: &str = "aether-merge-sorted-reexports.py";
+
+/// The driver's `merge.<name>.name` — what git prints when it reports which
+/// driver resolved (or declined) a path.
+const MERGE_DRIVER_NAME: &str = "sorted one-name-per-line re-export lists";
+
+/// The interpreter the driver is invoked through. Named rather than relying on
+/// the script's own shebang because the git directory it is written into is not
+/// guaranteed to be on an executable mount.
+const PYTHON: &str = "python3";
+
 /// A [`GitDataApi`] backed by `git` against one absolute repository path.
 #[derive(Clone, Debug)]
 pub struct LocalGitData {
@@ -55,7 +73,36 @@ impl LocalGitData {
                 String::from_utf8_lossy(&hashed.stderr).trim()
             )));
         }
-        Ok(Self { repo, zero_oid })
+        let local = Self { repo, zero_oid };
+        local.install_merge_driver()?;
+        Ok(local)
+    }
+
+    /// Materialize the sorted-re-export merge driver and point this repository's
+    /// config at it.
+    ///
+    /// Done at open rather than in a separate setup step so a fresh deployment
+    /// has the driver without anyone remembering to install it, and the script
+    /// is written into the git directory rather than read from a checkout
+    /// because the fleet repository is bare — there is no working tree beside it
+    /// holding `scripts/`. The bytes are the checked-in script, embedded at
+    /// compile time, so the reviewable copy and the running copy cannot drift.
+    ///
+    /// Which paths the driver applies to is *not* decided here: that is
+    /// `.gitattributes` in the merged trees, which a candidate can edit. Naming
+    /// the driver in config and selecting it per path in the tree is git's own
+    /// split, and it is why the driver is written to refuse anything that is not
+    /// a sorted `pub use` insertion rather than to trust where it was pointed.
+    fn install_merge_driver(&self) -> Result<(), GitDataError> {
+        let git_dir = PathBuf::from(command::run_ok(&self.repo, &["rev-parse", "--absolute-git-dir"])?);
+        let script = git_dir.join(MERGE_DRIVER_SCRIPT);
+        std::fs::write(&script, MERGE_DRIVER_SOURCE)
+            .map_err(|error| GitDataError::Command(format!("writing {}: {error}", script.display())))?;
+
+        let driver = format!("{} {} %O %A %B", PYTHON, script.display());
+        command::run_ok(&self.repo, &["config", "merge.sorted-reexports.name", MERGE_DRIVER_NAME])?;
+        command::run_ok(&self.repo, &["config", "merge.sorted-reexports.driver", &driver])?;
+        Ok(())
     }
 
     /// The absolute repository path this backend addresses.
