@@ -760,10 +760,7 @@ fn read_ordering_edges(projections: &[&MemberProjection]) -> Vec<MemberDependenc
                 continue;
             }
             if reader.declared_reads.iter().any(|read| writer.declared_crates.contains(read)) {
-                edges.push(MemberDependency {
-                    member: reader.workpiece.clone(),
-                    depends_on: writer.workpiece.clone(),
-                });
+                edges.push(MemberDependency { member: reader.workpiece.clone(), depends_on: writer.workpiece.clone() });
             }
         }
     }
@@ -1185,10 +1182,8 @@ mod tests {
         // aether-data — or say nothing and race it.
         let members = [member("wp-a", 1), member("wp-b", 2)];
 
-        let writing = [
-            declaring("wp-a", 1, &["aether-data"], &[]),
-            declaring("wp-b", 2, &["aether-codec"], &["aether-data"]),
-        ];
+        let writing =
+            [declaring("wp-a", 1, &["aether-data"], &[]), declaring("wp-b", 2, &["aether-codec"], &["aether-data"])];
         assert_eq!(
             resolve_seal_graph(&members, &writing, &[]).expect("acyclic"),
             [MemberDependency { member: WorkpieceId("wp-b".to_owned()), depends_on: WorkpieceId("wp-a".to_owned()) }],
@@ -1198,10 +1193,8 @@ mod tests {
         // The negative case, which is the whole point: A's *surface* covers
         // aether-data (its closure reaches it) but A never declares it, so A is
         // not going to change it and B is owed no wait.
-        let quiet = [
-            declaring("wp-a", 1, &["aether-math"], &[]),
-            declaring("wp-b", 2, &["aether-codec"], &["aether-data"]),
-        ];
+        let quiet =
+            [declaring("wp-a", 1, &["aether-math"], &[]), declaring("wp-b", 2, &["aether-codec"], &["aether-data"])];
         assert!(
             resolve_seal_graph(&members, &quiet, &[]).expect("acyclic").is_empty(),
             "a read against a crate nobody in the seal is changing costs nothing",

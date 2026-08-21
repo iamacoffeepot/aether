@@ -1167,8 +1167,7 @@ fn observe_lane_writes(
             continue;
         }
 
-        let fingerprint =
-            Digest::of_domain_tagged(LEASE_OBSERVATION_DOMAIN, paths.join("\0").as_bytes()).to_hex();
+        let fingerprint = Digest::of_domain_tagged(LEASE_OBSERVATION_DOMAIN, paths.join("\0").as_bytes()).to_hex();
         let event = Event {
             idempotency_key: AdmissionKey::LeaseObservation.of(&format!("{}:{fingerprint}", observed.nonce.0)),
             fact: Fact::LaneWritesObserved {

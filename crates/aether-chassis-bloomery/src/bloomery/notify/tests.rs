@@ -48,8 +48,7 @@ fn store() -> SqliteStore {
 }
 
 fn wedged_member(workpiece: &str) -> MemberView {
-    let wedge =
-        Wedge { stage: StageId::Verify, evidence: digest(9), repeated_verifiers: VerifyFailureSet::default() };
+    let wedge = Wedge { stage: StageId::Verify, evidence: digest(9), repeated_verifiers: VerifyFailureSet::default() };
 
     MemberView { workpiece: WorkpieceId(workpiece.to_owned()), wedge: Some(wedge), ..MemberView::default() }
 }
@@ -70,10 +69,10 @@ fn one_message_per_transition_and_never_a_second() {
     let mut store = store();
     let sink = RecordingSink::default();
 
-    let sealed = bloom(BloomStatus::Sealed, vec![MemberView {
-        workpiece: WorkpieceId("issue-1".to_owned()),
-        ..MemberView::default()
-    }]);
+    let sealed = bloom(
+        BloomStatus::Sealed,
+        vec![MemberView { workpiece: WorkpieceId("issue-1".to_owned()), ..MemberView::default() }],
+    );
     deliver(&mut store, &sink, &sealed, 1).expect("the ledger writes");
     deliver(&mut store, &sink, &sealed, 2).expect("the ledger writes");
 
@@ -125,10 +124,10 @@ fn a_cleared_condition_is_forgotten_and_notifies_again_if_it_returns() {
     deliver(&mut store, &sink, &wedged, 1).expect("the ledger writes");
     assert_eq!(sink.posted().len(), 2, "the seal and the wedge");
 
-    let cleared = bloom(BloomStatus::Sealed, vec![MemberView {
-        workpiece: WorkpieceId("issue-1".to_owned()),
-        ..MemberView::default()
-    }]);
+    let cleared = bloom(
+        BloomStatus::Sealed,
+        vec![MemberView { workpiece: WorkpieceId("issue-1".to_owned()), ..MemberView::default() }],
+    );
     let quiet = deliver(&mut store, &sink, &cleared, 2).expect("the ledger writes");
     assert_eq!(quiet.forgotten, 1, "the wedge key is dropped once its condition clears");
     assert_eq!(sink.posted().len(), 2, "clearing a condition posts nothing");

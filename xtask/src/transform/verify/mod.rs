@@ -2393,10 +2393,9 @@ mod tests {
             if NOT_A_GATE.contains(&job.as_str()) {
                 continue;
             }
-            let (_, member) = GATE_MEMBERS
-                .iter()
-                .find(|(gate, _)| *gate == job)
-                .unwrap_or_else(|| panic!("required CI job `{job}` has no umbrella member and is not declared a non-gate"));
+            let (_, member) = GATE_MEMBERS.iter().find(|(gate, _)| *gate == job).unwrap_or_else(|| {
+                panic!("required CI job `{job}` has no umbrella member and is not declared a non-gate")
+            });
             assert!(verify_check_members().contains(member), "{member} is a required CI job the lane must run");
         }
     }
@@ -2419,7 +2418,8 @@ mod tests {
         // script rather than its first words.
         let lock = verify_command("verify.lock").expect("verify.lock mapped");
         let argv = argv(&lock);
-        let step = workflow::named_step("lock-freshness", "Resolve the dependency graph against the committed lock").run;
+        let step =
+            workflow::named_step("lock-freshness", "Resolve the dependency graph against the committed lock").run;
 
         assert!(
             step.windows(argv.len()).any(|window| window == argv.as_slice()),

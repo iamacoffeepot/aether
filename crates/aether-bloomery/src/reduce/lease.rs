@@ -383,9 +383,6 @@ mod tests {
             &["crates/a/src/lib.rs".to_string()],
         );
 
-        assert!(matches!(
-            decided.outcome,
-            Outcome::LeaseObservationRejected(LeaseObservationError::NotAMember(_))
-        ));
+        assert!(matches!(decided.outcome, Outcome::LeaseObservationRejected(LeaseObservationError::NotAMember(_))));
     }
 }

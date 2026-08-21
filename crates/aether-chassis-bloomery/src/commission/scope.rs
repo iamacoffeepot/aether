@@ -511,7 +511,8 @@ Create then show.\n"
         // share a parser.
         let error = parse_revision(
             "issue-5258",
-            &crate_declared().replace("## Protected files", "## Reads\n\n- crates/aether-data/src/lib.rs\n\n## Protected files"),
+            &crate_declared()
+                .replace("## Protected files", "## Reads\n\n- crates/aether-data/src/lib.rs\n\n## Protected files"),
             None,
         )
         .expect_err("a path in a reads block must refuse");
@@ -523,10 +524,8 @@ Create then show.\n"
     fn both_declaration_blocks_together_are_refused() {
         // Two answers to "what does this work intend" would leave the tier
         // resolver picking one silently.
-        let markdown = crate_declared().replace(
-            "## Declared crates",
-            "## Declared surface\n\ncrates/aether-math/**\n\n## Declared crates",
-        );
+        let markdown = crate_declared()
+            .replace("## Declared crates", "## Declared surface\n\ncrates/aether-math/**\n\n## Declared crates");
         let error = parse_revision("issue-5047", &markdown, None).expect_err("both blocks must refuse");
 
         assert!(error.to_string().contains("not both"), "got {error}");

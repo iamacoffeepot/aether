@@ -333,14 +333,9 @@ pub(super) fn newly_ready_entries(
                 .effects(|| {
                     match spliced_base(record.spec.base(), &ids, &record.dependencies, workpiece, &checkout_of) {
                         SplicedBase::Ready(digest) => Vec::from(construct_entry(bloom, member, sealed(digest))),
-                        SplicedBase::Join { tips } => splice_join_entry(
-                            bloom,
-                            member,
-                            &sealed(record.spec.base()),
-                            &tips,
-                            &checkout_of,
-                            None,
-                        ),
+                        SplicedBase::Join { tips } => {
+                            splice_join_entry(bloom, member, &sealed(record.spec.base()), &tips, &checkout_of, None)
+                        }
                     }
                 }),
         );
@@ -790,7 +785,9 @@ mod tests {
         // not enter the line. What must be absent is the entry itself.
         let owed = newly_ready_entries(record(&after, &spec), spec.id(), &WorkpieceId("wp-c".into()), digest(30));
         assert!(
-            !owed.iter().any(|effect| matches!(effect, Decision::DispatchAttempt { .. } | Decision::AdvanceStage { .. })),
+            !owed
+                .iter()
+                .any(|effect| matches!(effect, Decision::DispatchAttempt { .. } | Decision::AdvanceStage { .. })),
             "resolving C does not start B: B depends on A, not C",
         );
         assert!(

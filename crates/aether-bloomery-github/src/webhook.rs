@@ -130,7 +130,11 @@ impl WebhookSink for ReqwestWebhook {
             // into a log line. Report the class without it.
             .map_err(|error| WebhookError::Transport { detail: transport_class(&error) })?;
         let status = response.status().as_u16();
-        if (200..300).contains(&status) { Ok(()) } else { Err(WebhookError::Status { status }) }
+        if (200..300).contains(&status) {
+            Ok(())
+        } else {
+            Err(WebhookError::Status { status })
+        }
     }
 }
 
@@ -234,10 +238,9 @@ mod tests {
         let sink = ReqwestWebhook::new(secret.to_owned()).expect("the blocking client builds");
         assert!(!format!("{sink:?}").contains("verysecrettoken"));
 
-        for error in [
-            WebhookError::Status { status: 429 },
-            WebhookError::Transport { detail: "could not connect".to_owned() },
-        ] {
+        for error in
+            [WebhookError::Status { status: 429 }, WebhookError::Transport { detail: "could not connect".to_owned() }]
+        {
             assert!(!format!("{error}").contains("verysecrettoken"));
             assert!(!format!("{error:?}").contains("verysecrettoken"));
         }

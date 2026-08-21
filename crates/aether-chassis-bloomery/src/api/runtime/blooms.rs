@@ -19,8 +19,8 @@ use super::hex::{self, digest_from_hex, hex_encode};
 use super::response::{error_response, json};
 use super::state::{ApiCapabilityState, Routed, VerifyPending, admit};
 use crate::api::dto::{
-    AdjudicateRequest, GrantRequest, HoldRequest, OutcomeView, ReleaseAcceptedView, RepairRequest,
-    SuppressionAnswerRequest, SupersedeRequest, WithdrawRequest,
+    AdjudicateRequest, GrantRequest, HoldRequest, OutcomeView, ReleaseAcceptedView, RepairRequest, SupersedeRequest,
+    SuppressionAnswerRequest, WithdrawRequest,
 };
 use crate::bloomery::DoctorReport;
 use crate::control::ControlCore;

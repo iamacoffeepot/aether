@@ -172,7 +172,13 @@ fn owed_aggregates(record: &BloomRecord, bloom: BloomId) -> Vec<Decision> {
     };
     let mut owed = Vec::new();
     if record.deferred_aggregates.contains(&StageId::AggregateVerify) {
-        owed.push(owed_aggregate_verify(record, bloom, integration.tree, integration.head, record.aggregate_verify_rolls + 1));
+        owed.push(owed_aggregate_verify(
+            record,
+            bloom,
+            integration.tree,
+            integration.head,
+            record.aggregate_verify_rolls + 1,
+        ));
     }
     if record.deferred_aggregates.contains(&StageId::AggregateReview) {
         owed.push(owed_aggregate_review(record, bloom, integration.tree, integration.head, record.aggregate_rolls + 1));

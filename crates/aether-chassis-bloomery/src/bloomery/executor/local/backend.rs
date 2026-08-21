@@ -10,9 +10,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_bloomery::{
     BackendObjectId, CandidateRef, Conclusion, ConfigRegistry, ConfigScopes, Digest, EvidenceRef, ExecutionStatus,
-    ExecutorBackend, Nonce, ObservedLaneWrites, PriceTable, ResolvedModel, SharedCorrespondence, StageId,
-    StageVerdict, StudyCost, SuppressionRequest, SurfaceRequest, Transformation, VerifyFailureSet, WorkHandle,
-    WorkOrder, is_model_lane,
+    ExecutorBackend, Nonce, ObservedLaneWrites, PriceTable, ResolvedModel, SharedCorrespondence, StageId, StageVerdict,
+    StudyCost, SuppressionRequest, SurfaceRequest, Transformation, VerifyFailureSet, WorkHandle, WorkOrder,
+    is_model_lane,
 };
 use aether_bloomery_git::command;
 use aether_bloomery_github::parse_study;
@@ -2110,9 +2110,7 @@ impl ExecutorBackend for LocalExecutor {
             registry
                 .runs
                 .iter()
-                .filter_map(|(nonce, run)| {
-                    run.worktree_dir.clone().map(|worktree| (Nonce(nonce.clone()), worktree))
-                })
+                .filter_map(|(nonce, run)| run.worktree_dir.clone().map(|worktree| (Nonce(nonce.clone()), worktree)))
                 .collect()
         };
 

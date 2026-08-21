@@ -26,8 +26,7 @@ use serde::{Deserialize, Serialize};
 use aether_bloomery::{BloomId, ClaimHolder, ClaimRefKind};
 use aether_bloomery::{
     CandidateRef, ConfigRegistry, Digest, Disposition, Event, Forecast, MemberDependency, Membership, Outcome,
-    ScopeRevision, ScopeVerifyInput, ScopeVerifyReport, StageId, Statement, SuppressionVerdict, Workpiece,
-    WorkpieceId,
+    ScopeRevision, ScopeVerifyInput, ScopeVerifyReport, StageId, Statement, SuppressionVerdict, Workpiece, WorkpieceId,
 };
 
 use crate::bloomery::{AdrTouch, Completeness};

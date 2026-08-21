@@ -227,7 +227,12 @@ fn aggregate_rung(
         return rung(name, WhyState::Blocked, hold, None);
     }
     if record.review_park.is_some() && stage == StageId::AggregateReview {
-        return rung(name, WhyState::Blocked, "the review parked on a question an operator must settle".to_owned(), None);
+        return rung(
+            name,
+            WhyState::Blocked,
+            "the review parked on a question an operator must settle".to_owned(),
+            None,
+        );
     }
     if at_park_ceiling(record, stage, rolls) {
         return rung(name, WhyState::Blocked, format!("{rolls} rolls have spent this gate's sealed budget"), None);
@@ -263,7 +268,9 @@ fn land_rung(record: &BloomRecord, verify: &TransitionWhy, review: &TransitionWh
             format!("the bloom is not resolved; {} has not passed", gate.transition),
             Some(gate.transition.clone()),
         ),
-        None => rung(LAND, WhyState::Blocked, "both aggregate gates passed but the bloom is not resolved".to_owned(), None),
+        None => {
+            rung(LAND, WhyState::Blocked, "both aggregate gates passed but the bloom is not resolved".to_owned(), None)
+        }
     }
 }
 
@@ -364,17 +371,12 @@ mod tests {
 
     #[test]
     fn a_member_waiting_on_a_declared_edge_names_the_dependency() {
-        let (snapshot, bloom) = sealed(&[MemberDependency {
-            member: WorkpieceId("wp-b".into()),
-            depends_on: WorkpieceId("wp-a".into()),
-        }]);
+        let (snapshot, bloom) =
+            sealed(&[MemberDependency { member: WorkpieceId("wp-b".into()), depends_on: WorkpieceId("wp-a".into()) }]);
 
         let document = why_of(&snapshot, &bloom).expect("the bloom is known");
-        let waiting = document
-            .members
-            .iter()
-            .find(|member| member.workpiece.0 == "wp-b")
-            .expect("the dependent is a member");
+        let waiting =
+            document.members.iter().find(|member| member.workpiece.0 == "wp-b").expect("the dependent is a member");
 
         assert_eq!(waiting.blocked_by.as_ref().map(|id| id.0.as_str()), Some("wp-a"));
         assert!(waiting.because.contains("wp-a"), "{}", waiting.because);
@@ -402,8 +404,7 @@ mod tests {
         let (snapshot, bloom) = sealed(&[]);
 
         let document = why_of(&snapshot, &bloom).expect("the bloom is known");
-        let names: Vec<&str> =
-            document.chain.iter().map(|rung| rung.transition.as_str()).collect();
+        let names: Vec<&str> = document.chain.iter().map(|rung| rung.transition.as_str()).collect();
 
         assert_eq!(names, vec!["land", "aggregate_review", "aggregate_verify", "fold", "dispatch_member"]);
         assert_eq!(rung(&document.chain, FOLD).waiting_on.as_deref(), Some(super::DISPATCH_MEMBER));

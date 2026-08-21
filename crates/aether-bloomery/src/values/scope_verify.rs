@@ -419,7 +419,8 @@ mod tests {
         // `path_in_surface` drops unparseable globs rather than treating them
         // as covering anything, matching the seal door's fail-closed grammar
         // refusal.
-        let report = verify_scope(&input(vec![step("crates/aether-bloomery/src/lib.rs", 1)], Vec::new(), &["/absolute"]));
+        let report =
+            verify_scope(&input(vec![step("crates/aether-bloomery/src/lib.rs", 1)], Vec::new(), &["/absolute"]));
 
         assert!(report.refused());
     }

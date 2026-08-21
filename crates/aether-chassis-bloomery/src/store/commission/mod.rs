@@ -11,8 +11,7 @@ use std::fmt;
 use aether_bloomery::{
     AuthorityDoor, CommissionApprovalTier, CommissionProjection, CommissionStatementRole, CommissionStatus,
     CommissionValueError, Digest, KeyProvider, Observation, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision,
-    ScopeVerifyInput, ScopeVerifyReport, Statement, Topic, WorkpieceId, digest_of, intent_title,
-    verify_scope,
+    ScopeVerifyInput, ScopeVerifyReport, Statement, Topic, WorkpieceId, digest_of, intent_title, verify_scope,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use rusqlite::{Connection, OptionalExtension, Transaction};
@@ -598,10 +597,7 @@ fn insert_scope_verify_report(
 }
 
 /// The report journaled for `revision`, or `None` when none was written.
-fn load_scope_verify_report(
-    conn: &Connection,
-    revision: Digest,
-) -> Result<Option<ScopeVerifyReport>, CommissionError> {
+fn load_scope_verify_report(conn: &Connection, revision: Digest) -> Result<Option<ScopeVerifyReport>, CommissionError> {
     let canonical: Option<Vec<u8>> = conn
         .query_row(
             "SELECT canonical FROM scope_verify_reports WHERE revision = ?1",
@@ -791,9 +787,7 @@ fn load_statement(conn: &Connection, digest: Digest) -> Result<Option<Statement>
             |row| row.get(0),
         )
         .optional()?;
-    canonical
-        .map(|bytes| from_bytes::<Statement>(&bytes).map_err(|_| CommissionError::MalformedCanonical))
-        .transpose()
+    canonical.map(|bytes| from_bytes::<Statement>(&bytes).map_err(|_| CommissionError::MalformedCanonical)).transpose()
 }
 
 fn first_approval(conn: &Connection, scope: Digest) -> Result<(Option<String>, Option<Digest>), CommissionError> {

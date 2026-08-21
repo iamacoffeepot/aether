@@ -108,7 +108,11 @@ fn push_bloom_events(events: &mut Vec<LoudEvent>, bloom: &BloomView) {
         ));
     }
     if let Some(fault) = &bloom.executor_fault {
-        let terminal = if fault.terminal { "; terminal, recovery is a successor" } else { "" };
+        let terminal = if fault.terminal {
+            "; terminal, recovery is a successor"
+        } else {
+            ""
+        };
         events.push(LoudEvent::new(
             format!("fault:{id}:{}", fault.rolls),
             format!(
@@ -266,13 +270,16 @@ mod tests {
             ..ViewDocument::default()
         };
         let keys: Vec<_> = loud_events(&view).into_iter().map(|event| event.key).collect();
-        assert_eq!(keys, [
-            "status:abababababab:Sealed",
-            "landing:abababababab:2",
-            "wedge:abababababab:issue-1",
-            "host_fault:abababababab:issue-2",
-            "member_park:abababababab:issue-3",
-        ]);
+        assert_eq!(
+            keys,
+            [
+                "status:abababababab:Sealed",
+                "landing:abababababab:2",
+                "wedge:abababababab:issue-1",
+                "host_fault:abababababab:issue-2",
+                "member_park:abababababab:issue-3",
+            ]
+        );
     }
 
     #[test]

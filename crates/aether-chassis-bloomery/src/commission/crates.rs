@@ -264,15 +264,7 @@ mod tests {
 
         assert_eq!(
             surface,
-            [
-                "crates/middle/**",
-                "crates/top/**",
-                "xtask/**",
-                "scripts/**",
-                "docs/guide/**",
-                "tests/**",
-                "Cargo.lock",
-            ],
+            ["crates/middle/**", "crates/top/**", "xtask/**", "scripts/**", "docs/guide/**", "tests/**", "Cargo.lock",],
             "the closure, then the standing roots, then the entries the tier reads"
         );
     }

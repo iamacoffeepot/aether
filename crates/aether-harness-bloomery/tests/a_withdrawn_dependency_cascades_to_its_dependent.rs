@@ -34,8 +34,7 @@ fn a_withdrawn_dependency_cascades_to_its_dependent() {
     let mut harness = FixtureHarness::start("withdraw-cascade");
     // The edge is declared at the seal: without one the reducer has no
     // dependent to strand and nothing here would be refused.
-    let bloom = harness
-        .seal_graph(&[(ANCESTOR, digest(0x51)), (DEPENDENT, digest(0x52))], &[(DEPENDENT, ANCESTOR)]);
+    let bloom = harness.seal_graph(&[(ANCESTOR, digest(0x51)), (DEPENDENT, digest(0x52))], &[(DEPENDENT, ANCESTOR)]);
 
     let refused = harness.apply_operator(bloom, &withdraw(false));
     assert!(
@@ -58,11 +57,8 @@ fn a_withdrawn_dependency_cascades_to_its_dependent() {
     );
 
     let view = harness.bloom(bloom);
-    let dependent = view
-        .members
-        .iter()
-        .find(|member| member.workpiece.0 == DEPENDENT)
-        .expect("the dependent is still listed");
+    let dependent =
+        view.members.iter().find(|member| member.workpiece.0 == DEPENDENT).expect("the dependent is still listed");
     let record = dependent.withdrawn.as_ref().expect("the dependent left with the ancestor");
     assert_eq!(
         record.depends_on.as_ref().map(|id| id.0.as_str()),

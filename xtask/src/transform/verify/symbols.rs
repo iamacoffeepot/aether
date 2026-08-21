@@ -157,8 +157,7 @@ pub(super) fn flags(diff_base: Option<&str>) -> Option<String> {
 fn introduced_symbols(root: &Path, base: &str, table: &Table) -> Vec<Symbol> {
     let mut introduced = Vec::new();
     for path in changed_rust_files(root, base) {
-        let head: Vec<&Symbol> =
-            table.symbols.iter().filter(|symbol| symbol.path == path && !symbol.test).collect();
+        let head: Vec<&Symbol> = table.symbols.iter().filter(|symbol| symbol.path == path && !symbol.test).collect();
         if head.is_empty() {
             continue;
         }
@@ -452,21 +451,30 @@ mod tests {
         // not a flag: rendering it alone would put every new helper in front of
         // a review seat and train it to skip the channel.
         assert!(
-            render(&[], &[Dossier { introduced: symbol("weave", "crates/demo/src/lib.rs"), neighbours: vec![
-                symbol("weaver", "crates/other/src/lib.rs")
-            ] }], &[])
+            render(
+                &[],
+                &[Dossier {
+                    introduced: symbol("weave", "crates/demo/src/lib.rs"),
+                    neighbours: vec![symbol("weaver", "crates/other/src/lib.rs")]
+                }],
+                &[]
+            )
             .is_none()
         );
     }
 
     #[test]
     fn a_rule_hit_names_the_primitive_to_reach_for() {
-        let flagged = render(&[], &[], &[RuleHit {
-            rule: "git-spawn",
-            path: "crates/demo/src/lib.rs".to_owned(),
-            line: "let out = Command::new(\"git\").arg(\"status\");".to_owned(),
-            reach_for: "aether_bloomery_git::command::run",
-        }])
+        let flagged = render(
+            &[],
+            &[],
+            &[RuleHit {
+                rule: "git-spawn",
+                path: "crates/demo/src/lib.rs".to_owned(),
+                line: "let out = Command::new(\"git\").arg(\"status\");".to_owned(),
+                reach_for: "aether_bloomery_git::command::run",
+            }],
+        )
         .expect("a rule hit is flagged");
 
         assert!(flagged.contains("git-spawn"), "{flagged}");

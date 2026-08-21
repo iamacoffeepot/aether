@@ -479,7 +479,11 @@ impl ApprovalPolicy {
             .cloned()
             .collect();
 
-        if protected.is_empty() { self.default } else { self.resolve_surface(&protected) }
+        if protected.is_empty() {
+            self.default
+        } else {
+            self.resolve_surface(&protected)
+        }
     }
 
     /// The most restrictive tier over every path a declared surface permits — the

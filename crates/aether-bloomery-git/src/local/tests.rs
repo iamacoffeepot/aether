@@ -442,17 +442,12 @@ fn reexport_tree(local: &LocalGitData, lib: &str) -> String {
     let src = git(local, &["mktree"], &format!("100644 blob {blob}\tlib.rs\n"));
     let example = git(local, &["mktree"], &format!("040000 tree {src}\tsrc\n"));
     let crates = git(local, &["mktree"], &format!("040000 tree {example}\texample\n"));
-    git(
-        local,
-        &["mktree"],
-        &format!("100644 blob {attributes}\t.gitattributes\n040000 tree {crates}\tcrates\n"),
-    )
+    git(local, &["mktree"], &format!("100644 blob {attributes}\t.gitattributes\n040000 tree {crates}\tcrates\n"))
 }
 
 fn fold(local: &LocalGitData, base: &str, ours: &str, theirs: &str) -> MergeResult {
     let base_sha = local.create_commit("base", &reexport_tree(local, base), &[]).expect("base").sha;
-    let ours_sha =
-        local.create_commit("ours", &reexport_tree(local, ours), from_ref(&base_sha)).expect("ours").sha;
+    let ours_sha = local.create_commit("ours", &reexport_tree(local, ours), from_ref(&base_sha)).expect("ours").sha;
     let theirs_sha =
         local.create_commit("theirs", &reexport_tree(local, theirs), from_ref(&base_sha)).expect("theirs").sha;
     local.create_ref("heads/fold-base", &ours_sha).expect("fold-base");

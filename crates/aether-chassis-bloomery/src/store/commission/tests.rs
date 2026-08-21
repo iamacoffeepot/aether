@@ -617,10 +617,7 @@ fn projection(paths: &[(&str, u32)], surface: &[&str]) -> ScopeVerifyInput {
         schema: SCOPE_VERIFY_SCHEMA,
         named_paths: paths
             .iter()
-            .map(|(path, step)| NamedPath {
-                path: (*path).to_owned(),
-                origin: PathOrigin::PlanStep { step: *step },
-            })
+            .map(|(path, step)| NamedPath { path: (*path).to_owned(), origin: PathOrigin::PlanStep { step: *step } })
             .collect(),
         named_symbols: Vec::new(),
         declared_surface: surface.iter().map(|glob| (*glob).to_owned()).collect(),
@@ -686,9 +683,8 @@ fn a_refusal_outlives_the_repaired_re_freeze() {
 
     let wide = &["crates/aether-bloomery/src/**", "crates/aether-chassis-bloomery/src/**"];
     let repaired = revision_with_surface("issue-5256", None, wide);
-    let stored = store
-        .write_revision_verified(&repaired, Some(&projection(named, wide)))
-        .expect("the widened surface freezes");
+    let stored =
+        store.write_revision_verified(&repaired, Some(&projection(named, wide))).expect("the widened surface freezes");
 
     let reports = stored_reports(&store, "issue-5256");
     assert_eq!(reports.len(), 2, "both the refusal and the pass are journaled");

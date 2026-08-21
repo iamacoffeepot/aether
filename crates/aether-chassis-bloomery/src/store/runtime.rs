@@ -1509,9 +1509,10 @@ impl StoreBackend for SqliteStore {
         // reviewer looking at a request the candidate no longer carries beside
         // one it does.
         let write = self.conn.transaction()?;
-        write.execute("DELETE FROM suppression_request WHERE bloom = ?1 AND workpiece = ?2", rusqlite::params![
-            bloom, workpiece
-        ])?;
+        write.execute(
+            "DELETE FROM suppression_request WHERE bloom = ?1 AND workpiece = ?2",
+            rusqlite::params![bloom, workpiece],
+        )?;
         for request in requests {
             write.execute(
                 "INSERT OR REPLACE INTO suppression_request (bloom, workpiece, path, line, lint, reason) \
@@ -1548,20 +1549,24 @@ impl StoreBackend for SqliteStore {
              ORDER BY workpiece, path, line, lint",
         )?;
         let rows = stmt.query_map(rusqlite::params![bloom], |row| {
-            Ok((row.get::<_, String>(0)?, SuppressionRequest {
-                path: row.get::<_, String>(1)?,
-                line: row.get::<_, u32>(2)?,
-                lint: row.get::<_, String>(3)?,
-                reason: row.get::<_, String>(4)?,
-            }))
+            Ok((
+                row.get::<_, String>(0)?,
+                SuppressionRequest {
+                    path: row.get::<_, String>(1)?,
+                    line: row.get::<_, u32>(2)?,
+                    lint: row.get::<_, String>(3)?,
+                    reason: row.get::<_, String>(4)?,
+                },
+            ))
         })?;
         rows.collect()
     }
 
     fn clear_suppression_requests(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<()> {
-        self.conn.execute("DELETE FROM suppression_request WHERE bloom = ?1 AND workpiece = ?2", rusqlite::params![
-            bloom, workpiece
-        ])?;
+        self.conn.execute(
+            "DELETE FROM suppression_request WHERE bloom = ?1 AND workpiece = ?2",
+            rusqlite::params![bloom, workpiece],
+        )?;
         Ok(())
     }
 
@@ -2246,10 +2251,10 @@ impl StoreBackend for SqliteStore {
              VALUES (?1, ?2, 'enqueued', ?3, ?4, ?5)",
             rusqlite::params![run.commission, run.ordinal, run.intent, run.base, run.subject],
         )?;
-        write.execute("INSERT INTO outbox (topic, payload) VALUES (?1, ?2)", rusqlite::params![
-            Topic::ScopeDispatch.as_str(),
-            run.payload
-        ])?;
+        write.execute(
+            "INSERT INTO outbox (topic, payload) VALUES (?1, ?2)",
+            rusqlite::params![Topic::ScopeDispatch.as_str(), run.payload],
+        )?;
         let sequence = u64::try_from(write.last_insert_rowid()).unwrap_or_default();
         write.commit()?;
         Ok(sequence)

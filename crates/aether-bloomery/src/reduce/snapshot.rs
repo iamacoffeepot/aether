@@ -19,8 +19,8 @@ use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
     Adjudication, BloomSpec, CandidateRef, CompositionFinding, ConfigScopes, DispatchKey, Evidence, EvidenceKind,
     MemberDependency, OperatorHold, OperatorRepair, OrphanClaimReleaseRecord, ResolutionClaim, ResolvedConfigs,
-    SpendQuiesce, StageCatalog, SuppressionDisposition, SurfaceRequest, VerifiedTree, VerifyFailureSet,
-    VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Withdrawal,
+    SpendQuiesce, StageCatalog, SuppressionDisposition, SurfaceRequest, VerifiedTree, VerifyFailureSet, VerifyGateSet,
+    VerifyProof, VerifyReuse, Wedge, Withdrawal,
 };
 
 /// The rebuildable projection state the reducer reads (ADR-0149 §The control
@@ -222,9 +222,13 @@ impl Snapshot {
     /// The paths `workpiece` holds leases on in `bloom`, in path order.
     #[must_use]
     pub fn leases_held(&self, bloom: &BloomId, workpiece: &WorkpieceId) -> Vec<String> {
-        self.file_leases.get(bloom).into_iter().flatten().filter(|(_, lease)| lease.holder == *workpiece).map(
-            |(path, _)| path.clone(),
-        ).collect()
+        self.file_leases
+            .get(bloom)
+            .into_iter()
+            .flatten()
+            .filter(|(_, lease)| lease.holder == *workpiece)
+            .map(|(path, _)| path.clone())
+            .collect()
     }
 
     /// Why `workpiece`'s lane was stopped in `bloom`, while it waits for the
@@ -1046,10 +1050,7 @@ impl Snapshot {
                     }
                     let table = self.file_leases.entry(*bloom).or_default();
                     for path in acquired {
-                        table.insert(
-                            path.clone(),
-                            FileLease { holder: workpiece.clone(), acquired_at: *observed_at },
-                        );
+                        table.insert(path.clone(), FileLease { holder: workpiece.clone(), acquired_at: *observed_at });
                     }
                 }
             }

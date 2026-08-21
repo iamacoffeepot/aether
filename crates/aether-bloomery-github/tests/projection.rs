@@ -381,10 +381,7 @@ fn a_titled_commission_is_distinguishable_in_an_issue_list() {
     open.title = "Refuse a contradictory workpiece".to_owned();
 
     let number = projection.project_commission(&open).expect("create");
-    assert_eq!(
-        projection.client().issue_title(number).as_deref(),
-        Some("Refuse a contradictory workpiece — open"),
-    );
+    assert_eq!(projection.client().issue_title(number).as_deref(), Some("Refuse a contradictory workpiece — open"),);
 
     let landed = CommissionProjection { status: "landed".to_owned(), recorded_issue: Some(number), ..open };
     projection.project_commission(&landed).expect("reconcile");

@@ -354,11 +354,10 @@ impl ScenarioHarness {
             })
             .collect::<Vec<_>>();
         let key = members.iter().map(|(workpiece, _)| *workpiece).collect::<Vec<_>>().join("+");
-        match self.admit(&format!("fixture-graph-seal-{key}"), Fact::GraphSeal {
-            predecessor: None,
-            spec: spec.clone(),
-            edges,
-        }) {
+        match self.admit(
+            &format!("fixture-graph-seal-{key}"),
+            Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges },
+        ) {
             Outcome::Sealed(sealed) => assert_eq!(sealed, bloom, "the sealed id is the spec's content address"),
             other => panic!("the fixture graph seal must seal: {other:?}"),
         }

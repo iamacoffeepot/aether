@@ -5,9 +5,7 @@
 //! answer arrives later, from a person, and this is what it does to the member.
 
 use super::attempt::{DispatchTargets, SealedLine, move_effects_with_candidate};
-use super::{
-    BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress, SuppressionDispositionError,
-};
+use super::{BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress, SuppressionDispositionError};
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{CandidateRef, SuppressionDisposition, VerifyFailure, VerifyFailureSet, Wedge};
 
