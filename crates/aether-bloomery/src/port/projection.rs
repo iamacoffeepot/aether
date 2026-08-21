@@ -412,7 +412,43 @@ pub struct CommissionProjection {
     /// projecting; `find_issue` is advisory crash-recovery only.
     #[serde(default)]
     pub recorded_issue: Option<u64>,
+    /// The commission's own title — the first markdown heading of its intent —
+    /// or empty when the intent carries no heading.
+    ///
+    /// Rendered into the replica's title so six freshly authored commissions
+    /// are six distinguishable rows in an issue list rather than six copies of
+    /// one constant. Trailing and defaulted, so an outbox row enqueued before
+    /// this field existed still decodes and renders the untitled form.
+    #[serde(default)]
+    pub title: String,
 }
+
+/// The first markdown heading of an intent statement's words, or `None`.
+///
+/// Deliberately only a heading. An intent with no heading has no title, and the
+/// closest available substitute — its first line of prose — is a sentence, not a
+/// name; putting one in an issue title reads worse than the untitled form the
+/// caller falls back to.
+///
+/// Capped at [`MAX_TITLE_CHARS`] on a character boundary, because the intent is
+/// authored text and a heading long enough to be refused by the mirror would
+/// stall the replica rather than shorten it.
+#[must_use]
+pub fn intent_title(words: &[u8]) -> Option<String> {
+    let heading = core::str::from_utf8(words)
+        .ok()?
+        .lines()
+        .find_map(|line| line.trim().strip_prefix('#').map(|rest| rest.trim_start_matches('#').trim()))
+        .filter(|heading| !heading.is_empty())?;
+
+    Some(heading.chars().take(MAX_TITLE_CHARS).collect())
+}
+
+/// How many characters of an intent heading reach the replica's title.
+///
+/// GitHub refuses an issue title past 256; this leaves room for the ` — status`
+/// suffix beside it with margin, and a heading this long is a paragraph anyway.
+pub const MAX_TITLE_CHARS: usize = 180;
 
 /// A landing receipt together with the landed bloom's membership — the whole
 /// render input a receipt projection needs.
@@ -461,4 +497,50 @@ pub trait ProjectionBackend {
     /// # Errors
     /// Backend-defined — e.g. the projection surface is unreachable.
     fn project_commission(&self, projection: &CommissionProjection) -> Result<u64, Self::Error>;
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::string::ToString;
+
+    use super::{MAX_TITLE_CHARS, intent_title};
+
+    #[test]
+    fn the_first_heading_names_the_commission() {
+        assert_eq!(
+            intent_title(b"# Refuse a contradictory workpiece\n\nProblem\n").as_deref(),
+            Some("Refuse a contradictory workpiece"),
+        );
+        assert_eq!(
+            intent_title(b"## Problem\n\n# Later\n").as_deref(),
+            Some("Problem"),
+            "the first heading wins whatever its depth",
+        );
+    }
+
+    #[test]
+    fn an_intent_with_no_heading_has_no_title() {
+        // The alternative — the first line of prose — is a sentence, not a name,
+        // and reads worse in an issue list than the untitled fallback does.
+        assert_eq!(intent_title(b"ship the commission store\n\nmore prose\n"), None);
+        assert_eq!(intent_title(b"#\n#   \n"), None, "an empty heading is not a title");
+        assert_eq!(intent_title(b""), None);
+    }
+
+    #[test]
+    fn a_heading_longer_than_the_cap_is_truncated_on_a_character_boundary() {
+        // The intent is authored text. A title past GitHub's own ceiling would
+        // stall the replica rather than shorten it, and slicing bytes out of a
+        // multi-byte heading would panic.
+        let heading = "# ".to_string() + &"é".repeat(MAX_TITLE_CHARS * 2);
+        let title = intent_title(heading.as_bytes()).expect("a long heading is still a heading");
+
+        assert_eq!(title.chars().count(), MAX_TITLE_CHARS);
+        assert!(title.chars().all(|character| character == 'é'));
+    }
+
+    #[test]
+    fn intent_bytes_that_are_not_text_have_no_title() {
+        assert_eq!(intent_title(&[0xff, 0xfe, b'#', b' ', b'x']), None);
+    }
 }

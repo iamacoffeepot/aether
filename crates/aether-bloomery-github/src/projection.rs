@@ -288,8 +288,16 @@ fn commission_key(workpiece: &str) -> String {
 fn render_commission_title(projection: &CommissionProjection) -> String {
     // The replica is not the human board's `issue-N` object. Titling it
     // `{workpiece} — {status}` collides with that numbering (`issue-5215 — open`
-    // reads as another card for #5215). The replica names itself.
-    format!("Bloomery replica — {}", projection.status)
+    // reads as another card for #5215), so the workpiece id stays out of the
+    // title. The commission's own intent heading does not collide, and without
+    // it every replica renders the same constant — six freshly authored
+    // commissions were six indistinguishable rows (#5233). An intent with no
+    // heading has no name to use, and falls back to the constant.
+    let name = match projection.title.trim() {
+        "" => "Bloomery replica",
+        title => title,
+    };
+    format!("{name} — {}", projection.status)
 }
 
 fn render_commission_body(projection: &CommissionProjection) -> String {

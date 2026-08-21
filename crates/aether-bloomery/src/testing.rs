@@ -256,6 +256,7 @@ impl Default for CommissionProjection {
             approval_digest: None,
             status: String::new(),
             recorded_issue: None,
+            title: String::new(),
         }
     }
 }

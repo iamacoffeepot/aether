@@ -125,7 +125,7 @@ fn a_v6_store_gains_empty_commission_tables() {
     let mut store = SqliteStore::open(path).expect("a v6 store migrates");
     assert!(store.list(None).expect("list").is_empty(), "migration invents no commissions");
     let flags: i64 = store.conn.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("user_version");
-    assert_eq!(flags, 11, "the open stamps the current schema");
+    assert_eq!(flags, 12, "the open stamps the current schema");
     assert!(
         store.load_projection(&workpiece("wp-1")).expect("load").is_none(),
         "migration invents no replica-issue numbers"
@@ -706,4 +706,28 @@ fn a_freeze_with_no_projection_reads_as_absent_rather_than_clean() {
     let view = store.load(&workpiece("issue-hand")).expect("load").expect("exists");
     assert!(view.current.is_some(), "the revision itself froze");
     assert_eq!(view.scope_verify, None, "absence is absence, not a clean report");
+}
+
+#[test]
+fn the_projection_snapshot_carries_the_intents_own_heading() {
+    // #5233: the replica's title was a constant, so the workpiece's identity
+    // lived only in the body. The heading is read back out of the stored intent
+    // bytes rather than an index column, so it cannot drift from the intent the
+    // commission was created with.
+    let mut store = memory();
+    let titled = Statement {
+        words: b"# Refuse a contradictory workpiece\n\nProblem statement.\n".to_vec(),
+        provenance: Provenance::ObservationAttestation(Observation { source: "test".to_owned() }),
+        parents: Vec::new(),
+    };
+    store.create(&workpiece("issue-9001"), &titled).expect("create commission");
+
+    let entries = store.drain_topic(Topic::Commission).expect("drain");
+    let payload: CommissionProjection = from_bytes(&entries[0].payload).expect("payload");
+    assert_eq!(payload.title, "Refuse a contradictory workpiece");
+
+    seed(&mut store, "wp-untitled");
+    let entries = store.drain_topic(Topic::Commission).expect("drain");
+    let payload: CommissionProjection = from_bytes(&entries[0].payload).expect("payload");
+    assert_eq!(payload.title, "", "an intent with no heading carries no title");
 }

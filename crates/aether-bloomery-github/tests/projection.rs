@@ -289,6 +289,7 @@ fn commission(workpiece: &str, recorded_issue: Option<u64>) -> CommissionProject
         approval_digest: Some(digest(3)),
         status: "open".to_owned(),
         recorded_issue,
+        title: String::new(),
     }
 }
 
@@ -367,4 +368,36 @@ fn a_landed_commission_closes_only_the_owned_replica() {
     assert_ne!(created, 7);
     assert_eq!(projection.client().issue_is_closed(7), Some(false), "the human issue stays open");
     assert_eq!(projection.client().issue_is_closed(created), Some(true), "the replica closes");
+}
+
+#[test]
+fn a_titled_commission_is_distinguishable_in_an_issue_list() {
+    // #5233: every replica rendered the constant `Bloomery replica — {status}`,
+    // so six freshly authored commissions were six indistinguishable rows and
+    // the only distinguishing text lived in the body. The status suffix stays,
+    // and the reconcile path retitles on a status change exactly as before.
+    let projection = GithubProjection::new(FakeGithub::new());
+    let mut open = commission("issue-9001", None);
+    open.title = "Refuse a contradictory workpiece".to_owned();
+
+    let number = projection.project_commission(&open).expect("create");
+    assert_eq!(
+        projection.client().issue_title(number).as_deref(),
+        Some("Refuse a contradictory workpiece — open"),
+    );
+
+    let landed = CommissionProjection { status: "landed".to_owned(), recorded_issue: Some(number), ..open };
+    projection.project_commission(&landed).expect("reconcile");
+    assert_eq!(
+        projection.client().issue_title(number).as_deref(),
+        Some("Refuse a contradictory workpiece — landed"),
+        "the status suffix still tracks the lifecycle",
+    );
+
+    let untitled = projection.project_commission(&commission("issue-9002", None)).expect("create untitled");
+    assert_eq!(
+        projection.client().issue_title(untitled).as_deref(),
+        Some("Bloomery replica — open"),
+        "an intent with no heading keeps the constant rather than inventing a name",
+    );
 }

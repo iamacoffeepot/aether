@@ -90,7 +90,7 @@ pub const LEDGER_CAVEAT: &str = concat!(
 );
 
 /// The verifier-identity vocabulary's width — the per-cell failure counters are
-/// one slot per identity, so a ninth identity widens them with the vocabulary.
+/// one slot per identity, so a new identity widens them with the vocabulary.
 const IDENTITIES: usize = VerifyFailure::ALL.len();
 
 /// How many failing terminal-Verify verdicts named one verifier identity, in

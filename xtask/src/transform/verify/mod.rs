@@ -356,6 +356,33 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             diff_base_flag: None,
             breadth: Breadth::Workspace,
         }),
+        "verify.lock" => Some(VerifyInvocation {
+            // The `lock-freshness` gate's own check (#5309). `--locked`
+            // resolves the dependency graph against the committed lock and
+            // fails when a manifest edit landed without regenerating it. No
+            // build, so it costs seconds — and it is the one required CI job
+            // that had no umbrella member, so a manifest edit passed every
+            // verify member and was first refused at the landing proposal,
+            // after the wave had already spent its construct and review budget.
+            //
+            // The graph itself goes to stdout, so this member's log is a large
+            // JSON document rather than a diagnostic stream. CI discards it to
+            // `/dev/null`; the lane keeps it, because the exit code is the
+            // verdict and the body is never read.
+            program: "cargo",
+            args: &["metadata", "--format-version", "1", "--locked"],
+            env: &[],
+            requires: &["cargo"],
+            requires_targets: &[],
+            prepare: None,
+            // cargo exits 1 for a lock that does not match the manifests, which
+            // is a defect in the candidate's own tree. Every other nonzero exit
+            // is cargo failing to run at all.
+            finding_exit_codes: &[1],
+            environment_exit_codes: &[],
+            diff_base_flag: None,
+            breadth: Breadth::Workspace,
+        }),
         "verify.suppress" => Some(VerifyInvocation {
             program: "python3",
             args: &["scripts/check-suppressions.py"],
@@ -433,7 +460,16 @@ const SCOPE_LOG: &str = "verify.scope.log";
 /// this list (e.g. a future `verify.test`) needs no change to the reducer's
 /// dispatched stage command.
 fn verify_check_members() -> &'static [&'static str] {
-    &["verify.suppress", "verify.fmt", "verify.clippy", "verify.docs", "verify.test", "verify.dup", "verify.deps"]
+    &[
+        "verify.suppress",
+        "verify.fmt",
+        "verify.clippy",
+        "verify.docs",
+        "verify.test",
+        "verify.dup",
+        "verify.deps",
+        "verify.lock",
+    ]
 }
 
 /// The status the umbrella stamps, from what its members said (ADR-0176's
@@ -2140,23 +2176,79 @@ mod tests {
         }
     }
 
+    /// The umbrella member each required CI job is predicted by.
+    ///
+    /// Every job in `ci-pass`'s `needs:` list is either here or in
+    /// [`NOT_A_GATE`]. A job in neither fails
+    /// [`the_umbrella_covers_every_required_ci_job`] — which is the drift the
+    /// old hand-written member list could not catch, because a gate that was
+    /// never a member had no assertion to fail (#5309).
+    const GATE_MEMBERS: &[(&str, &str)] = &[
+        ("suppressions", "verify.suppress"),
+        ("fmt", "verify.fmt"),
+        ("clippy", "verify.clippy"),
+        ("docs", "verify.docs"),
+        ("test", "verify.test"),
+        ("dup-check", "verify.dup"),
+        ("unused-deps", "verify.deps"),
+        ("lock-freshness", "verify.lock"),
+    ];
+
+    /// Required jobs that judge nothing about the candidate, so no umbrella
+    /// member could predict them.
+    ///
+    /// `changes` is the path filter every other job reads its `if:` from; it
+    /// resolves paths, it does not check the tree. Adding to this list is
+    /// stating that a required job cannot be predicted off Actions, which is a
+    /// claim worth making explicitly rather than by omission.
+    const NOT_A_GATE: &[&str] = &["changes"];
+
     #[test]
     fn the_umbrella_covers_every_required_ci_job() {
         // Tripwire: a member missing here is a gate CI enforces and the lane
         // does not, and the lane exists to predict CI. The gap costs a whole
         // bloom re-entry, because the disagreement surfaces at the landing pull
         // request after integrate, aggregate verify, and review have all run.
-        for id in [
-            "verify.fmt",
-            "verify.clippy",
-            "verify.docs",
-            "verify.test",
-            "verify.dup",
-            "verify.deps",
-            "verify.suppress",
-        ] {
-            assert!(verify_check_members().contains(&id), "{id} is a required CI job the lane must run");
+        //
+        // Read out of `ci-pass`'s own `needs:` rather than restated, so a gate
+        // added to the required list without a member fails here instead of
+        // passing unnoticed the way `lock-freshness` did.
+        for job in workflow::required_jobs() {
+            if NOT_A_GATE.contains(&job.as_str()) {
+                continue;
+            }
+            let (_, member) = GATE_MEMBERS
+                .iter()
+                .find(|(gate, _)| *gate == job)
+                .unwrap_or_else(|| panic!("required CI job `{job}` has no umbrella member and is not declared a non-gate"));
+            assert!(verify_check_members().contains(member), "{member} is a required CI job the lane must run");
         }
+    }
+
+    #[test]
+    fn every_gate_member_is_still_a_required_ci_job() {
+        // The other direction: a member predicting a job that has left
+        // `ci-pass`'s `needs:` spends lane time on a gate that no longer
+        // blocks, and the pairing table above would keep claiming it does.
+        let required = workflow::required_jobs();
+        for (job, member) in GATE_MEMBERS {
+            assert!(required.contains(&(*job).to_owned()), "`{job}` ({member}) is no longer a required CI job");
+        }
+    }
+
+    #[test]
+    fn the_lock_member_runs_the_lock_freshness_gate_command() {
+        // Parity with the gate, which wraps the command in an `if !` so its
+        // stdout can be discarded — the argv is a contiguous run inside that
+        // script rather than its first words.
+        let lock = verify_command("verify.lock").expect("verify.lock mapped");
+        let argv = argv(&lock);
+        let step = workflow::named_step("lock-freshness", "Resolve the dependency graph against the committed lock").run;
+
+        assert!(
+            step.windows(argv.len()).any(|window| window == argv.as_slice()),
+            "the lock-freshness step must run {argv:?}, found {step:?}",
+        );
     }
 
     #[test]
@@ -2349,7 +2441,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
     fn verify_check_members_are_the_ci_parity_ids_in_order() {
         // Tripwire: every id verify.check fans out to must resolve via
         // verify_command, and the order must match ci.yml's job order — a drift
-        // here breaks the umbrella-membership invariant. All seven of CI's
+        // here breaks the umbrella-membership invariant. All eight of CI's
         // required gates, because a member CI enforces and the lane skips is a
         // false green that surfaces at the landing pull request (#4706).
         assert_eq!(
@@ -2362,6 +2454,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
                 "verify.test",
                 "verify.dup",
                 "verify.deps",
+                "verify.lock",
             ],
         );
         for &id in verify_check_members() {
