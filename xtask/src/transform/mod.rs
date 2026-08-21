@@ -107,14 +107,6 @@ pub struct TransformArgs {
     /// continued session through the same flag. Ignored by the verify lane.
     #[arg(long)]
     resume: Option<String>,
-    /// Whether the resumed session is being continued over the tree it left,
-    /// rather than over a tree the host re-materialized. Not a CLI flag: only
-    /// the construct lane's own precheck loop sets it, when it hands its
-    /// session `verify.check` findings without touching the worktree in
-    /// between. It suppresses the reset warning [`lane::resumed_prompt`] adds,
-    /// which would otherwise tell the agent its own edits are gone.
-    #[arg(skip)]
-    continued_in_place: bool,
     /// The construct checkpoint this dispatch resumes from (#4994). Named in
     /// the assembled prompt together with its trust posture; absent on a cold
     /// start from the sealed (or spliced) base. Ignored by every lane except

@@ -219,7 +219,7 @@ fn run_headless_claude_at(
         &args.out,
         "headless claude",
         peak,
-        Some(resumed_prompt(prompt, args.resume.as_deref(), args.continued_in_place).into_bytes()),
+        Some(resumed_prompt(prompt, args.resume.as_deref()).into_bytes()),
     )?;
     // A non-zero exit is the CLI itself failing to run (auth, bad args, crash) —
     // an operational failure, distinct from a task-level error, which a completed

@@ -1794,7 +1794,7 @@ pub(super) fn run_verify_check(args: &TransformArgs, full: bool) -> Result<()> {
     }
 
     let CheckPass { runs, gates, log_names, first_failure_code, sccache_served, peak_resident_bytes } =
-        check_pass(args, Some(&args.out), full)?;
+        check_pass(args, &args.out, full)?;
 
     let status = umbrella_status(&runs.iter().map(|run| run.outcome).collect::<Vec<MemberOutcome>>());
     let failures = failed_verifiers(runs.iter().map(|run| (run.id.as_str(), run.outcome)));
@@ -1835,10 +1835,10 @@ pub(super) fn run_verify_check(args: &TransformArgs, full: bool) -> Result<()> {
 
 /// What one fan-out over [`verify_check_members`] produced.
 ///
-/// Held as a value so the umbrella and the construct lane's precheck share the
+/// Held as a value so the `verify.check` and `verify.base` umbrellas share the
 /// fan-out rather than each spelling it: two loops over the same member list
-/// would be free to drift, and a precheck that predicts a *different* gate set
-/// than the one that judges the candidate is worse than no precheck at all.
+/// would be free to drift, and a whole-workspace pass that judged a *different*
+/// gate set than the scoped one is not the same gate at all.
 struct CheckPass {
     runs: Vec<MemberRun>,
     gates: Vec<GateTiming>,
@@ -1851,11 +1851,9 @@ struct CheckPass {
 /// Run every member in [`verify_check_members`] over the current tree, in
 /// CI-parity order and without short-circuiting on the first failure.
 ///
-/// `logs` is where each member's log and the scope receipt are written; `None`
-/// runs the same members and keeps only what they said, which is what a
-/// precheck needs — its logs are not the lane's evidence and writing them into
-/// the construct output would put a second lane's receipts in that envelope.
-fn check_pass(args: &TransformArgs, logs: Option<&Path>, full: bool) -> Result<CheckPass> {
+/// `logs` is the evidence directory each member's log and the scope receipt are
+/// written into, under the names the envelope's `log` field then lists.
+fn check_pass(args: &TransformArgs, logs: &Path, full: bool) -> Result<CheckPass> {
     // Resolved once for the whole pass, so the counters the evidence carries
     // cover every member's build rather than one member's slice of it, and the
     // peak it reports is the high-water mark of the whole lane.
@@ -1881,12 +1879,9 @@ fn check_pass(args: &TransformArgs, logs: Option<&Path>, full: bool) -> Result<C
     } else {
         Scope::resolve(args.diff_base.as_deref())
     };
-    let mut log_names = Vec::new();
-    if let Some(dir) = logs {
-        let scope_path = dir.join(SCOPE_LOG);
-        fs::write(&scope_path, scope.receipt()).with_context(|| format!("write {}", scope_path.display()))?;
-        log_names.push(String::from(SCOPE_LOG));
-    }
+    let scope_path = logs.join(SCOPE_LOG);
+    fs::write(&scope_path, scope.receipt()).with_context(|| format!("write {}", scope_path.display()))?;
+    let mut log_names = vec![String::from(SCOPE_LOG)];
 
     let mut runs = Vec::with_capacity(verify_check_members().len());
     let mut gates = Vec::with_capacity(verify_check_members().len());
@@ -1920,12 +1915,10 @@ fn check_pass(args: &TransformArgs, logs: Option<&Path>, full: bool) -> Result<C
         };
         let duration_millis = elapsed_millis(gate_started);
 
-        if let Some(dir) = logs {
-            let log_name = format!("{id}.log");
-            let log_path = dir.join(&log_name);
-            fs::write(&log_path, &run.log).with_context(|| format!("write {}", log_path.display()))?;
-            log_names.push(log_name);
-        }
+        let log_name = format!("{id}.log");
+        let log_path = logs.join(&log_name);
+        fs::write(&log_path, &run.log).with_context(|| format!("write {}", log_path.display()))?;
+        log_names.push(log_name);
 
         if !run.outcome.passed() && first_failure_code.is_none() {
             first_failure_code = Some(run.exit_code);
@@ -1942,29 +1935,6 @@ fn check_pass(args: &TransformArgs, logs: Option<&Path>, full: bool) -> Result<C
         sccache_served: cache.as_ref().and_then(CompilerCache::served),
         peak_resident_bytes: peak.peak_resident_bytes(),
     })
-}
-
-/// What the gates that will judge this candidate say about the tree as it
-/// stands — the construct lane's own read, before it hands anything over.
-///
-/// The same member set `verify.check` runs, over the same tree, rendered as the
-/// same `findings` prose a `Refine` lap would be handed. `None` means the gates
-/// are clean and there is nothing to feed back.
-///
-/// A host missing a tool returns `None` rather than a finding: the precheck
-/// cannot compute what the member would have said, and inventing a defect for
-/// the lane to chase is worse than letting `verify.check` report the same
-/// preflight miss itself, on its own channel.
-///
-/// # Errors
-/// Writing a member's log or spawning a gate faulted.
-pub(super) fn precheck_findings(args: &TransformArgs) -> Result<Option<String>> {
-    let mut missing = preflight_tools();
-    missing.extend(tools::preflight_targets(&required_targets()));
-    if !missing.is_empty() {
-        return Ok(None);
-    }
-    Ok(verify_findings(&check_pass(args, None, false)?.runs))
 }
 
 #[cfg(test)]
