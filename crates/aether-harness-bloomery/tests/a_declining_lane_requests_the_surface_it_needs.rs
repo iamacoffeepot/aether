@@ -29,10 +29,8 @@ fn a_declining_lane_requests_the_surface_it_needs() {
     );
     let bloom = harness.seal_member("wp", digest(0x51));
 
-    harness.run_until(
-        |harness| harness.bloom(bloom).members.iter().any(|member| member.awaiting_surface.is_some()),
-        40,
-    );
+    harness
+        .run_until(|harness| harness.bloom(bloom).members.iter().any(|member| member.awaiting_surface.is_some()), 40);
 
     let view = harness.bloom(bloom);
     let member = &view.members[0];

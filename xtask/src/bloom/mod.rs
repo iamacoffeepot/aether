@@ -22,9 +22,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
 
+use crate::bloom::amend::AmendArgs;
 use crate::bloom::client::{Client, bloom_in};
 use crate::bloom::plan::{BaseChoice, ProjectionInput};
-use crate::bloom::amend::AmendArgs;
 use crate::bloom::roll::RollArgs;
 use crate::bloom::upgrade::UpgradeArgs;
 
@@ -290,11 +290,8 @@ fn run_withdraw(client: &Client<'_>, args: &WithdrawArgs) -> Result<String> {
         bail!("bloom {} has no member {}", args.bloom_id, args.workpiece);
     }
 
-    let request = dto::WithdrawRequest {
-        reason: args.reason.clone(),
-        operator: args.operator.clone(),
-        cascade: args.cascade,
-    };
+    let request =
+        dto::WithdrawRequest { reason: args.reason.clone(), operator: args.operator.clone(), cascade: args.cascade };
     Ok(render_outcome(&client.withdraw(&args.bloom_id, &args.workpiece, &request)?.outcome))
 }
 

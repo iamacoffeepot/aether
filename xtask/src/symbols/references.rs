@@ -167,8 +167,8 @@ pub fn search(symbol: &str, rev: &str, surface: &[String]) -> Result<ReferenceSe
     if !is_identifier(symbol) {
         bail!("`{symbol}` is not a Rust identifier: a reference search takes a bare symbol name");
     }
-    let root = command::run_ok(Path::new("."), &["rev-parse", "--show-toplevel"])
-        .context("resolve the repository root")?;
+    let root =
+        command::run_ok(Path::new("."), &["rev-parse", "--show-toplevel"]).context("resolve the repository root")?;
     let root = Path::new(&root);
     let at = command::run_ok(root, &["rev-parse", "--verify", &format!("{rev}^{{commit}}")])
         .with_context(|| format!("resolve `{rev}` to a commit"))?;
@@ -206,7 +206,9 @@ pub fn search(symbol: &str, rev: &str, surface: &[String]) -> Result<ReferenceSe
     let mut parse_faults = Vec::new();
     for path in &hits {
         match classify(root, &at, path, symbol) {
-            Ok(role) => paths.push(ClassifiedPath { path: path.clone(), role, covered: path_in_surface(surface, path) }),
+            Ok(role) => {
+                paths.push(ClassifiedPath { path: path.clone(), role, covered: path_in_surface(surface, path) })
+            }
             Err(error) => parse_faults.push(ParseFault { path: path.clone(), error }),
         }
     }
@@ -273,7 +275,11 @@ fn classify(root: &Path, at: &str, path: &str, symbol: &str) -> Result<Role, Str
     let rows = super::extract::extract_parsed(&crate_label(path), path, &file, false);
     let suffix = format!("::{symbol}");
     let defines = rows.iter().any(|row| row.name == symbol || row.name.ends_with(&suffix));
-    Ok(if defines { Role::Defining } else { Role::Referencing })
+    Ok(if defines {
+        Role::Defining
+    } else {
+        Role::Referencing
+    })
 }
 
 /// The crate a workspace path belongs to, for the extractor's module naming.

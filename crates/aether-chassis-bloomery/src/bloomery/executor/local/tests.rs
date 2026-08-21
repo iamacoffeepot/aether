@@ -2801,14 +2801,13 @@ fn a_refine_resumes_the_journaled_construct_session_at_any_context() {
     let construct = test_nonce("construct");
     let refine = test_nonce("refine");
     let runner = ReuseRunner { input_tokens: 400_000, ..ReuseRunner::new(Arc::clone(&seen)) };
-    let exec = LocalExecutor::new(Arc::new(runner), correspondence(), base.path())
-        .with_message_store(member_store(
-            &store,
-            &[
-                member_order_at(&construct, "issue-A", StageId::Construct),
-                member_order_at(&refine, "issue-A", StageId::Refine),
-            ],
-        ));
+    let exec = LocalExecutor::new(Arc::new(runner), correspondence(), base.path()).with_message_store(member_store(
+        &store,
+        &[
+            member_order_at(&construct, "issue-A", StageId::Construct),
+            member_order_at(&refine, "issue-A", StageId::Refine),
+        ],
+    ));
 
     exec.stream_evidence(&exec.submit(&claude_order(digest(5), &construct, "issue-A")).unwrap()).unwrap();
     exec.stream_evidence(&exec.submit(&claude_order(digest(5), &refine, "issue-A")).unwrap()).unwrap();

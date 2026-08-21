@@ -67,9 +67,9 @@ pub(super) fn reduce_surface_requested(
         }));
     }
     if !is_construct_family(stage) {
-        return Decisions::rejected(Outcome::SurfaceRequestRejected(
-            SurfaceRequestedError::NotAConstructFamilyStage(stage),
-        ));
+        return Decisions::rejected(Outcome::SurfaceRequestRejected(SurfaceRequestedError::NotAConstructFamilyStage(
+            stage,
+        )));
     }
     if request.scope_revision != member.scope_revision {
         return Decisions::rejected(Outcome::SurfaceRequestRejected(SurfaceRequestedError::RevisionMismatch {

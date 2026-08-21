@@ -138,7 +138,8 @@ fn launch(
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
 ) -> Result<Option<String>> {
-    let prompt_file = write_prompt(&args.out, &resumed_prompt(prompt, args.resume.as_deref(), args.continued_in_place))?;
+    let prompt_file =
+        write_prompt(&args.out, &resumed_prompt(prompt, args.resume.as_deref(), args.continued_in_place))?;
     let mut command = peak.command(program);
     command
         .args(grok_argv(

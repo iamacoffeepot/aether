@@ -30,9 +30,7 @@ mod tests;
 
 use std::path::{Path, PathBuf};
 
-use aether_bloomery::{
-    KeyId, Tier, TierVerdict, gate_widening, surface_additions, surface_intersection, tier_verdict,
-};
+use aether_bloomery::{KeyId, Tier, TierVerdict, gate_widening, surface_additions, surface_intersection, tier_verdict};
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 
@@ -193,11 +191,7 @@ fn preflight(client: &Client<'_>, args: &AmendArgs, policy_file: &Path) -> Resul
         bail!(
             "{}\nthe amendment is refused: {} above --accept-tier {:?}. The member stays parked.",
             tier::render(&verdict, &source, args.accept_tier.tier()),
-            offending
-                .iter()
-                .map(|(glob, tier)| format!("`{glob}` resolves {tier:?}"))
-                .collect::<Vec<_>>()
-                .join(", "),
+            offending.iter().map(|(glob, tier)| format!("`{glob}` resolves {tier:?}")).collect::<Vec<_>>().join(", "),
             args.accept_tier.tier(),
         );
     }

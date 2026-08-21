@@ -30,9 +30,9 @@ mod source;
 
 pub use executor::{Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend, WorkHandle, WorkOrder};
 pub use projection::{
-    AwaitingSurfaceView, BloomView, CommissionProjection, CompositionCursorView, CompositionView,
-    ExecutorFaultView, HostFaultView, LandingBlock, MemberView, PendingDecisionView, ProjectedReceipt,
-    ProjectionBackend, ReviewParkView, ViewDocument, WedgeCause, WithdrawnView,
+    AwaitingSurfaceView, BloomView, CommissionProjection, CompositionCursorView, CompositionView, ExecutorFaultView,
+    HostFaultView, LandingBlock, MemberView, PendingDecisionView, ProjectedReceipt, ProjectionBackend, ReviewParkView,
+    ViewDocument, WedgeCause, WithdrawnView,
 };
 pub use source::{
     Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome, IntegrateOutcome,

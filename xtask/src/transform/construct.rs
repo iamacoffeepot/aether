@@ -279,7 +279,9 @@ fn session_handle(record: &serde_json::Value) -> Option<String> {
     record
         .get("session_id")
         .and_then(serde_json::Value::as_str)
-        .or_else(|| record.get("result").and_then(|result| result.get("session_id")).and_then(serde_json::Value::as_str))
+        .or_else(|| {
+            record.get("result").and_then(|result| result.get("session_id")).and_then(serde_json::Value::as_str)
+        })
         .filter(|handle| !handle.is_empty())
         .map(str::to_owned)
 }
@@ -457,10 +459,7 @@ mod tests {
         // the handle under `result` would then never resume, and every precheck
         // lap would relaunch cold on a tree it did not build), or threading an
         // empty string, which names no session and spends a full cold run.
-        assert_eq!(
-            super::session_handle(&serde_json::json!({ "session_id": "sess-1" })).as_deref(),
-            Some("sess-1"),
-        );
+        assert_eq!(super::session_handle(&serde_json::json!({ "session_id": "sess-1" })).as_deref(), Some("sess-1"),);
         assert_eq!(
             super::session_handle(&serde_json::json!({ "result": { "session_id": "sess-2" } })).as_deref(),
             Some("sess-2"),

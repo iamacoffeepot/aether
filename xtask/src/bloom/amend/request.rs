@@ -39,10 +39,7 @@ pub fn member<'a>(bloom: &'a BloomView, workpiece: &str) -> Result<&'a MemberVie
 pub fn collect(member: &MemberView, extra: &[String]) -> Result<Requested> {
     let awaiting = member.awaiting_surface.as_ref();
     if awaiting.is_none() && extra.is_empty() {
-        bail!(
-            "member {} carries no surface request; pass --path to amend it anyway",
-            member.workpiece
-        );
+        bail!("member {} carries no surface request; pass --path to amend it anyway", member.workpiece);
     }
 
     let mut globs: Vec<String> = Vec::new();

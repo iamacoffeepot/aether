@@ -414,9 +414,10 @@ impl ApprovalPolicy {
     /// the entry the same way a `human` one does.
     #[must_use]
     pub fn names_file(&self, path: &str) -> bool {
-        self.rules.iter().map(|rule| RulePattern::parse(&rule.glob)).any(|rule| {
-            rule.is_file_granular() && rule.matches_path(path)
-        })
+        self.rules
+            .iter()
+            .map(|rule| RulePattern::parse(&rule.glob))
+            .any(|rule| rule.is_file_granular() && rule.matches_path(path))
     }
 
     /// The declared-surface entries that name one file no file-granular rule
@@ -1064,10 +1065,7 @@ mod tests {
         fn a_file_matched_only_by_a_directory_rule_is_refused() {
             // Treating any matching rule as a naming rule admits a file under
             // every `**` tree in the policy.
-            assert_eq!(
-                unnamed(&["crates/aether-data/src/lib.rs"]),
-                vec!["crates/aether-data/src/lib.rs".to_string()],
-            );
+            assert_eq!(unnamed(&["crates/aether-data/src/lib.rs"]), vec!["crates/aether-data/src/lib.rs".to_string()],);
         }
 
         #[test]

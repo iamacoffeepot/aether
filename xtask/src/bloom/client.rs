@@ -205,9 +205,7 @@ mod tests {
                 _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
             },
             |port| {
-                Client::new(&Endpoint { host: "127.0.0.1".to_owned(), port, token: None })
-                    .journal()
-                    .expect("full walk")
+                Client::new(&Endpoint { host: "127.0.0.1".to_owned(), port, token: None }).journal().expect("full walk")
             },
         );
 

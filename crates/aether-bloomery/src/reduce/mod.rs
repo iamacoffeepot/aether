@@ -55,8 +55,8 @@ pub use error::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError,
     AttemptCompletedError, BaseMismatch, FoldConflictError, GrantAttemptsError, HostFaultError, IntegrateError,
     LandError, LandingRejectedError, MemberExecutorFaultError, OperatorHoldError, OperatorRepairError,
-    OrphanClaimReleaseError, ResolveError, SealConflict, SealError, SpliceError, SupersedeError,
-    SurfaceRequestedError, VerifyFailedError, WithdrawError,
+    OrphanClaimReleaseError, ResolveError, SealConflict, SealError, SpliceError, SupersedeError, SurfaceRequestedError,
+    VerifyFailedError, WithdrawError,
 };
 pub use event::{Event, Fact};
 pub use gate::{Gate, Read, RecordedRead, RecordedRefusal, Refusal};

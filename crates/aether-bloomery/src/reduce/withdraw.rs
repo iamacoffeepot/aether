@@ -382,8 +382,7 @@ mod tests {
         );
         assert_eq!(integration_members(&decisions), None, "there is no artifact left to fold");
 
-        let withdrawn =
-            event("withdraw", Fact::Withdraw { bloom, withdrawals: all.to_vec(), cascade: false });
+        let withdrawn = event("withdraw", Fact::Withdraw { bloom, withdrawals: all.to_vec(), cascade: false });
         let next = step(&snapshot, &withdrawn).0;
         assert!(
             !is_active_unlanded(next.blooms[&bloom].status),

@@ -70,13 +70,8 @@ impl ExecutorReactorCapability {
     /// same intake cycle. It also drains [`Topic::CancelDispatch`] (#5327),
     /// which is the same shell in the other direction: a withdrawn member's
     /// running lane is killed and its order consumed.
-    pub const DRAINED_TOPICS: &'static [Topic] = &[
-        Topic::Dispatch,
-        Topic::AggregateReview,
-        Topic::AggregateVerify,
-        Topic::Redispatch,
-        Topic::CancelDispatch,
-    ];
+    pub const DRAINED_TOPICS: &'static [Topic] =
+        &[Topic::Dispatch, Topic::AggregateReview, Topic::AggregateVerify, Topic::Redispatch, Topic::CancelDispatch];
 }
 
 mod runtime;

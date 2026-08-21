@@ -38,14 +38,13 @@ pub use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
 
 use aether_bloomery::control::{
-    Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, ClaimResult, ClaimSeal, Commit, CommitResult,
-    CancelDispatchPayload, CompleteReleaseResult, DispatchPayload, EnumerateClaims, EnumerateClaimsResult, HealOp,
-    IntegratePayload, MemberClaimReleasePayload,
-    LandPayload, LoadConfigs, LoadConfigsResult, MembershipMutation, MetricsQuery, MetricsQueryResult, MetricsView,
-    ObserveMainline, ObserveMainlineResult, OrphanClaimReleasePayload, OutboxPayload, Query, QueryResult, ReconcileOp,
-    RedispatchPayload, ReplayJournal, ReplayJournalResult, ReviewPass, SpendQuery, SpendQueryResult, SplicePayload,
-    Topic, TransferSeal, held_to_seal_error, held_to_supersede_error, plan_heals, reconcile_op, release_seal_mail,
-    seal_claim_mail, transfer_seal_mail,
+    Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, CancelDispatchPayload, ClaimResult, ClaimSeal,
+    Commit, CommitResult, CompleteReleaseResult, DispatchPayload, EnumerateClaims, EnumerateClaimsResult, HealOp,
+    IntegratePayload, LandPayload, LoadConfigs, LoadConfigsResult, MemberClaimReleasePayload, MembershipMutation,
+    MetricsQuery, MetricsQueryResult, MetricsView, ObserveMainline, ObserveMainlineResult, OrphanClaimReleasePayload,
+    OutboxPayload, Query, QueryResult, ReconcileOp, RedispatchPayload, ReplayJournal, ReplayJournalResult, ReviewPass,
+    SpendQuery, SpendQueryResult, SplicePayload, Topic, TransferSeal, held_to_seal_error, held_to_supersede_error,
+    plan_heals, reconcile_op, release_seal_mail, seal_claim_mail, transfer_seal_mail,
 };
 use aether_bloomery::{
     BloomId, CalibrationDocument, CalibrationLedger, ClaimRefKind, ClaimRefState, DAYS_CAP, Decision, Decisions,
@@ -469,10 +468,8 @@ impl NativeActor for ControlCore {
                 // reach here — its members' refs go one at a time through
                 // `Topic::MemberClaimRelease`, because the bloom is still
                 // walking and still needs its admission ref.
-                if matches!(
-                    decisions.outcome,
-                    Outcome::Landed(_) | Outcome::MembersWithdrawn { terminal: true, .. }
-                ) && let Some(Ok(release)) = release_seal_mail(&decisions)
+                if matches!(decisions.outcome, Outcome::Landed(_) | Outcome::MembersWithdrawn { terminal: true, .. })
+                    && let Some(Ok(release)) = release_seal_mail(&decisions)
                 {
                     ctx.actor::<SourceCapability>().send_detached(&release);
                 }

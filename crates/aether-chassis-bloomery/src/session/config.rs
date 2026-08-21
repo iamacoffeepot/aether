@@ -82,7 +82,11 @@ impl SessionConfig {
     /// and the executor see one table rather than two.
     #[must_use]
     pub fn store_path(&self) -> &str {
-        if self.db_path == MEMORY_SENTINEL { SHARED_MEMORY } else { &self.db_path }
+        if self.db_path == MEMORY_SENTINEL {
+            SHARED_MEMORY
+        } else {
+            &self.db_path
+        }
     }
 
     /// Point an unconfigured pool at a durable file beside the journal store.

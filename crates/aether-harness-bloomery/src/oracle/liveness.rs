@@ -130,16 +130,12 @@ pub fn classify(document: &ViewDocument, outstanding: &[String]) -> Quiescence {
         // a *member's*: every member resolved and the fold is still held, so
         // without this it reads as a bloom that finished.
         let wedged = document.blooms.iter().any(|bloom| {
-            bloom
-                .members
-                .iter()
-                .any(|member| {
-                    member.wedge.is_some()
-                        || member.host_fault.is_some()
-                        || member.park.is_some()
-                        || member.awaiting_surface.is_some()
-                })
-                || bloom.executor_fault.is_some_and(|fault| fault.terminal)
+            bloom.members.iter().any(|member| {
+                member.wedge.is_some()
+                    || member.host_fault.is_some()
+                    || member.park.is_some()
+                    || member.awaiting_surface.is_some()
+            }) || bloom.executor_fault.is_some_and(|fault| fault.terminal)
                 || bloom.operator_hold.is_some()
                 || bloom.review_park.is_some()
         });

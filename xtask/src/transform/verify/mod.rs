@@ -977,7 +977,11 @@ fn run_member_discriminated(
             id: id.to_owned(),
             outcome,
             log,
-            exit_code: if outcome.passed() { 0 } else { exit_code },
+            exit_code: if outcome.passed() {
+                0
+            } else {
+                exit_code
+            },
             findings,
             observation: join_observations(classified.observation(), triaged.observation()),
             flakes: triaged.flakes,
@@ -1436,10 +1440,12 @@ fn append_flake_log(out: &Path, flakes: &[Excused]) {
     }
     let body: String =
         flakes.iter().map(|excused| format!("{}\treplayed {}\n", excused.test, excused.replayed)).collect();
-    if let Err(error) = fs::OpenOptions::new().create(true).append(true).open(out.join("flakes.log")).and_then(|mut file| {
-        use std::io::Write as _;
-        file.write_all(body.as_bytes())
-    }) {
+    if let Err(error) =
+        fs::OpenOptions::new().create(true).append(true).open(out.join("flakes.log")).and_then(|mut file| {
+            use std::io::Write as _;
+            file.write_all(body.as_bytes())
+        })
+    {
         eprintln!("could not append the flake log: {error}");
     }
 }
@@ -1750,12 +1756,7 @@ mod tests {
         /// the failure repeating. That is the direction that keeps a finding a
         /// finding, so a test that says nothing about replays is not silently
         /// excusing anything.
-        fn replay(
-            &mut self,
-            _invocation: &VerifyInvocation,
-            test: &str,
-            at: Option<&str>,
-        ) -> anyhow::Result<Captured> {
+        fn replay(&mut self, _invocation: &VerifyInvocation, test: &str, at: Option<&str>) -> anyhow::Result<Captured> {
             self.replayed.push((test.to_owned(), at.map(ToOwned::to_owned)));
             let scripted = self.replays.get(self.replayed.len() - 1);
             let last_run = self.scripted.get(self.runs.saturating_sub(1)).expect("a replay follows a run");
@@ -2582,8 +2583,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         // candidate that did not write it.
         let invocation = verify_command("verify.test").expect("verify.test mapped");
         let failing = failing_run(&["aether-component::fleetharness_asset_window"]);
-        let mut runner =
-            ScriptedRunner::with_replays(&[(&failing, 100)], &[(&failing, 100), (&failing, 100)]);
+        let mut runner = ScriptedRunner::with_replays(&[(&failing, 100)], &[(&failing, 100), (&failing, 100)]);
 
         let run = run_member_discriminated(
             "verify.test",
@@ -2616,8 +2616,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         // is green, so the candidate is why. Nothing excuses it.
         let invocation = verify_command("verify.test").expect("verify.test mapped");
         let failing = failing_run(&["aether-component::fleetharness_asset_window"]);
-        let mut runner =
-            ScriptedRunner::with_replays(&[(&failing, 100)], &[(&failing, 100), (&passing_run(), 0)]);
+        let mut runner = ScriptedRunner::with_replays(&[(&failing, 100)], &[(&failing, 100), (&passing_run(), 0)]);
 
         let run = run_member_discriminated(
             "verify.test",

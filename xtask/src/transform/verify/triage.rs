@@ -78,10 +78,20 @@ impl Triage {
                  {} rather than handed to a repair lap:",
                 self.flakes.len(),
                 tests_word(self.flakes.len()),
-                if self.flakes.len() == 1 { "it is" } else { "they are" },
-                if self.flakes.len() == 1 { "a flake" } else { "flakes" },
+                if self.flakes.len() == 1 {
+                    "it is"
+                } else {
+                    "they are"
+                },
+                if self.flakes.len() == 1 {
+                    "a flake"
+                } else {
+                    "flakes"
+                },
             ));
-            lines.extend(self.flakes.iter().map(|excused| format!("  {} (replayed {})", excused.test, excused.replayed)));
+            lines.extend(
+                self.flakes.iter().map(|excused| format!("  {} (replayed {})", excused.test, excused.replayed)),
+            );
         }
         if !self.inherited.is_empty() {
             lines.push(format!(
@@ -89,7 +99,11 @@ impl Triage {
                  candidate's to fix:",
                 self.inherited.len(),
                 tests_word(self.inherited.len()),
-                if self.inherited.len() == 1 { "it was" } else { "they were" },
+                if self.inherited.len() == 1 {
+                    "it was"
+                } else {
+                    "they were"
+                },
             ));
             lines.extend(
                 self.inherited.iter().map(|excused| format!("  {} (red at {})", excused.test, excused.replayed)),
@@ -100,7 +114,11 @@ impl Triage {
 }
 
 fn tests_word(count: usize) -> &'static str {
-    if count == 1 { "test" } else { "tests" }
+    if count == 1 {
+        "test"
+    } else {
+        "tests"
+    }
 }
 
 /// What one replay said about the test it was asked about.

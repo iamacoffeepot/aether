@@ -282,8 +282,7 @@ pub fn projections(
     // fallback, because `--surface` is the flag operators actually reach for.
     if let Some(policy) = &input.policy {
         for member in members {
-            let declared =
-                grouped.get(member.workpiece.as_str()).unwrap_or(&input.declared_surface).clone();
+            let declared = grouped.get(member.workpiece.as_str()).unwrap_or(&input.declared_surface).clone();
             if let Some(glob) = policy.unnamed_file_entries(&declared).first() {
                 bail!(
                     "member {} declared surface {glob:?} names one file and no approval-policy rule names that \
@@ -732,9 +731,8 @@ mod tests {
         };
         let members = [member("issue-A", 1)];
 
-        let error =
-            projections(&members, &input, &[("issue-A".to_owned(), "crates/foo/src/lib.rs".to_owned())])
-                .expect_err("a file the policy does not name is refused");
+        let error = projections(&members, &input, &[("issue-A".to_owned(), "crates/foo/src/lib.rs".to_owned())])
+            .expect_err("a file the policy does not name is refused");
         assert!(error.to_string().contains("issue-A"), "the refusal names the member: {error}");
         assert!(error.to_string().contains("crates/foo/src/lib.rs"), "and the entry: {error}");
 

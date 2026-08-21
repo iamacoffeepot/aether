@@ -113,7 +113,10 @@ pub(super) fn read_config(state: &ApiCapabilityState, digest: &str) -> Routed {
         return Routed::Reply(error_response(404, "no stored configuration at that address"));
     };
     let Some(schema) = schema_of(kind) else {
-        return Routed::Reply(error_response(500, &format!("stored config kind `{kind}` is not linked in this binary")));
+        return Routed::Reply(error_response(
+            500,
+            &format!("stored config kind `{kind}` is not linked in this binary"),
+        ));
     };
     match decode_schema(bytes, &schema) {
         Ok(value) => Routed::Reply(json(200, &ConfigValueView { digest: address, kind: kind.to_owned(), value })),
