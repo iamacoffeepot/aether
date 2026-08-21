@@ -317,36 +317,40 @@ mod tests {
 
     // Tripwire: version-1 wire bytes. A signature covers these exact bytes; the
     // encoder may be superseded, never silently changed. Recompute-and-repin
-    // only when introducing a new schema.
+    // only when introducing a new schema, or when the revision grows a trailing
+    // field — `declared_crates` and `declared_reads` append eight bytes of empty
+    // list here, and every constant below is over those bytes, so a signature
+    // made before them covers a different subject.
     const GOLDEN_SCOPE_REVISION_V1: &[u8] = &[
         1, 0, 0, 0, 10, 0, 0, 0, 105, 115, 115, 117, 101, 45, 53, 48, 52, 53, 0, 1, 0, 0, 0, 112, 1, 0, 0, 0, 100, 1,
         0, 0, 0, 110, 1, 0, 0, 0, 25, 0, 0, 0, 99, 114, 97, 116, 101, 115, 47, 97, 101, 116, 104, 101, 114, 45, 98,
         108, 111, 111, 109, 101, 114, 121, 47, 42, 42, 2, 0, 0, 0, 100, 102, 1, 0, 0, 0, 77, 15, 0, 0, 0, 99, 111, 110,
         115, 116, 114, 117, 99, 116, 58, 32, 116, 101, 115, 116, 0, 0, 0, 0, 4, 0, 0, 0, 100, 101, 115, 99, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
     ];
 
     // Tripwire: content address of the version-1 fixture under
     // `aether.bloomery.scope_revision`. Drifts if the domain tag, the hash, or
     // the fixture bytes move.
     const GOLDEN_SCOPE_REVISION_DIGEST: [u8; 32] = [
-        251, 11, 252, 204, 212, 102, 22, 62, 168, 153, 97, 215, 99, 5, 239, 228, 36, 133, 53, 158, 99, 207, 253, 23,
-        13, 58, 186, 139, 246, 97, 105, 120,
+        106, 252, 76, 112, 153, 209, 157, 145, 94, 25, 40, 102, 66, 34, 108, 81, 182, 247, 55, 143, 119, 76, 254, 18,
+        164, 35, 206, 147, 150, 28, 6, 176,
     ];
 
     // Tripwire: ADR-0182 authorization message for Approve over the fixture
     // digest, with words equal to that digest's raw bytes. Drifts if the door
     // discriminant, domain tag, or binding layout changes.
     const GOLDEN_APPROVE_AUTHORIZATION: [u8; 32] = [
-        166, 129, 38, 225, 125, 70, 148, 35, 82, 146, 188, 122, 199, 210, 169, 61, 113, 120, 74, 9, 202, 80, 5, 254,
-        161, 69, 91, 49, 103, 59, 159, 30,
+        161, 51, 115, 65, 247, 125, 10, 176, 31, 204, 141, 138, 218, 104, 255, 144, 86, 6, 212, 83, 154, 88, 59, 163,
+        20, 174, 44, 200, 3, 175, 56, 194,
     ];
 
     // Tripwire: ed25519 signature by seed-7 over the golden authorization
     // message. Drifts if the signed subject or the seed-7 key meaning changes.
     const GOLDEN_APPROVE_SIGNATURE: &[u8] = &[
-        72, 10, 248, 173, 204, 193, 11, 124, 137, 171, 170, 32, 246, 207, 136, 171, 68, 136, 168, 228, 136, 110, 242,
-        126, 118, 55, 49, 14, 85, 254, 6, 195, 151, 213, 135, 54, 117, 219, 214, 220, 137, 74, 132, 86, 180, 252, 29,
-        35, 21, 56, 152, 50, 170, 134, 58, 130, 244, 244, 218, 79, 27, 93, 24, 3,
+        97, 90, 179, 174, 210, 149, 159, 234, 250, 61, 102, 14, 26, 95, 23, 88, 122, 30, 219, 167, 176, 52, 241, 76,
+        175, 91, 181, 109, 147, 201, 201, 36, 15, 38, 106, 116, 95, 93, 135, 27, 232, 220, 64, 137, 12, 40, 238, 11,
+        118, 173, 253, 255, 25, 106, 133, 184, 115, 185, 218, 47, 111, 174, 174, 9,
     ];
 
     #[test]
