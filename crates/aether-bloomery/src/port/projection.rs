@@ -388,6 +388,10 @@ pub struct MemberView {
     /// declared nothing and would have run, and the file it collided on is the
     /// only reason it is waiting. Trailing and `#[serde(default)]` so a reader
     /// that predates the field still decodes.
+    ///
+    /// `None` on every bloom a current coordinator walks: #5401 retracted the
+    /// eviction, so a shared file is merged at integration instead. The slot
+    /// stays for a projection served off a journal an older binary wrote.
     #[serde(default)]
     pub evicted_by: Option<LeaseEvictionView>,
 }
