@@ -532,6 +532,7 @@ mod tests {
             composition: None,
             operator_hold: None,
             blocker: None,
+            leases: Vec::new(),
         }
     }
 

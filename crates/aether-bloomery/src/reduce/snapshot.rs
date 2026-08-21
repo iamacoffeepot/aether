@@ -1250,6 +1250,11 @@ impl Snapshot {
             Decision::RecordWithdrawal { .. } | Decision::MarkBloomWithdrawn { .. } => {
                 self.apply_withdrawal_effect(effect);
             }
+            // Folded by `record_refusals`, which runs over the same effect set
+            // once the per-effect fold is done: a refusal is keyed by gate or by
+            // member and pairs with the dispatch arms that clear it, so it reads
+            // the set as a whole rather than one effect at a time.
+            Decision::RecordRefusal { .. } => {}
             Decision::EmitReceipt(projected) => {
                 if let Some(record) = self.blooms.get_mut(&projected.receipt.bloom) {
                     record.status = BloomStatus::Landed;
@@ -1762,7 +1767,12 @@ impl BloomRecord {
             // A construct-declined park binds the member through
             // `Snapshot::member_parks`, not a pending-decision hold: an
             // adopting answer would re-dispatch the same refused work.
-            | EvidenceKind::ConstructDeclined => {}
+            | EvidenceKind::ConstructDeclined
+            // A suppression request raises no hold and advances no member
+            // (ADR-0193): the case a lane states for the suppressions it
+            // carries is read by a reviewer who does not exist yet at the
+            // moment the member verifies, so the row stands in the log alone.
+            | EvidenceKind::SuppressionRequest => {}
         }
     }
 }
