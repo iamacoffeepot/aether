@@ -1468,7 +1468,8 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
         | Decision::RecordMemberMachinery { .. }
         | Decision::RecordWithdrawal { .. }
         | Decision::MarkBloomWithdrawn { .. }
-        | Decision::RecordAggregateGatePass { .. } => None,
+        | Decision::RecordAggregateGatePass { .. }
+        | Decision::RecordRefusal { .. } => None,
     })
 }
 

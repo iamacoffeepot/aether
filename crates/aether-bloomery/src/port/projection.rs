@@ -380,6 +380,15 @@ pub struct MemberWhy {
     /// (ADR-0196) — the same answer [`MemberView::blocked_by`] carries, from
     /// the same function.
     pub blocked_by: Option<WorkpieceId>,
+    /// The `dispatch_member` guard that refused this member's entry into the
+    /// line, when one is stored (ADR-0206).
+    ///
+    /// Trailing and `#[serde(default)]`, so a reader of an older projection
+    /// still decodes. `None` is the ordinary case: a member that is working,
+    /// resolved, or held out by a rung the chain above already names has
+    /// nothing to refuse.
+    #[serde(default)]
+    pub refusal: Option<RecordedRefusal>,
 }
 
 /// Why one bloom is not advancing (#5281).

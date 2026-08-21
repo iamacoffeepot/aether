@@ -29,8 +29,14 @@ use crate::values::{
 pub struct Decisions {
     /// What the event resolved to.
     pub outcome: Outcome,
-    /// The ordered effects to apply — empty when the outcome is a rejection
-    /// or a duplicate.
+    /// The ordered effects to apply.
+    ///
+    /// Empty for a duplicate, and for a rejection that has nothing to say. An
+    /// operator-visible boundary's rejection carries one
+    /// [`Decision::RecordRefusal`] (ADR-0206) — a rejected event is journaled
+    /// with its effects, so the refusal folds on replay exactly as it did at
+    /// admission. Nothing else rides a rejection: no membership claim, no
+    /// outbox row.
     pub effects: Vec<Decision>,
 }
 

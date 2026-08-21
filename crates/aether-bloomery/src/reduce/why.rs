@@ -24,12 +24,12 @@
 //! is recorded", "member `wp-a` is wedged at Verify" — so it cannot drift
 //! away from the truth without the field drifting with it.
 //!
-//! Where a boundary has recorded an ADR-0206 [`RecordedRefusal`], that refusal
-//! rides the rung verbatim, gate and guard and reads together. Today the fold
-//! is the one converted boundary, so the fold rung is the one that can carry a
-//! refusal; the rest report their stored state with `refusal: None` and gain
-//! their reasons as #5289 converts them. No rung is ever given a fabricated
-//! stand-in for a refusal it does not hold.
+//! Where a boundary has recorded an ADR-0206 refusal, that refusal rides the
+//! rung verbatim — gate, guard, and the values the guard read. Every boundary
+//! in the chain is converted (#5289), and each carries its own stored refusal
+//! when it holds one. A rung with none reports its stored state and
+//! `refusal: None`; no rung is ever given a fabricated stand-in for a refusal
+//! it does not hold, which is the whole distinction above.
 //!
 //! # The answer nests
 //!
@@ -55,11 +55,11 @@ use crate::port::{MemberWhy, TransitionWhy, WhyDocument, WhyState};
 /// The transition names, spelled once. They are the machinery's own words for
 /// these boundaries — the same five ADR-0206 names as its operator-visible set
 /// — so a reader can grep a rung's name and land on the code.
-const LAND: &str = "land";
-const AGGREGATE_REVIEW: &str = "aggregate_review";
-const AGGREGATE_VERIFY: &str = "aggregate_verify";
-const FOLD: &str = "fold";
-const DISPATCH_MEMBER: &str = "dispatch_member";
+const LAND: &str = super::gate::LAND_GATE;
+const AGGREGATE_REVIEW: &str = super::gate::AGGREGATE_REVIEW_GATE;
+const AGGREGATE_VERIFY: &str = super::gate::AGGREGATE_VERIFY_GATE;
+const FOLD: &str = super::gate::FOLD_GATE;
+const DISPATCH_MEMBER: &str = super::gate::DISPATCH_MEMBER_GATE;
 
 /// Why `bloom` is not advancing, or `None` when no such bloom is known.
 #[must_use]
@@ -69,9 +69,17 @@ pub fn why_of(snapshot: &Snapshot, bloom: &BloomId) -> Option<WhyDocument> {
 
     let dispatch = dispatch_rung(record, &members);
     let fold = fold_rung(snapshot, record, *bloom, &dispatch);
-    let verify = aggregate_rung(record, AGGREGATE_VERIFY, StageId::AggregateVerify, record.aggregate_verify_rolls, &fold);
-    let review = aggregate_rung(record, AGGREGATE_REVIEW, StageId::AggregateReview, record.aggregate_rolls, &fold);
-    let land = land_rung(record, &verify, &review);
+    let verify = stored_refusal(
+        aggregate_rung(record, AGGREGATE_VERIFY, StageId::AggregateVerify, record.aggregate_verify_rolls, &fold),
+        snapshot,
+        bloom,
+    );
+    let review = stored_refusal(
+        aggregate_rung(record, AGGREGATE_REVIEW, StageId::AggregateReview, record.aggregate_rolls, &fold),
+        snapshot,
+        bloom,
+    );
+    let land = stored_refusal(land_rung(record, &verify, &review), snapshot, bloom);
 
     Some(WhyDocument {
         bloom: *bloom,
@@ -101,6 +109,7 @@ fn member_answers(snapshot: &Snapshot, record: &BloomRecord, bloom: BloomId) -> 
                 state,
                 because,
                 blocked_by: blocking_ancestor(record, workpiece),
+                refusal: snapshot.member_refusal(&bloom, workpiece).cloned(),
             }
         })
         .collect()
@@ -266,6 +275,29 @@ fn operator_hold(record: &BloomRecord) -> Option<String> {
 
 fn rung(transition: &'static str, state: WhyState, because: String, waiting_on: Option<String>) -> TransitionWhy {
     TransitionWhy { transition: transition.to_owned(), state, because, refusal: None, waiting_on }
+}
+
+/// Attach the ADR-0206 refusal this boundary recorded, when one still stands.
+///
+/// A stored refusal is stronger evidence than the rung's own reading of the
+/// record: the rung infers state from stored fields, and the refusal *is* the
+/// decision that produced that state, with the values the guard consulted. So
+/// it overrides the state to [`WhyState::Refused`] and speaks in the gate's own
+/// words rather than the projection's paraphrase.
+///
+/// It cannot contradict a completed transition, because the fold that records a
+/// boundary's dispatch drops that boundary's refusal in the same breath — the
+/// rung and the refusal are two readings of one write.
+fn stored_refusal(rung: TransitionWhy, snapshot: &Snapshot, bloom: &BloomId) -> TransitionWhy {
+    let Some(refusal) = snapshot.refusal(bloom, &rung.transition) else {
+        return rung;
+    };
+    TransitionWhy {
+        state: WhyState::Refused,
+        because: format!("{} refused at {}", refusal.gate, refusal.guard),
+        refusal: Some(refusal.clone()),
+        ..rung
+    }
 }
 
 #[cfg(test)]

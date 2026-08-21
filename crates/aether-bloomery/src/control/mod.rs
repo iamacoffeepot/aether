@@ -375,7 +375,11 @@ impl Topic {
             // the sibling verdict that arrives second. The landing it leads to
             // reaches the reactor through the `DispatchLand` emitted beside it,
             // so a topic here would enqueue a row nothing drains.
-            | Decision::RecordAggregateGatePass { .. } => None,
+            | Decision::RecordAggregateGatePass { .. }
+            // Snapshot-only: a refusal is precisely the statement that no work
+            // went out (ADR-0206). What reads it is `/why`, off the record; a
+            // topic here would enqueue a row nothing drains.
+            | Decision::RecordRefusal { .. } => None,
         }
     }
 }

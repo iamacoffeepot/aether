@@ -151,9 +151,10 @@ pub(super) fn reduce_adopt_answer(snapshot: &Snapshot, bloom: &BloomId, answer: 
             // ordinary dispatches use, so a hold taken before the owner re-arms
             // still withholds the paid lane (#5100).
             if !record.aggregate_passed.contains(&StageId::AggregateVerify) {
-                effects.push(super::aggregate_verify::gate_aggregate(
+                effects.extend(super::aggregate_verify::gate_aggregate(
                     record,
                     *bloom,
+                    crate::AGGREGATE_VERIFY_GATE,
                     StageId::AggregateVerify,
                     super::aggregate_verify::owed_aggregate_verify(
                         record,
@@ -165,9 +166,10 @@ pub(super) fn reduce_adopt_answer(snapshot: &Snapshot, bloom: &BloomId, answer: 
                 ));
             }
             if !record.aggregate_passed.contains(&StageId::AggregateReview) {
-                effects.push(super::aggregate_verify::gate_aggregate(
+                effects.extend(super::aggregate_verify::gate_aggregate(
                     record,
                     *bloom,
+                    crate::AGGREGATE_REVIEW_GATE,
                     StageId::AggregateReview,
                     super::aggregate_verify::owed_aggregate_review(
                         record,

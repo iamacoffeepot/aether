@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
-use super::gate::RecordedRefusal;
+use super::gate::{AGGREGATE_REVIEW_GATE, AGGREGATE_VERIFY_GATE, LAND_GATE, RecordedRefusal};
 use super::{Decision, Decisions, Event, Fact, Outcome};
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
@@ -133,6 +133,32 @@ pub struct Snapshot {
     /// fold. `#[serde(default)]` is the `surface_requests` precedent.
     #[serde(default)]
     pub lease_evictions: BTreeMap<BloomId, BTreeMap<WorkpieceId, LeaseEviction>>,
+    /// Why a bloom-scoped boundary refused (ADR-0206), keyed by bloom then
+    /// gate name.
+    ///
+    /// Folded from [`Decision::RecordRefusal`] with no workpiece. Keyed by
+    /// gate because that is the question — "why did the land not happen" is
+    /// asked of one boundary at a time, and a boundary's newest refusal is
+    /// the only one that describes the state the record is in now. The entry
+    /// is dropped the moment that boundary's own dispatch is folded, so a
+    /// stored refusal is never a stale account of a transition that has since
+    /// gone out.
+    ///
+    /// Snapshot-level rather than a [`BloomRecord`] field so every existing
+    /// `BloomRecord { … }` literal stays compiling; `#[serde(default)]` is
+    /// the `fold_refusals` precedent.
+    #[serde(default)]
+    pub refusals: BTreeMap<BloomId, BTreeMap<String, RecordedRefusal>>,
+    /// Why one member's attempt dispatch refused (ADR-0206), keyed by bloom
+    /// then workpiece.
+    ///
+    /// Apart from [`Snapshot::refusals`] because member dispatch is decided
+    /// once per member per scheduling pass: folding every member's answer
+    /// into one gate-keyed slot would leave whichever member happened to be
+    /// last in sealed order, which is not an answer about any particular one.
+    /// Dropped when that member's own dispatch is folded.
+    #[serde(default)]
+    pub member_refusals: BTreeMap<BloomId, BTreeMap<WorkpieceId, RecordedRefusal>>,
 }
 
 impl Snapshot {
@@ -194,6 +220,18 @@ impl Snapshot {
     #[must_use]
     pub fn lease_eviction(&self, bloom: &BloomId, workpiece: &WorkpieceId) -> Option<&LeaseEviction> {
         self.lease_evictions.get(bloom)?.get(workpiece)
+    }
+
+    /// Why `gate` last refused for `bloom` (ADR-0206), while it still stands.
+    #[must_use]
+    pub fn refusal(&self, bloom: &BloomId, gate: &str) -> Option<&RecordedRefusal> {
+        self.refusals.get(bloom)?.get(gate)
+    }
+
+    /// Why `workpiece`'s attempt dispatch last refused in `bloom` (ADR-0206).
+    #[must_use]
+    pub fn member_refusal(&self, bloom: &BloomId, workpiece: &WorkpieceId) -> Option<&RecordedRefusal> {
+        self.member_refusals.get(bloom)?.get(workpiece)
     }
 }
 
@@ -772,6 +810,7 @@ impl Snapshot {
         next.record_construct_checkpoint(event, decisions);
         next.record_construct_park(event, decisions);
         next.record_fold_refusal(event, decisions);
+        next.record_refusals(decisions);
         next.record_surface_request(event, decisions);
         next.record_file_leases(event, decisions);
         next
@@ -844,6 +883,64 @@ impl Snapshot {
                 self.fold_refusals.remove(bloom);
             }
             _ => {}
+        }
+    }
+
+    /// Record (or clear) the ADR-0206 refusals this decision set carries.
+    ///
+    /// Driven by the effects rather than by the fact, because a refusal is
+    /// something the *reducer* decided rather than something the admitter
+    /// asserted: a caller cannot plant one by naming a fact.
+    ///
+    /// A dispatch clears the refusal of the boundary it belongs to, in the
+    /// same fold that records it. That pairing is what keeps a stored
+    /// refusal an account of the present rather than of some earlier pass —
+    /// the record answers "why is this not happening", so a boundary that
+    /// has since gone out must hold nothing. Both directions can appear in
+    /// one set (one member dispatches while a sibling refuses), which is why
+    /// the clear runs per effect rather than per set.
+    fn record_refusals(&mut self, decisions: &Decisions) {
+        for effect in &decisions.effects {
+            match effect {
+                Decision::RecordRefusal { bloom, workpiece: Some(workpiece), refusal } => {
+                    self.member_refusals.entry(*bloom).or_default().insert(workpiece.clone(), refusal.clone());
+                }
+                Decision::RecordRefusal { bloom, workpiece: None, refusal } => {
+                    self.refusals.entry(*bloom).or_default().insert(refusal.gate.clone(), refusal.clone());
+                }
+                Decision::DispatchAttempt { bloom, workpiece, .. }
+                | Decision::DispatchSplice { bloom, workpiece, .. } => {
+                    self.clear_member_refusal(bloom, workpiece);
+                }
+                Decision::DispatchAggregateVerify { bloom, .. } => self.clear_refusal(bloom, AGGREGATE_VERIFY_GATE),
+                Decision::DispatchAggregateReview { bloom, .. } => self.clear_refusal(bloom, AGGREGATE_REVIEW_GATE),
+                Decision::DispatchLand { bloom, .. } => self.clear_refusal(bloom, LAND_GATE),
+                _ => {}
+            }
+        }
+    }
+
+    /// Drop `gate`'s stored refusal for `bloom`, and the bloom's entry once it
+    /// holds none.
+    fn clear_refusal(&mut self, bloom: &BloomId, gate: &str) {
+        let Some(gates) = self.refusals.get_mut(bloom) else {
+            return;
+        };
+        gates.remove(gate);
+        if gates.is_empty() {
+            self.refusals.remove(bloom);
+        }
+    }
+
+    /// Drop `workpiece`'s stored dispatch refusal in `bloom`, and the bloom's
+    /// entry once it holds none.
+    fn clear_member_refusal(&mut self, bloom: &BloomId, workpiece: &WorkpieceId) {
+        let Some(members) = self.member_refusals.get_mut(bloom) else {
+            return;
+        };
+        members.remove(workpiece);
+        if members.is_empty() {
+            self.member_refusals.remove(bloom);
         }
     }
 

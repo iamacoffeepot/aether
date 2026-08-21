@@ -242,7 +242,7 @@ pub(super) fn reduce_aggregate_review_executor_fault(
     // judged, so re-running the review is the whole retry — not a re-fold, and
     // not a member lap. The roll stays the critic's own unspent cursor. The
     // helper is what withholds that work order under an operator hold (#5100).
-    effects.push(super::aggregate_verify::aggregate_review_dispatch(
+    effects.extend(super::aggregate_verify::aggregate_review_dispatch(
         record,
         *bloom,
         integration.tree,

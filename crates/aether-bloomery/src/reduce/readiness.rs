@@ -18,13 +18,18 @@
 //! Reconcile (ADR-0189 / ADR-0196).
 
 use alloc::collections::BTreeSet;
+use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::attempt::{DispatchTargets, SealedLine, move_effects};
+use super::boundary::EffectBoundary;
+use super::gate::DISPATCH_MEMBER_GATE;
 use super::splice::{SplicedBase, checkout_from, spliced_base};
 use super::{BloomRecord, BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress};
 use crate::digest::Digest;
 use crate::ids::{BloomId, WorkpieceId};
+use crate::reads;
 use crate::values::{
     BloomSpec, ConfigRegistry, MemberCandidate, MemberDependency, Membership, StageCatalog, VerifyFailureSet,
 };
@@ -268,42 +273,77 @@ pub(super) fn newly_ready_entries(
     let ids: Vec<WorkpieceId> = record.spec.members().iter().map(|member| member.workpiece.clone()).collect();
     let mut effects = Vec::new();
     for member in record.spec.members() {
-        if member.workpiece == *just_resolved {
-            continue;
-        }
-        if record.claims.contains_key(&member.workpiece)
+        // The member that just resolved, and one already claimed or already
+        // out, are not candidates for *entry* at all — this loop is asking
+        // which members the claim just unblocked. ADR-0206 keeps those as
+        // ordinary control flow: an operator does not ask why a member that is
+        // already running did not start again, and recording an answer for one
+        // would put a refusal on every healthy member of every fold.
+        if member.workpiece == *just_resolved
+            || record.claims.contains_key(&member.workpiece)
             || record.progress.contains_key(&member.workpiece)
-            || record.wedged.contains_key(&member.workpiece)
-            // A withdrawn member has left the line for good (#5327): it is
-            // owed no entry however its dependencies resolve.
-            || record.withdrawn.contains_key(&member.workpiece)
         {
             continue;
         }
-        if !dependencies_resolved(&resolved, &record.dependencies, &member.workpiece) {
-            continue;
-        }
+        let workpiece = &member.workpiece;
         let sealed = |base: Digest| SealedLine {
             configs: member.configs.layered_over(record.spec.configs()),
             catalog: &record.stage_catalog,
             base,
             held: record.operator_hold.is_some(),
         };
-        match spliced_base(record.spec.base(), &ids, &record.dependencies, &member.workpiece, &checkout_of) {
-            SplicedBase::Ready(digest) => {
-                effects.extend(construct_entry(bloom, member, sealed(digest)));
-            }
-            SplicedBase::Join { tips } => {
-                effects.extend(splice_join_entry(
-                    bloom,
-                    member,
-                    &sealed(record.spec.base()),
-                    &tips,
-                    &checkout_of,
-                    None,
-                ));
-            }
-        }
+        effects.extend(
+            EffectBoundary::new(DISPATCH_MEMBER_GATE, bloom, Some(workpiece.clone()))
+                // A withdrawn member has left the line for good (#5327): it is
+                // owed no entry however its dependencies resolve.
+                .require(
+                    "not_withdrawn",
+                    || !record.withdrawn.contains_key(workpiece),
+                    || {
+                        reads![
+                            withdrawn_by: record
+                                .withdrawn
+                                .get(workpiece)
+                                .map_or_else(String::new, |withdrawal| withdrawal.operator.clone()),
+                        ]
+                    },
+                )
+                .require(
+                    "not_wedged",
+                    || !record.wedged.contains_key(workpiece),
+                    || {
+                        reads![
+                            wedged_at: record
+                                .wedged
+                                .get(workpiece)
+                                .map_or_else(String::new, |wedge| format!("{:?}", wedge.stage)),
+                        ]
+                    },
+                )
+                .require(
+                    "dependencies_resolved",
+                    || dependencies_resolved(&resolved, &record.dependencies, workpiece),
+                    || {
+                        reads![
+                            blocked_by: blocking_ancestor(record, workpiece)
+                                .map_or_else(String::new, |ancestor| ancestor.0),
+                        ]
+                    },
+                )
+                .effects(|| {
+                    match spliced_base(record.spec.base(), &ids, &record.dependencies, workpiece, &checkout_of) {
+                        SplicedBase::Ready(digest) => Vec::from(construct_entry(bloom, member, sealed(digest))),
+                        SplicedBase::Join { tips } => splice_join_entry(
+                            bloom,
+                            member,
+                            &sealed(record.spec.base()),
+                            &tips,
+                            &checkout_of,
+                            None,
+                        ),
+                    }
+                }),
+        );
     }
     effects
 }

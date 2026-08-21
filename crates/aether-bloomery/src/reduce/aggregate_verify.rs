@@ -7,12 +7,19 @@
 //! together do not. Without this gate the landing CI is what discovers that,
 //! downstream of the point where the bloom can still route it back to an owner.
 
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use super::attempt::stage_binding;
+use super::boundary::EffectBoundary;
 use super::composition::{Refusal, finding_of, reweave};
+use super::gate::{AGGREGATE_REVIEW_GATE, AGGREGATE_VERIFY_GATE};
 use super::verify_memo::proof_of;
 use super::{AggregateVerifyError, BloomRecord, BloomStatus, Decision, Decisions, Outcome, Snapshot};
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId};
+use crate::reads;
 use crate::values::{Evidence, Transformation};
 
 /// Fallback when a sealed catalog binds no retry budget: one attempt, then the ceiling.
@@ -38,10 +45,21 @@ pub(super) fn at_park_ceiling(record: &BloomRecord, stage: StageId, rolls: u32) 
 /// Under an operator hold the work order is withheld and a
 /// [`Decision::DeferAggregate`] is recorded instead (#5100), the same swap
 /// [`super::attempt::move_effects_with_candidate`] makes for a member lap.
-pub(super) fn aggregate_verify_dispatch(record: &BloomRecord, bloom: BloomId, tree: Digest, head: Digest) -> Decision {
+pub(super) fn aggregate_verify_dispatch(
+    record: &BloomRecord,
+    bloom: BloomId,
+    tree: Digest,
+    head: Digest,
+) -> Vec<Decision> {
     let roll = record.aggregate_verify_rolls + 1;
 
-    gate_aggregate(record, bloom, StageId::AggregateVerify, owed_aggregate_verify(record, bloom, tree, head, roll))
+    gate_aggregate(
+        record,
+        bloom,
+        AGGREGATE_VERIFY_GATE,
+        StageId::AggregateVerify,
+        owed_aggregate_verify(record, bloom, tree, head, roll),
+    )
 }
 
 /// The dispatch that hands a built fold to the critic: the `AggregateReview`
@@ -53,10 +71,16 @@ pub(super) fn aggregate_verify_dispatch(record: &BloomRecord, bloom: BloomId, tr
 /// orders. Each retry path goes through [`gate_aggregate`] with its own roll so
 /// it cannot hand the critic a different tree. Held, the work order is withheld
 /// the same way [`aggregate_verify_dispatch`] withholds its own (#5100).
-pub(super) fn aggregate_review_dispatch(record: &BloomRecord, bloom: BloomId, tree: Digest, head: Digest) -> Decision {
+pub(super) fn aggregate_review_dispatch(
+    record: &BloomRecord,
+    bloom: BloomId,
+    tree: Digest,
+    head: Digest,
+) -> Vec<Decision> {
     gate_aggregate(
         record,
         bloom,
+        AGGREGATE_REVIEW_GATE,
         StageId::AggregateReview,
         owed_aggregate_review(record, bloom, tree, head, record.aggregate_rolls + 1),
     )
@@ -84,22 +108,40 @@ pub(super) fn aggregate_gate_dispatches(
     bloom: BloomId,
     tree: Digest,
     head: Digest,
-) -> alloc::vec::Vec<Decision> {
-    alloc::vec![
-        aggregate_verify_dispatch(record, bloom, tree, head),
-        aggregate_review_dispatch(record, bloom, tree, head),
-    ]
+) -> Vec<Decision> {
+    let mut effects = aggregate_verify_dispatch(record, bloom, tree, head);
+    effects.extend(aggregate_review_dispatch(record, bloom, tree, head));
+    effects
 }
 
 /// Withhold an aggregate work order while the bloom is on the operator brake
 /// (#5100). The one place a [`Decision::DeferAggregate`] is built, so a later
 /// site that reaches for a helper here inherits the gate.
-pub(super) fn gate_aggregate(record: &BloomRecord, bloom: BloomId, stage: StageId, dispatch: Decision) -> Decision {
-    if record.operator_hold.is_some() {
-        Decision::DeferAggregate { bloom, stage }
-    } else {
-        dispatch
-    }
+///
+/// The ADR-0206 boundary for both aggregate dispatches (`gate` names which):
+/// the brake is exactly the "why did this not go out" an operator asks about,
+/// and the deferral row alone says only that something was withheld, never who
+/// withheld it. The refusal rides beside the deferral rather than replacing
+/// it — a release still has to know which orders it owes.
+pub(super) fn gate_aggregate(
+    record: &BloomRecord,
+    bloom: BloomId,
+    gate: &'static str,
+    stage: StageId,
+    dispatch: Decision,
+) -> Vec<Decision> {
+    EffectBoundary::new(gate, bloom, None)
+        .require(
+            "not_on_operator_hold",
+            || record.operator_hold.is_none(),
+            || {
+                reads![
+                    held_by: record.operator_hold.as_ref().map_or_else(String::new, |hold| hold.operator.clone()),
+                    stage: format!("{stage:?}"),
+                ]
+            },
+        )
+        .effects_or(|| alloc::vec![Decision::DeferAggregate { bloom, stage }], || alloc::vec![dispatch])
 }
 
 /// Rebuild the aggregate-verify work order from the catalog, fold, and `roll` as

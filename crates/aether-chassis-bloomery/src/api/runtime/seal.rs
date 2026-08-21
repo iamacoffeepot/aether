@@ -645,8 +645,8 @@ fn resolve_seal_memberships(
                 sealed.approval = approval;
                 sealed_proposals.push(sealed);
             }
-            Decision::Incomplete(incompleteness) => {
-                return Err(error_response(422, &format!("member {member} is incomplete: {incompleteness:?}")));
+            Decision::Incomplete { reason, refusal } => {
+                return Err(error_response(422, &format!("member {member} is incomplete: {reason:?} ({refusal})")));
             }
             Decision::RequiresStatement(_tier) => {
                 // Above-auto: consume the member projection's signed statement, run

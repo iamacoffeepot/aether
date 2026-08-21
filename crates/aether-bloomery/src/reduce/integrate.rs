@@ -1,9 +1,13 @@
 //! Integration and resolution: recording one member's resolution claim, and
 //! folding a complete claim set into the bloom's one artifact (ADR-0152).
 
+use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::aggregate_verify::{aggregate_gate_dispatches, aggregate_review_dispatch, at_park_ceiling};
+use super::boundary::EventBoundary;
+use super::gate::AGGREGATE_VERIFY_GATE;
 use super::lease::resume_entries;
 use super::readiness::newly_ready_entries;
 use super::verify_memo::{proof_of, reuse_of};
@@ -13,7 +17,8 @@ use super::{
 use crate::digest::Digest;
 use crate::ids::BloomId;
 use crate::ids::StageId;
-use crate::values::{CandidateRef, MemberCandidate, ResolutionClaim};
+use crate::reads;
+use crate::values::{CandidateRef, MemberCandidate, ResolutionClaim, VerifyProof};
 
 /// The effects one member's resolution claim produces: the claim itself, the
 /// `provenance` note for the verdict it carries, and — when it completes the
@@ -174,6 +179,12 @@ pub(super) fn reduce_integrate(snapshot: &Snapshot, bloom: &BloomId, claim: &Res
 
     Decisions { outcome: Outcome::Integrated { bloom: *bloom, workpiece: claim.workpiece.clone() }, effects }
 }
+
+/// The `aggregate_verify` boundary (ADR-0206): a complete claim set is folded
+/// and handed to the composite gates, or the record says which guard stopped it.
+///
+/// The unknown-bloom lookup stays an ordinary early return — an addressing
+/// error has no record to file a refusal against.
 pub(super) fn reduce_resolve(
     snapshot: &Snapshot,
     bloom: &BloomId,
@@ -184,52 +195,93 @@ pub(super) fn reduce_resolve(
     let Some(record) = snapshot.blooms.get(bloom) else {
         return Decisions::rejected(Outcome::ResolveRejected(ResolveError::UnknownOrInactiveBloom));
     };
-    if record.status != BloomStatus::Sealed {
-        return Decisions::rejected(Outcome::ResolveRejected(ResolveError::UnknownOrInactiveBloom));
-    }
-    // A member held on a parked question cannot integrate, so a bloom with any
-    // open hold cannot resolve (ADR-0151) — refused before the per-member claim
-    // scan so the pending decision is the named reason, not a bare
-    // MemberNotIntegrated.
-    if let Some(question) = record.holds.iter().next().copied() {
-        return Decisions::rejected(Outcome::ResolveRejected(ResolveError::PendingDecision { question }));
-    }
-    // Every frozen member must carry a resolution claim before the bloom can
-    // resolve — a resolved bloom carries a claim for every member (ADR-0149
-    // §The bloom).
-    if let Some(member) = record
-        .spec
-        .members()
-        .iter()
-        .filter(|member| !record.withdrawn.contains_key(&member.workpiece))
-        .find(|member| !record.claims.contains_key(&member.workpiece))
-    {
-        return Decisions::rejected(Outcome::ResolveRejected(ResolveError::MemberNotIntegrated {
-            workpiece: member.workpiece.clone(),
-        }));
-    }
-    // The claim set checked out, so the fold's head is gated before the bloom
-    // may resolve (ADR-0153): hold the fold on the record and dispatch *both*
-    // whole-bloom gates against it — the claim scan above stays the integrity
-    // gate, the compiler is the mechanical gate, and the critic the judgment
-    // gate. They run together rather than in series because neither reads the
-    // other's verdict, so the bloom pays the larger of the two latencies
-    // instead of their sum; the landing waits on the join of the two passes
-    // (`BloomRecord::aggregate_passed`), and a refusal from either re-weaves
-    // the composition once. The ceiling is the same inclusive park comparison
-    // the verify completion gate uses: a fold whose next roll is at or past
-    // AggregateVerify's catalog budget is refused fail-closed (unreachable
-    // through this reducer — a wedged bloom's members stay closed, so no
-    // re-fold dispatches — but a buggy reactor must not buy a roll the
-    // vocabulary forbids).
+    // The roll this fold would buy, read before the guards so the ceiling guard
+    // and the effects below agree on one number.
     let roll = record.aggregate_verify_rolls + 1;
-    if at_park_ceiling(record, StageId::AggregateVerify, roll) {
-        return Decisions::rejected(Outcome::ResolveRejected(ResolveError::ReviewCeiling {
-            rolls: record.aggregate_verify_rolls,
-        }));
-    }
-    let integration = FoldedIntegration { tree: *tree, head: *head, lineage: lineage.to_vec() };
-    let hold = Decision::RecordIntegration { bloom: *bloom, integration: Some(integration) };
+    let pending = || record.holds.iter().next().copied();
+    let unclaimed = || {
+        record
+            .spec
+            .members()
+            .iter()
+            .filter(|member| !record.withdrawn.contains_key(&member.workpiece))
+            .find(|member| !record.claims.contains_key(&member.workpiece))
+            .map(|member| member.workpiece.clone())
+    };
+
+    EventBoundary::new(AGGREGATE_VERIFY_GATE, *bloom)
+        .require(
+            "bloom_sealed",
+            || record.status == BloomStatus::Sealed,
+            || reads![status: format!("{:?}", record.status), required: "Sealed"],
+            || Outcome::ResolveRejected(ResolveError::UnknownOrInactiveBloom),
+        )
+        // A member held on a parked question cannot integrate, so a bloom with
+        // any open hold cannot resolve (ADR-0151) — guarded before the
+        // per-member claim scan so the pending decision is the named reason,
+        // not a bare MemberNotIntegrated.
+        .require(
+            "no_open_question",
+            || pending().is_none(),
+            || reads![questions: record.holds.len()],
+            || {
+                pending().map_or(Outcome::ResolveRejected(ResolveError::UnknownOrInactiveBloom), |question| {
+                    Outcome::ResolveRejected(ResolveError::PendingDecision { question })
+                })
+            },
+        )
+        // Every frozen member must carry a resolution claim before the bloom
+        // can resolve — a resolved bloom carries a claim for every member
+        // (ADR-0149 §The bloom).
+        .require(
+            "every_member_claimed",
+            || unclaimed().is_none(),
+            || {
+                reads![
+                    unclaimed: unclaimed().map_or_else(String::new, |workpiece| workpiece.0),
+                    claimed: record.claims.len(),
+                ]
+            },
+            || {
+                unclaimed().map_or(Outcome::ResolveRejected(ResolveError::UnknownOrInactiveBloom), |workpiece| {
+                    Outcome::ResolveRejected(ResolveError::MemberNotIntegrated { workpiece })
+                })
+            },
+        )
+        // The ceiling is the same inclusive park comparison the verify
+        // completion gate uses: a fold whose next roll is at or past
+        // AggregateVerify's catalog budget is refused fail-closed (unreachable
+        // through this reducer — a wedged bloom's members stay closed, so no
+        // re-fold dispatches — but a buggy reactor must not buy a roll the
+        // vocabulary forbids).
+        .require(
+            "under_verify_budget",
+            || !at_park_ceiling(record, StageId::AggregateVerify, roll),
+            || reads![roll: roll, spent: record.aggregate_verify_rolls],
+            || Outcome::ResolveRejected(ResolveError::ReviewCeiling { rolls: record.aggregate_verify_rolls }),
+        )
+        .decide(|| folded(snapshot, record, *bloom, *tree, *head, lineage, roll))
+}
+
+/// The effects a passing fold produces: the fold is held on the record, and
+/// both composite gates are dispatched against it — the claim scan above stays
+/// the integrity gate, the compiler is the mechanical gate, and the critic the
+/// judgment gate. They run together rather than in series because neither reads
+/// the other's verdict, so the bloom pays the larger of the two latencies
+/// instead of their sum; the landing waits on the join of the two passes
+/// (`BloomRecord::aggregate_passed`), and a refusal from either re-weaves the
+/// composition once.
+fn folded(
+    snapshot: &Snapshot,
+    record: &BloomRecord,
+    bloom: BloomId,
+    tree: Digest,
+    head: Digest,
+    lineage: &[Digest],
+    roll: u32,
+) -> Decisions {
+    let integration = FoldedIntegration { tree, head, lineage: lineage.to_vec() };
+    let hold = Decision::RecordIntegration { bloom, integration: Some(integration) };
 
     // The fold may be a tree this bloom has already proven (#4891): a
     // single-member fold is byte-identical to the candidate its member verified,
@@ -238,24 +290,40 @@ pub(super) fn reduce_resolve(
     // exactly as a returning green verdict would record it — and dispatch only
     // the critic. A multi-member fold is a tree that never existed before this
     // moment, so it misses and both gates run.
-    //
-    // The gate-pass row sits after the `hold`, which clears the join: the fold
-    // being recorded here is the subject this pass is about.
-    if let Some(proof) = record.verify_proof_for(*tree) {
+    if let Some(proof) = record.verify_proof_for(tree) {
         return Decisions {
-            outcome: Outcome::AggregateVerifyReused { bloom: *bloom, rolls: roll, proof: proof.evidence.detail },
-            effects: alloc::vec![
-                hold,
-                reuse_of(*bloom, StageId::AggregateVerify, proof),
-                Decision::RecordAggregateVerifyRoll { bloom: *bloom, rolls: roll },
-                Decision::RecordAggregateGatePass { bloom: *bloom, stage: StageId::AggregateVerify },
-                aggregate_review_dispatch(record, *bloom, *tree, *head),
-            ],
+            outcome: Outcome::AggregateVerifyReused { bloom, rolls: roll, proof: proof.evidence.detail },
+            effects: reused_fold_effects(record, bloom, tree, head, hold, proof, roll),
         };
     }
 
     let mut effects = alloc::vec![hold];
-    effects.extend(aggregate_gate_dispatches(record, *bloom, *tree, *head));
+    effects.extend(aggregate_gate_dispatches(record, bloom, tree, head));
 
-    Decisions { outcome: Outcome::AggregateVerifyDispatched { bloom: *bloom, roll }, effects }
+    Decisions { outcome: Outcome::AggregateVerifyDispatched { bloom, roll }, effects }
+}
+
+/// The effects of a fold whose mechanical verdict the journal already holds.
+///
+/// The gate-pass row sits after the `hold`, which clears the join: the fold
+/// being recorded here is the subject this pass is about. Only the critic is
+/// dispatched, and the brake still gets to withhold that order — which is why
+/// the review dispatch is extended in rather than pushed.
+fn reused_fold_effects(
+    record: &BloomRecord,
+    bloom: BloomId,
+    tree: Digest,
+    head: Digest,
+    hold: Decision,
+    proof: &VerifyProof,
+    roll: u32,
+) -> Vec<Decision> {
+    let mut effects = alloc::vec![
+        hold,
+        reuse_of(bloom, StageId::AggregateVerify, proof),
+        Decision::RecordAggregateVerifyRoll { bloom, rolls: roll },
+        Decision::RecordAggregateGatePass { bloom, stage: StageId::AggregateVerify },
+    ];
+    effects.extend(aggregate_review_dispatch(record, bloom, tree, head));
+    effects
 }

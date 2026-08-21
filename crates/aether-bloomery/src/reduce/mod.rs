@@ -21,6 +21,7 @@
 
 mod aggregate_verify;
 mod attempt;
+mod boundary;
 mod composition;
 mod decision;
 mod decisions_v1;
@@ -61,7 +62,10 @@ pub use error::{
     SurfaceRequestedError, VerifyFailedError, WithdrawError,
 };
 pub use event::{Event, Fact};
-pub use gate::{Gate, Read, RecordedRead, RecordedRefusal, Refusal};
+pub use gate::{
+    AGGREGATE_REVIEW_GATE, AGGREGATE_VERIFY_GATE, DISPATCH_MEMBER_GATE, DRAFT_ADMISSION_GATE, FOLD_GATE, Gate,
+    LAND_GATE, Read, RecordedRead, RecordedRefusal, Refusal,
+};
 pub use outcome::{
     DECISIONS_SCHEMA, DECISIONS_SCHEMA_V1, Decisions, DecisionsSchemaError, Outcome, decode_recorded_decisions,
 };

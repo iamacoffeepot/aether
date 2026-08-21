@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
+use super::gate::RecordedRefusal;
 use super::{FoldedIntegration, StageProgress};
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -803,5 +804,30 @@ pub enum Decision {
         /// Which gate passed — [`StageId::AggregateVerify`] or
         /// [`StageId::AggregateReview`].
         stage: StageId,
+    },
+    /// Record why an operator-visible boundary refused (ADR-0206).
+    ///
+    /// Emitted *beside* the boundary's existing typed rejection rather than
+    /// replacing it: the admitter keeps the `Outcome` variant it has always
+    /// matched on, and this row is what the snapshot — and through it
+    /// [`why_of`](crate::why_of) — reads back. A rejected event is journaled
+    /// with its effects, so replay folds the refusal exactly as the live
+    /// admission did.
+    ///
+    /// The refusal does not live on [`Decisions`](super::Decisions) itself,
+    /// which is journaled under a frozen writing schema; a field there would
+    /// need a fresh schema identity and an upcast for every prior row.
+    ///
+    /// Snapshot-only: a refusal is precisely the statement that no work went
+    /// out, so a topic here would enqueue a row nothing drains. Appended so
+    /// the prior decisions' wire discriminants are unchanged.
+    RecordRefusal {
+        /// The bloom the boundary refused for.
+        bloom: BloomId,
+        /// The member whose dispatch refused, or `None` for a bloom-scoped
+        /// boundary.
+        workpiece: Option<WorkpieceId>,
+        /// The gate, the guard that failed, and the values it read.
+        refusal: RecordedRefusal,
     },
 }
