@@ -697,6 +697,12 @@ pub struct FileLease {
 /// [`Fact::LaneWritesObserved`] that took the lease away. An eviction is not a
 /// wedge and not a park — no attempt or repair roll moved — and it clears
 /// itself when `by` integrates and the resume dispatch goes out.
+///
+/// Nothing decides one any more (#5401): two members writing one file are
+/// merged at integration, and only a textual conflict costs a reconcile lap.
+/// The type stays because a journal an older binary wrote records evictions,
+/// and replay folds recorded decisions — the member it stopped still has to
+/// be redeemed when the member that took its path integrates.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct LeaseEviction {
     /// The earlier-canonical member that took the path.
