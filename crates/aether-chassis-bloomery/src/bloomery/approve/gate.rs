@@ -16,8 +16,16 @@ pub struct AdmissionRequest {
     /// revision, and sealed configuration together (ADR-0174,
     /// [`Membership::subject`](aether_bloomery::Membership::subject)).
     pub subject: Digest,
-    /// The declared-surface globs (the `## Declared surface` block).
+    /// The declared-surface globs the tier and containment are read from.
     pub declared_surface: Vec<String>,
+    /// The workspace crates the scope declared (the `## Declared crates`
+    /// block), empty when it declared globs instead.
+    ///
+    /// The gate reads only whether it is empty, and that is the whole of what
+    /// it needs: a crate-derived surface is mostly blast radius rather than
+    /// intent, so its tier comes from the protected files it names, while a
+    /// hand-declared glob surface still resolves over every glob in it.
+    pub declared_crates: Vec<String>,
     /// The completeness facts the gate fails closed on.
     pub completeness: Completeness,
     /// The ADR-maturity of the change, for the unconditional hard gate.
@@ -149,12 +157,28 @@ impl<'policy> Gate<'policy> {
         } else if request.pre_approved {
             Tier::Auto
         } else {
-            self.policy.resolve_surface(&request.declared_surface)
+            self.tier_of(request)
         };
         if tier == Tier::Auto {
             Decision::AutoApproved(auto_approval(request.subject, request.projection_digest))
         } else {
             Decision::RequiresStatement(tier)
+        }
+    }
+
+    /// The policy tier of one request's surface, read the way that surface was
+    /// declared.
+    ///
+    /// A glob surface is a statement of intent about every path it names, so
+    /// its tier is the most restrictive over all of them. A crate-derived
+    /// surface is a containment bound — the declared crates plus everything
+    /// that depends on them — so most of its globs say nothing about what the
+    /// work means to change, and only its protected files do.
+    fn tier_of(&self, request: &AdmissionRequest) -> Tier {
+        if request.declared_crates.is_empty() {
+            self.policy.resolve_surface(&request.declared_surface)
+        } else {
+            self.policy.resolve_protected(&request.declared_surface)
         }
     }
 }

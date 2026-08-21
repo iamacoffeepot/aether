@@ -784,4 +784,24 @@ pub enum Decision {
         /// The bloom that has nothing left to run.
         bloom: BloomId,
     },
+    /// Record that one composite gate has passed on the fold currently held.
+    ///
+    /// The two aggregate gates are dispatched together against one fold, so
+    /// neither verdict on its own resolves the bloom: whichever verdict lands
+    /// second reads this set to learn its sibling already passed, and only then
+    /// is the landing dispatched. Bound to the *held fold* rather than to a
+    /// tree because [`Decision::RecordIntegration`] clears the set — a new weave
+    /// is a new subject, and a gate that passed on the tree before it has said
+    /// nothing about this one.
+    ///
+    /// Snapshot-only: each gate's work order already went out with its own
+    /// dispatch, and a pass opens no new work of its own. Appended so the prior
+    /// decisions' wire discriminants are unchanged.
+    RecordAggregateGatePass {
+        /// The bloom whose fold was judged.
+        bloom: BloomId,
+        /// Which gate passed — [`StageId::AggregateVerify`] or
+        /// [`StageId::AggregateReview`].
+        stage: StageId,
+    },
 }

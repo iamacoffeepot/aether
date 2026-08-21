@@ -1441,7 +1441,8 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
         | Decision::RecordCandidateVehicle { .. }
         | Decision::RecordMemberMachinery { .. }
         | Decision::RecordWithdrawal { .. }
-        | Decision::MarkBloomWithdrawn { .. } => None,
+        | Decision::MarkBloomWithdrawn { .. }
+        | Decision::RecordAggregateGatePass { .. } => None,
     })
 }
 

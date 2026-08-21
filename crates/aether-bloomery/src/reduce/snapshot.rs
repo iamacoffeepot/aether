@@ -271,6 +271,20 @@ pub struct BloomRecord {
     /// fold that burned the compiler's rolls has not touched the critic's, and
     /// one shared counter would let either gate spend the other's.
     pub aggregate_verify_rolls: u32,
+    /// Which composite gates have passed on the fold now held — the join the
+    /// landing waits on.
+    ///
+    /// The mechanical gate and the critic are dispatched against one fold at
+    /// the same time, so neither verdict resolves the bloom by itself: each
+    /// records its pass here, and the second one to arrive reads the first out
+    /// of this set and dispatches the landing. A landing therefore requires
+    /// both, in either order, with no serialization between them.
+    ///
+    /// Cleared by [`Decision::RecordIntegration`] — a new weave is a new
+    /// subject, and a gate that passed the tree before it has said nothing
+    /// about this one. That also clears it on resolution, which records the
+    /// consumed fold away.
+    pub aggregate_passed: BTreeSet<StageId>,
     /// How many landing attempts this bloom has consumed (#4689), against the
     /// `Land` binding's catalog retry budget.
     ///
@@ -865,6 +879,17 @@ impl Snapshot {
             Decision::RecordIntegration { bloom, integration } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.integration.clone_from(integration);
+                    // The composite-gate join belongs to the fold that was
+                    // held, so a new weave — or the consumption of the one
+                    // that just resolved — starts it empty. Without the clear,
+                    // a gate that passed the tree before a repair would count
+                    // towards a landing it never judged.
+                    record.aggregate_passed.clear();
+                }
+            }
+            Decision::RecordAggregateGatePass { bloom, stage } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.aggregate_passed.insert(*stage);
                 }
             }
             Decision::RecordAggregateRoll { bloom, rolls } => {
@@ -1297,7 +1322,7 @@ impl BloomRecord {
     /// An empty record over `spec`: compiled-line catalog, sealed status,
     /// empty collections, and zeroed counters.
     ///
-    /// The one 29-field literal. Production sealed-record construction and every
+    /// The one 30-field literal. Production sealed-record construction and every
     /// test fixture fill from here, so a new field has a single home rather than
     /// steering placement across four test copies.
     #[must_use]
@@ -1315,6 +1340,7 @@ impl BloomRecord {
             integration: None,
             aggregate_rolls: 0,
             aggregate_verify_rolls: 0,
+            aggregate_passed: BTreeSet::new(),
             landing_rolls: 0,
             resolved_head: None,
             review_park: None,

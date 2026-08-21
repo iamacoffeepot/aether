@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use aether_bloomery::{BloomId, StageId, VerifyFailureSet, WorkpieceId};
+use aether_bloomery::{BloomId, CandidateRef, Digest, StageId, VerifyFailureSet, WorkpieceId};
 
 /// One generated or pinned coordinator run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +72,11 @@ pub enum OperatorMove {
         at_tick: u32,
         /// Member the grant names.
         workpiece: WorkpieceId,
+        /// The stage the extra attempts are spent at. Named rather than derived
+        /// from the member's cursor: a grant is an operator's statement about
+        /// one stage's budget, and reading the cursor would silently aim it
+        /// wherever the member happened to be when the tick landed.
+        stage: StageId,
         /// Extra attempts.
         attempts: u32,
     },
@@ -103,6 +108,8 @@ pub enum OperatorMove {
         at_tick: u32,
         /// Member the repair names.
         workpiece: WorkpieceId,
+        /// The tree the operator is handing in, and the commit carrying it.
+        candidate: CandidateRef,
         /// Why.
         reason: String,
         /// Who.
@@ -123,6 +130,22 @@ pub enum OperatorMove {
         /// Also withdraw every member that depends on this one. Without it, a
         /// withdrawal that would strand a dependent is refused, naming them.
         cascade: bool,
+    },
+    /// Grant one member the wider declared surface it asked for (ADR-0207).
+    ///
+    /// Lowers to [`aether_bloomery::Fact::Supersede`], because a sealed bloom's
+    /// membership is frozen: the amended member enters a successor at its new
+    /// scope revision and every sibling is carried across at the revision it
+    /// already holds, inheriting its claim and its finished work. Appended for
+    /// the reason the wire additions are appended.
+    Amend {
+        /// Tick index.
+        at_tick: u32,
+        /// The member whose surface is widened.
+        workpiece: WorkpieceId,
+        /// The widened revision's digest — what the successor admits the member
+        /// at, and what the containment check reads its surface out of.
+        scope_revision: Digest,
     },
 }
 

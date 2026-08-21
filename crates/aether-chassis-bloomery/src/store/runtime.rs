@@ -30,7 +30,7 @@ use aether_actor::runtime;
 use aether_bloomery::{
     Commit, CommitResult, ConfigRecord, DECISIONS_SCHEMA, Decision, Digest, Event, JournalRecord, LoadConfigs,
     LoadConfigsResult, MembershipMutation, MetricDispatch, MetricsLedger, OutboxPayload, ReplayJournal,
-    ReplayJournalResult, ScopeRevision, Statement, Topic, WorkpieceId, decode_recorded_decisions,
+    ReplayJournalResult, ScopeRevision, ScopeVerifyInput, Statement, Topic, WorkpieceId, decode_recorded_decisions,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use std::iter::repeat_n;
@@ -644,7 +644,13 @@ impl SqliteStore {
 /// gains `deposited_unix` (warmth), and `member_dependency` holds the sealed
 /// graph a dependent construct looks up at unblock. Empty on creation; a
 /// pre-column row stays `NULL` (not assumed warm) and nothing is backfilled.
-const SCHEMA_VERSION: i64 = 11;
+///
+/// `12` is the scope-verify report ledger (ADR-0208): `scope_verify_reports`,
+/// one immutable row per set of revision bytes the freeze checked. Empty on
+/// creation and nothing is backfilled — a revision frozen before the check
+/// existed was not verified, and inventing a clean report for it is the exact
+/// lie the absent reading exists to prevent.
+const SCHEMA_VERSION: i64 = 12;
 
 /// Bring a store opened at [`MIGRATIONS`] up to [`SCHEMA_VERSION`], or refuse it.
 ///
@@ -748,6 +754,12 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     // creation; a pre-existing store has no owned issues to invent.
     if !has_table(&migration, "commission_projections")? {
         migration.execute_batch(super::commission::COMMISSION_PROJECTION_TABLE)?;
+    }
+
+    // Version 12 (ADR-0208): the scope-verify report ledger. Empty on creation;
+    // a revision frozen before the check existed reads as absent, never clean.
+    if !has_table(&migration, "scope_verify_reports")? {
+        migration.execute_batch(super::commission::SCOPE_VERIFY_REPORTS_TABLE)?;
     }
 
     // Version 9 (ADR-0201): architecture decision records. Empty on
@@ -2328,12 +2340,22 @@ impl NativeActor for StoreCapability {
         _ctx: &mut NativeCtx<'_>,
         mail: WriteScopeRevision,
     ) -> WriteScopeRevisionResult {
-        let WriteScopeRevision { canonical } = mail;
+        let WriteScopeRevision { canonical, scope_verify } = mail;
         let revision = match ScopeRevision::from_canonical(&canonical) {
             Ok(revision) => revision,
             Err(error) => return write_revision_error(CommissionError::from(error)),
         };
-        match state.backend.write_revision(&revision) {
+        // Empty bytes are absent, not an empty projection: a hand-authored
+        // revision carries no field records, and absence is reported rather
+        // than passed.
+        let projection = match scope_verify.is_empty() {
+            true => None,
+            false => match ScopeVerifyInput::from_canonical(&scope_verify) {
+                Ok(projection) => Some(projection),
+                Err(error) => return write_revision_error(CommissionError::from(error)),
+            },
+        };
+        match state.backend.write_revision_verified(&revision, projection.as_ref()) {
             Ok(digest) => WriteScopeRevisionResult::Ok { digest: digest.as_bytes().to_vec() },
             Err(error) => write_revision_error(error),
         }
@@ -2376,6 +2398,7 @@ impl NativeActor for StoreCapability {
                     status: view.head.status.as_str().to_owned(),
                     current: view.current.map(|revision| revision.to_canonical()),
                     approvals,
+                    scope_verify: view.scope_verify.map(|report| report.to_canonical()),
                 }
             }
             Err(error) => LoadCommissionResult::Err { error: error.to_string() },
@@ -2455,6 +2478,7 @@ fn write_revision_error(error: CommissionError) -> WriteScopeRevisionResult {
         CommissionError::UnsupportedSchema(schema) => WriteScopeRevisionResult::UnsupportedSchema { schema },
         CommissionError::MalformedCanonical => WriteScopeRevisionResult::Malformed,
         CommissionError::NotOpen => WriteScopeRevisionResult::NotOpen,
+        CommissionError::SurfaceGap { paths } => WriteScopeRevisionResult::SurfaceGap { paths },
         error => WriteScopeRevisionResult::Err { error: error.to_string() },
     }
 }

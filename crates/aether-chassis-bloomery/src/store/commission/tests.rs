@@ -4,8 +4,9 @@ use std::collections::BTreeMap;
 
 use aether_bloomery::{
     AuthorityDoor, CommissionProjection, CommissionStatus, Digest, Ed25519KeyProvider, FakeKeyProvider, KeyId,
-    Observation, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, SignatureEnvelope, Statement, Topic,
-    WorkpieceId, authorization_message, digest_of,
+    NamedPath, Observation, PathOrigin, Provenance, SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA, ScopeRevision,
+    ScopeRouting, ScopeVerifyInput, SignatureEnvelope, Statement, Topic, WorkpieceId, authorization_message,
+    digest_of,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use ed25519_dalek::{Signer, SigningKey};
@@ -45,6 +46,7 @@ fn revision(id: &str, predecessor: Option<Digest>) -> ScopeRevision {
         dependencies: Vec::new(),
         description: "advisory".to_owned(),
         implements: Vec::new(),
+        declared_crates: Vec::new(),
     }
 }
 
@@ -600,4 +602,108 @@ fn the_live_approve_door_refuses_uncommissioned_dependencies() {
         RecordCommissionApprovalResult::Ok { .. } => {}
         other => panic!("an existing open dependency must still record, got {other:?}"),
     }
+}
+
+fn projection(paths: &[(&str, u32)], surface: &[&str]) -> ScopeVerifyInput {
+    ScopeVerifyInput {
+        schema: SCOPE_VERIFY_SCHEMA,
+        named_paths: paths
+            .iter()
+            .map(|(path, step)| NamedPath {
+                path: (*path).to_owned(),
+                origin: PathOrigin::PlanStep { step: *step },
+            })
+            .collect(),
+        named_symbols: Vec::new(),
+        declared_surface: surface.iter().map(|glob| (*glob).to_owned()).collect(),
+    }
+}
+
+fn revision_with_surface(id: &str, predecessor: Option<Digest>, surface: &[&str]) -> ScopeRevision {
+    let mut revision = revision(id, predecessor);
+    revision.declared_surface = surface.iter().map(|glob| (*glob).to_owned()).collect();
+    revision
+}
+
+fn stored_reports(store: &SqliteStore, id: &str) -> Vec<(Vec<u8>, i64)> {
+    let mut statement = store
+        .conn
+        .prepare("SELECT revision, refused FROM scope_verify_reports WHERE commission = ?1 ORDER BY refused DESC")
+        .expect("prepare");
+    statement
+        .query_map([id], |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)))
+        .expect("query")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("rows")
+}
+
+#[test]
+fn a_workpiece_naming_a_path_outside_its_surface_is_refused_at_the_freeze() {
+    // Reconstructs #5256: the workpiece declared `aether-bloomery` and named
+    // its own edit target in `aether-chassis-bloomery`. Before this check the
+    // contradiction froze clean and first surfaced hours later at Member-Verify.
+    let mut store = memory();
+    seed(&mut store, "issue-5256");
+    let surface = &["crates/aether-bloomery/src/**"];
+    let revision = revision_with_surface("issue-5256", None, surface);
+    let refused = store.write_revision_verified(
+        &revision,
+        Some(&projection(&[("crates/aether-chassis-bloomery/src/api/runtime/seal.rs", 2)], surface)),
+    );
+
+    assert_eq!(
+        refused,
+        Err(CommissionError::SurfaceGap {
+            paths: vec!["crates/aether-chassis-bloomery/src/api/runtime/seal.rs (plan step 2)".to_owned()]
+        })
+    );
+
+    let view = store.load(&workpiece("issue-5256")).expect("load").expect("exists");
+    assert_eq!(view.head.current_revision, None, "a refused freeze writes no revision row");
+    assert_eq!(stored_reports(&store, "issue-5256"), vec![(digest_of(&revision).as_bytes().to_vec(), 1)]);
+}
+
+#[test]
+fn a_refusal_outlives_the_repaired_re_freeze() {
+    // The refusal must survive the successful freeze that repairs it, or the
+    // refusal rate is unrecoverable the moment the surface is widened.
+    let mut store = memory();
+    seed(&mut store, "issue-5256");
+    let narrow = &["crates/aether-bloomery/src/**"];
+    let refused_revision = revision_with_surface("issue-5256", None, narrow);
+    let named = &[("crates/aether-chassis-bloomery/src/api/runtime/seal.rs", 2)];
+    store
+        .write_revision_verified(&refused_revision, Some(&projection(named, narrow)))
+        .expect_err("the narrow surface is refused");
+
+    let wide = &["crates/aether-bloomery/src/**", "crates/aether-chassis-bloomery/src/**"];
+    let repaired = revision_with_surface("issue-5256", None, wide);
+    let stored = store
+        .write_revision_verified(&repaired, Some(&projection(named, wide)))
+        .expect("the widened surface freezes");
+
+    let reports = stored_reports(&store, "issue-5256");
+    assert_eq!(reports.len(), 2, "both the refusal and the pass are journaled");
+    assert!(reports.contains(&(digest_of(&refused_revision).as_bytes().to_vec(), 1)));
+    assert!(reports.contains(&(stored.as_bytes().to_vec(), 0)));
+
+    let view = store.load(&workpiece("issue-5256")).expect("load").expect("exists");
+    let report = view.scope_verify.expect("the current revision carries its report");
+    assert!(!report.refused());
+    assert_eq!(report.checked, 1);
+}
+
+#[test]
+fn a_freeze_with_no_projection_reads_as_absent_rather_than_clean() {
+    // A hand-authored revision carries no field records. It must journal no
+    // report at all: inventing a clean one is the lie the absent reading exists
+    // to prevent.
+    let mut store = memory();
+    seed(&mut store, "issue-hand");
+    write(&mut store, "issue-hand", None);
+
+    assert!(stored_reports(&store, "issue-hand").is_empty());
+    let view = store.load(&workpiece("issue-hand")).expect("load").expect("exists");
+    assert!(view.current.is_some(), "the revision itself froze");
+    assert_eq!(view.scope_verify, None, "absence is absence, not a clean report");
 }

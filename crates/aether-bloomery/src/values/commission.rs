@@ -80,6 +80,26 @@ pub struct ScopeRevision {
     /// not bind itself to a stored decision. Trailing so the version-1 layout
     /// can name ADRs without a schema bump (#5124).
     pub implements: Vec<Digest>,
+    /// The workspace crates the scope declared, in declaration order — the
+    /// `## Declared crates` block. Empty when the scope declared its surface as
+    /// globs instead.
+    ///
+    /// A surface is not a forecast of the files a lane will touch: nobody can
+    /// compute that before the work is done. What is computable is the blast
+    /// radius of the crates the work is *about* — those crates plus every
+    /// workspace crate that depends on them — and that is what
+    /// [`declared_surface`](Self::declared_surface) carries once this block is
+    /// present.
+    ///
+    /// Kept beside the derived globs rather than replaced by them for two
+    /// reasons. It is what the scope actually said, so a renderer can emit the
+    /// operator's own block back rather than a machine-expanded one. And a
+    /// non-empty list is the fact the tier resolver needs: a crate-derived
+    /// surface takes its tier from the protected files it names, never from the
+    /// crate globs, so the resolver has to be able to tell one kind of surface
+    /// from the other. Trailing for the reason
+    /// [`implements`](Self::implements) is.
+    pub declared_crates: Vec<String>,
 }
 
 impl ScopeRevision {
@@ -272,6 +292,7 @@ mod tests {
             dependencies: Vec::new(),
             description: String::from("desc"),
             implements: Vec::new(),
+            declared_crates: Vec::new(),
         }
     }
 

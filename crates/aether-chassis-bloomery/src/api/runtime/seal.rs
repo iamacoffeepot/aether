@@ -633,6 +633,7 @@ fn resolve_seal_memberships(
         let admission = AdmissionRequest {
             subject: proposal.subject(),
             declared_surface: projection.declared_surface.clone(),
+            declared_crates: projection.declared_crates.clone(),
             completeness: projection.completeness,
             adr_touch: projection.adr_touch,
             pre_approved: projection.pre_approved,
@@ -892,6 +893,7 @@ mod tests {
             workpiece: WorkpieceId(workpiece.to_owned()),
             scope_revision: Digest::from_bytes([revision; 32]),
             declared_surface: surface.iter().map(|glob| (*glob).to_owned()).collect(),
+            declared_crates: Vec::new(),
             completeness: Completeness {
                 has_problem_statement: true,
                 has_design_notes: true,

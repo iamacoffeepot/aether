@@ -273,8 +273,10 @@ pub enum Outcome {
         /// Which verify pass was dispatched.
         roll: u32,
     },
-    /// A passing aggregate verify handed the same fold to the aggregate review:
-    /// the fold builds, so it is now worth judging.
+    /// A passing aggregate verify whose sibling review has not returned yet:
+    /// the fold builds, and the bloom waits on the critic judging it in
+    /// parallel. Nothing is dispatched from here — both gates went out
+    /// together.
     AggregateVerifyPassed {
         /// The verified bloom.
         bloom: BloomId,
@@ -701,6 +703,31 @@ pub enum Outcome {
     /// answers it `422`, so a script that only checks the status cannot read a
     /// refused withdrawal as an applied one.
     WithdrawRejected(WithdrawError),
+    /// A passing aggregate review whose sibling verify has not returned yet.
+    ///
+    /// The two composite gates run against one fold at the same time, and a
+    /// landing needs both, so a review that arrives first records its pass and
+    /// the bloom waits. The verify's own arrival is what resolves it. Appended
+    /// so every prior outcome keeps its wire discriminant.
+    AggregateReviewPassed {
+        /// The reviewed bloom.
+        bloom: BloomId,
+        /// The review verdicts consumed, this one included.
+        rolls: u32,
+    },
+    /// A composite gate refused a fold whose weave repair is already dispatched.
+    ///
+    /// The two gates judge the same tree concurrently, so both can refuse it.
+    /// The second refusal files its finding on the composition's channel and
+    /// stops there: a second repair lap would double-spend the weave budget and
+    /// put two lanes on one seam. Appended so every prior outcome keeps its wire
+    /// discriminant.
+    CompositionRepairInFlight {
+        /// The bloom whose composition is already under repair.
+        bloom: BloomId,
+        /// Which gate filed this second refusal.
+        refused_at: StageId,
+    },
 }
 
 impl Outcome {

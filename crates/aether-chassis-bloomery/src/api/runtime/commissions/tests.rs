@@ -79,6 +79,7 @@ fn every_route_result_has_a_success_status() {
             status: "open".to_owned(),
             current: None,
             approvals: Vec::new(),
+            scope_verify: None,
         })
         .status,
         200

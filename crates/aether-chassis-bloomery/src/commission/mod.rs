@@ -8,6 +8,7 @@
 //! [`SignatureEnvelope`]; this crate does not hold private keys.
 
 mod client;
+mod crates;
 pub(crate) mod import;
 pub(crate) mod scope;
 

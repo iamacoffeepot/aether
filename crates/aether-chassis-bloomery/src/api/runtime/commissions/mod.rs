@@ -7,7 +7,7 @@
 //! store write.
 
 use aether_actor::Manual;
-use aether_bloomery::{AuthorityDoor, Digest, ScopeRevision, Statement, WorkpieceId};
+use aether_bloomery::{AuthorityDoor, Digest, ScopeRevision, ScopeVerifyReport, Statement, WorkpieceId};
 use aether_data::wire::{from_bytes, to_vec};
 use aether_http::{HttpHeader, HttpServerRequest, HttpServerResponse};
 use aether_substrate::actor::native::NativeCtx;
@@ -17,7 +17,7 @@ use super::response::{error_response, json};
 use super::state::{ApiCapabilityState, Routed};
 use crate::api::dto::{
     CommissionApprovalView, CommissionCancelledView, CommissionCreatedView, CommissionHeadView, CommissionShowView,
-    CommissionsView, CreateCommissionRequest, ScopeRevisionWrittenView,
+    CommissionsView, CreateCommissionRequest, RevisionProjection, ScopeRevisionWrittenView,
 };
 use crate::bloomery::{StatementRejected, precheck_statement, verified_statement_approval};
 use crate::signing::{SigningCapability, Verify, VerifyResult, authority_bytes};
@@ -118,7 +118,19 @@ impl ApiCapabilityState {
         if revision.workpiece.0 != id {
             return Routed::Reply(error_response(400, "scope revision workpiece does not match the path"));
         }
-        Routed::WriteScopeRevision(WriteScopeRevision { canonical: revision.to_canonical() })
+        // The projection rides beside the revision rather than inside it: the
+        // revision's bytes are the signed subject and cannot grow a field, and a
+        // body that omits `scope_verify` is a hand-authored freeze with no
+        // records to check. Decoded from the same body separately for that
+        // reason — the two values have independent lifetimes downstream.
+        let projection: RevisionProjection = match hex::from_slice(&request.body) {
+            Ok(projection) => projection,
+            Err(error) => {
+                return Routed::Reply(error_response(400, &format!("invalid scope-verify projection: {error}")));
+            }
+        };
+        let scope_verify = projection.scope_verify.map(|input| input.to_canonical()).unwrap_or_default();
+        Routed::WriteScopeRevision(WriteScopeRevision { canonical: revision.to_canonical(), scope_verify })
     }
 
     /// `POST /commissions/{id}/approvals` — precheck, then verify, then store.
@@ -312,6 +324,9 @@ pub(super) fn revision_response(result: WriteScopeRevisionResult) -> HttpServerR
             error_response(500, &format!("scope revision write failed: {error}"))
         }
         WriteScopeRevisionResult::NotOpen => error_response(409, "commission is not open"),
+        WriteScopeRevisionResult::SurfaceGap { paths } => {
+            error_response(422, &format!("declared surface does not cover {}", paths.join(", ")))
+        }
     }
 }
 
@@ -346,7 +361,16 @@ pub(super) fn approval_response(result: RecordCommissionApprovalResult) -> HttpS
 /// Render [`LoadCommissionResult`].
 pub(super) fn show_response(result: LoadCommissionResult) -> HttpServerResponse {
     match result {
-        LoadCommissionResult::Ok { id, intent, current_revision, current_ordinal, status, current, approvals } => {
+        LoadCommissionResult::Ok {
+            id,
+            intent,
+            current_revision,
+            current_ordinal,
+            status,
+            current,
+            approvals,
+            scope_verify,
+        } => {
             let Ok(intent) = digest_of_bytes(&intent) else {
                 return error_response(500, "stored intent digest is not 32 bytes");
             };
@@ -371,6 +395,13 @@ pub(super) fn show_response(result: LoadCommissionResult) -> HttpServerResponse 
                     Err(_) => return error_response(500, "stored approval is malformed"),
                 }
             }
+            let scope_verify = match scope_verify {
+                Some(bytes) => match ScopeVerifyReport::from_canonical(&bytes) {
+                    Ok(report) => Some(report),
+                    Err(_) => return error_response(500, "stored scope-verify report is malformed"),
+                },
+                None => None,
+            };
             json(
                 200,
                 &CommissionShowView {
@@ -381,6 +412,7 @@ pub(super) fn show_response(result: LoadCommissionResult) -> HttpServerResponse 
                     status,
                     current,
                     approvals: decoded,
+                    scope_verify,
                 },
             )
         }
