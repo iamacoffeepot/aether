@@ -255,6 +255,29 @@ fn deliver_commission(
     Ok(Some(RecordCommissionProjection { id: document.workpiece.0, issue_number: number }))
 }
 
+/// Push the refs a timer check found unpublished (#5260).
+///
+/// No ack: nothing decided this and no outbox row is spent, so a failure needs
+/// no row left undelivered — the next check finds the same ref still ahead and
+/// tries again. That is the redrive, and it stays bounded because the backend's
+/// own transient counter escalates an identical repeated failure to a
+/// deterministic one rather than looping at warn forever.
+fn publish_reconciled_head(replica: &SourceReplicaShell, head: &str) {
+    match replica.publish() {
+        Ok(()) => tracing::info!(
+            target: "aether_chassis_bloomery::mirror",
+            %head,
+            "source replica reconciled a mainline advance no coordinator event announced",
+        ),
+        Err(error) => tracing::warn!(
+            target: "aether_chassis_bloomery::mirror",
+            %head,
+            %error,
+            "source replica reconcile push failed; the next drain tick re-checks the ref",
+        ),
+    }
+}
+
 /// Coalesce superseded replica requests to the latest sequence and push once.
 /// A transient failure leaves the whole prefix queued; a rejected force or
 /// other deterministic refusal raises an operator-visible alert and still
@@ -388,6 +411,30 @@ impl NativeActor for MirrorReactorCapability {
         // remote, which converges only when the writes are serial: two workers
         // racing over one entry both read "absent" and both create.
         if state.cycle_in_flight() {
+            return;
+        }
+        // A mainline ref that advanced without a coordinator event — an
+        // operator's direct push — emits no replica topic, so nothing would
+        // ever drain it and the mirror lags for as long as the board stays
+        // quiet (#5260). Ask the ref itself instead of waiting to be told.
+        //
+        // Exclusive with the drain: claiming a worker slot makes the next
+        // tick's `cycle_in_flight` true, so the reconcile push and a topic
+        // push are never in flight together — two concurrent pushes of the
+        // same refs is exactly the race the serial cycle exists to prevent.
+        // The drains run on the following tick, which costs the poll interval
+        // and only on a tick that found work to reconcile.
+        //
+        // The question is a local `git rev-parse`, so it is answered inline;
+        // only the push it may lead to goes to a worker.
+        if let Some(replica) = state.replica.clone()
+            && let Some(head) = replica.unpublished_head()
+        {
+            let slot = WorkerSlot::claim(&state.outstanding);
+            ctx.spawn_detached::<MirrorReactorCapability, _>(move |_root| {
+                let _slot = slot;
+                publish_reconciled_head(&replica, &head);
+            });
             return;
         }
         let mut drains = Vec::new();
