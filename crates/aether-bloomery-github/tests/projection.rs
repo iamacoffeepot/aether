@@ -52,6 +52,7 @@ fn member(number: u64, revision: u8) -> MemberView {
         cursor: None,
         park: None,
         awaiting_surface: None,
+        withdrawn: None,
     }
 }
 
