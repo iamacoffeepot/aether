@@ -781,19 +781,18 @@ impl LocalExecutor {
     }
 
     /// Same-member Refine resume from the construct session journaled on this
-    /// workpiece. Missing handles fall through to the pool; an over-threshold
-    /// or unparseable handle launches fresh.
+    /// workpiece. Only a missing handle falls through to the pool; a journaled
+    /// handle resumes whatever context it carries, and an unparseable one
+    /// launches fresh. Context never diverts a refine to the pool — the pool
+    /// key is the findings overlay, which is a colder start than the construct
+    /// session it would replace.
     fn journaled_refine_plan(&self, pending: &PendingRun, worktree_dir: &Path) -> Option<super::ReusePlan> {
         let (bloom, workpiece, stage) = self.order_identity(&pending.nonce)?;
         if stage != StageId::Refine {
             return None;
         }
-        let (session_id, context) = self.lookup_construct_session(&bloom, &workpiece)?;
+        let (session_id, _context) = self.lookup_construct_session(&bloom, &workpiece)?;
         let profile = pending.profile.as_ref()?;
-        let cliff = self
-            .sessions
-            .as_ref()
-            .map_or(DEFAULT_PRICING_CLIFF_TOKENS, super::session_reuse::SessionReuse::pricing_cliff_tokens);
         let task = super::session_reuse::pool_task(&pending.command, pending.task.as_deref());
         let request = AcquireRequest {
             model: &profile.model,
@@ -802,7 +801,7 @@ impl LocalExecutor {
             worktree: worktree_dir,
             command: &pending.command,
         };
-        Some(match decide_refine_resume(&session_id, context, cliff) {
+        Some(match decide_refine_resume(&session_id) {
             RefineResume::Resumed(id) => plan_for(&request, ReuseArm::Resumed, None, Some(id)),
             RefineResume::Fresh { miss } => plan_for(&request, ReuseArm::Fresh, miss, None),
         })

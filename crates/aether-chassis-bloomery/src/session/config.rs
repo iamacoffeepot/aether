@@ -8,9 +8,11 @@
 /// `AGENT_POOL_CONTEXT_CAP_TOKENS = 150000` context ceiling. `lease_ttl_mins`
 /// bounds how long one `acquire` holds a session before lazy expiry reclaims it
 /// (a crashed holder never wedges a key). `pricing_cliff_tokens` is the
-/// prompt-size cut a same-member refine or dependent construct resume must
-/// project under (#5177, #5178); `200_000` is grok-4.6's measured long-context
-/// band. `dependency_increment_tokens` is the per-link addend that projection
+/// prompt-size cut a *dependent construct* resume must project under (#5178);
+/// `200_000` is grok-4.6's measured long-context band. It bounds chains only —
+/// a same-member refine resumes its own construct session at any context,
+/// because the alternative there is a cold re-read of the same member.
+/// `dependency_increment_tokens` is the per-link addend that projection
 /// uses on a predecessor resume. `db_path` is the pool
 /// table's `SQLite` file; the sentinel `":memory:"` opens a private non-durable
 /// store — the default, so an unconfigured chassis boots without touching the
@@ -35,9 +37,9 @@ pub struct SessionConfig {
     /// is ineligible (`AGENT_POOL_CONTEXT_CAP_TOKENS`).
     #[config(default = 150_000)]
     pub context_cap_tokens: u64,
-    /// Prompt-token threshold a resumed refine or dependent construct must
-    /// project under, or it launches fresh. Default `200_000` is grok-4.6's
-    /// measured long-context pricing cliff.
+    /// Prompt-token threshold a resumed dependent construct must project under,
+    /// or it launches fresh. Chains only — a same-member refine ignores it.
+    /// Default `200_000` is grok-4.6's measured long-context pricing cliff.
     #[config(default = 200_000)]
     pub pricing_cliff_tokens: u64,
     /// Tokens a dependent construct is projected to add on top of a predecessor's

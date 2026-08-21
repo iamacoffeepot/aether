@@ -2768,16 +2768,18 @@ fn member_store(dir: &TempDir, orders: &[OutstandingOrder]) -> SqliteStore {
 }
 
 #[test]
-fn a_refine_resumes_the_journaled_construct_session_under_the_cliff() {
-    // Acceptance (#5177): a same-member refine whose construct session is
-    // journaled and under the pricing cliff threads that handle, even though
-    // the findings overlay would have been a different pool key.
+fn a_refine_resumes_the_journaled_construct_session_at_any_context() {
+    // Acceptance: a same-member refine threads the journaled construct handle
+    // even though the findings overlay would have been a different pool key,
+    // and even when that session's context sits far above the pricing cliff —
+    // the cliff gates dependency chains, never a member's own refine lap.
     let seen = Arc::new(Mutex::new(Vec::new()));
     let base = TempDir::new().unwrap();
     let store = store_dir();
     let construct = test_nonce("construct");
     let refine = test_nonce("refine");
-    let exec = LocalExecutor::new(Arc::new(ReuseRunner::new(Arc::clone(&seen))), correspondence(), base.path())
+    let runner = ReuseRunner { input_tokens: 400_000, ..ReuseRunner::new(Arc::clone(&seen)) };
+    let exec = LocalExecutor::new(Arc::new(runner), correspondence(), base.path())
         .with_message_store(member_store(
             &store,
             &[
@@ -2799,35 +2801,6 @@ fn a_refine_resumes_the_journaled_construct_session_under_the_cliff() {
     assert_eq!(stamped["session_reuse"]["arm"], "resumed");
     assert_eq!(stamped["session_reuse"]["output_tokens"], 200);
     assert_eq!(stamped["session_reuse"]["duration_millis"], 1_200);
-}
-
-#[test]
-fn a_refine_over_the_pricing_cliff_launches_fresh() {
-    // Acceptance: a journaled handle whose projected context meets the cliff
-    // is not resumed — paying the long-context band is the cost the gate exists
-    // to avoid.
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let base = TempDir::new().unwrap();
-    let store = store_dir();
-    let construct = test_nonce("construct");
-    let refine = test_nonce("refine");
-    let runner = ReuseRunner::new(Arc::clone(&seen));
-    let runner = ReuseRunner { input_tokens: 200_000, ..runner };
-    let exec = LocalExecutor::new(Arc::new(runner), correspondence(), base.path()).with_message_store(member_store(
-        &store,
-        &[
-            member_order_at(&construct, "issue-A", StageId::Construct),
-            member_order_at(&refine, "issue-A", StageId::Refine),
-        ],
-    ));
-
-    exec.stream_evidence(&exec.submit(&claude_order(digest(5), &construct, "issue-A")).unwrap()).unwrap();
-    exec.stream_evidence(&exec.submit(&claude_order(digest(5), &refine, "issue-A")).unwrap()).unwrap();
-
-    assert!(seen.lock().unwrap()[1].resume.is_none(), "an over-cliff session launches fresh");
-    let stamped = stamped_evidence(&base, &refine);
-    assert_eq!(stamped["session_reuse"]["arm"], "fresh");
-    assert_eq!(stamped["session_reuse"]["miss"], "pricing_cliff");
 }
 
 #[test]
