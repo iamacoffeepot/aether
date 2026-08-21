@@ -21,7 +21,7 @@ use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneRun, LaneScript
 use aether_chassis_bloomery::bloomery::{
     BloomeryChassis, BloomeryEnv, Chassis, CoordinatorConfig, DispatchTick, DoctorReactorCapability, DoctorReport,
     DoctorTick, ExecutorReactorCapability, GithubConnectionConfig, IntegrateReactorCapability, IntegrateTick,
-    LandReactorCapability, LandTick, ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload,
+    LandReactorCapability, LandTick, NotifyConfig, ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload,
 };
 use aether_chassis_bloomery::control::ObserveTick;
 use aether_chassis_bloomery::session::SessionConfig;
@@ -651,6 +651,10 @@ fn in_process_env(
         store: StoreConfig { path: store_path.to_owned() },
         artifacts: ArtifactsConfig { root: Some(artifacts_root.to_owned()) },
         github,
+        // No webhook path, so the notification reactor mounts disabled (#5166):
+        // a scenario asserts on the coordinator's own transitions, and a
+        // scripted run has no operator channel to shout down.
+        notify: NotifyConfig::default(),
         coordinator,
         session: SessionConfig::default(),
         signing: SigningConfig::default(),
