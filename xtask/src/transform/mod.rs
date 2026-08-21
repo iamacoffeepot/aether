@@ -50,7 +50,7 @@ use crate::transform::review::REVIEW_CRITIC;
 use crate::transform::review_reports::REVIEW_REPORT;
 use crate::transform::sccache::{CompilerCache, Counters};
 use crate::transform::scratch::Scratch;
-use crate::transform::verify::VERIFY_CHECK;
+use crate::transform::verify::{Excused, VERIFY_CHECK};
 
 #[derive(Args, Clone)]
 pub struct TransformArgs {
@@ -187,6 +187,20 @@ struct Evidence {
     /// on a preflight-refused run that executed none.
     #[serde(skip_serializing_if = "Option::is_none")]
     gates: Option<Vec<GateTiming>>,
+    /// Tests a same-input replay cleared, so the run declined to charge them to
+    /// the candidate (FIX-4b).
+    ///
+    /// Its own ledger rather than prose in `environment`, because this is the
+    /// channel a flake is *counted* on: a test that appears here run after run
+    /// is a test to fix or delete, and that is only visible if the records are
+    /// machine-readable. Absent when nothing was excused this way.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    flakes: Option<Vec<Excused>>,
+    /// Tests already red at the work order's base, so this candidate is not why
+    /// (FIX-4b). Its own ledger for the reason `flakes` is. Absent when nothing
+    /// was excused this way.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inherited_failures: Option<Vec<Excused>>,
 }
 
 /// One umbrella member's wall-clock share: everything run under that gate's
@@ -250,6 +264,8 @@ fn build_evidence(
         peak_resident_bytes: None,
         duration_millis: None,
         gates: None,
+        flakes: None,
+        inherited_failures: None,
         command: command.to_string(),
         nonce,
         status: if passed {
