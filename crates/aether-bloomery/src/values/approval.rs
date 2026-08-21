@@ -277,6 +277,30 @@ pub fn surface_intersection(left: &[String], right: &[String]) -> Vec<String> {
     shared.into_iter().collect()
 }
 
+/// Whether `path` matches any declared-surface glob.
+///
+/// The asymmetric membership test containment is built on, and the one a
+/// derived-reference search asks about a path it found (#5300): does *this*
+/// surface admit *this* path. Deliberately not
+/// [`SurfacePattern::intersects`], which is symmetric — an `Exact` surface
+/// glob "intersects" a path it does not cover.
+///
+/// Lives here rather than in the chassis so both readers can reach it: the
+/// member-Verify containment check and the xtask search, which depends on this
+/// crate and not on the chassis.
+///
+/// A glob outside the surface grammar is skipped rather than treated as
+/// covering anything — the same fail-closed parse the seal door applies.
+#[must_use]
+pub fn path_in_surface(surface: &[String], path: &str) -> bool {
+    surface.iter().filter_map(|glob| SurfacePattern::parse(glob)).any(|pattern| match pattern {
+        SurfacePattern::Exact(exact) => path == exact,
+        SurfacePattern::Subtree(prefix) => {
+            path == prefix || path.starts_with(&prefix) && path.as_bytes().get(prefix.len()) == Some(&b'/')
+        }
+    })
+}
+
 /// A policy-rule glob, parsed once so the set-algebra helpers are total over a
 /// type rather than re-inspecting the raw string. `Exact` / `Subtree` share
 /// [`SurfacePattern`]; a slashless gitignore pattern is unanchored; anything

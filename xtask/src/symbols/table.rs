@@ -14,6 +14,15 @@ pub enum SymbolKind {
     ImplMethod,
     Struct,
     Trait,
+    /// A method a trait *declares*, as distinct from an implementing type's
+    /// definition of it (#5300).
+    ///
+    /// Named `Trait::method`, the way an [`ImplMethod`](Self::ImplMethod) is
+    /// named `Type::method`. Without this row a trait declaration is invisible
+    /// to the inventory — which is exactly the file a signature change is
+    /// guaranteed to touch, so a search that could not see it reported a
+    /// declared surface as complete when it was not.
+    TraitMethod,
 }
 
 /// One inventoried item.

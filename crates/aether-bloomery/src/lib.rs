@@ -154,6 +154,6 @@ pub use values::{
     Transformation, Unproducible, VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK, VerifiedTree,
     VerifyFailure, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Workpiece, WorkpieceBuilder,
     Withdrawal, WithdrawalCause, WorkpieceFact, WorkpieceFields, WorkpieceRefusal, classify_findings,
-    config_address, decode_config, gate_widening, is_model_lane, pin_workpiece_description,
+    config_address, decode_config, gate_widening, is_model_lane, path_in_surface, pin_workpiece_description,
     resolve_member_dependencies, split_lane_identity, surface_additions, surface_intersection, tier_verdict,
 };

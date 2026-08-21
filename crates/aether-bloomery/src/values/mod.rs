@@ -33,8 +33,8 @@ mod workpiece_builder;
 
 pub use adr::{ADR_SCHEMA, ADR_TRANSITION_SCHEMA, Adr, AdrStatus, AdrTransition, AdrValueError};
 pub use approval::{
-    ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, TierVerdict, gate_widening, surface_additions,
-    surface_intersection, tier_verdict,
+    ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, TierVerdict, gate_widening, path_in_surface,
+    surface_additions, surface_intersection, tier_verdict,
 };
 pub use bloom::{
     BloomDraft, BloomSpec, DependencyError, LandingReceipt, MemberCandidate, MemberDependency, MemberSubject,

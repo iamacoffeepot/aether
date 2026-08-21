@@ -9,8 +9,18 @@
 
 use std::path::Path;
 
-use aether_bloomery::{StageVerdict, SurfacePattern, VerifyFailure, VerifyFailureSet};
+use aether_bloomery::{StageVerdict, VerifyFailure, VerifyFailureSet};
 use aether_bloomery_git::command::{self, GitCommandError};
+
+/// The membership test this module is built on, now owned by the domain crate
+/// so xtask can reach it too (#5300) — xtask depends on `aether-bloomery` and
+/// not on this chassis.
+///
+/// Re-exported rather than merely imported: `verify::mod`'s own `pub use` list
+/// and `batch.rs`'s `super::path_in_surface` both address it through this
+/// module, and the name has to be in scope here for [`out_of_surface`], which
+/// calls it unqualified.
+pub use aether_bloomery::path_in_surface;
 
 /// The workspace lockfile any member's rebuild may rewrite.
 const LOCKFILE: &str = "Cargo.lock";
@@ -30,17 +40,6 @@ pub fn out_of_surface<'a>(changed: impl IntoIterator<Item = &'a str>, surface: &
     violations.sort();
     violations.dedup();
     violations
-}
-
-/// Whether `path` matches any declared-surface glob.
-#[must_use]
-pub fn path_in_surface(surface: &[String], path: &str) -> bool {
-    surface.iter().filter_map(|glob| SurfacePattern::parse(glob)).any(|pattern| match pattern {
-        SurfacePattern::Exact(exact) => path == exact,
-        SurfacePattern::Subtree(prefix) => {
-            path == prefix || path.starts_with(&prefix) && path.as_bytes().get(prefix.len()) == Some(&b'/')
-        }
-    })
 }
 
 /// The repository-relative paths `base..HEAD` changed.
