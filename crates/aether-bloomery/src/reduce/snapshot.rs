@@ -17,11 +17,16 @@ use super::{Decision, Decisions, Event, Fact, Outcome};
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
-    Adjudication, BaseReceipt, BaseVerdict, BloomSpec, CandidateRef, CompositionFinding, ConfigScopes, DispatchKey,
-    Evidence, EvidenceKind, MemberDependency, OperatorHold, OperatorRepair, OrphanClaimReleaseRecord, ResolutionClaim,
+    Adjudication, BaseReceipt, BloomSpec, CandidateRef, CompositionFinding, ConfigScopes, DispatchKey, Evidence,
+    EvidenceKind, MemberDependency, OperatorHold, OperatorRepair, OrphanClaimReleaseRecord, ResolutionClaim,
     ResolvedConfigs, SpendQuiesce, StageCatalog, SuppressionDisposition, SurfaceRequest, VerifiedTree,
     VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Withdrawal,
 };
+// Only [`Snapshot::with_green_base`] names it, and that door is behind the same cfg.
+// A plain import would be an unused one on a lib-scoped build, where the fixture
+// feature is off (#5411).
+#[cfg(any(test, feature = "testing"))]
+use crate::values::BaseVerdict;
 
 /// The rebuildable projection state the reducer reads (ADR-0149 §The control
 /// core). Holds nothing that is not derivable from the journal.
