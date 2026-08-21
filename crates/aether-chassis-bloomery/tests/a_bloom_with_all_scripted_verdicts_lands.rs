@@ -14,15 +14,11 @@
 //! path is where one is cheapest to hold. The two refused uploads sit beside the
 //! Construct verdict and leave the bloom's own progress untouched.
 
-mod common;
-pub mod fixture;
-pub mod harness;
-
 use aether_bloomery::{BloomStatus, Nonce, StudyCost, StudyRecord};
 use aether_chassis_bloomery::artifacts::GetResult;
 use aether_chassis_bloomery::bloomery::{ScriptedEvidenceResult, ScriptedUpload};
 use aether_data::wire::from_bytes;
-use fixture::{FixtureHarness, captured, digest, passed};
+use aether_harness_bloomery::{FixtureHarness, captured, digest, passed};
 
 /// The workpiece the single sealed member covers.
 const WORKPIECE: &str = "wp";

@@ -15,10 +15,6 @@
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, reason = "a scenario that cannot set up its coordinator reports it by panicking")]
 
-mod common;
-pub mod harness;
-mod lane;
-
 use std::fs;
 use std::path::PathBuf;
 use std::thread;
@@ -29,7 +25,7 @@ use aether_bloomery::{
     VerifyFailureSet,
 };
 use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneScript};
-use lane::{LaneHarness, while_pumping};
+use aether_harness_bloomery::{LaneHarness, while_pumping};
 
 /// Whether the bloom's single member has come to rest either way — resolved, or
 /// wedged. The predicate most scenarios wait on, because what separates them is

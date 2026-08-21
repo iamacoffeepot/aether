@@ -19,9 +19,9 @@ use aether_bloomery_github::{GitDataApi, PullRequestApi, candidate_ref_name, lan
 use aether_chassis_bloomery::artifacts::{ArtifactsCapabilityState, ArtifactsConfig, GetResult};
 use aether_chassis_bloomery::bloomery::mock_lane::{LaneRun, read_ledger};
 use aether_chassis_bloomery::bloomery::{
-    BloomeryChassis, BloomeryEnv, Chassis, CoordinatorConfig, DispatchTick, ExecutorReactorCapability,
-    GithubConnectionConfig, IntegrateReactorCapability, IntegrateTick, LandReactorCapability, LandTick,
-    ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload,
+    BloomeryChassis, BloomeryEnv, Chassis, CoordinatorConfig, DispatchTick, DoctorReactorCapability, DoctorTick,
+    ExecutorReactorCapability, GithubConnectionConfig, IntegrateReactorCapability, IntegrateTick,
+    LandReactorCapability, LandTick, ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload,
 };
 use aether_chassis_bloomery::control::ObserveTick;
 use aether_chassis_bloomery::session::SessionConfig;
@@ -29,16 +29,18 @@ use aether_chassis_bloomery::signing::SigningConfig;
 use aether_chassis_bloomery::store::{OutstandingOrder, SqliteCorrespondence, SqliteStore, StoreBackend, StoreConfig};
 use aether_data::Kind;
 use aether_data::wire::to_vec;
+use aether_http::HttpServerHandle;
 use aether_rpc::RpcServerHandle;
 use aether_substrate::chassis::builder::BuiltChassis;
 use tempfile::TempDir;
 
 use super::drive::member;
-use super::{BOOT_BUDGET, Backend, CoordinatorKind, HARNESS_STARTED, HarnessBuilder, Lane, POLL, liveness};
-use crate::common::client::connect_and_handshake;
-use crate::common::repo::Repo;
-use crate::common::wire::{Wire, control_mailbox};
-use crate::common::{Coordinator, free_port};
+use super::{BOOT_BUDGET, Backend, CoordinatorKind, HARNESS_STARTED, HarnessBuilder, Lane, POLL};
+use crate::oracle::liveness;
+use crate::support::client::connect_and_handshake;
+use crate::support::repo::Repo;
+use crate::support::wire::{Wire, control_mailbox};
+use crate::support::{Coordinator, free_port};
 
 /// How long the world must hold still, with nothing in flight, before a settle
 /// loop calls it quiescent. Comfortably more than the poll cadence plus the gap
@@ -107,7 +109,7 @@ impl ScenarioHarness {
 
         let repo = match builder.backend {
             Backend::Fixture => None,
-            Backend::LocalRepo if builder.authority_path.is_some() => None,
+            Backend::LocalRepo if builder.authority_path.is_some() => builder.repo.take(),
             Backend::LocalRepo => Some(builder.repo.take().unwrap_or_else(Repo::scratch)),
         };
 
@@ -130,9 +132,12 @@ impl ScenarioHarness {
                 let fake = builder.github_fixture.then(|| env.github.shared_fixture());
                 let chassis = BloomeryChassis::build(env).expect("the coordinator boots");
                 let port = chassis.handle::<RpcServerHandle>().expect("the RPC ingress published its port").local_port;
-                let wire = Wire::connect(port, client_name);
+                let mut wire = Wire::connect(port, client_name);
                 if let Some(timeout) = builder.socket_read_timeout {
                     wire.set_read_timeout(timeout);
+                }
+                if let Some(http) = chassis.handle::<HttpServerHandle>() {
+                    wire.set_http_port(http.local_port);
                 }
                 (Some(chassis), None, wire, fake)
             }
@@ -203,6 +208,11 @@ impl ScenarioHarness {
         self.wire.view()
     }
 
+    /// The doctor's latest pass, as `GET /view` overlays it.
+    pub fn doctor(&mut self) -> Option<aether_chassis_bloomery::bloomery::DoctorReport> {
+        self.wire.doctor()
+    }
+
     /// One bloom's view.
     pub fn bloom(&mut self, bloom: BloomId) -> BloomView {
         self.wire.bloom(bloom)
@@ -211,6 +221,73 @@ impl ScenarioHarness {
     /// Admit one reducer fact through the control core's wire ingress.
     pub fn admit(&mut self, key: &str, fact: Fact) -> Outcome {
         self.wire.admit(key, fact)
+    }
+
+    /// Local-authority cell over the three-crate example project.
+    pub fn start() -> Self {
+        let repo = Repo::with_example_project();
+        HarnessBuilder::local_authority(&repo).hold_repo(repo).start("bloomery-harness")
+    }
+
+    /// Seal `scenario`'s members on the observed mainline.
+    pub fn seal_scenario(&mut self, scenario: &crate::scenario::Scenario) -> BloomId {
+        let members: Vec<(&str, Digest)> = scenario
+            .members
+            .iter()
+            .enumerate()
+            .map(|(index, spec)| (spec.workpiece.0.as_str(), crate::digest((index + 1) as u8)))
+            .collect();
+        let pairs: Vec<(String, Digest)> =
+            members.iter().map(|(workpiece, digest)| ((*workpiece).to_owned(), *digest)).collect();
+        let refs: Vec<(&str, Digest)> = pairs.iter().map(|(workpiece, digest)| (workpiece.as_str(), *digest)).collect();
+        self.seal_members(&refs)
+    }
+
+    /// Write `scripts` for `workpiece`'s `stage` as a mock-lane script.
+    pub fn script_lane(
+        &self,
+        workpiece: &WorkpieceId,
+        stage: aether_bloomery::StageId,
+        scripts: &[crate::scenario::LaneScript],
+    ) {
+        let command = stage_command(stage);
+        let mut script = aether_chassis_bloomery::bloomery::mock_lane::LaneScript::all_passing();
+        for item in scripts {
+            script = script.then(command, lower_lane_script(item));
+        }
+        let _ = workpiece;
+        script.write_to(Path::new(&self.worktree_base)).expect("the mock-lane script writes");
+    }
+
+    /// Tick until `predicate` holds or `ticks` is exhausted, checking
+    /// [`crate::Oracle`] whenever the world has gone still.
+    pub fn run_until(&mut self, predicate: impl Fn(&mut Self) -> bool, ticks: u32) {
+        let mut last: Option<(String, Vec<String>, usize)> = None;
+        let mut still = 0_u32;
+        for _ in 0..ticks {
+            self.tick();
+            let document = self.view();
+            let outstanding = self.outstanding();
+            let progress = (format!("{document:?}"), outstanding.clone(), self.ledger().len());
+            if last.as_ref() == Some(&progress) {
+                still += 1;
+            } else {
+                last = Some(progress);
+                still = 0;
+            }
+            if still >= 2 {
+                crate::Oracle::check(&document, self.doctor().as_ref(), &outstanding)
+                    .unwrap_or_else(|violation| panic!("{violation}"));
+            }
+            if predicate(self) {
+                crate::Oracle::check(&self.view(), self.doctor().as_ref(), &self.outstanding())
+                    .unwrap_or_else(|violation| panic!("{violation}"));
+                return;
+            }
+        }
+        crate::Oracle::check(&self.view(), self.doctor().as_ref(), &self.outstanding())
+            .unwrap_or_else(|violation| panic!("tick budget exhausted: {violation}"));
+        panic!("predicate not reached inside {ticks} ticks");
     }
 
     /// Seal a single-member bloom on the observed mainline and return its id.
@@ -459,7 +536,7 @@ fn in_process_env(
             defaults.local_lane_commands
         },
         local_lane_program: if scripted {
-            env!("CARGO_BIN_EXE_bloomery-mock-lane").to_owned()
+            crate::mock_lane_program()
         } else {
             defaults.local_lane_program
         },
@@ -510,12 +587,13 @@ fn spawn_listening_coordinator(
     heartbeat_silence_secs: Option<u64>,
 ) -> (Coordinator, TcpStream) {
     let heartbeat = heartbeat_silence_secs.map(|secs| secs.to_string());
+    let lane_program = crate::mock_lane_program();
     for _ in 0..8 {
         let rpc_port = free_port();
         let mut env = vec![
             ("AETHER_STORE_PATH", store_path),
             ("AETHER_ARTIFACTS_ROOT", artifacts_root),
-            ("AETHER_BLOOMERY_LANE_PROGRAM", env!("CARGO_BIN_EXE_bloomery-mock-lane")),
+            ("AETHER_BLOOMERY_LANE_PROGRAM", lane_program.as_str()),
             ("AETHER_GITHUB_LOCAL_WORKTREE_BASE", worktree_base),
             ("AETHER_GITHUB_LOCAL_LANE_COMMANDS", "construct.,review.,verify."),
             ("AETHER_GITHUB_POLL_INTERVAL_SECS", "1"),
@@ -705,6 +783,20 @@ impl ScenarioHarness {
         self.wire.tick(control_mailbox(), &ObserveTick::default());
     }
 
+    /// Wake the doctor reactor once so `/view` overlays a fresh report.
+    pub fn doctor_tick(&mut self) {
+        self.wire.tick(<DoctorReactorCapability as Addressable>::resolve(0, ()), &DoctorTick::default());
+    }
+
+    /// One round of executor / integrate / land / observe / doctor.
+    pub fn tick(&mut self) {
+        self.dispatch_tick();
+        self.integrate_tick();
+        self.land_tick();
+        self.observe_tick();
+        self.doctor_tick();
+    }
+
     /// Move the repository's mainline to `head` as a fast-forward.
     pub fn move_mainline(&self, head: Digest) {
         const MAINLINE_REF: &str = "heads/main";
@@ -869,4 +961,26 @@ impl ScenarioHarness {
 
 fn nonces(orders: &[OutstandingOrder]) -> Vec<&str> {
     orders.iter().map(|order| order.nonce.as_str()).collect()
+}
+
+fn stage_command(stage: aether_bloomery::StageId) -> &'static str {
+    match stage {
+        aether_bloomery::StageId::Verify | aether_bloomery::StageId::AggregateVerify => {
+            aether_bloomery::VERIFY_CHECK_COMMAND
+        }
+        aether_bloomery::StageId::AggregateReview => aether_bloomery::REVIEW_CRITIC_COMMAND,
+        _ => aether_bloomery::CONSTRUCT_IMPLEMENT_COMMAND,
+    }
+}
+
+fn lower_lane_script(script: &crate::scenario::LaneScript) -> aether_chassis_bloomery::bloomery::mock_lane::LaneMode {
+    use aether_chassis_bloomery::bloomery::mock_lane::LaneMode;
+    match script {
+        crate::scenario::LaneScript::Candidate => LaneMode::Pass,
+        crate::scenario::LaneScript::Decline => LaneMode::Declines,
+        crate::scenario::LaneScript::OutsideSurface(_) => LaneMode::Fail,
+        crate::scenario::LaneScript::Die => LaneMode::ExitsNonZero,
+        crate::scenario::LaneScript::WrongSubject => LaneMode::WrongSubject,
+        crate::scenario::LaneScript::VerifyFail(_) => LaneMode::Fail,
+    }
 }

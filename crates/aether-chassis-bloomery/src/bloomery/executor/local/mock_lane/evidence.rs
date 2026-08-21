@@ -89,6 +89,13 @@ fn environment_findings() -> String {
 /// `nonce` is stamped into the evidence the way the real lanes stamp theirs.
 #[must_use]
 pub fn outcome(command: &str, nonce: &str, mode: LaneMode) -> Outcome {
+    outcome_for(command, nonce, mode, None)
+}
+
+/// [`outcome`], with the `--subject` the coordinator displayed so
+/// [`LaneMode::WrongSubject`] can bind a different digest.
+#[must_use]
+pub fn outcome_for(command: &str, nonce: &str, mode: LaneMode, subject: Option<&str>) -> Outcome {
     let body = |value: &Value| Some(serde_json::to_vec_pretty(value).unwrap_or_default());
     let evidence_nonce = if mode == LaneMode::MismatchedNonce {
         "mismatched-nonce"
@@ -109,7 +116,9 @@ pub fn outcome(command: &str, nonce: &str, mode: LaneMode) -> Outcome {
         | LaneMode::Environment
         | LaneMode::ConcludesWithoutWriting
         | LaneMode::MismatchedNonce
-        | LaneMode::NeverExits => {}
+        | LaneMode::NeverExits
+        | LaneMode::Declines
+        | LaneMode::WrongSubject => {}
     }
 
     if command == CONSTRUCT_IMPLEMENT_COMMAND {
@@ -117,25 +126,47 @@ pub fn outcome(command: &str, nonce: &str, mode: LaneMode) -> Outcome {
         // it stamps no status, so the coordinator's construct gate is what
         // decides. `ConcludesWithoutWriting` is the interesting one: it claims a
         // candidate and leaves the tree clean, which the capture must catch.
+        // `Declines` is the clean refusal: no candidate, terminal `is_error:
+        // false`, which intake maps onto ConstructDeclined.
         let produced = matches!(
             mode,
-            LaneMode::Pass | LaneMode::ConcludesWithoutWriting | LaneMode::MismatchedNonce | LaneMode::NeverExits
+            LaneMode::Pass
+                | LaneMode::ConcludesWithoutWriting
+                | LaneMode::MismatchedNonce
+                | LaneMode::NeverExits
+                | LaneMode::WrongSubject
         );
+        let mut evidence = json!({
+            "command": command,
+            "nonce": evidence_nonce,
+            "produced_candidate": produced,
+            "result_record": result_record(false, Some("wrote the candidate.")),
+        });
+        if mode == LaneMode::Declines
+            && let Some(object) = evidence.as_object_mut()
+        {
+            object
+                .insert("findings".to_owned(), Value::String("the work lies outside the declared surface".to_owned()));
+        }
+        if mode == LaneMode::WrongSubject
+            && let Some(object) = evidence.as_object_mut()
+        {
+            object.insert("claimed_subject".to_owned(), Value::String(wrong_subject(subject)));
+        }
         return Outcome {
-            evidence: body(&json!({
-                "command": command,
-                "nonce": evidence_nonce,
-                "produced_candidate": produced,
-                "result_record": result_record(false, Some("wrote the candidate.")),
-            })),
+            evidence: body(&evidence),
             exit_code: 0,
-            candidate: matches!(mode, LaneMode::Pass | LaneMode::MismatchedNonce | LaneMode::NeverExits)
-                .then(|| format!("the candidate a mock construct lane left for run {nonce}.\n")),
+            candidate: matches!(
+                mode,
+                LaneMode::Pass | LaneMode::MismatchedNonce | LaneMode::NeverExits | LaneMode::WrongSubject
+            )
+            .then(|| format!("the candidate a mock construct lane left for run {nonce}.\n")),
         };
     }
 
     if command == REVIEW_CRITIC_COMMAND {
-        let passed = matches!(mode, LaneMode::Pass | LaneMode::MismatchedNonce | LaneMode::NeverExits);
+        let passed =
+            matches!(mode, LaneMode::Pass | LaneMode::MismatchedNonce | LaneMode::NeverExits | LaneMode::WrongSubject);
         let findings = match mode {
             LaneMode::Environment => Value::String(environment_findings()),
             _ if passed => Value::Null,
@@ -151,17 +182,19 @@ pub fn outcome(command: &str, nonce: &str, mode: LaneMode) -> Outcome {
             _ if passed => "pass",
             _ => "fail",
         };
-        return Outcome {
-            evidence: body(&json!({
-                "command": command,
-                "nonce": evidence_nonce,
-                "status": status,
-                "findings": findings,
-                "result_record": result_record(false, findings.as_str()),
-            })),
-            exit_code: 0,
-            candidate: None,
-        };
+        let mut review = json!({
+            "command": command,
+            "nonce": evidence_nonce,
+            "status": status,
+            "findings": findings,
+            "result_record": result_record(false, findings.as_str()),
+        });
+        if mode == LaneMode::WrongSubject
+            && let Some(object) = review.as_object_mut()
+        {
+            object.insert("claimed_subject".to_owned(), Value::String(wrong_subject(subject)));
+        }
+        return Outcome { evidence: body(&review), exit_code: 0, candidate: None };
     }
 
     // Every remaining command is a mechanical verify lane.
@@ -191,7 +224,11 @@ pub fn outcome(command: &str, nonce: &str, mode: LaneMode) -> Outcome {
 
     let passed = matches!(
         mode,
-        LaneMode::Pass | LaneMode::ConcludesWithoutWriting | LaneMode::MismatchedNonce | LaneMode::NeverExits
+        LaneMode::Pass
+            | LaneMode::ConcludesWithoutWriting
+            | LaneMode::MismatchedNonce
+            | LaneMode::NeverExits
+            | LaneMode::WrongSubject
     );
     let mut evidence = json!({
         "command": command,
@@ -205,7 +242,31 @@ pub fn outcome(command: &str, nonce: &str, mode: LaneMode) -> Outcome {
         object.insert("findings".to_owned(), Value::String(verify_findings(command)));
     }
 
+    if mode == LaneMode::WrongSubject
+        && let Some(object) = evidence.as_object_mut()
+    {
+        object.insert("claimed_subject".to_owned(), Value::String(wrong_subject(subject)));
+    }
     Outcome { evidence: body(&evidence), exit_code: i32::from(!passed), candidate: None }
+}
+
+/// A digest that is not the one the order displayed.
+fn wrong_subject(displayed: Option<&str>) -> String {
+    match displayed {
+        Some(hex) if hex.len() == 64 => {
+            let mut flipped = hex.to_owned();
+            flipped.replace_range(
+                ..1,
+                if hex.starts_with('0') {
+                    "f"
+                } else {
+                    "0"
+                },
+            );
+            flipped
+        }
+        _ => "ee".repeat(32),
+    }
 }
 
 /// Apply an outcome: write the candidate into `worktree` when there is one, and

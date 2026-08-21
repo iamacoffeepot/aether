@@ -283,6 +283,14 @@ pub struct MemberView {
     /// that predates the field still decodes.
     #[serde(default)]
     pub cursor: Option<CompositionCursorView>,
+    /// A construct that concluded without a candidate (#5292, #5332). `None`
+    /// while the member is working, wedged, or resolved. Distinct from
+    /// [`pending_decision`]: a park is not an ADR-0151 question, and both
+    /// liveness oracles read this field rather than reconstructing it from
+    /// snapshot state. Trailing and `#[serde(default)]` so a reader that
+    /// predates the field still decodes.
+    #[serde(default)]
+    pub park: Option<crate::MemberPark>,
 }
 
 /// Why a member stopped dispatching (ADR-0195).

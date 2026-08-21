@@ -23,7 +23,7 @@ use aether_data::{Kind, MailboxId};
 use aether_rpc::{Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, WIRE_VERSION, WireFrame};
 use serde::Serialize;
 
-use super::Coordinator;
+use super::process::Coordinator;
 
 /// How long one Hello probe may wait. A stranger that completes TCP (kernel
 /// listen backlog) but never speaks the wire used to hold this helper for the

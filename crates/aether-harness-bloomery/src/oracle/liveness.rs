@@ -104,7 +104,11 @@ pub fn classify(document: &ViewDocument, outstanding: &[String]) -> Quiescence {
             BloomStatus::Sealed => {}
         }
         for member in &bloom.members {
-            if member.resolution.is_none() && member.wedge.is_none() && member.host_fault.is_none() {
+            if member.resolution.is_none()
+                && member.wedge.is_none()
+                && member.host_fault.is_none()
+                && member.park.is_none()
+            {
                 unresolved.push(format!("{:?}/{}", bloom.id, member.workpiece.0));
             }
         }
@@ -119,8 +123,13 @@ pub fn classify(document: &ViewDocument, outstanding: &[String]) -> Quiescence {
         // a *member's*: every member resolved and the fold is still held, so
         // without this it reads as a bloom that finished.
         let wedged = document.blooms.iter().any(|bloom| {
-            bloom.members.iter().any(|member| member.wedge.is_some() || member.host_fault.is_some())
+            bloom
+                .members
+                .iter()
+                .any(|member| member.wedge.is_some() || member.host_fault.is_some() || member.park.is_some())
                 || bloom.executor_fault.is_some_and(|fault| fault.terminal)
+                || bloom.operator_hold.is_some()
+                || bloom.review_park.is_some()
         });
         let summary = statuses.join(", ");
         return if wedged {

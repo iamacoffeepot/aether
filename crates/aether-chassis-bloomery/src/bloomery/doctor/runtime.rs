@@ -389,8 +389,8 @@ mod tests {
         assert!(board.latest().is_none());
         board.publish(DoctorReport {
             checks: vec![CheckResult {
-                name: "observed_head_equals_daily_head",
-                statement: "the observed head equals the actual daily ref head",
+                name: "observed_head_equals_daily_head".into(),
+                statement: "the observed head equals the actual daily ref head".into(),
                 passed: false,
                 divergences: vec!["observed aa != actual bb".into()],
             }],

@@ -6,6 +6,7 @@
 //! that retried TCP only and Hello'd once is how a bind-race stranger used to
 //! look like a coordinator bug.
 
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
@@ -14,6 +15,7 @@ use aether_bloomery::{
     Admit, AdmitResult, BloomId, BloomView, Event, Fact, IdempotencyKey, Outcome, Query, QueryResult, ViewDocument,
 };
 use aether_chassis_bloomery::ControlCore;
+use aether_chassis_bloomery::bloomery::DoctorReport;
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId};
@@ -26,6 +28,7 @@ use super::client::{call, call_frame, connect_and_handshake};
 pub struct Wire {
     stream: TcpStream,
     cid: u64,
+    http_port: Option<u16>,
 }
 
 impl Wire {
@@ -36,14 +39,20 @@ impl Wire {
     /// No coordinator answered inside the handshake deadline.
     #[must_use]
     pub fn connect(port: u16, client_name: &str) -> Self {
-        Self { stream: connect_and_handshake(port, client_name), cid: 1 }
+        Self { stream: connect_and_handshake(port, client_name), cid: 1, http_port: None }
     }
 
     /// Take an already-handshaken stream — the spawn-and-connect path hands
     /// one back beside the child guard.
     #[must_use]
     pub fn from_stream(stream: TcpStream) -> Self {
-        Self { stream, cid: 1 }
+        Self { stream, cid: 1, http_port: None }
+    }
+
+    /// Bind the REST port `GET /view` answers on, so [`doctor`](Self::doctor)
+    /// can read the overlay production serves.
+    pub fn set_http_port(&mut self, port: u16) {
+        self.http_port = Some(port);
     }
 
     /// Widen the socket read timeout past a scenario's step budget, so a slow
@@ -79,6 +88,23 @@ impl Wire {
             QueryResult::Document { document } => from_bytes(&document).expect("the projection decodes"),
             other => panic!("expected a document reply, got {other:?}"),
         }
+    }
+
+    /// The doctor's latest pass, as `GET /view` overlays it.
+    ///
+    /// `None` when the REST port was never bound, the ingress has not
+    /// answered yet, or this pass has not published a report.
+    pub fn doctor(&self) -> Option<DoctorReport> {
+        let port = self.http_port?;
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
+        let request = format!("GET /view HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+        stream.write_all(request.as_bytes()).ok()?;
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).ok()?;
+        let text = String::from_utf8_lossy(&bytes);
+        let body = text.split("\r\n\r\n").nth(1)?;
+        let value: serde_json::Value = serde_json::from_str(body).ok()?;
+        value.get("doctor").cloned().and_then(|doctor| serde_json::from_value(doctor).ok())
     }
 
     /// One bloom's view.

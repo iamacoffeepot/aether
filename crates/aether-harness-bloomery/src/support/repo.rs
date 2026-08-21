@@ -24,7 +24,7 @@ enum Layout {
 /// A scratch git repository: identity, one seed commit, and either a working
 /// clone with origin or a bare authority.
 pub struct Repo {
-    root: TempDir,
+    _root: TempDir,
     work: PathBuf,
     bare: PathBuf,
     head: String,
@@ -38,6 +38,7 @@ pub struct RepoBuilder {
     user_email: String,
     seed_path: String,
     seed_contents: String,
+    seed_files: Vec<(String, String)>,
     seed_message: String,
     branch: String,
     layout: Layout,
@@ -50,6 +51,7 @@ impl Default for RepoBuilder {
             user_email: "lane-harness@example.test".to_owned(),
             seed_path: "README.md".to_owned(),
             seed_contents: "the subject a lane-boundary scenario checks out.\n".to_owned(),
+            seed_files: Vec::new(),
             seed_message: "subject".to_owned(),
             branch: "main".to_owned(),
             layout: Layout::Origin,
@@ -71,6 +73,16 @@ impl RepoBuilder {
     pub fn seed_file(mut self, path: impl Into<String>, contents: impl Into<String>) -> Self {
         self.seed_path = path.into();
         self.seed_contents = contents.into();
+        self.seed_files.clear();
+        self
+    }
+
+    /// Replace the seed with a small three-crate workspace so a declared
+    /// surface glob (`crates/example-a/**`) is real and two members editing
+    /// `crates/example-shared/src/lib.rs` collide textually.
+    #[must_use]
+    pub fn example_tree(mut self) -> Self {
+        self.seed_files = example_project_files();
         self
     }
 
@@ -132,6 +144,14 @@ impl Repo {
             .seed_file("README.md", "the sealed subject a local-authority bloom checks out.\n")
             .bare_clone()
             .create()
+    }
+
+    /// [`bare_authority`](Self::bare_authority) seeded with the three-crate
+    /// example project [`BloomeryHarness::start`](crate::BloomeryHarness::start)
+    /// checks out.
+    #[must_use]
+    pub fn with_example_project() -> Self {
+        RepoBuilder::default().identity("test", "test@example.test").example_tree().bare_clone().create()
     }
 
     /// Start from a custom seed rather than either named shape.
@@ -232,7 +252,7 @@ fn create_origin(root: TempDir, spec: &RepoBuilder) -> Repo {
     git(&work, &["push", "--quiet", "origin", "HEAD:refs/heads/main"]);
 
     let head = git_capture(&work, &["rev-parse", "HEAD"]);
-    Repo { root, work, bare: origin, head, layout: Layout::Origin }
+    Repo { _root: root, work, bare: origin, head, layout: Layout::Origin }
 }
 
 fn create_bare(root: TempDir, spec: &RepoBuilder) -> Repo {
@@ -249,7 +269,7 @@ fn create_bare(root: TempDir, spec: &RepoBuilder) -> Repo {
     let status = Command::new("git").args(["clone", "--bare", "--quiet"]).arg(&seed).arg(&bare).status().unwrap();
     assert!(status.success(), "clone --bare into {}", bare.display());
 
-    Repo { root, work: seed, bare, head, layout: Layout::Bare }
+    Repo { _root: root, work: seed, bare, head, layout: Layout::Bare }
 }
 
 fn configure_identity(dir: &Path, spec: &RepoBuilder) {
@@ -258,11 +278,43 @@ fn configure_identity(dir: &Path, spec: &RepoBuilder) {
 }
 
 fn write_seed(dir: &Path, spec: &RepoBuilder) {
-    let path = dir.join(&spec.seed_path);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).unwrap();
+    let files = if spec.seed_files.is_empty() {
+        vec![(spec.seed_path.clone(), spec.seed_contents.clone())]
+    } else {
+        spec.seed_files.clone()
+    };
+    for (relative, contents) in files {
+        let path = dir.join(&relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, contents).unwrap();
     }
-    fs::write(path, &spec.seed_contents).unwrap();
+}
+
+fn example_project_files() -> Vec<(String, String)> {
+    vec![
+        (
+            "Cargo.toml".into(),
+            "[workspace]\nresolver = \"3\"\nmembers = [\"crates/example-a\", \"crates/example-b\", \"crates/example-shared\"]\n"
+                .into(),
+        ),
+        (
+            "crates/example-a/Cargo.toml".into(),
+            "[package]\nname = \"example-a\"\nversion = \"0.0.0\"\nedition = \"2024\"\n".into(),
+        ),
+        ("crates/example-a/src/lib.rs".into(), "pub fn a() -> u8 { 1 }\n".into()),
+        (
+            "crates/example-b/Cargo.toml".into(),
+            "[package]\nname = \"example-b\"\nversion = \"0.0.0\"\nedition = \"2024\"\n".into(),
+        ),
+        ("crates/example-b/src/lib.rs".into(), "pub fn b() -> u8 { 1 }\n".into()),
+        (
+            "crates/example-shared/Cargo.toml".into(),
+            "[package]\nname = \"example-shared\"\nversion = \"0.0.0\"\nedition = \"2024\"\n".into(),
+        ),
+        ("crates/example-shared/src/lib.rs".into(), "pub fn shared() -> u8 { 1 }\n".into()),
+    ]
 }
 
 fn git(dir: &Path, args: &[&str]) {

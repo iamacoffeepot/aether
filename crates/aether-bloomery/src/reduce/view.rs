@@ -161,6 +161,7 @@ fn member_views(
                 }
             }),
             cursor: stage_cursor(record, &member.workpiece),
+            park: snapshot.member_park(&record.spec.id(), &member.workpiece).copied(),
         })
         .collect()
 }

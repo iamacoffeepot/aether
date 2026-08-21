@@ -274,6 +274,9 @@ pub struct MemberView {
     /// Stage cursor when the coordinator serves it. Absent-tolerant.
     #[serde(default)]
     pub cursor: Option<CompositionCursorView>,
+    /// Construct-declined park (#5292 / #5332). Absent-tolerant.
+    #[serde(default)]
+    pub park: Option<Present>,
 }
 
 /// Host-fault findings, listed verbatim when the coordinator serves them.

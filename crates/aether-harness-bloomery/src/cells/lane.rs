@@ -47,6 +47,4 @@
 #![allow(dead_code, reason = "each test binary compiles the whole module and uses only the fixtures it needs")]
 #![allow(clippy::unwrap_used, reason = "a fixture that cannot set up its coordinator reports it by panicking")]
 
-pub mod liveness;
-
 pub use crate::harness::{LaneHarness, while_pumping};

@@ -1,0 +1,39 @@
+[package]
+name = "aether-harness-bloomery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# `BloomeryHarness` — the coordinator scenario harness (issue 5332), promoted
+# from `aether-chassis-bloomery`'s tests tree so any crate can take it as a
+# dev-dependency and so a generated suite can live next to the driver it
+# exercises. It boots a real coordinator chassis (in-process by default,
+# forked as an axis), drives it over raw RPC, and substitutes only the lane
+# program (`bloomery-mock-lane`) and, on the fixture cell, the in-memory
+# GitHub. The journal, artifacts, reducer, reactors, and git checkout stay
+# real. The crate is test-support end to end — it is only ever a
+# dev-dependency — so nothing here enters a production graph.
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-bloomery = { path = "../aether-bloomery", default-features = false, features = ["testing"] }
+aether-bloomery-github = { path = "../aether-bloomery-github", features = ["testing"] }
+aether-chassis-bloomery = { path = "../aether-chassis-bloomery", features = ["testing"] }
+aether-codec = { path = "../aether-codec" }
+aether-data = { path = "../aether-data" }
+aether-http = { path = "../aether-http" }
+aether-rpc = { path = "../aether-rpc" }
+aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tempfile = "3"
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[[bin]]
+name = "bloomery-harness-mock-lane"
+path = "src/bin/mock_lane.rs"
+
+[lints]
+workspace = true

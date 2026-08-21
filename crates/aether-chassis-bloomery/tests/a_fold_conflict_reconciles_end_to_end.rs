@@ -6,14 +6,10 @@
 //! cross — the dispatch → executor → intake seam, where a completed
 //! Reconcile used to be refused as out-of-line and the bloom stalled.
 
-mod common;
-pub mod fixture;
-pub mod harness;
-
 use aether_bloomery::{BloomStatus, StageId, Transformation};
 use aether_chassis_bloomery::store::OutstandingOrder;
 use aether_data::wire::from_bytes;
-use fixture::{FixtureHarness, captured, digest, passed};
+use aether_harness_bloomery::{FixtureHarness, captured, digest, passed};
 
 const FIRST: &str = "wp-0";
 const SECOND: &str = "wp-1";
