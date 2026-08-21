@@ -176,6 +176,25 @@ fn landing_source(
 }
 
 #[cfg(feature = "github")]
+fn land_reactor_source(
+    github: &GithubConnectionConfig,
+    coordinator: &CoordinatorConfig,
+    source: &SourceShell,
+    correspondence: SharedCorrespondence,
+    configured: bool,
+) -> Result<Option<Arc<dyn aether_bloomery_github::LandingSource>>, BootError> {
+    if coordinator.uses_local_authority() {
+        let landing = if configured {
+            LocalLanding::with_issues(source.clone(), Some(landing_source(github, coordinator, correspondence)?))
+        } else {
+            LocalLanding::new(source.clone())
+        };
+        return Ok(Some(Arc::new(landing)));
+    }
+    configured.then(|| landing_source(github, coordinator, correspondence)).transpose()
+}
+
+#[cfg(feature = "github")]
 fn projection_shell(github: &GithubConnectionConfig, configured: bool) -> Result<Option<ProjectionShell>, BootError> {
     #[cfg(any(test, feature = "testing"))]
     if github.uses_fixture() {
@@ -254,18 +273,7 @@ fn actor_setups(
             pusher: Arc::clone(&pusher),
         },
         land: LandReactorSetup {
-            source: if coordinator.uses_local_authority() {
-                Some(Arc::new(if configured {
-                    LocalLanding::with_issues(
-                        source.clone(),
-                        Some(landing_source(github, coordinator, Arc::clone(&correspondence))?),
-                    )
-                } else {
-                    LocalLanding::new(source.clone())
-                }))
-            } else {
-                configured.then(|| landing_source(github, coordinator, Arc::clone(&correspondence))).transpose()?
-            },
+            source: land_reactor_source(github, coordinator, &source, Arc::clone(&correspondence), configured)?,
             store_path: coordinator.store_path.clone(),
             poll_interval_secs: coordinator.poll_interval_secs,
             repository: repository.clone(),

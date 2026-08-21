@@ -88,10 +88,7 @@ impl LandingSource for LocalLanding {
     }
 
     fn close_issue(&self, number: u64, key: &str, comment: &str) -> Result<(), SourceError> {
-        match &self.issues {
-            Some(issues) => issues.close_issue(number, key, comment),
-            None => Ok(()),
-        }
+        self.issues.as_ref().map_or(Ok(()), |issues| issues.close_issue(number, key, comment))
     }
 }
 
