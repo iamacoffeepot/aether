@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use aether_actor::Addressable;
 use aether_bloomery::{
     BackendObjectId, BloomDraft, BloomId, BloomSpec, BloomStatus, BloomView, CandidateRef, ConfigKind, ConfigRegistry,
-    Correspondence, Digest, Evidence, EvidenceKind, Fact, Membership, Outcome, Snapshot, StageCatalog, StageId,
-    ViewDocument, WorkpieceId,
+    Correspondence, Digest, Evidence, EvidenceKind, Fact, MemberDependency, Membership, Outcome, Snapshot,
+    StageCatalog, StageId, ViewDocument, WorkpieceId,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{GitDataApi, PullRequestApi, candidate_ref_name, landing_branch, short_hex, to_hex};
@@ -325,6 +325,45 @@ impl ScenarioHarness {
             Outcome::Sealed(sealed) => assert_eq!(sealed, bloom, "the sealed id is the spec's content address"),
             other => panic!("the fixture seal must seal: {other:?}"),
         }
+        bloom
+    }
+
+    /// Seal a multi-member bloom carrying a declared dependency graph.
+    ///
+    /// The edgeless [`Fact::Seal`] is what `seal_members` admits, and a
+    /// scenario about readiness, splices, or a cascading withdrawal needs the
+    /// edges the door would have resolved from the members' scopes. `edges` is
+    /// `(member, depends_on)` pairs, both member workpieces.
+    ///
+    /// # Panics
+    /// The seal was refused.
+    pub fn seal_graph(&mut self, members: &[(&str, Digest)], edges: &[(&str, &str)]) -> BloomId {
+        let base = if self.base == Digest::default() {
+            self.view().mainline
+        } else {
+            self.base
+        };
+        let spec =
+            super::draft(base, &members.iter().map(|(workpiece, scope)| member(workpiece, *scope)).collect::<Vec<_>>());
+        let bloom = spec.id();
+        let edges = edges
+            .iter()
+            .map(|(dependent, depends_on)| MemberDependency {
+                member: WorkpieceId((*dependent).to_owned()),
+                depends_on: WorkpieceId((*depends_on).to_owned()),
+            })
+            .collect::<Vec<_>>();
+        let key = members.iter().map(|(workpiece, _)| *workpiece).collect::<Vec<_>>().join("+");
+        match self.admit(&format!("fixture-graph-seal-{key}"), Fact::GraphSeal {
+            predecessor: None,
+            spec: spec.clone(),
+            edges,
+        }) {
+            Outcome::Sealed(sealed) => assert_eq!(sealed, bloom, "the sealed id is the spec's content address"),
+            other => panic!("the fixture graph seal must seal: {other:?}"),
+        }
+        self.sealed = Some(spec);
+
         bloom
     }
 
@@ -884,16 +923,29 @@ impl ScenarioHarness {
     pub fn resolve_and_propose(&mut self, bloom: BloomId) -> (bool, u64) {
         self.integrate_tick();
 
-        let order = self.await_order();
-        assert!(order.workpiece.is_empty(), "a bloom-level order carries no member axis");
-        let mut key = self.upload_admitted(&super::passed(&order));
-
-        let mechanical_ran = key.starts_with("aether.bloomery.aggregate_verify:");
-        if mechanical_ran {
-            let aggregate_review = self.await_order();
-            key = self.upload_admitted(&super::passed(&aggregate_review));
+        // Both composite gates go out over the same fold and neither reads the
+        // other's verdict, so both orders stand outstanding at once and either
+        // can arrive first. The exception is a fold of one live member: that
+        // tree is byte-identical to the candidate the member already verified,
+        // so the mechanical gate passes by identity (#4891) and only the critic
+        // is dispatched.
+        let live = self.bloom(bloom).members.iter().filter(|member| member.withdrawn.is_none()).count();
+        let mechanical_ran = live > 1;
+        let orders = self.await_orders(usize::from(mechanical_ran) + 1);
+        let mut keys = Vec::new();
+        for order in &orders {
+            assert!(order.workpiece.is_empty(), "a bloom-level order carries no member axis");
+            keys.push(self.upload_admitted(&super::passed(order)));
         }
-        assert!(key.starts_with("aether.bloomery.aggregate_review:"), "the critic's gate: {key}");
+        assert!(
+            keys.iter().any(|key| key.starts_with("aether.bloomery.aggregate_review:")),
+            "the critic's gate ran: {keys:?}",
+        );
+        assert_eq!(
+            keys.iter().any(|key| key.starts_with("aether.bloomery.aggregate_verify:")),
+            mechanical_ran,
+            "the mechanical gate runs exactly when the fold is not one already-verified candidate: {keys:?}",
+        );
 
         self.land_tick();
         let proposal = self.landing_proposal(bloom).expect("a resolved bloom proposes a landing");
