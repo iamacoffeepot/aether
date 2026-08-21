@@ -451,6 +451,38 @@ impl ApprovalPolicy {
         self.rules.iter().all(|rule| valid_policy_glob(&rule.glob))
     }
 
+    /// The tier of a *crate-derived* surface: the most restrictive tier over
+    /// the files it protects, and the policy default when it protects none.
+    ///
+    /// A crate-derived surface names whole crates and their reverse-dependency
+    /// closure, so most of its globs are subtrees the work is merely allowed to
+    /// reach rather than places it intends to change. Resolving the tier over
+    /// those would put every bloom that so much as depends on a guarded crate
+    /// in front of the owner, which is the gate refusing work rather than
+    /// judging it — the closure is a containment bound, not a statement of
+    /// intent.
+    ///
+    /// What *is* a statement of intent is the `## Protected files` block: the
+    /// scope naming, one literal path at a time, a file the policy guards and
+    /// this work means to touch. Those are the entries the tier reads. They are
+    /// exactly the surface's file-granular entries, because the granularity
+    /// check refuses a literal no `human`/`judge` rule names, so nothing else
+    /// can be sitting in that position.
+    ///
+    /// The globs never lower the tier either: the protected literals resolve
+    /// through [`resolve_surface`](Self::resolve_surface), which folds in the
+    /// policy default for anything a rule does not cover.
+    #[must_use]
+    pub fn resolve_protected(&self, surface: &[String]) -> Tier {
+        let protected: Vec<String> = surface
+            .iter()
+            .filter(|glob| matches!(SurfacePattern::parse(glob), Some(SurfacePattern::Exact(_))))
+            .cloned()
+            .collect();
+
+        if protected.is_empty() { self.default } else { self.resolve_surface(&protected) }
+    }
+
     /// The most restrictive tier over every path a declared surface permits — the
     /// gate's answer for one workpiece. An empty surface resolves the policy
     /// default; any surface glob outside the validated grammar resolves

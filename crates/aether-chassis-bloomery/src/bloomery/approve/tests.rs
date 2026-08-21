@@ -116,6 +116,7 @@ fn request(surface: &[&str]) -> AdmissionRequest {
     AdmissionRequest {
         subject: revision(),
         declared_surface: surface.iter().map(|s| (*s).to_owned()).collect(),
+        declared_crates: Vec::new(),
         completeness: complete(),
         adr_touch: AdrTouch::None,
         pre_approved: false,

@@ -88,8 +88,16 @@ pub struct MemberProjection {
     /// The exact scope-revision digest — matches the proposal's `scope_revision`
     /// and the digest the formed approval binds.
     pub scope_revision: Digest,
-    /// The declared-surface globs the tier policy resolves over.
+    /// The declared-surface globs the containment bound is drawn from.
     pub declared_surface: Vec<String>,
+    /// The workspace crates the scope declared, when it declared crates rather
+    /// than globs. Non-empty means `declared_surface` above was *derived* — the
+    /// declared crates, their reverse-dependency closure, the shared roots, and
+    /// the protected files — and the tier resolves over the protected files
+    /// alone. Defaulted so a projection written before the block existed reads
+    /// back as the glob-declared surface it is.
+    #[serde(default)]
+    pub declared_crates: Vec<String>,
     /// The nine completeness facts the gate fails closed on.
     pub completeness: Completeness,
     /// The ADR-maturity of the change, for the unconditional hard gate.

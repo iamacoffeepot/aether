@@ -339,6 +339,7 @@ impl WorkpieceBuilder {
             dependencies: self.texts(FieldKind::Edge).into_iter().map(|id| WorkpieceId(String::from(id))).collect(),
             description: String::new(),
             implements: Vec::new(),
+            declared_crates: Vec::new(),
         }
     }
 
@@ -588,6 +589,7 @@ mod tests {
             dependencies: vec![WorkpieceId(String::from("issue-5298"))],
             description: String::new(),
             implements: Vec::new(),
+            declared_crates: Vec::new(),
         };
         assert_eq!(digest_of(&revision), digest_of(&expected));
     }

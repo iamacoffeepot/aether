@@ -131,6 +131,7 @@ fn seed_commission_revision(
         dependencies: dependencies.iter().map(|dep| WorkpieceId((*dep).to_owned())).collect(),
         description: description.to_owned(),
         implements: Vec::new(),
+        declared_crates: Vec::new(),
     };
     let (status, written) =
         send_auth(port, "POST", &format!("/commissions/{id}/revisions"), &serde_json::to_value(&revision).unwrap());

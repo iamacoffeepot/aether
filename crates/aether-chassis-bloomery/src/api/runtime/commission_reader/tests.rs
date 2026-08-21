@@ -34,6 +34,7 @@ fn revision(id: &str, problem: &str) -> ScopeRevision {
         dependencies: Vec::new(),
         description: "advisory".to_owned(),
         implements: Vec::new(),
+        declared_crates: Vec::new(),
     }
 }
 
@@ -351,6 +352,7 @@ fn gate_request(admitted: &AdmittedMember, pre_approved: bool) -> AdmissionReque
     AdmissionRequest {
         subject: admitted.workpiece.scope_revision,
         declared_surface: admitted.projection.declared_surface.clone(),
+        declared_crates: admitted.projection.declared_crates.clone(),
         completeness: admitted.projection.completeness,
         adr_touch: admitted.projection.adr_touch,
         pre_approved,
