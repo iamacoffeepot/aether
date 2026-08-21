@@ -147,16 +147,10 @@ mod tests {
             MemberState::Idle,
         ] {
             match state {
-                MemberState::Running
-                | MemberState::Wedged
-                | MemberState::AwaitingSurface
-                | MemberState::Held => {
+                MemberState::Running | MemberState::Wedged | MemberState::AwaitingSurface | MemberState::Held => {
                     assert!(state.walks(), "{state:?} must walk");
                 }
-                MemberState::Withdrawn
-                | MemberState::Integrated
-                | MemberState::Blocked
-                | MemberState::Idle => {
+                MemberState::Withdrawn | MemberState::Integrated | MemberState::Blocked | MemberState::Idle => {
                     assert!(!state.walks(), "{state:?} must rest");
                 }
             }
