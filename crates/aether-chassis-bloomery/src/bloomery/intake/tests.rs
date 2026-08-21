@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Debug, Write as _};
+use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -406,7 +407,7 @@ impl aether_bloomery::ExecutorBackend for JournalReadingExecutor {
         drop(store);
 
         if self.refuse {
-            return Err(ExecutorPortError::Local(LocalExecutorError::Spawn(std::io::Error::other("refused"))));
+            return Err(ExecutorPortError::Local(LocalExecutorError::Spawn(io::Error::other("refused"))));
         }
         Ok(WorkHandle::new(order.nonce.clone()))
     }

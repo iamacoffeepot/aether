@@ -219,11 +219,17 @@ fn lint_surface_granularity(revision: &ScopeRevision, approval_policy: &Path) ->
     let policy = match load_policy(approval_policy) {
         Ok(policy) => policy,
         Err(error) => {
-            eprintln!(
-                "warning: approval policy {} could not be read ({error}); skipping the declared-surface \
-                 granularity lint. The seal door still enforces it.",
-                approval_policy.display()
-            );
+            #[allow(
+                clippy::print_stderr,
+                reason = "an advisory the operator reads; the command's own output is the String it returns on stdout"
+            )]
+            {
+                eprintln!(
+                    "warning: approval policy {} could not be read ({error}); skipping the declared-surface \
+                     granularity lint. The seal door still enforces it.",
+                    approval_policy.display()
+                );
+            }
             return Ok(());
         }
     };

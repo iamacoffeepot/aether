@@ -13,6 +13,7 @@
 //! to, which is what keeps a coordinator that has authored none working
 //! unchanged. Either failure below is a gate failure, never a silent tier.
 
+use std::error::Error;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -39,8 +40,8 @@ impl fmt::Display for PolicyError {
     }
 }
 
-impl std::error::Error for PolicyError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl Error for PolicyError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Unreadable(error) => Some(error),
             Self::Malformed => None,

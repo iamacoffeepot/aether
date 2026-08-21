@@ -538,6 +538,48 @@ fn verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Ev
     }
 }
 
+/// Every refusal a claimed verdict earns by naming a stage that cannot carry
+/// it. All of them precede the consume, so a refused order stays live and an
+/// honest result on it can still land.
+fn out_of_stage_refusal(stage: StageId, upload: &UploadedEvidence) -> Option<IntakeRefusal> {
+    if let Some(refusal) = verifier_failure_refusal(stage, upload) {
+        return Some(refusal);
+    }
+    // ADR-0195 admits ExecutorFault for dispatched member stages and the
+    // aggregate review. A fault claimed against any other stage is refused
+    // rather than routed.
+    if upload.verdict == StageVerdict::ExecutorFault
+        && stage != StageId::AggregateReview
+        && !admits_member_executor_fault(stage)
+    {
+        return Some(IntakeRefusal::ExecutorFaultOutOfStage(stage));
+    }
+    // ADR-0207's two decline verdicts belong to the construct family alone.
+    if matches!(upload.verdict, StageVerdict::Declined | StageVerdict::SurfaceRequested)
+        && !admits_as_attempt_completed(stage)
+    {
+        return Some(IntakeRefusal::SurfaceRequestOutOfStage(stage));
+    }
+    None
+}
+
+/// The fact a decline that named the paths its work requires admits as
+/// (ADR-0207): the reducer parks the member awaiting a surface amendment
+/// rather than spending an attempt on a lap that would reproduce the same
+/// refusal.
+fn surface_requested_event(record: &DispatchRecord, evidence: Evidence, request: SurfaceRequest) -> Event {
+    Event {
+        idempotency_key: AdmissionKey::SurfaceRequest.of(&record.nonce.0),
+        fact: Fact::SurfaceRequested {
+            bloom: record.bloom,
+            workpiece: record.workpiece.clone(),
+            stage: record.stage,
+            evidence,
+            request,
+        },
+    }
+}
+
 fn admits_as_attempt_completed(stage: StageId) -> bool {
     StageCatalog::next_member_stage(stage).is_some() || matches!(stage, StageId::Refine | StageId::Reconcile)
 }
@@ -550,26 +592,8 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     let Some(record) = DispatchRecord::from_stored(&stored) else {
         return Ok(AdmitDecision::Refused(IntakeRefusal::CorruptOrder(upload.nonce.clone())));
     };
-    if let Some(refusal) = verifier_failure_refusal(record.stage, upload) {
+    if let Some(refusal) = out_of_stage_refusal(record.stage, upload) {
         return Ok(AdmitDecision::Refused(refusal));
-    }
-    // ADR-0195 admits ExecutorFault for dispatched member stages and the
-    // aggregate review. A fault claimed against any other stage is refused
-    // here rather than routed — the refusal precedes the consume, so the
-    // order stays live and an honest result on it can still land.
-    if upload.verdict == StageVerdict::ExecutorFault
-        && record.stage != StageId::AggregateReview
-        && !admits_member_executor_fault(record.stage)
-    {
-        return Ok(AdmitDecision::Refused(IntakeRefusal::ExecutorFaultOutOfStage(record.stage)));
-    }
-    // ADR-0207's two decline verdicts belong to the construct family alone.
-    // Refused here, ahead of the consume, so the order stays live and an
-    // honest result on it can still land.
-    if matches!(upload.verdict, StageVerdict::Declined | StageVerdict::SurfaceRequested)
-        && !admits_as_attempt_completed(record.stage)
-    {
-        return Ok(AdmitDecision::Refused(IntakeRefusal::SurfaceRequestOutOfStage(record.stage)));
     }
     let observed = StageResult { subject: upload.subject, verdict: upload.verdict, detail: upload.detail };
     let evidence = match normalize_stage_result(&record.displayed_digest, &observed) {
@@ -637,16 +661,7 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
         && let Some(request) = upload.surface_request.clone()
         && admits_as_attempt_completed(record.stage)
     {
-        Event {
-            idempotency_key: AdmissionKey::SurfaceRequest.of(&record.nonce.0),
-            fact: Fact::SurfaceRequested {
-                bloom: record.bloom,
-                workpiece: record.workpiece.clone(),
-                stage: record.stage,
-                evidence,
-                request,
-            },
-        }
+        surface_requested_event(&record, evidence, request)
     } else if evidence.kind == EvidenceKind::ConstructDeclined && admits_as_attempt_completed(record.stage) {
         Event {
             idempotency_key: AdmissionKey::Attempt.of(&record.nonce.0),

@@ -1503,6 +1503,7 @@ impl LocalExecutor {
                 None
             }
         };
+        drop(store);
         Some((record.scope_revision, surface))
     }
 
@@ -1694,16 +1695,14 @@ impl LocalExecutor {
         } else {
             Vec::new()
         };
-        vec![judged_evidence_ref(
-            handle,
-            &subject,
-            bytes,
-            candidate,
+        let judgement = Judgement {
             verdict,
-            failed_verifiers.unwrap_or_default(),
+            failed_verifiers: failed_verifiers.unwrap_or_default(),
             violating_paths,
             surface_request,
-        )]
+        };
+
+        vec![judged_evidence_ref(handle, &subject, bytes, candidate, judgement)]
     }
 }
 
@@ -1791,16 +1790,25 @@ fn synthesized_executor_fault(
     vec![executor_fault_ref(handle, subject, &bytes, candidate, None, None, None)]
 }
 
+/// What the lane's own conclusion says about the attempt, as opposed to what
+/// the run mechanically produced. Grouped because the four travel together
+/// from the conclusion that derived them into the evidence that records them.
+struct Judgement {
+    verdict: StageVerdict,
+    failed_verifiers: VerifyFailureSet,
+    violating_paths: Vec<String>,
+    /// The paths a declining construct-family lane asked for (ADR-0207).
+    surface_request: Option<SurfaceRequest>,
+}
+
 fn judged_evidence_ref(
     handle: &WorkHandle,
     subject: &Digest,
     bytes: &[u8],
     candidate: Option<CandidateRef>,
-    verdict: StageVerdict,
-    failed_verifiers: VerifyFailureSet,
-    violating_paths: Vec<String>,
-    surface_request: Option<SurfaceRequest>,
+    judgement: Judgement,
 ) -> EvidenceRef {
+    let Judgement { verdict, failed_verifiers, violating_paths, surface_request } = judgement;
     let overlay = apply_containment(verdict, failed_verifiers, parse_findings(bytes), &violating_paths);
     let detail = Digest::of_wire_bytes(bytes);
     EvidenceRef {

@@ -362,7 +362,8 @@ impl NativeActor for BloomeryApiCapability {
         ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
         digest: http::Path<String>,
     ) -> http::Outcome {
-        let routed = configs::read_config(state, &digest.0);
+        let digest = digest.0;
+        let routed = configs::read_config(state, &digest);
         finish(state, ctx, routed)
     }
 
