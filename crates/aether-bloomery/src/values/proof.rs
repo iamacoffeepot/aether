@@ -73,12 +73,14 @@ impl VerifyGateSet {
     /// When the gate set becomes an explicitly declared value it lands in this
     /// type and the memo keeps keying on exactly the same digest.
     ///
-    /// The verifier set is the eight identities the compiled `verify.check`
+    /// The verifier set is the nine identities the compiled `verify.check`
     /// fan-out runs, listed by hand rather than derived from
     /// [`VerifyFailure::ALL`]. Containment is coordinator-side and never a lane
     /// member; picking it up from the vocabulary would re-key every stored
     /// [`VerifiedTree`] proof memo. A future identity the lane *does* run must
-    /// be added here by hand.
+    /// be added here by hand — as [`VerifyFailure::Lock`] was (#5309), which
+    /// re-keys every stored memo exactly as the doc above says it should,
+    /// because the lane's gate set genuinely changed.
     #[must_use]
     pub fn lane() -> Self {
         Self {
@@ -91,6 +93,7 @@ impl VerifyGateSet {
                 VerifyFailure::Dup,
                 VerifyFailure::Deps,
                 VerifyFailure::Suppress,
+                VerifyFailure::Lock,
             ]
             .into_iter()
             .collect(),
@@ -222,6 +225,6 @@ mod tests {
             !lane.verifiers.contains(VerifyFailure::Containment),
             "containment must not sit in the compiled lane's gate set"
         );
-        assert_eq!(lane.verifiers.to_mask(), "00ff");
+        assert_eq!(lane.verifiers.to_mask(), "02ff");
     }
 }

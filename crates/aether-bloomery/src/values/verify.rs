@@ -39,11 +39,15 @@ pub enum VerifyFailure {
     Suppress,
     /// The candidate edited a path no declared-surface glob covers (ADR-0209).
     Containment,
+    /// `verify.lock` failed — a manifest edit landed without the matching
+    /// `Cargo.lock` regeneration (#5309). Appended past
+    /// [`Self::Containment`] so every earlier identity keeps its bit.
+    Lock,
 }
 
 impl VerifyFailure {
     /// Every V1 identity, in canonical wire order.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Preflight,
         Self::Fmt,
         Self::Clippy,
@@ -53,6 +57,7 @@ impl VerifyFailure {
         Self::Deps,
         Self::Suppress,
         Self::Containment,
+        Self::Lock,
     ];
 
     /// The canonical identity string.
@@ -68,6 +73,7 @@ impl VerifyFailure {
             Self::Deps => "verify.deps",
             Self::Suppress => "verify.suppress",
             Self::Containment => "verify.containment",
+            Self::Lock => "verify.lock",
         }
     }
 
@@ -84,6 +90,7 @@ impl VerifyFailure {
             b"verify.deps" => Some(Self::Deps),
             b"verify.suppress" => Some(Self::Suppress),
             b"verify.containment" => Some(Self::Containment),
+            b"verify.lock" => Some(Self::Lock),
             _ => None,
         }
     }
@@ -358,16 +365,16 @@ mod tests {
         assert_eq!(VerifyFailureSet::from_mask("7f").map(VerifyFailureSet::to_mask).as_deref(), Some("007f"));
 
         // Tripwire: the whole vocabulary must still fit the four-hex-digit token
-        // the attempt-artifact grammar reserves for it. A tenth identity shifts
-        // `bit()` by 9 without widening the set, and with overflow checks on —
-        // the profile `cargo test` and CI run — that panics here before the
-        // comparison is reached.
-        assert_eq!(VerifyFailure::ALL.into_iter().collect::<VerifyFailureSet>().to_mask(), "01ff");
+        // the attempt-artifact grammar reserves for it. A seventeenth identity
+        // shifts `bit()` by 16 without widening the set, and with overflow
+        // checks on — the profile `cargo test` and CI run — that panics here
+        // before the comparison is reached.
+        assert_eq!(VerifyFailure::ALL.into_iter().collect::<VerifyFailureSet>().to_mask(), "03ff");
         assert_eq!(VerifyFailureSet::one(VerifyFailure::Suppress).to_mask(), "0080");
         assert_eq!(VerifyFailureSet::from_mask("80"), Some(VerifyFailureSet::one(VerifyFailure::Suppress)));
         assert_eq!(VerifyFailureSet::from_mask("0080"), Some(VerifyFailureSet::one(VerifyFailure::Suppress)));
         assert_eq!(
-            VerifyFailureSet::from_mask("01ff"),
+            VerifyFailureSet::from_mask("03ff"),
             Some(VerifyFailure::ALL.into_iter().collect::<VerifyFailureSet>())
         );
 

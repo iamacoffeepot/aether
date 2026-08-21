@@ -6,7 +6,7 @@
 //! - The **mechanical verify lane** (`verify.fmt`, `verify.clippy`,
 //!   `verify.docs`, `verify.test`, `verify.dup`, `verify.deps`, and
 //!   `verify.suppress`, #3501) — zero-secret invocations byte-for-byte with CI.
-//!   The `verify.check` umbrella runs all seven without short-circuiting.
+//!   The `verify.check` umbrella runs all eight without short-circuiting.
 //! - The **model-driven construct lane** (`construct.implement`, #3511) —
 //!   runs headless Claude at the resolved model + reasoning effort against the
 //!   checked-out **subject** tree, and writes the nonce-tagged **result record**
