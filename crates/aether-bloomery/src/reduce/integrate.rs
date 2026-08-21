@@ -260,7 +260,7 @@ pub(super) fn reduce_resolve(
             || reads![roll: roll, spent: record.aggregate_verify_rolls],
             || Outcome::ResolveRejected(ResolveError::ReviewCeiling { rolls: record.aggregate_verify_rolls }),
         )
-        .decide(|| folded(snapshot, record, *bloom, *tree, *head, lineage, roll))
+        .decide(|| folded(record, *bloom, *tree, *head, lineage, roll))
 }
 
 /// The effects a passing fold produces: the fold is held on the record, and
@@ -272,7 +272,6 @@ pub(super) fn reduce_resolve(
 /// (`BloomRecord::aggregate_passed`), and a refusal from either re-weaves the
 /// composition once.
 fn folded(
-    snapshot: &Snapshot,
     record: &BloomRecord,
     bloom: BloomId,
     tree: Digest,
