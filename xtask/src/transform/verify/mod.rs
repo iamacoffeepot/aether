@@ -15,6 +15,7 @@ use std::time::Instant;
 
 use aether_bloomery::{VerifyFailure, VerifyFailureSet};
 use anyhow::{Context, Result, bail};
+use serde::Serialize;
 
 use crate::cargo::{self, WASM_TARGET, run_captured, write_json_pretty};
 use crate::transform::peak_memory::{self, PeakMemory};
@@ -83,6 +84,21 @@ struct VerifyInvocation {
     /// gate that cannot name its `--base` must not invent one and must not
     /// look like a defect the candidate can edit away.
     environment_exit_codes: &'static [i32],
+    /// The exit codes with which this member reports a finding it **declines to
+    /// judge**, because granting it is a reviewer's act and no reviewer exists
+    /// at the moment a member verifies (ADR-0193).
+    ///
+    /// The third thing an exit code can mean here, and distinct from all three
+    /// above: the scan ran, it found something, and it is telling the lane that
+    /// the candidate stated its case rather than hiding it. The member passes —
+    /// no identity is added to `failed_verifiers`, so ADR-0178's arithmetic is
+    /// untouched — and the request rides out on
+    /// [`MemberRun::suppression_requests`] for the two reviewer surfaces to
+    /// render.
+    ///
+    /// Only `verify.suppress` states one. A member that declines to judge
+    /// without a place to send the question would just be a silent pass.
+    requested_exit_codes: &'static [i32],
     /// When set, [`Self::args_under`] appends this flag and the work-order's
     /// resolved diff base. The suppression scanner is the one member that
     /// reads a git range, and without this it falls back to `origin/main`.
@@ -232,6 +248,7 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // exits 1 too, so that conflation survives this change unresolved.
             finding_exit_codes: &[1],
             environment_exit_codes: &[],
+            requested_exit_codes: &[],
             diff_base_flag: None,
             breadth: Breadth::Workspace,
         }),
@@ -246,6 +263,7 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // zero; 101 is cargo's "could not compile", which is a finding too.
             finding_exit_codes: &[101],
             environment_exit_codes: &[],
+            requested_exit_codes: &[],
             diff_base_flag: None,
             breadth: Breadth::Closure,
         }),
@@ -264,6 +282,7 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // does.
             finding_exit_codes: &[101],
             environment_exit_codes: &[],
+            requested_exit_codes: &[],
             diff_base_flag: None,
             breadth: Breadth::Closure,
         }),
@@ -299,6 +318,7 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // of those is a statement about the candidate.
             finding_exit_codes: &[100, 101],
             environment_exit_codes: &[],
+            requested_exit_codes: &[],
             diff_base_flag: None,
             breadth: Breadth::Closure,
         }),
@@ -324,6 +344,7 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // exit 2, which lands on the operational side where it belongs.
             finding_exit_codes: &[1],
             environment_exit_codes: &[],
+            requested_exit_codes: &[],
             diff_base_flag: None,
             breadth: Breadth::Workspace,
         }),
@@ -353,6 +374,7 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // scanner draws, from a different program.
             finding_exit_codes: &[1],
             environment_exit_codes: &[],
+            requested_exit_codes: &[],
             diff_base_flag: None,
             breadth: Breadth::Workspace,
         }),
@@ -380,6 +402,7 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // is cargo failing to run at all.
             finding_exit_codes: &[1],
             environment_exit_codes: &[],
+            requested_exit_codes: &[],
             diff_base_flag: None,
             breadth: Breadth::Workspace,
         }),
@@ -397,13 +420,85 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             //
             // An unresolvable `--base` leaves by 3: the input was refused, no
             // scan ran, and the umbrella reads that as a host fault (#5033).
+            //
+            // A scan whose every finding states a request leaves by 4
+            // (ADR-0193): the candidate is not hiding the suppression, and the
+            // question it raises is one only a reviewer can answer.
             finding_exit_codes: &[1],
             environment_exit_codes: &[3],
+            requested_exit_codes: &[SUPPRESSION_REQUESTED_EXIT],
             diff_base_flag: Some("--base"),
             breadth: Breadth::Workspace,
         }),
         _ => None,
     }
+}
+
+/// The exit code `scripts/check-suppressions.py` leaves by when it found
+/// suppressions and every one of them states a request (ADR-0193).
+///
+/// Tripwire: the scanner's `EXIT_REQUESTED`. The two constants are in different
+/// languages with nothing tying them together, and a drift here reads a
+/// requested scan as an operational fault — a `VerifyFailure::Preflight` on a
+/// candidate that did exactly what it was asked to do.
+const SUPPRESSION_REQUESTED_EXIT: i32 = 4;
+
+/// The member whose findings a lane may state a request against. Only the
+/// suppression scanner has a marker to read, and the parser below is written
+/// for its `path:line — token — source` output shape.
+const SUPPRESS_MEMBER: &str = "verify.suppress";
+
+/// The trailing comment a lane writes on the suppression line itself to state
+/// its case (ADR-0193 §1). Shared with `xtask/src/transform/construct_instructions.md`,
+/// which is where a lane learns to write it, and with the scanner's own
+/// `REQUEST_RE`.
+const REQUEST_MARKER: &str = "aether-suppression-request:";
+
+/// One suppression the lane declined to judge, as the evidence record carries
+/// it (ADR-0193 §2).
+///
+/// Its own channel rather than a section of `findings`, for the reason the
+/// environment observation is its own channel: findings are handed to a repair
+/// lap as *work*, and a request handed over as work is repaired away by the
+/// next model that reads it.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize)]
+pub(super) struct SuppressionRequest {
+    /// The repository-relative path the suppression sits in.
+    pub(super) path: String,
+    /// The line the scanner reported it on. For reading only: the request rides
+    /// the line, so a shift moves both together and binds nothing.
+    pub(super) line: u32,
+    /// The lint the attribute allows, as the scanner tokenized it.
+    pub(super) lint: String,
+    /// The lane's one line stating why the policy blesses this write.
+    pub(super) reason: String,
+}
+
+/// Read the requests a `verify.suppress` run stated out of its own output.
+///
+/// Parsed from the rendered findings rather than from a second artifact,
+/// because the scanner already prints every finding as
+/// `path:line — token — source` and the marker is part of that source. A line
+/// that does not split into all three parts, or whose source carries no marker
+/// with a non-empty reason, contributes nothing — the scanner's own
+/// all-of-them rule is what decides the verdict, and this reader only has to
+/// name what it can.
+fn parse_suppression_requests(log: &str) -> Vec<SuppressionRequest> {
+    log.lines()
+        .filter_map(|line| {
+            let (location, rest) = line.split_once(" — ")?;
+            let (path, number) = location.rsplit_once(':')?;
+            let (lint, source) = rest.split_once(" — ")?;
+            let reason = source.split_once(REQUEST_MARKER)?.1.trim();
+            let line = number.parse().ok()?;
+            (!path.is_empty() && !reason.is_empty()).then(|| SuppressionRequest {
+                path: path.to_owned(),
+                line,
+                lint: lint.trim().to_owned(),
+                reason: reason.to_owned(),
+            })
+        })
+        .collect()
 }
 
 /// Whether a clippy run that was *not* asked to deny warnings should count as a
@@ -557,6 +652,12 @@ fn member_outcome(invocation: &VerifyInvocation, derived_pass: bool, code: Optio
         } else {
             MemberOutcome::Failed
         };
+    }
+
+    // Read before the finding codes: a member that declined to judge has said
+    // the candidate stated its case, and the lane has no standing to answer.
+    if code.is_some_and(|code| invocation.requested_exit_codes.contains(&code)) {
+        return MemberOutcome::Passed;
     }
 
     if code.is_some_and(|code| invocation.finding_exit_codes.contains(&code)) {
@@ -881,15 +982,27 @@ struct MemberRun {
     flakes: Vec<Excused>,
     /// Tests this run excused because they were already red at the base.
     inherited: Vec<Excused>,
+    /// Suppressions this run declined to judge, each with the reason the lane
+    /// stated for it (ADR-0193).
+    suppression_requests: Vec<SuppressionRequest>,
 }
 
 impl MemberRun {
     /// A member whose log the distillers read as they always have — everything
     /// but a `verify.test` run whose failures were classified.
     fn plain(id: &str, outcome: MemberOutcome, log: Vec<u8>, exit_code: i32) -> Self {
+        let rendered = String::from_utf8_lossy(&log);
         let findings = matches!(outcome, MemberOutcome::Failed | MemberOutcome::Operational)
-            .then(|| distil_member(id, &String::from_utf8_lossy(&log)))
+            .then(|| distil_member(id, &rendered))
             .flatten();
+        // Keyed on the code the scanner left by rather than on the outcome: a
+        // requested run passes, and reading the marker off every passing
+        // member's log would hand the reviewer whatever prose happened to
+        // resemble it.
+        let suppression_requests = (id == SUPPRESS_MEMBER && exit_code == SUPPRESSION_REQUESTED_EXIT)
+            .then(|| parse_suppression_requests(&rendered))
+            .unwrap_or_default();
+
         Self {
             id: id.to_owned(),
             outcome,
@@ -899,6 +1012,7 @@ impl MemberRun {
             observation: None,
             flakes: Vec::new(),
             inherited: Vec::new(),
+            suppression_requests,
         }
     }
 }
@@ -1024,6 +1138,8 @@ fn run_member_discriminated(
             observation: join_observations(classified.observation(), triaged.observation()),
             flakes: triaged.flakes,
             inherited: triaged.inherited,
+            // Only `verify.suppress` states one, and this arm is `verify.test`.
+            suppression_requests: Vec::new(),
         });
     }
 
@@ -1057,6 +1173,7 @@ fn run_member_discriminated(
         observation: rerun_observation(outcome, classified.observation()),
         flakes: Vec::new(),
         inherited: Vec::new(),
+        suppression_requests: Vec::new(),
     })
 }
 
@@ -1259,15 +1376,19 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
     let exit_code = effective_exit_code(passed, code);
 
     // A failing single verify contributes its own diagnostics on the same
-    // channel the umbrella uses, so a lane run alone directs a Refine too.
-    let findings =
-        (!passed).then(|| verify_findings(&[MemberRun::plain(&args.command, outcome, log_bytes, exit_code)])).flatten();
+    // channel the umbrella uses, so a lane run alone directs a Refine too — and
+    // a `verify.suppress` run alone states its requests on the same channel the
+    // umbrella states them on, so the two paths hand the reviewer one shape.
+    let run = MemberRun::plain(&args.command, outcome, log_bytes, exit_code);
+    let findings = (!passed).then(|| verify_findings(std::slice::from_ref(&run))).flatten();
+    let requests = stated_requests(std::slice::from_ref(&run));
 
     let failures = outcome.failure(&args.command).map(VerifyFailureSet::one);
-    let evidence =
+    let mut evidence =
         build_evidence(&args.command, args.nonce.clone(), passed, Some(exit_code), log_name, findings, failures)
             .measured_by(cache.as_ref(), &peak)
             .timed(duration_millis);
+    evidence.suppression_requests = requests;
     write_json_pretty(&args.out.join("evidence.json"), &evidence)?;
 
     if passed {
@@ -1490,6 +1611,17 @@ fn append_flake_log(out: &Path, flakes: &[Excused]) {
     }
 }
 
+/// Gather the requests the members stated, for the evidence's own channel.
+///
+/// Presence-driven like the excusal ledgers: absent when nothing was requested,
+/// so a reader tells "this candidate asked for nothing" from "this build
+/// predates the channel" by whether the key is there at all.
+fn stated_requests(members: &[MemberRun]) -> Option<Vec<SuppressionRequest>> {
+    let gathered: Vec<SuppressionRequest> =
+        members.iter().flat_map(|member| member.suppression_requests.iter().cloned()).collect();
+    (!gathered.is_empty()).then_some(gathered)
+}
+
 /// Assemble the members' environment observations into the evidence's own
 /// channel — the receipts for everything this run declined to charge the
 /// candidate for (#4895).
@@ -1545,6 +1677,7 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
             environment: None,
             flakes: None,
             inherited_failures: None,
+            suppression_requests: None,
         };
         write_json_pretty(&args.out.join("evidence.json"), &evidence)?;
         process::exit(1);
@@ -1570,6 +1703,7 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
         environment: environment_observations(&runs),
         flakes: excused(&runs, |run| &run.flakes),
         inherited_failures: excused(&runs, |run| &run.inherited),
+        suppression_requests: stated_requests(&runs),
     }
     .timed(elapsed_millis(umbrella_started))
     .with_gates(gates);

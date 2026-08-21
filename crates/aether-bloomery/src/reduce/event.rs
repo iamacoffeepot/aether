@@ -11,8 +11,8 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
     Adjudication, BloomSpec, CandidateRef, ConfigRegistry, Evidence, MemberDependency, OperatorHold, OperatorRepair,
-    OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim, Statement, SurfaceRequest, VerifyFailureSet,
-    Withdrawal,
+    OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim, Statement, SuppressionDisposition,
+    SurfaceRequest, VerifyFailureSet, Withdrawal,
 };
 
 /// An admitted fact plus its idempotency key (ADR-0149 §The control core).
@@ -715,6 +715,27 @@ pub enum Fact {
         /// a lease to make visible — arrives with the observation that takes
         /// it.
         observed_at: u64,
+    },
+    /// A reviewer answered the suppression requests a member's candidate is
+    /// carrying (ADR-0193 §5).
+    ///
+    /// The lane states; only a reviewer grants. A grant arrives by observation
+    /// — the coordinator reads the owner-edited marker off its own landing
+    /// proposal on the pass it already polls, and takes the granter from the
+    /// editor login the marker check itself trusts. A denial has no marker for
+    /// "no", so it arrives through a REST door of its own. Both admit here,
+    /// because what is being recorded is the same thing either way: who
+    /// answered what, and how.
+    ///
+    /// Appended past [`Fact::LaneWritesObserved`] so every prior fact keeps its
+    /// wire discriminant.
+    SuppressionDisposition {
+        /// The bloom the answered member belongs to.
+        bloom: BloomId,
+        /// The member whose candidate carries the requests.
+        workpiece: WorkpieceId,
+        /// The answer, naming the requests it closes by digest.
+        disposition: SuppressionDisposition,
     },
 }
 

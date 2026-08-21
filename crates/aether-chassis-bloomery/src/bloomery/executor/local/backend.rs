@@ -11,7 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use aether_bloomery::{
     BackendObjectId, CandidateRef, Conclusion, ConfigRegistry, ConfigScopes, Digest, EvidenceRef, ExecutionStatus,
     ExecutorBackend, Nonce, ObservedLaneWrites, PriceTable, ResolvedModel, SharedCorrespondence, StageId,
-    StageVerdict, StudyCost, SurfaceRequest, Transformation, VerifyFailureSet, WorkHandle, WorkOrder, is_model_lane,
+    StageVerdict, StudyCost, SuppressionRequest, SurfaceRequest, Transformation, VerifyFailureSet, WorkHandle,
+    WorkOrder, is_model_lane,
 };
 use aether_bloomery_git::command;
 use aether_bloomery_github::parse_study;
@@ -1701,6 +1702,11 @@ impl LocalExecutor {
             failed_verifiers: failed_verifiers.unwrap_or_default(),
             violating_paths,
             surface_request,
+            // Read off every lane's evidence, not only a verify's: the umbrella
+            // is what states them, and a `verify.suppress` dispatched on its
+            // own writes the same channel. A lane that stated none yields an
+            // empty set, which is the absence the reviewer surfaces read.
+            suppression_requests: SuppressionRequest::normalize(parse_suppression_requests(bytes)),
         };
 
         vec![judged_evidence_ref(handle, &subject, bytes, candidate, judgement)]
@@ -1792,7 +1798,7 @@ fn synthesized_executor_fault(
 }
 
 /// What the lane's own conclusion says about the attempt, as opposed to what
-/// the run mechanically produced. Grouped because the four travel together
+/// the run mechanically produced. Grouped because the five travel together
 /// from the conclusion that derived them into the evidence that records them.
 struct Judgement {
     verdict: StageVerdict,
@@ -1800,6 +1806,8 @@ struct Judgement {
     violating_paths: Vec<String>,
     /// The paths a declining construct-family lane asked for (ADR-0207).
     surface_request: Option<SurfaceRequest>,
+    /// The suppressions the candidate states a case for (ADR-0193).
+    suppression_requests: Vec<SuppressionRequest>,
 }
 
 fn judged_evidence_ref(
@@ -1809,7 +1817,7 @@ fn judged_evidence_ref(
     candidate: Option<CandidateRef>,
     judgement: Judgement,
 ) -> EvidenceRef {
-    let Judgement { verdict, failed_verifiers, violating_paths, surface_request } = judgement;
+    let Judgement { verdict, failed_verifiers, violating_paths, surface_request, suppression_requests } = judgement;
     let overlay = apply_containment(verdict, failed_verifiers, parse_findings(bytes), &violating_paths);
     let detail = Digest::of_wire_bytes(bytes);
     EvidenceRef {
@@ -1836,6 +1844,7 @@ fn judged_evidence_ref(
         peak_resident_bytes: parse_peak_resident_bytes(bytes),
         violating_paths,
         surface_request,
+        suppression_requests,
     }
 }
 
@@ -1870,6 +1879,7 @@ fn executor_fault_ref(
         peak_resident_bytes: parse_peak_resident_bytes(bytes),
         violating_paths: Vec::new(),
         surface_request: None,
+        suppression_requests: Vec::new(),
     }
 }
 
@@ -2405,6 +2415,37 @@ fn parse_surface_request(bytes: &[u8]) -> Option<(String, Vec<(String, String)>)
         })
         .collect();
     (!claimed.is_empty()).then_some((summary, claimed))
+}
+
+/// The evidence's top-level `suppression_requests` array — the case a lane
+/// stated for each suppression it declined to remove (ADR-0193), returned as
+/// the lane's raw claim for [`SuppressionRequest::normalize`] to judge.
+///
+/// Presence-driven and tolerant like [`parse_surface_request`]: bytes that do
+/// not decode, an absent array, and an entry missing any of its four members
+/// all yield nothing rather than failing the lane. The lane is an untrusted
+/// worker; the trust boundary is `normalize`, not this reader.
+fn parse_suppression_requests(bytes: &[u8]) -> Vec<(String, u32, String, String)> {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Vec::new();
+    };
+    value
+        .get("suppression_requests")
+        .and_then(serde_json::Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    Some((
+                        entry.get("path")?.as_str()?.to_owned(),
+                        u32::try_from(entry.get("line")?.as_u64()?).ok()?,
+                        entry.get("lint")?.as_str()?.to_owned(),
+                        entry.get("reason")?.as_str()?.to_owned(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// What the attempt cost, from the `result_record` the lane nested in its

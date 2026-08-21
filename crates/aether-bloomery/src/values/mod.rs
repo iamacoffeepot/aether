@@ -28,6 +28,7 @@ mod spend;
 mod stage;
 mod statement;
 mod study;
+mod suppression;
 mod surface;
 mod timeout;
 mod verify;
@@ -80,6 +81,7 @@ pub use stage::{
 pub use statement::signed_approval;
 pub use statement::{Observation, Provenance, StageReceipt, Statement};
 pub use study::{StudyCall, StudyCost, StudyRecord};
+pub use suppression::{SuppressionDisposition, SuppressionRequest, SuppressionVerdict};
 pub use surface::{SurfacePathRequest, SurfaceRequest};
 pub use timeout::TimeoutRecord;
 pub use verify::{VerifyFailure, VerifyFailureSet};
@@ -251,6 +253,16 @@ pub enum EvidenceKind {
     /// operator reads. Appended past [`Self::ReviewAdvisory`] so the prior
     /// kinds' wire discriminants are unchanged.
     ConstructDeclined,
+    /// A candidate's stated case for the suppressions it is carrying
+    /// (ADR-0193). Its `detail` names the [`SuppressionRequest`] set the lane
+    /// wrote on the suppression lines themselves.
+    ///
+    /// It raises no hold and advances no member — a request is a question
+    /// asked of a reviewer who does not exist yet at the moment a member
+    /// verifies, and the member proceeds while it stands. Appended past
+    /// [`Self::ConstructDeclined`] so the prior kinds' wire discriminants are
+    /// unchanged.
+    SuppressionRequest,
 }
 
 /// The sealed forecast of what a bloom's set will spend — what a study report

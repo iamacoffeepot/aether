@@ -508,6 +508,22 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, routed)
     }
 
+    /// `POST /blooms/{id}/members/{workpiece}/suppression` — answer the
+    /// suppression requests the workpiece's candidate is carrying (ADR-0193).
+    /// A grant lets it stand; a denial bounces the member to a repair lap.
+    #[http::route(Post, "/blooms/{id}/members/{workpiece}/suppression")]
+    fn on_suppression(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+        workpiece: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let workpiece = workpiece.0;
+        let routed = state.suppression(&id, &workpiece, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
     /// `POST /blooms/{id}/members/{workpiece}/repair` — re-enter a wedged
     /// workpiece at `Verify` on the candidate the operator pushed (#4957). The
     /// gates still run; only the model lap is skipped.

@@ -6,8 +6,8 @@
 use aether_actor::Manual;
 use aether_bloomery::{
     Adjudication, Admit, AdmitResult, AuthorityDoor, BloomId, BloomView, CandidateRef, Disposition, Event, Fact,
-    IdempotencyKey, OperatorHold, OperatorRepair, Outcome, Query, QueryResult, Statement, ViewDocument,
-    WhyDocument, Withdrawal, WithdrawalCause, WorkpieceId, digest_of,
+    IdempotencyKey, OperatorHold, OperatorRepair, Outcome, Query, QueryResult, Statement, SuppressionDisposition,
+    ViewDocument, WhyDocument, Withdrawal, WithdrawalCause, WorkpieceId, digest_of,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_http::HttpServerResponse;
@@ -19,8 +19,8 @@ use super::hex::{self, digest_from_hex, hex_encode};
 use super::response::{error_response, json};
 use super::state::{ApiCapabilityState, Routed, VerifyPending, admit};
 use crate::api::dto::{
-    AdjudicateRequest, GrantRequest, HoldRequest, OutcomeView, ReleaseAcceptedView, RepairRequest, SupersedeRequest,
-    WithdrawRequest,
+    AdjudicateRequest, GrantRequest, HoldRequest, OutcomeView, ReleaseAcceptedView, RepairRequest,
+    SuppressionAnswerRequest, SupersedeRequest, WithdrawRequest,
 };
 use crate::bloomery::DoctorReport;
 use crate::control::ControlCore;
@@ -142,6 +142,63 @@ impl ApiCapabilityState {
         });
 
         admit(&Event { idempotency_key: IdempotencyKey(key), fact: Fact::OperatorAdjudication { bloom, adjudication } })
+    }
+
+    /// `POST /blooms/{id}/members/{workpiece}/suppression` — answer the
+    /// suppression requests `{workpiece}`'s candidate is carrying (ADR-0193 §5).
+    ///
+    /// Journal-first like `adjudicate`: appending the fact is the route's whole
+    /// effect, and every state movement a denial causes — the revoked claim, the
+    /// `Refine` re-entry, the spent repair roll — is the reducer's, so a
+    /// reviewer's answer replays exactly as it happened (ADR-0190).
+    ///
+    /// What the route decides for itself is only what it can see in the request:
+    /// a body that says nothing. A blank reason and a blank operator are `422`
+    /// here rather than a round trip, because each is a malformed answer rather
+    /// than a refused one — and an empty request set is the same, since an answer
+    /// that closes nothing has answered nothing.
+    ///
+    /// The reason travels on the fact rather than on the member's findings
+    /// channel. That channel is written at intake, from what a lane's evidence
+    /// said, and a route that wrote it directly would put a person's words in a
+    /// place every reader treats as a gate's — with nothing to stop the next
+    /// verify capture from overwriting them. The repair lap therefore reads the
+    /// refusal from the journal, where the answer lives.
+    pub(super) fn suppression(&self, id: &str, workpiece: &str, body: &[u8]) -> Routed {
+        let bloom = match digest_from_hex(id) {
+            Some(digest) => BloomId(digest),
+            None => return Routed::Reply(error_response(400, "bloom id is not a 32-byte hex bloom id")),
+        };
+        let request: SuppressionAnswerRequest = match hex::from_slice(body) {
+            Ok(request) => request,
+            Err(error) => return Routed::Reply(error_response(400, &format!("invalid suppression body: {error}"))),
+        };
+        let SuppressionAnswerRequest { requests, verdict, reason, operator, idempotency_key } = request;
+        if requests.is_empty() {
+            return Routed::Reply(error_response(
+                422,
+                "a suppression answer must name the requests it closes; an answer that closes nothing is not one",
+            ));
+        }
+        if let Some(refusal) = unstated(&reason, &operator) {
+            return Routed::Reply(refusal);
+        }
+
+        let workpiece = WorkpieceId(workpiece.to_owned());
+        let disposition = SuppressionDisposition { requests, verdict, reason, operator };
+        let key = idempotency_key.unwrap_or_else(|| {
+            format!(
+                "aether.bloomery.suppression:{}:{}:{}",
+                hex_encode(bloom.0.as_bytes()),
+                workpiece.0,
+                hex_encode(digest_of(&disposition).as_bytes())
+            )
+        });
+
+        admit(&Event {
+            idempotency_key: IdempotencyKey(key),
+            fact: Fact::SuppressionDisposition { bloom, workpiece, disposition },
+        })
     }
 
     /// `POST /blooms/{id}/members/{workpiece}/repair` — hand the wedged

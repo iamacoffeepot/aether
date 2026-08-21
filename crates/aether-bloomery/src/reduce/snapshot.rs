@@ -19,8 +19,8 @@ use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
     Adjudication, BloomSpec, CandidateRef, CompositionFinding, ConfigScopes, DispatchKey, Evidence, EvidenceKind,
     MemberDependency, OperatorHold, OperatorRepair, OrphanClaimReleaseRecord, ResolutionClaim, ResolvedConfigs,
-    SpendQuiesce, StageCatalog, SurfaceRequest, VerifiedTree, VerifyFailureSet, VerifyGateSet, VerifyProof,
-    VerifyReuse, Wedge, Withdrawal,
+    SpendQuiesce, StageCatalog, SuppressionDisposition, SurfaceRequest, VerifiedTree, VerifyFailureSet,
+    VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Withdrawal,
 };
 
 /// The rebuildable projection state the reducer reads (ADR-0149 §The control
@@ -133,6 +133,18 @@ pub struct Snapshot {
     /// fold. `#[serde(default)]` is the `surface_requests` precedent.
     #[serde(default)]
     pub lease_evictions: BTreeMap<BloomId, BTreeMap<WorkpieceId, LeaseEviction>>,
+    /// Every reviewer answer to a member's suppression requests (ADR-0193),
+    /// keyed by bloom then workpiece, in admission order.
+    ///
+    /// Folded straight from [`Fact::SuppressionDisposition`] the way the lease
+    /// table is folded from its own fact, so no new [`Decision`] enters the
+    /// wire-frozen graph. Appended rather than replaced: "who granted this
+    /// allow, and who denied one before them" is the audit question the
+    /// mechanism exists to answer, and a map that kept only the latest answer
+    /// would lose the denial a later grant overrode. `#[serde(default)]` is the
+    /// `surface_requests` precedent.
+    #[serde(default)]
+    pub suppression_dispositions: BTreeMap<BloomId, BTreeMap<WorkpieceId, Vec<SuppressionDisposition>>>,
     /// Why a bloom-scoped boundary refused (ADR-0206), keyed by bloom then
     /// gate name.
     ///
@@ -813,6 +825,7 @@ impl Snapshot {
         next.record_refusals(decisions);
         next.record_surface_request(event, decisions);
         next.record_file_leases(event, decisions);
+        next.record_suppression_disposition(event, decisions);
         next
     }
 
@@ -977,6 +990,27 @@ impl Snapshot {
             }
             _ => {}
         }
+    }
+
+    /// Append a reviewer's answer to the member it answered (ADR-0193).
+    ///
+    /// Gated on [`Outcome::SuppressionAnswered`] so a refused answer cannot
+    /// plant a record of a decision the reducer rejected. Nothing clears the
+    /// list: it is the audit trail, and a member whose next candidate states no
+    /// request has not un-asked the one a reviewer already answered.
+    fn record_suppression_disposition(&mut self, event: &Event, decisions: &Decisions) {
+        let Fact::SuppressionDisposition { bloom, workpiece, disposition } = &event.fact else {
+            return;
+        };
+        if !matches!(decisions.outcome, Outcome::SuppressionAnswered { .. }) {
+            return;
+        }
+        self.suppression_dispositions
+            .entry(*bloom)
+            .or_default()
+            .entry(workpiece.clone())
+            .or_default()
+            .push(disposition.clone());
     }
 
     /// Move the bloom's file-lease table from the admitted fact (ADR-0204).

@@ -15,8 +15,9 @@ use crate::values::{Evidence, EvidenceKind, Statement};
 /// [`ResolutionClaim`](crate::ResolutionClaim) enters through
 /// [`Fact::Integrate`](crate::Fact::Integrate) and an [`EvidenceKind::Approval`]
 /// seals a member, so
-/// neither is bound to the free evidence-log door. The four non-integrating
-/// classes (`VerificationResult`, `ReviewFinding`, `StudyRecord`, `Question`)
+/// neither is bound to the free evidence-log door. The five non-integrating
+/// classes (`VerificationResult`, `ReviewFinding`, `StudyRecord`, `Question`,
+/// `SuppressionRequest`)
 /// are what this log records; a mis-routed integrating/approval class is
 /// [`AdmitEvidenceError::EvidenceNotBound`]. A `Question` entry additionally
 /// derives a pending-decision hold in the fold (see
@@ -40,6 +41,10 @@ pub(super) fn reduce_admit_evidence(snapshot: &Snapshot, bloom: &BloomId, eviden
             | EvidenceKind::ReviewFinding
             | EvidenceKind::StudyRecord
             | EvidenceKind::Question
+            // A candidate's stated case for its suppressions (ADR-0193). It
+            // raises no hold and advances nothing: the lane already passed, and
+            // the request is a question for a reviewer who does not exist yet.
+            | EvidenceKind::SuppressionRequest
     ) {
         return Decisions::rejected(Outcome::AdmitEvidenceRejected(AdmitEvidenceError::EvidenceNotBound));
     }

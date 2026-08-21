@@ -11,7 +11,7 @@
 //! `Lint title` check would refuse, drops to the floor title. A GitHub issue
 //! title is not a rung — GitHub is a replica.
 
-use aether_bloomery::{Adjudication, BloomId, Disposition, Event, Fact};
+use aether_bloomery::{Adjudication, BloomId, Disposition, Event, Fact, SuppressionRequest};
 use aether_bloomery_github::{LandingProposal, canonical_issue_number};
 use aether_data::wire::from_bytes;
 
@@ -43,7 +43,8 @@ struct Member {
 pub(super) fn assemble(store: &mut dyn StoreBackend, bloom: &BloomId) -> rusqlite::Result<LandingProposal> {
     let members = roster(store, bloom)?;
     let waived = adjudications(store, bloom)?;
-    Ok(LandingProposal { title: title_for(&members), body: body_for(&members, &waived) })
+    let requested = store.list_suppression_requests(bloom.0.as_bytes())?;
+    Ok(LandingProposal { title: title_for(&members), body: body_for(&members, &waived, &requested) })
 }
 
 /// The operator adjudications this bloom carries, oldest first (#4957).
@@ -98,6 +99,39 @@ fn waivers_section(waived: &[Adjudication]) -> Option<String> {
     Some(format!("### Adjudicated findings\n\n{}", lines.join("\n")))
 }
 
+/// The standing suppression-request section, or `None` when the bloom's
+/// candidates ask for nothing (ADR-0193 §4).
+///
+/// One line per request naming the member, the path, the lint, and the reason
+/// the lane gave, followed by the marker text a reviewer pastes to grant them.
+/// The coordinator renders those bytes and never places them: the scanner
+/// accepts a marker only when the body's last editor is the repository owner,
+/// and a body the coordinator authored and nobody edited reports no editor at
+/// all — so this composes the question and cannot answer it.
+///
+/// The reason is the lane's own words, which is exactly why the line names the
+/// path beside it. A reviewer who reads only the reason is reading the
+/// applicant's case for itself.
+fn requests_section(requested: &[(String, SuppressionRequest)]) -> Option<String> {
+    if requested.is_empty() {
+        return None;
+    }
+    let lines: Vec<String> = requested
+        .iter()
+        .map(|(workpiece, request)| {
+            format!("- `{workpiece}` — {}:{} — {} — {}", request.path, request.line, request.lint, request.reason)
+        })
+        .collect();
+
+    Some(format!(
+        "### Suppression requests\n\n{}\n\nThese are stated by the lanes, granted by nobody. To grant them, edit \
+         this body and add the sign-off marker `.github/workflows/ci.yml`'s `New suppressions` job accepts; to \
+         refuse one, `POST /blooms/{{id}}/members/{{workpiece}}/suppression` with the reason, which bounces the \
+         member to a repair lap.",
+        lines.join("\n")
+    ))
+}
+
 /// How many composition findings one adjudication closed, spelled for prose.
 fn finding_count(adjudication: &Adjudication) -> String {
     match adjudication.findings.len() {
@@ -142,7 +176,7 @@ fn title_for(members: &[Member]) -> Option<String> {
 /// The proposal's body: what the lanes wrote, then whatever an operator waived
 /// to get here, then one closing line per member that addresses an object. The
 /// provenance footer is the source port's and is appended below this.
-fn body_for(members: &[Member], waived: &[Adjudication]) -> String {
+fn body_for(members: &[Member], waived: &[Adjudication], requested: &[(String, SuppressionRequest)]) -> String {
     let mut sections: Vec<String> = match members {
         // One member: the title already carries its subject, so the body is the
         // message's prose and nothing else.
@@ -152,6 +186,7 @@ fn body_for(members: &[Member], waived: &[Adjudication]) -> String {
         members => members.iter().filter_map(|member| member.message.as_deref()).map(section_of).collect(),
     };
     sections.extend(waivers_section(waived));
+    sections.extend(requests_section(requested));
     sections.extend(members.iter().filter_map(|member| member.issue).map(|issue| format!("Closes #{issue}")));
     sections.join("\n\n")
 }

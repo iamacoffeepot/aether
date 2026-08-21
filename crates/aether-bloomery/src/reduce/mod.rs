@@ -46,6 +46,7 @@ mod review;
 mod seal;
 mod snapshot;
 mod splice;
+mod suppression;
 mod surface_request;
 mod verify;
 mod verify_memo;
@@ -59,7 +60,7 @@ pub use error::{
     AttemptCompletedError, BaseMismatch, FoldConflictError, GrantAttemptsError, HostFaultError, IntegrateError,
     LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError, OperatorHoldError,
     OperatorRepairError, OrphanClaimReleaseError, ResolveError, SealConflict, SealError, SpliceError, SupersedeError,
-    SurfaceRequestedError, VerifyFailedError, WithdrawError,
+    SuppressionDispositionError, SurfaceRequestedError, VerifyFailedError, WithdrawError,
 };
 pub use event::{Event, Fact};
 pub use gate::{
@@ -96,6 +97,7 @@ use orphan_claim::{reduce_complete_orphan_claim_release, reduce_request_orphan_c
 use readiness::reduce_splice_assembled;
 use review::{reduce_aggregate_review_completed, reduce_aggregate_review_executor_fault};
 use seal::{reduce_seal, reduce_supersede, reduce_surface_overlap};
+use suppression::reduce_suppression_disposition;
 use surface_request::reduce_surface_requested;
 use verify::{reduce_resume_host_fault, reduce_verify_failed, reduce_verify_host_fault};
 use withdraw::reduce_withdraw;
@@ -194,6 +196,9 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         Fact::Withdraw { bloom, withdrawals, cascade } => reduce_withdraw(snapshot, bloom, withdrawals, *cascade),
         Fact::LaneWritesObserved { bloom, workpiece, stage, paths, observed_at: _ } => {
             reduce_lane_writes_observed(snapshot, bloom, workpiece, *stage, paths)
+        }
+        Fact::SuppressionDisposition { bloom, workpiece, disposition } => {
+            reduce_suppression_disposition(snapshot, bloom, workpiece, disposition)
         }
     }
 }

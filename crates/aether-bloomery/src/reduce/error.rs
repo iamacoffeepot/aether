@@ -725,3 +725,36 @@ pub enum LeaseObservationError {
     /// journal never carries a fact that changed nothing.
     NoPathsObserved,
 }
+
+/// Why a reviewer's suppression answer was refused (ADR-0193 §5).
+///
+/// Checked in declaration order, so the first thing wrong with an answer is the
+/// thing the door reports. Every arm means the answer named something the
+/// reducer cannot act on — never that the requests it closes were themselves
+/// malformed, which [`SuppressionRequest::normalize`](crate::SuppressionRequest::normalize)
+/// already dropped at the host.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum SuppressionDispositionError {
+    /// No active bloom with this id.
+    UnknownOrInactiveBloom,
+    /// The answer closes no request. Refused rather than treated as a no-op, so
+    /// the journal never carries an answer that answered nothing.
+    ClosesNothing,
+    /// The answer states no reason. Refused rather than defaulted, for the
+    /// reason an adjudication's blank reason is: a suppression cleared by a
+    /// record that says nothing is the whole failure the request path exists to
+    /// avoid.
+    BlankReason,
+    /// The answer names no operator, so the record would not say who decided —
+    /// and "who granted this allow" is the audit question the mechanism is for.
+    BlankOperator,
+    /// The answer names a workpiece that is not a member of the bloom.
+    NotAMember(WorkpieceId),
+    /// The member has been withdrawn, so there is no candidate left carrying
+    /// the suppressions and nothing to re-open.
+    AlreadyWithdrawn(WorkpieceId),
+    /// A denial named a member that has produced no candidate. A repair lap
+    /// checks out the tree carrying the refused suppression; with no such tree
+    /// the dispatch would bill a fresh construct as a repair.
+    NoCandidate(WorkpieceId),
+}

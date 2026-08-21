@@ -134,7 +134,10 @@ fn covered(patterns: &[SurfacePattern], path: &str) -> bool {
 }
 
 /// `text` clipped to at most `max_bytes`, never mid-character.
-fn truncated(text: &str, max_bytes: usize) -> String {
+///
+/// Shared with [`suppression`](super::suppression), which caps an untrusted
+/// lane's stated reason the same way and for the same reason.
+pub(super) fn truncated(text: &str, max_bytes: usize) -> String {
     if text.len() <= max_bytes {
         return text.to_owned();
     }

@@ -50,7 +50,7 @@ use crate::transform::review::REVIEW_CRITIC;
 use crate::transform::review_reports::REVIEW_REPORT;
 use crate::transform::sccache::{CompilerCache, Counters};
 use crate::transform::scratch::Scratch;
-use crate::transform::verify::{Excused, VERIFY_CHECK};
+use crate::transform::verify::{Excused, SuppressionRequest, VERIFY_CHECK};
 
 #[derive(Args, Clone)]
 pub struct TransformArgs {
@@ -201,6 +201,17 @@ struct Evidence {
     /// was excused this way.
     #[serde(skip_serializing_if = "Option::is_none")]
     inherited_failures: Option<Vec<Excused>>,
+    /// Suppressions the candidate states a case for, which the lane declined to
+    /// judge (ADR-0193). Each names the file, the line, the lint, and the
+    /// reason the lane gave.
+    ///
+    /// A separate channel from `findings` deliberately, and this is the one
+    /// place the distinction bites hardest: findings are handed to a repair lap
+    /// as work, so a request routed there would be repaired away by the next
+    /// model that read it — which is exactly the refine lap this mechanism
+    /// exists to stop buying. Absent when the candidate asked for nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suppression_requests: Option<Vec<SuppressionRequest>>,
 }
 
 /// One umbrella member's wall-clock share: everything run under that gate's
@@ -265,7 +276,11 @@ fn build_evidence(
         duration_millis: None,
         gates: None,
         flakes: None,
+        // The single-command path has one member's word for everything it
+        // reports, and only the umbrella's `verify.suppress` member can state a
+        // request — `run_single` fills this in itself for that one case.
         inherited_failures: None,
+        suppression_requests: None,
         command: command.to_string(),
         nonce,
         status: if passed {

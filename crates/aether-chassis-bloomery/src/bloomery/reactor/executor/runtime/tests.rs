@@ -2229,6 +2229,7 @@ fn uploaded(nonce: &str, subject: Digest, verdict: StageVerdict, detail: Digest)
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
         surface_request: None,
+        suppression_requests: Vec::new(),
     }
 }
 
@@ -2357,6 +2358,7 @@ fn park_and_answer(
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
         surface_request: None,
+        suppression_requests: Vec::new(),
     };
     assert!(matches!(admit_uploaded(store, &upload).unwrap(), AdmitDecision::Admitted(_)), "the parked upload admits");
 
@@ -2935,6 +2937,7 @@ fn a_dispatch_whose_fact_never_reached_the_journal_is_re_queued_at_boot() {
             peak_resident_bytes: None,
             violating_paths: Vec::new(),
             surface_request: None,
+            suppression_requests: Vec::new(),
         };
         // The admission is built and the order spent — and then the process
         // stops, so the `Admit` this returns never reaches the control core.
@@ -3134,6 +3137,7 @@ fn construct_attempt_ref(nonce: &Nonce, subject: u8) -> EvidenceRef {
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
         surface_request: None,
+        suppression_requests: Vec::new(),
     }
 }
 

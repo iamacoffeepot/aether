@@ -123,6 +123,7 @@ impl ScriptedUpload {
             peak_resident_bytes: None,
             violating_paths: Vec::new(),
             surface_request: None,
+            suppression_requests: Vec::new(),
         }
     }
 }

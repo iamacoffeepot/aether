@@ -15,7 +15,7 @@ use super::{
     AggregateVerifyError, AttemptCompletedError, Decision, FoldConflictError, GrantAttemptsError, HostFaultError,
     IntegrateError, LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError,
     OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ResolveError, SealError, SpliceError,
-    SupersedeError, SurfaceRequestedError, VerifyFailedError, WithdrawError,
+    SupersedeError, SuppressionDispositionError, SurfaceRequestedError, VerifyFailedError, WithdrawError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -754,6 +754,21 @@ pub enum Outcome {
     },
     /// A lane-write observation was refused.
     LeaseObservationRejected(LeaseObservationError),
+    /// A reviewer answered a member's standing suppression requests
+    /// (ADR-0193). Appended last so every prior outcome keeps its wire
+    /// discriminant.
+    SuppressionAnswered {
+        /// The bloom the answered member belongs to.
+        bloom: BloomId,
+        /// The answered member.
+        workpiece: WorkpieceId,
+        /// Whether the member re-opens at `Refine`. A grant lets the candidate
+        /// stand; a denial spends a repair roll exactly as any other bounced
+        /// lap does.
+        reopened: bool,
+    },
+    /// A suppression disposition was refused.
+    SuppressionRejected(SuppressionDispositionError),
 }
 
 impl Outcome {
@@ -774,6 +789,7 @@ impl Outcome {
                 | Self::OperatorRepairRejected(_)
                 | Self::OperatorHoldRejected(_)
                 | Self::WithdrawRejected(_)
+                | Self::SuppressionRejected(_)
         )
     }
 }

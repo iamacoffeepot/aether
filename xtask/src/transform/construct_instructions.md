@@ -56,9 +56,25 @@ after the shared work order so sibling lanes share a prompt-cache prefix.
    test files included — except the exact inner attribute `#![allow(clippy::unwrap_used)]`
    (that lint alone) on a `tests.rs` file, a file under a `tests/` directory, or a
    `#[cfg(test)]` module. Any other lint, `expect`, `ignore`, a mixed allow list, or
-   the same allow in production code remains a finding; state one you genuinely need
-   in your final message as a request carrying its reason, and leave it out of the
-   diff.
+   the same allow in production code remains a finding.
+
+   If you genuinely need one — the repository's own policy blesses several, and
+   `clippy.toml` names them in its entry text — **state a request on the suppression
+   line itself** and keep it in the diff:
+
+   ```rust
+   #[allow(clippy::disallowed_methods)] // aether-suppression-request: operator tooling reading the coordinator's REST bind, not cap config
+   ```
+
+   The trailing `// aether-suppression-request: <reason>` comment is what the gate
+   reads. One line, saying why the policy blesses this write at this site — not what
+   the lint is, which the attribute already says. A request states a case; only a
+   reviewer grants it, and the reviewer sees the reason you wrote here. Write the
+   marker on **every** new suppression in your diff: one bare `#[allow]` beside a
+   requested one refuses the whole candidate. And never route around the ban instead
+   — replacing a disallowed call with an unenumerated spelling of the same read is a
+   worse outcome than the suppression, because it hides from the audit the lint
+   exists to make possible.
 5. **Build scratch where the host put it.** If you do reach for a check that wants
    a `CARGO_TARGET_DIR` of its own, put it under the path the `AETHER_LANE_SCRATCH`
    environment variable names — never under `/tmp` or another default temp

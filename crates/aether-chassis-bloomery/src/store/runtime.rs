@@ -30,7 +30,8 @@ use aether_actor::runtime;
 use aether_bloomery::{
     Commit, CommitResult, ConfigRecord, DECISIONS_SCHEMA, Decision, Digest, Event, JournalRecord, LoadConfigs,
     LoadConfigsResult, MembershipMutation, MetricDispatch, MetricsLedger, OutboxPayload, ReplayJournal,
-    ReplayJournalResult, ScopeRevision, ScopeVerifyInput, Statement, Topic, WorkpieceId, decode_recorded_decisions,
+    ReplayJournalResult, ScopeRevision, ScopeVerifyInput, Statement, SuppressionRequest, Topic, WorkpieceId,
+    decode_recorded_decisions,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use std::iter::repeat_n;
@@ -368,6 +369,38 @@ pub trait StoreBackend: Send {
     fn lookup_review_findings(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<String>>;
     /// Clear the member's recorded findings — a passing review makes them stale.
     fn clear_review_findings(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<()>;
+    /// Record the suppressions (`bloom`, `workpiece`)'s current candidate states
+    /// a case for (ADR-0193), replacing whatever it stated before.
+    ///
+    /// Replaced rather than merged, and keyed per member the way the findings
+    /// channel is: the row answers "what does this member's live candidate ask
+    /// for right now", which is what the two reviewer surfaces render. The
+    /// journal answers the other question — what was asked and who answered —
+    /// and neither surface can stand in for the other.
+    ///
+    /// Stored column-per-field rather than as an encoded blob, so a reviewer
+    /// surface reading one row does not depend on a codec and the table is
+    /// queryable by path and lint.
+    fn record_suppression_requests(
+        &mut self,
+        bloom: &[u8],
+        workpiece: &str,
+        requests: &[SuppressionRequest],
+    ) -> rusqlite::Result<()>;
+    /// The suppressions (`bloom`, `workpiece`)'s live candidate asks for, in
+    /// path order. Empty when it asks for none.
+    fn lookup_suppression_requests(
+        &mut self,
+        bloom: &[u8],
+        workpiece: &str,
+    ) -> rusqlite::Result<Vec<SuppressionRequest>>;
+    /// Every standing request across `bloom`, each paired with the member that
+    /// stated it, in member-then-path order — what the landing proposal renders.
+    fn list_suppression_requests(&mut self, bloom: &[u8]) -> rusqlite::Result<Vec<(String, SuppressionRequest)>>;
+    /// Clear the member's standing requests — a candidate that states none has
+    /// nothing outstanding, and a stale row would ask a reviewer to grant an
+    /// allow that is no longer in the diff.
+    fn clear_suppression_requests(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<()>;
     /// Record the commit message the member's construct/refine lane wrote for the
     /// candidate it just captured, keyed by (`bloom`, `workpiece`) exactly as the
     /// findings channel is. Last-writer-wins on the key, which is what makes the
@@ -933,6 +966,15 @@ CREATE TABLE IF NOT EXISTS candidate_commit_message (
     message   TEXT NOT NULL,
     PRIMARY KEY (bloom, workpiece)
 );
+CREATE TABLE IF NOT EXISTS suppression_request (
+    bloom     BLOB NOT NULL,
+    workpiece TEXT NOT NULL,
+    path      TEXT NOT NULL,
+    line      INTEGER NOT NULL,
+    lint      TEXT NOT NULL,
+    reason    TEXT NOT NULL,
+    PRIMARY KEY (bloom, workpiece, path, line, lint)
+);
 CREATE TABLE IF NOT EXISTS dispatch_owners (
     nonce TEXT PRIMARY KEY,
     bloom BLOB NOT NULL
@@ -1342,6 +1384,73 @@ impl StoreBackend for SqliteStore {
             "DELETE FROM review_findings WHERE bloom = ?1 AND workpiece = ?2",
             rusqlite::params![bloom, workpiece],
         )?;
+        Ok(())
+    }
+
+    fn record_suppression_requests(
+        &mut self,
+        bloom: &[u8],
+        workpiece: &str,
+        requests: &[SuppressionRequest],
+    ) -> rusqlite::Result<()> {
+        // Delete-then-insert inside one transaction: the row set *is* the
+        // member's current ask, and a partial replacement would leave a
+        // reviewer looking at a request the candidate no longer carries beside
+        // one it does.
+        let write = self.conn.transaction()?;
+        write.execute("DELETE FROM suppression_request WHERE bloom = ?1 AND workpiece = ?2", rusqlite::params![
+            bloom, workpiece
+        ])?;
+        for request in requests {
+            write.execute(
+                "INSERT OR REPLACE INTO suppression_request (bloom, workpiece, path, line, lint, reason) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![bloom, workpiece, request.path, request.line, request.lint, request.reason],
+            )?;
+        }
+        write.commit()
+    }
+
+    fn lookup_suppression_requests(
+        &mut self,
+        bloom: &[u8],
+        workpiece: &str,
+    ) -> rusqlite::Result<Vec<SuppressionRequest>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, line, lint, reason FROM suppression_request WHERE bloom = ?1 AND workpiece = ?2 \
+             ORDER BY path, line, lint",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![bloom, workpiece], |row| {
+            Ok(SuppressionRequest {
+                path: row.get::<_, String>(0)?,
+                line: row.get::<_, u32>(1)?,
+                lint: row.get::<_, String>(2)?,
+                reason: row.get::<_, String>(3)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    fn list_suppression_requests(&mut self, bloom: &[u8]) -> rusqlite::Result<Vec<(String, SuppressionRequest)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT workpiece, path, line, lint, reason FROM suppression_request WHERE bloom = ?1 \
+             ORDER BY workpiece, path, line, lint",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![bloom], |row| {
+            Ok((row.get::<_, String>(0)?, SuppressionRequest {
+                path: row.get::<_, String>(1)?,
+                line: row.get::<_, u32>(2)?,
+                lint: row.get::<_, String>(3)?,
+                reason: row.get::<_, String>(4)?,
+            }))
+        })?;
+        rows.collect()
+    }
+
+    fn clear_suppression_requests(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<()> {
+        self.conn.execute("DELETE FROM suppression_request WHERE bloom = ?1 AND workpiece = ?2", rusqlite::params![
+            bloom, workpiece
+        ])?;
         Ok(())
     }
 

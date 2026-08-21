@@ -17,7 +17,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::ids::Nonce;
-use crate::values::{CandidateRef, StudyCall, StudyCost, SurfaceRequest, Transformation, VerifyFailureSet};
+use crate::values::{
+    CandidateRef, StudyCall, StudyCost, SuppressionRequest, SurfaceRequest, Transformation, VerifyFailureSet,
+};
 
 /// A fully-resolved unit of work to dispatch. The [`Transformation`] already
 /// carries the typed command id, digest-pinned inputs, declared outputs,
@@ -169,6 +171,15 @@ pub struct EvidenceRef {
     /// request is a list of paths and prose and a name is not a data channel.
     /// The name-only Actions backend reports `None`.
     pub surface_request: Option<SurfaceRequest>,
+    /// The suppressions the candidate states a case for (ADR-0193), read out of
+    /// the evidence's own `suppression_requests` channel and normalized.
+    ///
+    /// Host-recorded state riding the reference like `findings` and
+    /// `surface_request`, and never part of the artifact-name contract: a
+    /// request is a file, a line, a lint and a sentence, and a name is not a
+    /// data channel. Empty from the name-only Actions backend, from every
+    /// mechanical run that stated none, and from every model lane.
+    pub suppression_requests: Vec<SuppressionRequest>,
 }
 
 /// One live construct lane's working tree, as the executor last read it

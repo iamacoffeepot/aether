@@ -26,7 +26,8 @@ use serde::{Deserialize, Serialize};
 use aether_bloomery::{BloomId, ClaimHolder, ClaimRefKind};
 use aether_bloomery::{
     CandidateRef, ConfigRegistry, Digest, Disposition, Event, Forecast, MemberDependency, Membership, Outcome,
-    ScopeRevision, ScopeVerifyInput, ScopeVerifyReport, StageId, Statement, Workpiece, WorkpieceId,
+    ScopeRevision, ScopeVerifyInput, ScopeVerifyReport, StageId, Statement, SuppressionVerdict, Workpiece,
+    WorkpieceId,
 };
 
 use crate::bloomery::{AdrTouch, Completeness};
@@ -214,6 +215,39 @@ pub struct AdjudicateRequest {
     ///
     /// The default is derived from the adjudication's own content, so re-POSTing
     /// the same request is a no-op duplicate rather than a second waiver.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+/// `POST /blooms/{id}/members/{workpiece}/suppression` body — the reviewer's
+/// answer to the suppression requests a member's candidate is carrying
+/// (ADR-0193 §5).
+///
+/// The lane states; only a reviewer grants. Both answers arrive at this one
+/// door, because what is recorded is the same thing either way — who answered
+/// what, and how — and there is no marker for "no" to place anywhere else.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuppressionAnswerRequest {
+    /// The requests being answered, by [`SuppressionRequest`] digest. Required
+    /// and non-empty: an answer that closes nothing is not an answer, and one
+    /// that closed *everything standing* would silently answer a request the
+    /// reviewer had not read.
+    ///
+    /// [`SuppressionRequest`]: aether_bloomery::SuppressionRequest
+    pub requests: Vec<Digest>,
+    /// The answer. `Granted` lets the candidate keep its suppressions;
+    /// `Denied` bounces the member to a repair lap at its own budget's expense.
+    pub verdict: SuppressionVerdict,
+    /// Why. Required and non-blank — for a denial it is what the repair lap is
+    /// told, and for a grant it is the record of the judgment.
+    pub reason: String,
+    /// Who answered. Recorded as the decider; required and non-blank, because
+    /// "who granted this allow" is the audit question the mechanism exists for.
+    pub operator: String,
+    /// Override the admit idempotency key.
+    ///
+    /// The default is derived from the answer's own content, so re-POSTing the
+    /// same answer is a no-op duplicate rather than a second decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
 }

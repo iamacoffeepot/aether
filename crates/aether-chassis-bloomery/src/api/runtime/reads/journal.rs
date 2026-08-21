@@ -127,7 +127,8 @@ fn fact_blooms(fact: &Fact) -> Vec<BloomId> {
         | Fact::ContainmentRefused { bloom, .. }
         | Fact::SurfaceRequested { bloom, .. }
         | Fact::Withdraw { bloom, .. }
-        | Fact::LaneWritesObserved { bloom, .. } => vec![*bloom],
+        | Fact::LaneWritesObserved { bloom, .. }
+        | Fact::SuppressionDisposition { bloom, .. } => vec![*bloom],
         Fact::ObserveMainline { .. }
         | Fact::ObserveMainlineDiverged { .. }
         | Fact::SurfaceOverlap { .. }

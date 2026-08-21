@@ -7,8 +7,8 @@ use std::fmt;
 
 use aether_bloomery::{
     Admit, BloomId, CandidateRef, Digest, Event, Evidence, EvidenceKind, Fact, InwardError, Nonce, ResolutionClaim,
-    StageCatalog, StageId, StageResult, StageVerdict, StudyCall, StudyCost, SurfaceRequest, VerifyFailure,
-    VerifyFailureSet, WorkpieceId, classify_findings, normalize_stage_result,
+    StageCatalog, StageId, StageResult, StageVerdict, StudyCall, StudyCost, SuppressionRequest, SurfaceRequest,
+    VerifyFailure, VerifyFailureSet, WorkpieceId, classify_findings, normalize_stage_result,
 };
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 
@@ -82,6 +82,10 @@ pub struct UploadedEvidence {
     /// `None` from a lane that named nothing, from a claim that did not
     /// survive normalization, and from the name-only Actions transport.
     pub surface_request: Option<SurfaceRequest>,
+    /// The suppressions the candidate states a case for (ADR-0193),
+    /// authoritative from the port reference like `findings`. Empty from a
+    /// candidate that stated none and from the name-only Actions transport.
+    pub suppression_requests: Vec<SuppressionRequest>,
 }
 
 /// Why the broker refused an upload without touching the reducer.
@@ -801,6 +805,17 @@ fn persist_consumed(
         } else if let Some(findings) = &upload.findings {
             store.record_review_findings(record.bloom.0.as_bytes(), &record.workpiece.0, findings)?;
         }
+        // The member's standing suppression requests are whatever its newest
+        // candidate asks for (ADR-0193), so the write is a replacement and an
+        // empty set is the clear. One call rather than a record/clear pair: two
+        // calls under two conditions are two chances for a stale row to outlive
+        // the candidate that stated it, and a stale row asks a reviewer to grant
+        // an allow the diff no longer carries.
+        store.record_suppression_requests(
+            record.bloom.0.as_bytes(),
+            &record.workpiece.0,
+            &upload.suppression_requests,
+        )?;
     } else if record.stage == StageId::AggregateVerify {
         persist_aggregate_verify_findings(store, record, upload)?;
     } else if record.stage == StageId::AggregateReview && upload.verdict != StageVerdict::ExecutorFault {

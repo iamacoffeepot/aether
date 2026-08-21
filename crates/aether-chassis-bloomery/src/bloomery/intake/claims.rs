@@ -126,6 +126,7 @@ impl EvidenceClaims for NameEvidenceClaims {
             peak_resident_bytes: reference.peak_resident_bytes,
             violating_paths: reference.violating_paths.clone(),
             surface_request: reference.surface_request.clone(),
+            suppression_requests: reference.suppression_requests.clone(),
         })
     }
 }
