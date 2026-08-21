@@ -60,6 +60,10 @@ pub enum ScriptedVerdict {
     Parked,
     /// The lane concluded without a candidate (#5292 / #5332).
     Declined,
+    /// The lane could not reach a verdict at all — the umbrella's `environment`
+    /// stamp (ADR-0176), which a base verify on a lane worktree with no
+    /// `origin/main` produced for real (#5384).
+    Faulted,
 }
 
 impl ScriptedVerdict {
@@ -73,6 +77,7 @@ impl ScriptedVerdict {
             Self::ReviewFinding => StageVerdict::ReviewFinding,
             Self::Parked => StageVerdict::Parked,
             Self::Declined => StageVerdict::Declined,
+            Self::Faulted => StageVerdict::ExecutorFault,
         }
     }
 }

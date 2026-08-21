@@ -70,6 +70,14 @@ pub fn failed(order: &OutstandingOrder, failed: VerifyFailureSet) -> ScriptedUpl
     ScriptedUpload { failed_verifiers: failed, ..verdict(order, ScriptedVerdict::VerificationFailed) }
 }
 
+/// A verdict the lane could not reach — what a gate whose scan refused to run
+/// uploads, and what the base fan-out uploaded for real when its suppression
+/// member could not resolve `origin/main` (#5384).
+#[must_use]
+pub fn faulted(order: &OutstandingOrder) -> ScriptedUpload {
+    verdict(order, ScriptedVerdict::Faulted)
+}
+
 /// A passing verdict that captured `candidate` — what a construct or refine run
 /// uploads once it has a tree to stand behind.
 #[must_use]

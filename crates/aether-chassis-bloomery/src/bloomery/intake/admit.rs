@@ -456,6 +456,19 @@ fn admits_member_executor_fault(stage: StageId) -> bool {
     stage == StageId::Verify || admits_as_attempt_completed(stage)
 }
 
+/// Whether a claimed [`StageVerdict::ExecutorFault`] has a fact to become.
+///
+/// ADR-0195 gives the dispatched member gates and the aggregate review one.
+/// `BaseVerify` is the third (#5384): its fold is a receipt on the sealed base
+/// rather than a verdict on a candidate, and a whole-workspace fan-out that
+/// reached no verdict leaves that base exactly as unproven as a red one does.
+/// It becomes a red receipt, which raises the day-level `base_alert` an
+/// operator can act on; refusing it instead leaves every sealed member withheld
+/// with nothing on the view to say why.
+fn admits_executor_fault(stage: StageId) -> bool {
+    matches!(stage, StageId::AggregateReview | StageId::BaseVerify) || admits_member_executor_fault(stage)
+}
+
 /// The finding a weave repair was dispatched to repair: the composition's own
 /// row when a previous bounce wrote one, else the bloom-scoped frozen set.
 ///
@@ -503,6 +516,12 @@ fn thread_triage_note(
 /// subject is the tree the fan-out judged. The executor peels the checkout
 /// into `inputs[0]`, and a capture-free run leaves that as the displayed
 /// digest.
+///
+/// A run that reached no verdict at all ([`StageVerdict::ExecutorFault`], the
+/// umbrella's `environment` stamp) folds here too rather than through the
+/// member-fault arm: `verdict_passed` is false for it, so the base stays
+/// unproven and the day-level alert is raised, which is the same thing an
+/// operator has to act on (#5384).
 fn base_verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Evidence) -> Event {
     Event {
         idempotency_key: AdmissionKey::BaseVerify.of(&record.nonce.0),
@@ -583,13 +602,10 @@ fn out_of_stage_refusal(stage: StageId, upload: &UploadedEvidence) -> Option<Int
     if let Some(refusal) = verifier_failure_refusal(stage, upload) {
         return Some(refusal);
     }
-    // ADR-0195 admits ExecutorFault for dispatched member stages and the
-    // aggregate review. A fault claimed against any other stage is refused
-    // rather than routed.
-    if upload.verdict == StageVerdict::ExecutorFault
-        && stage != StageId::AggregateReview
-        && !admits_member_executor_fault(stage)
-    {
+    // A fault claimed against a stage with no fact to carry it is refused
+    // rather than routed — see [`admits_executor_fault`] for the three that
+    // have one.
+    if upload.verdict == StageVerdict::ExecutorFault && !admits_executor_fault(stage) {
         return Some(IntakeRefusal::ExecutorFaultOutOfStage(stage));
     }
     // ADR-0207's two decline verdicts belong to the construct family alone.

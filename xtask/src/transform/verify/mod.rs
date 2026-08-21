@@ -472,6 +472,41 @@ const DUP_MEMBER: &str = "verify.dup";
 /// for its `path:line — token — source` output shape.
 const SUPPRESS_MEMBER: &str = "verify.suppress";
 
+/// The committish a whole-workspace base run names as its own diff base.
+///
+/// The tree the lane stands on, rather than the sealed sha the coordinator
+/// dispatched: `--subject` is a model-lane flag and never reaches a verify
+/// dispatch, so `HEAD` is the only name this process can give for the subject.
+/// It names the same commit either way — the executor resets the slot to the
+/// sealed subject before the lane spawns — and it always resolves, where a
+/// sealed identity may name a bare tree (ADR-0196) that
+/// `rev-parse <ref>^{commit}` refuses for the same exit code this exists to
+/// stop producing.
+const BASE_SET_SUBJECT: &str = "HEAD";
+
+/// The base one umbrella member scans its range from.
+///
+/// A whole-workspace base run judges the sealed base itself, so its work order
+/// states no candidate range and the base arrives absent. The suppression
+/// scanner is the one member that reads a git range, and with no `--base` it
+/// falls back to `origin/main` — a ref a lane worktree does not carry, so the
+/// scan refuses with the unresolvable-base exit, the umbrella stamps
+/// `environment`, and the receipt every seal waits on never arrives (#5384).
+///
+/// Naming the tree itself is the honest answer to what a base run introduced:
+/// an empty range, and an empty range holds no new suppression. Only the
+/// suppression member gets it. The other members that read a base read it to
+/// *excuse* a failure — `verify.test`'s triage re-runs a red test at the base
+/// and inherits away anything red there — so handing them a base equal to the
+/// candidate would turn a base run green over its own failures.
+fn member_diff_base<'a>(id: &str, order_base: Option<&'a str>, full: bool) -> Option<&'a str> {
+    match order_base {
+        Some(base) => Some(base),
+        None if full && id == SUPPRESS_MEMBER => Some(BASE_SET_SUBJECT),
+        None => None,
+    }
+}
+
 /// The trailing comment a lane writes on the suppression line itself to state
 /// its case (ADR-0193 §1). Shared with `xtask/src/transform/construct_instructions.md`,
 /// which is where a lane learns to write it, and with the scanner's own
@@ -1879,7 +1914,7 @@ fn check_pass(args: &TransformArgs, logs: Option<&Path>, full: bool) -> Result<C
                 &invocation,
                 &scope,
                 closure.as_ref(),
-                args.diff_base.as_deref(),
+                member_diff_base(id, args.diff_base.as_deref(), full),
                 &mut runner,
             )?,
         };
@@ -1935,11 +1970,12 @@ pub(super) fn precheck_findings(args: &TransformArgs) -> Result<Option<String>> 
 #[cfg(test)]
 mod tests {
     use super::{
-        Captured, MAX_FINDING_LINES, MemberOutcome, MemberRun, MemberRunner, Scope, VERIFY_BASE, VERIFY_CHECK,
-        VerifyInvocation, clippy_verdict, closure, distil_diagnostics, effective_exit_code, environment_observations,
-        failed_verifiers, member_outcome, member_scope_notice, operational_failure_notice, preflight_tools,
-        prepare_failure_log, render_diagnostics, required_targets, required_tools, run_member_discriminated,
-        run_timed_prepare, umbrella_status, verify_check_members, verify_command, verify_findings, workflow,
+        BASE_SET_SUBJECT, Captured, MAX_FINDING_LINES, MemberOutcome, MemberRun, MemberRunner, SUPPRESS_MEMBER, Scope,
+        VERIFY_BASE, VERIFY_CHECK, VerifyInvocation, clippy_verdict, closure, distil_diagnostics, effective_exit_code,
+        environment_observations, failed_verifiers, member_diff_base, member_outcome, member_scope_notice,
+        operational_failure_notice, preflight_tools, prepare_failure_log, render_diagnostics, required_targets,
+        required_tools, run_member_discriminated, run_timed_prepare, umbrella_status, verify_check_members,
+        verify_command, verify_findings, workflow,
     };
     use std::iter;
 
@@ -2291,6 +2327,40 @@ mod tests {
         assert!(
             preflight_tools().iter().all(|missing| missing.requirement != "git" && missing.requirement != "python3"),
             "the host running the verifier tests must satisfy the scanner roots",
+        );
+    }
+
+    // Tripwire for #5384: a base-set run states no work-order range, and a
+    // suppression member left without `--base` falls back to `origin/main` — a
+    // ref no lane worktree carries. The scan then refuses, the umbrella stamps
+    // `environment`, and the receipt every seal waits on never arrives.
+    #[test]
+    fn a_base_set_run_never_leaves_the_suppression_scan_on_its_origin_main_default() {
+        let suppress = verify_command(SUPPRESS_MEMBER).expect("verify.suppress mapped");
+        let base = member_diff_base(SUPPRESS_MEMBER, None, true);
+        assert_eq!(base, Some(BASE_SET_SUBJECT), "a base-set suppression scan names the tree it stands on");
+        assert_eq!(
+            suppress.args_under(&Scope::resolve(None), base),
+            owned(&["scripts/check-suppressions.py", "--base", BASE_SET_SUBJECT]),
+        );
+
+        for id in verify_check_members().iter().filter(|id| **id != SUPPRESS_MEMBER) {
+            assert_eq!(
+                member_diff_base(id, None, true),
+                None,
+                "{id} reads a base to excuse a failure, and the subject would excuse every one",
+            );
+        }
+
+        assert_eq!(
+            member_diff_base(SUPPRESS_MEMBER, None, false),
+            None,
+            "a candidate run with no stated range keeps the working-tree contract",
+        );
+        assert_eq!(
+            member_diff_base(SUPPRESS_MEMBER, Some("abc123def"), true),
+            Some("abc123def"),
+            "a stated range outranks the subject fallback",
         );
     }
 

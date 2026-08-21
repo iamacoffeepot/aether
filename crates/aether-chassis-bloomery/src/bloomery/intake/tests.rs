@@ -1453,6 +1453,46 @@ fn an_executor_fault_on_a_stage_without_a_lifecycle_is_refused_and_the_order_sta
     }
 }
 
+// #5384: a `verify.base` fan-out on a lane worktree with no `origin/main`
+// stamps `environment`, which reaches intake as an `ExecutorFault`. Refusing it
+// left every sealed member withheld forever with nothing on the view.
+// Tripwire: the fault folds as an unproven base, exactly as a red one does.
+#[test]
+fn a_base_verify_that_reached_no_verdict_admits_as_an_unproven_base() {
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let subject = Digest::from_bytes([32; 32]);
+
+    let mut record = dispatch_record("n-base-fault", bloom, &WorkpieceId("wp".to_owned()), subject, subject);
+    record.stage = StageId::BaseVerify;
+    record_dispatch(&mut store, &record).unwrap();
+
+    let upload = UploadedEvidence {
+        nonce: Nonce("n-base-fault".to_owned()),
+        subject,
+        verdict: StageVerdict::ExecutorFault,
+        detail: Digest::from_bytes([9; 32]),
+        candidate: None,
+        findings: None,
+        failed_verifiers: VerifyFailureSet::EMPTY,
+        cost: None,
+        calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
+        violating_paths: Vec::new(),
+        surface_request: None,
+        suppression_requests: Vec::new(),
+    };
+    let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
+        panic!("a base verify that reached no verdict must admit, not refuse");
+    };
+    let Fact::BaseVerifyCompleted { passed, .. } = &admission.event.fact else {
+        panic!("got {:?}", admission.event.fact);
+    };
+    assert!(!passed, "a fan-out that reached no verdict leaves the base unproven");
+}
+
 // ADR-0207 gives only the construct family a decline lifecycle: those three
 // stages run `construct.implement`, and nothing else can refuse for want of
 // surface. Tripwire: admitting the verdict anywhere else would park a member
