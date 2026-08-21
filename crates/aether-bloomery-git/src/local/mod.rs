@@ -5,6 +5,7 @@
 //! same way.
 
 use std::fmt::Write as _;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::client::{GitCommit, GitDataApi, GitDataError, GitRef, MergeResult, RefTxnOp, strip_heads};
@@ -96,7 +97,7 @@ impl LocalGitData {
     fn install_merge_driver(&self) -> Result<(), GitDataError> {
         let git_dir = PathBuf::from(command::run_ok(&self.repo, &["rev-parse", "--absolute-git-dir"])?);
         let script = git_dir.join(MERGE_DRIVER_SCRIPT);
-        std::fs::write(&script, MERGE_DRIVER_SOURCE)
+        fs::write(&script, MERGE_DRIVER_SOURCE)
             .map_err(|error| GitDataError::Command(format!("writing {}: {error}", script.display())))?;
 
         let driver = format!("{} {} %O %A %B", PYTHON, script.display());

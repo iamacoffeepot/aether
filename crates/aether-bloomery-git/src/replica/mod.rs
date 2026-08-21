@@ -158,6 +158,9 @@ impl GitSourceReplica {
     /// The remote was unreachable, git failed, the replica rejected a
     /// mainline force-push, or a deterministic refusal (auth, absent
     /// mainline, unknown remote).
+    ///
+    /// # Panics
+    /// The published-head mutex was poisoned by a panic in an earlier push.
     pub fn push(&self) -> Result<(), ReplicaError> {
         let refs = Self::list_refs(&self.authority)?;
         let mainline = self.mainline.to_string();
