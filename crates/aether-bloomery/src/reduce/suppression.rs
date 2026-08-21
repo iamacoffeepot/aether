@@ -157,7 +157,9 @@ mod tests {
     use crate::ids::{BloomId, StageId};
     use crate::reduce::{Decision, Fact, Outcome, Snapshot, SuppressionDispositionError};
     use crate::testing::{digest, draft, event, membership, step, workpiece};
-    use crate::values::{CandidateRef, Evidence, EvidenceKind, SuppressionDisposition, SuppressionVerdict};
+    use crate::values::{
+        CandidateRef, Evidence, EvidenceKind, SuppressionDisposition, SuppressionVerdict, VerifyFailure,
+    };
 
     fn answer(verdict: SuppressionVerdict) -> SuppressionDisposition {
         SuppressionDisposition {
@@ -254,7 +256,7 @@ mod tests {
 
         assert_eq!(progress.stage, StageId::Refine);
         assert_eq!(progress.repair_rolls, 1);
-        assert!(progress.seen_verify_failures.contains(crate::values::VerifyFailure::Suppress));
+        assert!(progress.seen_verify_failures.contains(VerifyFailure::Suppress));
     }
 
     #[test]

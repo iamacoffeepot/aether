@@ -18,6 +18,7 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 use alloc::string::String;
+use core::str::from_utf8;
 
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -581,7 +582,7 @@ pub struct CommissionProjection {
 /// stall the replica rather than shorten it.
 #[must_use]
 pub fn intent_title(words: &[u8]) -> Option<String> {
-    let heading = core::str::from_utf8(words)
+    let heading = from_utf8(words)
         .ok()?
         .lines()
         .find_map(|line| line.trim().strip_prefix('#').map(|rest| rest.trim_start_matches('#').trim()))

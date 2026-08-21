@@ -1122,6 +1122,44 @@ impl Snapshot {
         }
     }
 
+    /// Fold the held composition and the composite-gate ledger that judges it.
+    ///
+    /// Split out of [`apply_effect`](Self::apply_effect) so the parent match
+    /// stays inside its line budget, and grouped because these four rows are
+    /// one subject: the fold that is held, the gates that have passed it, and
+    /// the rolls each of them has spent.
+    fn apply_fold_effect(&mut self, effect: &Decision) {
+        match effect {
+            Decision::RecordIntegration { bloom, integration } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.integration.clone_from(integration);
+                    // The composite-gate join belongs to the fold that was
+                    // held, so a new weave — or the consumption of the one
+                    // that just resolved — starts it empty. Without the clear,
+                    // a gate that passed the tree before a repair would count
+                    // towards a landing it never judged.
+                    record.aggregate_passed.clear();
+                }
+            }
+            Decision::RecordAggregateGatePass { bloom, stage } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.aggregate_passed.insert(*stage);
+                }
+            }
+            Decision::RecordAggregateRoll { bloom, rolls } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.aggregate_rolls = *rolls;
+                }
+            }
+            Decision::RecordAggregateVerifyRoll { bloom, rolls } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.aggregate_verify_rolls = *rolls;
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn apply_effect(&mut self, effect: &Decision) {
         match effect {
             Decision::ClaimMembership { workpiece, bloom } => {
@@ -1169,11 +1207,15 @@ impl Snapshot {
             // no bloom's retry ledger — its whole state is the record below. A
             // cancel and a single-ref release are inert for a third: what they
             // do happens at the source and the executor, and the record of it
-            // is the withdrawal row `apply_withdrawal_effect` writes.
+            // is the withdrawal row `apply_withdrawal_effect` writes. A refusal
+            // is inert here for a fourth: `record_refusals` folds it over the
+            // whole effect set, because it is keyed by gate or by member and
+            // pairs with the dispatch that clears it.
             Decision::RedispatchStage { .. }
             | Decision::DispatchOrphanClaimRelease { .. }
             | Decision::CancelDispatch { .. }
-            | Decision::ReleaseMemberClaimRef { .. } => {}
+            | Decision::ReleaseMemberClaimRef { .. }
+            | Decision::RecordRefusal { .. } => {}
             Decision::RecordOrphanClaimRelease { request, target, completion } => {
                 // Opening the record and completing it write the same entry, so
                 // the completion overwrites rather than inserting beside — a
@@ -1182,32 +1224,10 @@ impl Snapshot {
                 self.orphan_releases
                     .insert(*request, OrphanClaimReleaseRecord { target: target.clone(), completion: *completion });
             }
-            Decision::RecordIntegration { bloom, integration } => {
-                if let Some(record) = self.blooms.get_mut(bloom) {
-                    record.integration.clone_from(integration);
-                    // The composite-gate join belongs to the fold that was
-                    // held, so a new weave — or the consumption of the one
-                    // that just resolved — starts it empty. Without the clear,
-                    // a gate that passed the tree before a repair would count
-                    // towards a landing it never judged.
-                    record.aggregate_passed.clear();
-                }
-            }
-            Decision::RecordAggregateGatePass { bloom, stage } => {
-                if let Some(record) = self.blooms.get_mut(bloom) {
-                    record.aggregate_passed.insert(*stage);
-                }
-            }
-            Decision::RecordAggregateRoll { bloom, rolls } => {
-                if let Some(record) = self.blooms.get_mut(bloom) {
-                    record.aggregate_rolls = *rolls;
-                }
-            }
-            Decision::RecordAggregateVerifyRoll { bloom, rolls } => {
-                if let Some(record) = self.blooms.get_mut(bloom) {
-                    record.aggregate_verify_rolls = *rolls;
-                }
-            }
+            Decision::RecordIntegration { .. }
+            | Decision::RecordAggregateGatePass { .. }
+            | Decision::RecordAggregateRoll { .. }
+            | Decision::RecordAggregateVerifyRoll { .. } => self.apply_fold_effect(effect),
             Decision::RecordVerifyProof { .. } | Decision::RecordVerifyReuse { .. } => {
                 self.apply_verify_memo_effect(effect);
             }
@@ -1250,11 +1270,6 @@ impl Snapshot {
             Decision::RecordWithdrawal { .. } | Decision::MarkBloomWithdrawn { .. } => {
                 self.apply_withdrawal_effect(effect);
             }
-            // Folded by `record_refusals`, which runs over the same effect set
-            // once the per-effect fold is done: a refusal is keyed by gate or by
-            // member and pairs with the dispatch arms that clear it, so it reads
-            // the set as a whole rather than one effect at a time.
-            Decision::RecordRefusal { .. } => {}
             Decision::EmitReceipt(projected) => {
                 if let Some(record) = self.blooms.get_mut(&projected.receipt.bloom) {
                     record.status = BloomStatus::Landed;

@@ -151,10 +151,10 @@ fn member_state(
     if let Some(ancestor) = blocking_ancestor(record, workpiece) {
         return (WhyState::Blocked, format!("waiting on the declared dependency {}", ancestor.0));
     }
-    match record.progress.get(workpiece) {
-        Some(cursor) => (WhyState::InFlight, format!("attempt {} of {:?} is out", cursor.attempts, cursor.stage)),
-        None => (WhyState::Blocked, "never entered the line and no ancestor explains it".to_owned()),
+    if let Some(cursor) = record.progress.get(workpiece) {
+        return (WhyState::InFlight, format!("attempt {} of {:?} is out", cursor.attempts, cursor.stage));
     }
+    (WhyState::Blocked, "never entered the line and no ancestor explains it".to_owned())
 }
 
 /// Member dispatch: done once every member that has not left the line carries a
@@ -260,18 +260,15 @@ fn land_rung(record: &BloomRecord, verify: &TransitionWhy, review: &TransitionWh
     if record.status == BloomStatus::Resolved {
         return rung(LAND, WhyState::InFlight, "the bloom is resolved and its land is dispatched".to_owned(), None);
     }
-    let waiting = [verify, review].into_iter().find(|gate| gate.state != WhyState::Done);
-    match waiting {
-        Some(gate) => rung(
+    if let Some(gate) = [verify, review].into_iter().find(|gate| gate.state != WhyState::Done) {
+        return rung(
             LAND,
             WhyState::Blocked,
             format!("the bloom is not resolved; {} has not passed", gate.transition),
             Some(gate.transition.clone()),
-        ),
-        None => {
-            rung(LAND, WhyState::Blocked, "both aggregate gates passed but the bloom is not resolved".to_owned(), None)
-        }
+        );
     }
+    rung(LAND, WhyState::Blocked, "both aggregate gates passed but the bloom is not resolved".to_owned(), None)
 }
 
 /// The operator brake, worded once. It stops dispatch at every rung, so the
