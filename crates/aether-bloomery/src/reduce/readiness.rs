@@ -786,9 +786,20 @@ mod tests {
             !decided.effects.iter().any(|effect| matches!(effect, Decision::DispatchIntegration { .. })),
             "the weave still waits for the unfinished members",
         );
+        // Not `is_empty`: since ADR-0206 an unready member records *why* it did
+        // not enter the line. What must be absent is the entry itself.
+        let owed = newly_ready_entries(record(&after, &spec), spec.id(), &WorkpieceId("wp-c".into()), digest(30));
         assert!(
-            newly_ready_entries(record(&after, &spec), spec.id(), &WorkpieceId("wp-c".into()), digest(30)).is_empty(),
+            !owed.iter().any(|effect| matches!(effect, Decision::DispatchAttempt { .. } | Decision::AdvanceStage { .. })),
             "resolving C does not start B: B depends on A, not C",
+        );
+        assert!(
+            owed.iter().any(|effect| matches!(
+                effect,
+                Decision::RecordRefusal { workpiece: Some(workpiece), refusal, .. }
+                    if workpiece.0 == "wp-b" && refusal.guard == "dependencies_resolved"
+            )),
+            "and it says so rather than going quiet",
         );
     }
 
