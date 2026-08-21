@@ -288,7 +288,7 @@ fn classify(root: &Path, at: &str, path: &str, symbol: &str) -> Result<Role, Str
 /// workspace has, and anything else falls back to the leading segment. It
 /// affects only the `crate`/`module` columns of rows this search reads for
 /// their names, never the defining test.
-pub(crate) fn crate_label(path: &str) -> String {
+pub fn crate_label(path: &str) -> String {
     let mut segments = path.split('/');
     match (segments.next(), segments.next()) {
         (Some("crates"), Some(name)) => name.to_owned(),

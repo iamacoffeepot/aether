@@ -205,7 +205,7 @@ fn normalized_index(table: &Table) -> BTreeMap<String, Vec<&Symbol>> {
 
 /// Split the introduced set into the ones that collide and the ones that get a
 /// neighbour dossier, capped at [`MAX_FLAGGED`] each.
-fn classify<'a>(introduced: &[Symbol], index: &BTreeMap<String, Vec<&'a Symbol>>) -> (Vec<Collision>, Vec<Dossier>) {
+fn classify(introduced: &[Symbol], index: &BTreeMap<String, Vec<&Symbol>>) -> (Vec<Collision>, Vec<Dossier>) {
     let mut collisions = Vec::new();
     let mut dossiers = Vec::new();
     for symbol in introduced {
@@ -240,7 +240,7 @@ fn classify<'a>(introduced: &[Symbol], index: &BTreeMap<String, Vec<&'a Symbol>>
 /// is trying to catch is `digest_of` beside `digest`, and a ratio floor is what
 /// keeps a common token (`new`, `run`) from making every symbol everyone's
 /// neighbour.
-fn neighbours_of<'a>(symbol: &Symbol, index: &BTreeMap<String, Vec<&'a Symbol>>) -> Vec<Symbol> {
+fn neighbours_of(symbol: &Symbol, index: &BTreeMap<String, Vec<&Symbol>>) -> Vec<Symbol> {
     let key = normalize(&symbol.name);
     if key.is_empty() {
         return Vec::new();
@@ -263,15 +263,21 @@ fn neighbours_of<'a>(symbol: &Symbol, index: &BTreeMap<String, Vec<&'a Symbol>>)
 /// Whether two normalized names are close enough to offer one as the other's
 /// neighbour: one contains the other, and neither is a small fraction of it.
 fn related(key: &str, candidate: &str) -> bool {
-    if key == candidate || !(key.contains(candidate) || candidate.contains(key)) {
+    if key == candidate {
         return false;
     }
+    // Two distinct names can only contain one another the long way round, so
+    // the ordering that answers the length question also answers the
+    // containment one.
     let (short, long) = if key.len() < candidate.len() {
-        (key.len(), candidate.len())
+        (key, candidate)
     } else {
-        (candidate.len(), key.len())
+        (candidate, key)
     };
-    short * 100 >= long * NEIGHBOUR_LENGTH_PERCENT
+    if !long.contains(short) {
+        return false;
+    }
+    short.len() * 100 >= long.len() * NEIGHBOUR_LENGTH_PERCENT
 }
 
 /// Lowercase, drop underscores — the same fold
@@ -294,7 +300,7 @@ fn rule_hits(root: &Path, base: &str) -> Vec<RuleHit> {
     let mut path = String::new();
     for line in diff.lines() {
         if let Some(named) = line.strip_prefix("+++ b/") {
-            path = named.to_owned();
+            named.clone_into(&mut path);
             continue;
         }
         let Some(added) = line.strip_prefix('+') else {
@@ -406,6 +412,8 @@ fn doc_line(symbol: &Symbol) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::{Collision, Dossier, RuleHit, is_test_path, normalize, related, render, rule_hits};
     use crate::symbols::table::{Signature, Symbol, SymbolKind};
 
@@ -504,6 +512,6 @@ mod tests {
         // Tripwire: `rule_hits` takes the base as an argument, and a bad one
         // must come back empty rather than diffing against the working tree —
         // which would flag every line the candidate never wrote.
-        assert!(rule_hits(std::path::Path::new("."), "not-a-ref\u{0}bad").is_empty());
+        assert!(rule_hits(Path::new("."), "not-a-ref\u{0}bad").is_empty());
     }
 }

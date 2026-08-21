@@ -12,6 +12,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
+use std::slice::from_ref;
 use std::time::Instant;
 
 use aether_bloomery::{VerifyFailure, VerifyFailureSet};
@@ -236,23 +237,16 @@ impl VerifyInvocation {
 /// `.github/workflows/ci.yml` so the comparison is against the command the
 /// gate runs rather than against a second literal in this file (#4843).
 fn verify_command(id: &str) -> Option<VerifyInvocation> {
+    compiled_member(id).or_else(|| tree_member(id))
+}
+
+/// The members that build the workspace, and so answer for the crates a
+/// candidate's closure reaches rather than for the tree as a whole.
+///
+/// Split from [`tree_member`] along the property `Breadth` is derived from,
+/// so neither table runs past a reader's — or the lint's — line budget.
+fn compiled_member(id: &str) -> Option<VerifyInvocation> {
     match id {
-        "verify.fmt" => Some(VerifyInvocation {
-            program: "cargo",
-            args: &["fmt", "--all", "--", "--check"],
-            env: &[],
-            requires: &["cargo", "rustfmt"],
-            requires_targets: &[],
-            prepare: None,
-            // rustfmt exits 1 for a diff under `--check`, and cargo fmt
-            // forwards it. It has no second code: a manifest it cannot read
-            // exits 1 too, so that conflation survives this change unresolved.
-            finding_exit_codes: &[1],
-            environment_exit_codes: &[],
-            requested_exit_codes: &[],
-            diff_base_flag: None,
-            breadth: Breadth::Workspace,
-        }),
         "verify.clippy" => Some(VerifyInvocation {
             program: "cargo",
             args: &["clippy", "--workspace", "--all-targets", "--keep-going", "--message-format=json"],
@@ -322,6 +316,30 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             requested_exit_codes: &[],
             diff_base_flag: None,
             breadth: Breadth::Closure,
+        }),
+        _ => None,
+    }
+}
+
+/// The members that read the tree without building it: formatting, the two
+/// duplication scanners, the manifest walks, and the suppression scan.
+fn tree_member(id: &str) -> Option<VerifyInvocation> {
+    match id {
+        "verify.fmt" => Some(VerifyInvocation {
+            program: "cargo",
+            args: &["fmt", "--all", "--", "--check"],
+            env: &[],
+            requires: &["cargo", "rustfmt"],
+            requires_targets: &[],
+            prepare: None,
+            // rustfmt exits 1 for a diff under `--check`, and cargo fmt
+            // forwards it. It has no second code: a manifest it cannot read
+            // exits 1 too, so that conflation survives this change unresolved.
+            finding_exit_codes: &[1],
+            environment_exit_codes: &[],
+            requested_exit_codes: &[],
+            diff_base_flag: None,
+            breadth: Breadth::Workspace,
         }),
         "verify.dup" => Some(VerifyInvocation {
             // The settings ride the argv rather than a `.jscpd.json` (#4856).
@@ -496,10 +514,10 @@ fn parse_suppression_requests(log: &str) -> Vec<SuppressionRequest> {
             let (path, number) = location.rsplit_once(':')?;
             let (lint, source) = rest.split_once(" — ")?;
             let reason = source.split_once(REQUEST_MARKER)?.1.trim();
-            let line = number.parse().ok()?;
+            let line_number = number.parse().ok()?;
             (!path.is_empty() && !reason.is_empty()).then(|| SuppressionRequest {
                 path: path.to_owned(),
-                line,
+                line: line_number,
                 lint: lint.trim().to_owned(),
                 reason: reason.to_owned(),
             })
@@ -1010,9 +1028,11 @@ impl MemberRun {
         // requested run passes, and reading the marker off every passing
         // member's log would hand the reviewer whatever prose happened to
         // resemble it.
-        let suppression_requests = (id == SUPPRESS_MEMBER && exit_code == SUPPRESSION_REQUESTED_EXIT)
-            .then(|| parse_suppression_requests(&rendered))
-            .unwrap_or_default();
+        let suppression_requests = if id == SUPPRESS_MEMBER && exit_code == SUPPRESSION_REQUESTED_EXIT {
+            parse_suppression_requests(&rendered)
+        } else {
+            Vec::new()
+        };
 
         Self {
             id: id.to_owned(),
@@ -1399,8 +1419,8 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
     // umbrella states them on, so the two paths hand the reviewer one shape.
     let mut run = MemberRun::plain(&args.command, outcome, log_bytes, exit_code);
     run.review_flags = symbol_flags(&args.command, args.diff_base.as_deref());
-    let findings = (!passed).then(|| verify_findings(std::slice::from_ref(&run))).flatten();
-    let requests = stated_requests(std::slice::from_ref(&run));
+    let findings = (!passed).then(|| verify_findings(from_ref(&run))).flatten();
+    let requests = stated_requests(from_ref(&run));
 
     let failures = outcome.failure(&args.command).map(VerifyFailureSet::one);
     let mut evidence =
@@ -1408,7 +1428,7 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
             .measured_by(cache.as_ref(), &peak)
             .timed(duration_millis);
     evidence.suppression_requests = requests;
-    evidence.review_flags = review_flags(std::slice::from_ref(&run));
+    evidence.review_flags = review_flags(from_ref(&run));
     write_json_pretty(&args.out.join("evidence.json"), &evidence)?;
 
     if passed {
