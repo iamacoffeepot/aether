@@ -23,7 +23,7 @@
 //!
 //! A new scenario picks a cell. It does not write a fourth `struct Harness`.
 //!
-//! Shared pieces live next door: [`Repo`](crate::support::repo::Repo) for a real
+//! Shared pieces live next door: [`Repo`] for a real
 //! repository, [`Wire`](crate::support::wire::Wire) for handshake-retry / `call` /
 //! view, [`MapCorrespondence`](crate::support::correspondence::MapCorrespondence)
 //! for an in-memory correspondence store.
