@@ -293,18 +293,31 @@ impl ScenarioHarness {
                 still = 0;
             }
             if still >= 2 {
-                Oracle::check(&document, self.doctor().as_ref(), &outstanding)
-                    .unwrap_or_else(|violation| panic!("{violation}"));
+                self.check_oracle("");
             }
             if predicate(self) {
-                Oracle::check(&self.view(), self.doctor().as_ref(), &self.outstanding())
-                    .unwrap_or_else(|violation| panic!("{violation}"));
+                self.check_oracle("");
                 return;
             }
         }
-        Oracle::check(&self.view(), self.doctor().as_ref(), &self.outstanding())
-            .unwrap_or_else(|violation| panic!("tick budget exhausted: {violation}"));
+        self.check_oracle("tick budget exhausted: ");
         panic!("predicate not reached inside {ticks} ticks");
+    }
+
+    /// Check the [`Oracle`] against a report of the world as it stands now.
+    ///
+    /// The doctor writes its report on its own tick, so reading the report from
+    /// before the last admission judges a world that has since moved on: a
+    /// member whose park landed between that report and this read still reads
+    /// as a member with no lane and no dispatch. Re-ticking the doctor first is
+    /// what makes the report and the document one instant rather than two.
+    ///
+    /// # Panics
+    /// The oracle objected.
+    fn check_oracle(&mut self, context: &str) {
+        self.doctor_tick();
+        Oracle::check(&self.view(), self.doctor().as_ref(), &self.outstanding())
+            .unwrap_or_else(|violation| panic!("{context}{violation}"));
     }
 
     /// Seal a single-member bloom on the observed mainline and return its id.
