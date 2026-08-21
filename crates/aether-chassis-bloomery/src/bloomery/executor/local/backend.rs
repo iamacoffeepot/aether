@@ -89,6 +89,12 @@ const DEFAULT_LANE_BUILD_JOBS: usize = 8;
 /// progress signal (ADR-0195 §8); coordinator polling must never touch it.
 const TRANSCRIPT_FILE: &str = "transcript.jsonl";
 
+/// The file a lane stamps while it works past its model's last turn — the
+/// mechanical fixers, whose one scoped `clippy --fix` compiles (#5383). The
+/// transcript is silent for that whole stretch, so it is read alongside it and
+/// under the same rules: metadata only, never touched by the coordinator.
+const HEARTBEAT_FILE: &str = "heartbeat";
+
 /// The file a dispatch records its lane slot in, inside its own evidence
 /// directory — the durable half of the slot assignment, read back by boot
 /// reconciliation (see [`recorded_slot`]).
@@ -1958,7 +1964,7 @@ impl ExecutorBackend for LocalExecutor {
         };
         Ok(match lifecycle {
             RunLifecycle::Running => {
-                ExecutionStatus::Running { last_progress_unix_millis: transcript_progress_unix_millis(&evidence_dir) }
+                ExecutionStatus::Running { last_progress_unix_millis: lane_progress_unix_millis(&evidence_dir) }
             }
             // Every terminal observation is a completed run so `stream_evidence`
             // can classify it. A signal or a wait fault is not a clean success.
@@ -2204,15 +2210,32 @@ fn recorded_slot(evidence_dir: &Path) -> Option<usize> {
     fs::read_to_string(evidence_dir.join(SLOT_RECORD)).ok()?.trim().parse().ok()
 }
 
-/// The streamed transcript's modification time, or `None` when the file is
-/// absent, unreadable, or stamped in the future.
+/// The newest usable modification time among the files a live lane writes —
+/// the streamed transcript and the lane's own heartbeat — or `None` when
+/// neither is present, readable, and stamped in the past.
+///
+/// Both, because the transcript alone does not cover the lane. It goes quiet
+/// the moment the model ends its turn, and the mechanical fixers that follow
+/// can compile for minutes; a construct lane cancelled as a dead child in that
+/// window loses a finished candidate (#5383). The lane stamps `heartbeat` while
+/// it does that work, and the newer of the two is what this lane last did.
 ///
 /// Future metadata is refused rather than reported: a clock-skewed mtime would
 /// otherwise look like progress that has not happened yet and extend the
-/// silence window past the sealed deadline. Metadata is read only — opening the
-/// file for write here would make coordinator polling itself the heartbeat.
-fn transcript_progress_unix_millis(evidence_dir: &Path) -> Option<u64> {
-    let modified = fs::metadata(evidence_dir.join(TRANSCRIPT_FILE)).ok()?.modified().ok()?;
+/// silence window past the sealed deadline. Metadata is read only — opening
+/// either file for write here would make coordinator polling itself the
+/// heartbeat.
+fn lane_progress_unix_millis(evidence_dir: &Path) -> Option<u64> {
+    [TRANSCRIPT_FILE, HEARTBEAT_FILE]
+        .into_iter()
+        .filter_map(|name| file_progress_unix_millis(&evidence_dir.join(name)))
+        .max()
+}
+
+/// One file's modification time in Unix milliseconds, or `None` when it is
+/// absent, unreadable, or stamped in the future.
+fn file_progress_unix_millis(path: &Path) -> Option<u64> {
+    let modified = fs::metadata(path).ok()?.modified().ok()?;
     let millis = modified.duration_since(UNIX_EPOCH).ok().and_then(|since| u64::try_from(since.as_millis()).ok())?;
     let now =
         SystemTime::now().duration_since(UNIX_EPOCH).ok().and_then(|since| u64::try_from(since.as_millis()).ok())?;

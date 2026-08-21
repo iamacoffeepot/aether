@@ -585,6 +585,42 @@ fn an_absent_or_unreadable_or_future_transcript_is_not_fabricated_progress() {
     );
 }
 
+// Tripwire: the transcript falls silent the moment the model ends its turn,
+// and the lane then runs its mechanical fixers — a `clippy --fix` that
+// compiles. A progress signal read from the transcript alone measures that work
+// as silence, and the executor cancelled a finished candidate as a dead child
+// (#5383). The lane's own stamp is the second half of the signal.
+#[test]
+fn a_lane_working_past_its_transcript_reports_its_own_heartbeat() {
+    let base = TempDir::new().unwrap();
+    let exec = executor(&base, "{}", RunLifecycle::Running);
+    let handle = exec.submit(&construct_order(digest(5), "n-fixers")).unwrap();
+    let dir = evidence_dir(&base, "n-fixers");
+
+    let transcript = dir.join("transcript.jsonl");
+    fs::write(&transcript, b"{}\n").unwrap();
+    let file = fs::File::open(&transcript).unwrap();
+    file.set_modified(SystemTime::now() - Duration::from_mins(15)).unwrap();
+    drop(file);
+    let stale = unix_millis(fs::metadata(&transcript).unwrap().modified().unwrap());
+
+    assert_eq!(
+        exec.inspect(&handle).unwrap(),
+        ExecutionStatus::Running { last_progress_unix_millis: Some(stale) },
+        "with no heartbeat yet, the transcript is still the whole signal",
+    );
+
+    let heartbeat = dir.join("heartbeat");
+    fs::write(&heartbeat, b"").unwrap();
+    let stamped = unix_millis(fs::metadata(&heartbeat).unwrap().modified().unwrap());
+    assert!(stamped > stale, "the stamp under test has to be the newer of the two");
+    assert_eq!(
+        exec.inspect(&handle).unwrap(),
+        ExecutionStatus::Running { last_progress_unix_millis: Some(stamped) },
+        "a lane stamping its heartbeat is working, not silent",
+    );
+}
+
 #[test]
 fn stream_evidence_evicts_the_consumed_run() {
     // Once the evidence is read, the run is consumed: the registry drops it so a
