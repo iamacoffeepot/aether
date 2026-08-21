@@ -6,6 +6,7 @@
 //! cannot decide differently. What lives here is the half that *reads*: which
 //! `ApprovalPolicy` the successor's seal will actually gate against.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -75,7 +76,7 @@ pub fn render(verdict: &TierVerdict, source: &PolicySource, ceiling: Tier) -> St
         verdict.widened
     );
     for (glob, tier) in &verdict.per_added {
-        out.push_str(&format!("  + {glob}  {tier:?}\n"));
+        let _ = writeln!(out, "  + {glob}  {tier:?}");
     }
     out
 }

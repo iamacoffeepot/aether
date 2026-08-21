@@ -86,8 +86,6 @@ pub struct AwaitingSurfaceView {
     pub scope_revision: DigestHex,
     pub paths: Vec<SurfacePathRequest>,
     #[serde(default)]
-    pub summary: String,
-    #[serde(default)]
     pub requests: u32,
 }
 
@@ -104,9 +102,7 @@ pub struct SurfacePathRequest {
 /// `aether_bloomery`'s own type.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CommissionShowView {
-    pub id: String,
     pub current_revision: Option<DigestHex>,
-    pub status: String,
     pub current: Option<ScopeRevisionView>,
     #[serde(default)]
     pub approvals: Vec<StatementView>,
@@ -179,18 +175,17 @@ pub struct ScopeRevisionWrittenView {
     pub digest: DigestHex,
 }
 
-/// `POST /commissions/{id}/approvals` — the stored approval's address.
+/// `POST /commissions/{id}/approvals` — the stored approval's address. The
+/// address itself is the caller's own signed statement re-rendered, so nothing
+/// here reads it back; the type is what makes a non-object reply a parse
+/// failure rather than a silent success.
 #[derive(Debug, Clone, Deserialize)]
-pub struct ApprovalStoredView {
-    #[serde(default)]
-    pub digest: Option<DigestHex>,
-}
+pub struct ApprovalStoredView {}
 
 /// `GET /configs/{digest}` — a stored configuration, decoded through its kind's
 /// schema.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConfigValueView {
-    pub digest: DigestHex,
     pub kind: String,
     pub value: Value,
 }

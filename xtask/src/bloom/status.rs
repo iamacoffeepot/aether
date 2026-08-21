@@ -65,13 +65,21 @@ mod tests {
                     id: predecessor,
                     status: BloomStatus::Superseded,
                     superseded_by: Some(successor),
-                    members: vec![MemberView { workpiece: "wp-1".to_owned(), scope_revision: digest(7), awaiting_surface: None }],
+                    members: vec![MemberView {
+                        workpiece: "wp-1".to_owned(),
+                        scope_revision: digest(7),
+                        awaiting_surface: None,
+                    }],
                 },
                 BloomView {
                     id: successor,
                     status: BloomStatus::Sealed,
                     superseded_by: None,
-                    members: vec![MemberView { workpiece: "wp-1".to_owned(), scope_revision: digest(7), awaiting_surface: None }],
+                    members: vec![MemberView {
+                        workpiece: "wp-1".to_owned(),
+                        scope_revision: digest(7),
+                        awaiting_surface: None,
+                    }],
                 },
             ],
         });

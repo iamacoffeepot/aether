@@ -37,7 +37,7 @@ use super::nextest::ClassifiedRun;
 /// was re-run against the same input, and an inherited failure names the commit
 /// it was still red at.
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Excused {
+pub struct Excused {
     /// The nextest `binary-id test_name` pair.
     pub test: String,
     /// What the replay ran against — the persisted counterexample for a
@@ -58,12 +58,6 @@ pub(super) struct Triage {
 }
 
 impl Triage {
-    /// Whether the triage excused every failure the run named, so the member
-    /// passes without spending a repair lap.
-    pub(super) fn excused_everything(&self) -> bool {
-        self.findings.is_empty() && !(self.flakes.is_empty() && self.inherited.is_empty())
-    }
-
     /// The receipt for what was excused and why — the observation channel, not
     /// the findings channel: a repair lap handed these would chase a host or a
     /// defect it did not write.

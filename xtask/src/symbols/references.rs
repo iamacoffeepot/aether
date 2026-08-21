@@ -207,7 +207,7 @@ pub fn search(symbol: &str, rev: &str, surface: &[String]) -> Result<ReferenceSe
     for path in &hits {
         match classify(root, &at, path, symbol) {
             Ok(role) => {
-                paths.push(ClassifiedPath { path: path.clone(), role, covered: path_in_surface(surface, path) })
+                paths.push(ClassifiedPath { path: path.clone(), role, covered: path_in_surface(surface, path) });
             }
             Err(error) => parse_faults.push(ParseFault { path: path.clone(), error }),
         }
@@ -234,14 +234,14 @@ pub fn search(symbol: &str, rev: &str, surface: &[String]) -> Result<ReferenceSe
 /// clean empty result would come back as a spawn-level failure. Exit `0` is
 /// hits, `1` is none, anything else is a genuine fault.
 fn grep(root: &Path, argv: &[String], at: &str) -> Result<Vec<String>> {
-    let args: Vec<&str> = argv.iter().map(String::as_str).collect();
-    let output = command::run(root, &args).context("run the reference grep")?;
+    let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let output = command::run(root, &borrowed).context("run the reference grep")?;
     match output.status.code() {
         Some(0) => {}
         Some(1) => return Ok(Vec::new()),
         _ => {
             return Err(GitCommandError::Failed {
-                args: args.join(" "),
+                args: borrowed.join(" "),
                 stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
             })
             .context("the reference grep faulted");

@@ -37,7 +37,6 @@ fn awaiting(revision: DigestHex, paths: &[(&str, &str)]) -> AwaitingSurfaceView 
             .iter()
             .map(|(path, reason)| SurfacePathRequest { path: (*path).to_owned(), reason: (*reason).to_owned() })
             .collect(),
-        summary: "outside the sealed surface".to_owned(),
         requests: 1,
     }
 }

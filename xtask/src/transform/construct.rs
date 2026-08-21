@@ -68,16 +68,28 @@ pub(super) const CONSTRUCT_INSTRUCTIONS: &str = include_str!("construct_instruct
 /// fixer-authored one at the run level. `precheck_laps` is how many times the
 /// lane fed its own session a `verify.check` failure before capturing — `0` for
 /// a candidate that passed the gates first time.
+/// What a construct run left behind for the host to read, each stamped by the
+/// same presence rule: absent writes no key at all. Grouped because they are
+/// one thing — the deliverables of the run — and travel together from the
+/// worktree read into the envelope.
+#[derive(Clone, Copy, Default)]
+struct Deliverables<'a> {
+    /// The commit message the agent authored, when it wrote a non-empty one.
+    commit_message: Option<&'a str>,
+    /// The paths a declining lane asked for (ADR-0207), normalized.
+    surface_request: Option<&'a serde_json::Value>,
+}
+
 fn stamp_construct_evidence(
     nonce: Option<&str>,
     produced_candidate: bool,
-    commit_message: Option<&str>,
-    surface_request: Option<&serde_json::Value>,
+    deliverables: Deliverables<'_>,
     record: &serde_json::Value,
     measured: Measurements,
     fixers: FixerReport,
     precheck_laps: u32,
 ) -> serde_json::Value {
+    let Deliverables { commit_message, surface_request } = deliverables;
     let mut evidence = serde_json::json!({
         "command": CONSTRUCT_IMPLEMENT,
         "nonce": nonce,
@@ -259,8 +271,7 @@ pub(super) fn run_construct(args: &TransformArgs) -> Result<()> {
         &stamp_construct_evidence(
             args.nonce.as_deref(),
             produced_candidate,
-            commit_message.as_deref(),
-            surface_request.as_ref(),
+            Deliverables { commit_message: commit_message.as_deref(), surface_request: surface_request.as_ref() },
             &run.record,
             run.measured,
             fixers,
@@ -308,9 +319,9 @@ mod tests {
     use aether_bloomery::{LANE_WORKPIECE_HEADER, pin_workpiece_description};
 
     use super::{
-        COMMIT_MESSAGE_DELIVERABLE, CONSTRUCT_IMPLEMENT, CONSTRUCT_INSTRUCTIONS, FixerReport, Measurements,
-        SURFACE_REQUEST_DELIVERABLE, porcelain_signals_candidate, stamp_construct_evidence, take_commit_message,
-        take_surface_request,
+        COMMIT_MESSAGE_DELIVERABLE, CONSTRUCT_IMPLEMENT, CONSTRUCT_INSTRUCTIONS, Deliverables, FixerReport,
+        Measurements, SURFACE_REQUEST_DELIVERABLE, porcelain_signals_candidate, stamp_construct_evidence,
+        take_commit_message, take_surface_request,
     };
     use crate::transform::claude::assemble_construct_prompt;
     use crate::transform::conventions::LANE_CONTEXT;
@@ -321,8 +332,7 @@ mod tests {
         let evidence = stamp_construct_evidence(
             Some("nonce-7"),
             true,
-            None,
-            None,
+            Deliverables::default(),
             &record,
             Measurements::default(),
             FixerReport::default(),
@@ -350,8 +360,7 @@ mod tests {
         let no_nonce = stamp_construct_evidence(
             None,
             false,
-            None,
-            None,
+            Deliverables::default(),
             &serde_json::json!({ "no_result": true }),
             Measurements::default(),
             FixerReport::default(),
@@ -376,8 +385,7 @@ mod tests {
         let evidence = stamp_construct_evidence(
             Some("n-1"),
             true,
-            Some(message),
-            None,
+            Deliverables { commit_message: Some(message), surface_request: None },
             &serde_json::json!({}),
             Measurements::default(),
             FixerReport::default(),
@@ -395,8 +403,7 @@ mod tests {
         let evidence = stamp_construct_evidence(
             Some("n-1"),
             true,
-            None,
-            None,
+            Deliverables::default(),
             &serde_json::json!({}),
             Measurements::default(),
             FixerReport { ran: true, changed: true },
@@ -443,8 +450,7 @@ mod tests {
         let evidence = stamp_construct_evidence(
             Some("n-1"),
             true,
-            None,
-            None,
+            Deliverables::default(),
             &serde_json::json!({}),
             Measurements::default(),
             FixerReport::default(),

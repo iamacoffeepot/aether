@@ -10,6 +10,7 @@
 use std::fmt;
 use std::fs;
 use std::path::Path;
+use std::str;
 
 use aether_bloomery::{Digest, KeyId, ScopeRevision, Statement, digest_of, signed_approval};
 use anyhow::{Context, Result, bail};
@@ -64,7 +65,7 @@ fn decode_seed(bytes: &[u8]) -> Result<[u8; 32]> {
     if let Ok(raw) = <[u8; 32]>::try_from(bytes) {
         return Ok(raw);
     }
-    let text = std::str::from_utf8(bytes).context("seed is not raw bytes and not UTF-8 hex")?;
+    let text = str::from_utf8(bytes).context("seed is not raw bytes and not UTF-8 hex")?;
     let text = text.trim();
     if text.len() != 64 {
         bail!("hex seed is {} characters, not 64", text.len());

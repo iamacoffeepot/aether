@@ -6,15 +6,17 @@ mod triage;
 #[cfg(test)]
 mod workflow;
 
+use std::env;
+use std::fmt::Write as _;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::time::Instant;
 
 use aether_bloomery::{VerifyFailure, VerifyFailureSet};
 use anyhow::{Context, Result, bail};
 
-use crate::cargo::{WASM_TARGET, run_captured, write_json_pretty};
+use crate::cargo::{self, WASM_TARGET, run_captured, write_json_pretty};
 use crate::transform::peak_memory::{self, PeakMemory};
 use crate::transform::sccache::{self, CompilerCache, Counters};
 use crate::transform::verify::closure::Closure;
@@ -718,7 +720,7 @@ impl SpawnRunner<'_> {
             // every scenario test red — which this triage would then read as
             // "the base was already broken" and use to excuse a real finding.
             if let Some(prepare) = invocation.prepare {
-                let mut step = crate::cargo::command();
+                let mut step = cargo::command();
                 step.args(prepare.iter().copied()).current_dir(at).env("CARGO_TARGET_DIR", at.join("target"));
                 run_captured(step).with_context(|| format!("prepare the base checkout at {}", at.display()))?;
             }
@@ -751,12 +753,12 @@ fn nextest_filter(test: &str) -> String {
 /// swallows that would leave a stale entry in `.git/worktrees` that the next
 /// `git worktree add` at the same path refuses.
 struct BaseCheckout {
-    path: std::path::PathBuf,
+    path: PathBuf,
 }
 
 impl BaseCheckout {
     fn open(base: &str) -> Result<Self> {
-        let path = std::env::temp_dir().join(format!("aether-verify-base-{}", std::process::id()));
+        let path = env::temp_dir().join(format!("aether-verify-base-{}", process::id()));
         // A leftover from a killed run would make `worktree add` refuse; prune
         // first so a crashed predecessor cannot wedge every later triage.
         let _ = run_captured(git(&["worktree", "prune"]));
@@ -1438,8 +1440,10 @@ fn append_flake_log(out: &Path, flakes: &[Excused]) {
     if flakes.is_empty() {
         return;
     }
-    let body: String =
-        flakes.iter().map(|excused| format!("{}\treplayed {}\n", excused.test, excused.replayed)).collect();
+    let body = flakes.iter().fold(String::new(), |mut body, excused| {
+        let _ = writeln!(body, "{}\treplayed {}", excused.test, excused.replayed);
+        body
+    });
     if let Err(error) =
         fs::OpenOptions::new().create(true).append(true).open(out.join("flakes.log")).and_then(|mut file| {
             use std::io::Write as _;

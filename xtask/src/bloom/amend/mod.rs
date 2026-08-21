@@ -28,6 +28,7 @@ mod tier;
 #[cfg(test)]
 mod tests;
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use aether_bloomery::{KeyId, Tier, TierVerdict, gate_widening, surface_additions, surface_intersection, tier_verdict};
@@ -139,10 +140,10 @@ pub fn run(client: &Client<'_>, args: &AmendArgs, policy_file: &Path) -> Result<
     let widened = plan.current.to_revision().with_widened_surface(&plan.added);
     out.push_str("writing the widened revision; the commission tip advances here\n");
     let scope = revision::write_widened(client, &plan.workpiece, &widened)?;
-    out.push_str(&format!("revision   {scope}\n"));
+    let _ = writeln!(out, "revision   {scope}");
 
     if revision::approve(client, &plan.commission, &plan.workpiece, scope, &key)? {
-        out.push_str(&format!("approved   by {}\n", key.signer.0));
+        let _ = writeln!(out, "approved   by {}", key.signer.0);
     } else {
         out.push_str("approved   already stored\n");
     }
@@ -305,15 +306,17 @@ fn supersede(
 fn describe(plan: &AmendPlan, ceiling: Tier) -> String {
     let mut out = format!("member     {}\nrequests   {}\n", plan.workpiece, plan.requested.requests);
     for (path, reason) in &plan.requested.reasons {
-        out.push_str(&format!("  lane asked for {path}: {reason}\n"));
+        let _ = writeln!(out, "  lane asked for {path}: {reason}");
     }
+
     out.push_str("added\n");
     for glob in &plan.added {
-        out.push_str(&format!("  + {glob}\n"));
+        let _ = writeln!(out, "  + {glob}");
     }
+
     out.push_str(&tier::render(&plan.verdict, &plan.source, ceiling));
     for (sibling, shared) in &plan.new_overlaps {
-        out.push_str(&format!("overlap    {sibling}: {}\n", shared.join(", ")));
+        let _ = writeln!(out, "overlap    {sibling}: {}", shared.join(", "));
     }
     out
 }

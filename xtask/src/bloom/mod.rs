@@ -34,7 +34,7 @@ const DEFAULT_HTTP_PORT: u16 = 8910;
 
 /// The repository's approval policy — the fallback the coordinator itself
 /// loads when a bloom seals none of its own.
-pub(super) const DEFAULT_POLICY_FILE: &str = "approval-policy.toml";
+pub const DEFAULT_POLICY_FILE: &str = "approval-policy.toml";
 
 /// One coordinator the command talks to.
 #[derive(Clone, Debug)]
@@ -223,7 +223,7 @@ struct SupersedeArgs {
 }
 
 #[derive(Args, Debug)]
-pub(super) struct ProjectionArgs {
+pub struct ProjectionArgs {
     /// Declared-surface globs. Defaults to the shipped auto-tier surface.
     #[arg(long = "declared-surface")]
     declared_surface: Vec<String>,
@@ -261,9 +261,10 @@ pub fn run(args: &BloomArgs) -> Result<()> {
     Ok(())
 }
 
-/// Drive `command`, reading the granularity check's policy from the repository
-/// default. The three-argument form is what [`run`] calls; this spelling keeps
-/// every caller that does not configure a policy on one line.
+/// Drive `command` against the repository's default policy file. Only the
+/// tests reach for this spelling — [`run`] resolves the operator's
+/// `--approval-policy` and calls [`run_on_with_policy`] directly.
+#[cfg(test)]
 fn run_on(endpoint: &Endpoint, command: &BloomCommand) -> Result<String> {
     run_on_with_policy(endpoint, command, Path::new(DEFAULT_POLICY_FILE))
 }
@@ -355,7 +356,7 @@ fn run_supersede(client: &Client<'_>, args: &SupersedeArgs, approval_policy: &Pa
     Ok(render_outcome(&outcome.outcome))
 }
 
-pub(super) fn render_outcome(outcome: &serde_json::Value) -> String {
+pub fn render_outcome(outcome: &serde_json::Value) -> String {
     format!("{}\n", serde_json::to_string_pretty(outcome).unwrap_or_else(|_| outcome.to_string()))
 }
 
@@ -365,7 +366,7 @@ mod tests {
     use std::fs;
     use std::io::{self, Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::process;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
