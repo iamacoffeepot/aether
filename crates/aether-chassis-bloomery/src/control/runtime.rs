@@ -22,7 +22,7 @@
 //! reactor capabilities (#3499). This cap only *enqueues* outbox entries,
 //! atomically inside the commit.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::mem;
 #[cfg(test)]
 use std::sync::Arc;
@@ -71,6 +71,12 @@ use crate::store::{StoreCapability, now_unix_millis};
 /// count toward the same per-key cap ([`ControlCoreState::inflight_for_key`]), so
 /// the pre-commit ref stage cannot dodge the back-pressure.
 const MAX_INFLIGHT_PER_KEY: usize = 64;
+
+/// How many idempotency keys the duplicate reporter remembers before it starts
+/// over. Large enough that the keys a live coordinator sees duplicated fit
+/// comfortably, small enough that a process running for weeks cannot grow the
+/// set without limit; forgetting costs one repeated `warn` per key.
+const MAX_REPORTED_DUPLICATES: usize = 4_096;
 
 /// An admit awaiting its durable commit reply — the held reply obligation, the
 /// decoded event, and the decisions to apply to the snapshot once the store
@@ -198,6 +204,15 @@ pub struct ControlCoreState {
     /// arrives before the fold would otherwise reduce against the empty boot
     /// snapshot and consume its key as `UnknownOrInactiveBloom`.
     replayed: bool,
+    /// Idempotency keys whose duplicate admission has already been reported.
+    ///
+    /// A duplicate is a dropped fact and a fire-and-forget admitter never
+    /// learns it, so the first one per key is a `warn` an operator has to see.
+    /// A repeat is the same fact being re-derived on a poll cadence, and 543
+    /// identical lines in twenty minutes buries the events the `warn` exists to
+    /// surface — so the rest go to `trace` (#5387). Process-local and bounded
+    /// by [`MAX_REPORTED_DUPLICATES`].
+    reported_duplicates: BTreeSet<String>,
     /// The mainline observer's poll-timer sidecar, held for its `Drop` (which
     /// stops and joins the thread on teardown).
     _timer: TimerHandle,
@@ -237,6 +252,7 @@ impl NativeActor for ControlCore {
             held_admissions: VecDeque::new(),
             held_for_bloom: BTreeMap::new(),
             replayed: false,
+            reported_duplicates: BTreeSet::new(),
             _timer: timer,
         })
     }
@@ -479,7 +495,7 @@ impl NativeActor for ControlCore {
             // The store already held this key durably though our snapshot did not —
             // a rare divergence (a reply racing a concurrent replay). Reply
             // Duplicate and do not double-apply.
-            CommitResult::Duplicate { .. } => admit_duplicate(&key),
+            CommitResult::Duplicate { .. } => admit_duplicate(&mut state.reported_duplicates, &key),
             // The durable uniqueness backstop refused a claim the reducer's snapshot
             // screen missed — do not apply; report the conflict.
             CommitResult::Conflict { workpiece, .. } => {
@@ -879,6 +895,7 @@ impl ControlCoreState {
             held_admissions: VecDeque::new(),
             held_for_bloom: BTreeMap::new(),
             replayed: true,
+            reported_duplicates: BTreeSet::new(),
             _timer: spawn_timer(
                 mailer,
                 aether_data::MailboxId(0),
@@ -1542,7 +1559,7 @@ fn finish_admit(
     decisions: Decisions,
 ) {
     if matches!(decisions.outcome, Outcome::Duplicate) {
-        inbound.reply(&admit_duplicate(&event.idempotency_key.0));
+        inbound.reply(&admit_duplicate(&mut state.reported_duplicates, &event.idempotency_key.0));
         return;
     }
     match retag_rejected_repair(&state.snapshot, |key| state.inflight_for_key(key), raw, event, &decisions) {
@@ -1608,12 +1625,29 @@ fn rejected_repair_tag(error: &OperatorRepairError) -> &'static str {
 /// outcome — so a reactor's discarded fact is otherwise invisible at every layer
 /// and the run simply stops, with no wedge and no evidence (#4722). The `warn`
 /// is the one place that can see it.
-fn admit_duplicate(idempotency_key: &str) -> AdmitResult {
-    tracing::warn!(
-        target: "aether_chassis_bloomery::control",
-        idempotency_key,
-        "admission reduced to a duplicate; the fact is discarded and a fire-and-forget admitter never learns it",
-    );
+///
+/// Once per key, though. The first duplicate is the news; a second one under
+/// the same key says only that some admitter is re-deriving a fact the journal
+/// already holds, which at a one-second poll cadence produced 543 identical
+/// lines in twenty minutes and buried everything else in the log (#5387). The
+/// repeats stay observable at `trace`.
+fn admit_duplicate(reported: &mut BTreeSet<String>, idempotency_key: &str) -> AdmitResult {
+    if reported.len() >= MAX_REPORTED_DUPLICATES {
+        reported.clear();
+    }
+    if reported.insert(idempotency_key.to_owned()) {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::control",
+            idempotency_key,
+            "admission reduced to a duplicate; the fact is discarded and a fire-and-forget admitter never learns it",
+        );
+    } else {
+        tracing::trace!(
+            target: "aether_chassis_bloomery::control",
+            idempotency_key,
+            "admission reduced to a duplicate again; an admitter is re-deriving a fact the journal already holds",
+        );
+    }
     admit_ok(&Outcome::Duplicate)
 }
 
@@ -1642,26 +1676,44 @@ fn lowercase_hex(bytes: &[u8]) -> String {
 /// hold collapse to `Duplicate`, and a later miss (new evidence) is a new
 /// key.
 fn resume_host_faults(state: &ControlCoreState, ctx: &mut NativeCtx<'_, Manual>) {
-    for record in state.snapshot.blooms.values() {
-        if record.operator_hold.is_some() {
-            continue;
-        }
-        for (workpiece, hold) in &record.host_faults {
-            let event = Event {
-                idempotency_key: resume_host_fault_key(&record.spec.id(), workpiece, &hold.evidence),
-                fact: Fact::ResumeHostFault { bloom: record.spec.id(), workpiece: workpiece.clone() },
-            };
-            match to_vec(&event) {
-                Ok(bytes) => ctx.actor::<ControlCore>().send_detached(&Admit { event: bytes }),
-                Err(error) => tracing::warn!(
-                    target: "aether_chassis_bloomery::control",
-                    %error,
-                    workpiece = %workpiece.0,
-                    "host-fault resume did not encode"
-                ),
-            }
+    for event in owed_host_fault_resumes(&state.snapshot) {
+        match to_vec(&event) {
+            Ok(bytes) => ctx.actor::<ControlCore>().send_detached(&Admit { event: bytes }),
+            Err(error) => tracing::warn!(
+                target: "aether_chassis_bloomery::control",
+                %error,
+                idempotency_key = %event.idempotency_key.0,
+                "host-fault resume did not encode"
+            ),
         }
     }
+}
+
+/// The cadence resumes this snapshot still owes: one per held host fault whose
+/// admit the journal does not already carry.
+///
+/// The `seen` screen is what stops the tick talking to itself. The reducer
+/// refuses a resume whose member has moved off terminal Verify, and a refusal
+/// is journaled exactly as an acceptance is — but it clears no hold, so the
+/// entry stays in `host_faults` and the next tick derives the same key again.
+/// The admit is fire-and-forget, so the tick never learns the outcome, and the
+/// pair looped at the poll cadence for the life of the bloom (#5387). It is the
+/// screen the mainline observer already carries (#4938), and it costs nothing
+/// real: a hold that misses again under new evidence is a new key and still
+/// resumes.
+fn owed_host_fault_resumes(snapshot: &Snapshot) -> Vec<Event> {
+    snapshot
+        .blooms
+        .values()
+        .filter(|record| record.operator_hold.is_none())
+        .flat_map(|record| {
+            record.host_faults.iter().map(move |(workpiece, hold)| Event {
+                idempotency_key: resume_host_fault_key(&record.spec.id(), workpiece, &hold.evidence),
+                fact: Fact::ResumeHostFault { bloom: record.spec.id(), workpiece: workpiece.clone() },
+            })
+        })
+        .filter(|event| !snapshot.seen.contains(&event.idempotency_key))
+        .collect()
 }
 
 /// The admit key for one cadence resume of a host-fault hold.
@@ -1707,14 +1759,16 @@ mod tests {
     use aether_bloomery::testing::digest;
     use aether_bloomery::{
         BloomDraft, BloomId, BloomRecord, CandidateRef, Decisions, Digest, Event, Evidence, EvidenceKind, Fact,
-        IdempotencyKey, OperatorRepair, OperatorRepairError, Outcome, QueryResult, Snapshot, StudyCost, StudyRecord,
-        WorkpieceId,
+        HostFaultHold, IdempotencyKey, OperatorRepair, OperatorRepairError, Outcome, QueryResult, Snapshot, StudyCost,
+        StudyRecord, WorkpieceId,
     };
     use aether_data::wire::to_vec;
 
+    use std::collections::BTreeMap;
+
     use super::{
-        load_study_records, lowercase_hex, observation_already_admitted, observe_mainline_key, rejected_repair_key,
-        release_response, retag_rejected_repair,
+        load_study_records, lowercase_hex, observation_already_admitted, observe_mainline_key, owed_host_fault_resumes,
+        rejected_repair_key, release_response, resume_host_fault_key, retag_rejected_repair,
     };
     use crate::artifacts::{ArtifactsCapabilityState, PutResult};
 
@@ -1777,6 +1831,46 @@ mod tests {
             !observation_already_admitted(&snapshot, &head),
             "the same head against a different mainline is still a new admit",
         );
+    }
+
+    // Tripwire (#5387): the cadence tick admits fire-and-forget, so it never
+    // learns that the resume it just sent was already journaled. The reducer
+    // refuses a resume whose member has moved on and journals the refusal
+    // without clearing the hold, so the hold stays in `host_faults` and every
+    // later tick re-derived the same key — 543 identical duplicate warns in
+    // twenty minutes at the one-second poll, burying every real event.
+    #[test]
+    fn a_host_fault_resume_the_journal_already_holds_is_not_re_derived() {
+        let workpiece = WorkpieceId("wp-held".to_owned());
+        let hold = HostFaultHold { findings: "cargo not found".to_owned(), evidence: digest(9) };
+        let record = BloomRecord {
+            host_faults: BTreeMap::from([(workpiece.clone(), hold.clone())]),
+            ..BloomRecord::empty(BloomDraft::default().seal())
+        };
+        let bloom = record.spec.id();
+        let mut snapshot = Snapshot::default();
+        snapshot.blooms.insert(bloom, record);
+
+        let owed = owed_host_fault_resumes(&snapshot);
+        assert_eq!(owed.len(), 1, "a held host fault owes its resume once");
+        let key = owed[0].idempotency_key.clone();
+
+        snapshot.seen.insert(key.clone());
+        assert!(
+            owed_host_fault_resumes(&snapshot).is_empty(),
+            "a resume already in the journal is not re-derived, however long the hold outlives it",
+        );
+
+        // And the screen is per key, not per hold: a later miss stamps new
+        // evidence, which is a new key, and that resume must still go out.
+        let bloom_record = snapshot.blooms.get_mut(&bloom).expect("the bloom is in the snapshot");
+        bloom_record.host_faults.insert(workpiece.clone(), HostFaultHold { evidence: digest(10), ..hold });
+        assert_eq!(
+            owed_host_fault_resumes(&snapshot).first().map(|event| event.idempotency_key.clone()),
+            Some(resume_host_fault_key(&bloom, &workpiece, &digest(10))),
+            "a hold that missed again under new evidence is a new key and still resumes",
+        );
+        assert_ne!(key, resume_host_fault_key(&bloom, &workpiece, &digest(10)));
     }
 
     // Tripwire: a release read that misses must answer the release-shaped miss,
