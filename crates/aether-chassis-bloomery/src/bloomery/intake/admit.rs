@@ -605,6 +605,36 @@ fn admits_as_attempt_completed(stage: StageId) -> bool {
     StageCatalog::next_member_stage(stage).is_some() || matches!(stage, StageId::Refine | StageId::Reconcile)
 }
 
+/// Land a pre-bloom scoping run's verdict on the commission store's own run
+/// ledger (ADR-0208, #5304).
+///
+/// Split out of [`admit_uploaded`] so that function stays inside its line
+/// budget, and because this is a whole admission path rather than a step of the
+/// member ladder: it consumes the order and returns, and nothing below it runs.
+fn record_scope_verdict(
+    store: &mut dyn StoreBackend,
+    upload: &UploadedEvidence,
+    record: &DispatchRecord,
+    evidence: &Evidence,
+) -> Result<AdmitDecision, IntakeError> {
+    let Some((commission, ordinal)) = store.lookup_scope_run(&record.nonce.0)? else {
+        // A Scope order with no `dispatched` row names a run this coordinator
+        // never opened. Refuse rather than inventing an ordinal: an invented
+        // row would let a fabricated upload write into a commission's scoping
+        // history.
+        return Ok(AdmitDecision::Refused(IntakeRefusal::UnknownNonce(upload.nonce.clone())));
+    };
+    // Consume first here, unlike the member path: there is no fallible encode
+    // to fail after it, and a lost race to consumption must read as a replay
+    // rather than as a second verdict row on the same ordinal.
+    if !store.consume_order(&record.nonce.0)? {
+        return Ok(AdmitDecision::Refused(IntakeRefusal::UnknownNonce(upload.nonce.clone())));
+    }
+    store.record_scope_verdict(&commission, ordinal, &format!("{:?}", upload.verdict), evidence.detail.as_bytes())?;
+    store.clear_capture_diff(&record.nonce.0)?;
+    Ok(AdmitDecision::Recorded)
+}
+
 pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -> Result<AdmitDecision, IntakeError> {
     let Some(stored) = store.lookup_order(&upload.nonce.0)? else {
         // Fabricated, or the order was already consumed (a replay).
@@ -636,27 +666,7 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     // final `else` and be refused as `OutOfLineStage` — which is what it is
     // refused as today, and is this slice's pre-fix failure.
     if record.stage == StageId::Scope {
-        let Some((commission, ordinal)) = store.lookup_scope_run(&record.nonce.0)? else {
-            // A Scope order with no `dispatched` row names a run this
-            // coordinator never opened. Refuse rather than inventing an
-            // ordinal: an invented row would let a fabricated upload write
-            // into a commission's scoping history.
-            return Ok(AdmitDecision::Refused(IntakeRefusal::UnknownNonce(upload.nonce.clone())));
-        };
-        // Consume first here, unlike the member path: there is no fallible
-        // encode to fail after it, and a lost race to consumption must read as
-        // a replay rather than as a second verdict row on the same ordinal.
-        if !store.consume_order(&record.nonce.0)? {
-            return Ok(AdmitDecision::Refused(IntakeRefusal::UnknownNonce(upload.nonce.clone())));
-        }
-        store.record_scope_verdict(
-            &commission,
-            ordinal,
-            &format!("{:?}", upload.verdict),
-            evidence.detail.as_bytes().as_slice(),
-        )?;
-        store.clear_capture_diff(&record.nonce.0)?;
-        return Ok(AdmitDecision::Recorded);
+        return record_scope_verdict(store, upload, &record, &evidence);
     }
 
     // Provenance (a real outstanding order) and binding (the displayed digest)

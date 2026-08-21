@@ -3,7 +3,7 @@
 //! Post-cutover the operator's ambient verification surface is gone: the
 //! console covers attended watching, and nothing covers unattended. This
 //! capability is the unattended half — one plain-text message per loud
-//! transition, POSTed to a configured Discord-compatible webhook, best-effort
+//! transition, posted to a configured Discord-compatible webhook, best-effort
 //! and never on the line's critical path.
 //!
 //! # It drains no topic
@@ -66,6 +66,7 @@ mod runtime;
 pub use runtime::{Delivered, NotifyReactorState, NotifyTick, deliver};
 
 use aether_bloomery_github::{ReqwestWebhook, WebhookSink};
+use std::fs;
 use std::sync::Arc;
 
 /// Read the webhook URL out of the file [`NotifyConfig`] names and build the
@@ -80,7 +81,7 @@ use std::sync::Arc;
 #[must_use]
 pub fn webhook_sink(config: &NotifyConfig) -> Option<Arc<dyn WebhookSink>> {
     let path = config.webhook_file.as_deref()?;
-    let url = match std::fs::read_to_string(path) {
+    let url = match fs::read_to_string(path) {
         Ok(contents) => contents.trim().to_owned(),
         Err(error) => {
             tracing::warn!(

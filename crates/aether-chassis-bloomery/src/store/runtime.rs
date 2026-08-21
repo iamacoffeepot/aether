@@ -2678,12 +2678,13 @@ impl NativeActor for StoreCapability {
         // Empty bytes are absent, not an empty projection: a hand-authored
         // revision carries no field records, and absence is reported rather
         // than passed.
-        let projection = match scope_verify.is_empty() {
-            true => None,
-            false => match ScopeVerifyInput::from_canonical(&scope_verify) {
+        let projection = if scope_verify.is_empty() {
+            None
+        } else {
+            match ScopeVerifyInput::from_canonical(&scope_verify) {
                 Ok(projection) => Some(projection),
                 Err(error) => return write_revision_error(CommissionError::from(error)),
-            },
+            }
         };
         match state.backend.write_revision_verified(&revision, projection.as_ref()) {
             Ok(digest) => WriteScopeRevisionResult::Ok { digest: digest.as_bytes().to_vec() },

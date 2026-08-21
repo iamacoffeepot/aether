@@ -218,7 +218,7 @@ fn collect_dependencies(table: Option<&toml::Value>, names: &mut BTreeSet<String
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::{WorkspaceCrates, derive_surface};
 
@@ -229,7 +229,7 @@ mod tests {
             .into_iter()
             .map(|name| (name.to_owned(), format!("crates/{name}")))
             .collect::<BTreeMap<_, _>>();
-        let mut dependents: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
+        let mut dependents: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         dependents.entry("leaf".to_owned()).or_default().insert("middle".to_owned());
         dependents.entry("middle".to_owned()).or_default().insert("top".to_owned());
 

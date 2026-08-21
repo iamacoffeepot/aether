@@ -164,7 +164,7 @@ impl ApiCapabilityState {
     /// place every reader treats as a gate's — with nothing to stop the next
     /// verify capture from overwriting them. The repair lap therefore reads the
     /// refusal from the journal, where the answer lives.
-    pub(super) fn suppression(&self, id: &str, workpiece: &str, body: &[u8]) -> Routed {
+    pub(super) fn suppression(id: &str, workpiece: &str, body: &[u8]) -> Routed {
         let bloom = match digest_from_hex(id) {
             Some(digest) => BloomId(digest),
             None => return Routed::Reply(error_response(400, "bloom id is not a 32-byte hex bloom id")),

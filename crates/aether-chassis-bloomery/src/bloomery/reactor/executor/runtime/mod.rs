@@ -404,6 +404,32 @@ fn expire_overdue_orders(
     admits
 }
 
+/// Say which limit the cancelled run crossed.
+///
+/// Split out of `terminate_live_order` so the admission match stays readable:
+/// the two causes differ only in the sentence they warrant, and the fields they
+/// name are the same order's.
+fn warn_terminated(cause: TerminationCause, record: &DispatchRecord, deadline: u64) {
+    match cause {
+        TerminationCause::Deadline => tracing::warn!(
+            target: "aether_chassis_bloomery::executor",
+            nonce = %record.nonce.0,
+            workpiece = %record.workpiece.0,
+            stage = ?record.stage,
+            deadline_unix_millis = deadline,
+            "dispatched run outlived its sealed execution limit; cancelled and recorded as a host fault",
+        ),
+        TerminationCause::HeartbeatSilence => tracing::warn!(
+            target: "aether_chassis_bloomery::executor",
+            nonce = %record.nonce.0,
+            workpiece = %record.workpiece.0,
+            stage = ?record.stage,
+            deadline_unix_millis = deadline,
+            "dispatched run was silent past the host heartbeat threshold; cancelled and recorded as a host fault",
+        ),
+    }
+}
+
 /// Cancel a still-pending order and admit the synthesised failed attempt the
 /// deadline reaper already uses. Shared by wall-clock expiry and heartbeat
 /// silence so both keep cancel → deterministic record → intake ordering and
@@ -490,24 +516,7 @@ fn terminate_live_order(
     };
     match admit_uploaded(store, &upload) {
         Ok(AdmitDecision::Admitted(admission)) => {
-            match cause {
-                TerminationCause::Deadline => tracing::warn!(
-                    target: "aether_chassis_bloomery::executor",
-                    nonce = %record.nonce.0,
-                    workpiece = %record.workpiece.0,
-                    stage = ?record.stage,
-                    deadline_unix_millis = deadline,
-                    "dispatched run outlived its sealed execution limit; cancelled and recorded as a host fault",
-                ),
-                TerminationCause::HeartbeatSilence => tracing::warn!(
-                    target: "aether_chassis_bloomery::executor",
-                    nonce = %record.nonce.0,
-                    workpiece = %record.workpiece.0,
-                    stage = ?record.stage,
-                    deadline_unix_millis = deadline,
-                    "dispatched run was silent past the host heartbeat threshold; cancelled and recorded as a host fault",
-                ),
-            }
+            warn_terminated(cause, &record, deadline);
             tracked.retain(|tracked_handle| tracked_handle.handle.nonce != record.nonce);
             Some(admission.admit)
         }
@@ -548,6 +557,123 @@ fn terminate_live_order(
                 "timeout admission faulted; leaving the order live to retry",
             );
             None
+        }
+    }
+}
+
+/// Drain every dispatch topic this tick submits from, folding each drain's
+/// handles and transient failure into the tracking and backoff the tick shares.
+///
+/// Split out of `on_dispatch_tick` so the tick body stays inside its line
+/// budget. The five drains are one phase of the tick — what a reader needs from
+/// them there is that they all happen and all feed the same two pieces of
+/// state, which is exactly what the call site now says.
+fn drain_dispatch_topics(
+    tracked: &mut Vec<TrackedHandle>,
+    backoff: &mut Option<BackoffCursor>,
+    store: &mut dyn StoreBackend,
+    executor: &ExecutorShell,
+    now_unix_millis: u64,
+) {
+    // Drain + submit the newly-decided dispatches, acking the submitted prefix.
+    match drain_and_dispatch(store, executor, now_unix_millis) {
+        Ok((handles, ack_through, transient_failure)) => {
+            if let Some(sequence) = ack_through
+                && let Err(error) = store.ack_topic(Topic::Dispatch, sequence)
+            {
+                tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "dispatch ack failed; entries re-drive");
+            }
+            let now = Instant::now();
+            tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, now)));
+            *backoff = fold_drain_backoff(backoff.take(), transient_failure);
+        }
+        Err(error) => {
+            tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "dispatch drain failed");
+        }
+    }
+    // Drain + submit the whole-bloom aggregate reviews (ADR-0153) the
+    // same way — its handles ride the same intake cycle, and a
+    // transient failure joins the shared backoff window.
+    match drain_and_dispatch_aggregate(store, executor, now_unix_millis) {
+        Ok((handles, ack_through, transient_failure)) => {
+            if let Some(sequence) = ack_through
+                && let Err(error) = store.ack_topic(Topic::AggregateReview, sequence)
+            {
+                tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "aggregate-review ack failed; entries re-drive");
+            }
+            let now = Instant::now();
+            tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, now)));
+            *backoff = fold_drain_backoff(backoff.take(), transient_failure);
+        }
+        Err(error) => {
+            tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "aggregate-review drain failed");
+        }
+    }
+    // Drain + submit the whole-bloom aggregate verifies the same way —
+    // the mechanical gate the fold passes before its critic dispatches.
+    match drain_and_dispatch_aggregate_verify(store, executor, now_unix_millis) {
+        Ok((handles, ack_through, transient_failure)) => {
+            if let Some(sequence) = ack_through
+                && let Err(error) = store.ack_topic(Topic::AggregateVerify, sequence)
+            {
+                tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "aggregate-verify ack failed; entries re-drive");
+            }
+            let now = Instant::now();
+            tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, now)));
+            *backoff = fold_drain_backoff(backoff.take(), transient_failure);
+        }
+        Err(error) => {
+            tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "aggregate-verify drain failed");
+        }
+    }
+    // Drain + submit the pre-bloom scoping runs (ADR-0208) the same
+    // way. Its handles ride the same intake cycle and a transient
+    // failure joins the shared backoff window; what differs is only
+    // what the entry names, which is why it is its own topic.
+    match drain_and_dispatch_scope(store, executor, now_unix_millis) {
+        Ok((handles, ack_through, transient_failure)) => {
+            if let Some(sequence) = ack_through
+                && let Err(error) = store.ack_topic(Topic::ScopeDispatch, sequence)
+            {
+                tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "scope-dispatch ack failed; entries re-drive");
+            }
+            let now = Instant::now();
+            tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, now)));
+            *backoff = fold_drain_backoff(backoff.take(), transient_failure);
+        }
+        Err(error) => {
+            tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "scope-dispatch drain failed");
+        }
+    }
+    // Cancel the lanes of members an operator withdrew (#5327), on the
+    // same tick and the same ack-prefix discipline. No handles are
+    // tracked and no backoff is folded: a cancel starts nothing.
+    match drain_and_cancel(store, executor) {
+        Ok(Some(sequence)) => {
+            if let Err(error) = store.ack_topic(Topic::CancelDispatch, sequence) {
+                tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "cancel ack failed; entries re-drive");
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "cancel drain failed");
+        }
+    }
+    // Replay the attempts whose parked questions were answered (#3664),
+    // on the same shared handle tracking and backoff window.
+    match drain_and_redispatch(store, executor, now_unix_millis) {
+        Ok((handles, ack_through, transient_failure)) => {
+            if let Some(sequence) = ack_through
+                && let Err(error) = store.ack_topic(Topic::Redispatch, sequence)
+            {
+                tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "redispatch ack failed; entries re-drive");
+            }
+            let now = Instant::now();
+            tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, now)));
+            *backoff = fold_drain_backoff(backoff.take(), transient_failure);
+        }
+        Err(error) => {
+            tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "redispatch drain failed");
         }
     }
 }
@@ -2672,107 +2798,7 @@ impl NativeActor for ExecutorReactorCapability {
         // paces the re-drive instead of hammering GitHub at the flat poll cadence.
         let skip_drain = state.backoff.as_ref().is_some_and(|cursor| cursor.retry_after > Instant::now());
         if !skip_drain {
-            // Drain + submit the newly-decided dispatches, acking the submitted prefix.
-            match drain_and_dispatch(store, &executor, clock.now_unix_millis) {
-                Ok((handles, ack_through, transient_failure)) => {
-                    if let Some(sequence) = ack_through
-                        && let Err(error) = store.ack_topic(Topic::Dispatch, sequence)
-                    {
-                        tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "dispatch ack failed; entries re-drive");
-                    }
-                    let now = Instant::now();
-                    state.tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, now)));
-                    state.backoff = fold_drain_backoff(state.backoff.take(), transient_failure);
-                }
-                Err(error) => {
-                    tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "dispatch drain failed");
-                }
-            }
-            // Drain + submit the whole-bloom aggregate reviews (ADR-0153) the
-            // same way — its handles ride the same intake cycle, and a
-            // transient failure joins the shared backoff window.
-            match drain_and_dispatch_aggregate(store, &executor, clock.now_unix_millis) {
-                Ok((handles, ack_through, transient_failure)) => {
-                    if let Some(sequence) = ack_through
-                        && let Err(error) = store.ack_topic(Topic::AggregateReview, sequence)
-                    {
-                        tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "aggregate-review ack failed; entries re-drive");
-                    }
-                    let now = Instant::now();
-                    state.tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, now)));
-                    state.backoff = fold_drain_backoff(state.backoff.take(), transient_failure);
-                }
-                Err(error) => {
-                    tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "aggregate-review drain failed");
-                }
-            }
-            // Drain + submit the whole-bloom aggregate verifies the same way —
-            // the mechanical gate the fold passes before its critic dispatches.
-            match drain_and_dispatch_aggregate_verify(store, &executor, clock.now_unix_millis) {
-                Ok((handles, ack_through, transient_failure)) => {
-                    if let Some(sequence) = ack_through
-                        && let Err(error) = store.ack_topic(Topic::AggregateVerify, sequence)
-                    {
-                        tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "aggregate-verify ack failed; entries re-drive");
-                    }
-                    let now = Instant::now();
-                    state.tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, now)));
-                    state.backoff = fold_drain_backoff(state.backoff.take(), transient_failure);
-                }
-                Err(error) => {
-                    tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "aggregate-verify drain failed");
-                }
-            }
-            // Drain + submit the pre-bloom scoping runs (ADR-0208) the same
-            // way. Its handles ride the same intake cycle and a transient
-            // failure joins the shared backoff window; what differs is only
-            // what the entry names, which is why it is its own topic.
-            match drain_and_dispatch_scope(store, &executor, clock.now_unix_millis) {
-                Ok((handles, ack_through, transient_failure)) => {
-                    if let Some(sequence) = ack_through
-                        && let Err(error) = store.ack_topic(Topic::ScopeDispatch, sequence)
-                    {
-                        tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "scope-dispatch ack failed; entries re-drive");
-                    }
-                    let now = Instant::now();
-                    state.tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, now)));
-                    state.backoff = fold_drain_backoff(state.backoff.take(), transient_failure);
-                }
-                Err(error) => {
-                    tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "scope-dispatch drain failed");
-                }
-            }
-            // Cancel the lanes of members an operator withdrew (#5327), on the
-            // same tick and the same ack-prefix discipline. No handles are
-            // tracked and no backoff is folded: a cancel starts nothing.
-            match drain_and_cancel(store, &executor) {
-                Ok(Some(sequence)) => {
-                    if let Err(error) = store.ack_topic(Topic::CancelDispatch, sequence) {
-                        tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "cancel ack failed; entries re-drive");
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "cancel drain failed");
-                }
-            }
-            // Replay the attempts whose parked questions were answered (#3664),
-            // on the same shared handle tracking and backoff window.
-            match drain_and_redispatch(store, &executor, clock.now_unix_millis) {
-                Ok((handles, ack_through, transient_failure)) => {
-                    if let Some(sequence) = ack_through
-                        && let Err(error) = store.ack_topic(Topic::Redispatch, sequence)
-                    {
-                        tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "redispatch ack failed; entries re-drive");
-                    }
-                    let now = Instant::now();
-                    state.tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, now)));
-                    state.backoff = fold_drain_backoff(state.backoff.take(), transient_failure);
-                }
-                Err(error) => {
-                    tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "redispatch drain failed");
-                }
-            }
+            drain_dispatch_topics(&mut state.tracked, &mut state.backoff, store, &executor, clock.now_unix_millis);
         }
 
         // Sweep the live construct lanes' working trees and admit what they

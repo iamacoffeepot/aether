@@ -520,7 +520,7 @@ impl NativeActor for BloomeryApiCapability {
     ) -> http::Outcome {
         let id = id.0;
         let workpiece = workpiece.0;
-        let routed = state.suppression(&id, &workpiece, &ctx.request().body);
+        let routed = ApiCapabilityState::suppression(&id, &workpiece, &ctx.request().body);
         finish(state, ctx, routed)
     }
 
