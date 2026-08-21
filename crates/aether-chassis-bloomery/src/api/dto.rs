@@ -98,6 +98,16 @@ pub struct MemberProjection {
     /// back as the glob-declared surface it is.
     #[serde(default)]
     pub declared_crates: Vec<String>,
+    /// The workspace crates the scope declared it load-bearingly *reads*
+    /// (ADR-0204) — the `## Reads` block. The door turns these into
+    /// conditional ordering against the co-members that declared they will
+    /// change those crates, and into nothing at all when no co-member does.
+    ///
+    /// The gate never reads this: a read is not authority, so it lifts no
+    /// tier and widens no surface. Defaulted so a projection written before
+    /// the block existed reads back as declaring no reads.
+    #[serde(default)]
+    pub declared_reads: Vec<String>,
     /// The nine completeness facts the gate fails closed on.
     pub completeness: Completeness,
     /// The ADR-maturity of the change, for the unconditional hard gate.

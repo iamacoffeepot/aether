@@ -132,6 +132,7 @@ fn seed_commission_revision(
         description: description.to_owned(),
         implements: Vec::new(),
         declared_crates: Vec::new(),
+        declared_reads: Vec::new(),
     };
     let (status, written) =
         send_auth(port, "POST", &format!("/commissions/{id}/revisions"), &serde_json::to_value(&revision).unwrap());

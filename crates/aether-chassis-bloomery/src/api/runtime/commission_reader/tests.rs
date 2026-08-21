@@ -35,6 +35,7 @@ fn revision(id: &str, problem: &str) -> ScopeRevision {
         description: "advisory".to_owned(),
         implements: Vec::new(),
         declared_crates: Vec::new(),
+        declared_reads: Vec::new(),
     }
 }
 

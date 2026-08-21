@@ -340,6 +340,7 @@ impl WorkpieceBuilder {
             description: String::new(),
             implements: Vec::new(),
             declared_crates: Vec::new(),
+            declared_reads: Vec::new(),
         }
     }
 
@@ -590,6 +591,7 @@ mod tests {
             description: String::new(),
             implements: Vec::new(),
             declared_crates: Vec::new(),
+            declared_reads: Vec::new(),
         };
         assert_eq!(digest_of(&revision), digest_of(&expected));
     }

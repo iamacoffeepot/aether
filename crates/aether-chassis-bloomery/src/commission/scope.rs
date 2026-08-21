@@ -17,10 +17,11 @@ const DEPENDS: &str = "Depends on";
 const SURFACE: &str = "Declared surface";
 const CRATES: &str = "Declared crates";
 const PROTECTED: &str = "Protected files";
+const READS: &str = "Reads";
 const DOGFOOD: &str = "Dogfood brief";
 
 const MANAGED: &[&str] =
-    &[PROBLEM, DESIGN, PLAN, "Sub-issues", DEPENDS, SURFACE, CRATES, PROTECTED, DOGFOOD, "Side findings"];
+    &[PROBLEM, DESIGN, PLAN, "Sub-issues", DEPENDS, SURFACE, CRATES, PROTECTED, READS, DOGFOOD, "Side findings"];
 
 /// Render `markdown` as the next scope revision for `workpiece`.
 ///
@@ -37,6 +38,7 @@ pub fn parse_revision(workpiece: &str, markdown: &str, predecessor: Option<Diges
     let design = required_body(&sections, DESIGN)?;
     let (plan, routing) = plan_and_routing(required_span(&sections, PLAN)?)?;
     let (declared_crates, declared_surface) = parse_declaration(&sections)?;
+    let declared_reads = sections.get(READS).map(|span| parse_crates(READS, span)).transpose()?.unwrap_or_default();
     let dogfood_brief = sections.get(DOGFOOD).map(|span| body_of(span)).unwrap_or_default();
     let dependencies = sections.get(DEPENDS).map(|span| parse_workpieces(span)).unwrap_or_default();
 
@@ -54,6 +56,7 @@ pub fn parse_revision(workpiece: &str, markdown: &str, predecessor: Option<Diges
         description: String::new(),
         implements: Vec::new(),
         declared_crates,
+        declared_reads,
     };
     Ok(ScopeRevision { description: render_work_order(&revision), ..revision })
 }
@@ -64,7 +67,7 @@ pub fn parse_revision(workpiece: &str, markdown: &str, predecessor: Option<Diges
 /// refusal rather than a merge: a scope that says both is a scope whose author
 /// does not yet know which one the gate will read.
 fn parse_declaration(sections: &BTreeMap<String, String>) -> Result<(Vec<String>, Vec<String>)> {
-    let crates = sections.get(CRATES).map(|span| parse_crates(span)).transpose()?;
+    let crates = sections.get(CRATES).map(|span| parse_crates(CRATES, span)).transpose()?;
     let protected = sections.get(PROTECTED).map(|span| parse_protected(span)).transpose()?.unwrap_or_default();
 
     match (crates, sections.get(SURFACE)) {
@@ -132,6 +135,9 @@ fn render_work_order(revision: &ScopeRevision) -> String {
         if !protected.is_empty() {
             push_list(&mut out, PROTECTED, &protected);
         }
+    }
+    if !revision.declared_reads.is_empty() {
+        push_list(&mut out, READS, &revision.declared_reads);
     }
     if !revision.dogfood_brief.trim().is_empty() {
         out.push('\n');
@@ -299,13 +305,13 @@ fn parse_surface(span: &str) -> Result<Vec<String>> {
 }
 
 /// The crate names a `## Declared crates` block lists, in declaration order.
-fn parse_crates(span: &str) -> Result<Vec<String>> {
+fn parse_crates(heading: &str, span: &str) -> Result<Vec<String>> {
     let names = list_entries(span);
     if names.is_empty() {
-        bail!("declared crates lists no crate names");
+        bail!("## {heading} lists no crate names");
     }
     if let Some(bad) = names.iter().find(|name| name.contains('/') || name.contains('*')) {
-        bail!("declared crate {bad:?} is a path, not a crate name");
+        bail!("## {heading} entry {bad:?} is a path, not a crate name");
     }
     Ok(names)
 }
@@ -471,6 +477,46 @@ Create then show.\n"
         assert!(task.contains("## Declared crates") && task.contains("aether-math"), "{task}");
         assert!(task.contains("## Protected files") && task.contains("Cargo.lock"), "{task}");
         assert!(!task.contains("## Declared surface"), "{task}");
+    }
+
+    #[test]
+    fn a_reads_block_round_trips_and_widens_nothing() {
+        // ADR-0204: a read is not authority. It must survive parse and render
+        // so the door can turn it into conditional ordering, and it must leave
+        // the declared surface exactly where the crate block put it — a read
+        // that quietly widened the surface would be an authority grant nobody
+        // asked for.
+        let without = parse_revision("issue-5258", &crate_declared(), None)
+            .unwrap_or_else(|error| panic!("the fixture parses: {error}"));
+        let with_reads = parse_revision(
+            "issue-5258",
+            &crate_declared().replace("## Protected files", "## Reads\n\n- aether-data\n\n## Protected files"),
+            None,
+        )
+        .unwrap_or_else(|error| panic!("a reads block must parse: {error}"));
+
+        assert_eq!(with_reads.declared_reads, ["aether-data"]);
+        assert_eq!(with_reads.declared_surface, without.declared_surface, "a read widens no surface");
+        assert!(without.declared_reads.is_empty(), "an undeclared scope reads nothing");
+
+        let task = task_text(&with_reads);
+        assert!(task.contains("## Reads") && task.contains("aether-data"), "{task}");
+    }
+
+    #[test]
+    fn a_reads_block_naming_a_path_refuses() {
+        // The same guard the crate block has, and for the same reason: a path
+        // here would be a file-granular forecast, which the crate blocks exist
+        // to abolish. The message has to name which block, because the two
+        // share a parser.
+        let error = parse_revision(
+            "issue-5258",
+            &crate_declared().replace("## Protected files", "## Reads\n\n- crates/aether-data/src/lib.rs\n\n## Protected files"),
+            None,
+        )
+        .expect_err("a path in a reads block must refuse");
+
+        assert!(error.to_string().contains("Reads"), "{error}");
     }
 
     #[test]

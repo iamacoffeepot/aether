@@ -100,6 +100,24 @@ pub struct ScopeRevision {
     /// from the other. Trailing for the reason
     /// [`implements`](Self::implements) is.
     pub declared_crates: Vec<String>,
+    /// The workspace crates this scope load-bearingly *reads*, in declaration
+    /// order — the `## Reads` block (ADR-0204). Empty is the ordinary case.
+    ///
+    /// A read is not a claim on anything. It buys no lease, blocks nobody, and
+    /// widens no surface: what it buys is *conditional* ordering. A member that
+    /// declares a read on a crate a co-member declares it will change is
+    /// scheduled after that co-member, and a member that declares a read on a
+    /// crate nobody in the seal is changing is scheduled as if it had declared
+    /// nothing. That conditionality is the whole point — an unconditional
+    /// declared edge orders the two whether or not the write ever happens, and
+    /// pays the serialization either way.
+    ///
+    /// Crate-granular rather than file-granular for the reason
+    /// [`declared_crates`](Self::declared_crates) is: nobody can name the files
+    /// a lane will touch before the work is done, so a file-granular read list
+    /// is a forecast, and a forecast that misses reads as an assurance nobody
+    /// gave. Trailing for the reason [`implements`](Self::implements) is.
+    pub declared_reads: Vec<String>,
 }
 
 impl ScopeRevision {
@@ -293,6 +311,7 @@ mod tests {
             description: String::from("desc"),
             implements: Vec::new(),
             declared_crates: Vec::new(),
+            declared_reads: Vec::new(),
         }
     }
 

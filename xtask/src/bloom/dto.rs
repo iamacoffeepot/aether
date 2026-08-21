@@ -129,6 +129,8 @@ pub struct ScopeRevisionView {
     pub implements: Vec<DigestHex>,
     #[serde(default)]
     pub declared_crates: Vec<String>,
+    #[serde(default)]
+    pub declared_reads: Vec<String>,
 }
 
 /// The size and model-routing lines a revision seals.
@@ -160,6 +162,7 @@ impl ScopeRevisionView {
             description: self.description.clone(),
             implements: self.implements.iter().map(|digest| Digest::from_bytes(*digest.as_bytes())).collect(),
             declared_crates: self.declared_crates.clone(),
+            declared_reads: self.declared_reads.clone(),
         }
     }
 }

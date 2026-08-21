@@ -698,6 +698,7 @@ fn resolve_seal_graph(
     declared: &[MemberDependency],
 ) -> Result<Vec<MemberDependency>, HttpServerResponse> {
     let mut listed = Vec::with_capacity(members.len());
+    let mut matched = Vec::with_capacity(members.len());
     for member in members {
         let Some(projection) = projections.iter().find(|projection| {
             projection.workpiece == member.workpiece && projection.scope_revision == member.scope_revision
@@ -708,8 +709,16 @@ fn resolve_seal_graph(
             ));
         };
         listed.push((member.workpiece.clone(), projection.declared_surface.as_slice()));
+        matched.push(projection);
     }
-    match resolve_member_dependencies(&listed, declared) {
+
+    // Declared edges and read-derived ones go into the same argument, so the
+    // cycle check covers both: a read that closes a loop with an authored edge
+    // has to refuse at the door, not deadlock the line.
+    let mut authored: Vec<MemberDependency> = declared.to_vec();
+    authored.extend(read_ordering_edges(&matched));
+
+    match resolve_member_dependencies(&listed, &authored) {
         Ok(resolved) => Ok(resolved.declared),
         Err(DependencyError::UnknownWorkpiece(workpiece)) => Err(error_response(
             422,
@@ -720,6 +729,45 @@ fn resolve_seal_graph(
             Err(error_response(422, &format!("cyclic member dependencies: {named}")))
         }
     }
+}
+
+/// The ordering a member's declared reads earn against its co-members
+/// (ADR-0204 / #5258).
+///
+/// Conditional by construction, which is the entire difference between this
+/// and an authored `## Depends on` line: an edge appears only where a reader's
+/// declared crate is one a co-member declared it will *change*. Declare a read
+/// on a crate nobody in this seal is changing and it costs nothing — no edge,
+/// no serialization, no wait. An authored edge pays that cost whether or not
+/// the write ever happens, which is why reads could not be expressed as one.
+///
+/// Read against `declared_crates` rather than `declared_surface` because a
+/// crate-declared member's surface is its blast radius, not its intent (FIX-7 /
+/// ADR-0204): the closure admits every crate that depends on the declared ones,
+/// so ordering on the surface would put every reader behind every member whose
+/// closure happened to reach the crate — which is the over-serialization the
+/// conditional form exists to remove. A glob-declared member declares no
+/// crates and so is never a writer here; that is honest rather than a gap,
+/// because a glob surface states paths and this question is about crates.
+///
+/// A member never orders behind itself, and the edge set is deduplicated by
+/// `resolve_member_dependencies`, which also cycle-checks it.
+fn read_ordering_edges(projections: &[&MemberProjection]) -> Vec<MemberDependency> {
+    let mut edges = Vec::new();
+    for reader in projections {
+        for writer in projections {
+            if reader.workpiece == writer.workpiece {
+                continue;
+            }
+            if reader.declared_reads.iter().any(|read| writer.declared_crates.contains(read)) {
+                edges.push(MemberDependency {
+                    member: reader.workpiece.clone(),
+                    depends_on: writer.workpiece.clone(),
+                });
+            }
+        }
+    }
+    edges
 }
 
 /// Every pair of this seal's members whose declared surfaces intersect, as the
@@ -894,6 +942,7 @@ mod tests {
             scope_revision: Digest::from_bytes([revision; 32]),
             declared_surface: surface.iter().map(|glob| (*glob).to_owned()).collect(),
             declared_crates: Vec::new(),
+            declared_reads: Vec::new(),
             completeness: Completeness {
                 has_problem_statement: true,
                 has_design_notes: true,
@@ -1115,6 +1164,64 @@ mod tests {
 
         let edges = resolve_seal_graph(&members, &projections, &declared).expect("acyclic");
         assert_eq!(edges, declared);
+    }
+
+    /// `projection`, plus the crate blocks the read-ordering rule reads.
+    fn declaring(workpiece: &str, revision: u8, crates: &[&str], reads: &[&str]) -> MemberProjection {
+        MemberProjection {
+            declared_crates: crates.iter().map(|name| (*name).to_owned()).collect(),
+            declared_reads: reads.iter().map(|name| (*name).to_owned()).collect(),
+            ..projection(workpiece, revision, &["crates/aether-bloomery/**"])
+        }
+    }
+
+    #[test]
+    fn a_declared_read_orders_only_against_a_co_member_that_declares_that_crate() {
+        // ADR-0204's conditional half, and the reason a read could not just be
+        // written as a `## Depends on` line. The pre-fix failure is that the
+        // only ordering vocabulary was unconditional: B declaring that it reads
+        // aether-data had to either order behind A unconditionally — paying the
+        // serialization on every seal, including the ones where A never touches
+        // aether-data — or say nothing and race it.
+        let members = [member("wp-a", 1), member("wp-b", 2)];
+
+        let writing = [
+            declaring("wp-a", 1, &["aether-data"], &[]),
+            declaring("wp-b", 2, &["aether-codec"], &["aether-data"]),
+        ];
+        assert_eq!(
+            resolve_seal_graph(&members, &writing, &[]).expect("acyclic"),
+            [MemberDependency { member: WorkpieceId("wp-b".to_owned()), depends_on: WorkpieceId("wp-a".to_owned()) }],
+            "B reads what A declares it will change, so B waits",
+        );
+
+        // The negative case, which is the whole point: A's *surface* covers
+        // aether-data (its closure reaches it) but A never declares it, so A is
+        // not going to change it and B is owed no wait.
+        let quiet = [
+            declaring("wp-a", 1, &["aether-math"], &[]),
+            declaring("wp-b", 2, &["aether-codec"], &["aether-data"]),
+        ];
+        assert!(
+            resolve_seal_graph(&members, &quiet, &[]).expect("acyclic").is_empty(),
+            "a read against a crate nobody in the seal is changing costs nothing",
+        );
+    }
+
+    #[test]
+    fn a_read_that_closes_a_loop_refuses_at_the_door() {
+        // A read edge is a real edge, so it has to be cycle-checked with the
+        // authored ones rather than appended past the check. Two members that
+        // each read what the other changes is a graph no scheduler can fire.
+        let members = [member("wp-a", 1), member("wp-b", 2)];
+        let projections = [
+            declaring("wp-a", 1, &["aether-data"], &["aether-codec"]),
+            declaring("wp-b", 2, &["aether-codec"], &["aether-data"]),
+        ];
+
+        let error = resolve_seal_graph(&members, &projections, &[]).expect_err("a read cycle must refuse");
+
+        assert_eq!(error.status, 422);
     }
 
     #[test]
