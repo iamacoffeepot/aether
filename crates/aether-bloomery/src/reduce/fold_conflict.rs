@@ -178,7 +178,7 @@ mod tests {
         assert!(matches!(decided.outcome, Outcome::Superseded { .. }), "the successor seals: {:?}", decided.outcome);
         let record = snapshot.blooms.get(&successor).expect("the successor is in the snapshot");
         assert!(record.claims.contains_key(&workpiece("beta")), "beta arrived by InheritClaim");
-        assert!(record.progress.get(&workpiece("beta")).is_none(), "an inherited claim has no cursor in this bloom");
+        assert!(!record.progress.contains_key(&workpiece("beta")), "an inherited claim has no cursor in this bloom");
         (snapshot, successor, digest(21))
     }
 
