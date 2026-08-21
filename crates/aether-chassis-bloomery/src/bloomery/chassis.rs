@@ -361,7 +361,7 @@ impl BloomeryEnv {
         #[cfg(feature = "github")]
         let github = GithubConnectionConfig::try_from_argv_then_env(cli.github.clone().into_layer())?;
         let mut coordinator = CoordinatorConfig::try_from_argv_then_env(cli.coordinator.clone().into_layer())?;
-        let session = SessionConfig::try_from_argv_then_env(cli.session.clone().into_layer())?;
+        let mut session = SessionConfig::try_from_argv_then_env(cli.session.clone().into_layer())?;
         let signing = SigningConfig::try_from_argv_then_env(cli.signing.clone().into_layer())?;
 
         store.path = one_journal_path(
@@ -371,6 +371,10 @@ impl BloomeryEnv {
             &coordinator.store_path,
         )?;
         coordinator.store_path.clone_from(&store.path);
+        // The session pool belongs to the work the journal describes, so an
+        // unconfigured pool takes the journal's directory and its lifetime — a
+        // restart that keeps the journal keeps the resumable sessions with it.
+        session.default_beside_journal(&store.path);
 
         Ok(Self {
             rpc_port,
