@@ -503,8 +503,8 @@ pub fn require_task(text: &str, path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BaseChoice, ProjectionInput, eject_members, pin_revisions, projections, resolve_base, seal_patch,
-        successor_patch,
+        BaseChoice, ProjectionInput, direct_drive_surface, eject_members, pin_revisions, projections, resolve_base,
+        seal_patch, successor_patch,
     };
     use crate::bloom::dto::{
         AdrTouch, Approval, BloomSpec, Completeness, ConfigRegistry, DigestHex, Membership, ViewDocument,

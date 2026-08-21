@@ -141,6 +141,7 @@ mod tests {
                     members: vec![MemberView {
                         workpiece: format!("wp-{index}"),
                         scope_revision: DigestHex::from_bytes([7; 32]),
+                        awaiting_surface: None,
                     }],
                 })
                 .collect(),

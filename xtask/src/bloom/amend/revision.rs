@@ -7,6 +7,7 @@
 //! tip the member is unsealable — which is why the caller announces it before
 //! it happens.
 
+use std::fmt;
 use std::fs;
 use std::path::Path;
 
@@ -24,6 +25,15 @@ use crate::bloom::dto::{CommissionShowView, DigestHex};
 pub struct OperatorKey {
     pub signer: KeyId,
     seed: [u8; 32],
+}
+
+/// Hand-written rather than derived: the seed is a private signing key, and a
+/// derived `Debug` would put it in every panic message and test failure that
+/// prints one.
+impl fmt::Debug for OperatorKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OperatorKey").field("signer", &self.signer).field("seed", &"<redacted>").finish()
+    }
 }
 
 impl OperatorKey {

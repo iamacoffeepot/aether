@@ -166,6 +166,7 @@ mod tests_support {
                 members: vec![MemberView {
                     workpiece: "issue-5014".to_owned(),
                     scope_revision: DigestHex::from_bytes([7; 32]),
+                    awaiting_surface: None,
                 }],
             }],
         }

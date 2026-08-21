@@ -133,6 +133,7 @@ pub fn args(command: impl Into<String>, out: PathBuf) -> TransformArgs {
         effort: None,
         task: None,
         resume: None,
+        continued_in_place: false,
         seeded: None,
     }
 }

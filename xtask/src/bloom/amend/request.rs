@@ -11,6 +11,7 @@ use anyhow::{Result, bail};
 use crate::bloom::dto::{BloomView, MemberView};
 
 /// The paths an amendment is being asked to add, and where each came from.
+#[derive(Debug)]
 pub struct Requested {
     /// The globs, in request order: the lane's first, then the operator's.
     pub globs: Vec<String>,

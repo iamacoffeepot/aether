@@ -77,6 +77,7 @@ mod tests {
                         .map(|workpiece| MemberView {
                             workpiece: (*workpiece).to_owned(),
                             scope_revision: DigestHex::from_bytes([7; 32]),
+                            awaiting_surface: None,
                         })
                         .collect(),
                 })
