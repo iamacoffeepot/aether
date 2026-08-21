@@ -984,7 +984,11 @@ mod tests {
         fn the_gate_names_the_added_path_that_cost_the_amendment() {
             // The load-bearing half of a refusal: "widened to human" is not
             // actionable, "`/Cargo.toml` resolved human" is.
-            let verdict = tier_verdict(&policy(), &globs(&["crates/aether-bloomery/**"]), &globs(&["/Cargo.toml"]));
+            // `crates/<name>/src/**` and not `crates/<name>/**`: the whole-crate
+            // subtree contains `crates/<name>/Cargo.toml`, which the policy's
+            // manifest rule already resolves human, so it would stand at the
+            // ceiling before the amendment and demonstrate no rise at all.
+            let verdict = tier_verdict(&policy(), &globs(&["crates/aether-bloomery/src/**"]), &globs(&["/Cargo.toml"]));
 
             assert_eq!(verdict.existing, Tier::Judge);
             assert_eq!(verdict.widened, Tier::Human);
