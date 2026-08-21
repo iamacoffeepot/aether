@@ -679,7 +679,7 @@ mod tests {
     use super::*;
     use crate::ids::IdempotencyKey;
     use crate::reduce::{Event, Fact, Outcome, reduce};
-    use crate::values::{BloomDraft, EvidenceKind, Membership, OperatorHold, ResolvedConfigs, SpendWindow};
+    use crate::values::{BloomDraft, BloomSpec, EvidenceKind, Membership, OperatorHold, ResolvedConfigs, SpendWindow};
 
     fn digest(seed: u8) -> Digest {
         Digest::from_bytes([seed; 32])
@@ -1095,7 +1095,7 @@ mod tests {
         Evidence { subject: digest(checkpoint), kind: EvidenceKind::FoldConflict, detail: digest(90) }
     }
 
-    fn two_member_spec(base: u8) -> crate::values::BloomSpec {
+    fn two_member_spec(base: u8) -> BloomSpec {
         BloomDraft {
             proposals: vec![membership("alpha", 10), membership("beta", 11)],
             base: digest(base),

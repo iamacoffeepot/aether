@@ -566,7 +566,7 @@ pub struct StageProgress {
     /// Defaulted for the same reason as [`fold_checkpoint`](Self::fold_checkpoint).
     #[serde(default)]
     pub fold_conflict_evidence: Option<Digest>,
-    /// Set by [`Fact::FoldConflict`](crate::Fact::FoldConflict) when the Reconcile
+    /// Set by [`Fact::FoldConflict`] when the Reconcile
     /// lap builds a dependent's base (ADR-0196: no prior candidate, no claim)
     /// rather than re-placing the member's own revoked candidate. Read once at
     /// Reconcile completion to choose Construct over Verify; `false` everywhere
