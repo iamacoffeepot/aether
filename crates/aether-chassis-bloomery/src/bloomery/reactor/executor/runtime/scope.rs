@@ -32,6 +32,7 @@ use aether_data::wire::from_bytes;
 
 use crate::bloomery::ExecutorShell;
 use crate::bloomery::intake::{DispatchRecord, dispatch_and_record, dispatch_nonce};
+use crate::bloomery::outbox::TopicOutbox;
 use crate::store::StoreBackend;
 
 use super::transformation_has_subject;

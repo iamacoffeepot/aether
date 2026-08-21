@@ -145,7 +145,7 @@ pub struct ScriptedEvidence {
 
 /// Reply to [`ScriptedEvidence`].
 ///
-/// Three arms rather than a boolean because a scenario that fails needs to know
+/// Arms rather than a boolean because a scenario that fails needs to know
 /// *which* boundary refused it: `Refused` is the broker declining a nonce or a
 /// binding (a scenario that read the wrong order), while `Err` is the harness
 /// itself faulting (a decode, a store read). Collapsing them would make a
@@ -173,4 +173,14 @@ pub enum ScriptedEvidenceResult {
         /// The rendered fault.
         error: String,
     },
+    /// The broker accepted the verdict onto the commission store's own run
+    /// ledger, and there is no reducer event behind it — a pre-bloom scoping
+    /// run (ADR-0208, #5304).
+    ///
+    /// Its own arm rather than an `Admitted` carrying an empty key, for the
+    /// reason [`AdmitDecision::Recorded`](crate::bloomery::AdmitDecision)
+    /// is its own variant: a scenario asserting on the route the broker chose
+    /// must not read a key that names none. Appended past [`Self::Err`] so the
+    /// prior arms' wire discriminants are unchanged.
+    Recorded,
 }

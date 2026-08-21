@@ -486,6 +486,7 @@ fn terminate_live_order(
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
         surface_request: None,
+        suppression_requests: Vec::new(),
     };
     match admit_uploaded(store, &upload) {
         Ok(AdmitDecision::Admitted(admission)) => {
@@ -509,6 +510,21 @@ fn terminate_live_order(
             }
             tracked.retain(|tracked_handle| tracked_handle.handle.nonce != record.nonce);
             Some(admission.admit)
+        }
+        // A scoping run's timeout landed on the commission store's own run
+        // ledger (ADR-0208, #5304), so there is no event to hand the control
+        // core. The order was consumed either way, so the handle stops being
+        // tracked exactly as an admitted timeout stops tracking it.
+        Ok(AdmitDecision::Recorded) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                nonce = %record.nonce.0,
+                stage = ?record.stage,
+                deadline_unix_millis = deadline,
+                "dispatched scoping run outlived its sealed execution limit; cancelled and recorded on the run ledger",
+            );
+            tracked.retain(|tracked_handle| tracked_handle.handle.nonce != record.nonce);
+            None
         }
         Ok(AdmitDecision::Refused(refusal)) => {
             // A refusal is a judgement about the order's own stored columns,
@@ -2486,6 +2502,11 @@ fn admit_scripted(state: &mut ExecutorReactorState, encoded: &[u8]) -> (Scripted
             admits.push(admission.admit.clone());
             (ScriptedEvidenceResult::Admitted { idempotency_key: admission.event.idempotency_key.0.clone() }, admits)
         }
+        // A scripted scoping-run verdict is accepted onto the commission
+        // store's run ledger with no reducer event behind it (ADR-0208,
+        // #5304), so the scenario is told what happened rather than handed an
+        // idempotency key that does not exist.
+        Ok(AdmitDecision::Recorded) => (ScriptedEvidenceResult::Recorded, admits),
         Ok(AdmitDecision::Refused(refusal)) => {
             (ScriptedEvidenceResult::Refused { refusal: format!("{refusal:?}") }, Vec::new())
         }
