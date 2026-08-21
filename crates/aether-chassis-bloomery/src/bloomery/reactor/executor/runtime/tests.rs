@@ -834,6 +834,11 @@ fn drain_stops_the_ack_prefix_at_a_missing_subject_entry() {
         candidate: None,
         configs: ConfigRegistry::default(),
     };
+    // The same claim `enqueue_construct_dispatch` makes for its members: a
+    // queued dispatch belongs to a live member, and the drain retires an entry
+    // naming one that holds no membership before it ever inspects the
+    // transformation — which would skip this entry rather than break on it.
+    store.claim_seal(bloom.0.as_bytes(), &["wp-none".to_owned()]).unwrap();
     store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap()).unwrap();
     enqueue_construct_dispatch(&mut store, bloom, "wp-c", 7);
 

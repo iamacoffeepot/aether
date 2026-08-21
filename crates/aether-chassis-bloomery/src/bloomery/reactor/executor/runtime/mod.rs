@@ -1069,7 +1069,12 @@ fn member_still_live(
     workpiece: &WorkpieceId,
     sequence: u64,
 ) -> rusqlite::Result<bool> {
-    if store.holds_member_membership(bloom.as_bytes(), &workpiece.0)? {
+    // The reserved composition workpiece is synthetic — it is never sealed, so
+    // it never claims a membership, and its weave repair (ADR-0191) would be
+    // retired undispatched on every aggregate-review finding if the membership
+    // row decided its liveness. There is no operator verb that withdraws it
+    // either: it leaves with the bloom.
+    if workpiece.is_composition() || store.holds_member_membership(bloom.as_bytes(), &workpiece.0)? {
         return Ok(true);
     }
     tracing::info!(
