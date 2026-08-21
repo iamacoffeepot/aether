@@ -983,6 +983,7 @@ mod tests {
                 approval_digest: None,
                 status: "open".to_owned(),
                 recorded_issue,
+                title: String::new(),
             })
             .unwrap(),
         }

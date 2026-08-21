@@ -11,7 +11,8 @@ use std::fmt;
 use aether_bloomery::{
     AuthorityDoor, CommissionApprovalTier, CommissionProjection, CommissionStatementRole, CommissionStatus,
     CommissionValueError, Digest, KeyProvider, Observation, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision,
-    ScopeVerifyInput, ScopeVerifyReport, Statement, Topic, WorkpieceId, digest_of, verify_scope,
+    ScopeVerifyInput, ScopeVerifyReport, Statement, Topic, WorkpieceId, digest_of, intent_title,
+    verify_scope,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use rusqlite::{Connection, OptionalExtension, Transaction};
@@ -710,6 +711,10 @@ fn snapshot_projection(conn: &Connection, id: &str) -> Result<Vec<u8>, Commissio
         Some(scope) => first_approval(conn, scope)?,
         None => (None, None),
     };
+    // Read out of the stored intent bytes rather than carried on the head row:
+    // the head is an index, and a title recomputed from the bytes cannot drift
+    // from the intent the commission was created with.
+    let title = load_statement(conn, head.intent)?.and_then(|intent| intent_title(&intent.words)).unwrap_or_default();
     to_vec(&CommissionProjection {
         workpiece: head.id,
         intent: head.intent,
@@ -718,8 +723,23 @@ fn snapshot_projection(conn: &Connection, id: &str) -> Result<Vec<u8>, Commissio
         approval_digest,
         status: head.status.as_str().to_owned(),
         recorded_issue,
+        title,
     })
     .map_err(|error| CommissionError::Store(error.to_string()))
+}
+
+/// One stored commission statement, decoded from the exact bytes written.
+fn load_statement(conn: &Connection, digest: Digest) -> Result<Option<Statement>, CommissionError> {
+    let canonical: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT canonical FROM commission_statements WHERE digest = ?1",
+            [digest.as_bytes().as_slice()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    canonical
+        .map(|bytes| from_bytes::<Statement>(&bytes).map_err(|_| CommissionError::MalformedCanonical))
+        .transpose()
 }
 
 fn first_approval(conn: &Connection, scope: Digest) -> Result<(Option<String>, Option<Digest>), CommissionError> {
