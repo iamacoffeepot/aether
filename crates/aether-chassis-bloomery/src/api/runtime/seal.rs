@@ -303,7 +303,7 @@ impl ApiCapabilityState {
         // Pass 1: resolve every membership synchronously (fail-closed 422 on any
         // shortfall, before any signing dispatch).
         let (sealed_proposals, pending_verifications) =
-            match resolve_seal_memberships(&gate, &draft.proposals, projections) {
+            match resolve_seal_memberships(&gate, &policy, &draft.proposals, projections) {
                 Ok(resolved) => resolved,
                 Err(response) => return Routed::Reply(response),
             };
@@ -577,6 +577,7 @@ type PendingVerification = (usize, Digest, Statement);
 /// input (the gated proposals and the above-auto members still to verify).
 fn resolve_seal_memberships(
     gate: &Gate<'_>,
+    policy: &ApprovalPolicy,
     proposals: &[Membership],
     request_projections: &[MemberProjection],
 ) -> Result<(Vec<Membership>, Vec<PendingVerification>), HttpServerResponse> {
@@ -602,6 +603,22 @@ fn resolve_seal_memberships(
             return Err(error_response(
                 422,
                 &format!("member {member} declared surface {glob:?} is outside the surface grammar; seal fails closed"),
+            ));
+        }
+        // A file-granular declaration is a forecast, and the forecast is wrong
+        // often enough to cost blooms: the plan lists the files it mentions,
+        // the work needs one more sibling in the same crate, and the member is
+        // superseded for a glob. The policy already maintains the list of files
+        // special enough to name, so it is what decides granularity too — the
+        // same owner-signed table this door already consults for tier. Runs
+        // after the grammar check, so it only ever sees parseable globs.
+        if let Some(glob) = policy.unnamed_file_entries(&projection.declared_surface).first() {
+            return Err(error_response(
+                422,
+                &format!(
+                    "member {member} declared surface {glob:?} names one file and no approval-policy rule names \
+                     that file; widen it to a crate glob such as crates/<crate>/src/**; seal fails closed"
+                ),
             ));
         }
         // The digest binds the approval to the projection as evaluated. It is
@@ -1146,8 +1163,8 @@ mod tests {
         let mut projections = [projection("wp-a", 1, &["crates/foo/**", "crates/foo/**,crates/bar/**"])];
         projections[0].pre_approved = true;
 
-        let error =
-            resolve_seal_memberships(&gate, &members, &projections).expect_err("an unparseable glob must refuse");
+        let error = resolve_seal_memberships(&gate, &policy, &members, &projections)
+            .expect_err("an unparseable glob must refuse");
         let body = String::from_utf8_lossy(&error.body);
         assert_eq!(error.status, 422);
         assert!(body.contains("wp-a"), "refusal names the member: {body}");
@@ -1166,9 +1183,11 @@ mod tests {
         let policy = ApprovalPolicy { default: Tier::Human, rules: Vec::new() };
         let gate = Gate::new(&policy);
         let members = [member("wp-a", 1)];
-        let projections = [projection("wp-a", 1, &["crates/aether-data/src/lib.rs"])];
+        // A subtree glob, so the granularity check ahead of the gate passes it
+        // through and this test still exercises the signer-policy refusal.
+        let projections = [projection("wp-a", 1, &["crates/aether-data/src/**"])];
 
-        let error = resolve_seal_memberships(&gate, &members, &projections)
+        let error = resolve_seal_memberships(&gate, &policy, &members, &projections)
             .expect_err("an auto-only above-auto member must refuse");
         let body = String::from_utf8_lossy(&error.body);
         assert_eq!(error.status, 422);

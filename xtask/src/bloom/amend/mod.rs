@@ -28,7 +28,7 @@ mod tier;
 #[cfg(test)]
 mod tests;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use aether_bloomery::{
     KeyId, Tier, TierVerdict, gate_widening, surface_additions, surface_intersection, tier_verdict,
@@ -43,10 +43,6 @@ use super::{ProjectionArgs, plan, render_outcome};
 use request::Requested;
 use revision::OperatorKey;
 use tier::PolicySource;
-
-/// The repository's fallback approval policy, used only when the predecessor
-/// bloom sealed none of its own.
-const DEFAULT_POLICY_FILE: &str = "approval-policy.toml";
 
 /// `Tier`, as a CLI value.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -84,11 +80,6 @@ pub struct AmendArgs {
     /// Highest tier the amendment may grant unattended.
     #[arg(long = "accept-tier", value_enum, default_value = "auto")]
     accept_tier: TierArg,
-
-    /// Approval-policy fallback file, consulted only when the predecessor
-    /// sealed no `aether.bloomery.approval_policy`.
-    #[arg(long, default_value = DEFAULT_POLICY_FILE)]
-    policy_file: PathBuf,
 
     /// Operator signing seed: 32 raw bytes or 64 hex characters, mode 0600.
     #[arg(long)]
@@ -131,8 +122,8 @@ struct AmendPlan {
     new_overlaps: Vec<(String, Vec<String>)>,
 }
 
-pub fn run(client: &Client<'_>, args: &AmendArgs) -> Result<String> {
-    let Some(plan) = preflight(client, args)? else {
+pub fn run(client: &Client<'_>, args: &AmendArgs, policy_file: &Path) -> Result<String> {
+    let Some(plan) = preflight(client, args, policy_file)? else {
         return Ok(format!("member {} already holds every requested path; nothing to amend\n", args.workpiece));
     };
 
@@ -158,12 +149,12 @@ pub fn run(client: &Client<'_>, args: &AmendArgs) -> Result<String> {
         out.push_str("approved   already stored\n");
     }
 
-    out.push_str(&supersede(client, args, &plan, scope)?);
+    out.push_str(&supersede(client, args, &plan, scope, policy_file)?);
     Ok(out)
 }
 
 /// P1 – P8. Entirely reads; `None` means the request is already covered.
-fn preflight(client: &Client<'_>, args: &AmendArgs) -> Result<Option<AmendPlan>> {
+fn preflight(client: &Client<'_>, args: &AmendArgs, policy_file: &Path) -> Result<Option<AmendPlan>> {
     let view = client.view()?;
     let bloom = bloom_in(&view, &args.bloom_id)?;
     let member = request::member(bloom, &args.workpiece)?;
@@ -196,7 +187,7 @@ fn preflight(client: &Client<'_>, args: &AmendArgs) -> Result<Option<AmendPlan>>
     }
 
     let spec = client.spec_for(&args.bloom_id)?;
-    let (policy, source) = tier::resolve_policy(client, &spec, &args.policy_file)?;
+    let (policy, source) = tier::resolve_policy(client, &spec, policy_file)?;
     let verdict = tier_verdict(&policy, &current.declared_surface, &added);
     if let Err(offending) = gate_widening(&verdict, args.accept_tier.tier()) {
         bail!(
@@ -280,7 +271,13 @@ fn overlaps(
 }
 
 /// X: seal the successor with the amended member pinned at its new revision.
-fn supersede(client: &Client<'_>, args: &AmendArgs, plan: &AmendPlan, scope: DigestHex) -> Result<String> {
+fn supersede(
+    client: &Client<'_>,
+    args: &AmendArgs,
+    plan: &AmendPlan,
+    scope: DigestHex,
+    policy_file: &Path,
+) -> Result<String> {
     let task = plan::read_task_file(&args.task_file)?;
     plan::require_task(&task, &args.task_file)?;
     let view = client.view()?;
@@ -299,7 +296,14 @@ fn supersede(client: &Client<'_>, args: &AmendArgs, plan: &AmendPlan, scope: Dig
         plan.widened.iter().map(|glob| (plan.workpiece.clone(), glob.clone())).collect();
     let outcome = client.supersede(
         &args.bloom_id,
-        &plan::supersede_request(&draft.draft_id, &members, &task, &args.projection.input()?, &[], &surfaces)?,
+        &plan::supersede_request(
+            &draft.draft_id,
+            &members,
+            &task,
+            &args.projection.input(policy_file)?,
+            &[],
+            &surfaces,
+        )?,
     )?;
     Ok(render_outcome(&outcome.outcome))
 }

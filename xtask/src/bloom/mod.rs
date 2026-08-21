@@ -17,7 +17,7 @@ mod status;
 mod upgrade;
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::{Args, Subcommand};
@@ -31,6 +31,10 @@ use crate::bloom::upgrade::UpgradeArgs;
 /// Coordinator REST bind when `AETHER_HTTP_PORT` is unset — the same default
 /// `aether-chassis-bloomery` uses (`DEFAULT_HTTP_PORT`).
 const DEFAULT_HTTP_PORT: u16 = 8910;
+
+/// The repository's approval policy — the fallback the coordinator itself
+/// loads when a bloom seals none of its own.
+pub(super) const DEFAULT_POLICY_FILE: &str = "approval-policy.toml";
 
 /// One coordinator the command talks to.
 #[derive(Clone, Debug)]
@@ -79,6 +83,12 @@ pub struct BloomArgs {
     /// `AETHER_HTTP_CONTROL_TOKEN`.
     #[arg(long, global = true)]
     token: Option<String>,
+
+    /// Approval policy the declared-surface granularity check reads before a
+    /// seal or supersede is sent. The coordinator's seal door is the authority;
+    /// this refuses the same shape earlier and in the same words.
+    #[arg(long = "approval-policy", global = true, default_value = DEFAULT_POLICY_FILE)]
+    approval_policy: PathBuf,
 
     #[command(subcommand)]
     command: BloomCommand,
@@ -207,34 +217,45 @@ pub(super) struct ProjectionArgs {
 }
 
 impl ProjectionArgs {
-    pub(super) fn input(&self) -> Result<ProjectionInput> {
+    pub(super) fn input(&self, approval_policy: &Path) -> Result<ProjectionInput> {
         ProjectionInput::resolve(
             self.declared_surface.clone(),
             self.completeness_file.as_deref(),
             self.adr_touch,
             self.pre_approved,
+            Some(approval_policy),
         )
     }
 }
 
 pub fn run(args: &BloomArgs) -> Result<()> {
-    print!("{}", run_on(&Endpoint::resolve(args.port, args.token.as_deref()), &args.command)?);
+    print!(
+        "{}",
+        run_on_with_policy(&Endpoint::resolve(args.port, args.token.as_deref()), &args.command, &args.approval_policy)?
+    );
     Ok(())
 }
 
+/// Drive `command`, reading the granularity check's policy from the repository
+/// default. The three-argument form is what [`run`] calls; this spelling keeps
+/// every caller that does not configure a policy on one line.
 fn run_on(endpoint: &Endpoint, command: &BloomCommand) -> Result<String> {
+    run_on_with_policy(endpoint, command, Path::new(DEFAULT_POLICY_FILE))
+}
+
+fn run_on_with_policy(endpoint: &Endpoint, command: &BloomCommand, approval_policy: &Path) -> Result<String> {
     let client = Client::new(endpoint);
     match command {
         BloomCommand::Status => Ok(status::render(&client.view()?)),
-        BloomCommand::Seal(args) => run_seal(&client, args),
-        BloomCommand::Supersede(args) => run_supersede(&client, args),
+        BloomCommand::Seal(args) => run_seal(&client, args, approval_policy),
+        BloomCommand::Supersede(args) => run_supersede(&client, args, approval_policy),
         BloomCommand::Roll(args) => roll::run(&client, args),
         BloomCommand::Upgrade(args) => upgrade::run(&client, args),
-        BloomCommand::Amend(args) => amend::run(&client, args),
+        BloomCommand::Amend(args) => amend::run(&client, args, approval_policy),
     }
 }
 
-fn run_seal(client: &Client<'_>, args: &SealArgs) -> Result<String> {
+fn run_seal(client: &Client<'_>, args: &SealArgs, approval_policy: &Path) -> Result<String> {
     let task = plan::read_task_file(&args.task_file)?;
     plan::require_task(&task, &args.task_file)?;
     let workpieces = plan::seal_workpieces(&args.workpiece, &args.task_file)?;
@@ -255,12 +276,12 @@ fn run_seal(client: &Client<'_>, args: &SealArgs) -> Result<String> {
     let members = patch.proposals.unwrap_or_default();
     let outcome = client.seal(
         &draft.draft_id,
-        &plan::seal_request(&members, &task, &args.projection.input()?, &args.edges, &args.surfaces)?,
+        &plan::seal_request(&members, &task, &args.projection.input(approval_policy)?, &args.edges, &args.surfaces)?,
     )?;
     Ok(render_outcome(&outcome.outcome))
 }
 
-fn run_supersede(client: &Client<'_>, args: &SupersedeArgs) -> Result<String> {
+fn run_supersede(client: &Client<'_>, args: &SupersedeArgs, approval_policy: &Path) -> Result<String> {
     let task = plan::read_task_file(&args.task_file)?;
     plan::require_task(&task, &args.task_file)?;
     let view = client.view()?;
@@ -282,7 +303,14 @@ fn run_supersede(client: &Client<'_>, args: &SupersedeArgs) -> Result<String> {
     let members = patch.proposals.unwrap_or_default();
     let outcome = client.supersede(
         &args.bloom_id,
-        &plan::supersede_request(&draft.draft_id, &members, &task, &args.projection.input()?, &args.edges, &[])?,
+        &plan::supersede_request(
+            &draft.draft_id,
+            &members,
+            &task,
+            &args.projection.input(approval_policy)?,
+            &args.edges,
+            &[],
+        )?,
     )?;
     Ok(render_outcome(&outcome.outcome))
 }
@@ -297,7 +325,7 @@ mod tests {
     use std::fs;
     use std::io::{self, Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};

@@ -96,10 +96,17 @@ dogfood brief, and optional side findings. The Plan ends with exact `Size`,
 `Implementation model`, and `Routing reason` lines. Those body lines—not labels—
 select the implementation route.
 
-The declared surface is a strict list of concrete paths and narrow directory
-prefixes. It bounds approval-policy resolution and the eventual PR diff. A
-necessary edit outside it is evidence that the Plan must change, not permission
-to widen implementation. A pure umbrella declares that it has no implementation
+The declared surface bounds approval-policy resolution and the eventual PR
+diff. Declare it at crate granularity — `crates/<crate>/src/**` plus
+`crates/<crate>/tests/**` — and narrow to a module glob only when one crate
+hosts two genuinely separate things. Naming an individual file is a forecast of
+which files the work will touch, and that forecast is wrong often enough to cost
+blooms: the seal door refuses a file-granular entry unless `approval-policy.toml`
+itself names that file, so a change that ripples one sibling further does not
+need a whole successor bloom. Read the policy for which files those are rather
+than copying the list; it moves. A necessary edit outside the declared surface
+is still evidence that the Plan must change, not permission to widen
+implementation. A pure umbrella declares that it has no implementation
 PR and closes only after its children and coordination obligations are complete.
 
 The canonical Plan digest covers the approval-bearing managed sections and

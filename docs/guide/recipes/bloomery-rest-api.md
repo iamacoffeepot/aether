@@ -157,7 +157,7 @@ curl -s -X POST localhost:8910/drafts/1/seal -H 'content-type: application/json'
     {
       "workpiece": "wp-1",
       "scope_revision": "$revision",
-      "declared_surface": ["docs/guide/recipes/bloomery-rest-api.md"],
+      "declared_surface": ["docs/guide/**"],
       "completeness": {
         "has_problem_statement": true,
         "has_design_notes": true,
@@ -186,7 +186,10 @@ evidence the gate rules on:
 - `declared_surface` — the paths the change touches. The tier policy the draft
   resolves (its sealed entry, else the file fallback) resolves them
   most-restrictive-match-wins; an `auto` surface (`docs/guide/**` among them in
-  the shipped file) lets the gate form the approval itself.
+  the shipped file) lets the gate form the approval itself. Declare at crate
+  granularity: an entry naming one file is refused unless the policy itself
+  names that file, because the same table that decides tier decides which files
+  are special enough to name.
 - `completeness` — the nine facts the gate fails closed on. Every boolean must
   hold, `blocked` must be false, and `model_routing_count` must be exactly `1`.
 - `adr_touch` — `"None"`, `"ProposedOnly"`, or `"NewOrEstablished"`. The last
@@ -244,7 +247,7 @@ spelling of the tier enum, not the lowercase words the fallback file uses. Rules
 are unordered; resolution is most-restrictive-wins over the declared surface, the
 same semantics the file has.
 
-Four ways a seal is refused on this axis, all `422` and all before any admit:
+Five ways a seal is refused on this axis, all `422` and all before any admit:
 
 | Response | Cause |
 |---|---|
@@ -252,6 +255,7 @@ Four ways a seal is refused on this axis, all `422` and all before any admit:
 | `sealed approval policy unresolvable: …` | The bloom-wide address names content that is missing, filed under another kind, or no longer decodes. |
 | `configuration set not yet read; seal fails closed` | The seal arrived before the coordinator finished its boot configuration read. Retry. |
 | `approval policy unavailable; seal fails closed` | The draft seals no policy and the fallback file did not load. |
+| `member wp-1 declared surface "crates/aether-fs/src/lib.rs" names one file and no approval-policy rule names that file; widen it to a crate glob such as crates/<crate>/src/**; seal fails closed` | The declared surface names an individual file the policy does not. |
 
 `descriptions` is the one advisory field on the body: per-member work-order
 text, keyed by workpiece id, which the construct lane's prompt names as its
