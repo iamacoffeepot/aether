@@ -7,6 +7,7 @@ mod triage;
 #[cfg(test)]
 mod workflow;
 
+use std::collections::BTreeMap;
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
@@ -567,36 +568,123 @@ fn parse_suppression_requests(log: &str) -> Vec<SuppressionRequest> {
 /// Reads cargo's JSON diagnostic stream rather than scanning rendered text, so
 /// the verdict turns on a structured `level` rather than on the word "warning"
 /// appearing in someone's identifier or doc comment.
-fn clippy_verdict(stdout: &str) -> bool {
-    !stdout.lines().any(|line| diagnostic_level(line).is_some_and(|level| level == "warning" || level == "error"))
+fn clippy_verdict(stdout: &str, scope: &Scope) -> bool {
+    !diagnostics(stdout).any(|diagnostic| diagnostic.is_finding() && diagnostic.judged_under(scope))
 }
 
-/// The diagnostic level one `--message-format=json` line reports, or `None`
-/// when the line is not a compiler message (cargo interleaves build progress on
-/// the same stream).
-fn diagnostic_level(line: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(line).ok()?;
-    if value.get("reason")?.as_str()? != "compiler-message" {
-        return None;
+/// One compiler message cargo reported, reduced to what the verdict reads.
+struct Diagnostic {
+    /// rustc's own severity — the structured field the verdict turns on, so a
+    /// candidate whose identifiers or doc comments contain the word "warning"
+    /// is not judged for spelling.
+    level: String,
+    /// The package cargo attributed the message to, or `None` for a message it
+    /// attributed to nothing.
+    package: Option<String>,
+    /// rustc's own rendering of the message, as `--message-format=json` carries
+    /// it.
+    rendered: Option<String>,
+}
+
+impl Diagnostic {
+    /// Whether this message is what `-D warnings` would have failed the build
+    /// on. rustc emits `note` and `help` alongside real diagnostics, and
+    /// counting those fails every candidate that has any diagnostic context.
+    fn is_finding(&self) -> bool {
+        self.level == "warning" || self.level == "error"
     }
-    Some(value.get("message")?.get("level")?.as_str()?.to_owned())
+
+    /// Whether `scope` is answerable for this message — see [`Scope::judges`].
+    ///
+    /// An unattributed message is judged. Everything in this lane fails towards
+    /// the candidate, and a diagnostic whose owner cargo did not name is one
+    /// this run cannot rule out; silently dropping it is the false-green
+    /// direction.
+    fn judged_under(&self, scope: &Scope) -> bool {
+        self.package.as_deref().is_none_or(|package| scope.judges(package))
+    }
 }
 
-/// The human-readable rendering of every diagnostic in a JSON stream, which is
+/// Every compiler message in a `--message-format=json` stream, in the order
+/// cargo emitted them. Lines that are not compiler messages — the build
+/// progress cargo interleaves on the same stream — are skipped.
+fn diagnostics(stdout: &str) -> impl Iterator<Item = Diagnostic> + '_ {
+    stdout.lines().filter_map(|line| {
+        let value: serde_json::Value = serde_json::from_str(line).ok()?;
+        if value.get("reason")?.as_str()? != "compiler-message" {
+            return None;
+        }
+        let message = value.get("message")?;
+        Some(Diagnostic {
+            level: message.get("level")?.as_str()?.to_owned(),
+            package: value.get("package_id").and_then(serde_json::Value::as_str).map(package_name),
+            rendered: message.get("rendered").and_then(serde_json::Value::as_str).map(str::to_owned),
+        })
+    })
+}
+
+/// The package name a cargo `package_id` names.
+///
+/// cargo spells a workspace member's id as a `PackageIdSpec` URL —
+/// `path+file:///…/crates/aether-bloomery#0.3.0-alpha` — and omits the name
+/// from the fragment when it is the same as the directory's own. So the name is
+/// the fragment's when the fragment carries one, and the locator's last path
+/// segment when the fragment is a bare version.
+fn package_name(package_id: &str) -> String {
+    let Some((locator, fragment)) = package_id.rsplit_once('#') else {
+        return package_id.to_owned();
+    };
+    if let Some((name, _version)) = fragment.split_once('@') {
+        return name.to_owned();
+    }
+    if !fragment.starts_with(|character: char| character.is_ascii_digit()) {
+        return fragment.to_owned();
+    }
+    locator.rsplit('/').next().unwrap_or(locator).to_owned()
+}
+
+/// The human-readable rendering of the diagnostics `scope` judges, which is
 /// what a `Refine` re-entry is handed. cargo puts the same text rustc would
 /// have printed in each message's `rendered` field, so nothing is lost by
 /// asking for JSON.
-fn render_diagnostics(stdout: &str) -> String {
-    stdout
-        .lines()
-        .filter_map(|line| {
-            let value: serde_json::Value = serde_json::from_str(line).ok()?;
-            (value.get("reason")?.as_str()? == "compiler-message")
-                .then(|| value.get("message")?.get("rendered")?.as_str().map(str::to_owned))
-                .flatten()
-        })
+///
+/// Filtered by the same predicate the verdict uses, so a repair lap is directed
+/// at the crates it is accountable for rather than at a warning in a dependency
+/// it cannot edit inside its surface. What was left out is stated by
+/// [`unjudged_notice`] rather than dropped in silence.
+fn render_diagnostics(stdout: &str, scope: &Scope) -> String {
+    diagnostics(stdout)
+        .filter(|diagnostic| diagnostic.judged_under(scope))
+        .filter_map(|diagnostic| diagnostic.rendered)
         .collect::<Vec<String>>()
         .join("\n")
+}
+
+/// The receipt for what this run declined to blame the candidate for: which
+/// out-of-closure crates emitted findings, and how many each emitted.
+///
+/// The same argument the environment observations make one level out (#4895).
+/// A classification a reader cannot see is indistinguishable from a scanner
+/// that found nothing, and the two have to be told apart for a wrong closure to
+/// be noticed at all.
+fn unjudged_notice(stdout: &str, scope: &Scope) -> Option<String> {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for diagnostic in diagnostics(stdout).filter(Diagnostic::is_finding) {
+        if let Some(package) = diagnostic.package.filter(|package| !scope.judges(package)) {
+            *counts.entry(package).or_default() += 1;
+        }
+    }
+
+    let total: usize = counts.values().sum();
+    let named: Vec<String> = counts.iter().map(|(package, count)| format!("{package} ({count})")).collect();
+    (total > 0).then(|| {
+        format!(
+            "note: {total} diagnostic(s) from {} crate(s) outside this candidate's closure were not judged: {} — \
+             each compiles the same source at the base (see verify.scope.log)\n",
+            counts.len(),
+            named.join(", "),
+        )
+    })
 }
 
 /// The typed id of the verify umbrella (#3626) the reducer dispatches for the
@@ -1004,10 +1092,10 @@ fn run_member(
     // them. Everything else has nothing to derive and passes its zero exit
     // through.
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let (derived_pass, rendered) = if id == "verify.clippy" {
-        (clippy_verdict(&stdout), render_diagnostics(&stdout))
+    let (derived_pass, rendered, unjudged) = if id == "verify.clippy" {
+        (clippy_verdict(&stdout, scope), render_diagnostics(&stdout, scope), unjudged_notice(&stdout, scope))
     } else {
-        (true, stdout)
+        (true, stdout, None)
     };
 
     let code = output.code;
@@ -1018,6 +1106,9 @@ fn run_member(
     // handful of crates is otherwise indistinguishable from a workspace run
     // that happened to compile nothing else.
     if let Some(notice) = member_scope_notice(invocation, scope) {
+        log.extend_from_slice(notice.as_bytes());
+    }
+    if let Some(notice) = unjudged {
         log.extend_from_slice(notice.as_bytes());
     }
     if outcome == MemberOutcome::Operational {
@@ -1435,7 +1526,7 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
     fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let derived_pass = args.command != "verify.clippy" || clippy_verdict(&stdout);
+    let derived_pass = args.command != "verify.clippy" || clippy_verdict(&stdout, &scope);
     let code = output.status.code();
     let outcome = member_outcome(&invocation, derived_pass, code);
 
@@ -1443,6 +1534,9 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
     let log_path = args.out.join(&log_name);
     let mut log_bytes = Vec::new();
     if let Some(notice) = member_scope_notice(&invocation, &scope) {
+        log_bytes.extend_from_slice(notice.as_bytes());
+    }
+    if let Some(notice) = (args.command == "verify.clippy").then(|| unjudged_notice(&stdout, &scope)).flatten() {
         log_bytes.extend_from_slice(notice.as_bytes());
     }
     if outcome == MemberOutcome::Operational {
@@ -1943,9 +2037,9 @@ mod tests {
         BASE_SET_SUBJECT, Captured, MAX_FINDING_LINES, MemberOutcome, MemberRun, MemberRunner, SUPPRESS_MEMBER, Scope,
         VERIFY_BASE, VERIFY_CHECK, VerifyInvocation, clippy_verdict, closure, distil_diagnostics, effective_exit_code,
         environment_observations, failed_verifiers, member_diff_base, member_outcome, member_scope_notice,
-        operational_failure_notice, preflight_tools, prepare_failure_log, render_diagnostics, required_targets,
-        required_tools, run_member_discriminated, run_timed_prepare, umbrella_status, verify_check_members,
-        verify_command, verify_findings, workflow,
+        operational_failure_notice, package_name, preflight_tools, prepare_failure_log, render_diagnostics,
+        required_targets, required_tools, run_member_discriminated, run_timed_prepare, umbrella_status,
+        unjudged_notice, verify_check_members, verify_command, verify_findings, workflow,
     };
     use std::iter;
 
@@ -2208,6 +2302,17 @@ mod tests {
             ]),
         );
 
+        // Tripwire: narrowing is a package selection and nothing else. The
+        // scoped argv is what a member actually dispatches, and the CI-parity
+        // assertions above pin only the unscoped one — so a flag dropped on
+        // this path would leave the member predicting a gate CI does not run
+        // while every parity test stayed green (#5411). Read from the workflow
+        // rather than from a literal, so drift on either side fails here.
+        let ci_clippy = workflow::gate_step("clippy", &["cargo", "clippy"]).run;
+        let flags: Vec<String> =
+            ci_clippy[2..ci_clippy.len() - 3].iter().filter(|flag| *flag != "--workspace").cloned().collect();
+        assert_eq!(args[1..=flags.len()], flags[..], "the member must carry every CI flag but the selection");
+
         // nextest states no `--workspace` at all — the workspace is its own
         // default — so there the package flags are the entire narrowing.
         let test = verify_command("verify.test").expect("verify.test mapped");
@@ -2340,6 +2445,15 @@ mod tests {
         format!(r#"{{"reason":"compiler-message","message":{{"level":"{level}","rendered":"{rendered}"}}}}"#)
     }
 
+    // The same line as cargo actually writes it: attributed to the package
+    // whose compilation produced it, in the `PackageIdSpec` spelling cargo uses
+    // for a workspace member.
+    fn attributed_json_line(package: &str, level: &str, rendered: &str) -> String {
+        format!(
+            r#"{{"reason":"compiler-message","package_id":"path+file:///w/crates/{package}#0.3.0-alpha","message":{{"level":"{level}","rendered":"{rendered}"}}}}"#
+        )
+    }
+
     #[test]
     fn a_clippy_run_that_emitted_a_warning_fails_even_though_cargo_exited_zero() {
         // Tripwire: the whole verdict change (#4706). The run is not asked to
@@ -2354,10 +2468,94 @@ mod tests {
         ]
         .join("\n");
 
-        assert!(!clippy_verdict(&stream), "a warning is a failure exactly as `-D warnings` would make it");
-        assert!(clippy_verdict(r#"{"reason":"compiler-artifact","target":{"name":"x"}}"#), "progress alone passes");
-        assert!(clippy_verdict(""), "a silent run is a clean run");
+        let workspace = Scope::resolve(None);
+        assert!(!clippy_verdict(&stream, &workspace), "a warning is a failure exactly as `-D warnings` would make it");
+        assert!(
+            clippy_verdict(r#"{"reason":"compiler-artifact","target":{"name":"x"}}"#, &workspace),
+            "progress alone passes"
+        );
+        assert!(clippy_verdict("", &workspace), "a silent run is a clean run");
         assert_eq!(effective_exit_code(false, Some(0)), 1, "a derived failure must make the umbrella exit nonzero");
+    }
+
+    #[test]
+    fn a_warning_in_a_crate_the_closure_does_not_name_is_not_the_candidates() {
+        // Tripwire for bloom f063ff066e83, where every one of twenty members
+        // failed `verify.clippy` on one `unused import` line in
+        // `aether-bloomery` that no member had touched and that `verify.base`
+        // had passed over minutes earlier. The member run narrows to the
+        // candidate's closure (#4890), and cargo unifies features across the
+        // packages an invocation selects — so a crate compiled underneath a
+        // narrowed selection is compiled feature-poor, and an item some absent
+        // dev-dependency's feature gates reads as unused there and nowhere
+        // else. That crate is not in the closure, so it is not what this
+        // candidate can have broken, and blaming it sends every member into a
+        // Refine over a line outside its surface.
+        let scope = closure_scope(&["xtask"]);
+        let underneath = attributed_json_line("aether-bloomery", "warning", "warning: unused import: `BaseVerdict`");
+        let inside = attributed_json_line("xtask", "warning", "warning: unnecessary qualification");
+
+        assert!(
+            clippy_verdict(&underneath, &scope),
+            "a dependency outside the closure compiles the same source it compiles at the base",
+        );
+        assert!(
+            !clippy_verdict(&[underneath.clone(), inside].join("\n"), &scope),
+            "a warning in a crate the closure names is still a finding",
+        );
+        assert!(
+            !clippy_verdict(&underneath, &Scope::resolve(None)),
+            "the whole-workspace run judges every crate it compiled",
+        );
+    }
+
+    #[test]
+    fn an_unjudged_diagnostic_is_stated_rather_than_dropped() {
+        // A classification the reader cannot see is indistinguishable from a
+        // scanner that found nothing, and a wrong closure is only noticeable
+        // through the difference (#4895's argument, one member in).
+        let scope = closure_scope(&["xtask"]);
+        let stream = [
+            attributed_json_line("aether-bloomery", "warning", "warning: unused import"),
+            attributed_json_line("aether-bloomery-git", "warning", "warning: never used"),
+            attributed_json_line("aether-bloomery", "note", "note: for context"),
+        ]
+        .join("\n");
+
+        let notice = unjudged_notice(&stream, &scope).expect("two findings were left unjudged");
+
+        assert!(notice.starts_with("note: 2 diagnostic(s) from 2 crate(s)"), "got: {notice}");
+        assert!(notice.contains("aether-bloomery (1), aether-bloomery-git (1)"), "got: {notice}");
+        assert_eq!(unjudged_notice(&stream, &Scope::resolve(None)), None, "a workspace run leaves nothing unjudged");
+        assert!(
+            !render_diagnostics(&stream, &scope).contains("unused import"),
+            "a repair lap directed at a crate outside its surface is the cost this fix removes",
+        );
+    }
+
+    #[test]
+    fn a_message_cargo_attributed_to_nothing_is_judged() {
+        // Everything in this lane fails towards the candidate. A diagnostic
+        // whose owning package cargo did not name is one the run cannot rule
+        // out, and dropping it silently would be a verdict of green over an
+        // unread finding.
+        let scope = closure_scope(&["xtask"]);
+
+        assert!(!clippy_verdict(&json_line("warning", "warning: unnamed owner"), &scope));
+        assert_eq!(unjudged_notice(&json_line("warning", "warning: unnamed owner"), &scope), None);
+    }
+
+    #[test]
+    fn a_package_id_names_its_package_in_both_of_cargos_spellings() {
+        // Tripwire: the attribution the verdict filters on is parsed out of
+        // cargo's `package_id`, and cargo omits the name from the fragment
+        // whenever it matches the directory it lives in — which is every crate
+        // in this workspace. Reading the fragment as the name would attribute
+        // every diagnostic to a version string, which no closure ever names, so
+        // the member gate would go green over its own findings.
+        assert_eq!(package_name("path+file:///w/crates/aether-bloomery#0.3.0-alpha"), "aether-bloomery");
+        assert_eq!(package_name("path+file:///w/xtask#aether-xtask@0.3.0-alpha"), "aether-xtask");
+        assert_eq!(package_name("registry+https://github.com/rust-lang/crates.io-index#serde@1.0.0"), "serde");
     }
 
     #[test]
@@ -2365,7 +2563,7 @@ mod tests {
         // rustc emits `note` and `help` alongside real diagnostics. Counting
         // them would fail every candidate that has any diagnostic context at
         // all, including passing ones.
-        assert!(clippy_verdict(&json_line("note", "note: required by a bound")));
+        assert!(clippy_verdict(&json_line("note", "note: required by a bound"), &Scope::resolve(None)));
     }
 
     #[test]
@@ -2380,7 +2578,7 @@ mod tests {
         ]
         .join("\n");
 
-        let rendered = render_diagnostics(&stream);
+        let rendered = render_diagnostics(&stream, &Scope::resolve(None));
         assert!(rendered.contains("unused import"));
         assert!(rendered.contains("could not compile"));
         assert!(!rendered.contains("build-finished"), "progress must not reach the findings");
