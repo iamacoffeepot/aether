@@ -324,8 +324,13 @@ pub(super) fn resume_handle_rejected(status: ExitStatus, stdout: &[u8], stderr: 
 /// resumed conversation cannot see for itself — the working tree was reset
 /// between laps, so the files it edited last time are gone. A cold launch gets
 /// the prompt unchanged.
-pub(super) fn resumed_prompt(prompt: &str, resume: Option<&str>) -> String {
-    if resume.is_none() {
+///
+/// `continued_in_place` withholds that sentence, for the one resume that keeps
+/// the tree: the construct lane feeding its own session `verify.check` findings
+/// between laps. Telling that session its edits are gone would be false, and it
+/// would spend the lap rewriting work that is still on disk.
+pub(super) fn resumed_prompt(prompt: &str, resume: Option<&str>, continued_in_place: bool) -> String {
+    if resume.is_none() || continued_in_place {
         return prompt.to_owned();
     }
     format!(
@@ -432,9 +437,14 @@ mod tests {
     // lap that trusts that memory reports work it never redid.
     #[test]
     fn only_a_resumed_lap_is_told_its_tree_was_reset() {
-        assert_eq!(resumed_prompt("build it", None), "build it", "a cold launch gets the prompt unchanged");
-        assert!(resumed_prompt("build it", Some("sess-1")).starts_with("build it\n"));
-        assert!(resumed_prompt("build it", Some("sess-1")).contains("working tree was reset"));
+        assert_eq!(resumed_prompt("build it", None, false), "build it", "a cold launch gets the prompt unchanged");
+        assert_eq!(
+            resumed_prompt("build it", Some("sess-1"), true),
+            "build it",
+            "a lap continued over its own tree is not told the tree was reset",
+        );
+        assert!(resumed_prompt("build it", Some("sess-1"), false).starts_with("build it\n"));
+        assert!(resumed_prompt("build it", Some("sess-1"), false).contains("working tree was reset"));
     }
 
     // A harness that reports no counts renders them null, not zero: a study

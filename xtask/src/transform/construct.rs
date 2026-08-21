@@ -11,11 +11,22 @@ use anyhow::Result;
 
 use crate::transform::claude::assemble_construct_prompt;
 use crate::transform::fixers::{self, Report as FixerReport};
-use crate::transform::{Measurements, TransformArgs, run_model_lane, write_evidence_json};
+use crate::transform::{Measurements, TransformArgs, run_model_lane, verify, write_evidence_json};
 
 /// The typed id of the model-driven construct lane (#3511). Recognized here so
 /// an unknown id stays unmapped exactly as in the verify lane.
 pub(super) const CONSTRUCT_IMPLEMENT: &str = "construct.implement";
+
+/// How many times the lane feeds a `verify.check` failure back into its own
+/// session before capturing whatever it has.
+///
+/// Three, because the repair the precheck exists to catch is the shallow kind —
+/// a lint, a missing doc, a test the author can still see the cause of — and
+/// those close in one or two laps. A lane still red on the fourth is not
+/// converging on its own; the candidate is captured and the failure is handed
+/// to a `Refine` lap, which gets the findings written down and a fresh read of
+/// them.
+const MAX_PRECHECK_LAPS: u32 = 3;
 
 /// The file the agent writes its commit message to, relative to the run
 /// worktree's root — the lane's one deliverable besides the candidate itself.
@@ -45,7 +56,9 @@ pub(super) const CONSTRUCT_INSTRUCTIONS: &str = include_str!("construct_instruct
 /// presence-driven by [`Measurements::stamp`]. `fixers` is whether the
 /// mechanical fmt / clippy --fix pass ran and whether it moved the tree,
 /// always present so a later reader can tell a model-authored line from a
-/// fixer-authored one at the run level.
+/// fixer-authored one at the run level. `precheck_laps` is how many times the
+/// lane fed its own session a `verify.check` failure before capturing — `0` for
+/// a candidate that passed the gates first time.
 fn stamp_construct_evidence(
     nonce: Option<&str>,
     produced_candidate: bool,
@@ -53,11 +66,13 @@ fn stamp_construct_evidence(
     record: &serde_json::Value,
     measured: Measurements,
     fixers: FixerReport,
+    precheck_laps: u32,
 ) -> serde_json::Value {
     let mut evidence = serde_json::json!({
         "command": CONSTRUCT_IMPLEMENT,
         "nonce": nonce,
         "produced_candidate": produced_candidate,
+        "precheck_laps": precheck_laps,
         "result_record": record,
     });
     fixers.stamp(&mut evidence);
@@ -144,20 +159,52 @@ pub(super) fn run_construct(args: &TransformArgs) -> Result<()> {
         args.task.as_deref(),
         args.seeded.as_deref(),
     );
-    let run = run_model_lane(&prompt, args)?;
+    let mut run = run_model_lane(&prompt, args)?;
+
+    // The chassis stages with `git add --all` only after this process exits, so
+    // everything below is the last stretch in which the lane owns the tree.
+    // Fmt then a scoped MachineApplicable clippy --fix apply the class of
+    // findings that otherwise spend a Refine lap; they are best-effort and
+    // cannot fail the lane.
+    let mut fixers = fixers::apply(Path::new("."), &args.out);
+    let mut precheck_laps = 0_u32;
+
+    // Then the gates that will actually judge this candidate, run here rather
+    // than left for `verify.check` to discover: a failure the author's own
+    // session can still see is a repair inside this attempt, while the same
+    // failure found after capture costs a whole Refine lap on a cold session.
+    // Bounded, and the bound is the point — a lane that cannot get itself green
+    // in three laps is not converging, and burning the attempt on a fourth
+    // steals it from the Refine that has the findings written down.
+    while precheck_laps < MAX_PRECHECK_LAPS {
+        let Some(findings) = verify::precheck_findings(args)? else {
+            break;
+        };
+        let Some(session) = session_handle(&run.record) else {
+            // No handle to continue with. A fresh session would not know what
+            // this tree was built for, so the candidate is captured as it
+            // stands and `verify.check` reports the same findings itself.
+            break;
+        };
+        precheck_laps += 1;
+
+        let mut resumed = args.clone();
+        resumed.resume = Some(session);
+        resumed.continued_in_place = true;
+        // `run` becomes the repair lap's record, which is the one the
+        // completion gate and the session pool both want — the last thing this
+        // attempt did. Its token columns are that lap's alone, so the ledger
+        // reads a precheck attempt as cheaper than it was; `precheck_laps` is
+        // what tells a reader how many laps those columns are missing.
+        run = run_model_lane(&precheck_prompt(&findings), &resumed)?;
+        fixers = fixers.merged(fixers::apply(Path::new("."), &args.out));
+    }
 
     // Take the commit-message deliverable before the candidate is inspected, and
     // in that order for two reasons: the file is gone by the time the host stages
     // the worktree, and a run whose only change *was* the deliverable does not
     // read as having produced a candidate.
     let commit_message = take_commit_message(Path::new("."));
-    // The chassis stages with `git add --all` only after this process exits, so
-    // this is the last moment the lane owns the tree. Fmt then a scoped
-    // MachineApplicable clippy --fix apply the class of findings that otherwise
-    // spend a Refine lap; they are best-effort and cannot fail the lane. The
-    // candidate signal is read *after* so a fixer-authored edit is part of this
-    // candidate rather than a second authorship.
-    let fixers = fixers::apply(Path::new("."), &args.out);
     // Inspect the worktree (cwd) for the candidate change the run's whole job is
     // to leave (#3596): the gate demands a substantive conclusion, and an empty
     // diff is nothing to review. Captured after the child is reaped so it reflects
@@ -173,7 +220,37 @@ pub(super) fn run_construct(args: &TransformArgs) -> Result<()> {
             &run.record,
             run.measured,
             fixers,
+            precheck_laps,
         ),
+    )
+}
+
+/// The handle a precheck lap resumes this run's own session with.
+///
+/// Read from the result record the harness arms converge on: `session_id` at
+/// the top level, or nested under `result` on the arms that report it there.
+/// An empty string is no handle — threading it would launch a cold session
+/// under a name that resolves to nothing.
+fn session_handle(record: &serde_json::Value) -> Option<String> {
+    record
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| record.get("result").and_then(|result| result.get("session_id")).and_then(serde_json::Value::as_str))
+        .filter(|handle| !handle.is_empty())
+        .map(str::to_owned)
+}
+
+/// What a precheck lap hands the session that built the tree.
+///
+/// The findings are `verify.check`'s own prose, unedited — the same text a
+/// `Refine` lap would be given — so the author reads exactly what the gate
+/// said. The framing is the only thing added: this is the author's own work
+/// coming back, on a tree it still has, before anyone else has seen it.
+fn precheck_prompt(findings: &str) -> String {
+    format!(
+        "The gates that decide whether this candidate is accepted have just been run against the tree you left, \
+         and they are not clean. The working tree is exactly as you left it — your edits are still there. Fix what \
+         follows, in place, and stop when the gates would pass.\n\n{findings}\n"
     )
 }
 
@@ -201,8 +278,10 @@ mod tests {
             &record,
             Measurements::default(),
             FixerReport::default(),
+            0,
         );
         assert_eq!(evidence["command"], CONSTRUCT_IMPLEMENT);
+        assert_eq!(evidence["precheck_laps"], 0, "a candidate green on the first pass spent no repair lap");
         assert_eq!(evidence["nonce"], "nonce-7", "the broker-matched nonce binds the evidence");
         assert_eq!(
             evidence["produced_candidate"], true,
@@ -227,8 +306,13 @@ mod tests {
             &serde_json::json!({ "no_result": true }),
             Measurements::default(),
             FixerReport::default(),
+            2,
         );
         assert!(no_nonce["nonce"].is_null());
+        assert_eq!(
+            no_nonce["precheck_laps"], 2,
+            "the envelope states how many gate-repair laps the lane spent on its own session",
+        );
         assert_eq!(no_nonce["produced_candidate"], false, "an empty-candidate run stamps false");
         assert_eq!(no_nonce["result_record"]["no_result"], true, "the derived record is carried whole");
     }
@@ -247,6 +331,7 @@ mod tests {
             &serde_json::json!({}),
             Measurements::default(),
             FixerReport::default(),
+            0,
         );
         assert_eq!(evidence["commit_message"], message, "the message is carried verbatim, body included");
     }
@@ -264,9 +349,29 @@ mod tests {
             &serde_json::json!({}),
             Measurements::default(),
             FixerReport { ran: true, changed: true },
+            0,
         );
         assert_eq!(evidence["fixers"]["ran"], true);
         assert_eq!(evidence["fixers"]["changed"], true);
+    }
+
+    #[test]
+    fn a_precheck_lap_resumes_the_session_the_record_named() {
+        // Plausible bug: reading only the top-level key (the arms that report
+        // the handle under `result` would then never resume, and every precheck
+        // lap would relaunch cold on a tree it did not build), or threading an
+        // empty string, which names no session and spends a full cold run.
+        assert_eq!(
+            super::session_handle(&serde_json::json!({ "session_id": "sess-1" })).as_deref(),
+            Some("sess-1"),
+        );
+        assert_eq!(
+            super::session_handle(&serde_json::json!({ "result": { "session_id": "sess-2" } })).as_deref(),
+            Some("sess-2"),
+            "an arm that reports the handle only under `result` still resumes",
+        );
+        assert_eq!(super::session_handle(&serde_json::json!({ "session_id": "" })), None, "an empty handle is none");
+        assert_eq!(super::session_handle(&serde_json::json!({ "no_result": true })), None);
     }
 
     // The deliverable is read back *and removed*: the host stages the whole

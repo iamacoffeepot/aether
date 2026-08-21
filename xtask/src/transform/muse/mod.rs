@@ -170,7 +170,7 @@ fn run_at(
     peak: &PeakMemory,
 ) -> Result<serde_json::Value> {
     let session = args.resume.clone().unwrap_or_else(|| mint_session_id(args.nonce.as_deref()));
-    let prompt_file = write_prompt(&args.out, &resumed_prompt(prompt, args.resume.as_deref()))?;
+    let prompt_file = write_prompt(&args.out, &resumed_prompt(prompt, args.resume.as_deref(), args.continued_in_place))?;
     let mut command = peak.command(program);
     command
         .args(muse_argv(&prompt_file.to_string_lossy(), args.model.as_deref(), args.effort.as_deref(), &session))

@@ -37,6 +37,17 @@ pub(super) struct Report {
 }
 
 impl Report {
+    /// Fold a later pass's report into this one — the shape a lane that runs
+    /// the fixers once per precheck lap needs.
+    ///
+    /// Both fields are "did this ever happen over the whole attempt", so both
+    /// are unions: a lap that fixed nothing must not erase the lap that did,
+    /// or the envelope would credit the model for a fixer-authored line.
+    #[must_use]
+    pub(super) fn merged(self, later: Self) -> Self {
+        Self { ran: self.ran || later.ran, changed: self.changed || later.changed }
+    }
+
     /// Stamp `ran` / `changed` onto a construct evidence envelope. Always
     /// present: a reader that has to guess whether the lane even tried cannot
     /// tell a model-authored line from a fixer-authored one.

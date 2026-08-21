@@ -6,6 +6,7 @@ mod tools;
 mod workflow;
 
 use std::fs;
+use std::path::Path;
 use std::process::{self, Command};
 use std::time::Instant;
 
@@ -14,7 +15,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::cargo::{WASM_TARGET, run_captured, write_json_pretty};
 use crate::transform::peak_memory::{self, PeakMemory};
-use crate::transform::sccache::{self, CompilerCache};
+use crate::transform::sccache::{self, CompilerCache, Counters};
 use crate::transform::verify::closure::Closure;
 use crate::transform::verify::scope::Scope;
 use crate::transform::{Evidence, GateTiming, TransformArgs, build_evidence};
@@ -1361,7 +1362,60 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
         process::exit(1);
     }
 
-    // Resolved once for the whole umbrella, so the counters the evidence carries
+    let CheckPass { runs, gates, log_names, first_failure_code, sccache_served, peak_resident_bytes } =
+        check_pass(args, Some(&args.out))?;
+
+    let status = umbrella_status(&runs.iter().map(|run| run.outcome).collect::<Vec<MemberOutcome>>());
+    let failures = failed_verifiers(runs.iter().map(|run| (run.id.as_str(), run.outcome)));
+    let evidence = Evidence {
+        findings: verify_findings(&runs),
+        failed_verifiers: (!failures.is_empty()).then_some(failures),
+        sccache: sccache_served,
+        peak_resident_bytes,
+        duration_millis: None,
+        gates: None,
+        command: VERIFY_CHECK.to_owned(),
+        nonce: args.nonce.clone(),
+        status,
+        exit_code: Some(first_failure_code.unwrap_or(0)),
+        log: log_names.join(", "),
+        environment: environment_observations(&runs),
+    }
+    .timed(elapsed_millis(umbrella_started))
+    .with_gates(gates);
+    write_json_pretty(&args.out.join("evidence.json"), &evidence)?;
+
+    if status == "pass" {
+        Ok(())
+    } else {
+        process::exit(first_failure_code.unwrap_or(1))
+    }
+}
+
+/// What one fan-out over [`verify_check_members`] produced.
+///
+/// Held as a value so the umbrella and the construct lane's precheck share the
+/// fan-out rather than each spelling it: two loops over the same member list
+/// would be free to drift, and a precheck that predicts a *different* gate set
+/// than the one that judges the candidate is worse than no precheck at all.
+struct CheckPass {
+    runs: Vec<MemberRun>,
+    gates: Vec<GateTiming>,
+    log_names: Vec<String>,
+    first_failure_code: Option<i32>,
+    sccache_served: Option<Counters>,
+    peak_resident_bytes: Option<u64>,
+}
+
+/// Run every member in [`verify_check_members`] over the current tree, in
+/// CI-parity order and without short-circuiting on the first failure.
+///
+/// `logs` is where each member's log and the scope receipt are written; `None`
+/// runs the same members and keeps only what they said, which is what a
+/// precheck needs — its logs are not the lane's evidence and writing them into
+/// the construct output would put a second lane's receipts in that envelope.
+fn check_pass(args: &TransformArgs, logs: Option<&Path>) -> Result<CheckPass> {
+    // Resolved once for the whole pass, so the counters the evidence carries
     // cover every member's build rather than one member's slice of it, and the
     // peak it reports is the high-water mark of the whole lane.
     let cache = sccache::detect();
@@ -1374,11 +1428,13 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
     // narrowed to the same closure, and a receipt no one can read is not a
     // receipt (#4890).
     let scope = Scope::resolve(args.diff_base.as_deref());
-    let scope_log = String::from(SCOPE_LOG);
-    let scope_path = args.out.join(&scope_log);
-    fs::write(&scope_path, scope.receipt()).with_context(|| format!("write {}", scope_path.display()))?;
+    let mut log_names = Vec::new();
+    if let Some(dir) = logs {
+        let scope_path = dir.join(SCOPE_LOG);
+        fs::write(&scope_path, scope.receipt()).with_context(|| format!("write {}", scope_path.display()))?;
+        log_names.push(String::from(SCOPE_LOG));
+    }
 
-    let mut log_names = vec![scope_log];
     let mut runs = Vec::with_capacity(verify_check_members().len());
     let mut gates = Vec::with_capacity(verify_check_members().len());
     let mut first_failure_code: Option<i32> = None;
@@ -1411,43 +1467,51 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
         };
         let duration_millis = elapsed_millis(gate_started);
 
-        let log_name = format!("{id}.log");
-        let log_path = args.out.join(&log_name);
-        fs::write(&log_path, &run.log).with_context(|| format!("write {}", log_path.display()))?;
+        if let Some(dir) = logs {
+            let log_name = format!("{id}.log");
+            let log_path = dir.join(&log_name);
+            fs::write(&log_path, &run.log).with_context(|| format!("write {}", log_path.display()))?;
+            log_names.push(log_name);
+        }
 
         if !run.outcome.passed() && first_failure_code.is_none() {
             first_failure_code = Some(run.exit_code);
         }
-        log_names.push(log_name);
         runs.push(run);
         gates.push(GateTiming { command: id.to_owned(), duration_millis, prepare_millis });
     }
 
-    let status = umbrella_status(&runs.iter().map(|run| run.outcome).collect::<Vec<MemberOutcome>>());
-    let failures = failed_verifiers(runs.iter().map(|run| (run.id.as_str(), run.outcome)));
-    let evidence = Evidence {
-        findings: verify_findings(&runs),
-        failed_verifiers: (!failures.is_empty()).then_some(failures),
-        sccache: cache.as_ref().and_then(CompilerCache::served),
+    Ok(CheckPass {
+        runs,
+        gates,
+        log_names,
+        first_failure_code,
+        sccache_served: cache.as_ref().and_then(CompilerCache::served),
         peak_resident_bytes: peak.peak_resident_bytes(),
-        duration_millis: None,
-        gates: None,
-        command: VERIFY_CHECK.to_owned(),
-        nonce: args.nonce.clone(),
-        status,
-        exit_code: Some(first_failure_code.unwrap_or(0)),
-        log: log_names.join(", "),
-        environment: environment_observations(&runs),
-    }
-    .timed(elapsed_millis(umbrella_started))
-    .with_gates(gates);
-    write_json_pretty(&args.out.join("evidence.json"), &evidence)?;
+    })
+}
 
-    if status == "pass" {
-        Ok(())
-    } else {
-        process::exit(first_failure_code.unwrap_or(1))
+/// What the gates that will judge this candidate say about the tree as it
+/// stands — the construct lane's own read, before it hands anything over.
+///
+/// The same member set `verify.check` runs, over the same tree, rendered as the
+/// same `findings` prose a `Refine` lap would be handed. `None` means the gates
+/// are clean and there is nothing to feed back.
+///
+/// A host missing a tool returns `None` rather than a finding: the precheck
+/// cannot compute what the member would have said, and inventing a defect for
+/// the lane to chase is worse than letting `verify.check` report the same
+/// preflight miss itself, on its own channel.
+///
+/// # Errors
+/// Writing a member's log or spawning a gate faulted.
+pub(super) fn precheck_findings(args: &TransformArgs) -> Result<Option<String>> {
+    let mut missing = preflight_tools();
+    missing.extend(tools::preflight_targets(&required_targets()));
+    if !missing.is_empty() {
+        return Ok(None);
     }
+    Ok(verify_findings(&check_pass(args, None)?.runs))
 }
 
 #[cfg(test)]

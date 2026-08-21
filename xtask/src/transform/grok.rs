@@ -138,7 +138,7 @@ fn launch(
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
 ) -> Result<Option<String>> {
-    let prompt_file = write_prompt(&args.out, &resumed_prompt(prompt, args.resume.as_deref()))?;
+    let prompt_file = write_prompt(&args.out, &resumed_prompt(prompt, args.resume.as_deref(), args.continued_in_place))?;
     let mut command = peak.command(program);
     command
         .args(grok_argv(
@@ -317,7 +317,7 @@ mod tests {
         assert_eq!(launches.len(), 1, "a live handle forks once");
         assert_eq!(launches[0].flag("--resume"), Some("sess-1"));
         let path = launches[0].flag("--prompt-file").expect("a resumed lap still has a turn");
-        assert_eq!(fs::read_to_string(path).expect("read prompt file"), resumed_prompt(prompt, Some("sess-1")));
+        assert_eq!(fs::read_to_string(path).expect("read prompt file"), resumed_prompt(prompt, Some("sess-1"), false));
         assert!(launches[0].stdin.is_empty(), "the prompt still rides the file");
     }
 
