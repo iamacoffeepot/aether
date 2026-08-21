@@ -241,7 +241,16 @@ impl GitDataApi for LocalGitData {
             return Ok(MergeResult::AlreadyUpToDate);
         }
 
-        let output = command::run(&self.repo, &["merge-tree", "--write-tree", &base_sha, &head_sha])?;
+        // `merge-tree` merges in memory against a bare repository, so it reads
+        // no `.gitattributes` from an index or a worktree and finds none in the
+        // trees it is merging. Without an attribute source the `sorted-reexports`
+        // driver named there never runs and a determined re-export fold
+        // conflicts anyway. The base side is that source: the attributes that
+        // decide a merge are the ones already on the branch being merged into,
+        // never the ones the incoming candidate ships with itself.
+        let attributes = format!("attr.tree={base_sha}");
+        let output =
+            command::run(&self.repo, &["-c", &attributes, "merge-tree", "--write-tree", &base_sha, &head_sha])?;
         match output.status.code() {
             Some(0) => {
                 let tree = String::from_utf8_lossy(&output.stdout).lines().next().unwrap_or_default().trim().to_owned();
