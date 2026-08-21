@@ -94,6 +94,7 @@ use crate::store::{CommissionBackend, SqliteStore, StoreBackend};
 use aether_bloomery::Topic;
 
 mod proposal;
+mod receipt;
 
 /// The self-addressed wake the poll timer fires each interval; its handler drains
 /// the land topic and issues each land. Zero-field — the timer carries only the
@@ -518,7 +519,19 @@ fn close_member_source_issues(
         }
     };
     let key = format!("receipt:bloom:{}", short_hex(&bloom.0));
-    let comment = landed_comment(bloom, previous_base, new_head);
+    let comment = receipt::landed_comment(store, bloom, previous_base, new_head).unwrap_or_else(|error| {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::land",
+            %error,
+            "could not assemble the landing comment; writing the lead sentence so the close still proceeds",
+        );
+        format!(
+            "**Landed** — bloom `{}` landed; mainline moved `{}` → `{}`.",
+            short_hex(&bloom.0),
+            short_hex(previous_base),
+            short_hex(new_head)
+        )
+    });
     for (workpiece, _) in members {
         let Some(number) = canonical_issue_number(&workpiece) else {
             continue;
@@ -533,17 +546,6 @@ fn close_member_source_issues(
             );
         }
     }
-}
-
-/// The sentence a member's source issue receives when its bloom lands —
-/// unchanged from the receipt the mirror used to write on that issue.
-fn landed_comment(bloom: &BloomId, previous_base: &Digest, new_head: &Digest) -> String {
-    format!(
-        "**Landed** — bloom `{}` landed; mainline moved `{}` → `{}`.",
-        short_hex(&bloom.0),
-        short_hex(previous_base),
-        short_hex(new_head)
-    )
 }
 
 /// Mark each member commission landed before the replica is projected. Local
