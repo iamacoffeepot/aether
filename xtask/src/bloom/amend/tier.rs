@@ -1,9 +1,9 @@
 //! Which policy the amendment is judged against, and the gate over the delta.
 //!
 //! The tier verdict itself is [`aether_bloomery`]'s
-//! ([`tier_verdict`] / [`gate_widening`]) — the same implementation the seal
-//! door's `resolve_surface` stands on, so this command and the coordinator
-//! cannot decide differently. What lives here is the half that *reads*: which
+//! ([`aether_bloomery::tier_verdict`] / [`aether_bloomery::gate_widening`]) —
+//! the same implementation the seal door's `resolve_surface` stands on, so this
+//! command and the coordinator cannot decide differently. What lives here is the half that *reads*: which
 //! `ApprovalPolicy` the successor's seal will actually gate against.
 
 use std::fmt::Write as _;

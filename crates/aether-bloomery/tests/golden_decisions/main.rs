@@ -247,7 +247,7 @@ fn withdrawal_records(bloom: BloomId, workpiece: WorkpieceId) -> [Decision; 5] {
         Decision::RecordWithdrawal {
             bloom,
             withdrawal: Withdrawal {
-                workpiece: dependent.clone(),
+                workpiece: dependent,
                 cause: WithdrawalCause::Dependency { on: workpiece.clone() },
                 reason: "its construct base left the line".into(),
                 operator: "fixture-operator".into(),
