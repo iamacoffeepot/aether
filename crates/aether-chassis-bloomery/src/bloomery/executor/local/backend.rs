@@ -787,12 +787,35 @@ impl LocalExecutor {
     /// key is the findings overlay, which is a colder start than the construct
     /// session it would replace.
     fn journaled_refine_plan(&self, pending: &PendingRun, worktree_dir: &Path) -> Option<super::ReusePlan> {
-        let (bloom, workpiece, stage) = self.order_identity(&pending.nonce)?;
+        let Some((bloom, workpiece, stage)) = self.order_identity(&pending.nonce) else {
+            // The registry row is written before the submit that starts this
+            // lane, so a nonce that does not resolve here means the dispatch
+            // never recorded one — every journaled resume is dead until it does.
+            tracing::warn!(
+                nonce = %pending.nonce,
+                "local executor backend: no outstanding order resolves this nonce; journaled session resume is unavailable for this lap"
+            );
+            return None;
+        };
         if stage != StageId::Refine {
             return None;
         }
-        let (session_id, _context) = self.lookup_construct_session(&bloom, &workpiece)?;
-        let profile = pending.profile.as_ref()?;
+        let Some((session_id, _context)) = self.lookup_construct_session(&bloom, &workpiece) else {
+            tracing::warn!(
+                nonce = %pending.nonce,
+                workpiece = %workpiece,
+                "local executor backend: refine lap has no journaled construct session for its workpiece; falling through to the pool"
+            );
+            return None;
+        };
+        let Some(profile) = pending.profile.as_ref() else {
+            tracing::warn!(
+                nonce = %pending.nonce,
+                workpiece = %workpiece,
+                "local executor backend: refine lap carries no sealed profile, so its journaled construct session cannot be keyed; falling through to the pool"
+            );
+            return None;
+        };
         let task = super::session_reuse::pool_task(&pending.command, pending.task.as_deref());
         let request = AcquireRequest {
             model: &profile.model,

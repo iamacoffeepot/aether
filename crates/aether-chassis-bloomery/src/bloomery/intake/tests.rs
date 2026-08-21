@@ -352,8 +352,8 @@ fn a_right_nonce_with_the_wrong_digest_is_refused_and_the_order_stays_live() {
 }
 
 #[test]
-fn dispatch_and_record_submits_then_writes_the_order_row() {
-    // Step 2: submitting through the shell records exactly the order's registry
+fn dispatch_and_record_writes_the_order_row_and_submits() {
+    // Step 2: dispatching through the shell records exactly the order's registry
     // row (the linkage the returning evidence is matched by), leaving the core
     // work order unchanged.
     let fake = FakeGithub::new();
@@ -380,6 +380,105 @@ fn dispatch_and_record_submits_then_writes_the_order_row() {
     // the same catalog terminate differently, which is the property the sealed
     // catalog exists to deny.
     assert_eq!(stored.deadline_unix_millis, NOW_UNIX_MILLIS + 3_600_000);
+}
+
+/// An executor whose `submit` reads the journal back through its own
+/// connection, the way the local executor resolves the order it was handed
+/// before it starts the lane. `resolved` remembers whether the registry row was
+/// already there.
+struct JournalReadingExecutor {
+    store_path: String,
+    resolved: Arc<Mutex<Option<bool>>>,
+    refuse: bool,
+}
+
+impl aether_bloomery::ExecutorBackend for JournalReadingExecutor {
+    type Error = ExecutorPortError;
+
+    fn submit(&self, order: &aether_bloomery::WorkOrder) -> Result<WorkHandle, Self::Error> {
+        let mut store = SqliteStore::open(&self.store_path).expect("the lane's own connection opens the journal");
+        let found = store.lookup_order(&order.nonce.0).expect("the lookup runs").is_some();
+        *self.resolved.lock().unwrap() = Some(found);
+        drop(store);
+
+        if self.refuse {
+            return Err(ExecutorPortError::Local(LocalExecutorError::Spawn(std::io::Error::other("refused"))));
+        }
+        Ok(WorkHandle::new(order.nonce.clone()))
+    }
+
+    fn inspect(&self, _handle: &WorkHandle) -> Result<ExecutionStatus, Self::Error> {
+        Ok(ExecutionStatus::Unknown)
+    }
+
+    fn cancel(&self, _handle: &WorkHandle) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn stream_evidence(&self, _handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
+        Ok(Vec::new())
+    }
+}
+
+#[test]
+fn the_order_row_is_readable_by_the_executor_the_dispatch_hands_it_to() {
+    // Tripwire: `submit` is synchronous into the local executor, which starts
+    // the lane inside that call and resolves this order's (bloom, workpiece,
+    // stage) from the registry row to decide session reuse. Submitting before
+    // the record made every such lookup miss, so every refine relaunched cold
+    // and was then refused on the pool's context cap. The row must be visible to
+    // a separate connection by the time submit runs.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("bloomery.sqlite").to_str().expect("utf-8 temp path").to_owned();
+    let resolved = Arc::new(Mutex::new(None));
+    let shell = ExecutorShell::new(Arc::new(JournalReadingExecutor {
+        store_path: path.clone(),
+        resolved: Arc::clone(&resolved),
+        refuse: false,
+    }));
+    let mut store = SqliteStore::open(&path).unwrap();
+    let record = dispatch_record(
+        "n-visible",
+        BloomId(Digest::from_bytes([1; 32])),
+        &WorkpieceId("wp-return".to_owned()),
+        Digest::from_bytes([2; 32]),
+        Digest::from_bytes([5; 32]),
+    );
+
+    dispatch_and_record(&shell, &mut store, &record, NOW_UNIX_MILLIS).unwrap();
+
+    assert_eq!(
+        *resolved.lock().unwrap(),
+        Some(true),
+        "the executor must resolve the order it is handed, or every journaled session resume is dead",
+    );
+}
+
+#[test]
+fn a_refused_submit_leaves_no_order_row_behind() {
+    // The other half of recording first: a dispatch the executor refuses never
+    // ran, so its registry row must not outlive the refusal and wait out a
+    // deadline nobody is working against.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("bloomery.sqlite").to_str().expect("utf-8 temp path").to_owned();
+    let shell = ExecutorShell::new(Arc::new(JournalReadingExecutor {
+        store_path: path.clone(),
+        resolved: Arc::new(Mutex::new(None)),
+        refuse: true,
+    }));
+    let mut store = SqliteStore::open(&path).unwrap();
+    let record = dispatch_record(
+        "n-refused",
+        BloomId(Digest::from_bytes([1; 32])),
+        &WorkpieceId("wp-return".to_owned()),
+        Digest::from_bytes([2; 32]),
+        Digest::from_bytes([5; 32]),
+    );
+
+    let error = dispatch_and_record(&shell, &mut store, &record, NOW_UNIX_MILLIS).unwrap_err();
+
+    assert!(matches!(error, DispatchError::Submit(_)), "a refused submit surfaces as a submit fault, got {error:?}");
+    assert!(store.lookup_order("n-refused").unwrap().is_none(), "the rolled-back row is gone");
 }
 
 #[test]
