@@ -104,11 +104,16 @@ impl SurfaceRequest {
 
 /// Whether `path` is a literal repository-relative path a request may name.
 ///
+/// Shared with [`normalize_write_paths`](super::normalize_write_paths), which
+/// draws the same boundary around a lane's observed write set (ADR-0204): both
+/// take an untrusted worker's word for a path and both must refuse everything
+/// that is not one concrete file inside the repository.
+///
 /// Fails closed on everything that is not one concrete file or directory
 /// inside the repository: a glob metacharacter (which would widen the appeal
 /// past the refusal that prompted it), an absolute path, a Windows-style
 /// drive-or-backslash path, and any `..` component that walks out of the tree.
-fn literal_repo_path(path: &str) -> bool {
+pub(super) fn literal_repo_path(path: &str) -> bool {
     !path.is_empty()
         && !path.starts_with('/')
         && !path.contains('\\')

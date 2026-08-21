@@ -13,13 +13,15 @@ use super::decisions_v1::DecisionsV1;
 use super::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,
     AggregateVerifyError, AttemptCompletedError, Decision, FoldConflictError, GrantAttemptsError, HostFaultError,
-    IntegrateError, LandError, LandingRejectedError, MemberExecutorFaultError, OperatorHoldError, OperatorRepairError,
-    OrphanClaimReleaseError, ResolveError, SealError, SpliceError, SupersedeError, SurfaceRequestedError,
-    VerifyFailedError, WithdrawError,
+    IntegrateError, LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError,
+    OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ResolveError, SealError, SpliceError,
+    SupersedeError, SurfaceRequestedError, VerifyFailedError, WithdrawError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::{LandingReceipt, OrphanClaimReleaseCompletion, ResolvedBloom, SpendQuiesce, VerifyFailureSet};
+use crate::values::{
+    EvictedHolder, LandingReceipt, OrphanClaimReleaseCompletion, ResolvedBloom, SpendQuiesce, VerifyFailureSet,
+};
 
 /// The result of reducing one event: an outcome plus the ordered effects that
 /// enter the transactional outbox.
@@ -728,6 +730,24 @@ pub enum Outcome {
         /// Which gate filed this second refusal.
         refused_at: StageId,
     },
+    /// A construct lane's observed write set moved the bloom's file-lease
+    /// table (ADR-0204). Appended last so every prior outcome keeps its wire
+    /// discriminant.
+    LeasesObserved {
+        /// The bloom whose lanes contend.
+        bloom: BloomId,
+        /// The observed member.
+        workpiece: WorkpieceId,
+        /// The paths this observation took a lease on, in path order. Empty
+        /// when the member already held everything it was seen writing.
+        acquired: Vec<String>,
+        /// The later-canonical siblings this observation evicted, in member
+        /// order, each with the path that took it. Each has its lane cancelled
+        /// and re-dispatches once `workpiece` integrates.
+        evicted: Vec<EvictedHolder>,
+    },
+    /// A lane-write observation was refused.
+    LeaseObservationRejected(LeaseObservationError),
 }
 
 impl Outcome {

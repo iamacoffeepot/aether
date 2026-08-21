@@ -309,6 +309,35 @@ pub struct MemberView {
     /// that predates the field still decodes.
     #[serde(default)]
     pub withdrawn: Option<WithdrawnView>,
+    /// The repository paths this member holds a write lease on (ADR-0204), in
+    /// path order. Empty for a member whose lane has written nothing yet, and
+    /// for every member of a bloom that has finished — no lease survives its
+    /// bloom. Trailing and `#[serde(default)]` so a reader that predates the
+    /// field still decodes.
+    #[serde(default)]
+    pub leases: Vec<String>,
+    /// The earlier-canonical sibling that took a path this member held,
+    /// stopping its lane until that sibling integrates (ADR-0204). `None` for
+    /// a member that is working normally. Distinct from [`Self::blocked_by`],
+    /// which names a *declared* dependency that has not resolved: this member
+    /// declared nothing and would have run, and the file it collided on is the
+    /// only reason it is waiting. Trailing and `#[serde(default)]` so a reader
+    /// that predates the field still decodes.
+    #[serde(default)]
+    pub evicted_by: Option<LeaseEvictionView>,
+}
+
+/// Why a member's lane stopped for a file another member took (ADR-0204),
+/// rendered so the board can tell it from a member still working.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct LeaseEvictionView {
+    /// The earlier-canonical member that took the path.
+    pub by: WorkpieceId,
+    /// The contended path — the whole reason, named.
+    pub path: String,
+    /// When the eviction was decided, in unix milliseconds, so an operator
+    /// reads the lease's age the way ADR-0198 asks a lease surface to show it.
+    pub evicted_at: u64,
 }
 
 /// A member withdrawn from a walking bloom (#5327), rendered so the board can

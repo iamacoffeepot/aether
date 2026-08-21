@@ -33,7 +33,9 @@ use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
-use aether_bloomery::{EvidenceRef, ExecutionStatus, ExecutorBackend, SharedCorrespondence, WorkHandle, WorkOrder};
+use aether_bloomery::{
+    EvidenceRef, ExecutionStatus, ExecutorBackend, ObservedLaneWrites, SharedCorrespondence, WorkHandle, WorkOrder,
+};
 use aether_bloomery_github::{ActionsExecutor, ExecutorError, GithubError, LaneWorkflows};
 
 use super::{CoordinatorConfig, GithubConnectionConfig};
@@ -178,6 +180,10 @@ where
 
     fn stream_evidence(&self, handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
         self.0.stream_evidence(handle).map_err(Into::into)
+    }
+
+    fn observe_writes(&self) -> Vec<ObservedLaneWrites> {
+        self.0.observe_writes()
     }
 }
 
@@ -342,5 +348,16 @@ impl ExecutorShell {
     /// No run resolves for the nonce, or the artifact surface is unreachable.
     pub fn stream_evidence(&self, handle: &WorkHandle) -> Result<Vec<EvidenceRef>, ExecutorPortError> {
         self.backend.stream_evidence(handle)
+    }
+
+    /// What each live construct lane has written into its working tree so far
+    /// (ADR-0204) — the observation the reactor turns into
+    /// [`Fact::LaneWritesObserved`](aether_bloomery::Fact::LaneWritesObserved).
+    ///
+    /// Infallible: a mount with no readable working trees observes nothing,
+    /// which is the honest answer and not an error.
+    #[must_use]
+    pub fn observe_writes(&self) -> Vec<ObservedLaneWrites> {
+        self.backend.observe_writes()
     }
 }

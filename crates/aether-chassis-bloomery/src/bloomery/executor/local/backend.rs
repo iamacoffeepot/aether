@@ -10,9 +10,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_bloomery::{
     BackendObjectId, CandidateRef, Conclusion, ConfigRegistry, ConfigScopes, Digest, EvidenceRef, ExecutionStatus,
-    ExecutorBackend, Nonce, PriceTable, ResolvedModel, SharedCorrespondence, StageId, StageVerdict, StudyCost,
-    SurfaceRequest, Transformation, VerifyFailureSet, WorkHandle, WorkOrder, is_model_lane,
+    ExecutorBackend, Nonce, ObservedLaneWrites, PriceTable, ResolvedModel, SharedCorrespondence, StageId,
+    StageVerdict, StudyCost, SurfaceRequest, Transformation, VerifyFailureSet, WorkHandle, WorkOrder, is_model_lane,
 };
+use aether_bloomery_git::command;
 use aether_bloomery_github::parse_study;
 use aether_data::Kind;
 use aether_data::wire::from_bytes;
@@ -2082,6 +2083,44 @@ impl ExecutorBackend for LocalExecutor {
             return Ok(self.unbound_body_fault(handle, run, host_fault, parseable));
         }
         Ok(self.bound_stream_evidence(handle, run, host_fault, &bytes))
+    }
+
+    /// Read every live run's slot checkout (ADR-0204).
+    ///
+    /// The registry lock is released before any git spawn: an observation is a
+    /// best-effort read of a directory a child owns, and holding the allocator
+    /// across a subprocess would let one slow checkout stall every submit. A
+    /// run whose slot could not be recovered at boot carries no `worktree_dir`
+    /// and is skipped — there is no tree to read — and a read that faults warns
+    /// and contributes nothing, because an absent observation is "no new
+    /// writes" and a lease taken from a guess would be worse than a late one.
+    fn observe_writes(&self) -> Vec<ObservedLaneWrites> {
+        let live: Vec<(Nonce, PathBuf)> = {
+            let registry = self.lock();
+            registry
+                .runs
+                .iter()
+                .filter_map(|(nonce, run)| {
+                    run.worktree_dir.clone().map(|worktree| (Nonce(nonce.clone()), worktree))
+                })
+                .collect()
+        };
+
+        live.into_iter()
+            .filter_map(|(nonce, worktree)| match command::written_paths(&worktree) {
+                Ok(paths) if paths.is_empty() => None,
+                Ok(paths) => Some(ObservedLaneWrites { nonce, paths }),
+                Err(error) => {
+                    tracing::debug!(
+                        target: "aether_chassis_bloomery::executor",
+                        nonce = %nonce.0,
+                        %error,
+                        "local executor backend: lane working tree unreadable this tick; observing no writes",
+                    );
+                    None
+                }
+            })
+            .collect()
     }
 }
 

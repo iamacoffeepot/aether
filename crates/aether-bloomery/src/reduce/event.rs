@@ -675,6 +675,47 @@ pub enum Fact {
         /// dependent's withdrawal without its cause.
         cascade: bool,
     },
+    /// The executor observed what one construct lane has written into its slot
+    /// checkout (ADR-0204).
+    ///
+    /// Exclusivity between co-sealed members is per file and acquired at first
+    /// observed write, so this is the only input the lease table has. The host
+    /// reads the lane's working tree — `git status --porcelain` on the slot
+    /// checkout — and reports the repository-relative paths; the reducer owns
+    /// what that means for the lease table, exactly as it owns the advance
+    /// decision behind a raw pass/fail observation.
+    ///
+    /// Restating the same set is a no-op by construction: a path the member
+    /// already holds re-reads its own lease. What makes the observation
+    /// idempotent against the *journal* is the admission key, which the host
+    /// derives from the nonce and the observed set together, so re-observing
+    /// an unchanged tree never reaches the reducer at all.
+    ///
+    /// A write outside the declared surface is *not* handled here. It stays a
+    /// containment verify failure (ADR-0209 / #5238): the lease table answers
+    /// "who else is writing this", never "may this member write at all".
+    ///
+    /// Appended past [`Fact::Withdraw`] so every prior fact keeps its wire
+    /// discriminant.
+    LaneWritesObserved {
+        /// The bloom whose lanes contend.
+        bloom: BloomId,
+        /// The member whose lane was observed.
+        workpiece: WorkpieceId,
+        /// The stage the observed lane is running — the member's current
+        /// cursor stage, or the observation is stale.
+        stage: StageId,
+        /// The repository-relative paths the lane has written, already through
+        /// [`normalize_write_paths`](crate::normalize_write_paths): sorted,
+        /// deduplicated, capped, and free of anything that is not one literal
+        /// path inside the repository.
+        paths: Vec<String>,
+        /// When the host read the working tree, in unix milliseconds. The
+        /// reducer holds no clock, so a lease's age — which ADR-0198 requires
+        /// a lease to make visible — arrives with the observation that takes
+        /// it.
+        observed_at: u64,
+    },
 }
 
 impl Fact {

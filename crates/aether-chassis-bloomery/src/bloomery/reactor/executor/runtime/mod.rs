@@ -46,9 +46,9 @@ use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
     Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, BloomId, CancelDispatchPayload, CandidateRef,
-    ConfigRegistry, ConfigScopes, Digest, DispatchPayload, ExecutionStatus, Fact, ModelOverride, Nonce,
+    ConfigRegistry, ConfigScopes, Digest, DispatchPayload, Event, ExecutionStatus, Fact, ModelOverride, Nonce,
     RedispatchPayload, ReviewPass, SharedCorrespondence, StageId, StageVerdict, TimeoutRecord, Topic, VerifyFailureSet,
-    WorkHandle, WorkpieceId, pin_workpiece_description,
+    WorkHandle, WorkpieceId, normalize_write_paths, pin_workpiece_description,
 };
 use aether_bloomery_git::command;
 use aether_bloomery_github::{GitObjectId, candidate_ref_name, member_checkpoint_ref_name, short_hex};
@@ -69,8 +69,8 @@ use crate::bloomery::GithubConnectionConfig;
 use crate::bloomery::dispatch_model;
 use crate::bloomery::executor::OutstandingDispatch;
 use crate::bloomery::intake::{
-    Admission, AdmitDecision, AdmitSink, CycleReport, DispatchRecord, NameEvidenceClaims, UploadedEvidence,
-    admit_uploaded, dispatch_and_record, dispatch_nonce, run_intake_cycle,
+    Admission, AdmissionKey, AdmitDecision, AdmitSink, CycleReport, DispatchRecord, NameEvidenceClaims,
+    UploadedEvidence, admit_uploaded, dispatch_and_record, dispatch_nonce, run_intake_cycle,
 };
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
@@ -1119,6 +1119,76 @@ fn drain_and_cancel(store: &mut dyn StoreBackend, executor: &ExecutorShell) -> r
     }
     Ok(ack_through)
 }
+
+/// Turn one sweep of the live construct lanes' working trees into admissible
+/// facts (ADR-0204).
+///
+/// Not an outbox drain: nothing decided this, and there is no topic to ack. The
+/// executor reads its own slot checkouts and the reducer owns what the reading
+/// means, exactly as it owns the advance decision behind a lane's raw pass/fail.
+///
+/// Three filters stand between an observation and a fact, and each drops rather
+/// than refuses, because a sweep runs every tick and a refusal storm would bury
+/// the log the real refusals live in:
+///
+/// - A nonce naming no live order is a run whose evidence already admitted.
+/// - A stage outside the construct family authors nothing to lease; the
+///   mechanical Verify lane reads and builds.
+/// - An observation whose paths all fail normalization has nothing to say.
+///
+/// The idempotency key carries a digest of the observed set, so the ordinary
+/// case — a lane re-observed on the next tick having written nothing new — is a
+/// journal no-op rather than a second fact.
+fn observe_lane_writes(
+    store: &mut dyn StoreBackend,
+    executor: &ExecutorShell,
+    now_unix_millis: u64,
+) -> rusqlite::Result<Vec<Admit>> {
+    let mut admits = Vec::new();
+    for observed in executor.observe_writes() {
+        let Some(order) = store.lookup_order(&observed.nonce.0)? else {
+            continue;
+        };
+        let Some(record) = DispatchRecord::from_stored(&order) else {
+            continue;
+        };
+        if !matches!(record.stage, StageId::Construct | StageId::Refine | StageId::Reconcile) {
+            continue;
+        }
+        let paths = normalize_write_paths(observed.paths);
+        if paths.is_empty() {
+            continue;
+        }
+
+        let fingerprint =
+            Digest::of_domain_tagged(LEASE_OBSERVATION_DOMAIN, paths.join("\0").as_bytes()).to_hex();
+        let event = Event {
+            idempotency_key: AdmissionKey::LeaseObservation.of(&format!("{}:{fingerprint}", observed.nonce.0)),
+            fact: Fact::LaneWritesObserved {
+                bloom: record.bloom,
+                workpiece: record.workpiece.clone(),
+                stage: record.stage,
+                paths,
+                observed_at: now_unix_millis,
+            },
+        };
+        match to_vec(&event) {
+            Ok(bytes) => admits.push(Admit { event: bytes }),
+            Err(error) => tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                nonce = %observed.nonce.0,
+                %error,
+                "lane-write observation did not encode; skipping this tick's leases",
+            ),
+        }
+    }
+    Ok(admits)
+}
+
+/// The domain tag the observed-set fingerprint in a lease admission key is
+/// taken under. Its own tag rather than a bare hash, so the key cannot collide
+/// with any other digest the estate mints over the same bytes.
+const LEASE_OBSERVATION_DOMAIN: &str = "aether.bloomery.lease_observation";
 
 /// Why a cancel drain stopped its ack prefix.
 enum CancelStop {
@@ -2656,6 +2726,23 @@ impl NativeActor for ExecutorReactorCapability {
                 Err(error) => {
                     tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "redispatch drain failed");
                 }
+            }
+        }
+
+        // Sweep the live construct lanes' working trees and admit what they
+        // have written (ADR-0204). Outside the backoff skip: the backoff paces
+        // a *dispatch* surface that is refusing, and an observation dispatches
+        // nothing — it reads directories this process owns. Before the pull, so
+        // a lane whose evidence lands this same tick has its final write set
+        // leased before the integration that releases it.
+        match observe_lane_writes(store, &executor, clock.now_unix_millis) {
+            Ok(admits) => {
+                for admit in admits {
+                    let _ = ctx.send_envelope_detached(control_mailbox, Admit::ID, &admit.encode_into_bytes());
+                }
+            }
+            Err(error) => {
+                tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "lane-write observation failed");
             }
         }
 

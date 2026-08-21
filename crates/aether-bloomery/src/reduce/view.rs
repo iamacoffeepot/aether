@@ -2,12 +2,13 @@
 //! render without querying back into the store (ADR-0149 §The boundary).
 
 use super::readiness::blocking_ancestor;
-use super::{AwaitingSurface, BloomRecord, Snapshot};
+use super::{AwaitingSurface, BloomRecord, LeaseEviction, Snapshot};
 use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
 use crate::port::{
     AwaitingSurfaceView, BloomView, CompositionCursorView, CompositionView, ExecutorFaultView, HostFaultView,
-    LandingBlock, MemberView, PendingDecisionView, ReviewParkView, ViewDocument, WedgeCause, WithdrawnView,
+    LandingBlock, LeaseEvictionView, MemberView, PendingDecisionView, ReviewParkView, ViewDocument, WedgeCause,
+    WithdrawnView,
 };
 use crate::values::{Question, Withdrawal, WithdrawalCause};
 
@@ -150,8 +151,16 @@ fn member_views(
                 .awaiting_surface(&record.spec.id(), &member.workpiece)
                 .map(awaiting_surface_view),
             withdrawn: record.withdrawn.get(&member.workpiece).map(withdrawn_view),
+            leases: snapshot.leases_held(&record.spec.id(), &member.workpiece),
+            evicted_by: snapshot.lease_eviction(&record.spec.id(), &member.workpiece).map(lease_eviction_view),
         })
         .collect()
+}
+
+/// Render a lease eviction so an operator reads which sibling took which file
+/// without opening the journal (ADR-0204).
+fn lease_eviction_view(eviction: &LeaseEviction) -> LeaseEvictionView {
+    LeaseEvictionView { by: eviction.by.clone(), path: eviction.path.clone(), evicted_at: eviction.evicted_at }
 }
 
 /// Render a member's surface request so an operator reads which paths are

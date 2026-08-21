@@ -142,6 +142,35 @@ pub fn porcelain_entries(repo: &Path) -> Result<Vec<String>, GitCommandError> {
     Ok(split_nul(&String::from_utf8_lossy(&output.stdout)))
 }
 
+/// The repository-relative paths `git status --porcelain -z` reports as
+/// written in `repo` — the observation ADR-0204's write leases are acquired
+/// from.
+///
+/// # Errors
+/// Spawn failed or `git status` exited non-zero.
+pub fn written_paths(repo: &Path) -> Result<Vec<String>, GitCommandError> {
+    Ok(porcelain_path_tokens(porcelain_entries(repo)?))
+}
+
+/// Strip the two-letter status field from each `-z` porcelain entry.
+///
+/// A rename emits two tokens: the entry proper (`R  <new>`) and a bare
+/// following token holding the old name. The bare token is a path a lane
+/// touched just as much as the new name is, so it is kept as written rather
+/// than dropped — a rename out of a file another member is editing is exactly
+/// the contention a lease exists to catch. An entry is recognized by the
+/// separating space git puts at index 2; anything shorter, or without it, is
+/// the bare form.
+fn porcelain_path_tokens(entries: Vec<String>) -> Vec<String> {
+    entries
+        .into_iter()
+        .map(|entry| match entry.as_bytes().get(2) {
+            Some(b' ') if entry.len() > 3 => entry[3..].to_owned(),
+            _ => entry,
+        })
+        .collect()
+}
+
 /// Split a `-z` path list. Empty tokens (a trailing NUL) are dropped.
 #[must_use]
 pub fn split_nul(stdout: &str) -> Vec<String> {
@@ -425,8 +454,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        MIN_GIT, NAME_ONLY_DIFF_FLAGS, PORCELAIN_STATUS, name_only_diff_argv, parse_version, require_min,
-        shares_object_database, split_nul,
+        MIN_GIT, NAME_ONLY_DIFF_FLAGS, PORCELAIN_STATUS, name_only_diff_argv, parse_version, porcelain_path_tokens,
+        require_min, shares_object_database, split_nul,
     };
 
     #[test]
@@ -456,6 +485,31 @@ mod tests {
         for flag in NAME_ONLY_DIFF_FLAGS {
             assert!(argv.contains(flag), "{flag} missing from {argv:?}");
         }
+    }
+
+    #[test]
+    fn a_porcelain_entry_yields_the_path_without_its_status_field() {
+        // The plausible bug: the two-letter status field rides into the lease
+        // table, so `M  crates/a/src/lib.rs` and `A  crates/a/src/lib.rs` are
+        // two different "paths" and neither is the file anyone else contends
+        // for. The rename's bare second token has no status field to strip and
+        // must survive as written.
+        let entries = vec![
+            " M crates/a/src/lib.rs".to_string(),
+            "?? crates/a/src/new.rs".to_string(),
+            "R  crates/a/src/to.rs".to_string(),
+            "crates/a/src/from.rs".to_string(),
+        ];
+
+        assert_eq!(
+            porcelain_path_tokens(entries),
+            vec![
+                "crates/a/src/lib.rs".to_string(),
+                "crates/a/src/new.rs".to_string(),
+                "crates/a/src/to.rs".to_string(),
+                "crates/a/src/from.rs".to_string(),
+            ],
+        );
     }
 
     #[test]

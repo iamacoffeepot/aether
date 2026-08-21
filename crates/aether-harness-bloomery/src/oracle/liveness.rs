@@ -115,6 +115,10 @@ pub fn classify(document: &ViewDocument, outstanding: &[String]) -> Quiescence {
                 // A withdrawn member is an accountable stop with a named
                 // decider, not a member the machinery lost (#5327).
                 && member.withdrawn.is_none()
+                // An evicted member names the sibling and the file it waits
+                // behind (ADR-0204); it re-dispatches on that sibling's
+                // integration.
+                && member.evicted_by.is_none()
             {
                 unresolved.push(format!("{:?}/{}", bloom.id, member.workpiece.0));
             }

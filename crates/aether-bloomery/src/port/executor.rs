@@ -171,6 +171,24 @@ pub struct EvidenceRef {
     pub surface_request: Option<SurfaceRequest>,
 }
 
+/// One live construct lane's working tree, as the executor last read it
+/// (ADR-0204).
+///
+/// The nonce rather than the member, because the observation is of a *run* and
+/// only the store knows which member and stage a nonce was dispatched for. The
+/// caller resolves that from the order row it already holds, exactly as it does
+/// for every other nonce-keyed result.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ObservedLaneWrites {
+    /// The dispatch's idempotency nonce.
+    pub nonce: Nonce,
+    /// The repository-relative paths the lane has written, raw. The caller
+    /// normalizes through
+    /// [`normalize_write_paths`](crate::normalize_write_paths) before the fact
+    /// is admitted.
+    pub paths: Vec<String>,
+}
+
 /// The disposable-worker boundary (ADR-0149 §The boundary). Exactly the four
 /// messages — no arbitrary-command message exists; the command is the typed
 /// [`Transformation::command`] id. The implementation does the I/O — this
@@ -219,4 +237,24 @@ pub trait ExecutorBackend {
     /// Backend-defined — e.g. no run resolves for the nonce, or the artifact
     /// surface is unreachable.
     fn stream_evidence(&self, handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error>;
+
+    /// What each live construct lane has written into its working tree so far
+    /// (ADR-0204) — the observation per-file write leases are acquired from.
+    ///
+    /// Defaulted to empty rather than added to the four required messages: a
+    /// backend whose lanes run somewhere this process cannot read a working
+    /// tree (the Actions arm, whose runs live on GitHub's side of the wire)
+    /// honestly observes nothing, and the caller reads an empty observation as
+    /// "no new writes", never as an error. Latitude is deliberate about
+    /// cadence, not about correctness: ADR-0204 fixes candidate capture as the
+    /// *latest* permissible observation point, so a backend that returns
+    /// nothing here still cannot let a collision reach the fold undetected —
+    /// it merely detects it later.
+    ///
+    /// Infallible on purpose. A working tree that cannot be read this tick is
+    /// an absent observation, and a backend that raised here would make one
+    /// unreadable checkout stop the whole sweep.
+    fn observe_writes(&self) -> Vec<ObservedLaneWrites> {
+        Vec::new()
+    }
 }

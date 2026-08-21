@@ -15,6 +15,7 @@ mod config;
 mod fields;
 mod finding;
 mod lane;
+mod lease;
 mod model_override;
 mod operator;
 mod orphan_claim;
@@ -56,6 +57,7 @@ pub use finding::{
     classify_findings,
 };
 pub use lane::{LANE_WORKPIECE_HEADER, pin_workpiece_description, split_lane_identity};
+pub use lease::{EvictedHolder, MAX_OBSERVED_WRITES, normalize_write_paths};
 pub use model_override::{AgentSelection, ModelOverride, OverrideError, ResolvedModel, StageOverride};
 pub use operator::{Adjudication, Disposition, OperatorHold, OperatorRepair, Withdrawal, WithdrawalCause};
 pub use orphan_claim::{

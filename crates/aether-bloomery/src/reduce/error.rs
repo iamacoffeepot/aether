@@ -688,3 +688,40 @@ pub enum WithdrawError {
     /// too.
     DependentsWouldStrand(Vec<WorkpieceId>),
 }
+
+/// Why a lane-write observation was refused (ADR-0204).
+///
+/// The ladder is checked in declaration order, so the first thing wrong with an
+/// observation is the thing the host is told about. Every arm here means the
+/// observation named a member the lease table must not move for — never that
+/// the observation itself was malformed, which
+/// [`normalize_write_paths`](crate::normalize_write_paths) already dropped at
+/// the host.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum LeaseObservationError {
+    /// No active bloom with this id.
+    UnknownOrInactiveBloom,
+    /// The observation names a workpiece that is not a member of the bloom.
+    /// The composition workpiece lands here too: it weaves finished members
+    /// rather than writing beside them, so it contends with nobody.
+    NotAMember(WorkpieceId),
+    /// The member holds no dispatched cursor, so there is no lane whose
+    /// working tree this could be.
+    NotDispatched(WorkpieceId),
+    /// The named stage is not the member's current cursor stage — a stale
+    /// observation of a lane the member has already left.
+    StageMismatch {
+        /// The stage the member is actually at.
+        expected: StageId,
+        /// The stage the observation named.
+        got: StageId,
+    },
+    /// The observed stage is outside the construct family (Construct, Refine,
+    /// Reconcile) — the only stages whose lane writes a working tree. A
+    /// mechanical Verify reads and builds; it authors nothing to lease.
+    NotAConstructFamilyStage(StageId),
+    /// The observation named no path that survived normalization, so there is
+    /// nothing to lease. Refused rather than treated as a no-op, so the
+    /// journal never carries a fact that changed nothing.
+    NoPathsObserved,
+}

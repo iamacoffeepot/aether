@@ -99,15 +99,17 @@ fn termination(document: &ViewDocument, outstanding: &[String]) -> Result<(), Vi
         for member in &bloom.members {
             // Each of these is an accountable stop with a name on it: a
             // resolution, a wedge, a sick host, a construct that declined, a
-            // surface amendment a person owes (ADR-0207), or an operator's
-            // withdrawal (#5327). A member with none of them and no lane is
+            // surface amendment a person owes (ADR-0207), an operator's
+            // withdrawal (#5327), or an eviction waiting on the sibling that
+            // took its file (ADR-0204). A member with none of them and no lane is
             // the nameless wait this oracle exists to catch.
             let named = member.resolution.is_some()
                 || member.wedge.is_some()
                 || member.host_fault.is_some()
                 || member.park.is_some()
                 || member.awaiting_surface.is_some()
-                || member.withdrawn.is_some();
+                || member.withdrawn.is_some()
+                || member.evicted_by.is_some();
             if !named {
                 return Err(Violation {
                     bloom: Some(bloom.id.0.to_hex()),

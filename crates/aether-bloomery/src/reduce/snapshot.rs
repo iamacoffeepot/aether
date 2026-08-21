@@ -7,6 +7,7 @@
 //! mechanical, and history immune to rule changes.
 
 use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
@@ -114,6 +115,24 @@ pub struct Snapshot {
     /// frozen graph. `#[serde(default)]` is the `member_parks` precedent.
     #[serde(default)]
     pub surface_requests: BTreeMap<BloomId, BTreeMap<WorkpieceId, AwaitingSurface>>,
+    /// The per-file write leases a bloom's construct lanes hold (ADR-0204),
+    /// keyed by bloom then repository path. Folded from
+    /// [`Fact::LaneWritesObserved`] the way a surface request is folded from
+    /// its own fact, so no new [`Decision`] enters the wire-frozen graph.
+    ///
+    /// Keyed by path rather than by member because the exclusivity question is
+    /// "who holds this file", asked once per observed write. `#[serde(default)]`
+    /// is the `surface_requests` precedent.
+    #[serde(default)]
+    pub file_leases: BTreeMap<BloomId, BTreeMap<String, FileLease>>,
+    /// The members whose lanes were stopped so an earlier-canonical sibling
+    /// could take a path they held (ADR-0204), keyed by bloom then workpiece.
+    ///
+    /// Read at the evicting member's integration, which is what re-dispatches
+    /// the evicted one on the advanced base; the entry is dropped on the same
+    /// fold. `#[serde(default)]` is the `surface_requests` precedent.
+    #[serde(default)]
+    pub lease_evictions: BTreeMap<BloomId, BTreeMap<WorkpieceId, LeaseEviction>>,
 }
 
 impl Snapshot {
@@ -154,6 +173,27 @@ impl Snapshot {
     #[must_use]
     pub fn awaiting_surface(&self, bloom: &BloomId, workpiece: &WorkpieceId) -> Option<&AwaitingSurface> {
         self.surface_requests.get(bloom)?.get(workpiece)
+    }
+
+    /// Who holds the write lease on `path` in `bloom` (ADR-0204).
+    #[must_use]
+    pub fn file_lease(&self, bloom: &BloomId, path: &str) -> Option<&FileLease> {
+        self.file_leases.get(bloom)?.get(path)
+    }
+
+    /// The paths `workpiece` holds leases on in `bloom`, in path order.
+    #[must_use]
+    pub fn leases_held(&self, bloom: &BloomId, workpiece: &WorkpieceId) -> Vec<String> {
+        self.file_leases.get(bloom).into_iter().flatten().filter(|(_, lease)| lease.holder == *workpiece).map(
+            |(path, _)| path.clone(),
+        ).collect()
+    }
+
+    /// Why `workpiece`'s lane was stopped in `bloom`, while it waits for the
+    /// sibling that took its path to integrate (ADR-0204).
+    #[must_use]
+    pub fn lease_eviction(&self, bloom: &BloomId, workpiece: &WorkpieceId) -> Option<&LeaseEviction> {
+        self.lease_evictions.get(bloom)?.get(workpiece)
     }
 }
 
@@ -519,6 +559,39 @@ pub struct AwaitingSurface {
     pub requests: u32,
 }
 
+/// One member's exclusive write lease on one repository path (ADR-0204).
+///
+/// Projection state, not a journal row: the durable write is
+/// [`Fact::LaneWritesObserved`]. Held from the first observed write until the
+/// member integrates or is retired, and never past the bloom — every lease is
+/// scoped to the bloom whose lanes contend for the file.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct FileLease {
+    /// The member holding the path.
+    pub holder: WorkpieceId,
+    /// When the lease was taken, in unix milliseconds as the observing host
+    /// read its clock. The operator projection renders holder and age from
+    /// this, which is what ADR-0198 asks a lease to make visible.
+    pub acquired_at: u64,
+}
+
+/// Why a member's lane was stopped and which sibling it now waits behind
+/// (ADR-0204 §Contention resolves by canonical id).
+///
+/// Projection state, not a journal row: the durable write is the same
+/// [`Fact::LaneWritesObserved`] that took the lease away. An eviction is not a
+/// wedge and not a park — no attempt or repair roll moved — and it clears
+/// itself when `by` integrates and the resume dispatch goes out.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct LeaseEviction {
+    /// The earlier-canonical member that took the path.
+    pub by: WorkpieceId,
+    /// The contended path, so an operator reads why without the journal.
+    pub path: String,
+    /// When the eviction was decided, in unix milliseconds.
+    pub evicted_at: u64,
+}
+
 /// A member held at Verify because the host could not run the gates (#5020).
 ///
 /// Projection state, not a journal row: the durable write is
@@ -700,6 +773,7 @@ impl Snapshot {
         next.record_construct_park(event, decisions);
         next.record_fold_refusal(event, decisions);
         next.record_surface_request(event, decisions);
+        next.record_file_leases(event, decisions);
         next
     }
 
@@ -805,6 +879,106 @@ impl Snapshot {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Move the bloom's file-lease table from the admitted fact (ADR-0204).
+    ///
+    /// Three lifetimes meet here, which is why they are one function rather
+    /// than three scattered arms — a lease that outlives any of them is a file
+    /// no sibling can ever take:
+    ///
+    /// - **Acquisition and eviction** ride [`Fact::LaneWritesObserved`], gated
+    ///   on the matching outcome so a refused observation cannot plant a lease
+    ///   the reducer rejected.
+    /// - **Integration** releases the member's leases: its work is folded, so
+    ///   nothing of it is still being written. The same fold drops the
+    ///   evictions it caused, because the resume dispatches were decided on
+    ///   this row.
+    /// - **Retirement** releases them too — a wedged or withdrawn member is
+    ///   never going to write again — and a bloom reaching a terminal status
+    ///   drops its whole table, so no lease survives its bloom.
+    fn record_file_leases(&mut self, event: &Event, decisions: &Decisions) {
+        match &event.fact {
+            Fact::LaneWritesObserved { bloom, workpiece, observed_at, .. } => {
+                if let Outcome::LeasesObserved { acquired, evicted, .. } = &decisions.outcome {
+                    for holder in evicted {
+                        self.release_member_leases(bloom, &holder.workpiece);
+                        self.lease_evictions.entry(*bloom).or_default().insert(
+                            holder.workpiece.clone(),
+                            LeaseEviction {
+                                by: workpiece.clone(),
+                                path: holder.path.clone(),
+                                evicted_at: *observed_at,
+                            },
+                        );
+                    }
+                    let table = self.file_leases.entry(*bloom).or_default();
+                    for path in acquired {
+                        table.insert(
+                            path.clone(),
+                            FileLease { holder: workpiece.clone(), acquired_at: *observed_at },
+                        );
+                    }
+                }
+            }
+            Fact::Integrate { bloom, claim } => {
+                self.release_member_leases(bloom, &claim.workpiece);
+                if let Some(evictions) = self.lease_evictions.get_mut(bloom) {
+                    evictions.retain(|_, eviction| eviction.by != claim.workpiece);
+                }
+            }
+            _ => {}
+        }
+
+        for effect in &decisions.effects {
+            match effect {
+                Decision::RecordWedge { bloom, workpiece, .. } => self.retire_member_leases(bloom, workpiece),
+                Decision::RecordWithdrawal { bloom, withdrawal } => {
+                    self.retire_member_leases(bloom, &withdrawal.workpiece);
+                }
+                Decision::SetResolved { bloom, .. }
+                | Decision::MarkSuperseded { bloom, .. }
+                | Decision::MarkBloomWithdrawn { bloom } => {
+                    self.file_leases.remove(bloom);
+                    self.lease_evictions.remove(bloom);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Retire a member that will never dispatch again: its leases go, its own
+    /// eviction record goes, and so does every eviction it *caused*.
+    ///
+    /// That last part is the one that is easy to miss and matters most. An
+    /// eviction is an excuse — the doctor and both liveness oracles read it as
+    /// "this member is legitimately waiting" — and it is redeemed by the
+    /// evicting member's integration. A member that wedges or is withdrawn
+    /// never integrates, so leaving its evictions standing would leave the
+    /// siblings it stopped excused forever, waiting on a resume that cannot
+    /// come. Dropping the excuse does not restart them, which is deliberate:
+    /// this fold decides nothing, and a member with no lane and no named stop
+    /// is exactly what the liveness invariant exists to shout about.
+    fn retire_member_leases(&mut self, bloom: &BloomId, workpiece: &WorkpieceId) {
+        self.release_member_leases(bloom, workpiece);
+        if let Some(evictions) = self.lease_evictions.get_mut(bloom) {
+            evictions.retain(|evicted, eviction| evicted != workpiece && eviction.by != *workpiece);
+            if evictions.is_empty() {
+                self.lease_evictions.remove(bloom);
+            }
+        }
+    }
+
+    /// Drop every lease `workpiece` holds in `bloom`, and the bloom's entry
+    /// once it holds none.
+    fn release_member_leases(&mut self, bloom: &BloomId, workpiece: &WorkpieceId) {
+        let Some(table) = self.file_leases.get_mut(bloom) else {
+            return;
+        };
+        table.retain(|_, lease| lease.holder != *workpiece);
+        if table.is_empty() {
+            self.file_leases.remove(bloom);
         }
     }
 

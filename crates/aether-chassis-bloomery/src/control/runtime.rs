@@ -1291,7 +1291,8 @@ fn event_bloom(event: &Event) -> Option<BloomId> {
         | Fact::FoldRefused { bloom, .. }
         | Fact::ContainmentRefused { bloom, .. }
         | Fact::SurfaceRequested { bloom, .. }
-        | Fact::Withdraw { bloom, .. } => Some(*bloom),
+        | Fact::Withdraw { bloom, .. }
+        | Fact::LaneWritesObserved { bloom, .. } => Some(*bloom),
         Fact::ObserveMainline { .. }
         | Fact::ObserveMainlineDiverged { .. }
         | Fact::RequestOrphanClaimRelease { .. }

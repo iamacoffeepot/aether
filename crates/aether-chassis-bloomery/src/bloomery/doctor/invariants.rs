@@ -508,6 +508,12 @@ fn nonterminal_member_has_lane_or_dispatch(live: &LiveState<'_>) -> Vec<String> 
                 // no lane can move it and dispatching one would reproduce the
                 // same refusal.
                 || live.snapshot.awaiting_surface(bloom, workpiece).is_some()
+                // Evicted off a contended file (ADR-0204) is likewise an
+                // accountable stop, and this one names the exact sibling and
+                // path holding the member: it re-dispatches when that sibling
+                // integrates, and dispatching it now would put two lanes back
+                // on one file.
+                || live.snapshot.lease_eviction(bloom, workpiece).is_some()
             {
                 continue;
             }

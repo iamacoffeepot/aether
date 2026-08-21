@@ -34,6 +34,7 @@ mod grant;
 mod integrate;
 mod land;
 mod landing;
+mod lease;
 mod observe;
 mod operator;
 mod operator_hold;
@@ -54,9 +55,9 @@ pub use decision::Decision;
 pub use error::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError,
     AttemptCompletedError, BaseMismatch, FoldConflictError, GrantAttemptsError, HostFaultError, IntegrateError,
-    LandError, LandingRejectedError, MemberExecutorFaultError, OperatorHoldError, OperatorRepairError,
-    OrphanClaimReleaseError, ResolveError, SealConflict, SealError, SpliceError, SupersedeError, SurfaceRequestedError,
-    VerifyFailedError, WithdrawError,
+    LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError, OperatorHoldError,
+    OperatorRepairError, OrphanClaimReleaseError, ResolveError, SealConflict, SealError, SpliceError, SupersedeError,
+    SurfaceRequestedError, VerifyFailedError, WithdrawError,
 };
 pub use event::{Event, Fact};
 pub use gate::{Gate, Read, RecordedRead, RecordedRefusal, Refusal};
@@ -65,8 +66,8 @@ pub use outcome::{
 };
 pub use seal::is_active_unlanded;
 pub use snapshot::{
-    AggregateReviewFault, AwaitingSurface, BloomRecord, BloomStatus, FoldedIntegration, HostFaultHold,
-    MemberMachineryFault, MemberPark, Snapshot, StageProgress,
+    AggregateReviewFault, AwaitingSurface, BloomRecord, BloomStatus, FileLease, FoldedIntegration, HostFaultHold,
+    LeaseEviction, MemberMachineryFault, MemberPark, Snapshot, StageProgress,
 };
 pub use view::view_of;
 
@@ -81,6 +82,7 @@ use grant::reduce_grant_attempts;
 use integrate::{reduce_integrate, reduce_resolve};
 use land::reduce_land;
 use landing::reduce_landing_rejected;
+use lease::reduce_lane_writes_observed;
 use observe::{reduce_observe_mainline, reduce_observe_mainline_diverged};
 use operator::{reduce_operator_adjudication, reduce_operator_repair};
 use operator_hold::{reduce_operator_hold, reduce_operator_release};
@@ -184,5 +186,8 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
             reduce_surface_requested(snapshot, bloom, workpiece, *stage, evidence, request)
         }
         Fact::Withdraw { bloom, withdrawals, cascade } => reduce_withdraw(snapshot, bloom, withdrawals, *cascade),
+        Fact::LaneWritesObserved { bloom, workpiece, stage, paths, observed_at: _ } => {
+            reduce_lane_writes_observed(snapshot, bloom, workpiece, *stage, paths)
+        }
     }
 }

@@ -4,6 +4,7 @@
 use alloc::vec::Vec;
 
 use super::aggregate_verify::{aggregate_gate_dispatches, aggregate_review_dispatch, at_park_ceiling};
+use super::lease::resume_entries;
 use super::readiness::newly_ready_entries;
 use super::verify_memo::{proof_of, reuse_of};
 use super::{
@@ -54,6 +55,18 @@ pub(super) fn claim_effects(
         bloom,
         &claim.workpiece,
         vehicle.map_or(claim.candidate, |candidate| candidate.checkout),
+    ));
+
+    // Members this one evicted off a contended file re-dispatch on the base it
+    // just advanced to (ADR-0204). Journaled on this row for the same reason
+    // the readiness entries above are: replay folds decisions, so a resume the
+    // integration decided has to be recorded by it.
+    effects.extend(resume_entries(
+        record,
+        bloom,
+        &claim.workpiece,
+        vehicle.map_or(claim.candidate, |candidate| candidate.checkout),
+        snapshot.lease_evictions.get(&bloom),
     ));
 
     // A withdrawn member never produces a claim and contributes no candidate
