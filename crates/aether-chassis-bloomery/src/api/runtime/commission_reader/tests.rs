@@ -57,6 +57,7 @@ fn loaded(id: &str, revision: &ScopeRevision, approvals: Vec<Vec<u8>>) -> LoadCo
         status: "open".to_owned(),
         current: Some(revision.to_canonical()),
         approvals,
+        scope_verify: None,
     }
 }
 
@@ -204,6 +205,7 @@ fn garbage_canonical_bytes_are_malformed() {
         status: "open".to_owned(),
         current: Some(vec![0xff, 0x00]),
         approvals: vec![auto_approval(digest)],
+        scope_verify: None,
     };
     let error = admit(digest, result).expect_err("garbage");
     match error {
@@ -326,6 +328,7 @@ crates/aether-chassis-bloomery/src/commission/import/**
         status: view.head.status.as_str().to_owned(),
         current: view.current.map(|revision| revision.to_canonical()),
         approvals: approvals.iter().map(|statement| to_vec(statement).expect("encode")).collect(),
+        scope_verify: None,
     };
     match admit(scope, result) {
         Err(AdmitError::Refused(refusal @ AdmissionRefusal::AbsentApproval { .. })) => {

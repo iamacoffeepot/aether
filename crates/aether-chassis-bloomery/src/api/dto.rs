@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use aether_bloomery::{BloomId, ClaimHolder, ClaimRefKind};
 use aether_bloomery::{
     CandidateRef, ConfigRegistry, Digest, Disposition, Event, Forecast, MemberDependency, Membership, Outcome,
-    ScopeRevision, StageId, Statement, Workpiece, WorkpieceId,
+    ScopeRevision, ScopeVerifyInput, ScopeVerifyReport, StageId, Statement, Workpiece, WorkpieceId,
 };
 
 use crate::bloomery::{AdrTouch, Completeness};
@@ -535,6 +535,21 @@ pub struct CreateCommissionRequest {
     pub intent: Statement,
 }
 
+/// `POST /commissions/{id}/revisions` body, read for the projection only.
+///
+/// The same body also decodes as a bare [`ScopeRevision`]; this shape reads the
+/// one field beside it. Kept separate rather than flattened onto the revision
+/// because the revision's bytes are the signed subject and must stay exactly
+/// what the encoder writes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RevisionProjection {
+    /// The workpiece's field records projected for the freeze check
+    /// (ADR-0208). Absent for a hand-authored revision, which carries no
+    /// records — absence writes no report, never a clean one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_verify: Option<ScopeVerifyInput>,
+}
+
 /// `POST /commissions` reply.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommissionCreatedView {
@@ -588,6 +603,13 @@ pub struct CommissionShowView {
     pub current: Option<ScopeRevision>,
     /// Approval statements stored for the current revision, in insert order.
     pub approvals: Vec<Statement>,
+    /// The scope-verify report journaled for the current revision (ADR-0208).
+    ///
+    /// Rendered even when `null`, unlike the optional fields above: `null` is
+    /// the explicit statement that no scope-verify evidence exists for these
+    /// bytes, and omitting the key would let a reader mistake absence for a
+    /// clean report.
+    pub scope_verify: Option<ScopeVerifyReport>,
 }
 
 /// `POST /commissions/{id}/revisions` reply.

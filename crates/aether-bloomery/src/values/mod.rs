@@ -22,6 +22,7 @@ mod price;
 mod profile;
 mod proof;
 mod question;
+mod scope_verify;
 mod spend;
 mod stage;
 mod statement;
@@ -64,6 +65,9 @@ pub use price::{LongContextBand, PriceRates, PriceTable, SealedPriceTable};
 pub use profile::{AgentProfile, Harness, ReasoningEffort, ToolPolicy};
 pub use proof::{VerifiedTree, VerifyGateSet, VerifyProof, VerifyReuse};
 pub use question::Question;
+pub use scope_verify::{
+    NamedPath, NamedSymbol, PathOrigin, SCOPE_VERIFY_SCHEMA, ScopeVerifyInput, ScopeVerifyReport, verify_scope,
+};
 pub use spend::{SpendCeiling, SpendQuiesce, SpendWindow};
 pub use stage::{
     Attempt, CONSTRUCT_IMPLEMENT_COMMAND, CandidateRef, CatalogError, DispatchKey, ExecutionLimits, NetworkProfile,
