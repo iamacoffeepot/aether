@@ -832,8 +832,14 @@ fn rerun_observation(kind: RerunKind, outcome: MemberOutcome, block: Option<Stri
 ///
 /// A failing `verify.test` with no closure at all — `AggregateVerify`, or a
 /// candidate whose blast radius the graph cannot bound — has nothing to
-/// classify out. It is worth exactly one identical recheck. A green second
-/// run is a flake, kept as an observation. A red second run is judged on the
+/// classify out. It is worth exactly one identical recheck, *unless* a property
+/// test failed: proptest prints the shrunk counterexample it found, and that
+/// input is the finding. The recheck would draw a fresh random sample, so its
+/// verdict is about different inputs entirely — a green one would excuse a
+/// defect that has a written reproduction attached to it. Such a run reports
+/// its findings from the first log and is not repeated.
+///
+/// Otherwise: a green second run is a flake, kept as an observation. A red second run is judged on the
 /// intersection of the two runs' named failures: a test that failed in both
 /// is a finding, and a test that failed in exactly one is a host fault
 /// (ADR-0176), reported as an observation. An empty intersection escalates
@@ -854,6 +860,24 @@ fn run_member_discriminated(
 
     if !classified.is_environmental() {
         if closure.is_none() {
+            // A property test that failed printed the counterexample it shrank
+            // to. That input is the finding; the recheck it would otherwise earn
+            // draws fresh random cases and says nothing about it, so a green
+            // second run here is silence, not evidence of a flake.
+            if let Some(findings) = {
+                let text = String::from_utf8_lossy(&log);
+                names_a_minimal_failing_input(&text).then(|| classified.findings().or_else(|| distil_diagnostics(&text)))
+            } {
+                return Ok(MemberRun {
+                    id: id.to_owned(),
+                    outcome,
+                    log,
+                    exit_code,
+                    findings,
+                    observation: classified.observation(),
+                });
+            }
+
             let first = classified.findings().or_else(|| distil_diagnostics(&String::from_utf8_lossy(&log)));
             let (repeat_outcome, repeat_log, repeat_exit) = run_member(id, invocation, scope, diff_base, runner)?;
             let repeat = classify_failures(id, repeat_outcome, &repeat_log, None);
@@ -936,6 +960,18 @@ fn run_member_discriminated(
         findings,
         observation: rerun_observation(RerunKind::OutOfClosure, outcome, classified.observation()),
     })
+}
+
+/// Whether this run's output carries a property test's shrunk counterexample.
+///
+/// `minimal failing input:` is the line proptest prints once it has shrunk a
+/// failing case down, and it is what makes such a failure reproducible: the
+/// input is written into the log (and into the crate's `proptest-regressions`
+/// file) rather than left to the next random draw. A run that printed one has
+/// produced a finding, never an environment observation — which is why the
+/// identical-recheck excuse does not reach it.
+fn names_a_minimal_failing_input(log: &str) -> bool {
+    log.contains("minimal failing input:")
 }
 
 /// The scope line this member's log opens with, when the member is one the run
@@ -2252,6 +2288,44 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         assert!(
             String::from_utf8_lossy(&run.log).contains("being rechecked once"),
             "both runs stay in the log, separated by the notice that says why there are two",
+        );
+    }
+
+    /// A nextest failure whose panic body is proptest's shrunk counterexample —
+    /// what a failing property test actually prints.
+    fn failing_proptest_run(test: &str) -> String {
+        format!(
+            " Starting 900 tests across 312 binaries\n        FAIL [   0.008s] (  1/900) {test}\n\n\
+             --- STDERR:              {test} ---\n\
+             thread 'test' panicked at crates/somewhere/src/lib.rs:1:9:\n\
+             Test failed: assertion failed: doctor.objections().is_empty().\n\
+             minimal failing input: script = LaneScript::Die\n\
+             \tsuccesses: 12\n\tlocal rejects: 0\n\tglobal rejects: 0\n\n\
+                  Summary [  74.6s] 900 tests run: 1 failed, 0 skipped\nerror: test run failed\n"
+        )
+    }
+
+    #[test]
+    fn a_property_test_failure_is_never_excused_by_a_green_recheck() {
+        // Acceptance: proptest draws fresh cases every run, so a recheck that
+        // comes back green proves nothing about the counterexample the first run
+        // shrank to and wrote down. Excusing it as a flake discards a defect that
+        // arrives with its own reproduction. Such a run is not repeated at all.
+        let invocation = verify_command("verify.test").expect("verify.test mapped");
+        let mut runner = ScriptedRunner::new(&[
+            (&failing_proptest_run("aether-harness-bloomery::generated a_generated_scenario_never_silences_a_member"), 100),
+            (&passing_run(), 0),
+        ]);
+
+        let run = run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, None, &mut runner)
+            .expect("the policy runs");
+
+        assert_eq!(runner.runs, 1, "a shrunk counterexample earns no recheck — a fresh sample cannot speak to it");
+        assert_eq!(run.outcome, MemberOutcome::Failed);
+        let findings = run.findings.expect("a property-test failure is repair work");
+        assert!(
+            findings.contains("a_generated_scenario_never_silences_a_member"),
+            "the failing property is named in the findings a Refine is handed",
         );
     }
 
