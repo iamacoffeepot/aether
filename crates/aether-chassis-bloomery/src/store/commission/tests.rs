@@ -2,17 +2,18 @@
 
 use std::collections::BTreeMap;
 
+use aether_bloomery::control::ScopeDispatchPayload;
 use aether_bloomery::{
     AuthorityDoor, CommissionProjection, CommissionStatus, Digest, Ed25519KeyProvider, FakeKeyProvider, KeyId,
-    NamedPath, Observation, PathOrigin, Provenance, SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA, ScopeRevision,
-    ScopeRouting, ScopeVerifyInput, SignatureEnvelope, Statement, Topic, WorkpieceId, authorization_message,
-    digest_of,
+    NamedPath, Observation, PathOrigin, Provenance, SCOPE_FILL_COMMAND, SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA,
+    ScopeRevision, ScopeRouting, ScopeVerifyInput, SignatureEnvelope, StageId, Statement, Topic, WorkpieceId,
+    authorization_message, digest_of,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use ed25519_dalek::{Signer, SigningKey};
 
 use super::{CommissionBackend, CommissionError, RecordCommissionApproval, RecordCommissionApprovalResult};
-use crate::bloomery::TopicOutbox;
+use crate::bloomery::{ScopeRunRefusal, TopicOutbox, open_scope_run};
 use crate::store::runtime::{SqliteStore, StoreBackend, StoreCapabilityState};
 use crate::store::{JournalWrite, now_unix_millis};
 
@@ -92,6 +93,12 @@ fn cancel_of(intent: Digest) -> Statement {
     }
 }
 
+/// A stand-in mainline head for a scoping run — any digest, since nothing on
+/// this path resolves it against a repository.
+fn base() -> Digest {
+    Digest::from_bytes([2; 32])
+}
+
 fn seed(store: &mut SqliteStore, id: &str) -> Digest {
     store.create(&workpiece(id), &intent()).expect("create commission")
 }
@@ -126,7 +133,7 @@ fn a_v6_store_gains_empty_commission_tables() {
     let mut store = SqliteStore::open(path).expect("a v6 store migrates");
     assert!(store.list(None).expect("list").is_empty(), "migration invents no commissions");
     let flags: i64 = store.conn.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("user_version");
-    assert_eq!(flags, 12, "the open stamps the current schema");
+    assert_eq!(flags, 13, "the open stamps the current schema");
     assert!(
         store.load_projection(&workpiece("wp-1")).expect("load").is_none(),
         "migration invents no replica-issue numbers"
@@ -731,4 +738,85 @@ fn the_projection_snapshot_carries_the_intents_own_heading() {
     let entries = store.drain_topic(Topic::Commission).expect("drain");
     let payload: CommissionProjection = from_bytes(&entries[0].payload).expect("payload");
     assert_eq!(payload.title, "", "an intent with no heading carries no title");
+}
+
+#[test]
+fn a_scope_run_writes_its_ledger_row_and_its_outbox_row_together() {
+    // The acceptance case: enqueueing a scoping run journals it and dispatches
+    // it in *one* transaction (ADR-0208, #5304). The two failure shapes it
+    // rules out are a run that is recorded and never dispatched, and a
+    // dispatch with no record of why it ran — and the sequence the call
+    // returns is what makes the run addressable from its outbox row alone,
+    // because `dispatch_nonce` is a pure function of it.
+    let mut store = memory();
+    let commission = workpiece("wp-scope");
+    let intent_digest = seed(&mut store, "wp-scope");
+
+    let sequence = open_scope_run(&mut store, &commission, intent_digest, base())
+        .expect("a fresh commission opens its first scoping run");
+
+    let entries = store.drain_topic(Topic::ScopeDispatch).expect("drain");
+    assert_eq!(entries.len(), 1, "one enqueued run, one outbox row");
+    assert_eq!(entries[0].sequence, sequence, "the returned sequence is the row the drain will name");
+
+    let payload = from_bytes::<ScopeDispatchPayload>(&entries[0].payload).expect("the payload decodes");
+    assert_eq!(payload.commission, commission);
+    assert_eq!(payload.ordinal, 1);
+    assert_eq!(payload.stage, StageId::Scope);
+    assert_eq!(payload.transformation.command, SCOPE_FILL_COMMAND);
+    assert_eq!(payload.transformation.inputs, vec![payload.subject], "the run pins its own subject");
+    assert!(payload.transformation.diff_base.is_none(), "a scoping run judges no diff");
+
+    let rows = store.list_scope_runs(&commission.0).expect("list runs");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].kind, "enqueued");
+    assert_eq!(rows[0].ordinal, 1);
+}
+
+#[test]
+fn a_run_in_flight_refuses_a_second_lane_on_the_same_commission() {
+    // The plausible bug: the door keys only on "has this commission frozen a
+    // revision", so an operator double-click puts two scoping lanes on one
+    // workpiece and the later one's revision silently supersedes the
+    // earlier's.
+    let mut store = memory();
+    let commission = workpiece("wp-twice");
+    let intent_digest = seed(&mut store, "wp-twice");
+
+    open_scope_run(&mut store, &commission, intent_digest, base()).expect("the first run opens");
+    assert_eq!(
+        open_scope_run(&mut store, &commission, intent_digest, base()),
+        Err(ScopeRunRefusal::AlreadyInFlight { ordinal: 1 }),
+    );
+
+    // Answered, and the budget allows another: the second run opens at the
+    // next ordinal rather than colliding with the first.
+    let why = Digest::from_bytes([9; 32]);
+    store.record_scope_verdict(&commission.0, 1, "VerificationFailed", why.as_bytes().as_slice()).expect("verdict");
+
+    assert!(
+        open_scope_run(&mut store, &commission, intent_digest, base()).is_ok(),
+        "an answered run inside the budget does not block the retry",
+    );
+    assert_eq!(
+        store.list_scope_runs(&commission.0).expect("list").last().map(|row| row.ordinal),
+        Some(2),
+        "the retry opens at the next ordinal rather than colliding with the first",
+    );
+}
+
+#[test]
+fn a_dispatched_run_is_reachable_from_its_nonce() {
+    // The plausible bug: the ledger records the nonce but nothing can walk
+    // back from it, so the intake has no way to say which run an evidence
+    // upload answered — and the verdict lands on the wrong ordinal or nowhere.
+    let mut store = memory();
+    let commission = workpiece("wp-nonce");
+    let intent_digest = seed(&mut store, "wp-nonce");
+    open_scope_run(&mut store, &commission, intent_digest, base()).expect("open");
+
+    store.record_scope_dispatch(&commission.0, 1, "dispatch-7").expect("record dispatch");
+
+    assert_eq!(store.lookup_scope_run("dispatch-7").expect("lookup"), Some((commission.0.clone(), 1)));
+    assert_eq!(store.lookup_scope_run("dispatch-8").expect("lookup"), None);
 }

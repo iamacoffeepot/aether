@@ -29,6 +29,8 @@ pub(crate) mod poll_timer;
 #[cfg(feature = "github")]
 mod reactor;
 mod repair;
+#[cfg(feature = "runtime")]
+mod scope_run;
 #[cfg(feature = "github")]
 mod source;
 #[cfg(feature = "github")]
@@ -91,6 +93,10 @@ pub use reactor::{
 };
 #[cfg(feature = "github")]
 pub use repair::{CandidateSource, PrepareError, prepare_candidate};
+#[cfg(feature = "runtime")]
+pub use scope_run::{
+    ScopeRunRefusal, ScopeRunState, open_scope_run, scope_dispatch_payload, scope_run_state, scope_run_subject,
+};
 pub use repair::{candidate_tree_digest, capture_commit_digest};
 #[cfg(feature = "github")]
 pub use replica::{SourceReplicaShell, github_push_url, writer_marker_present};

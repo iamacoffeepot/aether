@@ -134,6 +134,11 @@ pub fn run_intake_cycle(
                     report.admitted += 1;
                     sink.admit(*admission);
                 }
+                // A scoping run's verdict landed on the commission store's own
+                // ledger and there is nothing to hand the control core
+                // (ADR-0208, #5304). Counted as admitted because it is: the
+                // order was consumed and the verdict reached the coordinator.
+                AdmitDecision::Recorded => report.admitted += 1,
                 AdmitDecision::Refused(refusal) => {
                     tracing::warn!(
                         target: "aether_chassis_bloomery::intake",
@@ -193,7 +198,9 @@ fn recover_completed_mismatch(
     };
     match admit_uploaded(store, &fault).map_err(CycleError::Intake)? {
         AdmitDecision::Admitted(admission) => Ok(Some(admission)),
-        AdmitDecision::Refused(_) => Ok(None),
+        // A recovery fault against a scoping run has already been recorded on
+        // its ledger; there is no event for the caller to admit.
+        AdmitDecision::Recorded | AdmitDecision::Refused(_) => Ok(None),
     }
 }
 

@@ -224,6 +224,25 @@ topic_vocabulary! {
     /// the bloom is still walking (#5327). Appended so the prior topics'
     /// display spellings and ordering are unchanged.
     MemberClaimRelease,
+    /// A pre-bloom scoping run (host-minted, ADR-0208): the commission store
+    /// enqueues a [`ScopeDispatchPayload`] in the same transaction that writes
+    /// the run's `enqueued` row, and the executor reactor drains it into an
+    /// ordinary work order.
+    ///
+    /// Host-minted for the reason the ADR names: scoping runs *before* a
+    /// workpiece qualifies for a bloom, so no [`Decision`] can project onto it
+    /// and [`of_decision`](Self::of_decision) never returns it — the same
+    /// posture [`Commission`](Self::Commission) already holds, and the same
+    /// producer idiom.
+    ///
+    /// Its own topic rather than a second payload shape on
+    /// [`Dispatch`](Self::Dispatch), because that drain decodes fail-stop and
+    /// `break`s without advancing its ack prefix: a foreign payload there would
+    /// park every member dispatch behind it forever. The two aggregate topics
+    /// are the estate's own precedent for "a dispatched position that is not
+    /// the member line gets its own topic and its own payload". Appended so the
+    /// prior topics' display spellings and ordering are unchanged.
+    ScopeDispatch,
 }
 
 impl Topic {
@@ -250,6 +269,7 @@ impl Topic {
             Self::Commission => "topic:commission",
             Self::CancelDispatch => "topic:cancel_dispatch",
             Self::MemberClaimRelease => "topic:member_claim_release",
+            Self::ScopeDispatch => "topic:scope_dispatch",
         }
     }
 
@@ -472,6 +492,62 @@ pub struct DispatchPayload {
     /// registry layered over the bloom's. The reactor resolves each address it
     /// needs against the store.
     pub configs: ConfigRegistry,
+}
+
+/// The pre-bloom scoping-run dispatch outbox payload (ADR-0208): the
+/// commission, the attempt ordinal, the run's content-addressed subject, and
+/// the fully-built portable [`Transformation`] the executor dispatch reactor
+/// wraps in a work order and submits — the same shape [`DispatchPayload`] has,
+/// minus every field that only a sealed bloom can supply.
+///
+/// **There is no bloom here and that is the point.** The commission's
+/// [`WorkpieceId`] is its primary key from `create_commission` onward, so it is
+/// the identity that exists before a workpiece is frozen; `ordinal` is the
+/// attempt number on that commission, mirroring `scope_revisions`' own
+/// `UNIQUE (commission, ordinal)`. A re-run against an unchanged intent is a new
+/// ordinal, never a collision — which is why the intent is a *field* of the run
+/// rather than its key.
+///
+/// Enqueued by the host (the commission store), never by the reducer: no
+/// [`Decision`] projects onto [`Topic::ScopeDispatch`]. Defined here (always
+/// compiled) so the host reactor can decode it inward, cycle-free — like
+/// [`DispatchPayload`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ScopeDispatchPayload {
+    /// The commission being scoped — the pre-freeze identity, and the order
+    /// record's workpiece axis.
+    pub commission: WorkpieceId,
+    /// Which attempt on that commission this is, from `1`.
+    pub ordinal: u64,
+    /// The run's content-addressed subject: the digest of the triple
+    /// (commission id, intent digest, base commit). Every order must pin a
+    /// digest — the drain refuses an empty `inputs` and the broker binds
+    /// returning evidence to it — and the run's own *input* is the only
+    /// content-addressable thing that exists before a revision is frozen. Not
+    /// the predecessor revision: a first-ever scope has none.
+    pub subject: Digest,
+    /// The commission's stored intent statement — the sketch the run is about.
+    pub intent: Digest,
+    /// The observed mainline the run reads code at. There is no sealed base and
+    /// no candidate before the freeze, so the tree is the head the journal
+    /// already recorded.
+    pub base: Digest,
+    /// The stage this run executes — always [`StageId::Scope`], carried
+    /// explicitly so the order record and the intake route from the payload
+    /// rather than from a constant the drain re-asserts.
+    pub stage: StageId,
+    /// The portable transformation to submit, built by
+    /// [`Transformation::for_scoping_run`](crate::values::Transformation::for_scoping_run).
+    pub transformation: Transformation,
+    /// The seat the compiled line calibrates `Scope` at
+    /// ([`StageCatalog::profile_of`](crate::values::StageCatalog::profile_of)).
+    /// Pre-bloom means no sealed catalog, so the compiled line is the
+    /// authority, exactly as `stage_binding` already falls back. Carried
+    /// unread by this path: whatever the identity slice calibrated is what
+    /// dispatches, and no [`ModelOverride`](crate::values::ModelOverride) is
+    /// resolved against it — that type is sealed into a *bloom's* registry and
+    /// there is no bloom here.
+    pub profile: AgentProfile,
 }
 
 /// The integration dispatch outbox payload (ADR-0152 §Resolution drives

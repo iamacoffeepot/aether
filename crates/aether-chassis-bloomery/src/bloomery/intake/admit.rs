@@ -156,6 +156,15 @@ pub enum AdmitDecision {
     /// The upload was refused; the reducer is untouched and the order (on a
     /// digest mismatch) stays live for the honest worker.
     Refused(IntakeRefusal),
+    /// The upload was accepted and the order consumed, but there is no reducer
+    /// event to admit — a pre-bloom scoping run (ADR-0208, #5304), whose
+    /// verdict lands on the commission store's own run ledger.
+    ///
+    /// Its own variant rather than an `Admitted` carrying an empty event: the
+    /// caller's whole job with an `Admitted` is to hand the event to the
+    /// control core, and a variant that means "nothing to hand over" must not
+    /// be reachable by forgetting to look inside one.
+    Recorded,
 }
 
 /// A failure that is neither a clean accept nor a clean refuse — the durable
@@ -546,6 +555,14 @@ fn verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Ev
 /// it. All of them precede the consume, so a refused order stays live and an
 /// honest result on it can still land.
 fn out_of_stage_refusal(stage: StageId, upload: &UploadedEvidence) -> Option<IntakeRefusal> {
+    // A pre-bloom scoping run (ADR-0208) carries every verdict onto its own
+    // ledger rather than into a `Fact`, including an `ExecutorFault` from an
+    // overdue run's termination. None of the member-stage guards below is
+    // about it: each asks which *bloom* fact a verdict would build, and this
+    // stage builds none.
+    if stage == StageId::Scope {
+        return None;
+    }
     if let Some(refusal) = verifier_failure_refusal(stage, upload) {
         return Some(refusal);
     }
@@ -608,6 +625,40 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
             return Ok(AdmitDecision::Refused(IntakeRefusal::DigestMismatch { displayed, claimed }));
         }
     };
+    // A pre-bloom scoping run (ADR-0208, #5304) routes before the member-stage
+    // ladder, because it is not on that ladder at all: it names no bloom, so
+    // there is no `Fact` for its verdict to be and nothing for the reducer to
+    // fold. The verdict lands on the run's own append-only ledger, keyed by the
+    // commission and ordinal the drain recorded against this nonce, and the
+    // order is consumed exactly as every other admitted upload consumes it.
+    //
+    // Before the ladder rather than after, so a Scope order can never reach the
+    // final `else` and be refused as `OutOfLineStage` — which is what it is
+    // refused as today, and is this slice's pre-fix failure.
+    if record.stage == StageId::Scope {
+        let Some((commission, ordinal)) = store.lookup_scope_run(&record.nonce.0)? else {
+            // A Scope order with no `dispatched` row names a run this
+            // coordinator never opened. Refuse rather than inventing an
+            // ordinal: an invented row would let a fabricated upload write
+            // into a commission's scoping history.
+            return Ok(AdmitDecision::Refused(IntakeRefusal::UnknownNonce(upload.nonce.clone())));
+        };
+        // Consume first here, unlike the member path: there is no fallible
+        // encode to fail after it, and a lost race to consumption must read as
+        // a replay rather than as a second verdict row on the same ordinal.
+        if !store.consume_order(&record.nonce.0)? {
+            return Ok(AdmitDecision::Refused(IntakeRefusal::UnknownNonce(upload.nonce.clone())));
+        }
+        store.record_scope_verdict(
+            &commission,
+            ordinal,
+            &format!("{:?}", upload.verdict),
+            evidence.detail.as_bytes().as_slice(),
+        )?;
+        store.clear_capture_diff(&record.nonce.0)?;
+        return Ok(AdmitDecision::Recorded);
+    }
+
     // Provenance (a real outstanding order) and binding (the displayed digest)
     // both hold. Build the whole admission — including the fallible event encode
     // — *before* consuming the order: consuming first and then failing the encode

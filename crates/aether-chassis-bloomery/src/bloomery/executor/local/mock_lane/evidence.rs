@@ -19,7 +19,9 @@
 use std::path::Path;
 use std::{fs, io};
 
-use aether_bloomery::{CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND, VerifyFailure, VerifyFailureSet};
+use aether_bloomery::{
+    CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND, SCOPE_FILL_COMMAND, VerifyFailure, VerifyFailureSet,
+};
 use serde_json::{Value, json};
 
 use super::script::LaneMode;
@@ -134,6 +136,9 @@ pub fn outcome_for(command: &str, nonce: &str, mode: LaneMode, subject: Option<&
     if command == REVIEW_CRITIC_COMMAND {
         return review_outcome(command, evidence_nonce, mode, subject);
     }
+    if command == SCOPE_FILL_COMMAND {
+        return scope_outcome(command, evidence_nonce, mode, subject);
+    }
     if mode == LaneMode::Environment {
         return verify_environment_outcome(command, evidence_nonce);
     }
@@ -226,6 +231,31 @@ fn review_outcome(command: &str, evidence_nonce: &str, mode: LaneMode, subject: 
     });
     stamp_claimed_subject(&mut review, mode, subject);
     Outcome { evidence: Some(evidence_bytes(&review)), exit_code: 0, candidate: None }
+}
+
+/// A scoping run's evidence (ADR-0208): a pass fills the workpiece's fields
+/// and freezes a revision; a fail says why it could not.
+///
+/// It produces **no candidate**, because there is no tree to capture: a
+/// scoping run writes a scope revision through the commission store, not a git
+/// tree the coordinator integrates. That is also why nothing here is routed
+/// through `authored_pass`'s candidate arm — the verdict is the whole result.
+fn scope_outcome(command: &str, evidence_nonce: &str, mode: LaneMode, subject: Option<&str>) -> Outcome {
+    let passed = authored_pass(mode);
+    let findings = if passed {
+        Value::Null
+    } else {
+        Value::String("the sketch does not name a producible outcome; it cannot be scoped as written.".to_owned())
+    };
+    let mut scope = json!({
+        "command": command,
+        "nonce": evidence_nonce,
+        "status": if passed { "pass" } else { "fail" },
+        "findings": findings,
+        "result_record": result_record(false, findings.as_str()),
+    });
+    stamp_claimed_subject(&mut scope, mode, subject);
+    Outcome { evidence: Some(evidence_bytes(&scope)), exit_code: 0, candidate: None }
 }
 
 fn verify_environment_outcome(command: &str, evidence_nonce: &str) -> Outcome {

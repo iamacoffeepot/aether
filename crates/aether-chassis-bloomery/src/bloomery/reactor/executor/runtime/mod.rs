@@ -82,6 +82,9 @@ use crate::bloomery::{CoordinatorConfig, ExecutorReactorSetup};
 use crate::control::ControlCore;
 use crate::store::{OutstandingOrder, SqliteStore, StoreBackend, StoreConfigError, resolve_config};
 
+mod scope;
+use scope::drain_and_dispatch_scope;
+
 mod strand;
 
 use strand::readopt_stranded_dispatches;
@@ -215,9 +218,13 @@ fn timeout_verdict(stage: StageId) -> Option<(StageVerdict, VerifyFailureSet)> {
         | StageId::Refine
         | StageId::Reconcile
         | StageId::AggregateVerify
-        | StageId::AggregateReview => Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
+        | StageId::AggregateReview
+        // A scoping run is dispatched too (ADR-0208), so an overdue one must
+        // terminate: without an arm here `terminate_live_order` cancels the
+        // child and bails, the registry row survives, and every later sweep
+        // re-selects a run nobody is waiting for.
+        | StageId::Scope => Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
         StageId::Sketch
-        | StageId::Scope
         | StageId::Approve
         | StageId::Review
         | StageId::Integrate
@@ -2694,6 +2701,25 @@ impl NativeActor for ExecutorReactorCapability {
                 }
                 Err(error) => {
                     tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "aggregate-verify drain failed");
+                }
+            }
+            // Drain + submit the pre-bloom scoping runs (ADR-0208) the same
+            // way. Its handles ride the same intake cycle and a transient
+            // failure joins the shared backoff window; what differs is only
+            // what the entry names, which is why it is its own topic.
+            match drain_and_dispatch_scope(store, &executor, clock.now_unix_millis) {
+                Ok((handles, ack_through, transient_failure)) => {
+                    if let Some(sequence) = ack_through
+                        && let Err(error) = store.ack_topic(Topic::ScopeDispatch, sequence)
+                    {
+                        tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "scope-dispatch ack failed; entries re-drive");
+                    }
+                    let now = Instant::now();
+                    state.tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, now)));
+                    state.backoff = fold_drain_backoff(state.backoff.take(), transient_failure);
+                }
+                Err(error) => {
+                    tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "scope-dispatch drain failed");
                 }
             }
             // Cancel the lanes of members an operator withdrew (#5327), on the

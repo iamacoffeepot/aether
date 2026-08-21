@@ -125,6 +125,60 @@ BEGIN
 END;
 ";
 
+/// Schema fragment for the pre-bloom scoping-run ledger (ADR-0208, #5304).
+///
+/// Beside `scope_revisions` because that is where every other pre-bloom fact
+/// already lives, and deliberately *not* in the reducer's journal:
+/// [`Snapshot`](aether_bloomery::Snapshot) keys everything by `BloomId` and
+/// every `Fact` carries one, so a scoping run there would mean either a
+/// synthetic bloom contaminating membership, the view, and the metrics ledger,
+/// or a second reducer.
+///
+/// **Append-only rows, one per transition**, rather than a mutated cursor —
+/// ADR-0208's own record-shape argument. The transitions are `enqueued` (the
+/// run and its outbox row, in one transaction), `dispatched` (the nonce the
+/// drain minted, so a run stays addressable from its outbox row alone),
+/// `verdict` (from intake), and `frozen` (the revision the run produced, the
+/// terminal success).
+///
+/// Keyed on the commission plus an attempt ordinal — the identity that exists
+/// before a workpiece is frozen. `commissions.id` is written by
+/// `create_commission` before any revision exists; the intent is a *field* of
+/// the run rather than its key, so a re-run against an unchanged intent is a
+/// new ordinal rather than a collision. The nonce index is what the intake
+/// walks back from an evidence upload.
+///
+/// The per-transition columns are nullable because a row carries only the
+/// fields its own transition names; the `kind` CHECK is what keeps the set
+/// closed.
+pub const SCOPE_RUNS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS scope_runs (
+    sequence   INTEGER PRIMARY KEY AUTOINCREMENT,
+    commission TEXT NOT NULL REFERENCES commissions(id),
+    ordinal    INTEGER NOT NULL CHECK (ordinal >= 1),
+    kind       TEXT NOT NULL CHECK (kind IN ('enqueued', 'dispatched', 'verdict', 'frozen')),
+    nonce      TEXT,
+    intent     BLOB,
+    base       BLOB,
+    subject    BLOB,
+    verdict    TEXT,
+    evidence   BLOB,
+    revision   BLOB
+);
+CREATE INDEX IF NOT EXISTS scope_runs_by_commission ON scope_runs (commission, ordinal);
+CREATE INDEX IF NOT EXISTS scope_runs_by_nonce ON scope_runs (nonce);
+CREATE TRIGGER IF NOT EXISTS scope_runs_no_update
+BEFORE UPDATE ON scope_runs
+BEGIN
+    SELECT RAISE(ABORT, 'scope_runs rows are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS scope_runs_no_delete
+BEFORE DELETE ON scope_runs
+BEGIN
+    SELECT RAISE(ABORT, 'scope_runs rows are immutable');
+END;
+";
+
 /// Schema fragment for the persisted replica-issue number (ADR-0199). The
 /// projector writes title and body only to a number stored here.
 pub const COMMISSION_PROJECTION_TABLE: &str = "\
