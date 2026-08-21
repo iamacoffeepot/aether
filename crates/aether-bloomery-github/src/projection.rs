@@ -20,8 +20,9 @@
 //!   successor bloom re-admitting the same workpiece shares one issue with its
 //!   predecessor, and a workpiece-only key would have the two overwrite each
 //!   other.
-//! - A landing receipt → one comment per bloom on every resolvable member
-//!   issue, and on the landing pull request when one exists.
+//! - A landing receipt → one comment on the landing pull request when one
+//!   exists. The member's own landing comment is written by the land reactor
+//!   at close time, not here.
 //! - A bloom has no object of its own. Before it lands there is nothing to
 //!   aggregate that `GET /view` does not serve live; afterwards its landing
 //!   pull request *is* the aggregate (ADR-0149 §What each object is).
@@ -203,18 +204,15 @@ impl<C: GithubApi + PullRequestApi + CommissionProjectionApi> ProjectionBackend 
         Ok(())
     }
 
+    /// Comment the landing receipt onto the bloom's landing pull request, if
+    /// one exists. Member issues are not a target: the land reactor writes
+    /// that comment as it closes the issue, so projecting it here would
+    /// duplicate the sentence.
     fn project_receipt(&self, projected: &ProjectedReceipt) -> Result<(), Self::Error> {
         let receipt = &projected.receipt;
         let key = receipt_key(receipt.bloom);
         let digest = content_digest("bloomery.receipt", receipt);
         let body = render_receipt_body(receipt);
-
-        for workpiece in &projected.members {
-            let Some(object) = addressed_object(workpiece) else {
-                continue;
-            };
-            self.comment_on(object, &key, digest, &body)?;
-        }
 
         // The landing pull request is a target, not a precondition — a bloom can
         // land through a path that opened none, and requiring one would wedge

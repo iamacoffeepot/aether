@@ -255,7 +255,14 @@ fn actor_setups(
         },
         land: LandReactorSetup {
             source: if coordinator.uses_local_authority() {
-                Some(Arc::new(LocalLanding::new(source.clone())))
+                Some(Arc::new(if configured {
+                    LocalLanding::with_issues(
+                        source.clone(),
+                        Some(landing_source(github, coordinator, Arc::clone(&correspondence))?),
+                    )
+                } else {
+                    LocalLanding::new(source.clone())
+                }))
             } else {
                 configured.then(|| landing_source(github, coordinator, Arc::clone(&correspondence))).transpose()?
             },

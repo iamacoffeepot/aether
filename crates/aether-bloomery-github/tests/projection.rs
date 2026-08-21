@@ -1,7 +1,7 @@
 //! Projection reconcile against the fake GitHub (#3459 step 5 coverage, as
 //! narrowed by #4663): the objects the projection must leave alone, the one
 //! folded comment per member it writes, idempotency, in-place update, the
-//! receipt's fan-out onto member issues and the landing pull request, and the
+//! receipt's comment on the landing pull request, and the
 //! delete → reappear rebuild property.
 
 #![allow(clippy::unwrap_used)]
@@ -209,7 +209,7 @@ fn two_blooms_admitting_one_workpiece_keep_a_comment_each() {
 }
 
 #[test]
-fn a_receipt_reaches_every_member_issue_and_the_landing_pull_request() {
+fn a_receipt_reaches_the_landing_pull_request() {
     const LANDING: u64 = 5000;
 
     let bloom = BloomId(digest(1));
@@ -224,16 +224,23 @@ fn a_receipt_reaches_every_member_issue_and_the_landing_pull_request() {
         })
         .expect("receipt");
 
-    assert_eq!(projection.client().comments_on(MEMBER_A).len(), 1);
-    assert_eq!(projection.client().comments_on(MEMBER_B).len(), 1);
-    assert_eq!(projection.client().comments_on(LANDING).len(), 1, "the landing pull request is a target too");
+    assert!(
+        projection.client().comments_on(MEMBER_A).is_empty(),
+        "the member's landing comment is written by the land reactor"
+    );
+    assert!(
+        projection.client().comments_on(MEMBER_B).is_empty(),
+        "the member's landing comment is written by the land reactor"
+    );
+    assert_eq!(projection.client().comments_on(LANDING).len(), 1, "the landing pull request is a target");
     assert_eq!(projection.client().issue_count(), 2, "a receipt opens nothing");
 }
 
 #[test]
-fn a_receipt_with_no_landing_pull_request_still_reaches_its_members() {
+fn a_receipt_with_no_landing_pull_request_comments_on_nothing() {
     // The pull request is a target, not a precondition: a bloom can land through
     // a path that opened none, and requiring one would wedge those lanes.
+    // Member issues are closed by the land reactor, not this projection.
     let projection = GithubProjection::new(seeded());
 
     projection
@@ -243,7 +250,10 @@ fn a_receipt_with_no_landing_pull_request_still_reaches_its_members() {
         })
         .expect("a bloom that opened no proposal still receipts");
 
-    assert_eq!(projection.client().comments_on(MEMBER_A).len(), 1);
+    assert!(
+        projection.client().comments_on(MEMBER_A).is_empty(),
+        "the member's landing comment is written by the land reactor"
+    );
 }
 
 #[test]

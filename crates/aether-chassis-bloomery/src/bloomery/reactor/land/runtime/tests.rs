@@ -290,11 +290,77 @@ fn an_open_proposal_does_not_close_member_issues() {
 }
 
 #[test]
-fn landing_does_not_close_human_source_issues() {
-    // After ADR-0199, GitHub issues Bloomery did not create stay human objects.
-    // Land marks the local commission landed and leaves close to the replica
-    // projector; treating `issue-11` as a close target would write a title
-    // Bloomery does not own.
+fn a_landed_bloom_closes_the_issue_its_member_names() {
+    // Tripwire: a day-branch land fires no GitHub closing keyword, so an
+    // uncalled close leaves every landed issue open forever.
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    fake.seed_issue(4242, "the addressing member");
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    seed_member(
+        &mut store,
+        bloom,
+        "issue-4242",
+        Some("feat(crate:aether-text): shelf-pack the glyph atlas\n\nGlyphs arrive one at a time."),
+    );
+    enqueue_land(&mut store, bloom, base, new_head);
+
+    drain_and_land(&mut store, &source).unwrap();
+
+    assert_eq!(fake.issue_is_closed(4242), Some(true));
+    let comments = fake.comments_on(4242);
+    assert_eq!(comments.len(), 1, "the landed issue receives one landing comment");
+    assert!(comments[0].contains(&short_hex(&bloom.0)), "the comment names the bloom: {}", comments[0]);
+}
+
+#[test]
+fn a_second_drain_does_not_stack_a_second_landing_comment() {
+    // The Watched::Landed arm re-runs until the journal admits the land.
+    // A blind create would stack a copy per restart; the marker upsert must not.
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    fake.seed_issue(4242, "the addressing member");
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    seed_member(&mut store, bloom, "issue-4242", Some("feat(crate:aether-text): shelf-pack the glyph atlas"));
+    enqueue_land(&mut store, bloom, base, new_head);
+
+    drain_and_land(&mut store, &source).unwrap();
+    drain_and_land(&mut store, &source).unwrap();
+
+    assert_eq!(fake.issue_is_closed(4242), Some(true));
+    assert_eq!(fake.comments_on(4242).len(), 1);
+}
+
+#[test]
+fn a_member_that_names_no_object_is_skipped() {
+    // A local-lane workpiece has no GitHub home and must not become a guessed
+    // number. The land still admits.
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    seed_member(&mut store, bloom, "reactor-core", Some("feat(crate:aether-text): shelf-pack the glyph atlas"));
+    enqueue_land(&mut store, bloom, base, new_head);
+    let before = fake.issue_count();
+
+    let (admits, _) = drain_and_land(&mut store, &source).unwrap();
+
+    assert_eq!(admits.len(), 1, "a local-lane workpiece does not block the land");
+    assert_eq!(fake.issue_count(), before, "no issue is fabricated for an unaddressable workpiece");
+}
+
+#[test]
+fn landing_closes_only_the_issue_the_member_names() {
+    // The named member is the close target. A non-member and a workpiece that
+    // names a number the repository does not hold must not be guessed at.
     let (fake, base) = seeded();
     let new_head = digest(90);
     fake.seed_git_object(&new_head);
@@ -309,11 +375,11 @@ fn landing_does_not_close_human_source_issues() {
     enqueue_land(&mut store, bloom, base, new_head);
 
     let (admits, ack_through) = drain_and_land(&mut store, &source).unwrap();
-    assert_eq!(admits.len(), 1, "leaving human issues open does not block the land");
+    assert_eq!(admits.len(), 1, "an unreachable sibling does not block the land");
     assert_eq!(ack_through, None, "the journal is still the receipt oracle");
 
-    assert_eq!(fake.issue_is_closed(11), Some(false), "a human-authored member issue is not closed");
-    assert!(fake.comments_on(11).is_empty(), "a human-authored member issue is not commented by land");
+    assert_eq!(fake.issue_is_closed(11), Some(true), "the member's source issue closes with the land");
+    assert_eq!(fake.comments_on(11).len(), 1, "the member's source issue receives one landing comment");
     assert_eq!(fake.issue_is_closed(42), Some(false), "an issue that is not a member is left alone");
     assert_eq!(fake.issue_is_closed(9999), None, "a workpiece naming no object does not fabricate one");
 }

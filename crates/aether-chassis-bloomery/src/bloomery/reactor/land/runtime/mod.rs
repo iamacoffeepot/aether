@@ -80,7 +80,8 @@ use serde::{Deserialize, Serialize};
 
 use super::LandReactorCapability;
 use aether_bloomery_github::{
-    LandAcceptance, LandProposal, LandingRefusal, LandingSource, ProposalOutcome, SourceError,
+    LandAcceptance, LandProposal, LandingRefusal, LandingSource, ProposalOutcome, SourceError, canonical_issue_number,
+    short_hex,
 };
 
 use crate::bloomery::LandReactorSetup;
@@ -252,7 +253,17 @@ enum Watched {
     /// `Resolved` and supersedable. Carries the line the drain journals.
     Declined(String),
     /// Terminal — mainline moved; admit this and ack the entry.
-    Landed(Admit),
+    ///
+    /// `new_head` is the commit mainline actually became. Under a squash
+    /// accept that is not the proposed head, so it rides here rather than
+    /// being re-derived from [`LandPayload`] — that would name a commit
+    /// that exists nowhere.
+    Landed {
+        /// The `Fact::Land` to forward.
+        admit: Admit,
+        /// The squash (or fast-forward) commit the receipt attests.
+        new_head: Digest,
+    },
     /// The landing was refused: its proposal drifted off the head the bloom
     /// proved (#4953), or the source refused the merge. Terminal *for this
     /// entry* — the admit routes the bloom back into repair or parks it — so
@@ -331,7 +342,7 @@ fn accept_proposal(
 fn landed(bloom: &BloomId, payload: &LandPayload, new_head: Digest) -> Result<Watched, SourceError> {
     let event = Event { idempotency_key: land_key(&payload.bloom), fact: Fact::Land { bloom: *bloom, new_head } };
     to_vec(&event)
-        .map(|bytes| Watched::Landed(Admit { event: bytes }))
+        .map(|bytes| Watched::Landed { admit: Admit { event: bytes }, new_head })
         .map_err(|error| SourceError::Malformed(format!("land event did not encode: {error}")))
 }
 
@@ -397,8 +408,9 @@ fn drain_and_land_emitting(
         match source.land_proposal(&bloom, &payload.expected_base, &payload.new_head, Some(&assembled)) {
             Ok(ProposalOutcome::Proposed { number }) => {
                 match watch_proposal(source, &bloom, &payload, number) {
-                    Ok(Watched::Landed(admit)) => {
+                    Ok(Watched::Landed { admit, new_head }) => {
                         mark_member_commissions_landed(store, &bloom);
+                        close_member_source_issues(store, source, &bloom, &payload.expected_base, &new_head);
                         // External merge is observed; the receipt is not durable
                         // until the journal holds `land_key`. Hold the prefix and
                         // return the idempotent Admit so a miss or restart resends.
@@ -479,6 +491,59 @@ fn drain_and_land_emitting(
         }
     }
     Ok((admits, ack_through))
+}
+
+/// Close each member's canonical source issue after the land is observed.
+///
+/// A day-branch merge does not fire GitHub's `Closes #N` keywords, so this
+/// is the close. A workpiece that names no object is skipped; a per-issue
+/// refusal is warned and dropped so one unreachable issue cannot cost the
+/// others their close, or the land its admit.
+fn close_member_source_issues(
+    store: &mut SqliteStore,
+    source: &dyn LandingSource,
+    bloom: &BloomId,
+    previous_base: &Digest,
+    new_head: &Digest,
+) {
+    let members = match store.list_dispatch_descriptions(bloom.0.as_bytes()) {
+        Ok(members) => members,
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::land",
+                %error,
+                "could not list members to close source issues; the landing itself stands",
+            );
+            return;
+        }
+    };
+    let key = format!("receipt:bloom:{}", short_hex(&bloom.0));
+    let comment = landed_comment(bloom, previous_base, new_head);
+    for (workpiece, _) in members {
+        let Some(number) = canonical_issue_number(&workpiece) else {
+            continue;
+        };
+        if let Err(error) = source.close_issue(number, &key, &comment) {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::land",
+                workpiece = workpiece.as_str(),
+                number,
+                %error,
+                "failed to close the member source issue; the landing itself stands",
+            );
+        }
+    }
+}
+
+/// The sentence a member's source issue receives when its bloom lands —
+/// unchanged from the receipt the mirror used to write on that issue.
+fn landed_comment(bloom: &BloomId, previous_base: &Digest, new_head: &Digest) -> String {
+    format!(
+        "**Landed** — bloom `{}` landed; mainline moved `{}` → `{}`.",
+        short_hex(&bloom.0),
+        short_hex(previous_base),
+        short_hex(new_head)
+    )
 }
 
 /// Mark each member commission landed before the replica is projected. Local
