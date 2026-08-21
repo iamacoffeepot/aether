@@ -16,6 +16,8 @@ mod findings;
 mod intake;
 #[cfg(feature = "github")]
 mod mirror;
+#[cfg(feature = "github")]
+mod notify;
 mod outbox;
 #[cfg(feature = "github")]
 mod replica;
@@ -70,6 +72,11 @@ pub use intake::{
 };
 #[cfg(feature = "github")]
 pub use mirror::ProjectionShell;
+#[cfg(feature = "github")]
+pub use notify::{
+    Delivered, LoudEvent, NotifyConfig, NotifyOverlay, NotifyReactorCapability, NotifyReactorSetup, NotifyReactorState,
+    NotifyTick, deliver, loud_events, webhook_sink,
+};
 pub use outbox::TopicOutbox;
 #[cfg(feature = "github")]
 pub(crate) use reactor::candidate_push_at;

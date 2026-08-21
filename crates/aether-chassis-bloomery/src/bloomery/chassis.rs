@@ -35,8 +35,9 @@ use crate::bloomery::{
     CandidatePush, ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, DoctorBoard, DoctorReactorCapability,
     DoctorReactorSetup, ExecutorReactorCapability, ExecutorReactorSetup, ExecutorShell, GithubConnectionConfig,
     IntegrateReactorCapability, IntegrateReactorSetup, JanitorReactorCapability, JanitorReactorSetup,
-    LandReactorCapability, LandReactorSetup, LaneProgram, MirrorReactorCapability, MirrorReactorSetup, ProjectionShell,
-    SourceReplicaShell, SourceShell, candidate_push_at, github_push_url,
+    LandReactorCapability, LandReactorSetup, LaneProgram, MirrorReactorCapability, MirrorReactorSetup,
+    NotifyConfig, NotifyReactorCapability, NotifyReactorSetup, ProjectionShell, SourceReplicaShell, SourceShell,
+    candidate_push_at, github_push_url, webhook_sink,
 };
 use crate::control::{ControlCore, ControlSetup};
 use crate::session::{SessionConfig, SessionPoolCapability};
@@ -108,6 +109,7 @@ struct BloomeryActorSetups {
     land: LandReactorSetup,
     integrate: IntegrateReactorSetup,
     claim_release: ClaimReleaseReactorSetup,
+    notify: NotifyReactorSetup,
     janitor: JanitorReactorSetup,
     doctor: DoctorReactorSetup,
     source: SourceSetup,
@@ -190,6 +192,7 @@ fn actor_setups(
     github: &GithubConnectionConfig,
     coordinator: &CoordinatorConfig,
     session: &SessionConfig,
+    notify: &NotifyConfig,
 ) -> Result<BloomeryActorSetups, BootError> {
     let configured = github.uses_fixture() || github.missing_connection_knobs().is_empty();
     let source_configured = configured || coordinator.uses_local_authority();
@@ -274,6 +277,14 @@ fn actor_setups(
             store_path: coordinator.store_path.clone(),
             poll_interval_secs: coordinator.poll_interval_secs,
         },
+        // Independent of every GitHub knob: the operator channel answers "is
+        // anything stuck" whether or not a projection backend is configured,
+        // and its only credential is the webhook file.
+        notify: NotifyReactorSetup {
+            sink: webhook_sink(notify),
+            store_path: coordinator.store_path.clone(),
+            poll_interval_secs: coordinator.poll_interval_secs,
+        },
         janitor: JanitorReactorSetup {
             source: source_configured.then(|| source.clone()),
             executor: executor.clone(),
@@ -316,6 +327,10 @@ pub struct BloomeryEnv {
     /// Unconfigured (empty token/owner/repo) mounts remote reactors disabled.
     #[cfg(feature = "github")]
     pub github: GithubConnectionConfig,
+    /// The operator notification webhook's host-local file path (#5166). Unset
+    /// mounts the notification reactor disabled.
+    #[cfg(feature = "github")]
+    pub notify: NotifyConfig,
     /// Backend-neutral Bloomery coordinator settings.
     pub coordinator: CoordinatorConfig,
     /// The executor session-reuse pool configuration.
@@ -360,6 +375,8 @@ impl BloomeryEnv {
         let artifacts = ArtifactsConfig::try_from_argv_then_env(cli.artifacts.clone().into_layer())?;
         #[cfg(feature = "github")]
         let github = GithubConnectionConfig::try_from_argv_then_env(cli.github.clone().into_layer())?;
+        #[cfg(feature = "github")]
+        let notify = NotifyConfig::try_from_argv_then_env(cli.notify.clone().into_layer())?;
         let mut coordinator = CoordinatorConfig::try_from_argv_then_env(cli.coordinator.clone().into_layer())?;
         let mut session = SessionConfig::try_from_argv_then_env(cli.session.clone().into_layer())?;
         let signing = SigningConfig::try_from_argv_then_env(cli.signing.clone().into_layer())?;
@@ -383,6 +400,8 @@ impl BloomeryEnv {
             artifacts,
             #[cfg(feature = "github")]
             github,
+            #[cfg(feature = "github")]
+            notify,
             coordinator,
             session,
             signing,
@@ -499,7 +518,7 @@ impl BootableChassis for BloomeryChassis {
         if LaneProgram::parse(&env.coordinator.local_lane_program) == LaneProgram::default() {
             KitReport::inspect().log_at_boot();
         }
-        let BloomeryEnv { rpc_port, http_port, store, artifacts, github, coordinator, session, signing } = env;
+        let BloomeryEnv { rpc_port, http_port, store, artifacts, github, notify, coordinator, session, signing } = env;
         // Capture the tier-policy path before `github` is moved into the source
         // cap below; the api cap's pre-seal approve gate loads it at init (#3583).
         let approval_policy_file = coordinator.approval_policy_file.clone();
@@ -515,7 +534,7 @@ impl BootableChassis for BloomeryChassis {
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
         };
-        let setups = actor_setups(&github, &coordinator, &session)?;
+        let setups = actor_setups(&github, &coordinator, &session, &notify)?;
 
         // #3947's explicit `with_aborter` is superseded by the seam inversion:
         // `composed` (which `build` routes through) installs `OutboundFatalAborter`
@@ -548,6 +567,11 @@ impl BootableChassis for BloomeryChassis {
             // source shell and its coordinator scalars.
             .with_actor::<LandReactorCapability>(setups.land)
             .with_actor::<ClaimReleaseReactorCapability>(setups.claim_release)
+            // The unattended operator channel (#5166): each tick reads the live
+            // view document, differences its loud set against the ledger, and
+            // posts what is new to the configured webhook. Mounted disabled
+            // when no webhook file is configured.
+            .with_actor::<NotifyReactorCapability>(setups.notify)
             // The janitor: reconciles the journal against on-disk worktrees,
             // evidence dirs, slot target dirs, and a terminal bloom's working
             // refs, so a kill or crash does not wait for the next boot to
@@ -666,7 +690,7 @@ mod tests {
 
     use super::{
         ArtifactsConfig, BloomeryChassis, BloomeryEnv, Chassis, CoordinatorConfig, GithubConnectionConfig,
-        SessionConfig, actor_setups, mounted_correspondence,
+        NotifyConfig, SessionConfig, actor_setups, mounted_correspondence,
     };
     use crate::signing::SigningConfig;
     use crate::store::StoreConfig;
@@ -693,8 +717,9 @@ mod tests {
             "the default config names no fixture backend; configuration alone would not refuse"
         );
 
-        let setups = actor_setups(&github, &CoordinatorConfig::default(), &SessionConfig::default())
-            .expect("actor setups resolve under defaults");
+        let setups =
+            actor_setups(&github, &CoordinatorConfig::default(), &SessionConfig::default(), &NotifyConfig::default())
+                .expect("actor setups resolve under defaults");
         let refusal = setups
             .executor
             .pusher
@@ -742,6 +767,10 @@ mod tests {
             store: StoreConfig::default(),
             artifacts: ArtifactsConfig { root: Some(artifacts_root.path().to_str().unwrap().to_owned()) },
             github: GithubConnectionConfig::default(),
+            // No webhook file → the notification reactor mounts disabled, so it
+            // claims `aether.bloomery.notify` without opening a store or a
+            // socket.
+            notify: NotifyConfig::default(),
             coordinator: CoordinatorConfig::default(),
             // The default `:memory:` pool touches no filesystem, so the session
             // cap claims `aether.session` without a data-dir open.

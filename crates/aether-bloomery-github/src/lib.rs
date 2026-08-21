@@ -63,6 +63,7 @@ mod executor;
 mod inward;
 mod landing;
 mod projection;
+mod webhook;
 
 // Re-export the moved modules so in-crate paths (`crate::source::…`,
 // `crate::correspondence::…`, `crate::marker::…`, `crate::mainline::…`) and
@@ -96,3 +97,4 @@ pub use landing::{
     landing_floor_title,
 };
 pub use projection::{GithubProjection, canonical_issue_number};
+pub use webhook::{MAX_CONTENT_CHARS, ReqwestWebhook, WebhookError, WebhookSink, content_body};

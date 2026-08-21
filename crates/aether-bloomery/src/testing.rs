@@ -220,6 +220,7 @@ impl Default for BloomView {
             composition: None,
             operator_hold: None,
             blocker: None,
+            leases: Vec::new(),
         }
     }
 }
@@ -242,6 +243,8 @@ impl Default for MemberView {
             park: None,
             awaiting_surface: None,
             withdrawn: None,
+            leases: Vec::new(),
+            evicted_by: None,
         }
     }
 }

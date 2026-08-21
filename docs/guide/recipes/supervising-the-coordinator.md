@@ -45,7 +45,24 @@ its default. Two of them decide whether the arrangement holds up:
   there, and a full root filesystem fails every later lane before it produces a
   byte of evidence.
 
-The file holds no credential. The unit mints `GITHUB_TOKEN` from `gh auth token`
+One more knob is worth setting the first time you leave the coordinator
+unattended:
+
+- **`AETHER_BLOOMERY_NOTIFY_WEBHOOK_FILE`** names a host-local file whose
+  contents are a Discord-compatible incoming webhook URL. With it set the
+  coordinator posts one plain-text message per loud transition — a bloom
+  sealed, landed, or superseded; a member wedged, parked, or waiting on a
+  surface amendment; a host fault; a spend quiesce — so a stop reaches you
+  without anyone opening the board. Unset, the notification reactor mounts
+  disabled and logs one line saying so; nothing else changes.
+
+  It is a *path* rather than the URL because the URL is a credential: anything
+  passed on the command line or in the environment is readable from a process
+  listing. Give the file mode `600` and keep it outside the checkout. The URL
+  never reaches log output at any level.
+
+The environment file holds no credential of its own. The unit mints
+`GITHUB_TOKEN` from `gh auth token`
 inside its `ExecStart` wrapper at every start, so the token lives in the
 coordinator's environment for exactly as long as the coordinator does, and a
 rotated one is picked up by a restart. The unit file states that choice and the

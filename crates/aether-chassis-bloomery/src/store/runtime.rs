@@ -587,6 +587,24 @@ pub trait StoreBackend: Send {
     fn lookup_named_dispatch(&mut self, nonce: &str) -> rusqlite::Result<Option<Vec<u8>>>;
     /// Rebuild the metrics cache when the journal has moved past the cursor.
     fn ensure_metrics(&mut self) -> rusqlite::Result<()>;
+    /// Every notification key already posted, in key order (#5166).
+    ///
+    /// The whole set rather than a per-key `holds` read, because the caller's
+    /// question is a set difference: what is loud now that was not loud before,
+    /// and what has stopped being loud. Asking key-by-key answers only the
+    /// first half, and a condition that clears and returns would then never
+    /// notify twice.
+    fn list_notifications(&mut self) -> rusqlite::Result<Vec<String>>;
+    /// Record that `key`'s message was delivered, at `posted_unix_millis`.
+    ///
+    /// Written *after* the POST succeeds, never before: an unrecorded key is
+    /// exactly a message still owed, so a crash between the two re-sends
+    /// rather than dropping. That makes the channel at-least-once, which is
+    /// the correct trade for an operator alert.
+    fn record_notification(&mut self, key: &str, posted_unix_millis: u64) -> rusqlite::Result<()>;
+    /// Forget `key` — the condition it named is no longer loud, so the same
+    /// condition arising again is a new transition and notifies again.
+    fn forget_notification(&mut self, key: &str) -> rusqlite::Result<()>;
 }
 
 /// A WAL-mode `SQLite` store. Opening runs the migrations idempotently, so
@@ -1035,6 +1053,10 @@ CREATE TABLE IF NOT EXISTS member_dependency (
     member     TEXT NOT NULL,
     depends_on TEXT NOT NULL,
     PRIMARY KEY (bloom, member, depends_on)
+);
+CREATE TABLE IF NOT EXISTS notification_sent (
+    notification_key   TEXT PRIMARY KEY,
+    posted_unix_millis INTEGER NOT NULL
 );
 ";
 
@@ -2103,6 +2125,28 @@ impl StoreBackend for SqliteStore {
         if latest > cursor {
             self.fold_metrics_from_journal()?;
         }
+        Ok(())
+    }
+
+    fn list_notifications(&mut self) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT notification_key FROM notification_sent ORDER BY notification_key")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect()
+    }
+
+    fn record_notification(&mut self, key: &str, posted_unix_millis: u64) -> rusqlite::Result<()> {
+        // `OR REPLACE` rather than `OR IGNORE`: a key can only be recorded
+        // again after it was forgotten, so a collision means the same
+        // condition returned and the fresher timestamp is the true one.
+        self.conn.execute(
+            "INSERT OR REPLACE INTO notification_sent (notification_key, posted_unix_millis) VALUES (?1, ?2)",
+            rusqlite::params![key, posted_unix_millis],
+        )?;
+        Ok(())
+    }
+
+    fn forget_notification(&mut self, key: &str) -> rusqlite::Result<()> {
+        self.conn.execute("DELETE FROM notification_sent WHERE notification_key = ?1", rusqlite::params![key])?;
         Ok(())
     }
 }
