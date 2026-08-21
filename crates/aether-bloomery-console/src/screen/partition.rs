@@ -37,6 +37,13 @@ pub enum MemberState {
     /// rung rather than folded into `Held`: a hold is an ADR-0151 question an
     /// answer settles, and this is a boundary only an amendment moves.
     AwaitingSurface,
+    /// Stopped so an earlier-canonical sibling could take a file it held
+    /// (ADR-0204). Its own rung rather than `Blocked`: nothing was declared,
+    /// the member would have run, and what redeems it is a sibling's
+    /// integration rather than an operator or a budget. ADR-0198's point is
+    /// that this state must be nameable — an eviction rendered as `idle` is
+    /// the unexplained stall the lease surface exists to abolish.
+    Evicted,
     Held,
     Integrated,
     Running,
@@ -55,6 +62,9 @@ impl MemberState {
         }
         if member.awaiting_surface.is_some() {
             return Self::AwaitingSurface;
+        }
+        if member.evicted_by.is_some() {
+            return Self::Evicted;
         }
         if member.pending_decision.is_some() {
             return Self::Held;
@@ -77,6 +87,7 @@ impl MemberState {
             Self::Withdrawn => "withdrawn",
             Self::Wedged => "WEDGED",
             Self::AwaitingSurface => "surface",
+            Self::Evicted => "evicted",
             Self::Held => "held",
             Self::Integrated => "integrated",
             Self::Running => "running",
@@ -90,7 +101,10 @@ impl MemberState {
     /// owed on it.
     #[must_use]
     pub fn walks(self) -> bool {
-        matches!(self, Self::Running | Self::Wedged | Self::AwaitingSurface | Self::Held)
+        // An evicted member walks: its lane is stopped, but the bloom owes it
+        // a resume the moment the sibling that displaced it integrates. Off
+        // the live board it would go quiet exactly while it is waiting.
+        matches!(self, Self::Running | Self::Wedged | Self::AwaitingSurface | Self::Evicted | Self::Held)
     }
 }
 
@@ -102,7 +116,7 @@ fn attempt_in_flight(member: &MemberView) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{MemberState, is_history_status, is_live_status};
-    use crate::dto::{BloomStatus, MemberView, Present};
+    use crate::dto::{BloomStatus, LeaseEvictionView, MemberView, Present};
 
     #[test]
     fn board_and_history_partition_every_status() {
@@ -143,11 +157,16 @@ mod tests {
             MemberState::Held,
             MemberState::Integrated,
             MemberState::Running,
+            MemberState::Evicted,
             MemberState::Blocked,
             MemberState::Idle,
         ] {
             match state {
-                MemberState::Running | MemberState::Wedged | MemberState::AwaitingSurface | MemberState::Held => {
+                MemberState::Running
+                | MemberState::Wedged
+                | MemberState::AwaitingSurface
+                | MemberState::Evicted
+                | MemberState::Held => {
                     assert!(state.walks(), "{state:?} must walk");
                 }
                 MemberState::Withdrawn | MemberState::Integrated | MemberState::Blocked | MemberState::Idle => {
@@ -170,5 +189,26 @@ mod tests {
             }),
             MemberState::Wedged
         );
+    }
+
+    #[test]
+    fn an_evicted_member_is_named_rather_than_painted_idle() {
+        // The plausible bug (ADR-0198): a member whose lane was stopped for a
+        // contended file carries no wedge, no hold and no declared edge, so
+        // every earlier rung falls through and it paints `idle` — an
+        // unexplained stall on the board while it waits for the sibling that
+        // displaced it. It must also stay on the live board: a resume is owed.
+        let evicted = MemberView {
+            evicted_by: Some(LeaseEvictionView {
+                by: "wp-a".to_owned(),
+                path: "crates/aether-bloomery/src/lib.rs".to_owned(),
+                evicted_at: 1,
+            }),
+            ..MemberView::default()
+        };
+
+        assert_eq!(MemberState::of(&evicted), MemberState::Evicted);
+        assert_eq!(MemberState::of(&evicted).label(), "evicted");
+        assert!(MemberState::of(&evicted).walks());
     }
 }

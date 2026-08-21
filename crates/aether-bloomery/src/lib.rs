@@ -198,6 +198,7 @@ pub use port::IntegrationPosition;
 pub use port::LandOutcome;
 pub use port::LandingBlock;
 pub use port::LeaseEvictionView;
+pub use port::LeaseView;
 pub use port::MAX_TITLE_CHARS;
 pub use port::MemberView;
 pub use port::MemberWhy;

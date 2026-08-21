@@ -7,8 +7,8 @@ use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
 use crate::port::{
     AwaitingSurfaceView, BloomView, CompositionCursorView, CompositionView, ExecutorFaultView, HostFaultView,
-    LandingBlock, LeaseEvictionView, MemberView, PendingDecisionView, ReviewParkView, ViewDocument, WedgeCause,
-    WithdrawnView,
+    LandingBlock, LeaseEvictionView, LeaseView, MemberView, PendingDecisionView, ReviewParkView, ViewDocument,
+    WedgeCause, WithdrawnView,
 };
 use crate::values::{Question, Withdrawal, WithdrawalCause};
 
@@ -69,6 +69,7 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
                 composition: composition_view(record),
                 operator_hold: record.operator_hold.clone(),
                 blocker: snapshot.fold_refusal(&record.spec.id()).cloned(),
+                leases: lease_views(record, snapshot),
             }
         })
         .collect();
@@ -159,6 +160,26 @@ fn member_views(
 
 /// Render a lease eviction so an operator reads which sibling took which file
 /// without opening the journal (ADR-0204).
+/// Every lease the bloom's lanes hold, in path order (ADR-0204 / ADR-0198).
+///
+/// Path order rather than member order because the operator arrives at this
+/// table holding a path: a contended file is what an eviction names, and the
+/// table exists so that path can be looked up rather than searched for.
+fn lease_views(record: &BloomRecord, snapshot: &Snapshot) -> Vec<LeaseView> {
+    snapshot
+        .file_leases
+        .get(&record.spec.id())
+        .into_iter()
+        .flatten()
+        .map(|(path, lease)| LeaseView {
+            path: path.clone(),
+            holder: lease.holder.clone(),
+            stage: record.progress.get(&lease.holder).map(|cursor| cursor.stage),
+            acquired_at: lease.acquired_at,
+        })
+        .collect()
+}
+
 fn lease_eviction_view(eviction: &LeaseEviction) -> LeaseEvictionView {
     LeaseEvictionView { by: eviction.by.clone(), path: eviction.path.clone(), evicted_at: eviction.evicted_at }
 }
@@ -910,5 +931,44 @@ mod tests {
         let decoded: ViewDocument = serde_json::from_value(json).expect("an older document still decodes");
         assert_eq!(decoded.blooms[0].operator_hold, None);
         assert_eq!(decoded.blooms[0].members[0].cursor, None);
+    }
+
+    // The plausible bug (#5259 / ADR-0198): a lease is held, the contended
+    // path exists, and `/view` shows nothing — so contention reads as a
+    // member sitting idle for no reason, which is the unexplained stall the
+    // lease surface exists to abolish. The table is the bloom-level answer to
+    // "who holds this path", asked path-first.
+    #[test]
+    fn a_walking_bloom_carries_its_lease_table_and_an_idle_one_carries_none() {
+        let snapshot = sealed("wp");
+        let bloom = snapshot.blooms.keys().copied().next().expect("the sealed bloom");
+        assert!(view_of(&snapshot, |_| None).blooms[0].leases.is_empty(), "nothing observed, nothing held");
+
+        let observed = step(
+            &snapshot,
+            &event(
+                "writes",
+                Fact::LaneWritesObserved {
+                    bloom,
+                    workpiece: WorkpieceId("wp".into()),
+                    stage: StageId::Construct,
+                    paths: vec!["crates/aether-bloomery/src/lib.rs".into()],
+                    observed_at: 1_700_000_000_000,
+                },
+            ),
+        )
+        .0;
+
+        let view = with_following_bloom(view_of(&observed, |_| None));
+        assert_eq!(wire_round_trip(&view), view, "the lease slot must not steal the next bloom's bytes");
+
+        let leases = &view.blooms[0].leases;
+        assert_eq!(leases.len(), 1);
+        assert_eq!(leases[0].path, "crates/aether-bloomery/src/lib.rs");
+        assert_eq!(leases[0].holder.0, "wp");
+        assert_eq!(leases[0].acquired_at, 1_700_000_000_000);
+        // The stage is the holder's cursor, not the stage the observation
+        // carried: the operator question is where the holder stands now.
+        assert_eq!(leases[0].stage, observed.blooms[&bloom].progress.get(&WorkpieceId("wp".into())).map(|c| c.stage));
     }
 }

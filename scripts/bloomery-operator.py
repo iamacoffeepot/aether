@@ -935,6 +935,11 @@ def member_status_state(member: dict[str, Any], *, has_order: bool) -> str:
     A withdrawn member (#5327) outranks all of them: an operator took it out of
     the bloom, so whatever it was doing on the way out is history and it is not
     coming back into the line.
+
+    An evicted member (ADR-0204) is named rather than printed as `idle`: its
+    lane was stopped so an earlier-canonical sibling could take a file it held,
+    and it resumes when that sibling integrates. ADR-0198's whole point is that
+    a lease which is invisible turns contention into an unexplained stall.
     """
     if member.get("withdrawn"):
         return "withdrawn"
@@ -942,6 +947,8 @@ def member_status_state(member: dict[str, Any], *, has_order: bool) -> str:
         return "WEDGED"
     if member.get("awaiting_surface"):
         return "surface"
+    if member.get("evicted_by"):
+        return "evicted"
     if member.get("pending_decision"):
         return "held"
     if member.get("resolution"):

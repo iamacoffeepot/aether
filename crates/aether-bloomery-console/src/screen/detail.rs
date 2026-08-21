@@ -252,6 +252,7 @@ fn bloom_lines(view: &ViewDocument, id: DigestHex) -> Vec<Line> {
     if let Some(composition) = &bloom.composition {
         push_composition_section(&mut lines, composition);
     }
+    lines.extend(lease_lines(bloom));
     for member in &bloom.members {
         let state = member_status_state(member);
         lines.push(Line {
@@ -395,8 +396,36 @@ fn member_lines(view: &ViewDocument, bloom: DigestHex, workpiece: &str) -> Vec<L
         lines.push(label(RowKey::Other(100), format!("withdrawn  {cause}  by {}", withdrawn.operator)));
         lines.push(label(RowKey::Other(101), format!("  reason  {}", withdrawn.reason)));
     }
+    // ADR-0198: a lease is only useful if the operator can see who holds it and
+    // what displaced whom. The eviction line names both parties on one row, so
+    // a stopped member never reads as an unexplained stall.
+    if let Some(eviction) = &member.evicted_by {
+        lines.push(label(RowKey::Other(102), format!("evicted  {}  by {}", eviction.path, eviction.by)));
+    }
+    if !member.leases.is_empty() {
+        lines.push(label(RowKey::Other(103), format!("leases  {}", member.leases.join("  "))));
+    }
     if member.resolution.is_some() {
         lines.push(label(RowKey::Other(7), "resolution  integrated".to_owned()));
+    }
+    lines
+}
+
+/// The bloom's whole lease table, path-first (ADR-0204 / ADR-0198).
+///
+/// Rendered on the bloom rather than only under each member because
+/// contention is asked about path-first: an eviction names a path, and the
+/// answer to "who else is on it" is one row here instead of a scan across
+/// members. Empty while nothing has been observed writing, and the section
+/// disappears entirely rather than rendering an empty heading.
+fn lease_lines(bloom: &BloomView) -> Vec<Line> {
+    if bloom.leases.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![label(RowKey::Other(200), format!("leases  {}", bloom.leases.len()))];
+    for (row, lease) in (201u16..280).zip(bloom.leases.iter()) {
+        let stage = lease.stage.map_or_else(|| "-".to_owned(), |stage| stage.to_string());
+        lines.push(label(RowKey::Other(row), format!("  {}  {}  {stage}", lease.path, lease.holder)));
     }
     lines
 }

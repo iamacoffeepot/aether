@@ -115,6 +115,41 @@ pub struct BloomView {
     /// `#[serde(default)]` so a reader that predates the field still decodes.
     #[serde(default)]
     pub blocker: Option<RecordedRefusal>,
+    /// Every write lease this bloom's lanes hold (ADR-0204), in path order.
+    ///
+    /// Bloom-scoped rather than only per-member because the question
+    /// contention raises is "who holds this path", and answering it from
+    /// [`MemberView::leases`] means scanning every member and inverting the
+    /// map — which is how an invisible lease turns contention into an
+    /// unexplained stall (ADR-0198). Empty while nothing has been observed
+    /// writing, and empty again once the bloom finishes: no lease survives its
+    /// bloom. Trailing and `#[serde(default)]` so a reader that predates the
+    /// field still decodes.
+    #[serde(default)]
+    pub leases: Vec<LeaseView>,
+}
+
+/// One held write lease, rendered with everything ADR-0198 asks a lease
+/// surface to show: the path, who holds it, where that holder is, and how old
+/// the lease is.
+///
+/// `stage` is read off the holder's *current* cursor rather than stored on the
+/// lease, because the operator question is "who holds this path and what are
+/// they doing" — a lease taken at Construct and still held while its holder
+/// refines should read Refine, not the stage of the observation that took it.
+/// `None` when the holder carries no cursor at all, which is the moment
+/// between an eviction and its resume.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct LeaseView {
+    /// The repository-relative path under lease.
+    pub path: String,
+    /// The member holding it.
+    pub holder: WorkpieceId,
+    /// Where the holder stands now, when it has a cursor.
+    pub stage: Option<StageId>,
+    /// When the lease was taken, in unix milliseconds — the age an operator
+    /// reads against the bloom's other timestamps.
+    pub acquired_at: u64,
 }
 
 /// The composition workpiece's outward line: the cursor a weave repair sits

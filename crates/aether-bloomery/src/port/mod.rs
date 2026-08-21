@@ -33,7 +33,7 @@ pub use executor::{
 };
 pub use projection::{
     AwaitingSurfaceView, BloomView, CommissionProjection, CompositionCursorView, CompositionView,
-    ExecutorFaultView, HostFaultView, LandingBlock, LeaseEvictionView, MAX_TITLE_CHARS, MemberView, MemberWhy,
+    ExecutorFaultView, HostFaultView, LandingBlock, LeaseEvictionView, LeaseView, MAX_TITLE_CHARS, MemberView, MemberWhy,
     PendingDecisionView, ProjectedReceipt, ProjectionBackend, ReviewParkView, TransitionWhy, ViewDocument, WedgeCause,
     WhyDocument, WhyState, WithdrawnView, intent_title,
 };

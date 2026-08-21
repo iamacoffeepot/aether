@@ -250,6 +250,25 @@ pub struct BloomView {
     /// field or the bloom is not held.
     #[serde(default)]
     pub operator_hold: Option<OperatorHoldView>,
+    /// The write leases the bloom's lanes hold (ADR-0204), in path order.
+    /// Absent-tolerant: empty from a coordinator that predates the field, and
+    /// empty from one that has observed no writes yet.
+    #[serde(default)]
+    pub leases: Vec<LeaseView>,
+}
+
+/// One held write lease (ADR-0204 / ADR-0198): the path, who holds it, where
+/// that holder stands, and when it was taken.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LeaseView {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub holder: String,
+    #[serde(default)]
+    pub stage: Option<StageId>,
+    #[serde(default)]
+    pub acquired_at: u64,
 }
 
 /// One sealed member as the projection renders it.
@@ -286,6 +305,27 @@ pub struct MemberView {
     /// An operator's withdrawal (#5327). Absent-tolerant.
     #[serde(default)]
     pub withdrawn: Option<WithdrawnView>,
+    /// The paths this member holds a write lease on (ADR-0204).
+    /// Absent-tolerant.
+    #[serde(default)]
+    pub leases: Vec<String>,
+    /// The sibling that took a path this member held, stopping its lane until
+    /// that sibling integrates (ADR-0204). Absent-tolerant.
+    #[serde(default)]
+    pub evicted_by: Option<LeaseEvictionView>,
+}
+
+/// A member stopped for a file an earlier-canonical sibling took (ADR-0204).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LeaseEvictionView {
+    /// The member that took the path.
+    #[serde(default)]
+    pub by: String,
+    /// The contended path — the whole reason, named.
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub evicted_at: u64,
 }
 
 /// A member an operator withdrew (#5327): why it left, and on whose word.
