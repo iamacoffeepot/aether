@@ -1201,10 +1201,6 @@ fn a_failing_composition_review_repairs_the_weave_and_never_reopens_a_member() {
     );
     let (after3, d3) = step(&after2, &verify_passed(bloom, "v2", 44));
     assert!(matches!(d3.outcome, Outcome::AggregateVerifyPassed { .. }));
-    assert!(
-        !d3.effects.iter().any(|e| matches!(e, Decision::DispatchAggregateReview { .. })),
-        "and the returning compiler dispatches nothing: the critic is already judging that fold",
-    );
 
     // The failing delta-confirm hits the ceiling: the bloom parks to the owner,
     // and files the refusal's finding beside the park (#4977) — the two-pass

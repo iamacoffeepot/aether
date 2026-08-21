@@ -161,7 +161,7 @@ fn transport_class(error: &reqwest::Error) -> String {
 /// Hand-built rather than routed through a serde data format: this is one
 /// object with one string field, and the workspace's own codec is the only
 /// encoder the estate is permitted to grow. What that costs is the escaping,
-/// which is [`escape_json_string`] and is what the tests below pin.
+/// which is `escape_json_string` and is what the tests below pin.
 #[must_use]
 pub fn content_body(content: &str) -> String {
     let mut body = String::from("{\"content\":\"");

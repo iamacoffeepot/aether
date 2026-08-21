@@ -280,9 +280,9 @@ fn related(key: &str, candidate: &str) -> bool {
     short.len() * 100 >= long.len() * NEIGHBOUR_LENGTH_PERCENT
 }
 
-/// Lowercase, drop underscores — the same fold
-/// [`crate::symbols::query`] searches under, so what a lane finds by searching
-/// is what this gate collides on.
+/// Lowercase, drop underscores — the same fold the `crate::symbols::query`
+/// search folds under, so what a lane finds by searching is what this gate
+/// collides on.
 fn normalize(name: &str) -> String {
     name.chars().filter(|&character| character != '_').flat_map(char::to_lowercase).collect()
 }
