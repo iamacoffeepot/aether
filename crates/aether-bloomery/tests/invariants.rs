@@ -765,10 +765,11 @@ fn re_integration_overwrites_the_stale_claim() {
     assert_eq!(record.claims.len(), 1);
     assert_eq!(record.claims.get(&workpiece("wp")).unwrap().candidate, digest(200));
 
-    // The resolved bloom — through the fold's aggregate review pass
+    // The resolved bloom — through the join of the fold's two composite gates
     // (ADR-0153) — reads the refined claim.
     let (after, _) =
         step(&snapshot, &event("r", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }));
+    let (after, _) = step(&after, &verify_passed(bloom, "v-mechanical", 40));
     let verdict = event(
         "v",
         Fact::AggregateReviewCompleted {
@@ -1194,11 +1195,15 @@ fn a_failing_composition_review_repairs_the_weave_and_never_reopens_a_member() {
     // holds is the one that was refused.
     let (after2, d2) = step(&after1, &weave_repaired(bloom, "weave-1", 40, 44, 45));
     assert!(matches!(d2.outcome, Outcome::CompositionRepaired { .. }));
+    assert!(
+        d2.effects.iter().any(|e| matches!(e, Decision::DispatchAggregateReview { roll: 2, .. })),
+        "the repaired weave sends the delta-confirm out beside the compiler",
+    );
     let (after3, d3) = step(&after2, &verify_passed(bloom, "v2", 44));
     assert!(matches!(d3.outcome, Outcome::AggregateVerifyPassed { .. }));
     assert!(
-        d3.effects.iter().any(|e| matches!(e, Decision::DispatchAggregateReview { roll: 2, .. })),
-        "the passing re-verify dispatches the delta-confirm",
+        !d3.effects.iter().any(|e| matches!(e, Decision::DispatchAggregateReview { .. })),
+        "and the returning compiler dispatches nothing: the critic is already judging that fold",
     );
 
     // The failing delta-confirm hits the ceiling: the bloom parks to the owner,
@@ -2091,6 +2096,14 @@ fn a_replayed_journal_reproduces_the_landed_workpiece_refusal() {
         event("integrate", Fact::Integrate { bloom, claim: claim("issue-4866", 10, 100) }),
         event("resolve", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }),
         event(
+            "verify",
+            Fact::AggregateVerifyCompleted {
+                bloom,
+                passed: true,
+                evidence: Evidence { subject: digest(40), kind: EvidenceKind::VerificationResult, detail: digest(204) },
+            },
+        ),
+        event(
             "review",
             Fact::AggregateReviewCompleted {
                 bloom,
@@ -2119,23 +2132,22 @@ fn a_replayed_journal_reproduces_the_landed_workpiece_refusal() {
     }
 }
 
-// ADR-0153 + #4696 — the fold passes two gates before the bloom resolves, in
-// order, and resolution is land-readiness. A verified `Fact::Resolve` holds the
-// fold and dispatches the whole-bloom aggregate *verify* — the compiler, not the
-// critic; only its passing verdict dispatches the aggregate review, and only the
-// review's passing verdict emits SetResolved plus the DispatchLand naming the
-// sealed base and the resolved integrated *head* commit (distinct from the
-// artifact tree, #3615). Both lane transformations bind the integrated tree and
-// check out the integrated head.
+// ADR-0153 + #4696 — the fold passes two gates before the bloom resolves, and
+// resolution is land-readiness. A verified `Fact::Resolve` holds the fold and
+// dispatches both whole-bloom gates over it — the compiler and the critic judge
+// the same tree and read nothing from each other — and only the join of their
+// passes emits SetResolved plus the DispatchLand naming the sealed base and the
+// resolved integrated *head* commit (distinct from the artifact tree, #3615).
+// Both lane transformations bind the integrated tree and check out the
+// integrated head.
 //
-// Tripwire for the ordering above all: a fold reaching the model critic before
-// the compiler has passed is the failure this whole change exists to prevent —
-// it spends a model lane on a tree that may not build, and lets a broken fold
-// reach the landing CI, where #4689 says there is no route back. Also catches a
-// resolve that lands without either pass, a dispatch mis-binding tree/head, and
-// the land regressing to the artifact tree.
+// Tripwire for the join above all: a bloom that lands on one gate's word is the
+// failure this whole ladder exists to prevent — it lets a fold no compiler has
+// built, or no critic has read, reach the landing CI, where #4689 says there is
+// no route back. Also catches a resolve on a single verdict, a dispatch
+// mis-binding tree/head, and the land regressing to the artifact tree.
 #[test]
-fn the_fold_passes_verify_then_review_before_the_bloom_resolves() {
+fn the_fold_runs_both_composite_gates_before_the_bloom_resolves() {
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let mut snapshot = Snapshot::new(digest(1));
@@ -2152,10 +2164,14 @@ fn the_fold_passes_verify_then_review_before_the_bloom_resolves() {
         !dispatched.effects.iter().any(|effect| matches!(effect, Decision::DispatchLand { .. })),
         "no land dispatches before either verdict",
     );
-    assert!(
-        !dispatched.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })),
-        "the fold reaches the compiler before the critic, never the other way round",
-    );
+    match dispatched.effects.iter().find(|e| matches!(e, Decision::DispatchAggregateReview { .. })) {
+        Some(Decision::DispatchAggregateReview { transformation, roll, .. }) => {
+            assert_eq!(transformation.inputs[0], tree, "the critic judges the tree the compiler is building");
+            assert_eq!(transformation.checkout, head, "and checks out the same integrated head");
+            assert_eq!(*roll, 1);
+        }
+        other => panic!("expected a DispatchAggregateReview beside the verify, got {other:?}"),
+    }
     match dispatched.effects.iter().find(|e| matches!(e, Decision::DispatchAggregateVerify { .. })) {
         Some(Decision::DispatchAggregateVerify { transformation, roll, .. }) => {
             assert_eq!(transformation.inputs[0], tree, "the verify evidence binds the integrated tree");
@@ -2172,17 +2188,20 @@ fn the_fold_passes_verify_then_review_before_the_bloom_resolves() {
     let folded = after.blooms.get(&bloom).unwrap().integration.as_ref().expect("the fold is held on the record");
     assert_eq!((folded.tree, folded.head), (tree, head));
 
-    // The passing verify hands the same fold to the critic, still holding it.
+    // The passing verify files its half of the join and leaves the fold held:
+    // the critic is already judging it, so nothing is dispatched here.
     let (after, verified) = step(&after, &verify_passed(bloom, "verify", 40));
     assert!(matches!(verified.outcome, Outcome::AggregateVerifyPassed { rolls: 1, .. }));
-    match verified.effects.iter().find(|e| matches!(e, Decision::DispatchAggregateReview { .. })) {
-        Some(Decision::DispatchAggregateReview { transformation, roll, .. }) => {
-            assert_eq!(transformation.inputs[0], tree, "the review judges the tree the verify built");
-            assert_eq!(transformation.checkout, head, "the critic checks out the integrated head");
-            assert_eq!(*roll, 1);
-        }
-        other => panic!("expected a DispatchAggregateReview, got {other:?}"),
-    }
+    assert!(
+        !verified.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })),
+        "the critic left with the fold and is not dispatched twice",
+    );
+    assert!(
+        verified.effects.iter().any(|effect| {
+            matches!(effect, Decision::RecordAggregateGatePass { stage: StageId::AggregateVerify, .. })
+        }),
+        "the mechanical half of the join is recorded",
+    );
     assert!(
         !verified.effects.iter().any(|effect| matches!(effect, Decision::DispatchLand { .. })),
         "a passing verify is not land-readiness; the critic has not judged it yet",
@@ -4695,8 +4714,8 @@ fn a_multi_member_fold_still_runs_the_full_aggregate_verify() {
         "a combined tree has never been built, so the compiler has to build it",
     );
     assert!(
-        !resolved.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })),
-        "the critic still waits for the mechanical verdict",
+        resolved.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })),
+        "and the critic judges the same never-before-built tree beside it",
     );
     assert!(after.blooms.get(&bloom).unwrap().verify_reuses.is_empty());
 }
@@ -6090,7 +6109,7 @@ fn folded(bloom: BloomId, key: &str, tree: u8) -> Event {
 // lets either aggregate work order out, or one that swallowed the fold
 // itself instead of only the dispatch.
 #[test]
-fn a_held_bloom_defers_aggregate_verify_from_a_completed_fold() {
+fn a_held_bloom_defers_both_composite_gates_from_a_completed_fold() {
     let (ready, bloom) = ready_to_fold();
     let (frozen, _) = step(&ready, &held(bloom, "hold", "prevent repeated paid subject-only dispatches"));
 
@@ -6110,18 +6129,20 @@ fn a_held_bloom_defers_aggregate_verify_from_a_completed_fold() {
         "and must not skip ahead to the critic either: {:?}",
         decided.effects,
     );
-    assert!(
-        decided
-            .effects
-            .iter()
-            .any(|effect| { matches!(effect, Decision::DeferAggregate { stage: StageId::AggregateVerify, .. }) }),
-        "the withheld gate is recorded so release can rebuild it: {:?}",
-        decided.effects,
-    );
+    for stage in [StageId::AggregateVerify, StageId::AggregateReview] {
+        assert!(
+            decided
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, Decision::DeferAggregate { stage: deferred, .. } if *deferred == stage)),
+            "the withheld {stage:?} is recorded so release can rebuild it: {:?}",
+            decided.effects,
+        );
+    }
 
     let record = after.blooms.get(&bloom).unwrap();
     assert!(record.integration.is_some(), "the fold is still held — a hold gates dispatch, not facts");
-    assert_eq!(record.deferred_aggregates, BTreeSet::from([StageId::AggregateVerify]));
+    assert_eq!(record.deferred_aggregates, BTreeSet::from([StageId::AggregateVerify, StageId::AggregateReview]));
     assert_eq!(
         record.dispatches.get(&DispatchKey::Bloom { stage: StageId::AggregateVerify }),
         None,
@@ -6132,11 +6153,14 @@ fn a_held_bloom_defers_aggregate_verify_from_a_completed_fold() {
 // #5100 — the critic is the paid half of the same hole.
 //
 // An in-flight verify that returns green while the bloom is held is work
-// already running: it journals and the fold stays. What it must not do is
-// launch the review that spend is trying to stop. Tripwire: a passing
-// aggregate verify that still emits `DispatchAggregateReview` under a hold.
+// already running: it journals, records its half of the join, and the fold
+// stays. What it must not do is put anything new on a paid lane — the critic
+// left with the fold, so a verdict returning under the brake has nothing to
+// launch and nothing to owe. Tripwire: a passing aggregate verify that emits
+// `DispatchAggregateReview` under a hold, or that records a deferral for a
+// critic already judging that fold, which a release would then double-spend.
 #[test]
-fn a_held_bloom_defers_aggregate_review_from_a_passing_verify() {
+fn a_held_bloom_launches_nothing_from_a_passing_verify() {
     let (ready, bloom) = ready_to_fold();
     let (folding, _) = step(&ready, &folded(bloom, "resolve", 40));
     let (frozen, _) = step(&folding, &held(bloom, "hold", "stop the critic before it spends"));
@@ -6149,14 +6173,13 @@ fn a_held_bloom_defers_aggregate_review_from_a_passing_verify() {
         decided.effects,
     );
     assert!(
-        decided
-            .effects
-            .iter()
-            .any(|effect| { matches!(effect, Decision::DeferAggregate { stage: StageId::AggregateReview, .. }) }),
-        "the withheld critic is recorded: {:?}",
+        !decided.effects.iter().any(|effect| matches!(effect, Decision::DeferAggregate { .. })),
+        "and owes nothing it did not withhold: {:?}",
         decided.effects,
     );
-    assert_eq!(after.blooms.get(&bloom).unwrap().deferred_aggregates, BTreeSet::from([StageId::AggregateReview]),);
+    let record = after.blooms.get(&bloom).unwrap();
+    assert!(record.deferred_aggregates.is_empty());
+    assert!(record.aggregate_passed.contains(&StageId::AggregateVerify), "the mechanical half of the join is filed");
 }
 
 // #5100 — release re-derives the swallowed aggregate from the fold as it
@@ -6167,7 +6190,7 @@ fn a_held_bloom_defers_aggregate_review_from_a_passing_verify() {
 // second worker on a running verify. The recorded deferral is what tells
 // those two folds apart.
 #[test]
-fn releasing_rederives_the_aggregate_verify_the_hold_owed() {
+fn releasing_rederives_the_composite_gates_the_hold_owed() {
     let (ready, bloom) = ready_to_fold();
     let (frozen, _) = step(&ready, &held(bloom, "hold", "stop the fold's compiler"));
     let (owed, _) = step(&frozen, &folded(bloom, "resolve", 40));
@@ -6181,34 +6204,59 @@ fn releasing_rederives_the_aggregate_verify_the_hold_owed() {
         }
         other => panic!("expected the re-derived aggregate verify, got {other:?}"),
     }
-    assert!(
-        !decided.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })),
-        "release does not skip the compiler and launch the critic: {:?}",
-        decided.effects,
-    );
-
-    let record = after.blooms.get(&bloom).unwrap();
-    assert!(record.operator_hold.is_none(), "the brake is off");
-    assert!(record.deferred_aggregates.is_empty(), "and the gate that went out is no longer owed");
-}
-
-// #5100 — the critic half of the same release.
-#[test]
-fn releasing_rederives_the_aggregate_review_the_hold_owed() {
-    let (ready, bloom) = ready_to_fold();
-    let (folding, _) = step(&ready, &folded(bloom, "resolve", 40));
-    let (frozen, _) = step(&folding, &held(bloom, "hold", "stop the critic"));
-    let (owed, _) = step(&frozen, &verify_passed(bloom, "verify", 40));
-
-    let (after, decided) = step(&owed, &released(bloom, "release", "let the critic judge it"));
     match decided.effects.iter().find(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })) {
         Some(Decision::DispatchAggregateReview { transformation, roll, .. }) => {
-            assert_eq!(transformation.inputs[0], digest(40), "the critic judges the fold the verify already passed");
-            assert_eq!(transformation.checkout, digest(41), "and checks out the same head");
+            assert_eq!(transformation.inputs[0], digest(40), "the critic judges the same fold, on its own lane");
             assert_eq!(*roll, 1);
         }
         other => panic!("expected the re-derived aggregate review, got {other:?}"),
     }
+
+    let record = after.blooms.get(&bloom).unwrap();
+    assert!(record.operator_hold.is_none(), "the brake is off");
+    assert!(record.deferred_aggregates.is_empty(), "and the gates that went out are no longer owed");
+}
+
+// #5100 — the critic half of the same release, where the compiler is not owed.
+//
+// A bloom parked at the critic's ceiling has the mechanical gate's pass on the
+// held fold already, so the owner's re-arm re-dispatches only the critic. Taken
+// under a hold, that single order is the only one owed, and the release must
+// send it without re-buying a verify the record has already passed. Tripwire: a
+// release that re-derives the pair whatever the record holds.
+#[test]
+fn releasing_rederives_the_aggregate_review_the_hold_owed() {
+    let (ready, bloom) = ready_to_fold();
+    let (folding, _) = step(&ready, &folded(bloom, "resolve", 40));
+    let (verified, _) = step(&folding, &verify_passed(bloom, "v1", 40));
+    let (refused, _) = step(&verified, &review_refused(bloom, "f1", 40, 50));
+    let (rewoven, _) = step(&refused, &weave_repaired(bloom, "weave-1", 40, 42, 43));
+    let (reverified, _) = step(&rewoven, &verify_passed(bloom, "v2", 42));
+    let (parked, ceiling) = step(&reverified, &review_refused(bloom, "f2", 42, 51));
+    assert!(matches!(ceiling.outcome, Outcome::AggregateReviewParked { rolls: 2, .. }), "got {:?}", ceiling.outcome);
+
+    let (frozen, _) = step(&parked, &held(bloom, "hold", "stop the critic"));
+    let (owed, _) = step(&frozen, &event("ans", Fact::AdoptAnswer { bloom, answer: answer_adopting(digest(51)) }));
+    assert_eq!(
+        owed.blooms.get(&bloom).unwrap().deferred_aggregates,
+        BTreeSet::from([StageId::AggregateReview]),
+        "the re-arm owes the critic alone",
+    );
+
+    let (after, decided) = step(&owed, &released(bloom, "release", "let the critic judge it"));
+    match decided.effects.iter().find(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })) {
+        Some(Decision::DispatchAggregateReview { transformation, roll, .. }) => {
+            assert_eq!(transformation.inputs[0], digest(42), "the critic judges the fold the verify already passed");
+            assert_eq!(transformation.checkout, digest(43), "and checks out the same head");
+            assert_eq!(*roll, 1);
+        }
+        other => panic!("expected the re-derived aggregate review, got {other:?}"),
+    }
+    assert!(
+        !decided.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateVerify { .. })),
+        "and the compiler is not re-bought for a tree it has already passed: {:?}",
+        decided.effects,
+    );
 
     assert!(after.blooms.get(&bloom).unwrap().deferred_aggregates.is_empty());
 }

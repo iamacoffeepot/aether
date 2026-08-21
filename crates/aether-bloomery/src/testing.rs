@@ -174,8 +174,22 @@ pub fn sealed_and_resolved(mainline: u8, members: Vec<Membership>, tree: u8) -> 
         &reduce(&snapshot, &resolve, &ResolvedConfigs::default(), &SpendWindow::default()),
         &ResolvedConfigs::default(),
     );
-    // The fold dispatches the whole-bloom aggregate review (ADR-0153); a
-    // passing verdict bound to the integrated tree is what resolves the bloom.
+    // The fold dispatches both composite gates at once, and the bloom resolves
+    // on the join of the two passes. The mechanical verdict goes first so the
+    // critic's is the one that consumes the fold.
+    let mechanical = event(
+        "aggregate-verify-pass",
+        Fact::AggregateVerifyCompleted {
+            bloom,
+            passed: true,
+            evidence: Evidence { subject: digest(tree), kind: EvidenceKind::VerificationResult, detail: digest(204) },
+        },
+    );
+    snapshot = snapshot.apply(
+        &mechanical,
+        &reduce(&snapshot, &mechanical, &ResolvedConfigs::default(), &SpendWindow::default()),
+        &ResolvedConfigs::default(),
+    );
     let verdict = event(
         "aggregate-review-pass",
         Fact::AggregateReviewCompleted {
