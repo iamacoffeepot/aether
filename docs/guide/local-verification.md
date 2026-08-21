@@ -203,6 +203,24 @@ past a handful, revisit centralized rules vs. crate-local declaration (e.g.
 `[package.metadata.affected]` extra-paths read by `xtask`) as a deliberate
 design decision.
 
+## The symbol pass
+
+`verify.dup` runs a second pass beside jscpd (#5185). jscpd finds token clones;
+the pass finds *concept* clones — a helper re-derived under a name the
+workspace already has. It reads the symbols the candidate introduces (each
+touched file against the same file at the work order's diff base), asks the
+workspace inventory whether each name already lives somewhere, and adds a
+couple of argument-aware rules clippy's `disallowed-methods` cannot express: a
+`Command::new("git")` outside the modules that own the git spawn, and a
+hand-rolled hex nibble loop outside the digest codec.
+
+Nothing it finds refuses. A name that already exists may be a genuinely
+different responsibility, and only judgment separates that from re-derivation,
+so the pass writes a dossier to the evidence's `review_flags` channel and the
+review seat decides. Test files are exempt — a fixture that spawns git is
+building a repository to test against. Build the same inventory by hand with
+`cargo xtask symbols build` and search it with `cargo xtask symbols find`.
+
 ## Watching a draft PR
 
 Implementation PRs stay draft while their required facts accumulate. The

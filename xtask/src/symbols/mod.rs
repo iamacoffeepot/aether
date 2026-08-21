@@ -7,11 +7,14 @@
 //! over the shell.
 
 mod diff;
-mod extract;
+// `extract`, `references`, `table` and `walk` are read by the `verify.dup`
+// symbol pass (#5185) as well as by this command's own subcommands, so the
+// inventory has one implementation rather than a gate-side second one.
+pub(crate) mod extract;
 mod query;
-mod references;
-mod table;
-mod walk;
+pub(crate) mod references;
+pub(crate) mod table;
+pub(crate) mod walk;
 
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};

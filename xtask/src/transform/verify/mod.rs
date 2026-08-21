@@ -1,6 +1,7 @@
 mod closure;
 mod nextest;
 mod scope;
+mod symbols;
 mod tools;
 mod triage;
 #[cfg(test)]
@@ -442,6 +443,11 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
 /// requested scan as an operational fault — a `VerifyFailure::Preflight` on a
 /// candidate that did exactly what it was asked to do.
 const SUPPRESSION_REQUESTED_EXIT: i32 = 4;
+
+/// The member the symbol pass rides (#5185). jscpd's own member, because the
+/// question is the same one — has this already been written — asked at the
+/// granularity token detection cannot reach.
+const DUP_MEMBER: &str = "verify.dup";
 
 /// The member whose findings a lane may state a request against. Only the
 /// suppression scanner has a marker to read, and the parser below is written
@@ -985,6 +991,11 @@ struct MemberRun {
     /// Suppressions this run declined to judge, each with the reason the lane
     /// stated for it (ADR-0193).
     suppression_requests: Vec<SuppressionRequest>,
+    /// What the symbol pass flagged for the review seat (#5185). Its own
+    /// channel for the reason the request channel is its own: a flag is a
+    /// question about design, and a repair lap handed one spends its budget
+    /// renaming a symbol rather than answering it.
+    review_flags: Option<String>,
 }
 
 impl MemberRun {
@@ -1013,6 +1024,9 @@ impl MemberRun {
             flakes: Vec::new(),
             inherited: Vec::new(),
             suppression_requests,
+            // Set by the caller that knows the work order's diff base; a
+            // member with no base has no introduced set to read.
+            review_flags: None,
         }
     }
 }
@@ -1103,7 +1117,9 @@ fn run_member_discriminated(
 ) -> Result<MemberRun> {
     let (outcome, log, exit_code) = run_member(id, invocation, scope, diff_base, runner)?;
     let Some(classified) = classify_failures(id, outcome, &log, closure) else {
-        return Ok(MemberRun::plain(id, outcome, log, exit_code));
+        let mut run = MemberRun::plain(id, outcome, log, exit_code);
+        run.review_flags = symbol_flags(id, diff_base);
+        return Ok(run);
     };
 
     if !classified.is_environmental() {
@@ -1140,6 +1156,7 @@ fn run_member_discriminated(
             inherited: triaged.inherited,
             // Only `verify.suppress` states one, and this arm is `verify.test`.
             suppression_requests: Vec::new(),
+            review_flags: None,
         });
     }
 
@@ -1174,6 +1191,7 @@ fn run_member_discriminated(
         flakes: Vec::new(),
         inherited: Vec::new(),
         suppression_requests: Vec::new(),
+        review_flags: None,
     })
 }
 
@@ -1379,7 +1397,8 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
     // channel the umbrella uses, so a lane run alone directs a Refine too — and
     // a `verify.suppress` run alone states its requests on the same channel the
     // umbrella states them on, so the two paths hand the reviewer one shape.
-    let run = MemberRun::plain(&args.command, outcome, log_bytes, exit_code);
+    let mut run = MemberRun::plain(&args.command, outcome, log_bytes, exit_code);
+    run.review_flags = symbol_flags(&args.command, args.diff_base.as_deref());
     let findings = (!passed).then(|| verify_findings(std::slice::from_ref(&run))).flatten();
     let requests = stated_requests(std::slice::from_ref(&run));
 
@@ -1389,6 +1408,7 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
             .measured_by(cache.as_ref(), &peak)
             .timed(duration_millis);
     evidence.suppression_requests = requests;
+    evidence.review_flags = review_flags(std::slice::from_ref(&run));
     write_json_pretty(&args.out.join("evidence.json"), &evidence)?;
 
     if passed {
@@ -1611,6 +1631,26 @@ fn append_flake_log(out: &Path, flakes: &[Excused]) {
     }
 }
 
+/// The symbol pass's flags, for the one member that carries them (#5185).
+///
+/// Run beside jscpd rather than as a member of its own, because the two answer
+/// one question at two granularities and a reviewer reading "is this already
+/// written" wants both verdicts under one identity. ADR-0178's arithmetic is
+/// untouched either way: this returns prose, never an outcome.
+fn symbol_flags(id: &str, diff_base: Option<&str>) -> Option<String> {
+    (id == DUP_MEMBER).then(|| symbols::flags(diff_base)).flatten()
+}
+
+/// Gather the members' review flags into the evidence's own channel.
+fn review_flags(members: &[MemberRun]) -> Option<String> {
+    let flagged: Vec<String> = members
+        .iter()
+        .filter_map(|member| member.review_flags.as_ref().map(|body| format!("### {}\n\n{body}", member.id)))
+        .collect();
+
+    (!flagged.is_empty()).then(|| flagged.join("\n\n"))
+}
+
 /// Gather the requests the members stated, for the evidence's own channel.
 ///
 /// Presence-driven like the excusal ledgers: absent when nothing was requested,
@@ -1678,6 +1718,7 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
             flakes: None,
             inherited_failures: None,
             suppression_requests: None,
+            review_flags: None,
         };
         write_json_pretty(&args.out.join("evidence.json"), &evidence)?;
         process::exit(1);
@@ -1704,6 +1745,7 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
         flakes: excused(&runs, |run| &run.flakes),
         inherited_failures: excused(&runs, |run| &run.inherited),
         suppression_requests: stated_requests(&runs),
+        review_flags: review_flags(&runs),
     }
     .timed(elapsed_millis(umbrella_started))
     .with_gates(gates);

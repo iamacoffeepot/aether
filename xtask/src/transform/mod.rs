@@ -212,6 +212,18 @@ struct Evidence {
     /// exists to stop buying. Absent when the candidate asked for nothing.
     #[serde(skip_serializing_if = "Option::is_none")]
     suppression_requests: Option<Vec<SuppressionRequest>>,
+    /// What the symbol pass flagged for the review seat (#5185): a name the
+    /// candidate introduced that the workspace already has, or a primitive it
+    /// re-derived where one is owned.
+    ///
+    /// Flagged, never failed. "Similar-looking, genuinely different
+    /// responsibility" is real, and only judgment separates it from
+    /// re-derivation — so this is a dossier for the review stage rather than a
+    /// finding for a repair lap, which would spend its budget renaming the
+    /// symbol instead of answering the question. Absent when the pass found
+    /// nothing, and on a run with no diff base to read an introduced set from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_flags: Option<String>,
 }
 
 /// One umbrella member's wall-clock share: everything run under that gate's
@@ -281,6 +293,7 @@ fn build_evidence(
         // request — `run_single` fills this in itself for that one case.
         inherited_failures: None,
         suppression_requests: None,
+        review_flags: None,
         command: command.to_string(),
         nonce,
         status: if passed {
