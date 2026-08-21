@@ -114,6 +114,7 @@ mod tests {
             Some(BloomStatus::Resolved),
             Some(BloomStatus::Landed),
             Some(BloomStatus::Superseded),
+            Some(BloomStatus::Withdrawn),
             Some(BloomStatus::Unknown),
         ];
         for status in all {
@@ -125,6 +126,7 @@ mod tests {
         }
         assert!(is_history_status(Some(BloomStatus::Landed)));
         assert!(is_history_status(Some(BloomStatus::Superseded)));
+        assert!(is_history_status(Some(BloomStatus::Withdrawn)));
         assert!(is_live_status(Some(BloomStatus::Sealed)));
         assert!(is_live_status(Some(BloomStatus::Unknown)));
         assert!(is_live_status(None));
@@ -135,7 +137,9 @@ mod tests {
         // The plausible bug: Blocked walks onto the live board, or a new
         // variant is added to the ladder and lands in neither set.
         for state in [
+            MemberState::Withdrawn,
             MemberState::Wedged,
+            MemberState::AwaitingSurface,
             MemberState::Held,
             MemberState::Integrated,
             MemberState::Running,
@@ -143,10 +147,16 @@ mod tests {
             MemberState::Idle,
         ] {
             match state {
-                MemberState::Running | MemberState::Wedged | MemberState::Held => {
+                MemberState::Running
+                | MemberState::Wedged
+                | MemberState::AwaitingSurface
+                | MemberState::Held => {
                     assert!(state.walks(), "{state:?} must walk");
                 }
-                MemberState::Integrated | MemberState::Blocked | MemberState::Idle => {
+                MemberState::Withdrawn
+                | MemberState::Integrated
+                | MemberState::Blocked
+                | MemberState::Idle => {
                     assert!(!state.walks(), "{state:?} must rest");
                 }
             }

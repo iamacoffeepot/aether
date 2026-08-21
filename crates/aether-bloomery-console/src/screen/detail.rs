@@ -383,8 +383,8 @@ fn member_lines(view: &ViewDocument, bloom: DigestHex, workpiece: &str) -> Vec<L
     }
     if let Some(awaiting) = &member.awaiting_surface {
         lines.push(label(RowKey::Other(8), format!("surface  {} ({} asked)", awaiting.summary, awaiting.requests)));
-        for (index, request) in awaiting.paths.iter().enumerate() {
-            lines.push(label(RowKey::Other(9 + index), format!("  {}  {}", request.path, request.reason)));
+        for (row, request) in (9u16..99).zip(awaiting.paths.iter()) {
+            lines.push(label(RowKey::Other(row), format!("  {}  {}", request.path, request.reason)));
         }
     }
     if let Some(withdrawn) = &member.withdrawn {
