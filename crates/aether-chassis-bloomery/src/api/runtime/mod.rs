@@ -353,6 +353,20 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, routed)
     }
 
+    /// `GET /configs/{digest}` — read a stored configuration back as JSON
+    /// (ADR-0174). The inverse of `POST /configs`, and the route an operator
+    /// deciding against a bloom's *sealed* policy has to read through.
+    #[http::route(Get, "/configs/{digest}")]
+    fn on_get_config(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        digest: http::Path<String>,
+    ) -> http::Outcome {
+        let digest = digest.0;
+        let routed = configs::read_config(state, &digest);
+        finish(state, ctx, routed)
+    }
+
     /// `GET /workpieces` — list durable open commissions as workpieces.
     #[http::route(Get, "/workpieces")]
     fn on_get_workpieces(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
@@ -437,6 +451,23 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, routed)
     }
 
+    /// `GET /blooms/{id}/why` — why the `{id}` bloom is not advancing (#5281).
+    ///
+    /// The stored-fact chain from the land down to member dispatch, each rung
+    /// naming the one below it, plus one answer per member. A bloom that is
+    /// advancing normally reports the transition in flight; a bloom whose fold
+    /// refused reports that refusal with the values its guard read.
+    #[http::route(Get, "/blooms/{id}/why")]
+    fn on_get_bloom_why(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = ApiCapabilityState::query_why(&id);
+        finish(state, ctx, routed)
+    }
+
     /// `POST /blooms/{id}/supersede` — seal the successor draft and admit
     /// `Fact::Supersede` against the `{id}` predecessor bloom.
     #[http::route(Post, "/blooms/{id}/supersede")]
@@ -477,6 +508,22 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, routed)
     }
 
+    /// `POST /blooms/{id}/members/{workpiece}/suppression` — answer the
+    /// suppression requests the workpiece's candidate is carrying (ADR-0193).
+    /// A grant lets it stand; a denial bounces the member to a repair lap.
+    #[http::route(Post, "/blooms/{id}/members/{workpiece}/suppression")]
+    fn on_suppression(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+        workpiece: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let workpiece = workpiece.0;
+        let routed = ApiCapabilityState::suppression(&id, &workpiece, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
     /// `POST /blooms/{id}/members/{workpiece}/repair` — re-enter a wedged
     /// workpiece at `Verify` on the candidate the operator pushed (#4957). The
     /// gates still run; only the model lap is skipped.
@@ -490,6 +537,23 @@ impl NativeActor for BloomeryApiCapability {
         let id = id.0;
         let workpiece = workpiece.0;
         let routed = state.repair(&id, &workpiece, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /blooms/{id}/members/{workpiece}/withdraw` — take one member out
+    /// of a walking bloom without superseding it (#5327). Its lane is
+    /// cancelled, its claim ref freed, and the folds stop waiting on it; the
+    /// bloom keeps its id, its base, and every sibling's finished work.
+    #[http::route(Post, "/blooms/{id}/members/{workpiece}/withdraw")]
+    fn on_withdraw(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+        workpiece: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let workpiece = workpiece.0;
+        let routed = ApiCapabilityState::withdraw(&id, &workpiece, &ctx.request().body);
         finish(state, ctx, routed)
     }
 

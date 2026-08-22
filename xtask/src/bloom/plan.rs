@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aether_bloomery::{BloomDraft, Digest, Evidence, EvidenceKind, Forecast, Membership, WorkpieceId};
+use aether_bloomery::{ApprovalPolicy, BloomDraft, Digest, Evidence, EvidenceKind, Forecast, Membership, WorkpieceId};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -48,6 +48,10 @@ pub struct ProjectionInput {
     pub completeness: Completeness,
     pub adr_touch: AdrTouch,
     pub pre_approved: bool,
+    /// The approval policy the declared-surface granularity check reads, when
+    /// one could be loaded. `None` skips the check here; the seal door is the
+    /// authority and refuses the same shape with the same words.
+    pub policy: Option<ApprovalPolicy>,
 }
 
 impl ProjectionInput {
@@ -56,6 +60,7 @@ impl ProjectionInput {
         completeness_file: Option<&Path>,
         adr_touch: AdrTouch,
         pre_approved: bool,
+        approval_policy: Option<&Path>,
     ) -> Result<Self> {
         let completeness = match completeness_file {
             Some(path) => {
@@ -73,7 +78,40 @@ impl ProjectionInput {
             completeness,
             adr_touch,
             pre_approved,
+            policy: approval_policy.and_then(load_policy),
         })
+    }
+}
+
+/// The approval policy at `path`, or `None` with a warning.
+///
+/// A missing or malformed policy skips the client-side granularity check
+/// rather than blocking the command: the seal door reads the *stored* revision
+/// and refuses the same shape there, so this front is a courtesy that must not
+/// become the thing that stops work. `rules_in_grammar` is the same
+/// fail-closed check the coordinator's loader applies.
+fn load_policy(path: &Path) -> Option<ApprovalPolicy> {
+    let warn = |reason: &str| {
+        eprintln!(
+            "warning: approval policy {} {reason}; skipping the declared-surface granularity check. \
+             The seal door still enforces it.",
+            path.display()
+        );
+    };
+    let Ok(text) = fs::read_to_string(path) else {
+        warn("could not be read");
+        return None;
+    };
+    match toml::from_str::<ApprovalPolicy>(&text) {
+        Ok(policy) if policy.rules_in_grammar() => Some(policy),
+        Ok(_) => {
+            warn("carries a rule outside the policy grammar");
+            None
+        }
+        Err(_) => {
+            warn("does not parse");
+            None
+        }
     }
 }
 
@@ -239,6 +277,22 @@ pub fn projections(
         grouped.entry(member.as_str()).or_default().push(glob.clone());
     }
 
+    // The same refusal the seal door makes, in the same words, before the
+    // request is sent. Applied to the per-member overrides as well as the
+    // fallback, because `--surface` is the flag operators actually reach for.
+    if let Some(policy) = &input.policy {
+        for member in members {
+            let declared = grouped.get(member.workpiece.as_str()).unwrap_or(&input.declared_surface).clone();
+            if let Some(glob) = policy.unnamed_file_entries(&declared).first() {
+                bail!(
+                    "member {} declared surface {glob:?} names one file and no approval-policy rule names that \
+                     file; widen it to a crate glob such as crates/<crate>/src/**",
+                    member.workpiece,
+                );
+            }
+        }
+    }
+
     Ok(members
         .iter()
         .map(|member| MemberProjection {
@@ -278,10 +332,11 @@ pub fn supersede_request(
     task: &str,
     input: &ProjectionInput,
     edges: &[(String, String)],
+    surfaces: &[(String, String)],
 ) -> Result<SupersedeRequest> {
     Ok(SupersedeRequest {
         successor_draft: draft_id.to_owned(),
-        projections: projections(members, input, &[])?,
+        projections: projections(members, input, surfaces)?,
         descriptions: descriptions(task, members.iter().map(|member| member.workpiece.as_str())),
         edges: edges
             .iter()
@@ -448,13 +503,13 @@ pub fn require_task(text: &str, path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BaseChoice, ProjectionInput, eject_members, pin_revisions, projections, resolve_base, seal_patch,
-        successor_patch,
+        BaseChoice, ProjectionInput, direct_drive_surface, eject_members, pin_revisions, projections, resolve_base,
+        seal_patch, successor_patch,
     };
     use crate::bloom::dto::{
         AdrTouch, Approval, BloomSpec, Completeness, ConfigRegistry, DigestHex, Membership, ViewDocument,
     };
-    use aether_bloomery::{EvidenceKind, Forecast};
+    use aether_bloomery::{ApprovalPolicy, ApprovalRule, EvidenceKind, Forecast, Tier};
 
     fn digest(byte: u8) -> DigestHex {
         DigestHex::from_bytes([byte; 32])
@@ -621,7 +676,7 @@ mod tests {
 
     #[test]
     fn projection_input_defaults_the_direct_drive_surface() {
-        let input = ProjectionInput::resolve(Vec::new(), None, AdrTouch::None, false)
+        let input = ProjectionInput::resolve(Vec::new(), None, AdrTouch::None, false, None)
             .expect("defaults do not read a completeness file");
         assert_eq!(input.declared_surface, ["docs/guide/**"]);
         assert_eq!(input.completeness.model_routing_count, Completeness::direct_drive().model_routing_count);
@@ -633,7 +688,7 @@ mod tests {
         // A specialized member must not inherit the bloom-wide fallback, and a
         // member with no `--surface` entries must keep it. Mixing those up
         // would either invent a derived overlap edge or drop a declared surface.
-        let input = ProjectionInput::resolve(vec!["docs/guide/**".to_owned()], None, AdrTouch::None, false)
+        let input = ProjectionInput::resolve(vec!["docs/guide/**".to_owned()], None, AdrTouch::None, false, None)
             .expect("fallback surface does not read a completeness file");
         let members = [member("issue-A", 1), member("issue-B", 2)];
         let surfaces =
@@ -651,10 +706,39 @@ mod tests {
     fn projections_refuse_a_surface_for_an_unknown_member() {
         // Silently dropping `--surface issue-Z=…` would let the operator think
         // they specialized a workpiece the seal never admitted.
-        let input = ProjectionInput::resolve(Vec::new(), None, AdrTouch::None, false)
+        let input = ProjectionInput::resolve(Vec::new(), None, AdrTouch::None, false, None)
             .expect("defaults do not read a completeness file");
         let err = projections(&[member("issue-A", 1)], &input, &[("issue-Z".to_owned(), "crates/**".to_owned())])
             .expect_err("unknown member");
         assert!(err.to_string().contains("issue-Z"), "error names the absent workpiece: {err}");
+    }
+
+    #[test]
+    fn projections_refuse_a_file_granular_surface_the_policy_does_not_name() {
+        // The lint applied to the `ProjectionInput` default only would miss
+        // every per-member `--surface` override — which is the flag operators
+        // actually reach for, and the one this refusal exists to catch.
+        let policy = ApprovalPolicy {
+            default: Tier::Judge,
+            rules: vec![ApprovalRule { glob: "/Cargo.toml".to_owned(), tier: Tier::Human }],
+        };
+        let input = ProjectionInput {
+            declared_surface: direct_drive_surface(),
+            completeness: Completeness::direct_drive(),
+            adr_touch: AdrTouch::None,
+            pre_approved: false,
+            policy: Some(policy),
+        };
+        let members = [member("issue-A", 1)];
+
+        let error = projections(&members, &input, &[("issue-A".to_owned(), "crates/foo/src/lib.rs".to_owned())])
+            .expect_err("a file the policy does not name is refused");
+        assert!(error.to_string().contains("issue-A"), "the refusal names the member: {error}");
+        assert!(error.to_string().contains("crates/foo/src/lib.rs"), "and the entry: {error}");
+
+        projections(&members, &input, &[("issue-A".to_owned(), "crates/foo/src/**".to_owned())])
+            .expect("a crate glob is admitted");
+        projections(&members, &input, &[("issue-A".to_owned(), "Cargo.toml".to_owned())])
+            .expect("a file the policy names is admitted");
     }
 }

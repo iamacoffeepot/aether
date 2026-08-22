@@ -125,6 +125,8 @@ impl EvidenceClaims for NameEvidenceClaims {
             session_reuse_saved_micro_usd: reference.session_reuse_saved_micro_usd,
             peak_resident_bytes: reference.peak_resident_bytes,
             violating_paths: reference.violating_paths.clone(),
+            surface_request: reference.surface_request.clone(),
+            suppression_requests: reference.suppression_requests.clone(),
         })
     }
 }
@@ -138,6 +140,8 @@ fn verdict_token(verdict: StageVerdict) -> &'static str {
         StageVerdict::ReviewFinding => "finding",
         StageVerdict::Parked => "parked",
         StageVerdict::ExecutorFault => "fault",
+        StageVerdict::Declined => "declined",
+        StageVerdict::SurfaceRequested => "surface",
     }
 }
 
@@ -150,6 +154,8 @@ fn verdict_from_token(token: &str) -> Option<StageVerdict> {
         "finding" => StageVerdict::ReviewFinding,
         "parked" => StageVerdict::Parked,
         "fault" => StageVerdict::ExecutorFault,
+        "declined" => StageVerdict::Declined,
+        "surface" => StageVerdict::SurfaceRequested,
         _ => return None,
     })
 }

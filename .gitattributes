@@ -1,0 +1,12 @@
+# A crate root's re-export block is one sorted `pub use` statement per line, so
+# two members each appending a name conflict at the fold over a merge whose
+# answer is determined. `sorted-reexports` (scripts/merge-sorted-reexports.py,
+# registered in the fleet repository's config) resolves that one shape and exits
+# nonzero on everything else, so anything needing judgement still reaches the
+# reconcile lane.
+#
+# The driver is named here and defined in repository config, which is the trust
+# split worth knowing: this file lives in the tree and a candidate can edit it,
+# so an edit to it is a review surface, and the driver itself is written to be
+# harmless when pointed at a path it was never meant for.
+crates/*/src/lib.rs merge=sorted-reexports

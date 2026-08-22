@@ -1,5 +1,7 @@
 //! The `session` pool's boot configuration (ADR-0090 derive-`Config`).
 
+use std::path::Path;
+
 /// The executor session-pool knobs, resolved argv > env > default.
 ///
 /// The defaults port `scripts/agent-pool.mjs`'s precedents: `cache_ttl_cutoff_mins`
@@ -8,13 +10,16 @@
 /// `AGENT_POOL_CONTEXT_CAP_TOKENS = 150000` context ceiling. `lease_ttl_mins`
 /// bounds how long one `acquire` holds a session before lazy expiry reclaims it
 /// (a crashed holder never wedges a key). `pricing_cliff_tokens` is the
-/// prompt-size cut a same-member refine or dependent construct resume must
-/// project under (#5177, #5178); `200_000` is grok-4.6's measured long-context
-/// band. `dependency_increment_tokens` is the per-link addend that projection
+/// prompt-size cut a *dependent construct* resume must project under (#5178);
+/// `200_000` is grok-4.6's measured long-context band. It bounds chains only —
+/// a same-member refine resumes its own construct session at any context,
+/// because the alternative there is a cold re-read of the same member.
+/// `dependency_increment_tokens` is the per-link addend that projection
 /// uses on a predecessor resume. `db_path` is the pool
 /// table's `SQLite` file; the sentinel `":memory:"` opens a private non-durable
-/// store — the default, so an unconfigured chassis boots without touching the
-/// filesystem.
+/// store. A chassis that resolved a durable journal path repoints the
+/// unconfigured default at a file beside it — see
+/// [`default_beside_journal`](SessionConfig::default_beside_journal).
 #[derive(Clone, Debug, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_SESSION", cli_prefix = "session")]
 pub struct SessionConfig {
@@ -35,9 +40,9 @@ pub struct SessionConfig {
     /// is ineligible (`AGENT_POOL_CONTEXT_CAP_TOKENS`).
     #[config(default = 150_000)]
     pub context_cap_tokens: u64,
-    /// Prompt-token threshold a resumed refine or dependent construct must
-    /// project under, or it launches fresh. Default `200_000` is grok-4.6's
-    /// measured long-context pricing cliff.
+    /// Prompt-token threshold a resumed dependent construct must project under,
+    /// or it launches fresh. Chains only — a same-member refine ignores it.
+    /// Default `200_000` is grok-4.6's measured long-context pricing cliff.
     #[config(default = 200_000)]
     pub pricing_cliff_tokens: u64,
     /// Tokens a dependent construct is projected to add on top of a predecessor's
@@ -60,6 +65,9 @@ impl Default for SessionConfig {
     }
 }
 
+/// The unconfigured `db_path` — a private, non-durable store.
+const MEMORY_SENTINEL: &str = ":memory:";
+
 /// Process-wide in-memory `SQLite` URI. A bare `:memory:` is private per
 /// connection, so the mounted [`SessionPoolCapability`](super::SessionPoolCapability)
 /// and the executor consumer would otherwise be two empty tables. Shared-cache
@@ -74,10 +82,34 @@ impl SessionConfig {
     /// and the executor see one table rather than two.
     #[must_use]
     pub fn store_path(&self) -> &str {
-        if self.db_path == ":memory:" {
+        if self.db_path == MEMORY_SENTINEL {
             SHARED_MEMORY
         } else {
             &self.db_path
         }
+    }
+
+    /// Point an unconfigured pool at a durable file beside the journal store.
+    ///
+    /// A coordinator restart must not discard every resumable session. The
+    /// `:memory:` default lives exactly as long as the process, so a restart —
+    /// a redeploy, a crash, an operator bounce — leaves every in-flight member's
+    /// construct session unreachable, and the next lap on each of them relaunches
+    /// cold and re-reads its whole member. The pool belongs to the same work the
+    /// journal describes, so it gets the same lifetime: `sessions.sqlite` in the
+    /// journal file's own directory.
+    ///
+    /// Only the untouched default is repointed. An explicitly configured
+    /// `db_path` is the operator's choice, and a journal that is itself
+    /// non-durable (`:memory:`, or any `SQLite` URI) has no directory to sit
+    /// beside — both keep what they had.
+    pub fn default_beside_journal(&mut self, journal_path: &str) {
+        if self.db_path != MEMORY_SENTINEL || journal_path == MEMORY_SENTINEL || journal_path.starts_with("file:") {
+            return;
+        }
+        let Some(parent) = Path::new(journal_path).parent() else {
+            return;
+        };
+        self.db_path = parent.join("sessions.sqlite").to_string_lossy().into_owned();
     }
 }

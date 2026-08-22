@@ -32,6 +32,7 @@ pub enum ResourceBody {
     Journal(JournalPage),
     Artifact(DecodedArtifact),
     Transcript(DispatchFilePage),
+    Prompt(DispatchFilePage),
     Summary(MetricsSummary),
     Days(Vec<MetricDay>),
     Timeline(MetricsTimeline),
@@ -128,6 +129,9 @@ fn fetch_key(endpoint: &Endpoint, key: &ResourceKey, timeout: Duration) -> Resul
             .map_err(|error| error.to_string()),
         ResourceKey::Transcript(_) => http::get_json::<DispatchFilePage>(endpoint, &path, timeout)
             .map(ResourceBody::Transcript)
+            .map_err(|error| error.to_string()),
+        ResourceKey::Prompt(_) => http::get_json::<DispatchFilePage>(endpoint, &path, timeout)
+            .map(ResourceBody::Prompt)
             .map_err(|error| error.to_string()),
         ResourceKey::MetricsSummary => http::get_json::<MetricsSummary>(endpoint, &path, timeout)
             .map(ResourceBody::Summary)

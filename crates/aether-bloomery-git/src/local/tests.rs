@@ -429,3 +429,93 @@ fn boot_reconcile_re_releases_a_landed_blooms_stranded_refs() {
     );
     assert!(ref_absent(&local, &claim_ref("wp-1")), "a repeated reconcile re-creates nothing");
 }
+
+/// The checked-in attribute file, so these tests exercise the pattern that is
+/// actually shipped rather than a restatement of it.
+const GITATTRIBUTES: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.gitattributes"));
+
+/// Base, ours, and theirs for one crate root, each a full tree carrying the
+/// checked-in `.gitattributes` beside `crates/example/src/lib.rs`.
+fn reexport_tree(local: &LocalGitData, lib: &str) -> String {
+    let attributes = git(local, &["hash-object", "-w", "--stdin"], GITATTRIBUTES);
+    let blob = git(local, &["hash-object", "-w", "--stdin"], lib);
+    let src = git(local, &["mktree"], &format!("100644 blob {blob}\tlib.rs\n"));
+    let example = git(local, &["mktree"], &format!("040000 tree {src}\tsrc\n"));
+    let crates = git(local, &["mktree"], &format!("040000 tree {example}\texample\n"));
+    git(local, &["mktree"], &format!("100644 blob {attributes}\t.gitattributes\n040000 tree {crates}\tcrates\n"))
+}
+
+fn fold(local: &LocalGitData, base: &str, ours: &str, theirs: &str) -> MergeResult {
+    let base_sha = local.create_commit("base", &reexport_tree(local, base), &[]).expect("base").sha;
+    let ours_sha = local.create_commit("ours", &reexport_tree(local, ours), from_ref(&base_sha)).expect("ours").sha;
+    let theirs_sha =
+        local.create_commit("theirs", &reexport_tree(local, theirs), from_ref(&base_sha)).expect("theirs").sha;
+    local.create_ref("heads/fold-base", &ours_sha).expect("fold-base");
+    local.create_ref("heads/fold-side", &theirs_sha).expect("fold-side");
+    local.merge("heads/fold-base", "heads/fold-side", "fold").expect("merge runs")
+}
+
+fn lib_at(local: &LocalGitData, commit: &str) -> String {
+    git(local, &["show", &format!("{commit}:crates/example/src/lib.rs")], "")
+}
+
+#[test]
+fn two_members_each_appending_a_reexport_fold_without_a_reconcile_lane() {
+    // Pre-fix: the same two commits conflict, and the reconcile lane that
+    // repairs them costs a model dispatch on a merge whose answer is
+    // determined. `--write-tree` reads the driver out of the repository config
+    // and `.gitattributes` out of the merged trees.
+    let (_root, local) = open_temp();
+    let base = "pub use values::Alpha;\npub use values::Gamma;\n";
+    let ours = "pub use values::Alpha;\npub use values::Beta;\npub use values::Gamma;\n";
+    let theirs = "pub use values::Alpha;\npub use values::Delta;\npub use values::Gamma;\n";
+
+    let merged = match fold(&local, base, ours, theirs) {
+        MergeResult::Merged(commit) => commit,
+        other => panic!("the driver must resolve two appended re-exports, got {other:?}"),
+    };
+
+    // Byte-identical to what `cargo fmt` would leave: union, sorted, no
+    // conflict markers. An unsorted union is a `reorder_imports` finding, which
+    // would turn a resolved conflict into a failed verify.
+    assert_eq!(
+        lib_at(&local, &merged.sha),
+        "pub use values::Alpha;\npub use values::Beta;\npub use values::Delta;\npub use values::Gamma;",
+    );
+}
+
+#[test]
+fn a_change_that_is_not_an_insertion_still_conflicts() {
+    // Tripwire: the driver's whole safety argument is that it declines
+    // everything it does not recognize. One side rewriting a base line is a
+    // real edit needing judgement, and it must still reach reconcile.
+    let (_root, local) = open_temp();
+    let base = "pub use values::Alpha;\npub use values::Gamma;\n";
+    let ours = "pub use values::Alpha;\npub use values::Beta;\npub use values::Gamma;\n";
+    let theirs = "pub use values::Alpha;\npub use values::Omega;\n";
+
+    match fold(&local, base, ours, theirs) {
+        MergeResult::Conflict { paths, .. } => {
+            assert!(paths.iter().any(|path| path.contains("lib.rs")), "{paths:?}");
+        }
+        other => panic!("a rewritten line must not be resolved, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_conflicting_block_that_is_not_a_reexport_list_still_conflicts() {
+    // The trust boundary: `.gitattributes` lives in the tree, so a candidate
+    // can point this driver at a path it was never meant for. Pointed at one,
+    // it must be harmless — anything but a `pub use <path>;` line refuses.
+    let (_root, local) = open_temp();
+    let base = "pub mod values;\n";
+    let ours = "pub mod values;\npub mod alpha;\n";
+    let theirs = "pub mod values;\npub mod beta;\n";
+
+    match fold(&local, base, ours, theirs) {
+        MergeResult::Conflict { paths, .. } => {
+            assert!(paths.iter().any(|path| path.contains("lib.rs")), "{paths:?}");
+        }
+        other => panic!("a non-re-export block must not be resolved, got {other:?}"),
+    }
+}

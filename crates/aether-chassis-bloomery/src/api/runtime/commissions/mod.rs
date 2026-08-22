@@ -7,7 +7,7 @@
 //! store write.
 
 use aether_actor::Manual;
-use aether_bloomery::{AuthorityDoor, Digest, ScopeRevision, Statement, WorkpieceId};
+use aether_bloomery::{AuthorityDoor, Digest, ScopeRevision, ScopeVerifyReport, Statement, WorkpieceId};
 use aether_data::wire::{from_bytes, to_vec};
 use aether_http::{HttpHeader, HttpServerRequest, HttpServerResponse};
 use aether_substrate::actor::native::NativeCtx;
@@ -16,8 +16,9 @@ use super::hex;
 use super::response::{error_response, json};
 use super::state::{ApiCapabilityState, Routed};
 use crate::api::dto::{
-    CommissionApprovalView, CommissionCancelledView, CommissionCreatedView, CommissionHeadView, CommissionShowView,
-    CommissionsView, CreateCommissionRequest, ScopeRevisionWrittenView,
+    CancelCommissionRequest, CommissionApprovalView, CommissionCancelledView, CommissionCreatedView,
+    CommissionHeadView, CommissionShowView, CommissionsView, CreateCommissionRequest, RevisionProjection,
+    ScopeRevisionWrittenView,
 };
 use crate::bloomery::{StatementRejected, precheck_statement, verified_statement_approval};
 use crate::signing::{SigningCapability, Verify, VerifyResult, authority_bytes};
@@ -46,6 +47,9 @@ pub(super) enum CommissionWrite {
         id: WorkpieceId,
         /// The submitted cancel statement.
         statement: Statement,
+        /// Operator context for the cancel. Never authority: the signature and
+        /// the intent digest decide, and this field changes nothing about that.
+        reason: String,
     },
 }
 
@@ -118,7 +122,19 @@ impl ApiCapabilityState {
         if revision.workpiece.0 != id {
             return Routed::Reply(error_response(400, "scope revision workpiece does not match the path"));
         }
-        Routed::WriteScopeRevision(WriteScopeRevision { canonical: revision.to_canonical() })
+        // The projection rides beside the revision rather than inside it: the
+        // revision's bytes are the signed subject and cannot grow a field, and a
+        // body that omits `scope_verify` is a hand-authored freeze with no
+        // records to check. Decoded from the same body separately for that
+        // reason — the two values have independent lifetimes downstream.
+        let projection: RevisionProjection = match hex::from_slice(&request.body) {
+            Ok(projection) => projection,
+            Err(error) => {
+                return Routed::Reply(error_response(400, &format!("invalid scope-verify projection: {error}")));
+            }
+        };
+        let scope_verify = projection.scope_verify.map(|input| input.to_canonical()).unwrap_or_default();
+        Routed::WriteScopeRevision(WriteScopeRevision { canonical: revision.to_canonical(), scope_verify })
     }
 
     /// `POST /commissions/{id}/approvals` — precheck, then verify, then store.
@@ -182,16 +198,10 @@ impl ApiCapabilityState {
         if let Err(response) = authorize(request, &self.control_token) {
             return Routed::Reply(response);
         }
-        let statement: Statement = match hex::from_slice(&request.body) {
-            Ok(statement) => statement,
-            Err(error) => return Routed::Reply(error_response(400, &format!("invalid cancel statement: {error}"))),
+        let (statement, intent, reason) = match cancel_request(&request.body) {
+            Ok(parsed) => parsed,
+            Err(response) => return Routed::Reply(response),
         };
-        let Some(intent) = Digest::from_slice(&statement.words) else {
-            return Routed::Reply(error_response(400, "cancel words are not an intent digest"));
-        };
-        if let Err(rejected) = precheck_statement(intent, &statement) {
-            return Routed::Reply(approval_rejected(rejected));
-        }
         let encoded = match to_vec(&statement) {
             Ok(encoded) => encoded,
             Err(error) => return Routed::Reply(error_response(500, &format!("cancel encode failed: {error}"))),
@@ -202,7 +212,7 @@ impl ApiCapabilityState {
         );
         Routed::DeferredCommissionVerify {
             correlation,
-            write: CommissionWrite::Cancel { id: WorkpieceId(id.to_owned()), statement },
+            write: CommissionWrite::Cancel { id: WorkpieceId(id.to_owned()), statement, reason },
         }
     }
 
@@ -250,9 +260,15 @@ fn persist_verified(
                 to_vec(&statement).map_err(|error| error_response(500, &format!("approval encode failed: {error}")))?;
             Ok(state.send_tracked(ctx.actor::<StoreCapability>(), &RecordCommissionApproval { id: id.0, statement }))
         }
-        CommissionWrite::Cancel { id, statement } => {
+        CommissionWrite::Cancel { id, statement, reason } => {
             let statement =
                 to_vec(&statement).map_err(|error| error_response(500, &format!("cancel encode failed: {error}")))?;
+            tracing::info!(
+                target: "aether_chassis_bloomery::api",
+                commission = %id.0,
+                reason = %reason,
+                "commission cancelled"
+            );
             Ok(state.send_tracked(ctx.actor::<StoreCapability>(), &CancelCommission { id: id.0, statement }))
         }
     }
@@ -264,6 +280,23 @@ fn approval_rejected(rejected: StatementRejected) -> HttpServerResponse {
         StatementRejected::NotAnAuthorSignature => error_response(400, "approval is not an author signature"),
         StatementRejected::Unverified => error_response(400, "approval signature did not verify"),
     }
+}
+
+fn cancel_request(body: &[u8]) -> Result<(Statement, Digest, String), HttpServerResponse> {
+    let request: CancelCommissionRequest = match hex::from_slice(body) {
+        Ok(request) => request,
+        Err(error) => return Err(error_response(400, &format!("invalid cancel body: {error}"))),
+    };
+    if request.reason.trim().is_empty() {
+        return Err(error_response(400, "cancel reason is required"));
+    }
+    let Some(intent) = Digest::from_slice(&request.statement.words) else {
+        return Err(error_response(400, "cancel words are not an intent digest"));
+    };
+    if let Err(rejected) = precheck_statement(intent, &request.statement) {
+        return Err(approval_rejected(rejected));
+    }
+    Ok((request.statement, intent, request.reason))
 }
 
 fn query_status(query: &str) -> Option<String> {
@@ -312,6 +345,9 @@ pub(super) fn revision_response(result: WriteScopeRevisionResult) -> HttpServerR
             error_response(500, &format!("scope revision write failed: {error}"))
         }
         WriteScopeRevisionResult::NotOpen => error_response(409, "commission is not open"),
+        WriteScopeRevisionResult::SurfaceGap { paths } => {
+            error_response(422, &format!("declared surface does not cover {}", paths.join(", ")))
+        }
     }
 }
 
@@ -346,7 +382,16 @@ pub(super) fn approval_response(result: RecordCommissionApprovalResult) -> HttpS
 /// Render [`LoadCommissionResult`].
 pub(super) fn show_response(result: LoadCommissionResult) -> HttpServerResponse {
     match result {
-        LoadCommissionResult::Ok { id, intent, current_revision, current_ordinal, status, current, approvals } => {
+        LoadCommissionResult::Ok {
+            id,
+            intent,
+            current_revision,
+            current_ordinal,
+            status,
+            current,
+            approvals,
+            scope_verify,
+        } => {
             let Ok(intent) = digest_of_bytes(&intent) else {
                 return error_response(500, "stored intent digest is not 32 bytes");
             };
@@ -371,6 +416,13 @@ pub(super) fn show_response(result: LoadCommissionResult) -> HttpServerResponse 
                     Err(_) => return error_response(500, "stored approval is malformed"),
                 }
             }
+            let scope_verify = match scope_verify {
+                Some(bytes) => match ScopeVerifyReport::from_canonical(&bytes) {
+                    Ok(report) => Some(report),
+                    Err(_) => return error_response(500, "stored scope-verify report is malformed"),
+                },
+                None => None,
+            };
             json(
                 200,
                 &CommissionShowView {
@@ -381,6 +433,7 @@ pub(super) fn show_response(result: LoadCommissionResult) -> HttpServerResponse 
                     status,
                     current,
                     approvals: decoded,
+                    scope_verify,
                 },
             )
         }

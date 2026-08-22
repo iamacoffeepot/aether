@@ -5,6 +5,7 @@
 //! same way.
 
 use std::fmt::Write as _;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::client::{GitCommit, GitDataApi, GitDataError, GitRef, MergeResult, RefTxnOp, strip_heads};
@@ -12,6 +13,24 @@ use crate::command;
 
 #[cfg(test)]
 mod tests;
+
+/// The checked-in merge driver, embedded so the script that ships in the binary
+/// is the same one review reads. `include_str!` registers it as a build input,
+/// so editing the script rebuilds this crate.
+const MERGE_DRIVER_SOURCE: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/merge-sorted-reexports.py"));
+
+/// The file name the driver is materialized under inside the git directory.
+const MERGE_DRIVER_SCRIPT: &str = "aether-merge-sorted-reexports.py";
+
+/// The driver's `merge.<name>.name` — what git prints when it reports which
+/// driver resolved (or declined) a path.
+const MERGE_DRIVER_NAME: &str = "sorted one-name-per-line re-export lists";
+
+/// The interpreter the driver is invoked through. Named rather than relying on
+/// the script's own shebang because the git directory it is written into is not
+/// guaranteed to be on an executable mount.
+const PYTHON: &str = "python3";
 
 /// A [`GitDataApi`] backed by `git` against one absolute repository path.
 #[derive(Clone, Debug)]
@@ -55,7 +74,36 @@ impl LocalGitData {
                 String::from_utf8_lossy(&hashed.stderr).trim()
             )));
         }
-        Ok(Self { repo, zero_oid })
+        let local = Self { repo, zero_oid };
+        local.install_merge_driver()?;
+        Ok(local)
+    }
+
+    /// Materialize the sorted-re-export merge driver and point this repository's
+    /// config at it.
+    ///
+    /// Done at open rather than in a separate setup step so a fresh deployment
+    /// has the driver without anyone remembering to install it, and the script
+    /// is written into the git directory rather than read from a checkout
+    /// because the fleet repository is bare — there is no working tree beside it
+    /// holding `scripts/`. The bytes are the checked-in script, embedded at
+    /// compile time, so the reviewable copy and the running copy cannot drift.
+    ///
+    /// Which paths the driver applies to is *not* decided here: that is
+    /// `.gitattributes` in the merged trees, which a candidate can edit. Naming
+    /// the driver in config and selecting it per path in the tree is git's own
+    /// split, and it is why the driver is written to refuse anything that is not
+    /// a sorted `pub use` insertion rather than to trust where it was pointed.
+    fn install_merge_driver(&self) -> Result<(), GitDataError> {
+        let git_dir = PathBuf::from(command::run_ok(&self.repo, &["rev-parse", "--absolute-git-dir"])?);
+        let script = git_dir.join(MERGE_DRIVER_SCRIPT);
+        fs::write(&script, MERGE_DRIVER_SOURCE)
+            .map_err(|error| GitDataError::Command(format!("writing {}: {error}", script.display())))?;
+
+        let driver = format!("{} {} %O %A %B", PYTHON, script.display());
+        command::run_ok(&self.repo, &["config", "merge.sorted-reexports.name", MERGE_DRIVER_NAME])?;
+        command::run_ok(&self.repo, &["config", "merge.sorted-reexports.driver", &driver])?;
+        Ok(())
     }
 
     /// The absolute repository path this backend addresses.
@@ -193,7 +241,16 @@ impl GitDataApi for LocalGitData {
             return Ok(MergeResult::AlreadyUpToDate);
         }
 
-        let output = command::run(&self.repo, &["merge-tree", "--write-tree", &base_sha, &head_sha])?;
+        // `merge-tree` merges in memory against a bare repository, so it reads
+        // no `.gitattributes` from an index or a worktree and finds none in the
+        // trees it is merging. Without an attribute source the `sorted-reexports`
+        // driver named there never runs and a determined re-export fold
+        // conflicts anyway. The base side is that source: the attributes that
+        // decide a merge are the ones already on the branch being merged into,
+        // never the ones the incoming candidate ships with itself.
+        let attributes = format!("attr.tree={base_sha}");
+        let output =
+            command::run(&self.repo, &["-c", &attributes, "merge-tree", "--write-tree", &base_sha, &head_sha])?;
         match output.status.code() {
             Some(0) => {
                 let tree = String::from_utf8_lossy(&output.stdout).lines().next().unwrap_or_default().trim().to_owned();

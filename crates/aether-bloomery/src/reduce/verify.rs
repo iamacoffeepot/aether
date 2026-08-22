@@ -100,6 +100,7 @@ pub(super) fn reduce_verify_failed(
             seen_verify_failures,
             fold_checkpoint: cursor.fold_checkpoint,
             fold_conflict_evidence: None,
+            reconcile_assembles_base: false,
         };
         // Persist the union even on the terminal verdict. This cursor write is
         // intentionally not paired with a dispatch; the following RecordWedge
@@ -131,6 +132,7 @@ pub(super) fn reduce_verify_failed(
         seen_verify_failures,
         fold_checkpoint: cursor.fold_checkpoint,
         fold_conflict_evidence: None,
+        reconcile_assembles_base: false,
     };
     effects.extend(move_effects(
         *bloom,
@@ -196,6 +198,7 @@ fn unjudged_verify(
         seen_verify_failures: cursor.seen_verify_failures,
         fold_checkpoint: cursor.fold_checkpoint,
         fold_conflict_evidence: None,
+        reconcile_assembles_base: false,
     };
     effects.extend(move_effects(
         bloom,

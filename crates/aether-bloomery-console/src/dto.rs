@@ -67,6 +67,7 @@ pub enum BloomStatus {
     Resolved,
     Landed,
     Superseded,
+    Withdrawn,
     #[default]
     #[serde(other)]
     Unknown,
@@ -82,6 +83,7 @@ impl BloomStatus {
             Self::Resolved => "Resolved",
             Self::Landed => "Landed",
             Self::Superseded => "Superseded",
+            Self::Withdrawn => "Withdrawn",
             Self::Unknown => "unknown",
         }
     }
@@ -223,6 +225,21 @@ pub struct ViewDocument {
     pub spend_quiesce: Option<SpendQuiesce>,
     #[serde(default)]
     pub blooms: Vec<BloomView>,
+    #[serde(default)]
+    pub base_alert: Option<BaseAlertView>,
+}
+
+/// A red whole-workspace base receipt holding the day.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BaseAlertView {
+    #[serde(default)]
+    pub base: DigestHex,
+    #[serde(default)]
+    pub tree: DigestHex,
+    #[serde(default)]
+    pub failed: Vec<String>,
+    #[serde(default)]
+    pub evidence: DigestHex,
 }
 
 /// One bloom in the live projection.
@@ -248,6 +265,25 @@ pub struct BloomView {
     /// field or the bloom is not held.
     #[serde(default)]
     pub operator_hold: Option<OperatorHoldView>,
+    /// The write leases the bloom's lanes hold (ADR-0204), in path order.
+    /// Absent-tolerant: empty from a coordinator that predates the field, and
+    /// empty from one that has observed no writes yet.
+    #[serde(default)]
+    pub leases: Vec<LeaseView>,
+}
+
+/// One held write lease (ADR-0204 / ADR-0198): the path, who holds it, where
+/// that holder stands, and when it was taken.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LeaseView {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub holder: String,
+    #[serde(default)]
+    pub stage: Option<StageId>,
+    #[serde(default)]
+    pub acquired_at: u64,
 }
 
 /// One sealed member as the projection renders it.
@@ -274,6 +310,74 @@ pub struct MemberView {
     /// Stage cursor when the coordinator serves it. Absent-tolerant.
     #[serde(default)]
     pub cursor: Option<CompositionCursorView>,
+    /// Construct-declined park (#5292 / #5332). Absent-tolerant.
+    #[serde(default)]
+    pub park: Option<Present>,
+    /// The surface amendment this member is waiting on (ADR-0207).
+    /// Absent-tolerant.
+    #[serde(default)]
+    pub awaiting_surface: Option<AwaitingSurfaceView>,
+    /// An operator's withdrawal (#5327). Absent-tolerant.
+    #[serde(default)]
+    pub withdrawn: Option<WithdrawnView>,
+    /// The paths this member holds a write lease on (ADR-0204).
+    /// Absent-tolerant.
+    #[serde(default)]
+    pub leases: Vec<String>,
+    /// The sibling that took a path this member held, stopping its lane until
+    /// that sibling integrates (ADR-0204). Absent-tolerant.
+    #[serde(default)]
+    pub evicted_by: Option<LeaseEvictionView>,
+}
+
+/// A member stopped for a file an earlier-canonical sibling took (ADR-0204).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LeaseEvictionView {
+    /// The member that took the path.
+    #[serde(default)]
+    pub by: String,
+    /// The contended path — the whole reason, named.
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub evicted_at: u64,
+}
+
+/// A member an operator withdrew (#5327): why it left, and on whose word.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WithdrawnView {
+    /// `"operator"` or `"dependency"`; empty when the coordinator predates it.
+    #[serde(default)]
+    pub cause: String,
+    /// The withdrawn ancestor, for a `"dependency"` cause.
+    #[serde(default)]
+    pub depends_on: Option<String>,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub operator: String,
+}
+
+/// A member awaiting a surface amendment (ADR-0207): the paths a declining
+/// lane asked for, and the one line justifying each.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AwaitingSurfaceView {
+    #[serde(default)]
+    pub paths: Vec<SurfacePathRequest>,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub requests: u32,
+}
+
+/// One repo-relative path a declining lane asked to have added to its
+/// declared surface.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SurfacePathRequest {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub reason: String,
 }
 
 /// Host-fault findings, listed verbatim when the coordinator serves them.
@@ -509,8 +613,10 @@ pub struct MetricsSummary {
     pub active_blooms: u64,
 }
 
-/// One `GET /metrics/days` row. Extra series fields default so a thinner
-/// coordinator still decodes.
+/// One `GET /metrics/days` row. Extra series columns are served by the
+/// coordinator; the defaults cover a coordinator that predates them.
+/// `reconstructed` marks the undated bucket, which is not a civil day and
+/// must not be windowed with the dated ones.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct MetricDay {
     #[serde(default)]
@@ -527,6 +633,8 @@ pub struct MetricDay {
     pub cycle_time_millis: Option<u64>,
     #[serde(default)]
     pub quiesced: bool,
+    #[serde(default)]
+    pub reconstructed: bool,
 }
 
 /// One per-member stage span on `GET /metrics/blooms/{id}/timeline`.
@@ -964,6 +1072,15 @@ mod tests {
         assert_eq!(day.landed, 0);
         assert!(day.cycle_time_millis.is_none());
         assert!(!day.quiesced);
+        assert!(!day.reconstructed);
+
+        let reconstructed: MetricDay = serde_json::from_value(json!({
+            "label": "reconstructed",
+            "dispatches": 1,
+            "reconstructed": true
+        }))
+        .expect("reconstructed day");
+        assert!(reconstructed.reconstructed);
 
         let seat: MetricsSeat = serde_json::from_value(json!({
             "agent": {"harness": "Claude", "model": "opus", "effort": "High"},

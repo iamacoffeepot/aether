@@ -17,6 +17,7 @@ pub enum ResourceKey {
     Journal(JournalQuery),
     Artifact(DigestHex),
     Transcript(TranscriptQuery),
+    Prompt(PromptQuery),
     MetricsSummary,
     MetricsDays,
     MetricsTimeline(DigestHex),
@@ -71,6 +72,24 @@ impl TranscriptQuery {
     }
 }
 
+/// One ranged prompt page. A prompt is written once before the lane starts
+/// and never grows, so there is no `live` flag.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PromptQuery {
+    pub nonce: String,
+    pub cursor: Option<u64>,
+}
+
+impl PromptQuery {
+    #[must_use]
+    pub fn path(&self) -> String {
+        self.cursor.map_or_else(
+            || format!("/dispatches/{}/prompt", self.nonce),
+            |cursor| format!("/dispatches/{}/prompt?cursor={cursor}", self.nonce),
+        )
+    }
+}
+
 /// Which fetch thread serves a resource.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lane {
@@ -86,6 +105,7 @@ impl ResourceKey {
             Self::Journal(_)
             | Self::Artifact(_)
             | Self::Transcript(_)
+            | Self::Prompt(_)
             | Self::MetricsSummary
             | Self::MetricsDays
             | Self::MetricsTimeline(_)
@@ -105,6 +125,7 @@ impl ResourceKey {
             Self::Journal(query) => query.path(),
             Self::Artifact(digest) => format!("/artifacts/{}/decoded", digest.as_hex()),
             Self::Transcript(query) => query.path(),
+            Self::Prompt(query) => query.path(),
             Self::MetricsSummary => "/metrics/summary".to_owned(),
             Self::MetricsDays => "/metrics/days".to_owned(),
             Self::MetricsTimeline(bloom) => format!("/metrics/blooms/{}/timeline", bloom.as_hex()),
@@ -201,6 +222,7 @@ pub struct Store {
     journals: HashMap<JournalQuery, Cell<JournalPage>>,
     artifacts: HashMap<DigestHex, Cell<DecodedArtifact>>,
     transcripts: HashMap<TranscriptQuery, Cell<DispatchFilePage>>,
+    prompts: HashMap<PromptQuery, Cell<DispatchFilePage>>,
     summary: Cell<MetricsSummary>,
     days: Cell<Vec<MetricDay>>,
     timelines: HashMap<DigestHex, Cell<MetricsTimeline>>,
@@ -222,6 +244,7 @@ impl Store {
             journals: HashMap::new(),
             artifacts: HashMap::new(),
             transcripts: HashMap::new(),
+            prompts: HashMap::new(),
             summary: Cell::default(),
             days: Cell::default(),
             timelines: HashMap::new(),
@@ -253,6 +276,11 @@ impl Store {
     #[must_use]
     pub fn transcript(&self, query: &TranscriptQuery) -> Option<&Cell<DispatchFilePage>> {
         self.transcripts.get(query)
+    }
+
+    #[must_use]
+    pub fn prompt(&self, query: &PromptQuery) -> Option<&Cell<DispatchFilePage>> {
+        self.prompts.get(query)
     }
 
     #[must_use]
@@ -324,6 +352,7 @@ impl Store {
             ResourceKey::Journal(_)
             | ResourceKey::Artifact(_)
             | ResourceKey::Transcript(_)
+            | ResourceKey::Prompt(_)
             | ResourceKey::MetricsTimeline(_)
             | ResourceKey::MetricsSeats
             | ResourceKey::MetricsDispatches
@@ -350,6 +379,7 @@ impl Store {
                 !cell.inflight && cell.completed_at.is_none_or(|at| at.elapsed() >= self.view_cadence)
             }
             ResourceKey::Transcript(query) => self.transcripts.get(query).is_none_or(Cell::on_demand_due),
+            ResourceKey::Prompt(query) => self.prompts.get(query).is_none_or(Cell::on_demand_due),
             ResourceKey::MetricsSummary => self.polled_due(&self.summary),
             ResourceKey::MetricsDays => self.polled_due(&self.days),
             ResourceKey::Spend => self.polled_due(&self.spend),
@@ -383,6 +413,7 @@ impl Store {
             ResourceKey::Journal(query) => self.journals.get(query).is_some_and(|cell| cell.inflight),
             ResourceKey::Artifact(digest) => self.artifacts.get(digest).is_some_and(|cell| cell.inflight),
             ResourceKey::Transcript(query) => self.transcripts.get(query).is_some_and(|cell| cell.inflight),
+            ResourceKey::Prompt(query) => self.prompts.get(query).is_some_and(|cell| cell.inflight),
             ResourceKey::MetricsSummary => self.summary.inflight,
             ResourceKey::MetricsDays => self.days.inflight,
             ResourceKey::MetricsTimeline(bloom) => self.timelines.get(bloom).is_some_and(|cell| cell.inflight),
@@ -401,6 +432,7 @@ impl Store {
             ResourceKey::Journal(query) => self.journals.entry(*query).or_default().inflight = true,
             ResourceKey::Artifact(digest) => self.artifacts.entry(*digest).or_default().inflight = true,
             ResourceKey::Transcript(query) => self.transcripts.entry(query.clone()).or_default().inflight = true,
+            ResourceKey::Prompt(query) => self.prompts.entry(query.clone()).or_default().inflight = true,
             ResourceKey::MetricsSummary => self.summary.inflight = true,
             ResourceKey::MetricsDays => self.days.inflight = true,
             ResourceKey::MetricsTimeline(bloom) => self.timelines.entry(*bloom).or_default().inflight = true,
@@ -438,6 +470,14 @@ impl Store {
 
     pub fn apply_transcript(&mut self, query: TranscriptQuery, result: Result<DispatchFilePage, String>) {
         let cell = self.transcripts.entry(query).or_default();
+        match result {
+            Ok(page) => cell.apply_ok(page),
+            Err(error) => cell.apply_err(error),
+        }
+    }
+
+    pub fn apply_prompt(&mut self, query: PromptQuery, result: Result<DispatchFilePage, String>) {
+        let cell = self.prompts.entry(query).or_default();
         match result {
             Ok(page) => cell.apply_ok(page),
             Err(error) => cell.apply_err(error),
@@ -497,6 +537,7 @@ impl Store {
             ResourceKey::Journal(query) => self.journals.entry(*query).or_default().apply_err(error),
             ResourceKey::Artifact(digest) => self.artifacts.entry(*digest).or_default().apply_err(error),
             ResourceKey::Transcript(query) => self.transcripts.entry(query.clone()).or_default().apply_err(error),
+            ResourceKey::Prompt(query) => self.prompts.entry(query.clone()).or_default().apply_err(error),
             ResourceKey::MetricsSummary => self.summary.apply_err(error),
             ResourceKey::MetricsDays => self.days.apply_err(error),
             ResourceKey::MetricsTimeline(bloom) => self.timelines.entry(*bloom).or_default().apply_err(error),
@@ -519,7 +560,7 @@ fn apply<T>(cell: &mut Cell<T>, result: Result<T, String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommissionCapability, ResourceKey, Store};
+    use super::{CommissionCapability, PromptQuery, ResourceKey, Store};
     use crate::dto::{BloomView, DigestHex, MemberView, ViewDocument};
     use std::time::Duration;
 
@@ -572,5 +613,17 @@ mod tests {
         assert!(!store.due(&ResourceKey::Commission("wp-a".to_owned())));
         assert!(!store.view().is_stale());
         assert_eq!(store.view().value.as_ref().map(|view| view.blooms.len()), Some(1));
+    }
+
+    #[test]
+    fn a_prompt_query_targets_the_prompt_route() {
+        // Tripwire: the path is the whole contract with
+        // api/runtime/mod.rs:749; a typo here is a 404 the console cannot
+        // distinguish from a swept dispatch.
+        assert_eq!(PromptQuery { nonce: "dispatch-1".into(), cursor: None }.path(), "/dispatches/dispatch-1/prompt");
+        assert_eq!(
+            PromptQuery { nonce: "dispatch-1".into(), cursor: Some(40) }.path(),
+            "/dispatches/dispatch-1/prompt?cursor=40"
+        );
     }
 }

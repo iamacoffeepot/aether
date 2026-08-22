@@ -8,6 +8,7 @@
 
 mod adr;
 mod approval;
+mod base_verify;
 mod bloom;
 mod commission;
 mod composition;
@@ -15,6 +16,7 @@ mod config;
 mod fields;
 mod finding;
 mod lane;
+mod lease;
 mod model_override;
 mod operator;
 mod orphan_claim;
@@ -22,16 +24,23 @@ mod price;
 mod profile;
 mod proof;
 mod question;
+mod scope_verify;
 mod spend;
 mod stage;
 mod statement;
 mod study;
+mod suppression;
+mod surface;
 mod timeout;
 mod verify;
 mod workpiece_builder;
 
 pub use adr::{ADR_SCHEMA, ADR_TRANSITION_SCHEMA, Adr, AdrStatus, AdrTransition, AdrValueError};
-pub use approval::{ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, surface_intersection};
+pub use approval::{
+    ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, TierVerdict, gate_widening, path_in_surface, surface_additions,
+    surface_intersection, tier_verdict,
+};
+pub use base_verify::{BaseReceipt, BaseVerdict};
 pub use bloom::{
     BloomDraft, BloomSpec, DependencyError, LandingReceipt, MemberCandidate, MemberDependency, MemberSubject,
     Membership, ResolutionClaim, ResolvedBloom, ResolvedDependencies, resolve_member_dependencies,
@@ -51,8 +60,9 @@ pub use finding::{
     classify_findings,
 };
 pub use lane::{LANE_WORKPIECE_HEADER, pin_workpiece_description, split_lane_identity};
+pub use lease::{EvictedHolder, MAX_OBSERVED_WRITES, normalize_write_paths};
 pub use model_override::{AgentSelection, ModelOverride, OverrideError, ResolvedModel, StageOverride};
-pub use operator::{Adjudication, Disposition, OperatorHold, OperatorRepair};
+pub use operator::{Adjudication, Disposition, OperatorHold, OperatorRepair, Withdrawal, WithdrawalCause};
 pub use orphan_claim::{
     ORPHAN_CLAIM_RELEASE_WORDS, OrphanClaimRelease, OrphanClaimReleaseCompletion, OrphanClaimReleaseRecord,
 };
@@ -60,14 +70,21 @@ pub use price::{LongContextBand, PriceRates, PriceTable, SealedPriceTable};
 pub use profile::{AgentProfile, Harness, ReasoningEffort, ToolPolicy};
 pub use proof::{VerifiedTree, VerifyGateSet, VerifyProof, VerifyReuse};
 pub use question::Question;
+pub use scope_verify::{
+    NamedPath, NamedSymbol, PathOrigin, SCOPE_VERIFY_SCHEMA, ScopeVerifyInput, ScopeVerifyReport, verify_scope,
+};
 pub use spend::{SpendCeiling, SpendQuiesce, SpendWindow};
 pub use stage::{
     Attempt, CONSTRUCT_IMPLEMENT_COMMAND, CandidateRef, CatalogError, DispatchKey, ExecutionLimits, NetworkProfile,
-    REVIEW_CRITIC_COMMAND, SCOPE_FILL_COMMAND, StageBinding, StageCatalog, Transformation, VERIFY_CHECK_COMMAND,
-    VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK, is_model_lane,
+    REVIEW_CRITIC_COMMAND, SCOPE_FILL_COMMAND, StageBinding, StageCatalog, Transformation, VERIFY_BASE_COMMAND,
+    VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK, is_model_lane,
 };
 pub use statement::{Observation, Provenance, StageReceipt, Statement};
+#[cfg(not(target_arch = "wasm32"))]
+pub use statement::{signed_approval, signed_cancel};
 pub use study::{StudyCall, StudyCost, StudyRecord};
+pub use suppression::{SuppressionDisposition, SuppressionRequest, SuppressionVerdict};
+pub use surface::{SurfacePathRequest, SurfaceRequest};
 pub use timeout::TimeoutRecord;
 pub use verify::{VerifyFailure, VerifyFailureSet};
 pub use workpiece_builder::{FIELD_ENTRY_SCHEMA, FieldEntry, WorkpieceBuilder, WorkpieceRefusal};
@@ -238,6 +255,16 @@ pub enum EvidenceKind {
     /// operator reads. Appended past [`Self::ReviewAdvisory`] so the prior
     /// kinds' wire discriminants are unchanged.
     ConstructDeclined,
+    /// A candidate's stated case for the suppressions it is carrying
+    /// (ADR-0193). Its `detail` names the [`SuppressionRequest`] set the lane
+    /// wrote on the suppression lines themselves.
+    ///
+    /// It raises no hold and advances no member — a request is a question
+    /// asked of a reviewer who does not exist yet at the moment a member
+    /// verifies, and the member proceeds while it stands. Appended past
+    /// [`Self::ConstructDeclined`] so the prior kinds' wire discriminants are
+    /// unchanged.
+    SuppressionRequest,
 }
 
 /// The sealed forecast of what a bloom's set will spend — what a study report

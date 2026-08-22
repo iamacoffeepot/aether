@@ -11,7 +11,8 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
     Adjudication, BloomSpec, CandidateRef, ConfigRegistry, Evidence, MemberDependency, OperatorHold, OperatorRepair,
-    OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim, Statement, VerifyFailureSet,
+    OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim, Statement, SuppressionDisposition,
+    SurfaceRequest, VerifyFailureSet, Withdrawal,
 };
 
 /// An admitted fact plus its idempotency key (ADR-0149 §The control core).
@@ -622,6 +623,134 @@ pub enum Fact {
         /// Every repository-relative path the candidate changed that no glob
         /// in the member's sealed surface covers.
         violating_paths: Vec<String>,
+    },
+    /// A dispatched member stage declined and named the declared-surface paths
+    /// its work requires (ADR-0207).
+    ///
+    /// Distinct from a declining [`Fact::AttemptCompleted`] because the remedy
+    /// is a person rather than a lane: the reducer parks the member awaiting a
+    /// surface amendment, spends no attempt and no repair roll, and never
+    /// dispatches the same stage again against the same revision. Appended past
+    /// [`Fact::ContainmentRefused`] so every prior fact keeps its wire
+    /// discriminant.
+    SurfaceRequested {
+        /// The bloom whose member declined.
+        bloom: BloomId,
+        /// The member awaiting the amendment.
+        workpiece: WorkpieceId,
+        /// The stage that declined — the member's current cursor stage, or the
+        /// report is stale.
+        stage: StageId,
+        /// The decline evidence, bound to the member's current subject and
+        /// carrying [`crate::EvidenceKind::ConstructDeclined`].
+        evidence: Evidence,
+        /// The normalized request the lane returned.
+        request: SurfaceRequest,
+    },
+    /// An operator withdrew one or more members from a walking bloom (#5327).
+    ///
+    /// The narrow member-removal move `supersede --eject` never was: the bloom
+    /// keeps its id, its sealed base, and every sibling's finished work, and
+    /// only the named members leave — their lanes cancelled, their claim refs
+    /// freed one at a time, their cursors dropped. A withdrawal buys no
+    /// attempt, revokes no sibling's claim, and is one-way.
+    ///
+    /// Appended past [`Fact::SurfaceRequested`] so every prior fact keeps its
+    /// wire discriminant.
+    Withdraw {
+        /// The walking bloom the members belong to.
+        bloom: BloomId,
+        /// The operator-named members, in the order the request listed them.
+        /// Nonempty; each carries [`WithdrawalCause::Operator`](crate::WithdrawalCause::Operator).
+        withdrawals: Vec<Withdrawal>,
+        /// Also withdraw every member transitively downstream of the named
+        /// ones. Without it a withdrawal that would strand a dependent is
+        /// refused, naming them — a dependent left behind pins the bloom the
+        /// withdrawal was meant to free.
+        ///
+        /// The cascade set is *derived by the reducer* rather than carried
+        /// here, because journal replay folds recorded decisions rather than
+        /// re-reducing facts (ADR-0190): the derived withdrawals ride the same
+        /// atomic decision set as the named ones, so a replay can never land a
+        /// dependent's withdrawal without its cause.
+        cascade: bool,
+    },
+    /// The executor observed what one construct lane has written into its slot
+    /// checkout (ADR-0204).
+    ///
+    /// Exclusivity between co-sealed members is per file and acquired at first
+    /// observed write, so this is the only input the lease table has. The host
+    /// reads the lane's working tree — `git status --porcelain` on the slot
+    /// checkout — and reports the repository-relative paths; the reducer owns
+    /// what that means for the lease table, exactly as it owns the advance
+    /// decision behind a raw pass/fail observation.
+    ///
+    /// Restating the same set is a no-op by construction: a path the member
+    /// already holds re-reads its own lease. What makes the observation
+    /// idempotent against the *journal* is the admission key, which the host
+    /// derives from the nonce and the observed set together, so re-observing
+    /// an unchanged tree never reaches the reducer at all.
+    ///
+    /// A write outside the declared surface is *not* handled here. It stays a
+    /// containment verify failure (ADR-0209 / #5238): the lease table answers
+    /// "who else is writing this", never "may this member write at all".
+    ///
+    /// Appended past [`Fact::Withdraw`] so every prior fact keeps its wire
+    /// discriminant.
+    LaneWritesObserved {
+        /// The bloom whose lanes contend.
+        bloom: BloomId,
+        /// The member whose lane was observed.
+        workpiece: WorkpieceId,
+        /// The stage the observed lane is running — the member's current
+        /// cursor stage, or the observation is stale.
+        stage: StageId,
+        /// The repository-relative paths the lane has written, already through
+        /// [`normalize_write_paths`](crate::normalize_write_paths): sorted,
+        /// deduplicated, capped, and free of anything that is not one literal
+        /// path inside the repository.
+        paths: Vec<String>,
+        /// When the host read the working tree, in unix milliseconds. The
+        /// reducer holds no clock, so a lease's age — which ADR-0198 requires
+        /// a lease to make visible — arrives with the observation that takes
+        /// it.
+        observed_at: u64,
+    },
+    /// A reviewer answered the suppression requests a member's candidate is
+    /// carrying (ADR-0193 §5).
+    ///
+    /// The lane states; only a reviewer grants. A grant arrives by observation
+    /// — the coordinator reads the owner-edited marker off its own landing
+    /// proposal on the pass it already polls, and takes the granter from the
+    /// editor login the marker check itself trusts. A denial has no marker for
+    /// "no", so it arrives through a REST door of its own. Both admit here,
+    /// because what is being recorded is the same thing either way: who
+    /// answered what, and how.
+    ///
+    /// Appended past [`Fact::LaneWritesObserved`] so every prior fact keeps its
+    /// wire discriminant.
+    SuppressionDisposition {
+        /// The bloom the answered member belongs to.
+        bloom: BloomId,
+        /// The member whose candidate carries the requests.
+        workpiece: WorkpieceId,
+        /// The answer, naming the requests it closes by digest.
+        disposition: SuppressionDisposition,
+    },
+    /// A whole-workspace verify of a sealed base completed (ADR-0200).
+    ///
+    /// Appended, not inserted, so prior wire discriminants are unchanged.
+    BaseVerifyCompleted {
+        /// The commit the verify ran at.
+        base: Digest,
+        /// The tree it peeled to — the content key of the receipt.
+        tree: Digest,
+        /// The completion gate's pass/fail outcome.
+        passed: bool,
+        /// The evidence the run produced, bound to the tree it judged.
+        evidence: Evidence,
+        /// The verifier identities that failed together. Empty on a pass.
+        failed: VerifyFailureSet,
     },
 }
 

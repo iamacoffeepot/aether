@@ -248,11 +248,36 @@ fn deliver_commission(
     if let Some(&number) = recorded.get(&document.workpiece.0) {
         document.recorded_issue = Some(number);
     }
-    let number = projection.project_commission(&document).map_err(|error| error.to_string())?;
+    let Some(number) = projection.project_commission(&document).map_err(|error| error.to_string())? else {
+        return Ok(None);
+    };
     if document.recorded_issue == Some(number) {
         return Ok(None);
     }
     Ok(Some(RecordCommissionProjection { id: document.workpiece.0, issue_number: number }))
+}
+
+/// Push the refs a timer check found unpublished (#5260).
+///
+/// No ack: nothing decided this and no outbox row is spent, so a failure needs
+/// no row left undelivered — the next check finds the same ref still ahead and
+/// tries again. That is the redrive, and it stays bounded because the backend's
+/// own transient counter escalates an identical repeated failure to a
+/// deterministic one rather than looping at warn forever.
+fn publish_reconciled_head(replica: &SourceReplicaShell, head: &str) {
+    match replica.publish() {
+        Ok(()) => tracing::info!(
+            target: "aether_chassis_bloomery::mirror",
+            %head,
+            "source replica reconciled a mainline advance no coordinator event announced",
+        ),
+        Err(error) => tracing::warn!(
+            target: "aether_chassis_bloomery::mirror",
+            %head,
+            %error,
+            "source replica reconcile push failed; the next drain tick re-checks the ref",
+        ),
+    }
 }
 
 /// Coalesce superseded replica requests to the latest sequence and push once.
@@ -390,6 +415,30 @@ impl NativeActor for MirrorReactorCapability {
         if state.cycle_in_flight() {
             return;
         }
+        // A mainline ref that advanced without a coordinator event — an
+        // operator's direct push — emits no replica topic, so nothing would
+        // ever drain it and the mirror lags for as long as the board stays
+        // quiet (#5260). Ask the ref itself instead of waiting to be told.
+        //
+        // Exclusive with the drain: claiming a worker slot makes the next
+        // tick's `cycle_in_flight` true, so the reconcile push and a topic
+        // push are never in flight together — two concurrent pushes of the
+        // same refs is exactly the race the serial cycle exists to prevent.
+        // The drains run on the following tick, which costs the poll interval
+        // and only on a tick that found work to reconcile.
+        //
+        // The question is a local `git rev-parse`, so it is answered inline;
+        // only the push it may lead to goes to a worker.
+        if let Some(replica) = state.replica.clone()
+            && let Some(head) = replica.unpublished_head()
+        {
+            let slot = WorkerSlot::claim(&state.outstanding);
+            ctx.spawn_detached::<MirrorReactorCapability, _>(move |_root| {
+                let _slot = slot;
+                publish_reconciled_head(&replica, &head);
+            });
+            return;
+        }
         let mut drains = Vec::new();
         if state.projection.is_some() {
             drains.push(DrainOutbox::scoped(Topic::ViewDocument));
@@ -513,7 +562,9 @@ mod tests {
         Membership, ProjectedReceipt, ResolvedConfigs, Snapshot, SourceReplicaPayload, Topic, WorkpieceId, reduce,
         view_of,
     };
-    use aether_bloomery_github::{GithubProjection, ReplicaError, SourceReplica, testing::FakeGithub};
+    use aether_bloomery_github::{
+        GithubProjection, ReplicaError, SourceReplica, commission_floor_title, landing_branch, testing::FakeGithub,
+    };
     use aether_data::wire::{from_bytes, to_vec};
     use aether_data::{MailId, MailboxId, Source};
     use aether_substrate::actor::native::binding::NativeBinding;
@@ -644,18 +695,22 @@ mod tests {
     fn a_landing_receipt_projects_a_comment_on_its_topic() {
         // ADR-0149 migration step 3: a gate-enabled land emits a receipt the
         // control actor enqueues under the receipt topic, which the mirror
-        // reactor drains and projects as a comment on each landed member's own
-        // issue. This pins the receipt path — that the reactor topic matches the
-        // producer's (the mismatch step 3 reconciled), and that the topic's
-        // payload is the membership-carrying envelope rather than the bare
-        // receipt, which would decode into a projection that reaches nothing.
+        // reactor drains and projects onto the landing pull request. The
+        // member's own landing comment is written by the land reactor at close
+        // time, so this path must not comment the member issue. This pins the
+        // receipt path — that the reactor topic matches the producer's, and
+        // that the topic's payload is the membership-carrying envelope rather
+        // than the bare receipt.
+        const LANDING: u64 = 5000;
         let fake = FakeGithub::new();
+        let bloom = BloomId(digest(1));
         fake.seed_issue(MEMBER_ISSUE, "the workpiece's own issue");
+        fake.seed_pull_request(LANDING, &landing_branch(&bloom));
         let shell = ProjectionShell::new(Arc::new(GithubProjection::new(fake.clone())));
         let mut store = SqliteStore::open(":memory:").unwrap();
 
         let projected = ProjectedReceipt {
-            receipt: LandingReceipt { bloom: BloomId(digest(1)), previous_base: digest(10), new_head: digest(20) },
+            receipt: LandingReceipt { bloom, previous_base: digest(10), new_head: digest(20) },
             members: vec![WorkpieceId(format!("issue-{MEMBER_ISSUE}"))],
         };
         store.enqueue_topic(Topic::LandingReceipt, &to_vec(&projected).unwrap()).unwrap();
@@ -664,7 +719,11 @@ mod tests {
         assert_eq!(entries.len(), 1, "the enqueued receipt is drainable on the receipt topic");
 
         let acks = project_batch(&shell, &entries);
-        assert_eq!(fake.comments_on(MEMBER_ISSUE).len(), 1, "the receipt lands on the member's own issue");
+        assert!(
+            fake.comments_on(MEMBER_ISSUE).is_empty(),
+            "the member's landing comment is written by the land reactor"
+        );
+        assert_eq!(fake.comments_on(LANDING).len(), 1, "the receipt lands on the landing pull request");
         assert_eq!(fake.issue_count(), 1, "a receipt opens nothing");
         assert_eq!(acks.len(), 1);
         assert!(
@@ -983,6 +1042,7 @@ mod tests {
                 approval_digest: None,
                 status: "open".to_owned(),
                 recorded_issue,
+                title: String::new(),
             })
             .unwrap(),
         }
@@ -1019,8 +1079,9 @@ mod tests {
         assert_eq!(acks.len(), 1);
         assert_eq!(acks[0].through_sequence, 2, "both entries deliver on the same topic prefix");
         let title = fake.issue_title(fake.issue_numbers()[0]).expect("replica");
-        assert!(
-            title.starts_with("Bloomery replica"),
+        assert_eq!(
+            title,
+            commission_floor_title("wp-1"),
             "the replica title must not collide with human issue numbering: {title}"
         );
     }
@@ -1058,6 +1119,10 @@ mod tests {
         let view = OutboxEntry { sequence: 3, topic: Topic::ViewDocument.as_str().to_owned(), payload: encoded_view() };
         let view_acks = project_batch(&projection, &[view]);
         assert_eq!(view_acks.len(), 1, "the view topic still delivers beside a stalled commission");
-        assert_eq!(fake.comments_on(MEMBER_ISSUE).len(), 2, "receipt and view both wrote");
+        assert_eq!(
+            fake.comments_on(MEMBER_ISSUE).len(),
+            1,
+            "the view wrote on the member; the receipt comments the proposal, not the issue"
+        );
     }
 }

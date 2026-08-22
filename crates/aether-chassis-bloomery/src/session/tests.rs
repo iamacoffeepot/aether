@@ -284,3 +284,27 @@ fn release_chains_parent_receipt() {
         conn.query_row("SELECT parent_receipt FROM sessions LIMIT 1", [], |row| row.get(0)).unwrap();
     assert_eq!(stored_parent.as_deref(), Some("R1"));
 }
+
+#[test]
+fn an_unconfigured_pool_lands_beside_the_journal_and_a_configured_one_is_left_alone() {
+    // Plausible bug: repointing a `db_path` the operator set (their file is
+    // silently abandoned), or deriving a sibling path for a journal that has no
+    // durable directory to sit beside — a `:memory:` or URI journal would then
+    // hand the pool a nonsense relative file.
+    use super::SessionConfig;
+
+    let mut derived = SessionConfig::default();
+    derived.default_beside_journal("/srv/bloomery/state/bloomery.sqlite");
+    assert_eq!(derived.db_path, "/srv/bloomery/state/sessions.sqlite");
+    assert_eq!(derived.store_path(), "/srv/bloomery/state/sessions.sqlite");
+
+    let mut configured = SessionConfig { db_path: "/pool/mine.sqlite".to_owned(), ..SessionConfig::default() };
+    configured.default_beside_journal("/srv/bloomery/state/bloomery.sqlite");
+    assert_eq!(configured.db_path, "/pool/mine.sqlite", "an operator's own path is not repointed");
+
+    for journal in [":memory:", "file:aether-bloomery?mode=memory&cache=shared"] {
+        let mut volatile = SessionConfig::default();
+        volatile.default_beside_journal(journal);
+        assert_eq!(volatile.db_path, ":memory:", "a non-durable journal leaves the pool non-durable: {journal}");
+    }
+}

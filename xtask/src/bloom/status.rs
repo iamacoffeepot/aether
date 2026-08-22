@@ -39,6 +39,7 @@ fn status_label(status: BloomStatus) -> &'static str {
         BloomStatus::Resolved => "resolved",
         BloomStatus::Landed => "landed",
         BloomStatus::Superseded => "superseded",
+        BloomStatus::Withdrawn => "withdrawn",
     }
 }
 
@@ -64,13 +65,23 @@ mod tests {
                     id: predecessor,
                     status: BloomStatus::Superseded,
                     superseded_by: Some(successor),
-                    members: vec![MemberView { workpiece: "wp-1".to_owned(), scope_revision: digest(7) }],
+                    members: vec![MemberView {
+                        workpiece: "wp-1".to_owned(),
+                        scope_revision: digest(7),
+                        awaiting_surface: None,
+                        withdrawn: None,
+                    }],
                 },
                 BloomView {
                     id: successor,
                     status: BloomStatus::Sealed,
                     superseded_by: None,
-                    members: vec![MemberView { workpiece: "wp-1".to_owned(), scope_revision: digest(7) }],
+                    members: vec![MemberView {
+                        workpiece: "wp-1".to_owned(),
+                        scope_revision: digest(7),
+                        awaiting_surface: None,
+                        withdrawn: None,
+                    }],
                 },
             ],
         });

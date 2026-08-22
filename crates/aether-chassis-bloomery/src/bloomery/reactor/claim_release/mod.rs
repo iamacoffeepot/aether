@@ -36,8 +36,11 @@ pub struct ClaimReleaseReactorCapability;
 impl ClaimReleaseReactorCapability {
     /// The outbox topics this reactor drains — its half of the producer/reactor
     /// pairing the topic tripwire checks against [`Topic::ALL`]. It is the sole
-    /// drainer of [`Topic::OrphanClaimRelease`].
-    pub const DRAINED_TOPICS: &'static [Topic] = &[Topic::OrphanClaimRelease];
+    /// drainer of [`Topic::OrphanClaimRelease`] and of
+    /// [`Topic::MemberClaimRelease`] (#5327) — the same expected-holder
+    /// compare-and-swap, over one workpiece ref rather than an authorized
+    /// orphan.
+    pub const DRAINED_TOPICS: &'static [Topic] = &[Topic::OrphanClaimRelease, Topic::MemberClaimRelease];
 }
 
 mod runtime;

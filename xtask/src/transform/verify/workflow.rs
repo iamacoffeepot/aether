@@ -66,6 +66,27 @@ fn sole(job: &str, described: &str, predicate: impl Fn(&Step) -> bool) -> Step {
     matched.remove(0)
 }
 
+/// Every job named in `jobs.ci-pass.needs` — the list branch protection
+/// resolves to its one required check.
+///
+/// Read from the workflow for the same reason the argv assertions are: a second
+/// Rust literal of this list would prove only that xtask agrees with itself,
+/// and the drift worth catching is a gate added to `needs:` that nobody gave an
+/// umbrella member.
+pub(super) fn required_jobs() -> Vec<String> {
+    let declaration = block(&block(&CI_WORKFLOW.lines().collect::<Vec<&str>>(), "jobs"), "ci-pass");
+    assert!(!declaration.is_empty(), "`jobs.ci-pass` must exist in .github/workflows/ci.yml");
+
+    let needs = scalar(&declaration, "needs").expect("`jobs.ci-pass.needs` must be a flow sequence");
+    let inner = needs
+        .trim()
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .expect("`jobs.ci-pass.needs` must be spelled as a `[ a, b ]` flow sequence");
+
+    inner.split(',').map(str::trim).filter(|job| !job.is_empty()).map(str::to_owned).collect()
+}
+
 /// Every step of `jobs.<job>.steps`, in file order.
 fn steps(job: &str) -> Vec<Step> {
     let file: Vec<&str> = CI_WORKFLOW.lines().collect();

@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, HashMap};
 use aether_bloomery::testing::digest;
 use aether_bloomery::{
     Admit, AgentSelection, AggregateReviewPayload, BloomId, CandidateRef, Conclusion, ConfigKind, ConfigRegistry,
-    DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, Harness, ModelOverride, Nonce,
+    Digest, DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, Harness, ModelOverride, Nonce,
     ReasoningEffort, RedispatchPayload, ReviewPass, SharedCorrespondence, StageCatalog, StageId, StageOverride,
     TimeoutRecord, Topic, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId,
     pin_workpiece_description,
@@ -226,7 +226,7 @@ fn enqueue_dispatch_with_configs(
     store: &mut SqliteStore,
     bloom: BloomId,
     workpiece: &str,
-    scope_revision: aether_bloomery::Digest,
+    scope_revision: Digest,
     stage: StageId,
     configs: ConfigRegistry,
 ) -> u64 {
@@ -834,6 +834,11 @@ fn drain_stops_the_ack_prefix_at_a_missing_subject_entry() {
         candidate: None,
         configs: ConfigRegistry::default(),
     };
+    // The same claim `enqueue_construct_dispatch` makes for its members: a
+    // queued dispatch belongs to a live member, and the drain retires an entry
+    // naming one that holds no membership before it ever inspects the
+    // transformation — which would skip this entry rather than break on it.
+    store.claim_seal(bloom.0.as_bytes(), &["wp-none".to_owned()]).unwrap();
     store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap()).unwrap();
     enqueue_construct_dispatch(&mut store, bloom, "wp-c", 7);
 
@@ -2160,19 +2165,9 @@ fn an_aggregate_verify_failure_can_produce_a_repair_candidate() {
     let AdmitDecision::Admitted(_) = admit_uploaded(
         &mut store,
         &UploadedEvidence {
-            nonce: Nonce("n-av".to_owned()),
-            subject: tree,
-            verdict: StageVerdict::VerificationFailed,
-            detail: digest(7),
-            candidate: None,
             findings: Some(findings.to_owned()),
             failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
-            cost: None,
-            calls: None,
-            session_reuse_arm: None,
-            session_reuse_saved_micro_usd: None,
-            peak_resident_bytes: None,
-            violating_paths: Vec::new(),
+            ..uploaded("n-av", tree, StageVerdict::VerificationFailed, digest(7))
         },
     )
     .unwrap() else {
@@ -2198,19 +2193,8 @@ fn an_aggregate_verify_failure_can_produce_a_repair_candidate() {
     let AdmitDecision::Admitted(admission) = admit_uploaded(
         &mut store,
         &UploadedEvidence {
-            nonce: Nonce(format!("dispatch-{sequence}")),
-            subject: digest(5),
-            verdict: StageVerdict::VerificationPassed,
-            detail: digest(11),
             candidate: Some(captured),
-            findings: None,
-            failed_verifiers: VerifyFailureSet::EMPTY,
-            cost: None,
-            calls: None,
-            session_reuse_arm: None,
-            session_reuse_saved_micro_usd: None,
-            peak_resident_bytes: None,
-            violating_paths: Vec::new(),
+            ..uploaded(&format!("dispatch-{sequence}"), digest(5), StageVerdict::VerificationPassed, digest(11))
         },
     )
     .unwrap() else {
@@ -2223,6 +2207,30 @@ fn an_aggregate_verify_failure_can_produce_a_repair_candidate() {
     assert_eq!(stage, StageId::Refine);
     assert!(passed, "a findings-naming-nothing repair that captured a tree keeps its passing verdict");
     assert_eq!(candidate, Some(captured), "the completion path retains the captured weave");
+}
+
+/// An upload carrying only what its four arguments name — no candidate, no
+/// findings, no failed verifiers, no measurement. The shape most admission
+/// tests want; a test that cares about one more field sets it and takes the
+/// rest through struct update.
+fn uploaded(nonce: &str, subject: Digest, verdict: StageVerdict, detail: Digest) -> UploadedEvidence {
+    UploadedEvidence {
+        nonce: Nonce(nonce.to_owned()),
+        subject,
+        verdict,
+        detail,
+        candidate: None,
+        findings: None,
+        failed_verifiers: VerifyFailureSet::EMPTY,
+        cost: None,
+        calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
+        violating_paths: Vec::new(),
+        surface_request: None,
+        suppression_requests: Vec::new(),
+    }
 }
 
 // #5102 — the same AggregateVerify → accepted weave-repair path must publish
@@ -2259,19 +2267,9 @@ fn an_aggregate_verify_repair_candidate_reaches_landing_ref_creation() {
     let AdmitDecision::Admitted(_) = admit_uploaded(
         &mut store,
         &UploadedEvidence {
-            nonce: Nonce("n-av".to_owned()),
-            subject: tree,
-            verdict: StageVerdict::VerificationFailed,
-            detail: digest(7),
-            candidate: None,
             findings: Some(findings.to_owned()),
             failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
-            cost: None,
-            calls: None,
-            session_reuse_arm: None,
-            session_reuse_saved_micro_usd: None,
-            peak_resident_bytes: None,
-            violating_paths: Vec::new(),
+            ..uploaded("n-av", tree, StageVerdict::VerificationFailed, digest(7))
         },
     )
     .unwrap() else {
@@ -2285,19 +2283,8 @@ fn an_aggregate_verify_repair_candidate_reaches_landing_ref_creation() {
     let AdmitDecision::Admitted(admission) = admit_uploaded(
         &mut store,
         &UploadedEvidence {
-            nonce: Nonce(format!("dispatch-{sequence}")),
-            subject: digest(5),
-            verdict: StageVerdict::VerificationPassed,
-            detail: digest(11),
             candidate: Some(captured),
-            findings: None,
-            failed_verifiers: VerifyFailureSet::EMPTY,
-            cost: None,
-            calls: None,
-            session_reuse_arm: None,
-            session_reuse_saved_micro_usd: None,
-            peak_resident_bytes: None,
-            violating_paths: Vec::new(),
+            ..uploaded(&format!("dispatch-{sequence}"), digest(5), StageVerdict::VerificationPassed, digest(11))
         },
     )
     .unwrap() else {
@@ -2349,7 +2336,7 @@ fn park_and_answer(
     shell: &ExecutorShell,
     bloom: BloomId,
     workpiece: &str,
-    question: aether_bloomery::Digest,
+    question: Digest,
     words: &str,
 ) -> u64 {
     let (dispatched, subject) = enqueue_construct_dispatch(store, bloom, workpiece, 5);
@@ -2370,6 +2357,8 @@ fn park_and_answer(
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
+        suppression_requests: Vec::new(),
     };
     assert!(matches!(admit_uploaded(store, &upload).unwrap(), AdmitDecision::Admitted(_)), "the parked upload admits");
 
@@ -2947,6 +2936,8 @@ fn a_dispatch_whose_fact_never_reached_the_journal_is_re_queued_at_boot() {
             session_reuse_saved_micro_usd: None,
             peak_resident_bytes: None,
             violating_paths: Vec::new(),
+            surface_request: None,
+            suppression_requests: Vec::new(),
         };
         // The admission is built and the order spent — and then the process
         // stops, so the `Admit` this returns never reaches the control core.
@@ -3145,6 +3136,8 @@ fn construct_attempt_ref(nonce: &Nonce, subject: u8) -> EvidenceRef {
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
+        suppression_requests: Vec::new(),
     }
 }
 

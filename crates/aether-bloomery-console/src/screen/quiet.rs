@@ -32,7 +32,14 @@ pub fn quiet_lines(view: &ViewDocument) -> Vec<QuietLine> {
                 MemberState::Integrated => resolved += 1,
                 MemberState::Blocked => blocked += 1,
                 MemberState::Idle => idle += 1,
-                MemberState::Running | MemberState::Wedged | MemberState::Held => walking = true,
+                MemberState::Withdrawn => {}
+                MemberState::Running
+                | MemberState::Wedged
+                | MemberState::AwaitingSurface
+                | MemberState::Evicted
+                | MemberState::Held => {
+                    walking = true;
+                }
             }
         }
         if !walking {

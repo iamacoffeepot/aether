@@ -47,7 +47,7 @@ pub(super) struct PeakMemory {
     /// understands. False leaves every command unwrapped.
     available: bool,
     /// The largest reading any run under this wrapper reported. A lane runs
-    /// several commands (seven verify members, each possibly preceded by a
+    /// several commands (eight verify members, each possibly preceded by a
     /// pre-build), and what the concurrency model needs is the high-water mark
     /// one lane reached, not the last member to finish.
     observed: Cell<Option<u64>>,
@@ -245,7 +245,7 @@ mod tests {
 
     #[test]
     fn a_lane_reports_the_high_water_mark_of_its_commands() {
-        // The lane runs seven members; the concurrency model needs the most any
+        // The lane runs eight members; the concurrency model needs the most any
         // one of them held at once, not whichever finished last.
         let peak = wrapper(true);
         peak.observe(REPORT.as_bytes());

@@ -10,9 +10,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_bloomery::{
     BackendObjectId, CandidateRef, Conclusion, ConfigRegistry, ConfigScopes, Digest, EvidenceRef, ExecutionStatus,
-    ExecutorBackend, Nonce, PriceTable, ResolvedModel, SharedCorrespondence, StageId, StageVerdict, StudyCost,
-    Transformation, VerifyFailureSet, WorkHandle, WorkOrder, is_model_lane,
+    ExecutorBackend, Nonce, ObservedLaneWrites, PriceTable, ResolvedModel, SharedCorrespondence, StageId, StageVerdict,
+    StudyCost, SuppressionRequest, SurfaceRequest, Transformation, VerifyFailureSet, WorkHandle, WorkOrder,
+    is_model_lane,
 };
+use aether_bloomery_git::command;
 use aether_bloomery_github::parse_study;
 use aether_data::Kind;
 use aether_data::wire::from_bytes;
@@ -23,6 +25,7 @@ use super::error::LocalExecutorError;
 use super::identity::ProcessIdentity;
 use super::lane_program::LaneProgram;
 use super::orphan::OrphanedRun;
+use super::priority::{DispatchPriority, must_wait_behind, next_waiting, priority_of};
 use super::process_runner::{CaptureIdentity, ProcessTransformRunner};
 use super::quarantine;
 use super::runner::{RunLifecycle, RunProcess, RunSpec, TransformRunner};
@@ -86,6 +89,12 @@ const DEFAULT_LANE_BUILD_JOBS: usize = 8;
 /// evidence directory. Its modification time is the local backend's live
 /// progress signal (ADR-0195 §8); coordinator polling must never touch it.
 const TRANSCRIPT_FILE: &str = "transcript.jsonl";
+
+/// The file a lane stamps while it works past its model's last turn — the
+/// mechanical fixers, whose one scoped `clippy --fix` compiles (#5383). The
+/// transcript is silent for that whole stretch, so it is read alongside it and
+/// under the same rules: metadata only, never touched by the coordinator.
+const HEARTBEAT_FILE: &str = "heartbeat";
 
 /// The file a dispatch records its lane slot in, inside its own evidence
 /// directory — the durable half of the slot assignment, read back by boot
@@ -182,6 +191,8 @@ struct PendingRun {
     gates: LaneGates,
     // The slot the predecessor that produced this checkout ran in, when known.
     preferred: Option<usize>,
+    // Which band this dispatch queues in, from the stage its order names.
+    priority: DispatchPriority,
 }
 
 impl PendingRun {
@@ -263,6 +274,19 @@ impl Registry {
         let (slot, reason) = choose_slot(preferred, &self.slots, quarantined);
         self.slots.insert(slot);
         (slot, reason)
+    }
+
+    // The waiting dispatch the next free slot goes to: the highest band, and
+    // within it the one that has waited longest.
+    fn take_waiting(&mut self) -> Option<PendingRun> {
+        let bands: Vec<DispatchPriority> = self.waiting.iter().map(|pending| pending.priority).collect();
+        self.waiting.remove(next_waiting(&bands)?)
+    }
+
+    // Whether a dispatch of `priority` has to queue rather than take a free slot
+    // now, because something already waiting would be handed that slot first.
+    fn waits_behind(&self, priority: DispatchPriority) -> bool {
+        must_wait_behind(priority, &self.waiting.iter().map(|pending| pending.priority).collect::<Vec<_>>())
     }
 
     // Claim one named slot, reporting whether it was free. Boot reconciliation's
@@ -606,6 +630,11 @@ impl LocalExecutor {
         let gates = LaneGates::of(&order.transformation.command);
         let is_model_lane = is_model_lane(&order.transformation.command);
         let preferred = self.preferred_builder_slot(&checkout_hex);
+        // Resolved here, once, rather than at every pump: the stage lives in the
+        // outstanding-order row this nonce resolves, and reading it under the
+        // registry lock would put a database query inside the decision every
+        // freed slot makes.
+        let priority = priority_of(self.order_identity(&nonce).map(|(_, _, stage)| stage));
         // The stage's resolved agent profile, overlaid onto the order by the
         // dispatching host (ADR-0149 §The line) — never a backend-local config
         // knob, which would let a run's model diverge from the profile its bloom
@@ -629,6 +658,7 @@ impl LocalExecutor {
             subject: evidence_subject(&order.transformation),
             gates,
             preferred,
+            priority,
         })
     }
 
@@ -663,13 +693,16 @@ impl LocalExecutor {
     // Claim a lane slot for a dispatch that may start right now, or report that it
     // has to wait.
     //
-    // A dispatch already waiting has the prior claim on a free slot, so a fresh one
-    // never overtakes it — the submission order the queue promises holds even in
-    // the window between a slot freeing and the pump handing it out.
-    fn reserve_slot(&self, preferred: Option<usize>) -> Option<(usize, SlotChoice)> {
+    // A dispatch already waiting in this one's band or better has the prior claim
+    // on a free slot, so a fresh one never overtakes a peer — the order the queue
+    // promises holds even in the window between a slot freeing and the pump
+    // handing it out. A dispatch that outranks everything waiting does start
+    // inline, or the band ordering would apply only to slots that free after it
+    // has already parked (#5410).
+    fn reserve_slot(&self, priority: DispatchPriority, preferred: Option<usize>) -> Option<(usize, SlotChoice)> {
         let quarantined = quarantine::slots_on_disk(&self.base_dir);
         let mut registry = self.lock();
-        if !registry.waiting.is_empty() || registry.occupied(&quarantined) >= self.max_concurrent_lanes {
+        if registry.waits_behind(priority) || registry.occupied(&quarantined) >= self.max_concurrent_lanes {
             return None;
         }
         registry.starting += 1;
@@ -781,19 +814,41 @@ impl LocalExecutor {
     }
 
     /// Same-member Refine resume from the construct session journaled on this
-    /// workpiece. Missing handles fall through to the pool; an over-threshold
-    /// or unparseable handle launches fresh.
+    /// workpiece. Only a missing handle falls through to the pool; a journaled
+    /// handle resumes whatever context it carries, and an unparseable one
+    /// launches fresh. Context never diverts a refine to the pool — the pool
+    /// key is the findings overlay, which is a colder start than the construct
+    /// session it would replace.
     fn journaled_refine_plan(&self, pending: &PendingRun, worktree_dir: &Path) -> Option<super::ReusePlan> {
-        let (bloom, workpiece, stage) = self.order_identity(&pending.nonce)?;
+        let Some((bloom, workpiece, stage)) = self.order_identity(&pending.nonce) else {
+            // The registry row is written before the submit that starts this
+            // lane, so a nonce that does not resolve here means the dispatch
+            // never recorded one — every journaled resume is dead until it does.
+            tracing::warn!(
+                nonce = %pending.nonce,
+                "local executor backend: no outstanding order resolves this nonce; journaled session resume is unavailable for this lap"
+            );
+            return None;
+        };
         if stage != StageId::Refine {
             return None;
         }
-        let (session_id, context) = self.lookup_construct_session(&bloom, &workpiece)?;
-        let profile = pending.profile.as_ref()?;
-        let cliff = self
-            .sessions
-            .as_ref()
-            .map_or(DEFAULT_PRICING_CLIFF_TOKENS, super::session_reuse::SessionReuse::pricing_cliff_tokens);
+        let Some((session_id, _context)) = self.lookup_construct_session(&bloom, &workpiece) else {
+            tracing::warn!(
+                nonce = %pending.nonce,
+                workpiece = %workpiece,
+                "local executor backend: refine lap has no journaled construct session for its workpiece; falling through to the pool"
+            );
+            return None;
+        };
+        let Some(profile) = pending.profile.as_ref() else {
+            tracing::warn!(
+                nonce = %pending.nonce,
+                workpiece = %workpiece,
+                "local executor backend: refine lap carries no sealed profile, so its journaled construct session cannot be keyed; falling through to the pool"
+            );
+            return None;
+        };
         let task = super::session_reuse::pool_task(&pending.command, pending.task.as_deref());
         let request = AcquireRequest {
             model: &profile.model,
@@ -802,7 +857,7 @@ impl LocalExecutor {
             worktree: worktree_dir,
             command: &pending.command,
         };
-        Some(match decide_refine_resume(&session_id, context, cliff) {
+        Some(match decide_refine_resume(&session_id) {
             RefineResume::Resumed(id) => plan_for(&request, ReuseArm::Resumed, None, Some(id)),
             RefineResume::Fresh { miss } => plan_for(&request, ReuseArm::Fresh, miss, None),
         })
@@ -1023,9 +1078,9 @@ impl LocalExecutor {
         outcome
     }
 
-    // Hand every free lane slot to the dispatches waiting for one, in submission
-    // order. Called wherever a run leaves the registry, which is the only place a
-    // slot frees.
+    // Hand every free lane slot to the dispatches waiting for one, in band order
+    // (#5410). Called wherever a run leaves the registry, which is the only place
+    // a slot frees.
     //
     // A queued start that fails has no caller left to refuse it — its dispatch
     // acked as submitted cycles ago — so it is logged and dropped rather than
@@ -1056,7 +1111,7 @@ impl LocalExecutor {
         }
         // Reserved as it is taken: the slot is spent from here, not from whenever
         // the spawn it is handed to returns.
-        let pending = registry.waiting.pop_front()?;
+        let pending = registry.take_waiting()?;
         registry.starting += 1;
         let (slot, reason) = registry.claim_for(pending.preferred, &quarantined);
         drop(registry);
@@ -1415,7 +1470,15 @@ impl LocalExecutor {
     fn surface_violations(&self, nonce: &str, worktree: Option<&Path>, diff_base: Option<&str>) -> Option<Vec<String>> {
         let worktree = worktree?;
         let diff_base = diff_base?;
-        let surface = self.member_declared_surface(nonce)?;
+        // Containment is a terminal-Verify gate: only that stage judges a
+        // finished candidate against the declared surface. The guard lives
+        // here rather than inside `order_scope`, which a declining
+        // construct-family lane also reads (ADR-0207).
+        if self.order_stage(nonce) != Some(StageId::Verify) {
+            return None;
+        }
+        let (_, surface) = self.order_scope(nonce)?;
+        let surface = surface?;
         let changed = match changed_paths(worktree, diff_base) {
             Ok(changed) => changed,
             Err(error) => {
@@ -1431,21 +1494,35 @@ impl LocalExecutor {
         Some(out_of_surface(changed.iter().map(String::as_str), &surface))
     }
 
-    fn member_declared_surface(&self, nonce: &str) -> Option<Vec<String>> {
+    /// The stage the order under `nonce` was dispatched for.
+    fn order_stage(&self, nonce: &str) -> Option<StageId> {
+        let store = self.messages.as_ref()?;
+        let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
+        Some(DispatchRecord::from_stored(&store.lookup_order(nonce).ok().flatten()?)?.stage)
+    }
+
+    /// The order's sealed scope revision, and that revision's declared surface
+    /// when the row can be read.
+    ///
+    /// The digest is the order's own column, so it is available whether or not
+    /// the revision resolves; the surface is `None` when it does not, because
+    /// the two callers want different things from that miss. Containment skips
+    /// rather than fail open on a surface it cannot read. A declining lane's
+    /// surface request only reads the surface to drop paths the member already
+    /// has, so an unreadable one keeps a superset the granting half resolves
+    /// against the real surface — far better than losing the park entirely.
+    fn order_scope(&self, nonce: &str) -> Option<(Digest, Option<Vec<String>>)> {
         let store = self.messages.as_ref()?;
         let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
         let order = store.lookup_order(nonce).ok().flatten()?;
         let record = DispatchRecord::from_stored(&order)?;
-        if record.stage != StageId::Verify {
-            return None;
-        }
-        match store.load_revision(record.scope_revision) {
+        let surface = match store.load_revision(record.scope_revision) {
             Ok(Some(revision)) => Some(revision.declared_surface),
             Ok(None) => {
                 tracing::warn!(
                     target: "aether_chassis_bloomery::executor",
                     %nonce,
-                    "member verify: sealed scope revision is missing; skipping containment",
+                    "member lane: the sealed scope revision is missing",
                 );
                 None
             }
@@ -1454,11 +1531,22 @@ impl LocalExecutor {
                     target: "aether_chassis_bloomery::executor",
                     %nonce,
                     %error,
-                    "member verify: declared surface unreadable; skipping containment",
+                    "member lane: the declared surface is unreadable",
                 );
                 None
             }
-        }
+        };
+        drop(store);
+        Some((record.scope_revision, surface))
+    }
+
+    /// The normalized surface request a declining construct-family lane left in
+    /// its evidence, or `None` when it left none, the claim did not survive
+    /// normalization, or the order cannot be resolved (ADR-0207).
+    fn surface_request(&self, nonce: &str, bytes: &[u8]) -> Option<SurfaceRequest> {
+        let (summary, claimed) = parse_surface_request(bytes)?;
+        let (scope_revision, surface) = self.order_scope(nonce)?;
+        SurfaceRequest::normalize(scope_revision, surface.as_deref().unwrap_or_default(), &summary, claimed)
     }
 
     fn unread_evidence(
@@ -1525,6 +1613,7 @@ impl LocalExecutor {
             diff_base_hex,
             ..
         } = run;
+        let subject = parse_claimed_subject(bytes).unwrap_or(subject);
         let failed_verifiers = if is_verify {
             parse_failed_verifiers(bytes)
         } else {
@@ -1616,8 +1705,18 @@ impl LocalExecutor {
         // claim for a later retry, so nothing resets the checkout the retry reads.)
         self.retire(&handle.nonce.0);
         self.pump();
-        let verdict = if matches!(construct, Some(ConstructConclusion::Declined)) {
-            StageVerdict::Parked
+        // A declining construct-family lane that named the paths its work
+        // requires asks for surface (ADR-0207); one whose claim does not
+        // survive normalization degrades to a plain declined park rather than
+        // to nothing, because losing the park is the failure that whole path
+        // exists to remove.
+        let surface_request = matches!(construct, Some(ConstructConclusion::Declined))
+            .then(|| self.surface_request(&handle.nonce.0, bytes))
+            .flatten();
+        let verdict = if surface_request.is_some() {
+            StageVerdict::SurfaceRequested
+        } else if matches!(construct, Some(ConstructConclusion::Declined)) {
+            StageVerdict::Declined
         } else if passed {
             StageVerdict::VerificationPassed
         } else {
@@ -1629,15 +1728,19 @@ impl LocalExecutor {
         } else {
             Vec::new()
         };
-        vec![judged_evidence_ref(
-            handle,
-            &subject,
-            bytes,
-            candidate,
+        let judgement = Judgement {
             verdict,
-            failed_verifiers.unwrap_or_default(),
+            failed_verifiers: failed_verifiers.unwrap_or_default(),
             violating_paths,
-        )]
+            surface_request,
+            // Read off every lane's evidence, not only a verify's: the umbrella
+            // is what states them, and a `verify.suppress` dispatched on its
+            // own writes the same channel. A lane that stated none yields an
+            // empty set, which is the absence the reviewer surfaces read.
+            suppression_requests: SuppressionRequest::normalize(parse_suppression_requests(bytes)),
+        };
+
+        vec![judged_evidence_ref(handle, &subject, bytes, candidate, judgement)]
     }
 }
 
@@ -1725,15 +1828,27 @@ fn synthesized_executor_fault(
     vec![executor_fault_ref(handle, subject, &bytes, candidate, None, None, None)]
 }
 
+/// What the lane's own conclusion says about the attempt, as opposed to what
+/// the run mechanically produced. Grouped because the five travel together
+/// from the conclusion that derived them into the evidence that records them.
+struct Judgement {
+    verdict: StageVerdict,
+    failed_verifiers: VerifyFailureSet,
+    violating_paths: Vec<String>,
+    /// The paths a declining construct-family lane asked for (ADR-0207).
+    surface_request: Option<SurfaceRequest>,
+    /// The suppressions the candidate states a case for (ADR-0193).
+    suppression_requests: Vec<SuppressionRequest>,
+}
+
 fn judged_evidence_ref(
     handle: &WorkHandle,
     subject: &Digest,
     bytes: &[u8],
     candidate: Option<CandidateRef>,
-    verdict: StageVerdict,
-    failed_verifiers: VerifyFailureSet,
-    violating_paths: Vec<String>,
+    judgement: Judgement,
 ) -> EvidenceRef {
+    let Judgement { verdict, failed_verifiers, violating_paths, surface_request, suppression_requests } = judgement;
     let overlay = apply_containment(verdict, failed_verifiers, parse_findings(bytes), &violating_paths);
     let detail = Digest::of_wire_bytes(bytes);
     EvidenceRef {
@@ -1759,6 +1874,8 @@ fn judged_evidence_ref(
         session_reuse_saved_micro_usd: parse_session_reuse_saved(bytes),
         peak_resident_bytes: parse_peak_resident_bytes(bytes),
         violating_paths,
+        surface_request,
+        suppression_requests,
     }
 }
 
@@ -1792,6 +1909,8 @@ fn executor_fault_ref(
         session_reuse_saved_micro_usd: parse_session_reuse_saved(bytes),
         peak_resident_bytes: parse_peak_resident_bytes(bytes),
         violating_paths: Vec::new(),
+        surface_request: None,
+        suppression_requests: Vec::new(),
     }
 }
 
@@ -1833,7 +1952,7 @@ impl ExecutorBackend for LocalExecutor {
         // the ceiling existed. Otherwise the dispatch waits its turn — and is acked
         // as submitted either way, so the reducer's view of it never depends on how
         // busy this host happened to be.
-        if let Some((slot, reason)) = self.reserve_slot(pending.preferred) {
+        if let Some((slot, reason)) = self.reserve_slot(pending.priority, pending.preferred) {
             self.start_reserved(pending, slot, reason)?;
         } else {
             self.enqueue(pending);
@@ -1870,7 +1989,7 @@ impl ExecutorBackend for LocalExecutor {
         };
         Ok(match lifecycle {
             RunLifecycle::Running => {
-                ExecutionStatus::Running { last_progress_unix_millis: transcript_progress_unix_millis(&evidence_dir) }
+                ExecutionStatus::Running { last_progress_unix_millis: lane_progress_unix_millis(&evidence_dir) }
             }
             // Every terminal observation is a completed run so `stream_evidence`
             // can classify it. A signal or a wait fault is not a clean success.
@@ -2006,6 +2125,42 @@ impl ExecutorBackend for LocalExecutor {
         }
         Ok(self.bound_stream_evidence(handle, run, host_fault, &bytes))
     }
+
+    /// Read every live run's slot checkout (ADR-0204).
+    ///
+    /// The registry lock is released before any git spawn: an observation is a
+    /// best-effort read of a directory a child owns, and holding the allocator
+    /// across a subprocess would let one slow checkout stall every submit. A
+    /// run whose slot could not be recovered at boot carries no `worktree_dir`
+    /// and is skipped — there is no tree to read — and a read that faults warns
+    /// and contributes nothing, because an absent observation is "no new
+    /// writes" and a lease taken from a guess would be worse than a late one.
+    fn observe_writes(&self) -> Vec<ObservedLaneWrites> {
+        let live: Vec<(Nonce, PathBuf)> = {
+            let registry = self.lock();
+            registry
+                .runs
+                .iter()
+                .filter_map(|(nonce, run)| run.worktree_dir.clone().map(|worktree| (Nonce(nonce.clone()), worktree)))
+                .collect()
+        };
+
+        live.into_iter()
+            .filter_map(|(nonce, worktree)| match command::written_paths(&worktree) {
+                Ok(paths) if paths.is_empty() => None,
+                Ok(paths) => Some(ObservedLaneWrites { nonce, paths }),
+                Err(error) => {
+                    tracing::debug!(
+                        target: "aether_chassis_bloomery::executor",
+                        nonce = %nonce.0,
+                        %error,
+                        "local executor backend: lane working tree unreadable this tick; observing no writes",
+                    );
+                    None
+                }
+            })
+            .collect()
+    }
 }
 
 impl ReconcileLanes for LocalExecutor {
@@ -2080,15 +2235,32 @@ fn recorded_slot(evidence_dir: &Path) -> Option<usize> {
     fs::read_to_string(evidence_dir.join(SLOT_RECORD)).ok()?.trim().parse().ok()
 }
 
-/// The streamed transcript's modification time, or `None` when the file is
-/// absent, unreadable, or stamped in the future.
+/// The newest usable modification time among the files a live lane writes —
+/// the streamed transcript and the lane's own heartbeat — or `None` when
+/// neither is present, readable, and stamped in the past.
+///
+/// Both, because the transcript alone does not cover the lane. It goes quiet
+/// the moment the model ends its turn, and the mechanical fixers that follow
+/// can compile for minutes; a construct lane cancelled as a dead child in that
+/// window loses a finished candidate (#5383). The lane stamps `heartbeat` while
+/// it does that work, and the newer of the two is what this lane last did.
 ///
 /// Future metadata is refused rather than reported: a clock-skewed mtime would
 /// otherwise look like progress that has not happened yet and extend the
-/// silence window past the sealed deadline. Metadata is read only — opening the
-/// file for write here would make coordinator polling itself the heartbeat.
-fn transcript_progress_unix_millis(evidence_dir: &Path) -> Option<u64> {
-    let modified = fs::metadata(evidence_dir.join(TRANSCRIPT_FILE)).ok()?.modified().ok()?;
+/// silence window past the sealed deadline. Metadata is read only — opening
+/// either file for write here would make coordinator polling itself the
+/// heartbeat.
+fn lane_progress_unix_millis(evidence_dir: &Path) -> Option<u64> {
+    [TRANSCRIPT_FILE, HEARTBEAT_FILE]
+        .into_iter()
+        .filter_map(|name| file_progress_unix_millis(&evidence_dir.join(name)))
+        .max()
+}
+
+/// One file's modification time in Unix milliseconds, or `None` when it is
+/// absent, unreadable, or stamped in the future.
+fn file_progress_unix_millis(path: &Path) -> Option<u64> {
+    let modified = fs::metadata(path).ok()?.modified().ok()?;
     let millis = modified.duration_since(UNIX_EPOCH).ok().and_then(|since| u64::try_from(since.as_millis()).ok())?;
     let now =
         SystemTime::now().duration_since(UNIX_EPOCH).ok().and_then(|since| u64::try_from(since.as_millis()).ok())?;
@@ -2265,6 +2437,63 @@ fn parse_commit_message(bytes: &[u8]) -> Option<String> {
         .filter(|message| !message.is_empty())
 }
 
+/// The evidence's top-level `surface_request` object — what a declining
+/// construct-family lane wrote into `.bloomery-surface-request` (ADR-0207),
+/// returned as the lane's raw claim for [`SurfaceRequest::normalize`] to judge.
+///
+/// Presence-driven and tolerant like [`parse_findings`]: bytes that do not
+/// decode, an absent object, a missing `paths` array, and an entry missing
+/// either string all yield nothing rather than failing the lane. The lane is an
+/// untrusted worker; the trust boundary is `normalize`, not this reader.
+fn parse_surface_request(bytes: &[u8]) -> Option<(String, Vec<(String, String)>)> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let request = value.get("surface_request")?;
+    let summary = request.get("summary").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+    let claimed: Vec<(String, String)> = request
+        .get("paths")?
+        .as_array()?
+        .iter()
+        .filter_map(|entry| {
+            Some((
+                entry.get("path")?.as_str()?.to_owned(),
+                entry.get("reason").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+            ))
+        })
+        .collect();
+    (!claimed.is_empty()).then_some((summary, claimed))
+}
+
+/// The evidence's top-level `suppression_requests` array — the case a lane
+/// stated for each suppression it declined to remove (ADR-0193), returned as
+/// the lane's raw claim for [`SuppressionRequest::normalize`] to judge.
+///
+/// Presence-driven and tolerant like [`parse_surface_request`]: bytes that do
+/// not decode, an absent array, and an entry missing any of its four members
+/// all yield nothing rather than failing the lane. The lane is an untrusted
+/// worker; the trust boundary is `normalize`, not this reader.
+fn parse_suppression_requests(bytes: &[u8]) -> Vec<(String, u32, String, String)> {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Vec::new();
+    };
+    value
+        .get("suppression_requests")
+        .and_then(serde_json::Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    Some((
+                        entry.get("path")?.as_str()?.to_owned(),
+                        u32::try_from(entry.get("line")?.as_u64()?).ok()?,
+                        entry.get("lint")?.as_str()?.to_owned(),
+                        entry.get("reason")?.as_str()?.to_owned(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// What the attempt cost, from the `result_record` the lane nested in its
 /// `evidence.json` (#4679) — the same object `construct_conclusion` reads
 /// `is_error` out of, parsed for its token and price columns instead.
@@ -2357,6 +2586,13 @@ fn construct_conclusion(bytes: &[u8]) -> ConstructConclusion {
     } else {
         ConstructConclusion::Declined
     }
+}
+
+/// A mock-lane [`super::mock_lane::LaneMode::WrongSubject`] stamps this so the
+/// artifact name binds a digest the order did not display.
+fn parse_claimed_subject(bytes: &[u8]) -> Option<Digest> {
+    let value = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
+    Digest::from_hex(value.get("claimed_subject")?.as_str()?)
 }
 
 #[cfg(test)]

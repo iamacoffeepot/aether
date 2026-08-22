@@ -130,6 +130,8 @@ mod tests {
                 members: vec![MemberView {
                     workpiece: "issue-4945".to_owned(),
                     scope_revision: DigestHex::from_bytes([7; 32]),
+                    awaiting_surface: None,
+                    withdrawn: None,
                 }],
             }],
         }

@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use aether_bloomery::{BloomId, ClaimHolder, ClaimRefKind};
 use aether_bloomery::{
     CandidateRef, ConfigRegistry, Digest, Disposition, Event, Forecast, MemberDependency, Membership, Outcome,
-    ScopeRevision, StageId, Statement, Workpiece, WorkpieceId,
+    ScopeRevision, ScopeVerifyInput, ScopeVerifyReport, StageId, Statement, SuppressionVerdict, Workpiece, WorkpieceId,
 };
 
 use crate::bloomery::{AdrTouch, Completeness};
@@ -88,8 +88,26 @@ pub struct MemberProjection {
     /// The exact scope-revision digest — matches the proposal's `scope_revision`
     /// and the digest the formed approval binds.
     pub scope_revision: Digest,
-    /// The declared-surface globs the tier policy resolves over.
+    /// The declared-surface globs the containment bound is drawn from.
     pub declared_surface: Vec<String>,
+    /// The workspace crates the scope declared, when it declared crates rather
+    /// than globs. Non-empty means `declared_surface` above was *derived* — the
+    /// declared crates, their reverse-dependency closure, the shared roots, and
+    /// the protected files — and the tier resolves over the protected files
+    /// alone. Defaulted so a projection written before the block existed reads
+    /// back as the glob-declared surface it is.
+    #[serde(default)]
+    pub declared_crates: Vec<String>,
+    /// The workspace crates the scope declared it load-bearingly *reads*
+    /// (ADR-0204) — the `## Reads` block. The door turns these into
+    /// conditional ordering against the co-members that declared they will
+    /// change those crates, and into nothing at all when no co-member does.
+    ///
+    /// The gate never reads this: a read is not authority, so it lifts no
+    /// tier and widens no surface. Defaulted so a projection written before
+    /// the block existed reads back as declaring no reads.
+    #[serde(default)]
+    pub declared_reads: Vec<String>,
     /// The nine completeness facts the gate fails closed on.
     pub completeness: Completeness,
     /// The ADR-maturity of the change, for the unconditional hard gate.
@@ -200,6 +218,39 @@ pub struct AdjudicateRequest {
     pub idempotency_key: Option<String>,
 }
 
+/// `POST /blooms/{id}/members/{workpiece}/suppression` body — the reviewer's
+/// answer to the suppression requests a member's candidate is carrying
+/// (ADR-0193 §5).
+///
+/// The lane states; only a reviewer grants. Both answers arrive at this one
+/// door, because what is recorded is the same thing either way — who answered
+/// what, and how — and there is no marker for "no" to place anywhere else.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuppressionAnswerRequest {
+    /// The requests being answered, by [`SuppressionRequest`] digest. Required
+    /// and non-empty: an answer that closes nothing is not an answer, and one
+    /// that closed *everything standing* would silently answer a request the
+    /// reviewer had not read.
+    ///
+    /// [`SuppressionRequest`]: aether_bloomery::SuppressionRequest
+    pub requests: Vec<Digest>,
+    /// The answer. `Granted` lets the candidate keep its suppressions;
+    /// `Denied` bounces the member to a repair lap at its own budget's expense.
+    pub verdict: SuppressionVerdict,
+    /// Why. Required and non-blank — for a denial it is what the repair lap is
+    /// told, and for a grant it is the record of the judgment.
+    pub reason: String,
+    /// Who answered. Recorded as the decider; required and non-blank, because
+    /// "who granted this allow" is the audit question the mechanism exists for.
+    pub operator: String,
+    /// Override the admit idempotency key.
+    ///
+    /// The default is derived from the answer's own content, so re-POSTing the
+    /// same answer is a no-op duplicate rather than a second decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
 /// `POST /blooms/{id}/members/{workpiece}/repair` body — the manager override's
 /// second move (#4957): the candidate the operator pushed to the workpiece's
 /// candidate ref, offered to the ordinary gates.
@@ -251,6 +302,31 @@ pub struct HoldRequest {
     /// Override the admit idempotency key; defaults to the request's own
     /// content under this route's name, so a resend is a duplicate rather than a
     /// second brake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+/// `POST /blooms/{id}/members/{workpiece}/withdraw` body — take one member out
+/// of a walking bloom without superseding it (#5327).
+///
+/// Unauthenticated on the host-local bind like every other bloom operator
+/// route, and gated by the same mandatory non-blank `reason` + `operator`: the
+/// audit trail is the whole product of an act no verdict produced.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WithdrawRequest {
+    /// Why this member is leaving, in the operator's own words. Required and
+    /// non-blank; a blank one is `422`.
+    pub reason: String,
+    /// Who is deciding. Recorded as the decider; required and non-blank.
+    pub operator: String,
+    /// Also withdraw every member that transitively depends on this one.
+    /// Without it, a withdrawal that would strand a dependent is refused
+    /// `422`, naming them — a dependent left behind pins the bloom the
+    /// withdrawal was meant to free.
+    #[serde(default)]
+    pub cascade: bool,
+    /// Override the admit idempotency key; defaults to the withdrawal's own
+    /// content, so a resend is a duplicate rather than a second act.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
 }
@@ -502,6 +578,21 @@ pub struct CreateCommissionRequest {
     pub intent: Statement,
 }
 
+/// `POST /commissions/{id}/revisions` body, read for the projection only.
+///
+/// The same body also decodes as a bare [`ScopeRevision`]; this shape reads the
+/// one field beside it. Kept separate rather than flattened onto the revision
+/// because the revision's bytes are the signed subject and must stay exactly
+/// what the encoder writes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RevisionProjection {
+    /// The workpiece's field records projected for the freeze check
+    /// (ADR-0208). Absent for a hand-authored revision, which carries no
+    /// records — absence writes no report, never a clean one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_verify: Option<ScopeVerifyInput>,
+}
+
 /// `POST /commissions` reply.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommissionCreatedView {
@@ -555,6 +646,13 @@ pub struct CommissionShowView {
     pub current: Option<ScopeRevision>,
     /// Approval statements stored for the current revision, in insert order.
     pub approvals: Vec<Statement>,
+    /// The scope-verify report journaled for the current revision (ADR-0208).
+    ///
+    /// Rendered even when `null`, unlike the optional fields above: `null` is
+    /// the explicit statement that no scope-verify evidence exists for these
+    /// bytes, and omitting the key would let a reader mistake absence for a
+    /// clean report.
+    pub scope_verify: Option<ScopeVerifyReport>,
 }
 
 /// `POST /commissions/{id}/revisions` reply.
@@ -572,6 +670,17 @@ pub struct CommissionApprovalView {
     pub digest: Digest,
     /// The verified-statement evidence bound to the approved scope.
     pub evidence: aether_bloomery::Evidence,
+}
+
+/// `POST /commissions/{id}/cancel` body: the signature is the authority, the
+/// reason is the operator's own words and is recorded in the coordinator log,
+/// never in the signed bytes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelCommissionRequest {
+    /// The Cancel-door statement bound to the commission's intent digest.
+    pub statement: Statement,
+    /// Operator context for the cancel. Never authority.
+    pub reason: String,
 }
 
 /// `POST /commissions/{id}/cancel` reply.

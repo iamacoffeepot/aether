@@ -1,23 +1,24 @@
-//! Shell: endpoint, store, fetch lanes, a four-pane workspace, and pushed frames.
+//! Shell: endpoint, store, fetch lanes, a three-pane workspace, and pushed frames.
 //!
 //! Screens receive the store read-only and cannot fetch or mutate it.
-//! At rest the workspace owns the operator's seat; a drill-in replaces it
-//! with the top pushed frame. The one-line footer stays in both cases.
+//! The header and the one-line footer are shell chrome. Only the middle
+//! band swaps between the workspace and the top pushed frame.
 
 pub mod chrome;
 mod workspace;
 
+use std::iter::once;
 use std::thread;
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::widgets::Block;
+use ratatui::widgets::{Block, Clear};
 
 use crate::fetch::{FetchLanes, FetchReply, ResourceBody};
 use crate::http::Endpoint;
-use crate::keys::{KeyHint, Outcome};
+use crate::keys::{INLINE_HINTS, KeyHint, Outcome};
 use crate::nav::Nav;
 use crate::palette;
 use crate::screen::{Screen, compose};
@@ -43,17 +44,32 @@ pub struct Shell {
     fetch: Option<FetchLanes>,
     workspace: Workspace,
     stack: Vec<Screen>,
+    keys_overlay: bool,
+    ascii_mark: bool,
 }
 
 impl Shell {
     #[must_use]
-    pub fn new<'scope>(scope: &'scope thread::Scope<'scope, '_>, endpoint: Endpoint, view_cadence: Duration) -> Self {
+    pub fn new<'scope>(
+        scope: &'scope thread::Scope<'scope, '_>,
+        endpoint: Endpoint,
+        view_cadence: Duration,
+        ascii_mark: bool,
+    ) -> Self {
         let endpoint_label = endpoint.label();
-        Self::assemble(endpoint_label, Store::new(view_cadence), Some(FetchLanes::spawn(scope, endpoint)))
+        Self::assemble(endpoint_label, Store::new(view_cadence), Some(FetchLanes::spawn(scope, endpoint)), ascii_mark)
     }
 
-    fn assemble(endpoint_label: String, store: Store, fetch: Option<FetchLanes>) -> Self {
-        Self { endpoint_label, store, fetch, workspace: Workspace::new(), stack: Vec::new() }
+    fn assemble(endpoint_label: String, store: Store, fetch: Option<FetchLanes>, ascii_mark: bool) -> Self {
+        Self {
+            endpoint_label,
+            store,
+            fetch,
+            workspace: Workspace::new(),
+            stack: Vec::new(),
+            keys_overlay: false,
+            ascii_mark,
+        }
     }
 
     /// Drain finished fetches and issue any due subscriptions. No HTTP.
@@ -69,6 +85,18 @@ impl Shell {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return Outcome::Quit;
         }
+        if self.keys_overlay {
+            // An open overlay swallows navigation so the board does not walk
+            // underneath it; only quit and dismissal read through.
+            return match key.code {
+                KeyCode::Char('q') => Outcome::Quit,
+                KeyCode::Char('?') | KeyCode::Esc => {
+                    self.keys_overlay = false;
+                    Outcome::Handled
+                }
+                _ => Outcome::Handled,
+            };
+        }
         if key.code == KeyCode::Tab && self.stack.is_empty() {
             self.workspace.cycle();
             return Outcome::Handled;
@@ -83,6 +111,10 @@ impl Shell {
                 Outcome::Handled
             }
             KeyCode::Char('a') => self.handle_artifact(),
+            KeyCode::Char('?') => {
+                self.keys_overlay = true;
+                Outcome::Handled
+            }
             _ => Outcome::Ignored,
         }
     }
@@ -91,15 +123,30 @@ impl Shell {
         frame.render_widget(Block::default().style(palette::body()), frame.area());
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(1)])
+            .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)])
             .split(frame.area());
-        if self.stack.is_empty() {
-            self.workspace.render(frame, chunks[0], &self.store, &self.endpoint_label);
-        } else if let Some(screen) = self.stack.last_mut() {
-            screen.render(frame, chunks[0], &self.store);
-        }
         let dashboard = compose(&self.store);
-        frame.render_widget(chrome::footer(&self.footer_hints(), Some(&dashboard.footer)), chunks[1]);
+        frame.render_widget(
+            chrome::header(
+                &self.endpoint_label,
+                self.store.view(),
+                Some(&dashboard),
+                frame.area().width,
+                self.ascii_mark,
+            ),
+            chunks[0],
+        );
+        if self.stack.is_empty() {
+            self.workspace.render(frame, chunks[1], &self.store);
+        } else if let Some(screen) = self.stack.last_mut() {
+            screen.render(frame, chunks[1], &self.store);
+        }
+        if self.keys_overlay {
+            let (area, overlay) = chrome::keys_overlay(&self.footer_hints(), chunks[1]);
+            frame.render_widget(Clear, area);
+            frame.render_widget(overlay, area);
+        }
+        frame.render_widget(chrome::footer(&self.footer_trail(), INLINE_HINTS, chunks[2].width), chunks[2]);
     }
 
     fn drain_replies(&mut self) {
@@ -147,6 +194,13 @@ impl Shell {
             (ResourceKey::Transcript(query), Err(error)) => self.store.apply_transcript(query, Err(error)),
             (ResourceKey::Transcript(query), Ok(_)) => {
                 self.store.apply_transcript(query, Err("transcript lane returned a non-transcript body".to_owned()));
+            }
+            (ResourceKey::Prompt(query), Ok(ResourceBody::Prompt(page))) => {
+                self.store.apply_prompt(query, Ok(page));
+            }
+            (ResourceKey::Prompt(query), Err(error)) => self.store.apply_prompt(query, Err(error)),
+            (ResourceKey::Prompt(query), Ok(_)) => {
+                self.store.apply_prompt(query, Err("prompt lane returned a non-prompt body".to_owned()));
             }
             (ResourceKey::MetricsSummary, Ok(ResourceBody::Summary(value))) => self.store.apply_summary(Ok(value)),
             (ResourceKey::MetricsSummary, Err(error)) => self.store.apply_summary(Err(error)),
@@ -268,11 +322,7 @@ impl Shell {
     }
 
     fn handle_artifact(&mut self) -> Outcome {
-        let digest = match self.stack.last() {
-            Some(screen) => screen.digest_under_cursor(),
-            None => self.workspace.board().digest_under_cursor(),
-        };
-        let Some(digest) = digest else {
+        let Some(digest) = self.stack.last().and_then(Screen::openable_digest) else {
             return Outcome::Ignored;
         };
         self.push_nav(Nav::focus(Focus::artifact(digest)));
@@ -293,19 +343,25 @@ impl Shell {
         }
     }
 
+    /// Path from the workspace through each pushed frame, painted in the footer.
+    fn footer_trail(&self) -> String {
+        if self.stack.is_empty() {
+            String::new()
+        } else {
+            once("board".to_owned()).chain(self.stack.iter().map(Screen::label)).collect::<Vec<_>>().join(" › ")
+        }
+    }
+
     fn footer_hints(&self) -> Vec<KeyHint> {
         let mut hints = Vec::new();
         if let Some(screen) = self.stack.last() {
-            if screen.digest_under_cursor().is_some() {
+            if screen.openable_digest().is_some() {
                 hints.push(ARTIFACT_HINT);
             }
             hints.extend_from_slice(screen.key_hints());
             return hints;
         }
         hints.extend(self.workspace.key_hints(&self.store));
-        if self.workspace.board().digest_under_cursor().is_some() {
-            hints.push(ARTIFACT_HINT);
-        }
         hints
     }
 }
@@ -314,7 +370,7 @@ impl Shell {
 impl Shell {
     fn harness(view_cadence: Duration) -> (Self, FetchProbe) {
         let (fetch, probe) = FetchLanes::pair();
-        (Self::assemble("127.0.0.1:8910".to_owned(), Store::new(view_cadence), Some(fetch)), probe)
+        (Self::assemble("127.0.0.1:8910".to_owned(), Store::new(view_cadence), Some(fetch), false), probe)
     }
 
     pub(crate) fn showing(view: &ViewDocument, error: Option<&str>) -> Self {
@@ -323,7 +379,7 @@ impl Shell {
         if let Some(error) = error {
             store.apply_view(Err(error.to_owned()));
         }
-        let mut shell = Self::assemble("127.0.0.1:8910".to_owned(), store, None);
+        let mut shell = Self::assemble("127.0.0.1:8910".to_owned(), store, None, false);
         shell.reseat_top();
         shell
     }
@@ -359,7 +415,7 @@ impl Shell {
     }
 
     pub(crate) fn probe(nav: Nav) -> Self {
-        let mut shell = Self::assemble("127.0.0.1:8910".to_owned(), Store::new(Duration::from_secs(1)), None);
+        let mut shell = Self::assemble("127.0.0.1:8910".to_owned(), Store::new(Duration::from_secs(1)), None, false);
         shell.push_nav(nav);
         shell
     }
@@ -381,24 +437,25 @@ impl Shell {
 mod tests {
     use super::PaneId;
     use super::Shell;
+    use super::chrome;
     use crate::dto::{
         BloomDispatchView, BloomDispatchesView, BloomStatus, BloomView, CompositionCursorView, CompositionFinding,
         CompositionView, DigestHex, ExecutorFaultView, HostFaultView, LandingBlock, MemberView, OperatorHoldView,
-        PendingDecisionView, Present, ReviewParkView, SpendQuiesce, StageId, ViewDocument,
+        PendingDecisionView, Present, ReviewParkView, SpendQuiesce, StageId, ViewDocument, WedgeCause,
     };
     use crate::fetch::{FetchReply, ResourceBody};
     use crate::http::Endpoint;
-    use crate::keys::{Outcome, assert_footer_honest, footer_line};
+    use crate::keys::{INLINE_HINTS, Outcome, assert_footer_honest, footer_line};
     use crate::nav::Nav;
     use crate::palette::{Role, depth};
-    use crate::screen::RowId;
-    use crate::store::ResourceKey;
+    use crate::screen::{Dashboard, RowId};
+    use crate::store::{Cell, ResourceKey};
     use crate::warroom::Focus;
     use crossterm::event::{KeyCode, KeyEvent};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
-    use ratatui::style::Color;
+    use ratatui::style::{Color, Modifier};
     use std::net::TcpListener;
     use std::thread;
     use std::time::{Duration, Instant};
@@ -550,14 +607,44 @@ mod tests {
     }
 
     #[test]
+    fn the_artifact_key_is_not_offered_on_a_board_row() {
+        // The plausible bug: a bloom id is a digest, so the footer paints `a`
+        // and the key opens a 404 artifact frame on every board row.
+        let view = ViewDocument {
+            blooms: vec![BloomView { id: digest(1), ..BloomView::default() }],
+            ..ViewDocument::default()
+        };
+        let mut shell = Shell::showing(&view, None);
+        let mut terminal = Terminal::new(TestBackend::new(240, 16)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let text = buffer_text(&terminal);
+        assert!(!text.contains("a artifact"), "artifact hint painted on a board row:\n{text}");
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('a'))), Outcome::Ignored);
+        assert_eq!(shell.stack_depth(), 0);
+    }
+
+    #[test]
+    fn an_open_artifact_does_not_stack_a_copy_of_itself() {
+        // The plausible bug: the artifact screen reports its own digest as
+        // under the cursor, so `a` pushes a second identical frame.
+        let mut shell = Shell::probe(Nav::focus(Focus::artifact(digest(1))));
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('a'))), Outcome::Ignored);
+        assert_eq!(shell.stack_depth(), 1);
+    }
+
+    #[test]
     fn a_stalled_coordinator_does_not_block_the_shell() {
         // The plausible bug: GET /view still runs on the event loop, so a
         // coordinator that never answers freezes j/k for the full live timeout.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a silent coordinator");
         let addr = listener.local_addr().expect("addr");
         thread::scope(|scope| {
-            let mut shell =
-                Shell::new(scope, Endpoint { host: addr.ip().to_string(), port: addr.port() }, Duration::from_secs(1));
+            let mut shell = Shell::new(
+                scope,
+                Endpoint { host: addr.ip().to_string(), port: addr.port() },
+                Duration::from_secs(1),
+                false,
+            );
 
             let start = Instant::now();
             shell.pump();
@@ -738,12 +825,13 @@ mod tests {
         );
         assert!(empty_text.contains("needs you"), "empty workspace dropped needs you:\n{empty_text}");
         assert!(empty_text.contains("quiet"), "empty workspace dropped quiet:\n{empty_text}");
+        assert!(!empty_text.contains("fleet"), "fleet box still occupies the workspace:\n{empty_text}");
     }
 
     #[test]
     fn a_pushed_frame_replaces_the_workspace() {
         // The plausible bug: a drill-in still paints workspace chrome, or
-        // popping it fails to restore the four panes.
+        // popping it fails to restore the three panes.
         let view = bloom_with(
             vec![MemberView { workpiece: "issue-1".to_owned(), wedge: Some(Present {}), ..MemberView::default() }],
             |bloom| bloom.review_park = Some(ReviewParkView::default()),
@@ -758,6 +846,59 @@ mod tests {
         assert!(text.contains("needs you"), "pop did not restore the workspace:\n{text}");
         assert!(text.contains("accept or defer"), "{text}");
         assert!(text.contains("widen the surface or eject"), "{text}");
+    }
+
+    #[test]
+    fn the_header_survives_a_pushed_frame() {
+        // The plausible bug: Shell::render paints only the pushed screen into
+        // the body, so the endpoint and sample age leave the display.
+        let view = bloom_with(
+            vec![MemberView { workpiece: "issue-1".to_owned(), wedge: Some(Present {}), ..MemberView::default() }],
+            |bloom| bloom.review_park = Some(ReviewParkView::default()),
+        );
+        let mut shell = Shell::showing(&view, None);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
+        let text = draw(&mut shell);
+        assert!(text.contains("127.0.0.1:8910"), "endpoint missing under a pushed frame:\n{text}");
+        assert!(text.contains("sample"), "sample age missing under a pushed frame:\n{text}");
+    }
+
+    #[test]
+    fn the_header_spans_the_full_width() {
+        // Tripwire: the header being a half-width pane — any content past
+        // column 50 is clipped when it is.
+        let text = draw(&mut Shell::showing(&ViewDocument::default(), None));
+        let line = text.lines().next().expect("header row");
+        assert!(
+            line.find("lanes").expect("lanes missing from header") >= 50,
+            "metrics did not reach past the halfway point on:\n{line}"
+        );
+    }
+
+    #[test]
+    fn a_narrow_header_drops_the_sparklines_not_the_error() {
+        // Tripwire: the drop order — if the row ever elides right-to-left by
+        // truncation instead, the error goes first.
+        let mut view = Cell::<ViewDocument>::default();
+        view.apply_err("connection refused");
+        let dashboard = Dashboard {
+            spend_spark: "▁▂▃▄▅▆▇█▇▆▅▄▃▂".to_owned(),
+            footer: "landed 0  cycle —  flight 0  lanes 0/0".to_owned(),
+            ..Dashboard::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(80, 1)).expect("test backend");
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    chrome::header("127.0.0.1:8910", &view, Some(&dashboard), frame.area().width, false),
+                    frame.area(),
+                );
+            })
+            .expect("draw");
+        let text = buffer_text(&terminal);
+        assert!(text.contains("STALE"), "{text}");
+        assert!(text.contains("connection refused"), "{text}");
+        assert!(!text.contains(&dashboard.spend_spark), "sparkline survived a narrow header:\n{text}");
     }
 
     #[test]
@@ -797,6 +938,74 @@ mod tests {
         );
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
         assert_eq!(shell.top_focus(), Some(Focus::transcript("dispatch-1")));
+    }
+
+    #[test]
+    fn the_footer_trail_names_every_frame_on_the_stack() {
+        // The plausible bug: a three-Enter transcript names only the nonce, so
+        // the operator cannot tell which bloom or member the viewer belongs to.
+        let bloom = digest(0xab);
+        let mut shell = Shell::showing(
+            &ViewDocument {
+                blooms: vec![BloomView {
+                    id: bloom,
+                    members: vec![MemberView { workpiece: "issue-1".to_owned(), ..MemberView::default() }],
+                    ..BloomView::default()
+                }],
+                ..ViewDocument::default()
+            },
+            None,
+        );
+        shell.push_nav(Nav::focus(Focus::bloom(bloom)));
+        shell.push_nav(Nav::focus(Focus::member(bloom, "issue-1")));
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
+        shell.apply_bloom_dispatches(
+            bloom,
+            BloomDispatchesView {
+                dispatches: vec![BloomDispatchView {
+                    nonce: "dispatch-1".to_owned(),
+                    workpiece: "issue-1".to_owned(),
+                    stage: StageId::Construct,
+                    attempt: 1,
+                    verdict: Some("pass".to_owned()),
+                    cost: Some(1_000_000),
+                    evidence_retained: true,
+                }],
+            },
+        );
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
+        let last = draw(&mut shell).lines().last().unwrap_or("").to_owned();
+        assert!(last.contains("board › bloom "), "{last}");
+        assert!(last.contains("› member issue-1"), "{last}");
+        assert!(last.contains("› transcript"), "{last}");
+        assert!(last.trim_end().ends_with("q quit"), "{last}");
+    }
+
+    #[test]
+    fn at_rest_the_footer_carries_the_keys_alone() {
+        // Tripwire: the workspace is the root; a `board` crumb at rest is
+        // noise on every frame.
+        let mut shell = Shell::showing(&ViewDocument::default(), None);
+        let last = draw(&mut shell).lines().last().unwrap_or("").to_owned();
+        assert_eq!(last.trim(), footer_line(INLINE_HINTS));
+    }
+
+    #[test]
+    fn a_deep_trail_is_elided_from_the_left_and_keeps_the_keys() {
+        // The plausible bug: a trail longer than the frame is clipped from
+        // the right, so the deepest crumb and q quit vanish together.
+        let mut shell = Shell::showing(&ViewDocument::default(), None);
+        for _ in 0..12 {
+            shell.push_nav(Nav::days());
+        }
+        shell.push_nav(Nav::transcript("deep-crumb"));
+        let mut terminal = Terminal::new(TestBackend::new(60, 24)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let last = buffer_text(&terminal).lines().last().unwrap_or("").to_owned();
+        assert!(last.starts_with('…'), "{last}");
+        assert!(last.chars().count() <= 60, "{last}");
+        assert!(last.contains("deep-crumb"), "{last}");
+        assert!(last.trim_end().ends_with("q quit"), "{last}");
     }
 
     #[test]
@@ -1003,12 +1212,60 @@ mod tests {
             "missing jump hint in {}",
             footer_line(&inside)
         );
+        assert!(footer_line(&inside).contains("x dismiss"), "missing dismiss hint in {}", footer_line(&inside));
         assert_footer_honest(&inside, |code| {
             let mut probe = Shell::showing(&view, None);
             assert_eq!(probe.handle_key(KeyEvent::from(KeyCode::Tab)), Outcome::Handled);
             assert_eq!(probe.handle_key(KeyEvent::from(KeyCode::Char('i'))), Outcome::Handled);
             probe.handle_key(KeyEvent::from(code)) != Outcome::Ignored
         });
+    }
+
+    #[test]
+    fn a_dismissed_row_leaves_the_band_and_returns_when_its_facts_change() {
+        // The plausible bug: a park the operator already judged occupies a
+        // needs-you row forever, or a new stop on the same bloom stays hidden.
+        let view = parked_blooms(1);
+        let subject = digest(1).prefix();
+        let mut shell = Shell::showing(&view, None);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Tab)), Outcome::Handled);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('i'))), Outcome::Handled);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('x'))), Outcome::Handled);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Tab)), Outcome::Handled);
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let text = right_column(&terminal);
+        assert!(!text.contains(&subject), "dismissed subject still in the band:\n{text}");
+        assert!(text.contains("·1 cleared"), "cleared count missing from:\n{text}");
+
+        let mut wedged = parked_blooms(1);
+        wedged.blooms[0].review_park = None;
+        wedged.blooms[0].members[0].wedge = Some(Present {});
+        wedged.blooms[0].members[0].wedge_cause = Some(WedgeCause::Work);
+        shell.apply_view(wedged);
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let text = right_column(&terminal);
+        assert!(text.contains("wp-1"), "new stop missing from the band:\n{text}");
+    }
+
+    #[test]
+    fn a_dismissed_row_stays_walkable_while_the_band_has_focus() {
+        // The plausible bug: hiding the row immediately makes a mis-keyed
+        // dismissal unrecoverable without a restart.
+        let view = parked_blooms(1);
+        let subject = digest(1).prefix();
+        let mut shell = Shell::showing(&view, None);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Tab)), Outcome::Handled);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('i'))), Outcome::Handled);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('x'))), Outcome::Handled);
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let text = right_column(&terminal);
+        assert!(text.contains(&subject), "dismissed row missing while focused:\n{text}");
+        let mods = right_column_modifiers(&terminal, &subject);
+        assert!(mods.iter().any(|modifier| modifier.contains(Modifier::DIM)), "dismissed row was not dimmed: {mods:?}");
     }
 
     #[test]
@@ -1101,6 +1358,24 @@ mod tests {
     }
 
     #[test]
+    fn the_focused_pane_border_is_the_thick_stroke() {
+        // Names the bug: a focus ring that changes only colour is invisible at
+        // a distance, which is the whole point of the change.
+        let mut shell = Shell::showing(&ViewDocument::default(), None);
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        assert_eq!(title_border_symbol(buffer, "board"), "┏");
+        assert_eq!(title_border_symbol(buffer, "needs you"), "┌");
+
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Tab)), Outcome::Handled);
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        assert_eq!(title_border_symbol(buffer, "board"), "┌");
+        assert_eq!(title_border_symbol(buffer, "needs you"), "┏");
+    }
+
+    #[test]
     fn journal_filter_esc_leaves_edit_not_the_frame() {
         // The plausible bug: Esc is taken by the shell before the journal, so
         // a filter edit cannot be cancelled without popping the frame.
@@ -1112,6 +1387,82 @@ mod tests {
         assert_eq!(shell.stack_depth(), 1);
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Esc)), Outcome::Handled);
         assert_eq!(shell.stack_depth(), 0);
+    }
+
+    #[test]
+    fn the_header_opens_with_the_blossom_lockup() {
+        // Names the bug: a mark painted in body ink is a glyph, not a lockup —
+        // the one saturated cell is the whole point.
+        let mut shell = Shell::showing(&ViewDocument::default(), None);
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        let text = buffer_text(&terminal);
+        let first = text.lines().next().unwrap_or("").to_owned();
+        assert!(first.starts_with("\u{2740} bloomery"), "{first}");
+        assert!(!first.contains("bloomery-console"), "{first}");
+        assert_eq!(role_of(buffer[(0, 0)].fg), Role::Focus, "the mark cell is not the blossom");
+        assert_ne!(role_of(buffer[(2, 0)].fg), Role::Focus, "the wordmark is body ink, not petal");
+    }
+
+    #[test]
+    fn the_footer_paints_whole_keys_and_never_the_whole_hint_list() {
+        // The plausible bug: a footer that spends its columns on the full hint
+        // list, so the last hint is cut mid-word and `q quit` is never painted.
+        let mut shell = Shell::showing(&parked_blooms(3), None);
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let text = buffer_text(&terminal);
+        let last = text.lines().last().unwrap_or("").to_owned();
+        assert!(last.trim_end().ends_with("q quit"), "{last}");
+        assert!(last.contains("? keys"), "{last}");
+        assert!(!last.contains("landed "), "the metrics live in the header now: {last}");
+        assert!(!last.contains("j/k select"), "the full hint list is behind `?`: {last}");
+    }
+
+    #[test]
+    fn the_overlay_lists_every_key_the_seat_advertises() {
+        // Tripwire: the overlay is now the only thing that advertises those
+        // keys — an overlay built from a shorter list re-hides exactly what
+        // the trimmed footer stopped painting.
+        let mut shell = Shell::showing(&parked_blooms(3), None);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('?'))), Outcome::Handled);
+        let text = draw(&mut shell);
+        for hint in shell.footer_hints() {
+            let line = format!("{}  {}", hint.keys, hint.action);
+            assert!(text.contains(&line), "overlay is missing {line:?}:\n{text}");
+        }
+
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Esc)), Outcome::Handled);
+        let text = draw(&mut shell);
+        for hint in shell.footer_hints() {
+            let line = format!("{}  {}", hint.keys, hint.action);
+            assert!(!text.contains(&line), "the overlay survives dismissal: {line:?}\n{text}");
+        }
+    }
+
+    #[test]
+    fn an_open_overlay_does_not_walk_the_board_underneath() {
+        // The plausible bug: keys read through the overlay, so reading the
+        // key list moves the selection the operator was reading about.
+        let mut shell = Shell::showing(&parked_blooms(3), None);
+        let start = shell.board().cursor().selected().cloned();
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('?'))), Outcome::Handled);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('j'))), Outcome::Handled);
+        assert_eq!(shell.board().cursor().selected().cloned(), start);
+    }
+
+    #[test]
+    fn a_question_mark_still_types_into_the_journal_filter() {
+        // The plausible bug: `?` is taken ahead of the screens, so it cannot
+        // be typed into an editor the screen owns.
+        let mut shell = Shell::showing(&parked_blooms(3), None);
+        shell.push_nav(Nav::journal(None));
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('f'))), Outcome::Handled);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('?'))), Outcome::Handled);
+        assert!(!shell.keys_overlay, "the journal's filter editor owns the key");
+        let text = draw(&mut shell);
+        assert!(text.contains("filter  ?"), "typed ? missing from filter:\n{text}");
     }
 
     #[test]
@@ -1139,6 +1490,25 @@ mod tests {
         column_text(terminal, width / 2, width)
     }
 
+    fn right_column_modifiers(terminal: &Terminal<TestBackend>, needle: &str) -> Vec<Modifier> {
+        let buffer = terminal.backend().buffer();
+        let area = buffer.area();
+        let start = area.width / 2;
+        for y in area.y..area.y + area.height {
+            let mut line = String::new();
+            let mut mods = Vec::new();
+            for x in start..area.width {
+                let cell = &buffer[(x, y)];
+                line.push_str(cell.symbol());
+                mods.push(cell.modifier);
+            }
+            if let Some(at) = line.find(needle) {
+                return mods.into_iter().skip(at).take(needle.chars().count()).collect();
+            }
+        }
+        Vec::new()
+    }
+
     fn column_text(terminal: &Terminal<TestBackend>, start: u16, end: u16) -> String {
         let buffer = terminal.backend().buffer();
         let area = buffer.area();
@@ -1161,6 +1531,20 @@ mod tests {
                 }
                 let border_x = x.saturating_sub(1);
                 return role_of(buffer[(border_x, y)].fg);
+            }
+        }
+        panic!("title {title:?} not found");
+    }
+
+    fn title_border_symbol(buffer: &Buffer, title: &str) -> String {
+        let area = buffer.area();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                if !title_starts_at(buffer, x, y, title) {
+                    continue;
+                }
+                let border_x = x.saturating_sub(1);
+                return buffer[(border_x, y)].symbol().to_owned();
             }
         }
         panic!("title {title:?} not found");

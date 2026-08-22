@@ -12,8 +12,8 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 use crate::digest::{ContentAddressed, Digest};
-use crate::ids::StageId;
-use crate::sign::{AuthorityDoor, KeyProvider, SignatureEnvelope, authorization_message};
+use crate::ids::{KeyId, StageId};
+use crate::sign::{AuthorityDoor, KeyProvider, SignatureEnvelope, authorization_message, sign_authorization};
 
 /// An artifact carrying words plus exactly one provenance claim.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -96,6 +96,52 @@ pub enum Provenance {
     StageReceipt(StageReceipt),
 }
 
+/// The Approve door's exact statement shape, in one place (ADR-0182,
+/// ADR-0207): an author signature over `scope`'s raw bytes, bound to `scope`.
+///
+/// `words` is the revision digest itself, which is what
+/// [`Statement::verify_authority`] re-checks against the binding and what the
+/// coordinator's approval reader matches an approval to its revision by.
+/// `parents` is empty: authorization lives inside the signed bytes, not in the
+/// derivation edge.
+///
+/// Deterministic, so re-running an amendment re-mints a byte-identical
+/// statement with a byte-identical address and the store's duplicate check
+/// makes the re-submit a no-op.
+///
+/// Native-only, like [`sign_authorization`] — the private half of key custody
+/// is the operator's.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn signed_approval(signer: KeyId, seed: &[u8; 32], scope: Digest) -> Statement {
+    let words = scope.as_bytes().to_vec();
+    let envelope = sign_authorization(signer, seed, AuthorityDoor::Approve, scope, &words);
+    Statement { words, provenance: Provenance::AuthorSignature(envelope), parents: Vec::new() }
+}
+
+/// The Cancel door's exact statement shape, in one place (ADR-0182): an author
+/// signature over `intent`'s raw bytes, bound to `intent`.
+///
+/// `words` is the intent digest itself, which is what
+/// [`Statement::verify_authority`] re-checks against the binding and what the
+/// coordinator's cancel route matches a cancel to its commission by.
+/// `parents` is empty: authorization lives inside the signed bytes, not in the
+/// derivation edge.
+///
+/// Deterministic, so re-running a cancel re-mints a byte-identical statement
+/// with a byte-identical address and the store's not-open refusal is the only
+/// thing a second attempt hits.
+///
+/// Native-only, like [`sign_authorization`] — the private half of key custody
+/// is the operator's.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn signed_cancel(signer: KeyId, seed: &[u8; 32], intent: Digest) -> Statement {
+    let words = intent.as_bytes().to_vec();
+    let envelope = sign_authorization(signer, seed, AuthorityDoor::Cancel, intent, &words);
+    Statement { words, provenance: Provenance::AuthorSignature(envelope), parents: Vec::new() }
+}
+
 /// Where an adapter saw the observed bytes. An observation carries no
 /// authority — it becomes intent only when a person adopts its exact digest
 /// in a native signed statement (ADR-0149 §The boundary, second amendment).
@@ -124,4 +170,41 @@ pub struct StageReceipt {
     pub inputs: Vec<Digest>,
     /// The exact outputs produced, by digest.
     pub outputs: Vec<Digest>,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use alloc::collections::BTreeMap;
+    use alloc::string::String;
+
+    use ed25519_dalek::SigningKey;
+
+    use super::signed_cancel;
+    use crate::digest::Digest;
+    use crate::ids::KeyId;
+    use crate::sign::{AuthorityDoor, Ed25519KeyProvider};
+
+    #[test]
+    fn a_signed_cancel_verifies_only_at_the_cancel_door_for_its_own_intent() {
+        let seed = [7_u8; 32];
+        let key = SigningKey::from_bytes(&seed);
+        let signer = KeyId(String::from("operator"));
+        let keys = Ed25519KeyProvider::new(BTreeMap::from([(signer.clone(), key.verifying_key())]));
+        let intent = Digest::from_bytes([3; 32]);
+        let other = Digest::from_bytes([4; 32]);
+        let statement = signed_cancel(signer, &seed, intent);
+
+        assert!(
+            statement.verify_authority(&keys, AuthorityDoor::Cancel, intent),
+            "a cancel must verify at the Cancel door over its own intent"
+        );
+        assert!(
+            !statement.verify_authority(&keys, AuthorityDoor::Approve, intent),
+            "a cancel minted at the wrong door would be a signature good for a commission its signer never read"
+        );
+        assert!(
+            !statement.verify_authority(&keys, AuthorityDoor::Cancel, other),
+            "a cancel bound to nothing would be a signature good for a commission its signer never read"
+        );
+    }
 }

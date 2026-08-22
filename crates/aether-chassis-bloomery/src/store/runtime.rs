@@ -30,13 +30,15 @@ use aether_actor::runtime;
 use aether_bloomery::{
     Commit, CommitResult, ConfigRecord, DECISIONS_SCHEMA, Decision, Digest, Event, JournalRecord, LoadConfigs,
     LoadConfigsResult, MembershipMutation, MetricDispatch, MetricsLedger, OutboxPayload, ReplayJournal,
-    ReplayJournalResult, ScopeRevision, Statement, Topic, WorkpieceId, decode_recorded_decisions,
+    ReplayJournalResult, ScopeRevision, ScopeVerifyInput, Statement, SuppressionRequest, Topic, WorkpieceId,
+    decode_recorded_decisions,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use std::iter::repeat_n;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::Connection;
+use rusqlite::OptionalExtension;
 use rusqlite::ffi::{Error as SqliteFfiError, SQLITE_ERROR};
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -176,6 +178,49 @@ pub struct StudyRow {
     pub attempt_digest: Vec<u8>,
     /// The content-store digest of the `StudyRecord` artifact.
     pub study_artifact: String,
+}
+
+/// The fields a pre-bloom scoping run is opened with (ADR-0208, #5304) — the
+/// `enqueued` row and the outbox payload that ride the same transaction.
+///
+/// A struct rather than seven positional parameters because five of them are
+/// byte slices and a transposed pair would be invisible at the call site and
+/// at the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScopeRunOpen<'a> {
+    /// The commission being scoped — its `WorkpieceId`, the pre-freeze identity.
+    pub commission: &'a str,
+    /// Which attempt on that commission this is, from `1`.
+    pub ordinal: u64,
+    /// The commission's stored intent statement digest.
+    pub intent: &'a [u8],
+    /// The observed mainline the run reads code at.
+    pub base: &'a [u8],
+    /// The run's content-addressed subject — the digest of
+    /// (commission, intent, base).
+    pub subject: &'a [u8],
+    /// The wire-encoded `ScopeDispatchPayload` the outbox row carries.
+    pub payload: &'a [u8],
+}
+
+/// One append-only scoping-run row (ADR-0208, #5304), projected for a reader.
+///
+/// `kind` discriminates which of the other columns carry anything; the table's
+/// CHECK is what keeps the set closed, and this struct is the read side of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeRunRow {
+    /// The attempt ordinal this row belongs to.
+    pub ordinal: u64,
+    /// `enqueued` | `dispatched` | `verdict` | `frozen`.
+    pub kind: String,
+    /// The dispatch nonce, on a `dispatched` row.
+    pub nonce: Option<String>,
+    /// The run subject, on an `enqueued` row.
+    pub subject: Option<Vec<u8>>,
+    /// The verdict spelling, on a `verdict` row.
+    pub verdict: Option<String>,
+    /// The frozen revision digest, on a `frozen` row.
+    pub revision: Option<Vec<u8>>,
 }
 
 /// One append-only proof-fact row (ADR-0200). Column order is the wire:
@@ -343,6 +388,14 @@ pub trait StoreBackend: Send {
     /// superseded, so a bloom with none left is retired, and the executor reactor
     /// reads this to retire its already-queued dispatches with it (#4640).
     fn holds_active_membership(&mut self, bloom: &[u8]) -> rusqlite::Result<bool>;
+    /// Whether `bloom` still holds `workpiece`'s active membership — the
+    /// per-member counterpart of [`Self::holds_active_membership`].
+    ///
+    /// A withdrawal releases exactly one member's row while the bloom keeps
+    /// walking (#5327), so the whole-bloom answer stays `true` and cannot tell
+    /// a withdrawn member from a live one. The executor reactor reads this to
+    /// retire a queued dispatch for a member that has left.
+    fn holds_member_membership(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<bool>;
     /// Every persisted *member* work-order description for one bloom as
     /// (`workpiece`, `description`) pairs in workpiece order — the aggregate
     /// review composes its task context from the whole membership's orders
@@ -360,6 +413,38 @@ pub trait StoreBackend: Send {
     fn lookup_review_findings(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<String>>;
     /// Clear the member's recorded findings — a passing review makes them stale.
     fn clear_review_findings(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<()>;
+    /// Record the suppressions (`bloom`, `workpiece`)'s current candidate states
+    /// a case for (ADR-0193), replacing whatever it stated before.
+    ///
+    /// Replaced rather than merged, and keyed per member the way the findings
+    /// channel is: the row answers "what does this member's live candidate ask
+    /// for right now", which is what the two reviewer surfaces render. The
+    /// journal answers the other question — what was asked and who answered —
+    /// and neither surface can stand in for the other.
+    ///
+    /// Stored column-per-field rather than as an encoded blob, so a reviewer
+    /// surface reading one row does not depend on a codec and the table is
+    /// queryable by path and lint.
+    fn record_suppression_requests(
+        &mut self,
+        bloom: &[u8],
+        workpiece: &str,
+        requests: &[SuppressionRequest],
+    ) -> rusqlite::Result<()>;
+    /// The suppressions (`bloom`, `workpiece`)'s live candidate asks for, in
+    /// path order. Empty when it asks for none.
+    fn lookup_suppression_requests(
+        &mut self,
+        bloom: &[u8],
+        workpiece: &str,
+    ) -> rusqlite::Result<Vec<SuppressionRequest>>;
+    /// Every standing request across `bloom`, each paired with the member that
+    /// stated it, in member-then-path order — what the landing proposal renders.
+    fn list_suppression_requests(&mut self, bloom: &[u8]) -> rusqlite::Result<Vec<(String, SuppressionRequest)>>;
+    /// Clear the member's standing requests — a candidate that states none has
+    /// nothing outstanding, and a stale row would ask a reviewer to grant an
+    /// allow that is no longer in the diff.
+    fn clear_suppression_requests(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<()>;
     /// Record the commit message the member's construct/refine lane wrote for the
     /// candidate it just captured, keyed by (`bloom`, `workpiece`) exactly as the
     /// findings channel is. Last-writer-wins on the key, which is what makes the
@@ -546,6 +631,57 @@ pub trait StoreBackend: Send {
     fn lookup_named_dispatch(&mut self, nonce: &str) -> rusqlite::Result<Option<Vec<u8>>>;
     /// Rebuild the metrics cache when the journal has moved past the cursor.
     fn ensure_metrics(&mut self) -> rusqlite::Result<()>;
+    /// Every notification key already posted, in key order (#5166).
+    ///
+    /// The whole set rather than a per-key `holds` read, because the caller's
+    /// question is a set difference: what is loud now that was not loud before,
+    /// and what has stopped being loud. Asking key-by-key answers only the
+    /// first half, and a condition that clears and returns would then never
+    /// notify twice.
+    fn list_notifications(&mut self) -> rusqlite::Result<Vec<String>>;
+    /// Record that `key`'s message was delivered, at `posted_unix_millis`.
+    ///
+    /// Written *after* the POST succeeds, never before: an unrecorded key is
+    /// exactly a message still owed, so a crash between the two re-sends
+    /// rather than dropping. That makes the channel at-least-once, which is
+    /// the correct trade for an operator alert.
+    fn record_notification(&mut self, key: &str, posted_unix_millis: u64) -> rusqlite::Result<()>;
+    /// Forget `key` — the condition it named is no longer loud, so the same
+    /// condition arising again is a new transition and notifies again.
+    fn forget_notification(&mut self, key: &str) -> rusqlite::Result<()>;
+    /// Open a pre-bloom scoping run (ADR-0208, #5304): write its `enqueued`
+    /// row and its [`Topic::ScopeDispatch`] outbox row in **one** transaction,
+    /// returning the outbox sequence the drain will mint a nonce from.
+    ///
+    /// One transaction is the whole point. Journal-then-enqueue leaves a run
+    /// that is recorded and never dispatched; enqueue-then-journal leaves a
+    /// dispatch with no record of why it ran. The commission store's own
+    /// `enqueue_projection` writes its outbox row the same way, inside the
+    /// transaction that produced the thing being projected.
+    fn enqueue_scope_run(&mut self, run: &ScopeRunOpen<'_>) -> rusqlite::Result<u64>;
+    /// The ordinal a fresh run on `commission` takes — one past the highest
+    /// already opened, or `1` for a commission that has never been scoped.
+    fn next_scope_run_ordinal(&mut self, commission: &str) -> rusqlite::Result<u64>;
+    /// Record the nonce the drain dispatched (`commission`, `ordinal`) under,
+    /// so the run is addressable from its outbox row alone and the intake can
+    /// walk back from an evidence upload.
+    fn record_scope_dispatch(&mut self, commission: &str, ordinal: u64, nonce: &str) -> rusqlite::Result<()>;
+    /// Record the verdict an evidence upload delivered for a run.
+    fn record_scope_verdict(
+        &mut self,
+        commission: &str,
+        ordinal: u64,
+        verdict: &str,
+        evidence: &[u8],
+    ) -> rusqlite::Result<()>;
+    /// Record the revision a run froze — the terminal success.
+    fn record_scope_frozen(&mut self, commission: &str, ordinal: u64, revision: &[u8]) -> rusqlite::Result<()>;
+    /// The run a dispatch nonce belongs to, as (`commission`, `ordinal`);
+    /// `None` when the nonce names no scoping run.
+    fn lookup_scope_run(&mut self, nonce: &str) -> rusqlite::Result<Option<(String, u64)>>;
+    /// Every scoping-run row for `commission`, in write order — the operator
+    /// read, and the termination rule's input.
+    fn list_scope_runs(&mut self, commission: &str) -> rusqlite::Result<Vec<ScopeRunRow>>;
 }
 
 /// A WAL-mode `SQLite` store. Opening runs the migrations idempotently, so
@@ -636,7 +772,19 @@ impl SqliteStore {
 /// gains `deposited_unix` (warmth), and `member_dependency` holds the sealed
 /// graph a dependent construct looks up at unblock. Empty on creation; a
 /// pre-column row stays `NULL` (not assumed warm) and nothing is backfilled.
-const SCHEMA_VERSION: i64 = 11;
+///
+/// `12` is the scope-verify report ledger (ADR-0208): `scope_verify_reports`,
+/// one immutable row per set of revision bytes the freeze checked. Empty on
+/// creation and nothing is backfilled — a revision frozen before the check
+/// existed was not verified, and inventing a clean report for it is the exact
+/// lie the absent reading exists to prevent.
+///
+/// `13` is the pre-bloom scoping-run ledger (ADR-0208, #5304): `scope_runs`,
+/// append-only rows keyed by commission and attempt ordinal. Empty on creation
+/// and nothing is backfilled — a revision authored by hand through the REST
+/// door was not produced by a scoping run, and inventing a run for it would put
+/// a lane's name on an operator's work.
+const SCHEMA_VERSION: i64 = 13;
 
 /// Bring a store opened at [`MIGRATIONS`] up to [`SCHEMA_VERSION`], or refuse it.
 ///
@@ -740,6 +888,18 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     // creation; a pre-existing store has no owned issues to invent.
     if !has_table(&migration, "commission_projections")? {
         migration.execute_batch(super::commission::COMMISSION_PROJECTION_TABLE)?;
+    }
+
+    // Version 12 (ADR-0208): the scope-verify report ledger. Empty on creation;
+    // a revision frozen before the check existed reads as absent, never clean.
+    if !has_table(&migration, "scope_verify_reports")? {
+        migration.execute_batch(super::commission::SCOPE_VERIFY_REPORTS_TABLE)?;
+    }
+
+    // Version 13 (ADR-0208): the pre-bloom scoping-run ledger. Empty on
+    // creation; a revision authored by hand was not produced by a run.
+    if !has_table(&migration, "scope_runs")? {
+        migration.execute_batch(super::commission::SCOPE_RUNS_TABLE)?;
     }
 
     // Version 9 (ADR-0201): architecture decision records. Empty on
@@ -913,6 +1073,15 @@ CREATE TABLE IF NOT EXISTS candidate_commit_message (
     message   TEXT NOT NULL,
     PRIMARY KEY (bloom, workpiece)
 );
+CREATE TABLE IF NOT EXISTS suppression_request (
+    bloom     BLOB NOT NULL,
+    workpiece TEXT NOT NULL,
+    path      TEXT NOT NULL,
+    line      INTEGER NOT NULL,
+    lint      TEXT NOT NULL,
+    reason    TEXT NOT NULL,
+    PRIMARY KEY (bloom, workpiece, path, line, lint)
+);
 CREATE TABLE IF NOT EXISTS dispatch_owners (
     nonce TEXT PRIMARY KEY,
     bloom BLOB NOT NULL
@@ -973,6 +1142,10 @@ CREATE TABLE IF NOT EXISTS member_dependency (
     member     TEXT NOT NULL,
     depends_on TEXT NOT NULL,
     PRIMARY KEY (bloom, member, depends_on)
+);
+CREATE TABLE IF NOT EXISTS notification_sent (
+    notification_key   TEXT PRIMARY KEY,
+    posted_unix_millis INTEGER NOT NULL
 );
 ";
 
@@ -1285,6 +1458,12 @@ impl StoreBackend for SqliteStore {
         Ok(stmt.query_map(rusqlite::params![bloom], |_| Ok(()))?.next().transpose()?.is_some())
     }
 
+    fn holds_member_membership(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<bool> {
+        let mut stmt =
+            self.conn.prepare("SELECT 1 FROM active_membership WHERE bloom = ?1 AND workpiece = ?2 LIMIT 1")?;
+        Ok(stmt.query_map(rusqlite::params![bloom, workpiece], |_| Ok(()))?.next().transpose()?.is_some())
+    }
+
     fn list_dispatch_descriptions(&mut self, bloom: &[u8]) -> rusqlite::Result<Vec<(String, String)>> {
         let mut stmt = self
             .conn
@@ -1314,6 +1493,78 @@ impl StoreBackend for SqliteStore {
     fn clear_review_findings(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<()> {
         self.conn.execute(
             "DELETE FROM review_findings WHERE bloom = ?1 AND workpiece = ?2",
+            rusqlite::params![bloom, workpiece],
+        )?;
+        Ok(())
+    }
+
+    fn record_suppression_requests(
+        &mut self,
+        bloom: &[u8],
+        workpiece: &str,
+        requests: &[SuppressionRequest],
+    ) -> rusqlite::Result<()> {
+        // Delete-then-insert inside one transaction: the row set *is* the
+        // member's current ask, and a partial replacement would leave a
+        // reviewer looking at a request the candidate no longer carries beside
+        // one it does.
+        let write = self.conn.transaction()?;
+        write.execute(
+            "DELETE FROM suppression_request WHERE bloom = ?1 AND workpiece = ?2",
+            rusqlite::params![bloom, workpiece],
+        )?;
+        for request in requests {
+            write.execute(
+                "INSERT OR REPLACE INTO suppression_request (bloom, workpiece, path, line, lint, reason) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![bloom, workpiece, request.path, request.line, request.lint, request.reason],
+            )?;
+        }
+        write.commit()
+    }
+
+    fn lookup_suppression_requests(
+        &mut self,
+        bloom: &[u8],
+        workpiece: &str,
+    ) -> rusqlite::Result<Vec<SuppressionRequest>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, line, lint, reason FROM suppression_request WHERE bloom = ?1 AND workpiece = ?2 \
+             ORDER BY path, line, lint",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![bloom, workpiece], |row| {
+            Ok(SuppressionRequest {
+                path: row.get::<_, String>(0)?,
+                line: row.get::<_, u32>(1)?,
+                lint: row.get::<_, String>(2)?,
+                reason: row.get::<_, String>(3)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    fn list_suppression_requests(&mut self, bloom: &[u8]) -> rusqlite::Result<Vec<(String, SuppressionRequest)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT workpiece, path, line, lint, reason FROM suppression_request WHERE bloom = ?1 \
+             ORDER BY workpiece, path, line, lint",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![bloom], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                SuppressionRequest {
+                    path: row.get::<_, String>(1)?,
+                    line: row.get::<_, u32>(2)?,
+                    lint: row.get::<_, String>(3)?,
+                    reason: row.get::<_, String>(4)?,
+                },
+            ))
+        })?;
+        rows.collect()
+    }
+
+    fn clear_suppression_requests(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "DELETE FROM suppression_request WHERE bloom = ?1 AND workpiece = ?2",
             rusqlite::params![bloom, workpiece],
         )?;
         Ok(())
@@ -1821,7 +2072,9 @@ impl StoreBackend for SqliteStore {
                 ],
             )?;
         }
-        for row in ledger.day_rows() {
+        // The store holds no artifacts handle; metric_day rows are a write-only
+        // cache nothing decodes, so dollars stay unresolved here rather than a claim of zero spend.
+        for row in ledger.day_rows(|_| None) {
             let payload = encode_metric(&row)?;
             tx.execute(
                 "INSERT OR REPLACE INTO metric_day (label, payload) VALUES (?1, ?2)",
@@ -1969,6 +2222,111 @@ impl StoreBackend for SqliteStore {
             self.fold_metrics_from_journal()?;
         }
         Ok(())
+    }
+
+    fn list_notifications(&mut self) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT notification_key FROM notification_sent ORDER BY notification_key")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect()
+    }
+
+    fn record_notification(&mut self, key: &str, posted_unix_millis: u64) -> rusqlite::Result<()> {
+        // `OR REPLACE` rather than `OR IGNORE`: a key can only be recorded
+        // again after it was forgotten, so a collision means the same
+        // condition returned and the fresher timestamp is the true one.
+        self.conn.execute(
+            "INSERT OR REPLACE INTO notification_sent (notification_key, posted_unix_millis) VALUES (?1, ?2)",
+            rusqlite::params![key, posted_unix_millis],
+        )?;
+        Ok(())
+    }
+
+    fn forget_notification(&mut self, key: &str) -> rusqlite::Result<()> {
+        self.conn.execute("DELETE FROM notification_sent WHERE notification_key = ?1", rusqlite::params![key])?;
+        Ok(())
+    }
+
+    fn enqueue_scope_run(&mut self, run: &ScopeRunOpen<'_>) -> rusqlite::Result<u64> {
+        let write = self.conn.transaction()?;
+        write.execute(
+            "INSERT INTO scope_runs (commission, ordinal, kind, intent, base, subject) \
+             VALUES (?1, ?2, 'enqueued', ?3, ?4, ?5)",
+            rusqlite::params![run.commission, run.ordinal, run.intent, run.base, run.subject],
+        )?;
+        write.execute(
+            "INSERT INTO outbox (topic, payload) VALUES (?1, ?2)",
+            rusqlite::params![Topic::ScopeDispatch.as_str(), run.payload],
+        )?;
+        let sequence = u64::try_from(write.last_insert_rowid()).unwrap_or_default();
+        write.commit()?;
+        Ok(sequence)
+    }
+
+    fn next_scope_run_ordinal(&mut self, commission: &str) -> rusqlite::Result<u64> {
+        let highest: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(ordinal), 0) FROM scope_runs WHERE commission = ?1",
+            rusqlite::params![commission],
+            |row| row.get(0),
+        )?;
+        Ok(u64::try_from(highest).unwrap_or_default() + 1)
+    }
+
+    fn record_scope_dispatch(&mut self, commission: &str, ordinal: u64, nonce: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO scope_runs (commission, ordinal, kind, nonce) VALUES (?1, ?2, 'dispatched', ?3)",
+            rusqlite::params![commission, ordinal, nonce],
+        )?;
+        Ok(())
+    }
+
+    fn record_scope_verdict(
+        &mut self,
+        commission: &str,
+        ordinal: u64,
+        verdict: &str,
+        evidence: &[u8],
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO scope_runs (commission, ordinal, kind, verdict, evidence) VALUES (?1, ?2, 'verdict', ?3, ?4)",
+            rusqlite::params![commission, ordinal, verdict, evidence],
+        )?;
+        Ok(())
+    }
+
+    fn record_scope_frozen(&mut self, commission: &str, ordinal: u64, revision: &[u8]) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO scope_runs (commission, ordinal, kind, revision) VALUES (?1, ?2, 'frozen', ?3)",
+            rusqlite::params![commission, ordinal, revision],
+        )?;
+        Ok(())
+    }
+
+    fn lookup_scope_run(&mut self, nonce: &str) -> rusqlite::Result<Option<(String, u64)>> {
+        self.conn
+            .query_row(
+                "SELECT commission, ordinal FROM scope_runs WHERE kind = 'dispatched' AND nonce = ?1 LIMIT 1",
+                rusqlite::params![nonce],
+                |row| Ok((row.get::<_, String>(0)?, u64::try_from(row.get::<_, i64>(1)?).unwrap_or_default())),
+            )
+            .optional()
+    }
+
+    fn list_scope_runs(&mut self, commission: &str) -> rusqlite::Result<Vec<ScopeRunRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ordinal, kind, nonce, subject, verdict, revision FROM scope_runs WHERE commission = ?1 \
+             ORDER BY sequence",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![commission], |row| {
+            Ok(ScopeRunRow {
+                ordinal: u64::try_from(row.get::<_, i64>(0)?).unwrap_or_default(),
+                kind: row.get::<_, String>(1)?,
+                nonce: row.get::<_, Option<String>>(2)?,
+                subject: row.get::<_, Option<Vec<u8>>>(3)?,
+                verdict: row.get::<_, Option<String>>(4)?,
+                revision: row.get::<_, Option<Vec<u8>>>(5)?,
+            })
+        })?;
+        rows.collect()
     }
 }
 
@@ -2314,12 +2672,23 @@ impl NativeActor for StoreCapability {
         _ctx: &mut NativeCtx<'_>,
         mail: WriteScopeRevision,
     ) -> WriteScopeRevisionResult {
-        let WriteScopeRevision { canonical } = mail;
+        let WriteScopeRevision { canonical, scope_verify } = mail;
         let revision = match ScopeRevision::from_canonical(&canonical) {
             Ok(revision) => revision,
             Err(error) => return write_revision_error(CommissionError::from(error)),
         };
-        match state.backend.write_revision(&revision) {
+        // Empty bytes are absent, not an empty projection: a hand-authored
+        // revision carries no field records, and absence is reported rather
+        // than passed.
+        let projection = if scope_verify.is_empty() {
+            None
+        } else {
+            match ScopeVerifyInput::from_canonical(&scope_verify) {
+                Ok(projection) => Some(projection),
+                Err(error) => return write_revision_error(CommissionError::from(error)),
+            }
+        };
+        match state.backend.write_revision_verified(&revision, projection.as_ref()) {
             Ok(digest) => WriteScopeRevisionResult::Ok { digest: digest.as_bytes().to_vec() },
             Err(error) => write_revision_error(error),
         }
@@ -2362,6 +2731,7 @@ impl NativeActor for StoreCapability {
                     status: view.head.status.as_str().to_owned(),
                     current: view.current.map(|revision| revision.to_canonical()),
                     approvals,
+                    scope_verify: view.scope_verify.map(|report| report.to_canonical()),
                 }
             }
             Err(error) => LoadCommissionResult::Err { error: error.to_string() },
@@ -2441,6 +2811,7 @@ fn write_revision_error(error: CommissionError) -> WriteScopeRevisionResult {
         CommissionError::UnsupportedSchema(schema) => WriteScopeRevisionResult::UnsupportedSchema { schema },
         CommissionError::MalformedCanonical => WriteScopeRevisionResult::Malformed,
         CommissionError::NotOpen => WriteScopeRevisionResult::NotOpen,
+        CommissionError::SurfaceGap { paths } => WriteScopeRevisionResult::SurfaceGap { paths },
         error => WriteScopeRevisionResult::Err { error: error.to_string() },
     }
 }

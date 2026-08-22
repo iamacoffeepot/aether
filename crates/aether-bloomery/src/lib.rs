@@ -83,67 +83,363 @@ pub mod study_report;
 pub mod testing;
 pub mod values;
 
-pub use calibration::{
-    CalibrationDocument, CalibrationLedger, CapabilityCell, CapabilityLedger, LEDGER_CAVEAT, VerifierFailures,
-};
-pub use control::{
-    Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, CONTROL_CORE_NAMESPACE, ClaimResult, ClaimSeal,
-    Commit, CommitResult, CompleteRelease, CompleteReleaseResult, CompleteTransfer, ConfigRecord, DispatchPayload,
-    EnumerateClaims, EnumerateClaimsResult, IntegratePayload, JournalRecord, LandPayload, LoadConfigs,
-    LoadConfigsResult, MembershipMutation, MetricsQuery, MetricsQueryResult, MetricsView, ObserveMainline,
-    ObserveMainlineResult, OrphanClaimReleasePayload, OutboxPayload, Query, QueryResult, RedispatchPayload,
-    ReleaseSeal, ReplayJournal, ReplayJournalResult, ReviewPass, SourceReplicaPayload, SpendQuery, SpendQueryResult,
-    SplicePayload, Topic, TransferSeal,
-};
-pub use correspondence::{BackendObjectId, Correspondence, CorrespondenceError, SharedCorrespondence};
-pub use digest::{ContentAddressed, Digest, decode_hex, digest_of, encode_hex, hex_nibble};
-pub use ids::{BloomId, IdempotencyKey, KeyId, Nonce, StageId, WorkpieceId};
-pub use inward::{InwardError, StageResult, StageVerdict, StudyResult, normalize_stage_result, normalize_study_result};
-pub use manifest::{
-    ClosureViolation, MANIFEST_CLOSURE_BUDGET, PromptManifest, ProvenanceIndex, Slot, SlotRole, assemble_manifest,
-};
-pub use metrics::{
-    DAYS_CAP, METRICS_DEFAULT_LIMIT, METRICS_MAX_LIMIT, MetricBloom, MetricDay, MetricDispatch, MetricsLedger,
-    MetricsSeat, MetricsSummary, MetricsTimeline, RECONSTRUCTED_WINDOW, TIMELINE_SPAN_CAP, TimelineSpan, window_label,
-};
-pub use port::{
-    BloomView, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome,
-    CommissionProjection, CompositionCursorView, CompositionView, Conclusion, EvidenceRef, ExecutionStatus,
-    ExecutorBackend, ExecutorFaultView, HostFaultView, IntegrateOutcome, IntegrationPosition, LandOutcome,
-    LandingBlock, MemberView, PendingDecisionView, ProjectedReceipt, ProjectionBackend, ReviewParkView, SourceBackend,
-    SourceSnapshot, ViewDocument, WedgeCause, WorkHandle, WorkOrder,
-};
-pub use reduce::{
-    AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,
-    AggregateVerifyError, AttemptCompletedError, BaseMismatch, BloomRecord, BloomStatus, DECISIONS_SCHEMA, Decision,
-    Decisions, DecisionsSchemaError, Event, Fact, FoldConflictError, FoldedIntegration, Gate, GrantAttemptsError,
-    HostFaultError, HostFaultHold, IntegrateError, LandError, LandingRejectedError, MemberExecutorFaultError,
-    MemberMachineryFault, MemberPark, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, Outcome, Read,
-    RecordedRead, RecordedRefusal, Refusal, ResolveError, SealConflict, SealError, Snapshot, SpliceError,
-    StageProgress, SupersedeError, VerifyFailedError, decode_recorded_decisions, is_active_unlanded, reduce, view_of,
-};
+pub use calibration::CalibrationDocument;
+pub use calibration::CalibrationLedger;
+pub use calibration::CapabilityCell;
+pub use calibration::CapabilityLedger;
+pub use calibration::LEDGER_CAVEAT;
+pub use calibration::VerifierFailures;
+pub use control::Admit;
+pub use control::AdmitResult;
+pub use control::AggregateReviewPayload;
+pub use control::AggregateVerifyPayload;
+pub use control::BaseVerifyPayload;
+pub use control::CONTROL_CORE_NAMESPACE;
+pub use control::CancelDispatchPayload;
+pub use control::ClaimResult;
+pub use control::ClaimSeal;
+pub use control::Commit;
+pub use control::CommitResult;
+pub use control::CompleteRelease;
+pub use control::CompleteReleaseResult;
+pub use control::CompleteTransfer;
+pub use control::ConfigRecord;
+pub use control::DispatchPayload;
+pub use control::EnumerateClaims;
+pub use control::EnumerateClaimsResult;
+pub use control::IntegratePayload;
+pub use control::JournalRecord;
+pub use control::LandPayload;
+pub use control::LoadConfigs;
+pub use control::LoadConfigsResult;
+pub use control::MemberClaimReleasePayload;
+pub use control::MembershipMutation;
+pub use control::MetricsQuery;
+pub use control::MetricsQueryResult;
+pub use control::MetricsView;
+pub use control::ObserveMainline;
+pub use control::ObserveMainlineResult;
+pub use control::OrphanClaimReleasePayload;
+pub use control::OutboxPayload;
+pub use control::Query;
+pub use control::QueryResult;
+pub use control::RedispatchPayload;
+pub use control::ReleaseSeal;
+pub use control::ReplayJournal;
+pub use control::ReplayJournalResult;
+pub use control::ReviewPass;
+pub use control::SourceReplicaPayload;
+pub use control::SpendQuery;
+pub use control::SpendQueryResult;
+pub use control::SplicePayload;
+pub use control::Topic;
+pub use control::TransferSeal;
+pub use correspondence::BackendObjectId;
+pub use correspondence::Correspondence;
+pub use correspondence::CorrespondenceError;
+pub use correspondence::SharedCorrespondence;
+pub use digest::ContentAddressed;
+pub use digest::Digest;
+pub use digest::decode_hex;
+pub use digest::digest_of;
+pub use digest::encode_hex;
+pub use digest::hex_nibble;
+pub use ids::BloomId;
+pub use ids::IdempotencyKey;
+pub use ids::KeyId;
+pub use ids::Nonce;
+pub use ids::StageId;
+pub use ids::WorkpieceId;
+pub use inward::InwardError;
+pub use inward::StageResult;
+pub use inward::StageVerdict;
+pub use inward::StudyResult;
+pub use inward::normalize_stage_result;
+pub use inward::normalize_study_result;
+pub use manifest::ClosureViolation;
+pub use manifest::MANIFEST_CLOSURE_BUDGET;
+pub use manifest::PromptManifest;
+pub use manifest::ProvenanceIndex;
+pub use manifest::Slot;
+pub use manifest::SlotRole;
+pub use manifest::assemble_manifest;
+pub use metrics::DAYS_CAP;
+pub use metrics::METRICS_DEFAULT_LIMIT;
+pub use metrics::METRICS_MAX_LIMIT;
+pub use metrics::MetricBloom;
+pub use metrics::MetricDay;
+pub use metrics::MetricDispatch;
+pub use metrics::MetricsLedger;
+pub use metrics::MetricsSeat;
+pub use metrics::MetricsSummary;
+pub use metrics::MetricsTimeline;
+pub use metrics::RECONSTRUCTED_WINDOW;
+pub use metrics::TIMELINE_SPAN_CAP;
+pub use metrics::TimelineSpan;
+pub use metrics::window_label;
+pub use port::AwaitingSurfaceView;
+pub use port::BaseAlertView;
+pub use port::BloomView;
+pub use port::Checkpoint;
+pub use port::ClaimHolder;
+pub use port::ClaimOutcome;
+pub use port::ClaimRefKind;
+pub use port::ClaimRefState;
+pub use port::ClaimReleaseOutcome;
+pub use port::CommissionProjection;
+pub use port::CompositionCursorView;
+pub use port::CompositionView;
+pub use port::Conclusion;
+pub use port::EvidenceRef;
+pub use port::ExecutionStatus;
+pub use port::ExecutorBackend;
+pub use port::ExecutorFaultView;
+pub use port::HostFaultView;
+pub use port::IntegrateOutcome;
+pub use port::IntegrationPosition;
+pub use port::LandOutcome;
+pub use port::LandingBlock;
+pub use port::LeaseEvictionView;
+pub use port::LeaseView;
+pub use port::MAX_TITLE_CHARS;
+pub use port::MemberView;
+pub use port::MemberWhy;
+pub use port::ObservedLaneWrites;
+pub use port::PendingDecisionView;
+pub use port::ProjectedReceipt;
+pub use port::ProjectionBackend;
+pub use port::ReviewParkView;
+pub use port::SourceBackend;
+pub use port::SourceSnapshot;
+pub use port::TransitionWhy;
+pub use port::ViewDocument;
+pub use port::WedgeCause;
+pub use port::WhyDocument;
+pub use port::WhyState;
+pub use port::WithdrawnView;
+pub use port::WorkHandle;
+pub use port::WorkOrder;
+pub use port::intent_title;
+pub use reduce::AGGREGATE_REVIEW_GATE;
+pub use reduce::AGGREGATE_VERIFY_GATE;
+pub use reduce::AdjudicationError;
+pub use reduce::AdmitEvidenceError;
+pub use reduce::AdoptAnswerError;
+pub use reduce::AggregateReviewError;
+pub use reduce::AggregateReviewFault;
+pub use reduce::AggregateVerifyError;
+pub use reduce::AttemptCompletedError;
+pub use reduce::AwaitingSurface;
+pub use reduce::BaseMismatch;
+pub use reduce::BloomRecord;
+pub use reduce::BloomStatus;
+pub use reduce::DECISIONS_SCHEMA;
+pub use reduce::DECISIONS_SCHEMA_V1;
+pub use reduce::DISPATCH_MEMBER_GATE;
+pub use reduce::DRAFT_ADMISSION_GATE;
+pub use reduce::Decision;
+pub use reduce::Decisions;
+pub use reduce::DecisionsSchemaError;
+pub use reduce::Event;
+pub use reduce::FOLD_GATE;
+pub use reduce::Fact;
+pub use reduce::FileLease;
+pub use reduce::FoldConflictError;
+pub use reduce::FoldedIntegration;
+pub use reduce::Gate;
+pub use reduce::GrantAttemptsError;
+pub use reduce::HostFaultError;
+pub use reduce::HostFaultHold;
+pub use reduce::IntegrateError;
+pub use reduce::LAND_GATE;
+pub use reduce::LandError;
+pub use reduce::LandingRejectedError;
+pub use reduce::LeaseEviction;
+pub use reduce::LeaseObservationError;
+pub use reduce::MemberExecutorFaultError;
+pub use reduce::MemberMachineryFault;
+pub use reduce::MemberPark;
+pub use reduce::OperatorHoldError;
+pub use reduce::OperatorRepairError;
+pub use reduce::OrphanClaimReleaseError;
+pub use reduce::Outcome;
+pub use reduce::Read;
+pub use reduce::RecordedRead;
+pub use reduce::RecordedRefusal;
+pub use reduce::Refusal;
+pub use reduce::ResolveError;
+pub use reduce::SealConflict;
+pub use reduce::SealError;
+pub use reduce::Snapshot;
+pub use reduce::SpliceError;
+pub use reduce::StageProgress;
+pub use reduce::SupersedeError;
+pub use reduce::SuppressionDispositionError;
+pub use reduce::SurfaceRequestedError;
+pub use reduce::VerifyFailedError;
+pub use reduce::WithdrawError;
+pub use reduce::decode_recorded_decisions;
+pub use reduce::is_active_unlanded;
+pub use reduce::reduce;
+pub use reduce::view_of;
+pub use reduce::why_of;
+pub use sign::AuthorityDoor;
 #[cfg(not(target_arch = "wasm32"))]
 pub use sign::Ed25519KeyProvider;
-pub use sign::{AuthorityDoor, FakeKeyProvider, KeyProvider, SignatureEnvelope, authorization_message};
+pub use sign::FakeKeyProvider;
+pub use sign::KeyProvider;
+pub use sign::SignatureEnvelope;
+pub use sign::authorization_message;
+#[cfg(not(target_arch = "wasm32"))]
+pub use sign::sign_authorization;
 pub use spend::measure;
-pub use study_report::{BloomGrade, StudyReport, grade};
-pub use values::{
-    ADR_SCHEMA, ADR_TRANSITION_SCHEMA, Adjudication, Adr, AdrStatus, AdrTransition, AdrValueError, AgentProfile,
-    AgentSelection, ApprovalPolicy, ApprovalRule, Artifact, Attempt, BloomDraft, BloomSpec, CHECK_KEY,
-    CONSTRUCT_IMPLEMENT_COMMAND, CRITICAL_KEY, CandidateRef, CatalogError, ClassifiedFinding, ClassifiedFindings,
-    CommissionApprovalTier, CommissionStatementRole, CommissionStatus, CommissionValueError, CompositionFinding,
-    ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, DependencyError, DispatchKey, Disposition, Evidence,
-    EvidenceKind, ExecutionLimits, FIELD_ENTRY_SCHEMA, FieldEntry, FieldKind, FindingClass, Forecast, Harness,
-    JUDGMENT_TAG, LANE_WORKPIECE_HEADER, LandingReceipt, LongContextBand, MECHANICAL_TAG, MemberCandidate,
-    MemberDependency, MemberSubject, Membership, ModelOverride, NetworkProfile, ORPHAN_CLAIM_RELEASE_WORDS,
-    Observation, OperatorHold, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion,
-    OrphanClaimReleaseRecord, OverrideError, PriceRates, PriceTable, Provenance, Question, REVIEW_CRITIC_COMMAND,
-    ReasoningEffort, ResolutionClaim, ResolvedBloom, ResolvedConfigs, ResolvedDependencies, ResolvedModel,
-    SCOPE_FILL_COMMAND, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, SealedPriceTable, SpendCeiling,
-    SpendQuiesce, SpendWindow, StageBinding, StageCatalog, StageOverride, StageReceipt, Statement, StudyCall,
-    StudyCost, StudyRecord, SurfacePattern, Tier, TimeoutRecord, ToolPolicy, Transformation, Unproducible,
-    VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK, VerifiedTree, VerifyFailure, VerifyFailureSet,
-    VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Workpiece, WorkpieceBuilder, WorkpieceFact, WorkpieceFields,
-    WorkpieceRefusal, classify_findings, config_address, decode_config, is_model_lane, pin_workpiece_description,
-    resolve_member_dependencies, split_lane_identity, surface_intersection,
-};
+pub use study_report::BloomGrade;
+pub use study_report::StudyReport;
+pub use study_report::grade;
+pub use values::ADR_SCHEMA;
+pub use values::ADR_TRANSITION_SCHEMA;
+pub use values::Adjudication;
+pub use values::Adr;
+pub use values::AdrStatus;
+pub use values::AdrTransition;
+pub use values::AdrValueError;
+pub use values::AgentProfile;
+pub use values::AgentSelection;
+pub use values::ApprovalPolicy;
+pub use values::ApprovalRule;
+pub use values::Artifact;
+pub use values::Attempt;
+pub use values::BaseReceipt;
+pub use values::BaseVerdict;
+pub use values::BloomDraft;
+pub use values::BloomSpec;
+pub use values::CHECK_KEY;
+pub use values::CONSTRUCT_IMPLEMENT_COMMAND;
+pub use values::CRITICAL_KEY;
+pub use values::CandidateRef;
+pub use values::CatalogError;
+pub use values::ClassifiedFinding;
+pub use values::ClassifiedFindings;
+pub use values::CommissionApprovalTier;
+pub use values::CommissionStatementRole;
+pub use values::CommissionStatus;
+pub use values::CommissionValueError;
+pub use values::CompositionFinding;
+pub use values::ConfigKind;
+pub use values::ConfigRegistry;
+pub use values::ConfigResolveError;
+pub use values::ConfigScopes;
+pub use values::DependencyError;
+pub use values::DispatchKey;
+pub use values::Disposition;
+pub use values::EvictedHolder;
+pub use values::Evidence;
+pub use values::EvidenceKind;
+pub use values::ExecutionLimits;
+pub use values::FIELD_ENTRY_SCHEMA;
+pub use values::FieldEntry;
+pub use values::FieldKind;
+pub use values::FindingClass;
+pub use values::Forecast;
+pub use values::Harness;
+pub use values::JUDGMENT_TAG;
+pub use values::LANE_WORKPIECE_HEADER;
+pub use values::LandingReceipt;
+pub use values::LongContextBand;
+pub use values::MAX_OBSERVED_WRITES;
+pub use values::MECHANICAL_TAG;
+pub use values::MemberCandidate;
+pub use values::MemberDependency;
+pub use values::MemberSubject;
+pub use values::Membership;
+pub use values::ModelOverride;
+pub use values::NamedPath;
+pub use values::NamedSymbol;
+pub use values::NetworkProfile;
+pub use values::ORPHAN_CLAIM_RELEASE_WORDS;
+pub use values::Observation;
+pub use values::OperatorHold;
+pub use values::OperatorRepair;
+pub use values::OrphanClaimRelease;
+pub use values::OrphanClaimReleaseCompletion;
+pub use values::OrphanClaimReleaseRecord;
+pub use values::OverrideError;
+pub use values::PathOrigin;
+pub use values::PriceRates;
+pub use values::PriceTable;
+pub use values::Provenance;
+pub use values::Question;
+pub use values::REVIEW_CRITIC_COMMAND;
+pub use values::ReasoningEffort;
+pub use values::ResolutionClaim;
+pub use values::ResolvedBloom;
+pub use values::ResolvedConfigs;
+pub use values::ResolvedDependencies;
+pub use values::ResolvedModel;
+pub use values::SCOPE_FILL_COMMAND;
+pub use values::SCOPE_REVISION_SCHEMA;
+pub use values::SCOPE_VERIFY_SCHEMA;
+pub use values::ScopeRevision;
+pub use values::ScopeRouting;
+pub use values::ScopeVerifyInput;
+pub use values::ScopeVerifyReport;
+pub use values::SealedPriceTable;
+pub use values::SpendCeiling;
+pub use values::SpendQuiesce;
+pub use values::SpendWindow;
+pub use values::StageBinding;
+pub use values::StageCatalog;
+pub use values::StageOverride;
+pub use values::StageReceipt;
+pub use values::Statement;
+pub use values::StudyCall;
+pub use values::StudyCost;
+pub use values::StudyRecord;
+pub use values::SuppressionDisposition;
+pub use values::SuppressionRequest;
+pub use values::SuppressionVerdict;
+pub use values::SurfacePathRequest;
+pub use values::SurfacePattern;
+pub use values::SurfaceRequest;
+pub use values::Tier;
+pub use values::TierVerdict;
+pub use values::TimeoutRecord;
+pub use values::ToolPolicy;
+pub use values::Transformation;
+pub use values::Unproducible;
+pub use values::VERIFY_BASE_COMMAND;
+pub use values::VERIFY_CHECK_COMMAND;
+pub use values::VERIFY_LANE_IMAGE;
+pub use values::VERIFY_LANE_NETWORK;
+pub use values::VerifiedTree;
+pub use values::VerifyFailure;
+pub use values::VerifyFailureSet;
+pub use values::VerifyGateSet;
+pub use values::VerifyProof;
+pub use values::VerifyReuse;
+pub use values::Wedge;
+pub use values::Withdrawal;
+pub use values::WithdrawalCause;
+pub use values::Workpiece;
+pub use values::WorkpieceBuilder;
+pub use values::WorkpieceFact;
+pub use values::WorkpieceFields;
+pub use values::WorkpieceRefusal;
+pub use values::classify_findings;
+pub use values::config_address;
+pub use values::decode_config;
+pub use values::gate_widening;
+pub use values::is_model_lane;
+pub use values::normalize_write_paths;
+pub use values::path_in_surface;
+pub use values::pin_workpiece_description;
+pub use values::resolve_member_dependencies;
+#[cfg(not(target_arch = "wasm32"))]
+pub use values::signed_approval;
+#[cfg(not(target_arch = "wasm32"))]
+pub use values::signed_cancel;
+pub use values::split_lane_identity;
+pub use values::surface_additions;
+pub use values::surface_intersection;
+pub use values::tier_verdict;
+pub use values::verify_scope;

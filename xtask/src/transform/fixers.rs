@@ -27,6 +27,24 @@ const FMT_BUDGET: Duration = Duration::from_mins(2);
 /// rather than waiting out a wedged rustc.
 const CLIPPY_FIX_BUDGET: Duration = Duration::from_mins(15);
 
+/// The file the lane stamps in its evidence directory while it works after the
+/// model's last turn.
+///
+/// The coordinator measures a lane's liveness from the modification time of
+/// what it writes, and the streamed transcript goes quiet the moment the model
+/// ends its turn. The fixers that follow are work — the one scoped
+/// `clippy --fix` compiles — and a lane cancelled as a dead child during them
+/// loses a finished candidate (#5383). Its own file rather than a touch of the
+/// transcript, so a reader can still tell streamed model output from the
+/// lane's own liveness stamp.
+const HEARTBEAT_FILE: &str = "heartbeat";
+
+/// How often the lane re-stamps [`HEARTBEAT_FILE`] while it waits on a fixer
+/// child. Far under the coordinator's silence threshold, so a fixer that runs
+/// to its whole budget still reads as alive, and cheap enough to be unnoticed:
+/// one empty write per interval.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+
 /// What the construct/refine evidence envelope records about the fixers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Report {
@@ -68,19 +86,37 @@ pub(super) fn apply(worktree: &Path, out_dir: &Path) -> Report {
         return Report::default();
     }
 
+    // Everything from here is work the transcript will not show, so the lane
+    // stamps its own liveness before the first thing that can take a while —
+    // `workspace_members` shells out to cargo metadata (#5383).
+    stamp_heartbeat(out_dir);
     let packages =
         workspace_members(worktree).map(|members| owning_packages(&members, &rust_files)).unwrap_or_default();
     let before = worktree_state(worktree, out_dir);
 
-    run_fixer(worktree, "cargo", &fmt_argv(worktree, &rust_files), FMT_BUDGET, |_| {});
+    run_fixer(worktree, out_dir, "cargo", &fmt_argv(worktree, &rust_files), FMT_BUDGET, |_| {});
     if !packages.is_empty() {
-        run_fixer(worktree, "cargo", &clippy_fix_argv(&packages), CLIPPY_FIX_BUDGET, |command| {
+        run_fixer(worktree, out_dir, "cargo", &clippy_fix_argv(&packages), CLIPPY_FIX_BUDGET, |command| {
             command.env("CARGO_INCREMENTAL", "0");
             sccache::export(sccache::detect().as_ref(), command);
         });
     }
 
-    Report { ran: true, changed: before != worktree_state(worktree, out_dir) }
+    let report = Report { ran: true, changed: before != worktree_state(worktree, out_dir) };
+    stamp_heartbeat(out_dir);
+    report
+}
+
+/// Stamp the lane's heartbeat in `out_dir`, so the coordinator's silence guard
+/// reads the lane as alive while it works past the model's last turn.
+///
+/// Best-effort, like the fixers themselves: a stamp that cannot be written
+/// costs the lane its silence grace, never the run. The write is what moves the
+/// modification time — the bytes are never read by anyone.
+fn stamp_heartbeat(out_dir: &Path) {
+    if fs::create_dir_all(out_dir).is_ok() {
+        let _ = fs::write(out_dir.join(HEARTBEAT_FILE), b"");
+    }
 }
 
 /// Longest-prefix workspace-root match: each path belongs to the package that
@@ -135,9 +171,16 @@ fn clippy_fix_argv(packages: &[String]) -> Vec<String> {
 /// timeout the worktree is restored to the snapshot taken just before this
 /// command, so a fixer that cannot finish never leaves a half-applied tree
 /// and never fails the lane.
-fn run_fixer(worktree: &Path, program: &str, args: &[String], budget: Duration, configure: impl FnOnce(&mut Command)) {
+fn run_fixer(
+    worktree: &Path,
+    out_dir: &Path,
+    program: &str,
+    args: &[String],
+    budget: Duration,
+    configure: impl FnOnce(&mut Command),
+) {
     let snapshot = Snapshot::capture(worktree);
-    match spawn_and_wait(worktree, program, args, budget, configure) {
+    match spawn_and_wait(worktree, out_dir, program, args, budget, configure) {
         Ok(status) if status.success() => {}
         other => {
             match other {
@@ -163,6 +206,7 @@ fn run_fixer(worktree: &Path, program: &str, args: &[String], budget: Duration, 
 
 fn spawn_and_wait(
     worktree: &Path,
+    out_dir: &Path,
     program: &str,
     args: &[String],
     budget: Duration,
@@ -173,11 +217,16 @@ fn spawn_and_wait(
     isolate(&mut command);
     configure(&mut command);
     let mut child = command.spawn().map_err(|error| format!("could not spawn: {error}"))?;
-    wait_budget(&mut child, budget)
+    wait_budget(&mut child, budget, out_dir)
 }
 
-fn wait_budget(child: &mut Child, budget: Duration) -> Result<ExitStatus, String> {
+/// Wait for `child` under `budget`, stamping the lane's heartbeat into
+/// `out_dir` as it goes — on entry, so even a short fixer leaves the stamp, and
+/// then once per [`HEARTBEAT_INTERVAL`].
+fn wait_budget(child: &mut Child, budget: Duration, out_dir: &Path) -> Result<ExitStatus, String> {
     let deadline = Instant::now() + budget;
+    stamp_heartbeat(out_dir);
+    let mut next_stamp = Instant::now() + HEARTBEAT_INTERVAL;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Ok(status),
@@ -186,7 +235,13 @@ fn wait_budget(child: &mut Child, budget: Duration) -> Result<ExitStatus, String
                 let _ = child.wait();
                 return Err("timed out".to_owned());
             }
-            Ok(None) => thread::sleep(Duration::from_millis(100)),
+            Ok(None) => {
+                if Instant::now() >= next_stamp {
+                    stamp_heartbeat(out_dir);
+                    next_stamp = Instant::now() + HEARTBEAT_INTERVAL;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
             Err(error) => return Err(format!("could not wait: {error}")),
         }
     }
@@ -370,8 +425,8 @@ mod tests {
     use std::{env, fs, process};
 
     use super::{
-        Report, Snapshot, apply, clippy_fix_argv, dirty_paths, fmt_argv, in_out_dir, isolate, owning_packages,
-        porcelain_paths, revert_introduced, wait_budget,
+        HEARTBEAT_FILE, Report, Snapshot, apply, clippy_fix_argv, dirty_paths, fmt_argv, in_out_dir, isolate,
+        owning_packages, porcelain_paths, revert_introduced, wait_budget,
     };
 
     fn members(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -609,9 +664,34 @@ mod tests {
         command.arg("8").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
         isolate(&mut command);
         let mut child = command.spawn().expect("spawn sleep");
-        let error = wait_budget(&mut child, Duration::from_millis(150)).expect_err("sleep must time out");
+        let error =
+            wait_budget(&mut child, Duration::from_millis(150), &scratch_dir("timeout")).expect_err("must time out");
         assert!(error.contains("timed out"), "{error}");
         assert!(child.try_wait().expect("reap").is_some(), "the child must not be left running");
+    }
+
+    // Tripwire: the coordinator measures a lane's liveness from what the lane
+    // writes, and the streamed transcript stops the moment the model ends its
+    // turn. A fixer wait that stamped nothing left a construct lane looking
+    // dead for the whole of its `clippy --fix`, and the finished candidate was
+    // cancelled as a host fault (#5383).
+    #[test]
+    fn waiting_on_a_fixer_stamps_the_lane_heartbeat() {
+        use std::process::Stdio;
+        use std::time::Duration;
+
+        let out = scratch_dir("heartbeat");
+        let heartbeat = out.join(HEARTBEAT_FILE);
+        assert!(!heartbeat.exists(), "the stamp is the lane's own, not something the scratch dir came with");
+
+        let mut command = Command::new("sleep");
+        command.arg("0.3").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        isolate(&mut command);
+        let mut child = command.spawn().expect("spawn sleep");
+        let status = wait_budget(&mut child, Duration::from_secs(30), &out).expect("sleep exits clean");
+
+        assert!(status.success());
+        assert!(heartbeat.exists(), "a lane waiting on a fixer child must stamp its own liveness");
     }
 
     #[test]

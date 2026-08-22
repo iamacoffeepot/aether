@@ -124,11 +124,16 @@ fn fact_blooms(fact: &Fact) -> Vec<BloomId> {
         | Fact::SpliceAssembled { bloom, .. }
         | Fact::MemberExecutorFault { bloom, .. }
         | Fact::FoldRefused { bloom, .. }
-        | Fact::ContainmentRefused { bloom, .. } => vec![*bloom],
+        | Fact::ContainmentRefused { bloom, .. }
+        | Fact::SurfaceRequested { bloom, .. }
+        | Fact::Withdraw { bloom, .. }
+        | Fact::LaneWritesObserved { bloom, .. }
+        | Fact::SuppressionDisposition { bloom, .. } => vec![*bloom],
         Fact::ObserveMainline { .. }
         | Fact::ObserveMainlineDiverged { .. }
         | Fact::SurfaceOverlap { .. }
         | Fact::RequestOrphanClaimRelease { .. }
-        | Fact::CompleteOrphanClaimRelease { .. } => Vec::new(),
+        | Fact::CompleteOrphanClaimRelease { .. }
+        | Fact::BaseVerifyCompleted { .. } => Vec::new(),
     }
 }

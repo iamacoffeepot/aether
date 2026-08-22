@@ -105,7 +105,8 @@ impl Views for RestViews<'_> {
 
 /// Drive one upgrade against the live coordinator.
 pub fn run(client: &Client<'_>, args: &UpgradeArgs) -> Result<String> {
-    let views = RestViews { live: client, fold: Endpoint { host: "127.0.0.1".to_owned(), port: args.fold_http_port } };
+    let fold = Endpoint { host: "127.0.0.1".to_owned(), port: args.fold_http_port, token: None };
+    let views = RestViews { live: client, fold };
     upgrade(&client.view()?, &views, &Host, args)
 }
 
@@ -165,6 +166,8 @@ mod tests_support {
                 members: vec![MemberView {
                     workpiece: "issue-5014".to_owned(),
                     scope_revision: DigestHex::from_bytes([7; 32]),
+                    awaiting_surface: None,
+                    withdrawn: None,
                 }],
             }],
         }

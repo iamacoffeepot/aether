@@ -7,10 +7,14 @@
 //! over the shell.
 
 mod diff;
-mod extract;
+// `extract`, `references`, `table` and `walk` are read by the `verify.dup`
+// symbol pass (#5185) as well as by this command's own subcommands, so the
+// inventory has one implementation rather than a gate-side second one.
+pub mod extract;
 mod query;
-mod table;
-mod walk;
+pub mod references;
+pub mod table;
+pub mod walk;
 
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -38,6 +42,9 @@ enum SymbolsCommand {
     Find(FindArgs),
     /// Report symbols the working tree introduces relative to a stored table.
     Diff(DiffArgs),
+    /// Which files at a commit reference a symbol, which of them define it,
+    /// and which of those a declared surface fails to cover (ADR-0208).
+    References(ReferencesArgs),
 }
 
 #[derive(Args, Debug)]
@@ -65,11 +72,27 @@ struct DiffArgs {
     base_table: PathBuf,
 }
 
+#[derive(Args, Debug)]
+struct ReferencesArgs {
+    /// The symbol to search for. A bare Rust identifier; anything else is
+    /// refused before git is spawned.
+    symbol: String,
+    /// The commit to read. Resolved to a full sha and recorded as one, so a
+    /// stored record never says `HEAD`.
+    #[arg(long, default_value = "HEAD")]
+    at: String,
+    /// A declared-surface glob to judge coverage against. Repeatable; the
+    /// passed list is echoed back byte-identically and never appended to.
+    #[arg(long = "surface")]
+    surfaces: Vec<String>,
+}
+
 pub fn run(args: &SymbolsArgs) -> Result<()> {
     match &args.command {
         SymbolsCommand::Build(args) => run_build(args),
         SymbolsCommand::Find(args) => run_find(args),
         SymbolsCommand::Diff(args) => run_diff(args),
+        SymbolsCommand::References(args) => run_references(args),
     }
 }
 
@@ -88,6 +111,13 @@ fn run_diff(args: &DiffArgs) -> Result<()> {
     let base = Table::load(&args.base_table)?;
     let current = walk::build_workspace_table()?;
     print_json(&diff::diff(&base, &current))
+}
+
+/// The search always exits `0` once it completes, whatever the buckets hold:
+/// the gate that refuses an uncovered defining path is the scope-verify
+/// member's, not this command's.
+fn run_references(args: &ReferencesArgs) -> Result<()> {
+    print_json(&references::search(&args.symbol, &args.at, &args.surfaces)?)
 }
 
 fn load_or_build(table: Option<&Path>) -> Result<Table> {

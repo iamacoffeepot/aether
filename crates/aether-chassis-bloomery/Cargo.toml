@@ -166,6 +166,10 @@ aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 # of the same ed25519 primitive the capability verifies with.
 ed25519-dalek = { workspace = true }
 tempfile = "3"
+# Promoted scenario harness (issue 5332): the cells, oracle, and fixture
+# repository used to live under this crate's `tests/`. Scenarios take the
+# library as a dev-dependency so the driver has one home.
+aether-harness-bloomery = { path = "../aether-harness-bloomery" }
 
 [lints]
 workspace = true

@@ -160,28 +160,30 @@ pub(super) fn reduce_operator_release(snapshot: &Snapshot, bloom: &BloomId, rele
 /// The aggregate work orders a release owes, re-derived from the fold the
 /// record is holding now.
 ///
-/// Verify before review when both were swallowed: the critic judges a tree
-/// the compiler has already passed, and launching both would spend the paid
-/// lane on a fold that has not built yet. The leftover review deferral stays
-/// on the record until the verify that just went out completes and dispatches
-/// the critic itself — the same implicit clear a member dispatch uses.
-fn owed_aggregates(record: &BloomRecord, bloom: BloomId) -> Vec<Decision> {
+/// Every gate the hold swallowed goes back out, because the two composite gates
+/// run concurrently against one fold: neither reads the other's verdict, and
+/// the landing waits on the join of their passes. Releasing only one would
+/// leave the bloom waiting on a gate nothing re-dispatches. A gate whose work
+/// order actually goes out clears its own deferral in the fold — the same
+/// implicit clear a member dispatch uses.
+pub(super) fn owed_aggregates(record: &BloomRecord, bloom: BloomId) -> Vec<Decision> {
     let Some(integration) = record.integration.as_ref() else {
         return Vec::new();
     };
+    let mut owed = Vec::new();
     if record.deferred_aggregates.contains(&StageId::AggregateVerify) {
-        return alloc::vec![owed_aggregate_verify(record, bloom, integration.tree, integration.head)];
-    }
-    if record.deferred_aggregates.contains(&StageId::AggregateReview) {
-        return alloc::vec![owed_aggregate_review(
+        owed.push(owed_aggregate_verify(
             record,
             bloom,
             integration.tree,
             integration.head,
-            record.aggregate_rolls + 1,
-        )];
+            record.aggregate_verify_rolls + 1,
+        ));
     }
-    Vec::new()
+    if record.deferred_aggregates.contains(&StageId::AggregateReview) {
+        owed.push(owed_aggregate_review(record, bloom, integration.tree, integration.head, record.aggregate_rolls + 1));
+    }
+    owed
 }
 
 /// The advance-and-dispatch pair one owed workpiece is due, aimed from the
@@ -208,6 +210,27 @@ pub(super) fn owed_dispatch(
     workpiece: &WorkpieceId,
     member_checkpoint: Option<CandidateRef>,
 ) -> Option<[Decision; 2]> {
+    owed_dispatch_lifted(record, bloom, workpiece, member_checkpoint, true)
+}
+
+/// The same re-derived dispatch as [`owed_dispatch`], lifting the base brake
+/// rather than the operator brake.
+pub(super) fn owed_base_dispatch(
+    record: &BloomRecord,
+    bloom: BloomId,
+    workpiece: &WorkpieceId,
+    member_checkpoint: Option<CandidateRef>,
+) -> Option<[Decision; 2]> {
+    owed_dispatch_lifted(record, bloom, workpiece, member_checkpoint, false)
+}
+
+fn owed_dispatch_lifted(
+    record: &BloomRecord,
+    bloom: BloomId,
+    workpiece: &WorkpieceId,
+    member_checkpoint: Option<CandidateRef>,
+    operator_release: bool,
+) -> Option<[Decision; 2]> {
     let cursor = record.progress.get(workpiece).copied()?;
     let candidate = cursor.candidate;
     if workpiece.is_composition() {
@@ -222,7 +245,11 @@ pub(super) fn owed_dispatch(
             cursor,
             DispatchTargets { subject: weave.tree, checkout: weave.checkout },
             Some(weave.tree),
-            composition_line(record).released(),
+            if operator_release {
+                composition_line(record).released()
+            } else {
+                composition_line(record).base_released()
+            },
         ));
     }
     let member = record.spec.members().iter().find(|member| member.workpiece == *workpiece)?;
@@ -241,6 +268,10 @@ pub(super) fn owed_dispatch(
         cursor,
         (targets, construct_checkpoint_base),
         candidate.map(|current| current.tree),
-        SealedLine::of(record, member).released(),
+        if operator_release {
+            SealedLine::of(record, member).released()
+        } else {
+            SealedLine::of(record, member).base_released()
+        },
     ))
 }

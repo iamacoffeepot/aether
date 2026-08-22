@@ -11,9 +11,9 @@ use std::collections::BTreeMap;
 use aether_data::wire::to_vec;
 
 use aether_bloomery::{
-    AgentSelection, BloomId, CandidateRef, Decision, Decisions, Event, Evidence, EvidenceKind, Fact, Harness,
-    MetricDispatch, MetricsLedger, ModelOverride, ReasoningEffort, ResolvedConfigs, Snapshot, SpendWindow, StageId,
-    StageOverride, StudyCost, StudyRecord, reduce,
+    AgentSelection, BloomId, BloomStatus, CandidateRef, Decision, Decisions, Event, Evidence, EvidenceKind, Fact,
+    Harness, MetricDispatch, MetricsLedger, ModelOverride, ReasoningEffort, ResolvedConfigs, Snapshot, SpendWindow,
+    StageId, StageOverride, StudyCost, StudyRecord, reduce,
 };
 use common::{digest, draft_with_member_override, event, membership, workpiece};
 
@@ -35,7 +35,7 @@ impl Journal {
         let spec = draft.seal();
         let bloom = spec.id();
         let mut journal = Self {
-            snapshot: Snapshot::new(digest(1)),
+            snapshot: Snapshot::new(digest(1)).with_green_base(digest(1)),
             ledger: MetricsLedger::default(),
             configs,
             bloom,
@@ -121,11 +121,12 @@ fn study_record(bloom: BloomId, subject: u8, cost_micro_usd: u64) -> StudyRecord
     }
 }
 
-fn encoded_rows(ledger: &MetricsLedger) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+fn encoded_rows(ledger: &MetricsLedger, bloom: BloomId) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let records = BTreeMap::from([(digest(40), study_record(bloom, REVISION, 1_000_000))]);
     (
         to_vec(&ledger.dispatch_rows()).expect("dispatches encode"),
         to_vec(&ledger.bloom_rows()).expect("blooms encode"),
-        to_vec(&ledger.day_rows()).expect("days encode"),
+        to_vec(&ledger.day_rows(|asked| records.get(asked).copied())).expect("days encode"),
     )
 }
 
@@ -138,14 +139,14 @@ fn a_refold_from_the_same_journal_is_byte_identical_and_the_cursor_resumes() {
     live.completed("construct", StageId::Construct, Some(captured), Some(2_000));
     live.study("study", REVISION, 40);
 
-    let first = encoded_rows(&live.ledger);
+    let first = encoded_rows(&live.ledger, live.bloom);
 
     let mut refold = MetricsLedger::default();
     let mut replayed = Vec::new();
     {
         let (draft, configs) = draft_with_member_override(1, membership(MEMBER, REVISION), &escalating());
         let spec = draft.seal();
-        let mut snapshot = Snapshot::new(digest(1));
+        let mut snapshot = Snapshot::new(digest(1)).with_green_base(digest(1));
         for (index, fact) in [
             Fact::Seal(spec),
             Fact::AttemptCompleted {
@@ -180,12 +181,12 @@ fn a_refold_from_the_same_journal_is_byte_identical_and_the_cursor_resumes() {
             replayed.push((event, decisions, envelope));
         }
     }
-    assert_eq!(encoded_rows(&refold), first, "a full refold reproduces the live rows");
+    assert_eq!(encoded_rows(&refold, live.bloom), first, "a full refold reproduces the live rows");
 
     let mut resumed = MetricsLedger::default();
     let (draft, configs) = draft_with_member_override(1, membership(MEMBER, REVISION), &escalating());
     let spec = draft.seal();
-    let mut snapshot = Snapshot::new(digest(1));
+    let mut snapshot = Snapshot::new(digest(1)).with_green_base(digest(1));
     let first_event = event("row-0", Fact::Seal(spec));
     let first_decisions = reduce(&snapshot, &first_event, &configs, &SpendWindow::default());
     resumed.observe(1, &first_event, &first_decisions, &configs, Some(1_000));
@@ -199,7 +200,7 @@ fn a_refold_from_the_same_journal_is_byte_identical_and_the_cursor_resumes() {
         resumed.observe(sequence, event, decisions, &configs, *envelope);
         snapshot = snapshot.apply(event, decisions, &configs);
     }
-    assert_eq!(encoded_rows(&resumed), first, "resuming from the cursor matches a full fold");
+    assert_eq!(encoded_rows(&resumed, live.bloom), first, "resuming from the cursor matches a full fold");
 }
 
 /// Timeline spans carry the envelope stamp when the journal row has one, and
@@ -283,4 +284,84 @@ fn dispatch_rows_name_a_deterministic_fold_id() {
     journal.completed("construct", StageId::Construct, Some(captured), Some(2_000));
     let rows: Vec<MetricDispatch> = journal.ledger.dispatch_rows();
     assert!(rows.iter().any(|row| row.id.starts_with("fold:") && row.stage == StageId::Construct));
+}
+
+/// Tripwire: a consumer reading the tail as today gets a bucket that is not a day.
+#[test]
+fn the_undated_bucket_never_occupies_the_newest_day_slot() {
+    let mut journal = Journal::sealed(&escalating());
+    let captured = CandidateRef { tree: digest(TREE), checkout: digest(TREE + 1) };
+    journal.completed("construct", StageId::Construct, Some(captured), None);
+
+    let rows = journal.ledger.day_rows(|_| None);
+    assert!(
+        rows.first().is_some_and(|row| row.reconstructed),
+        "the undated bucket leads so it cannot be mistaken for a civil day: {rows:?}"
+    );
+    assert!(
+        rows.last().is_some_and(|row| !row.reconstructed && row.label.starts_with("bloomery/daily/")),
+        "the newest slot is a dated day: {rows:?}"
+    );
+}
+
+/// The plausible bug: a column is wired to the wrong accumulator, or dollars
+/// are attributed to the read day instead of the dispatch's day.
+#[test]
+fn a_day_carries_its_priced_dollars_landings_wedges_and_cycle_mean() {
+    let mut journal = Journal::sealed(&escalating());
+    let first_dispatch_millis = 1_000;
+    let land_millis = 5_000;
+    let miss = |key: &str, bloom| {
+        event(
+            key,
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece(MEMBER),
+                stage: StageId::Construct,
+                passed: false,
+                evidence: Evidence {
+                    subject: digest(TREE),
+                    kind: EvidenceKind::VerificationResult,
+                    detail: digest(91),
+                },
+                candidate: None,
+            },
+        )
+    };
+    journal.admit(&miss("fail-1", journal.bloom), Some(2_000));
+    let wedged = journal.admit(&miss("fail-2", journal.bloom), Some(2_000));
+    assert!(
+        wedged.effects.iter().any(|effect| matches!(effect, Decision::RecordWedge { .. })),
+        "the second Construct miss wedges: {wedged:?}"
+    );
+    journal.study("study", REVISION, 40);
+    journal.snapshot.blooms.get_mut(&journal.bloom).expect("the seal recorded the bloom").status =
+        BloomStatus::Resolved;
+    let landed =
+        journal.admit(&event("land", Fact::Land { bloom: journal.bloom, new_head: digest(40) }), Some(land_millis));
+    assert!(
+        landed.effects.iter().any(|effect| matches!(effect, Decision::EmitReceipt(_))),
+        "a resolved bloom on its sealed base lands: {landed:?}"
+    );
+
+    let bloom = journal.bloom;
+    let priced =
+        journal.ledger.day_rows(|asked| (*asked == digest(40)).then_some(study_record(bloom, REVISION, 900_000)));
+    let day = priced.last().expect("a stamped fold produces a dated day");
+    assert!(!day.reconstructed, "the newest row is the civil day: {day:?}");
+    assert_eq!(day.spend_micro_usd, 900_000, "priced dollars land on the dispatch's day: {day:?}");
+    assert_eq!(day.landed, 1, "EmitReceipt is one landing: {day:?}");
+    assert_eq!(day.wedges, 1, "RecordWedge is one stop: {day:?}");
+    assert_eq!(
+        day.cycle_time_millis,
+        Some(land_millis - first_dispatch_millis),
+        "cycle mean is first dispatch to land: {day:?}"
+    );
+
+    let unpriced = journal.ledger.day_rows(|asked| (*asked == digest(40)).then_some(study_record(bloom, REVISION, 0)));
+    assert_eq!(
+        unpriced.last().expect("the dated day remains").spend_micro_usd,
+        0,
+        "an unpriced record is unresolved, never averaged in as free"
+    );
 }

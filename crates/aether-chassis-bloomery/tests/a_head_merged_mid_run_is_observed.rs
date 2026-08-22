@@ -13,11 +13,7 @@
 //! poll-driven observation that displaced it would fail before this scenario's
 //! own subject is reached.
 
-mod common;
-pub mod fixture;
-pub mod harness;
-
-use fixture::{FixtureHarness, digest};
+use aether_harness_bloomery::{FixtureHarness, digest};
 
 /// The commit a person merges straight to mainline. Recognizable, and no bloom
 /// of this coordinator's ever names it — the point being that the coordinator

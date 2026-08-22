@@ -75,9 +75,33 @@ per member: forgiven the first time a member sees it, charged a repair roll on
 every later occurrence for that same member, and wedging the member with
 `repeated_verifiers = {verify.suppress}` if it keeps repeating. Replacing the
 candidate does not reset that memory (ADR-0178).
-Bloomery has no pull-request owner context, so the sign-off path below is
-closed to it and the lane re-enters `Refine` — the only way a candidate clears
-the finding is to remove the suppression.
+
+The scan has three terminals, not two (ADR-0193). It exits 0 when a diff adds
+no suppression at all, and 1 when it adds one that says nothing for itself. In
+between is the case a lane is actually in when the repository's own policy
+blesses the write it needs: it states its case **on the suppression line**, as a
+trailing comment on the attribute the scanner finds.
+
+```rust
+#[allow(clippy::disallowed_methods)] // aether-suppression-request: operator tooling reading the coordinator's REST bind, not cap config
+```
+
+A scan whose every finding carries such a marker with a non-empty reason exits
+4, and `verify.suppress` reads that as a pass: the member continues, and the
+requests ride out on the evidence's own `suppression_requests` channel. One
+unrequested finding among requested ones holds the whole run at 1, so a request
+cannot clear its neighbour. A `.jscpd.json` member can carry no comment, so a
+JSON suppression is never requestable.
+
+Passing the lane is not granting the suppression. The request travels with the
+candidate to the two places a reviewer already works — the bloom's landing
+proposal, which renders one line per standing request naming the member, the
+path, the lint and the reason, and the aggregate review — and it is granted by
+the sign-off marker below or refused through `POST
+/blooms/{id}/members/{workpiece}/suppression`, which bounces the member to a
+repair lap with the denial recorded. A lane never grants its own request; what
+it stops doing is paying a refine lap to remove a suppression the policy agrees
+with, or routing the write into a spelling the ban does not enumerate.
 
 A repository owner can sign off an intentional pull-request suppression only
 by editing the pull request's main body so it contains exactly one canonical
@@ -178,6 +202,24 @@ unselected set, turning this triage mechanical. And if the rule count grows
 past a handful, revisit centralized rules vs. crate-local declaration (e.g.
 `[package.metadata.affected]` extra-paths read by `xtask`) as a deliberate
 design decision.
+
+## The symbol pass
+
+`verify.dup` runs a second pass beside jscpd (#5185). jscpd finds token clones;
+the pass finds *concept* clones — a helper re-derived under a name the
+workspace already has. It reads the symbols the candidate introduces (each
+touched file against the same file at the work order's diff base), asks the
+workspace inventory whether each name already lives somewhere, and adds a
+couple of argument-aware rules clippy's `disallowed-methods` cannot express: a
+`Command::new("git")` outside the modules that own the git spawn, and a
+hand-rolled hex nibble loop outside the digest codec.
+
+Nothing it finds refuses. A name that already exists may be a genuinely
+different responsibility, and only judgment separates that from re-derivation,
+so the pass writes a dossier to the evidence's `review_flags` channel and the
+review seat decides. Test files are exempt — a fixture that spawns git is
+building a repository to test against. Build the same inventory by hand with
+`cargo xtask symbols build` and search it with `cargo xtask symbols find`.
 
 ## Watching a draft PR
 

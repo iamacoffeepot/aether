@@ -37,8 +37,30 @@ pub enum AdmissionKey {
     AggregateReviewExecutorFault,
     /// A whole-bloom aggregate-verify verdict.
     AggregateVerify,
+    /// A whole-workspace base-verify verdict (ADR-0200).
+    BaseVerify,
     /// A member stage whose executor could not judge the subject (ADR-0195).
     MemberExecutorFault,
+    /// A construct-family lane that declined and named the declared-surface
+    /// paths its work requires (ADR-0207). Dispatch-accounting like the rest:
+    /// the order is consumed and the verdict reached the reducer, so a
+    /// surface-request admission missing from [`Self::ALL`] would make a
+    /// completed dispatch look stranded.
+    SurfaceRequest,
+    /// One observation of a construct lane's working tree (ADR-0204). Not a
+    /// dispatch-accounting key: an observation neither consumes the order nor
+    /// carries a verdict — the lane is still running — so a lease admission
+    /// must not satisfy the strand check. Excluded from [`Self::ALL`] for the
+    /// same reason [`Self::Study`] is.
+    ///
+    /// Its `of` argument is the nonce joined with a digest of the observed
+    /// path set rather than the bare nonce, because a lane is observed on
+    /// every tick and each observation is a distinct fact: keyed by nonce
+    /// alone, the first observation would make every later one a replayed
+    /// duplicate and the table would freeze at the first tick's write set.
+    /// With the set in the key, re-observing an unchanged tree is exactly the
+    /// no-op it should be, and a grown one admits.
+    LeaseObservation,
     /// A study-record evidence admission. Not a dispatch-accounting key: a
     /// study row landing must not mark the dispatch complete — the verdict
     /// is what consumes the order. Excluded from [`Self::ALL`].
@@ -50,7 +72,7 @@ impl AdmissionKey {
     /// of these is the durable statement that the dispatch reached the
     /// reducer as a verdict. [`Self::Study`] is deliberately absent: it
     /// rides the same nonce but must not satisfy the strand check.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 10] = [
         Self::Attempt,
         Self::Integrate,
         Self::VerifyFailed,
@@ -58,7 +80,9 @@ impl AdmissionKey {
         Self::AggregateReview,
         Self::AggregateReviewExecutorFault,
         Self::AggregateVerify,
+        Self::BaseVerify,
         Self::MemberExecutorFault,
+        Self::SurfaceRequest,
     ];
 
     /// The key's stable prefix — the half of the key that is not the nonce.
@@ -71,7 +95,10 @@ impl AdmissionKey {
             Self::AggregateReview => "aether.bloomery.aggregate_review",
             Self::AggregateReviewExecutorFault => "aether.bloomery.aggregate_review_executor_fault",
             Self::AggregateVerify => "aether.bloomery.aggregate_verify",
+            Self::BaseVerify => "aether.bloomery.base_verify",
             Self::MemberExecutorFault => "aether.bloomery.member_executor_fault",
+            Self::LeaseObservation => "aether.bloomery.lease_observation",
+            Self::SurfaceRequest => "aether.bloomery.surface_request",
             Self::Study => "aether.bloomery.study",
         }
     }

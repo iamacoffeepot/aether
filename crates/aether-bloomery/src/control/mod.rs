@@ -173,14 +173,14 @@ topic_vocabulary! {
     /// under a bloom-level order record. Appended so the prior topics' display
     /// spellings and ordering are unchanged.
     AggregateVerify,
-    /// A whole-document projection (host-minted): the view-document producer
-    /// (#3497) enqueues [`ViewDocument`](crate::port::ViewDocument) payloads and
-    /// the mirror reactor drains them onto the outward mirror. No [`Decision`]
-    /// projects onto it — it is host-produced and host-drained, so
-    /// [`of_decision`](Self::of_decision) never returns it — but it is a real
-    /// outbox topic exactly one reactor drains, so it belongs to the closed set.
-    /// Its payload type [`ViewDocument`](crate::port::ViewDocument) already lives
-    /// in this crate.
+    /// A whole-document projection (host-minted): the control core's commit
+    /// path enqueues [`ViewDocument`](crate::port::ViewDocument) payloads when
+    /// the projected document changes, and the mirror reactor drains them onto
+    /// the outward mirror. No [`Decision`] projects onto it — it is
+    /// host-produced and host-drained, so [`of_decision`](Self::of_decision)
+    /// never returns it — but it is a real outbox topic exactly one reactor
+    /// drains, so it belongs to the closed set. Its payload type
+    /// [`ViewDocument`](crate::port::ViewDocument) already lives in this crate.
     ViewDocument,
     /// An authorized orphan-claim release (reducer-minted, from
     /// [`Decision::DispatchOrphanClaimRelease`]), drained by the claim-release
@@ -210,6 +210,45 @@ topic_vocabulary! {
     /// does not stall receipts or source mirroring (ADR-0199). Appended so
     /// the prior topics' display spellings and ordering are unchanged.
     Commission,
+    /// A withdrawn member's live-lane cancel (reducer-minted, from
+    /// [`Decision::CancelDispatch`]), drained by the executor reactor, which
+    /// cancels every outstanding order naming that bloom and workpiece and
+    /// consumes it. No evidence is admitted: the member has left the line, so
+    /// there is nothing for a verdict to be about (#5327). Appended so the
+    /// prior topics' display spellings and ordering are unchanged.
+    CancelDispatch,
+    /// A withdrawn member's single claim-ref release (reducer-minted, from
+    /// [`Decision::ReleaseMemberClaimRef`]), drained by the claim-release
+    /// reactor through the same expected-holder compare-and-swap the orphan
+    /// door uses — one workpiece ref, never the bloom's admission ref, because
+    /// the bloom is still walking (#5327). Appended so the prior topics'
+    /// display spellings and ordering are unchanged.
+    MemberClaimRelease,
+    /// A pre-bloom scoping run (host-minted, ADR-0208): the commission store
+    /// enqueues a [`ScopeDispatchPayload`] in the same transaction that writes
+    /// the run's `enqueued` row, and the executor reactor drains it into an
+    /// ordinary work order.
+    ///
+    /// Host-minted for the reason the ADR names: scoping runs *before* a
+    /// workpiece qualifies for a bloom, so no [`Decision`] can project onto it
+    /// and [`of_decision`](Self::of_decision) never returns it — the same
+    /// posture [`Commission`](Self::Commission) already holds, and the same
+    /// producer idiom.
+    ///
+    /// Its own topic rather than a second payload shape on
+    /// [`Dispatch`](Self::Dispatch), because that drain decodes fail-stop and
+    /// `break`s without advancing its ack prefix: a foreign payload there would
+    /// park every member dispatch behind it forever. The two aggregate topics
+    /// are the estate's own precedent for "a dispatched position that is not
+    /// the member line gets its own topic and its own payload". Appended so the
+    /// prior topics' display spellings and ordering are unchanged.
+    ScopeDispatch,
+    /// A whole-workspace base-verify dispatch (reducer-minted, from
+    /// [`Decision::DispatchBaseVerify`]), drained by the executor reactor,
+    /// which runs `verify.base` against the sealed base under a bloom-less
+    /// order record (ADR-0200). Appended so the prior topics' display
+    /// spellings and ordering are unchanged.
+    BaseVerify,
 }
 
 impl Topic {
@@ -234,6 +273,10 @@ impl Topic {
             Self::Splice => "topic:splice",
             Self::SourceReplica => "topic:source_replica",
             Self::Commission => "topic:commission",
+            Self::CancelDispatch => "topic:cancel_dispatch",
+            Self::MemberClaimRelease => "topic:member_claim_release",
+            Self::ScopeDispatch => "topic:scope_dispatch",
+            Self::BaseVerify => "topic:base_verify",
         }
     }
 
@@ -257,6 +300,9 @@ impl Topic {
             Decision::DispatchAggregateReview { .. } => Some(Self::AggregateReview),
             Decision::DispatchAggregateVerify { .. } => Some(Self::AggregateVerify),
             Decision::DispatchOrphanClaimRelease { .. } => Some(Self::OrphanClaimRelease),
+            Decision::DispatchBaseVerify { .. } => Some(Self::BaseVerify),
+            Decision::CancelDispatch { .. } => Some(Self::CancelDispatch),
+            Decision::ReleaseMemberClaimRef { .. } => Some(Self::MemberClaimRelease),
             Decision::ClaimMembership { .. }
             | Decision::ReleaseMembership { .. }
             | Decision::InheritClaim { .. }
@@ -345,7 +391,24 @@ impl Topic {
             // Snapshot-only: the member machinery series is what `/view` reads
             // to tell a sick host from rejected work. The retry it owes rides
             // as an ordinary `DispatchAttempt` beside this row.
-            | Decision::RecordMemberMachinery { .. } => None,
+            | Decision::RecordMemberMachinery { .. }
+            // Snapshot-only: the withdrawal record is what `/view` and the
+            // folds read. The two things a withdrawal actually *does* reach
+            // the host through the `CancelDispatch` and `ReleaseMemberClaimRef`
+            // effects emitted beside it, and a terminal bloom's status move
+            // dispatches nothing at all.
+            | Decision::RecordWithdrawal { .. }
+            | Decision::MarkBloomWithdrawn { .. }
+            // Snapshot-only: the composite-gate join is read off the record by
+            // the sibling verdict that arrives second. The landing it leads to
+            // reaches the reactor through the `DispatchLand` emitted beside it,
+            // so a topic here would enqueue a row nothing drains.
+            | Decision::RecordAggregateGatePass { .. }
+            // Snapshot-only: a refusal is precisely the statement that no work
+            // went out (ADR-0206). What reads it is `/why`, off the record; a
+            // topic here would enqueue a row nothing drains.
+            | Decision::RecordRefusal { .. }
+            | Decision::RecordBaseReceipt { .. } => None,
         }
     }
 }
@@ -440,6 +503,62 @@ pub struct DispatchPayload {
     pub configs: ConfigRegistry,
 }
 
+/// The pre-bloom scoping-run dispatch outbox payload (ADR-0208): the
+/// commission, the attempt ordinal, the run's content-addressed subject, and
+/// the fully-built portable [`Transformation`] the executor dispatch reactor
+/// wraps in a work order and submits — the same shape [`DispatchPayload`] has,
+/// minus every field that only a sealed bloom can supply.
+///
+/// **There is no bloom here and that is the point.** The commission's
+/// [`WorkpieceId`] is its primary key from `create_commission` onward, so it is
+/// the identity that exists before a workpiece is frozen; `ordinal` is the
+/// attempt number on that commission, mirroring `scope_revisions`' own
+/// `UNIQUE (commission, ordinal)`. A re-run against an unchanged intent is a new
+/// ordinal, never a collision — which is why the intent is a *field* of the run
+/// rather than its key.
+///
+/// Enqueued by the host (the commission store), never by the reducer: no
+/// [`Decision`] projects onto [`Topic::ScopeDispatch`]. Defined here (always
+/// compiled) so the host reactor can decode it inward, cycle-free — like
+/// [`DispatchPayload`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ScopeDispatchPayload {
+    /// The commission being scoped — the pre-freeze identity, and the order
+    /// record's workpiece axis.
+    pub commission: WorkpieceId,
+    /// Which attempt on that commission this is, from `1`.
+    pub ordinal: u64,
+    /// The run's content-addressed subject: the digest of the triple
+    /// (commission id, intent digest, base commit). Every order must pin a
+    /// digest — the drain refuses an empty `inputs` and the broker binds
+    /// returning evidence to it — and the run's own *input* is the only
+    /// content-addressable thing that exists before a revision is frozen. Not
+    /// the predecessor revision: a first-ever scope has none.
+    pub subject: Digest,
+    /// The commission's stored intent statement — the sketch the run is about.
+    pub intent: Digest,
+    /// The observed mainline the run reads code at. There is no sealed base and
+    /// no candidate before the freeze, so the tree is the head the journal
+    /// already recorded.
+    pub base: Digest,
+    /// The stage this run executes — always [`StageId::Scope`], carried
+    /// explicitly so the order record and the intake route from the payload
+    /// rather than from a constant the drain re-asserts.
+    pub stage: StageId,
+    /// The portable transformation to submit, built by
+    /// [`Transformation::for_scoping_run`](crate::values::Transformation::for_scoping_run).
+    pub transformation: Transformation,
+    /// The seat the compiled line calibrates `Scope` at
+    /// ([`StageCatalog::profile_of`](crate::values::StageCatalog::profile_of)).
+    /// Pre-bloom means no sealed catalog, so the compiled line is the
+    /// authority, exactly as `stage_binding` already falls back. Carried
+    /// unread by this path: whatever the identity slice calibrated is what
+    /// dispatches, and no [`ModelOverride`](crate::values::ModelOverride) is
+    /// resolved against it — that type is sealed into a *bloom's* registry and
+    /// there is no bloom here.
+    pub profile: AgentProfile,
+}
+
 /// The integration dispatch outbox payload (ADR-0152 §Resolution drives
 /// integration): the wasm control actor enqueues it under
 /// [`Topic::Integrate`] from a
@@ -524,6 +643,18 @@ pub struct AggregateVerifyPayload {
     pub profile: AgentProfile,
 }
 
+/// The payload a [`Topic::BaseVerify`] outbox row carries — the whole-workspace
+/// `verify.base` fan-out against a sealed base (ADR-0200).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct BaseVerifyPayload {
+    /// The commit the lane checks out.
+    pub base: Digest,
+    /// The `verify.base` transformation to submit.
+    pub transformation: Transformation,
+    /// The catalog-calibrated profile the mechanical lane runs under.
+    pub profile: AgentProfile,
+}
+
 /// Which pass of the two-pass whole-bloom aggregate review (ADR-0153) a dispatch
 /// is. Replaces the former `roll: u32` (`1` the full review, `2` the
 /// delta-confirm): the two passes are a closed set the reducer's ceiling caps at,
@@ -598,6 +729,35 @@ pub struct OrphanClaimReleasePayload {
     pub request: Digest,
     /// The signed target: which typed ref, and the holder the CAS expects.
     pub target: OrphanClaimRelease,
+}
+
+/// The withdrawn-member cancel outbox payload (#5327): the bloom and the
+/// member whose live lane the executor reactor must kill. The control core
+/// enqueues it under [`Topic::CancelDispatch`] from a
+/// [`Decision::CancelDispatch`]. Defined here (always compiled) so the host
+/// reactor can decode it inward, cycle-free — like [`OutboxPayload`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CancelDispatchPayload {
+    /// The bloom the cancelled orders were dispatched under.
+    pub bloom: Digest,
+    /// The withdrawn member whose outstanding orders are cancelled and consumed.
+    pub workpiece: WorkpieceId,
+}
+
+/// The withdrawn-member claim-ref release outbox payload (#5327): the bloom
+/// that holds `refs/bloomery/claims/<workpiece>` and the member it names. The
+/// control core enqueues it under [`Topic::MemberClaimRelease`] from a
+/// [`Decision::ReleaseMemberClaimRef`]; the claim-release reactor drains it
+/// through the same expected-holder compare-and-swap the orphan door uses.
+/// Carries one workpiece and never the mainline admission ref, because the
+/// bloom is still walking. Defined here (always compiled) so the host reactor
+/// can decode it inward, cycle-free — like [`OutboxPayload`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MemberClaimReleasePayload {
+    /// The bloom expected to be holding the ref.
+    pub bloom: Digest,
+    /// The withdrawn member whose ref is freed.
+    pub workpiece: WorkpieceId,
 }
 
 /// The combined atomic store commit (ADR-0149 §The control core). One
@@ -835,6 +995,20 @@ pub struct Query {
     /// the same most-specific-first order those two already resolve in.
     #[serde(default)]
     pub calibration: bool,
+    /// Answer "why is this bloom not advancing" instead of projecting its view
+    /// (#5281): the stored-fact chain from the land down to member dispatch,
+    /// plus one answer per member.
+    ///
+    /// A flag paired with [`bloom`](Self::bloom) rather than a fourth digest
+    /// field, because it selects a different *rendering* of the same subject
+    /// the bloom id already names. It yields to [`release`](Self::release) and
+    /// [`calibration`](Self::calibration), which name whole other subjects, and
+    /// is answered before the view document is projected — that document would
+    /// be built and thrown away. Without a `bloom` it has nothing to explain
+    /// and is ignored. Trailing and `#[serde(default)]` so a reader that
+    /// predates the field still decodes.
+    #[serde(default)]
+    pub why: bool,
 }
 
 /// Reply to [`Query`]: the requested projection as canonical
@@ -892,6 +1066,14 @@ pub enum QueryResult {
     /// unchanged.
     Calibration {
         /// The wire-encoded `CalibrationDocument`.
+        #[serde(with = "aether_data::bytes")]
+        document: Vec<u8>,
+    },
+    /// Why one bloom is not advancing, wire-encoded
+    /// [`WhyDocument`](crate::port::WhyDocument) (#5281). Appended so the prior
+    /// variants' wire discriminants are unchanged.
+    Why {
+        /// The wire-encoded `WhyDocument`.
         #[serde(with = "aether_data::bytes")]
         document: Vec<u8>,
     },

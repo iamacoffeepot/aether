@@ -86,7 +86,8 @@ use crate::store::StoreBackend;
 ///
 /// The other reducer topics (land, integration, receipts, claim releases) do not
 /// mint orders, so they have no nonce to strand.
-const ORDER_BEARING_TOPICS: [Topic; 3] = [Topic::Dispatch, Topic::AggregateReview, Topic::AggregateVerify];
+const ORDER_BEARING_TOPICS: [Topic; 5] =
+    [Topic::Dispatch, Topic::AggregateReview, Topic::AggregateVerify, Topic::ScopeDispatch, Topic::BaseVerify];
 
 /// Re-queue every acknowledged dispatch whose order was spent without its fact
 /// reaching the journal, returning the nonces put back in flight.
@@ -121,6 +122,19 @@ pub(super) fn readopt_stranded_dispatches(store: &mut dyn StoreBackend) -> rusql
 fn is_stranded(store: &mut dyn StoreBackend, nonce: &Nonce) -> rusqlite::Result<bool> {
     if store.lookup_order(&nonce.0)?.is_some() {
         return Ok(false);
+    }
+    // A pre-bloom scoping run is accounted for by its own ledger, never by the
+    // journal (ADR-0208, #5304): its verdict produces no `Fact`, because there
+    // is no bloom for one to be about. Neither question below can answer for it
+    // — `journal_holds_any` would call every completed run stranded, and the
+    // membership read at the end would call every run *not* stranded, because
+    // the reserved scope-run digest holds no membership by construction. The
+    // `verdict` row is the statement that this dispatch reached the
+    // coordinator, so it is the one this check asks for.
+    if let Some((commission, ordinal)) = store.lookup_scope_run(&nonce.0)? {
+        let answered =
+            store.list_scope_runs(&commission)?.iter().any(|row| row.ordinal == ordinal && row.kind == "verdict");
+        return Ok(!answered);
     }
     let Some(bloom) = store.lookup_dispatch_owner(&nonce.0)? else {
         return Ok(false);

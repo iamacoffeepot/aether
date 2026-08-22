@@ -1,20 +1,27 @@
-//! Application chrome: header, status, needs-you band, footer.
+//! Application chrome: header, status, needs-you band, footer, pane frames.
 //!
-//! Owned by the workspace panes: fleet paints the header, needs-you the
-//! merged queue, quiet the status, today, and rest-count lines.
+//! The header and footer are shell chrome. Needs-you paints the merged
+//! queue; quiet paints the status, today, and rest-count lines.
 
 use std::time::Duration;
 
+use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use crate::dto::{SpendQuiesce, ViewDocument};
-use crate::keys::{KeyHint, footer_line};
+use crate::keys::{KeyHint, footer_line, footer_row, overlay_lines};
 use crate::palette::{self, Role};
 use crate::screen::{Dashboard, QuietLine};
 use crate::store::Cell;
 use crate::warroom::{NeedsYouRow, Severity};
+
+/// One painted needs-you line, plus whether the operator has dismissed it.
+pub struct BandRow<'a> {
+    pub row: &'a NeedsYouRow,
+    pub dismissed: bool,
+}
 
 /// Age of the last successful sample, for the header.
 #[must_use]
@@ -33,22 +40,62 @@ pub fn format_age(age: Option<Duration>) -> String {
     format!("{}h", mins / 60)
 }
 
+// Three 14-cell series plus the metrics do not fit a narrower row, so the decoration goes before the facts.
+const SPARKLINE_MIN_WIDTH: u16 = 100;
+
+// The widest hint line is well under this, so the overlay stays a pane over the
+// body rather than a second screen.
+const OVERLAY_MAX_WIDTH: u16 = 40;
+
+/// The blossom the console opens with.
+pub const MARK: &str = "\u{2740}";
+/// What a terminal whose font has no `\u{2740}` paints instead — one cell either
+/// way, so the header row's budget does not move.
+pub const MARK_ASCII: &str = "*";
+
+/// The mark cell. Its petal colour is the palette's Blossom role, the one
+/// saturated thing the header carries.
 #[must_use]
-pub fn header(endpoint_label: &str, view: &Cell<ViewDocument>, dashboard: Option<&Dashboard>) -> Paragraph<'static> {
+pub fn mark_span(ascii: bool) -> Span<'static> {
+    Span::styled(
+        if ascii {
+            MARK_ASCII
+        } else {
+            MARK
+        },
+        palette::paint(Role::Focus),
+    )
+}
+
+/// Identity, endpoint, sample age, then staleness (deliberately before the metrics), then metrics and sparklines.
+#[must_use]
+pub fn header(
+    endpoint_label: &str,
+    view: &Cell<ViewDocument>,
+    dashboard: Option<&Dashboard>,
+    width: u16,
+    ascii_mark: bool,
+) -> Paragraph<'static> {
     let age = format_age(view.sample_age());
-    let mut spans = vec![Span::styled("bloomery-console", palette::body().add_modifier(Modifier::BOLD))];
+    let mut spans = vec![
+        mark_span(ascii_mark),
+        Span::styled(" bloomery", palette::body().add_modifier(Modifier::BOLD)),
+        Span::raw(format!("  {endpoint_label}  sample {age}")),
+    ];
     if view.is_stale() {
         spans.push(Span::styled("  STALE", palette::paint(Role::Loud).add_modifier(Modifier::BOLD)));
         if let Some(error) = &view.error {
             spans.push(Span::raw(format!("  {error}")));
         }
     }
-    spans.push(Span::raw(format!("  {endpoint_label}  sample {age}")));
     if let Some(dashboard) = dashboard {
-        spans.push(Span::raw(format!(
-            "  ${}  L{}  W{}",
-            dashboard.spend_spark, dashboard.landed_spark, dashboard.wedge_spark
-        )));
+        spans.push(Span::raw(format!("  {}", dashboard.footer)));
+        if width >= SPARKLINE_MIN_WIDTH {
+            spans.push(Span::raw(format!(
+                "  ${}  L{}  W{}",
+                dashboard.spend_spark, dashboard.landed_spark, dashboard.wedge_spark
+            )));
+        }
     }
     Paragraph::new(Line::from(spans)).style(palette::body())
 }
@@ -102,11 +149,7 @@ pub fn quiet(lines: &[QuietLine]) -> Paragraph<'static> {
 /// how many rows sit outside the window. `height` is the pane's inner height.
 /// When the queue overflows, the last line is reserved for `+N more`.
 #[must_use]
-pub fn needs_you_window(
-    rows: &[NeedsYouRow],
-    selected: Option<usize>,
-    height: usize,
-) -> (&[NeedsYouRow], Option<usize>, usize) {
+pub fn needs_you_window<T>(rows: &[T], selected: Option<usize>, height: usize) -> (&[T], Option<usize>, usize) {
     if height == 0 || rows.is_empty() {
         return (&[], None, 0);
     }
@@ -134,20 +177,36 @@ fn needs_you_window_start(len: usize, selected: Option<usize>, rows: usize) -> u
 }
 
 #[must_use]
-pub fn needs_you_band(window: &[NeedsYouRow], selected: Option<usize>, hidden: usize) -> Paragraph<'static> {
+pub fn needs_you_band(
+    window: &[BandRow<'_>],
+    selected: Option<usize>,
+    hidden: usize,
+    cleared: usize,
+) -> Paragraph<'static> {
     let mut lines: Vec<Line<'static>> = window
         .iter()
         .enumerate()
         .map(|(index, row)| {
-            let mut style = palette::paint(severity_role(row.severity)).add_modifier(Modifier::BOLD);
+            let mut style = palette::paint(severity_role(row.row.severity)).add_modifier(if row.dismissed {
+                Modifier::DIM
+            } else {
+                Modifier::BOLD
+            });
             if selected == Some(index) {
                 style = style.add_modifier(Modifier::REVERSED);
             }
-            Line::from(Span::styled(format!("{} · {} · {}", row.subject, row.happened, row.action), style))
+            Line::from(Span::styled(format!("{} · {} · {}", row.row.subject, row.row.happened, row.row.action), style))
         })
         .collect();
+    let mut clauses = Vec::new();
     if hidden > 0 {
-        lines.push(Line::from(Span::raw(format!("+{hidden} more"))));
+        clauses.push(format!("+{hidden} more"));
+    }
+    if cleared > 0 {
+        clauses.push(format!("·{cleared} cleared"));
+    }
+    if !clauses.is_empty() {
+        lines.push(Line::from(Span::raw(clauses.join("  "))));
     }
     Paragraph::new(lines).style(palette::body())
 }
@@ -159,20 +218,62 @@ fn severity_role(severity: Severity) -> Role {
     }
 }
 
+/// Bordered, titled pane chrome. The focused pane is the only heavy stroke on
+/// screen, so the ring's colour and its weight are one cue; the stroke is one
+/// cell wide in both styles, so no pane geometry moves.
 #[must_use]
-pub fn footer(hints: &[KeyHint], metrics: Option<&str>) -> Paragraph<'static> {
-    match metrics {
-        Some(metrics) if !metrics.is_empty() => {
-            Paragraph::new(format!("{metrics}   {}", footer_line(hints))).style(palette::body())
-        }
-        _ => Paragraph::new(footer_line(hints)).style(palette::body()),
-    }
+pub fn pane_block(title: impl Into<String>, focused: bool) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(if focused {
+            BorderType::Thick
+        } else {
+            BorderType::Plain
+        })
+        .title(Line::from(title.into()))
+        .border_style(if focused {
+            palette::border_focused()
+        } else {
+            palette::border()
+        })
+        .style(palette::body())
+}
+
+/// The `?` overlay: every hint the current seat advertises, in a bordered pane
+/// centred over the body. The footer keeps two keys inline, so this is what
+/// advertises the rest; it is drawn over the body and dismissed without
+/// disturbing the frame stack.
+#[must_use]
+pub fn keys_overlay(hints: &[KeyHint], area: Rect) -> (Rect, Paragraph<'static>) {
+    let lines = overlay_lines(hints);
+    let width = OVERLAY_MAX_WIDTH.min(area.width);
+    let height = u16::try_from(lines.len()).unwrap_or(u16::MAX).saturating_add(2).min(area.height);
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Thick)
+        .title(Line::from("keys"))
+        .border_style(palette::border_focused())
+        .style(palette::body());
+    (rect, Paragraph::new(lines.join("\n")).block(block).style(palette::body()))
+}
+
+#[must_use]
+pub fn footer(trail: &str, hints: &[KeyHint], width: u16) -> Paragraph<'static> {
+    Paragraph::new(footer_row(trail, &footer_line(hints), width as usize)).style(palette::body())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{format_age, format_seal, format_status, needs_you_window};
+    use super::{MARK, MARK_ASCII, format_age, format_seal, format_status, mark_span, needs_you_window};
     use crate::dto::{DigestHex, SpendQuiesce, ViewDocument};
+    use crate::palette::{self, Role};
     use crate::warroom::{Focus, NeedsYouRow, Severity};
     use std::time::Duration;
 
@@ -187,6 +288,18 @@ mod tests {
             happened: "park".to_owned(),
             action: "accept or defer".to_owned(),
             severity: Severity::Attention,
+        }
+    }
+
+    #[test]
+    fn the_mark_is_one_cell_in_both_forms() {
+        // The plausible bug: a fallback wider than the glyph it replaces,
+        // which shifts every span behind it and pushes the sparklines over
+        // the header row's budget.
+        assert_eq!(MARK.chars().count(), 1);
+        assert_eq!(MARK_ASCII.chars().count(), 1);
+        for ascii in [false, true] {
+            assert_eq!(mark_span(ascii).style.fg, Some(palette::color(Role::Focus)), "ascii={ascii}");
         }
     }
 

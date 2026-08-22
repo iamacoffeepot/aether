@@ -334,6 +334,7 @@ mod tests {
             StageId::AggregateVerify => {
                 Some(Transformation::for_aggregate_verify(&binding, digest, digest, digest).command)
             }
+            StageId::BaseVerify => Some(Transformation::for_base_verify(&binding, digest, digest).command),
             StageId::Sketch
             | StageId::Scope
             | StageId::Approve

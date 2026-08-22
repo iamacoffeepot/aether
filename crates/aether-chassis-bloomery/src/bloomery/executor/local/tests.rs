@@ -585,6 +585,42 @@ fn an_absent_or_unreadable_or_future_transcript_is_not_fabricated_progress() {
     );
 }
 
+// Tripwire: the transcript falls silent the moment the model ends its turn,
+// and the lane then runs its mechanical fixers — a `clippy --fix` that
+// compiles. A progress signal read from the transcript alone measures that work
+// as silence, and the executor cancelled a finished candidate as a dead child
+// (#5383). The lane's own stamp is the second half of the signal.
+#[test]
+fn a_lane_working_past_its_transcript_reports_its_own_heartbeat() {
+    let base = TempDir::new().unwrap();
+    let exec = executor(&base, "{}", RunLifecycle::Running);
+    let handle = exec.submit(&construct_order(digest(5), "n-fixers")).unwrap();
+    let dir = evidence_dir(&base, "n-fixers");
+
+    let transcript = dir.join("transcript.jsonl");
+    fs::write(&transcript, b"{}\n").unwrap();
+    let file = fs::File::open(&transcript).unwrap();
+    file.set_modified(SystemTime::now() - Duration::from_mins(15)).unwrap();
+    drop(file);
+    let stale = unix_millis(fs::metadata(&transcript).unwrap().modified().unwrap());
+
+    assert_eq!(
+        exec.inspect(&handle).unwrap(),
+        ExecutionStatus::Running { last_progress_unix_millis: Some(stale) },
+        "with no heartbeat yet, the transcript is still the whole signal",
+    );
+
+    let heartbeat = dir.join("heartbeat");
+    fs::write(&heartbeat, b"").unwrap();
+    let stamped = unix_millis(fs::metadata(&heartbeat).unwrap().modified().unwrap());
+    assert!(stamped > stale, "the stamp under test has to be the newer of the two");
+    assert_eq!(
+        exec.inspect(&handle).unwrap(),
+        ExecutionStatus::Running { last_progress_unix_millis: Some(stamped) },
+        "a lane stamping its heartbeat is working, not silent",
+    );
+}
+
 #[test]
 fn stream_evidence_evicts_the_consumed_run() {
     // Once the evidence is read, the run is consumed: the registry drops it so a
@@ -649,7 +685,7 @@ fn construct_gate_parks_an_empty_candidate_run_despite_a_clean_exit() {
     // diagnosis. The 2026-07-17 bloom-trial bug (advancing on exit-zero) stays
     // covered: this still must not pass.
     let ev = r#"{"command":"construct.implement","nonce":"n-g","produced_candidate":false,"result_record":{"is_error":false,"result":{"num_turns":6}}}"#;
-    assert_eq!(construct_verdict(ev), StageVerdict::Parked);
+    assert_eq!(construct_verdict(ev), StageVerdict::Declined);
 }
 
 #[test]
@@ -660,11 +696,33 @@ fn a_declined_construct_keeps_the_lane_findings_on_the_evidence_ref() {
     let handle = exec.submit(&construct_order(digest(5), "n-g")).unwrap();
     let refs = exec.stream_evidence(&handle).unwrap();
     let upload = NameEvidenceClaims.claim_for(&refs[0]).expect("the synthesized ref decodes");
-    assert_eq!(upload.verdict, StageVerdict::Parked);
+    assert_eq!(upload.verdict, StageVerdict::Declined);
     assert_eq!(
         refs[0].findings.as_deref(),
         Some("the work lies outside the declared surface"),
         "the lane's stated reason has to ride the ref so a park can name it",
+    );
+}
+
+#[test]
+fn a_decline_whose_request_cannot_be_bound_degrades_to_a_plain_park() {
+    // Tripwire for ADR-0207's degrade rule. A surface request has to bind the
+    // order's sealed scope revision, and this executor has no message store to
+    // resolve one from. Failing the whole verdict there would lose the park —
+    // the exact invisibility this path exists to remove — so the decline must
+    // still land, just without the request riding it.
+    let ev = r#"{"command":"construct.implement","nonce":"n-g","produced_candidate":false,"surface_request":{"summary":"outside","paths":[{"path":"crates/example-b/src/lib.rs","reason":"the caller"}]},"result_record":{"is_error":false,"result":{"num_turns":4}}}"#;
+    let base = TempDir::new().unwrap();
+    let exec = executor(&base, ev, RunLifecycle::Exited { success: true });
+    let handle = exec.submit(&construct_order(digest(5), "n-g")).unwrap();
+
+    let refs = exec.stream_evidence(&handle).unwrap();
+
+    assert!(refs[0].surface_request.is_none(), "an unbindable request rides nothing");
+    assert_eq!(
+        NameEvidenceClaims.claim_for(&refs[0]).expect("the synthesized ref decodes").verdict,
+        StageVerdict::Declined,
+        "the park survives the request that could not be bound",
     );
 }
 
@@ -1771,8 +1829,44 @@ fn an_orphan_does_not_invent_a_signal_or_a_wait_fault() {
     assert_eq!(landed.poll(), RunLifecycle::Exited { success: false });
 
     fs::remove_file(evidence_dir.join("evidence.json")).unwrap();
-    let mut unfinished = OrphanedRun::new(Nonce(nonce), &evidence_dir);
-    assert_eq!(unfinished.poll(), RunLifecycle::Running);
+    let mut unfinished = OrphanedRun::new(Nonce(nonce.clone()), &evidence_dir);
+    assert_eq!(unfinished.poll(), RunLifecycle::Running, "with no identity recorded, nothing here can tell");
+
+    // #5382: the identity record is the second observable, and a pid that is
+    // gone is a child that died with the previous coordinator. Reading it as
+    // running held the slot and the member until the dispatch deadline — an
+    // hour for a construct lane — with no process on the host at all.
+    ProcessIdentity { pid: u32::MAX, pgid: u32::MAX, starttime: 1, boot_id: "recorded".to_owned() }
+        .write(&evidence_dir)
+        .unwrap();
+    let mut departed = OrphanedRun::new(Nonce(nonce.clone()), &evidence_dir);
+    assert_eq!(
+        departed.poll(),
+        RunLifecycle::Exited { success: false },
+        "a recorded pid with no process behind it is an exit, so the executor host-faults and re-dispatches",
+    );
+
+    // And the discrimination that keeps the dangerous direction closed: a
+    // recorded identity that still names its live process is a lane that is
+    // simply still working, and reading that as exited would destroy in-flight
+    // work on every restart.
+    #[cfg(target_os = "linux")]
+    {
+        let (mut child, identity) = spawn_isolated_sleep();
+        identity.write(&evidence_dir).unwrap();
+        let mut live = OrphanedRun::new(Nonce(nonce.clone()), &evidence_dir);
+        assert_eq!(live.poll(), RunLifecycle::Running, "a re-attachable child is still working");
+
+        // And the order the two are asked in: the evidence is read first, so a
+        // child that wrote its evidence and is still winding down is a
+        // completed run to consume, never a host fault.
+        fs::write(evidence_dir.join("evidence.json"), "{}").unwrap();
+        let mut finished = OrphanedRun::new(Nonce(nonce), &evidence_dir);
+        assert_eq!(finished.poll(), RunLifecycle::Exited { success: false }, "written evidence outranks a live pid");
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -2069,6 +2163,56 @@ fn a_run_that_fails_without_evidence_frees_its_slot() {
     assert_eq!(refs.len(), 1, "the failed run still synthesizes its fail-closed attempt");
     assert_eq!(spawned(&started), ["wo-failing", "wo-waiting"], "and releases its slot to the queue");
     assert_ne!(exec.inspect(&waiting).unwrap(), ExecutionStatus::Queued, "the waiting dispatch is now a live run");
+}
+
+#[test]
+fn a_refine_takes_the_next_lane_slot_ahead_of_the_verify_and_construct_that_queued_first() {
+    // Tripwire for bloom f063ff066e83, where three members reached Refine while
+    // every slot was held and none of the three dispatched for minutes: the
+    // queue was strict FIFO, so a lane that only had to resume a live session
+    // against a tree it had just built waited behind constructs that had not
+    // started. What it loses while it waits is the thing that made it cheap —
+    // its session ages, and the slot holding its warm target directory is handed
+    // to a stranger.
+    let base = TempDir::new().unwrap();
+    let store = store_dir();
+    let started = Arc::new(Mutex::new(Vec::new()));
+    let runner = ThrottleRunner { started: Arc::clone(&started), writes_evidence: true };
+    let exec = LocalExecutor::new(Arc::new(runner), correspondence(), base.path())
+        .with_max_concurrent_lanes(1)
+        .with_message_store(member_store(
+            &store,
+            &[
+                member_order_at(&test_nonce("holder"), "issue-A", StageId::Construct),
+                member_order_at(&test_nonce("construct"), "issue-B", StageId::Construct),
+                member_order_at(&test_nonce("verify"), "issue-C", StageId::Verify),
+                member_order_at(&test_nonce("refine"), "issue-A", StageId::Refine),
+            ],
+        ));
+
+    let holder = exec.submit(&construct_order(digest(5), &test_nonce("holder"))).unwrap();
+    let construct = exec.submit(&construct_order(digest(5), &test_nonce("construct"))).unwrap();
+    let verify = exec.submit(&verify_order(digest(5), &test_nonce("verify"))).unwrap();
+    let refine = exec.submit(&construct_order(digest(5), &test_nonce("refine"))).unwrap();
+    assert_eq!(spawned(&started), ["wo-holder"], "the ceiling of one admits one child");
+
+    exec.stream_evidence(&holder).unwrap();
+    assert_eq!(
+        spawned(&started),
+        ["wo-holder", "wo-refine"],
+        "the freed slot goes to the refine, however late it queued",
+    );
+
+    exec.stream_evidence(&refine).unwrap();
+    assert_eq!(spawned(&started), ["wo-holder", "wo-refine", "wo-verify"], "then to the stage judging a candidate");
+
+    exec.stream_evidence(&verify).unwrap();
+    assert_eq!(
+        spawned(&started),
+        ["wo-holder", "wo-refine", "wo-verify", "wo-construct"],
+        "and last to the construct that has nothing waiting on it yet",
+    );
+    assert_eq!(exec.stream_evidence(&construct).unwrap().len(), 1, "every dispatch still resolves");
 }
 
 fn claude_order(subject: Digest, nonce: &str, task: &str) -> aether_bloomery::WorkOrder {
@@ -2768,23 +2912,24 @@ fn member_store(dir: &TempDir, orders: &[OutstandingOrder]) -> SqliteStore {
 }
 
 #[test]
-fn a_refine_resumes_the_journaled_construct_session_under_the_cliff() {
-    // Acceptance (#5177): a same-member refine whose construct session is
-    // journaled and under the pricing cliff threads that handle, even though
-    // the findings overlay would have been a different pool key.
+fn a_refine_resumes_the_journaled_construct_session_at_any_context() {
+    // Acceptance: a same-member refine threads the journaled construct handle
+    // even though the findings overlay would have been a different pool key,
+    // and even when that session's context sits far above the pricing cliff —
+    // the cliff gates dependency chains, never a member's own refine lap.
     let seen = Arc::new(Mutex::new(Vec::new()));
     let base = TempDir::new().unwrap();
     let store = store_dir();
     let construct = test_nonce("construct");
     let refine = test_nonce("refine");
-    let exec = LocalExecutor::new(Arc::new(ReuseRunner::new(Arc::clone(&seen))), correspondence(), base.path())
-        .with_message_store(member_store(
-            &store,
-            &[
-                member_order_at(&construct, "issue-A", StageId::Construct),
-                member_order_at(&refine, "issue-A", StageId::Refine),
-            ],
-        ));
+    let runner = ReuseRunner { input_tokens: 400_000, ..ReuseRunner::new(Arc::clone(&seen)) };
+    let exec = LocalExecutor::new(Arc::new(runner), correspondence(), base.path()).with_message_store(member_store(
+        &store,
+        &[
+            member_order_at(&construct, "issue-A", StageId::Construct),
+            member_order_at(&refine, "issue-A", StageId::Refine),
+        ],
+    ));
 
     exec.stream_evidence(&exec.submit(&claude_order(digest(5), &construct, "issue-A")).unwrap()).unwrap();
     exec.stream_evidence(&exec.submit(&claude_order(digest(5), &refine, "issue-A")).unwrap()).unwrap();
@@ -2799,35 +2944,6 @@ fn a_refine_resumes_the_journaled_construct_session_under_the_cliff() {
     assert_eq!(stamped["session_reuse"]["arm"], "resumed");
     assert_eq!(stamped["session_reuse"]["output_tokens"], 200);
     assert_eq!(stamped["session_reuse"]["duration_millis"], 1_200);
-}
-
-#[test]
-fn a_refine_over_the_pricing_cliff_launches_fresh() {
-    // Acceptance: a journaled handle whose projected context meets the cliff
-    // is not resumed — paying the long-context band is the cost the gate exists
-    // to avoid.
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let base = TempDir::new().unwrap();
-    let store = store_dir();
-    let construct = test_nonce("construct");
-    let refine = test_nonce("refine");
-    let runner = ReuseRunner::new(Arc::clone(&seen));
-    let runner = ReuseRunner { input_tokens: 200_000, ..runner };
-    let exec = LocalExecutor::new(Arc::new(runner), correspondence(), base.path()).with_message_store(member_store(
-        &store,
-        &[
-            member_order_at(&construct, "issue-A", StageId::Construct),
-            member_order_at(&refine, "issue-A", StageId::Refine),
-        ],
-    ));
-
-    exec.stream_evidence(&exec.submit(&claude_order(digest(5), &construct, "issue-A")).unwrap()).unwrap();
-    exec.stream_evidence(&exec.submit(&claude_order(digest(5), &refine, "issue-A")).unwrap()).unwrap();
-
-    assert!(seen.lock().unwrap()[1].resume.is_none(), "an over-cliff session launches fresh");
-    let stamped = stamped_evidence(&base, &refine);
-    assert_eq!(stamped["session_reuse"]["arm"], "fresh");
-    assert_eq!(stamped["session_reuse"]["miss"], "pricing_cliff");
 }
 
 #[test]

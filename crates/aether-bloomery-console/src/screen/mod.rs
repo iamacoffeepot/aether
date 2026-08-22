@@ -6,6 +6,7 @@ mod board;
 mod detail;
 mod dispatch;
 mod journal;
+mod json;
 mod metrics;
 mod partition;
 mod quiet;
@@ -43,7 +44,9 @@ pub enum Screen {
     Journal(Journal),
     Record(Record),
     Artifact(Artifact),
-    Transcript(Transcript),
+    /// Boxed: the transcript carries two paged line buffers, so inlining it
+    /// would size every pushed frame after the largest one.
+    Transcript(Box<Transcript>),
     Timeline(Timeline),
     Days(Days),
     Cost(Breakdown),
@@ -67,7 +70,7 @@ impl Screen {
         match nav {
             Nav::Focus(Focus::Record { sequence }) => Self::Record(Record::new(sequence)),
             Nav::Focus(Focus::Artifact { digest }) => Self::Artifact(Artifact::new(digest)),
-            Nav::Focus(Focus::Transcript { nonce }) => Self::Transcript(Transcript::new(nonce)),
+            Nav::Focus(Focus::Transcript { nonce }) => Self::Transcript(Box::new(Transcript::new(nonce))),
             Nav::Focus(Focus::Dispatch { bloom, workpiece }) => Self::DispatchList(DispatchList::new(bloom, workpiece)),
             Nav::Focus(Focus::Workpiece { id }) => Self::Workpiece(Workpiece::new(id)),
             Nav::Focus(focus) => Self::Detail(Detail::new(focus)),
@@ -95,6 +98,31 @@ impl Screen {
             | Self::Cost(_)
             | Self::Backlog(_) => None,
             Self::Workpiece(workpiece) => Some(workpiece.focus()),
+        }
+    }
+
+    /// Live crumb for the footer trail. Exhaustive so a new frame must name itself.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Detail(_)
+            | Self::DispatchList(_)
+            | Self::Record(_)
+            | Self::Artifact(_)
+            | Self::Transcript(_)
+            | Self::Workpiece(_) => self.focus().as_ref().map_or_else(String::new, Focus::label),
+            Self::Board(board) => {
+                if board.lane() == BoardLane::History {
+                    Nav::History.label()
+                } else {
+                    "board".to_owned()
+                }
+            }
+            Self::Journal(journal) => Nav::journal(journal.bloom()).label(),
+            Self::Timeline(timeline) => Nav::timeline(timeline.bloom()).label(),
+            Self::Days(_) => Nav::days().label(),
+            Self::Cost(_) => Nav::cost().label(),
+            Self::Backlog(_) => Nav::backlog().label(),
         }
     }
 
@@ -157,7 +185,7 @@ impl Screen {
         match self {
             Self::Board(board) => board.key_hints(),
             Self::Detail(detail) => detail.key_hints(),
-            Self::DispatchList(_) => DispatchList::key_hints(),
+            Self::DispatchList(list) => list.key_hints(),
             Self::Journal(_) => Journal::key_hints(),
             Self::Record(_) => Record::key_hints(),
             Self::Artifact(_) => Artifact::key_hints(),
@@ -185,6 +213,26 @@ impl Screen {
             Self::Timeline(timeline) => Some(timeline.bloom()),
             Self::Backlog(backlog) => backlog.digest_under_cursor(),
             Self::Workpiece(workpiece) => workpiece.digest_under_cursor(),
+        }
+    }
+
+    /// Only a digest the coordinator `put` into `aether.artifacts` is openable.
+    /// A bloom id, git tree, or git commit is an identity that would 404.
+    #[must_use]
+    pub fn openable_digest(&self) -> Option<DigestHex> {
+        match self {
+            Self::Board(_)
+            | Self::Timeline(_)
+            | Self::Artifact(_)
+            | Self::Journal(_)
+            | Self::DispatchList(_)
+            | Self::Record(_)
+            | Self::Transcript(_)
+            | Self::Days(_)
+            | Self::Cost(_) => None,
+            Self::Detail(detail) => detail.openable_digest(),
+            Self::Backlog(backlog) => backlog.digest_under_cursor(),
+            Self::Workpiece(workpiece) => workpiece.openable_digest(),
         }
     }
 

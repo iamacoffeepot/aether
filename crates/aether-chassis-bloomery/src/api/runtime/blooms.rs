@@ -6,8 +6,8 @@
 use aether_actor::Manual;
 use aether_bloomery::{
     Adjudication, Admit, AdmitResult, AuthorityDoor, BloomId, BloomView, CandidateRef, Disposition, Event, Fact,
-    IdempotencyKey, OperatorHold, OperatorRepair, Outcome, Query, QueryResult, Statement, ViewDocument, WorkpieceId,
-    digest_of,
+    IdempotencyKey, OperatorHold, OperatorRepair, Outcome, Query, QueryResult, Statement, SuppressionDisposition,
+    ViewDocument, WhyDocument, Withdrawal, WithdrawalCause, WorkpieceId, digest_of,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_http::HttpServerResponse;
@@ -20,6 +20,7 @@ use super::response::{error_response, json};
 use super::state::{ApiCapabilityState, Routed, VerifyPending, admit};
 use crate::api::dto::{
     AdjudicateRequest, GrantRequest, HoldRequest, OutcomeView, ReleaseAcceptedView, RepairRequest, SupersedeRequest,
+    SuppressionAnswerRequest, WithdrawRequest,
 };
 use crate::bloomery::DoctorReport;
 use crate::control::ControlCore;
@@ -143,6 +144,63 @@ impl ApiCapabilityState {
         admit(&Event { idempotency_key: IdempotencyKey(key), fact: Fact::OperatorAdjudication { bloom, adjudication } })
     }
 
+    /// `POST /blooms/{id}/members/{workpiece}/suppression` — answer the
+    /// suppression requests `{workpiece}`'s candidate is carrying (ADR-0193 §5).
+    ///
+    /// Journal-first like `adjudicate`: appending the fact is the route's whole
+    /// effect, and every state movement a denial causes — the revoked claim, the
+    /// `Refine` re-entry, the spent repair roll — is the reducer's, so a
+    /// reviewer's answer replays exactly as it happened (ADR-0190).
+    ///
+    /// What the route decides for itself is only what it can see in the request:
+    /// a body that says nothing. A blank reason and a blank operator are `422`
+    /// here rather than a round trip, because each is a malformed answer rather
+    /// than a refused one — and an empty request set is the same, since an answer
+    /// that closes nothing has answered nothing.
+    ///
+    /// The reason travels on the fact rather than on the member's findings
+    /// channel. That channel is written at intake, from what a lane's evidence
+    /// said, and a route that wrote it directly would put a person's words in a
+    /// place every reader treats as a gate's — with nothing to stop the next
+    /// verify capture from overwriting them. The repair lap therefore reads the
+    /// refusal from the journal, where the answer lives.
+    pub(super) fn suppression(id: &str, workpiece: &str, body: &[u8]) -> Routed {
+        let bloom = match digest_from_hex(id) {
+            Some(digest) => BloomId(digest),
+            None => return Routed::Reply(error_response(400, "bloom id is not a 32-byte hex bloom id")),
+        };
+        let request: SuppressionAnswerRequest = match hex::from_slice(body) {
+            Ok(request) => request,
+            Err(error) => return Routed::Reply(error_response(400, &format!("invalid suppression body: {error}"))),
+        };
+        let SuppressionAnswerRequest { requests, verdict, reason, operator, idempotency_key } = request;
+        if requests.is_empty() {
+            return Routed::Reply(error_response(
+                422,
+                "a suppression answer must name the requests it closes; an answer that closes nothing is not one",
+            ));
+        }
+        if let Some(refusal) = unstated(&reason, &operator) {
+            return Routed::Reply(refusal);
+        }
+
+        let workpiece = WorkpieceId(workpiece.to_owned());
+        let disposition = SuppressionDisposition { requests, verdict, reason, operator };
+        let key = idempotency_key.unwrap_or_else(|| {
+            format!(
+                "aether.bloomery.suppression:{}:{}:{}",
+                hex_encode(bloom.0.as_bytes()),
+                workpiece.0,
+                hex_encode(digest_of(&disposition).as_bytes())
+            )
+        });
+
+        admit(&Event {
+            idempotency_key: IdempotencyKey(key),
+            fact: Fact::SuppressionDisposition { bloom, workpiece, disposition },
+        })
+    }
+
     /// `POST /blooms/{id}/members/{workpiece}/repair` — hand the wedged
     /// `{workpiece}` the candidate the operator pushed to its candidate ref, and
     /// let the ordinary gates judge it (#4957).
@@ -259,6 +317,63 @@ impl ApiCapabilityState {
         admit(&Event { idempotency_key: IdempotencyKey(key), fact: edge(bloom, hold) })
     }
 
+    /// `POST /blooms/{id}/members/{workpiece}/withdraw` — take one member out
+    /// of the `{id}` bloom without superseding it (#5327).
+    ///
+    /// Journal-first like its siblings: the route appends one `Fact::Withdraw`
+    /// and nothing else. From there the reducer drops the member's cursor,
+    /// skips it in the three folds that are otherwise total over the sealed
+    /// member list, cancels its lane, and frees its claim ref alone — never the
+    /// bloom's admission ref, because the bloom keeps walking.
+    ///
+    /// The cascade is opt-in and the refusal is fail-closed: a withdrawal that
+    /// would strand dependents answers `422` naming them, because a parked
+    /// dependent still pins the bloom this was meant to free. A cascaded
+    /// dependent leaves with a derived `WithdrawalCause::Dependency`, which is
+    /// its visible reason.
+    ///
+    /// One-way. A member wrongly withdrawn is re-scoped and sealed into a
+    /// later bloom — which is exactly what freeing its claim ref makes
+    /// possible.
+    pub(super) fn withdraw(id: &str, workpiece: &str, body: &[u8]) -> Routed {
+        let bloom = match digest_from_hex(id) {
+            Some(digest) => BloomId(digest),
+            None => return Routed::Reply(error_response(400, "bloom id is not a 32-byte hex bloom id")),
+        };
+        let request: WithdrawRequest = match hex::from_slice(body) {
+            Ok(request) => request,
+            Err(error) => return Routed::Reply(error_response(400, &format!("invalid withdraw body: {error}"))),
+        };
+        let WithdrawRequest { reason, operator, cascade, idempotency_key } = request;
+        if let Some(refusal) = unstated(&reason, &operator) {
+            return Routed::Reply(refusal);
+        }
+
+        let withdrawal = Withdrawal {
+            workpiece: WorkpieceId(workpiece.to_owned()),
+            cause: WithdrawalCause::Operator,
+            reason,
+            operator,
+        };
+        // Content-addressed like the brake's: a resent request is one act, and
+        // a genuinely different reason is its own. The cascade flag rides the
+        // key because withdrawing one member and withdrawing its whole subtree
+        // are different acts stating identical words.
+        let key = idempotency_key.unwrap_or_else(|| {
+            format!(
+                "aether.bloomery.withdraw:{}:{}:{}",
+                hex_encode(bloom.0.as_bytes()),
+                hex_encode(digest_of(&withdrawal).as_bytes()),
+                u8::from(cascade)
+            )
+        });
+
+        admit(&Event {
+            idempotency_key: IdempotencyKey(key),
+            fact: Fact::Withdraw { bloom, withdrawals: vec![withdrawal], cascade },
+        })
+    }
+
     /// `POST /blooms/{id}/answer/{question}` — adopt an answer to the parked
     /// question `{question}` names, releasing its hold and re-dispatching the
     /// held stage (ADR-0151).
@@ -366,7 +481,7 @@ impl ApiCapabilityState {
 
     /// `GET /blooms` and `GET /view` — read the whole live projection.
     pub(super) fn query(bloom: Option<Vec<u8>>) -> Routed {
-        Routed::Query(Query { bloom, release: None, calibration: false })
+        Routed::Query(Query { bloom, release: None, calibration: false, why: false })
     }
 
     /// `GET /blooms/{id}` — read one bloom's live view by hex id.
@@ -374,6 +489,26 @@ impl ApiCapabilityState {
         digest_from_hex(id).map_or_else(
             || Routed::Reply(error_response(400, "bloom id is not a 32-byte hex digest")),
             |digest| Self::query(Some(digest.as_bytes().to_vec())),
+        )
+    }
+
+    /// `GET /blooms/{id}/why` — why the `{id}` bloom is not advancing (#5281).
+    ///
+    /// The same subject `query_bloom` names, rendered as the stored-fact chain
+    /// instead of the projection: not landing because no integration is
+    /// recorded, no integration because the fold refused, the fold refused
+    /// because adoption found no candidate ref for this member.
+    pub(super) fn query_why(id: &str) -> Routed {
+        digest_from_hex(id).map_or_else(
+            || Routed::Reply(error_response(400, "bloom id is not a 32-byte hex digest")),
+            |digest| {
+                Routed::Query(Query {
+                    bloom: Some(digest.as_bytes().to_vec()),
+                    release: None,
+                    calibration: false,
+                    why: true,
+                })
+            },
         )
     }
 }
@@ -555,6 +690,10 @@ pub(super) fn query_response(result: QueryResult, doctor: Option<&DoctorReport>)
             error_response(500, "projection read answered with a release record")
         }
         QueryResult::Calibration { .. } => error_response(500, "projection read answered with a calibration document"),
+        QueryResult::Why { document } => match from_bytes::<WhyDocument>(&document) {
+            Ok(document) => json(200, &document),
+            Err(error) => error_response(500, &format!("why document decode failed: {error}")),
+        },
     }
 }
 
@@ -601,6 +740,7 @@ mod tests {
                 ceiling_micro_usd: 10,
             }),
             blooms: Vec::new(),
+            base_alert: None,
         };
         let result = QueryResult::Document { document: to_vec(&document).unwrap() };
         let response = query_response(result, None);
@@ -621,11 +761,12 @@ mod tests {
             observed: Digest::from_bytes([2; 32]),
             spend_quiesce: None,
             blooms: Vec::new(),
+            base_alert: None,
         };
         let report = DoctorReport {
             checks: vec![CheckResult {
-                name: "claim_refs_name_active_blooms",
-                statement: "every ref under refs/bloomery/claims/ names a bloom currently Sealed or Resolved — never Landed, never unknown",
+                name: "claim_refs_name_active_blooms".into(),
+                statement: "every ref under refs/bloomery/claims/ names a bloom currently Sealed or Resolved — never Landed, never unknown".into(),
                 passed: false,
                 divergences: vec!["refs/bloomery/claims/issue-5175 held by Landed bloom ab".into()],
             }],

@@ -16,14 +16,10 @@
 //! inherits the predecessor's claim and folds its work, which is the wrong
 //! answer for a member whose work never passed.
 
-mod common;
-pub mod fixture;
-pub mod harness;
-
 use aether_bloomery::{BloomId, BloomStatus, Digest, Fact, Outcome, StageId};
 use aether_chassis_bloomery::bloomery::{ScriptedUpload, ScriptedVerdict};
 use aether_chassis_bloomery::store::OutstandingOrder;
-use fixture::{FixtureHarness, captured, digest, draft, member, passed, verdict};
+use aether_harness_bloomery::{FixtureHarness, captured, digest, draft, member, passed, verdict};
 
 /// The workpiece the wedged member covers, and the one the successor recovers.
 const WORKPIECE: &str = "wp";
