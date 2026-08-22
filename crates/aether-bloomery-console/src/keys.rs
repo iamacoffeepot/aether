@@ -35,9 +35,6 @@ impl KeyHint {
 /// Overlay key and quit; the footer never elides these.
 pub const INLINE_HINTS: &[KeyHint] = &[KeyHint { keys: "?", action: "keys" }, KeyHint { keys: "q", action: "quit" }];
 
-/// Sixteen columns buys `… › transcript`: the deepest crumb plus its elision marker.
-pub const MIN_TRAIL_COLUMNS: usize = 16;
-
 /// Render hints the way the footer paints them.
 #[must_use]
 pub fn footer_line(hints: &[KeyHint]) -> String {
