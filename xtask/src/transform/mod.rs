@@ -775,8 +775,9 @@ mod tests {
         let mut member = MemberRun::plain("verify.suppress", MemberOutcome::Failed, Vec::new(), 1);
         member.set(findings);
         member.set(requests);
-        let folded_findings = verify_findings(std::slice::from_ref(&member)).expect("findings fold");
-        let folded_requests = stated_requests(std::slice::from_ref(&member)).expect("requests fold");
+        let members = [member];
+        let folded_findings = verify_findings(&members).expect("findings fold");
+        let folded_requests = stated_requests(&members).expect("requests fold");
         assert!(matches!(folded_findings, EvidenceChannel::RepairWork(ChannelKind::Findings, _)));
         assert!(folded_findings.text().expect("prose").contains("error: clippy"));
         assert!(!folded_findings.text().expect("prose").contains("test fixture"));
