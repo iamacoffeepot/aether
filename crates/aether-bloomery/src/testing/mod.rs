@@ -1,8 +1,12 @@
 //! Shared domain fixtures for Bloomery tests.
 //!
 //! Compiled for this crate's own tests and, behind the `testing` feature,
-//! exported so dependents share one digest, membership, draft, and view-Default
-//! vocabulary instead of re-deriving it.
+//! exported so dependents share one digest, membership, draft, view-Default,
+//! and golden-wire vocabulary instead of re-deriving it.
+
+mod golden;
+
+pub use golden::{containment_refused_event, representative, surface_overlap_decisions, surface_overlap_event};
 
 use aether_data::Kind;
 use aether_data::wire::to_vec;
