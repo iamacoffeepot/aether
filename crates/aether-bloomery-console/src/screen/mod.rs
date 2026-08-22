@@ -157,7 +157,7 @@ impl Screen {
         match self {
             Self::Board(board) => board.key_hints(),
             Self::Detail(detail) => detail.key_hints(),
-            Self::DispatchList(_) => DispatchList::key_hints(),
+            Self::DispatchList(list) => list.key_hints(),
             Self::Journal(_) => Journal::key_hints(),
             Self::Record(_) => Record::key_hints(),
             Self::Artifact(_) => Artifact::key_hints(),
