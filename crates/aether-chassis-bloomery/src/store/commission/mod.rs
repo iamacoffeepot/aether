@@ -20,10 +20,10 @@ use super::SqliteStore;
 
 mod kinds;
 pub use kinds::{
-    CancelCommission, CancelCommissionResult, CreateCommission, CreateCommissionResult, ListCommissions,
-    ListCommissionsResult, ListedCommission, LoadCommission, LoadCommissionResult, RecordCommissionApproval,
-    RecordCommissionApprovalResult, RecordCommissionProjection, RecordCommissionProjectionResult, WriteScopeRevision,
-    WriteScopeRevisionResult,
+    CancelCommission, CancelCommissionResult, CreateCommission, CreateCommissionResult, EnqueueScopeRun,
+    EnqueueScopeRunResult, ListCommissions, ListCommissionsResult, ListedCommission, LoadCommission,
+    LoadCommissionResult, RecordCommissionApproval, RecordCommissionApprovalResult, RecordCommissionProjection,
+    RecordCommissionProjectionResult, WriteScopeRevision, WriteScopeRevisionResult,
 };
 
 #[cfg(test)]
@@ -162,7 +162,8 @@ CREATE TABLE IF NOT EXISTS scope_runs (
     subject    BLOB,
     verdict    TEXT,
     evidence   BLOB,
-    revision   BLOB
+    revision   BLOB,
+    UNIQUE (commission, ordinal, kind)
 );
 CREATE INDEX IF NOT EXISTS scope_runs_by_commission ON scope_runs (commission, ordinal);
 CREATE INDEX IF NOT EXISTS scope_runs_by_nonce ON scope_runs (nonce);

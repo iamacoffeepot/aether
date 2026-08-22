@@ -29,6 +29,7 @@ mod dev_component;
 mod dist;
 mod inventory;
 mod package;
+mod scope;
 mod symbols;
 mod transform;
 
@@ -40,6 +41,7 @@ use crate::bloom::BloomArgs;
 use crate::dev_component::DevComponentArgs;
 use crate::dist::DistArgs;
 use crate::package::PackageArgs;
+use crate::scope::ScopeArgs;
 use crate::symbols::SymbolsArgs;
 use crate::transform::TransformArgs;
 
@@ -77,6 +79,9 @@ enum Commands {
     /// Workspace symbol inventory: build a deterministic table, find by
     /// name, or diff a working tree against a stored base table.
     Symbols(SymbolsArgs),
+    /// Append one field write to a `scope.fill` run's call log. The value
+    /// arrives by file so multi-paragraph prose survives the transport.
+    Scope(ScopeArgs),
 }
 
 fn main() -> Result<()> {
@@ -89,5 +94,6 @@ fn main() -> Result<()> {
         Commands::Affected(args) => affected::run(&args),
         Commands::Bloom(args) => bloom::run(&args),
         Commands::Symbols(args) => symbols::run(&args),
+        Commands::Scope(args) => scope::run(&args),
     }
 }

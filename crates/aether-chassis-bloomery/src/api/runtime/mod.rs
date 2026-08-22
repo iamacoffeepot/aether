@@ -107,9 +107,9 @@ use crate::bloomery::load_policy;
 use crate::bloomery::{CandidatePush, DoctorBoard};
 use crate::signing::VerifyResult;
 use crate::store::{
-    CancelCommissionResult, CreateCommissionResult, ListCommissionsResult, LoadCommissionResult, PageJournal,
-    PageJournalResult, RecordCommissionApprovalResult, RecordConfigResult, RecordDispatchDescriptionResult,
-    WriteScopeRevisionResult,
+    CancelCommissionResult, CreateCommissionResult, EnqueueScopeRunResult, ListCommissionsResult, LoadCommissionResult,
+    PageJournal, PageJournalResult, RecordCommissionApprovalResult, RecordConfigResult,
+    RecordDispatchDescriptionResult, WriteScopeRevisionResult,
 };
 use state::{CommissionHttp, CommissionHttpRender};
 
@@ -334,6 +334,18 @@ impl NativeActor for BloomeryApiCapability {
     ) -> http::Outcome {
         let id = id.0;
         let routed = state.cancel_commission(&ctx, ctx.request(), &id);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /commissions/{id}/scope-runs` — open a pre-bloom scoping run.
+    #[http::route(Post, "/commissions/{id}/scope-runs")]
+    fn on_post_commission_scope_run(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = state.enqueue_scope_run(ctx.request(), &id);
         finish(state, ctx, routed)
     }
 
@@ -1014,6 +1026,15 @@ impl NativeActor for BloomeryApiCapability {
         mail: CreateCommissionResult,
     ) -> HttpServerResponse {
         commissions::create_response(mail)
+    }
+
+    #[http::reply]
+    fn on_enqueue_scope_run_result(
+        _state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: EnqueueScopeRunResult,
+    ) -> HttpServerResponse {
+        commissions::scope_run_response(mail)
     }
 
     #[http::reply]

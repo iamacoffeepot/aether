@@ -243,6 +243,7 @@ pub use reduce::Decision;
 pub use reduce::Decisions;
 pub use reduce::DecisionsSchemaError;
 pub use reduce::Event;
+pub use reduce::Excuse;
 pub use reduce::FOLD_GATE;
 pub use reduce::Fact;
 pub use reduce::FileLease;

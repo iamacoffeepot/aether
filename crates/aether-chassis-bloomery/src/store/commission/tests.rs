@@ -133,7 +133,7 @@ fn a_v6_store_gains_empty_commission_tables() {
     let mut store = SqliteStore::open(path).expect("a v6 store migrates");
     assert!(store.list(None).expect("list").is_empty(), "migration invents no commissions");
     let flags: i64 = store.conn.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("user_version");
-    assert_eq!(flags, 14, "the open stamps the current schema");
+    assert_eq!(flags, 15, "the open stamps the current schema");
     assert!(
         store.load_projection(&workpiece("wp-1")).expect("load").is_none(),
         "migration invents no replica-issue numbers"
@@ -754,8 +754,9 @@ fn a_scope_run_writes_its_ledger_row_and_its_outbox_row_together() {
     let commission = workpiece("wp-scope");
     let intent_digest = seed(&mut store, "wp-scope");
 
-    let sequence = open_scope_run(&mut store, &commission, intent_digest, base())
+    let opened = open_scope_run(&mut store, &commission, intent_digest, base())
         .expect("a fresh commission opens its first scoping run");
+    let sequence = opened.sequence;
 
     let entries = store.drain_topic(Topic::ScopeDispatch).expect("drain");
     assert_eq!(entries.len(), 1, "one enqueued run, one outbox row");
@@ -821,4 +822,39 @@ fn a_dispatched_run_is_reachable_from_its_nonce() {
 
     assert_eq!(store.lookup_scope_run("dispatch-7").expect("lookup"), Some((commission.0.clone(), 1)));
     assert_eq!(store.lookup_scope_run("dispatch-8").expect("lookup"), None);
+}
+
+#[test]
+fn enqueuing_a_scope_run_is_one_transaction() {
+    // Names the bug: a run journaled but never dispatched, or dispatched with
+    // no record of why. The `enqueued` row and the outbox row share one
+    // transaction, so forcing the outbox insert to abort must leave neither.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("scope.db");
+    let path = path.to_str().expect("utf-8 path");
+    let mut store = SqliteStore::open(path).expect("open");
+    let commission = workpiece("wp-atomic");
+    let intent_digest = seed(&mut store, "wp-atomic");
+    drop(store);
+
+    rusqlite::Connection::open(path)
+        .expect("schema connection")
+        .execute_batch(
+            "CREATE TRIGGER abort_scope_outbox AFTER INSERT ON outbox \
+             WHEN NEW.topic = 'topic:scope_dispatch' \
+             BEGIN SELECT RAISE(ABORT, 'forced'); END;",
+        )
+        .expect("install abort trigger");
+
+    let mut store = SqliteStore::open(path).expect("reopen");
+    let opened = open_scope_run(&mut store, &commission, intent_digest, base());
+    assert!(opened.is_err(), "the aborted outbox insert must refuse the open: {opened:?}");
+    assert!(
+        store.list_scope_runs(&commission.0).expect("list").is_empty(),
+        "the enqueued row must not survive the aborted transaction",
+    );
+    assert!(
+        store.drain_topic(Topic::ScopeDispatch).expect("drain").is_empty(),
+        "the outbox row must not survive the aborted transaction",
+    );
 }

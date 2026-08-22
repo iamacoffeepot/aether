@@ -5,10 +5,11 @@
 
 use aether_bloomery::testing::digest;
 use aether_bloomery::{
-    BloomId, BloomStatus, BloomView, Digest, Evidence, EvidenceKind, ExecutorFaultView, MemberPark, MemberView,
-    StageId, VerifyFailureSet, ViewDocument, Wedge, WorkpieceId,
+    AwaitingSurfaceView, BloomId, BloomStatus, BloomView, Digest, Evidence, EvidenceKind, Excuse, ExecutorFaultView,
+    HostFaultView, LeaseEvictionView, MemberPark, MemberView, StageId, VerifyFailureSet, ViewDocument, Wedge,
+    WithdrawnView, WorkpieceId,
 };
-use aether_harness_bloomery::{Quiescence, classify};
+use aether_harness_bloomery::{Oracle, Quiescence, classify};
 
 fn member(resolved: bool, wedge: Option<Wedge>) -> MemberView {
     MemberView {
@@ -108,4 +109,73 @@ fn a_construct_park_is_an_accountable_stop() {
         MemberView { park: Some(MemberPark { stage: StageId::Construct, evidence: digest(9) }), ..member(false, None) };
 
     assert!(matches!(classify(&document(BloomStatus::Sealed, vec![parked]), &[]), Quiescence::Wedged(_)));
+}
+
+fn member_carrying(excuse: Excuse) -> MemberView {
+    let mut member = member(false, None);
+    match excuse {
+        Excuse::Wedge => {
+            member.wedge = Some(Wedge {
+                stage: StageId::Verify,
+                evidence: digest(9),
+                repeated_verifiers: VerifyFailureSet::EMPTY,
+            });
+        }
+        Excuse::Claim => {
+            member.resolution = Some(aether_bloomery::ResolutionClaim {
+                workpiece: WorkpieceId("wp".to_owned()),
+                scope_revision: digest(1),
+                candidate: digest(2),
+                evidence: Evidence {
+                    subject: Digest::default(),
+                    kind: EvidenceKind::ResolutionClaim,
+                    detail: Digest::default(),
+                },
+            });
+        }
+        Excuse::HostFault => member.host_fault = Some(HostFaultView { findings: "missing tool".into() }),
+        Excuse::Park => {
+            member.park = Some(MemberPark { stage: StageId::Construct, evidence: digest(9) });
+        }
+        Excuse::AwaitingSurface => {
+            member.awaiting_surface = Some(AwaitingSurfaceView {
+                stage: StageId::Construct,
+                scope_revision: digest(1),
+                evidence: digest(9),
+                paths: Vec::new(),
+                summary: "need a path".into(),
+                requests: 1,
+            });
+        }
+        Excuse::LeaseEviction => {
+            member.evicted_by =
+                Some(LeaseEvictionView { by: WorkpieceId("sibling".into()), path: "src/lib.rs".into(), evicted_at: 0 });
+        }
+        Excuse::Withdrawal => {
+            member.withdrawn = Some(WithdrawnView {
+                cause: "operator".into(),
+                depends_on: None,
+                reason: "stop".into(),
+                operator: "op".into(),
+            });
+        }
+    }
+    member
+}
+
+#[test]
+fn every_excuse_kind_is_read_by_every_reader() {
+    // Tripwire: an excuse kind added to `Excuse` but not to a reader's match
+    // is the drift this enumeration exists to close — the member would look
+    // like a stall to one oracle and an accountable stop to another.
+    for excuse in Excuse::ALL {
+        let doc = document(BloomStatus::Sealed, vec![member_carrying(*excuse)]);
+        let quiescence = classify(&doc, &[]);
+        assert!(
+            !matches!(quiescence, Quiescence::Stalled(_)),
+            "{excuse:?} must be an accountable stop to liveness, got {quiescence:?}"
+        );
+        Oracle::check(&doc, None, &[])
+            .unwrap_or_else(|violation| panic!("{excuse:?} must be an accountable stop to termination: {violation}"));
+    }
 }

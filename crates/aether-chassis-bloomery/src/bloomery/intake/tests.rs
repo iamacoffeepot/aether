@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 use aether_bloomery::{
     BloomDraft, BloomId, BloomRecord, Conclusion, ConfigRegistry, Decision, Digest, Event, Evidence, EvidenceKind,
     EvidenceRef, ExecutionLimits, ExecutionStatus, Fact, Forecast, IdempotencyKey, Membership, NetworkProfile, Nonce,
-    Outcome, ResolvedConfigs, Snapshot, SpendWindow, StageCatalog, StageId, StageVerdict, Transformation,
-    VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, reduce,
+    Observation, Outcome, Provenance, ResolvedConfigs, Snapshot, SpendWindow, StageCatalog, StageId, StageVerdict,
+    Statement, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, reduce,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -26,13 +26,14 @@ use tracing::{Event as TracingEvent, Metadata, Subscriber};
 
 use super::{
     Admission, AdmitDecision, AdmitSink, DispatchError, DispatchRecord, EvidenceClaims, IntakeRefusal,
-    UploadedEvidence, admit_uploaded, dispatch_and_record, record_dispatch, run_intake_cycle,
+    UploadedEvidence, admit_uploaded, dispatch_and_record, dispatch_nonce, record_dispatch, run_intake_cycle,
 };
+use crate::bloomery::open_scope_run;
 use crate::bloomery::{
     ExecutorPortError, ExecutorShell, LocalExecutorError, OutstandingDispatch, ReconcileLanes, ReconcileReport,
     RoutingExecutor,
 };
-use crate::store::{SqliteStore, StoreBackend};
+use crate::store::{CommissionBackend, SqliteStore, StoreBackend};
 
 const WORKFLOW: &str = "bloomery-transform.yml";
 const MODEL_WORKFLOW: &str = "bloomery-transform-model.yml";
@@ -1746,6 +1747,57 @@ fn an_out_of_line_stage_is_refused_and_the_order_stays_live() {
     // The order stayed live — the refusal precedes the consume, so a corrected
     // dispatch could still land it.
     assert!(store.lookup_order("n-off").unwrap().is_some(), "an out-of-line refusal leaves the order live");
+}
+
+#[test]
+fn a_scope_result_is_admitted_and_readable_off_its_ordinal() {
+    // Pre-fix: admit_uploaded's ladder had no Scope arm and the final else
+    // returned IntakeRefusal::OutOfLineStage(StageId::Scope). After the arm
+    // the same upload is admitted onto the run ledger, keyed by the ordinal
+    // the drain recorded against this nonce.
+    let mut store = store();
+    let commission = WorkpieceId("wp-scope".to_owned());
+    let intent = Statement {
+        words: b"scope this workpiece".to_vec(),
+        provenance: Provenance::ObservationAttestation(Observation { source: "test".to_owned() }),
+        parents: Vec::new(),
+    };
+    let intent_digest = store.create(&commission, &intent).expect("create commission");
+    let base = Digest::from_bytes([2; 32]);
+    let opened = open_scope_run(&mut store, &commission, intent_digest, base).expect("open");
+    let nonce = dispatch_nonce(opened.sequence);
+    let mut record =
+        dispatch_record(&nonce.0, BloomId(Digest::from_bytes([1; 32])), &commission, opened.subject, opened.subject);
+    record.stage = StageId::Scope;
+    record_dispatch(&mut store, &record).unwrap();
+    store.record_scope_dispatch(&commission.0, opened.ordinal, &nonce.0).expect("record dispatch");
+
+    let upload = UploadedEvidence {
+        nonce: nonce.clone(),
+        subject: opened.subject,
+        verdict: StageVerdict::VerificationPassed,
+        detail: Digest::from_bytes([7; 32]),
+        candidate: None,
+        findings: None,
+        failed_verifiers: VerifyFailureSet::EMPTY,
+        cost: None,
+        calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
+        violating_paths: Vec::new(),
+        surface_request: None,
+        suppression_requests: Vec::new(),
+    };
+    match admit_uploaded(&mut store, &upload).unwrap() {
+        AdmitDecision::Recorded => {}
+        other => panic!("a scope result must land on the run ledger, got {other:?}"),
+    }
+    assert!(store.lookup_order(&nonce.0).unwrap().is_none(), "the admitted order is consumed");
+    let rows = store.list_scope_runs(&commission.0).expect("list");
+    let verdict = rows.iter().find(|row| row.kind == "verdict" && row.ordinal == opened.ordinal);
+    let verdict = verdict.expect("the verdict is readable off the run's ordinal");
+    assert_eq!(verdict.verdict.as_deref(), Some("VerificationPassed"));
 }
 
 // Tripwire: the attempt-artifact name codec round-trips (#3505). The wrapper
