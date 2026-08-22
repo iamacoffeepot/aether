@@ -147,7 +147,10 @@ impl ProjectionBackend for FailingMirror {
         Ok(())
     }
 
-    fn project_commission(&self, _projection: &aether_bloomery::CommissionProjection) -> Result<u64, GithubError> {
-        Ok(0)
+    fn project_commission(
+        &self,
+        _projection: &aether_bloomery::CommissionProjection,
+    ) -> Result<Option<u64>, GithubError> {
+        Ok(None)
     }
 }

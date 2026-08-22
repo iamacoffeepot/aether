@@ -10,7 +10,10 @@ use aether_bloomery::{
     BloomId, BloomStatus, BloomView, CommissionProjection, Digest, Evidence, EvidenceKind, LandingReceipt, MemberView,
     PendingDecisionView, ProjectedReceipt, ProjectionBackend, ResolutionClaim, StageId, ViewDocument, WorkpieceId,
 };
-use aether_bloomery_github::{GithubProjection, landing_branch, testing::FakeGithub};
+use aether_bloomery_github::{
+    CommissionProjectionApi, GithubProjection, Marker, NewIssue, landing_branch, marker::render_marker,
+    testing::FakeGithub,
+};
 
 /// The two issue numbers the view's members address — objects the repository
 /// already holds, which the projection comments on and never opens.
@@ -323,7 +326,7 @@ fn reconciling_a_commission_twice_creates_one_issue() {
 
     assert_eq!(first, second, "the second pass must reuse the created number");
     assert_eq!(projection.client().issue_count(), 1, "reconciling twice creates one issue");
-    let recorded = projection.project_commission(&commission("wp-1", Some(first))).expect("recorded reconcile");
+    let recorded = projection.project_commission(&commission("wp-1", first)).expect("recorded reconcile");
     assert_eq!(recorded, first);
     assert_eq!(projection.client().issue_count(), 1);
 }
@@ -334,7 +337,7 @@ fn a_human_edit_of_a_replica_is_overwritten_and_never_read() {
     // skipping the overwrite when the marker still matches the pre-edit
     // digest, would leave operator prose as the replica.
     let projection = GithubProjection::new(FakeGithub::new());
-    let number = projection.project_commission(&commission("wp-1", None)).expect("create");
+    let number = projection.project_commission(&commission("wp-1", None)).expect("create").expect("owns a replica");
     projection.client().edit_issue(number, "a person renamed this", "a person rewrote the body");
 
     projection.project_commission(&commission("wp-1", Some(number))).expect("overwrite");
@@ -352,41 +355,39 @@ fn a_human_edit_of_a_replica_is_overwritten_and_never_read() {
 fn the_projector_will_not_write_title_or_body_to_an_issue_it_did_not_create() {
     // Adoption is the hole the 2026-08-16 amendment closes. A workpiece that
     // looks like issue-42 must not retitle the human object already numbered
-    // 42 — the projector creates its own replica instead.
+    // 42. The projection surface for a home it does not own is a comment.
     let fake = FakeGithub::new();
     fake.seed_issue_with_title(42, "human title", "human body");
     let projection = GithubProjection::new(fake);
 
-    let created = projection.project_commission(&commission("issue-42", None)).expect("create a replica");
+    let created = projection.project_commission(&commission("issue-42", None)).expect("project onto the named issue");
 
-    assert_ne!(created, 42, "the projector must not adopt the pre-existing number");
+    assert_eq!(created, None, "the projector owns no issue for a named object");
     assert_eq!(projection.client().issue_title(42).as_deref(), Some("human title"));
     assert_eq!(projection.client().issue_body(42).as_deref(), Some("human body"));
-    assert_eq!(projection.client().issue_count(), 2, "a new replica is created beside the human issue");
-    let replica = projection.client().issue_body(created).expect("the replica exists");
-    assert!(replica.contains("do not edit"), "the created object is the replica: {replica}");
-    let replica_title = projection.client().issue_title(created).expect("the replica exists");
-    assert!(
-        replica_title.starts_with("Bloomery replica"),
-        "the replica title must not collide with the human board's numbering: {replica_title}"
-    );
-    assert!(!replica_title.contains("issue-42"), "the workpiece id is not the title: {replica_title}");
+    assert_eq!(projection.client().issue_count(), 1, "no replica opens beside the human issue");
+    let comments = projection.client().comments_on(42);
+    assert_eq!(comments.len(), 1, "one marker-keyed comment carries the commission");
+    assert!(comments[0].contains("`issue-42`"), "the comment names the workpiece: {}", comments[0]);
+    assert!(comments[0].contains("operator"), "the comment carries commission state: {}", comments[0]);
+    assert!(!comments[0].contains("do not edit"), "the replica preamble is false on a human issue: {}", comments[0]);
 }
 
 #[test]
 fn a_landed_commission_closes_only_the_owned_replica() {
     // Close is best-effort lifecycle of the replica, not of a human issue the
-    // workpiece id happens to resemble.
+    // workpiece id happens to resemble. A named object has no replica to close;
+    // closing the human issue is the land reactor's job.
     let fake = FakeGithub::new();
     fake.seed_issue(7, "human");
     let projection = GithubProjection::new(fake);
     let mut landed = commission("issue-7", None);
     landed.status = "landed".to_owned();
-    let created = projection.project_commission(&landed).expect("create and close");
+    let created = projection.project_commission(&landed).expect("project onto the named issue");
 
-    assert_ne!(created, 7);
+    assert_eq!(created, None, "a named object owns no replica");
     assert_eq!(projection.client().issue_is_closed(7), Some(false), "the human issue stays open");
-    assert_eq!(projection.client().issue_is_closed(created), Some(true), "the replica closes");
+    assert_eq!(projection.client().issue_count(), 1, "no replica opens to close");
 }
 
 #[test]
@@ -396,10 +397,10 @@ fn a_titled_commission_is_distinguishable_in_an_issue_list() {
     // the only distinguishing text lived in the body. The status suffix stays,
     // and the reconcile path retitles on a status change exactly as before.
     let projection = GithubProjection::new(FakeGithub::new());
-    let mut open = commission("issue-9001", None);
+    let mut open = commission("wp-titled", None);
     open.title = "Refuse a contradictory workpiece".to_owned();
 
-    let number = projection.project_commission(&open).expect("create");
+    let number = projection.project_commission(&open).expect("create").expect("owns a replica");
     assert_eq!(projection.client().issue_title(number).as_deref(), Some("Refuse a contradictory workpiece — open"),);
 
     let landed = CommissionProjection { status: "landed".to_owned(), recorded_issue: Some(number), ..open };
@@ -410,10 +411,74 @@ fn a_titled_commission_is_distinguishable_in_an_issue_list() {
         "the status suffix still tracks the lifecycle",
     );
 
-    let untitled = projection.project_commission(&commission("issue-9002", None)).expect("create untitled");
+    let untitled = projection
+        .project_commission(&commission("wp-untitled", None))
+        .expect("create untitled")
+        .expect("owns a replica");
     assert_eq!(
         projection.client().issue_title(untitled).as_deref(),
         Some("Bloomery replica — open"),
         "an intent with no heading keeps the constant rather than inventing a name",
     );
+}
+
+#[test]
+fn a_commission_that_names_an_issue_comments_on_it_and_opens_nothing() {
+    // Tripwire: naming the bug — one work item, two rows on the board.
+    let fake = FakeGithub::new();
+    fake.seed_issue(42, "human");
+    let projection = GithubProjection::new(fake);
+
+    projection.project_commission(&commission("issue-42", None)).expect("first");
+    projection.project_commission(&commission("issue-42", None)).expect("second");
+
+    assert_eq!(projection.client().issue_count(), 1, "a named object opens no replica");
+    assert_eq!(
+        projection.client().comments_on(42).len(),
+        1,
+        "the second projection updates the comment rather than appending"
+    );
+}
+
+#[test]
+fn a_stray_replica_is_retired_onto_its_source_issue() {
+    let fake = FakeGithub::new();
+    fake.seed_issue(42, "human");
+    let projection = GithubProjection::new(fake);
+    let replica = CommissionProjectionApi::create_issue(
+        projection.client(),
+        &NewIssue {
+            title: "Bloomery replica — open".into(),
+            body: format!(
+                "old replica\n\n{}",
+                render_marker(&Marker { key: "commission:issue-42".into(), digest: digest(9) })
+            ),
+        },
+    )
+    .expect("seed stray replica");
+
+    projection.project_commission(&commission("issue-42", Some(replica.number))).expect("retire onto the source");
+
+    assert_eq!(projection.client().issue_is_closed(replica.number), Some(true), "the stray replica closes");
+    let replica_comments = projection.client().comments_on(replica.number);
+    assert_eq!(replica_comments.len(), 1, "one retirement comment on the replica");
+    assert!(replica_comments[0].contains("#42"), "the replica names its source: {}", replica_comments[0]);
+    assert_eq!(projection.client().comments_on(42).len(), 1, "the source carries the commission");
+
+    projection.project_commission(&commission("issue-42", Some(replica.number))).expect("second retire is a no-op");
+    assert_eq!(
+        projection.client().comments_on(replica.number).len(),
+        1,
+        "a second projection adds no further retirement comment"
+    );
+}
+
+#[test]
+fn a_commission_with_no_github_home_still_gets_its_replica() {
+    let projection = GithubProjection::new(FakeGithub::new());
+    let created = projection.project_commission(&commission("wp-1", None)).expect("create");
+
+    assert_eq!(created, Some(projection.client().issue_numbers()[0]));
+    assert_eq!(projection.client().issue_count(), 1);
+    assert_eq!(projection.client().created_issue_count(), 1);
 }

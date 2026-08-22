@@ -23,6 +23,9 @@
 //! - A landing receipt → one comment on the landing pull request when one
 //!   exists. The member's own landing comment is written by the land reactor
 //!   at close time, not here.
+//! - A commission whose workpiece names a repository object (`issue-N`) →
+//!   one marker-keyed comment on that object. The projector owns no issue
+//!   for it. A commission with no GitHub home still gets a replica issue.
 //! - A bloom has no object of its own. Before it lands there is nothing to
 //!   aggregate that `GET /view` does not serve live; afterwards its landing
 //!   pull request *is* the aggregate (ADR-0149 §What each object is).
@@ -126,21 +129,26 @@ impl<C: GithubApi> GithubProjection<C> {
 }
 
 impl<C: GithubApi + CommissionProjectionApi> GithubProjection<C> {
-    /// Reconcile one commission onto a Bloomery-owned issue (ADR-0149
-    /// 2026-08-16 amendment). Returns the issue number this projector now
-    /// owns.
+    /// Reconcile one commission onto GitHub (ADR-0149 2026-08-16 amendment).
     ///
-    /// Title and body are written only to `projection.recorded_issue` — the
-    /// store row the reactor overlays at drain — or, when that is still
-    /// absent, to a number [`CommissionProjectionApi::find_issue`] returns
-    /// for this commission's marker. Search is advisory crash-recovery
-    /// after a create that has not yet been persisted; it is not the
-    /// create-vs-update authority. A workpiece that looks like `issue-<N>`
-    /// is not an address — adopting that number would write a human-authored
-    /// object.
-    pub fn project_owned_commission(&self, projection: &CommissionProjection) -> Result<u64, GithubError> {
+    /// A workpiece that names a repository object (`issue-<N>`) is a comment
+    /// on that object: adopting the number would write a human-authored
+    /// title and body. `Ok(None)` is that case — this projector owns no
+    /// issue for it. Otherwise title and body are written only to
+    /// `projection.recorded_issue` — the store row the reactor overlays at
+    /// drain — or, when that is still absent, to a number
+    /// [`CommissionProjectionApi::find_issue`] returns for this commission's
+    /// marker. Search is advisory crash-recovery after a create that has
+    /// not yet been persisted; it is not the create-vs-update authority.
+    pub fn project_owned_commission(&self, projection: &CommissionProjection) -> Result<Option<u64>, GithubError> {
         let key = commission_key(&projection.workpiece.0);
         let digest = content_digest("bloomery.commission", projection);
+        if let Some(number) = canonical_issue_number(&projection.workpiece.0) {
+            self.comment_on(number, &key, digest, &render_source_comment(projection))?;
+            self.retire_replica(projection, number)?;
+            return Ok(None);
+        }
+
         let title = render_commission_title(projection);
         let body = format!(
             "{}\n\n{}",
@@ -162,16 +170,41 @@ impl<C: GithubApi + CommissionProjectionApi> GithubProjection<C> {
                 && existing.marker.as_ref().map(|marker| marker.digest) == Some(digest)
             {
                 self.close_if_terminal(number, &projection.status)?;
-                return Ok(number);
+                return Ok(Some(number));
             }
             self.client.update_issue(number, &title, &body)?;
             self.close_if_terminal(number, &projection.status)?;
-            Ok(number)
+            Ok(Some(number))
         } else {
             let created = self.client.create_issue(&NewIssue { title, body })?;
             self.close_if_terminal(created.number, &projection.status)?;
-            Ok(created.number)
+            Ok(Some(created.number))
         }
+    }
+
+    /// Close a replica this projector opened for a commission that now lives
+    /// as a comment on `source`. A projector that never created one does
+    /// nothing. Both the retirement comment and the close are idempotent.
+    fn retire_replica(&self, projection: &CommissionProjection, source: u64) -> Result<(), GithubError> {
+        let key = commission_key(&projection.workpiece.0);
+        let stray = match projection.recorded_issue {
+            Some(number) if number != source => Some(number),
+            Some(_) => None,
+            None => self.client.find_issue(&key)?.map(|issue| issue.number).filter(|&number| number != source),
+        };
+        let Some(replica) = stray else {
+            return Ok(());
+        };
+        let retired_key = format!("{key}:retired");
+        let body = format!("This replica is retired. The commission is tracked on #{source}.");
+        self.comment_on(
+            replica,
+            &retired_key,
+            content_digest("bloomery.commission.retired", &(source, replica)),
+            &body,
+        )?;
+        CommissionProjectionApi::close_issue(&self.client, replica)?;
+        Ok(())
     }
 
     fn close_if_terminal(&self, number: u64, status: &str) -> Result<(), GithubError> {
@@ -225,7 +258,7 @@ impl<C: GithubApi + PullRequestApi + CommissionProjectionApi> ProjectionBackend 
         Ok(())
     }
 
-    fn project_commission(&self, projection: &CommissionProjection) -> Result<u64, Self::Error> {
+    fn project_commission(&self, projection: &CommissionProjection) -> Result<Option<u64>, Self::Error> {
         self.project_owned_commission(projection)
     }
 }
@@ -299,11 +332,20 @@ fn render_commission_title(projection: &CommissionProjection) -> String {
 }
 
 fn render_commission_body(projection: &CommissionProjection) -> String {
-    let mut body = String::from(
+    format!(
         "**Bloomery replica** — do not edit this issue. It is an outbound projection of a local \
-         commission (ADR-0199). Edits here are overwritten and are never read as input.\n",
-    );
-    let _ = writeln!(body, "\n- Workpiece: `{}`", projection.workpiece.0);
+         commission (ADR-0199). Edits here are overwritten and are never read as input.\n\n{}",
+        render_commission_fields(projection)
+    )
+}
+
+fn render_source_comment(projection: &CommissionProjection) -> String {
+    render_commission_fields(projection)
+}
+
+fn render_commission_fields(projection: &CommissionProjection) -> String {
+    let mut body = String::new();
+    let _ = writeln!(body, "- Workpiece: `{}`", projection.workpiece.0);
     let _ = writeln!(body, "- Intent: `{}`", short_hex(&projection.intent));
     match projection.scope_revision {
         Some(digest) => {

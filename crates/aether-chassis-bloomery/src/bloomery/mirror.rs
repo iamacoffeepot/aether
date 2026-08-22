@@ -48,11 +48,13 @@ impl ProjectionShell {
         self.backend.project_receipt(receipt)
     }
 
-    /// Project one commission as a Bloomery-owned issue.
+    /// Project one commission. `Some(number)` is an issue this projector owns
+    /// and may retitle; `None` is a commission whose workpiece already names
+    /// an object it must not own.
     ///
     /// # Errors
     /// The projection surface is unreachable or returned an error status.
-    pub fn project_commission(&self, projection: &CommissionProjection) -> Result<u64, GithubError> {
+    pub fn project_commission(&self, projection: &CommissionProjection) -> Result<Option<u64>, GithubError> {
         self.backend.project_commission(projection)
     }
 }

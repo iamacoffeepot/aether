@@ -21,9 +21,11 @@
 //! commission has no GitHub home for are a second class of object (ADR-0149
 //! 2026-08-16 amendment, derived from ADR-0199): the projector creates those
 //! and writes their title and body, and only those — never a human-authored
-//! issue it did not create. Every projection carries the internal Bloomery id
-//! plus a content digest in stable metadata (an HTML-comment [`Marker`] in
-//! comment and replica-issue bodies, the native `external_id` on check-runs),
+//! issue it did not create. A commission whose workpiece names a repository
+//! object is a comment on that object and owns no issue. Every projection
+//! carries the internal Bloomery id plus a content digest in stable metadata
+//! (an HTML-comment [`Marker`] in comment and replica-issue bodies, the native
+//! `external_id` on check-runs),
 //! so the projection is **idempotent** — reconciling the same document twice
 //! is a no-op — and **rebuildable from the journal** after a deletion: a
 //! deleted comment leaves no marker to find, so the reconcile recreates it.

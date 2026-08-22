@@ -248,7 +248,9 @@ fn deliver_commission(
     if let Some(&number) = recorded.get(&document.workpiece.0) {
         document.recorded_issue = Some(number);
     }
-    let number = projection.project_commission(&document).map_err(|error| error.to_string())?;
+    let Some(number) = projection.project_commission(&document).map_err(|error| error.to_string())? else {
+        return Ok(None);
+    };
     if document.recorded_issue == Some(number) {
         return Ok(None);
     }

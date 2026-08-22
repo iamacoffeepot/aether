@@ -670,13 +670,13 @@ pub trait ProjectionBackend {
     /// Backend-defined — e.g. the projection surface is unreachable.
     fn project_receipt(&self, receipt: &ProjectedReceipt) -> Result<(), Self::Error>;
 
-    /// Project one commission as a Bloomery-owned issue. Returns the issue
-    /// number the adapter now owns — recorded from create, or the number
-    /// already recorded on `projection`.
+    /// Project one commission. `Some(number)` is an issue this projector owns
+    /// and may retitle; `None` is a commission whose workpiece already names
+    /// an object it must not own.
     ///
     /// # Errors
     /// Backend-defined — e.g. the projection surface is unreachable.
-    fn project_commission(&self, projection: &CommissionProjection) -> Result<u64, Self::Error>;
+    fn project_commission(&self, projection: &CommissionProjection) -> Result<Option<u64>, Self::Error>;
 }
 
 #[cfg(test)]
