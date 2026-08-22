@@ -12,16 +12,10 @@
 //! title is not a rung — GitHub is a replica.
 
 use aether_bloomery::{Adjudication, BloomId, Disposition, Event, Fact, SuppressionRequest};
-use aether_bloomery_github::{LandingProposal, canonical_issue_number};
+use aether_bloomery_github::{ACCEPTED_TYPES, LandingProposal, canonical_issue_number};
 use aether_data::wire::from_bytes;
 
 use crate::store::StoreBackend;
-
-/// The Conventional Commits types `.github/workflows/lint-title.yml` accepts.
-/// The gate and this predictor change together: a title this admits and the gate
-/// refuses blocks the landing at the very last step, after the bloom has already
-/// resolved.
-const ACCEPTED_TYPES: [&str; 7] = ["feat", "fix", "chore", "docs", "perf", "refactor", "flake"];
 
 /// One member's contribution to the proposal: the message its lane wrote, and
 /// the object its workpiece addresses.

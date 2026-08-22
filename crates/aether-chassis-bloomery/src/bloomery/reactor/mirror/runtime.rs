@@ -562,7 +562,9 @@ mod tests {
         Membership, ProjectedReceipt, ResolvedConfigs, Snapshot, SourceReplicaPayload, Topic, WorkpieceId, reduce,
         view_of,
     };
-    use aether_bloomery_github::{GithubProjection, ReplicaError, SourceReplica, landing_branch, testing::FakeGithub};
+    use aether_bloomery_github::{
+        GithubProjection, ReplicaError, SourceReplica, commission_floor_title, landing_branch, testing::FakeGithub,
+    };
     use aether_data::wire::{from_bytes, to_vec};
     use aether_data::{MailId, MailboxId, Source};
     use aether_substrate::actor::native::binding::NativeBinding;
@@ -1077,8 +1079,9 @@ mod tests {
         assert_eq!(acks.len(), 1);
         assert_eq!(acks[0].through_sequence, 2, "both entries deliver on the same topic prefix");
         let title = fake.issue_title(fake.issue_numbers()[0]).expect("replica");
-        assert!(
-            title.starts_with("Bloomery replica"),
+        assert_eq!(
+            title,
+            commission_floor_title("wp-1"),
             "the replica title must not collide with human issue numbering: {title}"
         );
     }

@@ -115,10 +115,73 @@ impl fmt::Display for LandingRefusal {
     }
 }
 
+/// The Conventional Commits types `.github/workflows/lint-title.yml` accepts.
+/// The gate and this predictor change together: a title this admits and the gate
+/// refuses blocks the landing at the very last step, after the bloom has already
+/// resolved.
+///
+/// Both title gates — the pull-request `Lint title` check and the issue-labels
+/// workflow — draw their type set from this list.
+pub const ACCEPTED_TYPES: [&str; 7] = ["feat", "fix", "chore", "docs", "perf", "refactor", "flake"];
+
 /// The title a landing proposal falls back to.
 #[must_use]
 pub fn landing_floor_title(bloom: &BloomId) -> String {
     format!("chore(meta): land bloom {}", short_hex(&bloom.0))
+}
+
+/// Whether `title` is a header `.github/workflows/issue-labels.yml:80-83` would
+/// accept — a Conventional Commits header whose type is one of [`ACCEPTED_TYPES`],
+/// whose scope is required (`[a-z0-9-]+` with at most one `/[a-z0-9-]+` segment),
+/// and whose subject is non-empty.
+///
+/// This is not the pull-request `Lint title` predictor: the issue gate requires
+/// a scope, and that check constrains the subject's case instead. They share the
+/// type set and nothing else.
+///
+/// Fail-closed: anything this cannot recognize is not valid, so an unrecognized
+/// shape falls back to a title that is rather than being opened and labelled
+/// `invalid-title`.
+#[must_use]
+pub fn issue_title_is_valid(title: &str) -> bool {
+    let Some((header, subject)) = title.split_once(": ") else {
+        return false;
+    };
+    if subject.is_empty() {
+        return false;
+    }
+    let header = header.strip_suffix('!').unwrap_or(header);
+    let Some((kind, rest)) = header.split_once('(') else {
+        return false;
+    };
+    let Some(scope) = rest.strip_suffix(')') else {
+        return false;
+    };
+    issue_scope_is_accepted(scope) && ACCEPTED_TYPES.contains(&kind)
+}
+
+/// Whether `scope` matches `[a-z0-9-]+` with at most one `/[a-z0-9-]+` segment.
+fn issue_scope_is_accepted(scope: &str) -> bool {
+    let Some((head, tail)) = scope.split_once('/') else {
+        return issue_scope_segment_is_accepted(scope);
+    };
+    !tail.contains('/') && issue_scope_segment_is_accepted(head) && issue_scope_segment_is_accepted(tail)
+}
+
+fn issue_scope_segment_is_accepted(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+/// The title a commission replica falls back to.
+///
+/// `repo` is a `META_SCOPES` entry in `.github/workflows/issue-labels.yml`, so
+/// the floor is accepted with no crate lookup. The workpiece id lives in the
+/// subject rather than the scope so freshly authored commissions stay
+/// distinguishable from each other without inventing a per-workpiece scope.
+#[must_use]
+pub fn commission_floor_title(workpiece: &str) -> String {
+    format!("chore(repo): bloomery commission {workpiece}")
 }
 
 fn render_provenance_footer(
@@ -470,7 +533,7 @@ mod tests {
 
     use super::{
         GithubLanding, LandAcceptance, LandProposal, LandingRefusal, LandingSource, ProposalOutcome,
-        landing_floor_title,
+        commission_floor_title, issue_title_is_valid, landing_floor_title,
     };
     use crate::client::ChecksState;
     use crate::client::PullRequestApi;
@@ -817,5 +880,29 @@ mod tests {
     fn landing_floor_title_names_the_bloom() {
         let title = landing_floor_title(&bloom());
         assert!(title.starts_with("chore(meta): land bloom "), "{title}");
+    }
+
+    // Tripwire: a predictor that drifts from `.github/workflows/issue-labels.yml:80-83`
+    // opens issues the repository immediately labels `invalid-title`.
+    #[test]
+    fn the_predictor_mirrors_the_issue_label_gate() {
+        assert!(issue_title_is_valid("feat(bloomery-github): stop opening a second issue"));
+        assert!(issue_title_is_valid("fix(chassis-bloomery/mirror): drain the receipt topic"));
+
+        assert!(!issue_title_is_valid("Description"));
+        assert!(
+            !issue_title_is_valid("chore: bump the pinned toolchain"),
+            "the issue gate requires a scope where the pull-request gate does not",
+        );
+        assert!(!issue_title_is_valid("feat(): x"));
+        assert!(!issue_title_is_valid("wip(xtask): x"));
+        assert!(!issue_title_is_valid("feat(xtask):x"));
+    }
+
+    #[test]
+    fn commission_floor_title_is_accepted_by_the_issue_gate() {
+        let title = commission_floor_title("issue-5379");
+        assert_eq!(title, "chore(repo): bloomery commission issue-5379");
+        assert!(issue_title_is_valid(&title), "{title}");
     }
 }

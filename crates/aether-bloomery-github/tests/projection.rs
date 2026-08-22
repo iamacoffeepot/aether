@@ -11,8 +11,8 @@ use aether_bloomery::{
     PendingDecisionView, ProjectedReceipt, ProjectionBackend, ResolutionClaim, StageId, ViewDocument, WorkpieceId,
 };
 use aether_bloomery_github::{
-    CommissionProjectionApi, GithubProjection, Marker, NewIssue, landing_branch, marker::render_marker,
-    testing::FakeGithub,
+    CommissionProjectionApi, GithubProjection, Marker, NewIssue, commission_floor_title, issue_title_is_valid,
+    landing_branch, marker::render_marker, testing::FakeGithub,
 };
 
 /// The two issue numbers the view's members address — objects the repository
@@ -344,7 +344,7 @@ fn a_human_edit_of_a_replica_is_overwritten_and_never_read() {
 
     let title = projection.client().issue_title(number).expect("the replica still exists");
     let body = projection.client().issue_body(number).expect("the replica still exists");
-    assert!(title.contains("Bloomery replica"), "the title names the replica, not the workpiece: {title}");
+    assert_eq!(title, commission_floor_title("wp-1"), "an untitled replica is retitled to the floor: {title}");
     assert!(!title.contains("a person renamed this"), "the human title is not kept: {title}");
     assert!(body.contains("do not edit"), "the replica notice is restored: {body}");
     assert!(!body.contains("a person rewrote the body"), "the human body is not read: {body}");
@@ -394,31 +394,60 @@ fn a_landed_commission_closes_only_the_owned_replica() {
 fn a_titled_commission_is_distinguishable_in_an_issue_list() {
     // #5233: every replica rendered the constant `Bloomery replica — {status}`,
     // so six freshly authored commissions were six indistinguishable rows and
-    // the only distinguishing text lived in the body. The status suffix stays,
-    // and the reconcile path retitles on a status change exactly as before.
+    // the only distinguishing text lived in the body. A heading the issue-title
+    // gate accepts is the title; otherwise the floor names the workpiece.
     let projection = GithubProjection::new(FakeGithub::new());
     let mut open = commission("wp-titled", None);
-    open.title = "Refuse a contradictory workpiece".to_owned();
+    open.title = "feat(bloomery-github): refuse a contradictory workpiece".to_owned();
 
     let number = projection.project_commission(&open).expect("create").expect("owns a replica");
-    assert_eq!(projection.client().issue_title(number).as_deref(), Some("Refuse a contradictory workpiece — open"),);
-
-    let landed = CommissionProjection { status: "landed".to_owned(), recorded_issue: Some(number), ..open };
-    projection.project_commission(&landed).expect("reconcile");
     assert_eq!(
         projection.client().issue_title(number).as_deref(),
-        Some("Refuse a contradictory workpiece — landed"),
-        "the status suffix still tracks the lifecycle",
+        Some("feat(bloomery-github): refuse a contradictory workpiece"),
     );
 
     let untitled = projection
         .project_commission(&commission("wp-untitled", None))
         .expect("create untitled")
         .expect("owns a replica");
+    let untitled_title = projection.client().issue_title(untitled).expect("untitled replica");
+    assert_eq!(untitled_title, commission_floor_title("wp-untitled"));
+    assert_ne!(
+        projection.client().issue_title(number).as_deref(),
+        Some(untitled_title.as_str()),
+        "two commissions remain distinguishable in an issue list",
+    );
+}
+
+#[test]
+fn a_section_heading_falls_back_to_a_title_the_gate_accepts() {
+    // Tripwire: #5373, #5374, and #5375 opened as `Description — open` and
+    // immediately received `invalid-title` from `.github/workflows/issue-labels.yml`.
+    let projection = GithubProjection::new(FakeGithub::new());
+    let mut open = commission("wp-5379", None);
+    open.title = "Description".to_owned();
+
+    let number = projection.project_commission(&open).expect("create").expect("owns a replica");
+    let title = projection.client().issue_title(number).expect("the replica exists");
+    assert_eq!(title, commission_floor_title("wp-5379"));
+    assert!(issue_title_is_valid(&title), "{title}");
+}
+
+#[test]
+fn a_lifecycle_change_does_not_rewrite_the_title() {
+    let projection = GithubProjection::new(FakeGithub::new());
+    let mut open = commission("wp-titled", None);
+    open.title = "feat(bloomery-github): refuse a contradictory workpiece".to_owned();
+
+    let number = projection.project_commission(&open).expect("create").expect("owns a replica");
+    let created_title = projection.client().issue_title(number).expect("created");
+
+    let landed = CommissionProjection { status: "landed".to_owned(), recorded_issue: Some(number), ..open };
+    projection.project_commission(&landed).expect("reconcile");
     assert_eq!(
-        projection.client().issue_title(untitled).as_deref(),
-        Some("Bloomery replica — open"),
-        "an intent with no heading keeps the constant rather than inventing a name",
+        projection.client().issue_title(number).as_deref(),
+        Some(created_title.as_str()),
+        "a lifecycle change does not rewrite the title",
     );
 }
 

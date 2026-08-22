@@ -56,6 +56,7 @@ use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
 use crate::client::{CommissionProjectionApi, GithubApi, GithubError, NewComment, NewIssue, PullRequestApi};
+use crate::landing::{commission_floor_title, issue_title_is_valid};
 use crate::marker::{Marker, render_marker};
 use crate::short_hex;
 use crate::source::landing_branch;
@@ -317,18 +318,16 @@ fn commission_key(workpiece: &str) -> String {
 }
 
 fn render_commission_title(projection: &CommissionProjection) -> String {
-    // The replica is not the human board's `issue-N` object. Titling it
-    // `{workpiece} — {status}` collides with that numbering (`issue-5215 — open`
-    // reads as another card for #5215), so the workpiece id stays out of the
-    // title. The commission's own intent heading does not collide, and without
-    // it every replica renders the same constant — six freshly authored
-    // commissions were six indistinguishable rows (#5233). An intent with no
-    // heading has no name to use, and falls back to the constant.
-    let name = match projection.title.trim() {
-        "" => "Bloomery replica",
-        title => title,
-    };
-    format!("{name} — {}", projection.status)
+    // The replica title is the repository's issue-title rule or a floor that
+    // satisfies it. Lifecycle lives in the issue's open/closed state; a
+    // ` — {status}` suffix would rewrite the title on every transition and
+    // re-run the label workflow for nothing.
+    let title = projection.title.trim();
+    if issue_title_is_valid(title) {
+        title.to_owned()
+    } else {
+        commission_floor_title(&projection.workpiece.0)
+    }
 }
 
 fn render_commission_body(projection: &CommissionProjection) -> String {
