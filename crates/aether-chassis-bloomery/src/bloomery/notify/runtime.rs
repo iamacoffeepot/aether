@@ -1,6 +1,6 @@
 //! The runtime for the notification reactor capability (#5166).
 //!
-//! Two handlers and one ledger:
+//! Two handlers, one ledger, and a seeding pass on first mount:
 //!
 //! 1. **Ask.** The poll tick sends a detached
 //!    [`Query`] to the control core — the same live
@@ -9,9 +9,12 @@
 //!    read as well.
 //! 2. **Answer.** [`QueryResult::Document`] decodes back into a
 //!    [`ViewDocument`], [`loud_events`] turns it into a keyed set, and
-//!    [`deliver`] differences that against the `notification_sent` ledger:
-//!    keys that are new are posted and then recorded, keys that have gone
-//!    quiet are forgotten.
+//!    [`deliver`] differences that against the `notification_sent` ledger.
+//!    An empty ledger is a first mount: every current key plus a reserved
+//!    seed marker is recorded without posting, so the standing set is adopted
+//!    in silence. Every later pass posts keys that are new and forgets keys
+//!    that have gone quiet; the marker stays, so a ledger whose conditions
+//!    have all cleared is never mistaken for a first mount.
 //!
 //! The record-after-post order is the whole crash story. An unrecorded key is
 //! a message still owed, so a coordinator killed between the POST and the
@@ -91,10 +94,18 @@ pub struct Delivered {
     pub posted: u32,
     /// Keys whose condition has cleared, dropped from the ledger.
     pub forgotten: u32,
+    /// Keys recorded without posting because this was the first mount.
+    pub seeded: u32,
     /// Whether the pass stopped early on a failing endpoint. The unposted keys
     /// stay unrecorded, so the next tick re-derives and retries them.
     pub stalled: bool,
 }
+
+/// Reserved ledger key that names no condition. Its dotted spelling cannot be
+/// produced by any [`loud_events`] format (`<word>:<parts>`), and its presence
+/// is what distinguishes a never-mounted ledger from one whose conditions have
+/// all cleared.
+pub const SEED_MARKER_KEY: &str = "aether.bloomery.notify.seeded";
 
 /// Post every loud condition in `view` the ledger has not already reported,
 /// and forget every recorded key whose condition has cleared.
@@ -104,6 +115,14 @@ pub struct Delivered {
 /// difference is recomputed from the same document next tick, so pressing on
 /// buys nothing and costs one request per remaining event. The same ack-prefix
 /// discipline every other reactor uses on its topic.
+///
+/// An empty ledger is a first mount, not a quiet day: every current event key
+/// is recorded without posting, plus a reserved seed marker whose dotted
+/// spelling no [`loud_events`] format produces. The marker is what keeps the
+/// ledger non-empty after every condition has cleared, so a later genuinely
+/// new wedge is a transition rather than a second seed. The forget sweep
+/// skips the marker; the post loop never sees it, because it is not a
+/// [`loud_events`] key.
 ///
 /// The factored-out network side, unit-testable against a `SqliteStore` and a
 /// recording sink without the mail harness.
@@ -115,9 +134,17 @@ pub fn deliver(
 ) -> rusqlite::Result<Delivered> {
     let events = loud_events(view);
     let recorded = store.list_notifications()?;
+    if recorded.is_empty() {
+        for event in &events {
+            store.record_notification(&event.key, now_unix_millis)?;
+        }
+        store.record_notification(SEED_MARKER_KEY, now_unix_millis)?;
+        return Ok(Delivered { seeded: u32::try_from(events.len()).unwrap_or(u32::MAX), ..Delivered::default() });
+    }
+
     let mut report = Delivered::default();
 
-    for key in recorded.iter().filter(|key| !events.iter().any(|event| &&event.key == key)) {
+    for key in recorded.iter().filter(|key| *key != SEED_MARKER_KEY && !events.iter().any(|event| &&event.key == key)) {
         store.forget_notification(key)?;
         report.forgotten += 1;
     }
@@ -262,10 +289,11 @@ impl NativeActor for NotifyReactorCapability {
         };
 
         match deliver(store, sink.as_ref(), &view, now_unix_millis()) {
-            Ok(report) if report.posted > 0 || report.forgotten > 0 => tracing::info!(
+            Ok(report) if report.posted > 0 || report.forgotten > 0 || report.seeded > 0 => tracing::info!(
                 target: "aether_chassis_bloomery::notify",
                 posted = report.posted,
                 forgotten = report.forgotten,
+                seeded = report.seeded,
                 stalled = report.stalled,
                 "notification pass complete",
             ),
