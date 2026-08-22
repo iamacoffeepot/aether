@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::dto::{SpendQuiesce, ViewDocument};
-use crate::keys::{KeyHint, footer_line};
+use crate::keys::{KeyHint, footer_line, footer_row};
 use crate::palette::{self, Role};
 use crate::screen::{Dashboard, QuietLine};
 use crate::store::Cell;
@@ -192,13 +192,8 @@ fn severity_role(severity: Severity) -> Role {
 }
 
 #[must_use]
-pub fn footer(hints: &[KeyHint], metrics: Option<&str>) -> Paragraph<'static> {
-    match metrics {
-        Some(metrics) if !metrics.is_empty() => {
-            Paragraph::new(format!("{metrics}   {}", footer_line(hints))).style(palette::body())
-        }
-        _ => Paragraph::new(footer_line(hints)).style(palette::body()),
-    }
+pub fn footer(trail: &str, hints: &[KeyHint], width: u16) -> Paragraph<'static> {
+    Paragraph::new(footer_row(trail, &footer_line(hints), width as usize)).style(palette::body())
 }
 
 #[cfg(test)]

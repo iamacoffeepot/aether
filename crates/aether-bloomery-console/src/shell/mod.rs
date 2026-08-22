@@ -7,6 +7,7 @@
 pub mod chrome;
 mod workspace;
 
+use std::iter::once;
 use std::thread;
 use std::time::Duration;
 
@@ -17,7 +18,7 @@ use ratatui::widgets::Block;
 
 use crate::fetch::{FetchLanes, FetchReply, ResourceBody};
 use crate::http::Endpoint;
-use crate::keys::{KeyHint, Outcome};
+use crate::keys::{INLINE_HINTS, KeyHint, Outcome};
 use crate::nav::Nav;
 use crate::palette;
 use crate::screen::{Screen, compose};
@@ -103,7 +104,7 @@ impl Shell {
         } else if let Some(screen) = self.stack.last_mut() {
             screen.render(frame, chunks[1], &self.store);
         }
-        frame.render_widget(chrome::footer(&self.footer_hints(), None), chunks[2]);
+        frame.render_widget(chrome::footer(&self.footer_trail(), INLINE_HINTS, chunks[2].width), chunks[2]);
     }
 
     fn drain_replies(&mut self) {
@@ -300,6 +301,15 @@ impl Shell {
         }
     }
 
+    /// Path from the workspace through each pushed frame, painted in the footer.
+    fn footer_trail(&self) -> String {
+        if self.stack.is_empty() {
+            String::new()
+        } else {
+            once("board".to_owned()).chain(self.stack.iter().map(Screen::label)).collect::<Vec<_>>().join(" › ")
+        }
+    }
+
     fn footer_hints(&self) -> Vec<KeyHint> {
         let mut hints = Vec::new();
         if let Some(screen) = self.stack.last() {
@@ -393,7 +403,7 @@ mod tests {
     };
     use crate::fetch::{FetchReply, ResourceBody};
     use crate::http::Endpoint;
-    use crate::keys::{Outcome, assert_footer_honest, footer_line};
+    use crate::keys::{INLINE_HINTS, Outcome, assert_footer_honest, footer_line};
     use crate::nav::Nav;
     use crate::palette::{Role, depth};
     use crate::screen::{Dashboard, RowId};
@@ -882,6 +892,74 @@ mod tests {
         );
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
         assert_eq!(shell.top_focus(), Some(Focus::transcript("dispatch-1")));
+    }
+
+    #[test]
+    fn the_footer_trail_names_every_frame_on_the_stack() {
+        // The plausible bug: a three-Enter transcript names only the nonce, so
+        // the operator cannot tell which bloom or member the viewer belongs to.
+        let bloom = digest(0xab);
+        let mut shell = Shell::showing(
+            &ViewDocument {
+                blooms: vec![BloomView {
+                    id: bloom,
+                    members: vec![MemberView { workpiece: "issue-1".to_owned(), ..MemberView::default() }],
+                    ..BloomView::default()
+                }],
+                ..ViewDocument::default()
+            },
+            None,
+        );
+        shell.push_nav(Nav::focus(Focus::bloom(bloom)));
+        shell.push_nav(Nav::focus(Focus::member(bloom, "issue-1")));
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
+        shell.apply_bloom_dispatches(
+            bloom,
+            BloomDispatchesView {
+                dispatches: vec![BloomDispatchView {
+                    nonce: "dispatch-1".to_owned(),
+                    workpiece: "issue-1".to_owned(),
+                    stage: StageId::Construct,
+                    attempt: 1,
+                    verdict: Some("pass".to_owned()),
+                    cost: Some(1_000_000),
+                    evidence_retained: true,
+                }],
+            },
+        );
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
+        let last = draw(&mut shell).lines().last().unwrap_or("").to_owned();
+        assert!(last.contains("board › bloom "), "{last}");
+        assert!(last.contains("› member issue-1"), "{last}");
+        assert!(last.contains("› transcript"), "{last}");
+        assert!(last.trim_end().ends_with("q quit"), "{last}");
+    }
+
+    #[test]
+    fn at_rest_the_footer_carries_the_keys_alone() {
+        // Tripwire: the workspace is the root; a `board` crumb at rest is
+        // noise on every frame.
+        let mut shell = Shell::showing(&ViewDocument::default(), None);
+        let last = draw(&mut shell).lines().last().unwrap_or("").to_owned();
+        assert_eq!(last.trim(), footer_line(INLINE_HINTS));
+    }
+
+    #[test]
+    fn a_deep_trail_is_elided_from_the_left_and_keeps_the_keys() {
+        // The plausible bug: a trail longer than the frame is clipped from
+        // the right, so the deepest crumb and q quit vanish together.
+        let mut shell = Shell::showing(&ViewDocument::default(), None);
+        for _ in 0..12 {
+            shell.push_nav(Nav::days());
+        }
+        shell.push_nav(Nav::transcript("deep-crumb"));
+        let mut terminal = Terminal::new(TestBackend::new(60, 24)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let last = buffer_text(&terminal).lines().last().unwrap_or("").to_owned();
+        assert!(last.starts_with('…'), "{last}");
+        assert!(last.chars().count() <= 60, "{last}");
+        assert!(last.contains("deep-crumb"), "{last}");
+        assert!(last.trim_end().ends_with("q quit"), "{last}");
     }
 
     #[test]

@@ -60,6 +60,11 @@ impl Journal {
     }
 
     #[must_use]
+    pub fn bloom(&self) -> Option<DigestHex> {
+        self.query.bloom
+    }
+
+    #[must_use]
     pub fn key_hints() -> &'static [KeyHint] {
         LIST_HINTS
     }

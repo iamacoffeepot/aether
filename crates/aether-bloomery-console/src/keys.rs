@@ -32,10 +32,51 @@ impl KeyHint {
     }
 }
 
+/// Compact keys the footer keeps inline so the trail has the rest of the row.
+pub const INLINE_HINTS: &[KeyHint] = &[KeyHint { keys: "?", action: "keys" }, KeyHint { keys: "q", action: "quit" }];
+
 /// Render hints the way the footer paints them.
 #[must_use]
 pub fn footer_line(hints: &[KeyHint]) -> String {
     hints.iter().map(|hint| format!("{} {}", hint.keys, hint.action)).collect::<Vec<_>>().join("   ")
+}
+
+/// One footer line: `trail` on the left, `keys` flush right. A trail that
+/// cannot fit is elided from the left behind `…` so the deepest crumbs stay.
+#[must_use]
+pub fn footer_row(trail: &str, keys: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let keys_len = keys.chars().count();
+    if keys_len >= width {
+        return keys.chars().skip(keys_len - width).collect();
+    }
+    let gap = if trail.is_empty() {
+        0
+    } else {
+        2.min(width - keys_len)
+    };
+    let left = elide_from_left(trail, width - keys_len - gap);
+    let pad = width - left.chars().count() - keys_len;
+    let mut row = left;
+    row.push_str(&" ".repeat(pad));
+    row.push_str(keys);
+    row
+}
+
+fn elide_from_left(text: &str, budget: usize) -> String {
+    let len = text.chars().count();
+    if len <= budget {
+        return text.to_owned();
+    }
+    if budget == 0 {
+        return String::new();
+    }
+    let keep = budget - 1;
+    let mut out = String::from("…");
+    out.extend(text.chars().skip(len - keep));
+    out
 }
 
 /// Every advertised key must be one `handles` accepts. Later screens call

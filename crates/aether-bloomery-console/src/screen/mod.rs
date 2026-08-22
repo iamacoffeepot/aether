@@ -101,6 +101,31 @@ impl Screen {
         }
     }
 
+    /// Live crumb for the footer trail. Exhaustive so a new frame must name itself.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Detail(_)
+            | Self::DispatchList(_)
+            | Self::Record(_)
+            | Self::Artifact(_)
+            | Self::Transcript(_)
+            | Self::Workpiece(_) => self.focus().as_ref().map_or_else(String::new, Focus::label),
+            Self::Board(board) => {
+                if board.lane() == BoardLane::History {
+                    Nav::History.label()
+                } else {
+                    "board".to_owned()
+                }
+            }
+            Self::Journal(journal) => Nav::journal(journal.bloom()).label(),
+            Self::Timeline(timeline) => Nav::timeline(timeline.bloom()).label(),
+            Self::Days(_) => Nav::days().label(),
+            Self::Cost(_) => Nav::cost().label(),
+            Self::Backlog(_) => Nav::backlog().label(),
+        }
+    }
+
     #[must_use]
     pub fn scroll(&self) -> usize {
         match self {
