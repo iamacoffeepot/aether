@@ -12,10 +12,10 @@ use crate::dto::DigestHex;
 
 pub use alerts::{Alert, AlertKind, alerts};
 pub use interrupts::{Interrupt, InterruptKind, interrupts};
-pub use needs_you::{NeedsYouRow, Severity, rows};
+pub use needs_you::{DismissKey, NeedsYouRow, Severity, rows};
 
 /// The subject a chrome token or drill-in frame is about.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Focus {
     Bloom { id: DigestHex },
     Member { bloom: DigestHex, workpiece: String },

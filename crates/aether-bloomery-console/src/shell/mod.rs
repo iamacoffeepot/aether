@@ -389,7 +389,7 @@ mod tests {
     use crate::dto::{
         BloomDispatchView, BloomDispatchesView, BloomStatus, BloomView, CompositionCursorView, CompositionFinding,
         CompositionView, DigestHex, ExecutorFaultView, HostFaultView, LandingBlock, MemberView, OperatorHoldView,
-        PendingDecisionView, Present, ReviewParkView, SpendQuiesce, StageId, ViewDocument,
+        PendingDecisionView, Present, ReviewParkView, SpendQuiesce, StageId, ViewDocument, WedgeCause,
     };
     use crate::fetch::{FetchReply, ResourceBody};
     use crate::http::Endpoint;
@@ -403,7 +403,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
-    use ratatui::style::Color;
+    use ratatui::style::{Color, Modifier};
     use std::net::TcpListener;
     use std::thread;
     use std::time::{Duration, Instant};
@@ -1088,12 +1088,60 @@ mod tests {
             "missing jump hint in {}",
             footer_line(&inside)
         );
+        assert!(footer_line(&inside).contains("x dismiss"), "missing dismiss hint in {}", footer_line(&inside));
         assert_footer_honest(&inside, |code| {
             let mut probe = Shell::showing(&view, None);
             assert_eq!(probe.handle_key(KeyEvent::from(KeyCode::Tab)), Outcome::Handled);
             assert_eq!(probe.handle_key(KeyEvent::from(KeyCode::Char('i'))), Outcome::Handled);
             probe.handle_key(KeyEvent::from(code)) != Outcome::Ignored
         });
+    }
+
+    #[test]
+    fn a_dismissed_row_leaves_the_band_and_returns_when_its_facts_change() {
+        // The plausible bug: a park the operator already judged occupies a
+        // needs-you row forever, or a new stop on the same bloom stays hidden.
+        let view = parked_blooms(1);
+        let subject = digest(1).prefix();
+        let mut shell = Shell::showing(&view, None);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Tab)), Outcome::Handled);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('i'))), Outcome::Handled);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('x'))), Outcome::Handled);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Tab)), Outcome::Handled);
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let text = right_column(&terminal);
+        assert!(!text.contains(&subject), "dismissed subject still in the band:\n{text}");
+        assert!(text.contains("·1 cleared"), "cleared count missing from:\n{text}");
+
+        let mut wedged = parked_blooms(1);
+        wedged.blooms[0].review_park = None;
+        wedged.blooms[0].members[0].wedge = Some(Present {});
+        wedged.blooms[0].members[0].wedge_cause = Some(WedgeCause::Work);
+        shell.apply_view(wedged);
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let text = right_column(&terminal);
+        assert!(text.contains("wp-1"), "new stop missing from the band:\n{text}");
+    }
+
+    #[test]
+    fn a_dismissed_row_stays_walkable_while_the_band_has_focus() {
+        // The plausible bug: hiding the row immediately makes a mis-keyed
+        // dismissal unrecoverable without a restart.
+        let view = parked_blooms(1);
+        let subject = digest(1).prefix();
+        let mut shell = Shell::showing(&view, None);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Tab)), Outcome::Handled);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('i'))), Outcome::Handled);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('x'))), Outcome::Handled);
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let text = right_column(&terminal);
+        assert!(text.contains(&subject), "dismissed row missing while focused:\n{text}");
+        let mods = right_column_modifiers(&terminal, &subject);
+        assert!(mods.iter().any(|modifier| modifier.contains(Modifier::DIM)), "dismissed row was not dimmed: {mods:?}");
     }
 
     #[test]
@@ -1222,6 +1270,25 @@ mod tests {
     fn right_column(terminal: &Terminal<TestBackend>) -> String {
         let width = terminal.backend().buffer().area().width;
         column_text(terminal, width / 2, width)
+    }
+
+    fn right_column_modifiers(terminal: &Terminal<TestBackend>, needle: &str) -> Vec<Modifier> {
+        let buffer = terminal.backend().buffer();
+        let area = buffer.area();
+        let start = area.width / 2;
+        for y in area.y..area.y + area.height {
+            let mut line = String::new();
+            let mut mods = Vec::new();
+            for x in start..area.width {
+                let cell = &buffer[(x, y)];
+                line.push_str(cell.symbol());
+                mods.push(cell.modifier);
+            }
+            if let Some(at) = line.find(needle) {
+                return mods.into_iter().skip(at).take(needle.chars().count()).collect();
+            }
+        }
+        Vec::new()
     }
 
     fn column_text(terminal: &Terminal<TestBackend>, start: u16, end: u16) -> String {

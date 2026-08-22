@@ -16,6 +16,12 @@ use crate::screen::{Dashboard, QuietLine};
 use crate::store::Cell;
 use crate::warroom::{NeedsYouRow, Severity};
 
+/// One painted needs-you line, plus whether the operator has dismissed it.
+pub struct BandRow<'a> {
+    pub row: &'a NeedsYouRow,
+    pub dismissed: bool,
+}
+
 /// Age of the last successful sample, for the header.
 #[must_use]
 pub fn format_age(age: Option<Duration>) -> String {
@@ -116,11 +122,7 @@ pub fn quiet(lines: &[QuietLine]) -> Paragraph<'static> {
 /// how many rows sit outside the window. `height` is the pane's inner height.
 /// When the queue overflows, the last line is reserved for `+N more`.
 #[must_use]
-pub fn needs_you_window(
-    rows: &[NeedsYouRow],
-    selected: Option<usize>,
-    height: usize,
-) -> (&[NeedsYouRow], Option<usize>, usize) {
+pub fn needs_you_window<T>(rows: &[T], selected: Option<usize>, height: usize) -> (&[T], Option<usize>, usize) {
     if height == 0 || rows.is_empty() {
         return (&[], None, 0);
     }
@@ -148,20 +150,36 @@ fn needs_you_window_start(len: usize, selected: Option<usize>, rows: usize) -> u
 }
 
 #[must_use]
-pub fn needs_you_band(window: &[NeedsYouRow], selected: Option<usize>, hidden: usize) -> Paragraph<'static> {
+pub fn needs_you_band(
+    window: &[BandRow<'_>],
+    selected: Option<usize>,
+    hidden: usize,
+    cleared: usize,
+) -> Paragraph<'static> {
     let mut lines: Vec<Line<'static>> = window
         .iter()
         .enumerate()
         .map(|(index, row)| {
-            let mut style = palette::paint(severity_role(row.severity)).add_modifier(Modifier::BOLD);
+            let mut style = palette::paint(severity_role(row.row.severity)).add_modifier(if row.dismissed {
+                Modifier::DIM
+            } else {
+                Modifier::BOLD
+            });
             if selected == Some(index) {
                 style = style.add_modifier(Modifier::REVERSED);
             }
-            Line::from(Span::styled(format!("{} · {} · {}", row.subject, row.happened, row.action), style))
+            Line::from(Span::styled(format!("{} · {} · {}", row.row.subject, row.row.happened, row.row.action), style))
         })
         .collect();
+    let mut clauses = Vec::new();
     if hidden > 0 {
-        lines.push(Line::from(Span::raw(format!("+{hidden} more"))));
+        clauses.push(format!("+{hidden} more"));
+    }
+    if cleared > 0 {
+        clauses.push(format!("·{cleared} cleared"));
+    }
+    if !clauses.is_empty() {
+        lines.push(Line::from(Span::raw(clauses.join("  "))));
     }
     Paragraph::new(lines).style(palette::body())
 }

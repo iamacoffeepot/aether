@@ -20,6 +20,23 @@ pub struct NeedsYouRow {
     pub severity: Severity,
 }
 
+/// Subject plus a digest of the row's source facts.
+///
+/// A dismissal survives a poll but not a change of facts. It is process-local
+/// because the coordinator has no ack route.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct DismissKey {
+    focus: Focus,
+    facts: String,
+}
+
+impl NeedsYouRow {
+    #[must_use]
+    pub fn dismiss_key(&self) -> DismissKey {
+        DismissKey { focus: self.focus.clone(), facts: format!("{}|{}", self.happened, self.action) }
+    }
+}
+
 /// Owner-authority subjects in `view`, one row per [`Focus`], document order.
 #[must_use]
 pub fn rows(view: &ViewDocument) -> Vec<NeedsYouRow> {
@@ -180,6 +197,32 @@ mod tests {
         assert!(rows[0].happened.contains(InterruptKind::BaseRed.label()));
         assert_eq!(rows[0].action, "repair the base");
         assert_eq!(rows[0].severity, Severity::Loud);
+    }
+
+    #[test]
+    fn a_new_stop_on_one_bloom_mints_a_different_dismiss_key() {
+        // The plausible bug: keying on the subject alone, so a park the
+        // operator dismissed hides the wedge that replaces it.
+        let parked = ViewDocument {
+            blooms: vec![BloomView {
+                id: digest(1),
+                review_park: Some(ReviewParkView::default()),
+                ..BloomView::default()
+            }],
+            ..ViewDocument::default()
+        };
+        let first = rows(&parked)[0].dismiss_key();
+        assert_eq!(first, rows(&parked)[0].dismiss_key());
+
+        let wedged = ViewDocument {
+            blooms: vec![BloomView {
+                id: digest(1),
+                members: vec![MemberView { wedge: Some(Present {}), ..member("issue-1") }],
+                ..BloomView::default()
+            }],
+            ..ViewDocument::default()
+        };
+        assert_ne!(first, rows(&wedged)[0].dismiss_key());
     }
 
     #[test]
