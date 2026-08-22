@@ -9,10 +9,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use aether_bloomery::{
-    BloomDraft, BloomId, BloomRecord, ConfigRegistry, Decision, Digest, Event, Evidence, EvidenceKind, EvidenceRef,
-    ExecutionLimits, ExecutionStatus, Fact, Forecast, IdempotencyKey, Membership, NetworkProfile, Nonce, Outcome,
-    ResolvedConfigs, Snapshot, SpendWindow, StageCatalog, StageId, StageVerdict, Transformation, VerifyFailure,
-    VerifyFailureSet, WorkHandle, WorkpieceId, reduce,
+    BloomDraft, BloomId, BloomRecord, Conclusion, ConfigRegistry, Decision, Digest, Event, Evidence, EvidenceKind,
+    EvidenceRef, ExecutionLimits, ExecutionStatus, Fact, Forecast, IdempotencyKey, Membership, NetworkProfile, Nonce,
+    Outcome, ResolvedConfigs, Snapshot, SpendWindow, StageCatalog, StageId, StageVerdict, Transformation,
+    VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, reduce,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -28,7 +28,10 @@ use super::{
     Admission, AdmitDecision, AdmitSink, DispatchError, DispatchRecord, EvidenceClaims, IntakeRefusal,
     UploadedEvidence, admit_uploaded, dispatch_and_record, record_dispatch, run_intake_cycle,
 };
-use crate::bloomery::{ExecutorPortError, ExecutorShell, LocalExecutorError};
+use crate::bloomery::{
+    ExecutorPortError, ExecutorShell, LocalExecutorError, OutstandingDispatch, ReconcileLanes, ReconcileReport,
+    RoutingExecutor,
+};
 use crate::store::{SqliteStore, StoreBackend};
 
 const WORKFLOW: &str = "bloomery-transform.yml";
@@ -404,7 +407,7 @@ struct JournalReadingExecutor {
 impl aether_bloomery::ExecutorBackend for JournalReadingExecutor {
     type Error = ExecutorPortError;
 
-    fn submit(&self, order: &aether_bloomery::WorkOrder) -> Result<WorkHandle, Self::Error> {
+    fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
         let mut store = SqliteStore::open(&self.store_path).expect("the lane's own connection opens the journal");
         let found = store.lookup_order(&order.nonce.0).expect("the lookup runs").is_some();
         *self.resolved.lock().unwrap() = Some(found);
@@ -567,6 +570,169 @@ fn intake_cycle_admits_a_matching_upload_and_the_reducer_integrates_it() {
     assert_eq!(sink.0.len(), 1);
 
     // The reducer oracle: the admitted event integrates its member.
+    match reduce(&snapshot, &sink.0[0].event, &ResolvedConfigs::default(), &SpendWindow::default()).outcome {
+        Outcome::Integrated { bloom: integrated, workpiece: member } => {
+            assert_eq!(integrated, bloom);
+            assert_eq!(member, workpiece);
+        }
+        other => panic!("expected Integrated, got {other:?}"),
+    }
+}
+
+/// The Actions arm under GitHub's hourly limit: every call answers
+/// `403 API rate limit exceeded`. Submitting still works — the dispatch it
+/// answers for went out before the budget ran down, which is exactly the state
+/// the coordinator was in.
+struct RateLimitedActions;
+
+impl RateLimitedActions {
+    fn refusal() -> ExecutorError {
+        ExecutorError::Github(GithubError::Status { status: 403, body: "API rate limit exceeded".to_owned() })
+    }
+}
+
+impl aether_bloomery::ExecutorBackend for RateLimitedActions {
+    type Error = ExecutorError;
+
+    fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
+        Ok(WorkHandle::new(order.nonce.clone()))
+    }
+
+    fn inspect(&self, _handle: &WorkHandle) -> Result<ExecutionStatus, Self::Error> {
+        Err(Self::refusal())
+    }
+
+    fn cancel(&self, _handle: &WorkHandle) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn stream_evidence(&self, _handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
+        Err(Self::refusal())
+    }
+}
+
+/// A local arm whose dispatched lane finished and left one evidence reference
+/// — the reconcile lane that produced a candidate while the Actions API was
+/// refusing.
+struct FinishedLocalLane(Vec<EvidenceRef>);
+
+impl ReconcileLanes for FinishedLocalLane {
+    fn reconcile(&self, _live: &[OutstandingDispatch]) -> ReconcileReport {
+        ReconcileReport { readopted: Vec::new(), reclaimed: 0 }
+    }
+}
+
+impl aether_bloomery::ExecutorBackend for FinishedLocalLane {
+    type Error = LocalExecutorError;
+
+    fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
+        Ok(WorkHandle::new(order.nonce.clone()))
+    }
+
+    fn inspect(&self, _handle: &WorkHandle) -> Result<ExecutionStatus, Self::Error> {
+        Ok(ExecutionStatus::Completed { conclusion: Conclusion::Success })
+    }
+
+    fn cancel(&self, _handle: &WorkHandle) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn stream_evidence(&self, _handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
+        Ok(self.0.clone())
+    }
+}
+
+fn local_evidence(nonce: &str) -> EvidenceRef {
+    EvidenceRef {
+        name: format!("evidence-{nonce}-log"),
+        nonce: Nonce(nonce.to_owned()),
+        artifact_id: 1,
+        size_bytes: 10,
+        candidate: None,
+        findings: None,
+        failed_verifiers: VerifyFailureSet::EMPTY,
+        cost: None,
+        calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
+        violating_paths: Vec::new(),
+        surface_request: None,
+        suppression_requests: Vec::new(),
+    }
+}
+
+#[test]
+fn a_rate_limited_arm_does_not_withhold_another_arms_finished_result() {
+    // #5412. From 18:29 the Actions API answered `403 API rate limit exceeded`
+    // to every inspect, once a second for twenty-eight minutes. The cycle
+    // walked one flat handle list, abandoned it on that first fault, and never
+    // reached the local reconcile lane that had finished with a candidate at
+    // 18:34 — the member sat at Reconcile@1 with no dispatch and no fault. The
+    // two arms fail independently, so a fault on one must cost only that one.
+    let workpiece = WorkpieceId("wp-return".to_owned());
+    let scope_revision = Digest::from_bytes([2; 32]);
+    let (snapshot, bloom) = sealed_snapshot(&workpiece, scope_revision);
+    let candidate = Digest::from_bytes([5; 32]);
+
+    let router = RoutingExecutor::new(
+        Arc::new(RateLimitedActions),
+        Arc::new(FinishedLocalLane(vec![local_evidence("n-local")])),
+        vec!["construct.".to_owned()],
+    );
+    let shell = ExecutorShell::new(Arc::new(router));
+    let mut store = store();
+
+    // The verify lane routes to Actions, the construct lane to local, and the
+    // refusing one is inspected first.
+    let mut actions_record = dispatch_record("n-actions", bloom, &workpiece, scope_revision, candidate);
+    actions_record.transformation.command = "verify.clippy".to_owned();
+    let mut local_record = dispatch_record("n-local", bloom, &workpiece, scope_revision, candidate);
+    local_record.transformation.command = "construct.implement".to_owned();
+    let handles = vec![
+        dispatch_and_record(&shell, &mut store, &actions_record, NOW_UNIX_MILLIS).unwrap(),
+        dispatch_and_record(&shell, &mut store, &local_record, NOW_UNIX_MILLIS).unwrap(),
+    ];
+
+    let mut claims = HashMap::new();
+    claims.insert(
+        "n-local".to_owned(),
+        UploadedEvidence {
+            nonce: Nonce("n-local".to_owned()),
+            subject: candidate,
+            verdict: StageVerdict::VerificationPassed,
+            detail: Digest::from_bytes([7; 32]),
+            candidate: None,
+            findings: None,
+            failed_verifiers: VerifyFailureSet::EMPTY,
+            cost: None,
+            calls: None,
+            session_reuse_arm: None,
+            session_reuse_saved_micro_usd: None,
+            peak_resident_bytes: None,
+            violating_paths: Vec::new(),
+            surface_request: None,
+            suppression_requests: Vec::new(),
+        },
+    );
+    let claims = SeededClaims(claims);
+    let mut sink = Collector::default();
+
+    let report = run_intake_cycle(&mut store, &shell, &handles, &claims, None, &mut sink).unwrap();
+
+    assert_eq!(
+        (report.completed, report.admitted, report.refused),
+        (1, 1, 0),
+        "the finished local lane is admitted on the same tick the Actions arm refused",
+    );
+    assert_eq!(
+        report.unobserved,
+        vec![Nonce("n-actions".to_owned())],
+        "and only the refusing arm's handle is reported unobserved, so the sweeps leave it alone",
+    );
+    assert!(report.pending.is_empty(), "an unobserved handle is not pending — it was never asked");
+
+    // The reducer oracle: what got through is the real verdict, not a synthesised one.
     match reduce(&snapshot, &sink.0[0].event, &ResolvedConfigs::default(), &SpendWindow::default()).outcome {
         Outcome::Integrated { bloom: integrated, workpiece: member } => {
             assert_eq!(integrated, bloom);

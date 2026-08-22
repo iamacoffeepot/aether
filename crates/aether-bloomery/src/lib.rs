@@ -178,6 +178,7 @@ pub use metrics::TIMELINE_SPAN_CAP;
 pub use metrics::TimelineSpan;
 pub use metrics::window_label;
 pub use port::AwaitingSurfaceView;
+pub use port::BackendId;
 pub use port::BaseAlertView;
 pub use port::BloomView;
 pub use port::Checkpoint;

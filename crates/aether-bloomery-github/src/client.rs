@@ -32,8 +32,8 @@
 //! [#3460]: https://github.com/iamacoffeepot/aether/issues/3460
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use reqwest::Method as ReqwestMethod;
 use reqwest::blocking::Client as BlockingClient;
@@ -126,6 +126,97 @@ pub struct HttpResponse {
     pub status: u16,
     /// The body text.
     pub body: String,
+    /// The response headers, lowercased names. Carried because GitHub states
+    /// the account's remaining allowance and its reset instant only there
+    /// (#5412) — a refusal's body says "API rate limit exceeded" and nothing
+    /// about when to ask again.
+    pub headers: Vec<(String, String)>,
+}
+
+impl HttpResponse {
+    /// A response carrying no headers — every non-transport construction site.
+    #[must_use]
+    pub fn new(status: u16, body: String) -> Self {
+        Self { status, body, headers: Vec::new() }
+    }
+
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers.iter().find(|(header, _)| header == name).map(|(_, value)| value.as_str())
+    }
+}
+
+/// What one response said about the account's REST allowance.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct RateLimit {
+    /// `X-RateLimit-Remaining` — calls left in the current window.
+    pub remaining: Option<u32>,
+    /// `X-RateLimit-Reset` — Unix seconds at which the window refills.
+    pub reset_unix_secs: Option<u64>,
+}
+
+impl RateLimit {
+    fn of(response: &HttpResponse) -> Self {
+        Self {
+            remaining: response.header("x-ratelimit-remaining").and_then(|value| value.parse().ok()),
+            reset_unix_secs: response.header("x-ratelimit-reset").and_then(|value| value.parse().ok()),
+        }
+    }
+
+    fn is_exhausted(self) -> bool {
+        self.remaining == Some(0)
+    }
+}
+
+/// The statuses GitHub answers an exhausted allowance with: a secondary-limit
+/// or abuse refusal is `403`, a primary limit under the newer surface is `429`.
+fn is_refusal(status: u16) -> bool {
+    status == 403 || status == 429
+}
+
+/// The first backoff window for a refusal that named no reset instant.
+const BACKOFF_BASE: Duration = Duration::from_secs(30);
+
+/// The ceiling on any withholding window. GitHub's primary window is an hour,
+/// so an hour and a minute covers the longest honest reset plus clock skew, and
+/// caps a server that reports a nonsense reset far in the future.
+const MAX_WITHHOLD: Duration = Duration::from_mins(61);
+
+/// How long to stop issuing requests after one response, or `None` to carry on.
+///
+/// A refusal that names an exhausted window is waited out to the instant the
+/// window refills: retrying inside it cannot succeed, and each retry is itself
+/// a request the next window will have to pay for. A refusal that names no
+/// window backs off exponentially from [`BACKOFF_BASE`], because the only
+/// honest read of "refused, reason unstated" is "ask less often".
+///
+/// Pure over its inputs so the policy is testable without a clock or a network.
+fn withhold_for(status: u16, rate: RateLimit, now_unix_secs: u64, consecutive_refusals: u32) -> Option<Duration> {
+    if !is_refusal(status) {
+        return None;
+    }
+
+    let window = match (rate.is_exhausted(), rate.reset_unix_secs) {
+        // The extra second is the boundary: a reset at exactly `now` has not
+        // happened yet from the server's side of the clock.
+        (true, Some(reset)) => Duration::from_secs(reset.saturating_sub(now_unix_secs).saturating_add(1)),
+        _ => BACKOFF_BASE.saturating_mul(1_u32 << consecutive_refusals.min(7)),
+    };
+    Some(window.min(MAX_WITHHOLD))
+}
+
+/// The client's live decision about whether to spend an allowance it has
+/// already been told is gone.
+#[derive(Default)]
+struct Budget {
+    /// The instant before which no request is issued.
+    withhold_until: Option<Instant>,
+    /// Consecutive refusals, which is what the unnamed-window backoff doubles on.
+    consecutive_refusals: u32,
+}
+
+/// Unix seconds now, or 0 if the host clock is before the epoch.
+fn unix_secs_now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs())
 }
 
 /// The transport seam [`ReqwestGithub`] shapes requests against. The real
@@ -261,8 +352,13 @@ impl HttpTransport for ReqwestTransport {
         }
         let response = builder.send().map_err(|error| GithubError::Transport(error.to_string()))?;
         let status = response.status().as_u16();
+        let headers = response
+            .headers()
+            .iter()
+            .map(|(name, value)| (name.as_str().to_ascii_lowercase(), value.to_str().unwrap_or_default().to_owned()))
+            .collect();
         let body = response.text().map_err(|error| GithubError::Transport(error.to_string()))?;
-        Ok(HttpResponse { status, body })
+        Ok(HttpResponse { status, body, headers })
     }
 }
 
@@ -273,6 +369,11 @@ pub struct ReqwestGithub<T: HttpTransport = ReqwestTransport> {
     token_source: Arc<dyn TokenSource>,
     api_base: String,
     repo_path: String,
+    // What this client has been told about its remaining allowance (#5412).
+    // Behind a `Mutex` because the client is held in a capability's runtime
+    // state behind an `Arc` and driven from more than one reactor's thread; the
+    // section it guards is a comparison and two field writes.
+    budget: Mutex<Budget>,
 }
 
 /// The bound on how many list pages `find_*` walks — a shadow repo stays far
@@ -290,7 +391,13 @@ impl<T: HttpTransport> ReqwestGithub<T> {
         api_base: impl Into<String>,
         repo_path: impl Into<String>,
     ) -> Self {
-        Self { transport, token_source, api_base: api_base.into(), repo_path: repo_path.into() }
+        Self {
+            transport,
+            token_source,
+            api_base: api_base.into(),
+            repo_path: repo_path.into(),
+            budget: Mutex::new(Budget::default()),
+        }
     }
 
     fn issues_url(&self) -> String {
@@ -302,9 +409,71 @@ impl<T: HttpTransport> ReqwestGithub<T> {
     // through here so a rotating (App-minted) token is picked up per request
     // and the transport stays token-agnostic.
     fn dispatch(&self, method: Method, url: String, body: Option<String>) -> Result<HttpResponse, GithubError> {
+        self.withheld()?;
+
         let token = self.token_source.token()?;
         let headers = vec![("Authorization".to_owned(), format!("Bearer {token}"))];
-        self.transport.execute(HttpRequest { method, url, headers, body })
+        let response = self.transport.execute(HttpRequest { method, url, headers, body })?;
+        self.observe(&response);
+        Ok(response)
+    }
+
+    /// Refuse without a network hop while the allowance is known to be spent.
+    ///
+    /// The refusal echoes the status GitHub already gave rather than inventing
+    /// a variant: nothing about a caller's handling should change because the
+    /// refusal was remembered instead of re-fetched. What changes is the cost —
+    /// a poll loop that re-asked every tick spent the next window's allowance
+    /// on being told the current one was empty, which is how one exhausted
+    /// account produced twenty-eight minutes of once-a-second refusals.
+    fn withheld(&self) -> Result<(), GithubError> {
+        let budget = self.lock();
+        let Some(until) = budget.withhold_until else {
+            return Ok(());
+        };
+        let remaining = until.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(());
+        }
+        drop(budget);
+
+        Err(GithubError::Status {
+            status: 403,
+            body: format!(
+                "API rate limit exceeded; withholding requests for a further {}s rather than spending the next                  window on refusals",
+                remaining.as_secs()
+            ),
+        })
+    }
+
+    /// Fold one response's rate-limit headers into the budget.
+    fn observe(&self, response: &HttpResponse) {
+        let rate = RateLimit::of(response);
+        let mut budget = self.lock();
+        let refusals = budget.consecutive_refusals;
+
+        let Some(window) = withhold_for(response.status, rate, unix_secs_now(), refusals) else {
+            budget.consecutive_refusals = 0;
+            budget.withhold_until = None;
+            return;
+        };
+
+        budget.consecutive_refusals = refusals.saturating_add(1);
+        budget.withhold_until = Some(Instant::now() + window);
+        drop(budget);
+
+        tracing::warn!(
+            target: "aether_bloomery_github::client",
+            status = response.status,
+            remaining = ?rate.remaining,
+            reset_unix_secs = ?rate.reset_unix_secs,
+            withhold_secs = window.as_secs(),
+            "github refused on rate limit; withholding requests until the window refills",
+        );
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Budget> {
+        self.budget.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn request(&self, method: Method, url: String, body: Option<String>) -> Result<HttpResponse, GithubError> {
@@ -1141,9 +1310,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        CommissionProjectionApi, GitDataApi, GitDataError, GithubApi, GithubError, HttpRequest, HttpResponse,
-        HttpTransport, IssueStateApi, MergeResult, Method, NewComment, NewIssue, NewPullRequest, PullRequestApi,
-        ReqwestGithub, StaticTokenSource, TokenSource,
+        BACKOFF_BASE, CommissionProjectionApi, GitDataApi, GitDataError, GithubApi, GithubError, HttpRequest,
+        HttpResponse, HttpTransport, IssueStateApi, MAX_WITHHOLD, MergeResult, Method, NewComment, NewIssue,
+        NewPullRequest, PullRequestApi, RateLimit, ReqwestGithub, StaticTokenSource, TokenSource, withhold_for,
     };
 
     // Records the last request and replays a queued response — the seam that
@@ -1156,7 +1325,7 @@ mod tests {
 
     impl RecordingTransport {
         fn new(status: u16, body: &str) -> Self {
-            Self { last: RefCell::new(None), response: HttpResponse { status, body: body.to_owned() } }
+            Self { last: RefCell::new(None), response: HttpResponse::new(status, body.to_owned()) }
         }
     }
 
@@ -1442,12 +1611,11 @@ mod tests {
         // populates the collision evidence; without it a production fold
         // dispatches a reconcile order that cannot see the member's work.
         let transport = QueuedTransport::new(vec![
-            HttpResponse { status: 409, body: r#"{"message":"Merge conflict"}"#.to_owned() },
-            HttpResponse {
-                status: 200,
-                body: r#"{"files":[{"filename":"crates/overlap.rs","patch":"@@ -1 +1,2 @@\n keep\n+added"}]}"#
-                    .to_owned(),
-            },
+            HttpResponse::new(409, r#"{"message":"Merge conflict"}"#.to_owned()),
+            HttpResponse::new(
+                200,
+                r#"{"files":[{"filename":"crates/overlap.rs","patch":"@@ -1 +1,2 @@\n keep\n+added"}]}"#.to_owned(),
+            ),
         ]);
         let github = ReqwestGithub::with_transport(
             transport,
@@ -1911,5 +2079,104 @@ mod tests {
     fn find_pull_request_for_head_reports_none_when_the_branch_has_never_been_proposed() {
         let github = client(200, "[]");
         assert_eq!(github.find_pull_request_for_head("bloomery/land/abcd").expect("2xx decodes"), None);
+    }
+
+    /// A transport that counts every call and answers a fixed refusal — the
+    /// exhausted-allowance surface the poll loop kept re-asking.
+    struct CountingTransport {
+        calls: RefCell<u32>,
+        response: HttpResponse,
+    }
+
+    impl CountingTransport {
+        fn new(response: HttpResponse) -> Self {
+            Self { calls: RefCell::new(0), response }
+        }
+    }
+
+    impl HttpTransport for CountingTransport {
+        fn execute(&self, _request: HttpRequest) -> Result<HttpResponse, GithubError> {
+            *self.calls.borrow_mut() += 1;
+            Ok(self.response.clone())
+        }
+    }
+
+    fn exhausted(reset_unix_secs: u64) -> HttpResponse {
+        HttpResponse {
+            status: 403,
+            body: r#"{"message":"API rate limit exceeded"}"#.to_owned(),
+            headers: vec![
+                ("x-ratelimit-remaining".to_owned(), "0".to_owned()),
+                ("x-ratelimit-reset".to_owned(), reset_unix_secs.to_string()),
+            ],
+        }
+    }
+
+    // Tripwire: a refusal that names an exhausted window is waited out to the
+    // instant that window refills, not retried inside it. Every retry inside
+    // the window is a request the *next* window pays for, which is how one
+    // spent account produced twenty-eight minutes of once-a-second refusals
+    // (#5412).
+    #[test]
+    fn an_exhausted_window_is_waited_out_to_its_reset() {
+        let rate = RateLimit { remaining: Some(0), reset_unix_secs: Some(1_700_000_900) };
+
+        let window = withhold_for(403, rate, 1_700_000_000, 0).expect("an exhausted window withholds");
+
+        assert_eq!(window.as_secs(), 901, "to the reset instant, plus the boundary second");
+        assert_eq!(
+            withhold_for(429, rate, 1_700_000_000, 0),
+            Some(window),
+            "429 is the same refusal under the newer surface",
+        );
+    }
+
+    // A refusal that states no window is still a refusal; the only honest read
+    // of it is to ask less often, doubling until the ceiling.
+    #[test]
+    fn an_unnamed_window_backs_off_exponentially_under_a_ceiling() {
+        let unstated = RateLimit::default();
+
+        assert_eq!(withhold_for(403, unstated, 0, 0), Some(BACKOFF_BASE));
+        assert_eq!(withhold_for(403, unstated, 0, 1), Some(BACKOFF_BASE * 2));
+        assert_eq!(withhold_for(403, unstated, 0, 4), Some(BACKOFF_BASE * 16));
+        assert_eq!(withhold_for(403, unstated, 0, 30), Some(MAX_WITHHOLD), "and never past the ceiling");
+    }
+
+    #[test]
+    fn a_reset_far_in_the_future_is_capped() {
+        let nonsense = RateLimit { remaining: Some(0), reset_unix_secs: Some(u64::MAX) };
+
+        assert_eq!(withhold_for(403, nonsense, 0, 0), Some(MAX_WITHHOLD));
+    }
+
+    #[test]
+    fn a_served_response_clears_the_withholding() {
+        assert_eq!(withhold_for(200, RateLimit { remaining: Some(4_999), reset_unix_secs: Some(9) }, 0, 3), None);
+        assert_eq!(withhold_for(404, RateLimit::default(), 0, 3), None, "a miss is not a refusal");
+    }
+
+    // Tripwire: the second call inside the window never reaches the transport.
+    // Remembering the refusal is the whole point — a client that re-asks has
+    // only moved the sleep, and the request it spends is the one the next
+    // window will not have.
+    #[test]
+    fn a_call_inside_the_withheld_window_never_reaches_the_transport() {
+        let github = ReqwestGithub::with_transport(
+            CountingTransport::new(exhausted(u64::from(u32::MAX))),
+            Arc::new(StaticTokenSource::new("t0ken".to_owned())),
+            "https://api.github.com",
+            "octo/shadow",
+        );
+
+        let first = github.find_comment(7, "marker").expect_err("the allowance is spent");
+        let second = github.find_comment(7, "marker").expect_err("and still spent");
+
+        assert_eq!(*github.transport.calls.borrow(), 1, "only the first call is spent on being refused");
+        assert!(matches!(first, GithubError::Status { status: 403, .. }), "the refusal is GitHub's own: {first}");
+        assert!(
+            matches!(&second, GithubError::Status { status: 403, body } if body.contains("withholding")),
+            "and the remembered one says so: {second}",
+        );
     }
 }

@@ -22,11 +22,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use aether_bloomery::{EvidenceRef, ExecutionStatus, ExecutorBackend, ObservedLaneWrites, WorkHandle, WorkOrder};
+use aether_bloomery::{
+    BackendId, EvidenceRef, ExecutionStatus, ExecutorBackend, ObservedLaneWrites, WorkHandle, WorkOrder,
+};
 use aether_bloomery_github::ExecutorError;
 
-use super::ExecutorPortError;
 use super::reconcile::{LaneOccupancy, LocalLane, OutstandingDispatch, ReconcileLanes, ReconcileReport};
+use super::{ACTIONS_BACKEND, ExecutorPortError, LOCAL_BACKEND};
 
 /// Which backend an order routed to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -137,6 +139,17 @@ impl ExecutorBackend for RoutingExecutor {
     /// router does not ask it.
     fn observe_writes(&self) -> Vec<ObservedLaneWrites> {
         self.local.observe_writes()
+    }
+
+    /// The arm `inspect` / `cancel` / `stream_evidence` would resolve this
+    /// handle against, read from the same routing record they read (#5412), so
+    /// a caller grouping handles by arm groups them by where they will actually
+    /// go — fallback included.
+    fn backend_for(&self, handle: &WorkHandle) -> BackendId {
+        match self.lane_of(&handle.nonce.0) {
+            Lane::Actions => ACTIONS_BACKEND,
+            Lane::Local => LOCAL_BACKEND,
+        }
     }
 }
 
