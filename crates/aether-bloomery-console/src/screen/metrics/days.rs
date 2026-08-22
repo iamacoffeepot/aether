@@ -15,6 +15,7 @@ use crate::store::{ResourceKey, Store};
 
 use super::bucket::format_duration;
 use super::cost::format_micro_usd;
+use super::sparkline::dated;
 
 const HINTS: &[KeyHint] = &[
     KeyHint { keys: "Esc", action: "back" },
@@ -68,14 +69,21 @@ impl Days {
     }
 }
 
+fn dated_window(days: &[MetricDay]) -> Vec<&MetricDay> {
+    let dated = dated(days);
+    let skip = dated.len().saturating_sub(14);
+    dated.into_iter().skip(skip).collect()
+}
+
+fn spend_bar(day: &MetricDay) -> u64 {
+    day.spend_micro_usd
+}
+
 fn render_spend(frame: &mut Frame<'_>, area: Rect, days: &[MetricDay], ceiling: Option<u64>) {
-    let window: Vec<&MetricDay> = days.iter().rev().take(14).rev().collect();
+    let window = dated_window(days);
     let labels: Vec<String> = window.iter().map(|day| bar_label(day)).collect();
-    let data: Vec<(&str, u64)> = labels
-        .iter()
-        .zip(window.iter())
-        .map(|(label, day)| (label.as_str(), day.spend_micro_usd.max(day.dispatches)))
-        .collect();
+    let data: Vec<(&str, u64)> =
+        labels.iter().zip(window.iter()).map(|(label, day)| (label.as_str(), spend_bar(day))).collect();
     let title =
         ceiling.map_or_else(|| "SPEND".to_owned(), |ceiling| format!("SPEND  ceiling {}", format_micro_usd(ceiling)));
     let chart = BarChart::default()
@@ -90,7 +98,7 @@ fn render_spend(frame: &mut Frame<'_>, area: Rect, days: &[MetricDay], ceiling: 
 }
 
 fn render_landed(frame: &mut Frame<'_>, area: Rect, days: &[MetricDay]) {
-    let window: Vec<&MetricDay> = days.iter().rev().take(14).rev().collect();
+    let window = dated_window(days);
     let labels: Vec<String> = window.iter().map(|day| bar_label(day)).collect();
     let data: Vec<(&str, u64)> =
         labels.iter().zip(window.iter()).map(|(label, day)| (label.as_str(), day.landed)).collect();
@@ -110,8 +118,9 @@ fn render_landed(frame: &mut Frame<'_>, area: Rect, days: &[MetricDay]) {
 }
 
 fn render_cycle(frame: &mut Frame<'_>, area: Rect, days: &[MetricDay]) {
+    let window = dated_window(days);
     let mut line = String::from("cycle  ");
-    for day in days.iter().rev().take(14).rev() {
+    for day in &window {
         match day.cycle_time_millis {
             Some(millis) => {
                 let _ = write!(line, "{} ", format_duration(millis));
@@ -122,7 +131,7 @@ fn render_cycle(frame: &mut Frame<'_>, area: Rect, days: &[MetricDay]) {
             line.push_str("Q ");
         }
     }
-    if days.is_empty() {
+    if window.is_empty() {
         line.push_str("(no days)");
     }
     frame.render_widget(
@@ -150,7 +159,8 @@ fn bar_label(day: &MetricDay) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::Days;
+    use super::{Days, dated_window, spend_bar};
+    use crate::dto::MetricDay;
     use crate::keys::{Outcome, assert_footer_honest};
     use crate::nav::Nav;
     use crate::shell::Shell;
@@ -161,5 +171,30 @@ mod tests {
         assert_footer_honest(Days::key_hints(), |code| {
             Shell::probe(Nav::days()).handle_key(KeyEvent::from(code)) != Outcome::Ignored
         });
+    }
+
+    #[test]
+    fn the_spend_chart_never_substitutes_a_dispatch_count_for_dollars() {
+        // The plausible bug: a bar chart titled SPEND rendering a count of
+        // attempts as a dollar figure.
+        let days = [
+            MetricDay {
+                label: "bloomery/daily/2026-08-19".into(),
+                dispatches: 41,
+                spend_micro_usd: 0,
+                ..MetricDay::default()
+            },
+            MetricDay {
+                label: "reconstructed".into(),
+                reconstructed: true,
+                dispatches: 9,
+                spend_micro_usd: 100,
+                ..MetricDay::default()
+            },
+        ];
+        let window = dated_window(&days);
+        assert_eq!(window.len(), 1);
+        assert_eq!(window[0].label, "bloomery/daily/2026-08-19");
+        assert_eq!(spend_bar(window[0]), 0);
     }
 }

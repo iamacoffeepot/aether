@@ -613,8 +613,10 @@ pub struct MetricsSummary {
     pub active_blooms: u64,
 }
 
-/// One `GET /metrics/days` row. Extra series fields default so a thinner
-/// coordinator still decodes.
+/// One `GET /metrics/days` row. Extra series columns are served by the
+/// coordinator; the defaults cover a coordinator that predates them.
+/// `reconstructed` marks the undated bucket, which is not a civil day and
+/// must not be windowed with the dated ones.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct MetricDay {
     #[serde(default)]
@@ -631,6 +633,8 @@ pub struct MetricDay {
     pub cycle_time_millis: Option<u64>,
     #[serde(default)]
     pub quiesced: bool,
+    #[serde(default)]
+    pub reconstructed: bool,
 }
 
 /// One per-member stage span on `GET /metrics/blooms/{id}/timeline`.
@@ -1068,6 +1072,15 @@ mod tests {
         assert_eq!(day.landed, 0);
         assert!(day.cycle_time_millis.is_none());
         assert!(!day.quiesced);
+        assert!(!day.reconstructed);
+
+        let reconstructed: MetricDay = serde_json::from_value(json!({
+            "label": "reconstructed",
+            "dispatches": 1,
+            "reconstructed": true
+        }))
+        .expect("reconstructed day");
+        assert!(reconstructed.reconstructed);
 
         let seat: MetricsSeat = serde_json::from_value(json!({
             "agent": {"harness": "Claude", "model": "opus", "effort": "High"},
