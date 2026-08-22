@@ -142,7 +142,7 @@ pub(super) fn build_dir(inherited: Option<OsString>) -> Option<OsString> {
 /// `CARGO_TARGET_DIR` is a host-supplied location rather than a capability's
 /// configuration: the coordinator hands it to this process, and this passes the
 /// same value on.
-#[allow(clippy::disallowed_methods, reason = "the lane's own build directory is handed down by the host")]
+#[allow(clippy::disallowed_methods)] // the lane's own build directory is handed down by the host, not cap config.
 pub(super) fn export_build_dir(command: &mut Command) {
     if let Some(dir) = build_dir(env::var_os("CARGO_TARGET_DIR")) {
         command.env("CARGO_TARGET_DIR", dir);

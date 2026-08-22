@@ -129,9 +129,10 @@ const TRANSCRIPT_FILE: &str = "transcript.jsonl";
 /// under the same rules: metadata only, never touched by the coordinator.
 const HEARTBEAT_FILE: &str = "heartbeat";
 
-/// The file a dispatch records its lane slot in, inside its own evidence
-/// directory — the durable half of the slot assignment, read back by boot
-/// reconciliation (see [`recorded_slot`]).
+/// The file a dispatch records its lane in, inside its own evidence directory:
+/// the slot it borrowed and the session whose tree it is working in — the
+/// durable half of both, read back by boot reconciliation (see
+/// [`recorded_lane`]).
 const SLOT_RECORD: &str = "slot";
 
 /// One tracked run: the spawned child, the lane slot it holds, where its
@@ -2534,7 +2535,7 @@ fn usable_target_base(configured: &str, scratch_root: &Path) -> PathBuf {
 ///
 /// Read off the path rather than the filesystem: the checkouts a slot will use
 /// are named by construction (`slot-<index>` under the root, see
-/// [`LocalExecutor::slot_dir`]) and most of them do not exist yet at boot, so a
+/// [`LocalExecutor::checkout_dir`]) and most of them do not exist yet at boot, so a
 /// check that asked the disk would pass and then be wrong on the first dispatch.
 /// Both sides are resolved against the cwd first, since the scratch root ships
 /// relative and a deployment states its target volume absolute — comparing the
