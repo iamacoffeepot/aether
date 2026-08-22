@@ -6,11 +6,12 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Modifier;
-use ratatui::widgets::{BarChart, Block, Borders, Paragraph};
+use ratatui::widgets::{BarChart, Paragraph};
 
 use crate::dto::{MetricDay, SpendQuiesce};
 use crate::keys::{KeyHint, Outcome};
 use crate::palette::{self, Role};
+use crate::shell::chrome::pane_block;
 use crate::store::{ResourceKey, Store};
 
 use super::bucket::format_duration;
@@ -93,10 +94,6 @@ fn spend_bar(day: &MetricDay) -> u64 {
     day.spend_micro_usd
 }
 
-fn chart_block(title: impl Into<String>) -> Block<'static> {
-    Block::default().borders(Borders::ALL).border_style(palette::border()).style(palette::body()).title(title.into())
-}
-
 fn render_spend(frame: &mut Frame<'_>, area: Rect, days: &[MetricDay], ceiling: Option<u64>) {
     let window = dated_window(days, visible_span(area.width.saturating_sub(2), BAR_WIDTH, BAR_GAP));
     let title =
@@ -104,7 +101,7 @@ fn render_spend(frame: &mut Frame<'_>, area: Rect, days: &[MetricDay], ceiling: 
     if window.is_empty() || window.iter().all(|day| spend_bar(day) == 0) {
         frame.render_widget(
             Paragraph::new("no priced spend in this window")
-                .block(chart_block(title))
+                .block(pane_block(title, false))
                 .style(palette::body().add_modifier(Modifier::DIM)),
             area,
         );
@@ -114,7 +111,7 @@ fn render_spend(frame: &mut Frame<'_>, area: Rect, days: &[MetricDay], ceiling: 
     let data: Vec<(&str, u64)> =
         labels.iter().zip(window.iter()).map(|(label, day)| (label.as_str(), spend_bar(day))).collect();
     let chart = BarChart::default()
-        .block(chart_block(title))
+        .block(pane_block(title, false))
         .data(&data)
         .bar_width(BAR_WIDTH)
         .bar_gap(BAR_GAP)
@@ -127,7 +124,7 @@ fn render_landed(frame: &mut Frame<'_>, area: Rect, days: &[MetricDay]) {
     if window.is_empty() || window.iter().all(|day| day.landed == 0) {
         frame.render_widget(
             Paragraph::new("no landings recorded in this window")
-                .block(chart_block("LANDED".to_owned()))
+                .block(pane_block("LANDED", false))
                 .style(palette::body().add_modifier(Modifier::DIM)),
             area,
         );
@@ -137,7 +134,7 @@ fn render_landed(frame: &mut Frame<'_>, area: Rect, days: &[MetricDay]) {
     let data: Vec<(&str, u64)> =
         labels.iter().zip(window.iter()).map(|(label, day)| (label.as_str(), day.landed)).collect();
     let chart = BarChart::default()
-        .block(chart_block("LANDED".to_owned()))
+        .block(pane_block("LANDED", false))
         .data(&data)
         .bar_width(BAR_WIDTH)
         .bar_gap(BAR_GAP)
@@ -165,9 +162,7 @@ fn render_cycle(frame: &mut Frame<'_>, area: Rect, days: &[MetricDay]) {
         line
     };
     frame.render_widget(
-        Paragraph::new(line)
-            .block(chart_block("CYCLE TIME".to_owned()))
-            .style(palette::body().add_modifier(Modifier::DIM)),
+        Paragraph::new(line).block(pane_block("CYCLE TIME", false)).style(palette::body().add_modifier(Modifier::DIM)),
         area,
     );
 }
@@ -193,11 +188,13 @@ mod tests {
     use crate::dto::MetricDay;
     use crate::keys::{Outcome, assert_footer_honest};
     use crate::nav::Nav;
+    use crate::palette::{Role, depth};
     use crate::shell::Shell;
     use crate::store::Store;
     use crossterm::event::KeyEvent;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
     use std::time::Duration;
 
     fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
@@ -298,5 +295,56 @@ mod tests {
         }]);
         assert!(text.contains("no cycle time recorded"), "{text}");
         assert!(!text.contains("· ·"), "{text}");
+    }
+
+    #[test]
+    fn the_days_charts_wear_the_shared_pane_chrome() {
+        // Tripwire: the three charts are the copies that drift — the next
+        // change to pane_block must reach them, and a hand-built block would
+        // keep whatever it was born with.
+        let mut shell = Shell::probe(Nav::days());
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        for title in ["SPEND", "LANDED", "CYCLE TIME"] {
+            let (x, y) = title_origin(buffer, title);
+            let mut corner_x = x;
+            while corner_x > buffer.area().x && buffer[(corner_x, y)].symbol() != "┌" {
+                corner_x -= 1;
+            }
+            assert_eq!(buffer[(corner_x, y)].symbol(), "┌", "thin corner missing for {title}");
+            assert_eq!(buffer[(corner_x, y)].fg, Role::Frames.color(depth()), "{title} border is not Frames");
+        }
+        assert!(
+            buffer.content().iter().all(|cell| cell.symbol() != "┏"),
+            "no chart is a focus stop; a thick corner means a chart left pane_block"
+        );
+    }
+
+    fn title_origin(buffer: &Buffer, title: &str) -> (u16, u16) {
+        let area = buffer.area();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                if title_starts_at(buffer, x, y, title) {
+                    return (x, y);
+                }
+            }
+        }
+        panic!("title {title:?} not found");
+    }
+
+    fn title_starts_at(buffer: &Buffer, x: u16, y: u16, title: &str) -> bool {
+        let area = buffer.area();
+        let mut cursor = x;
+        for ch in title.chars() {
+            if cursor >= area.x + area.width {
+                return false;
+            }
+            if !buffer[(cursor, y)].symbol().starts_with(ch) {
+                return false;
+            }
+            cursor = cursor.saturating_add(1);
+        }
+        true
     }
 }

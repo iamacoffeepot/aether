@@ -1,4 +1,4 @@
-//! Application chrome: header, status, needs-you band, footer.
+//! Application chrome: header, status, needs-you band, footer, pane frames.
 //!
 //! The header and footer are shell chrome. Needs-you paints the merged
 //! queue; quiet paints the status, today, and rest-count lines.
@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use crate::dto::{SpendQuiesce, ViewDocument};
 use crate::keys::{KeyHint, footer_line, footer_row};
@@ -189,6 +189,27 @@ fn severity_role(severity: Severity) -> Role {
         Severity::Attention => Role::Attention,
         Severity::Loud => Role::Loud,
     }
+}
+
+/// Bordered, titled pane chrome. The focused pane is the only heavy stroke on
+/// screen, so the ring's colour and its weight are one cue; the stroke is one
+/// cell wide in both styles, so no pane geometry moves.
+#[must_use]
+pub fn pane_block(title: impl Into<String>, focused: bool) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(if focused {
+            BorderType::Thick
+        } else {
+            BorderType::Plain
+        })
+        .title(Line::from(title.into()))
+        .border_style(if focused {
+            palette::border_focused()
+        } else {
+            palette::border()
+        })
+        .style(palette::body())
 }
 
 #[must_use]

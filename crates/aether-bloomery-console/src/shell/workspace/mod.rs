@@ -9,7 +9,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::widgets::Paragraph;
 
-use super::chrome::{self, BandRow};
+use super::chrome::{self, BandRow, pane_block};
 use crate::cursor::Cursor;
 use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
@@ -19,7 +19,6 @@ use crate::store::{ResourceKey, Store};
 use crate::warroom::{self, DismissKey, Focus, NeedsYouRow};
 
 pub use pane::PaneId;
-use pane::pane_block;
 
 const TAB_HINT: KeyHint = KeyHint { keys: "Tab", action: "pane" };
 const ENTER_HINT: KeyHint = KeyHint { keys: "Enter", action: "jump" };

@@ -1312,6 +1312,24 @@ mod tests {
     }
 
     #[test]
+    fn the_focused_pane_border_is_the_thick_stroke() {
+        // Names the bug: a focus ring that changes only colour is invisible at
+        // a distance, which is the whole point of the change.
+        let mut shell = Shell::showing(&ViewDocument::default(), None);
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        assert_eq!(title_border_symbol(buffer, "board"), "┏");
+        assert_eq!(title_border_symbol(buffer, "needs you"), "┌");
+
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Tab)), Outcome::Handled);
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        assert_eq!(title_border_symbol(buffer, "board"), "┌");
+        assert_eq!(title_border_symbol(buffer, "needs you"), "┏");
+    }
+
+    #[test]
     fn journal_filter_esc_leaves_edit_not_the_frame() {
         // The plausible bug: Esc is taken by the shell before the journal, so
         // a filter edit cannot be cancelled without popping the frame.
@@ -1391,6 +1409,20 @@ mod tests {
                 }
                 let border_x = x.saturating_sub(1);
                 return role_of(buffer[(border_x, y)].fg);
+            }
+        }
+        panic!("title {title:?} not found");
+    }
+
+    fn title_border_symbol(buffer: &Buffer, title: &str) -> String {
+        let area = buffer.area();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                if !title_starts_at(buffer, x, y, title) {
+                    continue;
+                }
+                let border_x = x.saturating_sub(1);
+                return buffer[(border_x, y)].symbol().to_owned();
             }
         }
         panic!("title {title:?} not found");
