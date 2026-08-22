@@ -479,6 +479,15 @@ pub trait StoreBackend: Send {
         bloom: &[u8],
         workpiece: &str,
     ) -> rusqlite::Result<Option<(String, u64, Option<u64>)>>;
+    /// The member of `bloom` already holding `session_id`, when one does
+    /// (#5427).
+    ///
+    /// A session belongs to exactly one member. An edge resume hands a
+    /// dependent the predecessor's conversation to read, and the lap forks it so
+    /// what the dependent deposits is its own; a deposit that collides anyway
+    /// means the fork did not happen, and recording it would give two members
+    /// one thread — each later lap of either resuming the other's history.
+    fn construct_session_holder(&mut self, bloom: &[u8], session_id: &str) -> rusqlite::Result<Option<String>>;
     /// Record the construct session at an explicit unix-seconds deposit time —
     /// the clock the warmth gate compares.
     fn record_construct_session_at(
@@ -1621,6 +1630,14 @@ impl StoreBackend for SqliteStore {
             ],
         )?;
         Ok(())
+    }
+
+    fn construct_session_holder(&mut self, bloom: &[u8], session_id: &str) -> rusqlite::Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT workpiece FROM construct_session WHERE bloom = ?1 AND session_id = ?2 LIMIT 1")?;
+        let mut rows = stmt.query_map(rusqlite::params![bloom, session_id], |row| row.get::<_, String>(0))?;
+        rows.next().transpose()
     }
 
     fn lookup_construct_session(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<(String, u64)>> {

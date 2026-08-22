@@ -1019,6 +1019,28 @@ impl LocalExecutor {
                     if stage != StageId::Construct {
                         return Ok(());
                     }
+                    // One session, one member (#5427). An edge resume reads the
+                    // predecessor's conversation and forks it, so what comes
+                    // back is this member's own handle; a handle another member
+                    // already holds means the fork did not happen, and filing
+                    // it would leave two members resuming one thread — the
+                    // shape dispatch-2318 and dispatch-2321 landed in, where
+                    // the second construct opened carrying the first's whole
+                    // history.
+                    if let Some(holder) = store
+                        .construct_session_holder(&order.bloom, &session_id)?
+                        .filter(|held| *held != order.workpiece)
+                    {
+                        tracing::warn!(
+                            nonce,
+                            workpiece = %order.workpiece,
+                            holder = %holder,
+                            session = %session_id,
+                            "local executor backend: this session already belongs to another member; \
+                             not filing it, so the two do not resume one conversation",
+                        );
+                        return Ok(());
+                    }
                     let deposited_unix =
                         self.sessions.as_ref().map_or_else(unix_now_secs, super::session_reuse::SessionReuse::unix_now);
                     store.record_construct_session_at(

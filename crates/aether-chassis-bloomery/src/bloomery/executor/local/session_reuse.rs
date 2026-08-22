@@ -8,7 +8,22 @@
 //! - A judging lap never resumes a building thread (`pool_task` puts the lane
 //!   command ahead of the description; the commands are distinct constants).
 //!
-//! First laps of a thread are fresh by definition. Completed actuals still
+//! A first lap of a thread is fresh, with one exception, and only one: a
+//! dependent construct offered the journaled session of a predecessor it
+//! declares an edge to (#5178), which forks that conversation so the dependent
+//! records an id of its own.
+//!
+//! There used to be a second route, and it was not an edge at all (#5427). The
+//! pool kept the last builder session deposited *at each slot path* and handed
+//! it to any cold construct that landed in that slot with a matching model and
+//! effort — no workpiece check, no declared dependency. Two unrelated members
+//! dispatched into one slot six minutes apart therefore shared a conversation:
+//! the second opened carrying the first's whole history (188k of context
+//! against 79k) and then deposited the first's session id as its own. The slot
+//! path was never a member identity, and with the checkout keyed to the
+//! workpiece (#5425) it is not even a stable directory for one.
+//!
+//! Completed actuals still
 //! fold into a durable (model, effort, family) calibration cell so a later
 //! change can read it; the acquire path no longer consults it. Each lap's
 //! evidence stamps the sealed-table price of the observed calls beside the
@@ -257,8 +272,6 @@ struct ReuseState {
     last_context: HashMap<SessionKey, u64>,
     /// Slot path the last deposit for this key came from.
     slot: HashMap<SessionKey, String>,
-    /// Last builder key deposited in this slot path — the edge-affinity handle.
-    builder_at_slot: HashMap<String, SessionKey>,
 }
 
 impl SessionReuse {
@@ -320,13 +333,10 @@ impl SessionReuse {
 
     fn restore_snapshot(&self, rows: Vec<(SessionKey, u32, u64, String, bool)>) {
         let mut state = lock(&self.state);
-        for (key, deposit_count, context_tokens, slot_path, is_builder) in rows {
+        for (key, deposit_count, context_tokens, slot_path, _is_builder) in rows {
             state.failures.insert(key.clone(), deposit_count);
             state.last_context.insert(key.clone(), context_tokens);
-            state.slot.insert(key.clone(), slot_path.clone());
-            if is_builder {
-                state.builder_at_slot.insert(slot_path, key);
-            }
+            state.slot.insert(key, slot_path);
         }
     }
 
@@ -398,7 +408,11 @@ impl SessionReuse {
         };
         let head_hash = self.head_hash_for(request.worktree);
         let slot_path = canonical_slot(request.worktree);
-        let (key, edge) = self.acquire_key(request, &own, &slot_path);
+        // The key is the lap's own and nothing else (#5427). A thread is
+        // (workpiece × role), so the only session this lap may continue is the
+        // one its own thread deposited; a declared-edge inheritance is decided
+        // upstream against the member graph, not guessed at from a directory.
+        let key = own.clone();
 
         let (failures, deposited) = {
             let state = lock(&self.state);
@@ -451,7 +465,7 @@ impl SessionReuse {
                     key,
                     head_hash,
                     slot_path,
-                    edge,
+                    edge: false,
                     is_builder,
                 }
             }
@@ -467,27 +481,6 @@ impl SessionReuse {
                 is_builder,
             },
         }
-    }
-
-    /// Own key, or the slot's last builder when this is a cold construct on
-    /// the same seat. A judge command never sees the builder handle.
-    fn acquire_key(&self, request: &AcquireRequest<'_>, own: &SessionKey, slot_path: &str) -> (SessionKey, bool) {
-        if is_judge_command(request.command) {
-            return (own.clone(), false);
-        }
-        let state = lock(&self.state);
-        if state.slot.contains_key(own) {
-            return (own.clone(), false);
-        }
-        let Some(predecessor) = state.builder_at_slot.get(slot_path) else {
-            return (own.clone(), false);
-        };
-        if predecessor.model != own.model || predecessor.effort != own.effort || predecessor == own {
-            return (own.clone(), false);
-        }
-        let key = predecessor.clone();
-        drop(state);
-        (key, true)
     }
 
     /// Fold a completed attempt's token actuals into the durable cell for
@@ -561,9 +554,6 @@ impl SessionReuse {
         let routing_count = state.failures.get(key).copied().unwrap_or(0).max(1);
         state.last_context.insert(key.clone(), manifest.context_tokens);
         state.slot.insert(key.clone(), slot_path.to_owned());
-        if is_builder {
-            state.builder_at_slot.insert(slot_path.to_owned(), key.clone());
-        }
         drop(state);
         let _ =
             lock(&self.pool).release_routed(key, lease, session_id, manifest, (routing_count, slot_path, is_builder));
@@ -1204,43 +1194,34 @@ mod tests {
     }
 
     #[test]
-    fn a_dependent_construct_resumes_the_predecessors_session_in_the_same_slot() {
-        // Tripwire: B's own key is cold (different description), so without
-        // edge lookup the first lap of a dependent always launched fresh and
-        // paid the forensics tax ADR-0196 exists to avoid.
+    fn an_unrelated_member_in_the_same_slot_starts_fresh() {
+        // Acceptance for #5427: on 2026-08-21 two members with no declared edge
+        // between them were dispatched into slot-3 six minutes apart. The pool
+        // kept the slot's last builder session and handed it to the second
+        // whenever model and effort matched — no workpiece check — so the second
+        // construct opened carrying the first's whole conversation (188k of
+        // context against 79k) and then deposited the first's session id as its
+        // own. A thread is (workpiece x role); a directory is not a member.
         let reuse = SessionReuse::memory();
         reuse.set_head_hash("head-A");
         reuse.set_now(1_000);
         reuse.seed(&key(), "sess-A", &manifest("head-A", 8_000, 1_000), "/slot-0");
 
-        let plan = reuse.acquire(&construct_request("claude-opus-5", "issue-B", "/slot-0"));
-        assert_eq!(plan.arm, ReuseArm::Resumed, "B resumes A's construct session in A's slot");
-        assert_eq!(plan.resume.as_deref(), Some("sess-A"));
-        assert!(plan.edge, "the acquire must name the edge so evidence can justify it");
-    }
+        let unrelated = reuse.acquire(&construct_request("claude-opus-5", "issue-B", "/slot-0"));
+        assert_eq!(unrelated.arm, ReuseArm::Fresh, "a member's first construct is fresh, whoever built here last");
+        assert!(unrelated.resume.is_none(), "and inherits nothing to resume");
+        assert!(!unrelated.edge, "there is no edge here to name");
 
-    #[test]
-    fn a_cross_seat_edge_never_resumes() {
-        // Acceptance: grok built A; a different seat on B must not resume, even
-        // in A's slot. The plausible bug is matching on slot path alone and
-        // dropping the model/effort seat check.
-        let reuse = SessionReuse::memory();
-        reuse.set_head_hash("head-A");
-        reuse.set_now(1_000);
-        reuse.seed(&grok_key(), "sess-grok", &manifest("head-A", 8_000, 1_000), "/slot-0");
-
-        let plan = reuse.acquire(&construct_request("claude-opus-5", "issue-B", "/slot-0"));
-        assert_eq!(plan.arm, ReuseArm::Fresh, "a claude B does not resume a grok A");
-        assert!(plan.resume.is_none());
-        assert!(!plan.edge);
+        let own = reuse.acquire(&construct_request("claude-opus-5", "issue-4902", "/slot-0"));
+        assert_eq!(own.resume.as_deref(), Some("sess-A"), "the member that opened the thread still continues it");
     }
 
     #[test]
     fn a_judge_never_acquires_a_builder_session() {
         // Acceptance / ADR-0196: Review and AggregateReview seats always start
-        // fresh. The plausible bug is the new slot-path builder handle leaking
-        // into review.critic because the judge shares the predecessor's model,
-        // effort, and slot.
+        // fresh. A judge's own key is its own — the plausible bug is a judge
+        // acquire leasing the builder's row on its way past and leaving the
+        // member unable to resume its own thread.
         let reuse = SessionReuse::memory();
         reuse.set_head_hash("head-A");
         reuse.set_now(1_000);
@@ -1292,11 +1273,11 @@ mod tests {
     }
 
     #[test]
-    fn reopening_the_pool_restores_builder_routing() {
+    fn reopening_the_pool_restores_a_members_own_session() {
         // Tripwire: ReuseState used to start empty after a coordinator restart
-        // even though the SQLite pool still held the session. A same-slot
-        // dependent then paid the cold forensics tax ADR-0196 exists to avoid;
-        // a judge seat and a mismatched slot must still stay cold.
+        // even though the SQLite pool still held the session, so a member's own
+        // retry lap relaunched cold. The slot guard has to come back with it —
+        // a restored row is still bound to the directory it was deposited from.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = temp_pool_path(&dir);
 
@@ -1310,21 +1291,9 @@ mod tests {
         assert_eq!(mismatch.miss, Some(MissReason::SlotMismatch), "the restored slot must still guard cwd");
         assert!(mismatch.resume.is_none());
 
-        let edge = reuse.acquire(&construct_request("claude-opus-5", "issue-B", "/slot-0"));
-        assert_eq!(edge.arm, ReuseArm::Resumed, "a same-slot dependent resumes the restored builder");
-        assert_eq!(edge.resume.as_deref(), Some("sess-A"), "the judge deposit must not become the slot handle");
-        assert!(edge.edge);
-
-        let judge = reuse.acquire(&super::AcquireRequest {
-            model: "claude-opus-5",
-            effort: "high",
-            task: "review.critic\nissue-other",
-            worktree: Path::new("/slot-0"),
-            command: "review.critic",
-        });
-        assert_eq!(judge.arm, ReuseArm::Fresh, "a judge command never sees the restored builder handle");
-        assert!(judge.resume.is_none());
-        assert!(!judge.edge);
+        let unrelated = reuse.acquire(&construct_request("claude-opus-5", "issue-B", "/slot-0"));
+        assert_eq!(unrelated.arm, ReuseArm::Fresh, "a restore must not hand one member's thread to another");
+        assert!(unrelated.resume.is_none());
         drop(reuse);
 
         let reuse = file_reuse(&path);
