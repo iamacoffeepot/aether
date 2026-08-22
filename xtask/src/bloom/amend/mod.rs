@@ -40,8 +40,9 @@ use super::dto::{BloomSpec, BloomView, CommissionShowView, DigestHex, ScopeRevis
 use super::{ProjectionArgs, plan, render_outcome};
 
 use request::Requested;
-use revision::OperatorKey;
 use tier::PolicySource;
+
+pub(super) use revision::OperatorKey;
 
 /// `Tier`, as a CLI value.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]

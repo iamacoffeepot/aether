@@ -19,10 +19,11 @@ mod upgrade;
 use std::env;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use aether_bloomery::{Digest, KeyId};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 
-use crate::bloom::amend::AmendArgs;
+use crate::bloom::amend::{AmendArgs, OperatorKey};
 use crate::bloom::client::{Client, bloom_in};
 use crate::bloom::plan::{BaseChoice, ProjectionInput};
 use crate::bloom::roll::RollArgs;
@@ -113,6 +114,8 @@ enum BloomCommand {
     Amend(AmendArgs),
     /// Take one member out of a walking bloom without superseding it (#5327).
     Withdraw(WithdrawArgs),
+    /// Retire an open commission whose work landed outside its bloom.
+    Cancel(CancelArgs),
 }
 
 #[derive(Args, Debug)]
@@ -136,6 +139,24 @@ struct WithdrawArgs {
     /// withdrawal that would strand a dependent is refused, naming them.
     #[arg(long)]
     cascade: bool,
+}
+
+#[derive(Args, Debug)]
+struct CancelArgs {
+    /// The commission to retire.
+    workpiece: String,
+
+    /// Why, in your own words. Required; a blank one is refused at the door.
+    #[arg(long)]
+    reason: String,
+
+    /// Operator signing seed: 32 raw bytes or 64 hex characters, mode 0600.
+    #[arg(long)]
+    seed_file: Option<PathBuf>,
+
+    /// The `KeyId` the coordinator's allowlist names for that seed.
+    #[arg(long, default_value = "operator")]
+    signer: String,
 }
 
 #[derive(Args, Debug)]
@@ -279,6 +300,7 @@ fn run_on_with_policy(endpoint: &Endpoint, command: &BloomCommand, approval_poli
         BloomCommand::Upgrade(args) => upgrade::run(&client, args),
         BloomCommand::Amend(args) => amend::run(&client, args, approval_policy),
         BloomCommand::Withdraw(args) => run_withdraw(&client, args),
+        BloomCommand::Cancel(args) => run_cancel(&client, args),
     }
 }
 
@@ -294,6 +316,32 @@ fn run_withdraw(client: &Client<'_>, args: &WithdrawArgs) -> Result<String> {
     let request =
         dto::WithdrawRequest { reason: args.reason.clone(), operator: args.operator.clone(), cascade: args.cascade };
     Ok(render_outcome(&client.withdraw(&args.bloom_id, &args.workpiece, &request)?.outcome))
+}
+
+/// Cancel one commission, naming an unknown or already-closed workpiece locally
+/// before any write — the same read-first shape `run_withdraw` uses.
+fn run_cancel(client: &Client<'_>, args: &CancelArgs) -> Result<String> {
+    let shown =
+        client.commission(&args.workpiece).with_context(|| format!("no commission named {}", args.workpiece))?;
+    if shown.status != "open" {
+        bail!("commission {} is {}, not open", args.workpiece, shown.status);
+    }
+    if args.reason.trim().is_empty() {
+        bail!("cancel reason is required");
+    }
+
+    let key = OperatorKey::load(
+        KeyId(args.signer.clone()),
+        args.seed_file.as_deref().context("--seed-file is required to sign the cancel")?,
+    )?;
+    let stored = client.cancel(
+        &args.workpiece,
+        &dto::CancelCommissionRequest {
+            statement: key.cancel_of(Digest::from_bytes(*shown.intent.as_bytes())),
+            reason: args.reason.clone(),
+        },
+    )?;
+    Ok(format!("cancelled {} {} ({})\n", args.workpiece, stored.digest, stored.status))
 }
 
 fn run_seal(client: &Client<'_>, args: &SealArgs, approval_policy: &Path) -> Result<String> {
@@ -378,7 +426,7 @@ mod tests {
     };
     use serde_json::{Value, json};
 
-    use super::{BloomCommand, Endpoint, SealArgs, SupersedeArgs, run_on};
+    use super::{BloomCommand, CancelArgs, Endpoint, SealArgs, SupersedeArgs, run_on};
     use crate::bloom::dto::{AdrTouch, DigestHex};
     use crate::bloom::hex;
     use crate::bloom::plan::{self, BaseChoice};
@@ -1191,5 +1239,156 @@ mod tests {
         assert_eq!(patch["configs"]["entries"]["aether.bloomery.model_override"], override_digest);
         assert_eq!(patch["configs"]["entries"]["aether.bloomery.price_table"], table_digest);
         assert!(output.contains("Sealed"), "outcome is printed: {output}");
+    }
+
+    fn cancel_args(workpiece: &str, reason: &str, seed_file: PathBuf) -> BloomCommand {
+        BloomCommand::Cancel(CancelArgs {
+            workpiece: workpiece.to_owned(),
+            reason: reason.to_owned(),
+            seed_file: Some(seed_file),
+            signer: "operator".to_owned(),
+        })
+    }
+
+    fn temp_seed(name: &str, bytes: [u8; 32]) -> PathBuf {
+        let path = env::temp_dir().join(format!("aether-xtask-bloom-{name}-{}", process::id()));
+        fs::write(&path, bytes).expect("write seed");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("set mode");
+        }
+        path
+    }
+
+    fn posted(log: &[Recorded]) -> Vec<&Recorded> {
+        log.iter().filter(|entry| entry.method == "POST").collect()
+    }
+
+    #[test]
+    fn cancel_reads_the_commission_then_posts_a_signed_cancel_over_its_intent() {
+        let intent = digest(7);
+        let seed = temp_seed("cancel-open", [3_u8; 32]);
+        let reason = "the work landed on a sibling branch";
+        let (output, log) = with_fake(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/commissions/wp-1") => (
+                    200,
+                    json!({
+                        "id": "wp-1",
+                        "intent": hex_of(intent),
+                        "status": "open",
+                        "approvals": []
+                    }),
+                ),
+                ("POST", "/commissions/wp-1/cancel") => {
+                    (200, json!({ "digest": hex_of(digest(9)), "id": "wp-1", "status": "cancelled" }))
+                }
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                run_on(
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
+                    &cancel_args("wp-1", reason, seed.clone()),
+                )
+                .expect("cancel against the fake coordinator")
+            },
+        );
+        fs::remove_file(&seed).ok();
+
+        let cancel = find(&log, "POST", "/commissions/wp-1/cancel");
+        let body = cancel.body.as_ref().expect("cancel body");
+        assert_eq!(cancel.path, "/commissions/wp-1/cancel");
+        assert_eq!(body["reason"], reason);
+        assert_eq!(body["statement"]["words"], json!(intent.as_bytes().as_slice()));
+        assert!(output.contains("wp-1"), "the workpiece is named: {output}");
+        assert!(output.contains(&hex_of(digest(9))), "the stored statement digest is printed: {output}");
+        assert!(output.contains("cancelled"), "the new status is printed: {output}");
+    }
+
+    #[test]
+    fn cancel_refuses_a_commission_that_is_not_open_without_writing() {
+        let seed = temp_seed("cancel-closed", [3_u8; 32]);
+        let (error, log) = with_fake(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/commissions/wp-1") => (
+                    200,
+                    json!({
+                        "id": "wp-1",
+                        "intent": hex_of(digest(7)),
+                        "status": "cancelled",
+                        "approvals": []
+                    }),
+                ),
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                run_on(
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
+                    &cancel_args("wp-1", "landed elsewhere", seed.clone()),
+                )
+                .expect_err("a closed commission is refused")
+            },
+        );
+        fs::remove_file(&seed).ok();
+        assert!(error.to_string().contains("cancelled"), "the refusal names the status it found: {error}");
+        assert!(posted(&log).is_empty(), "a second cancel must not write: {log:?}");
+    }
+
+    #[test]
+    fn cancel_refuses_an_unknown_workpiece_without_writing() {
+        let seed = temp_seed("cancel-missing", [3_u8; 32]);
+        let (error, log) = with_fake(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/commissions/wp-missing") => (404, json!({ "error": "no commission named wp-missing" })),
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                run_on(
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
+                    &cancel_args("wp-missing", "landed elsewhere", seed.clone()),
+                )
+                .expect_err("an unknown workpiece is refused")
+            },
+        );
+        fs::remove_file(&seed).ok();
+        assert!(error.to_string().contains("wp-missing"), "the refusal names the workpiece: {error}");
+        assert!(posted(&log).is_empty(), "an unknown workpiece must not write: {log:?}");
+    }
+
+    // Tripwire: a signing seed another account on the host can read is a key
+    // that can cancel any commission.
+    #[cfg(unix)]
+    #[test]
+    fn cancel_refuses_a_group_readable_seed() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let path = env::temp_dir().join(format!("aether-xtask-bloom-cancel-loose-{}", process::id()));
+        fs::write(&path, [3_u8; 32]).expect("write seed");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("set mode");
+        let (error, log) = with_fake(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/commissions/wp-1") => (
+                    200,
+                    json!({
+                        "id": "wp-1",
+                        "intent": hex_of(digest(7)),
+                        "status": "open",
+                        "approvals": []
+                    }),
+                ),
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                run_on(
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
+                    &cancel_args("wp-1", "landed elsewhere", path.clone()),
+                )
+                .expect_err("a loose seed is refused")
+            },
+        );
+        fs::remove_file(&path).ok();
+        assert!(error.to_string().contains("0600"), "the refusal names the fix: {error}");
+        assert!(posted(&log).is_empty(), "a loose seed must not write: {log:?}");
     }
 }

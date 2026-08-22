@@ -8,9 +8,9 @@ use serde_json::Value;
 
 use super::Endpoint;
 use super::dto::{
-    ApprovalStoredView, BloomSpec, BloomView, CommissionShowView, ConfigRequest, ConfigValueView, ConfigView,
-    DraftPatch, DraftView, JournalEntry, JournalView, OutcomeView, ScopeRevisionWrittenView, SealRequest,
-    SupersedeRequest, ViewDocument, WithdrawRequest,
+    ApprovalStoredView, BloomSpec, BloomView, CancelCommissionRequest, CommissionCancelledView, CommissionShowView,
+    ConfigRequest, ConfigValueView, ConfigView, DraftPatch, DraftView, JournalEntry, JournalView, OutcomeView,
+    ScopeRevisionWrittenView, SealRequest, SupersedeRequest, ViewDocument, WithdrawRequest,
 };
 use super::http;
 use super::plan::spec_id;
@@ -101,6 +101,11 @@ impl<'a> Client<'a> {
     /// Submit `statement` as an approval of the commission's current revision.
     pub fn approve(&self, id: &str, statement: &Statement) -> Result<ApprovalStoredView> {
         self.send("POST", &format!("/commissions/{id}/approvals"), statement)
+    }
+
+    /// Close an open commission with a signed cancel envelope.
+    pub fn cancel(&self, id: &str, request: &CancelCommissionRequest) -> Result<CommissionCancelledView> {
+        self.send("POST", &format!("/commissions/{id}/cancel"), request)
     }
 
     /// A stored configuration, decoded through its kind's schema.

@@ -79,9 +79,9 @@ pub use stage::{
     REVIEW_CRITIC_COMMAND, SCOPE_FILL_COMMAND, StageBinding, StageCatalog, Transformation, VERIFY_BASE_COMMAND,
     VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK, is_model_lane,
 };
-#[cfg(not(target_arch = "wasm32"))]
-pub use statement::signed_approval;
 pub use statement::{Observation, Provenance, StageReceipt, Statement};
+#[cfg(not(target_arch = "wasm32"))]
+pub use statement::{signed_approval, signed_cancel};
 pub use study::{StudyCall, StudyCost, StudyRecord};
 pub use suppression::{SuppressionDisposition, SuppressionRequest, SuppressionVerdict};
 pub use surface::{SurfacePathRequest, SurfaceRequest};

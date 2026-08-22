@@ -672,6 +672,17 @@ pub struct CommissionApprovalView {
     pub evidence: aether_bloomery::Evidence,
 }
 
+/// `POST /commissions/{id}/cancel` body: the signature is the authority, the
+/// reason is the operator's own words and is recorded in the coordinator log,
+/// never in the signed bytes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelCommissionRequest {
+    /// The Cancel-door statement bound to the commission's intent digest.
+    pub statement: Statement,
+    /// Operator context for the cancel. Never authority.
+    pub reason: String,
+}
+
 /// `POST /commissions/{id}/cancel` reply.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommissionCancelledView {

@@ -12,7 +12,7 @@ use std::fs;
 use std::path::Path;
 use std::str;
 
-use aether_bloomery::{Digest, KeyId, ScopeRevision, Statement, digest_of, signed_approval};
+use aether_bloomery::{Digest, KeyId, ScopeRevision, Statement, digest_of, signed_approval, signed_cancel};
 use anyhow::{Context, Result, bail};
 
 use crate::bloom::client::Client;
@@ -58,6 +58,15 @@ impl OperatorKey {
     /// a re-run of the whole command a no-op at the store.
     pub fn approval_of(&self, scope: Digest) -> Statement {
         signed_approval(self.signer.clone(), &self.seed, scope)
+    }
+
+    /// The Cancel-door statement over `intent`.
+    ///
+    /// Deterministic for the same reason [`Self::approval_of`] is: a re-run re-mints
+    /// the same bytes, and the store's not-open refusal is what a second
+    /// attempt hits.
+    pub fn cancel_of(&self, intent: Digest) -> Statement {
+        signed_cancel(self.signer.clone(), &self.seed, intent)
     }
 }
 

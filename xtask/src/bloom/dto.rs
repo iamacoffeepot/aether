@@ -8,7 +8,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use aether_bloomery::{BloomStatus, Digest, EvidenceKind, Forecast, ScopeRevision, ScopeRouting, WorkpieceId};
+use aether_bloomery::{
+    BloomStatus, Digest, EvidenceKind, Forecast, ScopeRevision, ScopeRouting, Statement, WorkpieceId,
+};
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -102,6 +104,8 @@ pub struct SurfacePathRequest {
 /// `aether_bloomery`'s own type.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CommissionShowView {
+    pub intent: DigestHex,
+    pub status: String,
     pub current_revision: Option<DigestHex>,
     pub current: Option<ScopeRevisionView>,
     #[serde(default)]
@@ -187,6 +191,21 @@ pub struct ScopeRevisionWrittenView {
 /// failure rather than a silent success.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApprovalStoredView {}
+
+/// `POST /commissions/{id}/cancel` body: the signature is the authority; the
+/// reason is operator context recorded in the coordinator log.
+#[derive(Debug, Serialize)]
+pub struct CancelCommissionRequest {
+    pub statement: Statement,
+    pub reason: String,
+}
+
+/// `POST /commissions/{id}/cancel` reply.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommissionCancelledView {
+    pub digest: DigestHex,
+    pub status: String,
+}
 
 /// `GET /configs/{digest}` — a stored configuration, decoded through its kind's
 /// schema.
