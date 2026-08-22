@@ -15,8 +15,9 @@ use crate::values::{Evidence, EvidenceKind, Statement};
 /// [`ResolutionClaim`](crate::ResolutionClaim) enters through
 /// [`Fact::Integrate`](crate::Fact::Integrate) and an [`EvidenceKind::Approval`]
 /// seals a member, so
-/// neither is bound to the free evidence-log door. The four non-integrating
-/// classes (`VerificationResult`, `ReviewFinding`, `StudyRecord`, `Question`)
+/// neither is bound to the free evidence-log door. The five non-integrating
+/// classes (`VerificationResult`, `ReviewFinding`, `StudyRecord`, `Question`,
+/// `SuppressionRequest`)
 /// are what this log records; a mis-routed integrating/approval class is
 /// [`AdmitEvidenceError::EvidenceNotBound`]. A `Question` entry additionally
 /// derives a pending-decision hold in the fold (see
@@ -40,6 +41,10 @@ pub(super) fn reduce_admit_evidence(snapshot: &Snapshot, bloom: &BloomId, eviden
             | EvidenceKind::ReviewFinding
             | EvidenceKind::StudyRecord
             | EvidenceKind::Question
+            // A candidate's stated case for its suppressions (ADR-0193). It
+            // raises no hold and advances nothing: the lane already passed, and
+            // the request is a question for a reviewer who does not exist yet.
+            | EvidenceKind::SuppressionRequest
     ) {
         return Decisions::rejected(Outcome::AdmitEvidenceRejected(AdmitEvidenceError::EvidenceNotBound));
     }
@@ -131,22 +136,55 @@ pub(super) fn reduce_adopt_answer(snapshot: &Snapshot, bloom: &BloomId, answer: 
             Decision::ReleaseHold { bloom: *bloom, question },
             Decision::RecordReviewPark { bloom: *bloom, question: None },
             Decision::RecordAggregateRoll { bloom: *bloom, rolls: 0 },
+            Decision::RecordAggregateVerifyRoll { bloom: *bloom, rolls: 0 },
         ];
-        // The park keeps the fold held, so the re-armed review dispatches from
-        // it directly; a missing fold (unreachable through the park path) just
-        // resets the cycle and leaves the re-fold to dispatch the review.
+        // The park keeps the fold held, so the re-armed gates dispatch from it
+        // directly; a missing fold (unreachable through the park path) just
+        // resets the cycle and leaves the re-fold to dispatch them.
         if let Some(integration) = &record.integration {
-            // Roll 1, not `record.aggregate_rolls + 1`: the same decision set
-            // resets the cursor to zero, and the snapshot has not folded that
-            // yet. The gate is the same helper the other critic dispatches
-            // use, so a hold taken before the owner re-arms still withholds
-            // the paid lane (#5100).
-            effects.push(super::aggregate_verify::gate_aggregate(
-                record,
-                *bloom,
-                StageId::AggregateReview,
-                super::aggregate_verify::owed_aggregate_review(record, *bloom, integration.tree, integration.head, 1),
-            ));
+            // Only the gates that have not passed on the held fold. The two run
+            // concurrently, so the bloom can be parked at either ceiling with
+            // its sibling's pass already recorded, and re-dispatching a gate
+            // that passed would spend a lane to re-learn a verdict the record
+            // holds. Both roll cursors reset above, so a bloom parked at the
+            // mechanical ceiling gets a real cycle rather than a dispatch that
+            // parks again on arrival.
+            //
+            // Roll 1 in each order, not the record's stored counts: the same
+            // decision set zeroes both cursors and the snapshot has not folded
+            // that yet. Each order goes through the same gate helper the
+            // ordinary dispatches use, so a hold taken before the owner re-arms
+            // still withholds the paid lane (#5100).
+            if !record.aggregate_passed.contains(&StageId::AggregateVerify) {
+                effects.extend(super::aggregate_verify::gate_aggregate(
+                    record,
+                    *bloom,
+                    crate::AGGREGATE_VERIFY_GATE,
+                    StageId::AggregateVerify,
+                    super::aggregate_verify::owed_aggregate_verify(
+                        record,
+                        *bloom,
+                        integration.tree,
+                        integration.head,
+                        1,
+                    ),
+                ));
+            }
+            if !record.aggregate_passed.contains(&StageId::AggregateReview) {
+                effects.extend(super::aggregate_verify::gate_aggregate(
+                    record,
+                    *bloom,
+                    crate::AGGREGATE_REVIEW_GATE,
+                    StageId::AggregateReview,
+                    super::aggregate_verify::owed_aggregate_review(
+                        record,
+                        *bloom,
+                        integration.tree,
+                        integration.head,
+                        1,
+                    ),
+                ));
+            }
         }
         return Decisions { outcome: Outcome::AnswerAdopted { bloom: *bloom, question }, effects };
     }

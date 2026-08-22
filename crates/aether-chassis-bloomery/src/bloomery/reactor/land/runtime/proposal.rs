@@ -11,21 +11,15 @@
 //! `Lint title` check would refuse, drops to the floor title. A GitHub issue
 //! title is not a rung — GitHub is a replica.
 
-use aether_bloomery::{Adjudication, BloomId, Disposition, Event, Fact};
-use aether_bloomery_github::{LandingProposal, canonical_issue_number};
+use aether_bloomery::{Adjudication, BloomId, Disposition, Event, Fact, SuppressionRequest};
+use aether_bloomery_github::{ACCEPTED_TYPES, LandingProposal, canonical_issue_number};
 use aether_data::wire::from_bytes;
 
 use crate::store::StoreBackend;
 
-/// The Conventional Commits types `.github/workflows/lint-title.yml` accepts.
-/// The gate and this predictor change together: a title this admits and the gate
-/// refuses blocks the landing at the very last step, after the bloom has already
-/// resolved.
-const ACCEPTED_TYPES: [&str; 7] = ["feat", "fix", "chore", "docs", "perf", "refactor", "flake"];
-
 /// One member's contribution to the proposal: the message its lane wrote, and
 /// the object its workpiece addresses.
-struct Member {
+pub(super) struct Member {
     /// The commit message the member's resolving candidate was captured under,
     /// when its lane wrote one.
     message: Option<String>,
@@ -43,7 +37,8 @@ struct Member {
 pub(super) fn assemble(store: &mut dyn StoreBackend, bloom: &BloomId) -> rusqlite::Result<LandingProposal> {
     let members = roster(store, bloom)?;
     let waived = adjudications(store, bloom)?;
-    Ok(LandingProposal { title: title_for(&members), body: body_for(&members, &waived) })
+    let requested = store.list_suppression_requests(bloom.0.as_bytes())?;
+    Ok(LandingProposal { title: title_for(&members), body: body_for(&members, &waived, &requested) })
 }
 
 /// The operator adjudications this bloom carries, oldest first (#4957).
@@ -58,7 +53,7 @@ pub(super) fn assemble(store: &mut dyn StoreBackend, bloom: &BloomId) -> rusqlit
 /// A row that does not decode is skipped rather than propagated. This is the
 /// proposal's prose, and the same rule the title fallbacks follow applies: a
 /// malformed row costs the body a sentence, never the bloom its landing.
-fn adjudications(store: &mut dyn StoreBackend, bloom: &BloomId) -> rusqlite::Result<Vec<Adjudication>> {
+pub(super) fn adjudications(store: &mut dyn StoreBackend, bloom: &BloomId) -> rusqlite::Result<Vec<Adjudication>> {
     Ok(store
         .list_events()?
         .iter()
@@ -98,6 +93,39 @@ fn waivers_section(waived: &[Adjudication]) -> Option<String> {
     Some(format!("### Adjudicated findings\n\n{}", lines.join("\n")))
 }
 
+/// The standing suppression-request section, or `None` when the bloom's
+/// candidates ask for nothing (ADR-0193 §4).
+///
+/// One line per request naming the member, the path, the lint, and the reason
+/// the lane gave, followed by the marker text a reviewer pastes to grant them.
+/// The coordinator renders those bytes and never places them: the scanner
+/// accepts a marker only when the body's last editor is the repository owner,
+/// and a body the coordinator authored and nobody edited reports no editor at
+/// all — so this composes the question and cannot answer it.
+///
+/// The reason is the lane's own words, which is exactly why the line names the
+/// path beside it. A reviewer who reads only the reason is reading the
+/// applicant's case for itself.
+fn requests_section(requested: &[(String, SuppressionRequest)]) -> Option<String> {
+    if requested.is_empty() {
+        return None;
+    }
+    let lines: Vec<String> = requested
+        .iter()
+        .map(|(workpiece, request)| {
+            format!("- `{workpiece}` — {}:{} — {} — {}", request.path, request.line, request.lint, request.reason)
+        })
+        .collect();
+
+    Some(format!(
+        "### Suppression requests\n\n{}\n\nThese are stated by the lanes, granted by nobody. To grant them, edit \
+         this body and add the sign-off marker `.github/workflows/ci.yml`'s `New suppressions` job accepts; to \
+         refuse one, `POST /blooms/{{id}}/members/{{workpiece}}/suppression` with the reason, which bounces the \
+         member to a repair lap.",
+        lines.join("\n")
+    ))
+}
+
 /// How many composition findings one adjudication closed, spelled for prose.
 fn finding_count(adjudication: &Adjudication) -> String {
     match adjudication.findings.len() {
@@ -112,7 +140,7 @@ fn finding_count(adjudication: &Adjudication) -> String {
 /// — the same one the aggregate review's findings decomposition attributes
 /// against — because the land outbox payload carries three digests and no
 /// membership.
-fn roster(store: &mut dyn StoreBackend, bloom: &BloomId) -> rusqlite::Result<Vec<Member>> {
+pub(super) fn roster(store: &mut dyn StoreBackend, bloom: &BloomId) -> rusqlite::Result<Vec<Member>> {
     store
         .list_dispatch_descriptions(bloom.0.as_bytes())?
         .into_iter()
@@ -132,17 +160,22 @@ fn roster(store: &mut dyn StoreBackend, bloom: &BloomId) -> rusqlite::Result<Vec
 /// several-member bloom is several changes, and picking one member's subject to
 /// stand for all of them would name the mainline commit after a fraction of what
 /// it carries.
-fn title_for(members: &[Member]) -> Option<String> {
+pub(super) fn title_for(members: &[Member]) -> Option<String> {
     let [member] = members else {
         return None;
     };
     member.message.as_deref().and_then(subject_of).filter(|subject| title_is_lint_valid(subject)).map(str::to_owned)
 }
 
-/// The proposal's body: what the lanes wrote, then whatever an operator waived
-/// to get here, then one closing line per member that addresses an object. The
-/// provenance footer is the source port's and is appended below this.
-fn body_for(members: &[Member], waived: &[Adjudication]) -> String {
+/// The proposal's prose sections: what the lanes wrote, then whatever an
+/// operator waived to get here, then the standing suppression requests. Closing
+/// lines are the caller's — a landing comment does not carry `Closes` keywords
+/// that do not close.
+pub(super) fn sections_for(
+    members: &[Member],
+    waived: &[Adjudication],
+    requested: &[(String, SuppressionRequest)],
+) -> Vec<String> {
     let mut sections: Vec<String> = match members {
         // One member: the title already carries its subject, so the body is the
         // message's prose and nothing else.
@@ -152,6 +185,15 @@ fn body_for(members: &[Member], waived: &[Adjudication]) -> String {
         members => members.iter().filter_map(|member| member.message.as_deref()).map(section_of).collect(),
     };
     sections.extend(waivers_section(waived));
+    sections.extend(requests_section(requested));
+    sections
+}
+
+/// The proposal's body: [`sections_for`] plus one closing line per member that
+/// addresses an object. The provenance footer is the source port's and is
+/// appended below this.
+fn body_for(members: &[Member], waived: &[Adjudication], requested: &[(String, SuppressionRequest)]) -> String {
+    let mut sections = sections_for(members, waived, requested);
     sections.extend(members.iter().filter_map(|member| member.issue).map(|issue| format!("Closes #{issue}")));
     sections.join("\n\n")
 }

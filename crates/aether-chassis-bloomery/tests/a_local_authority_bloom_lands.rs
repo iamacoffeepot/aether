@@ -10,9 +10,6 @@
 //! the consolidated scenario harness — backend local, coordinator in-process,
 //! lane scripted — not a fourth copy of the boot loop.
 
-mod common;
-pub mod harness;
-
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,8 +23,7 @@ use aether_chassis_bloomery::bloomery::mock_lane::CANDIDATE_FILE;
 use aether_chassis_bloomery::store::SqliteStore;
 use aether_data::wire::from_bytes;
 
-use crate::common::repo::Repo;
-use crate::harness::{HarnessBuilder, HarnessRoots};
+use aether_harness_bloomery::{HarnessBuilder, HarnessRoots, Repo};
 
 const WORKPIECE: &str = "wp";
 
@@ -151,7 +147,10 @@ impl ProjectionBackend for FailingMirror {
         Ok(())
     }
 
-    fn project_commission(&self, _projection: &aether_bloomery::CommissionProjection) -> Result<u64, GithubError> {
-        Ok(0)
+    fn project_commission(
+        &self,
+        _projection: &aether_bloomery::CommissionProjection,
+    ) -> Result<Option<u64>, GithubError> {
+        Ok(None)
     }
 }

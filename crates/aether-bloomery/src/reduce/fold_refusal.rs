@@ -38,7 +38,7 @@ mod tests {
     fn sealed() -> (Snapshot, BloomId) {
         let spec = draft(0, vec![membership("wp-0", 1)]).seal();
         let bloom = spec.id();
-        let snapshot = Snapshot::new(digest(0));
+        let snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
         (
             snapshot.apply(
@@ -85,7 +85,7 @@ mod tests {
 
     #[test]
     fn an_unknown_bloom_is_refused_rather_than_recorded() {
-        let snapshot = Snapshot::new(digest(0));
+        let snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
         let recorded = refusal("wp-0");
         let decided = reduce_fold_refused(&snapshot, &BloomId(digest(9)), &recorded);
         assert_eq!(decided.outcome, Outcome::FoldRefusalRejected);

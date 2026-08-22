@@ -11,6 +11,8 @@ use crate::artifacts::ArtifactsOverlay;
 use crate::bloomery::CoordinatorOverlay;
 #[cfg(feature = "github")]
 use crate::bloomery::GithubConnectionOverlay;
+#[cfg(feature = "github")]
+use crate::bloomery::NotifyOverlay;
 use crate::bloomery::chassis::{HttpPortOverlay, RpcPortOverlay};
 use crate::session::SessionOverlay;
 use crate::signing::SigningOverlay;
@@ -47,6 +49,14 @@ pub struct BloomeryCli {
     #[cfg(feature = "github")]
     #[command(flatten)]
     pub github: GithubConnectionOverlay,
+
+    /// `--notify-webhook-file` shadows `AETHER_BLOOMERY_NOTIFY_WEBHOOK_FILE` —
+    /// the host-local file holding the operator webhook URL. Unset means the
+    /// notification reactor mounts disabled. A path, never the URL: the URL is
+    /// a credential and argv is public.
+    #[cfg(feature = "github")]
+    #[command(flatten)]
+    pub notify: NotifyOverlay,
 
     /// Backend-neutral coordinator cadence, persistence, routing, process, and identity knobs.
     #[command(flatten)]

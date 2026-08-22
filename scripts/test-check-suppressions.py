@@ -283,6 +283,64 @@ ignored = ["changed-but-unrelated"]
         self.assertIn("suppression scan refused:", invalid.stderr)
         self.assertIn("cannot resolve --base not-a-ref", invalid.stderr)
 
+    def test_a_wholly_requested_scan_leaves_by_its_own_code(self) -> None:
+        # ADR-0193's third terminal. The scanner still prints the finding and
+        # still refuses to clear it; what changes is who is being asked.
+        self.repo.write("src/lib.rs", "fn clean() {}\n")
+        base = self.repo.commit("base")
+        self.repo.write(
+            "src/lib.rs",
+            "#[allow(dead_code)] // aether-suppression-request: staged behind a feature that lands next\n"
+            "fn clean() {}\n",
+        )
+        head = self.repo.commit("requested")
+
+        requested = self.run_scan(base, head)
+
+        self.assertEqual(requested.returncode, scanner.EXIT_REQUESTED)
+        self.assertIn("aether-suppression-request: staged behind a feature", requested.stdout)
+
+    def test_one_unrequested_finding_holds_the_whole_run_at_findings(self) -> None:
+        # Tripwire: a request must not clear its neighbours. Without the
+        # all-of-them rule one marker would pass a bare `#[allow]` beside it,
+        # which is the smuggling route the third terminal has to keep shut.
+        self.repo.write("src/lib.rs", "fn clean() {}\n")
+        base = self.repo.commit("base")
+        self.repo.write(
+            "src/lib.rs",
+            "#[allow(dead_code)] // aether-suppression-request: operator tooling, not cap config\n"
+            "fn clean() {}\n"
+            "#[allow(clippy::disallowed_methods)]\n"
+            "fn bare() {}\n",
+        )
+        head = self.repo.commit("mixed")
+
+        mixed = self.run_scan(base, head)
+
+        self.assertEqual(mixed.returncode, scanner.EXIT_FINDINGS)
+
+    def test_a_blank_reason_is_not_a_request(self) -> None:
+        # An empty reason states nothing for a reviewer to grant against, so it
+        # is the bare suppression it looks like.
+        self.repo.write("src/lib.rs", "fn clean() {}\n")
+        base = self.repo.commit("base")
+        self.repo.write("src/lib.rs", "#[allow(dead_code)] // aether-suppression-request:\nfn clean() {}\n")
+        head = self.repo.commit("blank")
+
+        blank = self.run_scan(base, head)
+
+        self.assertEqual(blank.returncode, scanner.EXIT_FINDINGS)
+
+    def run_scan(self, base: str, head: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "--base", base, "--head", head],
+            cwd=self.repo.root,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
     def test_a_parentless_root_passes_when_that_root_is_the_threaded_base(self) -> None:
         # The umbrella threads the wrapper commit as --base (#5033). That root
         # *is* an ancestor of HEAD, so merge-base succeeds and a clean tree

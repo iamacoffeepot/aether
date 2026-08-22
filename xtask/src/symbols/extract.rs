@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use syn::punctuated::Punctuated;
 use syn::{
     Attribute, Expr, Fields, FnArg, GenericArgument, ImplItem, Item, ItemFn, ItemImpl, ItemMod, ItemStruct, ItemTrait,
-    Lit, Meta, PathArguments, ReturnType, Token, Type, Visibility,
+    Lit, Meta, PathArguments, ReturnType, Token, TraitItem, Type, Visibility,
 };
 
 #[cfg(test)]
@@ -122,15 +122,33 @@ impl Extractor<'_> {
     }
 
     fn record_trait(&mut self, item: &ItemTrait) {
-        let test = self.test || cfg_test(&item.attrs);
+        let trait_test = self.test || cfg_test(&item.attrs);
         self.symbols.push(self.symbol(
             item.ident.to_string(),
             SymbolKind::Trait,
             visibility(&item.vis),
             Signature { arity: 0, inputs: Vec::new(), output: String::new() },
             first_doc_line(&item.attrs),
-            test,
+            trait_test,
         ));
+        // Each declared method gets its own row, `Trait::method`, mirroring
+        // `record_impl` in every respect but the item type it reads (#5300).
+        // A trait item carries no visibility of its own, so it inherits the
+        // trait's.
+        for trait_item in &item.items {
+            let TraitItem::Fn(method) = trait_item else {
+                continue;
+            };
+            let name = format!("{}::{}", item.ident, method.sig.ident);
+            self.symbols.push(self.symbol(
+                name,
+                SymbolKind::TraitMethod,
+                visibility(&item.vis),
+                fn_signature(&method.sig),
+                first_doc_line(&method.attrs),
+                trait_test || cfg_test(&method.attrs),
+            ));
+        }
     }
 
     fn record_impl(&mut self, item: &ItemImpl) {
@@ -442,6 +460,36 @@ mod tests {
             .into_iter()
             .map(|symbol| (symbol.name, symbol.kind, symbol.test, symbol.visibility))
             .collect()
+    }
+
+    #[test]
+    fn a_trait_method_declaration_is_its_own_row() {
+        // The plausible bug: `record_trait` pushed one row for the trait's own
+        // ident and never iterated its items, so a trait's declared method had
+        // no row at all — and a trait declaration is exactly the file a
+        // signature change is guaranteed to touch (#5300). A reference search
+        // built on the inventory reported such a file as merely referencing,
+        // which is what let a declared surface read as complete when it covered
+        // none of the implementors.
+        let source = r"
+            pub trait SourceBackend {
+                /// Adopt the candidate refs a predecessor produced.
+                fn adopt_candidate(&self, bloom: u8) -> bool;
+                const LIMIT: usize = 1;
+            }
+        ";
+        let rows = names(source, false);
+        assert!(
+            rows.iter().any(|(name, kind, _, vis)| {
+                name == "SourceBackend::adopt_candidate" && *kind == SymbolKind::TraitMethod && vis == "public"
+            }),
+            "the declared method is a row of its own, named Trait::method: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|(name, kind, _, _)| name == "SourceBackend" && *kind == SymbolKind::Trait),
+            "and the trait's own row is unchanged: {rows:?}"
+        );
+        assert_eq!(rows.len(), 2, "a non-fn trait item contributes nothing: {rows:?}");
     }
 
     #[test]

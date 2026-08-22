@@ -8,6 +8,7 @@
 //! [`SignatureEnvelope`]; this crate does not hold private keys.
 
 mod client;
+mod crates;
 pub(crate) mod import;
 pub(crate) mod scope;
 
@@ -15,13 +16,15 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aether_bloomery::{Digest, Observation, Provenance, SignatureEnvelope, Statement};
+use aether_bloomery::{Digest, Observation, Provenance, ScopeRevision, SignatureEnvelope, Statement};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 
 use client::ControlApi;
 use scope::load_revision;
+
+use crate::bloomery::load_policy;
 
 /// Default REST port when `--http-port` is omitted — the same default the
 /// daemon binds when `AETHER_HTTP_PORT` is unset.
@@ -64,6 +67,11 @@ enum Command {
         /// Managed-heading markdown.
         #[arg(long)]
         file: PathBuf,
+        /// Approval policy the declared-surface granularity lint reads. The
+        /// seal door is the backstop; this stops an operator before they sign
+        /// an approval bound to a digest that can never seal.
+        #[arg(long = "approval-policy", default_value = "approval-policy.toml")]
+        approval_policy: PathBuf,
     },
     /// Submit a pre-signed approval envelope for a scope digest.
     Approve {
@@ -134,7 +142,7 @@ fn dispatch(cli: CommissionCli) -> Result<String> {
     let api = ControlApi { port: cli.http_port, token: cli.token };
     match cli.command {
         Command::Create { id, intent_file } => create(&api, &id, &intent_file),
-        Command::Scope { id, file } => write_scope(&api, &id, &file),
+        Command::Scope { id, file, approval_policy } => write_scope(&api, &id, &file, &approval_policy),
         Command::Approve { id, scope, envelope } => approve(&api, &id, &scope, &envelope),
         Command::Show { id, json } => show(&api, &id, json),
         Command::List { status } => list(&api, status.as_deref()),
@@ -187,14 +195,52 @@ fn create(api: &ControlApi, id: &str, intent_file: &Path) -> Result<String> {
     Ok(format!("created {} intent {}\n", created.id, created.intent))
 }
 
-fn write_scope(api: &ControlApi, id: &str, file: &Path) -> Result<String> {
+fn write_scope(api: &ControlApi, id: &str, file: &Path, approval_policy: &Path) -> Result<String> {
     let predecessor = match current_revision(api, id)? {
         Some(hex) => Some(digest_from_hex(&hex)?),
         None => None,
     };
     let revision = load_revision(id, file, predecessor)?;
+    lint_surface_granularity(&revision, approval_policy)?;
     let written: DigestView = api.send_json("POST", &format!("/commissions/{id}/revisions"), &revision)?;
     Ok(format!("{}\n", written.digest))
+}
+
+/// Refuse a declared surface that names a file the approval policy does not.
+///
+/// The seal door is the authority — it reads the *stored* revision, so a
+/// declaration that cannot seal is one an operator would otherwise discover
+/// only after signing an approval bound to its digest. This is where they are
+/// stopped instead.
+///
+/// A policy that cannot be read or parsed warns and skips: this is an authoring
+/// convenience with a backstop, and refusing every scope write on a missing
+/// file would make the lint the thing that blocks work.
+fn lint_surface_granularity(revision: &ScopeRevision, approval_policy: &Path) -> Result<()> {
+    let policy = match load_policy(approval_policy) {
+        Ok(policy) => policy,
+        Err(error) => {
+            #[allow(
+                clippy::print_stderr,
+                reason = "an advisory the operator reads; the command's own output is the String it returns on stdout"
+            )]
+            {
+                eprintln!(
+                    "warning: approval policy {} could not be read ({error}); skipping the declared-surface \
+                     granularity lint. The seal door still enforces it.",
+                    approval_policy.display()
+                );
+            }
+            return Ok(());
+        }
+    };
+    if let Some(glob) = policy.unnamed_file_entries(&revision.declared_surface).first() {
+        bail!(
+            "declared surface {glob:?} names one file and no approval-policy rule names that file; \
+             widen it to a crate glob such as crates/<crate>/src/**"
+        );
+    }
+    Ok(())
 }
 
 fn approve(api: &ControlApi, id: &str, scope: &str, envelope: &Path) -> Result<String> {

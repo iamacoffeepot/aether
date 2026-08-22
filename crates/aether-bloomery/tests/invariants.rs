@@ -165,7 +165,7 @@ fn seal_is_canonical_over_full_member_content() {
 // conflict). Tripwire: sealing a second concurrent bloom succeeds.
 #[test]
 fn second_concurrent_seal_is_refused() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let first = draft(1, vec![membership("alpha", 10)]).seal();
     let (after_first, sealed) = step(&base, &event("first", Fact::Seal(first)));
     assert!(matches!(sealed.outcome, Outcome::Sealed(_)));
@@ -188,7 +188,7 @@ fn second_concurrent_seal_is_refused() {
 // membership-conflict guard from the V1 rule.
 #[test]
 fn foreign_hold_aborts_the_whole_seal() {
-    let mut snapshot = Snapshot::new(digest(1));
+    let mut snapshot = Snapshot::new(digest(1)).with_green_base(digest(1));
     let held = draft(9, vec![membership("shared", 10)]).seal();
     splice_bloom(&mut snapshot, &held, BloomStatus::Landed);
 
@@ -208,7 +208,7 @@ fn foreign_hold_aborts_the_whole_seal() {
 // wrong-evidence-kind, and unbound-approval seals are all seal-time rejections.
 #[test]
 fn seal_rejects_empty_membership() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let empty = draft(1, vec![]).seal();
     let decided =
         reduce(&base, &event("empty", Fact::Seal(empty)), &ResolvedConfigs::default(), &SpendWindow::default());
@@ -217,7 +217,7 @@ fn seal_rejects_empty_membership() {
 
 #[test]
 fn seal_rejects_duplicate_workpiece() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     // Same workpiece at two distinct revisions — not an exact duplicate, so it
     // survives seal's dedup and reaches the reducer's duplicate check.
     let dup = draft(1, vec![membership("wp", 10), membership("wp", 11)]).seal();
@@ -235,7 +235,7 @@ fn seal_rejects_duplicate_workpiece() {
 // holding the membership they authored.
 #[test]
 fn seal_rejects_a_member_claiming_the_reserved_composition_id() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let reserved = draft(1, vec![membership(WorkpieceId::COMPOSITION, 10)]).seal();
     let decided =
         reduce(&base, &event("reserved", Fact::Seal(reserved)), &ResolvedConfigs::default(), &SpendWindow::default());
@@ -247,7 +247,7 @@ fn seal_rejects_a_member_claiming_the_reserved_composition_id() {
 
 #[test]
 fn seal_rejects_unbound_or_wrong_kind_approval() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
 
     // Approval whose subject is not the member's scope revision.
     let mut wrong_subject = membership("wp", 10);
@@ -276,7 +276,7 @@ fn seal_rejects_unbound_or_wrong_kind_approval() {
 // overwriting the existing record.
 #[test]
 fn seal_rejects_a_known_bloom_id() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (after_seal, sealed) = step(&base, &event("seal", Fact::Seal(spec.clone())));
@@ -301,7 +301,7 @@ fn seal_rejects_a_catalog_the_line_cannot_run() {
 
     let (unrunnable, configs) = draft_with_catalog(1, vec![membership("wp", 10)], &catalog);
     let decided = reduce(
-        &Snapshot::new(digest(1)),
+        &Snapshot::new(digest(1)).with_green_base(digest(1)),
         &event("unrunnable", Fact::Seal(unrunnable.seal())),
         &configs,
         &SpendWindow::default(),
@@ -323,7 +323,7 @@ fn seal_rejects_a_catalog_the_line_cannot_run() {
 fn an_absent_catalog_runs_the_line_but_an_empty_one_is_refused() {
     let unconfigured = draft(1, vec![membership("wp", 10)]);
     let admitted = reduce(
-        &Snapshot::new(digest(1)),
+        &Snapshot::new(digest(1)).with_green_base(digest(1)),
         &event("absent", Fact::Seal(unconfigured.seal())),
         &ResolvedConfigs::default(),
         &SpendWindow::default(),
@@ -331,8 +331,12 @@ fn an_absent_catalog_runs_the_line_but_an_empty_one_is_refused() {
     assert!(matches!(admitted.outcome, Outcome::Sealed(_)), "sealing no catalog runs the line: {:?}", admitted.outcome);
 
     let (empty, configs) = draft_with_catalog(1, vec![membership("wp", 10)], &StageCatalog::default());
-    let decided =
-        reduce(&Snapshot::new(digest(1)), &event("empty", Fact::Seal(empty.seal())), &configs, &SpendWindow::default());
+    let decided = reduce(
+        &Snapshot::new(digest(1)).with_green_base(digest(1)),
+        &event("empty", Fact::Seal(empty.seal())),
+        &configs,
+        &SpendWindow::default(),
+    );
     assert!(
         matches!(decided.outcome, Outcome::SealRejected(SealError::UnrunnableStageCatalog(_))),
         "an empty catalog binds nothing and is refused: {:?}",
@@ -359,8 +363,12 @@ fn a_sealed_catalog_whose_bytes_do_not_decode_is_refused() {
     let mut configs = ResolvedConfigs::default();
     configs.insert(catalog.address(), StageCatalog::NAME, vec![0xff]);
 
-    let decided =
-        reduce(&Snapshot::new(digest(1)), &event("stale", Fact::Seal(draft.seal())), &configs, &SpendWindow::default());
+    let decided = reduce(
+        &Snapshot::new(digest(1)).with_green_base(digest(1)),
+        &event("stale", Fact::Seal(draft.seal())),
+        &configs,
+        &SpendWindow::default(),
+    );
     assert_eq!(
         decided.outcome,
         Outcome::SealRejected(SealError::UnproducibleConfig {
@@ -384,7 +392,7 @@ fn resolved_bloom_is_supersedable() {
     // A successor differing in base — a distinct id, same member (exempt from
     // conflict via the predecessor's release). The base it rebases onto has to
     // be one the source reported (#4709).
-    let snapshot = observing(&snapshot, 2);
+    let snapshot = observing(&snapshot, 2).with_green_base(digest(2));
     let successor_spec = draft(2, vec![membership("wp", 10)]).seal();
     let successor = successor_spec.id();
     let (after, decided) = step(&snapshot, &event("sup", Fact::Supersede { predecessor, successor: successor_spec }));
@@ -408,7 +416,7 @@ fn a_successor_inheriting_every_claim_dispatches_its_own_fold() {
 
     // Same member at the same scope revision on a different base: every claim
     // inherits, and no member enters the line fresh.
-    let snapshot = observing(&snapshot, 2);
+    let snapshot = observing(&snapshot, 2).with_green_base(digest(2));
     let successor_spec = draft(2, vec![membership("wp", 10)]).seal();
     let successor = successor_spec.id();
     let successor_base = successor_spec.base();
@@ -453,7 +461,7 @@ fn a_mixed_successors_completing_claim_dispatches_a_fold_that_adopts_the_predece
 
     // "kept" is re-admitted at its own scope revision and inherits; "rerun" comes
     // back at a new one, so it drops its stale claim and enters the line fresh.
-    let snapshot = observing(&snapshot, 2);
+    let snapshot = observing(&snapshot, 2).with_green_base(digest(2));
     let successor_spec = draft(2, vec![membership("kept", 10), membership("rerun", 12)]).seal();
     let successor = successor_spec.id();
     let (snapshot, _) = step(&snapshot, &event("sup", Fact::Supersede { predecessor, successor: successor_spec }));
@@ -488,7 +496,7 @@ fn a_mixed_successors_completing_claim_dispatches_a_fold_that_adopts_the_predece
 // identical successor spec (same id) is refused.
 #[test]
 fn self_supersession_is_refused() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let predecessor = spec.id();
     let (after_seal, _) = step(&base, &event("seal", Fact::Seal(spec.clone())));
@@ -507,7 +515,7 @@ fn self_supersession_is_refused() {
 // mirroring `reduce_seal`'s `KnownBloom` guard on the seal door.
 #[test]
 fn supersede_rejects_a_known_successor_id() {
-    let mut snapshot = Snapshot::new(digest(1));
+    let mut snapshot = Snapshot::new(digest(1)).with_green_base(digest(1));
     // A landed bloom whose id the successor will collide with.
     let known = draft(9, vec![membership("landed", 10)]).seal();
     splice_bloom(&mut snapshot, &known, BloomStatus::Landed);
@@ -531,7 +539,7 @@ fn supersede_rejects_a_known_successor_id() {
 // blooms, the state the guard defends against.
 #[test]
 fn supersede_rejects_a_foreign_double_claim() {
-    let mut snapshot = Snapshot::new(digest(1));
+    let mut snapshot = Snapshot::new(digest(1)).with_green_base(digest(1));
     // A foreign active bloom holding "shared".
     let foreign = draft(7, vec![membership("shared", 30)]).seal();
     splice_bloom(&mut snapshot, &foreign, BloomStatus::Sealed);
@@ -563,7 +571,7 @@ fn supersede_rejects_a_foreign_double_claim() {
 // skipping the member-validity checks reduce_seal runs.
 #[test]
 fn supersede_rejects_an_invalid_successor_membership() {
-    let mut snapshot = Snapshot::new(digest(1));
+    let mut snapshot = Snapshot::new(digest(1)).with_green_base(digest(1));
     let predecessor_spec = draft(1, vec![membership("own", 10)]).seal();
     let predecessor = predecessor_spec.id();
     splice_bloom(&mut snapshot, &predecessor_spec, BloomStatus::Sealed);
@@ -600,7 +608,7 @@ fn supersede_rejects_an_invalid_successor_membership() {
 // failures a successor is held to.
 #[test]
 fn supersede_rejects_an_unknown_stage_catalog() {
-    let mut snapshot = Snapshot::new(digest(1));
+    let mut snapshot = Snapshot::new(digest(1)).with_green_base(digest(1));
     let predecessor_spec = draft(1, vec![membership("own", 10)]).seal();
     let predecessor = predecessor_spec.id();
     splice_bloom(&mut snapshot, &predecessor_spec, BloomStatus::Sealed);
@@ -630,7 +638,7 @@ fn supersede_rejects_an_unknown_stage_catalog() {
 // ejected workpiece and a scope-changed one both drop their stale claims.
 #[test]
 fn successor_inherits_only_still_valid_claims() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     // Predecessor admits kept (rev 10), ejected (rev 11), and changed (rev 12).
     let members = vec![membership("kept", 10), membership("ejected", 11), membership("changed", 12)];
     let predecessor_spec = draft(1, members).seal();
@@ -647,7 +655,7 @@ fn successor_inherits_only_still_valid_claims() {
 
     // Successor keeps "kept" at rev 10, drops "ejected", and re-admits "changed"
     // at a *new* revision 13 — so only "kept"'s claim is still valid to inherit.
-    let snapshot = observing(&snapshot, 2);
+    let snapshot = observing(&snapshot, 2).with_green_base(digest(2));
     let successor_spec = draft(2, vec![membership("kept", 10), membership("changed", 13)]).seal();
     let successor = successor_spec.id();
     let (after, decided) = step(&snapshot, &event("sup", Fact::Supersede { predecessor, successor: successor_spec }));
@@ -669,7 +677,7 @@ fn successor_inherits_only_still_valid_claims() {
 // never runs and the successor never resolves.
 #[test]
 fn supersession_dispatches_every_non_inherited_successor_member() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     // Predecessor admits "kept" (integrates at rev 10) and "wedged" (never
     // integrates — the escape-hatch case).
     let members = vec![membership("kept", 10), membership("wedged", 11)];
@@ -681,7 +689,7 @@ fn supersession_dispatches_every_non_inherited_successor_member() {
 
     // The successor re-admits "kept" at the same revision (inherits), "wedged"
     // at a fresh revision, and a net-new "grown".
-    let snapshot = observing(&snapshot, 2);
+    let snapshot = observing(&snapshot, 2).with_green_base(digest(2));
     let successor_spec =
         draft(2, vec![membership("kept", 10), membership("wedged", 12), membership("grown", 13)]).seal();
     let successor = successor_spec.id();
@@ -749,7 +757,7 @@ fn supersession_dispatches_every_non_inherited_successor_member() {
 // candidate, not the first one integrated.
 #[test]
 fn re_integration_overwrites_the_stale_claim() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (mut snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -765,10 +773,11 @@ fn re_integration_overwrites_the_stale_claim() {
     assert_eq!(record.claims.len(), 1);
     assert_eq!(record.claims.get(&workpiece("wp")).unwrap().candidate, digest(200));
 
-    // The resolved bloom — through the fold's aggregate review pass
+    // The resolved bloom — through the join of the fold's two composite gates
     // (ADR-0153) — reads the refined claim.
     let (after, _) =
         step(&snapshot, &event("r", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }));
+    let (after, _) = step(&after, &verify_passed(bloom, "v-mechanical", 40));
     let verdict = event(
         "v",
         Fact::AggregateReviewCompleted {
@@ -879,7 +888,7 @@ fn assert_no_member_dispatch(decided: &Decisions, why: &str) {
 // was `Outcome::Duplicate` and the bloom sat Resolved with its land acked.
 #[test]
 fn a_refused_landing_repairs_the_weave_then_parks_at_the_budget() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -967,7 +976,7 @@ fn a_refused_landing_repairs_the_weave_then_parks_at_the_budget() {
 // combination came to cost five members their finished work.
 #[test]
 fn a_failing_aggregate_verify_repairs_the_weave_then_parks_at_the_ceiling() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -1110,7 +1119,7 @@ fn the_park_ceiling_refuses_a_fold_at_the_budget() {
 // exist, so the assertion is that no member dispatch appears at all.
 #[test]
 fn a_failing_composition_review_repairs_the_weave_and_never_reopens_a_member() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -1194,12 +1203,12 @@ fn a_failing_composition_review_repairs_the_weave_and_never_reopens_a_member() {
     // holds is the one that was refused.
     let (after2, d2) = step(&after1, &weave_repaired(bloom, "weave-1", 40, 44, 45));
     assert!(matches!(d2.outcome, Outcome::CompositionRepaired { .. }));
+    assert!(
+        d2.effects.iter().any(|e| matches!(e, Decision::DispatchAggregateReview { roll: 2, .. })),
+        "the repaired weave sends the delta-confirm out beside the compiler",
+    );
     let (after3, d3) = step(&after2, &verify_passed(bloom, "v2", 44));
     assert!(matches!(d3.outcome, Outcome::AggregateVerifyPassed { .. }));
-    assert!(
-        d3.effects.iter().any(|e| matches!(e, Decision::DispatchAggregateReview { roll: 2, .. })),
-        "the passing re-verify dispatches the delta-confirm",
-    );
 
     // The failing delta-confirm hits the ceiling: the bloom parks to the owner,
     // and files the refusal's finding beside the park (#4977) — the two-pass
@@ -1256,7 +1265,7 @@ fn member_cursors_with_composition(
 // review.
 #[test]
 fn an_aggregate_review_executor_fault_retries_the_review_without_charging_any_other_ledger() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -1350,7 +1359,7 @@ fn an_aggregate_review_executor_fault_retries_the_review_without_charging_any_ot
 // first fault, permanently, with no route back other than supersession.
 #[test]
 fn a_fault_series_resets_when_a_different_fold_arrives() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -1408,7 +1417,7 @@ fn a_fault_series_resets_when_a_different_fold_arrives() {
 // a candidate's repair budget on a host outage.
 #[test]
 fn a_member_executor_fault_retries_the_same_stage_without_charging_work_or_repair() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -1519,7 +1528,7 @@ fn a_member_executor_fault_retries_the_same_stage_without_charging_work_or_repai
 // member-stage redispatch path, whose payload no consumer could resolve.
 #[test]
 fn adopting_the_park_question_rearms_the_review_cycle() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -1577,7 +1586,7 @@ fn adopting_the_park_question_rearms_the_review_cycle() {
 // stage.
 #[test]
 fn a_question_bound_to_the_held_fold_marks_the_review_park() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -1621,7 +1630,7 @@ fn a_question_bound_to_the_held_fold_marks_the_review_park() {
 // effect dropping the append.
 #[test]
 fn admit_evidence_records_it_in_the_bloom_log() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -1645,7 +1654,7 @@ fn admit_evidence_records_it_in_the_bloom_log() {
 // claim never enters through `AdmitEvidence`.
 #[test]
 fn admit_evidence_refuses_unknown_bloom_and_the_wrong_door() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
 
@@ -1688,7 +1697,7 @@ fn admit_evidence_refuses_unknown_bloom_and_the_wrong_door() {
 // `Duplicate` and the log does not grow a second copy.
 #[test]
 fn a_replayed_admission_is_a_duplicate() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -1732,7 +1741,7 @@ fn answer_adopting(question: Digest) -> Statement {
 // name (PendingDecision), not a misreported MemberNotIntegrated.
 #[test]
 fn a_question_admission_holds_the_bloom_and_blocks_resolve() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -1765,7 +1774,7 @@ fn a_question_admission_holds_the_bloom_and_blocks_resolve() {
 // resolve. A sibling member is unaffected throughout.
 #[test]
 fn an_adopted_answer_releases_the_hold_and_redispatches() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("held", 10), membership("free", 11)]).seal();
     let bloom = spec.id();
     let (mut snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -1824,7 +1833,7 @@ fn an_adopted_answer_releases_the_hold_and_redispatches() {
 // persists in both refusals.
 #[test]
 fn an_answer_that_does_not_adopt_a_held_question_is_refused() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -1872,7 +1881,7 @@ fn an_answer_that_does_not_adopt_a_held_question_is_refused() {
 // genuine envelope at a hold the signature never named.
 #[test]
 fn the_released_hold_is_the_first_parent_in_submitter_order() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("first", 10), membership("second", 11)]).seal();
     let bloom = spec.id();
     let (mut snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -1917,7 +1926,7 @@ fn the_released_hold_is_the_first_parent_in_submitter_order() {
 // own reason, never a misreported BaseMismatch.
 #[test]
 fn land_refusals_name_their_own_reason() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
 
@@ -1962,15 +1971,20 @@ fn landing_rejection_refusals_name_their_own_reason() {
         )
     };
 
-    let unknown =
-        reduce(&Snapshot::new(digest(1)), &rejected(40), &ResolvedConfigs::default(), &SpendWindow::default());
+    let unknown = reduce(
+        &Snapshot::new(digest(1)).with_green_base(digest(1)),
+        &rejected(40),
+        &ResolvedConfigs::default(),
+        &SpendWindow::default(),
+    );
     assert!(matches!(unknown.outcome, Outcome::LandingRejectedRefused(LandingRejectedError::UnknownBloom)));
 
-    let (sealed, _) = step(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(spec.clone())));
+    let (sealed, _) =
+        step(&Snapshot::new(digest(1)).with_green_base(digest(1)), &event("seal", Fact::Seal(spec.clone())));
     let not_awaiting = reduce(&sealed, &rejected(40), &ResolvedConfigs::default(), &SpendWindow::default());
     assert!(matches!(not_awaiting.outcome, Outcome::LandingRejectedRefused(LandingRejectedError::NotAwaitingLanding),));
 
-    let mut headless = Snapshot::new(digest(1));
+    let mut headless = Snapshot::new(digest(1)).with_green_base(digest(1));
     splice_bloom(&mut headless, &spec, BloomStatus::Resolved);
     let no_head = reduce(&headless, &rejected(40), &ResolvedConfigs::default(), &SpendWindow::default());
     assert!(matches!(no_head.outcome, Outcome::LandingRejectedRefused(LandingRejectedError::NoResolvedHead)));
@@ -2044,7 +2058,7 @@ fn supersede_refuses_a_fresh_landed_member_and_admits_the_predecessors_own() {
 
     // Rebase so the carry-only successor is a distinct spec; same members at the
     // same revision on the current base would be a self-supersession.
-    let snapshot = observing(&snapshot, 51);
+    let snapshot = observing(&snapshot, 51).with_green_base(digest(51));
     let carry_only = draft(51, vec![membership("carried", 20)]).seal();
     let carried = reduce(
         &snapshot,
@@ -2091,6 +2105,14 @@ fn a_replayed_journal_reproduces_the_landed_workpiece_refusal() {
         event("integrate", Fact::Integrate { bloom, claim: claim("issue-4866", 10, 100) }),
         event("resolve", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }),
         event(
+            "verify",
+            Fact::AggregateVerifyCompleted {
+                bloom,
+                passed: true,
+                evidence: Evidence { subject: digest(40), kind: EvidenceKind::VerificationResult, detail: digest(204) },
+            },
+        ),
+        event(
             "review",
             Fact::AggregateReviewCompleted {
                 bloom,
@@ -2101,7 +2123,9 @@ fn a_replayed_journal_reproduces_the_landed_workpiece_refusal() {
         ),
         event("land", Fact::Land { bloom, new_head: digest(50) }),
     ];
-    let fold = |events: &[Event]| events.iter().fold(Snapshot::new(digest(1)), |snapshot, ev| step(&snapshot, ev).0);
+    let fold = |events: &[Event]| {
+        events.iter().fold(Snapshot::new(digest(1)).with_green_base(digest(1)), |snapshot, ev| step(&snapshot, ev).0)
+    };
     let reseal = event("reseal", Fact::Seal(draft(50, vec![membership("issue-4866", 10)]).seal()));
 
     let live_refusal = reduce(&fold(&journal), &reseal, &ResolvedConfigs::default(), &SpendWindow::default());
@@ -2119,26 +2143,25 @@ fn a_replayed_journal_reproduces_the_landed_workpiece_refusal() {
     }
 }
 
-// ADR-0153 + #4696 — the fold passes two gates before the bloom resolves, in
-// order, and resolution is land-readiness. A verified `Fact::Resolve` holds the
-// fold and dispatches the whole-bloom aggregate *verify* — the compiler, not the
-// critic; only its passing verdict dispatches the aggregate review, and only the
-// review's passing verdict emits SetResolved plus the DispatchLand naming the
-// sealed base and the resolved integrated *head* commit (distinct from the
-// artifact tree, #3615). Both lane transformations bind the integrated tree and
-// check out the integrated head.
+// ADR-0153 + #4696 — the fold passes two gates before the bloom resolves, and
+// resolution is land-readiness. A verified `Fact::Resolve` holds the fold and
+// dispatches both whole-bloom gates over it — the compiler and the critic judge
+// the same tree and read nothing from each other — and only the join of their
+// passes emits SetResolved plus the DispatchLand naming the sealed base and the
+// resolved integrated *head* commit (distinct from the artifact tree, #3615).
+// Both lane transformations bind the integrated tree and check out the
+// integrated head.
 //
-// Tripwire for the ordering above all: a fold reaching the model critic before
-// the compiler has passed is the failure this whole change exists to prevent —
-// it spends a model lane on a tree that may not build, and lets a broken fold
-// reach the landing CI, where #4689 says there is no route back. Also catches a
-// resolve that lands without either pass, a dispatch mis-binding tree/head, and
-// the land regressing to the artifact tree.
+// Tripwire for the join above all: a bloom that lands on one gate's word is the
+// failure this whole ladder exists to prevent — it lets a fold no compiler has
+// built, or no critic has read, reach the landing CI, where #4689 says there is
+// no route back. Also catches a resolve on a single verdict, a dispatch
+// mis-binding tree/head, and the land regressing to the artifact tree.
 #[test]
-fn the_fold_passes_verify_then_review_before_the_bloom_resolves() {
+fn the_fold_runs_both_composite_gates_before_the_bloom_resolves() {
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
-    let mut snapshot = Snapshot::new(digest(1));
+    let mut snapshot = Snapshot::new(digest(1)).with_green_base(digest(1));
     let (next, _) = step(&snapshot, &event("seal", Fact::Seal(spec.clone())));
     snapshot = next;
     let (next, _) = step(&snapshot, &event("integrate", Fact::Integrate { bloom, claim: claim("wp", 10, 100) }));
@@ -2152,10 +2175,14 @@ fn the_fold_passes_verify_then_review_before_the_bloom_resolves() {
         !dispatched.effects.iter().any(|effect| matches!(effect, Decision::DispatchLand { .. })),
         "no land dispatches before either verdict",
     );
-    assert!(
-        !dispatched.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })),
-        "the fold reaches the compiler before the critic, never the other way round",
-    );
+    match dispatched.effects.iter().find(|e| matches!(e, Decision::DispatchAggregateReview { .. })) {
+        Some(Decision::DispatchAggregateReview { transformation, roll, .. }) => {
+            assert_eq!(transformation.inputs[0], tree, "the critic judges the tree the compiler is building");
+            assert_eq!(transformation.checkout, head, "and checks out the same integrated head");
+            assert_eq!(*roll, 1);
+        }
+        other => panic!("expected a DispatchAggregateReview beside the verify, got {other:?}"),
+    }
     match dispatched.effects.iter().find(|e| matches!(e, Decision::DispatchAggregateVerify { .. })) {
         Some(Decision::DispatchAggregateVerify { transformation, roll, .. }) => {
             assert_eq!(transformation.inputs[0], tree, "the verify evidence binds the integrated tree");
@@ -2172,17 +2199,20 @@ fn the_fold_passes_verify_then_review_before_the_bloom_resolves() {
     let folded = after.blooms.get(&bloom).unwrap().integration.as_ref().expect("the fold is held on the record");
     assert_eq!((folded.tree, folded.head), (tree, head));
 
-    // The passing verify hands the same fold to the critic, still holding it.
+    // The passing verify files its half of the join and leaves the fold held:
+    // the critic is already judging it, so nothing is dispatched here.
     let (after, verified) = step(&after, &verify_passed(bloom, "verify", 40));
     assert!(matches!(verified.outcome, Outcome::AggregateVerifyPassed { rolls: 1, .. }));
-    match verified.effects.iter().find(|e| matches!(e, Decision::DispatchAggregateReview { .. })) {
-        Some(Decision::DispatchAggregateReview { transformation, roll, .. }) => {
-            assert_eq!(transformation.inputs[0], tree, "the review judges the tree the verify built");
-            assert_eq!(transformation.checkout, head, "the critic checks out the integrated head");
-            assert_eq!(*roll, 1);
-        }
-        other => panic!("expected a DispatchAggregateReview, got {other:?}"),
-    }
+    assert!(
+        !verified.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })),
+        "the critic left with the fold and is not dispatched twice",
+    );
+    assert!(
+        verified.effects.iter().any(|effect| {
+            matches!(effect, Decision::RecordAggregateGatePass { stage: StageId::AggregateVerify, .. })
+        }),
+        "the mechanical half of the join is recorded",
+    );
     assert!(
         !verified.effects.iter().any(|effect| matches!(effect, Decision::DispatchLand { .. })),
         "a passing verify is not land-readiness; the critic has not judged it yet",
@@ -2278,7 +2308,7 @@ fn containment_refused(
 }
 
 fn at_verify(member: &str) -> (Snapshot, BloomId) {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership(member, 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -2428,7 +2458,7 @@ fn resuming_a_member_that_is_not_held_is_refused() {
 // and the folded snapshot reflects the seeded cursor.
 #[test]
 fn seal_dispatches_each_member_at_the_entry_stage() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
     let (after, decided) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -2458,7 +2488,7 @@ fn seal_dispatches_each_member_at_the_entry_stage() {
 // dispatches one `Verify` attempt.
 #[test]
 fn a_passing_attempt_advances_one_stage_and_dispatches_the_next() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -2502,7 +2532,7 @@ fn a_passing_attempt_advances_one_stage_and_dispatches_the_next() {
 // attempt 2 and the second wedges.
 #[test]
 fn a_failing_attempt_retries_within_budget_then_wedges() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -2566,6 +2596,7 @@ fn a_failing_attempt_retries_within_budget_then_wedges() {
                 seen_verify_failures: VerifyFailureSet::EMPTY,
                 fold_checkpoint: None,
                 fold_conflict_evidence: None,
+                reconcile_assembles_base: false,
             },
         }],
     };
@@ -2584,7 +2615,7 @@ fn a_failing_attempt_retries_within_budget_then_wedges() {
 // every stage dispatching against the bare sealed base.
 #[test]
 fn a_passing_capture_retargets_the_next_dispatch_at_the_candidate() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -2622,7 +2653,7 @@ fn a_passing_capture_retargets_the_next_dispatch_at_the_candidate() {
 // would re-verify a tree that failed its own gate.
 #[test]
 fn a_failing_capture_is_discarded_and_the_retry_targets_the_prior_candidate() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -2699,7 +2730,7 @@ fn a_failing_capture_is_discarded_and_the_retry_targets_the_prior_candidate() {
 // reports only the identities that were repeated in that verdict.
 #[test]
 fn verifier_failure_accounting_uses_per_member_union_and_intersection() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -2781,7 +2812,7 @@ fn verifier_failure_accounting_uses_per_member_union_and_intersection() {
 // against a worktree already checked out at the candidate.
 #[test]
 fn an_unjudged_verify_redispatches_verify_while_a_named_failure_still_refines() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -2848,7 +2879,7 @@ fn an_unjudged_verify_redispatches_verify_while_a_named_failure_still_refines() 
 // repair failure rather than "the gate never answered".
 #[test]
 fn an_unjudged_verify_wedges_once_the_verify_budget_is_spent() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let budget = StageCatalog::binding_of(StageId::Verify).retry_budget;
@@ -2906,7 +2937,7 @@ fn an_unjudged_verify_wedges_once_the_verify_budget_is_spent() {
 
 #[test]
 fn verify_failed_refuses_invalid_state_set_and_binding_without_effects() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -2984,7 +3015,7 @@ fn verify_failed_refuses_invalid_state_set_and_binding_without_effects() {
 
 #[test]
 fn repeated_verify_failure_wedges_at_budget_with_exact_terminal_set() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -3052,7 +3083,7 @@ fn repeated_verify_failure_wedges_at_budget_with_exact_terminal_set() {
 // re-wedges immediately or one that loops past its budget.
 #[test]
 fn a_grant_resumes_a_wedged_member_on_its_own_bloom() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec.clone())));
@@ -3114,7 +3145,7 @@ fn a_grant_resumes_a_wedged_member_on_its_own_bloom() {
 // verdict cannot change (ADR-0153). That is the most common wedge there is.
 #[test]
 fn a_grant_on_a_verify_wedge_resumes_at_refine_with_its_candidate() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -3202,7 +3233,7 @@ fn a_grant_on_a_verify_wedge_resumes_at_refine_with_its_candidate() {
 
 #[test]
 fn a_successor_starts_with_fresh_verifier_history() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let predecessor_spec = draft(1, vec![membership("wp", 10)]).seal();
     let predecessor = predecessor_spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(predecessor_spec)));
@@ -3278,7 +3309,7 @@ fn construct_slot(member: &str) -> DispatchKey {
 // budget cursor rather than the dispatch ledger.
 #[test]
 fn a_granted_attempt_counts_a_retry_the_grant_cannot_lower() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -3324,7 +3355,7 @@ fn a_granted_attempt_counts_a_retry_the_grant_cannot_lower() {
 // it carried forward or erased.
 #[test]
 fn a_successor_starts_a_fresh_ledger_and_its_predecessor_keeps_one() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let predecessor_spec = draft(1, vec![membership("wp", 10)]).seal();
     let predecessor = predecessor_spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(predecessor_spec)));
@@ -3366,7 +3397,7 @@ fn a_successor_starts_a_fresh_ledger_and_its_predecessor_keeps_one() {
 // confusion the ledger exists to keep apart.
 #[test]
 fn a_rearmed_review_cycle_counts_a_retry_though_the_roll_cursor_resets() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -3425,7 +3456,7 @@ fn a_rearmed_review_cycle_counts_a_retry_though_the_roll_cursor_resets() {
 // while handing back two.
 #[test]
 fn grant_refuses_a_running_member_a_stale_stage_and_an_unspendable_request() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (running, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -3513,7 +3544,7 @@ fn machinery_wedged_at_verify() -> (Snapshot, BloomId, CandidateRef) {
     let spec = draft(1, vec![membership("wp", 10), membership("other", 11)]).seal();
     let bloom = spec.id();
     let captured = CandidateRef { tree: digest(21), checkout: digest(22) };
-    let (snapshot, _) = step(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(&Snapshot::new(digest(1)).with_green_base(digest(1)), &event("seal", Fact::Seal(spec)));
     let (snapshot, _) = step(
         &snapshot,
         &event(
@@ -3681,7 +3712,7 @@ fn a_repeated_machinery_grant_needs_a_fresh_key_and_refuses_live_work() {
 // here), for a non-member, and for an unknown bloom.
 #[test]
 fn attempt_completion_refuses_mismatch_terminal_non_member_and_unknown() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -3767,7 +3798,7 @@ proptest! {
     // reconstructs in-flight line position.
     #[test]
     fn cursor_moves_only_along_the_repair_graph(passes in prop::collection::vec(any::<bool>(), 0..8)) {
-        let base = Snapshot::new(digest(1));
+        let base = Snapshot::new(digest(1)).with_green_base(digest(1));
         let spec = draft(1, vec![membership("wp", 10)]).seal();
         let bloom = spec.id();
         let (mut snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -3847,7 +3878,7 @@ proptest! {
 // folds), and never dispatching (resolutions that never reach the git side).
 #[test]
 fn the_completing_integrate_dispatches_the_integration_fold_in_member_order() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
     let spec_base = spec.base();
@@ -4056,7 +4087,7 @@ mod sealed_catalog {
 
         let (draft, configs) = draft_with_member_override(1, membership("wp", 10), &escalate(StageId::Verify));
         let decided = reduce(
-            &Snapshot::new(digest(1)),
+            &Snapshot::new(digest(1)).with_green_base(digest(1)),
             &event("seal", Fact::Seal(draft.seal())),
             &configs,
             &SpendWindow::default(),
@@ -4075,7 +4106,7 @@ mod sealed_catalog {
         // the test above would pass on a door that refused every override.
         let (draft, configs) = draft_with_member_override(1, membership("wp", 10), &escalate(StageId::Refine));
         let decided = reduce(
-            &Snapshot::new(digest(1)),
+            &Snapshot::new(digest(1)).with_green_base(digest(1)),
             &event("seal", Fact::Seal(draft.seal())),
             &configs,
             &SpendWindow::default(),
@@ -4097,7 +4128,8 @@ mod sealed_catalog {
         let spec = draft.seal();
         let bloom = spec.id();
         let seal = event("seal", Fact::Seal(spec));
-        let decided = reduce(&Snapshot::new(digest(1)), &seal, &configs, &SpendWindow::default());
+        let decided =
+            reduce(&Snapshot::new(digest(1)).with_green_base(digest(1)), &seal, &configs, &SpendWindow::default());
         assert!(matches!(decided.outcome, Outcome::Sealed(_)), "the authored catalog seals: {:?}", decided.outcome);
 
         let (construct_command, construct_profile) = decided
@@ -4111,7 +4143,7 @@ mod sealed_catalog {
             })
             .expect("sealing dispatches the entry stage");
 
-        let mut snapshot = Snapshot::new(digest(1)).apply(&seal, &decided, &configs);
+        let mut snapshot = Snapshot::new(digest(1)).with_green_base(digest(1)).apply(&seal, &decided, &configs);
         let construct_pass = event(
             "construct-pass",
             Fact::AttemptCompleted {
@@ -4184,9 +4216,9 @@ mod sealed_catalog {
         let spec = draft.seal();
         let bloom = spec.id();
         let seal = event("seal", Fact::Seal(spec));
-        let snapshot = Snapshot::new(digest(1)).apply(
+        let snapshot = Snapshot::new(digest(1)).with_green_base(digest(1)).apply(
             &seal,
-            &reduce(&Snapshot::new(digest(1)), &seal, &configs, &SpendWindow::default()),
+            &reduce(&Snapshot::new(digest(1)).with_green_base(digest(1)), &seal, &configs, &SpendWindow::default()),
             &configs,
         );
 
@@ -4221,7 +4253,7 @@ mod observed_mainline {
     // the drift this fact exists to close.
     #[test]
     fn an_observed_head_advances_mainline() {
-        let snapshot = Snapshot::new(digest(1));
+        let snapshot = Snapshot::new(digest(1)).with_green_base(digest(1));
         let observed = event("observe", Fact::ObserveMainline { head: digest(9) });
 
         let (next, decided) = step(&snapshot, &observed);
@@ -4240,7 +4272,7 @@ mod observed_mainline {
     // would churn the outbox on every poll.
     #[test]
     fn re_observing_the_current_head_moves_nothing() {
-        let snapshot = Snapshot::new(digest(1));
+        let snapshot = Snapshot::new(digest(1)).with_green_base(digest(1));
         let observed = event("observe", Fact::ObserveMainline { head: digest(1) });
 
         let (next, decided) = step(&snapshot, &observed);
@@ -4312,7 +4344,7 @@ mod observed_mainline {
     // the reducer and advances.
     #[test]
     fn observing_the_true_head_recovers_a_regressed_mainline() {
-        let snapshot = Snapshot::new(digest(1));
+        let snapshot = Snapshot::new(digest(1)).with_green_base(digest(1));
         let first = event("observe-mainline-9-at-1", Fact::ObserveMainline { head: digest(9) });
         let (mut snapshot, first_decided) = step(&snapshot, &first);
         assert!(
@@ -4636,7 +4668,7 @@ fn verified_claim(name: &str, revision: u8, candidate: u8, verdict: u8) -> Resol
 fn a_fold_on_an_already_verified_tree_passes_the_aggregate_verify_by_identity() {
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
-    let (snapshot, _) = step(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(&Snapshot::new(digest(1)).with_green_base(digest(1)), &event("seal", Fact::Seal(spec)));
     let (snapshot, _) =
         step(&snapshot, &event("integrate", Fact::Integrate { bloom, claim: verified_claim("wp", 10, 100, 60) }));
 
@@ -4676,7 +4708,7 @@ fn a_fold_on_an_already_verified_tree_passes_the_aggregate_verify_by_identity() 
 fn a_multi_member_fold_still_runs_the_full_aggregate_verify() {
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
-    let (snapshot, _) = step(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(&Snapshot::new(digest(1)).with_green_base(digest(1)), &event("seal", Fact::Seal(spec)));
     let (snapshot, _) =
         step(&snapshot, &event("i-a", Fact::Integrate { bloom, claim: verified_claim("alpha", 10, 100, 60) }));
     let (snapshot, _) =
@@ -4694,8 +4726,8 @@ fn a_multi_member_fold_still_runs_the_full_aggregate_verify() {
         "a combined tree has never been built, so the compiler has to build it",
     );
     assert!(
-        !resolved.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })),
-        "the critic still waits for the mechanical verdict",
+        resolved.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })),
+        "and the critic judges the same never-before-built tree beside it",
     );
     assert!(after.blooms.get(&bloom).unwrap().verify_reuses.is_empty());
 }
@@ -4712,7 +4744,7 @@ fn a_multi_member_fold_still_runs_the_full_aggregate_verify() {
 fn a_proof_from_another_gate_set_refuses_the_memo_and_re_proves() {
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
-    let (snapshot, _) = step(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(&Snapshot::new(digest(1)).with_green_base(digest(1)), &event("seal", Fact::Seal(spec)));
     let (mut snapshot, _) =
         step(&snapshot, &event("integrate", Fact::Integrate { bloom, claim: verified_claim("wp", 10, 100, 60) }));
 
@@ -4746,7 +4778,7 @@ fn a_repair_lap_that_leaves_the_tree_unchanged_reuses_its_verify_verdict() {
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let candidate = CandidateRef { tree: digest(100), checkout: digest(102) };
-    let (snapshot, _) = step(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(&Snapshot::new(digest(1)).with_green_base(digest(1)), &event("seal", Fact::Seal(spec)));
     let (snapshot, constructed) = step(
         &snapshot,
         &event(
@@ -4817,7 +4849,7 @@ fn a_repair_lap_that_leaves_the_tree_unchanged_reuses_its_verify_verdict() {
 fn three_members_with_claims() -> (Snapshot, BloomId) {
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11), membership("gamma", 12)]).seal();
     let bloom = spec.id();
-    let (snapshot, _) = step(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(&Snapshot::new(digest(1)).with_green_base(digest(1)), &event("seal", Fact::Seal(spec)));
     let mut snapshot = snapshot;
     for (name, revision, candidate) in [("alpha", 10, 20), ("beta", 11, 21), ("gamma", 12, 22)] {
         snapshot = step(
@@ -5027,7 +5059,7 @@ fn adjudicated(bloom: BloomId, key: &str, findings: Vec<u8>) -> Event {
 /// and is awaiting the delta-confirm over the re-woven tree — the position one
 /// refusal short of the two-pass ceiling.
 fn awaiting_the_delta_confirm() -> (Snapshot, BloomId) {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -5202,7 +5234,7 @@ fn a_pre_fix_park_still_replays_and_stays_adjudicable() {
 /// returns. The first refusal's finding stays open, so the same adjudication
 /// can be issued against either fork.
 fn newer_weave_awaiting_aggregate_verify() -> (Snapshot, BloomId) {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -5332,7 +5364,7 @@ fn an_override_refuses_a_bloom_whose_membership_is_not_approved() {
     };
     let spec = draft(1, vec![unapproved]).seal();
     let bloom = spec.id();
-    let mut snapshot = Snapshot::new(digest(1));
+    let mut snapshot = Snapshot::new(digest(1)).with_green_base(digest(1));
     splice_bloom(&mut snapshot, &spec, BloomStatus::Sealed);
 
     assert!(matches!(
@@ -5361,7 +5393,7 @@ fn an_override_refuses_a_bloom_whose_membership_is_not_approved() {
     // approved membership admits the very same adjudication shape (its own
     // refusal is the absent finding, which is a different door).
     let approved_spec = draft(1, vec![membership("alpha", 10)]).seal();
-    let mut approved_snapshot = Snapshot::new(digest(1));
+    let mut approved_snapshot = Snapshot::new(digest(1)).with_green_base(digest(1));
     splice_bloom(&mut approved_snapshot, &approved_spec, BloomStatus::Sealed);
     assert!(matches!(
         reduce(
@@ -5389,7 +5421,7 @@ fn an_override_refuses_a_bloom_whose_membership_is_not_approved() {
 // lap, never a fresh budget.
 #[test]
 fn an_operator_repair_re_enters_a_wedged_member_at_verify_with_the_gates_intact() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -5517,7 +5549,7 @@ fn review_passed_with_advisories(bloom: BloomId, key: &str, tree: u8, detail: u8
 
 /// A bloom whose composite gate run is green and whose review is the next fact.
 fn awaiting_composition_review() -> (Snapshot, BloomId) {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -5639,7 +5671,7 @@ fn member_dispatches(decided: &Decisions) -> Vec<(WorkpieceId, StageId)> {
 /// swallowed, and one whose worker is still out — which is the pair a release
 /// has to be able to tell apart.
 fn held_with_two_laps_returned() -> (Snapshot, BloomId) {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11), membership("gamma", 12)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -5665,7 +5697,7 @@ fn held_with_two_laps_returned() -> (Snapshot, BloomId) {
 // stranding the kill caused.
 #[test]
 fn a_held_bloom_dispatches_nothing_while_its_running_laps_still_journal() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
     let (sealed, seal_decided) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -5781,7 +5813,7 @@ fn releasing_dispatches_exactly_what_the_hold_owed_and_nothing_else() {
 // work that already went out or sit on work it thinks it still owes.
 #[test]
 fn a_hold_and_its_release_replay_from_the_recorded_decisions_alone() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11), membership("gamma", 12)]).seal();
     let bloom = spec.id();
     let script = vec![
@@ -5819,7 +5851,7 @@ fn a_hold_and_its_release_replay_from_the_recorded_decisions_alone() {
 // second hold cannot overwrite the reason the first recorded.
 #[test]
 fn both_brake_edges_state_a_reason_and_who_or_are_refused() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("alpha", 10)]).seal();
     let bloom = spec.id();
     let (sealed, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -5914,7 +5946,7 @@ fn a_hold_leaves_the_park_and_the_wedge_exactly_where_they_were() {
 
     // The wedge half: a member that spends its last attempt while held wedges,
     // and the release dispatches it no more than an unheld wedge would.
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let wedging = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -5948,7 +5980,7 @@ fn a_hold_leaves_the_park_and_the_wedge_exactly_where_they_were() {
 // dispatches a member on an unheld bloom; none of them may on a held one.
 #[test]
 fn no_fact_family_dispatches_a_member_of_a_held_bloom() {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
     let (sealed, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -6066,7 +6098,7 @@ fn a_held_composition_defers_its_weave_repair_and_resumes_it_on_release() {
 /// The position `Fact::Resolve` acts from: every member has a claim, the
 /// integration reactor has not yet handed back a tree.
 fn ready_to_fold() -> (Snapshot, BloomId) {
-    let base = Snapshot::new(digest(1));
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
@@ -6089,7 +6121,7 @@ fn folded(bloom: BloomId, key: &str, tree: u8) -> Event {
 // lets either aggregate work order out, or one that swallowed the fold
 // itself instead of only the dispatch.
 #[test]
-fn a_held_bloom_defers_aggregate_verify_from_a_completed_fold() {
+fn a_held_bloom_defers_both_composite_gates_from_a_completed_fold() {
     let (ready, bloom) = ready_to_fold();
     let (frozen, _) = step(&ready, &held(bloom, "hold", "prevent repeated paid subject-only dispatches"));
 
@@ -6109,18 +6141,20 @@ fn a_held_bloom_defers_aggregate_verify_from_a_completed_fold() {
         "and must not skip ahead to the critic either: {:?}",
         decided.effects,
     );
-    assert!(
-        decided
-            .effects
-            .iter()
-            .any(|effect| { matches!(effect, Decision::DeferAggregate { stage: StageId::AggregateVerify, .. }) }),
-        "the withheld gate is recorded so release can rebuild it: {:?}",
-        decided.effects,
-    );
+    for stage in [StageId::AggregateVerify, StageId::AggregateReview] {
+        assert!(
+            decided
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, Decision::DeferAggregate { stage: deferred, .. } if *deferred == stage)),
+            "the withheld {stage:?} is recorded so release can rebuild it: {:?}",
+            decided.effects,
+        );
+    }
 
     let record = after.blooms.get(&bloom).unwrap();
     assert!(record.integration.is_some(), "the fold is still held — a hold gates dispatch, not facts");
-    assert_eq!(record.deferred_aggregates, BTreeSet::from([StageId::AggregateVerify]));
+    assert_eq!(record.deferred_aggregates, BTreeSet::from([StageId::AggregateVerify, StageId::AggregateReview]));
     assert_eq!(
         record.dispatches.get(&DispatchKey::Bloom { stage: StageId::AggregateVerify }),
         None,
@@ -6131,11 +6165,14 @@ fn a_held_bloom_defers_aggregate_verify_from_a_completed_fold() {
 // #5100 — the critic is the paid half of the same hole.
 //
 // An in-flight verify that returns green while the bloom is held is work
-// already running: it journals and the fold stays. What it must not do is
-// launch the review that spend is trying to stop. Tripwire: a passing
-// aggregate verify that still emits `DispatchAggregateReview` under a hold.
+// already running: it journals, records its half of the join, and the fold
+// stays. What it must not do is put anything new on a paid lane — the critic
+// left with the fold, so a verdict returning under the brake has nothing to
+// launch and nothing to owe. Tripwire: a passing aggregate verify that emits
+// `DispatchAggregateReview` under a hold, or that records a deferral for a
+// critic already judging that fold, which a release would then double-spend.
 #[test]
-fn a_held_bloom_defers_aggregate_review_from_a_passing_verify() {
+fn a_held_bloom_launches_nothing_from_a_passing_verify() {
     let (ready, bloom) = ready_to_fold();
     let (folding, _) = step(&ready, &folded(bloom, "resolve", 40));
     let (frozen, _) = step(&folding, &held(bloom, "hold", "stop the critic before it spends"));
@@ -6148,14 +6185,13 @@ fn a_held_bloom_defers_aggregate_review_from_a_passing_verify() {
         decided.effects,
     );
     assert!(
-        decided
-            .effects
-            .iter()
-            .any(|effect| { matches!(effect, Decision::DeferAggregate { stage: StageId::AggregateReview, .. }) }),
-        "the withheld critic is recorded: {:?}",
+        !decided.effects.iter().any(|effect| matches!(effect, Decision::DeferAggregate { .. })),
+        "and owes nothing it did not withhold: {:?}",
         decided.effects,
     );
-    assert_eq!(after.blooms.get(&bloom).unwrap().deferred_aggregates, BTreeSet::from([StageId::AggregateReview]),);
+    let record = after.blooms.get(&bloom).unwrap();
+    assert!(record.deferred_aggregates.is_empty());
+    assert!(record.aggregate_passed.contains(&StageId::AggregateVerify), "the mechanical half of the join is filed");
 }
 
 // #5100 — release re-derives the swallowed aggregate from the fold as it
@@ -6166,7 +6202,7 @@ fn a_held_bloom_defers_aggregate_review_from_a_passing_verify() {
 // second worker on a running verify. The recorded deferral is what tells
 // those two folds apart.
 #[test]
-fn releasing_rederives_the_aggregate_verify_the_hold_owed() {
+fn releasing_rederives_the_composite_gates_the_hold_owed() {
     let (ready, bloom) = ready_to_fold();
     let (frozen, _) = step(&ready, &held(bloom, "hold", "stop the fold's compiler"));
     let (owed, _) = step(&frozen, &folded(bloom, "resolve", 40));
@@ -6180,34 +6216,59 @@ fn releasing_rederives_the_aggregate_verify_the_hold_owed() {
         }
         other => panic!("expected the re-derived aggregate verify, got {other:?}"),
     }
-    assert!(
-        !decided.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })),
-        "release does not skip the compiler and launch the critic: {:?}",
-        decided.effects,
-    );
-
-    let record = after.blooms.get(&bloom).unwrap();
-    assert!(record.operator_hold.is_none(), "the brake is off");
-    assert!(record.deferred_aggregates.is_empty(), "and the gate that went out is no longer owed");
-}
-
-// #5100 — the critic half of the same release.
-#[test]
-fn releasing_rederives_the_aggregate_review_the_hold_owed() {
-    let (ready, bloom) = ready_to_fold();
-    let (folding, _) = step(&ready, &folded(bloom, "resolve", 40));
-    let (frozen, _) = step(&folding, &held(bloom, "hold", "stop the critic"));
-    let (owed, _) = step(&frozen, &verify_passed(bloom, "verify", 40));
-
-    let (after, decided) = step(&owed, &released(bloom, "release", "let the critic judge it"));
     match decided.effects.iter().find(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })) {
         Some(Decision::DispatchAggregateReview { transformation, roll, .. }) => {
-            assert_eq!(transformation.inputs[0], digest(40), "the critic judges the fold the verify already passed");
-            assert_eq!(transformation.checkout, digest(41), "and checks out the same head");
+            assert_eq!(transformation.inputs[0], digest(40), "the critic judges the same fold, on its own lane");
             assert_eq!(*roll, 1);
         }
         other => panic!("expected the re-derived aggregate review, got {other:?}"),
     }
+
+    let record = after.blooms.get(&bloom).unwrap();
+    assert!(record.operator_hold.is_none(), "the brake is off");
+    assert!(record.deferred_aggregates.is_empty(), "and the gates that went out are no longer owed");
+}
+
+// #5100 — the critic half of the same release, where the compiler is not owed.
+//
+// A bloom parked at the critic's ceiling has the mechanical gate's pass on the
+// held fold already, so the owner's re-arm re-dispatches only the critic. Taken
+// under a hold, that single order is the only one owed, and the release must
+// send it without re-buying a verify the record has already passed. Tripwire: a
+// release that re-derives the pair whatever the record holds.
+#[test]
+fn releasing_rederives_the_aggregate_review_the_hold_owed() {
+    let (ready, bloom) = ready_to_fold();
+    let (folding, _) = step(&ready, &folded(bloom, "resolve", 40));
+    let (verified, _) = step(&folding, &verify_passed(bloom, "v1", 40));
+    let (refused, _) = step(&verified, &review_refused(bloom, "f1", 40, 50));
+    let (rewoven, _) = step(&refused, &weave_repaired(bloom, "weave-1", 40, 42, 43));
+    let (reverified, _) = step(&rewoven, &verify_passed(bloom, "v2", 42));
+    let (parked, ceiling) = step(&reverified, &review_refused(bloom, "f2", 42, 51));
+    assert!(matches!(ceiling.outcome, Outcome::AggregateReviewParked { rolls: 2, .. }), "got {:?}", ceiling.outcome);
+
+    let (frozen, _) = step(&parked, &held(bloom, "hold", "stop the critic"));
+    let (owed, _) = step(&frozen, &event("ans", Fact::AdoptAnswer { bloom, answer: answer_adopting(digest(51)) }));
+    assert_eq!(
+        owed.blooms.get(&bloom).unwrap().deferred_aggregates,
+        BTreeSet::from([StageId::AggregateReview]),
+        "the re-arm owes the critic alone",
+    );
+
+    let (after, decided) = step(&owed, &released(bloom, "release", "let the critic judge it"));
+    match decided.effects.iter().find(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })) {
+        Some(Decision::DispatchAggregateReview { transformation, roll, .. }) => {
+            assert_eq!(transformation.inputs[0], digest(42), "the critic judges the fold the verify already passed");
+            assert_eq!(transformation.checkout, digest(43), "and checks out the same head");
+            assert_eq!(*roll, 1);
+        }
+        other => panic!("expected the re-derived aggregate review, got {other:?}"),
+    }
+    assert!(
+        !decided.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateVerify { .. })),
+        "and the compiler is not re-bought for a tree it has already passed: {:?}",
+        decided.effects,
+    );
 
     assert!(after.blooms.get(&bloom).unwrap().deferred_aggregates.is_empty());
 }

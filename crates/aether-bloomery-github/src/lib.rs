@@ -15,14 +15,17 @@
 //! journal that [`aether_bloomery::view_of`] assembles) and mirrors it onto the
 //! objects the repository already holds: each member becomes one marker-keyed
 //! comment on the issue its workpiece addresses, and a landing receipt becomes
-//! one comment per member issue plus one on the landing pull request. Comments
+//! one comment on the landing pull request. The member's own landing comment is
+//! written by the land reactor at close time. Comments
 //! stay comments-only (ADR-0149, amended by [#4663]). Replica issues a
 //! commission has no GitHub home for are a second class of object (ADR-0149
 //! 2026-08-16 amendment, derived from ADR-0199): the projector creates those
 //! and writes their title and body, and only those — never a human-authored
-//! issue it did not create. Every projection carries the internal Bloomery id
-//! plus a content digest in stable metadata (an HTML-comment [`Marker`] in
-//! comment and replica-issue bodies, the native `external_id` on check-runs),
+//! issue it did not create. A commission whose workpiece names a repository
+//! object is a comment on that object and owns no issue. Every projection
+//! carries the internal Bloomery id plus a content digest in stable metadata
+//! (an HTML-comment [`Marker`] in comment and replica-issue bodies, the native
+//! `external_id` on check-runs),
 //! so the projection is **idempotent** — reconciling the same document twice
 //! is a no-op — and **rebuildable from the journal** after a deletion: a
 //! deleted comment leaves no marker to find, so the reconcile recreates it.
@@ -63,6 +66,7 @@ mod executor;
 mod inward;
 mod landing;
 mod projection;
+mod webhook;
 
 // Re-export the moved modules so in-crate paths (`crate::source::…`,
 // `crate::correspondence::…`, `crate::marker::…`, `crate::mainline::…`) and
@@ -92,7 +96,8 @@ pub use inward::{
     normalize_study_result, parse_study, parse_study_cost,
 };
 pub use landing::{
-    GithubLanding, LandAcceptance, LandProposal, LandingProposal, LandingRefusal, LandingSource, ProposalOutcome,
-    landing_floor_title,
+    ACCEPTED_TYPES, GithubLanding, LandAcceptance, LandProposal, LandingProposal, LandingRefusal, LandingSource,
+    ProposalOutcome, commission_floor_title, issue_title_is_valid, landing_floor_title,
 };
 pub use projection::{GithubProjection, canonical_issue_number};
+pub use webhook::{MAX_CONTENT_CHARS, ReqwestWebhook, WebhookError, WebhookSink, content_body};

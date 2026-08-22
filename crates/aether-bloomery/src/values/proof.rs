@@ -23,7 +23,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::StageId;
-use crate::values::{Evidence, NetworkProfile, VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK};
+use crate::values::{
+    Evidence, NetworkProfile, VERIFY_BASE_COMMAND, VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK,
+};
 use crate::values::{VerifyFailure, VerifyFailureSet};
 
 /// The identity of the gate set one verify position runs (ADR-0178): the
@@ -73,12 +75,14 @@ impl VerifyGateSet {
     /// When the gate set becomes an explicitly declared value it lands in this
     /// type and the memo keeps keying on exactly the same digest.
     ///
-    /// The verifier set is the eight identities the compiled `verify.check`
+    /// The verifier set is the nine identities the compiled `verify.check`
     /// fan-out runs, listed by hand rather than derived from
     /// [`VerifyFailure::ALL`]. Containment is coordinator-side and never a lane
     /// member; picking it up from the vocabulary would re-key every stored
     /// [`VerifiedTree`] proof memo. A future identity the lane *does* run must
-    /// be added here by hand.
+    /// be added here by hand — as [`VerifyFailure::Lock`] was (#5309), which
+    /// re-keys every stored memo exactly as the doc above says it should,
+    /// because the lane's gate set genuinely changed.
     #[must_use]
     pub fn lane() -> Self {
         Self {
@@ -91,6 +95,7 @@ impl VerifyGateSet {
                 VerifyFailure::Dup,
                 VerifyFailure::Deps,
                 VerifyFailure::Suppress,
+                VerifyFailure::Lock,
             ]
             .into_iter()
             .collect(),
@@ -98,6 +103,17 @@ impl VerifyGateSet {
             image: String::from(VERIFY_LANE_IMAGE),
             network: VERIFY_LANE_NETWORK,
         }
+    }
+
+    /// The gate set the compiled whole-workspace base verify runs.
+    ///
+    /// Identical eight-plus-one verifier list, image, and network as
+    /// [`Self::lane`]. The differing command is deliberate: a closure-narrowed
+    /// member proof must not satisfy the whole-workspace base question, and the
+    /// two proofs cannot be confused in one map.
+    #[must_use]
+    pub fn base() -> Self {
+        Self { command: String::from(VERIFY_BASE_COMMAND), ..Self::lane() }
     }
 
     /// This gate set's content-addressed identity — the half of a
@@ -170,7 +186,7 @@ mod tests {
     use super::{VerifyGateSet, VerifyProof};
     use crate::digest::Digest;
     use crate::ids::StageId;
-    use crate::values::{Evidence, EvidenceKind, NetworkProfile, VerifyFailure};
+    use crate::values::{Evidence, EvidenceKind, NetworkProfile, VERIFY_BASE_COMMAND, VerifyFailure};
 
     fn digest(seed: u8) -> Digest {
         Digest::from_bytes([seed; 32])
@@ -212,6 +228,16 @@ mod tests {
     }
 
     #[test]
+    fn the_base_gate_set_is_a_distinct_identity() {
+        // Tripwire: a closure-narrowed member proof must not satisfy the
+        // whole-workspace base question. The command is the half of the key
+        // that makes them distinct.
+        assert_ne!(VerifyGateSet::base().digest(), VerifyGateSet::lane().digest());
+        assert_eq!(VerifyGateSet::base().command, VERIFY_BASE_COMMAND);
+        assert_eq!(VerifyGateSet::base().verifiers, VerifyGateSet::lane().verifiers);
+    }
+
+    #[test]
     fn the_compiled_lane_does_not_run_containment() {
         // Tripwire: `VerifyGateSet::lane().digest()` is half of every
         // `VerifiedTree` memo key. Containment is not a `verify.check` member;
@@ -222,6 +248,6 @@ mod tests {
             !lane.verifiers.contains(VerifyFailure::Containment),
             "containment must not sit in the compiled lane's gate set"
         );
-        assert_eq!(lane.verifiers.to_mask(), "00ff");
+        assert_eq!(lane.verifiers.to_mask(), "02ff");
     }
 }

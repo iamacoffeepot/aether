@@ -51,8 +51,10 @@ refused with `approval policy unavailable; seal fails closed`.
 | `POST /blooms/{id}/supersede` | Seal the named successor draft and admit `Fact::Supersede` against the `{id}` predecessor. |
 | `POST /blooms/{id}/grant` | Hand a wedged member more attempts and resume it on the `{id}` bloom, without sealing anything. |
 | `POST /blooms/{id}/answer/{question}` | Adopt an owner-signed answer to the parked question `{question}` names, releasing the hold it took. |
+| `POST /blooms/{id}/members/{workpiece}/withdraw` | Take one member out of the walking `{id}` bloom: cancel its lane, free its claim ref, and stop the folds waiting on it. |
 | `GET /blooms` · `GET /view` | The whole live view document. |
 | `GET /blooms/{id}` | One bloom's live view (`{id}` is the bloom's hex digest). |
+| `GET /blooms/{id}/why` | Why the `{id}` bloom is not advancing: a chain from the land down to member dispatch, each rung naming the one below it, plus one answer per member. |
 | `GET /claims` | Every live claim ref and the bloom holding it. |
 | `POST /claims/releases` | Authorize releasing one orphaned claim ref with an author signature; returns `202` and the request digest. |
 | `GET /claims/releases/{digest}` | One authorized release's state — pending, or its terminal result. |
@@ -157,7 +159,7 @@ curl -s -X POST localhost:8910/drafts/1/seal -H 'content-type: application/json'
     {
       "workpiece": "wp-1",
       "scope_revision": "$revision",
-      "declared_surface": ["docs/guide/recipes/bloomery-rest-api.md"],
+      "declared_surface": ["docs/guide/**"],
       "completeness": {
         "has_problem_statement": true,
         "has_design_notes": true,
@@ -186,7 +188,10 @@ evidence the gate rules on:
 - `declared_surface` — the paths the change touches. The tier policy the draft
   resolves (its sealed entry, else the file fallback) resolves them
   most-restrictive-match-wins; an `auto` surface (`docs/guide/**` among them in
-  the shipped file) lets the gate form the approval itself.
+  the shipped file) lets the gate form the approval itself. Declare at crate
+  granularity: an entry naming one file is refused unless the policy itself
+  names that file, because the same table that decides tier decides which files
+  are special enough to name.
 - `completeness` — the nine facts the gate fails closed on. Every boolean must
   hold, `blocked` must be false, and `model_routing_count` must be exactly `1`.
 - `adr_touch` — `"None"`, `"ProposedOnly"`, or `"NewOrEstablished"`. The last
@@ -244,7 +249,7 @@ spelling of the tier enum, not the lowercase words the fallback file uses. Rules
 are unordered; resolution is most-restrictive-wins over the declared surface, the
 same semantics the file has.
 
-Four ways a seal is refused on this axis, all `422` and all before any admit:
+Five ways a seal is refused on this axis, all `422` and all before any admit:
 
 | Response | Cause |
 |---|---|
@@ -252,6 +257,7 @@ Four ways a seal is refused on this axis, all `422` and all before any admit:
 | `sealed approval policy unresolvable: …` | The bloom-wide address names content that is missing, filed under another kind, or no longer decodes. |
 | `configuration set not yet read; seal fails closed` | The seal arrived before the coordinator finished its boot configuration read. Retry. |
 | `approval policy unavailable; seal fails closed` | The draft seals no policy and the fallback file did not load. |
+| `member wp-1 declared surface "crates/aether-fs/src/lib.rs" names one file and no approval-policy rule names that file; widen it to a crate glob such as crates/<crate>/src/**; seal fails closed` | The declared surface names an individual file the policy does not. |
 
 `descriptions` is the one advisory field on the body: per-member work-order
 text, keyed by workpiece id, which the construct lane's prompt names as its
@@ -462,3 +468,87 @@ working.
 Every release is journaled: the signed request, its digest, and its terminal
 result. Resubmitting the same request returns the same digest and enqueues
 nothing, so a retried call cannot release twice.
+
+
+## Withdrawing one member
+
+`supersede --eject` is a draft edit, not a member-removal mechanism. It seals a
+whole successor: a new bloom id, a re-adoption of every resolved sibling, a
+fresh claim transfer, and a new work order — all to shed one member whose scope
+turned out wrong. `POST /blooms/{id}/members/{workpiece}/withdraw` is the narrow
+move instead. The bloom keeps its id, its sealed base, and every sibling's
+finished work; only the named member leaves.
+
+```bash
+curl -sS -X POST "$COORDINATOR/blooms/$BLOOM/members/issue-4291/withdraw" \
+  -H 'content-type: application/json' \
+  -d '{"reason": "the scope was wrong; re-scoping it for tomorrow", "operator": "ops"}'
+```
+
+Like every other bloom operator route this one is unauthenticated on the
+host-local bind, and like every other one it refuses a body that says nothing:
+`reason` and `operator` are both required and both non-blank, because an act no
+verdict produced has its audit trail as its whole product. A blank one is `422`.
+
+What a withdrawal does, and what it deliberately leaves alone:
+
+- **The folds stop waiting.** Three of them are otherwise total over the sealed
+  member list — the claim-completeness scan, the candidate list the fold is
+  built from, and the resolve gate — which is exactly why one member that will
+  never produce a claim pins the bloom, its siblings' finished work, and the
+  mainline behind it. If the withdrawal completes the remaining claim set, the
+  fold dispatches on the spot.
+- **The lane is killed, and nothing is charged for it.** The member's
+  outstanding orders are cancelled and consumed. No evidence is admitted and no
+  attempt is spent — a synthesised timeout verdict would route a member that has
+  left the line into a repair lap.
+- **One ref is freed, not the whole seal.** `refs/bloomery/claims/<workpiece>`
+  is released on its own; `refs/bloomery/admission/mainline` stays with the
+  bloom, which is still walking. Freeing the workpiece is the point: it is what
+  lets the member be re-scoped and sealed into a later bloom.
+- **Nothing else moves.** No sibling's claim is revoked, no budget is handed
+  back, no cursor of anyone else's moves, and the bloom does not un-resolve.
+
+A member that already carries a resolution claim cannot be withdrawn: reviewed
+work is immutable (ADR-0191 §4), and pulling it out from under a fold that has
+already counted it is the failure that rule exists to prevent. That is `422`,
+naming the member.
+
+### Dependents, and why the refusal is fail-closed
+
+A member that declares a construct-base dependency on a withdrawn one can never
+enter the line — its base will never exist. Parking it would not help: a parked
+dependent blocks the resolve gate exactly as an unclaimed member does, so the
+bloom stays pinned by the very member the withdrawal was meant to free. So the
+door refuses instead, naming the dependents, unless the request opts in:
+
+```bash
+curl -sS -X POST "$COORDINATOR/blooms/$BLOOM/members/issue-4291/withdraw" \
+  -H 'content-type: application/json' \
+  -d '{"reason": "the scope was wrong", "operator": "ops", "cascade": true}'
+```
+
+A cascaded dependent is withdrawn with a derived cause naming the ancestor that
+stranded it, which is the visible reason an operator reads on the board rather
+than a member sitting silently on a base that will never arrive.
+
+### It is one-way, and it needs a coordinator that knows the verb
+
+There is no un-withdraw, deliberately. A member wrongly withdrawn is re-scoped
+and sealed into a later bloom — which is what releasing its claim ref makes
+possible in the first place.
+
+The verb changes the reducer and the executor reactor, both of which are
+compiled into the running coordinator, so a live coordinator holding an older
+binary has nowhere to admit the fact. Replace it first with
+`cargo xtask bloom upgrade --candidate … --bin … --store …`, which fold-tests
+the candidate over a copy of the live journal before installing and restarting
+the unit. Every wire addition here is appended, so that replay reads existing
+rows unchanged.
+
+The CLI verb is the same act through the same door:
+
+```bash
+cargo xtask bloom withdraw "$BLOOM" issue-4291 \
+  --reason 'the scope was wrong; re-scoping it for tomorrow' --operator ops
+```

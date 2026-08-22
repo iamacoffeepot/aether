@@ -21,7 +21,8 @@ fn attempt_evidence() -> Evidence {
 fn two_member_with_claims() -> (Snapshot, aether_bloomery::BloomId) {
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
-    let (mut snapshot, _) = step(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(spec)));
+    let (mut snapshot, _) =
+        step(&Snapshot::new(digest(1)).with_green_base(digest(1)), &event("seal", Fact::Seal(spec)));
     for (name, revision, tree, checkout) in [("alpha", 10, 20, 22), ("beta", 11, 21, 23)] {
         snapshot = step(
             &snapshot,
@@ -279,7 +280,7 @@ fn a_replayed_journal_reproduces_the_fold_conflict_sequence() {
 fn a_splice_conflict_on_a_dependent_dispatches_reconcile() {
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
-    let (snapshot, _) = step(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(&Snapshot::new(digest(1)).with_green_base(digest(1)), &event("seal", Fact::Seal(spec)));
 
     let (after, decided) = step(
         &snapshot,
@@ -332,7 +333,7 @@ fn a_splice_conflict_on_a_dependent_dispatches_reconcile() {
 fn a_passing_base_assembly_reconcile_returns_to_construct() {
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
-    let (snapshot, _) = step(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(&Snapshot::new(digest(1)).with_green_base(digest(1)), &event("seal", Fact::Seal(spec)));
     let (snapshot, _) = step(
         &snapshot,
         &event(

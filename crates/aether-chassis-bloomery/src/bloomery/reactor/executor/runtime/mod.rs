@@ -45,10 +45,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
-    Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, BloomId, CandidateRef, ConfigRegistry,
-    ConfigScopes, Digest, DispatchPayload, ExecutionStatus, Fact, ModelOverride, Nonce, RedispatchPayload, ReviewPass,
-    SharedCorrespondence, StageId, StageVerdict, TimeoutRecord, Topic, VerifyFailureSet, WorkHandle, WorkpieceId,
-    pin_workpiece_description,
+    Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, BaseVerifyPayload, BloomId,
+    CancelDispatchPayload, CandidateRef, ConfigRegistry, ConfigScopes, Digest, DispatchPayload, Event, ExecutionStatus,
+    Fact, ModelOverride, Nonce, RedispatchPayload, ReviewPass, SharedCorrespondence, StageId, StageVerdict,
+    TimeoutRecord, Topic, VerifyFailureSet, WorkHandle, WorkpieceId, normalize_write_paths, pin_workpiece_description,
 };
 use aether_bloomery_git::command;
 use aether_bloomery_github::{GitObjectId, candidate_ref_name, member_checkpoint_ref_name, short_hex};
@@ -69,8 +69,8 @@ use crate::bloomery::GithubConnectionConfig;
 use crate::bloomery::dispatch_model;
 use crate::bloomery::executor::OutstandingDispatch;
 use crate::bloomery::intake::{
-    Admission, AdmitDecision, AdmitSink, CycleReport, DispatchRecord, NameEvidenceClaims, UploadedEvidence,
-    admit_uploaded, dispatch_and_record, dispatch_nonce, run_intake_cycle,
+    Admission, AdmissionKey, AdmitDecision, AdmitSink, CycleReport, DispatchRecord, NameEvidenceClaims,
+    UploadedEvidence, admit_uploaded, dispatch_and_record, dispatch_nonce, run_intake_cycle,
 };
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
@@ -81,6 +81,9 @@ use crate::bloomery::testing::{ScriptedEvidence, ScriptedEvidenceResult, Scripte
 use crate::bloomery::{CoordinatorConfig, ExecutorReactorSetup};
 use crate::control::ControlCore;
 use crate::store::{OutstandingOrder, SqliteStore, StoreBackend, StoreConfigError, resolve_config};
+
+mod scope;
+use scope::drain_and_dispatch_scope;
 
 mod strand;
 
@@ -215,9 +218,14 @@ fn timeout_verdict(stage: StageId) -> Option<(StageVerdict, VerifyFailureSet)> {
         | StageId::Refine
         | StageId::Reconcile
         | StageId::AggregateVerify
-        | StageId::AggregateReview => Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
+        | StageId::BaseVerify
+        | StageId::AggregateReview
+        // A scoping run is dispatched too (ADR-0208), so an overdue one must
+        // terminate: without an arm here `terminate_live_order` cancels the
+        // child and bails, the registry row survives, and every later sweep
+        // re-selects a run nobody is waiting for.
+        | StageId::Scope => Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
         StageId::Sketch
-        | StageId::Scope
         | StageId::Approve
         | StageId::Review
         | StageId::Integrate
@@ -397,6 +405,32 @@ fn expire_overdue_orders(
     admits
 }
 
+/// Say which limit the cancelled run crossed.
+///
+/// Split out of `terminate_live_order` so the admission match stays readable:
+/// the two causes differ only in the sentence they warrant, and the fields they
+/// name are the same order's.
+fn warn_terminated(cause: TerminationCause, record: &DispatchRecord, deadline: u64) {
+    match cause {
+        TerminationCause::Deadline => tracing::warn!(
+            target: "aether_chassis_bloomery::executor",
+            nonce = %record.nonce.0,
+            workpiece = %record.workpiece.0,
+            stage = ?record.stage,
+            deadline_unix_millis = deadline,
+            "dispatched run outlived its sealed execution limit; cancelled and recorded as a host fault",
+        ),
+        TerminationCause::HeartbeatSilence => tracing::warn!(
+            target: "aether_chassis_bloomery::executor",
+            nonce = %record.nonce.0,
+            workpiece = %record.workpiece.0,
+            stage = ?record.stage,
+            deadline_unix_millis = deadline,
+            "dispatched run was silent past the host heartbeat threshold; cancelled and recorded as a host fault",
+        ),
+    }
+}
+
 /// Cancel a still-pending order and admit the synthesised failed attempt the
 /// deadline reaper already uses. Shared by wall-clock expiry and heartbeat
 /// silence so both keep cancel → deterministic record → intake ordering and
@@ -478,29 +512,29 @@ fn terminate_live_order(
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
         violating_paths: Vec::new(),
+        surface_request: None,
+        suppression_requests: Vec::new(),
     };
     match admit_uploaded(store, &upload) {
         Ok(AdmitDecision::Admitted(admission)) => {
-            match cause {
-                TerminationCause::Deadline => tracing::warn!(
-                    target: "aether_chassis_bloomery::executor",
-                    nonce = %record.nonce.0,
-                    workpiece = %record.workpiece.0,
-                    stage = ?record.stage,
-                    deadline_unix_millis = deadline,
-                    "dispatched run outlived its sealed execution limit; cancelled and recorded as a host fault",
-                ),
-                TerminationCause::HeartbeatSilence => tracing::warn!(
-                    target: "aether_chassis_bloomery::executor",
-                    nonce = %record.nonce.0,
-                    workpiece = %record.workpiece.0,
-                    stage = ?record.stage,
-                    deadline_unix_millis = deadline,
-                    "dispatched run was silent past the host heartbeat threshold; cancelled and recorded as a host fault",
-                ),
-            }
+            warn_terminated(cause, &record, deadline);
             tracked.retain(|tracked_handle| tracked_handle.handle.nonce != record.nonce);
             Some(admission.admit)
+        }
+        // A scoping run's timeout landed on the commission store's own run
+        // ledger (ADR-0208, #5304), so there is no event to hand the control
+        // core. The order was consumed either way, so the handle stops being
+        // tracked exactly as an admitted timeout stops tracking it.
+        Ok(AdmitDecision::Recorded) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                nonce = %record.nonce.0,
+                stage = ?record.stage,
+                deadline_unix_millis = deadline,
+                "dispatched scoping run outlived its sealed execution limit; cancelled and recorded on the run ledger",
+            );
+            tracked.retain(|tracked_handle| tracked_handle.handle.nonce != record.nonce);
+            None
         }
         Ok(AdmitDecision::Refused(refusal)) => {
             // A refusal is a judgement about the order's own stored columns,
@@ -526,6 +560,86 @@ fn terminate_live_order(
             None
         }
     }
+}
+
+/// Fold one submitted-drain result into the tick's handle list and backoff.
+fn fold_submitted_drain(
+    tracked: &mut Vec<TrackedHandle>,
+    backoff: &mut Option<BackoffCursor>,
+    store: &mut dyn StoreBackend,
+    topic: Topic,
+    label: &'static str,
+    result: rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)>,
+) {
+    match result {
+        Ok((handles, ack_through, transient_failure)) => {
+            if let Some(sequence) = ack_through
+                && let Err(error) = store.ack_topic(topic, sequence)
+            {
+                tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "{label} ack failed; entries re-drive");
+            }
+            let now = Instant::now();
+            tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, now)));
+            *backoff = fold_drain_backoff(backoff.take(), transient_failure);
+        }
+        Err(error) => {
+            tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "{label} drain failed");
+        }
+    }
+}
+
+/// Drain every dispatch topic this tick submits from, folding each drain's
+/// handles and transient failure into the tracking and backoff the tick shares.
+///
+/// Split out of `on_dispatch_tick` so the tick body stays inside its line
+/// budget. The five drains are one phase of the tick — what a reader needs from
+/// them there is that they all happen and all feed the same two pieces of
+/// state, which is exactly what the call site now says.
+fn drain_dispatch_topics(
+    tracked: &mut Vec<TrackedHandle>,
+    backoff: &mut Option<BackoffCursor>,
+    store: &mut dyn StoreBackend,
+    executor: &ExecutorShell,
+    now_unix_millis: u64,
+) {
+    // Drain + submit the newly-decided dispatches, acking the submitted prefix.
+    let dispatched = drain_and_dispatch(store, executor, now_unix_millis);
+    fold_submitted_drain(tracked, backoff, store, Topic::Dispatch, "dispatch", dispatched);
+    // Drain + submit the whole-bloom aggregate reviews (ADR-0153) the
+    // same way — its handles ride the same intake cycle, and a
+    // transient failure joins the shared backoff window.
+    let reviews = drain_and_dispatch_aggregate(store, executor, now_unix_millis);
+    fold_submitted_drain(tracked, backoff, store, Topic::AggregateReview, "aggregate-review", reviews);
+    // Drain + submit the whole-bloom aggregate verifies the same way —
+    // the mechanical gate the fold passes before its critic dispatches.
+    let verifies = drain_and_dispatch_aggregate_verify(store, executor, now_unix_millis);
+    fold_submitted_drain(tracked, backoff, store, Topic::AggregateVerify, "aggregate-verify", verifies);
+    let bases = drain_and_dispatch_base_verify(store, executor, now_unix_millis);
+    fold_submitted_drain(tracked, backoff, store, Topic::BaseVerify, "base-verify", bases);
+    // Drain + submit the pre-bloom scoping runs (ADR-0208) the same
+    // way. Its handles ride the same intake cycle and a transient
+    // failure joins the shared backoff window; what differs is only
+    // what the entry names, which is why it is its own topic.
+    let scopes = drain_and_dispatch_scope(store, executor, now_unix_millis);
+    fold_submitted_drain(tracked, backoff, store, Topic::ScopeDispatch, "scope-dispatch", scopes);
+    // Cancel the lanes of members an operator withdrew (#5327), on the
+    // same tick and the same ack-prefix discipline. No handles are
+    // tracked and no backoff is folded: a cancel starts nothing.
+    match drain_and_cancel(store, executor) {
+        Ok(Some(sequence)) => {
+            if let Err(error) = store.ack_topic(Topic::CancelDispatch, sequence) {
+                tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "cancel ack failed; entries re-drive");
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "cancel drain failed");
+        }
+    }
+    // Replay the attempts whose parked questions were answered (#3664),
+    // on the same shared handle tracking and backoff window.
+    let redispatched = drain_and_redispatch(store, executor, now_unix_millis);
+    fold_submitted_drain(tracked, backoff, store, Topic::Redispatch, "redispatch", redispatched);
 }
 
 /// Record the newest usable heartbeat from this cycle's pending inspects and
@@ -1055,6 +1169,194 @@ fn bloom_still_live(store: &mut dyn StoreBackend, bloom: &Digest, sequence: u64,
     Ok(false)
 }
 
+/// Whether `workpiece` is still a live member of `bloom` — false once a
+/// withdrawal released its membership (#5327).
+///
+/// Read off the same `active_membership` table [`bloom_still_live`] reads,
+/// because that is where a withdrawal's `ReleaseMembership` effect lands: the
+/// row is the durable authority, and it is gone the moment the withdrawal
+/// commits.
+fn member_still_live(
+    store: &mut dyn StoreBackend,
+    bloom: &Digest,
+    workpiece: &WorkpieceId,
+    sequence: u64,
+) -> rusqlite::Result<bool> {
+    // The reserved composition workpiece is synthetic — it is never sealed, so
+    // it never claims a membership, and its weave repair (ADR-0191) would be
+    // retired undispatched on every aggregate-review finding if the membership
+    // row decided its liveness. There is no operator verb that withdraws it
+    // either: it leaves with the bloom.
+    if workpiece.is_composition() || store.holds_member_membership(bloom.as_bytes(), &workpiece.0)? {
+        return Ok(true);
+    }
+    tracing::info!(
+        target: "aether_chassis_bloomery::executor",
+        sequence,
+        bloom = %short_hex(bloom),
+        workpiece = %workpiece.0,
+        "dispatch names a member that no longer holds an active membership; retiring it undispatched",
+    );
+    Ok(false)
+}
+
+/// Drain the cancel topic and kill each withdrawn member's live lane (#5327).
+///
+/// Deliberately not routed through `terminate_live_order`: that path
+/// synthesises a `TimeoutRecord` and admits a failed attempt, which would
+/// spend the member's budget and route it into repair. A withdrawn member's
+/// lane is cancelled and its order consumed, and no evidence is admitted —
+/// there is no longer anything for evidence to be about.
+///
+/// Returns the highest contiguously-processed outbox sequence to ack (`None`
+/// when nothing processed). A decode failure or a cancel fault stops the ack
+/// prefix at the last success, so the entry re-drains — the same policy
+/// `terminate_live_order` applies to a cancel it could not reach.
+fn drain_and_cancel(store: &mut dyn StoreBackend, executor: &ExecutorShell) -> rusqlite::Result<Option<u64>> {
+    let entries = store.drain_topic(Topic::CancelDispatch)?;
+    let mut ack_through = None;
+    for entry in entries {
+        let Ok(payload) = from_bytes::<CancelDispatchPayload>(&entry.payload) else {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                sequence = entry.sequence,
+                "cancel outbox entry did not decode; stopping the ack prefix to re-drain",
+            );
+            break;
+        };
+        match cancel_member_orders(store, executor, &payload, entry.sequence) {
+            Ok(()) => ack_through = Some(entry.sequence),
+            Err(CancelStop::Store(error)) => return Err(error),
+            Err(CancelStop::Unreached) => break,
+        }
+    }
+    Ok(ack_through)
+}
+
+/// Turn one sweep of the live construct lanes' working trees into admissible
+/// facts (ADR-0204).
+///
+/// Not an outbox drain: nothing decided this, and there is no topic to ack. The
+/// executor reads its own slot checkouts and the reducer owns what the reading
+/// means, exactly as it owns the advance decision behind a lane's raw pass/fail.
+///
+/// Three filters stand between an observation and a fact, and each drops rather
+/// than refuses, because a sweep runs every tick and a refusal storm would bury
+/// the log the real refusals live in:
+///
+/// - A nonce naming no live order is a run whose evidence already admitted.
+/// - A stage outside the construct family authors nothing to lease; the
+///   mechanical Verify lane reads and builds.
+/// - An observation whose paths all fail normalization has nothing to say.
+///
+/// The idempotency key carries a digest of the observed set, so the ordinary
+/// case — a lane re-observed on the next tick having written nothing new — is a
+/// journal no-op rather than a second fact.
+fn observe_lane_writes(
+    store: &mut dyn StoreBackend,
+    executor: &ExecutorShell,
+    now_unix_millis: u64,
+) -> rusqlite::Result<Vec<Admit>> {
+    let mut admits = Vec::new();
+    for observed in executor.observe_writes() {
+        let Some(order) = store.lookup_order(&observed.nonce.0)? else {
+            continue;
+        };
+        let Some(record) = DispatchRecord::from_stored(&order) else {
+            continue;
+        };
+        if !matches!(record.stage, StageId::Construct | StageId::Refine | StageId::Reconcile) {
+            continue;
+        }
+        let paths = normalize_write_paths(observed.paths);
+        if paths.is_empty() {
+            continue;
+        }
+
+        let fingerprint = Digest::of_domain_tagged(LEASE_OBSERVATION_DOMAIN, paths.join("\0").as_bytes()).to_hex();
+        let event = Event {
+            idempotency_key: AdmissionKey::LeaseObservation.of(&format!("{}:{fingerprint}", observed.nonce.0)),
+            fact: Fact::LaneWritesObserved {
+                bloom: record.bloom,
+                workpiece: record.workpiece.clone(),
+                stage: record.stage,
+                paths,
+                observed_at: now_unix_millis,
+            },
+        };
+        match to_vec(&event) {
+            Ok(bytes) => admits.push(Admit { event: bytes }),
+            Err(error) => tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                nonce = %observed.nonce.0,
+                %error,
+                "lane-write observation did not encode; skipping this tick's leases",
+            ),
+        }
+    }
+    Ok(admits)
+}
+
+/// The domain tag the observed-set fingerprint in a lease admission key is
+/// taken under. Its own tag rather than a bare hash, so the key cannot collide
+/// with any other digest the estate mints over the same bytes.
+const LEASE_OBSERVATION_DOMAIN: &str = "aether.bloomery.lease_observation";
+
+/// Why a cancel drain stopped its ack prefix.
+enum CancelStop {
+    /// The store faulted — the drain itself cannot continue.
+    Store(rusqlite::Error),
+    /// The executor could not be reached for one order, so the entry stays
+    /// unacked and re-drives rather than leaving a lane burning.
+    Unreached,
+}
+
+/// Cancel and consume every outstanding order naming this bloom and workpiece.
+///
+/// The scan is over `list_outstanding_nonces` because an order is keyed by its
+/// nonce, not by its member: the reducer knows which member left, and only the
+/// stored `DispatchRecord` says which member a nonce belongs to. An order that
+/// no longer decodes is consumed anyway — its run is already cancelled, and
+/// leaving the row outstanding would keep the deadline reaper probing a run
+/// nobody is waiting for.
+fn cancel_member_orders(
+    store: &mut dyn StoreBackend,
+    executor: &ExecutorShell,
+    payload: &CancelDispatchPayload,
+    sequence: u64,
+) -> Result<(), CancelStop> {
+    let nonces = store.list_outstanding_nonces().map_err(CancelStop::Store)?;
+    for nonce in nonces {
+        let Some(order) = store.lookup_order(&nonce).map_err(CancelStop::Store)? else {
+            continue;
+        };
+        let names_member = DispatchRecord::from_stored(&order)
+            .is_some_and(|record| record.bloom.0 == payload.bloom && record.workpiece == payload.workpiece);
+        if !names_member {
+            continue;
+        }
+        if let Err(error) = executor.cancel(&WorkHandle::new(Nonce(nonce.clone()))) {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                sequence,
+                nonce = %nonce,
+                %error,
+                "withdrawn member's cancel failed; leaving the entry unacked to re-drive",
+            );
+            return Err(CancelStop::Unreached);
+        }
+        store.consume_order(&nonce).map_err(CancelStop::Store)?;
+        tracing::info!(
+            target: "aether_chassis_bloomery::executor",
+            sequence,
+            nonce = %nonce,
+            workpiece = %payload.workpiece.0,
+            "withdrawn member's lane cancelled and its order consumed",
+        );
+    }
+    Ok(())
+}
+
 /// The transformation pins the subject as its first input; a well-formed
 /// dispatch always carries one. Missing it stops the ack prefix so the entry
 /// re-drains rather than being submitted half-built.
@@ -1195,6 +1497,15 @@ fn drain_and_dispatch(
             continue;
         }
         if !bloom_still_live(store, &payload.bloom, entry.sequence, "dispatch")? {
+            ack_if_unblocked(held, &mut ack_through, entry.sequence);
+            continue;
+        }
+        // A withdrawal that landed between the decision and this drain must not
+        // race a pending outbox row into a lane it just killed (#5327): the
+        // member holds no active membership of its own once its withdrawal
+        // released it, so an entry naming it is retired undispatched the way an
+        // entry for a retired bloom is.
+        if !member_still_live(store, &payload.bloom, &payload.workpiece, entry.sequence)? {
             ack_if_unblocked(held, &mut ack_through, entry.sequence);
             continue;
         }
@@ -1490,6 +1801,83 @@ fn drain_and_dispatch_aggregate_verify(
                     sequence = entry.sequence,
                     %error,
                     "aggregate-verify submit/record failed; stopping the ack prefix to re-drive",
+                );
+                transient_failure = Some(entry.sequence);
+                break;
+            }
+        }
+    }
+    Ok((handles, ack_through, transient_failure))
+}
+
+/// Drain the base-verify topic and submit each entry through the executor
+/// under a bloom-less order record — the mechanical `verify.base` fan-out run
+/// over a sealed base.
+///
+/// Same ack-prefix / park / backoff semantics as
+/// [`drain_and_dispatch_aggregate_verify`], differing in two ways: no
+/// `bloom_still_live` check (there is no bloom) and `stage: StageId::BaseVerify`
+/// with an empty workpiece. The record's `bloom` is the zero [`BloomId`]; the
+/// base axis is the `base` the transformation checks out.
+fn drain_and_dispatch_base_verify(
+    store: &mut dyn StoreBackend,
+    executor: &ExecutorShell,
+    now_unix_millis: u64,
+) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
+    let entries = store.drain_topic(Topic::BaseVerify)?;
+    let mut handles = Vec::new();
+    let mut ack_through = None;
+    let mut transient_failure = None;
+    for entry in entries {
+        let Ok(payload) = from_bytes::<BaseVerifyPayload>(&entry.payload) else {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                sequence = entry.sequence,
+                "base-verify outbox entry did not decode; stopping the ack prefix to re-drain",
+            );
+            break;
+        };
+        if !transformation_has_subject(&payload.transformation.inputs, entry.sequence, "base-verify") {
+            break;
+        }
+
+        let displayed = payload.transformation.inputs[0];
+        let record = DispatchRecord {
+            nonce: dispatch_nonce(entry.sequence),
+            // The base axis is the `base` the transformation checks out; this
+            // zero id is the bloom-less order's placeholder.
+            bloom: BloomId(Digest::from_bytes([0; 32])),
+            workpiece: WorkpieceId(String::new()),
+            profile: payload.profile,
+            scope_revision: displayed,
+            candidate: displayed,
+            displayed_digest: displayed,
+            stage: StageId::BaseVerify,
+            transformation: payload.transformation,
+            configs: ConfigRegistry::default(),
+        };
+        match dispatch_and_record(executor, store, &record, now_unix_millis) {
+            Ok(handle) => {
+                handles.push(handle);
+                ack_through = Some(entry.sequence);
+            }
+            Err(error) if error.is_permanent() => {
+                tracing::error!(
+                    target: "aether_chassis_bloomery::executor",
+                    sequence = entry.sequence,
+                    nonce = %record.nonce.0,
+                    %error,
+                    "base-verify submit refused permanently; parking the entry instead of re-driving",
+                );
+                ack_through = Some(entry.sequence);
+                break;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::executor",
+                    sequence = entry.sequence,
+                    %error,
+                    "base-verify submit/record failed; stopping the ack prefix to re-drive",
                 );
                 transient_failure = Some(entry.sequence);
                 break;
@@ -2281,6 +2669,11 @@ fn admit_scripted(state: &mut ExecutorReactorState, encoded: &[u8]) -> (Scripted
             admits.push(admission.admit.clone());
             (ScriptedEvidenceResult::Admitted { idempotency_key: admission.event.idempotency_key.0.clone() }, admits)
         }
+        // A scripted scoping-run verdict is accepted onto the commission
+        // store's run ledger with no reducer event behind it (ADR-0208,
+        // #5304), so the scenario is told what happened rather than handed an
+        // idempotency key that does not exist.
+        Ok(AdmitDecision::Recorded) => (ScriptedEvidenceResult::Recorded, admits),
         Ok(AdmitDecision::Refused(refusal)) => {
             (ScriptedEvidenceResult::Refused { refusal: format!("{refusal:?}") }, Vec::new())
         }
@@ -2446,73 +2839,23 @@ impl NativeActor for ExecutorReactorCapability {
         // paces the re-drive instead of hammering GitHub at the flat poll cadence.
         let skip_drain = state.backoff.as_ref().is_some_and(|cursor| cursor.retry_after > Instant::now());
         if !skip_drain {
-            // Drain + submit the newly-decided dispatches, acking the submitted prefix.
-            match drain_and_dispatch(store, &executor, clock.now_unix_millis) {
-                Ok((handles, ack_through, transient_failure)) => {
-                    if let Some(sequence) = ack_through
-                        && let Err(error) = store.ack_topic(Topic::Dispatch, sequence)
-                    {
-                        tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "dispatch ack failed; entries re-drive");
-                    }
-                    let now = Instant::now();
-                    state.tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, now)));
-                    state.backoff = fold_drain_backoff(state.backoff.take(), transient_failure);
-                }
-                Err(error) => {
-                    tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "dispatch drain failed");
-                }
-            }
-            // Drain + submit the whole-bloom aggregate reviews (ADR-0153) the
-            // same way — its handles ride the same intake cycle, and a
-            // transient failure joins the shared backoff window.
-            match drain_and_dispatch_aggregate(store, &executor, clock.now_unix_millis) {
-                Ok((handles, ack_through, transient_failure)) => {
-                    if let Some(sequence) = ack_through
-                        && let Err(error) = store.ack_topic(Topic::AggregateReview, sequence)
-                    {
-                        tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "aggregate-review ack failed; entries re-drive");
-                    }
-                    let now = Instant::now();
-                    state.tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, now)));
-                    state.backoff = fold_drain_backoff(state.backoff.take(), transient_failure);
-                }
-                Err(error) => {
-                    tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "aggregate-review drain failed");
+            drain_dispatch_topics(&mut state.tracked, &mut state.backoff, store, &executor, clock.now_unix_millis);
+        }
+
+        // Sweep the live construct lanes' working trees and admit what they
+        // have written (ADR-0204). Outside the backoff skip: the backoff paces
+        // a *dispatch* surface that is refusing, and an observation dispatches
+        // nothing — it reads directories this process owns. Before the pull, so
+        // a lane whose evidence lands this same tick has its final write set
+        // leased before the integration that releases it.
+        match observe_lane_writes(store, &executor, clock.now_unix_millis) {
+            Ok(admits) => {
+                for admit in admits {
+                    let _ = ctx.send_envelope_detached(control_mailbox, Admit::ID, &admit.encode_into_bytes());
                 }
             }
-            // Drain + submit the whole-bloom aggregate verifies the same way —
-            // the mechanical gate the fold passes before its critic dispatches.
-            match drain_and_dispatch_aggregate_verify(store, &executor, clock.now_unix_millis) {
-                Ok((handles, ack_through, transient_failure)) => {
-                    if let Some(sequence) = ack_through
-                        && let Err(error) = store.ack_topic(Topic::AggregateVerify, sequence)
-                    {
-                        tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "aggregate-verify ack failed; entries re-drive");
-                    }
-                    let now = Instant::now();
-                    state.tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, now)));
-                    state.backoff = fold_drain_backoff(state.backoff.take(), transient_failure);
-                }
-                Err(error) => {
-                    tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "aggregate-verify drain failed");
-                }
-            }
-            // Replay the attempts whose parked questions were answered (#3664),
-            // on the same shared handle tracking and backoff window.
-            match drain_and_redispatch(store, &executor, clock.now_unix_millis) {
-                Ok((handles, ack_through, transient_failure)) => {
-                    if let Some(sequence) = ack_through
-                        && let Err(error) = store.ack_topic(Topic::Redispatch, sequence)
-                    {
-                        tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "redispatch ack failed; entries re-drive");
-                    }
-                    let now = Instant::now();
-                    state.tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, now)));
-                    state.backoff = fold_drain_backoff(state.backoff.take(), transient_failure);
-                }
-                Err(error) => {
-                    tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "redispatch drain failed");
-                }
+            Err(error) => {
+                tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "lane-write observation failed");
             }
         }
 

@@ -43,9 +43,49 @@ fn held_fold_under_review<'a>(
     Ok((record, integration))
 }
 
+/// The effects a fold produces once *both* composite gates have passed on it:
+/// the held fold is consumed, the bloom resolves onto it, and the land reactor
+/// is handed the head to fast-forward mainline onto.
+///
+/// Named once because either gate can be the one that completes the join — the
+/// two run concurrently against one fold — and a second copy would let the
+/// mechanical gate and the critic resolve a bloom onto different values. What
+/// the landing receives is the head of the tree that was judged; nothing is
+/// re-folded or rebuilt on the way, so the artifact that lands is the artifact
+/// the gates passed.
+pub(super) fn resolution_effects(
+    record: &BloomRecord,
+    bloom: BloomId,
+    integration: &FoldedIntegration,
+) -> (ResolvedBloom, Vec<Decision>) {
+    let resolved = ResolvedBloom {
+        bloom,
+        tree: integration.tree,
+        head: integration.head,
+        lineage: integration.lineage.clone(),
+        resolution_claims: record.claims.values().cloned().collect::<Vec<_>>(),
+    };
+
+    // Resolution is land-readiness: the bloom now carries its one judged
+    // artifact and a claim for every member, so the source-port CAS land can be
+    // driven (ADR-0149 migration step 3). `new_head` is the integrated head
+    // commit's digest (distinct from the artifact `tree`) the mainline advances
+    // to; the reducer never does the I/O. The consumed fold is cleared — a
+    // resolved bloom holds no pending gate run.
+    let effects = alloc::vec![
+        Decision::RecordIntegration { bloom, integration: None },
+        Decision::SetResolved { bloom, resolved: resolved.clone() },
+        Decision::DispatchLand { bloom, expected_base: record.spec.base(), new_head: integration.head },
+    ];
+
+    (resolved, effects)
+}
+
 /// Reduce a composition-review verdict (ADR-0153, ADR-0191 §3). A passing
-/// verdict resolves the bloom from its held fold — [`Decision::SetResolved`]
-/// plus the [`Decision::DispatchLand`] the land reactor consumes. A failing
+/// verdict records the critic's half of the composite-gate join; it resolves
+/// the bloom — [`Decision::SetResolved`] plus the [`Decision::DispatchLand`]
+/// the land reactor consumes — only when the mechanical gate has already passed
+/// on the same fold, and otherwise leaves the bloom waiting on it. A failing
 /// verdict files the finding on the composition's channel and dispatches the
 /// weave repair against the composed tree; the fold stays held, because it is
 /// the composition's candidate under repair rather than someone else's stale
@@ -80,9 +120,12 @@ pub(super) fn reduce_aggregate_review_completed(
     // An empty implication is never expanded to every member: under ADR-0191 there
     // is nothing to over-route *to*, and a verdict about the weave as a whole is
     // exactly a finding that names nobody.
-    if let Some(stranger) =
-        implicated.iter().find(|wp| !record.spec.members().iter().any(|member| member.workpiece == **wp))
-    {
+    // A withdrawn member is refused here for the reason a non-member is (#5327):
+    // the finding cannot be routed anywhere. There is no cursor to re-open and
+    // no claim the verdict could revoke.
+    if let Some(stranger) = implicated.iter().find(|wp| {
+        record.withdrawn.contains_key(wp) || !record.spec.members().iter().any(|member| member.workpiece == **wp)
+    }) {
         return Decisions::rejected(Outcome::AggregateReviewRejected(AggregateReviewError::NotAMember(
             stranger.clone(),
         )));
@@ -103,27 +146,18 @@ pub(super) fn reduce_aggregate_review_completed(
         if evidence.kind == EvidenceKind::ReviewAdvisory {
             effects.push(finding_of(*bloom, integration.tree, evidence, implicated));
         }
-        let resolution_claims = record.claims.values().cloned().collect::<Vec<_>>();
-        let resolved = ResolvedBloom {
-            bloom: *bloom,
-            tree: integration.tree,
-            head: integration.head,
-            lineage: integration.lineage.clone(),
-            resolution_claims,
-        };
-        // Resolution is land-readiness: the bloom now carries its one judged
-        // artifact and a claim for every member, so the source-port CAS land
-        // can be driven (ADR-0149 migration step 3). `new_head` is the
-        // integrated head commit's digest (distinct from the artifact `tree`),
-        // the head mainline advances to; the reducer never does the I/O. The
-        // consumed fold is cleared — a resolved bloom holds no pending review.
-        effects.push(Decision::RecordIntegration { bloom: *bloom, integration: None });
-        effects.push(Decision::SetResolved { bloom: *bloom, resolved: resolved.clone() });
-        effects.push(Decision::DispatchLand {
-            bloom: *bloom,
-            expected_base: record.spec.base(),
-            new_head: integration.head,
-        });
+        // The critic's half of the join. Filed whether or not it completes the
+        // pair, so the mechanical gate's own arrival can read it.
+        effects.push(Decision::RecordAggregateGatePass { bloom: *bloom, stage: StageId::AggregateReview });
+        if !record.aggregate_passed.contains(&StageId::AggregateVerify) {
+            // The compiler has not returned on this fold yet. Both gates were
+            // dispatched together, so there is nothing to dispatch here and
+            // nothing to wait on but the verdict already in flight.
+            return Decisions { outcome: Outcome::AggregateReviewPassed { bloom: *bloom, rolls }, effects };
+        }
+
+        let (resolved, resolution) = resolution_effects(record, *bloom, &integration);
+        effects.extend(resolution);
         return Decisions { outcome: Outcome::Resolved(resolved), effects };
     }
     if rolls >= record.stage_catalog.retry_budget_of(StageId::AggregateReview).unwrap_or(1) {
@@ -208,7 +242,7 @@ pub(super) fn reduce_aggregate_review_executor_fault(
     // judged, so re-running the review is the whole retry — not a re-fold, and
     // not a member lap. The roll stays the critic's own unspent cursor. The
     // helper is what withholds that work order under an operator hold (#5100).
-    effects.push(super::aggregate_verify::aggregate_review_dispatch(
+    effects.extend(super::aggregate_verify::aggregate_review_dispatch(
         record,
         *bloom,
         integration.tree,

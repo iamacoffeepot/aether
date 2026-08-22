@@ -16,7 +16,7 @@ fn a_newly_sealed_bloom_records_the_catalog_admission_resolved() {
     let spec = draft(1, vec![membership("alpha", 10)]).seal();
     let bloom = spec.id();
     let decisions = reduce(
-        &Snapshot::new(common::digest(1)),
+        &Snapshot::new(common::digest(1)).with_green_base(common::digest(1)),
         &event("seal", Fact::Seal(spec)),
         &ResolvedConfigs::default(),
         &SpendWindow::default(),
@@ -48,7 +48,7 @@ fn the_fold_reads_the_recorded_catalog_not_a_re_resolution() {
         outcome: Outcome::Sealed(bloom),
         effects: vec![Decision::RecordStageCatalog { bloom, catalog: catalog.clone() }],
     };
-    let snapshot = Snapshot::new(common::digest(1)).apply(
+    let snapshot = Snapshot::new(common::digest(1)).with_green_base(common::digest(1)).apply(
         &event("seal", Fact::Seal(spec)),
         &decisions,
         &ResolvedConfigs::default(),
@@ -73,7 +73,7 @@ fn a_sealed_catalog_is_what_the_effect_carries() {
     let spec = draft.seal();
     let bloom = spec.id();
     let decisions = reduce(
-        &Snapshot::new(common::digest(1)),
+        &Snapshot::new(common::digest(1)).with_green_base(common::digest(1)),
         &event("seal", Fact::Seal(spec.clone())),
         &configs,
         &SpendWindow::default(),
@@ -84,7 +84,11 @@ fn a_sealed_catalog_is_what_the_effect_carries() {
         }
         other => panic!("expected RecordStageCatalog, got {other:?}"),
     }
-    let snapshot = Snapshot::new(common::digest(1)).apply(&event("seal", Fact::Seal(spec)), &decisions, &configs);
+    let snapshot = Snapshot::new(common::digest(1)).with_green_base(common::digest(1)).apply(
+        &event("seal", Fact::Seal(spec)),
+        &decisions,
+        &configs,
+    );
     assert_eq!(snapshot.blooms.get(&bloom).expect("sealed").stage_catalog, catalog);
 }
 
@@ -96,7 +100,7 @@ fn pre_existing_rows_without_a_recorded_catalog_keep_the_compiled_line_fallback(
     let spec = draft(1, vec![membership("alpha", 10)]).seal();
     let bloom = spec.id();
     let decisions = Decisions { outcome: Outcome::Sealed(bloom), effects: Vec::new() };
-    let snapshot = Snapshot::new(common::digest(1)).apply(
+    let snapshot = Snapshot::new(common::digest(1)).with_green_base(common::digest(1)).apply(
         &event("seal", Fact::Seal(spec)),
         &decisions,
         &ResolvedConfigs::default(),

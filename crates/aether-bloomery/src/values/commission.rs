@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 use aether_data::wire::{from_bytes, to_vec};
 use serde::{Deserialize, Serialize};
 
-use crate::digest::{ContentAddressed, Digest};
+use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::WorkpieceId;
 
 /// The schema number a version-1 [`ScopeRevision`] writes into its first field.
@@ -80,6 +80,44 @@ pub struct ScopeRevision {
     /// not bind itself to a stored decision. Trailing so the version-1 layout
     /// can name ADRs without a schema bump (#5124).
     pub implements: Vec<Digest>,
+    /// The workspace crates the scope declared, in declaration order — the
+    /// `## Declared crates` block. Empty when the scope declared its surface as
+    /// globs instead.
+    ///
+    /// A surface is not a forecast of the files a lane will touch: nobody can
+    /// compute that before the work is done. What is computable is the blast
+    /// radius of the crates the work is *about* — those crates plus every
+    /// workspace crate that depends on them — and that is what
+    /// [`declared_surface`](Self::declared_surface) carries once this block is
+    /// present.
+    ///
+    /// Kept beside the derived globs rather than replaced by them for two
+    /// reasons. It is what the scope actually said, so a renderer can emit the
+    /// operator's own block back rather than a machine-expanded one. And a
+    /// non-empty list is the fact the tier resolver needs: a crate-derived
+    /// surface takes its tier from the protected files it names, never from the
+    /// crate globs, so the resolver has to be able to tell one kind of surface
+    /// from the other. Trailing for the reason
+    /// [`implements`](Self::implements) is.
+    pub declared_crates: Vec<String>,
+    /// The workspace crates this scope load-bearingly *reads*, in declaration
+    /// order — the `## Reads` block (ADR-0204). Empty is the ordinary case.
+    ///
+    /// A read is not a claim on anything. It buys no lease, blocks nobody, and
+    /// widens no surface: what it buys is *conditional* ordering. A member that
+    /// declares a read on a crate a co-member declares it will change is
+    /// scheduled after that co-member, and a member that declares a read on a
+    /// crate nobody in the seal is changing is scheduled as if it had declared
+    /// nothing. That conditionality is the whole point — an unconditional
+    /// declared edge orders the two whether or not the write ever happens, and
+    /// pays the serialization either way.
+    ///
+    /// Crate-granular rather than file-granular for the reason
+    /// [`declared_crates`](Self::declared_crates) is: nobody can name the files
+    /// a lane will touch before the work is done, so a file-granular read list
+    /// is a forecast, and a forecast that misses reads as an assurance nobody
+    /// gave. Trailing for the reason [`implements`](Self::implements) is.
+    pub declared_reads: Vec<String>,
 }
 
 impl ScopeRevision {
@@ -105,6 +143,33 @@ impl ScopeRevision {
     #[must_use]
     pub fn to_canonical(&self) -> Vec<u8> {
         to_vec(self).expect("commission values never exceed the ADR-0118 u32 wire-length ceiling")
+    }
+
+    /// The next revision of `self` whose declared surface is `self`'s unioned
+    /// with `added`, chained by `predecessor` to `self`'s own digest
+    /// (ADR-0207).
+    ///
+    /// Every other field is carried byte-identically: an amendment widens the
+    /// surface and nothing else, so the successor's problem, design, plan,
+    /// routing, dependencies and ADR bindings are the ones the approval that
+    /// already exists was read against. Additions are appended in the order
+    /// they were requested, and a glob the surface already carries verbatim is
+    /// skipped — the caller has usually run
+    /// [`surface_additions`](super::surface_additions) first, and this is the
+    /// backstop that keeps a duplicate out of the signed bytes either way.
+    ///
+    /// `predecessor: Some(digest_of(self))` is what makes the store's ordinal
+    /// check accept this as revision *n+1* rather than refusing it as a stale
+    /// or duplicate write.
+    #[must_use]
+    pub fn with_widened_surface(&self, added: &[String]) -> Self {
+        let mut declared_surface = self.declared_surface.clone();
+        for glob in added {
+            if !declared_surface.contains(glob) {
+                declared_surface.push(glob.clone());
+            }
+        }
+        Self { predecessor: Some(digest_of(self)), declared_surface, ..self.clone() }
     }
 }
 
@@ -245,41 +310,47 @@ mod tests {
             dependencies: Vec::new(),
             description: String::from("desc"),
             implements: Vec::new(),
+            declared_crates: Vec::new(),
+            declared_reads: Vec::new(),
         }
     }
 
     // Tripwire: version-1 wire bytes. A signature covers these exact bytes; the
     // encoder may be superseded, never silently changed. Recompute-and-repin
-    // only when introducing a new schema.
+    // only when introducing a new schema, or when the revision grows a trailing
+    // field — `declared_crates` and `declared_reads` append eight bytes of empty
+    // list here, and every constant below is over those bytes, so a signature
+    // made before them covers a different subject.
     const GOLDEN_SCOPE_REVISION_V1: &[u8] = &[
         1, 0, 0, 0, 10, 0, 0, 0, 105, 115, 115, 117, 101, 45, 53, 48, 52, 53, 0, 1, 0, 0, 0, 112, 1, 0, 0, 0, 100, 1,
         0, 0, 0, 110, 1, 0, 0, 0, 25, 0, 0, 0, 99, 114, 97, 116, 101, 115, 47, 97, 101, 116, 104, 101, 114, 45, 98,
         108, 111, 111, 109, 101, 114, 121, 47, 42, 42, 2, 0, 0, 0, 100, 102, 1, 0, 0, 0, 77, 15, 0, 0, 0, 99, 111, 110,
         115, 116, 114, 117, 99, 116, 58, 32, 116, 101, 115, 116, 0, 0, 0, 0, 4, 0, 0, 0, 100, 101, 115, 99, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
     ];
 
     // Tripwire: content address of the version-1 fixture under
     // `aether.bloomery.scope_revision`. Drifts if the domain tag, the hash, or
     // the fixture bytes move.
     const GOLDEN_SCOPE_REVISION_DIGEST: [u8; 32] = [
-        251, 11, 252, 204, 212, 102, 22, 62, 168, 153, 97, 215, 99, 5, 239, 228, 36, 133, 53, 158, 99, 207, 253, 23,
-        13, 58, 186, 139, 246, 97, 105, 120,
+        106, 252, 76, 112, 153, 209, 157, 145, 94, 25, 40, 102, 66, 34, 108, 81, 182, 247, 55, 143, 119, 76, 254, 18,
+        164, 35, 206, 147, 150, 28, 6, 176,
     ];
 
     // Tripwire: ADR-0182 authorization message for Approve over the fixture
     // digest, with words equal to that digest's raw bytes. Drifts if the door
     // discriminant, domain tag, or binding layout changes.
     const GOLDEN_APPROVE_AUTHORIZATION: [u8; 32] = [
-        166, 129, 38, 225, 125, 70, 148, 35, 82, 146, 188, 122, 199, 210, 169, 61, 113, 120, 74, 9, 202, 80, 5, 254,
-        161, 69, 91, 49, 103, 59, 159, 30,
+        161, 51, 115, 65, 247, 125, 10, 176, 31, 204, 141, 138, 218, 104, 255, 144, 86, 6, 212, 83, 154, 88, 59, 163,
+        20, 174, 44, 200, 3, 175, 56, 194,
     ];
 
     // Tripwire: ed25519 signature by seed-7 over the golden authorization
     // message. Drifts if the signed subject or the seed-7 key meaning changes.
     const GOLDEN_APPROVE_SIGNATURE: &[u8] = &[
-        72, 10, 248, 173, 204, 193, 11, 124, 137, 171, 170, 32, 246, 207, 136, 171, 68, 136, 168, 228, 136, 110, 242,
-        126, 118, 55, 49, 14, 85, 254, 6, 195, 151, 213, 135, 54, 117, 219, 214, 220, 137, 74, 132, 86, 180, 252, 29,
-        35, 21, 56, 152, 50, 170, 134, 58, 130, 244, 244, 218, 79, 27, 93, 24, 3,
+        97, 90, 179, 174, 210, 149, 159, 234, 250, 61, 102, 14, 26, 95, 23, 88, 122, 30, 219, 167, 176, 52, 241, 76,
+        175, 91, 181, 109, 147, 201, 201, 36, 15, 38, 106, 116, 95, 93, 135, 27, 232, 220, 64, 137, 12, 40, 238, 11,
+        118, 173, 253, 255, 25, 106, 133, 184, 115, 185, 218, 47, 111, 174, 174, 9,
     ];
 
     #[test]
@@ -362,5 +433,33 @@ mod tests {
             Err(super::CommissionValueError::Malformed),
             "garbage must refuse rather than panic in the wire decoder"
         );
+    }
+
+    // Tripwire: an amendment widens the surface and nothing else. A carry that
+    // dropped or rewrote any other field would produce a successor the existing
+    // approval was never read against — the reader would still accept it,
+    // because the approval binds the digest, not the prose.
+    #[test]
+    fn widening_carries_every_other_field_and_chains_to_its_predecessor() {
+        let base = fixture();
+        let widened = base.with_widened_surface(&[String::from("crates/other/**")]);
+
+        assert_eq!(widened.predecessor, Some(digest_of(&base)), "the chain is what makes it revision n+1");
+        assert_eq!(
+            widened.declared_surface,
+            vec![String::from("crates/aether-bloomery/**"), String::from("crates/other/**")],
+        );
+        assert_eq!(
+            ScopeRevision { predecessor: None, declared_surface: base.declared_surface.clone(), ..widened },
+            base,
+            "every field but the surface and the chain is carried byte-identically",
+        );
+    }
+
+    #[test]
+    fn widening_by_a_glob_the_surface_already_carries_does_not_duplicate_it() {
+        let base = fixture();
+        let widened = base.with_widened_surface(&[String::from("crates/aether-bloomery/**")]);
+        assert_eq!(widened.declared_surface, base.declared_surface);
     }
 }

@@ -16,6 +16,8 @@ mod findings;
 mod intake;
 #[cfg(feature = "github")]
 mod mirror;
+#[cfg(feature = "github")]
+mod notify;
 mod outbox;
 #[cfg(feature = "github")]
 mod replica;
@@ -27,6 +29,8 @@ pub(crate) mod poll_timer;
 #[cfg(feature = "github")]
 mod reactor;
 mod repair;
+#[cfg(feature = "runtime")]
+mod scope_run;
 #[cfg(feature = "github")]
 mod source;
 #[cfg(feature = "github")]
@@ -70,6 +74,11 @@ pub use intake::{
 };
 #[cfg(feature = "github")]
 pub use mirror::ProjectionShell;
+#[cfg(feature = "github")]
+pub use notify::{
+    Delivered, LoudEvent, NotifyConfig, NotifyOverlay, NotifyReactorCapability, NotifyReactorSetup, NotifyReactorState,
+    NotifyTick, deliver, loud_events, webhook_sink,
+};
 pub use outbox::TopicOutbox;
 #[cfg(feature = "github")]
 pub(crate) use reactor::candidate_push_at;
@@ -87,6 +96,10 @@ pub use repair::{CandidateSource, PrepareError, prepare_candidate};
 pub use repair::{candidate_tree_digest, capture_commit_digest};
 #[cfg(feature = "github")]
 pub use replica::{SourceReplicaShell, github_push_url, writer_marker_present};
+#[cfg(feature = "runtime")]
+pub use scope_run::{
+    ScopeRunRefusal, ScopeRunState, open_scope_run, scope_dispatch_payload, scope_run_state, scope_run_subject,
+};
 #[cfg(feature = "github")]
 pub use source::SourceShell;
 #[cfg(feature = "github")]

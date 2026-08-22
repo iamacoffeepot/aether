@@ -21,8 +21,11 @@
 
 mod aggregate_verify;
 mod attempt;
+mod base_verify;
+mod boundary;
 mod composition;
 mod decision;
+mod decisions_v1;
 mod error;
 mod event;
 mod evidence;
@@ -33,6 +36,7 @@ mod grant;
 mod integrate;
 mod land;
 mod landing;
+mod lease;
 mod observe;
 mod operator;
 mod operator_hold;
@@ -43,31 +47,43 @@ mod review;
 mod seal;
 mod snapshot;
 mod splice;
+mod suppression;
+mod surface_request;
 mod verify;
 mod verify_memo;
 mod view;
+mod why;
+mod withdraw;
 
 pub use decision::Decision;
 pub use error::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError,
     AttemptCompletedError, BaseMismatch, FoldConflictError, GrantAttemptsError, HostFaultError, IntegrateError,
-    LandError, LandingRejectedError, MemberExecutorFaultError, OperatorHoldError, OperatorRepairError,
-    OrphanClaimReleaseError, ResolveError, SealConflict, SealError, SpliceError, SupersedeError, VerifyFailedError,
+    LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError, OperatorHoldError,
+    OperatorRepairError, OrphanClaimReleaseError, ResolveError, SealConflict, SealError, SpliceError, SupersedeError,
+    SuppressionDispositionError, SurfaceRequestedError, VerifyFailedError, WithdrawError,
 };
 pub use event::{Event, Fact};
-pub use gate::{Gate, Read, RecordedRead, RecordedRefusal, Refusal};
-pub use outcome::{DECISIONS_SCHEMA, Decisions, DecisionsSchemaError, Outcome, decode_recorded_decisions};
+pub use gate::{
+    AGGREGATE_REVIEW_GATE, AGGREGATE_VERIFY_GATE, DISPATCH_MEMBER_GATE, DRAFT_ADMISSION_GATE, FOLD_GATE, Gate,
+    LAND_GATE, Read, RecordedRead, RecordedRefusal, Refusal,
+};
+pub use outcome::{
+    DECISIONS_SCHEMA, DECISIONS_SCHEMA_V1, Decisions, DecisionsSchemaError, Outcome, decode_recorded_decisions,
+};
 pub use seal::is_active_unlanded;
 pub use snapshot::{
-    AggregateReviewFault, BloomRecord, BloomStatus, FoldedIntegration, HostFaultHold, MemberMachineryFault, MemberPark,
-    Snapshot, StageProgress,
+    AggregateReviewFault, AwaitingSurface, BloomRecord, BloomStatus, FileLease, FoldedIntegration, HostFaultHold,
+    LeaseEviction, MemberMachineryFault, MemberPark, Snapshot, StageProgress,
 };
 pub use view::view_of;
+pub use why::why_of;
 
 use crate::values::{ResolvedConfigs, SpendWindow};
 
 use aggregate_verify::reduce_aggregate_verify_completed;
 use attempt::{reduce_attempt_completed, reduce_member_executor_fault};
+use base_verify::reduce_base_verify_completed;
 use evidence::{reduce_admit_evidence, reduce_adopt_answer};
 use fold_conflict::reduce_fold_conflict;
 use fold_refusal::reduce_fold_refused;
@@ -75,6 +91,7 @@ use grant::reduce_grant_attempts;
 use integrate::{reduce_integrate, reduce_resolve};
 use land::reduce_land;
 use landing::reduce_landing_rejected;
+use lease::reduce_lane_writes_observed;
 use observe::{reduce_observe_mainline, reduce_observe_mainline_diverged};
 use operator::{reduce_operator_adjudication, reduce_operator_repair};
 use operator_hold::{reduce_operator_hold, reduce_operator_release};
@@ -82,7 +99,10 @@ use orphan_claim::{reduce_complete_orphan_claim_release, reduce_request_orphan_c
 use readiness::reduce_splice_assembled;
 use review::{reduce_aggregate_review_completed, reduce_aggregate_review_executor_fault};
 use seal::{reduce_seal, reduce_supersede, reduce_surface_overlap};
+use suppression::reduce_suppression_disposition;
+use surface_request::reduce_surface_requested;
 use verify::{reduce_resume_host_fault, reduce_verify_failed, reduce_verify_host_fault};
+use withdraw::reduce_withdraw;
 
 /// Reduce one event against a snapshot into decisions. Pure: reads the
 /// snapshot, returns decisions, mutates nothing (ADR-0149 §The control core).
@@ -172,5 +192,18 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
             reduce_member_executor_fault(snapshot, bloom, workpiece, *stage, evidence)
         }
         Fact::FoldRefused { bloom, refusal } => reduce_fold_refused(snapshot, bloom, refusal),
+        Fact::SurfaceRequested { bloom, workpiece, stage, evidence, request } => {
+            reduce_surface_requested(snapshot, bloom, workpiece, *stage, evidence, request)
+        }
+        Fact::Withdraw { bloom, withdrawals, cascade } => reduce_withdraw(snapshot, bloom, withdrawals, *cascade),
+        Fact::LaneWritesObserved { bloom, workpiece, stage, paths, observed_at: _ } => {
+            reduce_lane_writes_observed(snapshot, bloom, workpiece, *stage, paths)
+        }
+        Fact::SuppressionDisposition { bloom, workpiece, disposition } => {
+            reduce_suppression_disposition(snapshot, bloom, workpiece, disposition)
+        }
+        Fact::BaseVerifyCompleted { base, tree, passed, evidence, failed } => {
+            reduce_base_verify_completed(snapshot, *base, *tree, *passed, evidence, *failed)
+        }
     }
 }

@@ -26,6 +26,7 @@ pub enum InterruptKind {
     Landing,
     Quiesce,
     Hold,
+    BaseRed,
 }
 
 impl InterruptKind {
@@ -40,6 +41,7 @@ impl InterruptKind {
             Self::Landing => "landing",
             Self::Quiesce => "quiesce",
             Self::Hold => "hold",
+            Self::BaseRed => "base",
         }
     }
 }
@@ -50,6 +52,14 @@ pub fn interrupts(view: &ViewDocument) -> Vec<Interrupt> {
     let mut entries = Vec::new();
     if let Some(quiesce) = &view.spend_quiesce {
         entries.push(quiesce_entry(quiesce));
+    }
+    if let Some(alert) = &view.base_alert {
+        entries.push(Interrupt {
+            kind: InterruptKind::BaseRed,
+            detail: alert.failed.join(", "),
+            focus: Focus::Seal,
+            stage: None,
+        });
     }
     for bloom in &view.blooms {
         push_bloom_interrupts(&mut entries, bloom);
@@ -132,6 +142,11 @@ fn push_bloom_interrupts(entries: &mut Vec<Interrupt>, bloom: &BloomView) {
         }
     }
     for member in &bloom.members {
+        // A withdrawn member interrupts nobody (#5327): an operator already
+        // decided it, and it is not coming back into the line.
+        if member.withdrawn.is_some() {
+            continue;
+        }
         if let Some(pending) = &member.pending_decision {
             entries.push(Interrupt {
                 kind: InterruptKind::Decision,
@@ -143,6 +158,17 @@ fn push_bloom_interrupts(entries: &mut Vec<Interrupt>, bloom: &BloomView) {
         if member.wedge.is_some() {
             entries.push(Interrupt {
                 kind: InterruptKind::Wedge,
+                detail: member_detail(bloom, &member.workpiece),
+                focus: Focus::member(bloom.id, member.workpiece.clone()),
+                stage: None,
+            });
+        }
+        // A member waiting on a surface amendment is blocked on a *person*
+        // (ADR-0207), so it belongs on the same list as a pending decision:
+        // more attempts cannot move it.
+        if member.awaiting_surface.is_some() {
+            entries.push(Interrupt {
+                kind: InterruptKind::Decision,
                 detail: member_detail(bloom, &member.workpiece),
                 focus: Focus::member(bloom.id, member.workpiece.clone()),
                 stage: None,

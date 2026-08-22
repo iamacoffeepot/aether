@@ -9,18 +9,20 @@ use alloc::vec::Vec;
 use aether_data::Kind;
 use serde::de::DeserializeOwned;
 
-use super::attempt::{DispatchTargets, SealedLine, move_effects};
-use super::readiness::{entry_line, ready_entries, successor_entries};
+use super::attempt::{DispatchTargets, SealedLine, move_effects, stage_binding};
+use super::readiness::{ReadyLine, entry_line, ready_entries, successor_entries};
 use super::splice::{SplicedBase, checkout_from, member_construct_base, spliced_base};
 use super::{
     BloomRecord, BloomStatus, Decision, Decisions, Outcome, SealConflict, SealError, Snapshot, StageProgress,
     SupersedeError,
 };
+use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{
-    BloomSpec, CandidateRef, ConfigKind, ConfigResolveError, ConfigScopes, DependencyError, EvidenceKind,
-    MemberCandidate, MemberDependency, Membership, ModelOverride, ResolutionClaim, ResolvedConfigs, SpendCeiling,
-    SpendWindow, StageCatalog, Unproducible, VerifyFailureSet, VerifyProof, resolve_member_dependencies,
+    BaseReceipt, BaseVerdict, BloomSpec, CandidateRef, ConfigKind, ConfigResolveError, ConfigScopes, DependencyError,
+    EvidenceKind, MemberCandidate, MemberDependency, Membership, ModelOverride, ResolutionClaim, ResolvedConfigs,
+    SpendCeiling, SpendWindow, StageCatalog, Transformation, Unproducible, VerifyFailureSet, VerifyGateSet,
+    VerifyProof, resolve_member_dependencies,
 };
 
 pub(super) fn reduce_seal(
@@ -111,9 +113,49 @@ pub(super) fn reduce_seal(
     // Record the catalog admission resolved so the fold reads the record, not
     // a later binary's compiled line (#4944).
     effects.push(Decision::RecordStageCatalog { bloom, catalog: catalog.clone() });
-    effects.extend(ready_entries(bloom, spec.members(), edges, &|_| false, spec.configs(), &catalog, spec.base()));
+    let proven = enqueue_base_verify_if_needed(snapshot, spec.base(), &catalog, &mut effects);
+    effects.extend(ready_entries(
+        bloom,
+        spec.members(),
+        edges,
+        &|_| false,
+        &ReadyLine { bloom_configs: spec.configs(), catalog: &catalog, base: spec.base(), base_proven: proven },
+    ));
     effects.push(Decision::RecordMemberDependencies { bloom, edges: edges.to_vec() });
     Decisions { outcome: Outcome::Sealed(bloom), effects }
+}
+
+/// Queue one `verify.base` for an unproven sealed base, or nothing if a receipt
+/// (pending or terminal) is already on record — the `orphan_releases`
+/// short-circuit this copies. Returns whether the base is already green, which
+/// is what ready entry dispatches consult.
+fn enqueue_base_verify_if_needed(
+    snapshot: &Snapshot,
+    base: Digest,
+    catalog: &StageCatalog,
+    effects: &mut Vec<Decision>,
+) -> bool {
+    if snapshot.base_receipt_for(base).is_some_and(BaseReceipt::is_green) {
+        return true;
+    }
+    if snapshot.base_receipt_for(base).is_some() {
+        return false;
+    }
+    let binding = stage_binding(catalog, StageId::BaseVerify);
+    effects.push(Decision::RecordBaseReceipt {
+        receipt: BaseReceipt {
+            base,
+            tree: base,
+            gate_set: VerifyGateSet::base().digest(),
+            verdict: BaseVerdict::Pending,
+        },
+    });
+    effects.push(Decision::DispatchBaseVerify {
+        base,
+        transformation: Transformation::for_base_verify(&binding, base, base),
+        profile: binding.profile,
+    });
+    false
 }
 
 /// Record a cross-member declared-surface overlap the seal door observed
@@ -442,11 +484,12 @@ pub(super) fn reduce_supersede(
         effects.push(Decision::ClaimMembership { workpiece: member.workpiece.clone(), bloom: successor_id });
     }
     effects.push(Decision::RecordStageCatalog { bloom: successor_id, catalog: catalog.clone() });
+    let proven = enqueue_base_verify_if_needed(snapshot, successor.base(), &catalog, &mut effects);
     // An edgeless supersede of a graph bloom keeps the remaining subgraph —
     // dropping a wedged member must not also drop the edges among the
     // members that stay. Explicit door-resolved edges still win.
     let graph = effective_successor_edges(edges, &record.dependencies, successor.members());
-    adopt_predecessor_work(&mut effects, successor, predecessor, record, &graph, &catalog);
+    adopt_predecessor_work(&mut effects, successor, predecessor, record, &graph, &catalog, proven);
     // Last, so the mainline move is part of the same atomic decision set that
     // released the predecessor and claimed the successor: the base a land
     // compare-and-swaps against and the bloom entitled to land on it change
@@ -468,6 +511,7 @@ fn adopt_predecessor_work(
     record: &BloomRecord,
     graph: &[MemberDependency],
     catalog: &StageCatalog,
+    base_proven: bool,
 ) {
     let successor_id = successor.id();
     // Inherit only a claim whose workpiece the successor re-admits at the same
@@ -511,7 +555,7 @@ fn adopt_predecessor_work(
     // otherwise be claimed but never executed, leaving the successor
     // unresolvable.
     let (every_member_inherited, entries) =
-        successor_entries(successor_id, successor, *predecessor, record, graph, catalog);
+        successor_entries(successor_id, successor, *predecessor, record, graph, catalog, base_proven);
     effects.extend(entries);
     for (member, candidate) in &reverify {
         let base = match successor_construct_base(successor, graph, record, &member.workpiece) {
@@ -521,7 +565,7 @@ fn adopt_predecessor_work(
         effects.extend(verify_reentry(
             successor_id,
             member,
-            entry_line(member, successor.configs(), catalog, base),
+            entry_line(member, successor.configs(), catalog, base, base_proven),
             *candidate,
         ));
     }
@@ -716,6 +760,7 @@ fn verify_reentry(
             seen_verify_failures: VerifyFailureSet::EMPTY,
             fold_checkpoint: None,
             fold_conflict_evidence: None,
+            reconcile_assembles_base: false,
         },
         DispatchTargets { subject: candidate.tree, checkout: candidate.checkout },
         sealed,
@@ -734,12 +779,13 @@ mod tests {
     use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
     use crate::reduce::SealError;
     use crate::reduce::{
-        BloomStatus, Decision, Decisions, Event, Fact, Outcome, Snapshot, decode_recorded_decisions, reduce,
+        BloomStatus, DECISIONS_SCHEMA, Decision, Decisions, Event, Fact, Outcome, Snapshot, decode_recorded_decisions,
+        reduce,
     };
     use crate::values::{
-        BloomDraft, BloomSpec, CandidateRef, ConfigKind, ConfigRegistry, Evidence, EvidenceKind, Forecast,
-        MemberDependency, Membership, ResolutionClaim, ResolvedConfigs, SpendCeiling, SpendQuiesce, SpendWindow,
-        Unproducible,
+        BaseReceipt, BaseVerdict, BloomDraft, BloomSpec, CandidateRef, ConfigKind, ConfigRegistry, Evidence,
+        EvidenceKind, Forecast, MemberDependency, Membership, ResolutionClaim, ResolvedConfigs, SpendCeiling,
+        SpendQuiesce, SpendWindow, Unproducible, VerifyGateSet,
     };
 
     fn digest(seed: u8) -> Digest {
@@ -791,7 +837,8 @@ mod tests {
         let ceiling = SpendCeiling { window_micro_usd: Some(10), bloom_micro_usd: None };
         let (draft, configs) = draft_with_ceiling(1, &ceiling);
         let spec = draft.seal();
-        let decided = reduce_seal(&Snapshot::new(digest(0)), &spec, &configs, &window(10, &[]), &[]);
+        let decided =
+            reduce_seal(&Snapshot::new(digest(0)).with_green_base(digest(0)), &spec, &configs, &window(10, &[]), &[]);
 
         assert_eq!(
             decided.outcome,
@@ -826,7 +873,7 @@ mod tests {
         let existing_id = existing.id();
         let event = Event { idempotency_key: IdempotencyKey("prior".into()), fact: Fact::Seal(existing) };
         let prior = reduce_seal(
-            &Snapshot::new(digest(0)),
+            &Snapshot::new(digest(0)).with_green_base(digest(0)),
             match &event.fact {
                 Fact::Seal(spec) => spec,
                 _ => unreachable!(),
@@ -835,7 +882,8 @@ mod tests {
             &SpendWindow::default(),
             &[],
         );
-        let snapshot = Snapshot::new(digest(0)).apply(&event, &prior, &ResolvedConfigs::default());
+        let snapshot =
+            Snapshot::new(digest(0)).with_green_base(digest(0)).apply(&event, &prior, &ResolvedConfigs::default());
         let before = snapshot.blooms.get(&existing_id).expect("the prior bloom is on the snapshot").clone();
 
         // Land the prior bloom so the one-active-bloom gate is not what refuses.
@@ -873,7 +921,7 @@ mod tests {
         let ceiling = SpendCeiling { window_micro_usd: Some(100), bloom_micro_usd: Some(50) };
         let (draft, configs) = draft_with_ceiling(1, &ceiling);
         let spec = draft.seal();
-        let mut snapshot = Snapshot::new(digest(0));
+        let mut snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
         snapshot.spend_quiesce = Some(SpendQuiesce::Window {
             window: String::from("bloomery/daily/2026-08-13"),
             spent_micro_usd: 100,
@@ -898,15 +946,20 @@ mod tests {
     #[test]
     fn an_absent_or_uncapped_ceiling_never_quiesces() {
         let spec = draft(1).seal();
-        let decided =
-            reduce_seal(&Snapshot::new(digest(0)), &spec, &ResolvedConfigs::default(), &window(u64::MAX, &[]), &[]);
+        let decided = reduce_seal(
+            &Snapshot::new(digest(0)).with_green_base(digest(0)),
+            &spec,
+            &ResolvedConfigs::default(),
+            &window(u64::MAX, &[]),
+            &[],
+        );
         assert!(matches!(decided.outcome, Outcome::Sealed(_)), "no ceiling is uncapped: {:?}", decided.outcome);
 
         let ceiling = SpendCeiling { window_micro_usd: None, bloom_micro_usd: None };
         let (draft, configs) = draft_with_ceiling(2, &ceiling);
         let spec = draft.seal();
         let decided = reduce_seal(
-            &Snapshot::new(digest(0)),
+            &Snapshot::new(digest(0)).with_green_base(digest(0)),
             &spec,
             &configs,
             &window(u64::MAX, &[(BloomId(digest(1)), u64::MAX)]),
@@ -931,7 +984,13 @@ mod tests {
         let mut configs = ResolvedConfigs::default();
         configs.insert(ceiling.address(), SpendCeiling::NAME, to_vec(&ceiling).expect("ceiling encodes"));
 
-        let decided = reduce_seal(&Snapshot::new(digest(0)), &spec, &configs, &SpendWindow::default(), &[]);
+        let decided = reduce_seal(
+            &Snapshot::new(digest(0)).with_green_base(digest(0)),
+            &spec,
+            &configs,
+            &SpendWindow::default(),
+            &[],
+        );
         assert!(
             matches!(
                 decided.outcome,
@@ -957,8 +1016,13 @@ mod tests {
         registry.insert::<SpendCeiling>(address);
 
         let spec = BloomDraft { configs: registry.clone(), ..draft(1) }.seal();
-        let decided =
-            reduce_seal(&Snapshot::new(digest(0)), &spec, &ResolvedConfigs::default(), &SpendWindow::default(), &[]);
+        let decided = reduce_seal(
+            &Snapshot::new(digest(0)).with_green_base(digest(0)),
+            &spec,
+            &ResolvedConfigs::default(),
+            &SpendWindow::default(),
+            &[],
+        );
         assert!(
             matches!(
                 decided.outcome,
@@ -974,7 +1038,13 @@ mod tests {
 
         let mut configs = ResolvedConfigs::default();
         configs.insert(address, String::from("aether.bloomery.price_table"), vec![1, 2, 3]);
-        let decided = reduce_seal(&Snapshot::new(digest(0)), &spec, &configs, &SpendWindow::default(), &[]);
+        let decided = reduce_seal(
+            &Snapshot::new(digest(0)).with_green_base(digest(0)),
+            &spec,
+            &configs,
+            &SpendWindow::default(),
+            &[],
+        );
         assert!(
             matches!(
                 decided.outcome,
@@ -990,7 +1060,13 @@ mod tests {
 
         configs = ResolvedConfigs::default();
         configs.insert(address, SpendCeiling::NAME, vec![0xff, 0xff]);
-        let decided = reduce_seal(&Snapshot::new(digest(0)), &spec, &configs, &SpendWindow::default(), &[]);
+        let decided = reduce_seal(
+            &Snapshot::new(digest(0)).with_green_base(digest(0)),
+            &spec,
+            &configs,
+            &SpendWindow::default(),
+            &[],
+        );
         assert!(
             matches!(
                 decided.outcome,
@@ -1015,8 +1091,14 @@ mod tests {
         let predecessor = predecessor_spec.id();
         let seal =
             Event { idempotency_key: IdempotencyKey("prior".into()), fact: Fact::Seal(predecessor_spec.clone()) };
-        let prior = reduce_seal(&Snapshot::new(digest(0)), &predecessor_spec, &configs, &SpendWindow::default(), &[]);
-        let snapshot = Snapshot::new(digest(0)).apply(&seal, &prior, &configs);
+        let prior = reduce_seal(
+            &Snapshot::new(digest(0)).with_green_base(digest(0)),
+            &predecessor_spec,
+            &configs,
+            &SpendWindow::default(),
+            &[],
+        );
+        let snapshot = Snapshot::new(digest(0)).with_green_base(digest(0)).apply(&seal, &prior, &configs);
 
         let (successor_draft, successor_configs) = draft_with_ceiling(2, &ceiling);
         let successor = successor_draft.seal();
@@ -1035,8 +1117,13 @@ mod tests {
     fn an_edgeless_seal_is_today_plus_an_empty_appended_graph() {
         let spec = draft(1).seal();
         let bloom = spec.id();
-        let decided =
-            reduce_seal(&Snapshot::new(digest(0)), &spec, &ResolvedConfigs::default(), &SpendWindow::default(), &[]);
+        let decided = reduce_seal(
+            &Snapshot::new(digest(0)).with_green_base(digest(0)),
+            &spec,
+            &ResolvedConfigs::default(),
+            &SpendWindow::default(),
+            &[],
+        );
 
         assert!(matches!(decided.outcome, Outcome::Sealed(id) if id == bloom));
         let Some(Decision::RecordMemberDependencies { bloom: recorded, edges }) = decided.effects.last() else {
@@ -1075,7 +1162,7 @@ mod tests {
             idempotency_key: IdempotencyKey("graph".into()),
             fact: Fact::GraphSeal { predecessor: None, spec, edges: edges.clone() },
         };
-        let base = Snapshot::new(digest(0));
+        let base = Snapshot::new(digest(0)).with_green_base(digest(0));
         let decided = reduce(&base, &event, &ResolvedConfigs::default(), &SpendWindow::default());
         assert!(matches!(decided.outcome, Outcome::Sealed(id) if id == bloom));
         match decided.effects.last() {
@@ -1088,8 +1175,9 @@ mod tests {
 
         let live = base.apply(&event, &decided, &ResolvedConfigs::default());
         let journaled: Event = from_bytes(&to_vec(&event).expect("event encodes")).expect("event decodes");
-        let recorded: Decisions = decode_recorded_decisions(&to_vec(&decided).expect("decisions encode"), None)
-            .expect("journaled decisions decode");
+        let recorded: Decisions =
+            decode_recorded_decisions(&to_vec(&decided).expect("decisions encode"), Some(DECISIONS_SCHEMA))
+                .expect("journaled decisions decode");
         let replayed = base.apply(&journaled, &recorded, &ResolvedConfigs::default());
 
         assert_eq!(
@@ -1233,7 +1321,7 @@ mod tests {
         let predecessor_spec = spec(&[("wp-a", 1), ("wp-b", 2), ("wp-c", 3)]);
         let edges = vec![edge("wp-b", "wp-a")];
         let (snapshot, _) = step(
-            &Snapshot::new(digest(0)),
+            &Snapshot::new(digest(0)).with_green_base(digest(0)),
             &event("seal", Fact::GraphSeal { predecessor: None, spec: predecessor_spec.clone(), edges: edges.clone() }),
         );
         let (snapshot, _) = step(
@@ -1305,7 +1393,7 @@ mod tests {
         let predecessor_spec = spec(&[("wp-a", 1), ("wp-b", 2), ("wp-c", 3)]);
         let edges = vec![edge("wp-b", "wp-a"), edge("wp-c", "wp-a")];
         let (snapshot, _) = step(
-            &Snapshot::new(digest(0)),
+            &Snapshot::new(digest(0)).with_green_base(digest(0)),
             &event("seal", Fact::GraphSeal { predecessor: None, spec: predecessor_spec.clone(), edges: edges.clone() }),
         );
         let snapshot = pass_construct(&snapshot, predecessor_spec.id(), "wp-a", 10, 110, "a-build");
@@ -1370,7 +1458,7 @@ mod tests {
     fn a_splice_mismatch_refuses_the_proof_and_re_verifies() {
         let predecessor_spec = spec(&[("wp-a", 1), ("wp-b", 2)]);
         let (snapshot, _) = step(
-            &Snapshot::new(digest(0)),
+            &Snapshot::new(digest(0)).with_green_base(digest(0)),
             &event(
                 "seal",
                 Fact::GraphSeal {
@@ -1448,7 +1536,7 @@ mod tests {
         let supersede =
             event("sup", Fact::Supersede { predecessor: predecessor_spec.id(), successor: successor_spec.clone() });
 
-        let base = Snapshot::new(digest(0));
+        let base = Snapshot::new(digest(0)).with_green_base(digest(0));
         let sealed = reduce(&base, &seal, &ResolvedConfigs::default(), &SpendWindow::default());
         let after_seal = base.apply(&seal, &sealed, &ResolvedConfigs::default());
         let decided_a = reduce(&after_seal, &a_done, &ResolvedConfigs::default(), &SpendWindow::default());
@@ -1461,22 +1549,26 @@ mod tests {
         let replayed = base
             .apply(
                 &from_bytes(&to_vec(&seal).expect("event encodes")).expect("event decodes"),
-                &decode_recorded_decisions(&to_vec(&sealed).expect("seal encodes"), None).expect("seal decodes"),
+                &decode_recorded_decisions(&to_vec(&sealed).expect("seal encodes"), Some(DECISIONS_SCHEMA))
+                    .expect("seal decodes"),
                 &ResolvedConfigs::default(),
             )
             .apply(
                 &from_bytes(&to_vec(&a_done).expect("event encodes")).expect("event decodes"),
-                &decode_recorded_decisions(&to_vec(&decided_a).expect("a encodes"), None).expect("a decodes"),
+                &decode_recorded_decisions(&to_vec(&decided_a).expect("a encodes"), Some(DECISIONS_SCHEMA))
+                    .expect("a decodes"),
                 &ResolvedConfigs::default(),
             )
             .apply(
                 &from_bytes(&to_vec(&c_done).expect("event encodes")).expect("event decodes"),
-                &decode_recorded_decisions(&to_vec(&decided_c).expect("c encodes"), None).expect("c decodes"),
+                &decode_recorded_decisions(&to_vec(&decided_c).expect("c encodes"), Some(DECISIONS_SCHEMA))
+                    .expect("c decodes"),
                 &ResolvedConfigs::default(),
             )
             .apply(
                 &from_bytes(&to_vec(&supersede).expect("event encodes")).expect("event decodes"),
-                &decode_recorded_decisions(&to_vec(&decided_sup).expect("sup encodes"), None).expect("sup decodes"),
+                &decode_recorded_decisions(&to_vec(&decided_sup).expect("sup encodes"), Some(DECISIONS_SCHEMA))
+                    .expect("sup decodes"),
                 &ResolvedConfigs::default(),
             );
 
@@ -1522,7 +1614,7 @@ mod tests {
         let predecessor_spec = spec(&[("wp-a", 1), ("wp-b", 2)]);
         let edges = vec![edge("wp-b", "wp-a")];
         let (snapshot, _) = step(
-            &Snapshot::new(digest(0)),
+            &Snapshot::new(digest(0)).with_green_base(digest(0)),
             &event("seal", Fact::GraphSeal { predecessor: None, spec: predecessor_spec.clone(), edges }),
         );
         let snapshot = pass_construct(&snapshot, predecessor_spec.id(), "wp-a", 10, 110, "a-build");
@@ -1574,7 +1666,7 @@ mod tests {
     fn a_claim_only_inherit_carries_the_matching_vehicle() {
         let predecessor_spec = spec(&[("wp-a", 1), ("wp-b", 2)]);
         let (snapshot, _) = step(
-            &Snapshot::new(digest(0)),
+            &Snapshot::new(digest(0)).with_green_base(digest(0)),
             &event(
                 "seal",
                 Fact::GraphSeal {
@@ -1618,7 +1710,7 @@ mod tests {
     fn a_reverify_inherit_carries_the_matching_vehicle() {
         let predecessor_spec = spec(&[("wp-a", 1), ("wp-b", 2)]);
         let (snapshot, _) = step(
-            &Snapshot::new(digest(0)),
+            &Snapshot::new(digest(0)).with_green_base(digest(0)),
             &event(
                 "seal",
                 Fact::GraphSeal {
@@ -1669,5 +1761,52 @@ mod tests {
         );
         let progress = successor.progress.get(&wp("wp-b")).expect("B is on Verify");
         assert_eq!(progress.candidate, Some(CandidateRef { tree: digest(20), checkout: digest(120) }));
+    }
+
+    #[test]
+    fn an_unproven_base_seals_but_withholds_construct() {
+        let spec = spec(&[("wp-a", 1)]);
+        let (after, decided) = step(&Snapshot::new(digest(0)), &event("seal", Fact::Seal(spec.clone())));
+        assert!(matches!(decided.outcome, Outcome::Sealed(_)));
+        assert!(
+            decided.effects.iter().any(|effect| matches!(effect, Decision::DispatchBaseVerify { .. })),
+            "an unproven base queues verify.base",
+        );
+        assert!(
+            !decided.effects.iter().any(|effect| matches!(effect, Decision::DispatchAttempt { .. })),
+            "construct is withheld until the base is green",
+        );
+        assert!(
+            decided.effects.iter().any(|effect| matches!(effect, Decision::DeferDispatch { .. })),
+            "the withheld dispatch is recorded so a green receipt can re-derive it",
+        );
+        let bloom = after.blooms.get(&spec.id()).expect("sealed");
+        assert!(!bloom.base_proven);
+        assert!(bloom.progress.contains_key(&wp("wp-a")), "the cursor is still seeded");
+    }
+
+    #[test]
+    fn a_second_seal_onto_a_pending_base_queues_nothing() {
+        let receipt = BaseReceipt {
+            base: digest(0),
+            tree: digest(0),
+            gate_set: VerifyGateSet::base().digest(),
+            verdict: BaseVerdict::Pending,
+        };
+        let mut snapshot = Snapshot::new(digest(0));
+        snapshot.base_trees.insert(digest(0), digest(0));
+        snapshot.base_receipts.insert(receipt.verified(), receipt);
+
+        let spec = spec(&[("wp-a", 1)]);
+        let (_, decided) = step(&snapshot, &event("seal", Fact::Seal(spec)));
+        assert!(matches!(decided.outcome, Outcome::Sealed(_)));
+        assert!(
+            !decided.effects.iter().any(|effect| matches!(effect, Decision::DispatchBaseVerify { .. })),
+            "a pending receipt already on record enqueues nothing",
+        );
+        assert!(
+            !decided.effects.iter().any(|effect| matches!(effect, Decision::DispatchAttempt { .. })),
+            "construct stays withheld while the receipt is pending",
+        );
     }
 }

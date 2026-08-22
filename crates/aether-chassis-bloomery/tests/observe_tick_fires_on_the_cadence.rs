@@ -11,14 +11,10 @@
 //! `assert_ne!(booted, merged)` fail whenever that sibling had already
 //! moved `heads/main` to the same digest (#5000).
 
-mod common;
-pub mod fixture;
-pub mod harness;
-
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fixture::{FixtureHarness, digest};
+use aether_harness_bloomery::{FixtureHarness, digest};
 
 /// The commit a person merges straight to mainline. Recognizable, and no bloom
 /// of this coordinator's ever names it — the point being that the coordinator

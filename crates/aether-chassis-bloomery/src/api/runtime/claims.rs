@@ -103,7 +103,12 @@ impl ApiCapabilityState {
         digest_from_hex(digest).map_or_else(
             || Routed::Reply(error_response(400, "release id is not a 32-byte hex digest")),
             |digest| {
-                Routed::Query(Query { bloom: None, release: Some(digest.as_bytes().to_vec()), calibration: false })
+                Routed::Query(Query {
+                    bloom: None,
+                    release: Some(digest.as_bytes().to_vec()),
+                    calibration: false,
+                    why: false,
+                })
             },
         )
     }
@@ -147,6 +152,7 @@ pub(super) fn release_status_response(result: QueryResult) -> HttpServerResponse
         QueryResult::Document { .. }
         | QueryResult::Bloom { .. }
         | QueryResult::NotFound
-        | QueryResult::Calibration { .. } => error_response(500, "release read answered with a projection"),
+        | QueryResult::Calibration { .. }
+        | QueryResult::Why { .. } => error_response(500, "release read answered with a projection"),
     }
 }

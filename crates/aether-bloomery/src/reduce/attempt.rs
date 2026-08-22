@@ -99,7 +99,7 @@ pub(super) fn move_effects_with_checkpoint(
     sealed: SealedLine<'_>,
 ) -> [Decision; 2] {
     let advance = Decision::AdvanceStage { bloom, workpiece: workpiece.clone(), progress };
-    if sealed.held {
+    if sealed.withheld() {
         return [advance, Decision::DeferDispatch { bloom, workpiece: workpiece.clone() }];
     }
     let binding = stage_binding(sealed.catalog, progress.stage);
@@ -158,6 +158,10 @@ pub(super) struct SealedLine<'a> {
     /// constructor reads it off the record, and this value is the only way into
     /// [`move_effects_with_candidate`].
     pub held: bool,
+    /// Whether this bloom's sealed base holds a green whole-workspace receipt
+    /// (ADR-0200). Independent of [`Self::held`]: releasing one brake must not
+    /// lift the other.
+    pub base_proven: bool,
 }
 
 impl<'a> SealedLine<'a> {
@@ -170,7 +174,13 @@ impl<'a> SealedLine<'a> {
             catalog: &record.stage_catalog,
             base: member_construct_base(record, &member.workpiece),
             held: record.operator_hold.is_some(),
+            base_proven: record.base_proven,
         }
+    }
+
+    /// Whether either brake is on: the operator hold, or an unproven base.
+    pub(super) fn withheld(&self) -> bool {
+        self.held || !self.base_proven
     }
 
     /// The same line, read as the release itself will leave the record (#4976).
@@ -183,9 +193,22 @@ impl<'a> SealedLine<'a> {
     /// Without lifting the flag here the release would defer the very dispatches
     /// it exists to emit. Named rather than assembled inline so the exemption is
     /// one greppable call with one caller, instead of a `held: false` literal
-    /// that reads like an oversight.
+    /// that reads like an oversight. Clears only the operator half: releasing
+    /// one brake must not lift the other.
     pub(super) fn released(mut self) -> Self {
         self.held = false;
+        self
+    }
+
+    /// The same line, read as a green base receipt will leave the record
+    /// (ADR-0200).
+    ///
+    /// The reducer decides against the record as it stands, where
+    /// `base_proven` is still false, while the effects it returns include the
+    /// [`Decision::RecordBaseReceipt`] that sets it. Clears only the base
+    /// half: releasing one brake must not lift the other.
+    pub(super) fn base_released(mut self) -> Self {
+        self.base_proven = true;
         self
     }
 }
@@ -253,16 +276,20 @@ pub(super) fn reduce_attempt_completed(
     };
     // Terminal `Verify` is a mis-route in either direction: passes integrate and
     // failures use the typed VerifyFailed fact. It is caught before the cursor
-    // check so it reads as `TerminalStage` rather than a `StageMismatch`. The
-    // repair-only `Refine` and the fold-conflict `Reconcile` sit off the
+    // stage check so it reads as `TerminalStage` rather than a `StageMismatch`.
+    // The repair-only `Refine` and the fold-conflict `Reconcile` sit off the
     // standing line (ADR-0153 / ADR-0189) with an explicit successor. A
-    // Reconcile that assembled a dependent's base (no prior candidate, no
+    // Reconcile that assembled a dependent's base (`reconcile_assembles_base`,
+    // recorded by `Fact::FoldConflict` when there was no prior candidate and no
     // claim) returns to Construct so the member builds on the spliced tree
     // rather than verifying the assembly as if it were their work. Every
     // other Reconcile — and Refine — returns to Verify for the delta-confirm.
-    let assembling = stage == StageId::Reconcile
-        && record.progress.get(workpiece).is_some_and(|cursor| cursor.candidate.is_none())
-        && !record.claims.contains_key(workpiece);
+    let Some(cursor) = record.progress.get(workpiece).copied() else {
+        return Decisions::rejected(Outcome::AttemptCompletedRejected(AttemptCompletedError::NotDispatched(
+            workpiece.clone(),
+        )));
+    };
+    let assembling = cursor.reconcile_assembles_base;
     let next = if stage == StageId::Refine || (stage == StageId::Reconcile && !assembling) {
         Some(StageId::Verify)
     } else if stage == StageId::Reconcile {
@@ -278,11 +305,6 @@ pub(super) fn reduce_attempt_completed(
     // claim), which is its own refusal — not a mismatch against a fabricated
     // entry-stage cursor (#3663); a result for a stage the member has already
     // left is stale/out-of-order and is not acted on.
-    let Some(cursor) = record.progress.get(workpiece).copied() else {
-        return Decisions::rejected(Outcome::AttemptCompletedRejected(AttemptCompletedError::NotDispatched(
-            workpiece.clone(),
-        )));
-    };
     if cursor.stage != stage {
         return Decisions::rejected(Outcome::AttemptCompletedRejected(AttemptCompletedError::StageMismatch {
             expected: cursor.stage,
@@ -295,10 +317,18 @@ pub(super) fn reduce_attempt_completed(
     // same inputs (#5292). A dead construct keeps `VerificationResult` and
     // still takes `retry_or_wedge` below — that is the case a second attempt
     // can recover.
-    if !passed && stage == StageId::Construct && evidence.kind == EvidenceKind::ConstructDeclined {
+    // The declining lane is `construct.implement`, which `StageCatalog` maps
+    // from Construct, Refine and Reconcile alike (`LaneGates::of` keys
+    // `is_construct` on the command), so a declining repair lap parks the same
+    // way a first construct does rather than falling into `retry_or_wedge`.
+    if !passed
+        && matches!(stage, StageId::Construct | StageId::Refine | StageId::Reconcile)
+        && evidence.kind == EvidenceKind::ConstructDeclined
+    {
         return park_declined_construct(
             *bloom,
             workpiece,
+            stage,
             evidence,
             alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }],
         );
@@ -498,6 +528,7 @@ fn advance_after_pass(
         seen_verify_failures: cursor.seen_verify_failures,
         fold_checkpoint: cursor.fold_checkpoint,
         fold_conflict_evidence: None,
+        reconcile_assembles_base: false,
     };
     // The member may be advancing onto a tree this bloom already proved
     // (#4891) — a repair lap that changed nothing the tree records hands
@@ -558,6 +589,7 @@ fn retry_or_wedge(
             seen_verify_failures: cursor.seen_verify_failures,
             fold_checkpoint: cursor.fold_checkpoint,
             fold_conflict_evidence,
+            reconcile_assembles_base: cursor.reconcile_assembles_base,
         };
         effects.extend(move_effects_with_checkpoint(
             bloom,
@@ -591,16 +623,12 @@ fn retry_or_wedge(
 fn park_declined_construct(
     bloom: BloomId,
     workpiece: &WorkpieceId,
+    stage: StageId,
     evidence: &Evidence,
     effects: Vec<Decision>,
 ) -> Decisions {
     Decisions {
-        outcome: Outcome::AttemptParked {
-            bloom,
-            workpiece: workpiece.clone(),
-            stage: StageId::Construct,
-            reason: evidence.detail,
-        },
+        outcome: Outcome::AttemptParked { bloom, workpiece: workpiece.clone(), stage, reason: evidence.detail },
         effects,
     }
 }
@@ -678,7 +706,7 @@ mod tests {
     use super::*;
     use crate::ids::IdempotencyKey;
     use crate::reduce::{Event, Fact, Outcome, reduce};
-    use crate::values::{BloomDraft, EvidenceKind, Membership, OperatorHold, ResolvedConfigs, SpendWindow};
+    use crate::values::{BloomDraft, BloomSpec, EvidenceKind, Membership, OperatorHold, ResolvedConfigs, SpendWindow};
 
     fn digest(seed: u8) -> Digest {
         Digest::from_bytes([seed; 32])
@@ -712,7 +740,8 @@ mod tests {
         let spec =
             BloomDraft { proposals: vec![membership("wp", 10)], base: digest(0), ..BloomDraft::default() }.seal();
         let bloom = spec.id();
-        let (snapshot, _) = step(&Snapshot::new(digest(0)), &event("seal", Fact::Seal(spec)));
+        let (snapshot, _) =
+            step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &event("seal", Fact::Seal(spec)));
         (snapshot, bloom)
     }
 
@@ -811,7 +840,8 @@ mod tests {
         let spec =
             BloomDraft { proposals: vec![membership("wp", 10)], base: digest(0), ..BloomDraft::default() }.seal();
         let bloom = spec.id();
-        let (after, decided) = step(&Snapshot::new(digest(0)), &event("seal", Fact::Seal(spec)));
+        let (after, decided) =
+            step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &event("seal", Fact::Seal(spec)));
         assert_eq!(
             construct_dispatch(&decided).checkout,
             digest(0),
@@ -1078,5 +1108,281 @@ mod tests {
             !matches!(decided.outcome, Outcome::AttemptParked { .. }),
             "a host fault must not be reclassified as a construct park",
         );
+    }
+
+    fn claim(name: &str, revision: u8, candidate: u8) -> ResolutionClaim {
+        let candidate = digest(candidate);
+        ResolutionClaim {
+            workpiece: WorkpieceId(name.into()),
+            scope_revision: digest(revision),
+            candidate,
+            evidence: Evidence { subject: candidate, kind: EvidenceKind::ResolutionClaim, detail: digest(201) },
+        }
+    }
+
+    fn conflict_evidence(checkpoint: u8) -> Evidence {
+        Evidence { subject: digest(checkpoint), kind: EvidenceKind::FoldConflict, detail: digest(90) }
+    }
+
+    fn two_member_spec(base: u8) -> BloomSpec {
+        BloomDraft {
+            proposals: vec![membership("alpha", 10), membership("beta", 11)],
+            base: digest(base),
+            ..BloomDraft::default()
+        }
+        .seal()
+    }
+
+    fn construct_and_integrate(mut snapshot: Snapshot, bloom: BloomId) -> Snapshot {
+        for (name, revision, tree, checkout) in [("alpha", 10, 20, 22), ("beta", 11, 21, 23)] {
+            snapshot = step(
+                &snapshot,
+                &event(
+                    &format!("construct-{name}"),
+                    Fact::AttemptCompleted {
+                        bloom,
+                        workpiece: WorkpieceId(name.into()),
+                        stage: StageId::Construct,
+                        passed: true,
+                        evidence: Evidence {
+                            subject: digest(tree),
+                            kind: EvidenceKind::VerificationResult,
+                            detail: digest(80),
+                        },
+                        candidate: Some(CandidateRef { tree: digest(tree), checkout: digest(checkout) }),
+                    },
+                ),
+            )
+            .0;
+            snapshot = step(
+                &snapshot,
+                &event(&format!("integrate-{name}"), Fact::Integrate { bloom, claim: claim(name, revision, tree) }),
+            )
+            .0;
+        }
+        snapshot
+    }
+
+    fn fold_beta(snapshot: &Snapshot, bloom: BloomId, key: &str, checkpoint: u8, head: u8) -> Snapshot {
+        step(
+            snapshot,
+            &event(
+                key,
+                Fact::FoldConflict {
+                    bloom,
+                    workpiece: WorkpieceId("beta".into()),
+                    checkpoint: digest(checkpoint),
+                    head: digest(head),
+                    evidence: conflict_evidence(checkpoint),
+                },
+            ),
+        )
+        .0
+    }
+
+    fn pass_reconcile(
+        snapshot: &Snapshot,
+        bloom: BloomId,
+        workpiece: &str,
+        key: &str,
+        captured: CandidateRef,
+    ) -> Decisions {
+        step(
+            snapshot,
+            &event(
+                key,
+                Fact::AttemptCompleted {
+                    bloom,
+                    workpiece: WorkpieceId(workpiece.into()),
+                    stage: StageId::Reconcile,
+                    passed: true,
+                    evidence: evidence(),
+                    candidate: Some(captured),
+                },
+            ),
+        )
+        .1
+    }
+
+    fn dispatch_stage_and_subject(decisions: &Decisions) -> (StageId, Digest) {
+        decisions
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                Decision::DispatchAttempt { stage, transformation, .. } => Some((*stage, transformation.inputs[0])),
+                _ => None,
+            })
+            .expect("expected a member-stage dispatch")
+    }
+
+    fn inherited_claim_successor() -> (Snapshot, BloomId) {
+        let spec = two_member_spec(0);
+        let predecessor = spec.id();
+        let (snapshot, _) =
+            step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &event("seal", Fact::Seal(spec)));
+        let snapshot = construct_and_integrate(snapshot, predecessor);
+        let snapshot = step(&snapshot, &event("observe-2", Fact::ObserveMainline { head: digest(2) }))
+            .0
+            .with_green_base(digest(2));
+        let successor_spec = two_member_spec(2);
+        let successor = successor_spec.id();
+        let (snapshot, decided) =
+            step(&snapshot, &event("sup", Fact::Supersede { predecessor, successor: successor_spec }));
+        assert!(matches!(decided.outcome, Outcome::Superseded { .. }), "the successor seals: {decided:?}");
+        (snapshot, successor)
+    }
+
+    // The plausible bug: an inherited claim has no cursor, so after FoldConflict
+    // revokes it both halves of the old inference read as a base assembly and
+    // the next dispatch is Construct against the scope revision.
+    #[test]
+    fn an_inherited_claim_folded_with_a_conflict_reconciles_back_to_verify() {
+        let (snapshot, bloom) = inherited_claim_successor();
+        let snapshot = fold_beta(&snapshot, bloom, "fold-conflict-beta", 30, 31);
+        let captured = CandidateRef { tree: digest(41), checkout: digest(42) };
+        let decided = pass_reconcile(&snapshot, bloom, "beta", "reconcile-pass", captured);
+
+        match decided.outcome {
+            Outcome::AttemptAdvanced { from, to, .. } => {
+                assert_eq!(from, StageId::Reconcile);
+                assert_eq!(to, StageId::Verify);
+            }
+            other => panic!("expected AttemptAdvanced onto Verify, got {other:?}"),
+        }
+        assert_eq!(
+            dispatch_stage_and_subject(&decided),
+            (StageId::Verify, captured.tree),
+            "Verify re-targets from the reconciled tree, not the scope revision",
+        );
+    }
+
+    // The plausible bug: recording the assembly bit for every FoldConflict,
+    // including a member that resolved in this bloom and still has a Verify
+    // cursor, would send that member back to Construct.
+    #[test]
+    fn a_member_resolved_in_this_bloom_still_reconciles_back_to_verify() {
+        let spec = two_member_spec(0);
+        let bloom = spec.id();
+        let (snapshot, _) =
+            step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &event("seal", Fact::Seal(spec)));
+        let snapshot = construct_and_integrate(snapshot, bloom);
+        let snapshot = fold_beta(&snapshot, bloom, "fold-conflict-beta", 30, 31);
+        let captured = CandidateRef { tree: digest(41), checkout: digest(42) };
+        let decided = pass_reconcile(&snapshot, bloom, "beta", "reconcile-pass", captured);
+
+        match decided.outcome {
+            Outcome::AttemptAdvanced { from, to, .. } => {
+                assert_eq!(from, StageId::Reconcile);
+                assert_eq!(to, StageId::Verify);
+            }
+            other => panic!("expected AttemptAdvanced onto Verify, got {other:?}"),
+        }
+        assert_eq!(dispatch_stage_and_subject(&decided), (StageId::Verify, captured.tree));
+    }
+
+    // The plausible bug: requiring a claim to route to Verify would send a
+    // dependent's base-assembly Reconcile into Verify against a tree it never
+    // authored (ADR-0196).
+    #[test]
+    fn a_dependents_base_assembly_still_returns_to_construct() {
+        let (snapshot, bloom) = sealed();
+        let (snapshot, _) = step(
+            &snapshot,
+            &event(
+                "splice-conflict",
+                Fact::FoldConflict {
+                    bloom,
+                    workpiece: WorkpieceId("wp".into()),
+                    checkpoint: digest(30),
+                    head: digest(31),
+                    evidence: conflict_evidence(30),
+                },
+            ),
+        );
+        let captured = CandidateRef { tree: digest(41), checkout: digest(42) };
+        let decided = pass_reconcile(&snapshot, bloom, "wp", "reconcile-pass", captured);
+
+        match decided.outcome {
+            Outcome::AttemptAdvanced { from, to, .. } => {
+                assert_eq!(from, StageId::Reconcile);
+                assert_eq!(to, StageId::Construct);
+            }
+            other => panic!("expected AttemptAdvanced onto Construct, got {other:?}"),
+        }
+        assert_eq!(
+            construct_dispatch(&decided).checkout,
+            captured.checkout,
+            "Construct checks out the assembled capture",
+        );
+    }
+
+    // The plausible bug: leaving `reconcile_assembles_base` set after the
+    // assembly's Construct is dispatched would send a later genuine revocation
+    // on the same member back to Construct.
+    #[test]
+    fn the_assembly_bit_does_not_outlive_its_reconcile() {
+        let (snapshot, bloom) = sealed();
+        let (snapshot, _) = step(
+            &snapshot,
+            &event(
+                "splice-conflict",
+                Fact::FoldConflict {
+                    bloom,
+                    workpiece: WorkpieceId("wp".into()),
+                    checkpoint: digest(30),
+                    head: digest(31),
+                    evidence: conflict_evidence(30),
+                },
+            ),
+        );
+        let assembled = CandidateRef { tree: digest(41), checkout: digest(42) };
+        let (snapshot, advanced) = step(
+            &snapshot,
+            &event(
+                "reconcile-pass",
+                Fact::AttemptCompleted {
+                    bloom,
+                    workpiece: WorkpieceId("wp".into()),
+                    stage: StageId::Reconcile,
+                    passed: true,
+                    evidence: evidence(),
+                    candidate: Some(assembled),
+                },
+            ),
+        );
+        assert!(matches!(
+            advanced.outcome,
+            Outcome::AttemptAdvanced { from: StageId::Reconcile, to: StageId::Construct, .. }
+        ));
+        let progress = snapshot.blooms[&bloom].progress[&WorkpieceId("wp".into())];
+        assert!(!progress.reconcile_assembles_base, "the bit is a property of one Reconcile lap");
+
+        let work = CandidateRef { tree: digest(51), checkout: digest(52) };
+        let (snapshot, _) = step(&snapshot, &pass_construct(bloom, "c-pass", work));
+        let (snapshot, _) =
+            step(&snapshot, &event("integrate-wp", Fact::Integrate { bloom, claim: claim("wp", 10, 51) }));
+        let (snapshot, _) = step(
+            &snapshot,
+            &event(
+                "fold-after-claim",
+                Fact::FoldConflict {
+                    bloom,
+                    workpiece: WorkpieceId("wp".into()),
+                    checkpoint: digest(32),
+                    head: digest(33),
+                    evidence: conflict_evidence(32),
+                },
+            ),
+        );
+        let reconciled = CandidateRef { tree: digest(61), checkout: digest(62) };
+        let decided = pass_reconcile(&snapshot, bloom, "wp", "reconcile-after-claim", reconciled);
+
+        match decided.outcome {
+            Outcome::AttemptAdvanced { from, to, .. } => {
+                assert_eq!(from, StageId::Reconcile);
+                assert_eq!(to, StageId::Verify);
+            }
+            other => panic!("expected the later revocation to rejoin Verify, got {other:?}"),
+        }
     }
 }

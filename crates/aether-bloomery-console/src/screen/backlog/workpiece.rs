@@ -39,6 +39,7 @@ struct Line {
     text: String,
     enter: Option<Nav>,
     digest: Option<DigestHex>,
+    openable: bool,
 }
 
 /// One workpiece's commission detail.
@@ -89,6 +90,11 @@ impl Workpiece {
     pub fn digest_under_cursor(&self) -> Option<DigestHex> {
         let key = self.cursor.selected()?;
         self.lines.iter().find(|line| line.key == *key).and_then(|line| line.digest)
+    }
+
+    #[must_use]
+    pub fn openable_digest(&self) -> Option<DigestHex> {
+        self.selected_line().filter(|line| line.openable).and_then(|line| line.digest)
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, _store: &Store) -> Outcome {
@@ -219,12 +225,13 @@ fn push_sealed_into(lines: &mut Vec<Line>, id: &str, store: &Store) {
             text: format!("sealed into  {}  {}", bloom.id.prefix(), bloom.id.as_hex()),
             enter: Some(Nav::focus(Focus::bloom(bloom.id))),
             digest: Some(bloom.id),
+            openable: false,
         });
     }
 }
 
 fn label(key: RowKey, text: String) -> Line {
-    Line { key, text, enter: None, digest: None }
+    Line { key, text, enter: None, digest: None, openable: false }
 }
 
 fn digest_line(key: RowKey, title: &str, digest: DigestHex) -> Line {
@@ -233,6 +240,7 @@ fn digest_line(key: RowKey, title: &str, digest: DigestHex) -> Line {
         text: format!("{title}  {}  {}", digest.prefix(), digest.as_hex()),
         enter: Some(Nav::focus(Focus::artifact(digest))),
         digest: Some(digest),
+        openable: true,
     }
 }
 

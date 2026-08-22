@@ -14,11 +14,12 @@
 //! evidence stamps the sealed-table price of the observed calls beside the
 //! replayed other-arm counterfactual.
 //!
-//! Same-member Refine additionally resumes the construct session journaled on
-//! the dispatch record when the stored context plus a fixed successor increment
-//! projects under the harness pricing-cliff threshold (#5177). That path is
-//! keyed by (bloom, workpiece), not the pool task text, so a findings overlay
-//! cannot hide the handle.
+//! Same-member Refine always resumes the construct session journaled on the
+//! dispatch record, whatever context that session carries. A refine lap is the
+//! same author fixing findings against the tree it just built, so relaunching
+//! it cold re-reads the whole member from scratch — strictly more expensive
+//! than any long-context band. That path is keyed by (bloom, workpiece), not
+//! the pool task text, so a findings overlay cannot hide the handle.
 //!
 //! A dependent Construct at unblock offers a predecessor's journaled session
 //! the same way (#5178): projection adds a per-link increment, warmth reuses
@@ -51,12 +52,9 @@ pub const SPLICED_RESET_NOTE: &str = "The working tree was reset to the spliced 
 const TURN_OBSERVATION_CAP: u64 = 32;
 /// Per-sample terminal-context cap, matching the pool's default ceiling.
 const CONTEXT_OBSERVATION_CAP: u64 = 150_000;
-/// Tokens a refine prompt is projected to add on top of the stored construct
-/// context (findings overlay plus successor framing). The cliff is the knob;
-/// this increment is fixed (#5177).
-const SUCCESSOR_INCREMENT_TOKENS: u64 = 8_000;
-/// Default prompt-token threshold a resumed refine must project under.
-/// Matches grok-4.6's measured long-context pricing cliff.
+/// Default prompt-token threshold a resumed *dependent construct* must project
+/// under. Matches grok-4.6's measured long-context pricing cliff. Same-member
+/// refine does not consult it.
 pub(super) const DEFAULT_PRICING_CLIFF_TOKENS: u64 = 200_000;
 /// Tokens one dependency link is projected to add on top of a predecessor's
 /// stored context. Measured successor increment (#5178).
@@ -96,8 +94,8 @@ pub enum MissReason {
     HeadHash,
     /// The pooled session was deposited from a different lane slot.
     SlotMismatch,
-    /// The stored construct context plus the successor increment projects at
-    /// or over the harness pricing-cliff threshold.
+    /// The stored predecessor context plus the dependency increment projects
+    /// at or over the harness pricing-cliff threshold.
     PricingCliff,
     /// The harness refused the resume handle before a billed turn.
     ResumeRefused,
@@ -144,18 +142,19 @@ pub struct PredecessorCandidate {
 
 /// Decide whether a journaled construct session is worth resuming.
 ///
-/// An empty or whitespace-only id is unparseable and launches fresh. A
-/// projection of `context + SUCCESSOR_INCREMENT_TOKENS` at or over `cliff`
-/// launches fresh so the refine lap does not cross the pricing band.
+/// A usable handle always resumes: the refine lap is the same author fixing
+/// findings on the tree that session just built, so the alternative is not a
+/// cheaper prompt but a cold re-read of the whole member. Only an empty or
+/// whitespace-only id — an unparseable handle — launches fresh. The pricing
+/// cliff gates dependent-construct chains only ([`decide_predecessor_resume`]),
+/// where the resumed context belongs to a *different* member.
 #[must_use]
-pub fn decide_refine_resume(session_id: &str, context_tokens: u64, pricing_cliff_tokens: u64) -> RefineResume {
-    if !usable_session_id(session_id) {
-        return RefineResume::Fresh { miss: None };
+pub fn decide_refine_resume(session_id: &str) -> RefineResume {
+    if usable_session_id(session_id) {
+        RefineResume::Resumed(session_id.to_owned())
+    } else {
+        RefineResume::Fresh { miss: None }
     }
-    if context_tokens.saturating_add(SUCCESSOR_INCREMENT_TOKENS) >= pricing_cliff_tokens {
-        return RefineResume::Fresh { miss: Some(MissReason::PricingCliff) };
-    }
-    RefineResume::Resumed(session_id.to_owned())
 }
 
 /// Decide whether a dependent construct should resume a predecessor session.
@@ -346,7 +345,7 @@ impl SessionReuse {
         *lock(&self.pricing_cliff_tokens) = tokens;
     }
 
-    /// The prompt-token cliff a same-member refine resume must project under.
+    /// The prompt-token cliff a dependent-construct resume must project under.
     #[must_use]
     pub fn pricing_cliff_tokens(&self) -> u64 {
         *lock(&self.pricing_cliff_tokens)
@@ -1067,25 +1066,23 @@ mod tests {
     }
 
     #[test]
-    fn a_journaled_construct_session_resumes_only_under_the_pricing_cliff() {
-        // Plausible bug: treating the stored context as the whole projection
-        // (so a session sitting just under the cliff still resumes) or treating
-        // an empty handle as resumable (so a missing parse wedges the lap).
+    fn a_journaled_construct_session_resumes_whatever_context_it_carries() {
+        // Plausible bug: reintroducing a context gate on the same-member refine
+        // path, which reads prudent and makes every findings lap re-read the
+        // member cold; or treating an empty handle as resumable, so a missing
+        // parse threads a garbage `--resume` and wedges the lap.
+        assert_eq!(super::decide_refine_resume("sess-1"), super::RefineResume::Resumed("sess-1".to_owned()));
         assert_eq!(
-            super::decide_refine_resume("sess-1", 8_000, 200_000),
-            super::RefineResume::Resumed("sess-1".to_owned()),
+            super::decide_refine_resume("sess-huge"),
+            super::RefineResume::Resumed("sess-huge".to_owned()),
+            "a refine resumes its own construct session however large that context grew",
         );
         assert_eq!(
-            super::decide_refine_resume("sess-1", 192_000, 200_000),
-            super::RefineResume::Fresh { miss: Some(MissReason::PricingCliff) },
-            "192k + the 8k successor increment is the cliff, not under it",
-        );
-        assert_eq!(
-            super::decide_refine_resume("   ", 8_000, 200_000),
+            super::decide_refine_resume("   "),
             super::RefineResume::Fresh { miss: None },
             "whitespace is an unparseable handle, not a session to resume",
         );
-        assert_eq!(super::decide_refine_resume("", 8_000, 200_000), super::RefineResume::Fresh { miss: None });
+        assert_eq!(super::decide_refine_resume(""), super::RefineResume::Fresh { miss: None });
     }
 
     fn predecessor(session_id: &str, context_tokens: u64, deposited_unix: Option<u64>) -> super::PredecessorCandidate {

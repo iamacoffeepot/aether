@@ -6,14 +6,14 @@
 //! what stays here is the host's file fallback and everything the gate decides
 //! on top of a resolved policy.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use aether_bloomery::{
     ApprovalRule, AuthorityDoor, Ed25519KeyProvider, EvidenceKind, KeyId, Provenance, SignatureEnvelope, Statement,
     authorization_message, digest_of,
 };
-use aether_bloomery::{Digest, FakeKeyProvider};
+use aether_bloomery::{DRAFT_ADMISSION_GATE, Digest, FakeKeyProvider};
 use ed25519_dalek::{Signer, SigningKey};
 
 use super::{
@@ -116,6 +116,7 @@ fn request(surface: &[&str]) -> AdmissionRequest {
     AdmissionRequest {
         subject: revision(),
         declared_surface: surface.iter().map(|s| (*s).to_owned()).collect(),
+        declared_crates: Vec::new(),
         completeness: complete(),
         adr_touch: AdrTouch::None,
         pre_approved: false,
@@ -145,15 +146,32 @@ fn each_completeness_check_fails_closed() {
         (|c| c.dependencies_all_closed = false, Incompleteness::OpenDependency),
         (|c| c.umbrella_integrity = false, Incompleteness::UmbrellaIntegrity),
     ];
+    let mut guards: BTreeSet<&'static str> = BTreeSet::new();
     for (mutate, expected) in cases {
         let mut req = request(&["docs/guide/x.md"]);
         mutate(&mut req.completeness);
-        assert_eq!(gate.evaluate(&req), Decision::Incomplete(expected));
+        let Decision::Incomplete { reason, refusal } = gate.evaluate(&req) else {
+            panic!("a failed completeness check refuses");
+        };
+        assert_eq!(reason, expected);
+        // ADR-0206: one guard per check, and the guard names the condition that
+        // held rather than the failure. A refusal that named the wrong guard —
+        // or the same guard for every case — would still carry the right typed
+        // reason, so the guard is what this asserts.
+        assert_eq!(refusal.gate, DRAFT_ADMISSION_GATE);
+        assert!(!refusal.reads.is_empty(), "{} named no value it read", refusal.guard);
+        assert!(guards.insert(refusal.guard), "two checks refused at the same guard: {}", refusal.guard);
     }
+    assert_eq!(guards.len(), cases.len(), "every completeness check has a guard of its own");
+
     // Two model routings is also a refusal (exactly-one).
     let mut req = request(&["docs/guide/x.md"]);
     req.completeness.model_routing_count = 2;
-    assert_eq!(gate.evaluate(&req), Decision::Incomplete(Incompleteness::ModelRouting(2)));
+    let Decision::Incomplete { reason, refusal } = gate.evaluate(&req) else {
+        panic!("two model routings refuses");
+    };
+    assert_eq!(reason, Incompleteness::ModelRouting(2));
+    assert_eq!(refusal.reads[0].value, "2", "the guard records the count it read, not just that it was wrong");
 }
 
 #[test]
@@ -234,7 +252,10 @@ fn pre_approval_waives_the_tier_but_not_the_gate_checks() {
     let mut blocked = request(&["crates/aether-data/src/lib.rs"]);
     blocked.pre_approved = true;
     blocked.completeness.blocked = true;
-    assert_eq!(gate.evaluate(&blocked), Decision::Incomplete(Incompleteness::Blocked));
+    assert!(
+        matches!(gate.evaluate(&blocked), Decision::Incomplete { reason: Incompleteness::Blocked, .. }),
+        "the override waives the tier, not a completeness check"
+    );
 }
 
 /// A deterministic signing key from a fixed seed (no rng, reproducible) — mirrors

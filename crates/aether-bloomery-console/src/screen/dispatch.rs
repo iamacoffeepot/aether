@@ -24,6 +24,14 @@ const HINTS: &[KeyHint] = &[
     KeyHint { keys: "q", action: "quit" },
 ];
 
+/// A swept dispatch has no `transcript.jsonl` on the host, so Enter would 404.
+const SWEPT_HINTS: &[KeyHint] = &[
+    KeyHint { keys: "j/k", action: "select" },
+    KeyHint { keys: "Esc", action: "back" },
+    KeyHint { keys: "r", action: "refresh" },
+    KeyHint { keys: "q", action: "quit" },
+];
+
 /// One member's attempts on a bloom, as `GET /blooms/{id}/dispatches` served them.
 #[derive(Clone, Debug)]
 pub struct DispatchList {
@@ -31,12 +39,13 @@ pub struct DispatchList {
     workpiece: String,
     cursor: Cursor<String>,
     scroll: usize,
+    selected_retained: bool,
 }
 
 impl DispatchList {
     #[must_use]
     pub fn new(bloom: DigestHex, workpiece: impl Into<String>) -> Self {
-        Self { bloom, workpiece: workpiece.into(), cursor: Cursor::new(), scroll: 0 }
+        Self { bloom, workpiece: workpiece.into(), cursor: Cursor::new(), scroll: 0, selected_retained: true }
     }
 
     #[must_use]
@@ -50,8 +59,12 @@ impl DispatchList {
     }
 
     #[must_use]
-    pub fn key_hints() -> &'static [KeyHint] {
-        HINTS
+    pub fn key_hints(&self) -> &'static [KeyHint] {
+        if self.selected_retained {
+            HINTS
+        } else {
+            SWEPT_HINTS
+        }
     }
 
     #[must_use]
@@ -70,12 +83,15 @@ impl DispatchList {
                 self.cursor.select_prev(&rows, |row| row.nonce.clone());
                 Outcome::Handled
             }
-            KeyCode::Enter => self
-                .cursor
-                .selected()
-                .filter(|nonce| !nonce.is_empty())
-                .cloned()
-                .map_or(Outcome::Handled, |nonce| Outcome::Push(Nav::transcript(nonce))),
+            KeyCode::Enter => {
+                self.cursor.selected().filter(|nonce| !nonce.is_empty()).cloned().map_or(Outcome::Handled, |nonce| {
+                    if rows.iter().find(|row| row.nonce == nonce).is_some_and(|row| !row.evidence_retained) {
+                        Outcome::Handled
+                    } else {
+                        Outcome::Push(Nav::transcript(nonce))
+                    }
+                })
+            }
             KeyCode::Char('r') => Outcome::Refresh,
             KeyCode::Char('q') => Outcome::Quit,
             _ => Outcome::Ignored,
@@ -85,6 +101,7 @@ impl DispatchList {
     pub fn reseat(&mut self, store: &Store) {
         let rows = self.rows(store);
         self.cursor.reseat(&rows, |row| row.nonce.clone(), |_, rows| rows.first().map(|row| row.nonce.clone()));
+        self.selected_retained = self.selected_row_retained(store);
     }
 
     pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, store: &Store) {
@@ -92,6 +109,7 @@ impl DispatchList {
         if self.cursor.selected().is_none() {
             self.reseat(store);
         }
+        self.selected_retained = self.selected_row_retained(store);
         let dimmed = store.bloom_dispatches(self.bloom).is_some_and(super::super::store::Cell::is_stale);
         let muted = if dimmed {
             palette::body().add_modifier(Modifier::DIM)
@@ -149,11 +167,18 @@ impl DispatchList {
         };
         page.dispatches.iter().filter(|row| row.workpiece == self.workpiece).cloned().collect()
     }
+
+    fn selected_row_retained(&self, store: &Store) -> bool {
+        let Some(nonce) = self.cursor.selected() else {
+            return true;
+        };
+        self.rows(store).iter().find(|row| &row.nonce == nonce).is_none_or(|row| row.evidence_retained)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::DispatchList;
+    use super::{DispatchList, HINTS, SWEPT_HINTS};
     use crate::dto::{BloomDispatchView, BloomDispatchesView, DigestHex, StageId};
     use crate::keys::{Outcome, assert_footer_honest};
     use crate::nav::Nav;
@@ -224,9 +249,40 @@ mod tests {
         // The plausible bug: the footer paints Enter while the match still
         // routes to the titled detail frame, so the advertised key is a no-op.
         let nav = Nav::focus(Focus::dispatch(digest(1), "wp-a"));
-        assert_footer_honest(DispatchList::key_hints(), |code| {
+        assert_footer_honest(HINTS, |code| {
             Shell::probe(nav.clone()).handle_key(KeyEvent::from(code)) != Outcome::Ignored
         });
+        assert_footer_honest(SWEPT_HINTS, |code| {
+            Shell::probe(nav.clone()).handle_key(KeyEvent::from(code)) != Outcome::Ignored
+        });
+    }
+
+    #[test]
+    fn enter_on_a_swept_row_does_not_push_a_transcript() {
+        // The plausible bug: Enter still pushes the transcript viewer for a
+        // nonce the coordinator will 404, even though the row is labelled swept.
+        let bloom = digest(1);
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_bloom_dispatches(bloom, Ok(page()));
+        let mut list = DispatchList::new(bloom, "wp-b");
+        list.reseat(&store);
+        assert_eq!(list.handle_key(KeyEvent::from(KeyCode::Enter), &store), Outcome::Handled);
+    }
+
+    #[test]
+    fn a_swept_row_does_not_advertise_enter() {
+        // Tripwire: the footer and the handler reading two different predicates —
+        // an advertised Enter that the handler refuses is the same dead end in
+        // the other direction.
+        let bloom = digest(1);
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_bloom_dispatches(bloom, Ok(page()));
+        let mut swept = DispatchList::new(bloom, "wp-b");
+        swept.reseat(&store);
+        assert!(!swept.key_hints().iter().any(|hint| hint.keys == "Enter"));
+        let mut kept = DispatchList::new(bloom, "wp-a");
+        kept.reseat(&store);
+        assert!(kept.key_hints().iter().any(|hint| hint.keys == "Enter"));
     }
 
     #[test]

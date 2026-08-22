@@ -123,6 +123,7 @@ pub(super) fn reduce_grant_attempts(
             seen_verify_failures: cursor.seen_verify_failures,
             fold_checkpoint: cursor.fold_checkpoint,
             fold_conflict_evidence: None,
+            reconcile_assembles_base: false,
         }
     } else {
         StageProgress {
@@ -133,6 +134,7 @@ pub(super) fn reduce_grant_attempts(
             seen_verify_failures: cursor.seen_verify_failures,
             fold_checkpoint: cursor.fold_checkpoint,
             fold_conflict_evidence: cursor.fold_conflict_evidence,
+            reconcile_assembles_base: false,
         }
     };
     let mut effects = move_effects_with_checkpoint(

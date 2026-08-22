@@ -16,16 +16,12 @@
 //! budget of three. A miscounted roll wedges a member that had rolls left, and
 //! a wedged member is terminal — the bloom can never resolve.
 
-mod common;
-pub mod fixture;
-pub mod harness;
-
 use core::iter::once;
 
 use aether_bloomery::{BloomStatus, VerifyFailure, VerifyFailureSet};
 use aether_chassis_bloomery::bloomery::{ScriptedUpload, ScriptedVerdict};
 use aether_chassis_bloomery::store::OutstandingOrder;
-use fixture::{FixtureHarness, captured, digest, passed, verdict};
+use aether_harness_bloomery::{FixtureHarness, captured, digest, passed, verdict};
 
 /// The workpiece the single sealed member covers.
 const WORKPIECE: &str = "wp";

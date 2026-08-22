@@ -35,10 +35,11 @@ use std::time::Duration;
 use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
-    Admit, AdmitResult, ClaimReleaseOutcome, Digest, Event, Fact, IdempotencyKey, OrphanClaimRelease,
-    OrphanClaimReleaseCompletion, OrphanClaimReleasePayload, Topic,
+    Admit, AdmitResult, BloomId, ClaimRefKind, ClaimReleaseOutcome, Digest, Event, Fact, IdempotencyKey,
+    MemberClaimReleasePayload, OrphanClaimRelease, OrphanClaimReleaseCompletion, OrphanClaimReleasePayload, Topic,
+    WorkpieceId,
 };
-use aether_bloomery_github::SourceError;
+use aether_bloomery_github::{SourceError, short_hex};
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
@@ -192,6 +193,76 @@ pub(super) fn drain_and_release(
     Ok((admits, ack_through))
 }
 
+/// Drain the withdrawn-member release topic and free one claim ref per entry
+/// (#5327), returning the highest contiguously-processed outbox sequence to
+/// ack.
+///
+/// The single-ref door rather than the seal-wide one: `release_seal` folds
+/// every member release into one mail and the host adds the *admission* ref to
+/// it, which would free `refs/bloomery/admission/mainline` while the bloom is
+/// still walking. This calls the same expected-holder compare-and-swap the
+/// orphan door uses, naming one [`ClaimRefKind::Workpiece`].
+///
+/// No completion fact is journaled: unlike the orphan door, whose authority is
+/// an operator request the journal has to close out, the authority here is the
+/// journaled withdrawal itself. `AlreadyAbsent` is a clean success — that is
+/// what a redrive after a crash between the ref delete and the ack sees — and
+/// `Changed` is a warning rather than a delete, because the CAS read-guard has
+/// already spared a ref some later bloom re-claimed.
+pub(super) fn drain_and_release_members(
+    store: &mut dyn StoreBackend,
+    source: &SourceShell,
+) -> rusqlite::Result<Option<u64>> {
+    let entries = store.drain_topic(Topic::MemberClaimRelease)?;
+    let mut ack_through = None;
+    for entry in entries {
+        let Ok(payload) = from_bytes::<MemberClaimReleasePayload>(&entry.payload) else {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::claim_release",
+                sequence = entry.sequence,
+                "member claim release outbox entry did not decode; stopping the ack prefix to re-drain",
+            );
+            break;
+        };
+        match release_member_ref(source, &payload) {
+            Ok(outcome) => {
+                tracing::info!(
+                    target: "aether_chassis_bloomery::claim_release",
+                    sequence = entry.sequence,
+                    bloom = %short_hex(&payload.bloom),
+                    workpiece = %payload.workpiece.0,
+                    ?outcome,
+                    "withdrawn member's claim ref released",
+                );
+                ack_through = Some(entry.sequence);
+            }
+            Err(error) => {
+                // Operational, therefore retryable: leave the entry unacked so
+                // the next tick re-drives rather than dropping a ref release
+                // the withdrawal already journaled.
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::claim_release",
+                    sequence = entry.sequence,
+                    %error,
+                    "member claim release failed; stopping the ack prefix to re-drive",
+                );
+                break;
+            }
+        }
+    }
+    Ok(ack_through)
+}
+
+/// Run one withdrawn member's expected-holder compare-and-swap against the
+/// source.
+fn release_member_ref(
+    source: &SourceShell,
+    payload: &MemberClaimReleasePayload,
+) -> Result<ClaimReleaseOutcome, SourceError> {
+    let holder = BloomId(payload.bloom);
+    source.complete_release(Some(&holder), &ClaimRefKind::Workpiece(WorkpieceId(payload.workpiece.0.clone())))
+}
+
 #[runtime]
 impl NativeActor for ClaimReleaseReactorCapability {
     type State = ClaimReleaseReactorState;
@@ -300,6 +371,30 @@ impl NativeActor for ClaimReleaseReactorCapability {
                     target: "aether_chassis_bloomery::claim_release",
                     %error,
                     "orphan claim release drain failed",
+                );
+            }
+        }
+
+        // Withdrawn members' single-ref releases ride the same tick and the
+        // same ack-prefix discipline (#5327). Nothing is admitted back: the
+        // journaled withdrawal is the authority, so there is no completion to
+        // forward to the control core.
+        match drain_and_release_members(store, &source) {
+            Ok(Some(sequence)) => {
+                if let Err(error) = store.ack_topic(Topic::MemberClaimRelease, sequence) {
+                    tracing::warn!(
+                        target: "aether_chassis_bloomery::claim_release",
+                        %error,
+                        "member claim release ack failed; entries re-drive",
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::claim_release",
+                    %error,
+                    "member claim release drain failed",
                 );
             }
         }

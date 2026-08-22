@@ -6,14 +6,16 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
+use super::gate::RecordedRefusal;
 use super::{FoldedIntegration, StageProgress};
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::port::ProjectedReceipt;
 use crate::values::{
-    Adjudication, AgentProfile, CandidateRef, CompositionFinding, ConfigRegistry, Evidence, MemberCandidate,
-    MemberDependency, OperatorHold, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim,
-    ResolvedBloom, SpendQuiesce, StageCatalog, Transformation, VerifyProof, VerifyReuse, Wedge,
+    Adjudication, AgentProfile, BaseReceipt, CandidateRef, CompositionFinding, ConfigRegistry, Evidence,
+    MemberCandidate, MemberDependency, OperatorHold, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion,
+    ResolutionClaim, ResolvedBloom, SpendQuiesce, StageCatalog, Transformation, VerifyProof, VerifyReuse, Wedge,
+    Withdrawal,
 };
 
 /// The ordered effects a decision applies to the projection (and, in
@@ -724,5 +726,135 @@ pub enum Decision {
         rolls: u32,
         /// The latest fault report's artifact digest.
         evidence: Digest,
+    },
+    /// Record one member's terminal withdrawal from a walking bloom (#5327) —
+    /// see [`BloomRecord::withdrawn`](crate::BloomRecord::withdrawn).
+    ///
+    /// Recorded rather than derived for the reason [`Decision::RecordWedge`]
+    /// is: a member with no cursor and no claim because it was withdrawn and
+    /// one that simply never entered the line look identical from the record,
+    /// and only this row says which. The fold also drops the member's cursor
+    /// and its deferred dispatch, on the wedge's own argument — a workpiece
+    /// that stops dispatching is owed nothing. Appended so the prior
+    /// decisions' wire discriminants are unchanged.
+    RecordWithdrawal {
+        /// The bloom the member is leaving.
+        bloom: BloomId,
+        /// Who is leaving, why, and on whose word.
+        withdrawal: Withdrawal,
+    },
+    /// Kill the withdrawn member's live lane, if it has one (#5327) — the
+    /// transactional-outbox intent the executor reactor drains under
+    /// [`Topic::CancelDispatch`](crate::Topic::CancelDispatch).
+    ///
+    /// Deliberately *not* the timeout path: that synthesises a `TimeoutRecord`
+    /// and admits a failed attempt, which would spend the member's budget and
+    /// route it into repair. A withdrawn member's lane is cancelled and its
+    /// order consumed; no evidence is admitted, because there is no longer
+    /// anything for evidence to be about. Snapshot-inert like
+    /// [`Decision::DispatchLand`]. Appended so the prior decisions' wire
+    /// discriminants are unchanged.
+    CancelDispatch {
+        /// The bloom the cancelled lane was dispatched under.
+        bloom: BloomId,
+        /// The withdrawn member whose orders are cancelled and consumed.
+        workpiece: WorkpieceId,
+    },
+    /// Free `refs/bloomery/claims/<workpiece>` without touching the bloom's
+    /// admission ref (#5327) — the intent the claim-release reactor drains
+    /// under [`Topic::MemberClaimRelease`](crate::Topic::MemberClaimRelease).
+    ///
+    /// The single-ref door rather than the seal-wide one: the seal-wide
+    /// release folds in the mainline admission ref, which a bloom that is
+    /// still walking must keep. Snapshot-inert; the authority is the journaled
+    /// withdrawal itself, so no completion fact is admitted back. Appended so
+    /// the prior decisions' wire discriminants are unchanged.
+    ReleaseMemberClaimRef {
+        /// The bloom holding the ref.
+        bloom: BloomId,
+        /// The withdrawn member whose ref is freed.
+        workpiece: WorkpieceId,
+    },
+    /// Move a bloom whose every member has been withdrawn to
+    /// [`BloomStatus::Withdrawn`](crate::BloomStatus::Withdrawn) (#5327).
+    ///
+    /// Terminal: a bloom with no remaining member has no artifact to land, so
+    /// it stops holding the one-active-bloom-per-mainline slot and a fresh
+    /// bloom can seal. Appended so the prior decisions' wire discriminants are
+    /// unchanged.
+    MarkBloomWithdrawn {
+        /// The bloom that has nothing left to run.
+        bloom: BloomId,
+    },
+    /// Record that one composite gate has passed on the fold currently held.
+    ///
+    /// The two aggregate gates are dispatched together against one fold, so
+    /// neither verdict on its own resolves the bloom: whichever verdict lands
+    /// second reads this set to learn its sibling already passed, and only then
+    /// is the landing dispatched. Bound to the *held fold* rather than to a
+    /// tree because [`Decision::RecordIntegration`] clears the set — a new weave
+    /// is a new subject, and a gate that passed on the tree before it has said
+    /// nothing about this one.
+    ///
+    /// Snapshot-only: each gate's work order already went out with its own
+    /// dispatch, and a pass opens no new work of its own. Appended so the prior
+    /// decisions' wire discriminants are unchanged.
+    RecordAggregateGatePass {
+        /// The bloom whose fold was judged.
+        bloom: BloomId,
+        /// Which gate passed — [`StageId::AggregateVerify`] or
+        /// [`StageId::AggregateReview`].
+        stage: StageId,
+    },
+    /// Record why an operator-visible boundary refused (ADR-0206).
+    ///
+    /// Emitted *beside* the boundary's existing typed rejection rather than
+    /// replacing it: the admitter keeps the `Outcome` variant it has always
+    /// matched on, and this row is what the snapshot — and through it
+    /// [`why_of`](crate::why_of) — reads back. A rejected event is journaled
+    /// with its effects, so replay folds the refusal exactly as the live
+    /// admission did.
+    ///
+    /// The refusal does not live on [`Decisions`](super::Decisions) itself,
+    /// which is journaled under a frozen writing schema; a field there would
+    /// need a fresh schema identity and an upcast for every prior row.
+    ///
+    /// Snapshot-only: a refusal is precisely the statement that no work went
+    /// out, so a topic here would enqueue a row nothing drains. Appended so
+    /// the prior decisions' wire discriminants are unchanged.
+    RecordRefusal {
+        /// The bloom the boundary refused for.
+        bloom: BloomId,
+        /// The member whose dispatch refused, or `None` for a bloom-scoped
+        /// boundary.
+        workpiece: Option<WorkpieceId>,
+        /// The gate, the guard that failed, and the values it read.
+        refusal: RecordedRefusal,
+    },
+    /// File a base-verify receipt in the snapshot ledger, keyed by the tree it
+    /// judged and the whole-workspace gate set (ADR-0200).
+    ///
+    /// Snapshot-folding: writes both the tree index and the receipt map so a
+    /// later seal of the same base (or another commit that peels to the same
+    /// tree) reads one answer. Appended so the prior decisions' wire
+    /// discriminants are unchanged.
+    RecordBaseReceipt {
+        /// The receipt, naming the commit, the peeled tree, the gate set, and
+        /// the pending / green / red verdict.
+        receipt: BaseReceipt,
+    },
+    /// Drive the whole-workspace `verify.base` fan-out against a sealed base
+    /// (ADR-0200) — a snapshot-inert outbox intent on the
+    /// [`Decision::DispatchOrphanClaimRelease`] model. The terminal result folds in later
+    /// from [`crate::Fact::BaseVerifyCompleted`], never from this decision.
+    /// Emitted exactly once per unproven base: a pending or terminal receipt
+    /// already on record enqueues nothing.
+    DispatchBaseVerify {
+        /// The commit the lane checks out.
+        base: Digest,
+        /// The `verify.base` transformation, with no named diff base.
+        transformation: Transformation,
+        /// The catalog-calibrated profile the mechanical lane runs under.
+        profile: AgentProfile,
     },
 }

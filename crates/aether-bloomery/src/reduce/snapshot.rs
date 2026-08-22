@@ -7,19 +7,26 @@
 //! mechanical, and history immune to rule changes.
 
 use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
-use super::gate::RecordedRefusal;
+use super::gate::{AGGREGATE_REVIEW_GATE, AGGREGATE_VERIFY_GATE, LAND_GATE, RecordedRefusal};
 use super::{Decision, Decisions, Event, Fact, Outcome};
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
-    Adjudication, BloomSpec, CandidateRef, CompositionFinding, ConfigScopes, DispatchKey, Evidence, EvidenceKind,
-    MemberDependency, OperatorHold, OperatorRepair, OrphanClaimReleaseRecord, ResolutionClaim, ResolvedConfigs,
-    SpendQuiesce, StageCatalog, VerifiedTree, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge,
+    Adjudication, BaseReceipt, BloomSpec, CandidateRef, CompositionFinding, ConfigScopes, DispatchKey, Evidence,
+    EvidenceKind, MemberDependency, OperatorHold, OperatorRepair, OrphanClaimReleaseRecord, ResolutionClaim,
+    ResolvedConfigs, SpendQuiesce, StageCatalog, SuppressionDisposition, SurfaceRequest, VerifiedTree,
+    VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Withdrawal,
 };
+// Only [`Snapshot::with_green_base`] names it, and that door is behind the same cfg.
+// A plain import would be an unused one on a lib-scoped build, where the fixture
+// feature is off (#5411).
+#[cfg(any(test, feature = "testing"))]
+use crate::values::BaseVerdict;
 
 /// The rebuildable projection state the reducer reads (ADR-0149 §The control
 /// core). Holds nothing that is not derivable from the journal.
@@ -107,6 +114,85 @@ pub struct Snapshot {
     /// field so every existing `BloomRecord { … }` literal stays compiling.
     #[serde(default)]
     pub member_parks: BTreeMap<BloomId, BTreeMap<WorkpieceId, MemberPark>>,
+    /// Members awaiting a surface amendment (ADR-0207), keyed by bloom then
+    /// workpiece. Folded from [`Fact::SurfaceRequested`] the way a fold
+    /// refusal is folded from its fact, so no new [`Decision`] enters the
+    /// frozen graph. `#[serde(default)]` is the `member_parks` precedent.
+    #[serde(default)]
+    pub surface_requests: BTreeMap<BloomId, BTreeMap<WorkpieceId, AwaitingSurface>>,
+    /// The per-file write leases a bloom's construct lanes hold (ADR-0204),
+    /// keyed by bloom then repository path. Folded from
+    /// [`Fact::LaneWritesObserved`] the way a surface request is folded from
+    /// its own fact, so no new [`Decision`] enters the wire-frozen graph.
+    ///
+    /// Keyed by path rather than by member because the exclusivity question is
+    /// "who holds this file", asked once per observed write. `#[serde(default)]`
+    /// is the `surface_requests` precedent.
+    #[serde(default)]
+    pub file_leases: BTreeMap<BloomId, BTreeMap<String, FileLease>>,
+    /// The members whose lanes were stopped so an earlier-canonical sibling
+    /// could take a path they held (ADR-0204), keyed by bloom then workpiece.
+    ///
+    /// Read at the evicting member's integration, which is what re-dispatches
+    /// the evicted one on the advanced base; the entry is dropped on the same
+    /// fold. `#[serde(default)]` is the `surface_requests` precedent.
+    #[serde(default)]
+    pub lease_evictions: BTreeMap<BloomId, BTreeMap<WorkpieceId, LeaseEviction>>,
+    /// Every reviewer answer to a member's suppression requests (ADR-0193),
+    /// keyed by bloom then workpiece, in admission order.
+    ///
+    /// Folded straight from [`Fact::SuppressionDisposition`] the way the lease
+    /// table is folded from its own fact, so no new [`Decision`] enters the
+    /// wire-frozen graph. Appended rather than replaced: "who granted this
+    /// allow, and who denied one before them" is the audit question the
+    /// mechanism exists to answer, and a map that kept only the latest answer
+    /// would lose the denial a later grant overrode. `#[serde(default)]` is the
+    /// `surface_requests` precedent.
+    #[serde(default)]
+    pub suppression_dispositions: BTreeMap<BloomId, BTreeMap<WorkpieceId, Vec<SuppressionDisposition>>>,
+    /// Why a bloom-scoped boundary refused (ADR-0206), keyed by bloom then
+    /// gate name.
+    ///
+    /// Folded from [`Decision::RecordRefusal`] with no workpiece. Keyed by
+    /// gate because that is the question — "why did the land not happen" is
+    /// asked of one boundary at a time, and a boundary's newest refusal is
+    /// the only one that describes the state the record is in now. The entry
+    /// is dropped the moment that boundary's own dispatch is folded, so a
+    /// stored refusal is never a stale account of a transition that has since
+    /// gone out.
+    ///
+    /// Snapshot-level rather than a [`BloomRecord`] field so every existing
+    /// `BloomRecord { … }` literal stays compiling; `#[serde(default)]` is
+    /// the `fold_refusals` precedent.
+    #[serde(default)]
+    pub refusals: BTreeMap<BloomId, BTreeMap<String, RecordedRefusal>>,
+    /// Why one member's attempt dispatch refused (ADR-0206), keyed by bloom
+    /// then workpiece.
+    ///
+    /// Apart from [`Snapshot::refusals`] because member dispatch is decided
+    /// once per member per scheduling pass: folding every member's answer
+    /// into one gate-keyed slot would leave whichever member happened to be
+    /// last in sealed order, which is not an answer about any particular one.
+    /// Dropped when that member's own dispatch is folded.
+    #[serde(default)]
+    pub member_refusals: BTreeMap<BloomId, BTreeMap<WorkpieceId, RecordedRefusal>>,
+    /// Snapshot-scoped base-verify receipts, keyed by the peeled tree and the
+    /// whole-workspace gate set (ADR-0200).
+    ///
+    /// Snapshot-level rather than a [`BloomRecord`] field so a receipt outlives
+    /// the bloom that asked for it and so every existing `BloomRecord { … }`
+    /// literal stays compiling. `#[serde(default)]` is the
+    /// `member_checkpoints` precedent.
+    #[serde(default)]
+    pub base_receipts: BTreeMap<VerifiedTree, BaseReceipt>,
+    /// Commit → peeled-tree index for [`Self::base_receipts`]. The ledger is
+    /// content-keyed; this map is only the lookup path from a sealed base
+    /// commit.
+    ///
+    /// Snapshot-level so every existing `BloomRecord { … }` literal stays
+    /// compiling. `#[serde(default)]` is the `member_checkpoints` precedent.
+    #[serde(default)]
+    pub base_trees: BTreeMap<Digest, Digest>,
 }
 
 impl Snapshot {
@@ -131,6 +217,45 @@ impl Snapshot {
         self.member_machinery.get(bloom)?.get(workpiece).copied()
     }
 
+    /// The recorded base-verify receipt for `base`, or `None` when this
+    /// snapshot holds none (ADR-0200).
+    ///
+    /// The one place the two-step lookup happens, so every seal asks the
+    /// question the same way: look the commit up in [`Self::base_trees`], then
+    /// the tree plus [`VerifyGateSet::base`] in [`Self::base_receipts`]. The
+    /// current gate set is recomputed rather than remembered, for the reason
+    /// [`BloomRecord::verify_proof_for`] states: a proof journaled under a
+    /// different verify vocabulary or lane misses instead of answering for
+    /// gates that no longer exist.
+    #[must_use]
+    pub fn base_receipt_for(&self, base: Digest) -> Option<&BaseReceipt> {
+        let tree = self.base_trees.get(&base).copied()?;
+        self.base_receipts.get(&VerifiedTree { tree, gate_set: VerifyGateSet::base().digest() })
+    }
+
+    /// Stamp a green whole-workspace receipt for `base` — the test-and-fixture
+    /// door that lets a scenario start from a proven tree without dispatching
+    /// `verify.base`.
+    #[cfg(any(test, feature = "testing"))]
+    #[must_use]
+    pub fn with_green_base(mut self, base: Digest) -> Self {
+        let receipt = BaseReceipt {
+            base,
+            tree: base,
+            gate_set: VerifyGateSet::base().digest(),
+            verdict: BaseVerdict::Green {
+                evidence: Evidence {
+                    subject: base,
+                    kind: EvidenceKind::VerificationResult,
+                    detail: Digest::from_bytes([0; 32]),
+                },
+            },
+        };
+        self.base_trees.insert(base, base);
+        self.base_receipts.insert(receipt.verified(), receipt);
+        self
+    }
+
     /// Why `bloom`'s fold refused, once it has (ADR-0206).
     #[must_use]
     pub fn fold_refusal(&self, bloom: &BloomId) -> Option<&RecordedRefusal> {
@@ -141,6 +266,49 @@ impl Snapshot {
     #[must_use]
     pub fn member_park(&self, bloom: &BloomId, workpiece: &WorkpieceId) -> Option<&MemberPark> {
         self.member_parks.get(bloom)?.get(workpiece)
+    }
+
+    /// The surface amendment `workpiece` is waiting on in `bloom` (ADR-0207).
+    #[must_use]
+    pub fn awaiting_surface(&self, bloom: &BloomId, workpiece: &WorkpieceId) -> Option<&AwaitingSurface> {
+        self.surface_requests.get(bloom)?.get(workpiece)
+    }
+
+    /// Who holds the write lease on `path` in `bloom` (ADR-0204).
+    #[must_use]
+    pub fn file_lease(&self, bloom: &BloomId, path: &str) -> Option<&FileLease> {
+        self.file_leases.get(bloom)?.get(path)
+    }
+
+    /// The paths `workpiece` holds leases on in `bloom`, in path order.
+    #[must_use]
+    pub fn leases_held(&self, bloom: &BloomId, workpiece: &WorkpieceId) -> Vec<String> {
+        self.file_leases
+            .get(bloom)
+            .into_iter()
+            .flatten()
+            .filter(|(_, lease)| lease.holder == *workpiece)
+            .map(|(path, _)| path.clone())
+            .collect()
+    }
+
+    /// Why `workpiece`'s lane was stopped in `bloom`, while it waits for the
+    /// sibling that took its path to integrate (ADR-0204).
+    #[must_use]
+    pub fn lease_eviction(&self, bloom: &BloomId, workpiece: &WorkpieceId) -> Option<&LeaseEviction> {
+        self.lease_evictions.get(bloom)?.get(workpiece)
+    }
+
+    /// Why `gate` last refused for `bloom` (ADR-0206), while it still stands.
+    #[must_use]
+    pub fn refusal(&self, bloom: &BloomId, gate: &str) -> Option<&RecordedRefusal> {
+        self.refusals.get(bloom)?.get(gate)
+    }
+
+    /// Why `workpiece`'s attempt dispatch last refused in `bloom` (ADR-0206).
+    #[must_use]
+    pub fn member_refusal(&self, bloom: &BloomId, workpiece: &WorkpieceId) -> Option<&RecordedRefusal> {
+        self.member_refusals.get(bloom)?.get(workpiece)
     }
 }
 
@@ -258,6 +426,20 @@ pub struct BloomRecord {
     /// fold that burned the compiler's rolls has not touched the critic's, and
     /// one shared counter would let either gate spend the other's.
     pub aggregate_verify_rolls: u32,
+    /// Which composite gates have passed on the fold now held — the join the
+    /// landing waits on.
+    ///
+    /// The mechanical gate and the critic are dispatched against one fold at
+    /// the same time, so neither verdict resolves the bloom by itself: each
+    /// records its pass here, and the second one to arrive reads the first out
+    /// of this set and dispatches the landing. A landing therefore requires
+    /// both, in either order, with no serialization between them.
+    ///
+    /// Cleared by [`Decision::RecordIntegration`] — a new weave is a new
+    /// subject, and a gate that passed the tree before it has said nothing
+    /// about this one. That also clears it on resolution, which records the
+    /// consumed fold away.
+    pub aggregate_passed: BTreeSet<StageId>,
     /// How many landing attempts this bloom has consumed (#4689), against the
     /// `Land` binding's catalog retry budget.
     ///
@@ -377,6 +559,11 @@ pub struct BloomRecord {
     /// defaulted so a journal written before the brake existed still decodes.
     #[serde(default)]
     pub operator_hold: Option<OperatorHold>,
+    /// Whether this bloom's sealed base holds a green whole-workspace receipt
+    /// (ADR-0200). Defaults `false` so an unstamped record is treated as
+    /// unproven rather than silently admitted.
+    #[serde(default)]
+    pub base_proven: bool,
     /// The workpieces this bloom owes a dispatch, because the hold swallowed the
     /// one their cursor move earned (#4976).
     ///
@@ -437,6 +624,20 @@ pub struct BloomRecord {
     /// for a JSON reader that predates the field.
     #[serde(default)]
     pub vehicles: BTreeMap<WorkpieceId, CandidateRef>,
+    /// Members an operator withdrew from this walking bloom (#5327) — keyed by
+    /// workpiece, carrying who decided and why.
+    ///
+    /// A withdrawn member is terminal: it produces no claim, contributes no
+    /// candidate to the fold, and is skipped by the three completeness folds
+    /// that are otherwise total over [`spec`](Self::spec)'s members. Distinct
+    /// from [`wedged`](Self::wedged), which a member *earns* by exhausting a
+    /// budget and which a grant or an operator repair can put back in the line;
+    /// a withdrawal is one-way. Journal-derived from
+    /// [`Decision::RecordWithdrawal`] and replay-rebuilt. `#[serde(default)]`
+    /// is the [`host_faults`](Self::host_faults) precedent for a JSON reader
+    /// that predates the field.
+    #[serde(default)]
+    pub withdrawn: BTreeMap<WorkpieceId, Withdrawal>,
     /// If superseded, the successor that replaced this bloom.
     pub superseded_by: Option<BloomId>,
 }
@@ -448,12 +649,73 @@ pub struct BloomRecord {
 /// Projection state, not a journal row: the durable write is the declining
 /// [`Fact::AttemptCompleted`]. `evidence` is the lane's artifact digest, the
 /// same value [`Outcome::AttemptParked`] carries as `reason`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct MemberPark {
-    /// The stage that declined — Construct.
+    /// The stage that declined — Construct, or the Refine / Reconcile repair
+    /// lap that runs the same construct-family lane.
     pub stage: StageId,
     /// The lane's evidence artifact — the diagnosis an operator reads.
     pub evidence: Digest,
+}
+
+/// A member parked awaiting a surface amendment (ADR-0207) — not wedged: no
+/// attempt or repair roll moved, and the remedy is a person, not a grant.
+///
+/// Projection state, not a journal row: the durable write is
+/// [`Fact::SurfaceRequested`]. Kept apart from [`MemberPark`], which is `Copy`
+/// and whose every literal would break, and distinguishable from it on the
+/// served view: a decline *with* a request lights this, a decline without one
+/// stays a plain park.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct AwaitingSurface {
+    /// The stage that declined.
+    pub stage: StageId,
+    /// The lane's evidence artifact — the diagnosis an operator reads.
+    pub evidence: Digest,
+    /// The newest request. A later request supersedes rather than appends: the
+    /// lane restates its whole need each lap.
+    pub request: SurfaceRequest,
+    /// How many requests this member has made in this bloom.
+    pub requests: u32,
+}
+
+/// One member's exclusive write lease on one repository path (ADR-0204).
+///
+/// Projection state, not a journal row: the durable write is
+/// [`Fact::LaneWritesObserved`]. Held from the first observed write until the
+/// member integrates or is retired, and never past the bloom — every lease is
+/// scoped to the bloom whose lanes contend for the file.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct FileLease {
+    /// The member holding the path.
+    pub holder: WorkpieceId,
+    /// When the lease was taken, in unix milliseconds as the observing host
+    /// read its clock. The operator projection renders holder and age from
+    /// this, which is what ADR-0198 asks a lease to make visible.
+    pub acquired_at: u64,
+}
+
+/// Why a member's lane was stopped and which sibling it now waits behind
+/// (ADR-0204 §Contention resolves by canonical id).
+///
+/// Projection state, not a journal row: the durable write is the same
+/// [`Fact::LaneWritesObserved`] that took the lease away. An eviction is not a
+/// wedge and not a park — no attempt or repair roll moved — and it clears
+/// itself when `by` integrates and the resume dispatch goes out.
+///
+/// Nothing decides one any more (#5401): two members writing one file are
+/// merged at integration, and only a textual conflict costs a reconcile lap.
+/// The type stays because a journal an older binary wrote records evictions,
+/// and replay folds recorded decisions — the member it stopped still has to
+/// be redeemed when the member that took its path integrates.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct LeaseEviction {
+    /// The earlier-canonical member that took the path.
+    pub by: WorkpieceId,
+    /// The contended path, so an operator reads why without the journal.
+    pub path: String,
+    /// When the eviction was decided, in unix milliseconds.
+    pub evicted_at: u64,
 }
 
 /// A member held at Verify because the host could not run the gates (#5020).
@@ -566,6 +828,13 @@ pub struct StageProgress {
     /// Defaulted for the same reason as [`fold_checkpoint`](Self::fold_checkpoint).
     #[serde(default)]
     pub fold_conflict_evidence: Option<Digest>,
+    /// Set by [`Fact::FoldConflict`] when the Reconcile
+    /// lap builds a dependent's base (ADR-0196: no prior candidate, no claim)
+    /// rather than re-placing the member's own revoked candidate. Read once at
+    /// Reconcile completion to choose Construct over Verify; `false` everywhere
+    /// else.
+    #[serde(default)]
+    pub reconcile_assembles_base: bool,
 }
 
 /// A bloom's position in the one-way lifecycle.
@@ -580,6 +849,12 @@ pub enum BloomStatus {
     Landed,
     /// Superseded by a successor that inherited its claims.
     Superseded,
+    /// Every member was withdrawn (#5327), so the bloom has no artifact left to
+    /// produce and nothing to land. Terminal, and outside
+    /// [`is_active_unlanded`](super::is_active_unlanded), so the
+    /// one-active-bloom-per-mainline slot is freed for a fresh seal. Appended
+    /// last so the prior statuses keep their wire discriminants.
+    Withdrawn,
 }
 
 /// The spec a successful seal or supersede just admitted, so the fold can
@@ -615,7 +890,9 @@ impl Snapshot {
         // Register the bloom the fact seals, before its membership claims
         // land, so the claim/inherit effects have a record to attach to.
         if let Some((spec, id)) = admitted_spec(&event.fact, &decisions.outcome) {
-            next.blooms.insert(id, BloomRecord::sealed(spec.clone(), configs));
+            let mut record = BloomRecord::sealed(spec.clone(), configs);
+            record.base_proven = next.base_receipt_for(spec.base()).is_some_and(BaseReceipt::is_green);
+            next.blooms.insert(id, record);
         }
         for effect in &decisions.effects {
             next.apply_effect(effect);
@@ -623,6 +900,10 @@ impl Snapshot {
         next.record_construct_checkpoint(event, decisions);
         next.record_construct_park(event, decisions);
         next.record_fold_refusal(event, decisions);
+        next.record_refusals(decisions);
+        next.record_surface_request(event, decisions);
+        next.record_file_leases(event, decisions);
+        next.record_suppression_disposition(event, decisions);
         next
     }
 
@@ -662,7 +943,11 @@ impl Snapshot {
         let Outcome::AttemptParked { bloom, workpiece, stage, reason } = &decisions.outcome else {
             return;
         };
-        let Fact::AttemptCompleted { stage: StageId::Construct, passed: false, evidence, .. } = &event.fact else {
+        // No stage gate here: the declining lane is `construct.implement`,
+        // which `StageCatalog` maps from Construct, Refine and Reconcile
+        // alike, so a declining repair lap parks the same way a first
+        // construct does. The outcome carries the stage the reducer accepted.
+        let Fact::AttemptCompleted { passed: false, evidence, .. } = &event.fact else {
             return;
         };
         if evidence.kind != EvidenceKind::ConstructDeclined {
@@ -692,11 +977,260 @@ impl Snapshot {
         }
     }
 
+    /// Record (or clear) the ADR-0206 refusals this decision set carries.
+    ///
+    /// Driven by the effects rather than by the fact, because a refusal is
+    /// something the *reducer* decided rather than something the admitter
+    /// asserted: a caller cannot plant one by naming a fact.
+    ///
+    /// A dispatch clears the refusal of the boundary it belongs to, in the
+    /// same fold that records it. That pairing is what keeps a stored
+    /// refusal an account of the present rather than of some earlier pass —
+    /// the record answers "why is this not happening", so a boundary that
+    /// has since gone out must hold nothing. Both directions can appear in
+    /// one set (one member dispatches while a sibling refuses), which is why
+    /// the clear runs per effect rather than per set.
+    fn record_refusals(&mut self, decisions: &Decisions) {
+        for effect in &decisions.effects {
+            match effect {
+                Decision::RecordRefusal { bloom, workpiece: Some(workpiece), refusal } => {
+                    self.member_refusals.entry(*bloom).or_default().insert(workpiece.clone(), refusal.clone());
+                }
+                Decision::RecordRefusal { bloom, workpiece: None, refusal } => {
+                    self.refusals.entry(*bloom).or_default().insert(refusal.gate.clone(), refusal.clone());
+                }
+                Decision::DispatchAttempt { bloom, workpiece, .. }
+                | Decision::DispatchSplice { bloom, workpiece, .. } => {
+                    self.clear_member_refusal(bloom, workpiece);
+                }
+                Decision::DispatchAggregateVerify { bloom, .. } => self.clear_refusal(bloom, AGGREGATE_VERIFY_GATE),
+                Decision::DispatchAggregateReview { bloom, .. } => self.clear_refusal(bloom, AGGREGATE_REVIEW_GATE),
+                Decision::DispatchLand { bloom, .. } => self.clear_refusal(bloom, LAND_GATE),
+                _ => {}
+            }
+        }
+    }
+
+    /// Drop `gate`'s stored refusal for `bloom`, and the bloom's entry once it
+    /// holds none.
+    fn clear_refusal(&mut self, bloom: &BloomId, gate: &str) {
+        let Some(gates) = self.refusals.get_mut(bloom) else {
+            return;
+        };
+        gates.remove(gate);
+        if gates.is_empty() {
+            self.refusals.remove(bloom);
+        }
+    }
+
+    /// Drop `workpiece`'s stored dispatch refusal in `bloom`, and the bloom's
+    /// entry once it holds none.
+    fn clear_member_refusal(&mut self, bloom: &BloomId, workpiece: &WorkpieceId) {
+        let Some(members) = self.member_refusals.get_mut(bloom) else {
+            return;
+        };
+        members.remove(workpiece);
+        if members.is_empty() {
+            self.member_refusals.remove(bloom);
+        }
+    }
+
+    /// Record (or clear) a member's surface request from the admitted fact
+    /// (ADR-0207).
+    ///
+    /// Gated on [`Outcome::SurfaceRequested`] so a refused admission cannot
+    /// plant a park the reducer rejected. A later passing attempt, integration,
+    /// or verify failure means the member moved, so the request has been
+    /// answered or overtaken and the entry is dropped — the `requests` counter
+    /// resets with the bloom, which is what ADR-0207's per-bloom budget says.
+    fn record_surface_request(&mut self, event: &Event, decisions: &Decisions) {
+        match &event.fact {
+            Fact::SurfaceRequested { bloom, workpiece, stage, evidence, request } => {
+                let Outcome::SurfaceRequested { requests, .. } = &decisions.outcome else {
+                    return;
+                };
+                self.surface_requests.entry(*bloom).or_default().insert(
+                    workpiece.clone(),
+                    AwaitingSurface {
+                        stage: *stage,
+                        evidence: evidence.detail,
+                        request: request.clone(),
+                        requests: *requests,
+                    },
+                );
+            }
+            Fact::AttemptCompleted { bloom, workpiece, passed: true, .. }
+            | Fact::Integrate { bloom, claim: ResolutionClaim { workpiece, .. } }
+            | Fact::VerifyFailed { bloom, workpiece, .. } => {
+                if let Some(members) = self.surface_requests.get_mut(bloom) {
+                    members.remove(workpiece);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Append a reviewer's answer to the member it answered (ADR-0193).
+    ///
+    /// Gated on [`Outcome::SuppressionAnswered`] so a refused answer cannot
+    /// plant a record of a decision the reducer rejected. Nothing clears the
+    /// list: it is the audit trail, and a member whose next candidate states no
+    /// request has not un-asked the one a reviewer already answered.
+    fn record_suppression_disposition(&mut self, event: &Event, decisions: &Decisions) {
+        let Fact::SuppressionDisposition { bloom, workpiece, disposition } = &event.fact else {
+            return;
+        };
+        if !matches!(decisions.outcome, Outcome::SuppressionAnswered { .. }) {
+            return;
+        }
+        self.suppression_dispositions
+            .entry(*bloom)
+            .or_default()
+            .entry(workpiece.clone())
+            .or_default()
+            .push(disposition.clone());
+    }
+
+    /// Move the bloom's file-lease table from the admitted fact (ADR-0204).
+    ///
+    /// Three lifetimes meet here, which is why they are one function rather
+    /// than three scattered arms — a lease that outlives any of them is a file
+    /// no sibling can ever take:
+    ///
+    /// - **Acquisition and eviction** ride [`Fact::LaneWritesObserved`], gated
+    ///   on the matching outcome so a refused observation cannot plant a lease
+    ///   the reducer rejected.
+    /// - **Integration** releases the member's leases: its work is folded, so
+    ///   nothing of it is still being written. The same fold drops the
+    ///   evictions it caused, because the resume dispatches were decided on
+    ///   this row.
+    /// - **Retirement** releases them too — a wedged or withdrawn member is
+    ///   never going to write again — and a bloom reaching a terminal status
+    ///   drops its whole table, so no lease survives its bloom.
+    fn record_file_leases(&mut self, event: &Event, decisions: &Decisions) {
+        match &event.fact {
+            Fact::LaneWritesObserved { bloom, workpiece, observed_at, .. } => {
+                if let Outcome::LeasesObserved { acquired, evicted, .. } = &decisions.outcome {
+                    for holder in evicted {
+                        self.release_member_leases(bloom, &holder.workpiece);
+                        self.lease_evictions.entry(*bloom).or_default().insert(
+                            holder.workpiece.clone(),
+                            LeaseEviction {
+                                by: workpiece.clone(),
+                                path: holder.path.clone(),
+                                evicted_at: *observed_at,
+                            },
+                        );
+                    }
+                    let table = self.file_leases.entry(*bloom).or_default();
+                    for path in acquired {
+                        table.insert(path.clone(), FileLease { holder: workpiece.clone(), acquired_at: *observed_at });
+                    }
+                }
+            }
+            Fact::Integrate { bloom, claim } => {
+                self.release_member_leases(bloom, &claim.workpiece);
+                if let Some(evictions) = self.lease_evictions.get_mut(bloom) {
+                    evictions.retain(|_, eviction| eviction.by != claim.workpiece);
+                }
+            }
+            _ => {}
+        }
+
+        for effect in &decisions.effects {
+            match effect {
+                Decision::RecordWedge { bloom, workpiece, .. } => self.retire_member_leases(bloom, workpiece),
+                Decision::RecordWithdrawal { bloom, withdrawal } => {
+                    self.retire_member_leases(bloom, &withdrawal.workpiece);
+                }
+                Decision::SetResolved { bloom, .. }
+                | Decision::MarkSuperseded { bloom, .. }
+                | Decision::MarkBloomWithdrawn { bloom } => {
+                    self.file_leases.remove(bloom);
+                    self.lease_evictions.remove(bloom);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Retire a member that will never dispatch again: its leases go, its own
+    /// eviction record goes, and so does every eviction it *caused*.
+    ///
+    /// That last part is the one that is easy to miss and matters most. An
+    /// eviction is an excuse — the doctor and both liveness oracles read it as
+    /// "this member is legitimately waiting" — and it is redeemed by the
+    /// evicting member's integration. A member that wedges or is withdrawn
+    /// never integrates, so leaving its evictions standing would leave the
+    /// siblings it stopped excused forever, waiting on a resume that cannot
+    /// come. Dropping the excuse does not restart them, which is deliberate:
+    /// this fold decides nothing, and a member with no lane and no named stop
+    /// is exactly what the liveness invariant exists to shout about.
+    fn retire_member_leases(&mut self, bloom: &BloomId, workpiece: &WorkpieceId) {
+        self.release_member_leases(bloom, workpiece);
+        if let Some(evictions) = self.lease_evictions.get_mut(bloom) {
+            evictions.retain(|evicted, eviction| evicted != workpiece && eviction.by != *workpiece);
+            if evictions.is_empty() {
+                self.lease_evictions.remove(bloom);
+            }
+        }
+    }
+
+    /// Drop every lease `workpiece` holds in `bloom`, and the bloom's entry
+    /// once it holds none.
+    fn release_member_leases(&mut self, bloom: &BloomId, workpiece: &WorkpieceId) {
+        let Some(table) = self.file_leases.get_mut(bloom) else {
+            return;
+        };
+        table.retain(|_, lease| lease.holder != *workpiece);
+        if table.is_empty() {
+            self.file_leases.remove(bloom);
+        }
+    }
+
     fn apply_graph_effect(&mut self, effect: &Decision) {
         if let Decision::RecordMemberDependencies { bloom, edges } = effect
             && let Some(record) = self.blooms.get_mut(bloom)
         {
             record.dependencies.clone_from(edges);
+        }
+    }
+
+    /// Fold the held composition and the composite-gate ledger that judges it.
+    ///
+    /// Split out of [`apply_effect`](Self::apply_effect) so the parent match
+    /// stays inside its line budget, and grouped because these four rows are
+    /// one subject: the fold that is held, the gates that have passed it, and
+    /// the rolls each of them has spent.
+    fn apply_fold_effect(&mut self, effect: &Decision) {
+        match effect {
+            Decision::RecordIntegration { bloom, integration } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.integration.clone_from(integration);
+                    // The composite-gate join belongs to the fold that was
+                    // held, so a new weave — or the consumption of the one
+                    // that just resolved — starts it empty. Without the clear,
+                    // a gate that passed the tree before a repair would count
+                    // towards a landing it never judged.
+                    record.aggregate_passed.clear();
+                }
+            }
+            Decision::RecordAggregateGatePass { bloom, stage } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.aggregate_passed.insert(*stage);
+                }
+            }
+            Decision::RecordAggregateRoll { bloom, rolls } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.aggregate_rolls = *rolls;
+                }
+            }
+            Decision::RecordAggregateVerifyRoll { bloom, rolls } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.aggregate_verify_rolls = *rolls;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -744,8 +1278,20 @@ impl Snapshot {
             // structurally — the ledger never sees it. Its hold release rides
             // ReleaseHold. An orphan-claim release is inert for a different
             // reason: it dispatches no member work at all, so it counts against
-            // no bloom's retry ledger — its whole state is the record below.
-            Decision::RedispatchStage { .. } | Decision::DispatchOrphanClaimRelease { .. } => {}
+            // no bloom's retry ledger — its whole state is the record below. A
+            // cancel and a single-ref release are inert for a third: what they
+            // do happens at the source and the executor, and the record of it
+            // is the withdrawal row `apply_withdrawal_effect` writes. A refusal
+            // is inert here for a fourth: `record_refusals` folds it over the
+            // whole effect set, because it is keyed by gate or by member and
+            // pairs with the dispatch that clears it.
+            Decision::RedispatchStage { .. }
+            | Decision::DispatchOrphanClaimRelease { .. }
+            | Decision::DispatchBaseVerify { .. }
+            | Decision::CancelDispatch { .. }
+            | Decision::ReleaseMemberClaimRef { .. }
+            | Decision::RecordRefusal { .. } => {}
+            Decision::RecordBaseReceipt { .. } => self.apply_base_verify_effect(effect),
             Decision::RecordOrphanClaimRelease { request, target, completion } => {
                 // Opening the record and completing it write the same entry, so
                 // the completion overwrites rather than inserting beside — a
@@ -754,21 +1300,10 @@ impl Snapshot {
                 self.orphan_releases
                     .insert(*request, OrphanClaimReleaseRecord { target: target.clone(), completion: *completion });
             }
-            Decision::RecordIntegration { bloom, integration } => {
-                if let Some(record) = self.blooms.get_mut(bloom) {
-                    record.integration.clone_from(integration);
-                }
-            }
-            Decision::RecordAggregateRoll { bloom, rolls } => {
-                if let Some(record) = self.blooms.get_mut(bloom) {
-                    record.aggregate_rolls = *rolls;
-                }
-            }
-            Decision::RecordAggregateVerifyRoll { bloom, rolls } => {
-                if let Some(record) = self.blooms.get_mut(bloom) {
-                    record.aggregate_verify_rolls = *rolls;
-                }
-            }
+            Decision::RecordIntegration { .. }
+            | Decision::RecordAggregateGatePass { .. }
+            | Decision::RecordAggregateRoll { .. }
+            | Decision::RecordAggregateVerifyRoll { .. } => self.apply_fold_effect(effect),
             Decision::RecordVerifyProof { .. } | Decision::RecordVerifyReuse { .. } => {
                 self.apply_verify_memo_effect(effect);
             }
@@ -808,6 +1343,9 @@ impl Snapshot {
             Decision::RecordHostFault { .. } | Decision::ClearHostFault { .. } => self.apply_host_fault_effect(effect),
             Decision::RecordCandidateVehicle { .. } => self.apply_vehicle_effect(effect),
             Decision::RecordMemberMachinery { .. } => self.apply_machinery_effect(effect),
+            Decision::RecordWithdrawal { .. } | Decision::MarkBloomWithdrawn { .. } => {
+                self.apply_withdrawal_effect(effect);
+            }
             Decision::EmitReceipt(projected) => {
                 if let Some(record) = self.blooms.get_mut(&projected.receipt.bloom) {
                     record.status = BloomStatus::Landed;
@@ -1020,6 +1558,35 @@ impl Snapshot {
         }
     }
 
+    /// Fold the two decisions that withdraw work (#5327): one member leaving
+    /// the line, and the bloom going terminal once the last one has. Split out
+    /// of [`apply_effect`](Self::apply_effect) so adding the arms does not blow
+    /// the parent match's line budget.
+    fn apply_withdrawal_effect(&mut self, effect: &Decision) {
+        match effect {
+            Decision::RecordWithdrawal { bloom, withdrawal } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    // Dropping the cursor is what keeps the doctor's
+                    // "non-terminal member has a lane or a dispatch" invariant
+                    // correct with no special case for withdrawal: the member
+                    // is no longer at a stage at all. The deferred dispatch
+                    // goes for the wedge's reason — a workpiece that stops
+                    // dispatching is owed nothing, and a later release must not
+                    // hand it a lap.
+                    record.progress.remove(&withdrawal.workpiece);
+                    record.deferred_dispatches.remove(&withdrawal.workpiece);
+                    record.withdrawn.insert(withdrawal.workpiece.clone(), withdrawal.clone());
+                }
+            }
+            Decision::MarkBloomWithdrawn { bloom } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.status = BloomStatus::Withdrawn;
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Fold the catalog a seal recorded (#4944). Split out of
     /// [`apply_effect`](Self::apply_effect) so adding the arm does not blow
     /// the parent match's line budget.
@@ -1101,6 +1668,34 @@ impl Snapshot {
     /// that when they sit together. Any other decision is a no-op here, and an
     /// unknown bloom is ignored exactly as every other record-scoped arm ignores
     /// one.
+    /// Fold a base-verify receipt into the snapshot ledger (ADR-0200): both
+    /// the commit→tree index and the tree-keyed map, so one decision keeps
+    /// them in step. On green, every sealed bloom whose base resolves to the
+    /// receipt's tree is marked proven.
+    fn apply_base_verify_effect(&mut self, effect: &Decision) {
+        let Decision::RecordBaseReceipt { receipt } = effect else {
+            return;
+        };
+        self.base_trees.insert(receipt.base, receipt.tree);
+        self.base_receipts.insert(receipt.verified(), receipt.clone());
+        let green = receipt.is_green();
+        let tree = receipt.tree;
+        let matching: Vec<BloomId> = self
+            .blooms
+            .iter()
+            .filter_map(|(id, record)| {
+                let spec_base = record.spec.base();
+                let resolved = self.base_trees.get(&spec_base).copied().unwrap_or(spec_base);
+                (resolved == tree).then_some(*id)
+            })
+            .collect();
+        for id in matching {
+            if let Some(record) = self.blooms.get_mut(&id) {
+                record.base_proven = green;
+            }
+        }
+    }
+
     fn apply_verify_memo_effect(&mut self, effect: &Decision) {
         match effect {
             Decision::RecordVerifyProof { bloom, proof } => {
@@ -1157,7 +1752,7 @@ impl BloomRecord {
     /// An empty record over `spec`: compiled-line catalog, sealed status,
     /// empty collections, and zeroed counters.
     ///
-    /// The one 28-field literal. Production sealed-record construction and every
+    /// The one 30-field literal. Production sealed-record construction and every
     /// test fixture fill from here, so a new field has a single home rather than
     /// steering placement across four test copies.
     #[must_use]
@@ -1175,6 +1770,7 @@ impl BloomRecord {
             integration: None,
             aggregate_rolls: 0,
             aggregate_verify_rolls: 0,
+            aggregate_passed: BTreeSet::new(),
             landing_rolls: 0,
             resolved_head: None,
             review_park: None,
@@ -1185,11 +1781,13 @@ impl BloomRecord {
             adjudications: Vec::new(),
             operator_repairs: Vec::new(),
             operator_hold: None,
+            base_proven: false,
             deferred_dispatches: BTreeSet::new(),
             deferred_aggregates: BTreeSet::new(),
             dependencies: Vec::new(),
             host_faults: BTreeMap::new(),
             vehicles: BTreeMap::new(),
+            withdrawn: BTreeMap::new(),
             superseded_by: None,
         }
     }
@@ -1289,7 +1887,12 @@ impl BloomRecord {
             // A construct-declined park binds the member through
             // `Snapshot::member_parks`, not a pending-decision hold: an
             // adopting answer would re-dispatch the same refused work.
-            | EvidenceKind::ConstructDeclined => {}
+            | EvidenceKind::ConstructDeclined
+            // A suppression request raises no hold and advances no member
+            // (ADR-0193): the case a lane states for the suppressions it
+            // carries is read by a reviewer who does not exist yet at the
+            // moment the member verifies, so the row stands in the log alone.
+            | EvidenceKind::SuppressionRequest => {}
         }
     }
 }

@@ -58,6 +58,12 @@ pub enum ScriptedVerdict {
     ReviewFinding,
     /// The lane raised a question instead of a verdict (ADR-0151).
     Parked,
+    /// The lane concluded without a candidate (#5292 / #5332).
+    Declined,
+    /// The lane could not reach a verdict at all — the umbrella's `environment`
+    /// stamp (ADR-0176), which a base verify on a lane worktree with no
+    /// `origin/main` produced for real (#5384).
+    Faulted,
 }
 
 impl ScriptedVerdict {
@@ -70,6 +76,8 @@ impl ScriptedVerdict {
             Self::VerificationFailed => StageVerdict::VerificationFailed,
             Self::ReviewFinding => StageVerdict::ReviewFinding,
             Self::Parked => StageVerdict::Parked,
+            Self::Declined => StageVerdict::Declined,
+            Self::Faulted => StageVerdict::ExecutorFault,
         }
     }
 }
@@ -119,6 +127,8 @@ impl ScriptedUpload {
             session_reuse_saved_micro_usd: None,
             peak_resident_bytes: None,
             violating_paths: Vec::new(),
+            surface_request: None,
+            suppression_requests: Vec::new(),
         }
     }
 }
@@ -140,7 +150,7 @@ pub struct ScriptedEvidence {
 
 /// Reply to [`ScriptedEvidence`].
 ///
-/// Three arms rather than a boolean because a scenario that fails needs to know
+/// Arms rather than a boolean because a scenario that fails needs to know
 /// *which* boundary refused it: `Refused` is the broker declining a nonce or a
 /// binding (a scenario that read the wrong order), while `Err` is the harness
 /// itself faulting (a decode, a store read). Collapsing them would make a
@@ -168,4 +178,14 @@ pub enum ScriptedEvidenceResult {
         /// The rendered fault.
         error: String,
     },
+    /// The broker accepted the verdict onto the commission store's own run
+    /// ledger, and there is no reducer event behind it — a pre-bloom scoping
+    /// run (ADR-0208, #5304).
+    ///
+    /// Its own arm rather than an `Admitted` carrying an empty key, for the
+    /// reason [`AdmitDecision::Recorded`](crate::bloomery::AdmitDecision)
+    /// is its own variant: a scenario asserting on the route the broker chose
+    /// must not read a key that names none. Appended past [`Self::Err`] so the
+    /// prior arms' wire discriminants are unchanged.
+    Recorded,
 }

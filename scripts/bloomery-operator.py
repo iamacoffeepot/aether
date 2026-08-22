@@ -927,9 +927,28 @@ def member_status_state(member: dict[str, Any], *, has_order: bool) -> str:
     bloom view (ADR-0196). Painting that as `idle` is the mysterious
     idleness the readiness scheduler exists to name: the member is held,
     not forgotten.
+
+    A member awaiting a surface amendment (ADR-0207) gets its own word rather
+    than `held`: a hold is a question an answer settles, and this one is a
+    boundary only an authored successor moves.
+
+    A withdrawn member (#5327) outranks all of them: an operator took it out of
+    the bloom, so whatever it was doing on the way out is history and it is not
+    coming back into the line.
+
+    An evicted member (ADR-0204) is named rather than printed as `idle`: its
+    lane was stopped so an earlier-canonical sibling could take a file it held,
+    and it resumes when that sibling integrates. ADR-0198's whole point is that
+    a lease which is invisible turns contention into an unexplained stall.
     """
+    if member.get("withdrawn"):
+        return "withdrawn"
     if member.get("wedge"):
         return "WEDGED"
+    if member.get("awaiting_surface"):
+        return "surface"
+    if member.get("evicted_by"):
+        return "evicted"
     if member.get("pending_decision"):
         return "held"
     if member.get("resolution"):
@@ -1657,6 +1676,7 @@ def composition_as_member(bloom: dict[str, Any]) -> dict[str, Any]:
         "wedge": composition.get("wedge") if isinstance(composition.get("wedge"), dict) else None,
         "resolution": None,
         "pending_decision": None,
+        "awaiting_surface": None,
         "blocked_by": None,
         "wedge_cause": None,
         "cursor": cursor.get("stage"),

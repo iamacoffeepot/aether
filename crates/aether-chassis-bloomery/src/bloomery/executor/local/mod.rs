@@ -31,9 +31,14 @@
 //! Each lane is a whole cargo build with its own throwaway target dir, and a seal
 //! fans out one dispatch per member, so the backend runs at most
 //! [`with_max_concurrent_lanes`](LocalExecutor::with_max_concurrent_lanes)
-//! children at once and holds the rest in submission order, starting each as a
-//! running lane finishes. Every dispatch is acked as submitted either way — the
-//! ceiling is a queue, never a refusal, so nothing about it reaches the reducer.
+//! children at once and holds the rest, starting each as a running lane
+//! finishes. Every dispatch is acked as submitted either way — the ceiling is a
+//! queue, never a refusal, so nothing about it reaches the reducer.
+//!
+//! Which held dispatch goes next is the [`priority`] band's answer, not the
+//! order they arrived in (#5410): a stage resuming a live session, then a stage
+//! judging a candidate that exists, then a stage starting something new, with
+//! submission order deciding inside each band.
 //!
 //! The ceiling is also what names the checkouts. A dispatch holds a **lane
 //! slot** — the lowest index free when it starts — and builds in that slot's
@@ -72,8 +77,9 @@
 //! which program it spawns, the [`mock_lane`] stand-in a lane-boundary scenario
 //! points that policy at, the [`identity`] a spawn records so a later process
 //! can re-attach, the [`orphan`] stand-in for a child inherited across a
-//! coordinator restart, the [`quarantine`] a slot takes when that child cannot
-//! be killed, and the [`backend`] registry +
+//! coordinator restart, the [`priority`] band that decides which waiting
+//! dispatch takes a slot as it frees, the [`quarantine`] a slot takes when that
+//! child cannot be killed, and the [`backend`] registry +
 //! [`ExecutorBackend`](aether_bloomery::ExecutorBackend) impl over them.
 
 mod affinity;
@@ -84,6 +90,7 @@ mod lane_env;
 mod lane_program;
 pub mod mock_lane;
 mod orphan;
+mod priority;
 mod process_runner;
 mod quarantine;
 mod runner;

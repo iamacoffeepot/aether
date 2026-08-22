@@ -28,11 +28,14 @@ mod executor;
 mod projection;
 mod source;
 
-pub use executor::{Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend, WorkHandle, WorkOrder};
+pub use executor::{
+    Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend, ObservedLaneWrites, WorkHandle, WorkOrder,
+};
 pub use projection::{
-    BloomView, CommissionProjection, CompositionCursorView, CompositionView, ExecutorFaultView, HostFaultView,
-    LandingBlock, MemberView, PendingDecisionView, ProjectedReceipt, ProjectionBackend, ReviewParkView, ViewDocument,
-    WedgeCause,
+    AwaitingSurfaceView, BaseAlertView, BloomView, CommissionProjection, CompositionCursorView, CompositionView,
+    ExecutorFaultView, HostFaultView, LandingBlock, LeaseEvictionView, LeaseView, MAX_TITLE_CHARS, MemberView,
+    MemberWhy, PendingDecisionView, ProjectedReceipt, ProjectionBackend, ReviewParkView, TransitionWhy, ViewDocument,
+    WedgeCause, WhyDocument, WhyState, WithdrawnView, intent_title,
 };
 pub use source::{
     Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome, IntegrateOutcome,

@@ -38,16 +38,29 @@ impl OrphanedRun {
 }
 
 impl RunProcess for OrphanedRun {
-    /// The run's lifecycle as its evidence file reports it — the only thing
-    /// still observable about a child this process never spawned.
+    /// The run's lifecycle as its evidence file and its recorded process
+    /// identity report it — the two things still observable about a child this
+    /// process never spawned.
     ///
-    /// A written `evidence.json` means the run reached the end of its work, so
-    /// it reads as exited and the intake proceeds to consume the evidence,
-    /// recovering an attempt that finished while the coordinator was down. An
-    /// absent one means the run either is still going or died without writing,
-    /// and the two are indistinguishable from here — so it reads as running and
-    /// the order rides on its dispatch deadline, which is the mechanism that
-    /// exists to bound exactly this.
+    /// The evidence is asked first, and the order is the point: a written
+    /// `evidence.json` means the run reached the end of its work, whatever the
+    /// child did afterwards, so it reads as exited and the intake proceeds to
+    /// consume it, recovering an attempt that finished while the coordinator was
+    /// down. Asking about the process first would race a child that wrote its
+    /// evidence and then exited into a host fault.
+    ///
+    /// With no evidence, the recorded identity decides. A pid that is no longer
+    /// under `/proc` — or one whose start time or boot id no longer match, which
+    /// is a recycled number and the same absence — is a child that died without
+    /// writing, so it reads as exited and the executor host-faults and
+    /// re-dispatches on the next poll. Before this, such a run held its slot and
+    /// its member until the dispatch deadline, an hour for a construct lane
+    /// (#5382).
+    ///
+    /// A run with no identity record on disk is the unowned stand-in this type
+    /// always was: nothing here can tell a live child from a dead one, so it
+    /// reads as running and the order rides on its dispatch deadline, which is
+    /// the mechanism that exists to bound exactly that.
     ///
     /// The exit is a clean **failure**, not a signal and not a wait fault.
     /// This process never called `try_wait` on the child, so fabricating
@@ -57,10 +70,15 @@ impl RunProcess for OrphanedRun {
     /// drives the verdict, and a missing body is the host-fault path.
     fn poll(&mut self) -> RunLifecycle {
         if self.evidence_path.exists() {
-            RunLifecycle::Exited { success: false }
-        } else {
-            RunLifecycle::Running
+            return RunLifecycle::Exited { success: false };
         }
+        #[cfg(unix)]
+        if let Some(recorded) = ProcessIdentity::read(&self.evidence_dir)
+            && recorded.attach().is_none()
+        {
+            return RunLifecycle::Exited { success: false };
+        }
+        RunLifecycle::Running
     }
 
     /// Terminate the re-attached process group, or report that this process
