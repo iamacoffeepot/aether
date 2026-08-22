@@ -1219,6 +1219,48 @@ fn grant_route_carries_the_selected_count_and_refuses_concurrent_work() {
     });
 }
 
+#[test]
+fn posting_a_scope_run_enqueues_the_host_minted_topic() {
+    // The trigger: POST /commissions/{id}/scope-runs writes the enqueued row
+    // and the Topic::ScopeDispatch outbox row in one transaction, so the
+    // executor can drain a pre-bloom run with no bloom in the store.
+    let http_port = free_port();
+    let rpc_port = free_port();
+    let (_policy_dir, policy_path) = test_policy();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store_path = store_dir.path().join("bloomery.db");
+    let store_path = store_path.to_str().unwrap();
+    let _coordinator = spawn_with_store(http_port, rpc_port, &policy_path, store_path);
+
+    wait_for_200(http_port, "/view");
+
+    let intent = Statement {
+        words: b"scope this workpiece".to_vec(),
+        provenance: Provenance::ObservationAttestation(Observation { source: "rest-api".to_owned() }),
+        parents: Vec::new(),
+    };
+    let (status, created) =
+        send_auth(http_port, "POST", "/commissions", &serde_json::json!({ "id": "wp-scope", "intent": intent }));
+    assert_eq!(status, 201, "create commission: {created:?}");
+
+    let (status, view) = get_json(http_port, "/view");
+    assert_eq!(status, 200, "view");
+    let (status, opened) = send_auth(
+        http_port,
+        "POST",
+        "/commissions/wp-scope/scope-runs",
+        &serde_json::json!({ "base": view["mainline"] }),
+    );
+    assert_eq!(status, 201, "open scope run: {opened:?}");
+    assert_eq!(opened["ordinal"], 1, "the first run is ordinal 1: {opened:?}");
+    assert_eq!(opened["id"], "wp-scope");
+
+    let mut store = SqliteStore::open(store_path).unwrap();
+    let entries = store.drain_topic(Topic::ScopeDispatch).expect("drain");
+    assert_eq!(entries.len(), 1, "one POST, one outbox row");
+    assert_eq!(entries[0].sequence, opened["sequence"].as_u64().expect("sequence is a u64"));
+}
+
 /// Endpoint laws the REST surface documents: a limit above the clamp is applied
 /// and named, percent-decoding is over the whole byte string, and a grant
 /// carries audit fields whose reducer refusal is `422`.
