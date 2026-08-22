@@ -121,7 +121,7 @@ pub fn sweep(request: &mut SweepRequest<'_>) -> rusqlite::Result<SweepReport> {
     let owners = dispatch_owners(request.store, &outstanding)?;
 
     let worktrees = reclaim_worktrees(request.runner, request.worktree_base, &live, &owners, &snapshot)
-        + reclaim_session_trees(request.runner, request.worktree_base, request.store, &snapshot)?;
+        + reclaim_session_trees(request.runner, request.worktree_base, request.store, &snapshot, &outstanding)?;
     let evidence_dirs = reclaim_evidence(request, &live, &owners, &snapshot);
     let refs = request.source.map_or(0, |source| prune_terminal_refs(source, &snapshot));
     let target_dirs = sweep_targets(request.target_base, request.policy.lane_target_budget_bytes, request.lanes);
@@ -229,11 +229,11 @@ fn reclaim_worktrees(
 /// A session's tree is created when the session is minted and reused by every
 /// launch of that conversation — a member's own retry laps, and a declared-edge
 /// dependent that inherits it — so nothing inside the session's life may remove
-/// it. What ends it is the work ending: every member whose row names this slug
-/// landed with its bloom, was withdrawn from it, or left with it when the bloom
-/// was superseded or cancelled. Everything the live set does not name is
-/// reclaimable, which also clears the trees of a bloom this process never saw
-/// walk.
+/// it. What ends it is the work ending: no order under this slug is outstanding
+/// any more, and every member whose row names it landed with its bloom, was
+/// withdrawn from it, or left with it when the bloom was superseded or
+/// cancelled. Everything the live set does not name is reclaimable, which also
+/// clears the trees of a bloom this process never saw walk.
 ///
 /// The candidates are the repository's *registered* worktrees, filtered to the
 /// `sessions/<slug>/tree` shape, for the reason [`reclaim_worktrees`] filters to
@@ -255,6 +255,7 @@ fn reclaim_session_trees(
     worktree_base: &Path,
     store: &mut dyn StoreBackend,
     snapshot: &Snapshot,
+    outstanding: &[String],
 ) -> rusqlite::Result<usize> {
     let Ok(base) = fs::canonicalize(worktree_base.join(SESSIONS_DIR)) else {
         return Ok(0);
@@ -270,7 +271,7 @@ fn reclaim_session_trees(
             return Ok(0);
         }
     };
-    let live = live_session_slugs(store, snapshot)?;
+    let live = live_session_slugs(store, snapshot, outstanding)?;
 
     let mut reclaimed = 0;
     for worktree in registered {
@@ -303,8 +304,23 @@ fn session_slug_of(base: &Path, worktree: &Path) -> Option<String> {
 }
 
 /// Every session slug still entitled to its tree: one named by a member of a
-/// bloom that is active and unlanded, and not itself withdrawn from it.
-fn live_session_slugs(store: &mut dyn StoreBackend, snapshot: &Snapshot) -> rusqlite::Result<HashSet<String>> {
+/// bloom that is active and unlanded and not itself withdrawn from it, and one
+/// named by an order that is still outstanding.
+///
+/// The second half is not a belt on the first. The journal is keyed by bloom
+/// and only blooms are in it, so a dispatch whose order names no sealed bloom
+/// is invisible to the membership walk however live it is — the pre-bloom
+/// scoping run (ADR-0208) is exactly that shape: a real lane, working in a real
+/// session tree, under a reserved digest nothing ever seals. Reading the
+/// outstanding orders as well is what makes "no live work is bound to this
+/// tree" a statement about the work rather than about the journal's coverage of
+/// it, and an outstanding order is the narrowest durable evidence that a lane
+/// may still be standing in the directory.
+fn live_session_slugs(
+    store: &mut dyn StoreBackend,
+    snapshot: &Snapshot,
+    outstanding: &[String],
+) -> rusqlite::Result<HashSet<String>> {
     let mut live = HashSet::new();
     for record in snapshot.blooms.values().filter(|record| is_active_unlanded(record.status)) {
         let bloom = record.spec.id();
@@ -315,6 +331,15 @@ fn live_session_slugs(store: &mut dyn StoreBackend, snapshot: &Snapshot) -> rusq
             if let Some(slug) = store.lookup_session_slug(bloom.0.as_bytes(), &member.workpiece.0)? {
                 live.insert(slug);
             }
+        }
+    }
+
+    for nonce in outstanding {
+        let Some(order) = store.lookup_order(nonce)? else {
+            continue;
+        };
+        if let Some(slug) = store.lookup_session_slug(&order.bloom, &order.workpiece)? {
+            live.insert(slug);
         }
     }
     Ok(live)

@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use aether_bloomery::testing::{draft, event, membership};
-use aether_bloomery::{BloomId, Fact, Forecast};
+use aether_bloomery::{BloomId, Digest, Fact, Forecast};
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{GitSource, MainlineRef, candidate_ref_name};
 use aether_data::wire::to_vec;
@@ -242,6 +242,46 @@ fn a_session_tree_outlives_its_launches_and_dies_with_the_work_bound_to_it() {
         "the session no live member is bound to loses its tree; the sealed bloom's member keeps its own",
     );
     assert!(live.is_dir(), "a live member's session tree is still there for its next launch");
+}
+
+#[test]
+fn a_session_tree_is_kept_while_its_own_order_is_outstanding() {
+    // The journal is keyed by bloom, so the membership walk can only speak for
+    // work a bloom carries. A pre-bloom scoping run (ADR-0208) is a real lane
+    // in a real session tree under a reserved digest nothing ever seals, so
+    // that walk says nothing about it at all — and "nothing says it is live"
+    // was being read as "it is terminal", which takes the tree out from under a
+    // running compiler. The order still being outstanding is the evidence.
+    let scratch = tempfile::tempdir().expect("a scratch dir is created");
+    let tree = scratch.path().join("sessions").join("s-scoping").join("tree");
+    fs::create_dir_all(&tree).expect("the scoping run's tree is created");
+
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
+    // A sealed bloom that names none of this, so the membership walk runs and
+    // still does not reach the slug under test.
+    journal_sealed(&mut store);
+    let pre_bloom = BloomId(Digest::of_domain_tagged("aether.bloomery.scope_run_bloom", b"scope-run"));
+    let order = OutstandingOrder { workpiece: "issue-5304".to_owned(), ..order_for("scope-nonce", &pre_bloom) };
+    store.record_order(&order).expect("the order is recorded");
+    store.record_session_slug(pre_bloom.0.as_bytes(), &order.workpiece, "s-scoping").expect("the run's slug records");
+
+    let released = Released(Arc::new(Mutex::new(Vec::new())));
+    let runner = StubRunner { registered: vec![tree.clone()], released: Released(Arc::clone(&released.0)) };
+    let keep = policy(7, u64::MAX);
+    let report = run(&mut SweepRequest {
+        store: &mut store,
+        runner: &runner,
+        source: None,
+        worktree_base: scratch.path(),
+        target_base: scratch.path(),
+        lanes: &idle,
+        policy: &keep,
+        now: SystemTime::now(),
+    });
+
+    assert_eq!(report.worktrees, 0, "a session with an outstanding order keeps its tree");
+    assert!(released.0.lock().expect("the release log is not poisoned").is_empty());
+    assert!(tree.is_dir(), "the lane still standing in it finds the directory it was born in");
 }
 
 #[test]
