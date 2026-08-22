@@ -155,7 +155,10 @@ pub fn annotate_findings(findings: &str) -> String {
     let hints: Vec<String> = FIXTURES
         .iter()
         .filter(|fixture| findings.contains(fixture.test))
-        .map(|fixture| format!("run `cargo xtask fixtures regen {}`", fixture.name))
+        .map(|fixture| {
+            let name = fixture.name;
+            format!("run `cargo xtask fixtures regen {name}`")
+        })
         .collect();
     if hints.is_empty() {
         findings.to_owned()
@@ -165,17 +168,17 @@ pub fn annotate_findings(findings: &str) -> String {
 }
 
 fn select(name: Option<&str>) -> Result<Vec<&'static Fixture>> {
-    match name {
-        None => Ok(FIXTURES.iter().collect()),
-        Some(name) => {
+    name.map_or_else(
+        || Ok(FIXTURES.iter().collect()),
+        |name| {
             FIXTURES.iter().find(|fixture| fixture.name == name).map(|fixture| vec![fixture]).ok_or_else(|| {
                 anyhow::anyhow!(
                     "unknown fixture {name:?}; known: {}",
                     FIXTURES.iter().map(|fixture| fixture.name).collect::<Vec<_>>().join(", ")
                 )
             })
-        }
-    }
+        },
+    )
 }
 
 fn workspace_root() -> PathBuf {

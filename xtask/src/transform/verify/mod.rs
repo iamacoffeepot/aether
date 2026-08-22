@@ -21,6 +21,7 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use crate::cargo::{self, WASM_TARGET, run_captured, write_json_pretty};
+use crate::fixtures::annotate_findings;
 use crate::transform::peak_memory::{self, PeakMemory};
 use crate::transform::sccache::{self, CompilerCache, Counters};
 use crate::transform::verify::closure::Closure;
@@ -1769,7 +1770,7 @@ fn distil_member(id: &str, log: &str) -> Option<String> {
     if id == "verify.test"
         && let Some(failures) = nextest::classify(log, None).as_ref().and_then(nextest::ClassifiedRun::findings)
     {
-        return Some(crate::fixtures::annotate_findings(&failures));
+        return Some(annotate_findings(&failures));
     }
 
     distil_diagnostics(log)

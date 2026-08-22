@@ -73,6 +73,7 @@ fn regen_is_idempotent_on_a_clean_tree() {
     for fixture in FIXTURES {
         let written = fs::read(root.join(FIXTURES_DIR).join(fixture.file)).unwrap();
         let pinned = fs::read(source.join(fixture.file)).unwrap();
-        assert_eq!(written, pinned, "{} drifted from the checked-in fixture", fixture.name);
+        let name = fixture.name;
+        assert_eq!(written, pinned, "{name} drifted from the checked-in fixture");
     }
 }
