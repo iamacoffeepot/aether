@@ -32,7 +32,9 @@
 //!
 //! [`admit_uploaded`]: crate::bloomery::admit_uploaded
 
-use aether_bloomery::{CandidateRef, Digest, Nonce, StageVerdict, StudyCall, StudyCost, VerifyFailureSet};
+use aether_bloomery::{
+    CandidateRef, Digest, LaneObservation, Nonce, StageVerdict, StudyCall, StudyCost, VerifyFailureSet,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::bloomery::UploadedEvidence;
@@ -118,17 +120,14 @@ impl ScriptedUpload {
             subject: self.subject,
             verdict: self.verdict.into_stage_verdict(),
             detail: self.detail,
-            candidate: self.candidate,
-            findings: self.findings,
-            failed_verifiers: self.failed_verifiers,
-            cost: self.cost,
-            calls: self.calls,
-            session_reuse_arm: None,
-            session_reuse_saved_micro_usd: None,
-            peak_resident_bytes: None,
-            violating_paths: Vec::new(),
-            surface_request: None,
-            suppression_requests: Vec::new(),
+            observation: LaneObservation {
+                candidate: self.candidate,
+                findings: self.findings,
+                failed_verifiers: self.failed_verifiers,
+                cost: self.cost,
+                calls: self.calls,
+                ..LaneObservation::default()
+            },
         }
     }
 }

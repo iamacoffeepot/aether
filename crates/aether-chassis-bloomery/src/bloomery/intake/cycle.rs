@@ -4,7 +4,7 @@
 use std::error::Error;
 use std::fmt;
 
-use aether_bloomery::{Admit, BackendId, ExecutionStatus, Nonce, StageVerdict, VerifyFailureSet, WorkHandle};
+use aether_bloomery::{Admit, BackendId, ExecutionStatus, LaneObservation, Nonce, StageVerdict, WorkHandle};
 use aether_data::wire::to_vec;
 
 use super::admit::{Admission, AdmitDecision, IntakeError, IntakeRefusal, UploadedEvidence, admit_uploaded};
@@ -251,17 +251,10 @@ fn recover_completed_mismatch(
         subject: record.displayed_digest,
         verdict: StageVerdict::ExecutorFault,
         detail: refused.detail,
-        candidate: None,
-        findings: Some("lane bound evidence to a digest the order did not display".into()),
-        failed_verifiers: VerifyFailureSet::EMPTY,
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation {
+            findings: Some("lane bound evidence to a digest the order did not display".into()),
+            ..LaneObservation::default()
+        },
     };
     match admit_uploaded(store, &fault).map_err(CycleError::Intake)? {
         AdmitDecision::Admitted(admission) => Ok(Some(admission)),
@@ -289,17 +282,17 @@ fn record_cost(
     artifacts: Option<&mut ArtifactsCapabilityState>,
     upload: &UploadedEvidence,
 ) -> Option<StudyAdmission> {
-    let (Some(cost), Some(artifacts)) = (upload.cost, artifacts) else {
+    let (Some(cost), Some(artifacts)) = (upload.observation.cost, artifacts) else {
         return None;
     };
     let record = UploadedStudyRecord {
         nonce: upload.nonce.clone(),
         subject: upload.subject,
         cost,
-        calls: upload.calls.clone(),
-        session_reuse_arm: upload.session_reuse_arm.clone(),
-        session_reuse_saved_micro_usd: upload.session_reuse_saved_micro_usd,
-        peak_resident_bytes: upload.peak_resident_bytes,
+        calls: upload.observation.calls.clone(),
+        session_reuse_arm: upload.observation.session_reuse_arm.clone(),
+        session_reuse_saved_micro_usd: upload.observation.session_reuse_saved_micro_usd,
+        peak_resident_bytes: upload.observation.peak_resident_bytes,
     };
 
     match admit_study(store, artifacts, &record) {

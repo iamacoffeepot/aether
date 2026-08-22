@@ -201,6 +201,7 @@ pub use port::IntegrateOutcome;
 pub use port::IntegrationPosition;
 pub use port::LandOutcome;
 pub use port::LandingBlock;
+pub use port::LaneObservation;
 pub use port::LeaseEvictionView;
 pub use port::LeaseView;
 pub use port::MAX_TITLE_CHARS;

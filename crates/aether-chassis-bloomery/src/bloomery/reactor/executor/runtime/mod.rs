@@ -47,8 +47,9 @@ use aether_actor::runtime;
 use aether_bloomery::{
     Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, BaseVerifyPayload, BloomId,
     CancelDispatchPayload, CandidateRef, ConfigRegistry, ConfigScopes, Digest, DispatchPayload, Event, ExecutionStatus,
-    Fact, ModelOverride, Nonce, RedispatchPayload, ReviewPass, SharedCorrespondence, StageId, StageVerdict,
-    TimeoutRecord, Topic, VerifyFailureSet, WorkHandle, WorkpieceId, normalize_write_paths, pin_workpiece_description,
+    Fact, LaneObservation, ModelOverride, Nonce, RedispatchPayload, ReviewPass, SharedCorrespondence, StageId,
+    StageVerdict, TimeoutRecord, Topic, VerifyFailureSet, WorkHandle, WorkpieceId, normalize_write_paths,
+    pin_workpiece_description,
 };
 use aether_bloomery_git::command;
 use aether_bloomery_github::{GitObjectId, candidate_ref_name, member_checkpoint_ref_name, short_hex};
@@ -511,17 +512,7 @@ fn terminate_live_order(
         subject: record.displayed_digest,
         verdict,
         detail,
-        candidate: None,
-        findings: None,
-        failed_verifiers,
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation { failed_verifiers, ..LaneObservation::default() },
     };
     match admit_uploaded(store, &upload) {
         Ok(AdmitDecision::Admitted(admission)) => {
@@ -2643,16 +2634,16 @@ fn admit_scripted(state: &mut ExecutorReactorState, encoded: &[u8]) -> (Scripted
     // test harness discards. So a scripted study that does not record stops the
     // call and names which of the three it was.
     let mut admits = Vec::new();
-    match (upload.cost, state.artifacts.as_mut()) {
+    match (upload.observation.cost, state.artifacts.as_mut()) {
         (Some(cost), Some(artifacts)) => {
             let record = UploadedStudyRecord {
                 nonce: upload.nonce.clone(),
                 subject: upload.subject,
                 cost,
-                calls: upload.calls.clone(),
-                session_reuse_arm: upload.session_reuse_arm.clone(),
-                session_reuse_saved_micro_usd: upload.session_reuse_saved_micro_usd,
-                peak_resident_bytes: upload.peak_resident_bytes,
+                calls: upload.observation.calls.clone(),
+                session_reuse_arm: upload.observation.session_reuse_arm.clone(),
+                session_reuse_saved_micro_usd: upload.observation.session_reuse_saved_micro_usd,
+                peak_resident_bytes: upload.observation.peak_resident_bytes,
             };
             match admit_study(store, artifacts, &record) {
                 Ok(StudyAdmitDecision::Admitted(admission)) => {

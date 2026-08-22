@@ -16,10 +16,10 @@ use std::collections::{BTreeMap, HashMap};
 use aether_bloomery::testing::digest;
 use aether_bloomery::{
     Admit, AgentSelection, AggregateReviewPayload, BloomId, CandidateRef, Conclusion, ConfigKind, ConfigRegistry,
-    Digest, DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, Harness, ModelOverride, Nonce,
-    Observation, Provenance, ReasoningEffort, RedispatchPayload, ReviewPass, SharedCorrespondence, StageCatalog,
-    StageId, StageOverride, Statement, TimeoutRecord, Topic, Transformation, VerifyFailure, VerifyFailureSet,
-    WorkHandle, WorkOrder, WorkpieceId, pin_workpiece_description,
+    Digest, DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, Harness, LaneObservation,
+    ModelOverride, Nonce, Observation, Provenance, ReasoningEffort, RedispatchPayload, ReviewPass,
+    SharedCorrespondence, StageCatalog, StageId, StageOverride, Statement, TimeoutRecord, Topic, Transformation,
+    VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, pin_workpiece_description,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -2270,8 +2270,11 @@ fn an_aggregate_verify_failure_can_produce_a_repair_candidate() {
     let AdmitDecision::Admitted(_) = admit_uploaded(
         &mut store,
         &UploadedEvidence {
-            findings: Some(findings.to_owned()),
-            failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
+            observation: LaneObservation {
+                findings: Some(findings.to_owned()),
+                failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
+                ..Default::default()
+            },
             ..uploaded("n-av", tree, StageVerdict::VerificationFailed, digest(7))
         },
     )
@@ -2298,7 +2301,7 @@ fn an_aggregate_verify_failure_can_produce_a_repair_candidate() {
     let AdmitDecision::Admitted(admission) = admit_uploaded(
         &mut store,
         &UploadedEvidence {
-            candidate: Some(captured),
+            observation: LaneObservation { candidate: Some(captured), ..Default::default() },
             ..uploaded(&format!("dispatch-{sequence}"), digest(5), StageVerdict::VerificationPassed, digest(11))
         },
     )
@@ -2324,17 +2327,7 @@ fn uploaded(nonce: &str, subject: Digest, verdict: StageVerdict, detail: Digest)
         subject,
         verdict,
         detail,
-        candidate: None,
-        findings: None,
-        failed_verifiers: VerifyFailureSet::EMPTY,
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation::default(),
     }
 }
 
@@ -2372,8 +2365,11 @@ fn an_aggregate_verify_repair_candidate_reaches_landing_ref_creation() {
     let AdmitDecision::Admitted(_) = admit_uploaded(
         &mut store,
         &UploadedEvidence {
-            findings: Some(findings.to_owned()),
-            failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
+            observation: LaneObservation {
+                findings: Some(findings.to_owned()),
+                failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
+                ..Default::default()
+            },
             ..uploaded("n-av", tree, StageVerdict::VerificationFailed, digest(7))
         },
     )
@@ -2388,7 +2384,7 @@ fn an_aggregate_verify_repair_candidate_reaches_landing_ref_creation() {
     let AdmitDecision::Admitted(admission) = admit_uploaded(
         &mut store,
         &UploadedEvidence {
-            candidate: Some(captured),
+            observation: LaneObservation { candidate: Some(captured), ..Default::default() },
             ..uploaded(&format!("dispatch-{sequence}"), digest(5), StageVerdict::VerificationPassed, digest(11))
         },
     )
@@ -2453,17 +2449,7 @@ fn park_and_answer(
         subject: digest(subject),
         verdict: StageVerdict::Parked,
         detail: question,
-        candidate: None,
-        findings: None,
-        failed_verifiers: VerifyFailureSet::EMPTY,
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation::default(),
     };
     assert!(matches!(admit_uploaded(store, &upload).unwrap(), AdmitDecision::Admitted(_)), "the parked upload admits");
 
@@ -3032,17 +3018,7 @@ fn a_dispatch_whose_fact_never_reached_the_journal_is_re_queued_at_boot() {
             subject: digest(subject),
             verdict: StageVerdict::VerificationPassed,
             detail: digest(9),
-            candidate: None,
-            findings: None,
-            failed_verifiers: VerifyFailureSet::EMPTY,
-            cost: None,
-            calls: None,
-            session_reuse_arm: None,
-            session_reuse_saved_micro_usd: None,
-            peak_resident_bytes: None,
-            violating_paths: Vec::new(),
-            surface_request: None,
-            suppression_requests: Vec::new(),
+            observation: LaneObservation::default(),
         };
         // The admission is built and the order spent — and then the process
         // stops, so the `Admit` this returns never reaches the control core.
@@ -3227,23 +3203,7 @@ fn heartbeat_shell(backend: &Arc<HeartbeatBackend>) -> ExecutorShell {
 
 fn construct_attempt_ref(nonce: &Nonce, subject: u8) -> EvidenceRef {
     let name = attempt_artifact_name(nonce, &digest(subject), StageVerdict::VerificationPassed, &digest(9));
-    EvidenceRef {
-        name,
-        nonce: nonce.clone(),
-        artifact_id: 1,
-        size_bytes: 20,
-        candidate: None,
-        findings: None,
-        failed_verifiers: VerifyFailureSet::EMPTY,
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
-    }
+    EvidenceRef { name, nonce: nonce.clone(), artifact_id: 1, size_bytes: 20, observation: LaneObservation::default() }
 }
 
 #[test]
