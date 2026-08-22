@@ -1602,8 +1602,16 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
     let Some(topic) = Topic::of_decision(effect) else {
         return Ok(None);
     };
+    let bytes = outbox_payload_bytes(effect)?;
+    debug_assert!(
+        bytes.is_some(),
+        "Topic::of_decision mapped {effect:?} to {topic:?} but the payload arm returned None"
+    );
+    Ok(bytes.map(|payload| OutboxPayload::new(topic, payload)))
+}
 
-    let bytes = match effect {
+fn outbox_payload_bytes(effect: &Decision) -> Result<Option<Vec<u8>>, WireError> {
+    Ok(match effect {
         // The landing-receipt topic carries the receipt *and* the landed
         // bloom's membership: the receipt value names no members, so a
         // payload without them cannot reach the objects it belongs on after
@@ -1630,16 +1638,7 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
             Some(to_vec(&payload)?)
         }
         Decision::DispatchSplice { .. } => splice_outbox(effect)?,
-        Decision::DispatchAggregateReview { bloom, transformation, roll, profile, configs } => {
-            let payload = AggregateReviewPayload {
-                profile: profile.clone(),
-                bloom: bloom.0,
-                transformation: transformation.clone(),
-                pass: ReviewPass::from_roll(*roll),
-                configs: configs.clone(),
-            };
-            Some(to_vec(&payload)?)
-        }
+        Decision::DispatchAggregateReview { .. } => aggregate_review_outbox(effect)?,
         Decision::DispatchAggregateVerify { bloom, transformation, profile, roll: _ } => {
             let payload = AggregateVerifyPayload {
                 profile: profile.clone(),
@@ -1706,16 +1705,7 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
         | Decision::MarkBloomWithdrawn { .. }
         | Decision::RecordAggregateGatePass { .. }
         | Decision::RecordRefusal { .. } => None,
-    };
-
-    debug_assert!(
-        bytes.is_some(),
-        "Topic::of_decision mapped {effect:?} to {topic:?} but the payload arm returned None"
-    );
-    let Some(bytes) = bytes else {
-        return Ok(None);
-    };
-    Ok(Some(OutboxPayload::new(topic, bytes)))
+    })
 }
 
 fn dispatch_attempt_outbox(effect: &Decision) -> Result<Option<Vec<u8>>, WireError> {
@@ -1740,6 +1730,20 @@ fn dispatch_attempt_outbox(effect: &Decision) -> Result<Option<Vec<u8>>, WireErr
         scope_revision: *scope_revision,
         candidate: *candidate,
         profile: profile.clone(),
+        configs: configs.clone(),
+    };
+    Ok(Some(to_vec(&payload)?))
+}
+
+fn aggregate_review_outbox(effect: &Decision) -> Result<Option<Vec<u8>>, WireError> {
+    let Decision::DispatchAggregateReview { bloom, transformation, roll, profile, configs } = effect else {
+        return Ok(None);
+    };
+    let payload = AggregateReviewPayload {
+        profile: profile.clone(),
+        bloom: bloom.0,
+        transformation: transformation.clone(),
+        pass: ReviewPass::from_roll(*roll),
         configs: configs.clone(),
     };
     Ok(Some(to_vec(&payload)?))
