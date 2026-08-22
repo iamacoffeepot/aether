@@ -1,45 +1,46 @@
-//! Root workspace: four bordered panes and one Tab-cycled focus ring.
+//! Root workspace: three bordered panes and one Tab-cycled focus ring.
 
 mod pane;
+
+use std::collections::HashSet;
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::widgets::Paragraph;
 
-use super::chrome;
+use super::chrome::{self, BandRow, pane_block};
 use crate::cursor::Cursor;
 use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
 use crate::palette;
 use crate::screen::{Board, Dashboard, compose, quiet_lines};
 use crate::store::{ResourceKey, Store};
-use crate::warroom::{self, Focus, NeedsYouRow};
+use crate::warroom::{self, DismissKey, Focus, NeedsYouRow};
 
 pub use pane::PaneId;
-use pane::pane_block;
-
-const FLEET_ROWS: u16 = 3;
 
 const TAB_HINT: KeyHint = KeyHint { keys: "Tab", action: "pane" };
 const ENTER_HINT: KeyHint = KeyHint { keys: "Enter", action: "jump" };
 const ENTER_BAND_HINT: KeyHint = KeyHint { keys: "i", action: "queue" };
 const LEAVE_BAND_HINT: KeyHint = KeyHint { keys: "Esc", action: "board" };
 const WALK_HINT: KeyHint = KeyHint { keys: "j/k", action: "select" };
+const DISMISS_HINT: KeyHint = KeyHint { keys: "x", action: "dismiss" };
 const REFRESH_HINT: KeyHint = KeyHint { keys: "r", action: "refresh" };
 const QUIT_HINT: KeyHint = KeyHint { keys: "q", action: "quit" };
 
-/// The rest root: fleet over board on the left, needs-you over quiet on the right.
+/// The rest root: board on the left, needs-you over quiet on the right.
 pub struct Workspace {
     board: Board,
     chrome: Cursor<Focus>,
     focus: PaneId,
+    dismissed: HashSet<DismissKey>,
 }
 
 impl Workspace {
     #[must_use]
     pub fn new() -> Self {
-        Self { board: Board::new(), chrome: Cursor::new(), focus: PaneId::Board }
+        Self { board: Board::new(), chrome: Cursor::new(), focus: PaneId::Board, dismissed: HashSet::new() }
     }
 
     pub fn cycle(&mut self) {
@@ -53,6 +54,7 @@ impl Workspace {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub fn board(&self) -> &Board {
         &self.board
     }
@@ -101,6 +103,7 @@ impl Workspace {
     pub fn reseat(&mut self, store: &Store) {
         self.board.reseat(store);
         let rows = needs_you_rows(store);
+        self.dismissed.retain(|key| rows.iter().any(|row| row.dismiss_key() == *key));
         if let Some(id) = self.chrome.selected()
             && !rows.iter().any(|row| row.focus == *id)
         {
@@ -108,10 +111,9 @@ impl Workspace {
         }
     }
 
-    pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, store: &Store, endpoint_label: &str) {
+    pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, store: &Store) {
         let dashboard = compose(store);
         let areas = split_panes(area);
-        render_fleet(frame, areas.fleet, store, endpoint_label, &dashboard);
         self.render_board(frame, areas.board, store);
         self.render_needs_you(frame, areas.needs_you, store);
         self.render_quiet(frame, areas.quiet, store, &dashboard);
@@ -143,6 +145,14 @@ impl Workspace {
                 self.chrome.select(None);
                 Outcome::Handled
             }
+            KeyCode::Char('x') if self.chrome.selected().is_some() => {
+                let Some(index) = self.chrome.selected_index(&rows, |row| row.focus.clone()) else {
+                    return Outcome::Ignored;
+                };
+                self.dismissed.insert(rows[index].dismiss_key());
+                self.chrome.select(rows.get(index + 1).map(|row| row.focus.clone()));
+                Outcome::Handled
+            }
             _ => Outcome::Ignored,
         }
     }
@@ -153,6 +163,7 @@ impl Workspace {
             hints.push(ENTER_HINT);
             hints.push(LEAVE_BAND_HINT);
             hints.push(WALK_HINT);
+            hints.push(DISMISS_HINT);
         } else if !needs_you_rows(store).is_empty() {
             hints.push(ENTER_BAND_HINT);
             hints.push(WALK_HINT);
@@ -160,6 +171,23 @@ impl Workspace {
         hints.push(REFRESH_HINT);
         hints.push(QUIT_HINT);
         hints
+    }
+
+    fn band_rows<'a>(&self, rows: &'a [NeedsYouRow]) -> (Vec<BandRow<'a>>, usize) {
+        let cleared = rows.iter().filter(|row| self.dismissed.contains(&row.dismiss_key())).count();
+        let keep_dismissed = self.focus == PaneId::NeedsYou;
+        let band = rows
+            .iter()
+            .filter_map(|row| {
+                let dismissed = self.dismissed.contains(&row.dismiss_key());
+                if dismissed && !keep_dismissed {
+                    None
+                } else {
+                    Some(BandRow { row, dismissed })
+                }
+            })
+            .collect();
+        (band, cleared)
     }
 
     fn render_board(&mut self, frame: &mut Frame<'_>, area: Rect, store: &Store) {
@@ -174,13 +202,15 @@ impl Workspace {
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let rows = needs_you_rows(store);
-        if rows.is_empty() {
+        let (band, cleared) = self.band_rows(&rows);
+        if band.is_empty() && cleared == 0 {
             frame.render_widget(Paragraph::new("empty").style(palette::body()), inner);
             return;
         }
-        let selected = self.chrome.selected_index(&rows, |row| row.focus.clone());
-        let (window, highlight, hidden) = chrome::needs_you_window(&rows, selected, usize::from(inner.height));
-        frame.render_widget(chrome::needs_you_band(window, highlight, hidden), inner);
+        let selected = self.chrome.selected_index(&band, |row| row.row.focus.clone());
+        let height = usize::from(inner.height).saturating_sub(usize::from(cleared > 0));
+        let (window, highlight, hidden) = chrome::needs_you_window(&band, selected, height);
+        frame.render_widget(chrome::needs_you_band(window, highlight, hidden, cleared), inner);
     }
 
     fn render_quiet(&self, frame: &mut Frame<'_>, area: Rect, store: &Store, dashboard: &Dashboard) {
@@ -214,7 +244,6 @@ impl Workspace {
 }
 
 struct PaneAreas {
-    fleet: Rect,
     board: Rect,
     needs_you: Rect,
     quiet: Rect,
@@ -225,24 +254,13 @@ fn split_panes(area: Rect) -> PaneAreas {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
-    let left = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(FLEET_ROWS), Constraint::Min(3)])
-        .split(columns[0]);
     let right = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(columns[1]);
-    PaneAreas { fleet: left[0], board: left[1], needs_you: right[0], quiet: right[1] }
+    PaneAreas { board: columns[0], needs_you: right[0], quiet: right[1] }
 }
 
 fn needs_you_rows(store: &Store) -> Vec<NeedsYouRow> {
     store.view().value.as_ref().map(warroom::rows).unwrap_or_default()
-}
-
-fn render_fleet(frame: &mut Frame<'_>, area: Rect, store: &Store, endpoint_label: &str, dashboard: &Dashboard) {
-    let block = pane_block("fleet", false);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    frame.render_widget(chrome::header(endpoint_label, store.view(), Some(dashboard)), inner);
 }

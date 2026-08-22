@@ -6,11 +6,7 @@
 //! longer has. New blooms sealed on that vanished base and landed with
 //! `BaseMismatch`. This drives the rewrite through the live observer.
 
-mod common;
-pub mod fixture;
-pub mod harness;
-
-use fixture::{FixtureHarness, digest};
+use aether_harness_bloomery::{FixtureHarness, digest};
 
 /// A force-pushed tip with no ancestry from the coordinator's current
 /// mainline. Recognizable, and no bloom of this coordinator's ever names it.

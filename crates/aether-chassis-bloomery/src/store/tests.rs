@@ -1389,3 +1389,35 @@ fn a_v10_store_gains_deposit_time_and_member_dependency() {
         Some(("sess-1".to_owned(), 8_000, Some(9))),
     );
 }
+
+#[test]
+fn a_v11_store_gains_an_empty_scope_verify_ledger() {
+    // Version 12 is the scope-verify report ledger. Opening a schema-11 file
+    // must create the table empty rather than skip it because user_version was
+    // already "current" at 11 — and must backfill nothing, because a revision
+    // frozen before the check existed was never verified.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v11.db").to_str().unwrap().to_owned();
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE journal (
+                 sequence        INTEGER PRIMARY KEY AUTOINCREMENT,
+                 idempotency_key TEXT NOT NULL UNIQUE,
+                 event           BLOB NOT NULL,
+                 decisions       BLOB,
+                 decider         TEXT,
+                 decisions_schema TEXT
+             );
+             PRAGMA user_version = 11;",
+        )
+        .unwrap();
+
+    let store = SqliteStore::open(&path).expect("a v11 store migrates");
+    let reports: i64 = store
+        .conn
+        .query_row("SELECT count(*) FROM scope_verify_reports", [], |row| row.get(0))
+        .expect("the ledger exists after migration");
+    assert_eq!(reports, 0, "migration invents no reports");
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 13);
+}

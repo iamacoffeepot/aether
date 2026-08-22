@@ -11,7 +11,7 @@ use std::fmt;
 use aether_bloomery::{
     AuthorityDoor, CommissionApprovalTier, CommissionProjection, CommissionStatementRole, CommissionStatus,
     CommissionValueError, Digest, KeyProvider, Observation, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision,
-    Statement, Topic, WorkpieceId, digest_of,
+    ScopeVerifyInput, ScopeVerifyReport, Statement, Topic, WorkpieceId, digest_of, intent_title, verify_scope,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use rusqlite::{Connection, OptionalExtension, Transaction};
@@ -98,6 +98,86 @@ BEGIN
 END;
 ";
 
+/// Schema fragment for the scope-verify report ledger (ADR-0208).
+///
+/// Keyed by the digest of the bytes verified, which the freeze computes before
+/// the insert — so a *refused* revision still has an identity to file its report
+/// under. Deliberately no foreign key to `scope_revisions`: the refused case has
+/// no row there, and a refusal that vanished when the repaired revision landed
+/// would make the refusal rate unrecoverable a second time.
+pub const SCOPE_VERIFY_REPORTS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS scope_verify_reports (
+    revision   BLOB PRIMARY KEY,
+    commission TEXT NOT NULL REFERENCES commissions(id),
+    refused    INTEGER NOT NULL CHECK (refused IN (0, 1)),
+    canonical  BLOB NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS scope_verify_reports_no_update
+BEFORE UPDATE ON scope_verify_reports
+BEGIN
+    SELECT RAISE(ABORT, 'scope_verify_reports rows are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS scope_verify_reports_no_delete
+BEFORE DELETE ON scope_verify_reports
+BEGIN
+    SELECT RAISE(ABORT, 'scope_verify_reports rows are immutable');
+END;
+";
+
+/// Schema fragment for the pre-bloom scoping-run ledger (ADR-0208, #5304).
+///
+/// Beside `scope_revisions` because that is where every other pre-bloom fact
+/// already lives, and deliberately *not* in the reducer's journal:
+/// [`Snapshot`](aether_bloomery::Snapshot) keys everything by `BloomId` and
+/// every `Fact` carries one, so a scoping run there would mean either a
+/// synthetic bloom contaminating membership, the view, and the metrics ledger,
+/// or a second reducer.
+///
+/// **Append-only rows, one per transition**, rather than a mutated cursor —
+/// ADR-0208's own record-shape argument. The transitions are `enqueued` (the
+/// run and its outbox row, in one transaction), `dispatched` (the nonce the
+/// drain minted, so a run stays addressable from its outbox row alone),
+/// `verdict` (from intake), and `frozen` (the revision the run produced, the
+/// terminal success).
+///
+/// Keyed on the commission plus an attempt ordinal — the identity that exists
+/// before a workpiece is frozen. `commissions.id` is written by
+/// `create_commission` before any revision exists; the intent is a *field* of
+/// the run rather than its key, so a re-run against an unchanged intent is a
+/// new ordinal rather than a collision. The nonce index is what the intake
+/// walks back from an evidence upload.
+///
+/// The per-transition columns are nullable because a row carries only the
+/// fields its own transition names; the `kind` CHECK is what keeps the set
+/// closed.
+pub const SCOPE_RUNS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS scope_runs (
+    sequence   INTEGER PRIMARY KEY AUTOINCREMENT,
+    commission TEXT NOT NULL REFERENCES commissions(id),
+    ordinal    INTEGER NOT NULL CHECK (ordinal >= 1),
+    kind       TEXT NOT NULL CHECK (kind IN ('enqueued', 'dispatched', 'verdict', 'frozen')),
+    nonce      TEXT,
+    intent     BLOB,
+    base       BLOB,
+    subject    BLOB,
+    verdict    TEXT,
+    evidence   BLOB,
+    revision   BLOB
+);
+CREATE INDEX IF NOT EXISTS scope_runs_by_commission ON scope_runs (commission, ordinal);
+CREATE INDEX IF NOT EXISTS scope_runs_by_nonce ON scope_runs (nonce);
+CREATE TRIGGER IF NOT EXISTS scope_runs_no_update
+BEFORE UPDATE ON scope_runs
+BEGIN
+    SELECT RAISE(ABORT, 'scope_runs rows are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS scope_runs_no_delete
+BEFORE DELETE ON scope_runs
+BEGIN
+    SELECT RAISE(ABORT, 'scope_runs rows are immutable');
+END;
+";
+
 /// Schema fragment for the persisted replica-issue number (ADR-0199). The
 /// projector writes title and body only to a number stored here.
 pub const COMMISSION_PROJECTION_TABLE: &str = "\
@@ -143,6 +223,13 @@ pub enum CommissionError {
     Store(String),
     /// The commission is not open, so a revision, approval, or cancel cannot land.
     NotOpen,
+    /// The workpiece's plan steps or inverse searches name paths its own
+    /// declared surface does not cover (ADR-0208). The revision is not stored;
+    /// its report is.
+    SurfaceGap {
+        /// Each uncovered path with the record that named it.
+        paths: Vec<String>,
+    },
 }
 
 impl fmt::Display for CommissionError {
@@ -166,6 +253,9 @@ impl fmt::Display for CommissionError {
             Self::WrongProvenance => write!(f, "approval provenance is neither signed nor auto"),
             Self::Store(message) => write!(f, "commission store: {message}"),
             Self::NotOpen => write!(f, "commission is not open"),
+            Self::SurfaceGap { paths } => {
+                write!(f, "declared surface does not cover {}", paths.join(", "))
+            }
         }
     }
 }
@@ -211,6 +301,11 @@ pub struct CommissionView {
     pub head: CommissionHead,
     /// The current revision decoded from its canonical bytes.
     pub current: Option<ScopeRevision>,
+    /// The scope-verify report journaled for the current revision (ADR-0208).
+    /// `None` is **absent** — hand-forked, lane-produced-but-empty, and
+    /// pre-migration revisions are honestly the same thing, and none of them is
+    /// a clean report.
+    pub scope_verify: Option<ScopeVerifyReport>,
 }
 
 /// Authoring and query transactions for signed commissions.
@@ -231,6 +326,27 @@ pub trait CommissionBackend {
     /// Missing commission, not open, stale predecessor, ordinal skip, malformed
     /// bytes, or a duplicate digest that is not already the current tip.
     fn write_revision(&mut self, revision: &ScopeRevision) -> Result<Digest, CommissionError>;
+
+    /// [`write_revision`](Self::write_revision), with the workpiece's projected
+    /// field records checked against its own declared surface first (ADR-0208).
+    ///
+    /// The check is the freeze's, not the seal's: a refusal here costs an edit,
+    /// where the same contradiction discovered at Member-Verify costs a whole
+    /// construct budget. `projection` is `None` for a hand-authored revision,
+    /// which has no records to check — that writes no report, and absence is
+    /// reported rather than passed.
+    ///
+    /// A refusal rolls the revision back and commits its report on its own, so
+    /// the refusal survives the repaired re-freeze that follows it.
+    ///
+    /// # Errors
+    /// Everything [`write_revision`](Self::write_revision) refuses, plus
+    /// [`CommissionError::SurfaceGap`] when a named path is uncovered.
+    fn write_revision_verified(
+        &mut self,
+        revision: &ScopeRevision,
+        projection: Option<&ScopeVerifyInput>,
+    ) -> Result<Digest, CommissionError>;
 
     /// Verify (when signed) and insert an approval for the current revision,
     /// in one transaction. Auto-tier rows carry observation provenance and no
@@ -303,7 +419,15 @@ impl CommissionBackend for SqliteStore {
     }
 
     fn write_revision(&mut self, revision: &ScopeRevision) -> Result<Digest, CommissionError> {
-        write_revision(&mut self.conn, revision)
+        write_revision(&mut self.conn, revision, None)
+    }
+
+    fn write_revision_verified(
+        &mut self,
+        revision: &ScopeRevision,
+        projection: Option<&ScopeVerifyInput>,
+    ) -> Result<Digest, CommissionError> {
+        write_revision(&mut self.conn, revision, projection)
     }
 
     fn insert_approval(&mut self, statement: &Statement, keys: &dyn KeyProvider) -> Result<Digest, CommissionError> {
@@ -378,7 +502,11 @@ fn create_commission(conn: &mut Connection, id: &WorkpieceId, intent: &Statement
     Ok(intent_digest)
 }
 
-fn write_revision(conn: &mut Connection, revision: &ScopeRevision) -> Result<Digest, CommissionError> {
+fn write_revision(
+    conn: &mut Connection,
+    revision: &ScopeRevision,
+    projection: Option<&ScopeVerifyInput>,
+) -> Result<Digest, CommissionError> {
     let canonical = revision.to_canonical();
     let decoded = decode_revision(&canonical)?;
     if decoded != *revision {
@@ -398,6 +526,17 @@ fn write_revision(conn: &mut Connection, revision: &ScopeRevision) -> Result<Dig
             return Ok(digest);
         }
         return Err(CommissionError::DuplicateRevision);
+    }
+
+    let report = projection.map(verify_scope);
+    if let Some(report) = &report
+        && report.refused()
+    {
+        drop(txn);
+        let refusal = conn.transaction()?;
+        insert_scope_verify_report(&refusal, digest, &decoded.workpiece.0, report)?;
+        refusal.commit()?;
+        return Err(CommissionError::SurfaceGap { paths: report.refusal_paths() });
     }
 
     let expected_ordinal = match (&head.current_revision, decoded.predecessor) {
@@ -425,9 +564,48 @@ fn write_revision(conn: &mut Connection, revision: &ScopeRevision) -> Result<Dig
         "UPDATE commissions SET current_revision = ?1, current_ordinal = ?2 WHERE id = ?3",
         rusqlite::params![digest.as_bytes().as_slice(), ordinal, decoded.workpiece.0],
     )?;
+    if let Some(report) = &report {
+        insert_scope_verify_report(&txn, digest, &decoded.workpiece.0, report)?;
+    }
     enqueue_projection(&txn, &decoded.workpiece.0)?;
     txn.commit()?;
     Ok(digest)
+}
+
+/// File one scope-verify report under the digest of the bytes it verified.
+///
+/// `INSERT OR IGNORE` because the report is a pure function of those bytes: a
+/// re-submitted revision recomputes the identical report, and the row is
+/// immutable by trigger. Silently keeping the first is correct; an UPDATE would
+/// abort.
+fn insert_scope_verify_report(
+    txn: &Transaction<'_>,
+    revision: Digest,
+    commission: &str,
+    report: &ScopeVerifyReport,
+) -> Result<(), CommissionError> {
+    txn.execute(
+        "INSERT OR IGNORE INTO scope_verify_reports (revision, commission, refused, canonical) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![
+            revision.as_bytes().as_slice(),
+            commission,
+            i64::from(report.refused()),
+            report.to_canonical()
+        ],
+    )?;
+    Ok(())
+}
+
+/// The report journaled for `revision`, or `None` when none was written.
+fn load_scope_verify_report(conn: &Connection, revision: Digest) -> Result<Option<ScopeVerifyReport>, CommissionError> {
+    let canonical: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT canonical FROM scope_verify_reports WHERE revision = ?1",
+            [revision.as_bytes().as_slice()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    canonical.map(|bytes| ScopeVerifyReport::from_canonical(&bytes).map_err(CommissionError::from)).transpose()
 }
 
 fn insert_approval(
@@ -583,6 +761,10 @@ fn snapshot_projection(conn: &Connection, id: &str) -> Result<Vec<u8>, Commissio
         Some(scope) => first_approval(conn, scope)?,
         None => (None, None),
     };
+    // Read out of the stored intent bytes rather than carried on the head row:
+    // the head is an index, and a title recomputed from the bytes cannot drift
+    // from the intent the commission was created with.
+    let title = load_statement(conn, head.intent)?.and_then(|intent| intent_title(&intent.words)).unwrap_or_default();
     to_vec(&CommissionProjection {
         workpiece: head.id,
         intent: head.intent,
@@ -591,8 +773,21 @@ fn snapshot_projection(conn: &Connection, id: &str) -> Result<Vec<u8>, Commissio
         approval_digest,
         status: head.status.as_str().to_owned(),
         recorded_issue,
+        title,
     })
     .map_err(|error| CommissionError::Store(error.to_string()))
+}
+
+/// One stored commission statement, decoded from the exact bytes written.
+fn load_statement(conn: &Connection, digest: Digest) -> Result<Option<Statement>, CommissionError> {
+    let canonical: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT canonical FROM commission_statements WHERE digest = ?1",
+            [digest.as_bytes().as_slice()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    canonical.map(|bytes| from_bytes::<Statement>(&bytes).map_err(|_| CommissionError::MalformedCanonical)).transpose()
 }
 
 fn first_approval(conn: &Connection, scope: Digest) -> Result<(Option<String>, Option<Digest>), CommissionError> {
@@ -645,7 +840,11 @@ fn load_commission(conn: &mut Connection, id: &WorkpieceId) -> Result<Option<Com
         Some(digest) => Some(load_revision(conn, digest)?.ok_or(CommissionError::MalformedCanonical)?),
         None => None,
     };
-    Ok(Some(CommissionView { head, current }))
+    let scope_verify = match head.current_revision {
+        Some(digest) => load_scope_verify_report(conn, digest)?,
+        None => None,
+    };
+    Ok(Some(CommissionView { head, current, scope_verify }))
 }
 
 fn load_revision(conn: &Connection, digest: Digest) -> Result<Option<ScopeRevision>, CommissionError> {

@@ -67,6 +67,8 @@ fn revision(id: &str) -> ScopeRevision {
         dependencies: Vec::new(),
         description: String::new(),
         implements: Vec::new(),
+        declared_crates: Vec::new(),
+        declared_reads: Vec::new(),
     }
 }
 

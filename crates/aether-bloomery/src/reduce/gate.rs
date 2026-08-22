@@ -12,6 +12,26 @@ use core::fmt;
 
 use serde::{Deserialize, Serialize};
 
+/// Member attempt dispatch: one member's entry into the line.
+///
+/// The six names below are the operator-visible boundaries ADR-0206 fixes, and
+/// they are spelled once here because three separate readers agree on them —
+/// the boundary that mints a refusal, the fold that files it under its gate,
+/// and the `/why` projection that reads it back. Three string literals in three
+/// crates would drift silently, and a refusal filed under a name nothing reads
+/// is invisible in exactly the way this decision exists to prevent.
+pub const DISPATCH_MEMBER_GATE: &str = "dispatch_member";
+/// The fold: merging every member's claimed candidate into one artifact.
+pub const FOLD_GATE: &str = "fold";
+/// Aggregate verify dispatch: handing the folded tree to the mechanical gate.
+pub const AGGREGATE_VERIFY_GATE: &str = "aggregate_verify";
+/// Aggregate review dispatch: handing the same fold to the critic.
+pub const AGGREGATE_REVIEW_GATE: &str = "aggregate_review";
+/// The land: advancing mainline onto a resolved bloom's head.
+pub const LAND_GATE: &str = "land";
+/// Draft admission: the pre-seal gate over one workpiece's scope revision.
+pub const DRAFT_ADMISSION_GATE: &str = "draft_admission";
+
 /// One named value a guard consulted.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Read {

@@ -30,6 +30,10 @@ pub fn short_hex(digest: &Digest) -> String {
 // The workflow-dispatch input key the in-process fake reads. Kept as a module
 // so the moved `testing.rs` can keep `use crate::executor::INPUT_NONCE` after
 // the extraction; the GitHub executor still owns the public constant.
+//
+// Behind the same cfg as its one reader, so a lib-scoped build does not compile
+// a constant nothing in it can reach (#5411).
+#[cfg(any(test, feature = "testing"))]
 mod executor {
     pub const INPUT_NONCE: &str = "nonce";
 }

@@ -259,6 +259,8 @@ fn admit_loaded(
         workpiece: workpiece.id.clone(),
         scope_revision: expected,
         declared_surface: revision.declared_surface.clone(),
+        declared_crates: revision.declared_crates.clone(),
+        declared_reads: revision.declared_reads.clone(),
         completeness: completeness_from(&revision, &status, current_digest == expected, resolution),
         adr_touch: adr_touch(&revision.declared_surface, maturity),
         pre_approved: false,

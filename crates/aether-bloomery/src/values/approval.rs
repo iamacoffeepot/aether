@@ -19,6 +19,7 @@
 use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::slice;
 
 use serde::{Deserialize, Serialize};
 
@@ -142,11 +143,106 @@ impl SurfacePattern {
         }
     }
 
+    /// Whether every path `other` permits is a path `self` permits.
+    ///
+    /// Inside this grammar an intersecting pair nests, so the narrower side
+    /// *is* the overlap — `self` covers `other` exactly when the intersection
+    /// is `other` itself.
+    #[must_use]
+    pub fn covers(&self, other: &Self) -> bool {
+        self.intersection(other).is_some_and(|narrower| narrower == other)
+    }
+
     fn as_prefix(&self) -> &str {
         match self {
             Self::Exact(path) | Self::Subtree(path) => path,
         }
     }
+}
+
+/// The globs in `requested` that `existing` does not already permit — the
+/// delta a surface amendment actually widens (ADR-0207).
+///
+/// Deduplicated, in request order: the operator reads the list back, and
+/// sorting it would separate a requested path from the reason that arrived
+/// with it. An empty result is the "the lane could have finished where it was"
+/// answer, and a caller that gets one should widen nothing.
+///
+/// # Errors
+/// The first requested glob outside the declared-surface grammar, by name. The
+/// request comes from an untrusted lane, so an unparseable glob is refused
+/// rather than skipped: skipping it would silently narrow the amendment the
+/// operator thinks they granted.
+pub fn surface_additions(existing: &[String], requested: &[String]) -> Result<Vec<String>, String> {
+    let held: Vec<SurfacePattern> = existing.iter().filter_map(|glob| SurfacePattern::parse(glob)).collect();
+
+    let mut added: Vec<String> = Vec::new();
+    for glob in requested {
+        let Some(pattern) = SurfacePattern::parse(glob) else {
+            return Err(glob.clone());
+        };
+        if held.iter().any(|owned| owned.covers(&pattern)) || added.contains(glob) {
+            continue;
+        }
+        added.push(glob.clone());
+    }
+    Ok(added)
+}
+
+/// What the tier ladder says about a widening: where the member stands now,
+/// where it would stand after, and what each added path resolved on its own.
+///
+/// The per-path breakdown is the load-bearing half of a refusal. `widened` on
+/// its own says an amendment was refused; `per_added` says *which* path cost
+/// it, which is the only form an operator can act on.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TierVerdict {
+    /// The tier the member's current declared surface resolves at.
+    pub existing: Tier,
+    /// The tier the union of the current surface and the additions resolves at.
+    pub widened: Tier,
+    /// Each added glob and the tier it resolves at alone, in request order.
+    pub per_added: Vec<(String, Tier)>,
+}
+
+/// Resolve `policy` over the widened surface and over each added glob alone
+/// (ADR-0207 §the tier ladder decides who grants it).
+#[must_use]
+pub fn tier_verdict(policy: &ApprovalPolicy, existing: &[String], added: &[String]) -> TierVerdict {
+    let mut widened_surface: Vec<String> = existing.to_vec();
+    widened_surface.extend(added.iter().cloned());
+
+    TierVerdict {
+        existing: policy.resolve_surface(existing),
+        widened: policy.resolve_surface(&widened_surface),
+        per_added: added.iter().map(|glob| (glob.clone(), policy.resolve_surface(slice::from_ref(glob)))).collect(),
+    }
+}
+
+/// Whether an amendment may be granted unattended at `ceiling`.
+///
+/// The one place the ladder is applied to the *delta*, and the only point in
+/// the amendment chain that can refuse before a signature exists — everything
+/// downstream of a signature treats the signature as the decision.
+///
+/// # Errors
+/// Every added glob whose own tier exceeds `ceiling`, paired with that tier.
+/// A refusal that named only the resolved maximum would leave the operator
+/// guessing which path to drop.
+pub fn gate_widening(verdict: &TierVerdict, ceiling: Tier) -> Result<(), Vec<(String, Tier)>> {
+    if verdict.widened <= ceiling {
+        return Ok(());
+    }
+    let offending: Vec<(String, Tier)> =
+        verdict.per_added.iter().filter(|(_, tier)| *tier > ceiling).cloned().collect();
+    // A widening can cross the ceiling with no single added path crossing it
+    // only if the existing surface already did, which is a member that was
+    // sealed above the ceiling — report the whole delta rather than nothing.
+    Err(if offending.is_empty() {
+        verdict.per_added.clone()
+    } else {
+        offending
+    })
 }
 
 /// Every glob two declared surfaces both permit — the seal door's cross-member
@@ -179,6 +275,30 @@ pub fn surface_intersection(left: &[String], right: &[String]) -> Vec<String> {
     shared.into_iter().collect()
 }
 
+/// Whether `path` matches any declared-surface glob.
+///
+/// The asymmetric membership test containment is built on, and the one a
+/// derived-reference search asks about a path it found (#5300): does *this*
+/// surface admit *this* path. Deliberately not
+/// [`SurfacePattern::intersects`], which is symmetric — an `Exact` surface
+/// glob "intersects" a path it does not cover.
+///
+/// Lives here rather than in the chassis so both readers can reach it: the
+/// member-Verify containment check and the xtask search, which depends on this
+/// crate and not on the chassis.
+///
+/// A glob outside the surface grammar is skipped rather than treated as
+/// covering anything — the same fail-closed parse the seal door applies.
+#[must_use]
+pub fn path_in_surface(surface: &[String], path: &str) -> bool {
+    surface.iter().filter_map(|glob| SurfacePattern::parse(glob)).any(|pattern| match pattern {
+        SurfacePattern::Exact(exact) => path == exact,
+        SurfacePattern::Subtree(prefix) => {
+            path == prefix || path.starts_with(&prefix) && path.as_bytes().get(prefix.len()) == Some(&b'/')
+        }
+    })
+}
+
 /// A policy-rule glob, parsed once so the set-algebra helpers are total over a
 /// type rather than re-inspecting the raw string. `Exact` / `Subtree` share
 /// [`SurfacePattern`]; a slashless gitignore pattern is unanchored; anything
@@ -186,7 +306,10 @@ pub fn surface_intersection(left: &[String], right: &[String]) -> Vec<String> {
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum RulePattern {
     Surface(SurfacePattern),
-    Unanchored,
+    /// A slashless pattern, matching at any depth. Carries its normalised text
+    /// so the granularity predicate can tell a literal name (`Cargo.lock`)
+    /// from a wildcard (`*.md`); the tier resolver ignores it.
+    Unanchored(String),
     Glob(Vec<String>),
 }
 
@@ -194,7 +317,7 @@ impl RulePattern {
     fn parse(glob: &str) -> Self {
         let (pattern, root_anchored) = normalise_pattern(glob);
         if !(root_anchored || pattern.contains('/')) {
-            return Self::Unanchored;
+            return Self::Unanchored(String::from(pattern));
         }
         if let Some(stripped) = pattern.strip_suffix("/**") {
             let prefix = stripped.trim_end_matches('/');
@@ -208,13 +331,159 @@ impl RulePattern {
     }
 }
 
+impl RulePattern {
+    /// Whether this rule addresses a file rather than a tree — its final
+    /// segment is a name, not `**`.
+    fn is_file_granular(&self) -> bool {
+        match self {
+            Self::Surface(SurfacePattern::Exact(_)) => true,
+            Self::Surface(SurfacePattern::Subtree(_)) => false,
+            Self::Unanchored(pattern) => !has_meta(pattern),
+            Self::Glob(segments) => segments.last().is_some_and(|last| last != "**"),
+        }
+    }
+
+    /// Whether this rule matches exactly `path`.
+    ///
+    /// A **full** match on both sides, unlike the deliberately prefix-tolerant
+    /// [`rule_intersects_subtree`]: the tier resolver asks "could this rule
+    /// touch anything under here" and answers yes the moment the surface
+    /// segments run out, which would report `crates/*/Cargo.toml` as naming the
+    /// bare path `crates/aether-fs`. This asks "does this rule name this file",
+    /// so it has to consume both sides.
+    fn matches_path(&self, path: &str) -> bool {
+        match self {
+            Self::Surface(SurfacePattern::Exact(exact)) => exact == path,
+            Self::Surface(SurfacePattern::Subtree(_)) => false,
+            // A slashless pattern matches at any depth, against the file name.
+            Self::Unanchored(pattern) => {
+                path.rsplit('/').next().is_some_and(|name| glob_match(pattern.as_bytes(), name.as_bytes()))
+            }
+            Self::Glob(segments) => segments_match(segments, path),
+        }
+    }
+}
+
+/// Whether `segments` matches every segment of `path`, both sides consumed.
+///
+/// Iterative with star backtracking over segments, the shape [`glob_match`]
+/// uses over bytes — a `**` segment is the backtrack point. Written this way
+/// rather than as a second memoized recursion because the input is a
+/// user-declared surface entry.
+fn segments_match(segments: &[String], path: &str) -> bool {
+    let text: Vec<&str> = path.split('/').collect();
+    let (mut rule, mut part) = (0_usize, 0_usize);
+    let mut star: Option<(usize, usize)> = None;
+    while part < text.len() {
+        let mut advanced = false;
+        if rule < segments.len() {
+            if segments[rule] == "**" {
+                star = Some((rule + 1, part));
+                rule += 1;
+                advanced = true;
+            } else if glob_match(segments[rule].as_bytes(), text[part].as_bytes()) {
+                rule += 1;
+                part += 1;
+                advanced = true;
+            }
+        }
+        if !advanced {
+            match star {
+                Some((after_star, consumed)) => {
+                    rule = after_star;
+                    part = consumed + 1;
+                    star = Some((after_star, consumed + 1));
+                }
+                None => return false,
+            }
+        }
+    }
+    while rule < segments.len() && segments[rule] == "**" {
+        rule += 1;
+    }
+    rule == segments.len()
+}
+
 impl ApprovalPolicy {
+    /// Whether some file-granular rule names exactly `path`.
+    ///
+    /// Tier is not consulted: the question is whether the policy *knows* the
+    /// file, not what it routes it to, so a file-granular `auto` rule admits
+    /// the entry the same way a `human` one does.
+    #[must_use]
+    pub fn names_file(&self, path: &str) -> bool {
+        self.rules
+            .iter()
+            .map(|rule| RulePattern::parse(&rule.glob))
+            .any(|rule| rule.is_file_granular() && rule.matches_path(path))
+    }
+
+    /// The declared-surface entries that name one file no file-granular rule
+    /// names — in declaration order, deduplicated.
+    ///
+    /// Empty is admissible. A glob outside the surface grammar is skipped: the
+    /// admission doors refuse it first, and there is no pattern here to judge.
+    ///
+    /// The policy is what defines "a file worth naming". Six of its rules
+    /// address a file rather than a tree, that list is owner-signed and already
+    /// consulted at every seal, so reusing it adds no second table to drift —
+    /// the same rules that decide tier decide granularity.
+    #[must_use]
+    pub fn unnamed_file_entries(&self, surface: &[String]) -> Vec<String> {
+        let mut refused: Vec<String> = Vec::new();
+        for glob in surface {
+            let Some(SurfacePattern::Exact(path)) = SurfacePattern::parse(glob) else {
+                continue;
+            };
+            if !self.names_file(&path) && !refused.contains(glob) {
+                refused.push(glob.clone());
+            }
+        }
+        refused
+    }
+
     /// Whether every rule glob is inside the policy grammar. The host file
     /// loader refuses a policy that is not; a sealed value is authored whole
     /// and is resolved as sealed.
     #[must_use]
     pub fn rules_in_grammar(&self) -> bool {
         self.rules.iter().all(|rule| valid_policy_glob(&rule.glob))
+    }
+
+    /// The tier of a *crate-derived* surface: the most restrictive tier over
+    /// the files it protects, and the policy default when it protects none.
+    ///
+    /// A crate-derived surface names whole crates and their reverse-dependency
+    /// closure, so most of its globs are subtrees the work is merely allowed to
+    /// reach rather than places it intends to change. Resolving the tier over
+    /// those would put every bloom that so much as depends on a guarded crate
+    /// in front of the owner, which is the gate refusing work rather than
+    /// judging it — the closure is a containment bound, not a statement of
+    /// intent.
+    ///
+    /// What *is* a statement of intent is the `## Protected files` block: the
+    /// scope naming, one literal path at a time, a file the policy guards and
+    /// this work means to touch. Those are the entries the tier reads. They are
+    /// exactly the surface's file-granular entries, because the granularity
+    /// check refuses a literal no `human`/`judge` rule names, so nothing else
+    /// can be sitting in that position.
+    ///
+    /// The globs never lower the tier either: the protected literals resolve
+    /// through [`resolve_surface`](Self::resolve_surface), which folds in the
+    /// policy default for anything a rule does not cover.
+    #[must_use]
+    pub fn resolve_protected(&self, surface: &[String]) -> Tier {
+        let protected: Vec<String> = surface
+            .iter()
+            .filter(|glob| matches!(SurfacePattern::parse(glob), Some(SurfacePattern::Exact(_))))
+            .cloned()
+            .collect();
+
+        if protected.is_empty() {
+            self.default
+        } else {
+            self.resolve_surface(&protected)
+        }
     }
 
     /// The most restrictive tier over every path a declared surface permits — the
@@ -333,7 +602,7 @@ fn normalise_pattern(glob: &str) -> (&str, bool) {
 /// richer glob keeps the segment matcher.
 fn rule_intersects_subtree(rule: &RulePattern, surface: &SurfacePattern) -> bool {
     match rule {
-        RulePattern::Unanchored => true,
+        RulePattern::Unanchored(_) => true,
         RulePattern::Surface(rule) => rule.intersects(surface),
         RulePattern::Glob(segments) => {
             let policy_segments: Vec<&str> = segments.iter().map(String::as_str).collect();
@@ -699,5 +968,147 @@ mod tests {
         let over_cap =
             ApprovalPolicy { default: Tier::Judge, rules: vec![rule(&vec!["a"; 4000].join("/"), Tier::Auto)] };
         assert!(!over_cap.rules_in_grammar(), "an over-cap policy glob must fail the grammar");
+    }
+
+    mod amendment {
+        use alloc::string::{String, ToString as _};
+        use alloc::vec;
+        use alloc::vec::Vec;
+
+        use super::super::{Tier, gate_widening, surface_additions, tier_verdict};
+        use super::policy;
+
+        fn globs(items: &[&str]) -> Vec<String> {
+            items.iter().map(|item| (*item).to_string()).collect()
+        }
+
+        #[test]
+        fn a_path_the_surface_already_permits_is_not_an_addition() {
+            // The "the lane could have finished where it was" answer. Widening
+            // on it would advance the commission tip and cost an approval for
+            // a delta of nothing.
+            assert_eq!(
+                surface_additions(
+                    &globs(&["crates/aether-bloomery/**"]),
+                    &globs(&["crates/aether-bloomery/src/lib.rs", "crates/aether-bloomery/**"]),
+                ),
+                Ok(Vec::new()),
+            );
+        }
+
+        #[test]
+        fn additions_keep_request_order_and_collapse_duplicates() {
+            assert_eq!(
+                surface_additions(&globs(&["crates/a/**"]), &globs(&["crates/z/**", "crates/b/**", "crates/z/**"])),
+                Ok(globs(&["crates/z/**", "crates/b/**"])),
+                "the operator reads this list back beside the reasons it arrived with",
+            );
+        }
+
+        #[test]
+        fn an_out_of_grammar_glob_is_refused_by_name_rather_than_skipped() {
+            // The request comes from an untrusted lane. Skipping the entry
+            // would silently narrow the amendment the operator believes they
+            // granted.
+            assert_eq!(
+                surface_additions(&globs(&["crates/a/**"]), &globs(&["crates/*/src/lib.rs"])),
+                Err("crates/*/src/lib.rs".to_string()),
+            );
+        }
+
+        #[test]
+        fn the_gate_names_the_added_path_that_cost_the_amendment() {
+            // The load-bearing half of a refusal: "widened to human" is not
+            // actionable, "`/Cargo.toml` resolved human" is.
+            // `crates/<name>/src/**` and not `crates/<name>/**`: the whole-crate
+            // subtree contains `crates/<name>/Cargo.toml`, which the policy's
+            // manifest rule already resolves human, so it would stand at the
+            // ceiling before the amendment and demonstrate no rise at all.
+            let verdict = tier_verdict(&policy(), &globs(&["crates/aether-bloomery/src/**"]), &globs(&["/Cargo.toml"]));
+
+            assert_eq!(verdict.existing, Tier::Judge);
+            assert_eq!(verdict.widened, Tier::Human);
+            assert_eq!(
+                gate_widening(&verdict, Tier::Auto),
+                Err(vec![("/Cargo.toml".to_string(), Tier::Human)]),
+                "the refusal names the path and the tier it resolved",
+            );
+        }
+
+        #[test]
+        fn a_widening_inside_the_ceiling_is_granted() {
+            let verdict = tier_verdict(&policy(), &globs(&["crates/aether-bloomery/**"]), &globs(&["crates/other/**"]));
+            assert_eq!(gate_widening(&verdict, verdict.existing), Ok(()));
+        }
+    }
+
+    mod granularity {
+        use alloc::string::{String, ToString as _};
+        use alloc::vec;
+        use alloc::vec::Vec;
+
+        use super::policy;
+
+        fn unnamed(entries: &[&str]) -> Vec<String> {
+            policy().unnamed_file_entries(&entries.iter().map(|entry| (*entry).to_string()).collect::<Vec<_>>())
+        }
+
+        #[test]
+        fn a_plain_file_under_a_crate_is_not_named_by_the_policy() {
+            // The predicate reusing the prefix-tolerant `rule_intersects_subtree`
+            // would let the `crates/aether-chassis-desktop/**` directory rule
+            // report this file as named, and the whole gate becomes a no-op.
+            assert_eq!(
+                unnamed(&["crates/aether-chassis-desktop/src/window.rs"]),
+                vec!["crates/aether-chassis-desktop/src/window.rs".to_string()],
+            );
+        }
+
+        #[test]
+        fn a_crate_subtree_declaration_is_never_file_granular() {
+            // A predicate inspecting raw strings instead of the parsed grammar
+            // would refuse every well-formed surface in the fleet.
+            assert!(unnamed(&["crates/foo/src/**"]).is_empty());
+        }
+
+        #[test]
+        fn a_bare_directory_path_is_file_granular_and_refused() {
+            // `matches_path` falling back to `intersects` succeeds the moment the
+            // surface segments run out, which would admit `crates/aether-fs`
+            // through the `crates/*/Cargo.toml` rule.
+            assert_eq!(unnamed(&["crates/aether-fs"]), vec!["crates/aether-fs".to_string()]);
+        }
+
+        #[test]
+        fn the_root_manifest_is_admitted_because_the_policy_names_it() {
+            // Forgetting `normalise_pattern`'s leading-slash strip leaves the rule
+            // `/Cargo.toml` unequal to the surface entry `Cargo.toml` — and a
+            // surface glob may not carry the slash, so that spelling is the only
+            // one a surface can hold. The owner's own special file would be
+            // refused.
+            assert!(unnamed(&["Cargo.toml"]).is_empty());
+        }
+
+        #[test]
+        fn a_crate_manifest_is_admitted_through_the_wildcard_segment_rule() {
+            // A matcher handling only literal rules drops `crates/*/Cargo.toml`
+            // and refuses every dependency edit the policy routes to the owner.
+            assert!(unnamed(&["crates/aether-fs/Cargo.toml"]).is_empty());
+        }
+
+        #[test]
+        fn a_file_matched_only_by_a_directory_rule_is_refused() {
+            // Treating any matching rule as a naming rule admits a file under
+            // every `**` tree in the policy.
+            assert_eq!(unnamed(&["crates/aether-data/src/lib.rs"]), vec!["crates/aether-data/src/lib.rs".to_string()],);
+        }
+
+        #[test]
+        fn entries_are_reported_in_declaration_order_and_deduplicated() {
+            assert_eq!(
+                unnamed(&["crates/a/src/lib.rs", "crates/foo/src/**", "crates/a/src/lib.rs", "crates/b/src/main.rs"]),
+                vec!["crates/a/src/lib.rs".to_string(), "crates/b/src/main.rs".to_string()],
+            );
+        }
     }
 }

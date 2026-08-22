@@ -1,5 +1,6 @@
 //! Coordinator REST verbs. Every request body is a typed serde value.
 
+use aether_bloomery::{ScopeRevision, Statement};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -7,8 +8,9 @@ use serde_json::Value;
 
 use super::Endpoint;
 use super::dto::{
-    BloomSpec, BloomView, ConfigRequest, ConfigView, DraftPatch, DraftView, JournalEntry, JournalView, OutcomeView,
-    SealRequest, SupersedeRequest, ViewDocument,
+    ApprovalStoredView, BloomSpec, BloomView, CancelCommissionRequest, CommissionCancelledView, CommissionShowView,
+    ConfigRequest, ConfigValueView, ConfigView, DraftPatch, DraftView, JournalEntry, JournalView, OutcomeView,
+    ScopeRevisionWrittenView, SealRequest, SupersedeRequest, ViewDocument, WithdrawRequest,
 };
 use super::http;
 use super::plan::spec_id;
@@ -75,6 +77,40 @@ impl<'a> Client<'a> {
 
     pub fn supersede(&self, bloom_id: &str, request: &SupersedeRequest) -> Result<OutcomeView> {
         self.send("POST", &format!("/blooms/{bloom_id}/supersede"), request)
+    }
+
+    /// Take one member out of a walking bloom without superseding it (#5327).
+    pub fn withdraw(&self, bloom_id: &str, workpiece: &str, request: &WithdrawRequest) -> Result<OutcomeView> {
+        self.send("POST", &format!("/blooms/{bloom_id}/members/{workpiece}/withdraw"), request)
+    }
+
+    /// One commission's tip, typed, plus the approvals stored against it.
+    pub fn commission(&self, id: &str) -> Result<CommissionShowView> {
+        self.get(&format!("/commissions/{id}"))
+    }
+
+    /// Write `revision` as the commission's next scope revision.
+    ///
+    /// Serializes the typed value rather than a rendering: the REST edge
+    /// accepts a digest as either hex or the canonical byte array, so the
+    /// successor's stored bytes are exactly what the widening produced.
+    pub fn write_revision(&self, id: &str, revision: &ScopeRevision) -> Result<ScopeRevisionWrittenView> {
+        self.send("POST", &format!("/commissions/{id}/revisions"), revision)
+    }
+
+    /// Submit `statement` as an approval of the commission's current revision.
+    pub fn approve(&self, id: &str, statement: &Statement) -> Result<ApprovalStoredView> {
+        self.send("POST", &format!("/commissions/{id}/approvals"), statement)
+    }
+
+    /// Close an open commission with a signed cancel envelope.
+    pub fn cancel(&self, id: &str, request: &CancelCommissionRequest) -> Result<CommissionCancelledView> {
+        self.send("POST", &format!("/commissions/{id}/cancel"), request)
+    }
+
+    /// A stored configuration, decoded through its kind's schema.
+    pub fn config(&self, digest: &str) -> Result<ConfigValueView> {
+        self.get(&format!("/configs/{digest}"))
     }
 
     /// The sealed spec that minted `bloom_id`, recovered from the journal.
@@ -173,7 +209,9 @@ mod tests {
                 ("GET", Some(2)) => (200, page(1, &json!({ "n": 1 }), false, None)),
                 _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
             },
-            |port| Client::new(&Endpoint { host: "127.0.0.1".to_owned(), port }).journal().expect("full walk"),
+            |port| {
+                Client::new(&Endpoint { host: "127.0.0.1".to_owned(), port, token: None }).journal().expect("full walk")
+            },
         );
 
         let facts: Vec<_> = journal.records.iter().map(|record| record.event.fact.clone()).collect();
@@ -197,7 +235,7 @@ mod tests {
                 _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
             },
             |port| {
-                Client::new(&Endpoint { host: "127.0.0.1".to_owned(), port })
+                Client::new(&Endpoint { host: "127.0.0.1".to_owned(), port, token: None })
                     .journal()
                     .expect_err("truncated without cursor")
             },

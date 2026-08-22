@@ -9,15 +9,19 @@ use core::fmt;
 use aether_data::wire::{Error as WireError, from_bytes};
 use serde::{Deserialize, Serialize};
 
+use super::decisions_v1::DecisionsV1;
 use super::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,
     AggregateVerifyError, AttemptCompletedError, Decision, FoldConflictError, GrantAttemptsError, HostFaultError,
-    IntegrateError, LandError, LandingRejectedError, MemberExecutorFaultError, OperatorHoldError, OperatorRepairError,
-    OrphanClaimReleaseError, ResolveError, SealError, SpliceError, SupersedeError, VerifyFailedError,
+    IntegrateError, LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError,
+    OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ResolveError, SealError, SpliceError,
+    SupersedeError, SuppressionDispositionError, SurfaceRequestedError, VerifyFailedError, WithdrawError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::{LandingReceipt, OrphanClaimReleaseCompletion, ResolvedBloom, SpendQuiesce, VerifyFailureSet};
+use crate::values::{
+    EvictedHolder, LandingReceipt, OrphanClaimReleaseCompletion, ResolvedBloom, SpendQuiesce, VerifyFailureSet,
+};
 
 /// The result of reducing one event: an outcome plus the ordered effects that
 /// enter the transactional outbox.
@@ -25,8 +29,14 @@ use crate::values::{LandingReceipt, OrphanClaimReleaseCompletion, ResolvedBloom,
 pub struct Decisions {
     /// What the event resolved to.
     pub outcome: Outcome,
-    /// The ordered effects to apply — empty when the outcome is a rejection
-    /// or a duplicate.
+    /// The ordered effects to apply.
+    ///
+    /// Empty for a duplicate, and for a rejection that has nothing to say. An
+    /// operator-visible boundary's rejection carries one
+    /// [`Decision::RecordRefusal`] (ADR-0206) — a rejected event is journaled
+    /// with its effects, so the refusal folds on replay exactly as it did at
+    /// admission. Nothing else rides a rejection: no membership claim, no
+    /// outbox row.
     pub effects: Vec<Decision>,
 }
 
@@ -37,9 +47,14 @@ impl Decisions {
 }
 
 /// The writing-schema identity this binary stamps beside every journaled
-/// [`Decisions`] blob (ADR-0187). A row whose stamp is not this value has no
-/// upcast here and refuses replay by name.
-pub const DECISIONS_SCHEMA: &str = "aether.bloomery.decisions.v1";
+/// [`Decisions`] blob (ADR-0187). A row whose stamp is not this value and not
+/// a known prior identity is refused by name.
+pub const DECISIONS_SCHEMA: &str = "aether.bloomery.decisions.v2";
+
+/// The writing-schema identity of rows encoded before #5330 appended
+/// `reconcile_assembles_base` to [`StageProgress`](super::StageProgress). An
+/// unstamped row is this identity too — it predates the column.
+pub const DECISIONS_SCHEMA_V1: &str = "aether.bloomery.decisions.v1";
 
 /// Why recorded decisions could not be folded (ADR-0187).
 #[derive(Debug)]
@@ -69,14 +84,18 @@ impl fmt::Display for DecisionsSchemaError {
 /// Decode journaled [`Decisions`] under the writing-schema identity stamped
 /// beside them (ADR-0187).
 ///
-/// The current identity decodes as today. A missing stamp is the implicit
-/// current-at-migration identity — rows written before the column existed,
-/// named here rather than treated as a zero-effect table or a fatal abort of
-/// an otherwise healthy shape. Any other identity is a named refusal: this
-/// binary has no upcast for it.
+/// The current identity decodes as today. A missing stamp is the implicit v1
+/// identity — rows written before the column existed, named here rather than
+/// treated as a zero-effect table or a fatal abort of an otherwise healthy
+/// shape. v1 (stamped or unstamped) upcasts by filling
+/// `StageProgress::reconcile_assembles_base` as `false`. Any other identity
+/// is a named refusal: this binary has no upcast for it.
 pub fn decode_recorded_decisions(bytes: &[u8], schema: Option<&str>) -> Result<Decisions, DecisionsSchemaError> {
     match schema {
-        None | Some(DECISIONS_SCHEMA) => from_bytes(bytes).map_err(DecisionsSchemaError::Decode),
+        None | Some(DECISIONS_SCHEMA_V1) => {
+            from_bytes::<DecisionsV1>(bytes).map(Decisions::from).map_err(DecisionsSchemaError::Decode)
+        }
+        Some(DECISIONS_SCHEMA) => from_bytes(bytes).map_err(DecisionsSchemaError::Decode),
         Some(found) => Err(DecisionsSchemaError::Unknown { found: String::from(found), current: DECISIONS_SCHEMA }),
     }
 }
@@ -262,8 +281,10 @@ pub enum Outcome {
         /// Which verify pass was dispatched.
         roll: u32,
     },
-    /// A passing aggregate verify handed the same fold to the aggregate review:
-    /// the fold builds, so it is now worth judging.
+    /// A passing aggregate verify whose sibling review has not returned yet:
+    /// the fold builds, and the bloom waits on the critic judging it in
+    /// parallel. Nothing is dispatched from here — both gates went out
+    /// together.
     AggregateVerifyPassed {
         /// The verified bloom.
         bloom: BloomId,
@@ -655,6 +676,126 @@ pub enum Outcome {
         /// The lane's evidence artifact — the diagnosis an operator reads.
         reason: Digest,
     },
+    /// A member declined and asked for the surface its work requires
+    /// (ADR-0207). Appended last so every prior outcome keeps its wire
+    /// discriminant.
+    SurfaceRequested {
+        /// The bloom.
+        bloom: BloomId,
+        /// The member now awaiting a surface amendment.
+        workpiece: WorkpieceId,
+        /// The stage it declined at.
+        stage: StageId,
+        /// The request's content-addressed id — the digest the granting half's
+        /// authorization names.
+        request: Digest,
+        /// How many times this member has requested in this bloom, including
+        /// this one (ADR-0207 §Amendments are budgeted).
+        requests: u32,
+    },
+    /// A surface-request admission was refused.
+    SurfaceRequestRejected(SurfaceRequestedError),
+    /// An operator withdrew members from a walking bloom (#5327). Appended
+    /// last so every prior outcome keeps its wire discriminant.
+    MembersWithdrawn {
+        /// The bloom the members left.
+        bloom: BloomId,
+        /// Every member withdrawn by this act, the operator-named ones first
+        /// and each cascaded dependent after, in sealed member order.
+        withdrawn: Vec<WorkpieceId>,
+        /// Whether that emptied the bloom, moving it to
+        /// [`BloomStatus::Withdrawn`](crate::BloomStatus::Withdrawn).
+        terminal: bool,
+    },
+    /// A withdrawal was refused. An operator-door refusal: the REST edge
+    /// answers it `422`, so a script that only checks the status cannot read a
+    /// refused withdrawal as an applied one.
+    WithdrawRejected(WithdrawError),
+    /// A passing aggregate review whose sibling verify has not returned yet.
+    ///
+    /// The two composite gates run against one fold at the same time, and a
+    /// landing needs both, so a review that arrives first records its pass and
+    /// the bloom waits. The verify's own arrival is what resolves it. Appended
+    /// so every prior outcome keeps its wire discriminant.
+    AggregateReviewPassed {
+        /// The reviewed bloom.
+        bloom: BloomId,
+        /// The review verdicts consumed, this one included.
+        rolls: u32,
+    },
+    /// A composite gate refused a fold whose weave repair is already dispatched.
+    ///
+    /// The two gates judge the same tree concurrently, so both can refuse it.
+    /// The second refusal files its finding on the composition's channel and
+    /// stops there: a second repair lap would double-spend the weave budget and
+    /// put two lanes on one seam. Appended so every prior outcome keeps its wire
+    /// discriminant.
+    CompositionRepairInFlight {
+        /// The bloom whose composition is already under repair.
+        bloom: BloomId,
+        /// Which gate filed this second refusal.
+        refused_at: StageId,
+    },
+    /// A construct lane's observed write set moved the bloom's file-lease
+    /// table (ADR-0204). Appended last so every prior outcome keeps its wire
+    /// discriminant.
+    LeasesObserved {
+        /// The bloom whose lanes contend.
+        bloom: BloomId,
+        /// The observed member.
+        workpiece: WorkpieceId,
+        /// The paths this observation took a lease on, in path order. Empty
+        /// when the member already held everything it was seen writing.
+        acquired: Vec<String>,
+        /// The later-canonical siblings this observation evicted, in member
+        /// order, each with the path that took it. Each has its lane cancelled
+        /// and re-dispatches once `workpiece` integrates.
+        evicted: Vec<EvictedHolder>,
+    },
+    /// A lane-write observation was refused.
+    LeaseObservationRejected(LeaseObservationError),
+    /// A reviewer answered a member's standing suppression requests
+    /// (ADR-0193). Appended last so every prior outcome keeps its wire
+    /// discriminant.
+    SuppressionAnswered {
+        /// The bloom the answered member belongs to.
+        bloom: BloomId,
+        /// The answered member.
+        workpiece: WorkpieceId,
+        /// Whether the member re-opens at `Refine`. A grant lets the candidate
+        /// stand; a denial spends a repair roll exactly as any other bounced
+        /// lap does.
+        reopened: bool,
+    },
+    /// A suppression disposition was refused.
+    SuppressionRejected(SuppressionDispositionError),
+    /// A `verify.base` dispatch was queued for an unproven sealed base
+    /// (ADR-0200). Appended so every prior outcome keeps its wire discriminant.
+    BaseVerifyQueued {
+        /// The commit the queued run will check out.
+        base: Digest,
+    },
+    /// A whole-workspace base verify passed, and the withheld member dispatches
+    /// it was holding went out. Appended so every prior outcome keeps its wire
+    /// discriminant.
+    BaseProven {
+        /// The commit the verify ran at.
+        base: Digest,
+        /// The tree it peeled to.
+        tree: Digest,
+        /// The blooms whose deferred entry dispatches this verdict released.
+        released: Vec<BloomId>,
+    },
+    /// A whole-workspace base verify failed. Member entry stays withheld.
+    /// Appended so every prior outcome keeps its wire discriminant.
+    BaseRefused {
+        /// The commit the verify ran at.
+        base: Digest,
+        /// The tree it peeled to.
+        tree: Digest,
+        /// The verifier identities that failed together.
+        failed: VerifyFailureSet,
+    },
 }
 
 impl Outcome {
@@ -674,6 +815,8 @@ impl Outcome {
                 | Self::AdjudicationRejected(_)
                 | Self::OperatorRepairRejected(_)
                 | Self::OperatorHoldRejected(_)
+                | Self::WithdrawRejected(_)
+                | Self::SuppressionRejected(_)
         )
     }
 }
@@ -682,31 +825,199 @@ impl Outcome {
 mod tests {
     use super::*;
     use crate::digest::Digest;
-    use crate::ids::BloomId;
-    use aether_data::wire::to_vec;
+    use crate::ids::{BloomId, StageId, WorkpieceId};
+    use crate::values::{
+        AgentProfile, ConfigRegistry, ExecutionLimits, Harness, NetworkProfile, ReasoningEffort, ToolPolicy,
+        Transformation, VerifyFailureSet,
+    };
+    use aether_data::wire::{from_bytes, to_vec};
 
-    fn sealed() -> Decisions {
-        Decisions { outcome: Outcome::Sealed(BloomId(Digest::from_bytes([1; 32]))), effects: Vec::new() }
+    // Tripwire: wire bytes of a DecisionsV1 whose effects are DispatchAttempt,
+    // AdvanceStage with StageProgressV1, then RecordObservation — so the bool
+    // #5330 added sits mid-stream. Decoding these as current Decisions returns
+    // InvalidBool; the v1 upcast must keep the trailing observation intact.
+    const V1_ROW: &[u8] = &[
+        1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3,
+        0, 0, 0, 11, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 2, 0, 0, 0, 119, 112, 3, 0, 0, 0, 19, 0, 0, 0, 99, 111, 110, 115, 116, 114, 117, 99, 116, 46, 105, 109,
+        112, 108, 101, 109, 101, 110, 116, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+        2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 16, 0, 0, 0, 105, 97, 109, 97, 47, 99, 111, 110, 115, 116, 114,
+        117, 99, 116, 58, 49, 60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+        3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 0, 3, 0, 0, 0, 4, 0, 0, 0, 103, 114, 111, 107, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 119, 112, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 25, 0, 0,
+        0, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9,
+    ];
+
+    fn digest(seed: u8) -> Digest {
+        Digest::from_bytes([seed; 32])
+    }
+
+    fn bloom() -> BloomId {
+        BloomId(digest(1))
+    }
+
+    fn workpiece() -> WorkpieceId {
+        WorkpieceId(String::from("wp"))
+    }
+
+    fn transformation() -> Transformation {
+        Transformation {
+            command: String::from("construct.implement"),
+            inputs: Vec::new(),
+            checkout: digest(2),
+            diff_base: None,
+            outputs: Vec::new(),
+            image: String::from("iama/construct:1"),
+            limits: ExecutionLimits { wall_clock_secs: 60 },
+            network: NetworkProfile::None,
+            description: None,
+            model: None,
+        }
+    }
+
+    fn profile() -> AgentProfile {
+        AgentProfile {
+            harness: Harness::Grok,
+            model: String::from("grok"),
+            effort: ReasoningEffort::Low,
+            tools: ToolPolicy::None,
+        }
+    }
+
+    fn dispatch() -> Decision {
+        Decision::DispatchAttempt {
+            bloom: bloom(),
+            workpiece: workpiece(),
+            stage: StageId::Construct,
+            transformation: transformation(),
+            scope_revision: digest(3),
+            candidate: None,
+            profile: profile(),
+            configs: ConfigRegistry::default(),
+        }
     }
 
     #[test]
-    fn current_and_missing_schema_decode() {
-        // A missing stamp is the implicit current-at-migration identity — the
-        // posture that lets a v2 store fold after the column appears.
-        let bytes = to_vec(&sealed()).expect("decisions encode");
-        decode_recorded_decisions(&bytes, Some(DECISIONS_SCHEMA)).expect("current identity decodes");
-        decode_recorded_decisions(&bytes, None).expect("missing stamp decodes as implicit current");
+    fn a_v1_row_carrying_a_dispatch_decodes_and_upcasts() {
+        let stamped = decode_recorded_decisions(V1_ROW, Some(DECISIONS_SCHEMA_V1)).expect("stamped v1 decodes");
+        let unstamped = decode_recorded_decisions(V1_ROW, None).expect("unstamped row is v1");
+        assert_eq!(stamped, unstamped);
+
+        match &stamped.effects[..] {
+            [
+                Decision::DispatchAttempt { .. },
+                Decision::AdvanceStage { progress, .. },
+                Decision::RecordObservation { head },
+            ] => {
+                assert!(!progress.reconcile_assembles_base, "pre-#5330 Reconcile never recorded an assembly");
+                assert_eq!(*head, digest(9), "the trailing effect survives the missing mid-stream bool");
+            }
+            other => panic!("expected dispatch, advance, observation; got {other:?}"),
+        }
+
+        assert!(
+            matches!(from_bytes::<Decisions>(V1_ROW), Err(WireError::InvalidBool(_))),
+            "v1 bytes are not the current shape: the missing bool sits mid-stream"
+        );
     }
 
     #[test]
-    fn unknown_schema_refuses_by_name() {
-        // The incident this names: a reshape without an upcast must refuse
-        // replay by the identities involved, never silently invent a value.
-        let error = decode_recorded_decisions(b"x", Some("aether.bloomery.decisions.v0"))
+    fn a_v2_row_decodes_as_current() {
+        let recorded = Decisions {
+            outcome: Outcome::Sealed(bloom()),
+            effects: vec![
+                dispatch(),
+                Decision::AdvanceStage {
+                    bloom: bloom(),
+                    workpiece: workpiece(),
+                    progress: crate::StageProgress {
+                        stage: StageId::Construct,
+                        attempts: 1,
+                        candidate: None,
+                        repair_rolls: 0,
+                        seen_verify_failures: VerifyFailureSet::EMPTY,
+                        fold_checkpoint: None,
+                        fold_conflict_evidence: None,
+                        reconcile_assembles_base: true,
+                    },
+                },
+                Decision::RecordObservation { head: digest(9) },
+            ],
+        };
+        let bytes = to_vec(&recorded).expect("v2 encodes");
+        let decoded = decode_recorded_decisions(&bytes, Some(DECISIONS_SCHEMA)).expect("current identity decodes");
+        assert_eq!(decoded, recorded);
+    }
+
+    fn minted_v2_row() -> Decisions {
+        Decisions {
+            outcome: Outcome::Sealed(bloom()),
+            effects: vec![
+                dispatch(),
+                Decision::AdvanceStage {
+                    bloom: bloom(),
+                    workpiece: workpiece(),
+                    progress: crate::StageProgress {
+                        stage: StageId::Construct,
+                        attempts: 1,
+                        candidate: None,
+                        repair_rolls: 0,
+                        seen_verify_failures: VerifyFailureSet::EMPTY,
+                        fold_checkpoint: None,
+                        fold_conflict_evidence: None,
+                        reconcile_assembles_base: true,
+                    },
+                },
+                Decision::RecordObservation { head: digest(9) },
+            ],
+        }
+    }
+
+    // Tripwire: a variant *inserted* rather than appended shifts every later
+    // discriminant and the boot replay misreads the journal, which is the
+    // #5338 abort class. These bytes are a `Decisions` whose effects include
+    // a `DispatchAttempt` followed by at least one further effect, minted
+    // once from the current shape.
+    const V2_ROW: &[u8] = &[
+        1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3,
+        0, 0, 0, 11, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 2, 0, 0, 0, 119, 112, 3, 0, 0, 0, 19, 0, 0, 0, 99, 111, 110, 115, 116, 114, 117, 99, 116, 46, 105, 109,
+        112, 108, 101, 109, 101, 110, 116, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+        2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 16, 0, 0, 0, 105, 97, 109, 97, 47, 99, 111, 110, 115, 116, 114,
+        117, 99, 116, 58, 49, 60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+        3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 0, 3, 0, 0, 0, 4, 0, 0, 0, 103, 114, 111, 107, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 119, 112, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 25, 0,
+        0, 0, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9,
+    ];
+
+    #[test]
+    fn appending_base_verify_variants_leaves_a_v2_row_decoding() {
+        // Tripwire: a variant inserted rather than appended shifts every later
+        // discriminant and the boot replay misreads the journal, which is the
+        // #5338 abort class.
+        let expected = minted_v2_row();
+        let stamped = decode_recorded_decisions(V2_ROW, Some(DECISIONS_SCHEMA)).expect("checked-in v2 decodes");
+        assert_eq!(stamped, expected);
+    }
+
+    #[test]
+    fn an_unknown_stamp_is_refused_by_name() {
+        // A reshape without an upcast must refuse replay by the identities
+        // involved, never silently invent a value.
+        let error = decode_recorded_decisions(b"x", Some("aether.bloomery.decisions.v3"))
             .expect_err("an unknown identity must refuse");
         let text = format!("{error}");
-        assert!(text.contains("no migration from schema `aether.bloomery.decisions.v0`"), "{text}");
+        assert!(text.contains("no migration from schema `aether.bloomery.decisions.v3`"), "{text}");
         assert!(text.contains(DECISIONS_SCHEMA), "{text}");
         assert!(text.contains("kind decisions"), "{text}");
+        match error {
+            DecisionsSchemaError::Unknown { found, current } => {
+                assert_eq!(found, "aether.bloomery.decisions.v3");
+                assert_eq!(current, DECISIONS_SCHEMA);
+            }
+            other @ DecisionsSchemaError::Decode(_) => panic!("expected Unknown, got {other:?}"),
+        }
     }
 }

@@ -82,6 +82,13 @@ pub struct GitSourceReplica {
     token: String,
     transient_redrive_limit: usize,
     transient_redrives: Mutex<Option<TransientRedrive>>,
+    // The authority's mainline sha as of the last push this process made, or
+    // `None` before it has made one. Compared against the live ref to notice a
+    // ref advance no coordinator event announced (#5260). Process-local by
+    // design: a fresh process knows nothing about what the previous one
+    // pushed, so its first check publishes once — which is the boot reconcile,
+    // and an idempotent push at that.
+    last_published: Mutex<Option<String>>,
 }
 
 impl GitSourceReplica {
@@ -101,6 +108,7 @@ impl GitSourceReplica {
             token: token.into(),
             transient_redrive_limit: DEFAULT_TRANSIENT_REDRIVE_LIMIT,
             transient_redrives: Mutex::new(None),
+            last_published: Mutex::new(None),
         }
     }
 
@@ -150,6 +158,9 @@ impl GitSourceReplica {
     /// The remote was unreachable, git failed, the replica rejected a
     /// mainline force-push, or a deterministic refusal (auth, absent
     /// mainline, unknown remote).
+    ///
+    /// # Panics
+    /// The published-head mutex was poisoned by a panic in an earlier push.
     pub fn push(&self) -> Result<(), ReplicaError> {
         let refs = Self::list_refs(&self.authority)?;
         let mainline = self.mainline.to_string();
@@ -157,7 +168,25 @@ impl GitSourceReplica {
             return Err(ReplicaError::Deterministic(format!("authority has no mainline ref {mainline}")));
         }
         let specs = published_refspecs(&self.mainline, &refs);
-        self.record_push(classify::classify_push(&self.git_push(&specs)?, &mainline))
+        let head = self.local_mainline_head();
+        let result = self.record_push(classify::classify_push(&self.git_push(&specs)?, &mainline));
+        if result.is_ok() {
+            *self.last_published.lock().expect("replica published-head mutex") = head;
+        }
+        result
+    }
+
+    /// The authority's current mainline commit sha, or `None` when the ref
+    /// cannot be read.
+    ///
+    /// Read *before* the push rather than after, so a ref that advances while
+    /// the push is in flight is not recorded as published by it — the next
+    /// check then republishes, which is the safe direction to be wrong in.
+    fn local_mainline_head(&self) -> Option<String> {
+        command::run_ok(&self.authority, &["rev-parse", &self.mainline.to_string()])
+            .ok()
+            .map(|stdout| stdout.trim().to_owned())
+            .filter(|head| !head.is_empty())
     }
 
     fn record_push(&self, result: Result<(), ReplicaError>) -> Result<(), ReplicaError> {
@@ -243,10 +272,32 @@ pub trait SourceReplica: Send + Sync {
     /// Transient transport failure, a rejected mainline force-push, or a
     /// deterministic refusal.
     fn publish(&self) -> Result<(), ReplicaError>;
+
+    /// The mainline head this replica has not published yet, or `None` when
+    /// the replica is up to date and nothing is owed (#5260).
+    ///
+    /// The replica reactor fires on coordinator events — a land, a roll — so a
+    /// ref that advances *without* one emits no topic and the mirror lags for
+    /// as long as the board stays quiet. Operator commits ride exactly that
+    /// path by design (ADR commits land on the batched-ratification flow), so
+    /// the window is routine rather than exotic. This is the question that
+    /// closes it: asked on a timer, answered from the ref itself.
+    ///
+    /// Defaulted to `None` — a replica with no notion of a local ref owes
+    /// nothing and is never asked to push speculatively.
+    fn unpublished_head(&self) -> Option<String> {
+        None
+    }
 }
 
 impl SourceReplica for GitSourceReplica {
     fn publish(&self) -> Result<(), ReplicaError> {
         self.push()
+    }
+
+    fn unpublished_head(&self) -> Option<String> {
+        let head = self.local_mainline_head()?;
+        let published = self.last_published.lock().expect("replica published-head mutex").clone();
+        (published.as_deref() != Some(head.as_str())).then_some(head)
     }
 }

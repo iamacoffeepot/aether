@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use aether_bloomery::{EvidenceRef, ExecutionStatus, ExecutorBackend, WorkHandle, WorkOrder};
+use aether_bloomery::{EvidenceRef, ExecutionStatus, ExecutorBackend, ObservedLaneWrites, WorkHandle, WorkOrder};
 use aether_bloomery_github::ExecutorError;
 
 use super::ExecutorPortError;
@@ -130,6 +130,13 @@ impl ExecutorBackend for RoutingExecutor {
         // record there would misroute that stream to the Actions fallback.
         self.lock().remove(&handle.nonce.0);
         Ok(refs)
+    }
+
+    /// Only the local arm has working trees this process can read (ADR-0204).
+    /// An Actions run's checkout lives on GitHub's side of the wire, so the
+    /// router does not ask it.
+    fn observe_writes(&self) -> Vec<ObservedLaneWrites> {
+        self.local.observe_writes()
     }
 }
 

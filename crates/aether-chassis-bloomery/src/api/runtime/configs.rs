@@ -1,4 +1,5 @@
-//! The configuration authoring route — `POST /configs` (ADR-0174).
+//! The configuration routes — `POST /configs` and `GET /configs/{digest}`
+//! (ADR-0174).
 //!
 //! A sealed [`ConfigRegistry`](aether_bloomery::ConfigRegistry) names each
 //! configuration by an opaque address, so without a route that computes one an
@@ -35,7 +36,7 @@
 
 use aether_actor::Manual;
 use aether_bloomery::{Digest, LoadConfigs, LoadConfigsResult, config_address};
-use aether_codec::encode_schema;
+use aether_codec::{decode_schema, encode_schema};
 use aether_data::schema::SchemaType;
 use aether_http::HttpServerResponse;
 use aether_kinds::descriptors;
@@ -66,6 +67,61 @@ pub(super) struct ConfigView {
     digest: Digest,
     /// The kind the bytes decode as — the registry key.
     kind: String,
+}
+
+/// The reply for a read: the address, the kind it was sealed under, and the
+/// value rendered back through that kind's schema.
+///
+/// The value rather than the raw bytes, because the caller that needs this is
+/// answering a question about the configuration's *content* — an operator
+/// deciding a tier against the policy a bloom actually sealed. Handing back
+/// opaque bytes would leave every such caller re-implementing the decode.
+#[derive(Serialize)]
+pub(super) struct ConfigValueView {
+    /// The content address that was read.
+    digest: Digest,
+    /// The kind the bytes decode as.
+    kind: String,
+    /// The configuration itself, shaped by that kind's schema.
+    value: Value,
+}
+
+/// `GET /configs/{digest}` — read a stored configuration back as JSON, the
+/// inverse of what [`author_config`] writes.
+///
+/// Reads the cap's own resolved-configuration cache, which the boot read and
+/// every successful authoring write both fill — the same content the pre-seal
+/// gate resolves against, which is the point: a caller answering "what tier
+/// will this bloom's seal resolve" has to read the *sealed* policy, not the
+/// host file, or its answer means nothing.
+///
+/// Unauthenticated, matching `POST /configs`: a sealed configuration is
+/// already recoverable from `/journal` plus `/artifacts/{digest}`.
+///
+/// A read before the boot hydration completes is a `503` rather than a `404`:
+/// an empty cache at that moment says nothing about whether the store holds
+/// the address, and answering "not found" would let a caller conclude a bloom
+/// sealed no policy when it sealed one this process had not yet read.
+pub(super) fn read_config(state: &ApiCapabilityState, digest: &str) -> Routed {
+    let Some(address) = hex::digest_from_hex(digest) else {
+        return Routed::Reply(error_response(400, "config address must be 64 hex characters"));
+    };
+    if !state.configs_ready {
+        return Routed::Reply(error_response(503, "stored configurations are not loaded yet"));
+    }
+    let Some((kind, bytes)) = state.configs.stored(address) else {
+        return Routed::Reply(error_response(404, "no stored configuration at that address"));
+    };
+    let Some(schema) = schema_of(kind) else {
+        return Routed::Reply(error_response(
+            500,
+            &format!("stored config kind `{kind}` is not linked in this binary"),
+        ));
+    };
+    match decode_schema(bytes, &schema) {
+        Ok(value) => Routed::Reply(json(200, &ConfigValueView { digest: address, kind: kind.to_owned(), value })),
+        Err(error) => Routed::Reply(error_response(500, &format!("stored config `{kind}` does not decode: {error}"))),
+    }
 }
 
 /// The kind's schema, from the descriptor inventory this binary links.

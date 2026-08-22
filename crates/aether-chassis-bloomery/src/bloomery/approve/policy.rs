@@ -13,6 +13,8 @@
 //! to, which is what keeps a coordinator that has authored none working
 //! unchanged. Either failure below is a gate failure, never a silent tier.
 
+use std::error::Error;
+use std::fmt;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -27,6 +29,24 @@ pub enum PolicyError {
     Unreadable(io::Error),
     /// The file was read but is not a well-formed policy (fail-closed parse).
     Malformed,
+}
+
+impl fmt::Display for PolicyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unreadable(error) => write!(f, "policy file could not be read: {error}"),
+            Self::Malformed => write!(f, "policy file is not a well-formed approval policy"),
+        }
+    }
+}
+
+impl Error for PolicyError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Unreadable(error) => Some(error),
+            Self::Malformed => None,
+        }
+    }
 }
 
 /// Parse a policy from its TOML text, or `None` if it is malformed

@@ -139,7 +139,7 @@ pub fn observing(snapshot: &Snapshot, head: u8) -> Snapshot {
 pub fn sealed_and_resolved(mainline: u8, members: Vec<Membership>, tree: u8) -> (Snapshot, BloomSpec) {
     let spec = draft(mainline, members).seal();
     let bloom = spec.id();
-    let mut snapshot = Snapshot::new(digest(mainline));
+    let mut snapshot = Snapshot::new(digest(mainline)).with_green_base(digest(mainline));
     let seal = event("seal", Fact::Seal(spec.clone()));
     snapshot = snapshot.apply(
         &seal,
@@ -174,8 +174,22 @@ pub fn sealed_and_resolved(mainline: u8, members: Vec<Membership>, tree: u8) -> 
         &reduce(&snapshot, &resolve, &ResolvedConfigs::default(), &SpendWindow::default()),
         &ResolvedConfigs::default(),
     );
-    // The fold dispatches the whole-bloom aggregate review (ADR-0153); a
-    // passing verdict bound to the integrated tree is what resolves the bloom.
+    // The fold dispatches both composite gates at once, and the bloom resolves
+    // on the join of the two passes. The mechanical verdict goes first so the
+    // critic's is the one that consumes the fold.
+    let mechanical = event(
+        "aggregate-verify-pass",
+        Fact::AggregateVerifyCompleted {
+            bloom,
+            passed: true,
+            evidence: Evidence { subject: digest(tree), kind: EvidenceKind::VerificationResult, detail: digest(204) },
+        },
+    );
+    snapshot = snapshot.apply(
+        &mechanical,
+        &reduce(&snapshot, &mechanical, &ResolvedConfigs::default(), &SpendWindow::default()),
+        &ResolvedConfigs::default(),
+    );
     let verdict = event(
         "aggregate-review-pass",
         Fact::AggregateReviewCompleted {
@@ -220,6 +234,7 @@ impl Default for BloomView {
             composition: None,
             operator_hold: None,
             blocker: None,
+            leases: Vec::new(),
         }
     }
 }
@@ -239,6 +254,11 @@ impl Default for MemberView {
             machinery_budget: 0,
             wedge_cause: None,
             cursor: None,
+            park: None,
+            awaiting_surface: None,
+            withdrawn: None,
+            leases: Vec::new(),
+            evicted_by: None,
         }
     }
 }
@@ -253,6 +273,7 @@ impl Default for CommissionProjection {
             approval_digest: None,
             status: String::new(),
             recorded_issue: None,
+            title: String::new(),
         }
     }
 }

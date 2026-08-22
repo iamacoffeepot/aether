@@ -82,6 +82,7 @@ pub(super) fn composition_progress(stage: StageId, attempt: u32, weave: Candidat
         seen_verify_failures: VerifyFailureSet::EMPTY,
         fold_checkpoint: None,
         fold_conflict_evidence: None,
+        reconcile_assembles_base: false,
     }
 }
 
@@ -97,6 +98,7 @@ pub(super) fn composition_line(record: &BloomRecord) -> SealedLine<'_> {
         catalog: &record.stage_catalog,
         base: record.spec.base(),
         held: record.operator_hold.is_some(),
+        base_proven: record.base_proven,
     }
 }
 
@@ -124,7 +126,9 @@ pub(super) fn finding_of(bloom: BloomId, tree: Digest, evidence: &Evidence, impl
 ///
 /// The effects, in order: the finding on the composition's channel, then either
 /// the weave repair's cursor move plus its dispatch, or — when the repair budget
-/// is already spent — the composition's wedge.
+/// is already spent — the composition's wedge. A refusal that arrives while a
+/// repair of the same tree is already out files only the finding: the two gates
+/// run concurrently, and one refused fold buys one repair lap.
 ///
 /// What this deliberately does *not* emit is the whole point of ADR-0191: no
 /// [`Decision::RevokeResolution`], and no [`Decision::DispatchAttempt`] naming a
@@ -134,6 +138,20 @@ pub(super) fn finding_of(bloom: BloomId, tree: Digest, evidence: &Evidence, impl
 pub(super) fn reweave(record: &BloomRecord, bloom: &BloomId, refusal: &Refusal<'_>) -> Decisions {
     let composition = WorkpieceId::composition();
     let mut effects = alloc::vec![finding_of(*bloom, refusal.tree, refusal.evidence, refusal.implicated)];
+
+    // The two composite gates judge one fold at the same time, so both can
+    // refuse it. The first refusal already put a repair lane on this exact
+    // tree; a second would double-spend the weave budget and set two lanes
+    // writing one seam. So the second files its finding — the verdict is real
+    // and belongs on the channel — and stops there.
+    if cursor(record).is_some_and(|progress| {
+        progress.stage == StageId::Refine && progress.candidate.is_some_and(|weave| weave.tree == refusal.tree)
+    }) {
+        return Decisions {
+            outcome: Outcome::CompositionRepairInFlight { bloom: *bloom, refused_at: refusal.refused_at },
+            effects,
+        };
+    }
 
     let spent =
         cursor(record).filter(|progress| progress.stage == StageId::Refine).map_or(0, |progress| progress.attempts);
@@ -233,7 +251,9 @@ pub(super) fn reduce_composition_attempt(
             workpiece: composition,
             progress: composition_progress(StageId::Verify, 1, woven),
         });
-        effects.push(super::aggregate_verify::aggregate_verify_dispatch(record, *bloom, woven.tree, woven.checkout));
+        // Both gates over the repaired weave, together — the same pair the
+        // completed fold dispatches, for the same reason.
+        effects.extend(super::aggregate_verify::aggregate_gate_dispatches(record, *bloom, woven.tree, woven.checkout));
         return Decisions { outcome: Outcome::CompositionRepaired { bloom: *bloom, tree: woven.tree }, effects };
     }
 

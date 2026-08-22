@@ -26,7 +26,7 @@ pub mod evidence;
 pub mod script;
 
 pub use argv::{ArgvError, LaneArgs};
-pub use evidence::CANDIDATE_FILE;
+pub use evidence::{CANDIDATE_FILE, REQUESTED_PATH};
 pub use script::{LaneMode, LaneRun, LaneScript, LaneStep, read_ledger};
 
 /// Why a mock run could not do its job. Distinct from a lane *failing*, which is
@@ -109,7 +109,7 @@ pub fn run<I: IntoIterator<Item = String>>(args: I, worktree: &Path) -> Result<i
         },
     )?;
 
-    let outcome = evidence::outcome(&args.command, &args.nonce, mode);
+    let outcome = evidence::outcome_for(&args.command, &args.nonce, mode, args.subject.as_deref());
     evidence::apply(&outcome, worktree, &args.out)?;
 
     if mode == LaneMode::NeverExits {

@@ -56,8 +56,15 @@ pub enum ReconcileOp {
 pub fn reconcile_op(record: &BloomRecord) -> Option<Result<ReconcileOp, WireError>> {
     let bloom = record.spec.id();
     if is_active_unlanded(record.status) {
-        Some(seal_claim_mail(&bloom, &record.spec).map(ReconcileOp::Assert))
-    } else if matches!(record.status, BloomStatus::Landed) {
+        // Withdrawn members are skipped: their refs were freed one at a time
+        // while the bloom kept walking (#5327), so re-asserting the sealed
+        // member list would re-claim, on the first coordinator restart, the
+        // exact workpiece the withdrawal freed for someone to re-scope.
+        Some(active_claim_mail(&bloom, record).map(ReconcileOp::Assert))
+    } else if matches!(record.status, BloomStatus::Landed | BloomStatus::Withdrawn) {
+        // A fully-withdrawn bloom is terminal like a landed one, and its
+        // admission ref is freed the same way — so a crash between the
+        // terminal transition and that release heals at boot.
         Some(release_reclaim_mail(&bloom, &record.spec).map(ReconcileOp::Release))
     } else {
         None
@@ -217,6 +224,26 @@ pub fn seal_claim_mail(bloom: &BloomId, spec: &BloomSpec) -> Result<ClaimSeal, W
     })
 }
 
+/// The boot re-assertion for an active-and-unlanded bloom: [`seal_claim_mail`]
+/// over the members that are still in the line.
+///
+/// Separate from the seal-time spelling because only a replayed record knows
+/// which members left: at seal there are none, and the seal door has no
+/// `BloomRecord` to consult.
+fn active_claim_mail(bloom: &BloomId, record: &BloomRecord) -> Result<ClaimSeal, WireError> {
+    Ok(ClaimSeal {
+        bloom: to_vec(bloom)?,
+        workpieces: encode_workpieces(
+            record
+                .spec
+                .members()
+                .iter()
+                .filter(|member| !record.withdrawn.contains_key(&member.workpiece))
+                .map(|member| &member.workpiece),
+        )?,
+    })
+}
+
 /// The `transfer_seal` mail for an accepted supersession: partition the
 /// successor's members against the predecessor's (mirroring `reduce_supersede`)
 /// — carried = shared, net-new = successor-only, dropped = predecessor-only —
@@ -230,10 +257,23 @@ pub fn transfer_seal_mail(
     predecessor: &BloomId,
     successor: &BloomSpec,
 ) -> Result<TransferSeal, WireError> {
+    // A withdrawn predecessor member's ref is already gone (#5327), so it is
+    // not a ref the successor can fast-forward: leaving it in the predecessor
+    // set would put it in `carried` and ask the source to move a ref that is no
+    // longer there. Dropping it here puts it in `net_new` — a fresh acquire —
+    // which is exactly what a successor re-admitting it needs.
     let predecessor_members: BTreeSet<&WorkpieceId> = snapshot
         .blooms
         .get(predecessor)
-        .map(|record| record.spec.members().iter().map(|member| &member.workpiece).collect())
+        .map(|record| {
+            record
+                .spec
+                .members()
+                .iter()
+                .map(|member| &member.workpiece)
+                .filter(|workpiece| !record.withdrawn.contains_key(*workpiece))
+                .collect()
+        })
         .unwrap_or_default();
     let successor_members: BTreeSet<&WorkpieceId> =
         successor.members().iter().map(|member| &member.workpiece).collect();

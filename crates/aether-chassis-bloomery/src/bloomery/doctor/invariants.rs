@@ -13,7 +13,7 @@ use aether_bloomery::{
     BackendObjectId, BloomId, BloomStatus, ClaimHolder, ClaimRefKind, ClaimRefState, Digest, Snapshot,
     is_active_unlanded,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// How long an undelivered source-replica topic may sit before it is a
 /// violation rather than a retry still in flight.
@@ -138,21 +138,21 @@ impl Invariant {
 }
 
 /// One invariant's verdict in a doctor pass.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckResult {
     /// [`Invariant::name`].
-    pub name: &'static str,
+    pub name: String,
     /// [`Invariant::statement`].
-    pub statement: &'static str,
+    pub statement: String,
     /// Whether the property held on this pass.
     pub passed: bool,
     /// Concrete divergent values when [`passed`](Self::passed) is false.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub divergences: Vec<String>,
 }
 
 /// The full doctor report: every seed invariant, in [`Invariant::ALL`] order.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DoctorReport {
     /// One row per seed invariant.
     pub checks: Vec<CheckResult>,
@@ -181,10 +181,7 @@ impl DoctorReport {
     pub fn fingerprint(&self) -> String {
         self.violations()
             .map(|check| {
-                check
-                    .divergences
-                    .first()
-                    .map_or_else(|| check.name.to_owned(), |first| format!("{}:{first}", check.name))
+                check.divergences.first().map_or_else(|| check.name.clone(), |first| format!("{}:{first}", check.name))
             })
             .collect::<Vec<_>>()
             .join("|")
@@ -259,8 +256,8 @@ pub fn evaluate(live: &LiveState<'_>) -> DoctorReport {
         .map(|invariant| {
             let divergences = invariant.divergences(live);
             CheckResult {
-                name: invariant.name(),
-                statement: invariant.statement(),
+                name: invariant.name().to_owned(),
+                statement: invariant.statement().to_owned(),
                 passed: divergences.is_empty(),
                 divergences,
             }
@@ -498,13 +495,33 @@ fn nonterminal_member_has_lane_or_dispatch(live: &LiveState<'_>) -> Vec<String> 
     let pending: BTreeSet<&str> = live.outstanding.iter().map(|open| open.workpiece).collect();
     let mut divergences = Vec::new();
     for (bloom, record) in &live.snapshot.blooms {
-        if record.status != BloomStatus::Sealed || record.operator_hold.is_some() || record.review_park.is_some() {
+        if record.status != BloomStatus::Sealed
+            || record.operator_hold.is_some()
+            || record.review_park.is_some()
+            // An unproven or red base is a day-level stop (ADR-0200): every
+            // member dispatch is withheld until the whole-workspace receipt is
+            // green, so a cursor with no live lane is the wait, not a lost
+            // member.
+            || !record.base_proven
+        {
             continue;
         }
         for workpiece in record.progress.keys() {
             if record.wedged.contains_key(workpiece)
                 || record.claims.contains_key(workpiece)
                 || record.host_faults.contains_key(workpiece)
+                || live.snapshot.member_park(bloom, workpiece).is_some()
+                // Awaiting a surface amendment is an accountable stop with an
+                // operator exit (ADR-0207), not a member the machinery lost:
+                // no lane can move it and dispatching one would reproduce the
+                // same refusal.
+                || live.snapshot.awaiting_surface(bloom, workpiece).is_some()
+                // Evicted off a contended file (ADR-0204) is likewise an
+                // accountable stop, and this one names the exact sibling and
+                // path holding the member: it re-dispatches when that sibling
+                // integrates, and dispatching it now would put two lanes back
+                // on one file.
+                || live.snapshot.lease_eviction(bloom, workpiece).is_some()
             {
                 continue;
             }
@@ -586,6 +603,10 @@ fn status_name(status: BloomStatus) -> &'static str {
         BloomStatus::Resolved => "Resolved",
         BloomStatus::Landed => "Landed",
         BloomStatus::Superseded => "Superseded",
+        // A fully-withdrawn bloom is terminal like a landed one: it holds no
+        // active membership, so a surviving ref under it is a genuine
+        // divergence and is reported as one (#5327).
+        BloomStatus::Withdrawn => "Withdrawn",
     }
 }
 

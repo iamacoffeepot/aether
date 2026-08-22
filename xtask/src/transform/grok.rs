@@ -42,6 +42,31 @@ fn grok_effort(effort: &str) -> &str {
     }
 }
 
+/// Tool schemas a headless lane never calls, deleted from the child's
+/// advertised set so they do not ride the cached prefix of every request.
+///
+/// Scheduler create/delete/list, `monitor`, and `workflow` are Grok's own
+/// orchestration surface — a bloom lap is a single fork the bloomery owns, not
+/// a recurring task, a watch, or a nested pipeline. `update_goal` and
+/// `ask_user_question` assume an operator conversation this session does not
+/// have. Enter/exit plan mode would re-plan a work order the lane is already
+/// implementing.
+///
+/// `search_tool` and `use_tool` are absent on purpose: they are the MCP
+/// bridge, and denying them would remove the lane's only route to
+/// harness-registered tools.
+const DISALLOWED_TOOLS: &[&str] = &[
+    "scheduler_create",
+    "scheduler_delete",
+    "scheduler_list",
+    "monitor",
+    "workflow",
+    "update_goal",
+    "ask_user_question",
+    "enter_plan_mode",
+    "exit_plan_mode",
+];
+
 /// The `grok` argv for a model-lane run.
 ///
 /// `--prompt-file` is both the prompt source and what makes the run headless —
@@ -59,6 +84,18 @@ fn grok_effort(effort: &str) -> &str {
 /// bloomery owns, cross-session memory would carry state between two runs the
 /// ledger treats as independent, and web search would source the work from
 /// outside the sealed subject.
+///
+/// `--verbatim` bypasses the harness's large-prompt offload: without it, a
+/// prompt over 25,000 bytes is replaced with an excerpt plus a notice telling
+/// the model to `read_file` the staged copy, so the conversation carries both
+/// and every later call of the lap replays them. Every assembled lane prompt
+/// is over that line by construction. Present on cold and resumed launches
+/// alike — a resumed lap still delivers a full turn through `--prompt-file`.
+///
+/// `--disallowed-tools` physically deletes the schemas in [`DISALLOWED_TOOLS`]
+/// from the child's advertised set. A denylist is chosen over `--tools`
+/// because the harness's allowlist fails open on a typo while the denylist
+/// refuses nothing silently.
 ///
 /// `--resume` continues the session a previous lap left behind, and rides
 /// *alongside* `--prompt-file` rather than replacing it — the resumed run is
@@ -79,6 +116,9 @@ fn grok_argv(prompt_file: &str, model: Option<&str>, effort: Option<&str>, resum
         "--no-plan".to_owned(),
         "--no-memory".to_owned(),
         "--disable-web-search".to_owned(),
+        "--verbatim".to_owned(),
+        "--disallowed-tools".to_owned(),
+        DISALLOWED_TOOLS.join(","),
     ];
     if let Some(model) = model {
         argv.push("--model".to_owned());
@@ -163,7 +203,7 @@ fn launch(
 mod tests {
     use std::fs;
 
-    use super::{grok_argv, grok_effort, run_at};
+    use super::{DISALLOWED_TOOLS, grok_argv, grok_effort, run_at};
     use crate::transform::TransformArgs;
     use crate::transform::construct::CONSTRUCT_IMPLEMENT;
     use crate::transform::harness_stub::{self, Stub};
@@ -195,6 +235,12 @@ mod tests {
         for hygiene in ["--no-subagents", "--no-plan", "--no-memory", "--disable-web-search"] {
             assert!(argv.iter().any(|flag| flag == hygiene), "a lane is a single deterministic worker: {hygiene}");
         }
+        // Tripwire: an argv without `--verbatim` is delivered as an excerpt plus a self-read.
+        assert!(argv.contains(&"--verbatim".to_owned()));
+        assert!(
+            argv.windows(2).any(|w| w == ["--disallowed-tools", DISALLOWED_TOOLS.join(",").as_str()]),
+            "the denylist deletes the unused schemas from the advertised set",
+        );
         assert!(argv.windows(2).any(|w| w == ["--model", "grok-4.6"]), "the resolved model rides argv");
         assert!(argv.windows(2).any(|w| w == ["--reasoning-effort", "high"]), "the resolved effort rides argv");
         assert!(!argv.iter().any(|flag| flag == "--resume"), "a cold launch names no session");
@@ -218,6 +264,18 @@ mod tests {
         let argv = grok_argv("/run/prompt.md", Some("grok-4.6"), Some("high"), Some("sess-1"));
         assert!(argv.windows(2).any(|w| w == ["--resume", "sess-1"]), "the handle follows its flag");
         assert!(argv.windows(2).any(|w| w == ["--prompt-file", "/run/prompt.md"]), "a resumed lap still has a turn");
+        // Tripwire: an argv without `--verbatim` is delivered as an excerpt plus a self-read.
+        assert!(argv.contains(&"--verbatim".to_owned()));
+    }
+
+    // Tripwire: `search_tool` and `use_tool` are the MCP bridge; denying them
+    // removes the lane's only route to harness-registered tools.
+    #[test]
+    fn disallowed_tools_does_not_include_the_mcp_bridge() {
+        assert!(
+            DISALLOWED_TOOLS.iter().all(|tool| *tool != "search_tool" && *tool != "use_tool"),
+            "the MCP bridge stays on the advertised set",
+        );
     }
 
     // Tripwire: the handle the pool deposits comes off Grok's own terminal

@@ -91,7 +91,23 @@ fn land(snapshot: Snapshot, spec: &BloomSpec, tree: u8, head: u8) -> (Snapshot, 
         &snapshot,
         &event("resolve", Fact::Resolve { bloom, tree: digest(tree), head: digest(head), lineage: vec![] }),
     );
-    // The fold's aggregate review must pass before the bloom resolves (ADR-0153).
+    // Both composite gates must pass before the bloom resolves: the fold
+    // dispatches them together and the landing waits on the join.
+    (snapshot, _) = step(
+        &snapshot,
+        &event(
+            "aggregate-verify-pass",
+            Fact::AggregateVerifyCompleted {
+                bloom,
+                passed: true,
+                evidence: Evidence {
+                    subject: digest(tree),
+                    kind: EvidenceKind::VerificationResult,
+                    detail: digest(203),
+                },
+            },
+        ),
+    );
     (snapshot, _) = step(
         &snapshot,
         &event(

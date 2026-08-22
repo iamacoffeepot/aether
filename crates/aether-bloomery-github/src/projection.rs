@@ -20,8 +20,12 @@
 //!   successor bloom re-admitting the same workpiece shares one issue with its
 //!   predecessor, and a workpiece-only key would have the two overwrite each
 //!   other.
-//! - A landing receipt → one comment per bloom on every resolvable member
-//!   issue, and on the landing pull request when one exists.
+//! - A landing receipt → one comment on the landing pull request when one
+//!   exists. The member's own landing comment is written by the land reactor
+//!   at close time, not here.
+//! - A commission whose workpiece names a repository object (`issue-N`) →
+//!   one marker-keyed comment on that object. The projector owns no issue
+//!   for it. A commission with no GitHub home still gets a replica issue.
 //! - A bloom has no object of its own. Before it lands there is nothing to
 //!   aggregate that `GET /view` does not serve live; afterwards its landing
 //!   pull request *is* the aggregate (ADR-0149 §What each object is).
@@ -45,13 +49,14 @@
 use std::fmt::Write as _;
 
 use aether_bloomery::{
-    BloomId, CommissionProjection, Digest, LandingReceipt, MemberView, PendingDecisionView, ProjectedReceipt,
-    ProjectionBackend, ViewDocument, WorkpieceId,
+    AwaitingSurfaceView, BloomId, CommissionProjection, Digest, LandingReceipt, MemberView, PendingDecisionView,
+    ProjectedReceipt, ProjectionBackend, ViewDocument, WorkpieceId,
 };
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
 use crate::client::{CommissionProjectionApi, GithubApi, GithubError, NewComment, NewIssue, PullRequestApi};
+use crate::landing::{commission_floor_title, issue_title_is_valid};
 use crate::marker::{Marker, render_marker};
 use crate::short_hex;
 use crate::source::landing_branch;
@@ -125,21 +130,26 @@ impl<C: GithubApi> GithubProjection<C> {
 }
 
 impl<C: GithubApi + CommissionProjectionApi> GithubProjection<C> {
-    /// Reconcile one commission onto a Bloomery-owned issue (ADR-0149
-    /// 2026-08-16 amendment). Returns the issue number this projector now
-    /// owns.
+    /// Reconcile one commission onto GitHub (ADR-0149 2026-08-16 amendment).
     ///
-    /// Title and body are written only to `projection.recorded_issue` — the
-    /// store row the reactor overlays at drain — or, when that is still
-    /// absent, to a number [`CommissionProjectionApi::find_issue`] returns
-    /// for this commission's marker. Search is advisory crash-recovery
-    /// after a create that has not yet been persisted; it is not the
-    /// create-vs-update authority. A workpiece that looks like `issue-<N>`
-    /// is not an address — adopting that number would write a human-authored
-    /// object.
-    pub fn project_owned_commission(&self, projection: &CommissionProjection) -> Result<u64, GithubError> {
+    /// A workpiece that names a repository object (`issue-<N>`) is a comment
+    /// on that object: adopting the number would write a human-authored
+    /// title and body. `Ok(None)` is that case — this projector owns no
+    /// issue for it. Otherwise title and body are written only to
+    /// `projection.recorded_issue` — the store row the reactor overlays at
+    /// drain — or, when that is still absent, to a number
+    /// [`CommissionProjectionApi::find_issue`] returns for this commission's
+    /// marker. Search is advisory crash-recovery after a create that has
+    /// not yet been persisted; it is not the create-vs-update authority.
+    pub fn project_owned_commission(&self, projection: &CommissionProjection) -> Result<Option<u64>, GithubError> {
         let key = commission_key(&projection.workpiece.0);
         let digest = content_digest("bloomery.commission", projection);
+        if let Some(number) = canonical_issue_number(&projection.workpiece.0) {
+            self.comment_on(number, &key, digest, &render_source_comment(projection))?;
+            self.retire_replica(projection, number)?;
+            return Ok(None);
+        }
+
         let title = render_commission_title(projection);
         let body = format!(
             "{}\n\n{}",
@@ -161,16 +171,41 @@ impl<C: GithubApi + CommissionProjectionApi> GithubProjection<C> {
                 && existing.marker.as_ref().map(|marker| marker.digest) == Some(digest)
             {
                 self.close_if_terminal(number, &projection.status)?;
-                return Ok(number);
+                return Ok(Some(number));
             }
             self.client.update_issue(number, &title, &body)?;
             self.close_if_terminal(number, &projection.status)?;
-            Ok(number)
+            Ok(Some(number))
         } else {
             let created = self.client.create_issue(&NewIssue { title, body })?;
             self.close_if_terminal(created.number, &projection.status)?;
-            Ok(created.number)
+            Ok(Some(created.number))
         }
+    }
+
+    /// Close a replica this projector opened for a commission that now lives
+    /// as a comment on `source`. A projector that never created one does
+    /// nothing. Both the retirement comment and the close are idempotent.
+    fn retire_replica(&self, projection: &CommissionProjection, source: u64) -> Result<(), GithubError> {
+        let key = commission_key(&projection.workpiece.0);
+        let stray = match projection.recorded_issue {
+            Some(number) if number != source => Some(number),
+            Some(_) => None,
+            None => self.client.find_issue(&key)?.map(|issue| issue.number).filter(|&number| number != source),
+        };
+        let Some(replica) = stray else {
+            return Ok(());
+        };
+        let retired_key = format!("{key}:retired");
+        let body = format!("This replica is retired. The commission is tracked on #{source}.");
+        self.comment_on(
+            replica,
+            &retired_key,
+            content_digest("bloomery.commission.retired", &(source, replica)),
+            &body,
+        )?;
+        CommissionProjectionApi::close_issue(&self.client, replica)?;
+        Ok(())
     }
 
     fn close_if_terminal(&self, number: u64, status: &str) -> Result<(), GithubError> {
@@ -203,18 +238,15 @@ impl<C: GithubApi + PullRequestApi + CommissionProjectionApi> ProjectionBackend 
         Ok(())
     }
 
+    /// Comment the landing receipt onto the bloom's landing pull request, if
+    /// one exists. Member issues are not a target: the land reactor writes
+    /// that comment as it closes the issue, so projecting it here would
+    /// duplicate the sentence.
     fn project_receipt(&self, projected: &ProjectedReceipt) -> Result<(), Self::Error> {
         let receipt = &projected.receipt;
         let key = receipt_key(receipt.bloom);
         let digest = content_digest("bloomery.receipt", receipt);
         let body = render_receipt_body(receipt);
-
-        for workpiece in &projected.members {
-            let Some(object) = addressed_object(workpiece) else {
-                continue;
-            };
-            self.comment_on(object, &key, digest, &body)?;
-        }
 
         // The landing pull request is a target, not a precondition — a bloom can
         // land through a path that opened none, and requiring one would wedge
@@ -227,7 +259,7 @@ impl<C: GithubApi + PullRequestApi + CommissionProjectionApi> ProjectionBackend 
         Ok(())
     }
 
-    fn project_commission(&self, projection: &CommissionProjection) -> Result<u64, Self::Error> {
+    fn project_commission(&self, projection: &CommissionProjection) -> Result<Option<u64>, Self::Error> {
         self.project_owned_commission(projection)
     }
 }
@@ -286,18 +318,33 @@ fn commission_key(workpiece: &str) -> String {
 }
 
 fn render_commission_title(projection: &CommissionProjection) -> String {
-    // The replica is not the human board's `issue-N` object. Titling it
-    // `{workpiece} — {status}` collides with that numbering (`issue-5215 — open`
-    // reads as another card for #5215). The replica names itself.
-    format!("Bloomery replica — {}", projection.status)
+    // The replica title is the repository's issue-title rule or a floor that
+    // satisfies it. Lifecycle lives in the issue's open/closed state; a
+    // ` — {status}` suffix would rewrite the title on every transition and
+    // re-run the label workflow for nothing.
+    let title = projection.title.trim();
+    if issue_title_is_valid(title) {
+        title.to_owned()
+    } else {
+        commission_floor_title(&projection.workpiece.0)
+    }
 }
 
 fn render_commission_body(projection: &CommissionProjection) -> String {
-    let mut body = String::from(
+    format!(
         "**Bloomery replica** — do not edit this issue. It is an outbound projection of a local \
-         commission (ADR-0199). Edits here are overwritten and are never read as input.\n",
-    );
-    let _ = writeln!(body, "\n- Workpiece: `{}`", projection.workpiece.0);
+         commission (ADR-0199). Edits here are overwritten and are never read as input.\n\n{}",
+        render_commission_fields(projection)
+    )
+}
+
+fn render_source_comment(projection: &CommissionProjection) -> String {
+    render_commission_fields(projection)
+}
+
+fn render_commission_fields(projection: &CommissionProjection) -> String {
+    let mut body = String::new();
+    let _ = writeln!(body, "- Workpiece: `{}`", projection.workpiece.0);
     let _ = writeln!(body, "- Intent: `{}`", short_hex(&projection.intent));
     match projection.scope_revision {
         Some(digest) => {
@@ -359,6 +406,42 @@ fn render_member_body(bloom: BloomId, member: &MemberView) -> String {
     );
     let _ = writeln!(body, "- State: {}", member_state(member));
 
+    if let Some(cursor) = &member.cursor {
+        let _ = writeln!(body, "- Stage: {:?} (attempts {}).", cursor.stage, cursor.attempts);
+    }
+    if let Some(fault) = &member.host_fault {
+        let _ = writeln!(body, "- **Host fault**: {}", fault.findings);
+    }
+    if let Some(park) = &member.park {
+        let _ = writeln!(
+            body,
+            "- **Parked** at {:?}: construct concluded without a candidate. Evidence: `{}`.",
+            park.stage,
+            short_hex(&park.evidence)
+        );
+    }
+    if let Some(eviction) = &member.evicted_by {
+        let _ = writeln!(body, "- **Evicted** by `{}` on `{}`.", eviction.by.0, eviction.path);
+    }
+    if let Some(withdrawal) = &member.withdrawn {
+        match &withdrawal.depends_on {
+            Some(depends_on) => {
+                let _ = writeln!(
+                    body,
+                    "- **Withdrawn** ({} of `{}`): {} — operator `{}`.",
+                    withdrawal.cause, depends_on.0, withdrawal.reason, withdrawal.operator
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    body,
+                    "- **Withdrawn** ({}): {} — operator `{}`.",
+                    withdrawal.cause, withdrawal.reason, withdrawal.operator
+                );
+            }
+        }
+    }
+
     if let Some(blocker) = &member.blocked_by {
         let _ = writeln!(body, "- **Blocked** by `{}`: construct waits until that ancestor resolves.", blocker.0);
     }
@@ -389,15 +472,30 @@ fn render_member_body(bloom: BloomId, member: &MemberView) -> String {
         push_pending_decision(&mut body, pending);
     }
 
+    if let Some(awaiting) = &member.awaiting_surface {
+        push_awaiting_surface(&mut body, awaiting);
+    }
+
     body
 }
 
 fn member_state(member: &MemberView) -> String {
-    match (&member.resolution, &member.wedge, &member.blocked_by) {
-        (_, Some(wedge), _) => format!("**wedged** at {:?}", wedge.stage),
-        (Some(_), None, _) => "integrated".to_owned(),
-        (None, None, Some(blocker)) => format!("blocked by `{}`", blocker.0),
-        (None, None, None) => "in progress".to_owned(),
+    // A withdrawal is a person's one-way decision: it outranks a wedge, a
+    // resolution, or any still-working hold that might also be on the view.
+    if member.withdrawn.is_some() {
+        "withdrawn".to_owned()
+    } else if let Some(wedge) = &member.wedge {
+        format!("**wedged** at {:?}", wedge.stage)
+    } else if member.resolution.is_some() {
+        "integrated".to_owned()
+    } else if let Some(blocker) = &member.blocked_by {
+        format!("blocked by `{}`", blocker.0)
+    } else if let Some(eviction) = &member.evicted_by {
+        format!("evicted by `{}`", eviction.by.0)
+    } else if member.host_fault.is_some() {
+        "held on host".to_owned()
+    } else {
+        "in progress".to_owned()
     }
 }
 
@@ -422,6 +520,28 @@ fn push_pending_decision(body: &mut String, pending: &PendingDecisionView) {
         body,
         "\nAnswer natively — a signed statement adopting question `{}`; a comment never becomes a command.",
         short_hex(&pending.question)
+    );
+}
+
+/// The surface-amendment section of a member's comment (ADR-0207): the paths a
+/// declining lane asked for, named where a person already looks so the remedy
+/// is readable without opening an evidence file. An outward mirror only —
+/// widening the surface is an authored successor, never a comment.
+fn push_awaiting_surface(body: &mut String, awaiting: &AwaitingSurfaceView) {
+    let _ = writeln!(
+        body,
+        "\n**Surface needed** — the lane declined at {:?} against scope revision `{}`.\n",
+        awaiting.stage,
+        short_hex(&awaiting.scope_revision)
+    );
+    let _ = writeln!(body, "{}\n", awaiting.summary);
+    for request in &awaiting.paths {
+        let _ = writeln!(body, "- `{}` — {}", request.path, request.reason);
+    }
+    let _ = writeln!(
+        body,
+        "\nRequests so far: {}. Widening the surface is an authored successor scope revision.",
+        awaiting.requests
     );
 }
 

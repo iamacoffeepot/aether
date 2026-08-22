@@ -5,6 +5,7 @@
 //! current observed head, reuses the predecessor's sealed configs by digest,
 //! and carries each member's scope revision so the workpiece claim transfers.
 
+mod amend;
 mod client;
 mod dto;
 mod hex;
@@ -16,11 +17,13 @@ mod status;
 mod upgrade;
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use aether_bloomery::{Digest, KeyId};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 
+use crate::bloom::amend::{AmendArgs, OperatorKey};
 use crate::bloom::client::{Client, bloom_in};
 use crate::bloom::plan::{BaseChoice, ProjectionInput};
 use crate::bloom::roll::RollArgs;
@@ -30,17 +33,37 @@ use crate::bloom::upgrade::UpgradeArgs;
 /// `aether-chassis-bloomery` uses (`DEFAULT_HTTP_PORT`).
 const DEFAULT_HTTP_PORT: u16 = 8910;
 
+/// The repository's approval policy — the fallback the coordinator itself
+/// loads when a bloom seals none of its own.
+pub const DEFAULT_POLICY_FILE: &str = "approval-policy.toml";
+
 /// One coordinator the command talks to.
 #[derive(Clone, Debug)]
 pub struct Endpoint {
     pub host: String,
     pub port: u16,
+    /// Bearer token for the commission routes, when one is configured. `None`
+    /// sends no `Authorization` header at all, which is what every route
+    /// outside `/commissions` expects.
+    pub token: Option<String>,
 }
 
 impl Endpoint {
-    fn resolve(port: Option<u16>) -> Self {
-        Self { host: "127.0.0.1".to_owned(), port: port.unwrap_or_else(coordinator_port) }
+    fn resolve(port: Option<u16>, token: Option<&str>) -> Self {
+        Self {
+            host: "127.0.0.1".to_owned(),
+            port: port.unwrap_or_else(coordinator_port),
+            token: token.map(ToOwned::to_owned).or_else(control_token),
+        }
     }
+}
+
+/// `AETHER_HTTP_CONTROL_TOKEN`, or nothing.
+fn control_token() -> Option<String> {
+    // Operator tooling reading the coordinator's control-route bearer token —
+    // not cap config.
+    #[allow(clippy::disallowed_methods)]
+    env::var("AETHER_HTTP_CONTROL_TOKEN").ok().filter(|token| !token.is_empty())
 }
 
 /// `AETHER_HTTP_PORT`, then the coordinator's compiled default.
@@ -56,6 +79,17 @@ pub struct BloomArgs {
     /// Coordinator REST port. Defaults to `AETHER_HTTP_PORT`, then 8910.
     #[arg(long, global = true)]
     port: Option<u16>,
+
+    /// Bearer token for the control routes. Defaults to
+    /// `AETHER_HTTP_CONTROL_TOKEN`.
+    #[arg(long, global = true)]
+    token: Option<String>,
+
+    /// Approval policy the declared-surface granularity check reads before a
+    /// seal or supersede is sent. The coordinator's seal door is the authority;
+    /// this refuses the same shape earlier and in the same words.
+    #[arg(long = "approval-policy", global = true, default_value = DEFAULT_POLICY_FILE)]
+    approval_policy: PathBuf,
 
     #[command(subcommand)]
     command: BloomCommand,
@@ -75,6 +109,54 @@ enum BloomCommand {
     Roll(RollArgs),
     /// Fold-test a candidate coordinator and replace the running binary if it holds.
     Upgrade(UpgradeArgs),
+    /// Answer a parked member's surface request: widen its scope revision,
+    /// approve the widening, and seal the successor (ADR-0207).
+    Amend(AmendArgs),
+    /// Take one member out of a walking bloom without superseding it (#5327).
+    Withdraw(WithdrawArgs),
+    /// Retire an open commission whose work landed outside its bloom.
+    Cancel(CancelArgs),
+}
+
+#[derive(Args, Debug)]
+struct WithdrawArgs {
+    /// The bloom the member belongs to (64 hex characters).
+    #[arg(value_parser = plan::parse_bloom_id)]
+    bloom_id: String,
+
+    /// The member to withdraw.
+    workpiece: String,
+
+    /// Why, in your own words. Required; a blank one is refused at the door.
+    #[arg(long)]
+    reason: String,
+
+    /// Who is deciding. Recorded as the decider.
+    #[arg(long, default_value = "operator")]
+    operator: String,
+
+    /// Also withdraw every member that depends on this one. Without it, a
+    /// withdrawal that would strand a dependent is refused, naming them.
+    #[arg(long)]
+    cascade: bool,
+}
+
+#[derive(Args, Debug)]
+struct CancelArgs {
+    /// The commission to retire.
+    workpiece: String,
+
+    /// Why, in your own words. Required; a blank one is refused at the door.
+    #[arg(long)]
+    reason: String,
+
+    /// Operator signing seed: 32 raw bytes or 64 hex characters, mode 0600.
+    #[arg(long)]
+    seed_file: Option<PathBuf>,
+
+    /// The `KeyId` the coordinator's allowlist names for that seed.
+    #[arg(long, default_value = "operator")]
+    signer: String,
 }
 
 #[derive(Args, Debug)]
@@ -162,7 +244,7 @@ struct SupersedeArgs {
 }
 
 #[derive(Args, Debug)]
-struct ProjectionArgs {
+pub struct ProjectionArgs {
     /// Declared-surface globs. Defaults to the shipped auto-tier surface.
     #[arg(long = "declared-surface")]
     declared_surface: Vec<String>,
@@ -181,33 +263,88 @@ struct ProjectionArgs {
 }
 
 impl ProjectionArgs {
-    fn input(&self) -> Result<ProjectionInput> {
+    pub(super) fn input(&self, approval_policy: &Path) -> Result<ProjectionInput> {
         ProjectionInput::resolve(
             self.declared_surface.clone(),
             self.completeness_file.as_deref(),
             self.adr_touch,
             self.pre_approved,
+            Some(approval_policy),
         )
     }
 }
 
 pub fn run(args: &BloomArgs) -> Result<()> {
-    print!("{}", run_on(&Endpoint::resolve(args.port), &args.command)?);
+    print!(
+        "{}",
+        run_on_with_policy(&Endpoint::resolve(args.port, args.token.as_deref()), &args.command, &args.approval_policy)?
+    );
     Ok(())
 }
 
+/// Drive `command` against the repository's default policy file. Only the
+/// tests reach for this spelling — [`run`] resolves the operator's
+/// `--approval-policy` and calls [`run_on_with_policy`] directly.
+#[cfg(test)]
 fn run_on(endpoint: &Endpoint, command: &BloomCommand) -> Result<String> {
+    run_on_with_policy(endpoint, command, Path::new(DEFAULT_POLICY_FILE))
+}
+
+fn run_on_with_policy(endpoint: &Endpoint, command: &BloomCommand, approval_policy: &Path) -> Result<String> {
     let client = Client::new(endpoint);
     match command {
         BloomCommand::Status => Ok(status::render(&client.view()?)),
-        BloomCommand::Seal(args) => run_seal(&client, args),
-        BloomCommand::Supersede(args) => run_supersede(&client, args),
+        BloomCommand::Seal(args) => run_seal(&client, args, approval_policy),
+        BloomCommand::Supersede(args) => run_supersede(&client, args, approval_policy),
         BloomCommand::Roll(args) => roll::run(&client, args),
         BloomCommand::Upgrade(args) => upgrade::run(&client, args),
+        BloomCommand::Amend(args) => amend::run(&client, args, approval_policy),
+        BloomCommand::Withdraw(args) => run_withdraw(&client, args),
+        BloomCommand::Cancel(args) => run_cancel(&client, args),
     }
 }
 
-fn run_seal(client: &Client<'_>, args: &SealArgs) -> Result<String> {
+/// Withdraw one member, naming an unknown bloom or workpiece locally before
+/// any write — the same read-first shape `run_supersede` uses.
+fn run_withdraw(client: &Client<'_>, args: &WithdrawArgs) -> Result<String> {
+    let view = client.view()?;
+    let bloom = bloom_in(&view, &args.bloom_id)?;
+    if !bloom.members.iter().any(|member| member.workpiece == args.workpiece) {
+        bail!("bloom {} has no member {}", args.bloom_id, args.workpiece);
+    }
+
+    let request =
+        dto::WithdrawRequest { reason: args.reason.clone(), operator: args.operator.clone(), cascade: args.cascade };
+    Ok(render_outcome(&client.withdraw(&args.bloom_id, &args.workpiece, &request)?.outcome))
+}
+
+/// Cancel one commission, naming an unknown or already-closed workpiece locally
+/// before any write — the same read-first shape `run_withdraw` uses.
+fn run_cancel(client: &Client<'_>, args: &CancelArgs) -> Result<String> {
+    let shown =
+        client.commission(&args.workpiece).with_context(|| format!("no commission named {}", args.workpiece))?;
+    if shown.status != "open" {
+        bail!("commission {} is {}, not open", args.workpiece, shown.status);
+    }
+    if args.reason.trim().is_empty() {
+        bail!("cancel reason is required");
+    }
+
+    let key = OperatorKey::load(
+        KeyId(args.signer.clone()),
+        args.seed_file.as_deref().context("--seed-file is required to sign the cancel")?,
+    )?;
+    let stored = client.cancel(
+        &args.workpiece,
+        &dto::CancelCommissionRequest {
+            statement: key.cancel_of(Digest::from_bytes(*shown.intent.as_bytes())),
+            reason: args.reason.clone(),
+        },
+    )?;
+    Ok(format!("cancelled {} {} ({})\n", args.workpiece, stored.digest, stored.status))
+}
+
+fn run_seal(client: &Client<'_>, args: &SealArgs, approval_policy: &Path) -> Result<String> {
     let task = plan::read_task_file(&args.task_file)?;
     plan::require_task(&task, &args.task_file)?;
     let workpieces = plan::seal_workpieces(&args.workpiece, &args.task_file)?;
@@ -228,12 +365,12 @@ fn run_seal(client: &Client<'_>, args: &SealArgs) -> Result<String> {
     let members = patch.proposals.unwrap_or_default();
     let outcome = client.seal(
         &draft.draft_id,
-        &plan::seal_request(&members, &task, &args.projection.input()?, &args.edges, &args.surfaces)?,
+        &plan::seal_request(&members, &task, &args.projection.input(approval_policy)?, &args.edges, &args.surfaces)?,
     )?;
     Ok(render_outcome(&outcome.outcome))
 }
 
-fn run_supersede(client: &Client<'_>, args: &SupersedeArgs) -> Result<String> {
+fn run_supersede(client: &Client<'_>, args: &SupersedeArgs, approval_policy: &Path) -> Result<String> {
     let task = plan::read_task_file(&args.task_file)?;
     plan::require_task(&task, &args.task_file)?;
     let view = client.view()?;
@@ -255,12 +392,19 @@ fn run_supersede(client: &Client<'_>, args: &SupersedeArgs) -> Result<String> {
     let members = patch.proposals.unwrap_or_default();
     let outcome = client.supersede(
         &args.bloom_id,
-        &plan::supersede_request(&draft.draft_id, &members, &task, &args.projection.input()?, &args.edges)?,
+        &plan::supersede_request(
+            &draft.draft_id,
+            &members,
+            &task,
+            &args.projection.input(approval_policy)?,
+            &args.edges,
+            &[],
+        )?,
     )?;
     Ok(render_outcome(&outcome.outcome))
 }
 
-fn render_outcome(outcome: &serde_json::Value) -> String {
+pub fn render_outcome(outcome: &serde_json::Value) -> String {
     format!("{}\n", serde_json::to_string_pretty(outcome).unwrap_or_else(|_| outcome.to_string()))
 }
 
@@ -282,7 +426,7 @@ mod tests {
     };
     use serde_json::{Value, json};
 
-    use super::{BloomCommand, Endpoint, SealArgs, SupersedeArgs, run_on};
+    use super::{BloomCommand, CancelArgs, Endpoint, SealArgs, SupersedeArgs, run_on};
     use crate::bloom::dto::{AdrTouch, DigestHex};
     use crate::bloom::hex;
     use crate::bloom::plan::{self, BaseChoice};
@@ -514,7 +658,7 @@ mod tests {
             },
             |port| {
                 run_on(
-                    &Endpoint { host: "127.0.0.1".to_owned(), port },
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
                     &BloomCommand::Supersede(SupersedeArgs {
                         bloom_id: bloom_id.clone(),
                         task_file: task.clone(),
@@ -592,7 +736,7 @@ mod tests {
             },
             |port| {
                 run_on(
-                    &Endpoint { host: "127.0.0.1".to_owned(), port },
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
                     &supersede_args(
                         bloom_id.clone(),
                         task.clone(),
@@ -652,7 +796,7 @@ mod tests {
             },
             |port| {
                 run_on(
-                    &Endpoint { host: "127.0.0.1".to_owned(), port },
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
                     &supersede_args(bloom_id.clone(), task.clone(), Vec::new(), vec!["wp-2".to_owned()], Vec::new()),
                 )
                 .expect("supersede --eject against the fake coordinator")
@@ -702,7 +846,7 @@ mod tests {
                 _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
             },
             |port| {
-                let endpoint = Endpoint { host: "127.0.0.1".to_owned(), port };
+                let endpoint = Endpoint { host: "127.0.0.1".to_owned(), port, token: None };
                 let unknown = run_on(
                     &endpoint,
                     &supersede_args(bloom_id.clone(), task.clone(), Vec::new(), vec!["wp-z".to_owned()], Vec::new()),
@@ -764,7 +908,7 @@ mod tests {
             },
             |port| {
                 run_on(
-                    &Endpoint { host: "127.0.0.1".to_owned(), port },
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
                     &supersede_args(
                         bloom_id.clone(),
                         task.clone(),
@@ -820,7 +964,10 @@ mod tests {
                 ),
                 _ => (404, json!({ "error": "unexpected" })),
             },
-            |port| run_on(&Endpoint { host: "127.0.0.1".to_owned(), port }, &BloomCommand::Status).expect("status"),
+            |port| {
+                run_on(&Endpoint { host: "127.0.0.1".to_owned(), port, token: None }, &BloomCommand::Status)
+                    .expect("status")
+            },
         );
         assert!(text.contains("superseded by"), "supersession is linked: {text}");
         assert!(text.contains("sealed"), "successor status is named: {text}");
@@ -851,7 +998,7 @@ mod tests {
             },
             |port| {
                 run_on(
-                    &Endpoint { host: "127.0.0.1".to_owned(), port },
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
                     &BloomCommand::Seal(SealArgs {
                         task_file: task.clone(),
                         configs: vec![("aether.bloomery.stage_catalog".to_owned(), config.clone())],
@@ -899,7 +1046,7 @@ mod tests {
             },
             |port| {
                 run_on(
-                    &Endpoint { host: "127.0.0.1".to_owned(), port },
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
                     &BloomCommand::Seal(SealArgs {
                         task_file: task.clone(),
                         configs: Vec::new(),
@@ -939,7 +1086,7 @@ mod tests {
             },
             |port| {
                 run_on(
-                    &Endpoint { host: "127.0.0.1".to_owned(), port },
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
                     &BloomCommand::Seal(SealArgs {
                         task_file: task.clone(),
                         configs: Vec::new(),
@@ -988,7 +1135,7 @@ mod tests {
             },
             |port| {
                 run_on(
-                    &Endpoint { host: "127.0.0.1".to_owned(), port },
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
                     &BloomCommand::Seal(SealArgs {
                         task_file: task.clone(),
                         configs: Vec::new(),
@@ -1059,7 +1206,7 @@ mod tests {
             },
             |port| {
                 run_on(
-                    &Endpoint { host: "127.0.0.1".to_owned(), port },
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
                     &BloomCommand::Seal(SealArgs {
                         task_file: task.clone(),
                         configs: Vec::new(),
@@ -1092,5 +1239,156 @@ mod tests {
         assert_eq!(patch["configs"]["entries"]["aether.bloomery.model_override"], override_digest);
         assert_eq!(patch["configs"]["entries"]["aether.bloomery.price_table"], table_digest);
         assert!(output.contains("Sealed"), "outcome is printed: {output}");
+    }
+
+    fn cancel_args(workpiece: &str, reason: &str, seed_file: PathBuf) -> BloomCommand {
+        BloomCommand::Cancel(CancelArgs {
+            workpiece: workpiece.to_owned(),
+            reason: reason.to_owned(),
+            seed_file: Some(seed_file),
+            signer: "operator".to_owned(),
+        })
+    }
+
+    fn temp_seed(name: &str, bytes: [u8; 32]) -> PathBuf {
+        let path = env::temp_dir().join(format!("aether-xtask-bloom-{name}-{}", process::id()));
+        fs::write(&path, bytes).expect("write seed");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("set mode");
+        }
+        path
+    }
+
+    fn posted(log: &[Recorded]) -> Vec<&Recorded> {
+        log.iter().filter(|entry| entry.method == "POST").collect()
+    }
+
+    #[test]
+    fn cancel_reads_the_commission_then_posts_a_signed_cancel_over_its_intent() {
+        let intent = digest(7);
+        let seed = temp_seed("cancel-open", [3_u8; 32]);
+        let reason = "the work landed on a sibling branch";
+        let (output, log) = with_fake(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/commissions/wp-1") => (
+                    200,
+                    json!({
+                        "id": "wp-1",
+                        "intent": hex_of(intent),
+                        "status": "open",
+                        "approvals": []
+                    }),
+                ),
+                ("POST", "/commissions/wp-1/cancel") => {
+                    (200, json!({ "digest": hex_of(digest(9)), "id": "wp-1", "status": "cancelled" }))
+                }
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                run_on(
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
+                    &cancel_args("wp-1", reason, seed.clone()),
+                )
+                .expect("cancel against the fake coordinator")
+            },
+        );
+        fs::remove_file(&seed).ok();
+
+        let cancel = find(&log, "POST", "/commissions/wp-1/cancel");
+        let body = cancel.body.as_ref().expect("cancel body");
+        assert_eq!(cancel.path, "/commissions/wp-1/cancel");
+        assert_eq!(body["reason"], reason);
+        assert_eq!(body["statement"]["words"], json!(intent.as_bytes().as_slice()));
+        assert!(output.contains("wp-1"), "the workpiece is named: {output}");
+        assert!(output.contains(&hex_of(digest(9))), "the stored statement digest is printed: {output}");
+        assert!(output.contains("cancelled"), "the new status is printed: {output}");
+    }
+
+    #[test]
+    fn cancel_refuses_a_commission_that_is_not_open_without_writing() {
+        let seed = temp_seed("cancel-closed", [3_u8; 32]);
+        let (error, log) = with_fake(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/commissions/wp-1") => (
+                    200,
+                    json!({
+                        "id": "wp-1",
+                        "intent": hex_of(digest(7)),
+                        "status": "cancelled",
+                        "approvals": []
+                    }),
+                ),
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                run_on(
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
+                    &cancel_args("wp-1", "landed elsewhere", seed.clone()),
+                )
+                .expect_err("a closed commission is refused")
+            },
+        );
+        fs::remove_file(&seed).ok();
+        assert!(error.to_string().contains("cancelled"), "the refusal names the status it found: {error}");
+        assert!(posted(&log).is_empty(), "a second cancel must not write: {log:?}");
+    }
+
+    #[test]
+    fn cancel_refuses_an_unknown_workpiece_without_writing() {
+        let seed = temp_seed("cancel-missing", [3_u8; 32]);
+        let (error, log) = with_fake(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/commissions/wp-missing") => (404, json!({ "error": "no commission named wp-missing" })),
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                run_on(
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
+                    &cancel_args("wp-missing", "landed elsewhere", seed.clone()),
+                )
+                .expect_err("an unknown workpiece is refused")
+            },
+        );
+        fs::remove_file(&seed).ok();
+        assert!(error.to_string().contains("wp-missing"), "the refusal names the workpiece: {error}");
+        assert!(posted(&log).is_empty(), "an unknown workpiece must not write: {log:?}");
+    }
+
+    // Tripwire: a signing seed another account on the host can read is a key
+    // that can cancel any commission.
+    #[cfg(unix)]
+    #[test]
+    fn cancel_refuses_a_group_readable_seed() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let path = env::temp_dir().join(format!("aether-xtask-bloom-cancel-loose-{}", process::id()));
+        fs::write(&path, [3_u8; 32]).expect("write seed");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("set mode");
+        let (error, log) = with_fake(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/commissions/wp-1") => (
+                    200,
+                    json!({
+                        "id": "wp-1",
+                        "intent": hex_of(digest(7)),
+                        "status": "open",
+                        "approvals": []
+                    }),
+                ),
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                run_on(
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
+                    &cancel_args("wp-1", "landed elsewhere", path.clone()),
+                )
+                .expect_err("a loose seed is refused")
+            },
+        );
+        fs::remove_file(&path).ok();
+        assert!(error.to_string().contains("0600"), "the refusal names the fix: {error}");
+        assert!(posted(&log).is_empty(), "a loose seed must not write: {log:?}");
     }
 }

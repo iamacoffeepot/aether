@@ -1,22 +1,32 @@
 mod closure;
 mod nextest;
 mod scope;
+mod symbols;
 mod tools;
+mod triage;
 #[cfg(test)]
 mod workflow;
 
+use std::collections::BTreeMap;
+use std::env;
+use std::fmt::Write as _;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::{self, Command};
+use std::slice::from_ref;
 use std::time::Instant;
 
 use aether_bloomery::{VerifyFailure, VerifyFailureSet};
 use anyhow::{Context, Result, bail};
+use serde::Serialize;
 
-use crate::cargo::{WASM_TARGET, run_captured, write_json_pretty};
+use crate::cargo::{self, WASM_TARGET, run_captured, write_json_pretty};
 use crate::transform::peak_memory::{self, PeakMemory};
-use crate::transform::sccache::{self, CompilerCache};
+use crate::transform::sccache::{self, CompilerCache, Counters};
 use crate::transform::verify::closure::Closure;
 use crate::transform::verify::scope::Scope;
+pub(super) use crate::transform::verify::triage::Excused;
+use crate::transform::verify::triage::ReplayVerdict;
 use crate::transform::{Evidence, GateTiming, TransformArgs, build_evidence};
 
 /// One CI-mirroring invocation for a `verify.*` command id, plus the tools it
@@ -77,6 +87,21 @@ struct VerifyInvocation {
     /// gate that cannot name its `--base` must not invent one and must not
     /// look like a defect the candidate can edit away.
     environment_exit_codes: &'static [i32],
+    /// The exit codes with which this member reports a finding it **declines to
+    /// judge**, because granting it is a reviewer's act and no reviewer exists
+    /// at the moment a member verifies (ADR-0193).
+    ///
+    /// The third thing an exit code can mean here, and distinct from all three
+    /// above: the scan ran, it found something, and it is telling the lane that
+    /// the candidate stated its case rather than hiding it. The member passes —
+    /// no identity is added to `failed_verifiers`, so ADR-0178's arithmetic is
+    /// untouched — and the request rides out on
+    /// [`MemberRun::suppression_requests`] for the two reviewer surfaces to
+    /// render.
+    ///
+    /// Only `verify.suppress` states one. A member that declines to judge
+    /// without a place to send the question would just be a silent pass.
+    requested_exit_codes: &'static [i32],
     /// When set, [`Self::args_under`] appends this flag and the work-order's
     /// resolved diff base. The suppression scanner is the one member that
     /// reads a git range, and without this it falls back to `origin/main`.
@@ -213,22 +238,16 @@ impl VerifyInvocation {
 /// `.github/workflows/ci.yml` so the comparison is against the command the
 /// gate runs rather than against a second literal in this file (#4843).
 fn verify_command(id: &str) -> Option<VerifyInvocation> {
+    compiled_member(id).or_else(|| tree_member(id))
+}
+
+/// The members that build the workspace, and so answer for the crates a
+/// candidate's closure reaches rather than for the tree as a whole.
+///
+/// Split from [`tree_member`] along the property `Breadth` is derived from,
+/// so neither table runs past a reader's — or the lint's — line budget.
+fn compiled_member(id: &str) -> Option<VerifyInvocation> {
     match id {
-        "verify.fmt" => Some(VerifyInvocation {
-            program: "cargo",
-            args: &["fmt", "--all", "--", "--check"],
-            env: &[],
-            requires: &["cargo", "rustfmt"],
-            requires_targets: &[],
-            prepare: None,
-            // rustfmt exits 1 for a diff under `--check`, and cargo fmt
-            // forwards it. It has no second code: a manifest it cannot read
-            // exits 1 too, so that conflation survives this change unresolved.
-            finding_exit_codes: &[1],
-            environment_exit_codes: &[],
-            diff_base_flag: None,
-            breadth: Breadth::Workspace,
-        }),
         "verify.clippy" => Some(VerifyInvocation {
             program: "cargo",
             args: &["clippy", "--workspace", "--all-targets", "--keep-going", "--message-format=json"],
@@ -240,6 +259,7 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // zero; 101 is cargo's "could not compile", which is a finding too.
             finding_exit_codes: &[101],
             environment_exit_codes: &[],
+            requested_exit_codes: &[],
             diff_base_flag: None,
             breadth: Breadth::Closure,
         }),
@@ -258,6 +278,7 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // does.
             finding_exit_codes: &[101],
             environment_exit_codes: &[],
+            requested_exit_codes: &[],
             diff_base_flag: None,
             breadth: Breadth::Closure,
         }),
@@ -293,8 +314,33 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // of those is a statement about the candidate.
             finding_exit_codes: &[100, 101],
             environment_exit_codes: &[],
+            requested_exit_codes: &[],
             diff_base_flag: None,
             breadth: Breadth::Closure,
+        }),
+        _ => None,
+    }
+}
+
+/// The members that read the tree without building it: formatting, the two
+/// duplication scanners, the manifest walks, and the suppression scan.
+fn tree_member(id: &str) -> Option<VerifyInvocation> {
+    match id {
+        "verify.fmt" => Some(VerifyInvocation {
+            program: "cargo",
+            args: &["fmt", "--all", "--", "--check"],
+            env: &[],
+            requires: &["cargo", "rustfmt"],
+            requires_targets: &[],
+            prepare: None,
+            // rustfmt exits 1 for a diff under `--check`, and cargo fmt
+            // forwards it. It has no second code: a manifest it cannot read
+            // exits 1 too, so that conflation survives this change unresolved.
+            finding_exit_codes: &[1],
+            environment_exit_codes: &[],
+            requested_exit_codes: &[],
+            diff_base_flag: None,
+            breadth: Breadth::Workspace,
         }),
         "verify.dup" => Some(VerifyInvocation {
             // The settings ride the argv rather than a `.jscpd.json` (#4856).
@@ -318,6 +364,7 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // exit 2, which lands on the operational side where it belongs.
             finding_exit_codes: &[1],
             environment_exit_codes: &[],
+            requested_exit_codes: &[],
             diff_base_flag: None,
             breadth: Breadth::Workspace,
         }),
@@ -347,6 +394,35 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // scanner draws, from a different program.
             finding_exit_codes: &[1],
             environment_exit_codes: &[],
+            requested_exit_codes: &[],
+            diff_base_flag: None,
+            breadth: Breadth::Workspace,
+        }),
+        "verify.lock" => Some(VerifyInvocation {
+            // The `lock-freshness` gate's own check (#5309). `--locked`
+            // resolves the dependency graph against the committed lock and
+            // fails when a manifest edit landed without regenerating it. No
+            // build, so it costs seconds — and it is the one required CI job
+            // that had no umbrella member, so a manifest edit passed every
+            // verify member and was first refused at the landing proposal,
+            // after the wave had already spent its construct and review budget.
+            //
+            // The graph itself goes to stdout, so this member's log is a large
+            // JSON document rather than a diagnostic stream. CI discards it to
+            // `/dev/null`; the lane keeps it, because the exit code is the
+            // verdict and the body is never read.
+            program: "cargo",
+            args: &["metadata", "--format-version", "1", "--locked"],
+            env: &[],
+            requires: &["cargo"],
+            requires_targets: &[],
+            prepare: None,
+            // cargo exits 1 for a lock that does not match the manifests, which
+            // is a defect in the candidate's own tree. Every other nonzero exit
+            // is cargo failing to run at all.
+            finding_exit_codes: &[1],
+            environment_exit_codes: &[],
+            requested_exit_codes: &[],
             diff_base_flag: None,
             breadth: Breadth::Workspace,
         }),
@@ -364,13 +440,125 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             //
             // An unresolvable `--base` leaves by 3: the input was refused, no
             // scan ran, and the umbrella reads that as a host fault (#5033).
+            //
+            // A scan whose every finding states a request leaves by 4
+            // (ADR-0193): the candidate is not hiding the suppression, and the
+            // question it raises is one only a reviewer can answer.
             finding_exit_codes: &[1],
             environment_exit_codes: &[3],
+            requested_exit_codes: &[SUPPRESSION_REQUESTED_EXIT],
             diff_base_flag: Some("--base"),
             breadth: Breadth::Workspace,
         }),
         _ => None,
     }
+}
+
+/// The exit code `scripts/check-suppressions.py` leaves by when it found
+/// suppressions and every one of them states a request (ADR-0193).
+///
+/// Tripwire: the scanner's `EXIT_REQUESTED`. The two constants are in different
+/// languages with nothing tying them together, and a drift here reads a
+/// requested scan as an operational fault — a `VerifyFailure::Preflight` on a
+/// candidate that did exactly what it was asked to do.
+const SUPPRESSION_REQUESTED_EXIT: i32 = 4;
+
+/// The member the symbol pass rides (#5185). jscpd's own member, because the
+/// question is the same one — has this already been written — asked at the
+/// granularity token detection cannot reach.
+const DUP_MEMBER: &str = "verify.dup";
+
+/// The member whose findings a lane may state a request against. Only the
+/// suppression scanner has a marker to read, and the parser below is written
+/// for its `path:line — token — source` output shape.
+const SUPPRESS_MEMBER: &str = "verify.suppress";
+
+/// The committish a whole-workspace base run names as its own diff base.
+///
+/// The tree the lane stands on, rather than the sealed sha the coordinator
+/// dispatched: `--subject` is a model-lane flag and never reaches a verify
+/// dispatch, so `HEAD` is the only name this process can give for the subject.
+/// It names the same commit either way — the executor resets the slot to the
+/// sealed subject before the lane spawns — and it always resolves, where a
+/// sealed identity may name a bare tree (ADR-0196) that
+/// `rev-parse <ref>^{commit}` refuses for the same exit code this exists to
+/// stop producing.
+const BASE_SET_SUBJECT: &str = "HEAD";
+
+/// The base one umbrella member scans its range from.
+///
+/// A whole-workspace base run judges the sealed base itself, so its work order
+/// states no candidate range and the base arrives absent. The suppression
+/// scanner is the one member that reads a git range, and with no `--base` it
+/// falls back to `origin/main` — a ref a lane worktree does not carry, so the
+/// scan refuses with the unresolvable-base exit, the umbrella stamps
+/// `environment`, and the receipt every seal waits on never arrives (#5384).
+///
+/// Naming the tree itself is the honest answer to what a base run introduced:
+/// an empty range, and an empty range holds no new suppression. Only the
+/// suppression member gets it. The other members that read a base read it to
+/// *excuse* a failure — `verify.test`'s triage re-runs a red test at the base
+/// and inherits away anything red there — so handing them a base equal to the
+/// candidate would turn a base run green over its own failures.
+fn member_diff_base<'a>(id: &str, order_base: Option<&'a str>, full: bool) -> Option<&'a str> {
+    match order_base {
+        Some(base) => Some(base),
+        None if full && id == SUPPRESS_MEMBER => Some(BASE_SET_SUBJECT),
+        None => None,
+    }
+}
+
+/// The trailing comment a lane writes on the suppression line itself to state
+/// its case (ADR-0193 §1). Shared with `xtask/src/transform/construct_instructions.md`,
+/// which is where a lane learns to write it, and with the scanner's own
+/// `REQUEST_RE`.
+const REQUEST_MARKER: &str = "aether-suppression-request:";
+
+/// One suppression the lane declined to judge, as the evidence record carries
+/// it (ADR-0193 §2).
+///
+/// Its own channel rather than a section of `findings`, for the reason the
+/// environment observation is its own channel: findings are handed to a repair
+/// lap as *work*, and a request handed over as work is repaired away by the
+/// next model that reads it.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize)]
+pub(super) struct SuppressionRequest {
+    /// The repository-relative path the suppression sits in.
+    pub(super) path: String,
+    /// The line the scanner reported it on. For reading only: the request rides
+    /// the line, so a shift moves both together and binds nothing.
+    pub(super) line: u32,
+    /// The lint the attribute allows, as the scanner tokenized it.
+    pub(super) lint: String,
+    /// The lane's one line stating why the policy blesses this write.
+    pub(super) reason: String,
+}
+
+/// Read the requests a `verify.suppress` run stated out of its own output.
+///
+/// Parsed from the rendered findings rather than from a second artifact,
+/// because the scanner already prints every finding as
+/// `path:line — token — source` and the marker is part of that source. A line
+/// that does not split into all three parts, or whose source carries no marker
+/// with a non-empty reason, contributes nothing — the scanner's own
+/// all-of-them rule is what decides the verdict, and this reader only has to
+/// name what it can.
+fn parse_suppression_requests(log: &str) -> Vec<SuppressionRequest> {
+    log.lines()
+        .filter_map(|line| {
+            let (location, rest) = line.split_once(" — ")?;
+            let (path, number) = location.rsplit_once(':')?;
+            let (lint, source) = rest.split_once(" — ")?;
+            let reason = source.split_once(REQUEST_MARKER)?.1.trim();
+            let line_number = number.parse().ok()?;
+            (!path.is_empty() && !reason.is_empty()).then(|| SuppressionRequest {
+                path: path.to_owned(),
+                line: line_number,
+                lint: lint.trim().to_owned(),
+                reason: reason.to_owned(),
+            })
+        })
+        .collect()
 }
 
 /// Whether a clippy run that was *not* asked to deny warnings should count as a
@@ -380,42 +568,136 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
 /// Reads cargo's JSON diagnostic stream rather than scanning rendered text, so
 /// the verdict turns on a structured `level` rather than on the word "warning"
 /// appearing in someone's identifier or doc comment.
-fn clippy_verdict(stdout: &str) -> bool {
-    !stdout.lines().any(|line| diagnostic_level(line).is_some_and(|level| level == "warning" || level == "error"))
+fn clippy_verdict(stdout: &str, scope: &Scope) -> bool {
+    !diagnostics(stdout).any(|diagnostic| diagnostic.is_finding() && diagnostic.judged_under(scope))
 }
 
-/// The diagnostic level one `--message-format=json` line reports, or `None`
-/// when the line is not a compiler message (cargo interleaves build progress on
-/// the same stream).
-fn diagnostic_level(line: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(line).ok()?;
-    if value.get("reason")?.as_str()? != "compiler-message" {
-        return None;
+/// One compiler message cargo reported, reduced to what the verdict reads.
+struct Diagnostic {
+    /// rustc's own severity — the structured field the verdict turns on, so a
+    /// candidate whose identifiers or doc comments contain the word "warning"
+    /// is not judged for spelling.
+    level: String,
+    /// The package cargo attributed the message to, or `None` for a message it
+    /// attributed to nothing.
+    package: Option<String>,
+    /// rustc's own rendering of the message, as `--message-format=json` carries
+    /// it.
+    rendered: Option<String>,
+}
+
+impl Diagnostic {
+    /// Whether this message is what `-D warnings` would have failed the build
+    /// on. rustc emits `note` and `help` alongside real diagnostics, and
+    /// counting those fails every candidate that has any diagnostic context.
+    fn is_finding(&self) -> bool {
+        self.level == "warning" || self.level == "error"
     }
-    Some(value.get("message")?.get("level")?.as_str()?.to_owned())
+
+    /// Whether `scope` is answerable for this message — see [`Scope::judges`].
+    ///
+    /// An unattributed message is judged. Everything in this lane fails towards
+    /// the candidate, and a diagnostic whose owner cargo did not name is one
+    /// this run cannot rule out; silently dropping it is the false-green
+    /// direction.
+    fn judged_under(&self, scope: &Scope) -> bool {
+        self.package.as_deref().is_none_or(|package| scope.judges(package))
+    }
 }
 
-/// The human-readable rendering of every diagnostic in a JSON stream, which is
+/// Every compiler message in a `--message-format=json` stream, in the order
+/// cargo emitted them. Lines that are not compiler messages — the build
+/// progress cargo interleaves on the same stream — are skipped.
+fn diagnostics(stdout: &str) -> impl Iterator<Item = Diagnostic> + '_ {
+    stdout.lines().filter_map(|line| {
+        let value: serde_json::Value = serde_json::from_str(line).ok()?;
+        if value.get("reason")?.as_str()? != "compiler-message" {
+            return None;
+        }
+        let message = value.get("message")?;
+        Some(Diagnostic {
+            level: message.get("level")?.as_str()?.to_owned(),
+            package: value.get("package_id").and_then(serde_json::Value::as_str).map(package_name),
+            rendered: message.get("rendered").and_then(serde_json::Value::as_str).map(str::to_owned),
+        })
+    })
+}
+
+/// The package name a cargo `package_id` names.
+///
+/// cargo spells a workspace member's id as a `PackageIdSpec` URL —
+/// `path+file:///…/crates/aether-bloomery#0.3.0-alpha` — and omits the name
+/// from the fragment when it is the same as the directory's own. So the name is
+/// the fragment's when the fragment carries one, and the locator's last path
+/// segment when the fragment is a bare version.
+fn package_name(package_id: &str) -> String {
+    let Some((locator, fragment)) = package_id.rsplit_once('#') else {
+        return package_id.to_owned();
+    };
+    if let Some((name, _version)) = fragment.split_once('@') {
+        return name.to_owned();
+    }
+    if !fragment.starts_with(|character: char| character.is_ascii_digit()) {
+        return fragment.to_owned();
+    }
+    locator.rsplit('/').next().unwrap_or(locator).to_owned()
+}
+
+/// The human-readable rendering of the diagnostics `scope` judges, which is
 /// what a `Refine` re-entry is handed. cargo puts the same text rustc would
 /// have printed in each message's `rendered` field, so nothing is lost by
 /// asking for JSON.
-fn render_diagnostics(stdout: &str) -> String {
-    stdout
-        .lines()
-        .filter_map(|line| {
-            let value: serde_json::Value = serde_json::from_str(line).ok()?;
-            (value.get("reason")?.as_str()? == "compiler-message")
-                .then(|| value.get("message")?.get("rendered")?.as_str().map(str::to_owned))
-                .flatten()
-        })
+///
+/// Filtered by the same predicate the verdict uses, so a repair lap is directed
+/// at the crates it is accountable for rather than at a warning in a dependency
+/// it cannot edit inside its surface. What was left out is stated by
+/// [`unjudged_notice`] rather than dropped in silence.
+fn render_diagnostics(stdout: &str, scope: &Scope) -> String {
+    diagnostics(stdout)
+        .filter(|diagnostic| diagnostic.judged_under(scope))
+        .filter_map(|diagnostic| diagnostic.rendered)
         .collect::<Vec<String>>()
         .join("\n")
+}
+
+/// The receipt for what this run declined to blame the candidate for: which
+/// out-of-closure crates emitted findings, and how many each emitted.
+///
+/// The same argument the environment observations make one level out (#4895).
+/// A classification a reader cannot see is indistinguishable from a scanner
+/// that found nothing, and the two have to be told apart for a wrong closure to
+/// be noticed at all.
+fn unjudged_notice(stdout: &str, scope: &Scope) -> Option<String> {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for diagnostic in diagnostics(stdout).filter(Diagnostic::is_finding) {
+        if let Some(package) = diagnostic.package.filter(|package| !scope.judges(package)) {
+            *counts.entry(package).or_default() += 1;
+        }
+    }
+
+    let total: usize = counts.values().sum();
+    let named: Vec<String> = counts.iter().map(|(package, count)| format!("{package} ({count})")).collect();
+    (total > 0).then(|| {
+        format!(
+            "note: {total} diagnostic(s) from {} crate(s) outside this candidate's closure were not judged: {} — \
+             each compiles the same source at the base (see verify.scope.log)\n",
+            counts.len(),
+            named.join(", "),
+        )
+    })
 }
 
 /// The typed id of the verify umbrella (#3626) the reducer dispatches for the
 /// Verify stage (`Transformation::for_member_stage`) — distinct from the
 /// concrete `verify.*` ids `verify_command` maps individually.
 pub(super) const VERIFY_CHECK: &str = "verify.check";
+
+/// The typed id of the whole-workspace base verify. Same
+/// [`verify_check_members`] fan-out as [`VERIFY_CHECK`], but closure resolution
+/// is skipped: with an empty candidate range `Scope::resolve` yields an empty
+/// package set and `args_under` would strip `--workspace` while adding no `-p`,
+/// reporting green over nothing.
+pub(super) const VERIFY_BASE: &str = "verify.base";
 
 /// The log the umbrella writes its computed scope to, alongside its members'
 /// own logs — the receipt that makes a wrong closure visible in the envelope
@@ -427,7 +709,16 @@ const SCOPE_LOG: &str = "verify.scope.log";
 /// this list (e.g. a future `verify.test`) needs no change to the reducer's
 /// dispatched stage command.
 fn verify_check_members() -> &'static [&'static str] {
-    &["verify.suppress", "verify.fmt", "verify.clippy", "verify.docs", "verify.test", "verify.dup", "verify.deps"]
+    &[
+        "verify.suppress",
+        "verify.fmt",
+        "verify.clippy",
+        "verify.docs",
+        "verify.test",
+        "verify.dup",
+        "verify.deps",
+        "verify.lock",
+    ]
 }
 
 /// The status the umbrella stamps, from what its members said (ADR-0176's
@@ -515,6 +806,12 @@ fn member_outcome(invocation: &VerifyInvocation, derived_pass: bool, code: Optio
         } else {
             MemberOutcome::Failed
         };
+    }
+
+    // Read before the finding codes: a member that declined to judge has said
+    // the candidate stated its case, and the lane has no standing to answer.
+    if code.is_some_and(|code| invocation.requested_exit_codes.contains(&code)) {
+        return MemberOutcome::Passed;
     }
 
     if code.is_some_and(|code| invocation.finding_exit_codes.contains(&code)) {
@@ -638,6 +935,15 @@ struct Captured {
 /// which a rerun repeats unchanged.
 trait MemberRunner {
     fn run(&mut self, invocation: &VerifyInvocation, scope: &Scope, diff_base: Option<&str>) -> Result<Captured>;
+
+    /// Replay one named test — the unit the per-test triage decides on.
+    ///
+    /// `at` is the commit to run it at, or `None` for the candidate's own tree.
+    /// The default spelling is the whole member again, which is what a runner
+    /// with no narrower form can honestly offer; the spawning runner overrides
+    /// it with a filtered invocation, and a scripted one in tests answers from
+    /// its script.
+    fn replay(&mut self, invocation: &VerifyInvocation, test: &str, at: Option<&str>) -> Result<Captured>;
 }
 
 /// The runner the lane uses: spawn the member's own command, through the host's
@@ -660,6 +966,114 @@ impl MemberRunner for SpawnRunner<'_> {
         // whoever reads the failure.
         Ok(Captured { stdout: output.stdout, stderr: self.peak.take_report(output.stderr), code: output.status.code() })
     }
+
+    fn replay(&mut self, invocation: &VerifyInvocation, test: &str, at: Option<&str>) -> Result<Captured> {
+        let Some(base) = at else {
+            return self.spawn_one(invocation, test, None);
+        };
+        // The base run needs a tree at the base commit, and it must not be this
+        // one: stashing would move the candidate out from under a lane that is
+        // mid-verification. A detached worktree is the cheap, side-effect-free
+        // form, removed whichever way the run went.
+        let checkout = BaseCheckout::open(base)?;
+        let captured = self.spawn_one(invocation, test, Some(checkout.path()));
+        checkout.close();
+        captured
+    }
+}
+
+impl SpawnRunner<'_> {
+    /// Spawn `invocation` narrowed to the one `test`, optionally in `at`.
+    ///
+    /// `PROPTEST_CASES=1` is what replays a property test's *own* counterexample
+    /// rather than a fresh sample: proptest runs every case persisted in the
+    /// crate's `proptest-regressions` file before it draws any new ones, and the
+    /// first failing run wrote the shrunk input there. Capping the fresh draws
+    /// at one keeps the replay about the recorded input, which is the whole
+    /// point of step 1 — a different dice roll is not evidence about this
+    /// failure either way.
+    fn spawn_one(&self, invocation: &VerifyInvocation, test: &str, at: Option<&Path>) -> Result<Captured> {
+        let mut command = self.peak.command(invocation.program);
+        command
+            .args(invocation.args.iter().copied())
+            .args(["-E", &nextest_filter(test)])
+            .envs(invocation.env.iter().copied())
+            .envs(CI_BUILD_ENV.iter().copied())
+            .env("PROPTEST_CASES", "1");
+        if let Some(at) = at {
+            // Its own target directory: cargo's incremental cache surfaces a
+            // dependency last compiled from the other tree's source otherwise,
+            // and a phantom error here would read as a base failure that
+            // excuses a real finding.
+            command.current_dir(at).env("CARGO_TARGET_DIR", at.join("target"));
+            // And its own prepare. `verify.test` needs the component wasm this
+            // step cross-builds, and without it `AETHER_REQUIRE_RUNTIME=1` turns
+            // every scenario test red — which this triage would then read as
+            // "the base was already broken" and use to excuse a real finding.
+            if let Some(prepare) = invocation.prepare {
+                let mut step = cargo::command();
+                step.args(prepare.iter().copied()).current_dir(at).env("CARGO_TARGET_DIR", at.join("target"));
+                run_captured(step).with_context(|| format!("prepare the base checkout at {}", at.display()))?;
+            }
+        } else {
+            sccache::export(self.cache, &mut command);
+        }
+        let output = run_captured(command).with_context(|| format!("replay {test}"))?;
+        Ok(Captured { stdout: output.stdout, stderr: self.peak.take_report(output.stderr), code: output.status.code() })
+    }
+}
+
+/// The nextest filterset selecting exactly one test.
+///
+/// The key a failing run reports is the `binary-id test_name` pair, and nextest
+/// addresses the two halves separately — filtering on the test name alone would
+/// re-run a same-named test in every binary that has one, which is not the same
+/// input.
+fn nextest_filter(test: &str) -> String {
+    let mut halves = test.split_whitespace();
+    match (halves.next(), halves.next()) {
+        (Some(binary), Some(name)) => format!("binary_id(={binary}) and test(={name})"),
+        (Some(name), None) => format!("test(={name})"),
+        _ => String::from("none()"),
+    }
+}
+
+/// A detached git worktree at one commit, removed on [`close`](Self::close).
+///
+/// Deliberately not `Drop`: removing a worktree can fail, and a destructor that
+/// swallows that would leave a stale entry in `.git/worktrees` that the next
+/// `git worktree add` at the same path refuses.
+struct BaseCheckout {
+    path: PathBuf,
+}
+
+impl BaseCheckout {
+    fn open(base: &str) -> Result<Self> {
+        let path = env::temp_dir().join(format!("aether-verify-base-{}", process::id()));
+        // A leftover from a killed run would make `worktree add` refuse; prune
+        // first so a crashed predecessor cannot wedge every later triage.
+        let _ = run_captured(git(&["worktree", "prune"]));
+        let added = run_captured(git(&["worktree", "add", "--detach", &path.to_string_lossy(), base]))
+            .with_context(|| format!("git worktree add at {base}"))?;
+        if !added.status.success() {
+            bail!("git worktree add at {base} failed: {}", String::from_utf8_lossy(&added.stderr));
+        }
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn close(self) {
+        let _ = run_captured(git(&["worktree", "remove", "--force", &self.path.to_string_lossy()]));
+    }
+}
+
+fn git(args: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command.args(args);
+    command
 }
 
 /// Run one umbrella member under `scope` and reduce its output to `(outcome,
@@ -678,10 +1092,10 @@ fn run_member(
     // them. Everything else has nothing to derive and passes its zero exit
     // through.
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let (derived_pass, rendered) = if id == "verify.clippy" {
-        (clippy_verdict(&stdout), render_diagnostics(&stdout))
+    let (derived_pass, rendered, unjudged) = if id == "verify.clippy" {
+        (clippy_verdict(&stdout, scope), render_diagnostics(&stdout, scope), unjudged_notice(&stdout, scope))
     } else {
-        (true, stdout)
+        (true, stdout, None)
     };
 
     let code = output.code;
@@ -692,6 +1106,9 @@ fn run_member(
     // handful of crates is otherwise indistinguishable from a workspace run
     // that happened to compile nothing else.
     if let Some(notice) = member_scope_notice(invocation, scope) {
+        log.extend_from_slice(notice.as_bytes());
+    }
+    if let Some(notice) = unjudged {
         log.extend_from_slice(notice.as_bytes());
     }
     if outcome == MemberOutcome::Operational {
@@ -718,16 +1135,52 @@ struct MemberRun {
     exit_code: i32,
     findings: Option<String>,
     observation: Option<String>,
+    /// Tests this run excused because a same-input replay cleared them.
+    flakes: Vec<Excused>,
+    /// Tests this run excused because they were already red at the base.
+    inherited: Vec<Excused>,
+    /// Suppressions this run declined to judge, each with the reason the lane
+    /// stated for it (ADR-0193).
+    suppression_requests: Vec<SuppressionRequest>,
+    /// What the symbol pass flagged for the review seat (#5185). Its own
+    /// channel for the reason the request channel is its own: a flag is a
+    /// question about design, and a repair lap handed one spends its budget
+    /// renaming a symbol rather than answering it.
+    review_flags: Option<String>,
 }
 
 impl MemberRun {
     /// A member whose log the distillers read as they always have — everything
     /// but a `verify.test` run whose failures were classified.
     fn plain(id: &str, outcome: MemberOutcome, log: Vec<u8>, exit_code: i32) -> Self {
+        let rendered = String::from_utf8_lossy(&log);
         let findings = matches!(outcome, MemberOutcome::Failed | MemberOutcome::Operational)
-            .then(|| distil_member(id, &String::from_utf8_lossy(&log)))
+            .then(|| distil_member(id, &rendered))
             .flatten();
-        Self { id: id.to_owned(), outcome, log, exit_code, findings, observation: None }
+        // Keyed on the code the scanner left by rather than on the outcome: a
+        // requested run passes, and reading the marker off every passing
+        // member's log would hand the reviewer whatever prose happened to
+        // resemble it.
+        let suppression_requests = if id == SUPPRESS_MEMBER && exit_code == SUPPRESSION_REQUESTED_EXIT {
+            parse_suppression_requests(&rendered)
+        } else {
+            Vec::new()
+        };
+
+        Self {
+            id: id.to_owned(),
+            outcome,
+            log,
+            exit_code,
+            findings,
+            observation: None,
+            flakes: Vec::new(),
+            inherited: Vec::new(),
+            suppression_requests,
+            // Set by the caller that knows the work order's diff base; a
+            // member with no base has no introduced set to read.
+            review_flags: None,
+        }
     }
 }
 
@@ -746,77 +1199,47 @@ fn classify_failures(
         .flatten()
 }
 
-/// Why a failing `verify.test` member is run a second time.
-#[derive(Clone, Copy)]
-enum RerunKind {
-    /// Every first-run failure sat outside the candidate's reverse-dependency
-    /// closure (#4895).
-    OutOfClosure,
-    /// No closure exists to classify against — an aggregate verify, or a
-    /// candidate whose blast radius could not be bounded (#5064).
-    NoClosure,
-}
-
-/// The line separating a member's first run from its repeat inside the one log
-/// the evidence keeps.
+/// The line separating a member's first run from its out-of-closure repeat
+/// inside the one log the evidence keeps.
 ///
 /// Both runs stay in that log. The receipt for a rerun is what each of the two
 /// runs said, and a log holding only the second cannot show that the first was
-/// environmental — or, with no closure, a flake.
-fn rerun_notice(id: &str, kind: RerunKind) -> String {
-    match kind {
-        RerunKind::OutOfClosure => format!(
-            "\n\n{id}: every failure above lies outside the candidate's reverse-dependency closure — a transient \
-             host fault far more often than a candidate defect, so the member is being rerun once. Everything \
-             below is that second run.\n\n"
-        ),
-        RerunKind::NoClosure => format!(
-            "\n\n{id}: this run has no reverse-dependency closure to classify the failures above against, so the \
-             identical invocation is being rechecked once. Everything below is that second run.\n\n"
-        ),
-    }
+/// environmental.
+fn rerun_notice(id: &str) -> String {
+    format!(
+        "\n\n{id}: every failure above lies outside the candidate's reverse-dependency closure — a transient \
+         host fault far more often than a candidate defect, so the member is being rerun once. Everything \
+         below is that second run.\n\n"
+    )
 }
 
-/// The environment observation for a member that earned one repeat, framed by
-/// what that repeat then did.
+/// The environment observation for a member whose failures were all
+/// out of closure, framed by what its one repeat then did.
 ///
-/// Out-of-closure blocks stay on this channel whichever way the repeat went.
-/// A no-closure flake is reported when the recheck came back green. A
-/// no-closure recheck whose named failures do not all persist is reported
-/// too: the exclusive-or is a host fault, and an empty intersection
-/// escalates as environment rather than as candidate work.
-fn rerun_observation(kind: RerunKind, outcome: MemberOutcome, block: Option<String>) -> Option<String> {
-    let verdict = match (kind, outcome) {
-        (RerunKind::OutOfClosure, MemberOutcome::Passed) => {
+/// The block stays on this channel whichever way the repeat went. Candidate
+/// failures no longer reach here at all: they are triaged per test
+/// ([`triage::triage`]), which is a statement about one named test rather than about
+/// the whole member.
+fn rerun_observation(outcome: MemberOutcome, block: Option<String>) -> Option<String> {
+    let verdict = match outcome {
+        MemberOutcome::Passed => {
             "The repeat came back green, so the block did not repeat: it was the host, and the member passes \
              without spending a repair lap."
         }
-        (RerunKind::OutOfClosure, MemberOutcome::Environment) => {
+        MemberOutcome::Environment => {
             "The repeat reported the same out-of-closure block, so this member escalates as an environment \
              fault on the bloom rather than as findings against a candidate that cannot reach it."
         }
-        (RerunKind::OutOfClosure, _) => {
+        _ => {
             "The repeat reported failures inside the closure, so the member is judged on those; the block \
              above is not among them."
-        }
-        (RerunKind::NoClosure, MemberOutcome::Passed) => {
-            "The identical recheck came back green, so the first failure did not repeat: it is preserved here \
-             as a flake observation, and the member passes without spending a repair lap."
-        }
-        (RerunKind::NoClosure, MemberOutcome::Environment) => {
-            "The two runs shared no failing test, so this member escalates as an environment fault on the \
-             bloom rather than as findings against a candidate the asymmetry never judged."
-        }
-        (RerunKind::NoClosure, _) => {
-            "The repeat confirmed the failures that appeared in both runs; the ones that failed in only one \
-             run are a host fault and are not among the findings."
         }
     };
     Some(format!("{}\n\n{verdict}", block?))
 }
 
 /// Run one member, discriminating an environment fault from a candidate defect
-/// (#4895, #5064, #5099).
+/// (#4895, #5064, #5099), then triaging each candidate failure on its own.
 ///
 /// Only a failing `verify.test` run can be discriminated: a failing test names
 /// the package it lives in, and that package either links something the diff
@@ -826,19 +1249,17 @@ fn rerun_observation(kind: RerunKind, outcome: MemberOutcome, block: Option<Stri
 /// A run whose failures are *all* out of closure is worth exactly one repeat
 /// before anything is charged to anyone — the fault class is transient by
 /// nature (contention, a fork that failed, a box out of memory), so a green
-/// repeat is the honest verdict and a red one is a host still broken. A mixed
-/// run is not repeated at all: it found a real defect, and the repair lap it
-/// earns is handed the in-closure half alone.
+/// repeat is the honest verdict and a red one is a host still broken.
 ///
-/// A failing `verify.test` with no closure at all — `AggregateVerify`, or a
-/// candidate whose blast radius the graph cannot bound — has nothing to
-/// classify out. It is worth exactly one identical recheck. A green second
-/// run is a flake, kept as an observation. A red second run is judged on the
-/// intersection of the two runs' named failures: a test that failed in both
-/// is a finding, and a test that failed in exactly one is a host fault
-/// (ADR-0176), reported as an observation. An empty intersection escalates
-/// the member as environment rather than handing the recheck's failures to a
-/// repair lap. The repeat is not itself rechecked.
+/// Everything else is judged per test rather than per member. The whole-member
+/// recheck this replaces was wrong in both directions: a green second run
+/// excused every failure in the first, including ones some *other* flaky test
+/// had nothing to do with, and no run ever asked whether the failure predates
+/// the candidate. Each candidate failure is instead replayed against the same
+/// input and, if it repeats, run at the work order's base — see
+/// [`triage::triage`]. Only a test red **only** on the candidate reaches the findings;
+/// the two excusals are recorded on the observation channel and in their own
+/// evidence ledgers rather than dropped.
 fn run_member_discriminated(
     id: &str,
     invocation: &VerifyInvocation,
@@ -849,61 +1270,46 @@ fn run_member_discriminated(
 ) -> Result<MemberRun> {
     let (outcome, log, exit_code) = run_member(id, invocation, scope, diff_base, runner)?;
     let Some(classified) = classify_failures(id, outcome, &log, closure) else {
-        return Ok(MemberRun::plain(id, outcome, log, exit_code));
+        let mut run = MemberRun::plain(id, outcome, log, exit_code);
+        run.review_flags = symbol_flags(id, diff_base);
+        return Ok(run);
     };
 
     if !classified.is_environmental() {
-        if closure.is_none() {
-            let first = classified.findings().or_else(|| distil_diagnostics(&String::from_utf8_lossy(&log)));
-            let (repeat_outcome, repeat_log, repeat_exit) = run_member(id, invocation, scope, diff_base, runner)?;
-            let repeat = classify_failures(id, repeat_outcome, &repeat_log, None);
-            let (outcome, findings, observation) = if repeat_outcome.passed() {
-                (MemberOutcome::Passed, None, rerun_observation(RerunKind::NoClosure, MemberOutcome::Passed, first))
-            } else if let Some(repeat_classified) = repeat.as_ref() {
-                let persistent = repeat_classified.intersect_named(&classified);
-                let outcome = if persistent.has_candidate_failures() {
-                    repeat_outcome
-                } else {
-                    MemberOutcome::Environment
-                };
-                let findings = matches!(outcome, MemberOutcome::Failed | MemberOutcome::Operational)
-                    .then(|| {
-                        persistent.findings().or_else(|| distil_diagnostics(&String::from_utf8_lossy(&repeat_log)))
-                    })
-                    .flatten();
-                (
-                    outcome,
-                    findings,
-                    rerun_observation(
-                        RerunKind::NoClosure,
-                        outcome,
-                        nextest::asymmetric_observation(&classified, repeat_classified),
-                    ),
-                )
-            } else {
-                let findings = matches!(repeat_outcome, MemberOutcome::Failed | MemberOutcome::Operational)
-                    .then(|| distil_diagnostics(&String::from_utf8_lossy(&repeat_log)))
-                    .flatten();
-                (repeat_outcome, findings, None)
-            };
-            return Ok(MemberRun {
-                id: id.to_owned(),
-                outcome,
-                log: [log, rerun_notice(id, RerunKind::NoClosure).into_bytes(), repeat_log].concat(),
-                exit_code: repeat_exit,
-                findings,
-                observation,
-            });
-        }
+        // Every failing test the candidate is charged with is triaged on its
+        // own (FIX-4b): replayed against the same input, then run at the work
+        // order's base. Only a test red *only* on the candidate is a finding.
+        let triaged = triage::triage(&classified, diff_base, |test, at| {
+            let captured = runner.replay(invocation, test, at)?;
+            Ok(replay_verdict(id, invocation, test, at, &captured))
+        })?;
 
-        let findings = classified.findings().or_else(|| distil_diagnostics(&String::from_utf8_lossy(&log)));
+        let kept = classified.retaining(&triaged.findings);
+        let outcome = if kept.has_candidate_failures() {
+            outcome
+        } else {
+            MemberOutcome::Passed
+        };
+        let findings = kept
+            .has_candidate_failures()
+            .then(|| kept.findings().or_else(|| distil_diagnostics(&String::from_utf8_lossy(&log))))
+            .flatten();
         return Ok(MemberRun {
             id: id.to_owned(),
             outcome,
             log,
-            exit_code,
+            exit_code: if outcome.passed() {
+                0
+            } else {
+                exit_code
+            },
             findings,
-            observation: classified.observation(),
+            observation: join_observations(classified.observation(), triaged.observation()),
+            flakes: triaged.flakes,
+            inherited: triaged.inherited,
+            // Only `verify.suppress` states one, and this arm is `verify.test`.
+            suppression_requests: Vec::new(),
+            review_flags: None,
         });
     }
 
@@ -931,11 +1337,82 @@ fn run_member_discriminated(
     Ok(MemberRun {
         id: id.to_owned(),
         outcome,
-        log: [log, rerun_notice(id, RerunKind::OutOfClosure).into_bytes(), repeat_log].concat(),
+        log: [log, rerun_notice(id).into_bytes(), repeat_log].concat(),
         exit_code: repeat_exit,
         findings,
-        observation: rerun_observation(RerunKind::OutOfClosure, outcome, classified.observation()),
+        observation: rerun_observation(outcome, classified.observation()),
+        flakes: Vec::new(),
+        inherited: Vec::new(),
+        suppression_requests: Vec::new(),
+        review_flags: None,
     })
+}
+
+/// Read one replay's captured output as a verdict about the one test it was
+/// asked to run, plus the label the ledger records for it.
+///
+/// Only three answers, and the burden of proof runs one way: a replay that
+/// cleared the test is `Cleared`, one that named it failing again is
+/// `Repeated`, and anything else — a build that would not run, a checkout that
+/// produced no test list, an exit code nextest does not use for a test result —
+/// is `Unreached`. `Unreached` never excuses: a triage step that did not happen
+/// is not evidence, and reading it as one would pass a candidate on the
+/// strength of a run that never judged it.
+fn replay_verdict(
+    id: &str,
+    invocation: &VerifyInvocation,
+    test: &str,
+    at: Option<&str>,
+    captured: &Captured,
+) -> (ReplayVerdict, String) {
+    let label = at.map_or_else(|| replay_label(captured), ToOwned::to_owned);
+    let mut log = captured.stdout.clone();
+    log.extend_from_slice(&captured.stderr);
+    let outcome = member_outcome(invocation, true, captured.code);
+    if outcome.passed() {
+        return (ReplayVerdict::Cleared, label);
+    }
+    let named = classify_failures(id, outcome, &log, None)
+        .is_some_and(|classified| classified.candidate_tests().iter().any(|failed| failed == test));
+    if named {
+        (ReplayVerdict::Repeated, label)
+    } else if outcome == MemberOutcome::Failed {
+        // Failed, but this test is not among the names — nextest ran and said
+        // nothing about it, which is the same silence a green run gives.
+        (ReplayVerdict::Cleared, label)
+    } else {
+        (ReplayVerdict::Unreached, label)
+    }
+}
+
+/// What a same-input replay ran against, as the flake ledger states it.
+fn replay_label(captured: &Captured) -> String {
+    let text = String::from_utf8_lossy(&captured.stdout);
+    if names_a_minimal_failing_input(&text) {
+        "the persisted counterexample".to_owned()
+    } else {
+        "an identical invocation".to_owned()
+    }
+}
+
+/// Both receipts a triaged member carries, or whichever one it has.
+fn join_observations(closure_block: Option<String>, triage_block: Option<String>) -> Option<String> {
+    match (closure_block, triage_block) {
+        (Some(first), Some(second)) => Some(format!("{first}\n\n{second}")),
+        (only, None) | (None, only) => only,
+    }
+}
+
+/// Whether this run's output carries a property test's shrunk counterexample.
+///
+/// `minimal failing input:` is the line proptest prints once it has shrunk a
+/// failing case down, and it is what makes such a failure reproducible: the
+/// input is written into the log (and into the crate's `proptest-regressions`
+/// file) rather than left to the next random draw. It is what a same-input
+/// replay of that test actually replays, so the flake ledger says so rather
+/// than claiming an identical invocation it did not run.
+fn names_a_minimal_failing_input(log: &str) -> bool {
+    log.contains("minimal failing input:")
 }
 
 /// The scope line this member's log opens with, when the member is one the run
@@ -1049,7 +1526,7 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
     fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let derived_pass = args.command != "verify.clippy" || clippy_verdict(&stdout);
+    let derived_pass = args.command != "verify.clippy" || clippy_verdict(&stdout, &scope);
     let code = output.status.code();
     let outcome = member_outcome(&invocation, derived_pass, code);
 
@@ -1057,6 +1534,9 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
     let log_path = args.out.join(&log_name);
     let mut log_bytes = Vec::new();
     if let Some(notice) = member_scope_notice(&invocation, &scope) {
+        log_bytes.extend_from_slice(notice.as_bytes());
+    }
+    if let Some(notice) = (args.command == "verify.clippy").then(|| unjudged_notice(&stdout, &scope)).flatten() {
         log_bytes.extend_from_slice(notice.as_bytes());
     }
     if outcome == MemberOutcome::Operational {
@@ -1070,15 +1550,21 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
     let exit_code = effective_exit_code(passed, code);
 
     // A failing single verify contributes its own diagnostics on the same
-    // channel the umbrella uses, so a lane run alone directs a Refine too.
-    let findings =
-        (!passed).then(|| verify_findings(&[MemberRun::plain(&args.command, outcome, log_bytes, exit_code)])).flatten();
+    // channel the umbrella uses, so a lane run alone directs a Refine too — and
+    // a `verify.suppress` run alone states its requests on the same channel the
+    // umbrella states them on, so the two paths hand the reviewer one shape.
+    let mut run = MemberRun::plain(&args.command, outcome, log_bytes, exit_code);
+    run.review_flags = symbol_flags(&args.command, args.diff_base.as_deref());
+    let findings = (!passed).then(|| verify_findings(from_ref(&run))).flatten();
+    let requests = stated_requests(from_ref(&run));
 
     let failures = outcome.failure(&args.command).map(VerifyFailureSet::one);
-    let evidence =
+    let mut evidence =
         build_evidence(&args.command, args.nonce.clone(), passed, Some(exit_code), log_name, findings, failures)
             .measured_by(cache.as_ref(), &peak)
             .timed(duration_millis);
+    evidence.suppression_requests = requests;
+    evidence.review_flags = review_flags(from_ref(&run));
     write_json_pretty(&args.out.join("evidence.json"), &evidence)?;
 
     if passed {
@@ -1267,6 +1753,71 @@ fn verify_findings(members: &[MemberRun]) -> Option<String> {
     ))
 }
 
+/// One of the two per-test excusal ledgers, gathered across the members that
+/// produced any (FIX-4b).
+///
+/// Absent rather than empty when nothing was excused, so the channel stays
+/// presence-driven: a reader distinguishes "nothing was excused" from "this
+/// build predates the ledgers" by whether the key is there at all.
+fn excused(members: &[MemberRun], of: impl Fn(&MemberRun) -> &Vec<Excused>) -> Option<Vec<Excused>> {
+    let gathered: Vec<Excused> = members.iter().flat_map(|member| of(member).iter().cloned()).collect();
+    (!gathered.is_empty()).then_some(gathered)
+}
+
+/// Append one line per excused flake to the run's flake log — the durable
+/// observation channel FIX-4b asks for, beside the evidence record.
+///
+/// Best-effort: an unwritable log is not a reason to fail a verification that
+/// already concluded, and the same records ride `evidence.json` regardless.
+fn append_flake_log(out: &Path, flakes: &[Excused]) {
+    if flakes.is_empty() {
+        return;
+    }
+    let body = flakes.iter().fold(String::new(), |mut body, excused| {
+        let _ = writeln!(body, "{}\treplayed {}", excused.test, excused.replayed);
+        body
+    });
+    if let Err(error) =
+        fs::OpenOptions::new().create(true).append(true).open(out.join("flakes.log")).and_then(|mut file| {
+            use std::io::Write as _;
+            file.write_all(body.as_bytes())
+        })
+    {
+        eprintln!("could not append the flake log: {error}");
+    }
+}
+
+/// The symbol pass's flags, for the one member that carries them (#5185).
+///
+/// Run beside jscpd rather than as a member of its own, because the two answer
+/// one question at two granularities and a reviewer reading "is this already
+/// written" wants both verdicts under one identity. ADR-0178's arithmetic is
+/// untouched either way: this returns prose, never an outcome.
+fn symbol_flags(id: &str, diff_base: Option<&str>) -> Option<String> {
+    (id == DUP_MEMBER).then(|| symbols::flags(diff_base)).flatten()
+}
+
+/// Gather the members' review flags into the evidence's own channel.
+fn review_flags(members: &[MemberRun]) -> Option<String> {
+    let flagged: Vec<String> = members
+        .iter()
+        .filter_map(|member| member.review_flags.as_ref().map(|body| format!("### {}\n\n{body}", member.id)))
+        .collect();
+
+    (!flagged.is_empty()).then(|| flagged.join("\n\n"))
+}
+
+/// Gather the requests the members stated, for the evidence's own channel.
+///
+/// Presence-driven like the excusal ledgers: absent when nothing was requested,
+/// so a reader tells "this candidate asked for nothing" from "this build
+/// predates the channel" by whether the key is there at all.
+fn stated_requests(members: &[MemberRun]) -> Option<Vec<SuppressionRequest>> {
+    let gathered: Vec<SuppressionRequest> =
+        members.iter().flat_map(|member| member.suppression_requests.iter().cloned()).collect();
+    (!gathered.is_empty()).then_some(gathered)
+}
+
 /// Assemble the members' environment observations into the evidence's own
 /// channel — the receipts for everything this run declined to charge the
 /// candidate for (#4895).
@@ -1282,7 +1833,7 @@ fn environment_observations(members: &[MemberRun]) -> Option<String> {
     (!observed.is_empty()).then(|| observed.join("\n\n"))
 }
 
-/// The `verify.check` umbrella (#3626): runs every member in
+/// The `verify.check` / `verify.base` umbrella (#3626): runs every member in
 /// `verify_check_members()` unconditionally — no short-circuit on first
 /// failure, so a partial failure still leaves every member's log for
 /// diagnosis — then writes one aggregate `evidence.json` whose `status`
@@ -1292,8 +1843,10 @@ fn environment_observations(members: &[MemberRun]) -> Option<String> {
 /// The candidate's reverse-dependency closure is resolved once, before any
 /// member runs, and every member is discriminated against that one answer
 /// (#4895) — recomputing it per member would let a mid-run repository change
-/// give two members two different candidates.
-pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
+/// give two members two different candidates. `full` skips that resolution so
+/// each member keeps its stated `--workspace` argv: an empty candidate range
+/// would otherwise false-green a workspace-wide question.
+pub(super) fn run_verify_check(args: &TransformArgs, full: bool) -> Result<()> {
     let umbrella_started = Instant::now();
     fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
 
@@ -1314,35 +1867,116 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
             peak_resident_bytes: None,
             duration_millis: None,
             gates: None,
-            command: VERIFY_CHECK.to_owned(),
+            command: if full {
+                VERIFY_BASE
+            } else {
+                VERIFY_CHECK
+            }
+            .to_owned(),
             nonce: args.nonce.clone(),
             status: "fail",
             exit_code: Some(1),
             log: String::new(),
             environment: None,
+            flakes: None,
+            inherited_failures: None,
+            suppression_requests: None,
+            review_flags: None,
         };
         write_json_pretty(&args.out.join("evidence.json"), &evidence)?;
         process::exit(1);
     }
 
-    // Resolved once for the whole umbrella, so the counters the evidence carries
+    let CheckPass { runs, gates, log_names, first_failure_code, sccache_served, peak_resident_bytes } =
+        check_pass(args, &args.out, full)?;
+
+    let status = umbrella_status(&runs.iter().map(|run| run.outcome).collect::<Vec<MemberOutcome>>());
+    let failures = failed_verifiers(runs.iter().map(|run| (run.id.as_str(), run.outcome)));
+    let evidence = Evidence {
+        findings: verify_findings(&runs),
+        failed_verifiers: (!failures.is_empty()).then_some(failures),
+        sccache: sccache_served,
+        peak_resident_bytes,
+        duration_millis: None,
+        gates: None,
+        command: if full {
+            VERIFY_BASE
+        } else {
+            VERIFY_CHECK
+        }
+        .to_owned(),
+        nonce: args.nonce.clone(),
+        status,
+        exit_code: Some(first_failure_code.unwrap_or(0)),
+        log: log_names.join(", "),
+        environment: environment_observations(&runs),
+        flakes: excused(&runs, |run| &run.flakes),
+        inherited_failures: excused(&runs, |run| &run.inherited),
+        suppression_requests: stated_requests(&runs),
+        review_flags: review_flags(&runs),
+    }
+    .timed(elapsed_millis(umbrella_started))
+    .with_gates(gates);
+    append_flake_log(&args.out, evidence.flakes.as_deref().unwrap_or_default());
+    write_json_pretty(&args.out.join("evidence.json"), &evidence)?;
+
+    if status == "pass" {
+        Ok(())
+    } else {
+        process::exit(first_failure_code.unwrap_or(1))
+    }
+}
+
+/// What one fan-out over [`verify_check_members`] produced.
+///
+/// Held as a value so the `verify.check` and `verify.base` umbrellas share the
+/// fan-out rather than each spelling it: two loops over the same member list
+/// would be free to drift, and a whole-workspace pass that judged a *different*
+/// gate set than the scoped one is not the same gate at all.
+struct CheckPass {
+    runs: Vec<MemberRun>,
+    gates: Vec<GateTiming>,
+    log_names: Vec<String>,
+    first_failure_code: Option<i32>,
+    sccache_served: Option<Counters>,
+    peak_resident_bytes: Option<u64>,
+}
+
+/// Run every member in [`verify_check_members`] over the current tree, in
+/// CI-parity order and without short-circuiting on the first failure.
+///
+/// `logs` is the evidence directory each member's log and the scope receipt are
+/// written into, under the names the envelope's `log` field then lists.
+fn check_pass(args: &TransformArgs, logs: &Path, full: bool) -> Result<CheckPass> {
+    // Resolved once for the whole pass, so the counters the evidence carries
     // cover every member's build rather than one member's slice of it, and the
     // peak it reports is the high-water mark of the whole lane.
     let cache = sccache::detect();
     let peak = peak_memory::detect();
-    let closure = closure::resolve(args.diff_base.as_deref());
+    // A whole-workspace run skips closure resolution: `Scope::resolve` of an
+    // empty candidate range yields no packages, and `args_under` would then
+    // strip `--workspace` while adding no `-p`.
+    let closure = if full {
+        None
+    } else {
+        closure::resolve(args.diff_base.as_deref())
+    };
     let mut runner = SpawnRunner { cache: cache.as_ref(), peak: &peak };
 
     // Resolved once, before any member runs, and written out as its own log:
     // the compiling members are only comparable across a run if they all
     // narrowed to the same closure, and a receipt no one can read is not a
-    // receipt (#4890).
-    let scope = Scope::resolve(args.diff_base.as_deref());
-    let scope_log = String::from(SCOPE_LOG);
-    let scope_path = args.out.join(&scope_log);
+    // receipt (#4890). `full` asks for the workspace, so `packages()` is
+    // `None` and each member's stated argv is used verbatim.
+    let scope = if full {
+        Scope::resolve(None)
+    } else {
+        Scope::resolve(args.diff_base.as_deref())
+    };
+    let scope_path = logs.join(SCOPE_LOG);
     fs::write(&scope_path, scope.receipt()).with_context(|| format!("write {}", scope_path.display()))?;
+    let mut log_names = vec![String::from(SCOPE_LOG)];
 
-    let mut log_names = vec![scope_log];
     let mut runs = Vec::with_capacity(verify_check_members().len());
     let mut gates = Vec::with_capacity(verify_check_members().len());
     let mut first_failure_code: Option<i32> = None;
@@ -1369,59 +2003,43 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
                 &invocation,
                 &scope,
                 closure.as_ref(),
-                args.diff_base.as_deref(),
+                member_diff_base(id, args.diff_base.as_deref(), full),
                 &mut runner,
             )?,
         };
         let duration_millis = elapsed_millis(gate_started);
 
         let log_name = format!("{id}.log");
-        let log_path = args.out.join(&log_name);
+        let log_path = logs.join(&log_name);
         fs::write(&log_path, &run.log).with_context(|| format!("write {}", log_path.display()))?;
+        log_names.push(log_name);
 
         if !run.outcome.passed() && first_failure_code.is_none() {
             first_failure_code = Some(run.exit_code);
         }
-        log_names.push(log_name);
         runs.push(run);
         gates.push(GateTiming { command: id.to_owned(), duration_millis, prepare_millis });
     }
 
-    let status = umbrella_status(&runs.iter().map(|run| run.outcome).collect::<Vec<MemberOutcome>>());
-    let failures = failed_verifiers(runs.iter().map(|run| (run.id.as_str(), run.outcome)));
-    let evidence = Evidence {
-        findings: verify_findings(&runs),
-        failed_verifiers: (!failures.is_empty()).then_some(failures),
-        sccache: cache.as_ref().and_then(CompilerCache::served),
+    Ok(CheckPass {
+        runs,
+        gates,
+        log_names,
+        first_failure_code,
+        sccache_served: cache.as_ref().and_then(CompilerCache::served),
         peak_resident_bytes: peak.peak_resident_bytes(),
-        duration_millis: None,
-        gates: None,
-        command: VERIFY_CHECK.to_owned(),
-        nonce: args.nonce.clone(),
-        status,
-        exit_code: Some(first_failure_code.unwrap_or(0)),
-        log: log_names.join(", "),
-        environment: environment_observations(&runs),
-    }
-    .timed(elapsed_millis(umbrella_started))
-    .with_gates(gates);
-    write_json_pretty(&args.out.join("evidence.json"), &evidence)?;
-
-    if status == "pass" {
-        Ok(())
-    } else {
-        process::exit(first_failure_code.unwrap_or(1))
-    }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        Captured, MAX_FINDING_LINES, MemberOutcome, MemberRun, MemberRunner, Scope, VERIFY_CHECK, VerifyInvocation,
-        clippy_verdict, closure, distil_diagnostics, effective_exit_code, environment_observations, failed_verifiers,
-        member_outcome, member_scope_notice, operational_failure_notice, preflight_tools, prepare_failure_log,
-        render_diagnostics, required_targets, required_tools, run_member_discriminated, run_timed_prepare,
-        umbrella_status, verify_check_members, verify_command, verify_findings, workflow,
+        BASE_SET_SUBJECT, Captured, MAX_FINDING_LINES, MemberOutcome, MemberRun, MemberRunner, SUPPRESS_MEMBER, Scope,
+        VERIFY_BASE, VERIFY_CHECK, VerifyInvocation, clippy_verdict, closure, distil_diagnostics, effective_exit_code,
+        environment_observations, failed_verifiers, member_diff_base, member_outcome, member_scope_notice,
+        operational_failure_notice, package_name, preflight_tools, prepare_failure_log, render_diagnostics,
+        required_targets, required_tools, run_member_discriminated, run_timed_prepare, umbrella_status,
+        unjudged_notice, verify_check_members, verify_command, verify_findings, workflow,
     };
     use std::iter;
 
@@ -1456,17 +2074,37 @@ mod tests {
     struct ScriptedRunner {
         scripted: Vec<Captured>,
         runs: usize,
+        replays: Vec<Captured>,
+        /// Every `(test, base)` the triage asked about, in order — what a test
+        /// asserts the triage actually did rather than only what it concluded.
+        replayed: Vec<(String, Option<String>)>,
     }
 
     impl ScriptedRunner {
         /// A runner scripted with one `(log, exit code)` per run, in order.
+        ///
+        /// Replays are unscripted here, which is the repeats-again case: see
+        /// [`Self::replay`].
         fn new(scripted: &[(&str, i32)]) -> Self {
-            let scripted = scripted
-                .iter()
-                .map(|(log, code)| Captured { stdout: log.as_bytes().to_vec(), stderr: Vec::new(), code: Some(*code) })
-                .collect();
-            Self { scripted, runs: 0 }
+            Self { scripted: captures(scripted), runs: 0, replays: Vec::new(), replayed: Vec::new() }
         }
+
+        /// A runner whose per-test replays are scripted too, in the order the
+        /// triage asks for them: one entry per `(test, base)` call.
+        fn with_replays(scripted: &[(&str, i32)], replays: &[(&str, i32)]) -> Self {
+            Self { scripted: captures(scripted), runs: 0, replays: captures(replays), replayed: Vec::new() }
+        }
+    }
+
+    fn captures(scripted: &[(&str, i32)]) -> Vec<Captured> {
+        scripted
+            .iter()
+            .map(|(log, code)| Captured { stdout: log.as_bytes().to_vec(), stderr: Vec::new(), code: Some(*code) })
+            .collect()
+    }
+
+    fn cloned(captured: &Captured) -> Captured {
+        Captured { stdout: captured.stdout.clone(), stderr: captured.stderr.clone(), code: captured.code }
     }
 
     impl MemberRunner for ScriptedRunner {
@@ -1478,7 +2116,18 @@ mod tests {
         ) -> anyhow::Result<Captured> {
             let captured = self.scripted.get(self.runs).expect("the policy ran the member more times than scripted");
             self.runs += 1;
-            Ok(Captured { stdout: captured.stdout.clone(), stderr: captured.stderr.clone(), code: captured.code })
+            Ok(cloned(captured))
+        }
+
+        /// An unscripted replay answers with the run this runner last gave —
+        /// the failure repeating. That is the direction that keeps a finding a
+        /// finding, so a test that says nothing about replays is not silently
+        /// excusing anything.
+        fn replay(&mut self, _invocation: &VerifyInvocation, test: &str, at: Option<&str>) -> anyhow::Result<Captured> {
+            self.replayed.push((test.to_owned(), at.map(ToOwned::to_owned)));
+            let scripted = self.replays.get(self.replayed.len() - 1);
+            let last_run = self.scripted.get(self.runs.saturating_sub(1)).expect("a replay follows a run");
+            Ok(cloned(scripted.unwrap_or(last_run)))
         }
     }
 
@@ -1653,6 +2302,17 @@ mod tests {
             ]),
         );
 
+        // Tripwire: narrowing is a package selection and nothing else. The
+        // scoped argv is what a member actually dispatches, and the CI-parity
+        // assertions above pin only the unscoped one — so a flag dropped on
+        // this path would leave the member predicting a gate CI does not run
+        // while every parity test stayed green (#5411). Read from the workflow
+        // rather than from a literal, so drift on either side fails here.
+        let ci_clippy = workflow::gate_step("clippy", &["cargo", "clippy"]).run;
+        let flags: Vec<String> =
+            ci_clippy[2..ci_clippy.len() - 3].iter().filter(|flag| *flag != "--workspace").cloned().collect();
+        assert_eq!(args[1..=flags.len()], flags[..], "the member must carry every CI flag but the selection");
+
         // nextest states no `--workspace` at all — the workspace is its own
         // default — so there the package flags are the entire narrowing.
         let test = verify_command("verify.test").expect("verify.test mapped");
@@ -1745,10 +2405,53 @@ mod tests {
         );
     }
 
+    // Tripwire for #5384: a base-set run states no work-order range, and a
+    // suppression member left without `--base` falls back to `origin/main` — a
+    // ref no lane worktree carries. The scan then refuses, the umbrella stamps
+    // `environment`, and the receipt every seal waits on never arrives.
+    #[test]
+    fn a_base_set_run_never_leaves_the_suppression_scan_on_its_origin_main_default() {
+        let suppress = verify_command(SUPPRESS_MEMBER).expect("verify.suppress mapped");
+        let base = member_diff_base(SUPPRESS_MEMBER, None, true);
+        assert_eq!(base, Some(BASE_SET_SUBJECT), "a base-set suppression scan names the tree it stands on");
+        assert_eq!(
+            suppress.args_under(&Scope::resolve(None), base),
+            owned(&["scripts/check-suppressions.py", "--base", BASE_SET_SUBJECT]),
+        );
+
+        for id in verify_check_members().iter().filter(|id| **id != SUPPRESS_MEMBER) {
+            assert_eq!(
+                member_diff_base(id, None, true),
+                None,
+                "{id} reads a base to excuse a failure, and the subject would excuse every one",
+            );
+        }
+
+        assert_eq!(
+            member_diff_base(SUPPRESS_MEMBER, None, false),
+            None,
+            "a candidate run with no stated range keeps the working-tree contract",
+        );
+        assert_eq!(
+            member_diff_base(SUPPRESS_MEMBER, Some("abc123def"), true),
+            Some("abc123def"),
+            "a stated range outranks the subject fallback",
+        );
+    }
+
     // One cargo JSON line per diagnostic level, plus the build-progress noise
     // cargo interleaves on the same stream.
     fn json_line(level: &str, rendered: &str) -> String {
         format!(r#"{{"reason":"compiler-message","message":{{"level":"{level}","rendered":"{rendered}"}}}}"#)
+    }
+
+    // The same line as cargo actually writes it: attributed to the package
+    // whose compilation produced it, in the `PackageIdSpec` spelling cargo uses
+    // for a workspace member.
+    fn attributed_json_line(package: &str, level: &str, rendered: &str) -> String {
+        format!(
+            r#"{{"reason":"compiler-message","package_id":"path+file:///w/crates/{package}#0.3.0-alpha","message":{{"level":"{level}","rendered":"{rendered}"}}}}"#
+        )
     }
 
     #[test]
@@ -1765,10 +2468,94 @@ mod tests {
         ]
         .join("\n");
 
-        assert!(!clippy_verdict(&stream), "a warning is a failure exactly as `-D warnings` would make it");
-        assert!(clippy_verdict(r#"{"reason":"compiler-artifact","target":{"name":"x"}}"#), "progress alone passes");
-        assert!(clippy_verdict(""), "a silent run is a clean run");
+        let workspace = Scope::resolve(None);
+        assert!(!clippy_verdict(&stream, &workspace), "a warning is a failure exactly as `-D warnings` would make it");
+        assert!(
+            clippy_verdict(r#"{"reason":"compiler-artifact","target":{"name":"x"}}"#, &workspace),
+            "progress alone passes"
+        );
+        assert!(clippy_verdict("", &workspace), "a silent run is a clean run");
         assert_eq!(effective_exit_code(false, Some(0)), 1, "a derived failure must make the umbrella exit nonzero");
+    }
+
+    #[test]
+    fn a_warning_in_a_crate_the_closure_does_not_name_is_not_the_candidates() {
+        // Tripwire for bloom f063ff066e83, where every one of twenty members
+        // failed `verify.clippy` on one `unused import` line in
+        // `aether-bloomery` that no member had touched and that `verify.base`
+        // had passed over minutes earlier. The member run narrows to the
+        // candidate's closure (#4890), and cargo unifies features across the
+        // packages an invocation selects — so a crate compiled underneath a
+        // narrowed selection is compiled feature-poor, and an item some absent
+        // dev-dependency's feature gates reads as unused there and nowhere
+        // else. That crate is not in the closure, so it is not what this
+        // candidate can have broken, and blaming it sends every member into a
+        // Refine over a line outside its surface.
+        let scope = closure_scope(&["xtask"]);
+        let underneath = attributed_json_line("aether-bloomery", "warning", "warning: unused import: `BaseVerdict`");
+        let inside = attributed_json_line("xtask", "warning", "warning: unnecessary qualification");
+
+        assert!(
+            clippy_verdict(&underneath, &scope),
+            "a dependency outside the closure compiles the same source it compiles at the base",
+        );
+        assert!(
+            !clippy_verdict(&[underneath.clone(), inside].join("\n"), &scope),
+            "a warning in a crate the closure names is still a finding",
+        );
+        assert!(
+            !clippy_verdict(&underneath, &Scope::resolve(None)),
+            "the whole-workspace run judges every crate it compiled",
+        );
+    }
+
+    #[test]
+    fn an_unjudged_diagnostic_is_stated_rather_than_dropped() {
+        // A classification the reader cannot see is indistinguishable from a
+        // scanner that found nothing, and a wrong closure is only noticeable
+        // through the difference (#4895's argument, one member in).
+        let scope = closure_scope(&["xtask"]);
+        let stream = [
+            attributed_json_line("aether-bloomery", "warning", "warning: unused import"),
+            attributed_json_line("aether-bloomery-git", "warning", "warning: never used"),
+            attributed_json_line("aether-bloomery", "note", "note: for context"),
+        ]
+        .join("\n");
+
+        let notice = unjudged_notice(&stream, &scope).expect("two findings were left unjudged");
+
+        assert!(notice.starts_with("note: 2 diagnostic(s) from 2 crate(s)"), "got: {notice}");
+        assert!(notice.contains("aether-bloomery (1), aether-bloomery-git (1)"), "got: {notice}");
+        assert_eq!(unjudged_notice(&stream, &Scope::resolve(None)), None, "a workspace run leaves nothing unjudged");
+        assert!(
+            !render_diagnostics(&stream, &scope).contains("unused import"),
+            "a repair lap directed at a crate outside its surface is the cost this fix removes",
+        );
+    }
+
+    #[test]
+    fn a_message_cargo_attributed_to_nothing_is_judged() {
+        // Everything in this lane fails towards the candidate. A diagnostic
+        // whose owning package cargo did not name is one the run cannot rule
+        // out, and dropping it silently would be a verdict of green over an
+        // unread finding.
+        let scope = closure_scope(&["xtask"]);
+
+        assert!(!clippy_verdict(&json_line("warning", "warning: unnamed owner"), &scope));
+        assert_eq!(unjudged_notice(&json_line("warning", "warning: unnamed owner"), &scope), None);
+    }
+
+    #[test]
+    fn a_package_id_names_its_package_in_both_of_cargos_spellings() {
+        // Tripwire: the attribution the verdict filters on is parsed out of
+        // cargo's `package_id`, and cargo omits the name from the fragment
+        // whenever it matches the directory it lives in — which is every crate
+        // in this workspace. Reading the fragment as the name would attribute
+        // every diagnostic to a version string, which no closure ever names, so
+        // the member gate would go green over its own findings.
+        assert_eq!(package_name("path+file:///w/crates/aether-bloomery#0.3.0-alpha"), "aether-bloomery");
+        assert_eq!(package_name("path+file:///w/xtask#aether-xtask@0.3.0-alpha"), "aether-xtask");
+        assert_eq!(package_name("registry+https://github.com/rust-lang/crates.io-index#serde@1.0.0"), "serde");
     }
 
     #[test]
@@ -1776,7 +2563,7 @@ mod tests {
         // rustc emits `note` and `help` alongside real diagnostics. Counting
         // them would fail every candidate that has any diagnostic context at
         // all, including passing ones.
-        assert!(clippy_verdict(&json_line("note", "note: required by a bound")));
+        assert!(clippy_verdict(&json_line("note", "note: required by a bound"), &Scope::resolve(None)));
     }
 
     #[test]
@@ -1791,7 +2578,7 @@ mod tests {
         ]
         .join("\n");
 
-        let rendered = render_diagnostics(&stream);
+        let rendered = render_diagnostics(&stream, &Scope::resolve(None));
         assert!(rendered.contains("unused import"));
         assert!(rendered.contains("could not compile"));
         assert!(!rendered.contains("build-finished"), "progress must not reach the findings");
@@ -1854,23 +2641,79 @@ mod tests {
         }
     }
 
+    /// The umbrella member each required CI job is predicted by.
+    ///
+    /// Every job in `ci-pass`'s `needs:` list is either here or in
+    /// [`NOT_A_GATE`]. A job in neither fails
+    /// [`the_umbrella_covers_every_required_ci_job`] — which is the drift the
+    /// old hand-written member list could not catch, because a gate that was
+    /// never a member had no assertion to fail (#5309).
+    const GATE_MEMBERS: &[(&str, &str)] = &[
+        ("suppressions", "verify.suppress"),
+        ("fmt", "verify.fmt"),
+        ("clippy", "verify.clippy"),
+        ("docs", "verify.docs"),
+        ("test", "verify.test"),
+        ("dup-check", "verify.dup"),
+        ("unused-deps", "verify.deps"),
+        ("lock-freshness", "verify.lock"),
+    ];
+
+    /// Required jobs that judge nothing about the candidate, so no umbrella
+    /// member could predict them.
+    ///
+    /// `changes` is the path filter every other job reads its `if:` from; it
+    /// resolves paths, it does not check the tree. Adding to this list is
+    /// stating that a required job cannot be predicted off Actions, which is a
+    /// claim worth making explicitly rather than by omission.
+    const NOT_A_GATE: &[&str] = &["changes"];
+
     #[test]
     fn the_umbrella_covers_every_required_ci_job() {
         // Tripwire: a member missing here is a gate CI enforces and the lane
         // does not, and the lane exists to predict CI. The gap costs a whole
         // bloom re-entry, because the disagreement surfaces at the landing pull
         // request after integrate, aggregate verify, and review have all run.
-        for id in [
-            "verify.fmt",
-            "verify.clippy",
-            "verify.docs",
-            "verify.test",
-            "verify.dup",
-            "verify.deps",
-            "verify.suppress",
-        ] {
-            assert!(verify_check_members().contains(&id), "{id} is a required CI job the lane must run");
+        //
+        // Read out of `ci-pass`'s own `needs:` rather than restated, so a gate
+        // added to the required list without a member fails here instead of
+        // passing unnoticed the way `lock-freshness` did.
+        for job in workflow::required_jobs() {
+            if NOT_A_GATE.contains(&job.as_str()) {
+                continue;
+            }
+            let (_, member) = GATE_MEMBERS.iter().find(|(gate, _)| *gate == job).unwrap_or_else(|| {
+                panic!("required CI job `{job}` has no umbrella member and is not declared a non-gate")
+            });
+            assert!(verify_check_members().contains(member), "{member} is a required CI job the lane must run");
         }
+    }
+
+    #[test]
+    fn every_gate_member_is_still_a_required_ci_job() {
+        // The other direction: a member predicting a job that has left
+        // `ci-pass`'s `needs:` spends lane time on a gate that no longer
+        // blocks, and the pairing table above would keep claiming it does.
+        let required = workflow::required_jobs();
+        for (job, member) in GATE_MEMBERS {
+            assert!(required.contains(&(*job).to_owned()), "`{job}` ({member}) is no longer a required CI job");
+        }
+    }
+
+    #[test]
+    fn the_lock_member_runs_the_lock_freshness_gate_command() {
+        // Parity with the gate, which wraps the command in an `if !` so its
+        // stdout can be discarded — the argv is a contiguous run inside that
+        // script rather than its first words.
+        let lock = verify_command("verify.lock").expect("verify.lock mapped");
+        let argv = argv(&lock);
+        let step =
+            workflow::named_step("lock-freshness", "Resolve the dependency graph against the committed lock").run;
+
+        assert!(
+            step.windows(argv.len()).any(|window| window == argv.as_slice()),
+            "the lock-freshness step must run {argv:?}, found {step:?}",
+        );
     }
 
     #[test]
@@ -2063,7 +2906,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
     fn verify_check_members_are_the_ci_parity_ids_in_order() {
         // Tripwire: every id verify.check fans out to must resolve via
         // verify_command, and the order must match ci.yml's job order — a drift
-        // here breaks the umbrella-membership invariant. All seven of CI's
+        // here breaks the umbrella-membership invariant. All eight of CI's
         // required gates, because a member CI enforces and the lane skips is a
         // false green that surfaces at the landing pull request (#4706).
         assert_eq!(
@@ -2076,6 +2919,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
                 "verify.test",
                 "verify.dup",
                 "verify.deps",
+                "verify.lock",
             ],
         );
         for &id in verify_check_members() {
@@ -2221,133 +3065,190 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         assert!(observation.contains("environment fault"), "and what it escalated as");
     }
 
+    /// A nextest failure whose panic body is proptest's shrunk counterexample —
+    /// what a failing property test actually prints.
+    fn failing_proptest_run(test: &str) -> String {
+        format!(
+            " Starting 900 tests across 312 binaries\n        FAIL [   0.008s] (  1/900) {test}\n\n\
+             --- STDERR:              {test} ---\n\
+             thread 'test' panicked at crates/somewhere/src/lib.rs:1:9:\n\
+             Test failed: assertion failed: doctor.objections().is_empty().\n\
+             minimal failing input: script = LaneScript::Die\n\
+             \tsuccesses: 12\n\tlocal rejects: 0\n\tglobal rejects: 0\n\n\
+                  Summary [  74.6s] 900 tests run: 1 failed, 0 skipped\nerror: test run failed\n"
+        )
+    }
+
     #[test]
-    fn a_disappearing_aggregate_test_failure_is_an_observation_only_pass() {
-        // Acceptance (#5064): AggregateVerify has no closure, so a transient
-        // workspace test failure used to become repair work. One identical
-        // recheck that comes back green is a flake — the member passes, nothing
-        // is charged to a verifier identity, and the first failure stays on
-        // the observation channel rather than in the findings a Refine is
-        // handed.
+    fn a_test_that_clears_on_a_same_input_replay_is_a_flake_and_costs_no_repair_lap() {
+        // Acceptance 1 (FIX-4b): the failure is replayed against the same
+        // input, not re-sampled. It does not repeat, so it is a flake: the
+        // member passes, nothing is charged to a verifier identity, and the
+        // test is written into the flake ledger rather than dropped.
         let invocation = verify_command("verify.test").expect("verify.test mapped");
-        let mut runner = ScriptedRunner::new(&[
-            (&failing_run(&["aether-component::replace_drop_reply_routing"]), 100),
-            (&passing_run(), 0),
-        ]);
+        let mut runner = ScriptedRunner::with_replays(
+            &[(&failing_run(&["aether-component::replace_drop_reply_routing"]), 100)],
+            &[(&passing_run(), 0)],
+        );
 
         let run = run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, None, &mut runner)
             .expect("the policy runs");
 
-        assert_eq!(runner.runs, 2, "a failed aggregate verify.test is rechecked exactly once");
+        assert_eq!(runner.runs, 1, "the whole member is never re-run: the triage replays one test");
+        assert_eq!(
+            runner.replayed,
+            vec![("aether-component::replace_drop_reply_routing".to_owned(), None)],
+            "and it replays exactly the failing test, on the candidate's own tree",
+        );
         assert_eq!(run.outcome, MemberOutcome::Passed);
         assert!(run.findings.is_none(), "a disappeared failure must not become repair work");
         assert!(run.outcome.failure(&run.id).is_none(), "and no verifier identity is charged for a flake");
-        let observation = run.observation.expect("the first failure is preserved as an observation");
-        assert!(observation.contains("replace_drop_reply_routing"), "naming what disappeared");
-        assert!(observation.contains("flake observation"), "and that it is a flake, not a host-closure block");
+        assert_eq!(run.flakes.len(), 1, "the excusal is recorded");
+        assert_eq!(run.flakes[0].test, "aether-component::replace_drop_reply_routing");
+        assert!(run.inherited.is_empty(), "and it is a flake, not an inherited failure");
         assert!(
-            !observation.contains("outside the candidate's reverse-dependency closure"),
-            "no closure exists to classify anything out",
-        );
-        assert!(
-            String::from_utf8_lossy(&run.log).contains("being rechecked once"),
-            "both runs stay in the log, separated by the notice that says why there are two",
+            run.observation.expect("the excusal is on the lane's receipt channel").contains("same input"),
+            "the receipt says what was replayed",
         );
     }
 
     #[test]
-    fn a_persistent_aggregate_test_failure_stays_repair_directed() {
-        // The fail-closed half of #5064, tightened by #5099. A first-run
-        // failure that is still red on the identical recheck is the
-        // candidate's. The two runs must name the *same* test: a different
-        // failure on the recheck is host contention, not a reason to take the
-        // second run wholesale.
+    fn a_property_test_replays_its_own_counterexample_rather_than_a_fresh_sample() {
+        // Acceptance (FIX-4, kept by FIX-4b): proptest draws fresh cases every
+        // run, so a *re-sample* that comes back green proves nothing about the
+        // counterexample the first run shrank to and wrote down. The replay
+        // step is a replay: the ledger names the persisted counterexample, and
+        // a repeat keeps the finding.
         let invocation = verify_command("verify.test").expect("verify.test mapped");
-        let mut runner = ScriptedRunner::new(&[
-            (&failing_run(&["aether-component::fleetharness_asset_window"]), 100),
-            (&failing_run(&["aether-component::fleetharness_asset_window"]), 100),
-        ]);
+        let failing =
+            failing_proptest_run("aether-harness-bloomery::generated a_generated_scenario_never_silences_a_member");
+        let mut runner = ScriptedRunner::with_replays(&[(&failing, 100)], &[(&failing, 100)]);
 
         let run = run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, None, &mut runner)
             .expect("the policy runs");
 
-        assert_eq!(runner.runs, 2, "a persistent aggregate failure is not rechecked again");
+        assert_eq!(runner.runs, 1, "the whole member earns no recheck");
+        assert_eq!(run.outcome, MemberOutcome::Failed);
+        let findings = run.findings.expect("a property-test failure that repeats is repair work");
+        assert!(
+            findings.contains("a_generated_scenario_never_silences_a_member"),
+            "the failing property is named in the findings a Refine is handed",
+        );
+        assert!(run.flakes.is_empty(), "a counterexample that reproduces is not a flake");
+    }
+
+    #[test]
+    fn a_test_already_red_at_the_base_is_inherited_and_not_this_candidates_finding() {
+        // Acceptance 2 (FIX-4b): the replay repeats, so the triage asks whether
+        // the candidate is why — the same one test at the work order's base.
+        // Red there too means pre-existing: recorded, and not charged to a
+        // candidate that did not write it.
+        let invocation = verify_command("verify.test").expect("verify.test mapped");
+        let failing = failing_run(&["aether-component::fleetharness_asset_window"]);
+        let mut runner = ScriptedRunner::with_replays(&[(&failing, 100)], &[(&failing, 100), (&failing, 100)]);
+
+        let run = run_member_discriminated(
+            "verify.test",
+            &invocation,
+            &Scope::resolve(None),
+            None,
+            Some("deadbeef"),
+            &mut runner,
+        )
+        .expect("the policy runs");
+
+        assert_eq!(
+            runner.replayed,
+            vec![
+                ("aether-component::fleetharness_asset_window".to_owned(), None),
+                ("aether-component::fleetharness_asset_window".to_owned(), Some("deadbeef".to_owned())),
+            ],
+            "the same-input replay comes first, and only a repeat earns the base run",
+        );
+        assert_eq!(run.outcome, MemberOutcome::Passed);
+        assert!(run.findings.is_none(), "a failure the base already had is not this candidate's to fix");
+        assert_eq!(run.inherited.len(), 1, "the excusal is recorded against the base it was red at");
+        assert_eq!(run.inherited[0].replayed, "deadbeef");
+        assert!(run.flakes.is_empty(), "and it is an inherited failure, not a flake");
+    }
+
+    #[test]
+    fn a_test_red_only_on_the_candidate_is_the_one_case_that_becomes_a_finding() {
+        // Acceptance 3 (FIX-4b): it repeats against the same input and the base
+        // is green, so the candidate is why. Nothing excuses it.
+        let invocation = verify_command("verify.test").expect("verify.test mapped");
+        let failing = failing_run(&["aether-component::fleetharness_asset_window"]);
+        let mut runner = ScriptedRunner::with_replays(&[(&failing, 100)], &[(&failing, 100), (&passing_run(), 0)]);
+
+        let run = run_member_discriminated(
+            "verify.test",
+            &invocation,
+            &Scope::resolve(None),
+            None,
+            Some("deadbeef"),
+            &mut runner,
+        )
+        .expect("the policy runs");
+
         assert_eq!(run.outcome, MemberOutcome::Failed);
         assert_eq!(run.outcome.failure(&run.id), VerifyFailure::from_name("verify.test"));
-        let findings = run.findings.expect("the shared failure is handed to the repair lap");
-        assert!(findings.contains("fleetharness_asset_window"), "findings name the test that failed in both runs");
-        assert!(run.observation.is_none(), "a fully persistent failure is not an observation");
+        let findings = run.findings.expect("the candidate-only failure is handed to the repair lap");
+        assert!(findings.contains("fleetharness_asset_window"));
+        assert!(run.flakes.is_empty() && run.inherited.is_empty(), "nothing was excused");
         assert_eq!(umbrella_status(&[MemberOutcome::Passed, run.outcome]), "fail");
     }
 
     #[test]
-    fn an_asymmetric_aggregate_recheck_is_an_environment_fault() {
-        // Tripwire (#5099): dispatch-542's shape. Run 1 failed two
-        // deadline-shaped tests that passed in run 2; run 2 failed a third that
-        // had passed in run 1. Taking the second run wholesale handed a Refine
-        // a finding no candidate could fix, in a package no member of the
-        // weave touched.
+    fn a_base_run_that_would_not_build_does_not_excuse_the_candidate() {
+        // Tripwire (FIX-4b): a base checkout that fails to compile exits 101 and
+        // names no failing test. Reading "the base run was red" as "the failure
+        // is pre-existing" would pass a candidate on the strength of a run that
+        // never judged it, so an unreached base step falls through to the
+        // finding.
         let invocation = verify_command("verify.test").expect("verify.test mapped");
-        let mut runner = ScriptedRunner::new(&[
-            (
-                &failing_run(&[
-                    "aether-chassis-bloomery::control_loop a_calibration_read_fills_cost_columns",
-                    "aether-chassis-bloomery::control_loop a_bloom_with_all_scripted_verdicts_lands",
-                ]),
-                100,
-            ),
-            (&failing_run(&["aether-http::rest_api the_release_route_binds_its_own_door"]), 100),
-        ]);
+        let failing = failing_run(&["aether-component::fleetharness_asset_window"]);
+        let mut runner = ScriptedRunner::with_replays(
+            &[(&failing, 100)],
+            &[(&failing, 100), ("error: could not compile `aether-data` (lib test)\n", 101)],
+        );
 
-        let run = run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, None, &mut runner)
-            .expect("the policy runs");
+        let run = run_member_discriminated(
+            "verify.test",
+            &invocation,
+            &Scope::resolve(None),
+            None,
+            Some("deadbeef"),
+            &mut runner,
+        )
+        .expect("the policy runs");
 
-        assert_eq!(runner.runs, 2, "an asymmetric aggregate recheck is not rechecked again");
-        assert_eq!(run.outcome, MemberOutcome::Environment);
-        assert!(run.findings.is_none(), "no shared failure means nothing judged the candidate");
-        assert!(run.outcome.failure(&run.id).is_none(), "so nothing is charged to a verifier identity");
-        assert_eq!(umbrella_status(&[MemberOutcome::Passed, run.outcome]), "environment");
-        let observation = run.observation.expect("the exclusive-or is reported on the lane");
-        assert!(observation.contains("a_calibration_read_fills_cost_columns"), "naming the first-run exclusives");
-        assert!(observation.contains("a_bloom_with_all_scripted_verdicts_lands"));
-        assert!(observation.contains("the_release_route_binds_its_own_door"), "and the recheck exclusive");
-        assert!(observation.contains("environment fault"), "and what it escalated as");
+        assert_eq!(run.outcome, MemberOutcome::Failed, "an unreached base step is not an excuse");
+        assert!(run.findings.is_some());
+        assert!(run.inherited.is_empty(), "and nothing is written into the inherited ledger");
     }
 
     #[test]
-    fn a_mixed_aggregate_recheck_hands_the_repair_lap_only_the_intersection() {
-        // Tripwire (#5099): when one test persists and others do not, taking
-        // the second run wholesale would either drop the real defect (if we
-        // excused the whole run) or promote a one-sided flake into the
-        // findings. The repair lap is directed by the intersection alone; the
-        // exclusive-or is an observation.
+    fn each_failing_test_is_triaged_on_its_own() {
+        // Tripwire (FIX-4b): the rule this replaces judged a whole member at
+        // once, so one flaky test excused every other failure in the same run.
+        // Two failures, one that clears on replay and one that does not: only
+        // the second reaches the findings, and the first is on the ledger.
         let invocation = verify_command("verify.test").expect("verify.test mapped");
-        let mut runner = ScriptedRunner::new(&[
-            (&failing_run(&["aether-component::fleetharness_asset_window", "aether-kit-sim::client_scenario"]), 100),
-            (
-                &failing_run(&[
-                    "aether-component::fleetharness_asset_window",
-                    "aether-http::rest_api the_release_route_binds_its_own_door",
-                ]),
-                100,
-            ),
-        ]);
+        let persists = failing_run(&["aether-component::fleetharness_asset_window"]);
+        let mut runner = ScriptedRunner::with_replays(
+            &[(&failing_run(&["aether-component::fleetharness_asset_window", "aether-kit-sim::client_scenario"]), 100)],
+            &[(&persists, 100), (&passing_run(), 0)],
+        );
 
         let run = run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, None, &mut runner)
             .expect("the policy runs");
 
-        assert_eq!(runner.runs, 2, "a mixed aggregate recheck is not rechecked again");
         assert_eq!(run.outcome, MemberOutcome::Failed);
-        assert_eq!(run.outcome.failure(&run.id), VerifyFailure::from_name("verify.test"));
-        let findings = run.findings.expect("the shared failure is handed to the repair lap");
-        assert!(findings.contains("fleetharness_asset_window"), "the intersection reaches the findings");
-        assert!(!findings.contains("client_scenario"), "a first-run-only failure does not");
-        assert!(!findings.contains("the_release_route_binds_its_own_door"), "and neither does a recheck-only failure");
-        let observation = run.observation.expect("the exclusive-or is still reported");
-        assert!(observation.contains("client_scenario"), "first-run exclusive is a host-fault receipt");
-        assert!(observation.contains("the_release_route_binds_its_own_door"), "and so is the recheck exclusive");
-        assert!(!observation.contains("fleetharness_asset_window"), "the persistent test is not among them");
-        assert_eq!(umbrella_status(&[MemberOutcome::Passed, run.outcome]), "fail");
+        let findings = run.findings.expect("the persistent failure is handed to the repair lap");
+        assert!(findings.contains("fleetharness_asset_window"), "the test that repeated reaches the findings");
+        assert!(!findings.contains("client_scenario"), "the one that cleared does not");
+        assert_eq!(run.flakes.len(), 1, "and the cleared one is on the flake ledger");
+        assert_eq!(run.flakes[0].test, "aether-kit-sim::client_scenario");
     }
 
     #[test]
@@ -2535,7 +3436,9 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         // verify.check would silently run as a single (wrong) cargo invocation
         // instead of falling to the unrecognized-id bail!.
         assert!(verify_command(VERIFY_CHECK).is_none());
+        assert!(verify_command(VERIFY_BASE).is_none());
         assert_ne!(VERIFY_CHECK, CONSTRUCT_IMPLEMENT);
+        assert_ne!(VERIFY_BASE, VERIFY_CHECK);
     }
 
     #[test]

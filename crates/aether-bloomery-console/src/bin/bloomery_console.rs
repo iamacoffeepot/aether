@@ -46,6 +46,10 @@ struct Args {
     #[arg(long)]
     indexed_color: bool,
 
+    /// Paint the mark as `*` on terminals whose font has no `\u{2740}`.
+    #[arg(long)]
+    ascii_mark: bool,
+
     /// `COLORTERM` — `truecolor` / `24bit` opt in to the native table.
     #[arg(long, env = "COLORTERM", hide = true)]
     colorterm: Option<String>,
@@ -65,10 +69,10 @@ fn main() -> Result<()> {
     palette::install(depth);
     let endpoint = Endpoint { host: args.host, port: args.port };
     let poll = Duration::from_millis(args.poll_millis);
-    run(endpoint, poll)
+    run(endpoint, poll, args.ascii_mark)
 }
 
-fn run(endpoint: Endpoint, poll: Duration) -> Result<()> {
+fn run(endpoint: Endpoint, poll: Duration, ascii_mark: bool) -> Result<()> {
     install_panic_hook();
     install_shutdown_signals();
     enable_raw_mode().context("enter raw mode")?;
@@ -78,14 +82,19 @@ fn run(endpoint: Endpoint, poll: Duration) -> Result<()> {
     }
     let result = Terminal::new(CrosstermBackend::new(stdout()))
         .context("open terminal")
-        .and_then(|mut terminal| event_loop(&mut terminal, endpoint, poll));
+        .and_then(|mut terminal| event_loop(&mut terminal, endpoint, poll, ascii_mark));
     restore_terminal();
     result
 }
 
-fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, endpoint: Endpoint, poll: Duration) -> Result<()> {
+fn event_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    endpoint: Endpoint,
+    poll: Duration,
+    ascii_mark: bool,
+) -> Result<()> {
     thread::scope(|scope| {
-        let mut shell = Shell::new(scope, endpoint, poll);
+        let mut shell = Shell::new(scope, endpoint, poll, ascii_mark);
 
         loop {
             if SHUTDOWN.load(Ordering::SeqCst) {

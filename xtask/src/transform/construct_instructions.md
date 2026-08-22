@@ -35,7 +35,8 @@ after the shared work order so sibling lanes share a prompt-cache prefix.
    that the order does not authorize is scope creep, not initiative — keep the
    candidate to the promised surface. Edits outside the declared surface fail
    Verify; when a change ripples into files the surface does not cover, refuse
-   and name the missing surface so the operator can widen it — never a silent edit.
+   and name the missing surface in `.bloomery-surface-request` (step 8) so the
+   operator can widen it — never a silent edit.
    Where the order asks for coverage, it is asking for the behavior to be covered,
    not for a literal shape: an order that says "tests covering all four cases" is
    satisfied by tests the conventions' testing doctrine would keep, and four
@@ -55,9 +56,25 @@ after the shared work order so sibling lanes share a prompt-cache prefix.
    test files included — except the exact inner attribute `#![allow(clippy::unwrap_used)]`
    (that lint alone) on a `tests.rs` file, a file under a `tests/` directory, or a
    `#[cfg(test)]` module. Any other lint, `expect`, `ignore`, a mixed allow list, or
-   the same allow in production code remains a finding; state one you genuinely need
-   in your final message as a request carrying its reason, and leave it out of the
-   diff.
+   the same allow in production code remains a finding.
+
+   If you genuinely need one — the repository's own policy blesses several, and
+   `clippy.toml` names them in its entry text — **state a request on the suppression
+   line itself** and keep it in the diff:
+
+   ```rust
+   #[allow(clippy::disallowed_methods)] // aether-suppression-request: operator tooling reading the coordinator's REST bind, not cap config
+   ```
+
+   The trailing `// aether-suppression-request: <reason>` comment is what the gate
+   reads. One line, saying why the policy blesses this write at this site — not what
+   the lint is, which the attribute already says. A request states a case; only a
+   reviewer grants it, and the reviewer sees the reason you wrote here. Write the
+   marker on **every** new suppression in your diff: one bare `#[allow]` beside a
+   requested one refuses the whole candidate. And never route around the ban instead
+   — replacing a disallowed call with an unenumerated spelling of the same read is a
+   worse outcome than the suppression, because it hides from the audit the lint
+   exists to make possible.
 5. **Build scratch where the host put it.** If you do reach for a check that wants
    a `CARGO_TARGET_DIR` of its own, put it under the path the `AETHER_LANE_SCRATCH`
    environment variable names — never under `/tmp` or another default temp
@@ -83,7 +100,34 @@ after the shared work order so sibling lanes share a prompt-cache prefix.
    open a pull request, push, merge, or touch git history — the broker collects
    your candidate and evidence. Do not delete or rewrite files outside the work
    order's surface: Verify fails those edits with the violating paths named, and
-   the honest move is a refusal that names the missing surface.
+   the honest move is the refusal in step 8.
+8. **Refusing for want of surface.** When — and only when — the reason you
+   cannot finish is that the work needs files the declared surface does not
+   cover, write the request to `.bloomery-surface-request` in the root of your
+   working directory and produce no candidate. The file is the whole request:
+   your final message is prose a person reads, not data anything parses.
+
+   ```json
+   {
+     "summary": "one line: why the sealed surface cannot carry this work",
+     "paths": [
+       { "path": "crates/aether-chassis-bloomery/src/api/runtime/seal.rs",
+         "reason": "the two tests pinning the behaviour being removed live here" }
+     ]
+   }
+   ```
+
+   - Literal repository-relative paths only. A glob is dropped, and so is an
+     absolute path or one containing `..` — an appeal must not widen further
+     than the refusal that prompted it.
+   - At most sixteen paths, one line of reason each. Ask for what the work
+     needs, not for room to move.
+   - Write the file and nothing else about it — the lane reads it back and
+     deletes it, the same way it handles the commit message.
+
+   The member then parks awaiting a person, spending no attempt and no repair
+   roll: the remedy is a wider surface, which no further lap of yours can
+   produce.
 
 ## Boundaries
 

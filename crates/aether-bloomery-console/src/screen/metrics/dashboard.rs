@@ -6,7 +6,7 @@ use crate::store::Store;
 
 use super::bucket::format_duration;
 use super::cost::format_micro_usd;
-use super::sparkline::{last_days, sparkline};
+use super::sparkline::{dated, day_spark};
 
 /// Header / today / footer strips the shell chrome paints.
 #[derive(Clone, Debug, Default)]
@@ -23,39 +23,16 @@ pub struct Dashboard {
 #[must_use]
 pub fn compose(store: &Store) -> Dashboard {
     let days = store.days().value.as_ref().map_or(&[][..], Vec::as_slice);
-    let spend = store.spend().value.as_ref();
     let summary = store.summary().value.as_ref();
     let view = store.view().value.as_ref();
-
-    let mut spend_days = last_days(days, |day| day.spend_micro_usd);
-    let mut landed_days = last_days(days, |day| day.landed);
-    let mut wedge_days = last_days(days, |day| day.wedges);
-    if let Some(window) = spend
-        && let Some(last) = spend_days.last_mut()
-    {
-        *last = window.total_micro_usd;
-    }
-    if let Some(view) = view {
-        if let Some(last) = landed_days.last_mut() {
-            *last = view.blooms.iter().filter(|bloom| bloom.status == Some(BloomStatus::Landed)).count() as u64;
-        }
-        if let Some(last) = wedge_days.last_mut() {
-            *last = view
-                .blooms
-                .iter()
-                .flat_map(|bloom| bloom.members.iter())
-                .filter(|member| member.wedge.is_some())
-                .count() as u64;
-        }
-    }
 
     let today = today_line(store, days);
     let footer = footer_line(store, days, summary.map(|summary| summary.active_blooms), view);
 
     Dashboard {
-        spend_spark: sparkline(&spend_days),
-        landed_spark: sparkline(&landed_days),
-        wedge_spark: sparkline(&wedge_days),
+        spend_spark: day_spark(days, |day| day.spend_micro_usd),
+        landed_spark: day_spark(days, |day| day.landed),
+        wedge_spark: day_spark(days, |day| day.wedges),
         today,
         footer,
     }
@@ -77,9 +54,10 @@ fn today_line(store: &Store, days: &[MetricDay]) -> String {
     let unaccounted = spend.map_or(0, |window| window.unaccounted_dispatches);
     let gauge = spend_gauge(total, ceiling, 10);
     let ceiling_label = ceiling.map_or_else(|| "uncapped".to_owned(), format_micro_usd);
+    let dated = dated(days);
     let window = spend
         .map(|window| window.label.as_str())
-        .or_else(|| days.last().map(|day| day.label.as_str()))
+        .or_else(|| dated.last().map(|day| day.label.as_str()))
         .unwrap_or("today");
     format!(
         "today  {window}  {}/{ceiling_label}  {gauge}  unpriced {unpriced}  unaccounted {unaccounted}",
@@ -88,7 +66,8 @@ fn today_line(store: &Store, days: &[MetricDay]) -> String {
 }
 
 fn footer_line(store: &Store, days: &[MetricDay], active: Option<u64>, view: Option<&ViewDocument>) -> String {
-    let landed_today = days.last().map_or_else(
+    let dated = dated(days);
+    let landed_today = dated.last().map_or_else(
         || {
             view.map_or(0, |view| {
                 view.blooms.iter().filter(|bloom| bloom.status == Some(BloomStatus::Landed)).count() as u64
@@ -96,7 +75,7 @@ fn footer_line(store: &Store, days: &[MetricDay], active: Option<u64>, view: Opt
         },
         |day| day.landed,
     );
-    let cycle = days.iter().rev().find_map(|day| day.cycle_time_millis).or_else(|| mean_cycle(store));
+    let cycle = dated.iter().rev().find_map(|day| day.cycle_time_millis).or_else(|| mean_cycle(store));
     let cycle_label = cycle.map_or_else(|| "—".to_owned(), format_duration);
     let flight = active.unwrap_or_else(|| view.map_or(0, |view| live_blooms(view).count() as u64));
     let (busy, total) = occupancy(view);
@@ -151,4 +130,53 @@ fn spend_gauge(spent: u64, ceiling: Option<u64>, width: usize) -> String {
         .unwrap_or(width)
         .min(width);
     format!("{}{}", "█".repeat(filled), "░".repeat(width.saturating_sub(filled)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compose, format_duration};
+    use crate::dto::MetricDay;
+    use crate::store::Store;
+    use std::time::Duration;
+
+    #[test]
+    fn the_footer_reads_the_newest_dated_day_not_the_undated_bucket() {
+        // The plausible bug: today's numbers read off a bucket that is not a day.
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_days(Ok(vec![
+            MetricDay {
+                label: "bloomery/daily/2026-08-19".into(),
+                landed: 3,
+                cycle_time_millis: Some(7_200_000),
+                reconstructed: false,
+                ..MetricDay::default()
+            },
+            MetricDay { label: "reconstructed".into(), landed: 0, reconstructed: true, ..MetricDay::default() },
+        ]));
+        let footer = compose(&store).footer;
+        assert!(footer.contains("landed 3"), "{footer}");
+        assert!(footer.contains(&format!("cycle {}", format_duration(7_200_000))), "{footer}");
+    }
+
+    #[test]
+    fn a_real_series_paints_shape_and_an_absent_one_says_so() {
+        // The plausible bug: the header reporting an invented flat series as data.
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_days(Ok((1..=14)
+            .map(|spend| MetricDay {
+                label: format!("bloomery/daily/2026-08-{spend:02}"),
+                spend_micro_usd: spend,
+                ..MetricDay::default()
+            })
+            .collect()));
+        let spark = compose(&store).spend_spark;
+        assert_ne!(spark.chars().min(), spark.chars().max(), "{spark}");
+
+        let empty = Store::new(Duration::from_secs(1));
+        let missing = compose(&empty);
+        assert_eq!(missing.spend_spark, "—");
+        assert_eq!(missing.landed_spark, "—");
+        assert_eq!(missing.wedge_spark, "—");
+        assert!(!missing.spend_spark.chars().all(|ch| ch == '▁'));
+    }
 }

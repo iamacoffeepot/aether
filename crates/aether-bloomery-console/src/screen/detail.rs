@@ -46,6 +46,7 @@ struct Line {
     text: String,
     enter: Option<Nav>,
     digest: Option<DigestHex>,
+    openable: bool,
 }
 
 /// One pushed subject. Last-known lines stay when the subject vanishes.
@@ -97,6 +98,11 @@ impl Detail {
     #[must_use]
     pub fn digest_under_cursor(&self) -> Option<DigestHex> {
         self.selected_line().and_then(|line| line.digest)
+    }
+
+    #[must_use]
+    pub fn openable_digest(&self) -> Option<DigestHex> {
+        self.selected_line().filter(|line| line.openable).and_then(|line| line.digest)
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, _store: &Store) -> Outcome {
@@ -246,12 +252,14 @@ fn bloom_lines(view: &ViewDocument, id: DigestHex) -> Vec<Line> {
             text: format!("superseded by  {}  {}", successor.prefix(), successor.as_hex()),
             enter: Some(Nav::focus(Focus::bloom(successor))),
             digest: Some(successor),
+            openable: false,
         });
     }
     push_alert_section(&mut lines, bloom);
     if let Some(composition) = &bloom.composition {
         push_composition_section(&mut lines, composition);
     }
+    lines.extend(lease_lines(bloom));
     for member in &bloom.members {
         let state = member_status_state(member);
         lines.push(Line {
@@ -259,6 +267,7 @@ fn bloom_lines(view: &ViewDocument, id: DigestHex) -> Vec<Line> {
             text: format!("  {}  {state}", member.workpiece),
             enter: Some(Nav::focus(Focus::member(bloom.id, member.workpiece.clone()))),
             digest: None,
+            openable: false,
         });
     }
     lines
@@ -300,8 +309,8 @@ fn push_composition_section(lines: &mut Vec<Line>, composition: &CompositionView
         let stage = cursor.stage.map_or_else(|| "?".to_owned(), |stage| stage.to_string());
         lines.push(label(RowKey::Other(10), format!("composition cursor  {stage}  ×{}", cursor.attempts)));
         if let Some(candidate) = &cursor.candidate {
-            lines.push(digest_line(RowKey::Digest(candidate.tree), "  tree", candidate.tree));
-            lines.push(digest_line(RowKey::Digest(candidate.checkout), "  checkout", candidate.checkout));
+            lines.push(reference_line(RowKey::Digest(candidate.tree), "  tree", candidate.tree));
+            lines.push(reference_line(RowKey::Digest(candidate.checkout), "  checkout", candidate.checkout));
         }
     }
     if let Some(wedge) = &composition.wedge {
@@ -334,6 +343,7 @@ fn member_lines(view: &ViewDocument, bloom: DigestHex, workpiece: &str) -> Vec<L
         text: format!("member {workpiece}  bloom {}  {}", bloom.id.prefix(), bloom.id.as_hex()),
         enter: Some(Nav::focus(Focus::dispatch(bloom.id, member.workpiece.clone()))),
         digest: None,
+        openable: false,
     }];
     lines.push(label(RowKey::Other(0), format!("state  {}", member_status_state(member))));
     if let Some(blocked) = member.blocked_by.as_deref().filter(|name| !name.is_empty()) {
@@ -342,6 +352,7 @@ fn member_lines(view: &ViewDocument, bloom: DigestHex, workpiece: &str) -> Vec<L
             text: format!("blocked by  {blocked}"),
             enter: Some(Nav::focus(Focus::member(bloom.id, blocked))),
             digest: None,
+            openable: false,
         });
     }
     if let Some(cursor) = &member.cursor {
@@ -351,10 +362,11 @@ fn member_lines(view: &ViewDocument, bloom: DigestHex, workpiece: &str) -> Vec<L
             text: format!("cursor  {stage}  ×{}", cursor.attempts),
             enter: Some(Nav::focus(Focus::dispatch(bloom.id, member.workpiece.clone()))),
             digest: None,
+            openable: false,
         });
         if let Some(candidate) = &cursor.candidate {
-            lines.push(digest_line(RowKey::Digest(candidate.tree), "  tree", candidate.tree));
-            lines.push(digest_line(RowKey::Digest(candidate.checkout), "  checkout", candidate.checkout));
+            lines.push(reference_line(RowKey::Digest(candidate.tree), "  tree", candidate.tree));
+            lines.push(reference_line(RowKey::Digest(candidate.checkout), "  checkout", candidate.checkout));
         }
     }
     if member.wedge.is_some() {
@@ -381,8 +393,50 @@ fn member_lines(view: &ViewDocument, bloom: DigestHex, workpiece: &str) -> Vec<L
             lines.push(label(RowKey::Other(6), format!("  blocked  {}", pending.blocked)));
         }
     }
+    if let Some(awaiting) = &member.awaiting_surface {
+        lines.push(label(RowKey::Other(8), format!("surface  {} ({} asked)", awaiting.summary, awaiting.requests)));
+        for (row, request) in (9u16..99).zip(awaiting.paths.iter()) {
+            lines.push(label(RowKey::Other(row), format!("  {}  {}", request.path, request.reason)));
+        }
+    }
+    if let Some(withdrawn) = &member.withdrawn {
+        let cause = match withdrawn.depends_on.as_deref() {
+            Some(ancestor) if !ancestor.is_empty() => format!("{} ({ancestor})", withdrawn.cause),
+            _ => withdrawn.cause.clone(),
+        };
+        lines.push(label(RowKey::Other(100), format!("withdrawn  {cause}  by {}", withdrawn.operator)));
+        lines.push(label(RowKey::Other(101), format!("  reason  {}", withdrawn.reason)));
+    }
+    // ADR-0198: a lease is only useful if the operator can see who holds it and
+    // what displaced whom. The eviction line names both parties on one row, so
+    // a stopped member never reads as an unexplained stall.
+    if let Some(eviction) = &member.evicted_by {
+        lines.push(label(RowKey::Other(102), format!("evicted  {}  by {}", eviction.path, eviction.by)));
+    }
+    if !member.leases.is_empty() {
+        lines.push(label(RowKey::Other(103), format!("leases  {}", member.leases.join("  "))));
+    }
     if member.resolution.is_some() {
         lines.push(label(RowKey::Other(7), "resolution  integrated".to_owned()));
+    }
+    lines
+}
+
+/// The bloom's whole lease table, path-first (ADR-0204 / ADR-0198).
+///
+/// Rendered on the bloom rather than only under each member because
+/// contention is asked about path-first: an eviction names a path, and the
+/// answer to "who else is on it" is one row here instead of a scan across
+/// members. Empty while nothing has been observed writing, and the section
+/// disappears entirely rather than rendering an empty heading.
+fn lease_lines(bloom: &BloomView) -> Vec<Line> {
+    if bloom.leases.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![label(RowKey::Other(200), format!("leases  {}", bloom.leases.len()))];
+    for (row, lease) in (201u16..280).zip(bloom.leases.iter()) {
+        let stage = lease.stage.map_or_else(|| "-".to_owned(), |stage| stage.to_string());
+        lines.push(label(RowKey::Other(row), format!("  {}  {}  {stage}", lease.path, lease.holder)));
     }
     lines
 }
@@ -408,7 +462,7 @@ fn seal_lines(view: &ViewDocument) -> Vec<Line> {
 }
 
 fn label(key: RowKey, text: String) -> Line {
-    Line { key, text, enter: None, digest: None }
+    Line { key, text, enter: None, digest: None, openable: false }
 }
 
 fn digest_line(key: RowKey, title: &str, digest: DigestHex) -> Line {
@@ -417,18 +471,57 @@ fn digest_line(key: RowKey, title: &str, digest: DigestHex) -> Line {
         text: format!("{title}  {}  {}", digest.prefix(), digest.as_hex()),
         enter: Some(Nav::focus(Focus::artifact(digest))),
         digest: Some(digest),
+        openable: true,
+    }
+}
+
+/// A digest that is an identity (a bloom id, a git tree, a git commit) and is
+/// not content in `aether.artifacts`.
+fn reference_line(key: RowKey, title: &str, digest: DigestHex) -> Line {
+    Line {
+        key,
+        text: format!("{title}  {}  {}", digest.prefix(), digest.as_hex()),
+        enter: None,
+        digest: Some(digest),
+        openable: false,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::Detail;
-    use crate::dto::DigestHex;
+    use crate::dto::{
+        BloomView, CandidateRef, CompositionCursorView, DigestHex, MemberView, ReviewParkView, ViewDocument,
+    };
     use crate::keys::{Outcome, assert_footer_honest};
     use crate::nav::Nav;
     use crate::shell::Shell;
+    use crate::store::Store;
     use crate::warroom::Focus;
-    use crossterm::event::KeyEvent;
+    use crossterm::event::{KeyCode, KeyEvent};
+    use std::time::Duration;
+
+    fn digest(byte: u8) -> DigestHex {
+        DigestHex::from_bytes([byte; 32])
+    }
+
+    fn detail_over(focus: Focus, view: ViewDocument) -> (Detail, Store) {
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_view(Ok(view));
+        let mut detail = Detail::new(focus);
+        detail.reseat(&store);
+        (detail, store)
+    }
+
+    fn walk_to_digest(detail: &mut Detail, store: &Store, target: DigestHex) {
+        for _ in 0..32 {
+            if detail.digest_under_cursor() == Some(target) {
+                return;
+            }
+            assert_eq!(detail.handle_key(KeyEvent::from(KeyCode::Char('j')), store), Outcome::Handled);
+        }
+        panic!("never reached digest {}", target.as_hex());
+    }
 
     #[test]
     fn detail_footer_keys_are_handled() {
@@ -438,5 +531,53 @@ mod tests {
         assert_footer_honest(Detail::new(Focus::bloom(DigestHex::from_bytes([1; 32]))).key_hints(), |code| {
             Shell::probe(nav.clone()).handle_key(KeyEvent::from(code)) != Outcome::Ignored
         });
+    }
+
+    #[test]
+    fn a_candidate_tree_is_shown_but_not_openable() {
+        // The plausible bug: a candidate tree is a digest on the row, so `a`
+        // (and Enter) treat it as artifact content and open a 404 frame.
+        // Tripwire: a git tree hash is not artifact content — if this ever
+        // returns Some, `a` on that row 404s again.
+        let tree = digest(0x22);
+        let view = ViewDocument {
+            blooms: vec![BloomView {
+                id: digest(1),
+                members: vec![MemberView {
+                    workpiece: "issue-1".to_owned(),
+                    cursor: Some(CompositionCursorView {
+                        candidate: Some(CandidateRef { tree, checkout: digest(0x33) }),
+                        ..CompositionCursorView::default()
+                    }),
+                    ..MemberView::default()
+                }],
+                ..BloomView::default()
+            }],
+            ..ViewDocument::default()
+        };
+        let (mut detail, store) = detail_over(Focus::member(digest(1), "issue-1"), view);
+        walk_to_digest(&mut detail, &store, tree);
+        assert_eq!(detail.digest_under_cursor(), Some(tree));
+        assert_eq!(detail.openable_digest(), None);
+    }
+
+    #[test]
+    fn a_park_question_stays_openable() {
+        // The plausible bug: closing the identity-digest doorway also hides
+        // the artifact key on the rows that actually store bytes.
+        // Tripwire: over-tightening the predicate would silently remove the
+        // artifact key from the rows it is actually for.
+        let question = digest(0x11);
+        let view = ViewDocument {
+            blooms: vec![BloomView {
+                id: digest(1),
+                review_park: Some(ReviewParkView { question, ..ReviewParkView::default() }),
+                ..BloomView::default()
+            }],
+            ..ViewDocument::default()
+        };
+        let (mut detail, store) = detail_over(Focus::bloom(digest(1)), view);
+        walk_to_digest(&mut detail, &store, question);
+        assert_eq!(detail.openable_digest(), Some(question));
     }
 }

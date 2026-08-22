@@ -117,6 +117,10 @@ stage_vocabulary! {
     /// [`FoldConflict`](crate::Fact::FoldConflict) fact rather than line
     /// progression, against the folded checkpoint rather than the sealed base.
     Reconcile,
+    /// Whole-workspace verify of a sealed base (ADR-0200): dispatched by a
+    /// seal that found no base receipt rather than by line progression,
+    /// belongs to no bloom and no member.
+    BaseVerify,
 }
 
 impl StageId {
@@ -143,6 +147,7 @@ impl StageId {
             Self::Land => "land",
             Self::Study => "study",
             Self::Reconcile => "reconcile",
+            Self::BaseVerify => "base-verify",
         };
         let mut identity = String::from("iama-");
         identity.push_str(slug);

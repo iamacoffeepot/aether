@@ -30,7 +30,7 @@
 
 use alloc::vec::Vec;
 
-use super::aggregate_verify::aggregate_verify_dispatch;
+use super::aggregate_verify::aggregate_gate_dispatches;
 use super::attempt::{DispatchTargets, SealedLine, move_effects_with_candidate};
 use super::composition::composition_progress;
 use super::{
@@ -338,6 +338,7 @@ pub(super) fn reduce_operator_repair(snapshot: &Snapshot, bloom: &BloomId, repai
         seen_verify_failures: cursor.map_or(VerifyFailureSet::EMPTY, |cursor| cursor.seen_verify_failures),
         fold_checkpoint: cursor.and_then(|cursor| cursor.fold_checkpoint),
         fold_conflict_evidence: None,
+        reconcile_assembles_base: false,
     };
     let mut effects = alloc::vec![recorded];
     effects.extend(move_effects_with_candidate(
@@ -365,7 +366,7 @@ pub(super) fn reduce_operator_repair(snapshot: &Snapshot, bloom: &BloomId, repai
 ///
 /// It lands exactly where a returning weave repair lands (ADR-0191 §5) — the
 /// operator's tree becomes the held integration, the composition's cursor
-/// advances to its `Verify`, and the composite gate run dispatches over it. The
+/// advances to its `Verify`, and both composite gates dispatch over it. The
 /// lineage the previous fold recorded rides along, because a repair edits the
 /// composed tree rather than re-ordering what went into it.
 fn rewoven_by_operator(
@@ -375,6 +376,23 @@ fn rewoven_by_operator(
     recorded: Decision,
 ) -> Decisions {
     let weave = repair.candidate;
+    let mut effects = alloc::vec![
+        recorded,
+        Decision::RecordIntegration {
+            bloom: *bloom,
+            integration: Some(FoldedIntegration {
+                tree: weave.tree,
+                head: weave.checkout,
+                lineage: record.integration.as_ref().map_or_else(Vec::new, |held| held.lineage.clone()),
+            }),
+        },
+        Decision::AdvanceStage {
+            bloom: *bloom,
+            workpiece: WorkpieceId::composition(),
+            progress: composition_progress(StageId::Verify, 1, weave),
+        },
+    ];
+    effects.extend(aggregate_gate_dispatches(record, *bloom, weave.tree, weave.checkout));
 
     Decisions {
         outcome: Outcome::OperatorRepairAccepted {
@@ -382,22 +400,6 @@ fn rewoven_by_operator(
             workpiece: repair.workpiece.clone(),
             candidate: weave.tree,
         },
-        effects: alloc::vec![
-            recorded,
-            Decision::RecordIntegration {
-                bloom: *bloom,
-                integration: Some(FoldedIntegration {
-                    tree: weave.tree,
-                    head: weave.checkout,
-                    lineage: record.integration.as_ref().map_or_else(Vec::new, |held| held.lineage.clone()),
-                }),
-            },
-            Decision::AdvanceStage {
-                bloom: *bloom,
-                workpiece: WorkpieceId::composition(),
-                progress: composition_progress(StageId::Verify, 1, weave),
-            },
-            aggregate_verify_dispatch(record, *bloom, weave.tree, weave.checkout),
-        ],
+        effects,
     }
 }

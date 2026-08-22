@@ -2,6 +2,7 @@
 //! the violated rule rather than a bare failure.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
@@ -615,4 +616,145 @@ pub enum MemberExecutorFaultError {
         /// The subject the evidence actually names.
         got: Digest,
     },
+}
+
+/// Why a surface-request admission was refused (ADR-0207).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum SurfaceRequestedError {
+    /// No active bloom with this id.
+    UnknownOrInactiveBloom,
+    /// The request names a workpiece that is not a member of the bloom. The
+    /// composition workpiece lands here too: it declares no surface, so there
+    /// is nothing for a request to amend.
+    NotAMember(WorkpieceId),
+    /// The member holds no dispatched cursor.
+    NotDispatched(WorkpieceId),
+    /// The named stage is not the member's current cursor stage — a stale
+    /// report from an attempt the member has already left.
+    StageMismatch {
+        /// The stage the member is actually waiting at.
+        expected: StageId,
+        /// The stage the request named.
+        got: StageId,
+    },
+    /// The request names a revision other than the member's sealed one. A
+    /// request never widens a revision it does not name.
+    RevisionMismatch {
+        /// The member's sealed scope revision.
+        expected: Digest,
+        /// The revision the request actually named.
+        got: Digest,
+    },
+    /// The declining stage is outside the construct family (Construct, Refine,
+    /// Reconcile) — the only stages whose lane can decline for want of
+    /// surface.
+    NotAConstructFamilyStage(StageId),
+}
+
+/// Why a member withdrawal was refused (#5327).
+///
+/// The ladder is checked in declaration order, so the first thing wrong with a
+/// request is the thing the operator is told about.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum WithdrawError {
+    /// No bloom with this id, or one past withdrawing. Only a `Sealed` bloom
+    /// is still running a line a member can leave: a resolved bloom's members
+    /// all carry claims, so every withdrawal against one is already
+    /// [`AlreadyResolved`](Self::AlreadyResolved).
+    UnknownOrInactiveBloom,
+    /// The request names no member at all. Refused rather than treated as a
+    /// no-op, so the journal never carries a fact that changed nothing.
+    NoMembersNamed,
+    /// The request names a workpiece that is not a member of the bloom.
+    NotAMember(WorkpieceId),
+    /// The request states no reason. Refused rather than defaulted: a member
+    /// removed from a running bloom is an act no verdict produced, so a record
+    /// of it that says nothing is the whole failure.
+    BlankReason,
+    /// The request names no operator, so the record would not say who decided.
+    BlankOperator,
+    /// The member has already been withdrawn. Refused for the reason a second
+    /// operator hold is: it would journal a fact that changed nothing, and it
+    /// would overwrite the reason the first one recorded.
+    AlreadyWithdrawn(WorkpieceId),
+    /// The member carries a resolution claim. A reviewed member is immutable
+    /// (ADR-0191 §4): withdrawing it would pull finished, verified work out
+    /// from under a fold that has already counted it.
+    AlreadyResolved(WorkpieceId),
+    /// Withdrawing the named members would strand these dependents on a
+    /// construct base that will never exist. Refused fail-closed rather than
+    /// parking them, because a parked dependent still pins the bloom the
+    /// withdrawal was meant to free; re-send with the cascade to withdraw them
+    /// too.
+    DependentsWouldStrand(Vec<WorkpieceId>),
+}
+
+/// Why a lane-write observation was refused (ADR-0204).
+///
+/// The ladder is checked in declaration order, so the first thing wrong with an
+/// observation is the thing the host is told about. Every arm here means the
+/// observation named a member the lease table must not move for — never that
+/// the observation itself was malformed, which
+/// [`normalize_write_paths`](crate::normalize_write_paths) already dropped at
+/// the host.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum LeaseObservationError {
+    /// No active bloom with this id.
+    UnknownOrInactiveBloom,
+    /// The observation names a workpiece that is not a member of the bloom.
+    /// The composition workpiece lands here too: it weaves finished members
+    /// rather than writing beside them, so it contends with nobody.
+    NotAMember(WorkpieceId),
+    /// The member holds no dispatched cursor, so there is no lane whose
+    /// working tree this could be.
+    NotDispatched(WorkpieceId),
+    /// The named stage is not the member's current cursor stage — a stale
+    /// observation of a lane the member has already left.
+    StageMismatch {
+        /// The stage the member is actually at.
+        expected: StageId,
+        /// The stage the observation named.
+        got: StageId,
+    },
+    /// The observed stage is outside the construct family (Construct, Refine,
+    /// Reconcile) — the only stages whose lane writes a working tree. A
+    /// mechanical Verify reads and builds; it authors nothing to lease.
+    NotAConstructFamilyStage(StageId),
+    /// The observation named no path that survived normalization, so there is
+    /// nothing to lease. Refused rather than treated as a no-op, so the
+    /// journal never carries a fact that changed nothing.
+    NoPathsObserved,
+}
+
+/// Why a reviewer's suppression answer was refused (ADR-0193 §5).
+///
+/// Checked in declaration order, so the first thing wrong with an answer is the
+/// thing the door reports. Every arm means the answer named something the
+/// reducer cannot act on — never that the requests it closes were themselves
+/// malformed, which [`SuppressionRequest::normalize`](crate::SuppressionRequest::normalize)
+/// already dropped at the host.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum SuppressionDispositionError {
+    /// No active bloom with this id.
+    UnknownOrInactiveBloom,
+    /// The answer closes no request. Refused rather than treated as a no-op, so
+    /// the journal never carries an answer that answered nothing.
+    ClosesNothing,
+    /// The answer states no reason. Refused rather than defaulted, for the
+    /// reason an adjudication's blank reason is: a suppression cleared by a
+    /// record that says nothing is the whole failure the request path exists to
+    /// avoid.
+    BlankReason,
+    /// The answer names no operator, so the record would not say who decided —
+    /// and "who granted this allow" is the audit question the mechanism is for.
+    BlankOperator,
+    /// The answer names a workpiece that is not a member of the bloom.
+    NotAMember(WorkpieceId),
+    /// The member has been withdrawn, so there is no candidate left carrying
+    /// the suppressions and nothing to re-open.
+    AlreadyWithdrawn(WorkpieceId),
+    /// A denial named a member that has produced no candidate. A repair lap
+    /// checks out the tree carrying the refused suppression; with no such tree
+    /// the dispatch would bill a fresh construct as a repair.
+    NoCandidate(WorkpieceId),
 }

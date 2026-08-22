@@ -45,8 +45,12 @@ impl Journal {
         let (draft, configs) = draft_with_member_override(1, membership(MEMBER, REVISION), override_);
         let spec = draft.seal();
         let bloom = spec.id();
-        let mut journal =
-            Self { snapshot: Snapshot::new(digest(1)), ledger: CalibrationLedger::default(), configs, bloom };
+        let mut journal = Self {
+            snapshot: Snapshot::new(digest(1)).with_green_base(digest(1)),
+            ledger: CalibrationLedger::default(),
+            configs,
+            bloom,
+        };
         journal.admit(&event("seal", Fact::Seal(spec)));
         journal
     }
@@ -336,7 +340,7 @@ struct History {
 impl History {
     fn new() -> Self {
         Self {
-            snapshot: Snapshot::new(digest(1)),
+            snapshot: Snapshot::new(digest(1)).with_green_base(digest(1)),
             live: CalibrationLedger::default(),
             configs: ResolvedConfigs::default(),
             rows: Vec::new(),

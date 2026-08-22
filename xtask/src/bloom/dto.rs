@@ -8,7 +8,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use aether_bloomery::{BloomStatus, EvidenceKind, Forecast};
+use aether_bloomery::{
+    BloomStatus, Digest, EvidenceKind, Forecast, ScopeRevision, ScopeRouting, Statement, WorkpieceId,
+};
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -74,6 +76,154 @@ pub struct BloomView {
 pub struct MemberView {
     pub workpiece: String,
     pub scope_revision: DigestHex,
+    /// The surface amendment this member is waiting on (ADR-0207). Absent from
+    /// a coordinator that predates the field, so `#[serde(default)]`.
+    #[serde(default)]
+    pub awaiting_surface: Option<AwaitingSurfaceView>,
+    /// Why the member left the line, once it was withdrawn (#5327). Absent
+    /// from a coordinator that predates the field, so `#[serde(default)]`.
+    #[serde(default)]
+    pub withdrawn: Option<WithdrawnView>,
+}
+
+/// A member the day withdrew, as `/view` renders it (#5327). The projection
+/// names the cause, the stranded ancestor, the reason and the operator; every
+/// one of them answers "this member never integrates" the same way, so the
+/// mirror keeps the presence and reads nothing out of the body.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WithdrawnView {}
+
+/// A member's journaled surface request, as `/view` renders it (ADR-0207).
+#[derive(Debug, Clone, Deserialize)]
+pub struct AwaitingSurfaceView {
+    pub scope_revision: DigestHex,
+    pub paths: Vec<SurfacePathRequest>,
+    #[serde(default)]
+    pub requests: u32,
+}
+
+/// One path a declining lane asked for, and the line justifying it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SurfacePathRequest {
+    pub path: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// `GET /commissions/{id}` — the tip, typed, plus the approvals stored against
+/// it. Digests arrive as hex, which is why this mirrors rather than reuses
+/// `aether_bloomery`'s own type.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommissionShowView {
+    pub intent: DigestHex,
+    pub status: String,
+    pub current_revision: Option<DigestHex>,
+    pub current: Option<ScopeRevisionView>,
+    #[serde(default)]
+    pub approvals: Vec<StatementView>,
+}
+
+/// A stored scope revision as the REST edge renders it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScopeRevisionView {
+    pub schema: u32,
+    pub workpiece: String,
+    pub predecessor: Option<DigestHex>,
+    pub problem: String,
+    pub design: String,
+    pub plan: String,
+    pub declared_surface: Vec<String>,
+    #[serde(default)]
+    pub dogfood_brief: String,
+    pub routing: ScopeRoutingView,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub implements: Vec<DigestHex>,
+    #[serde(default)]
+    pub declared_crates: Vec<String>,
+    #[serde(default)]
+    pub declared_reads: Vec<String>,
+}
+
+/// The size and model-routing lines a revision seals.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScopeRoutingView {
+    pub size: String,
+    pub model: String,
+}
+
+impl ScopeRevisionView {
+    /// The typed revision these rendered fields describe.
+    ///
+    /// The command widens and re-posts the *typed* value rather than the
+    /// rendering, so the successor's bytes are the tip's bytes with one field
+    /// changed — anything this conversion dropped would silently rewrite a
+    /// field the existing approval was read against.
+    pub fn to_revision(&self) -> ScopeRevision {
+        ScopeRevision {
+            schema: self.schema,
+            workpiece: WorkpieceId(self.workpiece.clone()),
+            predecessor: self.predecessor.map(|digest| Digest::from_bytes(*digest.as_bytes())),
+            problem: self.problem.clone(),
+            design: self.design.clone(),
+            plan: self.plan.clone(),
+            declared_surface: self.declared_surface.clone(),
+            dogfood_brief: self.dogfood_brief.clone(),
+            routing: ScopeRouting { size: self.routing.size.clone(), model: self.routing.model.clone() },
+            dependencies: self.dependencies.iter().map(|id| WorkpieceId(id.clone())).collect(),
+            description: self.description.clone(),
+            implements: self.implements.iter().map(|digest| Digest::from_bytes(*digest.as_bytes())).collect(),
+            declared_crates: self.declared_crates.clone(),
+            declared_reads: self.declared_reads.clone(),
+        }
+    }
+}
+
+/// A stored statement, as much of it as the command reads: the words are the
+/// scope digest an approval binds.
+#[derive(Debug, Clone, Deserialize)]
+pub struct StatementView {
+    #[serde(default)]
+    pub words: Vec<u8>,
+}
+
+/// `POST /commissions/{id}/revisions` — the written revision's address.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScopeRevisionWrittenView {
+    pub digest: DigestHex,
+}
+
+/// `POST /commissions/{id}/approvals` — the stored approval's address. The
+/// address itself is the caller's own signed statement re-rendered, so nothing
+/// here reads it back; the type is what makes a non-object reply a parse
+/// failure rather than a silent success.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApprovalStoredView {}
+
+/// `POST /commissions/{id}/cancel` body: the signature is the authority; the
+/// reason is operator context recorded in the coordinator log.
+#[derive(Debug, Serialize)]
+pub struct CancelCommissionRequest {
+    pub statement: Statement,
+    pub reason: String,
+}
+
+/// `POST /commissions/{id}/cancel` reply.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommissionCancelledView {
+    pub digest: DigestHex,
+    pub status: String,
+}
+
+/// `GET /configs/{digest}` — a stored configuration, decoded through its kind's
+/// schema.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConfigValueView {
+    pub kind: String,
+    pub value: Value,
 }
 
 /// `POST /drafts` / `GET /drafts/{id}` envelope.
@@ -244,6 +394,14 @@ pub struct SupersedeRequest {
     pub descriptions: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub edges: Vec<DependencyEdge>,
+}
+
+/// `POST /blooms/{id}/members/{workpiece}/withdraw` body (#5327).
+#[derive(Debug, Serialize)]
+pub struct WithdrawRequest {
+    pub reason: String,
+    pub operator: String,
+    pub cascade: bool,
 }
 
 /// `GET /journal`.

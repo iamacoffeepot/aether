@@ -303,7 +303,7 @@ impl ApiCapabilityState {
         // Pass 1: resolve every membership synchronously (fail-closed 422 on any
         // shortfall, before any signing dispatch).
         let (sealed_proposals, pending_verifications) =
-            match resolve_seal_memberships(&gate, &draft.proposals, projections) {
+            match resolve_seal_memberships(&gate, &policy, &draft.proposals, projections) {
                 Ok(resolved) => resolved,
                 Err(response) => return Routed::Reply(response),
             };
@@ -577,6 +577,7 @@ type PendingVerification = (usize, Digest, Statement);
 /// input (the gated proposals and the above-auto members still to verify).
 fn resolve_seal_memberships(
     gate: &Gate<'_>,
+    policy: &ApprovalPolicy,
     proposals: &[Membership],
     request_projections: &[MemberProjection],
 ) -> Result<(Vec<Membership>, Vec<PendingVerification>), HttpServerResponse> {
@@ -604,6 +605,22 @@ fn resolve_seal_memberships(
                 &format!("member {member} declared surface {glob:?} is outside the surface grammar; seal fails closed"),
             ));
         }
+        // A file-granular declaration is a forecast, and the forecast is wrong
+        // often enough to cost blooms: the plan lists the files it mentions,
+        // the work needs one more sibling in the same crate, and the member is
+        // superseded for a glob. The policy already maintains the list of files
+        // special enough to name, so it is what decides granularity too — the
+        // same owner-signed table this door already consults for tier. Runs
+        // after the grammar check, so it only ever sees parseable globs.
+        if let Some(glob) = policy.unnamed_file_entries(&projection.declared_surface).first() {
+            return Err(error_response(
+                422,
+                &format!(
+                    "member {member} declared surface {glob:?} names one file and no approval-policy rule names \
+                     that file; widen it to a crate glob such as crates/<crate>/src/**; seal fails closed"
+                ),
+            ));
+        }
         // The digest binds the approval to the projection as evaluated. It is
         // computed over the canonical wire re-encoding of the decoded struct, not
         // the raw request slice: the JSON body carries no per-projection byte
@@ -616,6 +633,7 @@ fn resolve_seal_memberships(
         let admission = AdmissionRequest {
             subject: proposal.subject(),
             declared_surface: projection.declared_surface.clone(),
+            declared_crates: projection.declared_crates.clone(),
             completeness: projection.completeness,
             adr_touch: projection.adr_touch,
             pre_approved: projection.pre_approved,
@@ -627,8 +645,8 @@ fn resolve_seal_memberships(
                 sealed.approval = approval;
                 sealed_proposals.push(sealed);
             }
-            Decision::Incomplete(incompleteness) => {
-                return Err(error_response(422, &format!("member {member} is incomplete: {incompleteness:?}")));
+            Decision::Incomplete { reason, refusal } => {
+                return Err(error_response(422, &format!("member {member} is incomplete: {reason:?} ({refusal})")));
             }
             Decision::RequiresStatement(_tier) => {
                 // Above-auto: consume the member projection's signed statement, run
@@ -680,6 +698,7 @@ fn resolve_seal_graph(
     declared: &[MemberDependency],
 ) -> Result<Vec<MemberDependency>, HttpServerResponse> {
     let mut listed = Vec::with_capacity(members.len());
+    let mut matched = Vec::with_capacity(members.len());
     for member in members {
         let Some(projection) = projections.iter().find(|projection| {
             projection.workpiece == member.workpiece && projection.scope_revision == member.scope_revision
@@ -690,8 +709,16 @@ fn resolve_seal_graph(
             ));
         };
         listed.push((member.workpiece.clone(), projection.declared_surface.as_slice()));
+        matched.push(projection);
     }
-    match resolve_member_dependencies(&listed, declared) {
+
+    // Declared edges and read-derived ones go into the same argument, so the
+    // cycle check covers both: a read that closes a loop with an authored edge
+    // has to refuse at the door, not deadlock the line.
+    let mut authored: Vec<MemberDependency> = declared.to_vec();
+    authored.extend(read_ordering_edges(&matched));
+
+    match resolve_member_dependencies(&listed, &authored) {
         Ok(resolved) => Ok(resolved.declared),
         Err(DependencyError::UnknownWorkpiece(workpiece)) => Err(error_response(
             422,
@@ -702,6 +729,42 @@ fn resolve_seal_graph(
             Err(error_response(422, &format!("cyclic member dependencies: {named}")))
         }
     }
+}
+
+/// The ordering a member's declared reads earn against its co-members
+/// (ADR-0204 / #5258).
+///
+/// Conditional by construction, which is the entire difference between this
+/// and an authored `## Depends on` line: an edge appears only where a reader's
+/// declared crate is one a co-member declared it will *change*. Declare a read
+/// on a crate nobody in this seal is changing and it costs nothing — no edge,
+/// no serialization, no wait. An authored edge pays that cost whether or not
+/// the write ever happens, which is why reads could not be expressed as one.
+///
+/// Read against `declared_crates` rather than `declared_surface` because a
+/// crate-declared member's surface is its blast radius, not its intent (FIX-7 /
+/// ADR-0204): the closure admits every crate that depends on the declared ones,
+/// so ordering on the surface would put every reader behind every member whose
+/// closure happened to reach the crate — which is the over-serialization the
+/// conditional form exists to remove. A glob-declared member declares no
+/// crates and so is never a writer here; that is honest rather than a gap,
+/// because a glob surface states paths and this question is about crates.
+///
+/// A member never orders behind itself, and the edge set is deduplicated by
+/// `resolve_member_dependencies`, which also cycle-checks it.
+fn read_ordering_edges(projections: &[&MemberProjection]) -> Vec<MemberDependency> {
+    let mut edges = Vec::new();
+    for reader in projections {
+        for writer in projections {
+            if reader.workpiece == writer.workpiece {
+                continue;
+            }
+            if reader.declared_reads.iter().any(|read| writer.declared_crates.contains(read)) {
+                edges.push(MemberDependency { member: reader.workpiece.clone(), depends_on: writer.workpiece.clone() });
+            }
+        }
+    }
+    edges
 }
 
 /// Every pair of this seal's members whose declared surfaces intersect, as the
@@ -875,6 +938,8 @@ mod tests {
             workpiece: WorkpieceId(workpiece.to_owned()),
             scope_revision: Digest::from_bytes([revision; 32]),
             declared_surface: surface.iter().map(|glob| (*glob).to_owned()).collect(),
+            declared_crates: Vec::new(),
+            declared_reads: Vec::new(),
             completeness: Completeness {
                 has_problem_statement: true,
                 has_design_notes: true,
@@ -1098,6 +1163,60 @@ mod tests {
         assert_eq!(edges, declared);
     }
 
+    /// `projection`, plus the crate blocks the read-ordering rule reads.
+    fn declaring(workpiece: &str, revision: u8, crates: &[&str], reads: &[&str]) -> MemberProjection {
+        MemberProjection {
+            declared_crates: crates.iter().map(|name| (*name).to_owned()).collect(),
+            declared_reads: reads.iter().map(|name| (*name).to_owned()).collect(),
+            ..projection(workpiece, revision, &["crates/aether-bloomery/**"])
+        }
+    }
+
+    #[test]
+    fn a_declared_read_orders_only_against_a_co_member_that_declares_that_crate() {
+        // ADR-0204's conditional half, and the reason a read could not just be
+        // written as a `## Depends on` line. The pre-fix failure is that the
+        // only ordering vocabulary was unconditional: B declaring that it reads
+        // aether-data had to either order behind A unconditionally — paying the
+        // serialization on every seal, including the ones where A never touches
+        // aether-data — or say nothing and race it.
+        let members = [member("wp-a", 1), member("wp-b", 2)];
+
+        let writing =
+            [declaring("wp-a", 1, &["aether-data"], &[]), declaring("wp-b", 2, &["aether-codec"], &["aether-data"])];
+        assert_eq!(
+            resolve_seal_graph(&members, &writing, &[]).expect("acyclic"),
+            [MemberDependency { member: WorkpieceId("wp-b".to_owned()), depends_on: WorkpieceId("wp-a".to_owned()) }],
+            "B reads what A declares it will change, so B waits",
+        );
+
+        // The negative case, which is the whole point: A's *surface* covers
+        // aether-data (its closure reaches it) but A never declares it, so A is
+        // not going to change it and B is owed no wait.
+        let quiet =
+            [declaring("wp-a", 1, &["aether-math"], &[]), declaring("wp-b", 2, &["aether-codec"], &["aether-data"])];
+        assert!(
+            resolve_seal_graph(&members, &quiet, &[]).expect("acyclic").is_empty(),
+            "a read against a crate nobody in the seal is changing costs nothing",
+        );
+    }
+
+    #[test]
+    fn a_read_that_closes_a_loop_refuses_at_the_door() {
+        // A read edge is a real edge, so it has to be cycle-checked with the
+        // authored ones rather than appended past the check. Two members that
+        // each read what the other changes is a graph no scheduler can fire.
+        let members = [member("wp-a", 1), member("wp-b", 2)];
+        let projections = [
+            declaring("wp-a", 1, &["aether-data"], &["aether-codec"]),
+            declaring("wp-b", 2, &["aether-codec"], &["aether-data"]),
+        ];
+
+        let error = resolve_seal_graph(&members, &projections, &[]).expect_err("a read cycle must refuse");
+
+        assert_eq!(error.status, 422);
+    }
+
     #[test]
     fn the_door_refuses_a_cycle_naming_its_members() {
         // The door is the refuse — a cycle that reached the reducer would
@@ -1146,8 +1265,8 @@ mod tests {
         let mut projections = [projection("wp-a", 1, &["crates/foo/**", "crates/foo/**,crates/bar/**"])];
         projections[0].pre_approved = true;
 
-        let error =
-            resolve_seal_memberships(&gate, &members, &projections).expect_err("an unparseable glob must refuse");
+        let error = resolve_seal_memberships(&gate, &policy, &members, &projections)
+            .expect_err("an unparseable glob must refuse");
         let body = String::from_utf8_lossy(&error.body);
         assert_eq!(error.status, 422);
         assert!(body.contains("wp-a"), "refusal names the member: {body}");
@@ -1166,9 +1285,11 @@ mod tests {
         let policy = ApprovalPolicy { default: Tier::Human, rules: Vec::new() };
         let gate = Gate::new(&policy);
         let members = [member("wp-a", 1)];
-        let projections = [projection("wp-a", 1, &["crates/aether-data/src/lib.rs"])];
+        // A subtree glob, so the granularity check ahead of the gate passes it
+        // through and this test still exercises the signer-policy refusal.
+        let projections = [projection("wp-a", 1, &["crates/aether-data/src/**"])];
 
-        let error = resolve_seal_memberships(&gate, &members, &projections)
+        let error = resolve_seal_memberships(&gate, &policy, &members, &projections)
             .expect_err("an auto-only above-auto member must refuse");
         let body = String::from_utf8_lossy(&error.body);
         assert_eq!(error.status, 422);

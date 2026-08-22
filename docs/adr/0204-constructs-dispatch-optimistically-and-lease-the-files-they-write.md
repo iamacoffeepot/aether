@@ -1,6 +1,6 @@
 # ADR-0204: constructs dispatch optimistically and lease the files they write
 
-- **Status:** Proposed
+- **Status:** Accepted (amended 2026-08-21 — §4's eviction is retracted: a shared file is a merge at integration, not a stopped lane. See [Amendment](#amendment-2026-08-21-a-shared-file-is-a-merge-not-an-eviction).)
 - **Date:** 2026-08-19
 
 ## Context
@@ -26,6 +26,13 @@ problem:
   `Cargo.lock`-only. The 39.6% is an upper bound on the honest rate: seven
   pairs collided through edits *outside* a declared surface, a class the
   containment gate now converts into verify refusals.
+
+  *Amended 2026-08-21:* this figure counts pairs that touched a common
+  **path**. It is not the rate at which two members' edits actually conflict,
+  and the amendment below shows it over-counts that rate badly — a pair
+  editing disjoint hunks of one file three-way merges cleanly and appears here
+  anyway. Read it as the rate at which a pair's trees have to be *merged*, not
+  the rate at which merging them fails.
 - Across 162 landed members, the median write set is 7 files (quartiles
   3–13, maximum 83), and a median 78% of a member's changed files sit in its
   single densest directory. Of the 678 changed files that fell outside those
@@ -66,21 +73,27 @@ acquired at first observed write.
    as an edge if the reader has not yet dispatched, as a rebase at
    integration if it has. Reads are never leased and never blocked.
 3. **Write leases.** The executor observes each construct lane's working
-   tree; the first observed write to a path acquires an exclusive per-file
-   lease for that member, held until the member integrates or is retired. A
-   write to an undeclared path inside the surface acquires its lease
-   automatically — that is the fault path the ripple data requires. A write
-   outside the surface remains a containment-gate verify failure. Leases are
-   visible in the operator projection with holder and age, per ADR-0198.
-   Observation cadence is implementation latitude; capture of a candidate is
-   the latest permissible observation point.
-4. **Contention resolves by canonical id, which is total, so no deadlock is
-   possible.** When an earlier-id member writes a path a later-id member
-   holds, the later holder is evicted with resume: its session state
-   persists, and it re-dispatches on the advanced base after the earlier
-   member integrates. When a later-id member writes a path an earlier-id
-   member holds, the later member continues its other work and takes the
-   rebase at integration.
+   tree; the first observed write to a path takes a per-file lease for that
+   member, held until the member integrates or is retired. A write to an
+   undeclared path inside the surface takes its lease automatically — that is
+   the fault path the ripple data requires. A write outside the surface
+   remains a containment-gate verify failure. Leases are visible in the
+   operator projection with holder and age, per ADR-0198. Observation cadence
+   is implementation latitude; capture of a candidate is the latest
+   permissible observation point.
+4. **Contention is a merge, not a race** (amended 2026-08-21, #5401). Two
+   members writing one file are two edits that have to be combined, and
+   whether they combine is a property of the *hunks*, not of the path — which
+   is all a lease can see. So no lane is stopped, in either canonical
+   direction. Every construct lane runs to completion, and the integration
+   fold merges each member's candidate onto the accumulated tree in canonical
+   member order, which is total. A clean three-way merge costs nothing: no
+   cancel, no re-dispatch, and no machinery roll. Only a merge that reports a
+   textual conflict costs anything, and it costs what ADR-0189 already prices
+   — the later-canonical member takes a reconcile lap on the advanced base,
+   on the session its lane never left, seeded from the candidate that lane
+   produced. The lease table survives as the observation §3 renders and as the
+   signal that says which pairs will meet at the fold.
 5. **The staleness backstop is unchanged.** A semantic interaction that
    involves no common file — a renamed function, a moved invariant — is
    caught by aggregate verification at fold and repaired by the existing
@@ -93,35 +106,72 @@ acquired at first observed write.
   the width of their declared dependencies, not the width of their glob
   unions. On the two counterfactual blooms this is 5 lanes instead of 1 and
   7 instead of 4 at dispatch.
-- True contention — bounded above by the measured 39.6%, expected lower now
-  that the containment gate removes the out-of-surface class — costs an
-  eviction-with-resume or an integration rebase instead of a fold wedge, and
-  the losing lane stops at first touch rather than after finishing doomed
-  work.
+- A shared file costs an integration merge and nothing more. Where the merge
+  is clean — which the path-level 39.6% over-counts, since it counts every
+  pair that has to be merged rather than every pair whose merge fails — the
+  pair costs exactly what two unrelated members cost. Where it conflicts
+  textually, it costs one ADR-0189 reconcile lap on work that already exists,
+  rather than a cancel that discards work which would have merged.
 - The lease table is small and cheap: entries on the order of the sum of
   live write sets (median 7 files per member across a single-digit member
   count), one hash operation per observed write, and a working-tree scan per
   lane per observation tick.
-- The executor gains observation, eviction, and resume machinery; the
-  operator projection gains a lease surface; scope authoring gains two
-  optional declaration lists. Read declarations stay load-bearing-only by
-  policy — exhaustive read declarations at glob granularity would rebuild
-  exactly the false serialization this decision removes, as the 13%
-  utilization figure shows.
+- The executor gains observation and a lease surface in the operator
+  projection; scope authoring gains two optional declaration lists. Read
+  declarations stay load-bearing-only by policy — exhaustive read
+  declarations at glob granularity would rebuild exactly the false
+  serialization this decision removes, as the 13% utilization figure shows.
 - Follow-on work: demoting surface-derived edges in the reducer; the lease
-  table, observation, and preemption in the executor; the declaration
-  vocabulary in commission scopes and the admission door; the lease view in
-  the operator projection. ADR-0198 remains the general lease decision —
-  this applies it to workspace files. ADR-0202's composition vocabulary
-  gains the read/write declaration terms.
+  table and observation in the executor; the declaration vocabulary in
+  commission scopes and the admission door; the lease view in the operator
+  projection. ADR-0198 remains the general lease decision — this applies it
+  to workspace files as a visibility surface. ADR-0202's composition
+  vocabulary gains the read/write declaration terms.
+
+## Amendment (2026-08-21): a shared file is a merge, not an eviction
+
+The decision as first written made the lease exclusive: an earlier-canonical
+member writing a path a later one held evicted the later holder, cancelling
+its lane, and the later member re-dispatched on the advanced base once the
+earlier one integrated.
+
+Bloom `4360e7e4a081` falsified the premise. `issue-5379`'s construct lane was
+evicted by `issue-5376` on one file: 5376 changed `close_issue` and added
+`upsert_comment`, with hunks at roughly lines 11, 200, 250, 400–460 and 760;
+5379 inserted three functions between lines 114 and 127. A three-way merge
+applies cleanly. The eviction still cost about five minutes of finished lane
+time and a machinery roll off a budget of three, for a conflict that did not
+exist and could not have — a lease sees the path, and the path is not where
+the collision lives.
+
+So §4 is retracted and replaced above. `LaneWritesObserved` stays exactly
+where it was, and so does the table it folds: it is the operator's answer to
+"who is writing this file" (ADR-0198) and the honest predictor of which pairs
+the fold will have to merge. What it stopped doing is stopping lanes. The
+mechanism that resolves a real collision was already built and already
+proven — ADR-0189's reconcile stage — and it has the property the eviction
+lacked: it fires on the trees, after the work exists, so it can tell a
+conflict from a coincidence.
+
+One compatibility note. `Outcome::LeasesObserved.evicted` is journaled at a
+fixed position (ADR-0187), and rows written before this amendment carry
+holders in it. The field is kept and always empty, the snapshot still folds a
+recorded eviction, and the integration resume still redeems one — otherwise a
+coordinator upgrading onto such a journal would strand the member the old
+binary stopped.
 
 ## Alternatives considered
 
 - **Keep glob-derived dispatch gating** — measured: 60% of the pairs it
   serializes never conflict.
-- **Optimistic dispatch with redo only, no leases** — loses early
-  stop-at-first-touch; at the measured collision rate, doomed constructs
-  routinely run to completion before the conflict is discovered.
+- **Stop the later lane at its first shared write** (the original §4) —
+  retracted above: it prices a shared path as a conflict, and the measured
+  case shows the two are not the same thing.
+- **Optimistic dispatch with redo only, no leases** — the amended decision is
+  nearly this, and keeps the table anyway: the operator surface ADR-0198 asks
+  for is worth one hash per observed write even when nothing acts on it. The
+  original objection — that this loses stop-at-first-touch — assumed the
+  path-level rate was the conflict rate.
 - **Lease reads as well as writes** — protects against a torn read the
   per-lane snapshot already prevents, at the price of re-serializing every
   wave through the files all lanes read.

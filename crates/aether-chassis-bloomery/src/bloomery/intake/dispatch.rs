@@ -171,9 +171,10 @@ pub(super) fn record_dispatch_at(
 /// failed.
 #[derive(Debug)]
 pub enum DispatchError {
-    /// The executor refused or could not reach the dispatch surface.
+    /// The executor refused or could not reach the dispatch surface. The
+    /// registry row written just before it has been removed again.
     Submit(ExecutorPortError),
-    /// The registry write faulted after a successful submit.
+    /// The registry write faulted, so nothing was submitted.
     Store(rusqlite::Error),
 }
 
@@ -220,37 +221,41 @@ impl DispatchError {
     }
 }
 
-/// Submit a work order through the executor shell and record its outstanding
-/// reducer context, in one host step (#3502). Submits first, so a submit that
-/// fails records nothing; the registry row is written only for a dispatch that
-/// actually reached the worker lane. A record write that faults *after* a
-/// successful submit best-effort cancels the just-submitted run before
-/// propagating — the order would otherwise run untracked, with no registry row
-/// to resolve its evidence against.
+/// Record a work order's outstanding reducer context and submit it through the
+/// executor shell, in one host step (#3502).
+///
+/// **Records first.** `submit` is synchronous into the local executor, which
+/// starts the lane on a free slot inside that call and resolves the order's
+/// (bloom, workpiece, stage) from this very registry row to decide session
+/// reuse. Submitting first therefore hands the executor a nonce it cannot
+/// resolve: every journaled resume — a refine's construct session, a dependent
+/// construct's predecessor session — reads as "no such order" and silently
+/// falls through to the pool, where the member's own grown context is refused
+/// on the context cap. A submit that then fails removes the row it wrote, so a
+/// dispatch that never reached the worker lane leaves no registry entry behind.
 ///
 /// `now_unix_millis` is the clock reading the order's ADR-0177 deadline is
 /// computed from — taken by the caller once per tick, and injected rather than
 /// read here so a scenario can place a dispatch anywhere relative to it. The
-/// deadline starts at the *record*, not the submit: a slow registry write must
-/// not spend the sealed allowance before the order is recoverable at all.
+/// deadline starts at the *record*, which is now also the earlier of the two
+/// steps: the sealed allowance covers the submit as well.
 ///
 /// # Errors
-/// [`DispatchError::Submit`] if the executor refused the dispatch, or
-/// [`DispatchError::Store`] if the registry write faulted after submit (the
-/// submitted run is best-effort cancelled first).
+/// [`DispatchError::Store`] if the registry write faulted (nothing was
+/// submitted), or [`DispatchError::Submit`] if the executor refused the
+/// dispatch (the registry row is removed again first).
 pub fn dispatch_and_record(
     shell: &ExecutorShell,
     store: &mut dyn StoreBackend,
     record: &DispatchRecord,
     now_unix_millis: u64,
 ) -> Result<WorkHandle, DispatchError> {
-    let handle = shell.submit(&record.to_order()).map_err(DispatchError::Submit)?;
-    if let Err(store_error) = record_dispatch_at(store, record, now_unix_millis) {
-        // The order reached the worker lane but its reducer context never
-        // landed, so it is untracked either way; best-effort cancel the run
-        // rather than leak an untracked dispatch, then surface the store fault.
-        let _ = shell.cancel(&handle);
-        return Err(DispatchError::Store(store_error));
-    }
-    Ok(handle)
+    record_dispatch_at(store, record, now_unix_millis).map_err(DispatchError::Store)?;
+    shell.submit(&record.to_order()).map_err(|error| {
+        // Nothing reached the worker lane, so the row describes a dispatch that
+        // does not exist; drop it rather than leave the deadline sweep to expire
+        // an order no run was ever started for.
+        let _ = store.consume_order(&record.nonce.0);
+        DispatchError::Submit(error)
+    })
 }

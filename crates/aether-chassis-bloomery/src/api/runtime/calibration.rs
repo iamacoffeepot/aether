@@ -16,7 +16,7 @@ use super::state::Routed;
 /// `GET /calibration` — read the ledger the control core folded beside its
 /// snapshot, together with the forecast grade of the blooms that produced it.
 pub(super) fn read() -> Routed {
-    Routed::Query(Query { bloom: None, release: None, calibration: true })
+    Routed::Query(Query { bloom: None, release: None, calibration: true, why: false })
 }
 
 /// Render the control core's calibration reply.

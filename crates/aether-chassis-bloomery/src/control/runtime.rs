@@ -22,7 +22,7 @@
 //! reactor capabilities (#3499). This cap only *enqueues* outbox entries,
 //! atomically inside the commit.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::mem;
 #[cfg(test)]
 use std::sync::Arc;
@@ -38,19 +38,21 @@ pub use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
 
 use aether_bloomery::control::{
-    Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, ClaimResult, ClaimSeal, Commit, CommitResult,
-    CompleteReleaseResult, DispatchPayload, EnumerateClaims, EnumerateClaimsResult, HealOp, IntegratePayload,
-    LandPayload, LoadConfigs, LoadConfigsResult, MembershipMutation, MetricsQuery, MetricsQueryResult, MetricsView,
-    ObserveMainline, ObserveMainlineResult, OrphanClaimReleasePayload, OutboxPayload, Query, QueryResult, ReconcileOp,
+    Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, BaseVerifyPayload, CancelDispatchPayload,
+    ClaimResult, ClaimSeal, Commit, CommitResult, CompleteReleaseResult, DispatchPayload, EnumerateClaims,
+    EnumerateClaimsResult, HealOp, IntegratePayload, LandPayload, LoadConfigs, LoadConfigsResult,
+    MemberClaimReleasePayload, MembershipMutation, MetricsQuery, MetricsQueryResult, MetricsView, ObserveMainline,
+    ObserveMainlineResult, OrphanClaimReleasePayload, OutboxPayload, Query, QueryResult, ReconcileOp,
     RedispatchPayload, ReplayJournal, ReplayJournalResult, ReviewPass, SpendQuery, SpendQueryResult, SplicePayload,
     Topic, TransferSeal, held_to_seal_error, held_to_supersede_error, plan_heals, reconcile_op, release_seal_mail,
     seal_claim_mail, transfer_seal_mail,
 };
 use aether_bloomery::{
-    BloomId, CalibrationDocument, CalibrationLedger, ClaimRefKind, ClaimRefState, DAYS_CAP, Decision, Decisions,
-    Digest, Event, EvidenceKind, Fact, IdempotencyKey, METRICS_DEFAULT_LIMIT, METRICS_MAX_LIMIT, MetricsLedger,
-    OperatorRepairError, Outcome, ResolvedConfigs, Snapshot, SpendWindow, StudyRecord, Unproducible,
-    decode_recorded_decisions, grade, is_active_unlanded, measure, reduce, view_of, window_label,
+    BloomId, BloomStatus, CalibrationDocument, CalibrationLedger, ClaimRefKind, ClaimRefState, DAYS_CAP, Decision,
+    Decisions, Digest, Event, EvidenceKind, Fact, IdempotencyKey, METRICS_DEFAULT_LIMIT, METRICS_MAX_LIMIT,
+    MetricsLedger, OperatorRepairError, Outcome, Question, ResolvedConfigs, Snapshot, SpendWindow, StudyRecord,
+    Unproducible, ViewDocument, decode_recorded_decisions, grade, is_active_unlanded, measure, reduce, view_of, why_of,
+    window_label,
 };
 
 use super::{ControlCore, ControlSetup, ObserveTick};
@@ -71,6 +73,12 @@ use crate::store::{StoreCapability, now_unix_millis};
 /// the pre-commit ref stage cannot dodge the back-pressure.
 const MAX_INFLIGHT_PER_KEY: usize = 64;
 
+/// How many idempotency keys the duplicate reporter remembers before it starts
+/// over. Large enough that the keys a live coordinator sees duplicated fit
+/// comfortably, small enough that a process running for weeks cannot grow the
+/// set without limit; forgetting costs one repeated `warn` per key.
+const MAX_REPORTED_DUPLICATES: usize = 4_096;
+
 /// An admit awaiting its durable commit reply — the held reply obligation, the
 /// decoded event, and the decisions to apply to the snapshot once the store
 /// confirms the commit landed. Each in-flight admit owns one, held in its key's
@@ -80,6 +88,10 @@ struct Pending {
     inbound: InboundMail,
     event: Event,
     decisions: Decisions,
+    /// Digest of the [`ViewDocument`] this commit enqueued, if any. Applied to
+    /// [`ControlCoreState::last_view_digest`] only when the store confirms the
+    /// commit, so a rejected commit cannot suppress the next attempt.
+    view_digest: Option<Digest>,
 }
 
 /// Which claim door an admit gated on, so a [`ClaimResult::Held`] maps to the
@@ -175,6 +187,10 @@ pub struct ControlCoreState {
     /// when the store would not open — those reads then report every study
     /// as unaccounted rather than guessing a price.
     artifacts: Option<ArtifactsCapabilityState>,
+    /// Digest of the last [`ViewDocument`] this core enqueued. `None` until a
+    /// commit that carried a view row is applied, so a rejected commit cannot
+    /// suppress the next attempt.
+    last_view_digest: Option<Digest>,
     pending: BTreeMap<String, VecDeque<Pending>>,
     pending_claims: BTreeMap<u64, PendingClaim>,
     pending_configs: BTreeMap<u64, PendingConfigs>,
@@ -197,6 +213,15 @@ pub struct ControlCoreState {
     /// arrives before the fold would otherwise reduce against the empty boot
     /// snapshot and consume its key as `UnknownOrInactiveBloom`.
     replayed: bool,
+    /// Idempotency keys whose duplicate admission has already been reported.
+    ///
+    /// A duplicate is a dropped fact and a fire-and-forget admitter never
+    /// learns it, so the first one per key is a `warn` an operator has to see.
+    /// A repeat is the same fact being re-derived on a poll cadence, and 543
+    /// identical lines in twenty minutes buries the events the `warn` exists to
+    /// surface — so the rest go to `trace` (#5387). Process-local and bounded
+    /// by [`MAX_REPORTED_DUPLICATES`].
+    reported_duplicates: BTreeSet<String>,
     /// The mainline observer's poll-timer sidecar, held for its `Drop` (which
     /// stops and joins the thread on teardown).
     _timer: TimerHandle,
@@ -230,12 +255,14 @@ impl NativeActor for ControlCore {
             configs: ResolvedConfigs::default(),
             spend: SpendWindow::default(),
             artifacts: open_artifacts(config.artifacts_root.as_deref()),
+            last_view_digest: None,
             pending: BTreeMap::new(),
             pending_claims: BTreeMap::new(),
             pending_configs: BTreeMap::new(),
             held_admissions: VecDeque::new(),
             held_for_bloom: BTreeMap::new(),
             replayed: false,
+            reported_duplicates: BTreeSet::new(),
             _timer: timer,
         })
     }
@@ -435,7 +462,7 @@ impl NativeActor for ControlCore {
             // No admit is waiting on this key — a stray or double reply.
             return;
         };
-        let Some(Pending { inbound, event, decisions }) = queue.pop_front() else {
+        let Some(Pending { inbound, event, decisions, view_digest }) = queue.pop_front() else {
             return;
         };
         // Drop the key's slot once its last in-flight entry is answered.
@@ -448,6 +475,9 @@ impl NativeActor for ControlCore {
                 let sequence = state.metrics.through_sequence().saturating_add(1);
                 state.metrics.observe(sequence, &event, &decisions, &state.configs, Some(now_unix_millis()));
                 state.snapshot = state.snapshot.apply(&event, &decisions, &state.configs);
+                if let Some(digest) = view_digest {
+                    state.last_view_digest = Some(digest);
+                }
                 state.refresh_spend();
                 // A committed land decision is already in the outbox; wake the
                 // reactor now rather than waiting on its next poll. The mail
@@ -461,7 +491,14 @@ impl NativeActor for ControlCore {
                 // A durably-landed bloom frees its member + admission claim refs
                 // (ADR-0150) — release with the local release, fire-and-forget: the
                 // boot reconcile re-releases any ref an interrupted release stranded.
-                if matches!(decisions.outcome, Outcome::Landed(_))
+                // A *fully*-withdrawn bloom frees the same set (#5327): its
+                // withdrawals carry a `ReleaseMembership` per member, so the
+                // seal-wide mail is exactly right and is the only path that
+                // carries the admission ref. A partial withdrawal must never
+                // reach here — its members' refs go one at a time through
+                // `Topic::MemberClaimRelease`, because the bloom is still
+                // walking and still needs its admission ref.
+                if matches!(decisions.outcome, Outcome::Landed(_) | Outcome::MembersWithdrawn { terminal: true, .. })
                     && let Some(Ok(release)) = release_seal_mail(&decisions)
                 {
                     ctx.actor::<SourceCapability>().send_detached(&release);
@@ -471,7 +508,7 @@ impl NativeActor for ControlCore {
             // The store already held this key durably though our snapshot did not —
             // a rare divergence (a reply racing a concurrent replay). Reply
             // Duplicate and do not double-apply.
-            CommitResult::Duplicate { .. } => admit_duplicate(&key),
+            CommitResult::Duplicate { .. } => admit_duplicate(&mut state.reported_duplicates, &key),
             // The durable uniqueness backstop refused a claim the reducer's snapshot
             // screen missed — do not apply; report the conflict.
             CommitResult::Conflict { workpiece, .. } => {
@@ -787,8 +824,8 @@ impl NativeActor for ControlCore {
     }
 
     /// The `aether.bloomery.query` read surface. With `bloom` unset, reply the
-    /// whole [`ViewDocument`](aether_bloomery::ViewDocument); with `bloom` set to a
-    /// digest, reply that one bloom's [`BloomView`](aether_bloomery::BloomView) (or
+    /// whole [`ViewDocument`]; with `bloom` set to a digest, reply that one
+    /// bloom's [`BloomView`](aether_bloomery::BloomView) (or
     /// [`QueryResult::NotFound`]). Reads off the live snapshot.
     #[handler::manual]
     fn on_query(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, mail: Query) {
@@ -805,6 +842,14 @@ impl NativeActor for ControlCore {
         // all — the document would be built and thrown away (ADR-0184).
         if mail.calibration {
             inbound.reply(&calibration_response(&state.calibration, &state.snapshot, state.artifacts.as_mut()));
+            return;
+        }
+        // The why chain answers before the view document is projected for the
+        // same reason calibration does: it reads the snapshot directly, so
+        // building the document first would build one and throw it away
+        // (#5281).
+        if mail.why {
+            inbound.reply(&why_response(&state.snapshot, mail.bloom.as_deref()));
             return;
         }
         // The live-read path holds no artifact access, so it resolves no question
@@ -857,12 +902,14 @@ impl ControlCoreState {
             configs: ResolvedConfigs::default(),
             spend: SpendWindow::default(),
             artifacts: None,
+            last_view_digest: None,
             pending: BTreeMap::new(),
             pending_claims: BTreeMap::new(),
             pending_configs: BTreeMap::new(),
             held_admissions: VecDeque::new(),
             held_for_bloom: BTreeMap::new(),
             replayed: true,
+            reported_duplicates: BTreeSet::new(),
             _timer: spawn_timer(
                 mailer,
                 aether_data::MailboxId(0),
@@ -1011,8 +1058,30 @@ impl ControlCoreState {
         // Projecting the decision encodes each outbox receipt; a receipt-encode
         // failure must reject the admit, not commit an empty payload the
         // republisher would later route as a valid-but-blank receipt.
-        let (releases, claims, outbox) = match project(&decisions) {
+        let (releases, claims, mut outbox) = match project(&decisions) {
             Ok(effects) => effects,
+            Err(error) => {
+                inbound.reply(&AdmitResult::Err { error: format!("admit receipt encode failed: {error}") });
+                return;
+            }
+        };
+        // The view row belongs in this same commit: a row written outside it
+        // could survive an event the store rejected, and the mirror would then
+        // publish a state the journal never admitted. An encode failure rejects
+        // the admit the same way a receipt-encode failure does.
+        let view_digest = match view_document_outbox(
+            &self.snapshot,
+            &self.configs,
+            &event,
+            &decisions,
+            self.artifacts.as_mut(),
+            self.last_view_digest,
+        ) {
+            Ok(Some((payload, digest))) => {
+                outbox.push(payload);
+                Some(digest)
+            }
+            Ok(None) => None,
             Err(error) => {
                 inbound.reply(&AdmitResult::Err { error: format!("admit receipt encode failed: {error}") });
                 return;
@@ -1044,7 +1113,7 @@ impl ControlCoreState {
             outbox,
         };
         ctx.actor::<StoreCapability>().send_detached(&commit);
-        self.pending.entry(key).or_default().push_back(Pending { inbound, event, decisions });
+        self.pending.entry(key).or_default().push_back(Pending { inbound, event, decisions, view_digest });
     }
 
     /// Boot-time claim-ref reconcile (ADR-0150 §The claim registry). After replay
@@ -1122,11 +1191,13 @@ fn metrics_response(state: &mut ControlCoreState, query: MetricsQuery) -> Metric
             encode_metrics(state.metrics.summary(active, |digest| records.get(digest).copied()), notice)
         }
         MetricsView::Days => {
-            let mut rows = state.metrics.day_rows();
+            let records = load_study_records(state.artifacts.as_mut(), &state.snapshot);
+            let mut rows = state.metrics.day_rows(|digest| records.get(digest).copied());
             let cap = usize::try_from(DAYS_CAP).unwrap_or(usize::MAX);
-            if rows.len() > cap {
-                let start = rows.len() - cap;
-                rows = rows.split_off(start);
+            let reconstructed_prefix = usize::from(rows.first().is_some_and(|row| row.reconstructed));
+            let dated = rows.len() - reconstructed_prefix;
+            if dated > cap {
+                rows.drain(reconstructed_prefix..reconstructed_prefix + (dated - cap));
             }
             encode_metrics(rows, notice)
         }
@@ -1235,6 +1306,23 @@ fn open_artifacts(configured: Option<&str>) -> Option<ArtifactsCapabilityState> 
 
 /// Answer an orphan-claim release-status read from the snapshot's record map
 /// (ADR-0179). A digest that is not 32 bytes, or names no admitted request, is
+/// Why one bloom is not advancing (#5281), or the bloom-shaped miss.
+///
+/// A `why` with no bloom named is the same miss: the question is about one
+/// bloom, and answering it for the whole fleet would be a different route.
+fn why_response(snapshot: &Snapshot, bloom: Option<&[u8]>) -> QueryResult {
+    let Some(bloom) = bloom.and_then(Digest::from_slice).map(BloomId) else {
+        return QueryResult::NotFound;
+    };
+    let Some(document) = why_of(snapshot, &bloom) else {
+        return QueryResult::NotFound;
+    };
+    match to_vec(&document) {
+        Ok(document) => QueryResult::Why { document },
+        Err(error) => QueryResult::Err { error: format!("why document encode failed: {error}") },
+    }
+}
+
 /// [`QueryResult::ReleaseNotFound`] — a release-shaped miss, not the bloom-shaped
 /// [`QueryResult::NotFound`], so the reader can name the resource the caller
 /// actually asked for.
@@ -1282,12 +1370,180 @@ fn event_bloom(event: &Event) -> Option<BloomId> {
         | Fact::SpliceAssembled { bloom, .. }
         | Fact::MemberExecutorFault { bloom, .. }
         | Fact::FoldRefused { bloom, .. }
-        | Fact::ContainmentRefused { bloom, .. } => Some(*bloom),
+        | Fact::ContainmentRefused { bloom, .. }
+        | Fact::SurfaceRequested { bloom, .. }
+        | Fact::Withdraw { bloom, .. }
+        | Fact::LaneWritesObserved { bloom, .. }
+        | Fact::SuppressionDisposition { bloom, .. } => Some(*bloom),
         Fact::ObserveMainline { .. }
         | Fact::ObserveMainlineDiverged { .. }
         | Fact::RequestOrphanClaimRelease { .. }
         | Fact::CompleteOrphanClaimRelease { .. }
-        | Fact::SurfaceOverlap { .. } => None,
+        | Fact::SurfaceOverlap { .. }
+        | Fact::BaseVerifyCompleted { .. } => None,
+    }
+}
+
+/// The blooms a reconcile must still comment on after this event: every
+/// non-terminal bloom, plus the blooms this event touched so a transition
+/// into a terminal state is published once and then drops out.
+///
+/// `view_of` walks every bloom the snapshot has ever sealed, and the snapshot
+/// never drops one. Without this filter the mirror issues a `find_comment` GET
+/// per member of every bloom the fleet has ever sealed, on every drain —
+/// thousands per hour at the five-second default poll. Restricting to blooms
+/// that are still walking, plus the ones this event named, is the difference
+/// between a handful of calls per change and a full-board sweep. `GET /view`
+/// and the console still read `view_of` unfiltered.
+fn projected_view(
+    snapshot: &Snapshot,
+    touched: &BTreeSet<BloomId>,
+    resolve: impl Fn(&Digest) -> Option<Question>,
+) -> ViewDocument {
+    let mut document = view_of(snapshot, resolve);
+    document.blooms.retain(|bloom| {
+        !matches!(bloom.status, BloomStatus::Landed | BloomStatus::Superseded | BloomStatus::Withdrawn)
+            || touched.contains(&bloom.id)
+    });
+    document
+}
+
+/// The bloom ids named by `event`'s fact and by the decision effects it
+/// produced — the set `projected_view` keeps even after they go terminal.
+fn touched_blooms(event: &Event, decisions: &Decisions) -> BTreeSet<BloomId> {
+    let mut touched = BTreeSet::new();
+    if let Some(bloom) = event_bloom(event) {
+        touched.insert(bloom);
+    }
+    match &event.fact {
+        Fact::Supersede { predecessor, .. } | Fact::GraphSeal { predecessor: Some(predecessor), .. } => {
+            touched.insert(*predecessor);
+        }
+        _ => {}
+    }
+    for effect in &decisions.effects {
+        collect_decision_blooms(effect, &mut touched);
+    }
+    touched
+}
+
+fn collect_decision_blooms(effect: &Decision, into: &mut BTreeSet<BloomId>) {
+    match effect {
+        Decision::ClaimMembership { bloom, .. }
+        | Decision::ReleaseMembership { bloom, .. }
+        | Decision::InheritClaim { bloom, .. }
+        | Decision::RecordResolution { bloom, .. }
+        | Decision::RecordEvidence { bloom, .. }
+        | Decision::SetResolved { bloom, .. }
+        | Decision::ReleaseHold { bloom, .. }
+        | Decision::RedispatchStage { bloom, .. }
+        | Decision::DispatchAttempt { bloom, .. }
+        | Decision::AdvanceStage { bloom, .. }
+        | Decision::DispatchLand { bloom, .. }
+        | Decision::RecordIntegration { bloom, .. }
+        | Decision::RecordAggregateRoll { bloom, .. }
+        | Decision::RevokeResolution { bloom, .. }
+        | Decision::DispatchAggregateReview { bloom, .. }
+        | Decision::RecordReviewPark { bloom, .. }
+        | Decision::RecordWedge { bloom, .. }
+        | Decision::DispatchAggregateVerify { bloom, .. }
+        | Decision::RecordAggregateVerifyRoll { bloom, .. }
+        | Decision::RecordLandingRoll { bloom, .. }
+        | Decision::SetUnresolved { bloom, .. }
+        | Decision::RecordVerifyProof { bloom, .. }
+        | Decision::RecordVerifyReuse { bloom, .. }
+        | Decision::RecordStageCatalog { bloom, .. }
+        | Decision::RecordCompositionFinding { bloom, .. }
+        | Decision::RecordAdjudication { bloom, .. }
+        | Decision::RecordOperatorRepair { bloom, .. }
+        | Decision::RecordOperatorHold { bloom, .. }
+        | Decision::RecordOperatorRelease { bloom, .. }
+        | Decision::DeferDispatch { bloom, .. }
+        | Decision::RecordMemberDependencies { bloom, .. }
+        | Decision::RecordHostFault { bloom, .. }
+        | Decision::ClearHostFault { bloom, .. }
+        | Decision::RecordCandidateVehicle { bloom, .. }
+        | Decision::DeferAggregate { bloom, .. }
+        | Decision::RecordMemberMachinery { bloom, .. }
+        | Decision::RecordWithdrawal { bloom, .. }
+        | Decision::CancelDispatch { bloom, .. }
+        | Decision::ReleaseMemberClaimRef { bloom, .. }
+        | Decision::MarkBloomWithdrawn { bloom, .. }
+        | Decision::RecordAggregateGatePass { bloom, .. }
+        | Decision::RecordRefusal { bloom, .. } => {
+            into.insert(*bloom);
+        }
+        Decision::MarkSuperseded { bloom, by } => {
+            into.insert(*bloom);
+            into.insert(*by);
+        }
+        Decision::DispatchIntegration { bloom, adopt_from, .. }
+        | Decision::DispatchSplice { bloom, adopt_from, .. } => {
+            into.insert(*bloom);
+            if let Some(predecessor) = adopt_from {
+                into.insert(*predecessor);
+            }
+        }
+        Decision::EmitReceipt(projected) => {
+            into.insert(projected.receipt.bloom);
+        }
+        Decision::AdvanceMainline { .. }
+        | Decision::RecordObservation { .. }
+        | Decision::RecordOrphanClaimRelease { .. }
+        | Decision::DispatchOrphanClaimRelease { .. }
+        | Decision::RecordSpendQuiesce { .. }
+        | Decision::RecordBaseReceipt { .. }
+        | Decision::DispatchBaseVerify { .. } => {}
+    }
+}
+
+/// Resolve each open hold's question digest against the artifacts store.
+///
+/// The live-read path passes `|_| None` because it holds no artifact access; this
+/// is the outward mirror path, so a held member can surface its pending decision.
+/// A digest the store does not have, or bytes that will not read as a
+/// [`Question`], contribute no `pending_decision`.
+fn resolve_holds(snapshot: &Snapshot, artifacts: Option<&mut ArtifactsCapabilityState>) -> BTreeMap<Digest, Question> {
+    let Some(artifacts) = artifacts else {
+        return BTreeMap::new();
+    };
+    let mut questions = BTreeMap::new();
+    for bloom in snapshot.blooms.values() {
+        for digest in &bloom.holds {
+            if questions.contains_key(digest) {
+                continue;
+            }
+            let GetResult::Ok { bytes, .. } = artifacts.get(lowercase_hex(digest.as_bytes())) else {
+                continue;
+            };
+            let Ok(question) = from_bytes::<Question>(&bytes) else {
+                continue;
+            };
+            questions.insert(*digest, question);
+        }
+    }
+    questions
+}
+
+/// The view-document outbox row this event should carry, if the projected
+/// document differs from the last one enqueued.
+fn view_document_outbox(
+    snapshot: &Snapshot,
+    configs: &ResolvedConfigs,
+    event: &Event,
+    decisions: &Decisions,
+    artifacts: Option<&mut ArtifactsCapabilityState>,
+    last_view_digest: Option<Digest>,
+) -> Result<Option<(OutboxPayload, Digest)>, WireError> {
+    let preview = snapshot.apply(event, decisions, configs);
+    let holds = resolve_holds(&preview, artifacts);
+    let document = projected_view(&preview, &touched_blooms(event, decisions), |digest| holds.get(digest).cloned());
+    let bytes = to_vec(&document)?;
+    let digest = Digest::of_wire_bytes(&bytes);
+    if last_view_digest == Some(digest) {
+        Ok(None)
+    } else {
+        Ok(Some((OutboxPayload::new(Topic::ViewDocument, bytes), digest)))
     }
 }
 
@@ -1387,8 +1643,22 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
             let payload = OrphanClaimReleasePayload { request: *request, target: target.clone() };
             Some(OutboxPayload::new(Topic::OrphanClaimRelease, to_vec(&payload)?))
         }
+        Decision::DispatchBaseVerify { base, transformation, profile } => {
+            let payload =
+                BaseVerifyPayload { base: *base, transformation: transformation.clone(), profile: profile.clone() };
+            Some(OutboxPayload::new(Topic::BaseVerify, to_vec(&payload)?))
+        }
+        Decision::CancelDispatch { bloom, workpiece } => {
+            let payload = CancelDispatchPayload { bloom: bloom.0, workpiece: workpiece.clone() };
+            Some(OutboxPayload::new(Topic::CancelDispatch, to_vec(&payload)?))
+        }
+        Decision::ReleaseMemberClaimRef { bloom, workpiece } => {
+            let payload = MemberClaimReleasePayload { bloom: bloom.0, workpiece: workpiece.clone() };
+            Some(OutboxPayload::new(Topic::MemberClaimRelease, to_vec(&payload)?))
+        }
         Decision::ClaimMembership { .. }
         | Decision::ReleaseMembership { .. }
+        | Decision::RecordBaseReceipt { .. }
         | Decision::RecordOrphanClaimRelease { .. }
         | Decision::InheritClaim { .. }
         | Decision::RecordResolution { .. }
@@ -1422,7 +1692,11 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
         | Decision::RecordHostFault { .. }
         | Decision::ClearHostFault { .. }
         | Decision::RecordCandidateVehicle { .. }
-        | Decision::RecordMemberMachinery { .. } => None,
+        | Decision::RecordMemberMachinery { .. }
+        | Decision::RecordWithdrawal { .. }
+        | Decision::MarkBloomWithdrawn { .. }
+        | Decision::RecordAggregateGatePass { .. }
+        | Decision::RecordRefusal { .. } => None,
     })
 }
 
@@ -1484,7 +1758,7 @@ fn finish_admit(
     decisions: Decisions,
 ) {
     if matches!(decisions.outcome, Outcome::Duplicate) {
-        inbound.reply(&admit_duplicate(&event.idempotency_key.0));
+        inbound.reply(&admit_duplicate(&mut state.reported_duplicates, &event.idempotency_key.0));
         return;
     }
     match retag_rejected_repair(&state.snapshot, |key| state.inflight_for_key(key), raw, event, &decisions) {
@@ -1550,12 +1824,29 @@ fn rejected_repair_tag(error: &OperatorRepairError) -> &'static str {
 /// outcome — so a reactor's discarded fact is otherwise invisible at every layer
 /// and the run simply stops, with no wedge and no evidence (#4722). The `warn`
 /// is the one place that can see it.
-fn admit_duplicate(idempotency_key: &str) -> AdmitResult {
-    tracing::warn!(
-        target: "aether_chassis_bloomery::control",
-        idempotency_key,
-        "admission reduced to a duplicate; the fact is discarded and a fire-and-forget admitter never learns it",
-    );
+///
+/// Once per key, though. The first duplicate is the news; a second one under
+/// the same key says only that some admitter is re-deriving a fact the journal
+/// already holds, which at a one-second poll cadence produced 543 identical
+/// lines in twenty minutes and buried everything else in the log (#5387). The
+/// repeats stay observable at `trace`.
+fn admit_duplicate(reported: &mut BTreeSet<String>, idempotency_key: &str) -> AdmitResult {
+    if reported.len() >= MAX_REPORTED_DUPLICATES {
+        reported.clear();
+    }
+    if reported.insert(idempotency_key.to_owned()) {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::control",
+            idempotency_key,
+            "admission reduced to a duplicate; the fact is discarded and a fire-and-forget admitter never learns it",
+        );
+    } else {
+        tracing::trace!(
+            target: "aether_chassis_bloomery::control",
+            idempotency_key,
+            "admission reduced to a duplicate again; an admitter is re-deriving a fact the journal already holds",
+        );
+    }
     admit_ok(&Outcome::Duplicate)
 }
 
@@ -1584,26 +1875,44 @@ fn lowercase_hex(bytes: &[u8]) -> String {
 /// hold collapse to `Duplicate`, and a later miss (new evidence) is a new
 /// key.
 fn resume_host_faults(state: &ControlCoreState, ctx: &mut NativeCtx<'_, Manual>) {
-    for record in state.snapshot.blooms.values() {
-        if record.operator_hold.is_some() {
-            continue;
-        }
-        for (workpiece, hold) in &record.host_faults {
-            let event = Event {
-                idempotency_key: resume_host_fault_key(&record.spec.id(), workpiece, &hold.evidence),
-                fact: Fact::ResumeHostFault { bloom: record.spec.id(), workpiece: workpiece.clone() },
-            };
-            match to_vec(&event) {
-                Ok(bytes) => ctx.actor::<ControlCore>().send_detached(&Admit { event: bytes }),
-                Err(error) => tracing::warn!(
-                    target: "aether_chassis_bloomery::control",
-                    %error,
-                    workpiece = %workpiece.0,
-                    "host-fault resume did not encode"
-                ),
-            }
+    for event in owed_host_fault_resumes(&state.snapshot) {
+        match to_vec(&event) {
+            Ok(bytes) => ctx.actor::<ControlCore>().send_detached(&Admit { event: bytes }),
+            Err(error) => tracing::warn!(
+                target: "aether_chassis_bloomery::control",
+                %error,
+                idempotency_key = %event.idempotency_key.0,
+                "host-fault resume did not encode"
+            ),
         }
     }
+}
+
+/// The cadence resumes this snapshot still owes: one per held host fault whose
+/// admit the journal does not already carry.
+///
+/// The `seen` screen is what stops the tick talking to itself. The reducer
+/// refuses a resume whose member has moved off terminal Verify, and a refusal
+/// is journaled exactly as an acceptance is — but it clears no hold, so the
+/// entry stays in `host_faults` and the next tick derives the same key again.
+/// The admit is fire-and-forget, so the tick never learns the outcome, and the
+/// pair looped at the poll cadence for the life of the bloom (#5387). It is the
+/// screen the mainline observer already carries (#4938), and it costs nothing
+/// real: a hold that misses again under new evidence is a new key and still
+/// resumes.
+fn owed_host_fault_resumes(snapshot: &Snapshot) -> Vec<Event> {
+    snapshot
+        .blooms
+        .values()
+        .filter(|record| record.operator_hold.is_none())
+        .flat_map(|record| {
+            record.host_faults.iter().map(move |(workpiece, hold)| Event {
+                idempotency_key: resume_host_fault_key(&record.spec.id(), workpiece, &hold.evidence),
+                fact: Fact::ResumeHostFault { bloom: record.spec.id(), workpiece: workpiece.clone() },
+            })
+        })
+        .filter(|event| !snapshot.seen.contains(&event.idempotency_key))
+        .collect()
 }
 
 /// The admit key for one cadence resume of a host-fault hold.
@@ -1648,15 +1957,18 @@ fn observation_already_admitted(snapshot: &Snapshot, head: &Digest) -> bool {
 mod tests {
     use aether_bloomery::testing::digest;
     use aether_bloomery::{
-        BloomDraft, BloomId, BloomRecord, CandidateRef, Decisions, Digest, Event, Evidence, EvidenceKind, Fact,
-        IdempotencyKey, OperatorRepair, OperatorRepairError, Outcome, QueryResult, Snapshot, StudyCost, StudyRecord,
-        WorkpieceId,
+        BloomDraft, BloomId, BloomRecord, BloomStatus, CandidateRef, ConfigRegistry, Decisions, Digest, Event,
+        Evidence, EvidenceKind, Fact, HostFaultHold, IdempotencyKey, Membership, OperatorRepair, OperatorRepairError,
+        OutboxPayload, Outcome, QueryResult, ResolvedConfigs, Snapshot, SpendWindow, StudyCost, StudyRecord, Topic,
+        ViewDocument, WorkpieceId, reduce,
     };
-    use aether_data::wire::to_vec;
+    use aether_data::wire::{from_bytes, to_vec};
+
+    use std::collections::BTreeMap;
 
     use super::{
-        load_study_records, lowercase_hex, observation_already_admitted, observe_mainline_key, rejected_repair_key,
-        release_response, retag_rejected_repair,
+        load_study_records, lowercase_hex, observation_already_admitted, observe_mainline_key, owed_host_fault_resumes,
+        rejected_repair_key, release_response, resume_host_fault_key, retag_rejected_repair, view_document_outbox,
     };
     use crate::artifacts::{ArtifactsCapabilityState, PutResult};
 
@@ -1719,6 +2031,46 @@ mod tests {
             !observation_already_admitted(&snapshot, &head),
             "the same head against a different mainline is still a new admit",
         );
+    }
+
+    // Tripwire (#5387): the cadence tick admits fire-and-forget, so it never
+    // learns that the resume it just sent was already journaled. The reducer
+    // refuses a resume whose member has moved on and journals the refusal
+    // without clearing the hold, so the hold stays in `host_faults` and every
+    // later tick re-derived the same key — 543 identical duplicate warns in
+    // twenty minutes at the one-second poll, burying every real event.
+    #[test]
+    fn a_host_fault_resume_the_journal_already_holds_is_not_re_derived() {
+        let workpiece = WorkpieceId("wp-held".to_owned());
+        let hold = HostFaultHold { findings: "cargo not found".to_owned(), evidence: digest(9) };
+        let record = BloomRecord {
+            host_faults: BTreeMap::from([(workpiece.clone(), hold.clone())]),
+            ..BloomRecord::empty(BloomDraft::default().seal())
+        };
+        let bloom = record.spec.id();
+        let mut snapshot = Snapshot::default();
+        snapshot.blooms.insert(bloom, record);
+
+        let owed = owed_host_fault_resumes(&snapshot);
+        assert_eq!(owed.len(), 1, "a held host fault owes its resume once");
+        let key = owed[0].idempotency_key.clone();
+
+        snapshot.seen.insert(key.clone());
+        assert!(
+            owed_host_fault_resumes(&snapshot).is_empty(),
+            "a resume already in the journal is not re-derived, however long the hold outlives it",
+        );
+
+        // And the screen is per key, not per hold: a later miss stamps new
+        // evidence, which is a new key, and that resume must still go out.
+        let bloom_record = snapshot.blooms.get_mut(&bloom).expect("the bloom is in the snapshot");
+        bloom_record.host_faults.insert(workpiece.clone(), HostFaultHold { evidence: digest(10), ..hold });
+        assert_eq!(
+            owed_host_fault_resumes(&snapshot).first().map(|event| event.idempotency_key.clone()),
+            Some(resume_host_fault_key(&bloom, &workpiece, &digest(10))),
+            "a hold that missed again under new evidence is a new key and still resumes",
+        );
+        assert_ne!(key, resume_host_fault_key(&bloom, &workpiece, &digest(10)));
     }
 
     // Tripwire: a release read that misses must answer the release-shaped miss,
@@ -1870,5 +2222,130 @@ mod tests {
         let records = load_study_records(Some(&mut artifacts), &snapshot_with_study(subject, detail));
         assert_eq!(records.get(&detail), Some(&study), "the reported columns are the record's");
         assert_eq!(records.len(), 1);
+    }
+
+    fn membership(name: &str, revision: u8) -> Membership {
+        let mut member = Membership {
+            workpiece: WorkpieceId(name.into()),
+            scope_revision: digest(revision),
+            configs: ConfigRegistry::default(),
+            approval: Evidence { subject: digest(0), kind: EvidenceKind::Approval, detail: digest(200) },
+        };
+        member.approval.subject = member.subject();
+        member
+    }
+
+    fn seal_event(key: &str, workpiece: &str) -> Event {
+        let spec =
+            BloomDraft { proposals: vec![membership(workpiece, 1)], base: digest(0), ..BloomDraft::default() }.seal();
+        Event { idempotency_key: IdempotencyKey(key.into()), fact: Fact::Seal(spec) }
+    }
+
+    fn overlap_event(key: &str, workpiece: &str) -> Event {
+        Event {
+            idempotency_key: IdempotencyKey(key.into()),
+            fact: Fact::SurfaceOverlap {
+                members: vec![WorkpieceId(workpiece.into()), WorkpieceId("other".into())],
+                intersection: vec!["crates/aether-bloomery/src/lib.rs".into()],
+            },
+        }
+    }
+
+    fn admit_view(
+        snapshot: &Snapshot,
+        event: &Event,
+        last: Option<Digest>,
+    ) -> Option<(ViewDocument, Digest, OutboxPayload)> {
+        let configs = ResolvedConfigs::default();
+        let decisions = reduce(snapshot, event, &configs, &SpendWindow::default());
+        view_document_outbox(snapshot, &configs, event, &decisions, None, last).expect("a view document encodes").map(
+            |(payload, digest)| {
+                assert_eq!(payload.topic, Topic::ViewDocument.as_str(), "the producer mints the view topic");
+                let document = from_bytes(&payload.payload).expect("the view payload decodes");
+                (document, digest, payload)
+            },
+        )
+    }
+
+    #[test]
+    fn a_sealed_member_publishes_a_view_document_naming_it() {
+        // Tripwire: the topic had a drainer, a renderer and no producer, so a
+        // member's issue was silent from seal to land.
+        let snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
+        let event = seal_event("seal", "issue-5381");
+        let (releases, claims, mut outbox) =
+            super::project(&reduce(&snapshot, &event, &ResolvedConfigs::default(), &SpendWindow::default()))
+                .expect("a seal projects");
+        let (document, _, payload) = admit_view(&snapshot, &event, None).expect("a seal enqueues a view row");
+        outbox.push(payload);
+
+        assert!(releases.is_empty());
+        assert!(!claims.is_empty(), "a seal still claims membership");
+        assert!(
+            outbox.iter().any(|row| row.topic == Topic::ViewDocument.as_str()),
+            "the commit's outbox carries the view document the mirror already knows how to drain",
+        );
+        assert!(
+            document
+                .blooms
+                .iter()
+                .any(|bloom| { bloom.members.iter().any(|member| member.workpiece.0 == "issue-5381") }),
+            "the published document names the sealed member: {document:?}",
+        );
+    }
+
+    #[test]
+    fn an_event_that_changes_nothing_renderable_enqueues_no_view_row() {
+        // The digest gate exists so a metrics fold, an ack, or any other admit
+        // that does not change a member comment does not cost the mirror a full
+        // round of GETs.
+        let snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
+        let seal = seal_event("seal", "issue-5381");
+        let (_, digest, _) = admit_view(&snapshot, &seal, None).expect("the first admit publishes");
+        let snapshot = snapshot.apply(
+            &seal,
+            &reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default()),
+            &ResolvedConfigs::default(),
+        );
+
+        assert!(
+            admit_view(&snapshot, &overlap_event("overlap", "issue-5381"), Some(digest)).is_none(),
+            "an admit whose projected document matches the last enqueued one carries no view row",
+        );
+    }
+
+    #[test]
+    fn a_landed_bloom_is_published_once_and_then_dropped() {
+        // The snapshot never drops a bloom, so an unfiltered document would
+        // re-read every comment the fleet has ever written on every drain.
+        let mut snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
+        let seal = seal_event("seal", "issue-5381");
+        snapshot = snapshot.apply(
+            &seal,
+            &reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default()),
+            &ResolvedConfigs::default(),
+        );
+        let bloom = snapshot.blooms.keys().copied().next().expect("the sealed bloom");
+        snapshot.blooms.get_mut(&bloom).expect("the sealed bloom").status = BloomStatus::Resolved;
+
+        let land =
+            Event { idempotency_key: IdempotencyKey("land".into()), fact: Fact::Land { bloom, new_head: digest(40) } };
+        let (document, digest, _) = admit_view(&snapshot, &land, None).expect("the land still publishes");
+        assert!(
+            document.blooms.iter().any(|view| view.id == bloom && view.status == BloomStatus::Landed),
+            "the terminal transition is published so the final comment is written: {document:?}",
+        );
+
+        snapshot = snapshot.apply(
+            &land,
+            &reduce(&snapshot, &land, &ResolvedConfigs::default(), &SpendWindow::default()),
+            &ResolvedConfigs::default(),
+        );
+        let (document, _, _) = admit_view(&snapshot, &overlap_event("overlap", "issue-5381"), Some(digest))
+            .expect("dropping the landed bloom is itself a document change");
+        assert!(
+            document.blooms.iter().all(|view| view.id != bloom),
+            "an unrelated later admit must not keep re-reading the landed bloom: {document:?}",
+        );
     }
 }

@@ -7,12 +7,12 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Modifier;
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::dto::DispatchFilePage;
 use crate::keys::{KeyHint, Outcome};
 use crate::palette;
-use crate::store::{ResourceKey, Store, TranscriptQuery};
+use crate::store::{PromptQuery, ResourceKey, Store, TranscriptQuery};
 use crate::warroom::Focus;
 
 pub use buffer::{DEFAULT_CAP, LineBuffer};
@@ -25,12 +25,63 @@ const HINTS: &[KeyHint] = &[
     KeyHint { keys: "/", action: "search" },
     KeyHint { keys: "n/N", action: "next" },
     KeyHint { keys: "</>", action: "pan" },
+    KeyHint { keys: "p", action: "prompt" },
     KeyHint { keys: "Esc", action: "back" },
     KeyHint { keys: "r", action: "refresh" },
     KeyHint { keys: "q", action: "quit" },
 ];
 
 const SEARCH_BUDGET: usize = 256;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pane {
+    Transcript,
+    Prompt,
+}
+
+impl Pane {
+    fn toggle(self) -> Self {
+        match self {
+            Self::Transcript => Self::Prompt,
+            Self::Prompt => Self::Transcript,
+        }
+    }
+}
+
+#[derive(Default)]
+struct PromptPane {
+    lines: Vec<String>,
+    have: u64,
+    started: bool,
+    scroll: usize,
+    error: Option<String>,
+}
+
+impl PromptPane {
+    fn apply_page(&mut self, page: &DispatchFilePage) {
+        self.error = None;
+        if !self.started {
+            self.have = page.cursor;
+            self.started = true;
+        }
+        if page.cursor != self.have {
+            return;
+        }
+        self.lines.extend_from_slice(&page.lines);
+        self.have = page.next_cursor.unwrap_or(page.length);
+    }
+
+    fn empty_label(&self) -> String {
+        if let Some(error) = &self.error {
+            return format!("prompt  {error}");
+        }
+        if self.started {
+            "prompt  (empty)".to_owned()
+        } else {
+            "prompt  loading".to_owned()
+        }
+    }
+}
 
 /// One dispatch's streamed transcript.
 pub struct Transcript {
@@ -46,6 +97,8 @@ pub struct Transcript {
     expand_scroll: usize,
     search: Search,
     last_error: Option<String>,
+    pane: Pane,
+    prompt: PromptPane,
 }
 
 #[derive(Default)]
@@ -78,6 +131,8 @@ impl Transcript {
             expand_scroll: 0,
             search: Search::default(),
             last_error: None,
+            pane: Pane::Transcript,
+            prompt: PromptPane::default(),
         }
     }
 
@@ -98,7 +153,11 @@ impl Transcript {
 
     #[must_use]
     pub fn subscriptions(&self) -> Vec<ResourceKey> {
-        vec![ResourceKey::Transcript(self.query())]
+        if self.pane == Pane::Prompt {
+            vec![ResourceKey::Prompt(self.prompt_query())]
+        } else {
+            vec![ResourceKey::Transcript(self.query())]
+        }
     }
 
     #[must_use]
@@ -112,6 +171,9 @@ impl Transcript {
         }
         if let Some(id) = self.expanded {
             return self.handle_expanded(key, id);
+        }
+        if self.pane == Pane::Prompt {
+            return self.handle_prompt(key);
         }
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
@@ -152,8 +214,41 @@ impl Transcript {
                 self.pan = self.pan.saturating_sub(4);
                 Outcome::Handled
             }
+            KeyCode::Char('p') => {
+                self.pane = self.pane.toggle();
+                Outcome::Handled
+            }
             KeyCode::Char('r') => Outcome::Refresh,
             KeyCode::Char('q') => Outcome::Quit,
+            _ => Outcome::Ignored,
+        }
+    }
+
+    fn handle_prompt(&mut self, key: KeyEvent) -> Outcome {
+        match key.code {
+            KeyCode::Char('p') => {
+                self.pane = self.pane.toggle();
+                Outcome::Handled
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.prompt.scroll = self.prompt.scroll.saturating_add(1);
+                Outcome::Handled
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.prompt.scroll = self.prompt.scroll.saturating_sub(1);
+                Outcome::Handled
+            }
+            KeyCode::Char('>') | KeyCode::Right => {
+                self.pan = self.pan.saturating_add(4);
+                Outcome::Handled
+            }
+            KeyCode::Char('<') | KeyCode::Left => {
+                self.pan = self.pan.saturating_sub(4);
+                Outcome::Handled
+            }
+            KeyCode::Char('r') => Outcome::Refresh,
+            KeyCode::Char('q') => Outcome::Quit,
+            KeyCode::Enter | KeyCode::Char('f' | 'G' | '/' | 'n' | 'N') => Outcome::Handled,
             _ => Outcome::Ignored,
         }
     }
@@ -164,12 +259,17 @@ impl Transcript {
 
     pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, store: &Store) {
         self.ingest(store);
-        self.scan_matches(SEARCH_BUDGET);
-        if self.follow {
-            self.pin_tail();
+        if self.pane == Pane::Transcript {
+            self.scan_matches(SEARCH_BUDGET);
+            if self.follow {
+                self.pin_tail();
+            }
         }
 
-        let banner = self.buffer.banner();
+        let banner = match self.pane {
+            Pane::Transcript => self.buffer.banner(),
+            Pane::Prompt => None,
+        };
         let banner_h = u16::from(banner.is_some());
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -180,10 +280,15 @@ impl Transcript {
             frame.render_widget(Paragraph::new(banner).style(palette::body().add_modifier(Modifier::BOLD)), chunks[0]);
         }
 
-        if let Some(id) = self.expanded {
-            self.render_expanded(frame, chunks[1], id);
-        } else {
-            self.render_list(frame, chunks[1]);
+        match self.pane {
+            Pane::Prompt => self.render_prompt(frame, chunks[1]),
+            Pane::Transcript => {
+                if let Some(id) = self.expanded {
+                    self.render_expanded(frame, chunks[1], id);
+                } else {
+                    self.render_list(frame, chunks[1]);
+                }
+            }
         }
         frame.render_widget(Paragraph::new(self.status_line()).style(palette::body()), chunks[2]);
     }
@@ -193,7 +298,15 @@ impl Transcript {
         TranscriptQuery { nonce: self.nonce.clone(), cursor, live: self.follow }
     }
 
+    fn prompt_query(&self) -> PromptQuery {
+        PromptQuery { nonce: self.nonce.clone(), cursor: self.prompt.started.then_some(self.prompt.have) }
+    }
+
     fn ingest(&mut self, store: &Store) {
+        if self.pane == Pane::Prompt {
+            self.ingest_prompt(store);
+            return;
+        }
         let query = self.query();
         let Some(cell) = store.transcript(&query) else {
             return;
@@ -205,6 +318,19 @@ impl Transcript {
             return;
         };
         self.apply_page(page);
+    }
+
+    fn ingest_prompt(&mut self, store: &Store) {
+        let Some(cell) = store.prompt(&self.prompt_query()) else {
+            return;
+        };
+        if let Some(error) = &cell.error {
+            self.prompt.error = Some(error.clone());
+        }
+        let Some(page) = cell.value.as_ref() else {
+            return;
+        };
+        self.prompt.apply_page(page);
     }
 
     fn apply_page(&mut self, page: &DispatchFilePage) {
@@ -406,11 +532,19 @@ impl Transcript {
     }
 
     fn render_expanded(&self, frame: &mut Frame<'_>, area: Rect, id: u64) {
-        let body = self
-            .buffer
-            .index_of(id)
-            .and_then(|index| self.buffer.expanded(index))
-            .unwrap_or_else(|| "line is gone".to_owned());
+        let raw = self.buffer.index_of(id).and_then(|index| self.buffer.raw(index));
+        if let Some(raw) = raw
+            && let Some(value) = event::expand_value(raw)
+        {
+            let lines = super::json::present(&value);
+            let offset = u16::try_from(self.expand_scroll.min(lines.len().saturating_sub(1))).unwrap_or(u16::MAX);
+            frame.render_widget(
+                Paragraph::new(lines).style(palette::body()).wrap(Wrap { trim: false }).scroll((offset, 0)),
+                area,
+            );
+            return;
+        }
+        let body = raw.map_or_else(|| "line is gone".to_owned(), event::expand);
         let lines = wrap(&body, usize::from(area.width.max(1)));
         let offset = self.expand_scroll.min(lines.len().saturating_sub(1));
         let items: Vec<ListItem> = lines.into_iter().skip(offset).map(ListItem::new).collect();
@@ -428,17 +562,38 @@ impl Transcript {
         }
     }
 
+    fn render_prompt(&self, frame: &mut Frame<'_>, area: Rect) {
+        let height = usize::from(area.height.max(1));
+        let width = usize::from(area.width.saturating_sub(2));
+        let offset = self.prompt.scroll.min(self.prompt.lines.len().saturating_sub(1));
+        let end = offset.saturating_add(height).min(self.prompt.lines.len());
+        let mut items = Vec::new();
+        for line in self.prompt.lines.iter().skip(offset).take(end.saturating_sub(offset)) {
+            items.push(ListItem::new(truncate(line, self.pan, width)));
+        }
+        if items.is_empty() {
+            items.push(ListItem::new(self.prompt.empty_label()));
+        }
+        frame.render_widget(List::new(items).style(palette::body()), area);
+    }
+
     fn status_line(&self) -> String {
-        let mut parts = vec![self.nonce.clone(), format!("{} lines", self.buffer.len())];
-        if self.follow {
-            parts.push("FOLLOW".to_owned());
-        }
-        if !self.search.needle.is_empty() {
-            let at = self.search.at.map_or(0, |index| index + 1);
-            parts.push(format!("{at}/{}  /{}", self.search.matches.len(), self.search.needle));
-        }
-        if self.search.editing {
-            parts.push("_".to_owned());
+        let (file, count) = match self.pane {
+            Pane::Prompt => ("prompt.md", self.prompt.lines.len()),
+            Pane::Transcript => ("transcript.jsonl", self.buffer.len()),
+        };
+        let mut parts = vec![file.to_owned(), self.nonce.clone(), format!("{count} lines")];
+        if self.pane == Pane::Transcript {
+            if self.follow {
+                parts.push("FOLLOW".to_owned());
+            }
+            if !self.search.needle.is_empty() {
+                let at = self.search.at.map_or(0, |index| index + 1);
+                parts.push(format!("{at}/{}  /{}", self.search.matches.len(), self.search.needle));
+            }
+            if self.search.editing {
+                parts.push("_".to_owned());
+            }
         }
         parts.join("  ")
     }
@@ -476,7 +631,7 @@ mod tests {
     use crate::keys::{Outcome, assert_footer_honest};
     use crate::nav::Nav;
     use crate::shell::Shell;
-    use crate::store::{Store, TranscriptQuery};
+    use crate::store::{PromptQuery, ResourceKey, Store, TranscriptQuery};
     use crossterm::event::{KeyCode, KeyEvent};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -486,6 +641,25 @@ mod tests {
         let mut store = Store::new(Duration::from_secs(1));
         store.apply_transcript(TranscriptQuery { nonce: "dispatch-1".to_owned(), cursor: None, live: false }, Ok(page));
         store
+    }
+
+    fn store_with_prompt(transcript: DispatchFilePage, prompt: DispatchFilePage) -> Store {
+        let mut store = store_with(transcript);
+        store.apply_prompt(PromptQuery { nonce: "dispatch-1".to_owned(), cursor: None }, Ok(prompt));
+        store
+    }
+
+    fn drawn(view: &mut Transcript, store: &Store) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(80, 8)).expect("test backend");
+        terminal.draw(|frame| view.render(frame, frame.area(), store)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buffer.area().height {
+            for x in 0..buffer.area().width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+        }
+        text
     }
 
     fn page(lines: &[&str]) -> DispatchFilePage {
@@ -583,5 +757,70 @@ mod tests {
         assert_footer_honest(Transcript::key_hints(), |code| {
             Shell::probe(Nav::transcript("dispatch-1")).handle_key(KeyEvent::from(code)) != Outcome::Ignored
         });
+    }
+
+    #[test]
+    fn transcript_footer_advertises_the_prompt_key() {
+        assert!(
+            Transcript::key_hints().iter().any(|hint| hint.keys == "p"),
+            "the transcript footer must advertise p so the prompt pane is discoverable"
+        );
+    }
+
+    #[test]
+    fn p_swaps_the_pane_to_the_prompt() {
+        // Tripwire: the subscription following the visible pane — if it does
+        // not, the prompt never gets fetched, or the transcript keeps polling
+        // while the prompt is on screen.
+        let store = store_with_prompt(page(&["hello-from-transcript"]), page(&["hello-from-prompt"]));
+        let mut view = Transcript::new("dispatch-1");
+        view.reseat(&store);
+        let text = drawn(&mut view, &store);
+        assert!(text.contains("hello-from-transcript"), "{text}");
+        assert!(!text.contains("hello-from-prompt"), "{text}");
+
+        assert_eq!(view.handle_key(KeyEvent::from(KeyCode::Char('p')), &store), Outcome::Handled);
+        assert!(
+            view.subscriptions().iter().any(|key| matches!(key, ResourceKey::Prompt(_))),
+            "visible prompt pane must subscribe to the prompt resource"
+        );
+        let text = drawn(&mut view, &store);
+        assert!(text.contains("hello-from-prompt"), "{text}");
+        assert!(text.contains("prompt.md"), "{text}");
+        assert!(!text.contains("hello-from-transcript"), "{text}");
+
+        assert_eq!(view.handle_key(KeyEvent::from(KeyCode::Char('p')), &store), Outcome::Handled);
+        let text = drawn(&mut view, &store);
+        assert!(text.contains("hello-from-transcript"), "{text}");
+        assert!(text.contains("transcript.jsonl"), "{text}");
+        assert!(!text.contains("hello-from-prompt"), "{text}");
+    }
+
+    #[test]
+    fn a_paged_prompt_accumulates_rather_than_replacing() {
+        // Tripwire: the cursor guard — dropping it lets an out-of-order page
+        // duplicate or truncate the prompt.
+        let first = DispatchFilePage {
+            lines: vec!["# Task".to_owned(), "do the thing".to_owned()],
+            cursor: 0,
+            next_cursor: Some(20),
+            length: 40,
+            notice: None,
+        };
+        let second = DispatchFilePage {
+            lines: vec!["more prompt".to_owned()],
+            cursor: 20,
+            next_cursor: None,
+            length: 40,
+            notice: None,
+        };
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_prompt(PromptQuery { nonce: "dispatch-1".to_owned(), cursor: None }, Ok(first));
+        let mut view = Transcript::new("dispatch-1");
+        assert_eq!(view.handle_key(KeyEvent::from(KeyCode::Char('p')), &store), Outcome::Handled);
+        view.reseat(&store);
+        store.apply_prompt(PromptQuery { nonce: "dispatch-1".to_owned(), cursor: Some(20) }, Ok(second));
+        view.reseat(&store);
+        assert_eq!(view.prompt.lines, ["# Task", "do the thing", "more prompt"]);
     }
 }

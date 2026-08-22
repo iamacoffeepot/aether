@@ -97,11 +97,18 @@ struct BloomAcc {
     seal_sequence: u64,
     members: u64,
     dispatches: u64,
+    first_unix_millis: Option<u64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 struct DayAcc {
     dispatches: u64,
+    landed: u64,
+    wedges: u64,
+    cycle_sum_millis: u64,
+    cycle_samples: u64,
+    quiesced: bool,
+    reconstructed: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -144,6 +151,19 @@ pub struct MetricBloom {
 pub struct MetricDay {
     pub label: String,
     pub dispatches: u64,
+    /// Priced study records attributed to this day's dispatches. `0` is
+    /// unpriced or unresolved, never free.
+    pub spend_micro_usd: u64,
+    pub landed: u64,
+    pub wedges: u64,
+    /// Mean first-dispatch-to-landing span of the blooms that landed this day,
+    /// or `None` when none did. Never a zero mean.
+    pub cycle_time_millis: Option<u64>,
+    /// A spend quiesce was recorded on this day.
+    pub quiesced: bool,
+    /// This is the undated bucket for rows with no envelope stamp — not a
+    /// civil day, and not comparable with the dated rows.
+    pub reconstructed: bool,
 }
 
 /// Fixed-size fleet summary.
@@ -271,10 +291,45 @@ impl MetricsLedger {
         rows
     }
 
-    /// Every day rollup, newest label last.
+    /// Every day rollup. The undated reconstructed bucket, when present, is
+    /// first; dated days follow in label-ascending order, newest dated day last.
     #[must_use]
-    pub fn day_rows(&self) -> Vec<MetricDay> {
-        self.days.iter().map(|(label, acc)| MetricDay { label: label.clone(), dispatches: acc.dispatches }).collect()
+    pub fn day_rows(&self, source: impl Fn(&Digest) -> Option<StudyRecord>) -> Vec<MetricDay> {
+        let mut spend_by_label: BTreeMap<String, u64> = BTreeMap::new();
+        for study in &self.studies {
+            let Some(acc) =
+                self.dispatches.values().find(|acc| (acc.bloom, acc.displayed) == (study.bloom, study.subject))
+            else {
+                continue;
+            };
+            let Some(record) =
+                source(&study.detail).filter(|record| record.grades(&study.subject) && record.bloom == study.bloom)
+            else {
+                continue;
+            };
+            let Some(cost) = priced_micro_usd(record.cost.cost_micro_usd) else {
+                continue;
+            };
+            let slot = spend_by_label.entry(day_label(acc.recorded_unix_millis)).or_insert(0);
+            *slot = slot.saturating_add(cost);
+        }
+
+        let mut rows: Vec<MetricDay> = self
+            .days
+            .iter()
+            .map(|(label, acc)| MetricDay {
+                label: label.clone(),
+                dispatches: acc.dispatches,
+                spend_micro_usd: spend_by_label.get(label).copied().unwrap_or(0),
+                landed: acc.landed,
+                wedges: acc.wedges,
+                cycle_time_millis: (acc.cycle_samples > 0).then(|| acc.cycle_sum_millis / acc.cycle_samples),
+                quiesced: acc.quiesced,
+                reconstructed: acc.reconstructed,
+            })
+            .collect();
+        rows.sort_by(|a, b| b.reconstructed.cmp(&a.reconstructed).then_with(|| a.label.cmp(&b.label)));
+        rows
     }
 
     /// Fixed-size summary. `active_blooms` is the live snapshot join.
@@ -392,10 +447,27 @@ impl MetricsLedger {
             self.dispatch(sequence, dispatched, configs, envelope);
             return;
         }
-        if let Decision::RecordEvidence { bloom, evidence } = effect
-            && evidence.kind == EvidenceKind::StudyRecord
-        {
-            self.studies.push(Study { bloom: *bloom, subject: evidence.subject, detail: evidence.detail });
+        match effect {
+            Decision::RecordEvidence { bloom, evidence } if evidence.kind == EvidenceKind::StudyRecord => {
+                self.studies.push(Study { bloom: *bloom, subject: evidence.subject, detail: evidence.detail });
+            }
+            Decision::EmitReceipt(projected) => {
+                let first = self.blooms.get(&projected.receipt.bloom).and_then(|acc| acc.first_unix_millis);
+                let day = self.day(envelope);
+                day.landed = day.landed.saturating_add(1);
+                if let (Some(landing_millis), Some(first)) = (envelope, first) {
+                    day.cycle_sum_millis = day.cycle_sum_millis.saturating_add(landing_millis.saturating_sub(first));
+                    day.cycle_samples = day.cycle_samples.saturating_add(1);
+                }
+            }
+            Decision::RecordWedge { .. } => {
+                let day = self.day(envelope);
+                day.wedges = day.wedges.saturating_add(1);
+            }
+            Decision::RecordSpendQuiesce { quiesce: Some(_) } => {
+                self.day(envelope).quiesced = true;
+            }
+            _ => {}
         }
     }
 
@@ -424,12 +496,25 @@ impl MetricsLedger {
             model_lane,
         });
         if is_new {
-            let bloom_acc = self.blooms.entry(bloom).or_default();
-            bloom_acc.dispatches = bloom_acc.dispatches.saturating_add(1);
-            let label = envelope.map_or_else(|| String::from(RECONSTRUCTED_WINDOW), window_label);
-            let day = self.days.entry(label).or_default();
+            {
+                let bloom_acc = self.blooms.entry(bloom).or_default();
+                bloom_acc.dispatches = bloom_acc.dispatches.saturating_add(1);
+                // Keep the earliest present stamp; `Option::min` treats `None` as
+                // smallest, so an unstamped later dispatch must not wipe one.
+                if envelope.is_some() {
+                    bloom_acc.first_unix_millis = bloom_acc.first_unix_millis.min(envelope).or(envelope);
+                }
+            }
+            let day = self.day(envelope);
             day.dispatches = day.dispatches.saturating_add(1);
         }
+    }
+
+    fn day(&mut self, envelope: Option<u64>) -> &mut DayAcc {
+        let reconstructed = envelope.is_none();
+        let acc = self.days.entry(day_label(envelope)).or_default();
+        acc.reconstructed = reconstructed;
+        acc
     }
 
     fn dispatch_row(&self, acc: &DispatchAcc) -> MetricDispatch {
@@ -467,6 +552,10 @@ impl SeatKey {
     }
 }
 
+fn day_label(envelope: Option<u64>) -> String {
+    envelope.map_or_else(|| String::from(RECONSTRUCTED_WINDOW), window_label)
+}
+
 fn dispatch_id(acc: &DispatchAcc) -> String {
     let mut id = String::from("fold:");
     id.push_str(&acc.bloom.0.to_hex());
@@ -494,6 +583,7 @@ fn stage_slug(stage: StageId) -> &'static str {
         StageId::Land => "land",
         StageId::Study => "study",
         StageId::Reconcile => "reconcile",
+        StageId::BaseVerify => "base-verify",
     }
 }
 

@@ -18,12 +18,14 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 use alloc::string::String;
+use core::str::from_utf8;
 
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::reduce::{BloomStatus, RecordedRefusal};
 use crate::values::{
-    CandidateRef, CompositionFinding, Evidence, LandingReceipt, OperatorHold, ResolutionClaim, SpendQuiesce, Wedge,
+    CandidateRef, CompositionFinding, Evidence, LandingReceipt, OperatorHold, ResolutionClaim, SpendQuiesce,
+    SurfacePathRequest, VerifyFailure, VerifyFailureSet, Wedge,
 };
 
 /// The self-contained render input a reconcile pushes outward: the current
@@ -50,6 +52,35 @@ pub struct ViewDocument {
     pub spend_quiesce: Option<SpendQuiesce>,
     /// The blooms to mirror, each self-describing.
     pub blooms: Vec<BloomView>,
+    /// A red whole-workspace base receipt, when one is holding the day
+    /// (ADR-0200). Trailing plus `serde(default)` so a reader that predates
+    /// the field still decodes.
+    #[serde(default)]
+    pub base_alert: Option<BaseAlertView>,
+}
+
+/// The day-level stop a red base receipt raises: which tree failed, and which
+/// gates named the failure. `failed` is rendered as
+/// [`VerifyFailure::as_str`] so the console paints gate names without owning
+/// the vocabulary.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct BaseAlertView {
+    /// The commit the verify ran at.
+    pub base: Digest,
+    /// The tree it peeled to.
+    pub tree: Digest,
+    /// Gate names that failed, in canonical identity order.
+    pub failed: Vec<String>,
+    /// The evidence digest the red verdict bound.
+    pub evidence: Digest,
+}
+
+impl BaseAlertView {
+    /// Render `failed` from a typed set.
+    #[must_use]
+    pub fn from_failure_set(base: Digest, tree: Digest, failed: VerifyFailureSet, evidence: Digest) -> Self {
+        Self { base, tree, failed: failed.iter().map(VerifyFailure::as_str).map(str::to_owned).collect(), evidence }
+    }
 }
 
 /// One bloom's outward view: its sealed identity, lifecycle status, optional
@@ -114,6 +145,41 @@ pub struct BloomView {
     /// `#[serde(default)]` so a reader that predates the field still decodes.
     #[serde(default)]
     pub blocker: Option<RecordedRefusal>,
+    /// Every write lease this bloom's lanes hold (ADR-0204), in path order.
+    ///
+    /// Bloom-scoped rather than only per-member because the question
+    /// contention raises is "who holds this path", and answering it from
+    /// [`MemberView::leases`] means scanning every member and inverting the
+    /// map — which is how an invisible lease turns contention into an
+    /// unexplained stall (ADR-0198). Empty while nothing has been observed
+    /// writing, and empty again once the bloom finishes: no lease survives its
+    /// bloom. Trailing and `#[serde(default)]` so a reader that predates the
+    /// field still decodes.
+    #[serde(default)]
+    pub leases: Vec<LeaseView>,
+}
+
+/// One held write lease, rendered with everything ADR-0198 asks a lease
+/// surface to show: the path, who holds it, where that holder is, and how old
+/// the lease is.
+///
+/// `stage` is read off the holder's *current* cursor rather than stored on the
+/// lease, because the operator question is "who holds this path and what are
+/// they doing" — a lease taken at Construct and still held while its holder
+/// refines should read Refine, not the stage of the observation that took it.
+/// `None` when the holder carries no cursor at all, which is the moment
+/// between an eviction and its resume.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct LeaseView {
+    /// The repository-relative path under lease.
+    pub path: String,
+    /// The member holding it.
+    pub holder: WorkpieceId,
+    /// Where the holder stands now, when it has a cursor.
+    pub stage: Option<StageId>,
+    /// When the lease was taken, in unix milliseconds — the age an operator
+    /// reads against the bloom's other timestamps.
+    pub acquired_at: u64,
 }
 
 /// The composition workpiece's outward line: the cursor a weave repair sits
@@ -283,6 +349,181 @@ pub struct MemberView {
     /// that predates the field still decodes.
     #[serde(default)]
     pub cursor: Option<CompositionCursorView>,
+    /// A construct that concluded without a candidate (#5292, #5332). `None`
+    /// while the member is working, wedged, or resolved. Distinct from
+    /// [`Self::pending_decision`]: a park is not an ADR-0151 question, and both
+    /// liveness oracles read this field rather than reconstructing it from
+    /// snapshot state. Trailing and `#[serde(default)]` so a reader that
+    /// predates the field still decodes.
+    #[serde(default)]
+    pub park: Option<crate::MemberPark>,
+    /// The surface amendment this member is waiting on (ADR-0207). `None`
+    /// while it is working, wedged, or resolved. Distinct from [`Self::wedge`]
+    /// (the machinery could not push it through) and from
+    /// [`Self::pending_decision`] (an ADR-0151 question an answer settles):
+    /// this member is waiting on a person to widen a boundary, and more
+    /// attempts cannot help. Trailing and `#[serde(default)]` so a reader that
+    /// predates the field still decodes.
+    #[serde(default)]
+    pub awaiting_surface: Option<AwaitingSurfaceView>,
+    /// Why the member left the line, when an operator withdrew it or its
+    /// dependency was withdrawn (#5327). `None` for every member still in the
+    /// line. Distinct from [`Self::wedge`], which a member earns by exhausting
+    /// a budget and which a grant can undo: a withdrawal is a person's
+    /// decision and is one-way. Trailing and `#[serde(default)]` so a reader
+    /// that predates the field still decodes.
+    #[serde(default)]
+    pub withdrawn: Option<WithdrawnView>,
+    /// The repository paths this member holds a write lease on (ADR-0204), in
+    /// path order. Empty for a member whose lane has written nothing yet, and
+    /// for every member of a bloom that has finished — no lease survives its
+    /// bloom. Trailing and `#[serde(default)]` so a reader that predates the
+    /// field still decodes.
+    #[serde(default)]
+    pub leases: Vec<String>,
+    /// The earlier-canonical sibling that took a path this member held,
+    /// stopping its lane until that sibling integrates (ADR-0204). `None` for
+    /// a member that is working normally. Distinct from [`Self::blocked_by`],
+    /// which names a *declared* dependency that has not resolved: this member
+    /// declared nothing and would have run, and the file it collided on is the
+    /// only reason it is waiting. Trailing and `#[serde(default)]` so a reader
+    /// that predates the field still decodes.
+    ///
+    /// `None` on every bloom a current coordinator walks: #5401 retracted the
+    /// eviction, so a shared file is merged at integration instead. The slot
+    /// stays for a projection served off a journal an older binary wrote.
+    #[serde(default)]
+    pub evicted_by: Option<LeaseEvictionView>,
+}
+
+/// One transition's answer to "why is this not happening" (#5281).
+///
+/// Read off stored facts, never re-derived: the state comes from record fields
+/// the reducer already wrote and `refusal` carries the ADR-0206 refusal the
+/// boundary recorded when it stopped. A boundary whose guards have not been
+/// converted to gates yet reports its state with `refusal: None` rather than a
+/// hand-written account of its reasoning — a second description of the decision
+/// path is exactly what would drift and then lie.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct TransitionWhy {
+    /// The transition, by the name the machinery uses for it: `dispatch_member`,
+    /// `fold`, `aggregate_verify`, `aggregate_review`, or `land`.
+    pub transition: String,
+    /// Where the transition stands.
+    pub state: WhyState,
+    /// One sentence naming the stored values behind [`Self::state`].
+    pub because: String,
+    /// The recorded refusal this boundary stopped on, when it recorded one
+    /// (ADR-0206).
+    pub refusal: Option<RecordedRefusal>,
+    /// The transition further down the chain this one waits on; `None` when
+    /// nothing below it is the reason. This is what makes the answer a chain
+    /// rather than a flat list — not landing because no integration is
+    /// recorded, no integration because the fold refused.
+    pub waiting_on: Option<String>,
+}
+
+/// Where one transition or member stands (#5281).
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum WhyState {
+    /// It has already happened.
+    Done,
+    /// It is happening now — a lane is out, or the dispatch is decided.
+    InFlight,
+    /// It has not happened and something named is why.
+    Blocked,
+    /// It ran and refused, and the refusal is recorded.
+    Refused,
+}
+
+/// One member's answer to "why is this member not moving" (#5281).
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct MemberWhy {
+    /// The member.
+    pub workpiece: WorkpieceId,
+    /// Where it stands.
+    pub state: WhyState,
+    /// One sentence naming the stored values behind [`Self::state`].
+    pub because: String,
+    /// The ancestor holding it out of the line, when a declared edge is why
+    /// (ADR-0196) — the same answer [`MemberView::blocked_by`] carries, from
+    /// the same function.
+    pub blocked_by: Option<WorkpieceId>,
+    /// The `dispatch_member` guard that refused this member's entry into the
+    /// line, when one is stored (ADR-0206).
+    ///
+    /// Trailing and `#[serde(default)]`, so a reader of an older projection
+    /// still decodes. `None` is the ordinary case: a member that is working,
+    /// resolved, or held out by a rung the chain above already names has
+    /// nothing to refuse.
+    #[serde(default)]
+    pub refusal: Option<RecordedRefusal>,
+}
+
+/// Why one bloom is not advancing (#5281).
+///
+/// A stalled member and a stalled composition have different causes, so both
+/// are reported: [`Self::chain`] runs from the land down to member dispatch,
+/// each rung naming the one below it, and [`Self::members`] answers per member.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct WhyDocument {
+    /// The bloom asked about.
+    pub bloom: BloomId,
+    /// Its status, so the answer is readable without a second request.
+    pub status: BloomStatus,
+    /// The transitions, outermost first: land, aggregate review, aggregate
+    /// verify, fold, member dispatch.
+    pub chain: Vec<TransitionWhy>,
+    /// One answer per sealed member, in sealed order.
+    pub members: Vec<MemberWhy>,
+}
+
+/// Why a member's lane stopped for a file another member took (ADR-0204),
+/// rendered so the board can tell it from a member still working.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct LeaseEvictionView {
+    /// The earlier-canonical member that took the path.
+    pub by: WorkpieceId,
+    /// The contended path — the whole reason, named.
+    pub path: String,
+    /// When the eviction was decided, in unix milliseconds, so an operator
+    /// reads the lease's age the way ADR-0198 asks a lease surface to show it.
+    pub evicted_at: u64,
+}
+
+/// A member withdrawn from a walking bloom (#5327), rendered so the board can
+/// tell it from a member still working without opening the journal.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct WithdrawnView {
+    /// `"operator"` when an operator named this member, `"dependency"` when an
+    /// ancestor's withdrawal stranded it. A stable string rather than the
+    /// value enum because this is the outward wire an absent-tolerant console
+    /// reads.
+    pub cause: String,
+    /// The withdrawn ancestor, for a `"dependency"` cause; `None` otherwise.
+    pub depends_on: Option<WorkpieceId>,
+    /// Why, in the operator's own words.
+    pub reason: String,
+    /// Who decided.
+    pub operator: String,
+}
+
+/// A member awaiting a surface amendment (ADR-0207), rendered so an operator
+/// reads which paths are needed without opening an evidence file.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct AwaitingSurfaceView {
+    /// The stage that declined.
+    pub stage: StageId,
+    /// The sealed revision the requested paths are additions to.
+    pub scope_revision: Digest,
+    /// The lane's evidence artifact.
+    pub evidence: Digest,
+    /// The requested paths and their one-line reasons.
+    pub paths: Vec<SurfacePathRequest>,
+    /// The lane's one-line summary.
+    pub summary: String,
+    /// Requests this member has made in this bloom.
+    pub requests: u32,
 }
 
 /// Why a member stopped dispatching (ADR-0195).
@@ -351,7 +592,43 @@ pub struct CommissionProjection {
     /// projecting; `find_issue` is advisory crash-recovery only.
     #[serde(default)]
     pub recorded_issue: Option<u64>,
+    /// The commission's own title — the first markdown heading of its intent —
+    /// or empty when the intent carries no heading.
+    ///
+    /// Rendered into the replica's title so six freshly authored commissions
+    /// are six distinguishable rows in an issue list rather than six copies of
+    /// one constant. Trailing and defaulted, so an outbox row enqueued before
+    /// this field existed still decodes and renders the untitled form.
+    #[serde(default)]
+    pub title: String,
 }
+
+/// The first markdown heading of an intent statement's words, or `None`.
+///
+/// Deliberately only a heading. An intent with no heading has no title, and the
+/// closest available substitute — its first line of prose — is a sentence, not a
+/// name; putting one in an issue title reads worse than the untitled form the
+/// caller falls back to.
+///
+/// Capped at [`MAX_TITLE_CHARS`] on a character boundary, because the intent is
+/// authored text and a heading long enough to be refused by the mirror would
+/// stall the replica rather than shorten it.
+#[must_use]
+pub fn intent_title(words: &[u8]) -> Option<String> {
+    let heading = from_utf8(words)
+        .ok()?
+        .lines()
+        .find_map(|line| line.trim().strip_prefix('#').map(|rest| rest.trim_start_matches('#').trim()))
+        .filter(|heading| !heading.is_empty())?;
+
+    Some(heading.chars().take(MAX_TITLE_CHARS).collect())
+}
+
+/// How many characters of an intent heading reach the replica's title.
+///
+/// GitHub refuses an issue title past 256; this leaves room for the ` — status`
+/// suffix beside it with margin, and a heading this long is a paragraph anyway.
+pub const MAX_TITLE_CHARS: usize = 180;
 
 /// A landing receipt together with the landed bloom's membership — the whole
 /// render input a receipt projection needs.
@@ -393,11 +670,57 @@ pub trait ProjectionBackend {
     /// Backend-defined — e.g. the projection surface is unreachable.
     fn project_receipt(&self, receipt: &ProjectedReceipt) -> Result<(), Self::Error>;
 
-    /// Project one commission as a Bloomery-owned issue. Returns the issue
-    /// number the adapter now owns — recorded from create, or the number
-    /// already recorded on `projection`.
+    /// Project one commission. `Some(number)` is an issue this projector owns
+    /// and may retitle; `None` is a commission whose workpiece already names
+    /// an object it must not own.
     ///
     /// # Errors
     /// Backend-defined — e.g. the projection surface is unreachable.
-    fn project_commission(&self, projection: &CommissionProjection) -> Result<u64, Self::Error>;
+    fn project_commission(&self, projection: &CommissionProjection) -> Result<Option<u64>, Self::Error>;
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::string::ToString;
+
+    use super::{MAX_TITLE_CHARS, intent_title};
+
+    #[test]
+    fn the_first_heading_names_the_commission() {
+        assert_eq!(
+            intent_title(b"# Refuse a contradictory workpiece\n\nProblem\n").as_deref(),
+            Some("Refuse a contradictory workpiece"),
+        );
+        assert_eq!(
+            intent_title(b"## Problem\n\n# Later\n").as_deref(),
+            Some("Problem"),
+            "the first heading wins whatever its depth",
+        );
+    }
+
+    #[test]
+    fn an_intent_with_no_heading_has_no_title() {
+        // The alternative — the first line of prose — is a sentence, not a name,
+        // and reads worse in an issue list than the untitled fallback does.
+        assert_eq!(intent_title(b"ship the commission store\n\nmore prose\n"), None);
+        assert_eq!(intent_title(b"#\n#   \n"), None, "an empty heading is not a title");
+        assert_eq!(intent_title(b""), None);
+    }
+
+    #[test]
+    fn a_heading_longer_than_the_cap_is_truncated_on_a_character_boundary() {
+        // The intent is authored text. A title past GitHub's own ceiling would
+        // stall the replica rather than shorten it, and slicing bytes out of a
+        // multi-byte heading would panic.
+        let heading = "# ".to_string() + &"é".repeat(MAX_TITLE_CHARS * 2);
+        let title = intent_title(heading.as_bytes()).expect("a long heading is still a heading");
+
+        assert_eq!(title.chars().count(), MAX_TITLE_CHARS);
+        assert!(title.chars().all(|character| character == 'é'));
+    }
+
+    #[test]
+    fn intent_bytes_that_are_not_text_have_no_title() {
+        assert_eq!(intent_title(&[0xff, 0xfe, b'#', b' ', b'x']), None);
+    }
 }

@@ -1,28 +1,44 @@
 //! Parse a managed-heading markdown file into a canonical [`ScopeRevision`].
 
 use std::collections::BTreeMap;
+use std::env;
 use std::fs;
 use std::path::Path;
 
 use aether_bloomery::{Digest, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, SurfacePattern, WorkpieceId};
 use anyhow::{Result, anyhow, bail};
 
+use super::crates::{WorkspaceCrates, derive_surface};
+
 const PROBLEM: &str = "Problem statement";
 const DESIGN: &str = "Design notes";
 const PLAN: &str = "Implementation plan";
 const DEPENDS: &str = "Depends on";
 const SURFACE: &str = "Declared surface";
+const CRATES: &str = "Declared crates";
+const PROTECTED: &str = "Protected files";
+const READS: &str = "Reads";
 const DOGFOOD: &str = "Dogfood brief";
 
-const MANAGED: &[&str] = &[PROBLEM, DESIGN, PLAN, "Sub-issues", DEPENDS, SURFACE, DOGFOOD, "Side findings"];
+const MANAGED: &[&str] =
+    &[PROBLEM, DESIGN, PLAN, "Sub-issues", DEPENDS, SURFACE, CRATES, PROTECTED, READS, DOGFOOD, "Side findings"];
 
 /// Render `markdown` as the next scope revision for `workpiece`.
+///
+/// The surface arrives one of two ways. `## Declared crates` names the crates
+/// the work is about and the surface is *derived* — those crates, every
+/// workspace crate that depends on them, the shared roots, and whatever
+/// `## Protected files` names. `## Declared surface` states the globs
+/// literally, and is what every scope written before the crate block used.
+/// Exactly one of the two, because a scope that carried both would leave the
+/// tier resolver with two different answers about what the work intends.
 pub fn parse_revision(workpiece: &str, markdown: &str, predecessor: Option<Digest>) -> Result<ScopeRevision> {
     let sections = managed_sections(markdown)?;
     let problem = required_body(&sections, PROBLEM)?;
     let design = required_body(&sections, DESIGN)?;
     let (plan, routing) = plan_and_routing(required_span(&sections, PLAN)?)?;
-    let declared_surface = parse_surface(required_span(&sections, SURFACE)?)?;
+    let (declared_crates, declared_surface) = parse_declaration(&sections)?;
+    let declared_reads = sections.get(READS).map(|span| parse_crates(READS, span)).transpose()?.unwrap_or_default();
     let dogfood_brief = sections.get(DOGFOOD).map(|span| body_of(span)).unwrap_or_default();
     let dependencies = sections.get(DEPENDS).map(|span| parse_workpieces(span)).unwrap_or_default();
 
@@ -39,8 +55,36 @@ pub fn parse_revision(workpiece: &str, markdown: &str, predecessor: Option<Diges
         dependencies,
         description: String::new(),
         implements: Vec::new(),
+        declared_crates,
+        declared_reads,
     };
     Ok(ScopeRevision { description: render_work_order(&revision), ..revision })
+}
+
+/// The declared crates and the surface they resolve to.
+///
+/// The crate block wins when present, and the two blocks together are a
+/// refusal rather than a merge: a scope that says both is a scope whose author
+/// does not yet know which one the gate will read.
+fn parse_declaration(sections: &BTreeMap<String, String>) -> Result<(Vec<String>, Vec<String>)> {
+    let crates = sections.get(CRATES).map(|span| parse_crates(CRATES, span)).transpose()?;
+    let protected = sections.get(PROTECTED).map(|span| parse_protected(span)).transpose()?.unwrap_or_default();
+
+    match (crates, sections.get(SURFACE)) {
+        (Some(_), Some(_)) => bail!("declare either ## {CRATES} or ## {SURFACE}, not both"),
+        (Some(crates), None) => {
+            let root = WorkspaceCrates::find_root(&env::current_dir()?)?;
+            let surface = derive_surface(&WorkspaceCrates::load(&root)?, &crates, &protected)?;
+            Ok((crates, surface))
+        }
+        (None, Some(span)) => {
+            if !protected.is_empty() {
+                bail!("## {PROTECTED} names files for a ## {CRATES} declaration; a ## {SURFACE} block lists its own");
+            }
+            Ok((Vec::new(), parse_surface(span)?))
+        }
+        (None, None) => bail!("missing required managed heading: ## {SURFACE} or ## {CRATES}"),
+    }
 }
 
 /// Work-order text the seal persists for construct.
@@ -78,18 +122,54 @@ fn render_work_order(revision: &ScopeRevision) -> String {
             out.push('\n');
         }
     }
-    out.push_str("\n## ");
-    out.push_str(SURFACE);
-    out.push_str("\n\n");
-    for glob in &revision.declared_surface {
-        out.push_str(glob);
-        out.push('\n');
+    // A crate-declared scope renders the blocks it was written with, not the
+    // globs they expanded to: the derived surface is a machine artifact of the
+    // workspace graph, and re-rendering it as the operator's own declaration
+    // would turn the next edit of this work order into a hand-maintained file
+    // list — the thing the crate block exists to stop.
+    if revision.declared_crates.is_empty() {
+        push_list(&mut out, SURFACE, &revision.declared_surface);
+    } else {
+        push_list(&mut out, CRATES, &revision.declared_crates);
+        let protected = protected_files(&revision.declared_surface);
+        if !protected.is_empty() {
+            push_list(&mut out, PROTECTED, &protected);
+        }
+    }
+    if !revision.declared_reads.is_empty() {
+        push_list(&mut out, READS, &revision.declared_reads);
     }
     if !revision.dogfood_brief.trim().is_empty() {
         out.push('\n');
         push_section(&mut out, DOGFOOD, &revision.dogfood_brief);
     }
     out
+}
+
+fn push_list(out: &mut String, name: &str, entries: &[String]) {
+    out.push_str("\n## ");
+    out.push_str(name);
+    out.push_str("\n\n");
+    for entry in entries {
+        out.push_str(entry);
+        out.push('\n');
+    }
+}
+
+/// The file-granular entries of a derived surface — what `## Protected files`
+/// put there.
+///
+/// Read back out of the surface rather than stored beside it: a derived
+/// surface's only literal entries are the protected ones (a crate subtree is a
+/// `dir/**`, a shared root likewise), and the granularity check refuses any
+/// literal the approval policy does not name, so nothing else can be sitting in
+/// that position.
+fn protected_files(surface: &[String]) -> Vec<String> {
+    surface
+        .iter()
+        .filter(|glob| matches!(SurfacePattern::parse(glob), Some(SurfacePattern::Exact(_))))
+        .cloned()
+        .collect()
 }
 
 fn push_section(out: &mut String, name: &str, body: &str) {
@@ -122,10 +202,16 @@ fn managed_sections(body: &str) -> Result<BTreeMap<String, String>> {
         offset += line.len();
     }
 
-    for required in [PROBLEM, DESIGN, PLAN, SURFACE] {
+    for required in [PROBLEM, DESIGN, PLAN] {
         if headings.iter().all(|(_, name)| name != required) {
             bail!("missing required managed heading: ## {required}");
         }
+    }
+    // The surface declaration is required too, but which heading carries it is
+    // the scope's choice, so the pair is checked where it is read rather than
+    // by naming one of them here.
+    if headings.iter().all(|(_, name)| name != SURFACE && name != CRATES) {
+        bail!("missing required managed heading: ## {SURFACE} or ## {CRATES}");
     }
 
     let mut sections = BTreeMap::new();
@@ -208,28 +294,61 @@ fn labeled(line: &str, prefix: &str) -> Result<String> {
 }
 
 fn parse_surface(span: &str) -> Result<Vec<String>> {
-    let body = body_of(span);
-    let mut globs = Vec::new();
+    let globs = list_entries(span);
+    if let Some(bad) = globs.iter().find(|entry| SurfacePattern::parse(entry).is_none()) {
+        bail!("declared surface {bad:?} is outside the surface grammar");
+    }
+    if globs.is_empty() {
+        bail!("declared surface lists no paths");
+    }
+    Ok(globs)
+}
+
+/// The crate names a `## Declared crates` block lists, in declaration order.
+fn parse_crates(heading: &str, span: &str) -> Result<Vec<String>> {
+    let names = list_entries(span);
+    if names.is_empty() {
+        bail!("## {heading} lists no crate names");
+    }
+    if let Some(bad) = names.iter().find(|name| name.contains('/') || name.contains('*')) {
+        bail!("## {heading} entry {bad:?} is a path, not a crate name");
+    }
+    Ok(names)
+}
+
+/// The literal paths a `## Protected files` block names.
+///
+/// Each must be a concrete path inside the declared-surface grammar: this block
+/// exists so a scope can say "this work touches a file the policy guards", and
+/// a glob here would claim a whole subtree at the guarded file's tier.
+fn parse_protected(span: &str) -> Result<Vec<String>> {
+    let paths = list_entries(span);
+    for path in &paths {
+        match SurfacePattern::parse(path) {
+            Some(SurfacePattern::Exact(_)) => {}
+            Some(SurfacePattern::Subtree(_)) => bail!("protected file {path:?} is a subtree glob, not a file"),
+            None => bail!("protected file {path:?} is outside the surface grammar"),
+        }
+    }
+    Ok(paths)
+}
+
+/// The non-empty, un-fenced, bullet-stripped lines of a managed list block.
+fn list_entries(span: &str) -> Vec<String> {
+    let mut entries = Vec::new();
     let mut in_fence = false;
-    for line in body.lines() {
+    for line in body_of(span).lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("```") {
             in_fence = !in_fence;
             continue;
         }
         let entry = trimmed.strip_prefix("- ").unwrap_or(trimmed);
-        if entry.is_empty() {
-            continue;
+        if !entry.is_empty() {
+            entries.push(entry.to_owned());
         }
-        if SurfacePattern::parse(entry).is_none() {
-            bail!("declared surface {entry:?} is outside the surface grammar");
-        }
-        globs.push(entry.to_owned());
     }
-    if globs.is_empty() {
-        bail!("declared surface lists no paths");
-    }
-    Ok(globs)
+    entries
 }
 
 fn parse_workpieces(span: &str) -> Vec<WorkpieceId> {
@@ -323,6 +442,103 @@ Create then show.\n"
                 );
             }
         }
+    }
+
+    fn crate_declared() -> String {
+        fixture().replace(
+            "## Declared surface\n\n```text\ncrates/aether-chassis-bloomery/src/commission/**\n```\n",
+            "## Declared crates\n\n- aether-math\n\n## Protected files\n\n- Cargo.lock\n",
+        )
+    }
+
+    #[test]
+    fn declared_crates_derive_the_surface_and_render_back_as_crates() {
+        let revision = parse_revision("issue-5047", &crate_declared(), None)
+            .unwrap_or_else(|error| panic!("a crate-declared file must parse: {error}"));
+
+        assert_eq!(revision.declared_crates, ["aether-math"]);
+        for expected in ["crates/aether-math/**", "xtask/**", "docs/guide/**", "Cargo.lock"] {
+            assert!(
+                revision.declared_surface.iter().any(|glob| glob == expected),
+                "the derived surface carries {expected}: {:?}",
+                revision.declared_surface
+            );
+        }
+        assert!(
+            revision.declared_surface.iter().any(|glob| glob == "crates/aether-kinds/**"),
+            "the reverse-dependency closure reaches a dependent of the declared crate: {:?}",
+            revision.declared_surface
+        );
+
+        // The rendered work order is what the next edit of this scope starts
+        // from, so it has to say what the operator said. Re-rendering the
+        // expansion would turn the block back into a hand-maintained file list.
+        let task = task_text(&revision);
+        assert!(task.contains("## Declared crates") && task.contains("aether-math"), "{task}");
+        assert!(task.contains("## Protected files") && task.contains("Cargo.lock"), "{task}");
+        assert!(!task.contains("## Declared surface"), "{task}");
+    }
+
+    #[test]
+    fn a_reads_block_round_trips_and_widens_nothing() {
+        // ADR-0204: a read is not authority. It must survive parse and render
+        // so the door can turn it into conditional ordering, and it must leave
+        // the declared surface exactly where the crate block put it — a read
+        // that quietly widened the surface would be an authority grant nobody
+        // asked for.
+        let without = parse_revision("issue-5258", &crate_declared(), None)
+            .unwrap_or_else(|error| panic!("the fixture parses: {error}"));
+        let with_reads = parse_revision(
+            "issue-5258",
+            &crate_declared().replace("## Protected files", "## Reads\n\n- aether-data\n\n## Protected files"),
+            None,
+        )
+        .unwrap_or_else(|error| panic!("a reads block must parse: {error}"));
+
+        assert_eq!(with_reads.declared_reads, ["aether-data"]);
+        assert_eq!(with_reads.declared_surface, without.declared_surface, "a read widens no surface");
+        assert!(without.declared_reads.is_empty(), "an undeclared scope reads nothing");
+
+        let task = task_text(&with_reads);
+        assert!(task.contains("## Reads") && task.contains("aether-data"), "{task}");
+    }
+
+    #[test]
+    fn a_reads_block_naming_a_path_refuses() {
+        // The same guard the crate block has, and for the same reason: a path
+        // here would be a file-granular forecast, which the crate blocks exist
+        // to abolish. The message has to name which block, because the two
+        // share a parser.
+        let error = parse_revision(
+            "issue-5258",
+            &crate_declared()
+                .replace("## Protected files", "## Reads\n\n- crates/aether-data/src/lib.rs\n\n## Protected files"),
+            None,
+        )
+        .expect_err("a path in a reads block must refuse");
+
+        assert!(error.to_string().contains("Reads"), "{error}");
+    }
+
+    #[test]
+    fn both_declaration_blocks_together_are_refused() {
+        // Two answers to "what does this work intend" would leave the tier
+        // resolver picking one silently.
+        let markdown = crate_declared()
+            .replace("## Declared crates", "## Declared surface\n\ncrates/aether-math/**\n\n## Declared crates");
+        let error = parse_revision("issue-5047", &markdown, None).expect_err("both blocks must refuse");
+
+        assert!(error.to_string().contains("not both"), "got {error}");
+    }
+
+    #[test]
+    fn a_protected_subtree_glob_is_refused() {
+        // `## Protected files` is what lifts the tier, so a subtree there would
+        // claim a whole directory at the guarded file's tier.
+        let markdown = crate_declared().replace("- Cargo.lock", "- crates/aether-data/**");
+        let error = parse_revision("issue-5047", &markdown, None).expect_err("a glob must refuse");
+
+        assert!(error.to_string().contains("not a file"), "got {error}");
     }
 
     #[test]

@@ -134,6 +134,31 @@ impl Scope {
         }
     }
 
+    /// Whether a diagnostic this run's compiler emitted about `package` is a
+    /// statement about the candidate.
+    ///
+    /// A workspace run judges everything it compiled. A closure run judges the
+    /// crates the diff can have broken — by construction every crate it changed
+    /// plus everything linking one — and not the crates underneath them. A
+    /// dependency the candidate never touched compiles the same source it
+    /// compiles at the base, so a warning in it is a standing property of the
+    /// tree rather than a finding about this candidate (#5411).
+    ///
+    /// Narrowing the package selection is what makes those diagnostics appear
+    /// at all. Cargo unifies features across the packages one invocation
+    /// selects, so the whole-workspace build the CI gate and `verify.base` run
+    /// turns on every feature some member's dev-dependency asks for, while a
+    /// closure that leaves that member out compiles the crate underneath it
+    /// feature-poor — and an item the missing feature gates is then an unused
+    /// one. Judging that is a member door red on a tree the base door passed
+    /// minutes earlier, which is the failure this predicate exists to stop.
+    pub(super) fn judges(&self, package: &str) -> bool {
+        match self {
+            Self::Workspace { .. } => true,
+            Self::Closure { packages, .. } => packages.iter().any(|name| name == package),
+        }
+    }
+
     /// The receipt this run writes alongside its members' logs: what the
     /// compiling gates ran over, and what they did not.
     ///

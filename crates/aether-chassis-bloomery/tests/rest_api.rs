@@ -131,6 +131,8 @@ fn seed_commission_revision(
         dependencies: dependencies.iter().map(|dep| WorkpieceId((*dep).to_owned())).collect(),
         description: description.to_owned(),
         implements: Vec::new(),
+        declared_crates: Vec::new(),
+        declared_reads: Vec::new(),
     };
     let (status, written) =
         send_auth(port, "POST", &format!("/commissions/{id}/revisions"), &serde_json::to_value(&revision).unwrap());
@@ -206,6 +208,42 @@ fn spawn_with_store(http_port: u16, rpc_port: u16, policy_path: &str, store_path
             ("AETHER_HTTP_CONTROL_TOKEN", CONTROL_TOKEN),
         ],
     )
+}
+
+/// Record a green whole-workspace receipt for `base` so a following HTTP seal
+/// dispatches Construct rather than waiting on `verify.base`.
+fn prove_green_base(rpc_port: u16, base: Digest) {
+    use aether_bloomery::{
+        Admit, AdmitResult, CONTROL_CORE_NAMESPACE, Event, Fact, IdempotencyKey, Outcome, VerifyFailureSet,
+    };
+    use aether_data::mailbox_id_from_path;
+    use aether_data::wire::to_vec;
+    use common::client::{call, connect_and_handshake};
+
+    let mut stream = connect_and_handshake(rpc_port, "prove-base");
+    let control = mailbox_id_from_path(CONTROL_CORE_NAMESPACE);
+    let event = Event {
+        idempotency_key: IdempotencyKey("fixture-base-verify".to_owned()),
+        fact: Fact::BaseVerifyCompleted {
+            base,
+            tree: base,
+            passed: true,
+            evidence: Evidence {
+                subject: base,
+                kind: EvidenceKind::VerificationResult,
+                detail: Digest::from_bytes([9; 32]),
+            },
+            failed: VerifyFailureSet::EMPTY,
+        },
+    };
+    let admit = Admit { event: to_vec(&event).unwrap() };
+    match call::<_, AdmitResult>(&mut stream, 1, control, &admit) {
+        AdmitResult::Ok { outcome } => {
+            let outcome: Outcome = from_bytes(&outcome).expect("outcome decodes");
+            assert!(matches!(outcome, Outcome::BaseProven { .. }), "the fixture base proves green: {outcome:?}");
+        }
+        AdmitResult::Err { error } => panic!("fixture base prove failed: {error}"),
+    }
 }
 
 /// One HTTP request over a fresh `Connection: close` socket; returns the status
@@ -923,8 +961,19 @@ fn authored_stage_catalog_reaches_the_dispatch_profile() {
     assert_eq!(fetched["draft"]["configs"], rendered_registry);
 
     wait_for_200(http_port, "/view");
+    prove_green_base(rpc_port, Digest::from_bytes([1; 32]));
     let (status, sealed) = send_json(http_port, "POST", &format!("/drafts/{draft_id}/seal"), &seal_body());
     assert_eq!(status, 200, "seal the draft carrying the authored catalog: {sealed:?}");
+
+    let (status, days) = get_json(http_port, "/metrics/days");
+    assert_eq!(status, 200, "days after a construct dispatch: {days:?}");
+    assert!(days.is_array(), "a fattened days document must render as an array, not a summary object: {days:?}");
+    let row = days.as_array().and_then(|rows| rows.last()).expect("a construct dispatch fills a dated day");
+    assert!(
+        row.get("label").and_then(Value::as_str).is_some_and(|label| label.starts_with("bloomery/daily/")),
+        "the newest row is a civil day: {row:?}"
+    );
+    assert!(row.get("spend_micro_usd").is_some(), "days columns survived the summary-first renderer: {row:?}");
 
     let mut store = SqliteStore::open(store_path).unwrap();
     let entries = store.drain_topic(Topic::Dispatch).unwrap();
@@ -1195,6 +1244,10 @@ fn rest_endpoint_laws_clamp_decode_and_unify_refusals() {
             "metrics names the clamp on x-aether-notice (the body is a bare array): {notice:?}"
         );
 
+        let (status, days) = get_json(http_port, "/metrics/days");
+        assert_eq!(status, 200, "empty days still 200: {days:?}");
+        assert!(days.is_array(), "days is a bare array even when empty, not a summary object: {days:?}");
+
         // `%C3%A9` is UTF-8 `é`. Decoding each escaped byte as a char would
         // produce Latin-1 mojibake; either way the query parses, so a `400` is
         // the missing-decode failure. Unavailable journald is `501`.
@@ -1231,7 +1284,7 @@ fn fold_unpriced_construct_seats() -> (Vec<MetricsSeat>, CapabilityLedger) {
     let spec = BloomDraft { proposals: vec![member], base: digest(1), ..BloomDraft::default() }.seal();
     let bloom = spec.id();
 
-    let mut snapshot = Snapshot::new(digest(1));
+    let mut snapshot = Snapshot::new(digest(1)).with_green_base(digest(1));
     let mut metrics = MetricsLedger::default();
     let mut calibration = CalibrationLedger::default();
     let mut sequence = 0_u64;

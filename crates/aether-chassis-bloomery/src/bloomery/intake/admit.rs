@@ -7,8 +7,8 @@ use std::fmt;
 
 use aether_bloomery::{
     Admit, BloomId, CandidateRef, Digest, Event, Evidence, EvidenceKind, Fact, InwardError, Nonce, ResolutionClaim,
-    StageCatalog, StageId, StageResult, StageVerdict, StudyCall, StudyCost, VerifyFailure, VerifyFailureSet,
-    WorkpieceId, classify_findings, normalize_stage_result,
+    StageCatalog, StageId, StageResult, StageVerdict, StudyCall, StudyCost, SuppressionRequest, SurfaceRequest,
+    VerifyFailure, VerifyFailureSet, WorkpieceId, classify_findings, normalize_stage_result,
 };
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 
@@ -77,6 +77,15 @@ pub struct UploadedEvidence {
     /// (ADR-0209). Host-recorded state copied off the port reference, like
     /// `findings`. Empty unless the containment overlay named a violation.
     pub violating_paths: Vec<String>,
+    /// The declining lane's normalized surface request (ADR-0207),
+    /// authoritative from the port reference like `candidate` / `findings`.
+    /// `None` from a lane that named nothing, from a claim that did not
+    /// survive normalization, and from the name-only Actions transport.
+    pub surface_request: Option<SurfaceRequest>,
+    /// The suppressions the candidate states a case for (ADR-0193),
+    /// authoritative from the port reference like `findings`. Empty from a
+    /// candidate that stated none and from the name-only Actions transport.
+    pub suppression_requests: Vec<SuppressionRequest>,
 }
 
 /// Why the broker refused an upload without touching the reducer.
@@ -116,6 +125,13 @@ pub enum IntakeRefusal {
     /// (ADR-0195 / ADR-0176); every other stage refuses rather than being
     /// given unratified semantics by admission.
     ExecutorFaultOutOfStage(StageId),
+    /// A surface-request or plain-decline verdict arrived against a stage that
+    /// runs no construct-family lane (ADR-0207). Only Construct / Refine /
+    /// Reconcile dispatch `construct.implement`, so only they can decline for
+    /// want of surface; every other stage refuses rather than being given
+    /// unratified semantics by admission. The refusal precedes the consume, so
+    /// the order stays live.
+    SurfaceRequestOutOfStage(StageId),
 }
 
 /// An accepted attempt result: the reducer [`Event`] the upload normalized to
@@ -140,6 +156,15 @@ pub enum AdmitDecision {
     /// The upload was refused; the reducer is untouched and the order (on a
     /// digest mismatch) stays live for the honest worker.
     Refused(IntakeRefusal),
+    /// The upload was accepted and the order consumed, but there is no reducer
+    /// event to admit — a pre-bloom scoping run (ADR-0208, #5304), whose
+    /// verdict lands on the commission store's own run ledger.
+    ///
+    /// Its own variant rather than an `Admitted` carrying an empty event: the
+    /// caller's whole job with an `Admitted` is to hand the event to the
+    /// control core, and a variant that means "nothing to hand over" must not
+    /// be reachable by forgetting to look inside one.
+    Recorded,
 }
 
 /// A failure that is neither a clean accept nor a clean refuse — the durable
@@ -207,7 +232,7 @@ fn verdict_passed(verdict: StageVerdict) -> bool {
 // execution limit, an hour later.
 fn verifier_failure_refusal(stage: StageId, upload: &UploadedEvidence) -> Option<IntakeRefusal> {
     let valid = match (stage, upload.verdict) {
-        (StageId::Verify | StageId::AggregateVerify, StageVerdict::VerificationFailed) => true,
+        (StageId::Verify | StageId::AggregateVerify | StageId::BaseVerify, StageVerdict::VerificationFailed) => true,
         _ => upload.failed_verifiers.is_empty(),
     };
     (!valid).then_some(IntakeRefusal::InvalidVerifierFailures {
@@ -431,6 +456,19 @@ fn admits_member_executor_fault(stage: StageId) -> bool {
     stage == StageId::Verify || admits_as_attempt_completed(stage)
 }
 
+/// Whether a claimed [`StageVerdict::ExecutorFault`] has a fact to become.
+///
+/// ADR-0195 gives the dispatched member gates and the aggregate review one.
+/// `BaseVerify` is the third (#5384): its fold is a receipt on the sealed base
+/// rather than a verdict on a candidate, and a whole-workspace fan-out that
+/// reached no verdict leaves that base exactly as unproven as a red one does.
+/// It becomes a red receipt, which raises the day-level `base_alert` an
+/// operator can act on; refusing it instead leaves every sealed member withheld
+/// with nothing on the view to say why.
+fn admits_executor_fault(stage: StageId) -> bool {
+    matches!(stage, StageId::AggregateReview | StageId::BaseVerify) || admits_member_executor_fault(stage)
+}
+
 /// The finding a weave repair was dispatched to repair: the composition's own
 /// row when a previous bounce wrote one, else the bloom-scoped frozen set.
 ///
@@ -472,6 +510,29 @@ fn thread_triage_note(
 ) -> rusqlite::Result<()> {
     let threaded = format!("{finding}\n\n{}", triage_note(named));
     store.record_review_findings(record.bloom.0.as_bytes(), &record.workpiece.0, &threaded)
+}
+
+/// The bloom-less whole-workspace verdict (ADR-0200): the evidence-binding
+/// subject is the tree the fan-out judged. The executor peels the checkout
+/// into `inputs[0]`, and a capture-free run leaves that as the displayed
+/// digest.
+///
+/// A run that reached no verdict at all ([`StageVerdict::ExecutorFault`], the
+/// umbrella's `environment` stamp) folds here too rather than through the
+/// member-fault arm: `verdict_passed` is false for it, so the base stays
+/// unproven and the day-level alert is raised, which is the same thing an
+/// operator has to act on (#5384).
+fn base_verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Evidence) -> Event {
+    Event {
+        idempotency_key: AdmissionKey::BaseVerify.of(&record.nonce.0),
+        fact: Fact::BaseVerifyCompleted {
+            base: record.transformation.checkout,
+            tree: record.displayed_digest,
+            passed: verdict_passed(upload.verdict),
+            evidence,
+            failed: upload.failed_verifiers,
+        },
+    }
 }
 
 /// Whether a completed attempt at `stage` is a member-line result the reducer
@@ -526,8 +587,85 @@ fn verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Ev
     }
 }
 
+/// Every refusal a claimed verdict earns by naming a stage that cannot carry
+/// it. All of them precede the consume, so a refused order stays live and an
+/// honest result on it can still land.
+fn out_of_stage_refusal(stage: StageId, upload: &UploadedEvidence) -> Option<IntakeRefusal> {
+    // A pre-bloom scoping run (ADR-0208) carries every verdict onto its own
+    // ledger rather than into a `Fact`, including an `ExecutorFault` from an
+    // overdue run's termination. None of the member-stage guards below is
+    // about it: each asks which *bloom* fact a verdict would build, and this
+    // stage builds none.
+    if stage == StageId::Scope {
+        return None;
+    }
+    if let Some(refusal) = verifier_failure_refusal(stage, upload) {
+        return Some(refusal);
+    }
+    // A fault claimed against a stage with no fact to carry it is refused
+    // rather than routed — see [`admits_executor_fault`] for the three that
+    // have one.
+    if upload.verdict == StageVerdict::ExecutorFault && !admits_executor_fault(stage) {
+        return Some(IntakeRefusal::ExecutorFaultOutOfStage(stage));
+    }
+    // ADR-0207's two decline verdicts belong to the construct family alone.
+    if matches!(upload.verdict, StageVerdict::Declined | StageVerdict::SurfaceRequested)
+        && !admits_as_attempt_completed(stage)
+    {
+        return Some(IntakeRefusal::SurfaceRequestOutOfStage(stage));
+    }
+    None
+}
+
+/// The fact a decline that named the paths its work requires admits as
+/// (ADR-0207): the reducer parks the member awaiting a surface amendment
+/// rather than spending an attempt on a lap that would reproduce the same
+/// refusal.
+fn surface_requested_event(record: &DispatchRecord, evidence: Evidence, request: SurfaceRequest) -> Event {
+    Event {
+        idempotency_key: AdmissionKey::SurfaceRequest.of(&record.nonce.0),
+        fact: Fact::SurfaceRequested {
+            bloom: record.bloom,
+            workpiece: record.workpiece.clone(),
+            stage: record.stage,
+            evidence,
+            request,
+        },
+    }
+}
+
 fn admits_as_attempt_completed(stage: StageId) -> bool {
     StageCatalog::next_member_stage(stage).is_some() || matches!(stage, StageId::Refine | StageId::Reconcile)
+}
+
+/// Land a pre-bloom scoping run's verdict on the commission store's own run
+/// ledger (ADR-0208, #5304).
+///
+/// Split out of [`admit_uploaded`] so that function stays inside its line
+/// budget, and because this is a whole admission path rather than a step of the
+/// member ladder: it consumes the order and returns, and nothing below it runs.
+fn record_scope_verdict(
+    store: &mut dyn StoreBackend,
+    upload: &UploadedEvidence,
+    record: &DispatchRecord,
+    evidence: &Evidence,
+) -> Result<AdmitDecision, IntakeError> {
+    let Some((commission, ordinal)) = store.lookup_scope_run(&record.nonce.0)? else {
+        // A Scope order with no `dispatched` row names a run this coordinator
+        // never opened. Refuse rather than inventing an ordinal: an invented
+        // row would let a fabricated upload write into a commission's scoping
+        // history.
+        return Ok(AdmitDecision::Refused(IntakeRefusal::UnknownNonce(upload.nonce.clone())));
+    };
+    // Consume first here, unlike the member path: there is no fallible encode
+    // to fail after it, and a lost race to consumption must read as a replay
+    // rather than as a second verdict row on the same ordinal.
+    if !store.consume_order(&record.nonce.0)? {
+        return Ok(AdmitDecision::Refused(IntakeRefusal::UnknownNonce(upload.nonce.clone())));
+    }
+    store.record_scope_verdict(&commission, ordinal, &format!("{:?}", upload.verdict), evidence.detail.as_bytes())?;
+    store.clear_capture_diff(&record.nonce.0)?;
+    Ok(AdmitDecision::Recorded)
 }
 
 pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -> Result<AdmitDecision, IntakeError> {
@@ -538,18 +676,8 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     let Some(record) = DispatchRecord::from_stored(&stored) else {
         return Ok(AdmitDecision::Refused(IntakeRefusal::CorruptOrder(upload.nonce.clone())));
     };
-    if let Some(refusal) = verifier_failure_refusal(record.stage, upload) {
+    if let Some(refusal) = out_of_stage_refusal(record.stage, upload) {
         return Ok(AdmitDecision::Refused(refusal));
-    }
-    // ADR-0195 admits ExecutorFault for dispatched member stages and the
-    // aggregate review. A fault claimed against any other stage is refused
-    // here rather than routed — the refusal precedes the consume, so the
-    // order stays live and an honest result on it can still land.
-    if upload.verdict == StageVerdict::ExecutorFault
-        && record.stage != StageId::AggregateReview
-        && !admits_member_executor_fault(record.stage)
-    {
-        return Ok(AdmitDecision::Refused(IntakeRefusal::ExecutorFaultOutOfStage(record.stage)));
     }
     let observed = StageResult { subject: upload.subject, verdict: upload.verdict, detail: upload.detail };
     let evidence = match normalize_stage_result(&record.displayed_digest, &observed) {
@@ -560,6 +688,20 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
             return Ok(AdmitDecision::Refused(IntakeRefusal::DigestMismatch { displayed, claimed }));
         }
     };
+    // A pre-bloom scoping run (ADR-0208, #5304) routes before the member-stage
+    // ladder, because it is not on that ladder at all: it names no bloom, so
+    // there is no `Fact` for its verdict to be and nothing for the reducer to
+    // fold. The verdict lands on the run's own append-only ledger, keyed by the
+    // commission and ordinal the drain recorded against this nonce, and the
+    // order is consumed exactly as every other admitted upload consumes it.
+    //
+    // Before the ladder rather than after, so a Scope order can never reach the
+    // final `else` and be refused as `OutOfLineStage` — which is what it is
+    // refused as today, and is this slice's pre-fix failure.
+    if record.stage == StageId::Scope {
+        return record_scope_verdict(store, upload, &record, &evidence);
+    }
+
     // Provenance (a real outstanding order) and binding (the displayed digest)
     // both hold. Build the whole admission — including the fallible event encode
     // — *before* consuming the order: consuming first and then failing the encode
@@ -602,7 +744,35 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     // detail, per the reducer's `RecordEvidence` fold) — the key the held order is
     // filed under below, captured before the evidence moves into the fact.
     let mut parked_under = None;
-    let event = if upload.verdict == StageVerdict::Parked {
+    // A construct/refine lane that concluded without a candidate is not an
+    // ADR-0151 question and is not a failed attempt: `StageVerdict::Declined`
+    // normalizes to ConstructDeclined so the reducer's park arm is reachable
+    // (#5292 / #5332). `Parked` stays the question path; a failing construct
+    // with no capture, and an executor fault, keep their own arms.
+    // A decline that named the paths its work requires is a first-class fact
+    // (ADR-0207): the reducer parks the member awaiting a surface amendment
+    // rather than spending an attempt on a lap that would reproduce the same
+    // refusal. A decline whose request did not survive normalization falls
+    // through to the plain park below — losing the park is the failure this
+    // whole path exists to remove.
+    let event = if upload.verdict == StageVerdict::SurfaceRequested
+        && let Some(request) = upload.surface_request.clone()
+        && admits_as_attempt_completed(record.stage)
+    {
+        surface_requested_event(&record, evidence, request)
+    } else if evidence.kind == EvidenceKind::ConstructDeclined && admits_as_attempt_completed(record.stage) {
+        Event {
+            idempotency_key: AdmissionKey::Attempt.of(&record.nonce.0),
+            fact: Fact::AttemptCompleted {
+                bloom: record.bloom,
+                workpiece: record.workpiece.clone(),
+                stage: record.stage,
+                passed: false,
+                evidence,
+                candidate: None,
+            },
+        }
+    } else if upload.verdict == StageVerdict::Parked {
         parked_under = Some(evidence.detail);
         Event {
             idempotency_key: AdmissionKey::Park.of(&record.nonce.0),
@@ -651,6 +821,8 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
                 evidence,
             },
         }
+    } else if record.stage == StageId::BaseVerify {
+        base_verify_event(&record, upload, evidence)
     } else {
         // An out-of-line stage never comes from a well-formed dispatch; refuse it
         // rather than folding a non-line result into the member's resolution. The
@@ -729,6 +901,17 @@ fn persist_consumed(
         } else if let Some(findings) = &upload.findings {
             store.record_review_findings(record.bloom.0.as_bytes(), &record.workpiece.0, findings)?;
         }
+        // The member's standing suppression requests are whatever its newest
+        // candidate asks for (ADR-0193), so the write is a replacement and an
+        // empty set is the clear. One call rather than a record/clear pair: two
+        // calls under two conditions are two chances for a stale row to outlive
+        // the candidate that stated it, and a stale row asks a reviewer to grant
+        // an allow the diff no longer carries.
+        store.record_suppression_requests(
+            record.bloom.0.as_bytes(),
+            &record.workpiece.0,
+            &upload.suppression_requests,
+        )?;
     } else if record.stage == StageId::AggregateVerify {
         persist_aggregate_verify_findings(store, record, upload)?;
     } else if record.stage == StageId::AggregateReview && upload.verdict != StageVerdict::ExecutorFault {

@@ -94,7 +94,7 @@ fn script() -> Vec<Event> {
 /// journal replay (decode the persisted bytes, then reduce), not a second
 /// in-process call over the same in-memory values.
 fn replay(journal: &[Event]) -> (Vec<Decisions>, Snapshot) {
-    let mut snapshot = Snapshot::new(digest(1));
+    let mut snapshot = Snapshot::new(digest(1)).with_green_base(digest(1));
     let mut decisions = Vec::with_capacity(journal.len());
     for ev in journal {
         let decoded: Event = from_bytes(&to_vec(ev).unwrap()).unwrap();
@@ -285,9 +285,20 @@ fn scripted_bloom_reaches_landed_and_advances_mainline() {
 // `Decision::RecordStageCatalog` carries that catalog by value. The
 // scripted draft configures nothing, so the compiled line's bytes are in
 // the stream (#4944). An intended catalog edit, recomputed.
+// Repinned for #5330: `StageProgress` gains trailing `reconcile_assembles_base`,
+// so every `AdvanceStage` in the stream carries one more bool. An intended,
+// coordinated break, recomputed.
+// Repinned for the concurrent composite gates: the fold dispatches the compiler
+// and the critic together, so the resolve step carries both work orders and the
+// returning verify records its half of the join instead of dispatching the
+// critic. The stream is the same script, decided the new way, and it still
+// reaches Landed. An intended, coordinated break, recomputed.
+// Repinned for base admission (ADR-0200): the compiled line gained the
+// `BaseVerify` binding, so `Decision::RecordStageCatalog` carries a fourteenth
+// stage. An intended catalog edit, recomputed.
 const GOLDEN_DECISION_DIGEST: [u8; 32] = [
-    0x4e, 0x2c, 0xc7, 0x16, 0x38, 0x95, 0x86, 0x25, 0xbd, 0x99, 0xe0, 0x60, 0x6e, 0x23, 0xaa, 0x3f, 0x74, 0x44, 0xd4,
-    0x0d, 0x23, 0x87, 0x46, 0x91, 0x19, 0xa4, 0xba, 0xb2, 0x1c, 0xd7, 0x28, 0x5c,
+    0x6c, 0xbc, 0xe1, 0x70, 0xf0, 0x4c, 0x42, 0x6f, 0x3c, 0x7c, 0x6b, 0x85, 0x20, 0xf5, 0xc6, 0x28, 0x3a, 0x24, 0x58,
+    0x9e, 0xe2, 0x20, 0xb6, 0x08, 0x20, 0xc3, 0x0c, 0x6d, 0xa4, 0x10, 0x20, 0xb9,
 ];
 
 #[test]

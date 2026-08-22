@@ -2,7 +2,9 @@
 //! pre-approval override over one admission request, and form the auto-tier
 //! `approval` [`Evidence`] directly.
 
-use aether_bloomery::{Digest, Evidence, EvidenceKind, Observation, Provenance, Statement, digest_of};
+use aether_bloomery::{
+    DRAFT_ADMISSION_GATE, Digest, Evidence, EvidenceKind, Observation, Provenance, Read, Refusal, Statement, digest_of,
+};
 use serde::{Deserialize, Serialize};
 
 use super::policy::{ApprovalPolicy, Tier};
@@ -16,8 +18,16 @@ pub struct AdmissionRequest {
     /// revision, and sealed configuration together (ADR-0174,
     /// [`Membership::subject`](aether_bloomery::Membership::subject)).
     pub subject: Digest,
-    /// The declared-surface globs (the `## Declared surface` block).
+    /// The declared-surface globs the tier and containment are read from.
     pub declared_surface: Vec<String>,
+    /// The workspace crates the scope declared (the `## Declared crates`
+    /// block), empty when it declared globs instead.
+    ///
+    /// The gate reads only whether it is empty, and that is the whole of what
+    /// it needs: a crate-derived surface is mostly blast radius rather than
+    /// intent, so its tier comes from the protected files it names, while a
+    /// hand-declared glob surface still resolves over every glob in it.
+    pub declared_crates: Vec<String>,
     /// The completeness facts the gate fails closed on.
     pub completeness: Completeness,
     /// The ADR-maturity of the change, for the unconditional hard gate.
@@ -107,7 +117,17 @@ pub enum Incompleteness {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Decision {
     /// A completeness check failed closed — no approval is formed.
-    Incomplete(Incompleteness),
+    ///
+    /// Both halves of the answer, because they have different readers: the
+    /// typed `reason` is what the seal route and its tests match on, and the
+    /// ADR-0206 `refusal` is the guard that failed with the value it read,
+    /// which is what an operator asking why a member did not seal needs.
+    Incomplete {
+        /// Which completeness check failed closed.
+        reason: Incompleteness,
+        /// The guard that failed and the value it consulted (ADR-0206).
+        refusal: Refusal,
+    },
     /// The tier resolved `auto` (and no ADR gate fired): the gate formed the
     /// `approval` [`Evidence`] directly, bound to the scope revision.
     AutoApproved(Evidence),
@@ -137,8 +157,8 @@ impl<'policy> Gate<'policy> {
     /// gate) requires a signed statement.
     #[must_use]
     pub fn evaluate(&self, request: &AdmissionRequest) -> Decision {
-        if let Some(incompleteness) = check_completeness(&request.completeness) {
-            return Decision::Incomplete(incompleteness);
+        if let Some((reason, refusal)) = check_completeness(&request.completeness) {
+            return Decision::Incomplete { reason, refusal };
         }
         // The ADR hard gate fires unconditionally and cannot be waived by the
         // pre-approval override; a still-Proposed touch (or no touch) defers to
@@ -149,7 +169,7 @@ impl<'policy> Gate<'policy> {
         } else if request.pre_approved {
             Tier::Auto
         } else {
-            self.policy.resolve_surface(&request.declared_surface)
+            self.tier_of(request)
         };
         if tier == Tier::Auto {
             Decision::AutoApproved(auto_approval(request.subject, request.projection_digest))
@@ -157,39 +177,115 @@ impl<'policy> Gate<'policy> {
             Decision::RequiresStatement(tier)
         }
     }
+
+    /// The policy tier of one request's surface, read the way that surface was
+    /// declared.
+    ///
+    /// A glob surface is a statement of intent about every path it names, so
+    /// its tier is the most restrictive over all of them. A crate-derived
+    /// surface is a containment bound — the declared crates plus everything
+    /// that depends on them — so most of its globs say nothing about what the
+    /// work means to change, and only its protected files do.
+    fn tier_of(&self, request: &AdmissionRequest) -> Tier {
+        if request.declared_crates.is_empty() {
+            self.policy.resolve_surface(&request.declared_surface)
+        } else {
+            self.policy.resolve_protected(&request.declared_surface)
+        }
+    }
 }
 
 /// The first completeness check that fails closed, or `None` if the revision is
 /// complete.
-fn check_completeness(completeness: &Completeness) -> Option<Incompleteness> {
-    if !completeness.has_problem_statement {
-        return Some(Incompleteness::MissingProblemStatement);
-    }
-    if !completeness.has_design_notes {
-        return Some(Incompleteness::MissingDesignNotes);
-    }
-    if !completeness.has_implementation_plan {
-        return Some(Incompleteness::MissingImplementationPlan);
-    }
-    if !completeness.referenced_adr_prs_merged {
-        return Some(Incompleteness::ReferencedAdrPrUnmerged);
-    }
-    if completeness.model_routing_count != 1 {
-        return Some(Incompleteness::ModelRouting(completeness.model_routing_count));
-    }
-    if completeness.blocked {
-        return Some(Incompleteness::Blocked);
-    }
-    if !completeness.declared_surface_fresh {
-        return Some(Incompleteness::StaleDeclaredSurface);
-    }
-    if !completeness.dependencies_all_closed {
-        return Some(Incompleteness::OpenDependency);
-    }
-    if !completeness.umbrella_integrity {
-        return Some(Incompleteness::UmbrellaIntegrity);
-    }
-    None
+///
+/// The `draft_admission` boundary (ADR-0206). Every check is a named guard
+/// rather than a bare `if`, and each names the value it read — "the surface is
+/// stale" is not something an operator can act on; "stale, and the request
+/// claimed otherwise" at least says which assertion was tested.
+///
+/// The rows carry the typed [`Incompleteness`] beside the guard because the
+/// seal route answers 422 on it. Recovering the typed reason from the guard's
+/// *name* at the call site would be the second description of this list that
+/// ADR-0206 exists to prevent, and it would keep compiling after a rename.
+///
+/// A table rather than a ladder of `if`s: guard name, assertion, consulted
+/// value, and typed reason belong to one another, and a row that loses one of
+/// them does not build. [`Gate`](aether_bloomery::Gate) still runs them, in
+/// declaration order, stopping at the first failure — the same order the
+/// early-return ladder reported.
+fn check_completeness(completeness: &Completeness) -> Option<(Incompleteness, Refusal)> {
+    let routings = completeness.model_routing_count;
+    let checks: [(&'static str, bool, &'static str, String, Incompleteness); 9] = [
+        (
+            "problem_statement_present",
+            completeness.has_problem_statement,
+            "section",
+            "## Problem statement".to_owned(),
+            Incompleteness::MissingProblemStatement,
+        ),
+        (
+            "design_notes_present",
+            completeness.has_design_notes,
+            "section",
+            "## Design notes".to_owned(),
+            Incompleteness::MissingDesignNotes,
+        ),
+        (
+            "implementation_plan_present",
+            completeness.has_implementation_plan,
+            "section",
+            "## Implementation plan".to_owned(),
+            Incompleteness::MissingImplementationPlan,
+        ),
+        (
+            "referenced_adr_prs_merged",
+            completeness.referenced_adr_prs_merged,
+            "all_merged",
+            completeness.referenced_adr_prs_merged.to_string(),
+            Incompleteness::ReferencedAdrPrUnmerged,
+        ),
+        (
+            "exactly_one_model_routing",
+            routings == 1,
+            "routings",
+            routings.to_string(),
+            Incompleteness::ModelRouting(routings),
+        ),
+        ("not_blocked", !completeness.blocked, "blocked", completeness.blocked.to_string(), Incompleteness::Blocked),
+        (
+            "declared_surface_fresh",
+            completeness.declared_surface_fresh,
+            "fresh_against_base",
+            completeness.declared_surface_fresh.to_string(),
+            Incompleteness::StaleDeclaredSurface,
+        ),
+        (
+            "dependencies_all_closed",
+            completeness.dependencies_all_closed,
+            "all_closed",
+            completeness.dependencies_all_closed.to_string(),
+            Incompleteness::OpenDependency,
+        ),
+        (
+            "umbrella_integrity",
+            completeness.umbrella_integrity,
+            "holds",
+            completeness.umbrella_integrity.to_string(),
+            Incompleteness::UmbrellaIntegrity,
+        ),
+    ];
+
+    let reason = checks.iter().find(|check| !check.1).map(|&(.., reason)| reason)?;
+    let refusal = checks
+        .iter()
+        .fold(aether_bloomery::Gate::new(DRAFT_ADMISSION_GATE), |gate, &(guard, holds, field, ref value, _)| {
+            gate.require(guard, || holds, || vec![Read { field, value: value.clone() }])
+        })
+        .decide(|| ())
+        .into_result()
+        .err()?;
+
+    Some((reason, refusal))
 }
 
 /// The source label the auto-tier approval's supporting observation carries.

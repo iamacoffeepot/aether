@@ -4,11 +4,12 @@
 use std::error::Error;
 use std::fmt;
 
-use aether_bloomery::{Admit, ExecutionStatus, Nonce, WorkHandle};
+use aether_bloomery::{Admit, ExecutionStatus, Nonce, StageVerdict, VerifyFailureSet, WorkHandle};
 use aether_data::wire::to_vec;
 
-use super::admit::{Admission, AdmitDecision, IntakeError, UploadedEvidence, admit_uploaded};
+use super::admit::{Admission, AdmitDecision, IntakeError, IntakeRefusal, UploadedEvidence, admit_uploaded};
 use super::claims::EvidenceClaims;
+use super::dispatch::DispatchRecord;
 use crate::artifacts::ArtifactsCapabilityState;
 use crate::bloomery::executor::{ExecutorPortError, ExecutorShell};
 use crate::bloomery::study::{
@@ -133,6 +134,11 @@ pub fn run_intake_cycle(
                     report.admitted += 1;
                     sink.admit(*admission);
                 }
+                // A scoping run's verdict landed on the commission store's own
+                // ledger and there is nothing to hand the control core
+                // (ADR-0208, #5304). Counted as admitted because it is: the
+                // order was consumed and the verdict reached the coordinator.
+                AdmitDecision::Recorded => report.admitted += 1,
                 AdmitDecision::Refused(refusal) => {
                     tracing::warn!(
                         target: "aether_chassis_bloomery::intake",
@@ -141,11 +147,61 @@ pub fn run_intake_cycle(
                         "attempt evidence refused",
                     );
                     report.refused += 1;
+                    // The lane process has already exited (`Completed` above).
+                    // DigestMismatch leaves the order live so an honest worker
+                    // still in flight can retry; a completed run cannot, and
+                    // waiting for it is the stall this cycle used to sit in
+                    // (#5332). Recover as a machinery fault so the member
+                    // retries or wedges on the sealed budget.
+                    if matches!(refusal, IntakeRefusal::DigestMismatch { .. })
+                        && let Some(admission) = recover_completed_mismatch(store, &upload)?
+                    {
+                        report.admitted += 1;
+                        sink.admit(*admission);
+                    }
                 }
             }
         }
     }
     Ok(report)
+}
+
+/// A completed run whose evidence bound the wrong digest cannot retry that
+/// upload. Admit an executor fault against the order's displayed digest so
+/// the member's machinery series moves instead of waiting forever.
+fn recover_completed_mismatch(
+    store: &mut dyn StoreBackend,
+    refused: &UploadedEvidence,
+) -> Result<Option<Box<Admission>>, CycleError> {
+    let Some(stored) = store.lookup_order(&refused.nonce.0).map_err(|error| CycleError::Intake(error.into()))? else {
+        return Ok(None);
+    };
+    let Some(record) = DispatchRecord::from_stored(&stored) else {
+        return Ok(None);
+    };
+    let fault = UploadedEvidence {
+        nonce: refused.nonce.clone(),
+        subject: record.displayed_digest,
+        verdict: StageVerdict::ExecutorFault,
+        detail: refused.detail,
+        candidate: None,
+        findings: Some("lane bound evidence to a digest the order did not display".into()),
+        failed_verifiers: VerifyFailureSet::EMPTY,
+        cost: None,
+        calls: None,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
+        violating_paths: Vec::new(),
+        surface_request: None,
+        suppression_requests: Vec::new(),
+    };
+    match admit_uploaded(store, &fault).map_err(CycleError::Intake)? {
+        AdmitDecision::Admitted(admission) => Ok(Some(admission)),
+        // A recovery fault against a scoping run has already been recorded on
+        // its ledger; there is no event for the caller to admit.
+        AdmitDecision::Recorded | AdmitDecision::Refused(_) => Ok(None),
+    }
 }
 
 /// Record what one attempt cost, returning the admission when a study row

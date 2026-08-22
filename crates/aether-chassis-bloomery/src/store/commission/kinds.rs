@@ -44,6 +44,15 @@ pub struct WriteScopeRevision {
     /// Canonical [`aether_bloomery::ScopeRevision`] bytes.
     #[serde(with = "aether_data::bytes")]
     pub canonical: Vec<u8>,
+    /// Canonical [`aether_bloomery::ScopeVerifyInput`] bytes — the workpiece's
+    /// own field records projected for the freeze check (ADR-0208).
+    ///
+    /// Empty means the caller had no projection to check, which is what a
+    /// hand-authored revision carries. An encoded input is never empty (its
+    /// schema field alone is four bytes), so empty is unambiguously absent, and
+    /// absent writes no report rather than a clean one.
+    #[serde(with = "aether_data::bytes")]
+    pub scope_verify: Vec<u8>,
 }
 
 /// Reply to [`WriteScopeRevision`].
@@ -84,6 +93,14 @@ pub enum WriteScopeRevisionResult {
     },
     /// The commission is not open.
     NotOpen,
+    /// The workpiece names paths its own declared surface does not cover
+    /// (ADR-0208). Appended past [`Self::NotOpen`] so the earlier variants keep
+    /// their wire discriminants.
+    SurfaceGap {
+        /// Each uncovered path with the record that named it. Never a glob to
+        /// add: proposing the widening is what drives surface inflation.
+        paths: Vec<String>,
+    },
 }
 
 /// Persist an approval whose signature the caller has already verified.
@@ -158,6 +175,13 @@ pub enum LoadCommissionResult {
         current: Option<Vec<u8>>,
         /// Wire-encoded approval statements for the current revision, in insert order.
         approvals: Vec<Vec<u8>>,
+        /// Canonical [`aether_bloomery::ScopeVerifyReport`] bytes for the
+        /// current revision, when one was journaled (ADR-0208). `None` is
+        /// **absent** — no scope-verify evidence exists for these bytes — and
+        /// must never render as a clean report. Trailing append: no reply bytes
+        /// here are content-addressed or signed, so nothing is pinned to the
+        /// old layout.
+        scope_verify: Option<Vec<u8>>,
     },
     /// No commission exists under this workpiece id.
     Missing {

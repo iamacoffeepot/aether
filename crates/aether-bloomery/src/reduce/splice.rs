@@ -207,7 +207,8 @@ mod tests {
     use crate::digest::Digest;
     use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
     use crate::reduce::{
-        BloomRecord, Decision, Decisions, Event, Fact, Outcome, Snapshot, decode_recorded_decisions, reduce,
+        BloomRecord, DECISIONS_SCHEMA, Decision, Decisions, Event, Fact, Outcome, Snapshot, decode_recorded_decisions,
+        reduce,
     };
     use crate::values::{
         BloomDraft, BloomSpec, CandidateRef, ConfigRegistry, Evidence, EvidenceKind, Forecast, MemberDependency,
@@ -319,7 +320,7 @@ mod tests {
         let spec = spec(&[("wp-a", 1), ("wp-b", 2)]);
         let seal =
             event("seal", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges: vec![edge("wp-b", "wp-a")] });
-        let (after_seal, _) = step(&Snapshot::new(digest(0)), &seal);
+        let (after_seal, _) = step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &seal);
         let integrate = event("a-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-a", 1, 10) });
         let (after, decided) = step(&after_seal, &integrate);
 
@@ -372,7 +373,7 @@ mod tests {
         let a_done = event("a-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-a", 1, 10) });
         let b_done = event("b-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-b", 2, 20) });
 
-        let base = Snapshot::new(digest(0));
+        let base = Snapshot::new(digest(0)).with_green_base(digest(0));
         let sealed = reduce(&base, &seal, &ResolvedConfigs::default(), &SpendWindow::default());
         let after_seal = base.apply(&seal, &sealed, &ResolvedConfigs::default());
         let decided_a = reduce(&after_seal, &a_done, &ResolvedConfigs::default(), &SpendWindow::default());
@@ -383,18 +384,19 @@ mod tests {
         let replayed = base
             .apply(
                 &from_bytes(&to_vec(&seal).expect("event encodes")).expect("event decodes"),
-                &decode_recorded_decisions(&to_vec(&sealed).expect("seal encodes"), None).expect("seal decodes"),
+                &decode_recorded_decisions(&to_vec(&sealed).expect("seal encodes"), Some(DECISIONS_SCHEMA))
+                    .expect("seal decodes"),
                 &ResolvedConfigs::default(),
             )
             .apply(
                 &from_bytes(&to_vec(&a_done).expect("event encodes")).expect("event decodes"),
-                &decode_recorded_decisions(&to_vec(&decided_a).expect("integrate a encodes"), None)
+                &decode_recorded_decisions(&to_vec(&decided_a).expect("integrate a encodes"), Some(DECISIONS_SCHEMA))
                     .expect("integrate a decodes"),
                 &ResolvedConfigs::default(),
             )
             .apply(
                 &from_bytes(&to_vec(&b_done).expect("event encodes")).expect("event decodes"),
-                &decode_recorded_decisions(&to_vec(&decided_b).expect("integrate b encodes"), None)
+                &decode_recorded_decisions(&to_vec(&decided_b).expect("integrate b encodes"), Some(DECISIONS_SCHEMA))
                     .expect("integrate b decodes"),
                 &ResolvedConfigs::default(),
             );
@@ -416,7 +418,7 @@ mod tests {
         let spec = spec(&[("wp-a", 1), ("wp-b", 2)]);
         let seal =
             event("seal", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges: vec![edge("wp-b", "wp-a")] });
-        let (snapshot, _) = step(&Snapshot::new(digest(0)), &seal);
+        let (snapshot, _) = step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &seal);
         let (snapshot, _) = step(
             &snapshot,
             &event("a-done", Fact::Integrate { bloom: spec.id(), claim: verified_claim("wp-a", 1, 10, 60) }),
@@ -487,7 +489,7 @@ mod tests {
         let spec = spec(&[("wp-a", 1), ("wp-c", 3), ("wp-b", 2)]);
         let edges = vec![edge("wp-b", "wp-a"), edge("wp-b", "wp-c")];
         let seal = event("seal", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges });
-        let (snapshot, _) = step(&Snapshot::new(digest(0)), &seal);
+        let (snapshot, _) = step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &seal);
         let (snapshot, _) =
             step(&snapshot, &event("a-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-a", 1, 10) }));
         let (after, decided) =
@@ -521,7 +523,7 @@ mod tests {
         let spec = spec(&[("wp-a", 1), ("wp-c", 3), ("wp-b", 2)]);
         let edges = vec![edge("wp-b", "wp-a"), edge("wp-b", "wp-c")];
         let seal = event("seal", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges });
-        let (snapshot, _) = step(&Snapshot::new(digest(0)), &seal);
+        let (snapshot, _) = step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &seal);
         let (snapshot, _) =
             step(&snapshot, &event("a-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-a", 1, 10) }));
         let (snapshot, _) =
@@ -565,7 +567,7 @@ mod tests {
             Fact::SpliceAssembled { bloom: spec.id(), workpiece: wp("wp-b"), tree: digest(40), head: digest(41) },
         );
 
-        let base = Snapshot::new(digest(0));
+        let base = Snapshot::new(digest(0)).with_green_base(digest(0));
         let (after_seal, sealed) = step(&base, &seal);
         let (after_a, decided_a) = step(&after_seal, &a_done);
         let (after_c, decided_c) = step(&after_a, &c_done);
@@ -593,7 +595,7 @@ mod tests {
         let spec = spec(&[("wp-a", 1), ("wp-c", 3), ("wp-b", 2)]);
         let edges = vec![edge("wp-b", "wp-a"), edge("wp-b", "wp-c")];
         let seal = event("seal", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges });
-        let (snapshot, _) = step(&Snapshot::new(digest(0)), &seal);
+        let (snapshot, _) = step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &seal);
         let (snapshot, _) =
             step(&snapshot, &event("a-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-a", 1, 10) }));
         let (snapshot, _) =
@@ -666,7 +668,7 @@ mod tests {
         let spec = spec(&[("wp-a", 1), ("wp-b", 2)]);
         let seal =
             event("seal", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges: vec![edge("wp-b", "wp-a")] });
-        let (after_seal, _) = step(&Snapshot::new(digest(0)), &seal);
+        let (after_seal, _) = step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &seal);
         let after_build = pass_construct(&after_seal, spec.id(), "wp-a", 10, 110, "a-build");
         let integrate = event("a-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-a", 1, 10) });
         let (after, decided) = step(&after_build, &integrate);
@@ -699,7 +701,7 @@ mod tests {
         let spec = spec(&[("wp-a", 1), ("wp-b", 2)]);
         let seal =
             event("seal", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges: vec![edge("wp-b", "wp-a")] });
-        let (after_seal, _) = step(&Snapshot::new(digest(0)), &seal);
+        let (after_seal, _) = step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &seal);
         let after_build = pass_construct(&after_seal, spec.id(), "wp-a", 11, 10, "a-build");
         let integrate = event("a-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-a", 1, 10) });
         let (after, decided) = step(&after_build, &integrate);
@@ -720,7 +722,8 @@ mod tests {
     fn replay_row(snapshot: &Snapshot, event: &Event, decided: &Decisions) -> Snapshot {
         snapshot.apply(
             &from_bytes(&to_vec(event).expect("event encodes")).expect("event decodes"),
-            &decode_recorded_decisions(&to_vec(decided).expect("decisions encode"), None).expect("decisions decode"),
+            &decode_recorded_decisions(&to_vec(decided).expect("decisions encode"), Some(DECISIONS_SCHEMA))
+                .expect("decisions decode"),
             &ResolvedConfigs::default(),
         )
     }
@@ -738,7 +741,7 @@ mod tests {
         let b_build = construct_pass(spec.id(), "wp-b", 20, 120, "b-build");
         let b_done = event("b-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-b", 2, 20) });
 
-        let base = Snapshot::new(digest(0));
+        let base = Snapshot::new(digest(0)).with_green_base(digest(0));
         let (after_seal, sealed) = step(&base, &seal);
         let (after_built_a, built_a) = step(&after_seal, &a_build);
         let (after_a, decided_a) = step(&after_built_a, &a_done);
@@ -771,7 +774,7 @@ mod tests {
         let predecessor = spec(&[("wp-a", 1), ("wp-b", 2), ("wp-c", 3)]);
         let edges = vec![edge("wp-b", "wp-a"), edge("wp-c", "wp-b")];
         let (snapshot, _) = step(
-            &Snapshot::new(digest(0)),
+            &Snapshot::new(digest(0)).with_green_base(digest(0)),
             &event("seal", Fact::GraphSeal { predecessor: None, spec: predecessor.clone(), edges }),
         );
         let snapshot = pass_construct(&snapshot, predecessor.id(), "wp-a", 10, 110, "a-build");
@@ -810,7 +813,7 @@ mod tests {
         let spec = spec(&[("wp-a", 1), ("wp-b", 2)]);
         let seal =
             event("seal", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges: vec![edge("wp-b", "wp-a")] });
-        let (after_seal, _) = step(&Snapshot::new(digest(0)), &seal);
+        let (after_seal, _) = step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &seal);
         let after_build = pass_construct(&after_seal, spec.id(), "wp-a", 10, 110, "a-build");
         let (after_a, _) =
             step(&after_build, &event("a-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-a", 1, 10) }));
@@ -867,7 +870,7 @@ mod tests {
         let predecessor = spec(&[("wp-a", 1), ("wp-b", 2), ("wp-c", 3)]);
         let pred_edges = vec![edge("wp-c", "wp-a"), edge("wp-c", "wp-b")];
         let (snapshot, _) = step(
-            &Snapshot::new(digest(0)),
+            &Snapshot::new(digest(0)).with_green_base(digest(0)),
             &event("seal", Fact::GraphSeal { predecessor: None, spec: predecessor.clone(), edges: pred_edges.clone() }),
         );
         let snapshot = pass_construct(&snapshot, predecessor.id(), "wp-a", 10, 110, "a-build");

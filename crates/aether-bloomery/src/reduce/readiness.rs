@@ -18,13 +18,18 @@
 //! Reconcile (ADR-0189 / ADR-0196).
 
 use alloc::collections::BTreeSet;
+use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::attempt::{DispatchTargets, SealedLine, move_effects};
+use super::boundary::EffectBoundary;
+use super::gate::DISPATCH_MEMBER_GATE;
 use super::splice::{SplicedBase, checkout_from, spliced_base};
 use super::{BloomRecord, BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress};
 use crate::digest::Digest;
 use crate::ids::{BloomId, WorkpieceId};
+use crate::reads;
 use crate::values::{
     BloomSpec, ConfigRegistry, MemberCandidate, MemberDependency, Membership, StageCatalog, VerifyFailureSet,
 };
@@ -45,14 +50,15 @@ pub(super) fn dependencies_resolved<F: Fn(&WorkpieceId) -> bool>(
 
 /// The sealed line a brand-new bloom's entry dispatch runs under. A hold cannot
 /// exist yet — the bloom is what the same decision is creating — so `held` is
-/// always false here.
+/// always false here. `base_proven` is the snapshot's answer at seal time.
 pub(super) fn entry_line<'a>(
     member: &Membership,
     bloom_configs: &ConfigRegistry,
     catalog: &'a StageCatalog,
     base: Digest,
+    base_proven: bool,
 ) -> SealedLine<'a> {
-    SealedLine { configs: member.configs.layered_over(bloom_configs), catalog, base, held: false }
+    SealedLine { configs: member.configs.layered_over(bloom_configs), catalog, base, held: false, base_proven }
 }
 
 /// Seed `member` at the entry stage and dispatch its first construct (or defer
@@ -71,6 +77,7 @@ pub(super) fn construct_entry(bloom: BloomId, member: &Membership, sealed: Seale
             seen_verify_failures: VerifyFailureSet::EMPTY,
             fold_checkpoint: None,
             fold_conflict_evidence: None,
+            reconcile_assembles_base: false,
         },
         DispatchTargets { subject: member.scope_revision, checkout: sealed.base },
         sealed,
@@ -103,11 +110,12 @@ fn splice_join_entry<F: Fn(&WorkpieceId) -> Option<Digest>>(
         seen_verify_failures: VerifyFailureSet::EMPTY,
         fold_checkpoint: None,
         fold_conflict_evidence: None,
+        reconcile_assembles_base: false,
     };
     let advance = Decision::AdvanceStage { bloom, workpiece: member.workpiece.clone(), progress };
     let splice =
         Decision::DispatchSplice { bloom, workpiece: member.workpiece.clone(), base: sealed.base, members, adopt_from };
-    if sealed.held {
+    if sealed.withheld() {
         alloc::vec![advance, Decision::DeferDispatch { bloom, workpiece: member.workpiece.clone() }, splice]
     } else {
         alloc::vec![advance, splice]
@@ -155,10 +163,20 @@ pub(super) fn reduce_splice_assembled(
             catalog: &record.stage_catalog,
             base: head,
             held: record.operator_hold.is_some(),
+            base_proven: record.base_proven,
         },
     )
     .to_vec();
     Decisions { outcome: Outcome::SpliceAssembled { bloom: *bloom, workpiece: workpiece.clone() }, effects }
+}
+
+/// Bloom-wide inputs to [`entry_line`]. Grouped so [`ready_entries`] can take
+/// them as one argument rather than four.
+pub(super) struct ReadyLine<'a> {
+    pub bloom_configs: &'a ConfigRegistry,
+    pub catalog: &'a StageCatalog,
+    pub base: Digest,
+    pub base_proven: bool,
 }
 
 /// Entry dispatches for every member of a newly sealed bloom whose
@@ -172,16 +190,18 @@ pub(super) fn ready_entries<F: Fn(&WorkpieceId) -> bool>(
     members: &[Membership],
     edges: &[MemberDependency],
     resolved: &F,
-    bloom_configs: &ConfigRegistry,
-    catalog: &StageCatalog,
-    base: Digest,
+    line: &ReadyLine<'_>,
 ) -> Vec<Decision> {
     let mut effects = Vec::new();
     for member in members {
         if !dependencies_resolved(resolved, edges, &member.workpiece) {
             continue;
         }
-        effects.extend(construct_entry(bloom, member, entry_line(member, bloom_configs, catalog, base)));
+        effects.extend(construct_entry(
+            bloom,
+            member,
+            entry_line(member, line.bloom_configs, line.catalog, line.base, line.base_proven),
+        ));
     }
     effects
 }
@@ -198,6 +218,7 @@ pub(super) fn successor_entries(
     predecessor: &BloomRecord,
     edges: &[MemberDependency],
     catalog: &StageCatalog,
+    base_proven: bool,
 ) -> (bool, Vec<Decision>) {
     let inherited = |workpiece: &WorkpieceId| {
         predecessor.claims.get(workpiece).is_some_and(|claim| {
@@ -223,14 +244,14 @@ pub(super) fn successor_entries(
             SplicedBase::Ready(digest) => effects.extend(construct_entry(
                 successor_id,
                 member,
-                entry_line(member, successor.configs(), catalog, digest),
+                entry_line(member, successor.configs(), catalog, digest, base_proven),
             )),
             SplicedBase::Join { tips } => {
                 let adopt_from = tips.iter().any(|tip| predecessor.claims.contains_key(tip)).then_some(predecessor_id);
                 effects.extend(splice_join_entry(
                     successor_id,
                     member,
-                    &entry_line(member, successor.configs(), catalog, successor.base()),
+                    &entry_line(member, successor.configs(), catalog, successor.base(), base_proven),
                     &tips,
                     &checkout_of,
                     adopt_from,
@@ -266,39 +287,73 @@ pub(super) fn newly_ready_entries(
     let ids: Vec<WorkpieceId> = record.spec.members().iter().map(|member| member.workpiece.clone()).collect();
     let mut effects = Vec::new();
     for member in record.spec.members() {
-        if member.workpiece == *just_resolved {
-            continue;
-        }
-        if record.claims.contains_key(&member.workpiece)
+        // The member that just resolved, and one already claimed or already
+        // out, are not candidates for *entry* at all — this loop is asking
+        // which members the claim just unblocked. ADR-0206 keeps those as
+        // ordinary control flow: an operator does not ask why a member that is
+        // already running did not start again, and recording an answer for one
+        // would put a refusal on every healthy member of every fold.
+        if member.workpiece == *just_resolved
+            || record.claims.contains_key(&member.workpiece)
             || record.progress.contains_key(&member.workpiece)
-            || record.wedged.contains_key(&member.workpiece)
         {
             continue;
         }
-        if !dependencies_resolved(&resolved, &record.dependencies, &member.workpiece) {
-            continue;
-        }
+        let workpiece = &member.workpiece;
         let sealed = |base: Digest| SealedLine {
             configs: member.configs.layered_over(record.spec.configs()),
             catalog: &record.stage_catalog,
             base,
             held: record.operator_hold.is_some(),
+            base_proven: record.base_proven,
         };
-        match spliced_base(record.spec.base(), &ids, &record.dependencies, &member.workpiece, &checkout_of) {
-            SplicedBase::Ready(digest) => {
-                effects.extend(construct_entry(bloom, member, sealed(digest)));
-            }
-            SplicedBase::Join { tips } => {
-                effects.extend(splice_join_entry(
-                    bloom,
-                    member,
-                    &sealed(record.spec.base()),
-                    &tips,
-                    &checkout_of,
-                    None,
-                ));
-            }
-        }
+        effects.extend(
+            EffectBoundary::new(DISPATCH_MEMBER_GATE, bloom, Some(workpiece.clone()))
+                // A withdrawn member has left the line for good (#5327): it is
+                // owed no entry however its dependencies resolve.
+                .require(
+                    "not_withdrawn",
+                    || !record.withdrawn.contains_key(workpiece),
+                    || {
+                        reads![
+                            withdrawn_by: record
+                                .withdrawn
+                                .get(workpiece)
+                                .map_or_else(String::new, |withdrawal| withdrawal.operator.clone()),
+                        ]
+                    },
+                )
+                .require(
+                    "not_wedged",
+                    || !record.wedged.contains_key(workpiece),
+                    || {
+                        reads![
+                            wedged_at: record
+                                .wedged
+                                .get(workpiece)
+                                .map_or_else(String::new, |wedge| format!("{:?}", wedge.stage)),
+                        ]
+                    },
+                )
+                .require(
+                    "dependencies_resolved",
+                    || dependencies_resolved(&resolved, &record.dependencies, workpiece),
+                    || {
+                        reads![
+                            blocked_by: blocking_ancestor(record, workpiece)
+                                .map_or_else(String::new, |ancestor| ancestor.0),
+                        ]
+                    },
+                )
+                .effects(|| {
+                    match spliced_base(record.spec.base(), &ids, &record.dependencies, workpiece, &checkout_of) {
+                        SplicedBase::Ready(digest) => Vec::from(construct_entry(bloom, member, sealed(digest))),
+                        SplicedBase::Join { tips } => {
+                            splice_join_entry(bloom, member, &sealed(record.spec.base()), &tips, &checkout_of, None)
+                        }
+                    }
+                }),
+        );
     }
     effects
 }
@@ -314,7 +369,12 @@ pub(super) fn newly_ready_entries(
 /// — and a tie (two wedged ancestors, or two unfinished reasons) breaks in
 /// sealed member order so the view is deterministic.
 pub(super) fn blocking_ancestor(record: &BloomRecord, member: &WorkpieceId) -> Option<WorkpieceId> {
-    if record.claims.contains_key(member) || record.progress.contains_key(member) {
+    if record.claims.contains_key(member)
+        || record.progress.contains_key(member)
+        // A withdrawn member is not held out of the line by anything: it has
+        // left it, and `MemberView::withdrawn` says so in its own words.
+        || record.withdrawn.contains_key(member)
+    {
         return None;
     }
 
@@ -324,10 +384,18 @@ pub(super) fn blocking_ancestor(record: &BloomRecord, member: &WorkpieceId) -> O
     }
 
     let mut seen = BTreeSet::new();
+    let mut withdrawn: Option<WorkpieceId> = None;
     let mut wedged: Option<WorkpieceId> = None;
     let mut unfinished: Option<WorkpieceId> = None;
     while let Some(dep) = stack.pop() {
         if !seen.insert(dep) {
+            continue;
+        }
+        // Ranked above a wedge for the reason a wedge is ranked above an
+        // unfinished parent: it is the most terminal reason the subtree is
+        // held, and the only one no retry budget can change (#5327).
+        if record.withdrawn.contains_key(dep) {
+            keep_earlier(record, &mut withdrawn, dep);
             continue;
         }
         if record.wedged.contains_key(dep) {
@@ -347,7 +415,44 @@ pub(super) fn blocking_ancestor(record: &BloomRecord, member: &WorkpieceId) -> O
             stack.extend(next);
         }
     }
-    wedged.or(unfinished)
+    withdrawn.or(wedged).or(unfinished)
+}
+
+/// Every member transitively downstream of `roots` over the declared graph,
+/// paired with the withdrawn ancestor that stranded it, in sealed member
+/// order (#5327).
+///
+/// The set a withdrawal has to decide about: each of these depends — directly
+/// or through a chain — on a member that is leaving, so its construct base
+/// will never exist. Members that already carry a claim are excluded because
+/// their work is finished and no longer needs the ancestor, and members
+/// already withdrawn because they have already left.
+///
+/// Iterative over [`BloomRecord::dependencies`] with a `BTreeSet` seen-guard,
+/// the shape [`blocking_ancestor`] uses — the graph is operator-declared, so
+/// recursion here would put its depth in an operator's hands.
+pub(super) fn dependents_of(record: &BloomRecord, roots: &[WorkpieceId]) -> Vec<(WorkpieceId, WorkpieceId)> {
+    let mut seen: BTreeSet<&WorkpieceId> = roots.iter().collect();
+    let mut frontier: Vec<WorkpieceId> = roots.to_vec();
+    let mut found: Vec<(WorkpieceId, WorkpieceId)> = Vec::new();
+    while let Some(ancestor) = frontier.pop() {
+        for member in record.spec.members() {
+            let workpiece = &member.workpiece;
+            if !record.dependencies.iter().any(|edge| edge.member == *workpiece && edge.depends_on == ancestor) {
+                continue;
+            }
+            if record.claims.contains_key(workpiece) || record.withdrawn.contains_key(workpiece) {
+                continue;
+            }
+            if !seen.insert(workpiece) {
+                continue;
+            }
+            found.push((workpiece.clone(), ancestor.clone()));
+            frontier.push(workpiece.clone());
+        }
+    }
+    found.sort_by_key(|(workpiece, _)| member_index(record, workpiece));
+    found
 }
 
 fn incoming<'a>(record: &'a BloomRecord, member: &'a WorkpieceId) -> impl Iterator<Item = &'a WorkpieceId> {
@@ -374,8 +479,8 @@ mod tests {
     use crate::digest::Digest;
     use crate::ids::{IdempotencyKey, StageId, WorkpieceId};
     use crate::reduce::{
-        BloomRecord, Decision, Decisions, Event, Fact, Outcome, Snapshot, StageProgress, decode_recorded_decisions,
-        reduce,
+        BloomRecord, DECISIONS_SCHEMA, Decision, Decisions, Event, Fact, Outcome, Snapshot, StageProgress,
+        decode_recorded_decisions, reduce,
     };
     use crate::values::{
         BloomDraft, BloomSpec, ConfigRegistry, Evidence, EvidenceKind, MemberDependency, Membership, ResolutionClaim,
@@ -422,7 +527,7 @@ mod tests {
     fn seal_graph(members: &[(&str, u8)], edges: Vec<MemberDependency>) -> (Snapshot, BloomSpec) {
         let spec = spec(members);
         let event = event("seal", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges });
-        (step(&Snapshot::new(digest(0)), &event).0, spec)
+        (step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &event).0, spec)
     }
 
     fn fold_member_order(members: &[(&str, u8)], edges: Vec<MemberDependency>) -> Vec<WorkpieceId> {
@@ -432,7 +537,7 @@ mod tests {
         } else {
             Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges }
         };
-        let (mut snapshot, _) = step(&Snapshot::new(digest(0)), &event("seal", fact));
+        let (mut snapshot, _) = step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &event("seal", fact));
         let mut fold = None;
         for ((name, revision), candidate) in members.iter().zip(10u8..) {
             let integrate = event(
@@ -516,7 +621,7 @@ mod tests {
         let spec = spec(&[("wp-a", 1), ("wp-b", 2)]);
         let edges = vec![edge("wp-b", "wp-a")];
         let seal = event("seal", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges });
-        let (after_seal, sealed) = step(&Snapshot::new(digest(0)), &seal);
+        let (after_seal, sealed) = step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &seal);
 
         assert!(matches!(sealed.outcome, Outcome::Sealed(_)));
         assert_eq!(construct_dispatches(&sealed), vec![WorkpieceId("wp-a".into())]);
@@ -546,7 +651,7 @@ mod tests {
     fn independent_roots_dispatch_at_seal() {
         let spec = spec(&[("wp-a", 1), ("wp-c", 3)]);
         let seal = event("seal", Fact::GraphSeal { predecessor: None, spec, edges: Vec::new() });
-        let (_, sealed) = step(&Snapshot::new(digest(0)), &seal);
+        let (_, sealed) = step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &seal);
         assert_eq!(construct_dispatches(&sealed), vec![WorkpieceId("wp-a".into()), WorkpieceId("wp-c".into())],);
     }
 
@@ -565,7 +670,7 @@ mod tests {
 
         let spec = spec(&[("wp-a", 1), ("wp-b", 2)]);
         let seal = event("seal", Fact::Seal(spec.clone()));
-        let (after, sealed) = step(&Snapshot::new(digest(0)), &seal);
+        let (after, sealed) = step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &seal);
         assert_eq!(
             construct_dispatches(&sealed),
             vec![WorkpieceId("wp-a".into()), WorkpieceId("wp-b".into())],
@@ -589,7 +694,7 @@ mod tests {
 
         let spec = spec(&members);
         let (after_declared, declared_seal) = step(
-            &Snapshot::new(digest(0)),
+            &Snapshot::new(digest(0)).with_green_base(digest(0)),
             &event("seal-declared", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges: declared.clone() }),
         );
         assert_eq!(
@@ -623,16 +728,17 @@ mod tests {
             event("seal", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges: vec![edge("wp-b", "wp-a")] });
         let integrate = event("a-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-a", 1, 10) });
 
-        let base = Snapshot::new(digest(0));
+        let base = Snapshot::new(digest(0)).with_green_base(digest(0));
         let sealed = reduce(&base, &seal, &ResolvedConfigs::default(), &SpendWindow::default());
         let after_seal = base.apply(&seal, &sealed, &ResolvedConfigs::default());
         let integrated = reduce(&after_seal, &integrate, &ResolvedConfigs::default(), &SpendWindow::default());
         let live = after_seal.apply(&integrate, &integrated, &ResolvedConfigs::default());
 
         let replayed_seal: Decisions =
-            decode_recorded_decisions(&to_vec(&sealed).expect("seal encodes"), None).expect("seal decodes");
+            decode_recorded_decisions(&to_vec(&sealed).expect("seal encodes"), Some(DECISIONS_SCHEMA))
+                .expect("seal decodes");
         let replayed_integrate: Decisions =
-            decode_recorded_decisions(&to_vec(&integrated).expect("integrate encodes"), None)
+            decode_recorded_decisions(&to_vec(&integrated).expect("integrate encodes"), Some(DECISIONS_SCHEMA))
                 .expect("integrate decodes");
         let replayed = base
             .apply(
@@ -690,9 +796,22 @@ mod tests {
             !decided.effects.iter().any(|effect| matches!(effect, Decision::DispatchIntegration { .. })),
             "the weave still waits for the unfinished members",
         );
+        // Not `is_empty`: since ADR-0206 an unready member records *why* it did
+        // not enter the line. What must be absent is the entry itself.
+        let owed = newly_ready_entries(record(&after, &spec), spec.id(), &WorkpieceId("wp-c".into()), digest(30));
         assert!(
-            newly_ready_entries(record(&after, &spec), spec.id(), &WorkpieceId("wp-c".into()), digest(30)).is_empty(),
+            !owed
+                .iter()
+                .any(|effect| matches!(effect, Decision::DispatchAttempt { .. } | Decision::AdvanceStage { .. })),
             "resolving C does not start B: B depends on A, not C",
+        );
+        assert!(
+            owed.iter().any(|effect| matches!(
+                effect,
+                Decision::RecordRefusal { workpiece: Some(workpiece), refusal, .. }
+                    if workpiece.0 == "wp-b" && refusal.guard == "dependencies_resolved"
+            )),
+            "and it says so rather than going quiet",
         );
     }
 
@@ -827,7 +946,7 @@ mod tests {
     fn an_inherited_claim_unblocks_a_successor_dependent() {
         let predecessor_spec = spec(&[("wp-a", 1)]);
         let seal = event("seal", Fact::GraphSeal { predecessor: None, spec: predecessor_spec.clone(), edges: vec![] });
-        let (after_seal, _) = step(&Snapshot::new(digest(0)), &seal);
+        let (after_seal, _) = step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &seal);
         let integrate = event("a-done", Fact::Integrate { bloom: predecessor_spec.id(), claim: claim("wp-a", 1, 10) });
         let (after_a, _) = step(&after_seal, &integrate);
 
@@ -856,7 +975,7 @@ mod tests {
     fn an_inherited_join_dispatches_splice_for_the_dependent() {
         let predecessor_spec = spec(&[("wp-a", 1), ("wp-c", 3)]);
         let seal = event("seal", Fact::GraphSeal { predecessor: None, spec: predecessor_spec.clone(), edges: vec![] });
-        let (snapshot, _) = step(&Snapshot::new(digest(0)), &seal);
+        let (snapshot, _) = step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &seal);
         let (snapshot, _) = step(
             &snapshot,
             &event("a-done", Fact::Integrate { bloom: predecessor_spec.id(), claim: claim("wp-a", 1, 10) }),

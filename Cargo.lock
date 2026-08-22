@@ -232,6 +232,7 @@ dependencies = [
  "aether-codec",
  "aether-component",
  "aether-data",
+ "aether-harness-bloomery",
  "aether-http",
  "aether-kinds",
  "aether-rpc",
@@ -532,6 +533,25 @@ dependencies = [
  "inventory",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "aether-harness-bloomery"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-bloomery",
+ "aether-bloomery-github",
+ "aether-chassis-bloomery",
+ "aether-codec",
+ "aether-data",
+ "aether-http",
+ "aether-rpc",
+ "aether-substrate",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

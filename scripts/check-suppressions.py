@@ -33,6 +33,11 @@ CFG_TEST_ATTR_RE = re.compile(r"#\[\s*cfg\s*\(\s*test\s*\)\s*\]")
 MOD_ITEM_RE = re.compile(r"(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*")
 TOML_STRING_RE = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:[^\']|\'\')*\'')
 TEST_UNWRAP_LINT = "clippy::unwrap_used"
+# A lane states its request on the suppression line itself (ADR-0193), so the
+# request and the thing it describes move together and there is no manifest to
+# reconcile. Read off the finding's raw source, which is why `sanitize_rust`
+# masking comments in the parallel token view does not reach it.
+REQUEST_RE = re.compile(r"(?://|#)\s*aether-suppression-request:\s*(\S.*?)\s*$")
 
 
 class OperationalError(RuntimeError):
@@ -50,6 +55,11 @@ EXIT_OPERATIONAL = 2
 # The stated --base is not a commit this tree can name. A host-input
 # refusal, never a scan against a guessed substitute (#5033).
 EXIT_UNRESOLVABLE_BASE = 3
+# Every printed suppression carries a request marker with a non-empty reason
+# (ADR-0193). The scan found something and refuses to judge it: granting is the
+# reviewer's, so the lane defers rather than blaming the candidate. Not 3, which
+# #5033 already spent on the unresolvable-base refusal.
+EXIT_REQUESTED = 4
 
 
 @dataclass(frozen=True, order=True)
@@ -61,6 +71,17 @@ class Suppression:
 
     def render(self) -> str:
         return f"{self.path}:{self.line} — {self.token} — {self.source.rstrip()}"
+
+    def request(self) -> str | None:
+        """The reason this suppression states for itself, or None if it states none.
+
+        Derived rather than stored so every construction site above is
+        unchanged: the marker is part of the raw added line, and `source` is
+        that line.  A `.jscpd.json` member can carry no comment at all, so a
+        JSON suppression is never requestable and refuses as it always has.
+        """
+        match = REQUEST_RE.search(self.source)
+        return match.group(1) if match else None
 
 
 @dataclass
@@ -807,6 +828,16 @@ query SuppressionSignoff($owner: String!, $name: String!, $number: Int!) {
     )
 
 
+def every_finding_requested(findings: list[Suppression]) -> bool:
+    """Whether every printed finding states a request with a non-empty reason.
+
+    All of them, deliberately (ADR-0193): one unrequested finding among
+    requested ones keeps the whole run at EXIT_FINDINGS, so a request beside a
+    bare `#[allow]` cannot smuggle its neighbour through.
+    """
+    return all(finding.request() for finding in findings)
+
+
 def arguments(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", default="origin/main", help="base ref; its merge base with --head is scanned")
@@ -825,7 +856,7 @@ def main(argv: list[str] | None = None) -> int:
         if not findings:
             return 0
         if args.pull_request is None:
-            return EXIT_FINDINGS
+            return EXIT_REQUESTED if every_finding_requested(findings) else EXIT_FINDINGS
         if not args.repository:
             raise OperationalError("--repository or GITHUB_REPOSITORY is required with --pull-request")
         token = os.environ.get("GITHUB_TOKEN")
