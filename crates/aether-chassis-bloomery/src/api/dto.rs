@@ -331,6 +331,35 @@ pub struct WithdrawRequest {
     pub idempotency_key: Option<String>,
 }
 
+/// `POST /blooms/{id}/members/{workpiece}/retry` body — re-dispatch one member's
+/// current stage on the candidate it already holds (#5423).
+///
+/// The operator states the stage and the subject it read them off the view at,
+/// and the reducer refuses both if the member has moved since: a retry aimed
+/// from a stale read must not spend a machinery roll on a stage the member is no
+/// longer sitting at, or bind a fault to a candidate it no longer holds.
+///
+/// Unauthenticated on the host-local bind like every other bloom operator route,
+/// and gated by the same mandatory non-blank `reason` + `operator`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryRequest {
+    /// The stage to re-dispatch — the member's current cursor stage. A mismatch
+    /// is refused rather than applied to wherever the member actually is.
+    pub stage: StageId,
+    /// The subject the retry binds its fault evidence to: the member's candidate
+    /// tree, or its scope revision when it holds no candidate yet.
+    pub subject: Digest,
+    /// Why this stage is being run again, in the operator's own words. Required
+    /// and non-blank; a blank one is `422`.
+    pub reason: String,
+    /// Who is deciding. Recorded as the decider; required and non-blank.
+    pub operator: String,
+    /// Override the admit idempotency key; defaults to the retry's own content,
+    /// so a resend is a duplicate rather than a second roll.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
 /// The reply to a write route: the reducer outcome the admitted event resolved
 /// to (decoded from the control core's wire bytes).
 #[derive(Debug, Clone, Serialize, Deserialize)]

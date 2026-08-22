@@ -557,6 +557,23 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, routed)
     }
 
+    /// `POST /blooms/{id}/members/{workpiece}/retry` — run the member's current
+    /// stage again on the candidate it already holds (#5423). No new revision and
+    /// no supersede: the retry rides the member's machinery roll budget, which is
+    /// where a stage that did not judge its subject belongs.
+    #[http::route(Post, "/blooms/{id}/members/{workpiece}/retry")]
+    fn on_retry(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+        workpiece: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let workpiece = workpiece.0;
+        let routed = ApiCapabilityState::retry(&id, &workpiece, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
     /// `POST /blooms/{id}/hold` — freeze the bloom's dispatch — member laps and
     /// the two aggregate gates — while the laps already running finish and
     /// journal normally (#4976 / #5100).

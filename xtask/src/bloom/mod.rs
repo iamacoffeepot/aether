@@ -114,6 +114,8 @@ enum BloomCommand {
     Amend(AmendArgs),
     /// Take one member out of a walking bloom without superseding it (#5327).
     Withdraw(WithdrawArgs),
+    /// Run one member's current stage again on the candidate it already holds.
+    Retry(RetryArgs),
     /// Retire an open commission whose work landed outside its bloom.
     Cancel(CancelArgs),
 }
@@ -139,6 +141,30 @@ struct WithdrawArgs {
     /// withdrawal that would strand a dependent is refused, naming them.
     #[arg(long)]
     cascade: bool,
+}
+
+#[derive(Args, Debug)]
+struct RetryArgs {
+    /// The bloom the member belongs to (64 hex characters).
+    #[arg(value_parser = plan::parse_bloom_id)]
+    bloom_id: String,
+
+    /// The member to re-dispatch.
+    workpiece: String,
+
+    /// The stage to run again. Defaults to wherever the member is sitting;
+    /// naming a different one is refused rather than applied, so a retry aimed
+    /// from a stale read of the board does not spend a roll on the wrong stage.
+    #[arg(long)]
+    stage: Option<String>,
+
+    /// Why, in your own words. Required; a blank one is refused at the door.
+    #[arg(long)]
+    reason: String,
+
+    /// Who is deciding. Recorded as the decider.
+    #[arg(long, default_value = "operator")]
+    operator: String,
 }
 
 #[derive(Args, Debug)]
@@ -300,6 +326,7 @@ fn run_on_with_policy(endpoint: &Endpoint, command: &BloomCommand, approval_poli
         BloomCommand::Upgrade(args) => upgrade::run(&client, args),
         BloomCommand::Amend(args) => amend::run(&client, args, approval_policy),
         BloomCommand::Withdraw(args) => run_withdraw(&client, args),
+        BloomCommand::Retry(args) => run_retry(&client, args),
         BloomCommand::Cancel(args) => run_cancel(&client, args),
     }
 }
@@ -316,6 +343,49 @@ fn run_withdraw(client: &Client<'_>, args: &WithdrawArgs) -> Result<String> {
     let request =
         dto::WithdrawRequest { reason: args.reason.clone(), operator: args.operator.clone(), cascade: args.cascade };
     Ok(render_outcome(&client.withdraw(&args.bloom_id, &args.workpiece, &request)?.outcome))
+}
+
+/// Re-dispatch one member's current stage on the candidate it already holds
+/// (#5423) — the read-first shape `run_withdraw` uses, plus the two facts the
+/// retry has to name.
+///
+/// The stage and the subject come off the board rather than out of the
+/// operator's head: the coordinator refuses a retry that names either wrongly,
+/// and reconstructing them by hand is how an operator spends a machinery roll on
+/// a member that has already moved on. A named `--stage` is checked against the
+/// cursor here so the refusal reads as a stale board rather than as a rejected
+/// fact.
+fn run_retry(client: &Client<'_>, args: &RetryArgs) -> Result<String> {
+    let view = client.view()?;
+    let bloom = bloom_in(&view, &args.bloom_id)?;
+    let member = bloom
+        .members
+        .iter()
+        .find(|member| member.workpiece == args.workpiece)
+        .with_context(|| format!("bloom {} has no member {}", args.bloom_id, args.workpiece))?;
+    let cursor = member
+        .cursor
+        .as_ref()
+        .with_context(|| format!("{} has never entered the line, so it has no stage to run again", args.workpiece))?;
+    if let Some(named) = &args.stage
+        && !named.eq_ignore_ascii_case(&cursor.stage)
+    {
+        bail!("{} is at {}, not {named}", args.workpiece, cursor.stage);
+    }
+    if args.reason.trim().is_empty() {
+        bail!("retry reason is required");
+    }
+
+    // The subject the fault binds to: the candidate the member is carrying, or
+    // the scope revision it was admitted at when it is carrying none.
+    let subject = cursor.candidate.as_ref().map_or(member.scope_revision, |candidate| candidate.tree);
+    let request = dto::RetryRequest {
+        stage: cursor.stage.clone(),
+        subject,
+        reason: args.reason.clone(),
+        operator: args.operator.clone(),
+    };
+    Ok(render_outcome(&client.retry(&args.bloom_id, &args.workpiece, &request)?.outcome))
 }
 
 /// Cancel one commission, naming an unknown or already-closed workpiece locally

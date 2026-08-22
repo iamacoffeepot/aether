@@ -32,6 +32,7 @@ fn member(awaiting: Option<AwaitingSurfaceView>) -> MemberView {
         scope_revision: digest(1),
         awaiting_surface: awaiting,
         withdrawn: None,
+        cursor: None,
     }
 }
 

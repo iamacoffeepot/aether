@@ -70,6 +70,7 @@ mod tests {
                         scope_revision: digest(7),
                         awaiting_surface: None,
                         withdrawn: None,
+                        cursor: None,
                     }],
                 },
                 BloomView {
@@ -81,6 +82,7 @@ mod tests {
                         scope_revision: digest(7),
                         awaiting_surface: None,
                         withdrawn: None,
+                        cursor: None,
                     }],
                 },
             ],
