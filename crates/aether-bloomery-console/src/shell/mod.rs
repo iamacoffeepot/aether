@@ -152,6 +152,13 @@ impl Shell {
             (ResourceKey::Transcript(query), Ok(_)) => {
                 self.store.apply_transcript(query, Err("transcript lane returned a non-transcript body".to_owned()));
             }
+            (ResourceKey::Prompt(query), Ok(ResourceBody::Prompt(page))) => {
+                self.store.apply_prompt(query, Ok(page));
+            }
+            (ResourceKey::Prompt(query), Err(error)) => self.store.apply_prompt(query, Err(error)),
+            (ResourceKey::Prompt(query), Ok(_)) => {
+                self.store.apply_prompt(query, Err("prompt lane returned a non-prompt body".to_owned()));
+            }
             (ResourceKey::MetricsSummary, Ok(ResourceBody::Summary(value))) => self.store.apply_summary(Ok(value)),
             (ResourceKey::MetricsSummary, Err(error)) => self.store.apply_summary(Err(error)),
             (ResourceKey::MetricsSummary, Ok(_)) => {

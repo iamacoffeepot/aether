@@ -43,7 +43,9 @@ pub enum Screen {
     Journal(Journal),
     Record(Record),
     Artifact(Artifact),
-    Transcript(Transcript),
+    /// Boxed: the transcript carries two paged line buffers, so inlining it
+    /// would size every pushed frame after the largest one.
+    Transcript(Box<Transcript>),
     Timeline(Timeline),
     Days(Days),
     Cost(Breakdown),
@@ -67,7 +69,7 @@ impl Screen {
         match nav {
             Nav::Focus(Focus::Record { sequence }) => Self::Record(Record::new(sequence)),
             Nav::Focus(Focus::Artifact { digest }) => Self::Artifact(Artifact::new(digest)),
-            Nav::Focus(Focus::Transcript { nonce }) => Self::Transcript(Transcript::new(nonce)),
+            Nav::Focus(Focus::Transcript { nonce }) => Self::Transcript(Box::new(Transcript::new(nonce))),
             Nav::Focus(Focus::Dispatch { bloom, workpiece }) => Self::DispatchList(DispatchList::new(bloom, workpiece)),
             Nav::Focus(Focus::Workpiece { id }) => Self::Workpiece(Workpiece::new(id)),
             Nav::Focus(focus) => Self::Detail(Detail::new(focus)),
