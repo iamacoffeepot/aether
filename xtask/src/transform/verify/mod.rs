@@ -916,6 +916,56 @@ fn operational_failure_notice(id: &str, invocation: &VerifyInvocation, code: Opt
     )
 }
 
+/// The exact phrases a toolchain child uses to report that it died rather than
+/// judged — the whole basis for reading an arm's failure as the host's.
+///
+/// Three, each one a specific program's own wording, because the scan runs over
+/// captured build output and a looser pattern would read a test's own stdout as
+/// a host condition:
+///
+/// - `terminated with signal` is what `rustc` prints when the linker it forked
+///   was killed (`ld terminated with signal 7 [Bus error]`, dispatch-2366).
+/// - `(signal: ` is what cargo appends when `rustc` itself was killed
+///   (`could not compile … (signal: 9, SIGKILL: kill)`) — the out-of-memory
+///   shape.
+/// - `No space left on device` is ENOSPC from any of them.
+///
+/// A false positive here costs a retry on another slot; a false negative costs
+/// a paid repair lap against a candidate nobody read, and then the repeated
+/// identity that wedges the member. The scan is deliberately calibrated toward
+/// the first, which is the direction the exit-code table already fails in.
+const HOST_FAULT_PHRASES: [&str; 3] = ["terminated with signal", "(signal: ", "No space left on device"];
+
+/// The host condition `captured` reports, when it reports one.
+///
+/// The line rather than the phrase: an operator reading the evidence needs to
+/// know which toolchain process died and how, and the phrase alone says
+/// neither.
+fn host_fault_in(captured: &str) -> Option<String> {
+    captured
+        .lines()
+        .find(|line| HOST_FAULT_PHRASES.iter().any(|phrase| line.contains(phrase)))
+        .map(|line| line.trim().to_owned())
+}
+
+/// The line a member's log opens with when a toolchain process inside it died
+/// rather than reporting on the candidate (#5422).
+///
+/// The same work [`operational_failure_notice`] does, for the case its exit-code
+/// reading cannot see: the arm's own program exited with a code it states a
+/// finding with, and the thing that actually happened is one level down — a
+/// linker killed by a signal, a `rustc` killed for memory, a write that ran out
+/// of disk. Read as a finding, that dump is handed to a repair lap, which then
+/// edits working code until a host condition it cannot see stops happening.
+fn host_fault_notice(id: &str, condition: &str) -> String {
+    format!(
+        "error: {id} reported nothing about the candidate — a toolchain process it ran died rather than \
+         finishing: {condition}. That is a host condition, so this run is accounted to {} rather than to \
+         {id}, and no repair lap is dispatched for it.\n",
+        VerifyFailure::Preflight,
+    )
+}
+
 /// One member run's captured output, in the shape the umbrella reads it.
 ///
 /// A struct rather than a [`std::process::Output`] because this is the seam a
@@ -1099,7 +1149,18 @@ fn run_member(
     };
 
     let code = output.code;
-    let outcome = member_outcome(invocation, derived_pass, code);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Read only against a run that would otherwise be charged to the candidate.
+    // A member already accounted to the host needs no promotion, and a passing
+    // one is not being blamed for anything.
+    let host_fault = (member_outcome(invocation, derived_pass, code) == MemberOutcome::Failed)
+        .then(|| host_fault_in(&rendered).or_else(|| host_fault_in(&stderr)))
+        .flatten();
+    let outcome = if host_fault.is_some() {
+        MemberOutcome::Operational
+    } else {
+        member_outcome(invocation, derived_pass, code)
+    };
 
     let mut log = Vec::new();
     // The narrowing states itself where the reader is: a log that names a
@@ -1111,8 +1172,12 @@ fn run_member(
     if let Some(notice) = unjudged {
         log.extend_from_slice(notice.as_bytes());
     }
-    if outcome == MemberOutcome::Operational {
-        log.extend_from_slice(operational_failure_notice(id, invocation, code).as_bytes());
+    match &host_fault {
+        Some(condition) => log.extend_from_slice(host_fault_notice(id, condition).as_bytes()),
+        None if outcome == MemberOutcome::Operational => {
+            log.extend_from_slice(operational_failure_notice(id, invocation, code).as_bytes());
+        }
+        None => {}
     }
     log.extend_from_slice(rendered.as_bytes());
     log.extend_from_slice(&output.stderr);
@@ -1435,14 +1500,15 @@ fn effective_exit_code(passed: bool, exit_code: Option<i32>) -> i32 {
 }
 
 /// Run `invocation`'s prepare step, when it has one. `None` is a member clear to
-/// run; `Some((log, exit_code))` is a prepare that failed, already framed as the
-/// member's log by [`prepare_failure_log`].
+/// run; `Some((log, exit_code, outcome))` is a prepare that failed, already framed
+/// as the member's log by [`prepare_failure_log`] and already charged to the
+/// candidate or to the host.
 fn run_prepare(
     id: &str,
     invocation: &VerifyInvocation,
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
-) -> Result<Option<(String, i32)>> {
+) -> Result<PrepareFailure> {
     let Some(prepare) = invocation.prepare else {
         return Ok(None);
     };
@@ -1464,7 +1530,20 @@ fn run_prepare(
 
     let mut captured = String::from_utf8_lossy(&output.stdout).into_owned();
     captured.push_str(&String::from_utf8_lossy(&stderr));
-    Ok(Some((prepare_failure_log(id, prepare, &captured), output.status.code().unwrap_or(1))))
+    // The pre-build is a cargo invocation like any other, and it fails the same
+    // two ways: the candidate broke its own build, or a toolchain process under
+    // it died. The second is the host's — including when the prepare child
+    // itself was signalled, which leaves no exit code at all.
+    let condition = output
+        .status
+        .code()
+        .map_or_else(|| Some(String::from("the pre-build was terminated by a signal")), |_| host_fault_in(&captured));
+    let framed = prepare_failure_log(id, prepare, &captured);
+    let (outcome, log) = match &condition {
+        Some(condition) => (MemberOutcome::Operational, format!("{}{framed}", host_fault_notice(id, condition))),
+        None => (MemberOutcome::Failed, framed),
+    };
+    Ok(Some((log, output.status.code().unwrap_or(1), outcome)))
 }
 
 /// Wall-clock milliseconds since `started`, saturating at `u64::MAX` so a
@@ -1473,8 +1552,9 @@ fn elapsed_millis(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-/// A failed prepare's framed member log and exit code. `None` is clear to run.
-type PrepareFailure = Option<(String, i32)>;
+/// A failed prepare's framed member log, exit code, and which side it is
+/// charged to. `None` is clear to run.
+type PrepareFailure = Option<(String, i32, MemberOutcome)>;
 
 /// Prepare-step result plus its own wall-clock share.
 ///
@@ -1994,10 +2074,15 @@ fn check_pass(args: &TransformArgs, logs: &Path, full: bool) -> Result<CheckPass
         // it is already covered — the preflight checks the cross-target the
         // pre-build needs — so what is left is the candidate breaking its own
         // build.
+        //
+        // Unless the pre-build did not fail so much as die (#5422): a linker
+        // killed by a signal, a `rustc` killed for memory, a write out of disk.
+        // The candidate cannot repair any of those, and `run_prepare` charges
+        // them to the host instead.
         let gate_started = Instant::now();
         let (prepare_failure, prepare_millis) = run_timed_prepare(id, &invocation, cache.as_ref(), &peak)?;
         let run = match prepare_failure {
-            Some((log, code)) => MemberRun::plain(id, MemberOutcome::Failed, log.into_bytes(), code),
+            Some((log, code, outcome)) => MemberRun::plain(id, outcome, log.into_bytes(), code),
             None => run_member_discriminated(
                 id,
                 &invocation,
@@ -2036,10 +2121,10 @@ mod tests {
     use super::{
         BASE_SET_SUBJECT, Captured, MAX_FINDING_LINES, MemberOutcome, MemberRun, MemberRunner, SUPPRESS_MEMBER, Scope,
         VERIFY_BASE, VERIFY_CHECK, VerifyInvocation, clippy_verdict, closure, distil_diagnostics, effective_exit_code,
-        environment_observations, failed_verifiers, member_diff_base, member_outcome, member_scope_notice,
-        operational_failure_notice, package_name, preflight_tools, prepare_failure_log, render_diagnostics,
-        required_targets, required_tools, run_member_discriminated, run_timed_prepare, umbrella_status,
-        unjudged_notice, verify_check_members, verify_command, verify_findings, workflow,
+        environment_observations, failed_verifiers, host_fault_in, member_diff_base, member_outcome,
+        member_scope_notice, operational_failure_notice, package_name, preflight_tools, prepare_failure_log,
+        render_diagnostics, required_targets, required_tools, run_member, run_member_discriminated, run_timed_prepare,
+        umbrella_status, unjudged_notice, verify_check_members, verify_command, verify_findings, workflow,
     };
     use std::iter;
 
@@ -2159,6 +2244,52 @@ mod tests {
     fn passing_run() -> String {
         " Starting 900 tests across 312 binaries\n     Summary [  71.2s] 900 tests run: 900 passed, 0 skipped\n"
             .to_owned()
+    }
+
+    #[test]
+    fn a_toolchain_process_killed_mid_arm_is_charged_to_the_host_not_the_candidate() {
+        // Acceptance for #5422. In dispatch-2366 the linker `verify.test`'s
+        // pre-build forked died on `ld terminated with signal 7 [Bus error]`;
+        // cargo exited 101, which is a code `verify.test` states findings with,
+        // so the arm was read as a verdict: `status: fail`,
+        // `failed_verifiers: ["verify.test"]`, and the linker dump handed to a
+        // Refine lap as findings for a model to repair. Nothing in that dump is
+        // repairable from inside the candidate.
+        let invocation = verify_command("verify.test").expect("verify.test mapped");
+        let log = "error: linking with `cc` failed\n  = note: ld terminated with signal 7 [Bus error]\n";
+        let mut runner = ScriptedRunner::new(&[(log, 101)]);
+
+        let (outcome, rendered, _) =
+            run_member("verify.test", &invocation, &Scope::resolve(None), None, &mut runner).expect("the member runs");
+
+        assert_eq!(outcome, MemberOutcome::Operational, "a linker that died reported nothing about the candidate");
+        assert_eq!(
+            failed_verifiers([("verify.test", outcome)]),
+            VerifyFailureSet::one(VerifyFailure::Preflight),
+            "a preflight-only set is the shape intake raises a host fault from: the member retries on another \
+             slot with no lap charged and no Refine dispatched",
+        );
+        let rendered = String::from_utf8_lossy(&rendered);
+        assert!(rendered.contains("ld terminated with signal 7"), "the evidence names the condition: {rendered}");
+        assert!(rendered.contains("verify.test"), "and the arm it happened in: {rendered}");
+    }
+
+    #[test]
+    fn only_a_toolchain_death_reads_as_a_host_condition() {
+        // Tripwire: this scan runs over captured build output, so a looser
+        // pattern would start reading a failing test's own words as a host
+        // condition and retire real findings as retries. Each phrase kept here
+        // is one program's own wording for "I died"; a candidate defect and a
+        // failing test must both stay the candidate's.
+        assert!(host_fault_in("  = note: ld terminated with signal 7 [Bus error]").is_some());
+        assert!(host_fault_in("error: could not compile `aether-render` (lib) (signal: 9, SIGKILL: kill)").is_some());
+        assert!(host_fault_in("error: failed to write: No space left on device (os error 28)").is_some());
+        assert_eq!(
+            host_fault_in("thread 'test' panicked at crates/somewhere/src/lib.rs:9:9:\nassertion failed"),
+            None,
+            "an ordinary panic is the candidate's",
+        );
+        assert_eq!(host_fault_in(&failing_run(&["aether-render::a_test"])), None, "and so is a failing test");
     }
 
     #[test]

@@ -4,9 +4,9 @@
 //! round-trips through [`NameEvidenceClaims`], so an admitted local run binds
 //! exactly as a wrapper-uploaded one would.
 
-use std::collections::HashMap;
 use std::fmt::{Debug, Write as _};
 use std::fs;
+use std::io::{Error as IoError, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -2252,10 +2252,8 @@ struct ReuseRunner {
     /// A nonce that stays `Running` so its slot stays held — the fixture for
     /// forcing a predecessor into a non-lowest slot.
     hold: Option<String>,
-    /// Direct parents `checkout_parents` reports for a checkout hex.
-    parents: HashMap<String, Vec<String>>,
-    /// When set, `checkout_parents` fails rather than returning a list.
-    fail_parents: bool,
+    /// A nonce whose `start` fails the way a host out of disk fails it.
+    fail_start: Option<String>,
 }
 
 impl ReuseRunner {
@@ -2266,8 +2264,7 @@ impl ReuseRunner {
             session_id: "sess-1".to_owned(),
             reject_resume: None,
             hold: None,
-            parents: HashMap::new(),
-            fail_parents: false,
+            fail_start: None,
         }
     }
 
@@ -2286,13 +2283,8 @@ impl ReuseRunner {
         self
     }
 
-    fn with_parents(mut self, checkout: impl Into<String>, parents: Vec<String>) -> Self {
-        self.parents.insert(checkout.into(), parents);
-        self
-    }
-
-    fn failing_parents(mut self) -> Self {
-        self.fail_parents = true;
+    fn failing_start(mut self, nonce: impl Into<String>) -> Self {
+        self.fail_start = Some(nonce.into());
         self
     }
 }
@@ -2311,6 +2303,9 @@ impl TransformRunner for ReuseRunner {
             worktree: Some(spec.worktree_dir.to_owned()),
             task: spec.task.map(str::to_owned),
         });
+        if self.fail_start.as_deref() == Some(spec.nonce) {
+            return Err(LocalExecutorError::Io(IoError::from(ErrorKind::StorageFull)));
+        }
         if spec.resume.is_some() && spec.resume == self.reject_resume.as_deref() {
             return Err(LocalExecutorError::Worktree(format!(
                 "No conversation found with session ID {}",
@@ -2346,13 +2341,87 @@ impl TransformRunner for ReuseRunner {
     ) -> Result<Option<CapturedObjects>, LocalExecutorError> {
         Ok(Some(canned_capture()))
     }
+}
 
-    fn checkout_parents(&self, checkout_hex: &str) -> Result<Vec<String>, LocalExecutorError> {
-        if self.fail_parents {
-            return Err(LocalExecutorError::Worktree("checkout parents unreadable".to_owned()));
-        }
-        Ok(self.parents.get(checkout_hex).cloned().unwrap_or_default())
-    }
+#[test]
+fn a_queued_dispatch_whose_launch_fails_becomes_a_host_fault_rather_than_a_deadline() {
+    // Acceptance for #5422: a dispatch that was waiting on the lane ceiling and
+    // then failed to launch is a host fault the member re-dispatches from, not
+    // an order left outstanding until its deadline.
+    //
+    // Pre-fix the failure was logged and the pending run dropped: on 2026-08-21
+    // eight queued constructs failed to start on `No space left on device` and
+    // their members sat idle for four hours with lane slots free. The registry
+    // then held nothing for the nonce, so the intake's next `stream_evidence`
+    // answered `NoRunForNonce` — no verdict, no fault, nothing to re-dispatch on.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let holder = test_nonce("hold");
+    let queued = test_nonce("queued");
+    let exec = LocalExecutor::new(
+        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(holder.clone()).failing_start(queued.clone())),
+        correspondence(),
+        base.path(),
+    )
+    .with_max_concurrent_lanes(1);
+
+    // The holder occupies the only lane, so the second dispatch queues rather
+    // than failing in front of its caller — the shape the incident had.
+    let holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
+    let waiting = exec.submit(&construct_order(digest(5), &queued)).unwrap();
+    exec.cancel(&holding).unwrap();
+
+    let refs = exec.stream_evidence(&waiting).expect("a failed launch leaves a run to read, not an unknown nonce");
+    let claimed = NameEvidenceClaims
+        .claim_for(refs.first().expect("one synthesized fault"))
+        .expect("the synthesized fault is a well-formed attempt claim");
+    assert_eq!(claimed.verdict, StageVerdict::ExecutorFault, "a launch that never happened judged nothing");
+    assert!(claimed.failed_verifiers.is_empty(), "and named no verifier, so no repair lap is dispatched for it");
+    assert!(
+        exec.lane_occupancy().slots.is_empty(),
+        "the failed launch hands its lane slot back rather than shrinking the ceiling",
+    );
+}
+
+#[test]
+fn a_session_another_member_already_holds_is_not_filed_as_this_ones() {
+    // Acceptance for #5427: an edge resume hands a dependent the predecessor's
+    // conversation to read and forks it, so what the dependent deposits is its
+    // own handle. When the fork does not happen the lap comes back carrying the
+    // predecessor's id — and filing it would leave two members resuming one
+    // thread, which is how dispatch-2321's construct opened with dispatch-2318's
+    // whole history loaded (188k of context against 79k).
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let store_dir = store_dir();
+    let first = test_nonce("A-construct");
+    let second = test_nonce("B-construct");
+    // Both laps report the same session id — the runner's fixed handle stands in
+    // for the un-forked resume that returns the predecessor's.
+    let exec = LocalExecutor::new(Arc::new(ReuseRunner::new(Arc::clone(&seen))), correspondence(), base.path())
+        .with_message_store(member_store(
+            &store_dir,
+            &[
+                member_order_at(&first, "issue-A", StageId::Construct),
+                member_order_at(&second, "issue-B", StageId::Construct),
+            ],
+        ));
+
+    exec.stream_evidence(&exec.submit(&claude_order(digest(5), &first, "issue-A")).unwrap()).unwrap();
+    exec.stream_evidence(&exec.submit(&claude_order(digest(5), &second, "issue-B")).unwrap()).unwrap();
+
+    let mut store = SqliteStore::open(store_dir.path().join("bloomery.sqlite").to_str().unwrap()).unwrap();
+    let bloom = vec![1; 32];
+    assert_eq!(
+        store.lookup_construct_session(&bloom, "issue-A").unwrap().map(|(id, _)| id).as_deref(),
+        Some("sess-1"),
+        "the member that opened the conversation keeps it",
+    );
+    assert_eq!(
+        store.lookup_construct_session(&bloom, "issue-B").unwrap(),
+        None,
+        "and the second member files nothing rather than claiming the same thread",
+    );
 }
 
 #[test]

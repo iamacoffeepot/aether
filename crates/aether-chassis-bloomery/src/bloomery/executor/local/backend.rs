@@ -158,6 +158,30 @@ struct Run {
     diff_base_hex: Option<String>,
 }
 
+/// What a failed queued start has to keep in order to be recorded as a host
+/// fault: everything the tracked [`Run`] it becomes needs, taken before the
+/// [`PendingRun`] is moved into the start that consumed it.
+struct FailedStart {
+    nonce: String,
+    evidence_dir: PathBuf,
+    subject: Digest,
+    gates: LaneGates,
+}
+
+/// The stand-in process of a dispatch that never launched: terminal from the
+/// first poll, and unkillable because there is nothing to kill.
+struct UnlaunchedRun;
+
+impl RunProcess for UnlaunchedRun {
+    fn poll(&mut self) -> RunLifecycle {
+        RunLifecycle::Exited { success: false }
+    }
+
+    fn kill(&mut self) -> Result<(), LocalExecutorError> {
+        Ok(())
+    }
+}
+
 /// Snapshot of a tracked run taken under the registry lock so evidence
 /// streaming can drop the mutex before blocking IO.
 struct StreamedRun {
@@ -1138,21 +1162,64 @@ impl LocalExecutor {
     // a slot frees.
     //
     // A queued start that fails has no caller left to refuse it — its dispatch
-    // acked as submitted cycles ago — so it is logged and dropped rather than
-    // retried: the order stays outstanding with no run behind it and resolves
-    // through the reactor's deadline sweep, and a head that fails every time can
-    // never block the lanes queued behind it.
+    // acked as submitted cycles ago — so the failure is recorded as the host
+    // fault it is (#5422) and the member is re-dispatched on the intake's next
+    // poll. Dropping it, which is what this did, left the order outstanding with
+    // no run behind it: on 2026-08-21 eight queued constructs failed to start on
+    // `No space left on device` and their members sat idle for the whole four-hour
+    // deadline with four lane slots free.
+    //
+    // A head that fails every time still cannot block the lanes queued behind
+    // it: the failed start releases its slot before this records anything, and
+    // the loop moves on to the next waiting dispatch.
     fn pump(&self) {
         while let Some((pending, slot, reason)) = self.take_waiting() {
-            let nonce = pending.nonce.clone();
+            let failed = FailedStart {
+                nonce: pending.nonce.clone(),
+                evidence_dir: pending.evidence_dir.clone(),
+                subject: pending.subject,
+                gates: pending.gates,
+            };
             if let Err(error) = self.start_reserved(pending, slot, reason) {
-                tracing::error!(
-                    %nonce,
-                    %error,
-                    "local executor backend: a queued dispatch failed to start; its order will expire at its deadline",
-                );
+                self.record_failed_start(failed, &error);
             }
         }
+    }
+
+    // Stand a dispatch that never launched in the registry as an already-terminal
+    // run, so the next intake poll reads it the way it reads every other run that
+    // left no evidence: a synthesized `ExecutorFault`, a machinery roll, and a
+    // fresh order for the same stage (ADR-0195 §§1–2).
+    //
+    // Nothing is written to disk. The launch failed for a host reason — out of
+    // space is the one that happened — and a recovery path that has to write a
+    // file first is a recovery path that fails for the same reason the dispatch
+    // did. The missing-evidence route needs no file: the run is terminal and its
+    // evidence is unreadable, which is the whole of what it reads.
+    fn record_failed_start(&self, failed: FailedStart, error: &LocalExecutorError) {
+        tracing::error!(
+            nonce = %failed.nonce,
+            %error,
+            "local executor backend: a queued dispatch failed to start; recording a host fault so its member re-dispatches",
+        );
+        let FailedStart { nonce, evidence_dir, subject, gates } = failed;
+        self.lock().runs.insert(
+            nonce,
+            Run {
+                process: Box::new(UnlaunchedRun),
+                // No slot and no checkout: the start released the one it had
+                // reserved, and there is no tree to capture from a run that never
+                // began.
+                slot: None,
+                worktree_dir: None,
+                evidence_dir,
+                subject,
+                gates,
+                reuse: None,
+                affinity: SlotAffinity::readopted(None),
+                diff_base_hex: None,
+            },
+        );
     }
 
     // Take the next waiting dispatch against a free slot, reserving that slot.
