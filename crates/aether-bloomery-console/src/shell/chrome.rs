@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use crate::dto::{SpendQuiesce, ViewDocument};
-use crate::keys::{KeyHint, footer_line, footer_row, overlay_lines};
+use crate::keys::{INLINE_HINTS, KeyHint, MIN_TRAIL_COLUMNS, footer_keys, footer_row, overlay_lines};
 use crate::palette::{self, Role};
 use crate::screen::{Dashboard, QuietLine};
 use crate::store::Cell;
@@ -240,9 +240,8 @@ pub fn pane_block(title: impl Into<String>, focused: bool) -> Block<'static> {
 }
 
 /// The `?` overlay: every hint the current seat advertises, in a bordered pane
-/// centred over the body. The footer keeps two keys inline, so this is what
-/// advertises the rest; it is drawn over the body and dismissed without
-/// disturbing the frame stack.
+/// centred over the body. The footer elides the rare tail of this list when
+/// the row is too narrow; this overlay is how the operator reads the rest.
 #[must_use]
 pub fn keys_overlay(hints: &[KeyHint], area: Rect) -> (Rect, Paragraph<'static>) {
     let lines = overlay_lines(hints);
@@ -264,9 +263,18 @@ pub fn keys_overlay(hints: &[KeyHint], area: Rect) -> (Rect, Paragraph<'static>)
     (rect, Paragraph::new(lines.join("\n")).block(block).style(palette::body()))
 }
 
+/// One footer row: trail on the left, the current screen's keys on the right.
+/// The unelidable tail is applied here; callers pass the screen's set, not
+/// the inline pair.
 #[must_use]
 pub fn footer(trail: &str, hints: &[KeyHint], width: u16) -> Paragraph<'static> {
-    Paragraph::new(footer_row(trail, &footer_line(hints), width as usize)).style(palette::body())
+    let budget = if trail.is_empty() {
+        width as usize
+    } else {
+        (width as usize).saturating_sub(MIN_TRAIL_COLUMNS)
+    };
+    let keys = footer_keys(hints, INLINE_HINTS, budget);
+    Paragraph::new(footer_row(trail, &keys, width as usize)).style(palette::body())
 }
 
 #[cfg(test)]
