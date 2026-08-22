@@ -51,7 +51,7 @@ mod gate;
 mod policy;
 mod statement;
 
-pub use gate::{AdmissionRequest, AdrTouch, Completeness, Decision, Gate, Incompleteness};
+pub use gate::{AdmissionRequest, AdrTouch, Completeness, Decision, Gate, Incompleteness, projection_digest};
 pub use policy::{ApprovalPolicy, PolicyError, Tier, load_policy, parse_policy};
 pub use statement::{StatementRejected, approval_from_statement, precheck_statement, verified_statement_approval};
 
