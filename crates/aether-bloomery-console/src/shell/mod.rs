@@ -272,11 +272,7 @@ impl Shell {
     }
 
     fn handle_artifact(&mut self) -> Outcome {
-        let digest = match self.stack.last() {
-            Some(screen) => screen.digest_under_cursor(),
-            None => self.workspace.board().digest_under_cursor(),
-        };
-        let Some(digest) = digest else {
+        let Some(digest) = self.stack.last().and_then(Screen::openable_digest) else {
             return Outcome::Ignored;
         };
         self.push_nav(Nav::focus(Focus::artifact(digest)));
@@ -300,16 +296,13 @@ impl Shell {
     fn footer_hints(&self) -> Vec<KeyHint> {
         let mut hints = Vec::new();
         if let Some(screen) = self.stack.last() {
-            if screen.digest_under_cursor().is_some() {
+            if screen.openable_digest().is_some() {
                 hints.push(ARTIFACT_HINT);
             }
             hints.extend_from_slice(screen.key_hints());
             return hints;
         }
         hints.extend(self.workspace.key_hints(&self.store));
-        if self.workspace.board().digest_under_cursor().is_some() {
-            hints.push(ARTIFACT_HINT);
-        }
         hints
     }
 }
@@ -552,6 +545,32 @@ mod tests {
         probe.reply(FetchReply { key: ResourceKey::View, outcome: Ok(ResourceBody::View(view)) });
         shell.pump();
         assert_eq!(shell.board().cursor().selected(), Some(&RowId::Bloom { id: digest(1) }));
+    }
+
+    #[test]
+    fn the_artifact_key_is_not_offered_on_a_board_row() {
+        // The plausible bug: a bloom id is a digest, so the footer paints `a`
+        // and the key opens a 404 artifact frame on every board row.
+        let view = ViewDocument {
+            blooms: vec![BloomView { id: digest(1), ..BloomView::default() }],
+            ..ViewDocument::default()
+        };
+        let mut shell = Shell::showing(&view, None);
+        let mut terminal = Terminal::new(TestBackend::new(240, 16)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let text = buffer_text(&terminal);
+        assert!(!text.contains("a artifact"), "artifact hint painted on a board row:\n{text}");
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('a'))), Outcome::Ignored);
+        assert_eq!(shell.stack_depth(), 0);
+    }
+
+    #[test]
+    fn an_open_artifact_does_not_stack_a_copy_of_itself() {
+        // The plausible bug: the artifact screen reports its own digest as
+        // under the cursor, so `a` pushes a second identical frame.
+        let mut shell = Shell::probe(Nav::focus(Focus::artifact(digest(1))));
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('a'))), Outcome::Ignored);
+        assert_eq!(shell.stack_depth(), 1);
     }
 
     #[test]

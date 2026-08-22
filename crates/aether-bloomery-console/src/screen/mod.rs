@@ -188,6 +188,26 @@ impl Screen {
         }
     }
 
+    /// Only a digest the coordinator `put` into `aether.artifacts` is openable.
+    /// A bloom id, git tree, or git commit is an identity that would 404.
+    #[must_use]
+    pub fn openable_digest(&self) -> Option<DigestHex> {
+        match self {
+            Self::Board(_)
+            | Self::Timeline(_)
+            | Self::Artifact(_)
+            | Self::Journal(_)
+            | Self::DispatchList(_)
+            | Self::Record(_)
+            | Self::Transcript(_)
+            | Self::Days(_)
+            | Self::Cost(_) => None,
+            Self::Detail(detail) => detail.openable_digest(),
+            Self::Backlog(backlog) => backlog.digest_under_cursor(),
+            Self::Workpiece(workpiece) => workpiece.openable_digest(),
+        }
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, store: &Store) -> Outcome {
         match self {
             Self::Board(board) => board.handle_key(key, store),

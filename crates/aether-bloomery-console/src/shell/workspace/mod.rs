@@ -51,6 +51,7 @@ impl Workspace {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub fn board(&self) -> &Board {
         &self.board
     }
