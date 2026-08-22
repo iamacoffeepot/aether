@@ -28,10 +28,11 @@ const EVIDENCE_SUFFIX: &str = "-evidence";
 /// The prefix a lane slot's fallback checkout or target directory carries.
 const SLOT_PREFIX: &str = "slot-";
 
-/// The directory under the scratch root holding the per-workpiece lane
-/// checkouts — the same spelling
+/// The directory under the scratch root holding one checkout per reusable
+/// harness session, and the working tree inside each — the same spelling
 /// [`LocalExecutor`](crate::bloomery::LocalExecutor) lays them out under.
-const WORKTREES_DIR: &str = "worktrees";
+const SESSIONS_DIR: &str = "sessions";
+const SESSION_TREE_DIR: &str = "tree";
 
 /// The suffix a lane slot's cargo target directory carries.
 const TARGET_SUFFIX: &str = "-target";
@@ -57,8 +58,8 @@ pub struct JanitorPolicy {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SweepReport {
     /// Checkouts released because the work they belong to is terminal: a
-    /// nonce-keyed one whose owning run is over, and a workpiece-keyed one
-    /// whose member has landed, been withdrawn, or left with its bloom.
+    /// nonce-keyed one whose owning run is over, and a session tree no live
+    /// member's conversation is bound to any more.
     pub worktrees: usize,
     /// Consumed evidence directories past the retention window.
     pub evidence_dirs: usize,
@@ -120,7 +121,7 @@ pub fn sweep(request: &mut SweepRequest<'_>) -> rusqlite::Result<SweepReport> {
     let owners = dispatch_owners(request.store, &outstanding)?;
 
     let worktrees = reclaim_worktrees(request.runner, request.worktree_base, &live, &owners, &snapshot)
-        + reclaim_member_checkouts(request.runner, request.worktree_base, &snapshot);
+        + reclaim_session_trees(request.runner, request.worktree_base, request.store, &snapshot)?;
     let evidence_dirs = reclaim_evidence(request, &live, &owners, &snapshot);
     let refs = request.source.map_or(0, |source| prune_terminal_refs(source, &snapshot));
     let target_dirs = sweep_targets(request.target_base, request.policy.lane_target_budget_bytes, request.lanes);
@@ -222,34 +223,41 @@ fn reclaim_worktrees(
     reclaimed
 }
 
-/// Release the per-workpiece lane checkouts of members that have reached a
-/// terminal state (#5425).
+/// Release the checkout of every harness session no live member is bound to
+/// any more (#5425).
 ///
-/// A member's checkout is created on its first dispatch and reused by every
-/// lane of that member, so nothing inside the member's own life may remove it —
-/// its last lane is not the end of it, and the next stage is entitled to the
-/// tree the previous one left. What ends it is the member itself ending: landed
-/// with its bloom, withdrawn from it, or carried out of the walking set when
-/// the bloom was superseded or cancelled. Everything not in the live set is
-/// reclaimable, which is also what clears the checkouts of a bloom this process
-/// never saw walk.
+/// A session's tree is created when the session is minted and reused by every
+/// launch of that conversation — a member's own retry laps, and a declared-edge
+/// dependent that inherits it — so nothing inside the session's life may remove
+/// it. What ends it is the work ending: every member whose row names this slug
+/// landed with its bloom, was withdrawn from it, or left with it when the bloom
+/// was superseded or cancelled. Everything the live set does not name is
+/// reclaimable, which also clears the trees of a bloom this process never saw
+/// walk.
 ///
-/// The candidates are the repository's *registered* worktrees, filtered to
-/// children of `<base>/worktrees`, for the reason
-/// [`reclaim_worktrees`] filters to children of the base: the scratch root is a
-/// configured path, and a registration is the only positive proof a directory
-/// under it is one of ours.
+/// The candidates are the repository's *registered* worktrees, filtered to the
+/// `sessions/<slug>/tree` shape, for the reason [`reclaim_worktrees`] filters to
+/// children of the base: the scratch root is a configured path, and a
+/// registration is the only positive proof a directory under it is one of ours.
 ///
-/// The member's compiled artifacts inside each slot target are deliberately
-/// *not* chased here. Cargo names its fingerprint and incremental directories
-/// by a metadata hash this process cannot derive from the source path, and a
+/// The session's compiled artifacts inside each slot target are deliberately
+/// not chased. Cargo names its fingerprint and incremental directories by a
+/// metadata hash this process cannot derive from a source path, and a
 /// hand-removal of part of a target directory is not an operation cargo
 /// supports — a half-removed fingerprint set fails the next build in ways that
-/// read as a regression in the candidate. What bounds that growth instead is
-/// the budget eviction below, which takes a whole target out atomically.
-fn reclaim_member_checkouts(runner: &dyn TransformRunner, worktree_base: &Path, snapshot: &Snapshot) -> usize {
-    let Ok(base) = fs::canonicalize(worktree_base.join(WORKTREES_DIR)) else {
-        return 0;
+/// read as a regression in the candidate. What bounds that growth is the budget
+/// eviction below, which takes a whole target out atomically.
+///
+/// # Errors
+/// The store could not be read for the live members' slugs.
+fn reclaim_session_trees(
+    runner: &dyn TransformRunner,
+    worktree_base: &Path,
+    store: &mut dyn StoreBackend,
+    snapshot: &Snapshot,
+) -> rusqlite::Result<usize> {
+    let Ok(base) = fs::canonicalize(worktree_base.join(SESSIONS_DIR)) else {
+        return Ok(0);
     };
     let registered = match runner.registered_worktrees() {
         Ok(registered) => registered,
@@ -257,51 +265,59 @@ fn reclaim_member_checkouts(runner: &dyn TransformRunner, worktree_base: &Path, 
             tracing::warn!(
                 target: "aether_chassis_bloomery::janitor",
                 %error,
-                "janitor: worktree registrations unreadable; terminal member checkouts not reclaimed",
+                "janitor: worktree registrations unreadable; terminal session trees not reclaimed",
             );
-            return 0;
+            return Ok(0);
         }
     };
-    let live = live_workpieces(snapshot);
+    let live = live_session_slugs(store, snapshot)?;
 
     let mut reclaimed = 0;
     for worktree in registered {
-        let Some(workpiece) = child_name_of(&base, &worktree) else {
+        let Some(slug) = session_slug_of(&base, &worktree) else {
             continue;
         };
-        if live.contains(workpiece.as_str()) {
+        if live.contains(slug.as_str()) {
             continue;
         }
         tracing::info!(
             target: "aether_chassis_bloomery::janitor",
-            %workpiece,
+            %slug,
             worktree = %worktree.display(),
-            "janitor: reclaiming the lane checkout of a member that has reached a terminal state",
+            "janitor: reclaiming the checkout of a session no live member is bound to",
         );
         if reclaim_checkout(runner, &worktree) {
             reclaimed += 1;
         }
     }
-    reclaimed
+    Ok(reclaimed)
 }
 
-/// Every workpiece still entitled to its checkout: a member of a bloom that is
-/// active and unlanded, and not itself withdrawn from it.
-fn live_workpieces(snapshot: &Snapshot) -> HashSet<String> {
-    snapshot
-        .blooms
-        .values()
-        .filter(|record| is_active_unlanded(record.status))
-        .flat_map(|record| {
-            record
-                .spec
-                .members()
-                .iter()
-                .map(|member| &member.workpiece)
-                .filter(|workpiece| !record.withdrawn.contains_key(*workpiece))
-                .map(|workpiece| workpiece.0.clone())
-        })
-        .collect()
+/// The slug a registered worktree belongs to, when it is one of ours: exactly
+/// `<base>/<slug>/tree`, both sides canonicalized.
+fn session_slug_of(base: &Path, worktree: &Path) -> Option<String> {
+    if worktree.file_name()?.to_str()? != SESSION_TREE_DIR {
+        return None;
+    }
+    child_name_of(base, worktree.parent()?)
+}
+
+/// Every session slug still entitled to its tree: one named by a member of a
+/// bloom that is active and unlanded, and not itself withdrawn from it.
+fn live_session_slugs(store: &mut dyn StoreBackend, snapshot: &Snapshot) -> rusqlite::Result<HashSet<String>> {
+    let mut live = HashSet::new();
+    for record in snapshot.blooms.values().filter(|record| is_active_unlanded(record.status)) {
+        let bloom = record.spec.id();
+        for member in record.spec.members() {
+            if record.withdrawn.contains_key(&member.workpiece) {
+                continue;
+            }
+            if let Some(slug) = store.lookup_session_slug(bloom.0.as_bytes(), &member.workpiece.0)? {
+                live.insert(slug);
+            }
+        }
+    }
+    Ok(live)
 }
 
 fn reclaim_evidence(

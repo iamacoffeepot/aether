@@ -53,6 +53,71 @@ impl WorkpieceId {
 #[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct BloomId(pub Digest);
 
+/// One reusable harness conversation's identity, minted by the coordinator
+/// before that conversation exists (#5425).
+///
+/// The coordinator's key, and deliberately not the harness's own. A harness
+/// mints its session id on the first launch, which is too late to name the
+/// directory that launch has to run in — and every harness binds a session
+/// permanently to the directory it was born in (grok stores sessions under a
+/// percent-encoded working directory, Claude Code under
+/// `~/.claude/projects/<encoded cwd>`), so the directory has to be decided
+/// first. One format for every harness: the slug names the checkout
+/// (`sessions/<slug>/tree`), keys the deposit row, and rides the dispatch
+/// evidence, while the harness's native id is a recorded attribute of that row.
+///
+/// A session outlives one workpiece. Along a declared edge the dependent's
+/// construct resumes the predecessor's conversation, in the predecessor's tree,
+/// reset to the dependent's own base — so the slug cannot be a member's name
+/// either.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+pub struct SessionSlug(pub String);
+
+impl SessionSlug {
+    /// Mint the slug of the session `nonce`'s dispatch opens.
+    ///
+    /// Derived rather than drawn from a generator. It has to survive the
+    /// relaunch a refused resume triggers inside one dispatch, or that dispatch
+    /// would open two conversations; and an operator reading a transcript has to
+    /// be able to say which dispatch opened a session without a second index.
+    ///
+    /// The nonce is coordinator-minted text and this becomes a directory name,
+    /// so anything outside the path-safe set becomes a dash: a separator in it
+    /// would put the tree somewhere else entirely, where nothing that reads the
+    /// layout would find it.
+    #[must_use]
+    pub fn minted_from(nonce: &str) -> Self {
+        let safe: String = nonce
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                    character
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        Self(alloc::format!(
+            "s-{}",
+            if safe.is_empty() {
+                "unnamed"
+            } else {
+                safe.as_str()
+            }
+        ))
+    }
+
+    /// Whether this slug may be used as a directory name — the guard the
+    /// checkout path resolves through, so a row carrying anything else falls
+    /// back rather than naming a directory outside the layout.
+    #[must_use]
+    pub fn is_nameable(&self) -> bool {
+        !self.0.is_empty()
+            && !self.0.starts_with('.')
+            && self.0.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    }
+}
+
 /// A signer identity (ADR-0149 §The value vocabulary). The signature
 /// *mechanism* is stubbed against a fake key provider in v1; the id shape
 /// ships from the start so everything downstream binds to it.

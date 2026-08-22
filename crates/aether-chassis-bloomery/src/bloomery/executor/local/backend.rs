@@ -10,9 +10,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_bloomery::{
     BackendObjectId, CandidateRef, Conclusion, ConfigRegistry, ConfigScopes, Digest, EvidenceRef, ExecutionStatus,
-    ExecutorBackend, Nonce, ObservedLaneWrites, PriceTable, ResolvedModel, SharedCorrespondence, StageId, StageVerdict,
-    StudyCost, SuppressionRequest, SurfaceRequest, Transformation, VerifyFailureSet, WorkHandle, WorkOrder,
-    is_model_lane,
+    ExecutorBackend, Nonce, ObservedLaneWrites, PriceTable, ResolvedModel, SessionSlug, SharedCorrespondence, StageId,
+    StageVerdict, StudyCost, SuppressionRequest, SurfaceRequest, Transformation, VerifyFailureSet, WorkHandle,
+    WorkOrder, is_model_lane,
 };
 use aether_bloomery_git::command;
 use aether_bloomery_github::parse_study;
@@ -50,28 +50,38 @@ use crate::store::{CommissionBackend, SqliteStore, StoreBackend};
 /// it is what that one attempt produced.
 const EVIDENCE_SUFFIX: &str = "-evidence";
 
-/// The directory under the scratch root that holds the per-workpiece lane
-/// checkouts, one child per member (`worktrees/issue-5140`).
+/// The directory under the scratch root that holds one checkout per reusable
+/// harness session: `sessions/<slug>/tree`.
 ///
-/// A checkout belongs to the **workpiece** being built (#5425). Every lane of
-/// one member — construct, verify, review, refine, and the retries of each —
-/// runs against the tree the lane before it left, so the tree has to be the
-/// member's own; and a model session a later lap resumes is bound to the
-/// directory it was born in, which a checkout that moved between dispatches
-/// silently breaks. Created on the member's first dispatch, reset to that
-/// dispatch's subject at every launch, and removed by the janitor when the
-/// member reaches a terminal state.
-const WORKTREES_DIR: &str = "worktrees";
+/// A checkout belongs to the **session** that works in it (#5425). Every
+/// harness binds a conversation permanently to the directory it was born in —
+/// grok stores sessions under a percent-encoded working directory and ignores
+/// `--cwd` on a resume, Claude Code keys `~/.claude/projects/<encoded cwd>` the
+/// same way — so a lap that resumes anywhere else either edits the tree it was
+/// born in or starts over. The session is therefore what the directory is for,
+/// and the coordinator mints its [`SessionSlug`] before the cold launch,
+/// because the harness's own id does not exist until after it.
+///
+/// Not the workpiece, and not the lane slot. One session carries several
+/// workpieces along declared edges (A then B then C), each reset in place, so a
+/// workpiece-keyed tree would split one conversation across directories; a
+/// slot-keyed one moves the tree out from under a session the moment the
+/// allocator hands that slot to someone else.
+const SESSIONS_DIR: &str = "sessions";
+
+/// The working tree inside one session's directory. A child of the session
+/// directory rather than the directory itself, so anything else the session
+/// accumulates has somewhere to live that a `git clean` will not take.
+const SESSION_TREE_DIR: &str = "tree";
 
 /// The prefix a fallback lane-slot checkout directory carries under the scratch
 /// root, completed by the slot's index (`slot-0`, `slot-1`, …).
 ///
-/// The fallback rather than the rule (#5425): a dispatch this backend can name
-/// a workpiece for builds under [`WORKTREES_DIR`], and this path is what is
-/// left for one it cannot — an aggregate lane, whose order names no member, and
-/// a backend built without a store, which can read no order at all. Both are
-/// single-tree dispatches with no successor lane waiting on the tree they
-/// leave, so the slot is a sufficient key for them.
+/// The fallback rather than the rule (#5425): a dispatch that resolves a
+/// session builds under [`SESSIONS_DIR`], and this path is what is left for one
+/// that cannot — an aggregate lane, whose order names no member, and a backend
+/// built without a store, which can read no order at all. Neither resumes a
+/// conversation, so neither needs a directory a conversation is bound to.
 const SLOT_PREFIX: &str = "slot-";
 
 /// The suffix a lane slot's cargo target directory carries, completing the slot's
@@ -237,10 +247,13 @@ struct PendingRun {
     task: Option<String>,
     subject: Digest,
     gates: LaneGates,
-    // The member this dispatch belongs to, when the order row names one. The
-    // checkout's key; `None` for an aggregate lane or a store-less backend,
-    // which fall back to the slot path.
+    // The member this dispatch belongs to, when the order row names one.
+    // `None` for an aggregate lane or a store-less backend.
     workpiece: Option<String>,
+    // The session this dispatch works in — the checkout's key, minted before
+    // the launch and resolved from the member's own row or from the predecessor
+    // whose conversation it inherits. `None` alongside a `None` workpiece.
+    slug: Option<SessionSlug>,
     // The slot that last built this member, when one has.
     preferred: Option<usize>,
     // Which band this dispatch queues in, from the stage its order names.
@@ -605,18 +618,61 @@ impl LocalExecutor {
         absolute(self.base_dir.join(format!("{nonce}{EVIDENCE_SUFFIX}")))
     }
 
-    // The checkout one dispatch builds in: the workpiece's own tree when the
-    // order names a member, the lane slot's own path when it does not. Absolute
+    // The checkout one dispatch works in: its session's tree when the dispatch
+    // resolves a session, the lane slot's own path when it does not. Absolute
     // for the reason the evidence dir is.
     //
-    // The two cases are one function because both sides of the layout read it
-    // backwards — the janitor recognizes a member checkout by this shape, and
-    // boot reconciliation recovers a run's tree from the slot it recorded.
-    fn checkout_dir(&self, workpiece: Option<&str>, slot: usize) -> io::Result<PathBuf> {
-        absolute(workpiece.filter(|workpiece| is_checkout_name(workpiece)).map_or_else(
+    // The one spelling of the layout, because three sides read it: the dispatch
+    // resolves it forward, boot reconciliation resolves it again from the slug
+    // the run recorded, and the janitor recognizes a session tree by this shape.
+    fn checkout_dir(&self, slug: Option<&SessionSlug>, slot: usize) -> io::Result<PathBuf> {
+        absolute(slug.filter(|slug| slug.is_nameable()).map_or_else(
             || self.base_dir.join(format!("{SLOT_PREFIX}{slot}")),
-            |workpiece| self.base_dir.join(WORKTREES_DIR).join(workpiece),
+            |slug| self.base_dir.join(SESSIONS_DIR).join(&slug.0).join(SESSION_TREE_DIR),
         ))
+    }
+
+    // The session this dispatch works in, minted before it launches.
+    //
+    // Three answers in order, and the order is the whole rule. The member's own
+    // row names one once it has dispatched — every later lap of that member is
+    // the same conversation in the same tree. A member that has never dispatched
+    // inherits the slug of a declared predecessor that has, because the edge
+    // resume continues *that* conversation and a harness continues it only in
+    // the directory it was born in; the inheritance is written onto this
+    // member's row, so its own later laps resolve directly. Everything else
+    // mints a fresh slug from the dispatch nonce.
+    //
+    // Store-only, and deliberately so: it runs before the pool acquire, because
+    // the acquire needs the tree (it hashes the static prefix out of it) and the
+    // tree needs the slug.
+    fn session_slug(&self, nonce: &str, bloom: &[u8], workpiece: &str) -> Option<SessionSlug> {
+        let messages = self.messages.as_ref()?;
+        let (slug, recorded) = {
+            let mut store = messages.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Ok(Some(slug)) = store.lookup_session_slug(bloom, workpiece) {
+                return Some(SessionSlug(slug));
+            }
+            let inherited = store
+                .lookup_predecessors(bloom, workpiece)
+                .ok()
+                .into_iter()
+                .flatten()
+                .find_map(|predecessor| store.lookup_session_slug(bloom, &predecessor).ok().flatten());
+            let slug = inherited.map_or_else(|| SessionSlug::minted_from(nonce), SessionSlug);
+            let recorded = store.record_session_slug(bloom, workpiece, &slug.0);
+            drop(store);
+            (slug, recorded)
+        };
+        if let Err(error) = recorded {
+            tracing::warn!(
+                nonce,
+                workpiece,
+                %error,
+                "local executor backend: the session slug did not record; this member's next lap opens a new session",
+            );
+        }
+        Some(slug)
     }
 
     // The cargo target directory one lane slot builds into, reused by every
@@ -697,7 +753,11 @@ impl LocalExecutor {
         // inside the decision every freed slot makes.
         let identity = self.order_identity(&nonce);
         let priority = priority_of(identity.as_ref().map(|(_, _, stage)| *stage));
-        let workpiece = identity.map(|(_, workpiece, _)| workpiece).filter(|workpiece| is_checkout_name(workpiece));
+        let slug = identity
+            .as_ref()
+            .filter(|(_, workpiece, _)| !workpiece.is_empty())
+            .and_then(|(bloom, workpiece, _)| self.session_slug(&nonce, bloom, workpiece));
+        let workpiece = identity.map(|(_, workpiece, _)| workpiece).filter(|workpiece| !workpiece.is_empty());
         let preferred = workpiece.as_deref().and_then(|workpiece| self.preferred_slot_of(workpiece));
         // The stage's resolved agent profile, overlaid onto the order by the
         // dispatching host (ADR-0149 §The line) — never a backend-local config
@@ -722,6 +782,7 @@ impl LocalExecutor {
             subject: evidence_subject(&order.transformation),
             gates,
             workpiece,
+            slug,
             preferred,
             priority,
         })
@@ -1107,7 +1168,7 @@ impl LocalExecutor {
         // behind either, and the ceiling would shrink by one for the life of the
         // process.
         let paths = self
-            .checkout_dir(pending.workpiece.as_deref(), slot)
+            .checkout_dir(pending.slug.as_ref(), slot)
             .and_then(|worktree| self.slot_target_dir(slot).map(|target| (worktree, target)));
         let (worktree_dir, target_dir) = match paths {
             Ok(paths) => paths,
@@ -1120,7 +1181,7 @@ impl LocalExecutor {
                 return Err(LocalExecutorError::Io(error));
             }
         };
-        record_slot(&pending.evidence_dir, slot);
+        record_lane(&pending.evidence_dir, slot, pending.slug.as_ref());
         if let Some(workpiece) = pending.workpiece.as_deref() {
             self.remember_builder(workpiece, slot);
         }
@@ -1306,18 +1367,18 @@ impl LocalExecutor {
         if registry.runs.contains_key(&nonce.0) {
             return false;
         }
-        let slot = recorded_slot(&evidence_dir).filter(|slot| registry.claim_slot(*slot));
-        // The member the order names, so a re-adopted run points at the same
-        // checkout the dying process was building in. A slot the record lost
-        // leaves the tree unnameable either way: this process must not reset or
-        // capture a checkout it cannot prove belongs to the run.
-        let workpiece = self.order_identity(&nonce.0).map(|(_, workpiece, _)| workpiece);
+        let (recorded, slug) = recorded_lane(&evidence_dir);
+        let slot = recorded.filter(|slot| registry.claim_slot(*slot));
+        // The slug the dying process recorded, resolved forward through the same
+        // function the dispatch resolved it with, so a re-adopted run points at
+        // the tree its child is actually working in rather than at whichever
+        // slot directory the index happens to name.
         registry.runs.insert(
             nonce.0.clone(),
             Run {
                 process: Box::new(OrphanedRun::new(nonce.clone(), &evidence_dir)),
                 slot,
-                worktree_dir: slot.and_then(|slot| self.checkout_dir(workpiece.as_deref(), slot).ok()),
+                worktree_dir: slot.and_then(|slot| self.checkout_dir(slug.as_ref(), slot).ok()),
                 evidence_dir,
                 subject: evidence_subject(&dispatch.transformation),
                 gates: LaneGates::of(&dispatch.transformation.command),
@@ -2349,20 +2410,24 @@ impl ReconcileLanes for LocalExecutor {
     }
 }
 
-/// Record which lane slot a dispatch is running in, beside that dispatch's own
-/// evidence.
+/// Record what a dispatch is running on, beside that dispatch's own evidence:
+/// the lane slot it borrowed and the session whose tree it is working in.
 ///
-/// The slot decides the build path and the path is reused, so a coordinator that
-/// restarts mid-dispatch has to be able to find the slot a surviving child is
-/// building in — otherwise the next dispatch claims that slot and resets the
-/// checkout out from under it. The record lives in the evidence directory
-/// because that is per dispatch and is already where boot reconciliation looks.
+/// Both, because they answer different questions and a restart needs both
+/// (#5425). The slot is the lent target and the concurrency token — the next
+/// dispatch must not claim one a surviving child still holds. The slug is the
+/// *directory*, and a run re-adopted with only a slot would attach to whatever
+/// the slot path names rather than to the tree its child is actually in.
+///
+/// Two lines, slot then slug, so the record stays readable by eye and a
+/// pre-slug record still parses as a slot with no session.
 ///
 /// Best-effort: a record that cannot be written costs a re-adopted run its
 /// checkout (it captures nothing and fails closed), never the dispatch itself.
-fn record_slot(evidence_dir: &Path, slot: usize) {
+fn record_lane(evidence_dir: &Path, slot: usize, slug: Option<&SessionSlug>) {
+    let record = format!("{slot}\n{}\n", slug.map_or("", |slug| slug.0.as_str()));
     if let Err(error) =
-        fs::create_dir_all(evidence_dir).and_then(|()| fs::write(evidence_dir.join(SLOT_RECORD), slot.to_string()))
+        fs::create_dir_all(evidence_dir).and_then(|()| fs::write(evidence_dir.join(SLOT_RECORD), record))
     {
         tracing::warn!(
             evidence = %evidence_dir.display(),
@@ -2372,11 +2437,21 @@ fn record_slot(evidence_dir: &Path, slot: usize) {
     }
 }
 
-/// The lane slot a dispatch recorded in its evidence directory, or `None` when
-/// it recorded none (a dispatch from before this layout, or one whose record
-/// could not be written) or recorded text that is not a slot index.
-fn recorded_slot(evidence_dir: &Path) -> Option<usize> {
-    fs::read_to_string(evidence_dir.join(SLOT_RECORD)).ok()?.trim().parse().ok()
+/// What a dispatch recorded in its evidence directory: the lane slot, and the
+/// session whose tree it is working in.
+///
+/// Either half is `None` when it was not recorded (a dispatch from before that
+/// half of the layout, or one whose record could not be written) or when what
+/// was recorded is not that shape. The caller resolves the pair forward through
+/// `checkout_dir`, the same function the dispatch resolved it with.
+fn recorded_lane(evidence_dir: &Path) -> (Option<usize>, Option<SessionSlug>) {
+    let Ok(record) = fs::read_to_string(evidence_dir.join(SLOT_RECORD)) else {
+        return (None, None);
+    };
+    let mut lines = record.lines();
+    let slot = lines.next().and_then(|line| line.trim().parse().ok());
+    let slug = lines.next().map(|line| SessionSlug(line.trim().to_owned())).filter(SessionSlug::is_nameable);
+    (slot, slug)
 }
 
 /// The newest usable modification time among the files a live lane writes —
@@ -2416,20 +2491,6 @@ fn file_progress_unix_millis(path: &Path) -> Option<u64> {
 /// Exact rather than prefix-loose: the sweep reads this to decide what it must
 /// *not* reclaim, and a nonce that merely began with the prefix would otherwise
 /// leave an abandoned checkout on disk forever.
-/// Whether a workpiece id may be used as a directory name under the scratch
-/// root.
-///
-/// A workpiece id is operator-supplied text and this turns it into a path, so
-/// the accepted set is stated rather than sanitized: the ids in use are drawn
-/// from it (`issue-5140`, `wp-0`), and anything outside it — a separator, a
-/// parent-directory hop, a leading dot — falls back to the slot path instead of
-/// being rewritten into some name that might be another member's.
-fn is_checkout_name(workpiece: &str) -> bool {
-    !workpiece.is_empty()
-        && !workpiece.starts_with('.')
-        && workpiece.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-}
-
 fn is_slot_directory(name: &str) -> bool {
     name.strip_prefix(SLOT_PREFIX)
         .is_some_and(|index| !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit()))

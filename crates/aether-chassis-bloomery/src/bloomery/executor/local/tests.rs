@@ -24,8 +24,8 @@ use tracing::{Event, Metadata, Subscriber};
 use aether_bloomery::testing::digest;
 use aether_bloomery::{
     BackendObjectId, Conclusion, Correspondence, CorrespondenceError, Digest, ExecutionStatus, ExecutorBackend,
-    Harness, Nonce, ReasoningEffort, ResolvedModel, StageCatalog, StageId, StageVerdict, Transformation, VerifyFailure,
-    VerifyFailureSet, WorkHandle,
+    Harness, Nonce, ReasoningEffort, ResolvedModel, SessionSlug, StageCatalog, StageId, StageVerdict, Transformation,
+    VerifyFailure, VerifyFailureSet, WorkHandle,
 };
 use tempfile::TempDir;
 
@@ -2573,16 +2573,19 @@ fn order_on(mut order: aether_bloomery::WorkOrder, checkout: Digest) -> aether_b
     order
 }
 
-// The checkout a member builds in under a scratch root (#5425) — the tree every
-// lane of that member shares, and the assertion target wherever a test says
-// which member's work a dispatch was standing in.
-fn member_checkout(base: &TempDir, workpiece: &str) -> PathBuf {
-    base.path().join("worktrees").join(workpiece)
+// The checkout one session works in under a scratch root (#5425) — the tree
+// every launch of that conversation shares, and the assertion target wherever a
+// test says which session a dispatch was standing in.
+fn session_tree(base: &TempDir, opened_by: &str) -> PathBuf {
+    base.path().join("sessions").join(SessionSlug::minted_from(opened_by).0).join("tree")
 }
 
 fn assigned_slot(base: &TempDir, nonce: &str) -> usize {
     fs::read_to_string(base.path().join(format!("{nonce}-evidence/slot")))
-        .expect("every dispatched run records its slot")
+        .expect("every dispatched run records its lane")
+        .lines()
+        .next()
+        .expect("the lane record leads with the slot")
         .trim()
         .parse()
         .expect("the slot record is an index")
@@ -2593,14 +2596,17 @@ fn started_worktrees(seen: &Arc<Mutex<Vec<SeenSpec>>>) -> Vec<Option<PathBuf>> {
 }
 
 #[test]
-fn every_lane_of_one_member_builds_in_that_members_own_checkout() {
+fn every_lane_of_one_member_works_in_that_members_session_tree() {
     // Acceptance for #5425: construct and the verify that follows it stand in
-    // the same tree, and that tree is named for the member rather than for
-    // whichever slot each lane happened to be handed. Pre-fix each lane built
-    // in `slot-<index>`, so a member whose two lanes landed in different slots
-    // verified a tree its construct had never written to — and a resumed model
-    // session, which is bound to the directory it was born in, edited the old
-    // slot's tree instead of its own (dispatch-2374 / dispatch-2379).
+    // the same tree, and that tree belongs to the session the member opened
+    // rather than to whichever slot each lane happened to be handed.
+    //
+    // Pre-fix each lane built in `slot-<index>`. A harness binds a conversation
+    // permanently to the directory it was born in — grok stores sessions under a
+    // percent-encoded working directory and ignores `--cwd` on a resume — so a
+    // member whose lanes landed in different slots had its resumed lap edit the
+    // old slot's tree while its own checkout stayed clean and read downstream as
+    // a lane that produced nothing (dispatch-2374 / dispatch-2379).
     let seen = Arc::new(Mutex::new(Vec::new()));
     let base = TempDir::new().unwrap();
     let store = store_dir();
@@ -2635,21 +2641,22 @@ fn every_lane_of_one_member_builds_in_that_members_own_checkout() {
     assert_eq!(
         started_worktrees(&seen),
         [
-            Some(member_checkout(&base, "issue-H")),
-            Some(member_checkout(&base, "issue-A")),
+            Some(session_tree(&base, &holder)),
+            Some(session_tree(&base, &construct)),
             Some(slot_path(&base, 1)),
-            Some(member_checkout(&base, "issue-A")),
+            Some(session_tree(&base, &construct)),
         ],
-        "both of the member's lanes stand in its own checkout however the slots moved under them",
+        "both of the member's lanes stand in the session its construct opened, however the slots moved under them",
     );
 }
 
 #[test]
-fn a_dispatch_that_names_no_member_still_builds_in_its_lane_slot() {
+fn a_dispatch_that_resolves_no_session_still_builds_in_its_lane_slot() {
     // Tripwire: an aggregate lane's order names no workpiece, and a backend
-    // built without a store can read no order at all. Both must keep the slot
-    // path they always had — a checkout keyed on an empty name would put every
-    // unnameable dispatch in one shared directory.
+    // built without a store can read no order at all. Neither resumes a
+    // conversation, so neither needs a directory one is bound to — and a
+    // checkout keyed on an empty slug would put every such dispatch in one
+    // shared directory.
     let seen = Arc::new(Mutex::new(Vec::new()));
     let base = TempDir::new().unwrap();
     let exec = LocalExecutor::new(Arc::new(ReuseRunner::new(Arc::clone(&seen))), correspondence(), base.path());

@@ -197,25 +197,28 @@ fn a_killed_runs_worktree_is_reclaimed_once_its_bloom_is_terminal() {
 }
 
 #[test]
-fn a_member_checkout_outlives_its_lanes_and_dies_with_its_member() {
-    // Acceptance for #5425. A member's checkout is created on its first
-    // dispatch and reused by every lane of that member, so nothing inside the
-    // member's own life may remove it — its construct finishing is not the end
-    // of it, and the verify that follows is entitled to the tree construct
-    // left. What ends it is the member ending, which is a fact only the journal
-    // holds.
+fn a_session_tree_outlives_its_launches_and_dies_with_the_work_bound_to_it() {
+    // Acceptance for #5425. A session's tree is created when the session is
+    // minted and reused by every launch of that conversation — the member's own
+    // retry laps, and a declared-edge dependent that inherits it — so nothing
+    // inside the session's life may remove it. Its construct finishing is not
+    // the end of it; the verify that follows is entitled to the tree that
+    // construct left, and the harness will only resume the conversation in that
+    // directory anyway. What ends it is the work ending, which is a fact only
+    // the journal holds.
     //
     // Both directions in one pass, because getting either alone is easy and the
     // pair is the whole rule: the live bloom's member keeps its tree, and one no
     // live bloom names loses it.
     let scratch = tempfile::tempdir().expect("a scratch dir is created");
-    let live = scratch.path().join("worktrees").join("wp");
-    let terminal = scratch.path().join("worktrees").join("wp-landed");
-    fs::create_dir_all(&live).expect("the live member's checkout is created");
-    fs::create_dir_all(&terminal).expect("the terminal member's checkout is created");
+    let live = scratch.path().join("sessions").join("s-live").join("tree");
+    let terminal = scratch.path().join("sessions").join("s-landed").join("tree");
+    fs::create_dir_all(&live).expect("the live session's tree is created");
+    fs::create_dir_all(&terminal).expect("the terminal session's tree is created");
 
     let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
-    journal_sealed(&mut store);
+    let bloom = journal_sealed(&mut store);
+    store.record_session_slug(bloom.0.as_bytes(), "wp", "s-live").expect("the live member's slug records");
 
     let released = Released(Arc::new(Mutex::new(Vec::new())));
     let runner =
@@ -232,13 +235,13 @@ fn a_member_checkout_outlives_its_lanes_and_dies_with_its_member() {
         now: SystemTime::now(),
     });
 
-    assert_eq!(report.worktrees, 1, "one checkout went and one stayed");
+    assert_eq!(report.worktrees, 1, "one tree went and one stayed");
     assert_eq!(
         released.0.lock().expect("the release log is not poisoned").as_slice(),
         [terminal],
-        "the member no live bloom names loses its tree; the sealed bloom's member keeps its own",
+        "the session no live member is bound to loses its tree; the sealed bloom's member keeps its own",
     );
-    assert!(live.is_dir(), "a live member's checkout is still there for its next lane");
+    assert!(live.is_dir(), "a live member's session tree is still there for its next launch");
 }
 
 #[test]

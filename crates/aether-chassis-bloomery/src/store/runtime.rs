@@ -469,8 +469,12 @@ pub trait StoreBackend: Send {
         session_id: &str,
         context_tokens: u64,
     ) -> rusqlite::Result<()>;
-    /// The construct session recorded for (`bloom`, `workpiece`), or `None`
-    /// when construct never journaled a handle — Refine then launches fresh.
+    /// The harness session recorded for (`bloom`, `workpiece`), or `None` when
+    /// construct never journaled a handle — Refine then launches fresh.
+    ///
+    /// A row minted for its slug alone carries no handle yet, and reads as
+    /// `None`: the slug names where the session will live, and says nothing
+    /// about a conversation that has not started.
     fn lookup_construct_session(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<(String, u64)>>;
     /// The construct session plus its deposit time, for a predecessor-resume
     /// warmth gate (#5178). `deposited_unix` is `None` on a pre-column row.
@@ -479,6 +483,13 @@ pub trait StoreBackend: Send {
         bloom: &[u8],
         workpiece: &str,
     ) -> rusqlite::Result<Option<(String, u64, Option<u64>)>>;
+    /// The coordinator-minted slug naming the checkout this member's session
+    /// lives in, when one has been minted (#5425). `None` for a member that has
+    /// never dispatched, and for a row written before the slug existed.
+    fn lookup_session_slug(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<String>>;
+    /// Record the slug a dispatch is about to run in, before the harness has
+    /// reported anything. Idempotent per (`bloom`, `workpiece`).
+    fn record_session_slug(&mut self, bloom: &[u8], workpiece: &str, slug: &str) -> rusqlite::Result<()>;
     /// The member of `bloom` already holding `session_id`, when one does
     /// (#5427).
     ///
@@ -793,7 +804,7 @@ impl SqliteStore {
 /// and nothing is backfilled — a revision authored by hand through the REST
 /// door was not produced by a scoping run, and inventing a run for it would put
 /// a lane's name on an operator's work.
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 
 /// Bring a store opened at [`MIGRATIONS`] up to [`SCHEMA_VERSION`], or refuse it.
 ///
@@ -932,6 +943,17 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     }
     if !has_table(&migration, "member_dependency")? {
         migration.execute_batch(MEMBER_DEPENDENCY_TABLE)?;
+    }
+
+    // Version 14 (#5425): the coordinator-minted session slug, and the harness's
+    // own id demoted to an attribute of the row it keys. No backfill — a
+    // pre-existing row names no checkout, so the member it belongs to mints a
+    // slug on its next dispatch and starts a session of its own.
+    if has_column(&migration, "construct_session", "session_id")? {
+        migration.execute_batch("ALTER TABLE construct_session RENAME COLUMN session_id TO harness_session_id;")?;
+    }
+    if !has_column(&migration, "construct_session", "slug")? {
+        migration.execute_batch("ALTER TABLE construct_session ADD COLUMN slug TEXT;")?;
     }
 
     migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -1139,11 +1161,12 @@ CREATE TABLE IF NOT EXISTS metric_cursor (
     through_sequence INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS construct_session (
-    bloom           BLOB NOT NULL,
-    workpiece       TEXT NOT NULL,
-    session_id      TEXT NOT NULL,
-    context_tokens  INTEGER NOT NULL,
-    deposited_unix  INTEGER,
+    bloom               BLOB NOT NULL,
+    workpiece           TEXT NOT NULL,
+    harness_session_id  TEXT NOT NULL,
+    context_tokens      INTEGER NOT NULL,
+    deposited_unix      INTEGER,
+    slug                TEXT,
     PRIMARY KEY (bloom, workpiece)
 );
 CREATE TABLE IF NOT EXISTS member_dependency (
@@ -1174,11 +1197,12 @@ CREATE TABLE IF NOT EXISTS proof_facts (
 /// The per-member construct session a same-member refine resumes (#5177).
 const CONSTRUCT_SESSION_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS construct_session (
-    bloom           BLOB NOT NULL,
-    workpiece       TEXT NOT NULL,
-    session_id      TEXT NOT NULL,
-    context_tokens  INTEGER NOT NULL,
-    deposited_unix  INTEGER,
+    bloom               BLOB NOT NULL,
+    workpiece           TEXT NOT NULL,
+    harness_session_id  TEXT NOT NULL,
+    context_tokens      INTEGER NOT NULL,
+    deposited_unix      INTEGER,
+    slug                TEXT,
     PRIMARY KEY (bloom, workpiece)
 );
 ";
@@ -1618,9 +1642,17 @@ impl StoreBackend for SqliteStore {
         context_tokens: u64,
         deposited_unix: u64,
     ) -> rusqlite::Result<()> {
+        // An upsert rather than a replace: the slug on this row was minted
+        // before the dispatch launched and names the checkout the session lives
+        // in, so a deposit that overwrote the whole row would lose the directory
+        // its own conversation is bound to.
         self.conn.execute(
-            "INSERT OR REPLACE INTO construct_session \
-             (bloom, workpiece, session_id, context_tokens, deposited_unix) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO construct_session \
+             (bloom, workpiece, harness_session_id, context_tokens, deposited_unix) VALUES (?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT(bloom, workpiece) DO UPDATE SET \
+             harness_session_id = excluded.harness_session_id, \
+             context_tokens = excluded.context_tokens, \
+             deposited_unix = excluded.deposited_unix",
             rusqlite::params![
                 bloom,
                 workpiece,
@@ -1633,11 +1665,32 @@ impl StoreBackend for SqliteStore {
     }
 
     fn construct_session_holder(&mut self, bloom: &[u8], session_id: &str) -> rusqlite::Result<Option<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT workpiece FROM construct_session WHERE bloom = ?1 AND session_id = ?2 LIMIT 1")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT workpiece FROM construct_session \
+                 WHERE bloom = ?1 AND harness_session_id = ?2 AND harness_session_id <> '' LIMIT 1",
+        )?;
         let mut rows = stmt.query_map(rusqlite::params![bloom, session_id], |row| row.get::<_, String>(0))?;
         rows.next().transpose()
+    }
+
+    fn lookup_session_slug(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<String>> {
+        let mut stmt = self.conn.prepare("SELECT slug FROM construct_session WHERE bloom = ?1 AND workpiece = ?2")?;
+        let mut rows = stmt.query_map(rusqlite::params![bloom, workpiece], |row| row.get::<_, Option<String>>(0))?;
+        Ok(rows.next().transpose()?.flatten())
+    }
+
+    fn record_session_slug(&mut self, bloom: &[u8], workpiece: &str, slug: &str) -> rusqlite::Result<()> {
+        // The slug is minted before the harness has said anything, so the row
+        // may not exist yet and its `harness_session_id` may still be unknown:
+        // the empty string stands for "this session has not reported its own id",
+        // which the deposit fills in and every reader treats as no handle.
+        self.conn.execute(
+            "INSERT INTO construct_session (bloom, workpiece, harness_session_id, context_tokens, slug) \
+             VALUES (?1, ?2, '', 0, ?3) \
+             ON CONFLICT(bloom, workpiece) DO UPDATE SET slug = excluded.slug",
+            rusqlite::params![bloom, workpiece, slug],
+        )?;
+        Ok(())
     }
 
     fn lookup_construct_session(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<(String, u64)>> {
@@ -1650,8 +1703,8 @@ impl StoreBackend for SqliteStore {
         workpiece: &str,
     ) -> rusqlite::Result<Option<(String, u64, Option<u64>)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT session_id, context_tokens, deposited_unix FROM construct_session \
-             WHERE bloom = ?1 AND workpiece = ?2",
+            "SELECT harness_session_id, context_tokens, deposited_unix FROM construct_session \
+             WHERE bloom = ?1 AND workpiece = ?2 AND harness_session_id <> ''",
         )?;
         let mut rows = stmt.query_map(rusqlite::params![bloom, workpiece], |row| {
             let session_id = row.get::<_, String>(0)?;

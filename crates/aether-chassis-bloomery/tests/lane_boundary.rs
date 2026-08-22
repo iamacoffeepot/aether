@@ -72,44 +72,45 @@ fn a_bloom_whose_lanes_all_pass_resolves_its_member() {
 }
 
 #[test]
-fn every_lane_of_a_member_stands_in_that_members_own_checkout() {
+fn every_launch_of_one_session_stands_in_that_sessions_tree() {
     // Acceptance for #5425, below the spawn seam: construct and the verify that
-    // judges what it built run in one tree, and that tree is named for the
-    // member rather than for whichever lane slot each was handed.
+    // judges what it built run in one tree, and that tree belongs to the session
+    // the construct opened rather than to whichever lane slot each launch was
+    // handed.
     //
-    // Pre-fix every lane built in `<scratch>/slot-<index>`. A member whose two
-    // lanes landed in different slots therefore verified a tree its construct
-    // had never written to, and a model session — which both harnesses resume in
-    // the directory it was born in, whatever the launch says — edited whatever
-    // member happened to be in the old slot while its own checkout stayed clean
-    // and read downstream as a lane that produced nothing (dispatch-2374,
-    // dispatch-2379).
+    // Pre-fix every lane built in `<scratch>/slot-<index>`. A harness binds a
+    // conversation permanently to the directory it was born in — grok stores
+    // sessions under a percent-encoded working directory and ignores `--cwd` on
+    // a resume — so a member whose launches landed in different slots had its
+    // resumed lap edit whatever was in the old slot while its own checkout
+    // stayed clean, which reads downstream as a lane that produced nothing
+    // (dispatch-2374, dispatch-2379).
     let mut harness = LaneHarness::start_with(&LaneScript::all_passing(), "wp-own-tree");
     harness
         .settle("the member resolves", |bloom| bloom.members.first().is_some_and(|member| member.resolution.is_some()));
 
-    let expected = harness.runs_dir().join("worktrees").join("wp-own-tree");
+    let sessions = harness.runs_dir().join("sessions");
     let member_lanes: Vec<(String, String)> = harness
         .ledger()
         .into_iter()
         .filter_map(|run| run.worktree.map(|worktree| (run.command, worktree)))
-        .filter(|(_, worktree)| worktree.contains("/worktrees/"))
+        .filter(|(_, worktree)| worktree.contains("/sessions/"))
         .collect();
 
     let commands: BTreeSet<&str> = member_lanes.iter().map(|(command, _)| command.as_str()).collect();
     assert!(commands.len() > 1, "more than one of the member's stages ran: {member_lanes:?}");
-    assert!(
-        member_lanes.iter().all(|(_, worktree)| Path::new(worktree) == expected),
-        "every one of them stood in {}: {member_lanes:?}",
-        expected.display(),
-    );
+    let trees: BTreeSet<&str> = member_lanes.iter().map(|(_, worktree)| worktree.as_str()).collect();
+    assert_eq!(trees.len(), 1, "every one of them stood in one tree: {member_lanes:?}");
+    let tree = Path::new(trees.iter().next().unwrap());
+    assert_eq!(tree.file_name().and_then(|name| name.to_str()), Some("tree"));
+    assert_eq!(tree.parent().and_then(Path::parent), Some(sessions.as_path()), "and it is a session's: {tree:?}");
 
-    let member_trees: Vec<String> = fs::read_dir(harness.runs_dir().join("worktrees"))
-        .expect("the member checkout root exists")
+    let session_dirs: Vec<String> = fs::read_dir(&sessions)
+        .expect("the session root exists")
         .flatten()
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(member_trees, ["wp-own-tree"], "and no other member's tree was created beside it");
+    assert_eq!(session_dirs.len(), 1, "one member's line opened one session: {session_dirs:?}");
 }
 
 #[test]
@@ -502,26 +503,27 @@ fn registered_scratch_checkouts(harness: &LaneHarness) -> Vec<PathBuf> {
         .collect()
 }
 
-// Every scratch checkout is named for a member or for a lane slot, and none is
+// Every scratch checkout belongs to a session or to a lane slot, and none is
 // named for an order.
 //
 // A worktree per order, accumulating forever, is the leak this catches — and it
 // is invisible to any double mounted above the spawn, because there is no
-// worktree to leak. What a dispatch registers is its member's own checkout
-// (`worktrees/<workpiece>`, #5425), or the lane slot's own (#4904) when the
-// order names no member, and either way it is reused by every dispatch that
-// follows. The registered set is therefore bounded by the member count plus the
-// lane ceiling, however many orders run. Anything named after an order is the
-// leak, and the name is what says so.
+// worktree to leak. What a dispatch registers is its session's tree
+// (`sessions/<slug>/tree`, #5425), or the lane slot's own checkout (#4904) when
+// the order resolves no session, and either way it is reused by every launch
+// that follows. The registered set is therefore bounded by the live session
+// count plus the lane ceiling, however many orders run. Anything named after an
+// order is the leak, and the shape is what says so.
 fn assert_scratch_checkouts_are_named_for_work(harness: &LaneHarness, context: &str) {
-    let members = fs::canonicalize(harness.runs_dir()).unwrap().join("worktrees");
+    let sessions = fs::canonicalize(harness.runs_dir()).unwrap().join("sessions");
     for checkout in registered_scratch_checkouts(harness) {
         let name = checkout.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_owned();
         let slot = name.strip_prefix("slot-").is_some_and(|index| index.chars().all(|digit| digit.is_ascii_digit()));
-        let member = checkout.parent() == Some(members.as_path());
+        let session = name == "tree" && checkout.parent().and_then(Path::parent) == Some(sessions.as_path());
         assert!(
-            slot || member,
-            "{context}: {name} is named for neither a member nor a lane slot, so something registered one per order",
+            slot || session,
+            "{context}: {} belongs to neither a session nor a lane slot, so something registered one per order",
+            checkout.display(),
         );
     }
 }
@@ -536,5 +538,8 @@ fn the_only_scratch_checkouts_a_bloom_leaves_are_named_for_its_work() {
     harness
         .settle("the member resolves", |bloom| bloom.members.first().is_some_and(|member| member.resolution.is_some()));
 
-    assert_scratch_checkouts_are_named_for_work(&harness, "a resolved member's dispatches shared their slots' checkouts");
+    assert_scratch_checkouts_are_named_for_work(
+        &harness,
+        "a resolved member's dispatches shared their slots' checkouts",
+    );
 }

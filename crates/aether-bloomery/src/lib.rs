@@ -148,6 +148,7 @@ pub use ids::BloomId;
 pub use ids::IdempotencyKey;
 pub use ids::KeyId;
 pub use ids::Nonce;
+pub use ids::SessionSlug;
 pub use ids::StageId;
 pub use ids::WorkpieceId;
 pub use inward::InwardError;
