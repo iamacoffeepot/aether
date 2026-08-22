@@ -249,6 +249,20 @@ pub struct CommissionCancelledView {
     pub status: String,
 }
 
+/// `POST /commissions/{id}/reopen` body: the cancel's shape at the Reopen door.
+#[derive(Debug, Serialize)]
+pub struct ReopenCommissionRequest {
+    pub statement: Statement,
+    pub reason: String,
+}
+
+/// `POST /commissions/{id}/reopen` reply.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommissionReopenedView {
+    pub digest: DigestHex,
+    pub status: String,
+}
+
 /// `GET /configs/{digest}` — a stored configuration, decoded through its kind's
 /// schema.
 #[derive(Debug, Clone, Deserialize)]

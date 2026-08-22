@@ -142,6 +142,26 @@ pub fn signed_cancel(signer: KeyId, seed: &[u8; 32], intent: Digest) -> Statemen
     Statement { words, provenance: Provenance::AuthorSignature(envelope), parents: Vec::new() }
 }
 
+/// The Reopen door's exact statement shape, in one place (ADR-0182): an author
+/// signature over `intent`'s raw bytes, bound to `intent`.
+///
+/// The same shape [`signed_cancel`] carries, at its own door. Sharing the Cancel
+/// door would make one signature good for both a retirement and a restoration,
+/// and those are opposite acts an operator signs separately.
+///
+/// Deterministic, so a re-run re-mints a byte-identical statement and the
+/// store's already-open refusal is the only thing a second attempt hits.
+///
+/// Native-only, like [`sign_authorization`] — the private half of key custody
+/// is the operator's.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn signed_reopen(signer: KeyId, seed: &[u8; 32], intent: Digest) -> Statement {
+    let words = intent.as_bytes().to_vec();
+    let envelope = sign_authorization(signer, seed, AuthorityDoor::Reopen, intent, &words);
+    Statement { words, provenance: Provenance::AuthorSignature(envelope), parents: Vec::new() }
+}
+
 /// Where an adapter saw the observed bytes. An observation carries no
 /// authority — it becomes intent only when a person adopts its exact digest
 /// in a native signed statement (ADR-0149 §The boundary, second amendment).
@@ -179,7 +199,7 @@ mod tests {
 
     use ed25519_dalek::SigningKey;
 
-    use super::signed_cancel;
+    use super::{signed_cancel, signed_reopen};
     use crate::digest::Digest;
     use crate::ids::KeyId;
     use crate::sign::{AuthorityDoor, Ed25519KeyProvider};
@@ -206,5 +226,27 @@ mod tests {
             !statement.verify_authority(&keys, AuthorityDoor::Cancel, other),
             "a cancel bound to nothing would be a signature good for a commission its signer never read"
         );
+    }
+
+    #[test]
+    fn a_reopen_and_a_cancel_are_not_each_other_at_their_own_doors() {
+        // Retiring a commission and putting it back in the line are opposite
+        // acts. A signature good for both would let one submitted envelope be
+        // replayed at the other door.
+        let seed = [7_u8; 32];
+        let key = SigningKey::from_bytes(&seed);
+        let signer = KeyId(String::from("operator"));
+        let keys = Ed25519KeyProvider::new(BTreeMap::from([(signer.clone(), key.verifying_key())]));
+        let intent = Digest::from_bytes([3; 32]);
+
+        let reopen = signed_reopen(signer.clone(), &seed, intent);
+        let cancel = signed_cancel(signer, &seed, intent);
+
+        assert!(
+            reopen.verify_authority(&keys, AuthorityDoor::Reopen, intent),
+            "a reopen must verify at the Reopen door over its own intent"
+        );
+        assert!(!reopen.verify_authority(&keys, AuthorityDoor::Cancel, intent), "a reopen must not retire anything");
+        assert!(!cancel.verify_authority(&keys, AuthorityDoor::Reopen, intent), "a cancel must not restore anything");
     }
 }

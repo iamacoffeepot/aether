@@ -109,7 +109,7 @@ use crate::signing::VerifyResult;
 use crate::store::{
     CancelCommissionResult, CreateCommissionResult, EnqueueScopeRunResult, ListCommissionsResult, LoadCommissionResult,
     PageJournal, PageJournalResult, RecordCommissionApprovalResult, RecordConfigResult,
-    RecordDispatchDescriptionResult, WriteScopeRevisionResult,
+    RecordDispatchDescriptionResult, ReopenCommissionResult, WriteScopeRevisionResult,
 };
 use state::{CommissionHttp, CommissionHttpRender};
 
@@ -334,6 +334,18 @@ impl NativeActor for BloomeryApiCapability {
     ) -> http::Outcome {
         let id = id.0;
         let routed = state.cancel_commission(&ctx, ctx.request(), &id);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /commissions/{id}/reopen` — verify a reopen envelope and restore.
+    #[http::route(Post, "/commissions/{id}/reopen")]
+    fn on_post_commission_reopen(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = state.reopen_commission(&ctx, ctx.request(), &id);
         finish(state, ctx, routed)
     }
 
@@ -1099,6 +1111,15 @@ impl NativeActor for BloomeryApiCapability {
         mail: CancelCommissionResult,
     ) {
         state.answer_commission_write(ctx, &commissions::cancel_response(mail));
+    }
+
+    #[handler::manual]
+    fn on_reopen_commission_result(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Manual>,
+        mail: ReopenCommissionResult,
+    ) {
+        state.answer_commission_write(ctx, &commissions::reopen_response(mail));
     }
 
     /// The store's reply to the boot configuration read (#4616). Fills the

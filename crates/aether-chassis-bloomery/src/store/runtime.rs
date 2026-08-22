@@ -13,7 +13,8 @@ use super::commission::{
     CancelCommission, CancelCommissionResult, CommissionBackend, CommissionError, CreateCommission,
     CreateCommissionResult, EnqueueScopeRun, EnqueueScopeRunResult, ListCommissions, ListCommissionsResult,
     ListedCommission, LoadCommission, LoadCommissionResult, RecordCommissionApproval, RecordCommissionApprovalResult,
-    RecordCommissionProjection, RecordCommissionProjectionResult, WriteScopeRevision, WriteScopeRevisionResult,
+    RecordCommissionProjection, RecordCommissionProjectionResult, ReopenCommission, ReopenCommissionResult,
+    WriteScopeRevision, WriteScopeRevisionResult,
 };
 use super::kinds::{
     AckOutbox, AckOutboxResult, AppendEvent, AppendEventResult, BloomDispatchLive, BloomDispatchRollup, ClaimSeal,
@@ -2502,7 +2503,7 @@ fn encode_metric<T: serde::Serialize>(value: &T) -> rusqlite::Result<Vec<u8>> {
     })
 }
 
-fn resolved_configs(store: &mut SqliteStore) -> rusqlite::Result<aether_bloomery::ResolvedConfigs> {
+pub fn resolved_configs(store: &mut dyn StoreBackend) -> rusqlite::Result<aether_bloomery::ResolvedConfigs> {
     let mut configs = aether_bloomery::ResolvedConfigs::default();
     for record in store.load_configs()? {
         let Some(address) = Digest::from_slice(&record.digest) else {
@@ -2878,6 +2879,28 @@ impl NativeActor for StoreCapability {
             Err(CommissionError::NotOpen) => CancelCommissionResult::NotOpen,
             Err(CommissionError::WrongSubject) => CancelCommissionResult::WrongSubject,
             Err(error) => CancelCommissionResult::Err { error: error.to_string() },
+        }
+    }
+
+    #[handler::single]
+    fn on_reopen_commission(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: ReopenCommission,
+    ) -> ReopenCommissionResult {
+        let statement: Statement = match from_bytes(&mail.statement) {
+            Ok(statement) => statement,
+            Err(error) => return ReopenCommissionResult::Err { error: error.to_string() },
+        };
+        match state.backend.reopen(&WorkpieceId(mail.id.clone()), &statement) {
+            Ok(digest) => ReopenCommissionResult::Ok { id: mail.id, digest: digest.as_bytes().to_vec() },
+            Err(CommissionError::MissingCommission(id)) => ReopenCommissionResult::Missing { id },
+            Err(CommissionError::NotLanded(status)) => {
+                ReopenCommissionResult::NotLanded { status: status.as_str().to_owned() }
+            }
+            Err(CommissionError::Resolved(bloom)) => ReopenCommissionResult::Resolved { bloom: bloom.0.to_hex() },
+            Err(CommissionError::WrongSubject) => ReopenCommissionResult::WrongSubject,
+            Err(error) => ReopenCommissionResult::Err { error: error.to_string() },
         }
     }
 

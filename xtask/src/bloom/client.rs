@@ -8,9 +8,10 @@ use serde_json::Value;
 
 use super::Endpoint;
 use super::dto::{
-    ApprovalStoredView, BloomSpec, BloomView, CancelCommissionRequest, CommissionCancelledView, CommissionShowView,
-    ConfigRequest, ConfigValueView, ConfigView, DraftPatch, DraftView, JournalEntry, JournalView, OutcomeView,
-    RetryRequest, ScopeRevisionWrittenView, SealRequest, SupersedeRequest, ViewDocument, WithdrawRequest,
+    ApprovalStoredView, BloomSpec, BloomView, CancelCommissionRequest, CommissionCancelledView, CommissionReopenedView,
+    CommissionShowView, ConfigRequest, ConfigValueView, ConfigView, DraftPatch, DraftView, JournalEntry, JournalView,
+    OutcomeView, ReopenCommissionRequest, RetryRequest, ScopeRevisionWrittenView, SealRequest, SupersedeRequest,
+    ViewDocument, WithdrawRequest,
 };
 use super::http;
 use super::plan::spec_id;
@@ -111,6 +112,11 @@ impl<'a> Client<'a> {
     /// Close an open commission with a signed cancel envelope.
     pub fn cancel(&self, id: &str, request: &CancelCommissionRequest) -> Result<CommissionCancelledView> {
         self.send("POST", &format!("/commissions/{id}/cancel"), request)
+    }
+
+    /// Put a landed commission back in the line with a signed reopen envelope.
+    pub fn reopen(&self, id: &str, request: &ReopenCommissionRequest) -> Result<CommissionReopenedView> {
+        self.send("POST", &format!("/commissions/{id}/reopen"), request)
     }
 
     /// A stored configuration, decoded through its kind's schema.

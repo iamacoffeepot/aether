@@ -118,6 +118,8 @@ enum BloomCommand {
     Retry(RetryArgs),
     /// Retire an open commission whose work landed outside its bloom.
     Cancel(CancelArgs),
+    /// Put a landed commission whose member never resolved back in the line.
+    Reopen(ReopenArgs),
 }
 
 #[derive(Args, Debug)]
@@ -170,6 +172,24 @@ struct RetryArgs {
 #[derive(Args, Debug)]
 struct CancelArgs {
     /// The commission to retire.
+    workpiece: String,
+
+    /// Why, in your own words. Required; a blank one is refused at the door.
+    #[arg(long)]
+    reason: String,
+
+    /// Operator signing seed: 32 raw bytes or 64 hex characters, mode 0600.
+    #[arg(long)]
+    seed_file: Option<PathBuf>,
+
+    /// The `KeyId` the coordinator's allowlist names for that seed.
+    #[arg(long, default_value = "operator")]
+    signer: String,
+}
+
+#[derive(Args, Debug)]
+struct ReopenArgs {
+    /// The commission to restore.
     workpiece: String,
 
     /// Why, in your own words. Required; a blank one is refused at the door.
@@ -328,6 +348,7 @@ fn run_on_with_policy(endpoint: &Endpoint, command: &BloomCommand, approval_poli
         BloomCommand::Withdraw(args) => run_withdraw(&client, args),
         BloomCommand::Retry(args) => run_retry(&client, args),
         BloomCommand::Cancel(args) => run_cancel(&client, args),
+        BloomCommand::Reopen(args) => run_reopen(&client, args),
     }
 }
 
@@ -414,6 +435,36 @@ fn run_cancel(client: &Client<'_>, args: &CancelArgs) -> Result<String> {
     Ok(format!("cancelled {} {} ({})\n", args.workpiece, stored.digest, stored.status))
 }
 
+/// Reopen one commission, naming an unknown or not-landed workpiece locally
+/// before any write — the same read-first shape [`run_cancel`] uses.
+///
+/// The coordinator is the authority on whether the workpiece may come back: it
+/// refuses one that a bloom actually resolved. This read only spends the
+/// operator's attention rather than their signature on the obvious cases.
+fn run_reopen(client: &Client<'_>, args: &ReopenArgs) -> Result<String> {
+    let shown =
+        client.commission(&args.workpiece).with_context(|| format!("no commission named {}", args.workpiece))?;
+    if shown.status != "landed" {
+        bail!("commission {} is {}, not landed", args.workpiece, shown.status);
+    }
+    if args.reason.trim().is_empty() {
+        bail!("reopen reason is required");
+    }
+
+    let key = OperatorKey::load(
+        KeyId(args.signer.clone()),
+        args.seed_file.as_deref().context("--seed-file is required to sign the reopen")?,
+    )?;
+    let restored = client.reopen(
+        &args.workpiece,
+        &dto::ReopenCommissionRequest {
+            statement: key.reopen_of(Digest::from_bytes(*shown.intent.as_bytes())),
+            reason: args.reason.clone(),
+        },
+    )?;
+    Ok(format!("reopened {} {} ({})\n", args.workpiece, restored.digest, restored.status))
+}
+
 fn run_seal(client: &Client<'_>, args: &SealArgs, approval_policy: &Path) -> Result<String> {
     let task = plan::read_task_file(&args.task_file)?;
     plan::require_task(&task, &args.task_file)?;
@@ -496,7 +547,7 @@ mod tests {
     };
     use serde_json::{Value, json};
 
-    use super::{BloomCommand, CancelArgs, Endpoint, SealArgs, SupersedeArgs, run_on};
+    use super::{BloomCommand, CancelArgs, Endpoint, ReopenArgs, SealArgs, SupersedeArgs, run_on};
     use crate::bloom::dto::{AdrTouch, DigestHex};
     use crate::bloom::hex;
     use crate::bloom::plan::{self, BaseChoice};
@@ -1320,6 +1371,15 @@ mod tests {
         })
     }
 
+    fn reopen_args(workpiece: &str, reason: &str, seed_file: PathBuf) -> BloomCommand {
+        BloomCommand::Reopen(ReopenArgs {
+            workpiece: workpiece.to_owned(),
+            reason: reason.to_owned(),
+            seed_file: Some(seed_file),
+            signer: "operator".to_owned(),
+        })
+    }
+
     fn temp_seed(name: &str, bytes: [u8; 32]) -> PathBuf {
         let path = env::temp_dir().join(format!("aether-xtask-bloom-{name}-{}", process::id()));
         fs::write(&path, bytes).expect("write seed");
@@ -1403,6 +1463,80 @@ mod tests {
         fs::remove_file(&seed).ok();
         assert!(error.to_string().contains("cancelled"), "the refusal names the status it found: {error}");
         assert!(posted(&log).is_empty(), "a second cancel must not write: {log:?}");
+    }
+
+    #[test]
+    fn reopen_reads_the_commission_then_posts_a_signed_reopen_over_its_intent() {
+        let intent = digest(7);
+        let seed = temp_seed("reopen-landed", [3_u8; 32]);
+        let reason = "withdrawn from the bloom that landed";
+        let (output, log) = with_fake(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/commissions/wp-1") => (
+                    200,
+                    json!({
+                        "id": "wp-1",
+                        "intent": hex_of(intent),
+                        "status": "landed",
+                        "approvals": []
+                    }),
+                ),
+                ("POST", "/commissions/wp-1/reopen") => {
+                    (200, json!({ "digest": hex_of(digest(9)), "id": "wp-1", "status": "open" }))
+                }
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                run_on(
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
+                    &reopen_args("wp-1", reason, seed.clone()),
+                )
+                .expect("reopen against the fake coordinator")
+            },
+        );
+        fs::remove_file(&seed).ok();
+
+        let reopen = find(&log, "POST", "/commissions/wp-1/reopen");
+        let body = reopen.body.as_ref().expect("reopen body");
+        assert_eq!(body["reason"], reason);
+        assert_eq!(
+            body["statement"]["words"],
+            json!(intent.as_bytes().as_slice()),
+            "the signature is bound to the commission's own intent"
+        );
+        assert!(output.contains("wp-1"), "the workpiece is named: {output}");
+        assert!(output.contains("open"), "the restored status is printed: {output}");
+    }
+
+    #[test]
+    fn reopen_refuses_a_commission_that_is_not_landed_without_writing() {
+        // Read-first, exactly as the cancel is: an operator aiming at the wrong
+        // status is told so before their key is asked for.
+        let seed = temp_seed("reopen-open", [3_u8; 32]);
+        let (error, log) = with_fake(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/commissions/wp-1") => (
+                    200,
+                    json!({
+                        "id": "wp-1",
+                        "intent": hex_of(digest(7)),
+                        "status": "open",
+                        "approvals": []
+                    }),
+                ),
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                run_on(
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
+                    &reopen_args("wp-1", "already in the line", seed.clone()),
+                )
+                .expect_err("an open commission is refused")
+            },
+        );
+        fs::remove_file(&seed).ok();
+        assert!(error.to_string().contains("open"), "the refusal names the status it found: {error}");
+        assert!(posted(&log).is_empty(), "a refused reopen must not write: {log:?}");
     }
 
     #[test]

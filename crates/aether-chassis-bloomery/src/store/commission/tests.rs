@@ -3,11 +3,12 @@
 use std::collections::BTreeMap;
 
 use aether_bloomery::control::ScopeDispatchPayload;
+use aether_bloomery::testing::{claim, draft, event as decided_event, membership as member_of};
 use aether_bloomery::{
-    AuthorityDoor, CommissionProjection, CommissionStatus, Digest, Ed25519KeyProvider, FakeKeyProvider, KeyId,
-    NamedPath, Observation, PathOrigin, Provenance, SCOPE_FILL_COMMAND, SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA,
-    ScopeRevision, ScopeRouting, ScopeVerifyInput, SignatureEnvelope, StageId, Statement, Topic, WorkpieceId,
-    authorization_message, digest_of,
+    AuthorityDoor, BloomId, CommissionProjection, CommissionStatus, Decision, Decisions, Digest, Ed25519KeyProvider,
+    Fact, FakeKeyProvider, KeyId, NamedPath, Observation, Outcome, PathOrigin, Provenance, SCOPE_FILL_COMMAND,
+    SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA, ScopeRevision, ScopeRouting, ScopeVerifyInput, SignatureEnvelope,
+    StageId, Statement, Topic, WorkpieceId, authorization_message, digest_of,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use ed25519_dalek::{Signer, SigningKey};
@@ -91,6 +92,45 @@ fn cancel_of(intent: Digest) -> Statement {
         }),
         parents: Vec::new(),
     }
+}
+
+/// A reopen statement over `intent`. The signature is checked at the Reopen
+/// door before the store is reached, so the store's own guard is the binding:
+/// these are the bytes it must match against the stored intent.
+fn reopen_of(intent: Digest) -> Statement {
+    Statement {
+        words: intent.as_bytes().to_vec(),
+        provenance: Provenance::AuthorSignature(SignatureEnvelope {
+            signer: KeyId("owner".to_owned()),
+            signature: vec![4, 5, 6],
+        }),
+        parents: Vec::new(),
+    }
+}
+
+/// Journal one sealed bloom that resolved `id`, and return its bloom id.
+///
+/// A resolution reaches a member as a recorded decision, so the fixture states
+/// the decision the coordinator would have written rather than a fact.
+fn journal_resolution(store: &mut SqliteStore, id: &str) -> BloomId {
+    let spec = draft(0, vec![member_of(id, 1)]).seal();
+    let bloom = spec.id();
+    let event = decided_event("seal", Fact::Seal(spec));
+    let bytes = to_vec(&event).expect("the event encodes");
+    let decisions = to_vec(&Decisions {
+        outcome: Outcome::Sealed(bloom),
+        effects: vec![Decision::RecordResolution { bloom, claim: claim(id, 1, 50) }],
+    })
+    .expect("the decisions encode");
+    store
+        .append_event(&JournalWrite {
+            idempotency_key: &event.idempotency_key.0,
+            event: &bytes,
+            decisions: &decisions,
+            decider: "test",
+        })
+        .expect("the journal appends");
+    bloom
 }
 
 /// A stand-in mainline head for a scoping run — any digest, since nothing on
@@ -857,4 +897,73 @@ fn enqueuing_a_scope_run_is_one_transaction() {
         store.drain_topic(Topic::ScopeDispatch).expect("drain").is_empty(),
         "the outbox row must not survive the aborted transaction",
     );
+}
+
+#[test]
+fn a_landed_commission_no_bloom_resolved_reopens_and_projects_the_restored_status() {
+    // The stranding this door exists for (#5428): the commission was stamped
+    // landed by a bloom that never ran its member, so nothing of it is in
+    // mainline and it must be able to go round again.
+    let mut store = memory();
+    let intent = seed(&mut store, "wp-1");
+    store.mark_landed(&workpiece("wp-1")).expect("mark landed");
+    let _ = store.drain_topic(Topic::Commission).expect("drain the projections so far");
+
+    let statement = reopen_of(intent);
+    let digest = store.reopen(&workpiece("wp-1"), &statement).expect("a stranded commission reopens");
+
+    assert_eq!(digest, digest_of(&statement), "the reply addresses the statement that authorized it");
+    let view = store.load(&workpiece("wp-1")).expect("load").expect("the commission remains");
+    assert_eq!(view.head.status, CommissionStatus::Open, "the workpiece is back in the line");
+    let queued = store.drain_topic(Topic::Commission).expect("drain");
+    let projected: CommissionProjection =
+        from_bytes(&queued.last().expect("the reopen enqueues a projection").payload).expect("projection decodes");
+    assert_eq!(projected.status, "open", "the replica is told the commission is open again");
+}
+
+#[test]
+fn a_landed_commission_a_bloom_resolved_is_refused_at_the_reopen_door() {
+    // The case that must never reopen: this workpiece's work is in mainline,
+    // and putting it back in the line would re-run a landed change.
+    let mut store = memory();
+    let intent = seed(&mut store, "wp-1");
+    let bloom = journal_resolution(&mut store, "wp-1");
+    store.mark_landed(&workpiece("wp-1")).expect("mark landed");
+
+    match store.reopen(&workpiece("wp-1"), &reopen_of(intent)) {
+        Err(CommissionError::Resolved(named)) => assert_eq!(named, bloom, "the refusal names the resolving bloom"),
+        other => panic!("a resolved workpiece must not reopen: {other:?}"),
+    }
+    let view = store.load(&workpiece("wp-1")).expect("load").expect("the commission remains");
+    assert_eq!(view.head.status, CommissionStatus::Landed, "a refused reopen writes nothing");
+}
+
+#[test]
+fn an_open_commission_has_nothing_to_reopen() {
+    // Answered rather than shrugged at: a reopen that reported success over a
+    // commission it did not move would read as evidence the workpiece was
+    // checked and freed when nothing checked anything.
+    let mut store = memory();
+    let intent = seed(&mut store, "wp-1");
+
+    match store.reopen(&workpiece("wp-1"), &reopen_of(intent)) {
+        Err(CommissionError::NotLanded(status)) => assert_eq!(status, CommissionStatus::Open),
+        other => panic!("an open commission is not reopenable: {other:?}"),
+    }
+}
+
+#[test]
+fn a_reopen_bound_to_another_commissions_intent_is_refused() {
+    // The words are the binding the operator signed. A statement minted over a
+    // different commission's intent must not move this one.
+    let mut store = memory();
+    seed(&mut store, "wp-1");
+    store.mark_landed(&workpiece("wp-1")).expect("mark landed");
+
+    match store.reopen(&workpiece("wp-1"), &reopen_of(Digest::from_bytes([9; 32]))) {
+        Err(CommissionError::WrongSubject) => {}
+        other => panic!("a mis-bound reopen must be refused: {other:?}"),
+    }
+    let view = store.load(&workpiece("wp-1")).expect("load").expect("the commission remains");
+    assert_eq!(view.head.status, CommissionStatus::Landed, "a refused reopen writes nothing");
 }

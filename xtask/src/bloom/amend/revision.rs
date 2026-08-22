@@ -12,7 +12,9 @@ use std::fs;
 use std::path::Path;
 use std::str;
 
-use aether_bloomery::{Digest, KeyId, ScopeRevision, Statement, digest_of, signed_approval, signed_cancel};
+use aether_bloomery::{
+    Digest, KeyId, ScopeRevision, Statement, digest_of, signed_approval, signed_cancel, signed_reopen,
+};
 use anyhow::{Context, Result, bail};
 
 use crate::bloom::client::Client;
@@ -67,6 +69,14 @@ impl OperatorKey {
     /// attempt hits.
     pub fn cancel_of(&self, intent: Digest) -> Statement {
         signed_cancel(self.signer.clone(), &self.seed, intent)
+    }
+
+    /// The Reopen-door statement over `intent`.
+    ///
+    /// Deterministic for the same reason [`Self::cancel_of`] is; the store's
+    /// not-landed refusal is what a second attempt hits.
+    pub fn reopen_of(&self, intent: Digest) -> Statement {
+        signed_reopen(self.signer.clone(), &self.seed, intent)
     }
 }
 

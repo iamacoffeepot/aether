@@ -439,10 +439,10 @@ pub use values::pin_workpiece_description;
 pub use values::resolve_member_dependencies;
 #[cfg(not(target_arch = "wasm32"))]
 pub use values::signed_approval;
-#[cfg(not(target_arch = "wasm32"))]
-pub use values::signed_cancel;
 pub use values::split_lane_identity;
 pub use values::surface_additions;
 pub use values::surface_intersection;
 pub use values::tier_verdict;
 pub use values::verify_scope;
+#[cfg(not(target_arch = "wasm32"))]
+pub use values::{signed_cancel, signed_reopen};

@@ -90,6 +90,7 @@ use crate::bloomery::LandReactorSetup;
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::control::ControlCore;
+use crate::store::membership;
 use crate::store::{CommissionBackend, SqliteStore, StoreBackend};
 
 use aether_bloomery::Topic;
@@ -639,10 +640,23 @@ fn reconciled_comment(workpiece: &str, status: &str) -> String {
     format!("This issue's commission (`{workpiece}`) is {status} on the board, so the issue is being closed to match.")
 }
 
-/// Mark each member commission landed before the replica is projected. Local
-/// status is the authority; a missing commission or a store fault is warned
-/// and dropped so the land itself still admits. The mirror then projects
-/// the landed replica and closes it best-effort (ADR-0199).
+/// Mark each *resolved* member's commission landed before the replica is
+/// projected. Local status is the authority; a missing commission or a store
+/// fault is warned and dropped so the land itself still admits. The mirror then
+/// projects the landed replica and closes it best-effort (ADR-0199).
+///
+/// The sealed membership is not the landed set. A member an operator withdrew
+/// while the bloom walked (#5327) produced no resolution claim and contributed
+/// no candidate to the fold, so nothing of it is in the head being landed —
+/// while it is still named in the spec and still has a `dispatch_description`
+/// row. Stamping it landed strands the workpiece: every door that could
+/// re-author or re-seal it requires `open`, so the id, its intent, and its
+/// approvals all leave the line with a bloom that never ran them.
+///
+/// So the resolution — not the membership — decides, and an unreadable answer
+/// marks nothing. A commission left open when it should be landed is one
+/// `reopen`'s inverse away and is caught by the reconcile pass; a commission
+/// wrongly stamped landed is the stranding this exists to stop.
 fn mark_member_commissions_landed(store: &mut SqliteStore, bloom: &BloomId) {
     let members = match store.list_dispatch_descriptions(bloom.0.as_bytes()) {
         Ok(members) => members,
@@ -655,11 +669,31 @@ fn mark_member_commissions_landed(store: &mut SqliteStore, bloom: &BloomId) {
             return;
         }
     };
-    for (workpiece, _) in members {
-        if let Err(error) = store.mark_landed(&WorkpieceId(workpiece.clone())) {
+    let resolved = match membership::resolved_members(store, bloom) {
+        Ok(resolved) => resolved,
+        Err(error) => {
             tracing::warn!(
                 target: "aether_chassis_bloomery::land",
-                workpiece = workpiece.as_str(),
+                %error,
+                "could not read which members resolved; marking none landed, the landing itself stands",
+            );
+            return;
+        }
+    };
+    for (workpiece, _) in members {
+        let workpiece = WorkpieceId(workpiece);
+        if !resolved.contains(&workpiece) {
+            tracing::info!(
+                target: "aether_chassis_bloomery::land",
+                workpiece = workpiece.0.as_str(),
+                "member did not resolve into the landed head; its commission stays open",
+            );
+            continue;
+        }
+        if let Err(error) = store.mark_landed(&workpiece) {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::land",
+                workpiece = workpiece.0.as_str(),
                 %error,
                 "failed to mark the member commission landed; the landing itself stands",
             );

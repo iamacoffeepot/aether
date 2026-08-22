@@ -307,6 +307,59 @@ pub enum CancelCommissionResult {
     },
 }
 
+/// Put a commission stranded outside `open` back into the line.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.store.reopen_commission")]
+pub struct ReopenCommission {
+    /// The workpiece this commission is.
+    pub id: String,
+    /// Wire-encoded reopen [`aether_bloomery::Statement`]. Verified at the
+    /// Reopen door before it arrives here; the store re-checks only that its
+    /// words are this commission's intent digest.
+    #[serde(with = "aether_data::bytes")]
+    pub statement: Vec<u8>,
+}
+
+/// Reply to [`ReopenCommission`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.store.reopen_commission_result")]
+pub enum ReopenCommissionResult {
+    /// The commission is open again.
+    Ok {
+        /// The workpiece this commission is.
+        id: String,
+        /// Digest of the reopen statement that authorized it.
+        #[serde(with = "aether_data::bytes")]
+        digest: Vec<u8>,
+    },
+    /// No commission exists under this workpiece id.
+    Missing {
+        /// The workpiece id that was missing.
+        id: String,
+    },
+    /// The commission is not landed, so there is nothing to restore. An
+    /// already-open commission answers here rather than succeeding quietly:
+    /// a reopen that reports success over a commission it did not move would
+    /// read as evidence the workpiece is free when nothing checked.
+    NotLanded {
+        /// The status the commission is actually in.
+        status: String,
+    },
+    /// A bloom resolved this workpiece, so the landing is the ordinary one and
+    /// the work is in mainline.
+    Resolved {
+        /// Hex digest of the bloom that resolved it.
+        bloom: String,
+    },
+    /// The statement's words are not the stored intent digest.
+    WrongSubject,
+    /// The write failed.
+    Err {
+        /// A human-readable failure reason.
+        error: String,
+    },
+}
+
 /// Open a pre-bloom scoping run (ADR-0208, #5304): write its `enqueued` row
 /// and its `Topic::ScopeDispatch` outbox row in one transaction.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]

@@ -114,6 +114,18 @@ enum Command {
         #[arg(long)]
         envelope: PathBuf,
     },
+    /// Submit a pre-signed reopen envelope and put a stranded commission back
+    /// in the line.
+    Reopen {
+        /// Workpiece id to restore.
+        id: String,
+        /// Operator-facing reason printed after a successful reopen.
+        #[arg(long)]
+        reason: String,
+        /// Already-produced ADR-0179 signature envelope.
+        #[arg(long)]
+        envelope: PathBuf,
+    },
     /// Import an explicit snapshot of planned issues into a local journal.
     Import {
         /// JSON listing the named issues and their body files. Never a directory sweep.
@@ -153,6 +165,7 @@ fn dispatch(cli: CommissionCli) -> Result<String> {
         Command::Show { id, json } => show(&api, &id, json),
         Command::List { status } => list(&api, status.as_deref()),
         Command::Cancel { id, reason, envelope } => cancel(&api, &id, &reason, &envelope),
+        Command::Reopen { id, reason, envelope } => reopen(&api, &id, &reason, &envelope),
         Command::Import { manifest, store_path, sealed } => {
             import::import_paths(&manifest, &store_path, sealed.as_deref())
         }
@@ -193,6 +206,12 @@ struct ListView {
 struct CancelledView {
     id: String,
     status: String,
+}
+
+#[derive(Serialize)]
+struct ReopenBody {
+    statement: Statement,
+    reason: String,
 }
 
 #[derive(Deserialize)]
@@ -314,6 +333,21 @@ fn cancel(api: &ControlApi, id: &str, reason: &str, envelope: &Path) -> Result<S
     Ok(format!("{} {} ({reason})\n", cancelled.id, cancelled.status))
 }
 
+/// Put a landed commission whose member never resolved back in the line.
+///
+/// The envelope is a Reopen-door signature over the commission's intent digest,
+/// which is why the intent is read first: the operator signs the commission
+/// they are looking at. The coordinator refuses a workpiece some bloom actually
+/// resolved, so a wrong id is answered rather than acted on.
+fn reopen(api: &ControlApi, id: &str, reason: &str, envelope: &Path) -> Result<String> {
+    let view: ShowView = api.get_json(&format!("/commissions/{id}"))?;
+    let intent = digest_from_hex(&view.intent)?;
+    let statement = signed_statement(envelope, intent.as_bytes())?;
+    let body = ReopenBody { statement, reason: reason.to_owned() };
+    let reopened: CancelledView = api.send_json("POST", &format!("/commissions/{id}/reopen"), &body)?;
+    Ok(format!("{} {} ({reason})\n", reopened.id, reopened.status))
+}
+
 fn current_revision(api: &ControlApi, id: &str) -> Result<Option<String>> {
     match api.get_json::<ShowView>(&format!("/commissions/{id}")) {
         Ok(view) => Ok(view.current_revision),
@@ -370,6 +404,27 @@ mod tests {
         match cli.command {
             Command::ScopeRun { id } => assert_eq!(id, "issue-1"),
             other => panic!("expected scope-run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reopen_is_a_verb_on_the_sibling_binary() {
+        let cli = CommissionCli::try_parse_from([
+            "bloomery-commission",
+            "reopen",
+            "issue-1",
+            "--reason",
+            "withdrawn from a landed bloom",
+            "--envelope",
+            "envelope.json",
+        ])
+        .unwrap_or_else(|error| panic!("reopen must parse: {error}"));
+        match cli.command {
+            Command::Reopen { id, reason, .. } => {
+                assert_eq!(id, "issue-1");
+                assert_eq!(reason, "withdrawn from a landed bloom");
+            }
+            other => panic!("expected reopen, got {other:?}"),
         }
     }
 

@@ -8,10 +8,11 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use aether_bloomery::testing::digest;
+use aether_bloomery::testing::{claim, digest, draft, event as decided_event, membership as member_of};
 use aether_bloomery::{
-    Adjudication, Admit, BloomId, Correspondence, Decisions, Digest, Disposition, Event, Fact, IdempotencyKey,
-    LandPayload, Observation, Outcome, Provenance, SourceReplicaPayload, StageId, Statement, Topic, WorkpieceId,
+    Adjudication, Admit, BloomId, Correspondence, Decision, Decisions, Digest, Disposition, Event, Fact,
+    IdempotencyKey, LandPayload, Observation, Outcome, Provenance, SourceReplicaPayload, StageId, Statement, Topic,
+    Withdrawal, WithdrawalCause, WorkpieceId,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -477,6 +478,65 @@ fn landing_closes_only_the_issue_the_member_names() {
     assert_eq!(fake.issue_is_closed(9999), None, "a workpiece naming no object does not fabricate one");
 }
 
+// Journal one sealed bloom and what the reducer decided about its members: a
+// resolution claim for every name in `resolved`, a withdrawal for every name in
+// `withdrawn`. Returns the sealed bloom's own id.
+//
+// The decisions are stated rather than re-derived because that is what the
+// journal holds: a claim reaches a member as a recorded effect (inherited across
+// a supersession, in the case this fixture does not build), never as a fact
+// anyone can match on.
+fn journal_membership(store: &mut SqliteStore, resolved: &[&str], withdrawn: &[&str]) -> BloomId {
+    let members = resolved.iter().chain(withdrawn.iter()).map(|name| member_of(name, 1)).collect();
+    let spec = draft(0, members).seal();
+    let bloom = spec.id();
+
+    let mut effects: Vec<Decision> = resolved
+        .iter()
+        .enumerate()
+        .map(|(index, name)| Decision::RecordResolution {
+            bloom,
+            claim: claim(name, 1, 50_u8.saturating_add(u8::try_from(index).unwrap_or(0))),
+        })
+        .collect();
+    effects.extend(withdrawn.iter().map(|name| Decision::RecordWithdrawal {
+        bloom,
+        withdrawal: Withdrawal {
+            workpiece: WorkpieceId((*name).to_owned()),
+            cause: WithdrawalCause::Operator,
+            reason: "the lane host ran out of disk".to_owned(),
+            operator: "operator".to_owned(),
+        },
+    }));
+
+    let event = decided_event("seal", Fact::Seal(spec));
+    let bytes = to_vec(&event).unwrap();
+    let decisions = to_vec(&Decisions { outcome: Outcome::Sealed(bloom), effects }).unwrap();
+    store
+        .append_event(&JournalWrite {
+            idempotency_key: &event.idempotency_key.0,
+            event: &bytes,
+            decisions: &decisions,
+            decider: "test",
+        })
+        .unwrap();
+    bloom
+}
+
+// Open a commission for `workpiece` under an unsigned observation intent.
+fn seed_open_commission(store: &mut SqliteStore, workpiece: &str) {
+    store
+        .create(
+            &WorkpieceId(workpiece.to_owned()),
+            &Statement {
+                words: format!("intent for {workpiece}").into_bytes(),
+                provenance: Provenance::ObservationAttestation(Observation { source: "test".to_owned() }),
+                parents: Vec::new(),
+            },
+        )
+        .unwrap();
+}
+
 #[test]
 fn landing_marks_member_commissions_landed_before_any_replica_close() {
     // Local status is the authority. A land that closed GitHub first and then
@@ -489,17 +549,8 @@ fn landing_marks_member_commissions_landed_before_any_replica_close() {
     fake.seed_git_object(&new_head);
     let source = shell(fake, true);
     let mut store = SqliteStore::open(":memory:").unwrap();
-    let bloom = BloomId(digest(1));
-    store
-        .create(
-            &WorkpieceId("wp-1".to_owned()),
-            &Statement {
-                words: b"intent".to_vec(),
-                provenance: Provenance::ObservationAttestation(Observation { source: "test".to_owned() }),
-                parents: Vec::new(),
-            },
-        )
-        .unwrap();
+    seed_open_commission(&mut store, "wp-1");
+    let bloom = journal_membership(&mut store, &["wp-1"], &[]);
     seed_member(&mut store, bloom, "wp-1", Some("fix(crate): land the commission"));
     enqueue_land(&mut store, bloom, base, new_head);
 
@@ -512,6 +563,39 @@ fn landing_marks_member_commissions_landed_before_any_replica_close() {
     let last: aether_bloomery::CommissionProjection =
         from_bytes(&queued.last().unwrap().payload).expect("landed projection");
     assert_eq!(last.status, "landed");
+}
+
+#[test]
+fn a_withdrawn_members_commission_stays_open_when_the_bloom_lands() {
+    // Tripwire (#5428): a withdrawn member produced no claim and contributed
+    // nothing to the head being landed, but it keeps its seat in the sealed
+    // spec and its `dispatch_description` row. Stamping it landed strands the
+    // workpiece for good — every re-author and re-seal door requires `open` —
+    // so the resolution, not the membership, decides what the landing marks.
+    use aether_bloomery::CommissionStatus;
+
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    let source = shell(fake, true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    seed_open_commission(&mut store, "wp-resolved");
+    seed_open_commission(&mut store, "wp-withdrawn");
+    let bloom = journal_membership(&mut store, &["wp-resolved"], &["wp-withdrawn"]);
+    seed_member(&mut store, bloom, "wp-resolved", Some("fix(crate): the work that landed"));
+    seed_member(&mut store, bloom, "wp-withdrawn", None);
+    enqueue_land(&mut store, bloom, base, new_head);
+
+    drain_and_land(&mut store, &source).unwrap();
+
+    let resolved = store.load(&WorkpieceId("wp-resolved".to_owned())).unwrap().expect("commission remains");
+    let withdrawn = store.load(&WorkpieceId("wp-withdrawn".to_owned())).unwrap().expect("commission remains");
+    assert_eq!(resolved.head.status, CommissionStatus::Landed, "the member that resolved is what landed");
+    assert_eq!(
+        withdrawn.head.status,
+        CommissionStatus::Open,
+        "a withdrawn member's commission must stay open for the next wave"
+    );
 }
 
 fn seed_commission(store: &mut SqliteStore, workpiece: &str) {

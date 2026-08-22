@@ -9,7 +9,7 @@ use std::error::Error;
 use std::fmt;
 
 use aether_bloomery::{
-    AuthorityDoor, CommissionApprovalTier, CommissionProjection, CommissionStatementRole, CommissionStatus,
+    AuthorityDoor, BloomId, CommissionApprovalTier, CommissionProjection, CommissionStatementRole, CommissionStatus,
     CommissionValueError, Digest, KeyProvider, Observation, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision,
     ScopeVerifyInput, ScopeVerifyReport, Statement, Topic, WorkpieceId, digest_of, intent_title, verify_scope,
 };
@@ -17,13 +17,15 @@ use aether_data::wire::{from_bytes, to_vec};
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
 use super::SqliteStore;
+use super::membership;
 
 mod kinds;
 pub use kinds::{
     CancelCommission, CancelCommissionResult, CreateCommission, CreateCommissionResult, EnqueueScopeRun,
     EnqueueScopeRunResult, ListCommissions, ListCommissionsResult, ListedCommission, LoadCommission,
     LoadCommissionResult, RecordCommissionApproval, RecordCommissionApprovalResult, RecordCommissionProjection,
-    RecordCommissionProjectionResult, WriteScopeRevision, WriteScopeRevisionResult,
+    RecordCommissionProjectionResult, ReopenCommission, ReopenCommissionResult, WriteScopeRevision,
+    WriteScopeRevisionResult,
 };
 
 #[cfg(test)]
@@ -224,6 +226,12 @@ pub enum CommissionError {
     Store(String),
     /// The commission is not open, so a revision, approval, or cancel cannot land.
     NotOpen,
+    /// The commission is not landed, so a reopen has nothing to restore.
+    NotLanded(CommissionStatus),
+    /// A bloom resolved this workpiece, so its landing is the ordinary one and
+    /// the work it names is in mainline. Reopening it would put resolved work
+    /// back in the line.
+    Resolved(BloomId),
     /// The workpiece's plan steps or inverse searches name paths its own
     /// declared surface does not cover (ADR-0208). The revision is not stored;
     /// its report is.
@@ -254,6 +262,8 @@ impl fmt::Display for CommissionError {
             Self::WrongProvenance => write!(f, "approval provenance is neither signed nor auto"),
             Self::Store(message) => write!(f, "commission store: {message}"),
             Self::NotOpen => write!(f, "commission is not open"),
+            Self::NotLanded(status) => write!(f, "commission is {}, not landed", status.as_str()),
+            Self::Resolved(bloom) => write!(f, "bloom {} resolved this workpiece", bloom.0.to_hex()),
             Self::SurfaceGap { paths } => {
                 write!(f, "declared surface does not cover {}", paths.join(", "))
             }
@@ -396,6 +406,18 @@ pub trait CommissionBackend {
     /// Missing commission, not open, or words that are not the intent digest.
     fn cancel(&mut self, id: &WorkpieceId, statement: &Statement) -> Result<Digest, CommissionError>;
 
+    /// Put a landed commission back in the line, when no bloom ever resolved
+    /// its workpiece.
+    ///
+    /// The status is the only thing that moves: the intent, every revision, and
+    /// every approval are already immutable rows, so a restored commission is
+    /// the one that was stranded rather than a new one wearing its id.
+    ///
+    /// # Errors
+    /// Missing commission, a status that is not landed, a workpiece some bloom
+    /// resolved, or words that are not the intent digest.
+    fn reopen(&mut self, id: &WorkpieceId, statement: &Statement) -> Result<Digest, CommissionError>;
+
     /// Mark an open commission landed and enqueue its replica projection.
     /// Missing or already-closed commissions are a no-op so a bloom that
     /// mixed local and GitHub-era workpieces can land without failing closed.
@@ -461,6 +483,24 @@ impl CommissionBackend for SqliteStore {
 
     fn cancel(&mut self, id: &WorkpieceId, statement: &Statement) -> Result<Digest, CommissionError> {
         cancel_commission(&mut self.conn, id, statement)
+    }
+
+    fn reopen(&mut self, id: &WorkpieceId, statement: &Statement) -> Result<Digest, CommissionError> {
+        // Read the head first: an unknown or not-landed commission is answered
+        // from one row, and the journal replay behind the resolution guard is
+        // only worth paying for once the commission is a candidate to restore.
+        // The transaction below re-reads both, so this read is a filter and
+        // never the authority.
+        let Some(head) = load_head(&self.conn, &id.0)? else {
+            return Err(CommissionError::MissingCommission(id.0.clone()));
+        };
+        if head.status != CommissionStatus::Landed {
+            return Err(CommissionError::NotLanded(head.status));
+        }
+        if let Some(bloom) = membership::resolving_bloom(self, id)? {
+            return Err(CommissionError::Resolved(bloom));
+        }
+        reopen_commission(&mut self.conn, id, statement)
     }
 
     fn mark_landed(&mut self, id: &WorkpieceId) -> Result<(), CommissionError> {
@@ -703,6 +743,43 @@ fn cancel_commission(
     txn.execute(
         "UPDATE commissions SET status = ?1 WHERE id = ?2",
         rusqlite::params![CommissionStatus::Cancelled.as_str(), id.0],
+    )?;
+    enqueue_projection(&txn, &id.0)?;
+    txn.commit()?;
+    Ok(statement_digest)
+}
+
+/// Flip a landed commission back to open under one transaction, re-checking
+/// the status and the intent binding the caller filtered on.
+///
+/// The reopen statement is not filed beside the intent and the cancel:
+/// `commission_statements.role` is a closed `CHECK` on a table that already
+/// exists on every live journal, so adding a role means migrating a running
+/// coordinator's store to record an act that restores rather than concludes.
+/// The signature is verified at the Reopen door before this is reached and the
+/// route logs the signer and the reason, so what a stored row would add is a
+/// second copy of an authorization that has already been checked.
+fn reopen_commission(
+    conn: &mut Connection,
+    id: &WorkpieceId,
+    statement: &Statement,
+) -> Result<Digest, CommissionError> {
+    let intent = Digest::from_slice(&statement.words).ok_or(CommissionError::WrongSubject)?;
+    let statement_digest = digest_of(statement);
+    let txn = conn.transaction()?;
+    let Some(head) = load_head(&txn, &id.0)? else {
+        return Err(CommissionError::MissingCommission(id.0.clone()));
+    };
+    if head.status != CommissionStatus::Landed {
+        return Err(CommissionError::NotLanded(head.status));
+    }
+    if head.intent != intent {
+        return Err(CommissionError::WrongSubject);
+    }
+
+    txn.execute(
+        "UPDATE commissions SET status = ?1 WHERE id = ?2",
+        rusqlite::params![CommissionStatus::Open.as_str(), id.0],
     )?;
     enqueue_projection(&txn, &id.0)?;
     txn.commit()?;

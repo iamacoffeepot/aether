@@ -81,7 +81,7 @@ pub use stage::{
 };
 pub use statement::{Observation, Provenance, StageReceipt, Statement};
 #[cfg(not(target_arch = "wasm32"))]
-pub use statement::{signed_approval, signed_cancel};
+pub use statement::{signed_approval, signed_cancel, signed_reopen};
 pub use study::{StudyCall, StudyCost, StudyRecord};
 pub use suppression::{SuppressionDisposition, SuppressionRequest, SuppressionVerdict};
 pub use surface::{SurfacePathRequest, SurfaceRequest};

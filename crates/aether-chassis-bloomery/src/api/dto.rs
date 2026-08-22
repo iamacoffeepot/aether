@@ -723,6 +723,29 @@ pub struct CommissionCancelledView {
     pub status: String,
 }
 
+/// `POST /commissions/{id}/reopen` body: the same shape a cancel submits, at
+/// the Reopen door. The signature is the authority; the reason is the
+/// operator's own words and is recorded in the coordinator log, never in the
+/// signed bytes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReopenCommissionRequest {
+    /// The Reopen-door statement bound to the commission's intent digest.
+    pub statement: Statement,
+    /// Operator context for the reopen. Never authority.
+    pub reason: String,
+}
+
+/// `POST /commissions/{id}/reopen` reply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommissionReopenedView {
+    /// Digest of the reopen statement that authorized it.
+    pub digest: Digest,
+    /// The workpiece this commission is.
+    pub id: WorkpieceId,
+    /// Always `"open"`.
+    pub status: String,
+}
+
 /// `POST /commissions/{id}/scope-runs` body: the observed mainline the run
 /// reads code at. The coordinator does not invent a tree; this is
 /// `Snapshot.mainline` as the CLI (or a caller that has just read `GET /view`)
