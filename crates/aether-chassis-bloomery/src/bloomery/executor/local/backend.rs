@@ -433,9 +433,9 @@ impl LocalExecutor {
     /// stub runner, and [`from_config`](Self::from_config) drives with the
     /// production [`ProcessTransformRunner`]. `base_dir` is the scratch root;
     /// each run writes its evidence to `base_dir/<nonce>-evidence` and builds in
-    /// its member's checkout, `base_dir/worktrees/<workpiece>` — falling back to
-    /// the lane slot's own `base_dir/slot-<index>` for a dispatch that names no
-    /// member.
+    /// its session's tree, `base_dir/sessions/<slug>/tree` — falling back to
+    /// the lane slot's own `base_dir/slot-<index>` for a dispatch that resolves
+    /// no session.
     /// Unthrottled — every submit spawns immediately until
     /// [`with_max_concurrent_lanes`](Self::with_max_concurrent_lanes) sets a
     /// ceiling, which is what [`from_config`](Self::from_config) does.
