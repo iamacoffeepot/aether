@@ -7,7 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Modifier;
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::dto::DispatchFilePage;
 use crate::keys::{KeyHint, Outcome};
@@ -532,11 +532,19 @@ impl Transcript {
     }
 
     fn render_expanded(&self, frame: &mut Frame<'_>, area: Rect, id: u64) {
-        let body = self
-            .buffer
-            .index_of(id)
-            .and_then(|index| self.buffer.expanded(index))
-            .unwrap_or_else(|| "line is gone".to_owned());
+        let raw = self.buffer.index_of(id).and_then(|index| self.buffer.raw(index));
+        if let Some(raw) = raw
+            && let Some(value) = event::expand_value(raw)
+        {
+            let lines = super::json::present(&value);
+            let offset = u16::try_from(self.expand_scroll.min(lines.len().saturating_sub(1))).unwrap_or(u16::MAX);
+            frame.render_widget(
+                Paragraph::new(lines).style(palette::body()).wrap(Wrap { trim: false }).scroll((offset, 0)),
+                area,
+            );
+            return;
+        }
+        let body = raw.map_or_else(|| "line is gone".to_owned(), event::expand);
         let lines = wrap(&body, usize::from(area.width.max(1)));
         let offset = self.expand_scroll.min(lines.len().saturating_sub(1));
         let items: Vec<ListItem> = lines.into_iter().skip(offset).map(ListItem::new).collect();

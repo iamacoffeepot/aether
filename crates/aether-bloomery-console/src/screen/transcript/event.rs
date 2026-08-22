@@ -33,13 +33,16 @@ pub fn collapse(raw: &str) -> String {
     }
 }
 
+/// Parsed form for the expanded pane. Non-JSON returns `None`.
+#[must_use]
+pub fn expand_value(raw: &str) -> Option<Value> {
+    serde_json::from_str(raw).ok()
+}
+
 /// Pretty form for the expanded pane. Non-JSON stays raw.
 #[must_use]
 pub fn expand(raw: &str) -> String {
-    serde_json::from_str::<Value>(raw)
-        .ok()
-        .and_then(|value| serde_json::to_string_pretty(&value).ok())
-        .unwrap_or_else(|| raw.to_owned())
+    expand_value(raw).and_then(|value| serde_json::to_string_pretty(&value).ok()).unwrap_or_else(|| raw.to_owned())
 }
 
 fn assistant_preview(value: &Value) -> String {

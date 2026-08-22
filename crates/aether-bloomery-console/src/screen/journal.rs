@@ -3,7 +3,8 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::widgets::{List, ListItem, ListState};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 use serde_json::Value;
 
 use crate::cursor::Cursor;
@@ -230,23 +231,31 @@ impl Record {
     }
 
     pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, store: &Store) {
-        let mut lines = vec![format!("record  {}", self.sequence)];
+        let mut lines = vec![plain(format!("record  {}", self.sequence))];
         match store.record(self.sequence) {
-            None => lines.push("record not in the current page".to_owned()),
+            None => lines.push(plain("record not in the current page")),
             Some(record) => {
-                lines.push(format!("key  {}", record.idempotency_key));
-                lines.push(format!("decider  {}", record.decider));
-                lines.push("event".to_owned());
-                lines.extend(pretty(&record.event).lines().map(str::to_owned));
-                lines.push("outcome".to_owned());
-                lines.extend(pretty(&record.outcome).lines().map(str::to_owned));
+                lines.push(plain(format!("key  {}", record.idempotency_key)));
+                lines.push(plain(format!("decider  {}", record.decider)));
+                lines.push(plain("event"));
+                lines.extend(super::json::present(&record.event));
+                lines.push(plain("outcome"));
+                lines.extend(super::json::present(&record.outcome));
             }
         }
-        let items: Vec<ListItem> = lines.into_iter().map(ListItem::new).collect();
-        let mut state = ListState::default().with_offset(self.offset);
-        frame.render_stateful_widget(List::new(items).style(palette::body()), area, &mut state);
-        self.offset = state.offset();
+        let line_count = lines.len();
+        let offset = self.offset.min(line_count.saturating_sub(1));
+        self.offset = offset;
+        let offset = u16::try_from(offset).unwrap_or(u16::MAX);
+        frame.render_widget(
+            Paragraph::new(lines).style(palette::body()).wrap(Wrap { trim: false }).scroll((offset, 0)),
+            area,
+        );
     }
+}
+
+fn plain(text: impl Into<String>) -> Line<'static> {
+    Line::from(Span::styled(text.into(), palette::body()))
 }
 
 fn record_summary(record: &JournalRecordView) -> String {
@@ -275,10 +284,6 @@ fn variant_name(value: &Value, field: &str) -> String {
         }
     }
     obj.keys().next().cloned().unwrap_or_else(|| value.to_string())
-}
-
-fn pretty(value: &Value) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
 }
 
 fn parse_bloom_filter(filter: &str) -> Option<DigestHex> {

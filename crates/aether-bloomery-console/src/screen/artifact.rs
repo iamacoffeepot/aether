@@ -6,7 +6,8 @@ use std::str::from_utf8;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::widgets::{List, ListItem, ListState};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::dto::{DecodedArtifact, DigestHex};
 use crate::keys::{KeyHint, Outcome};
@@ -71,27 +72,43 @@ impl Artifact {
     }
 
     pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, store: &Store) {
-        let mut lines = vec![format!("artifact  {}  {}", self.digest.prefix(), self.digest.as_hex())];
+        let mut lines = vec![plain(format!("artifact  {}  {}", self.digest.prefix(), self.digest.as_hex()))];
         match store.artifact(self.digest) {
-            None => lines.push("loading".to_owned()),
+            None => lines.push(plain("loading")),
             Some(cell) if cell.value.is_none() && cell.error.is_some() => {
-                lines.push(cell.error.clone().unwrap_or_default());
+                lines.push(plain(cell.error.clone().unwrap_or_default()));
             }
             Some(cell) => {
                 if let Some(error) = &cell.error {
-                    lines.push(error.clone());
+                    lines.push(plain(error.clone()));
                 }
                 if let Some(body) = &cell.value {
-                    lines.extend(present_artifact(body).lines().map(str::to_owned));
+                    lines.extend(present_lines(body));
                 }
             }
         }
-        let items: Vec<ListItem> = lines.into_iter().map(ListItem::new).collect();
-        let list = List::new(items).style(palette::body()).highlight_symbol("");
-        let mut state = ListState::default().with_offset(self.offset);
-        frame.render_stateful_widget(list, area, &mut state);
-        self.offset = state.offset();
+        let line_count = lines.len();
+        let offset = self.offset.min(line_count.saturating_sub(1));
+        self.offset = offset;
+        let offset = u16::try_from(offset).unwrap_or(u16::MAX);
+        frame.render_widget(
+            Paragraph::new(lines).style(palette::body()).wrap(Wrap { trim: false }).scroll((offset, 0)),
+            area,
+        );
     }
+}
+
+fn plain(text: impl Into<String>) -> Line<'static> {
+    Line::from(Span::styled(text.into(), palette::body()))
+}
+
+/// Coloured JSON lines, line-delimited UTF-8, or a hex dump.
+#[must_use]
+pub fn present_lines(body: &DecodedArtifact) -> Vec<Line<'static>> {
+    if let Some(value) = &body.value {
+        return super::json::present(value);
+    }
+    present_artifact(body).lines().map(|line| plain(line.to_owned())).collect()
 }
 
 /// JSON pretty-print, line-delimited UTF-8, or a hex dump.
@@ -147,9 +164,13 @@ mod tests {
     use crate::keys::{Outcome, assert_footer_honest};
     use crate::nav::Nav;
     use crate::shell::Shell;
+    use crate::store::Store;
     use crate::warroom::Focus;
     use crossterm::event::KeyEvent;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use serde_json::json;
+    use std::time::Duration;
 
     #[test]
     fn present_artifact_picks_json_then_text_then_hex() {
@@ -165,6 +186,31 @@ mod tests {
         let dump = present_artifact(&binary);
         assert!(dump.contains("00 ff 41"), "{dump}");
         assert!(dump.contains(".A") || dump.contains('.'), "{dump}");
+    }
+
+    #[test]
+    fn a_wide_value_is_wrapped_not_cut() {
+        // The plausible bug: List cuts at the pane edge, so a 200-character
+        // string loses everything past column 40.
+        let digest = DigestHex::from_bytes([1; 32]);
+        let tail = "TAILTOKEN";
+        let payload = format!("{}{tail}", "x".repeat(200 - tail.len()));
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_artifact(
+            digest,
+            Ok(DecodedArtifact { value: Some(json!({ "body": payload })), ..DecodedArtifact::default() }),
+        );
+        let mut artifact = Artifact::new(digest);
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).expect("test backend");
+        terminal.draw(|frame| artifact.render(frame, frame.area(), &store)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buffer.area().height {
+            for x in 0..buffer.area().width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+        }
+        assert!(text.contains(tail), "{text}");
     }
 
     #[test]

@@ -6,6 +6,7 @@ mod board;
 mod detail;
 mod dispatch;
 mod journal;
+mod json;
 mod metrics;
 mod partition;
 mod quiet;
