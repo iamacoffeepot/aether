@@ -173,14 +173,14 @@ topic_vocabulary! {
     /// under a bloom-level order record. Appended so the prior topics' display
     /// spellings and ordering are unchanged.
     AggregateVerify,
-    /// A whole-document projection (host-minted): the view-document producer
-    /// (#3497) enqueues [`ViewDocument`](crate::port::ViewDocument) payloads and
-    /// the mirror reactor drains them onto the outward mirror. No [`Decision`]
-    /// projects onto it — it is host-produced and host-drained, so
-    /// [`of_decision`](Self::of_decision) never returns it — but it is a real
-    /// outbox topic exactly one reactor drains, so it belongs to the closed set.
-    /// Its payload type [`ViewDocument`](crate::port::ViewDocument) already lives
-    /// in this crate.
+    /// A whole-document projection (host-minted): the control core's commit
+    /// path enqueues [`ViewDocument`](crate::port::ViewDocument) payloads when
+    /// the projected document changes, and the mirror reactor drains them onto
+    /// the outward mirror. No [`Decision`] projects onto it — it is
+    /// host-produced and host-drained, so [`of_decision`](Self::of_decision)
+    /// never returns it — but it is a real outbox topic exactly one reactor
+    /// drains, so it belongs to the closed set. Its payload type
+    /// [`ViewDocument`](crate::port::ViewDocument) already lives in this crate.
     ViewDocument,
     /// An authorized orphan-claim release (reducer-minted, from
     /// [`Decision::DispatchOrphanClaimRelease`]), drained by the claim-release

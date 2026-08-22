@@ -8,7 +8,8 @@
 
 use aether_bloomery::{
     BloomId, BloomStatus, BloomView, CommissionProjection, Digest, Evidence, EvidenceKind, LandingReceipt, MemberView,
-    PendingDecisionView, ProjectedReceipt, ProjectionBackend, ResolutionClaim, StageId, ViewDocument, WorkpieceId,
+    PendingDecisionView, ProjectedReceipt, ProjectionBackend, ResolutionClaim, StageId, ViewDocument, WithdrawnView,
+    WorkpieceId,
 };
 use aether_bloomery_github::{
     CommissionProjectionApi, GithubProjection, Marker, NewIssue, commission_floor_title, issue_title_is_valid,
@@ -163,6 +164,30 @@ fn a_blocked_member_names_the_ancestor_holding_it_out_of_the_line() {
     let body = &projection.client().comments_on(MEMBER_B)[0];
     assert!(body.contains(&format!("blocked by `issue-{MEMBER_A}`")), "state names the ancestor: {body}");
     assert!(body.contains("**Blocked** by"), "the hold is stated, not left as silence: {body}");
+}
+
+#[test]
+fn a_withdrawn_member_does_not_render_as_in_progress() {
+    // Tripwire: member_state used to fall through to "in progress" for a
+    // withdrawn member, so turning the view producer on would publish a
+    // comment that is wrong rather than absent.
+    let projection = GithubProjection::new(seeded());
+    let mut document = view(false);
+    document.blooms[0].members[0].withdrawn = Some(WithdrawnView {
+        cause: "operator".into(),
+        depends_on: None,
+        reason: "dropped from the bloom".into(),
+        operator: "eve".into(),
+    });
+
+    projection.reconcile_view(&document).expect("withdrawn reconcile");
+    let body = &projection.client().comments_on(MEMBER_A)[0];
+    assert!(body.contains("- State: withdrawn"), "a withdrawal is a terminal state, not silence: {body}");
+    assert!(!body.contains("in progress"), "a withdrawn member must not read as still working: {body}");
+    assert!(
+        body.contains("**Withdrawn** (operator): dropped from the bloom — operator `eve`."),
+        "the comment names cause, reason, and operator: {body}",
+    );
 }
 
 #[test]

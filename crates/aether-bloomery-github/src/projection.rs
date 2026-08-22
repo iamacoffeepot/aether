@@ -406,6 +406,42 @@ fn render_member_body(bloom: BloomId, member: &MemberView) -> String {
     );
     let _ = writeln!(body, "- State: {}", member_state(member));
 
+    if let Some(cursor) = &member.cursor {
+        let _ = writeln!(body, "- Stage: {:?} (attempts {}).", cursor.stage, cursor.attempts);
+    }
+    if let Some(fault) = &member.host_fault {
+        let _ = writeln!(body, "- **Host fault**: {}", fault.findings);
+    }
+    if let Some(park) = &member.park {
+        let _ = writeln!(
+            body,
+            "- **Parked** at {:?}: construct concluded without a candidate. Evidence: `{}`.",
+            park.stage,
+            short_hex(&park.evidence)
+        );
+    }
+    if let Some(eviction) = &member.evicted_by {
+        let _ = writeln!(body, "- **Evicted** by `{}` on `{}`.", eviction.by.0, eviction.path);
+    }
+    if let Some(withdrawal) = &member.withdrawn {
+        match &withdrawal.depends_on {
+            Some(depends_on) => {
+                let _ = writeln!(
+                    body,
+                    "- **Withdrawn** ({} of `{}`): {} — operator `{}`.",
+                    withdrawal.cause, depends_on.0, withdrawal.reason, withdrawal.operator
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    body,
+                    "- **Withdrawn** ({}): {} — operator `{}`.",
+                    withdrawal.cause, withdrawal.reason, withdrawal.operator
+                );
+            }
+        }
+    }
+
     if let Some(blocker) = &member.blocked_by {
         let _ = writeln!(body, "- **Blocked** by `{}`: construct waits until that ancestor resolves.", blocker.0);
     }
@@ -444,11 +480,22 @@ fn render_member_body(bloom: BloomId, member: &MemberView) -> String {
 }
 
 fn member_state(member: &MemberView) -> String {
-    match (&member.resolution, &member.wedge, &member.blocked_by) {
-        (_, Some(wedge), _) => format!("**wedged** at {:?}", wedge.stage),
-        (Some(_), None, _) => "integrated".to_owned(),
-        (None, None, Some(blocker)) => format!("blocked by `{}`", blocker.0),
-        (None, None, None) => "in progress".to_owned(),
+    // A withdrawal is a person's one-way decision: it outranks a wedge, a
+    // resolution, or any still-working hold that might also be on the view.
+    if member.withdrawn.is_some() {
+        "withdrawn".to_owned()
+    } else if let Some(wedge) = &member.wedge {
+        format!("**wedged** at {:?}", wedge.stage)
+    } else if member.resolution.is_some() {
+        "integrated".to_owned()
+    } else if let Some(blocker) = &member.blocked_by {
+        format!("blocked by `{}`", blocker.0)
+    } else if let Some(eviction) = &member.evicted_by {
+        format!("evicted by `{}`", eviction.by.0)
+    } else if member.host_fault.is_some() {
+        "held on host".to_owned()
+    } else {
+        "in progress".to_owned()
     }
 }
 
