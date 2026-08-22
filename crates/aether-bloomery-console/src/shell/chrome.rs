@@ -5,12 +5,13 @@
 
 use std::time::Duration;
 
+use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use crate::dto::{SpendQuiesce, ViewDocument};
-use crate::keys::{KeyHint, footer_line, footer_row};
+use crate::keys::{KeyHint, footer_line, footer_row, overlay_lines};
 use crate::palette::{self, Role};
 use crate::screen::{Dashboard, QuietLine};
 use crate::store::Cell;
@@ -41,6 +42,10 @@ pub fn format_age(age: Option<Duration>) -> String {
 
 // Three 14-cell series plus the metrics do not fit a narrower row, so the decoration goes before the facts.
 const SPARKLINE_MIN_WIDTH: u16 = 100;
+
+// The widest hint line is well under this, so the overlay stays a pane over the
+// body rather than a second screen.
+const OVERLAY_MAX_WIDTH: u16 = 40;
 
 /// Identity, endpoint, sample age, then staleness (deliberately before the metrics), then metrics and sparklines.
 #[must_use]
@@ -210,6 +215,31 @@ pub fn pane_block(title: impl Into<String>, focused: bool) -> Block<'static> {
             palette::border()
         })
         .style(palette::body())
+}
+
+/// The `?` overlay: every hint the current seat advertises, in a bordered pane
+/// centred over the body. The footer keeps two keys inline, so this is what
+/// advertises the rest; it is drawn over the body and dismissed without
+/// disturbing the frame stack.
+#[must_use]
+pub fn keys_overlay(hints: &[KeyHint], area: Rect) -> (Rect, Paragraph<'static>) {
+    let lines = overlay_lines(hints);
+    let width = OVERLAY_MAX_WIDTH.min(area.width);
+    let height = u16::try_from(lines.len()).unwrap_or(u16::MAX).saturating_add(2).min(area.height);
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Thick)
+        .title(Line::from("keys"))
+        .border_style(palette::border_focused())
+        .style(palette::body());
+    (rect, Paragraph::new(lines.join("\n")).block(block).style(palette::body()))
 }
 
 #[must_use]

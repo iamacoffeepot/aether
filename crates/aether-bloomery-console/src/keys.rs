@@ -65,6 +65,14 @@ pub fn footer_row(trail: &str, keys: &str, width: usize) -> String {
     row
 }
 
+/// One `"{keys}  {action}"` line per hint, for the `?` overlay. The overlay is
+/// what advertises the keys the footer no longer has room to paint, so it is
+/// built from the same list `footer_line` renders.
+#[must_use]
+pub fn overlay_lines(hints: &[KeyHint]) -> Vec<String> {
+    hints.iter().map(|hint| format!("{}  {}", hint.keys, hint.action)).collect()
+}
+
 fn elide_from_left(text: &str, budget: usize) -> String {
     let len = text.chars().count();
     if len <= budget {
@@ -114,7 +122,7 @@ fn parse_key_token(token: &str) -> KeyCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{KeyHint, assert_footer_honest, footer_line};
+    use super::{KeyHint, assert_footer_honest, footer_line, footer_row, overlay_lines};
     use crossterm::event::KeyCode;
     use std::panic::catch_unwind;
 
@@ -137,6 +145,47 @@ mod tests {
         // real search key.
         let hint = KeyHint { keys: "/", action: "search" };
         assert_eq!(hint.advertised_codes(), vec![KeyCode::Char('/')]);
+    }
+
+    #[test]
+    fn the_footer_row_keeps_the_keys_and_marks_an_elided_trail() {
+        // The plausible bug: a row that spends its last columns on the path,
+        // so `q quit` is the token that goes.
+        let keys = footer_line(&[KeyHint { keys: "?", action: "keys" }, KeyHint { keys: "q", action: "quit" }]);
+        let trail = "board › bloom ab12cd34 › member issue-1 › transcript dispatch-1";
+        let row = footer_row(trail, &keys, 40);
+        assert_eq!(row.chars().count(), 40, "{row}");
+        assert!(row.ends_with("q quit"), "{row}");
+        assert!(row.starts_with('…'), "{row}");
+        assert!(row.contains("dispatch-1"), "the deepest crumb is the one that survives: {row}");
+    }
+
+    #[test]
+    fn a_trail_that_fits_is_padded_not_elided() {
+        // The plausible bug: eliding unconditionally, so a short path is
+        // marked truncated when nothing was dropped.
+        let keys = footer_line(&[KeyHint { keys: "q", action: "quit" }]);
+        let row = footer_row("board › days", &keys, 40);
+        assert!(row.starts_with("board › days"), "{row}");
+        assert!(!row.contains('…'), "{row}");
+        assert!(row.ends_with("q quit"), "{row}");
+        assert_eq!(row.chars().count(), 40, "{row}");
+    }
+
+    #[test]
+    fn a_width_narrower_than_the_keys_paints_the_keys_alone() {
+        // The plausible bug: a narrow frame paints a path and no quit key.
+        let keys = footer_line(&[KeyHint { keys: "q", action: "quit" }]);
+        let row = footer_row("board › days › a very long crumb", &keys, 6);
+        assert_eq!(row, "q quit");
+    }
+
+    #[test]
+    fn the_overlay_lists_one_line_per_hint() {
+        // Tripwire: the overlay is the only surface that advertises the keys
+        // the footer stopped painting; a line lost here hides a key entirely.
+        let hints = [KeyHint { keys: "j/k", action: "select" }, KeyHint { keys: "r", action: "refresh" }];
+        assert_eq!(overlay_lines(&hints), vec!["j/k  select".to_owned(), "r  refresh".to_owned()]);
     }
 
     #[test]

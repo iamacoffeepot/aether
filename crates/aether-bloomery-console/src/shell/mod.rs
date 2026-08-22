@@ -14,7 +14,7 @@ use std::time::Duration;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::widgets::Block;
+use ratatui::widgets::{Block, Clear};
 
 use crate::fetch::{FetchLanes, FetchReply, ResourceBody};
 use crate::http::Endpoint;
@@ -44,6 +44,7 @@ pub struct Shell {
     fetch: Option<FetchLanes>,
     workspace: Workspace,
     stack: Vec<Screen>,
+    keys_overlay: bool,
 }
 
 impl Shell {
@@ -54,7 +55,7 @@ impl Shell {
     }
 
     fn assemble(endpoint_label: String, store: Store, fetch: Option<FetchLanes>) -> Self {
-        Self { endpoint_label, store, fetch, workspace: Workspace::new(), stack: Vec::new() }
+        Self { endpoint_label, store, fetch, workspace: Workspace::new(), stack: Vec::new(), keys_overlay: false }
     }
 
     /// Drain finished fetches and issue any due subscriptions. No HTTP.
@@ -70,6 +71,18 @@ impl Shell {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return Outcome::Quit;
         }
+        if self.keys_overlay {
+            // An open overlay swallows navigation so the board does not walk
+            // underneath it; only quit and dismissal read through.
+            return match key.code {
+                KeyCode::Char('q') => Outcome::Quit,
+                KeyCode::Char('?') | KeyCode::Esc => {
+                    self.keys_overlay = false;
+                    Outcome::Handled
+                }
+                _ => Outcome::Handled,
+            };
+        }
         if key.code == KeyCode::Tab && self.stack.is_empty() {
             self.workspace.cycle();
             return Outcome::Handled;
@@ -84,6 +97,10 @@ impl Shell {
                 Outcome::Handled
             }
             KeyCode::Char('a') => self.handle_artifact(),
+            KeyCode::Char('?') => {
+                self.keys_overlay = true;
+                Outcome::Handled
+            }
             _ => Outcome::Ignored,
         }
     }
@@ -103,6 +120,11 @@ impl Shell {
             self.workspace.render(frame, chunks[1], &self.store);
         } else if let Some(screen) = self.stack.last_mut() {
             screen.render(frame, chunks[1], &self.store);
+        }
+        if self.keys_overlay {
+            let (area, overlay) = chrome::keys_overlay(&self.footer_hints(), chunks[1]);
+            frame.render_widget(Clear, area);
+            frame.render_widget(overlay, area);
         }
         frame.render_widget(chrome::footer(&self.footer_trail(), INLINE_HINTS, chunks[2].width), chunks[2]);
     }
@@ -1341,6 +1363,66 @@ mod tests {
         assert_eq!(shell.stack_depth(), 1);
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Esc)), Outcome::Handled);
         assert_eq!(shell.stack_depth(), 0);
+    }
+
+    #[test]
+    fn the_footer_paints_whole_keys_and_never_the_whole_hint_list() {
+        // The plausible bug: a footer that spends its columns on the full hint
+        // list, so the last hint is cut mid-word and `q quit` is never painted.
+        let mut shell = Shell::showing(&parked_blooms(3), None);
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let text = buffer_text(&terminal);
+        let last = text.lines().last().unwrap_or("").to_owned();
+        assert!(last.trim_end().ends_with("q quit"), "{last}");
+        assert!(last.contains("? keys"), "{last}");
+        assert!(!last.contains("landed "), "the metrics live in the header now: {last}");
+        assert!(!last.contains("j/k select"), "the full hint list is behind `?`: {last}");
+    }
+
+    #[test]
+    fn the_overlay_lists_every_key_the_seat_advertises() {
+        // Tripwire: the overlay is now the only thing that advertises those
+        // keys — an overlay built from a shorter list re-hides exactly what
+        // the trimmed footer stopped painting.
+        let mut shell = Shell::showing(&parked_blooms(3), None);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('?'))), Outcome::Handled);
+        let text = draw(&mut shell);
+        for hint in shell.footer_hints() {
+            let line = format!("{}  {}", hint.keys, hint.action);
+            assert!(text.contains(&line), "overlay is missing {line:?}:\n{text}");
+        }
+
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Esc)), Outcome::Handled);
+        let text = draw(&mut shell);
+        for hint in shell.footer_hints() {
+            let line = format!("{}  {}", hint.keys, hint.action);
+            assert!(!text.contains(&line), "the overlay survives dismissal: {line:?}\n{text}");
+        }
+    }
+
+    #[test]
+    fn an_open_overlay_does_not_walk_the_board_underneath() {
+        // The plausible bug: keys read through the overlay, so reading the
+        // key list moves the selection the operator was reading about.
+        let mut shell = Shell::showing(&parked_blooms(3), None);
+        let start = shell.board().cursor().selected().cloned();
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('?'))), Outcome::Handled);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('j'))), Outcome::Handled);
+        assert_eq!(shell.board().cursor().selected().cloned(), start);
+    }
+
+    #[test]
+    fn a_question_mark_still_types_into_the_journal_filter() {
+        // The plausible bug: `?` is taken ahead of the screens, so it cannot
+        // be typed into an editor the screen owns.
+        let mut shell = Shell::showing(&parked_blooms(3), None);
+        shell.push_nav(Nav::journal(None));
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('f'))), Outcome::Handled);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('?'))), Outcome::Handled);
+        assert!(!shell.keys_overlay, "the journal's filter editor owns the key");
+        let text = draw(&mut shell);
+        assert!(text.contains("filter  ?"), "typed ? missing from filter:\n{text}");
     }
 
     #[test]
