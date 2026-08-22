@@ -37,6 +37,8 @@ use aether_data::wire::{from_bytes, to_vec};
 use std::iter::repeat_n;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::bloomery::{ScopeRunRefusal, open_scope_run};
+
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use rusqlite::ffi::{Error as SqliteFfiError, SQLITE_ERROR};
@@ -2837,21 +2839,17 @@ fn enqueue_scope_run_mail(store: &mut SqliteStore, mail: EnqueueScopeRun) -> Enq
     if view.head.status != CommissionStatus::Open {
         return EnqueueScopeRunResult::NotOpen;
     }
-    match crate::bloomery::open_scope_run(store, &id, view.head.intent, base) {
+    match open_scope_run(store, &id, view.head.intent, base) {
         Ok(opened) => EnqueueScopeRunResult::Ok {
             id: mail.id,
             ordinal: opened.ordinal,
             sequence: opened.sequence,
             subject: opened.subject.as_bytes().to_vec(),
         },
-        Err(crate::bloomery::ScopeRunRefusal::AlreadyInFlight { ordinal }) => {
-            EnqueueScopeRunResult::AlreadyInFlight { ordinal }
-        }
-        Err(crate::bloomery::ScopeRunRefusal::AlreadyFrozen) => EnqueueScopeRunResult::AlreadyFrozen,
-        Err(crate::bloomery::ScopeRunRefusal::Exhausted { attempts }) => EnqueueScopeRunResult::Exhausted { attempts },
-        Err(crate::bloomery::ScopeRunRefusal::Encode(error) | crate::bloomery::ScopeRunRefusal::Store(error)) => {
-            EnqueueScopeRunResult::Err { error }
-        }
+        Err(ScopeRunRefusal::AlreadyInFlight { ordinal }) => EnqueueScopeRunResult::AlreadyInFlight { ordinal },
+        Err(ScopeRunRefusal::AlreadyFrozen) => EnqueueScopeRunResult::AlreadyFrozen,
+        Err(ScopeRunRefusal::Exhausted { attempts }) => EnqueueScopeRunResult::Exhausted { attempts },
+        Err(ScopeRunRefusal::Encode(error) | ScopeRunRefusal::Store(error)) => EnqueueScopeRunResult::Err { error },
     }
 }
 
