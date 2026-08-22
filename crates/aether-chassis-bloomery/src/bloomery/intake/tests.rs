@@ -653,8 +653,7 @@ fn claim_for_carries_the_whole_observation() {
         observation.failed_verifiers,
         &detail,
     );
-    let reference =
-        EvidenceRef { name, nonce: nonce, artifact_id: 17, size_bytes: 18, observation: observation.clone() };
+    let reference = EvidenceRef { name, nonce, artifact_id: 17, size_bytes: 18, observation: observation.clone() };
 
     let admitted = NameEvidenceClaims.claim_for(&reference).expect("a well-formed attempt name decodes");
     assert_eq!(admitted.observation, observation);
