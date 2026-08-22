@@ -10,7 +10,7 @@ mod log;
 
 use std::fs;
 use std::io::{self, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
@@ -39,11 +39,11 @@ struct SetArgs {
     field: String,
     /// The transform run directory that owns the call log.
     #[arg(long)]
-    run: std::path::PathBuf,
+    run: PathBuf,
     /// Path to the field's value. `-` reads stdin so a multi-paragraph value
     /// never has to survive shell quoting.
     #[arg(long)]
-    value_file: std::path::PathBuf,
+    value_file: PathBuf,
 }
 
 /// Dispatch `cargo xtask scope`.

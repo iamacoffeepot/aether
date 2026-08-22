@@ -1,6 +1,6 @@
 //! The `scope.fill` lane (ADR-0208): assemble the prompt from the lane's
 //! in-repo instruction source, run the resolved harness, replay the setter
-//! call log through [`WorkpieceBuilder`], derive inverse-search, verify the
+//! call log through [`aether_bloomery::WorkpieceBuilder`], derive inverse-search, verify the
 //! workpiece against its own declared surface, and stamp a review-shaped
 //! evidence envelope.
 

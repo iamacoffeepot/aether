@@ -6,7 +6,7 @@
 //! which is what reproduces generations: [`WorkpieceBuilder`] counts calls and
 //! last-write-wins by maximum generation.
 //!
-//! The value rides as text, not a [`WorkpieceFact`] digest, because a builder
+//! The value rides as text, not a [`aether_bloomery::WorkpieceFact`] digest, because a builder
 //! rehydrated from records alone can report presence but cannot resolve
 //! content. Persisted bytes are `aether_data::wire`.
 
@@ -223,6 +223,7 @@ pub fn parse_field(name: &str) -> Result<FieldKind> {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
+    use super::super::set;
     use super::{append, load, parse_field, replay, winning_texts};
     use aether_bloomery::{FieldKind, ScopeRouting, WorkpieceId};
     use std::path::{Path, PathBuf};
@@ -253,9 +254,9 @@ mod tests {
         // is stored byte for byte.
         let run = scratch("backtick");
         let step = "Replay through `WorkpieceBuilder::finish` after the \"log\".\n\nThen call `verify_scope`.";
-        crate::scope::set("plan-step", &run, &write_value(&run, "step.txt", step)).unwrap();
-        crate::scope::set("problem", &run, &write_value(&run, "problem.txt", "the sketch has no program")).unwrap();
-        crate::scope::set("declared-surface", &run, &write_value(&run, "surface.txt", "xtask/**")).unwrap();
+        set("plan-step", &run, &write_value(&run, "step.txt", step)).unwrap();
+        set("problem", &run, &write_value(&run, "problem.txt", "the sketch has no program")).unwrap();
+        set("declared-surface", &run, &write_value(&run, "surface.txt", "xtask/**")).unwrap();
 
         let calls = load(&run).unwrap();
         let builder = replay(workpiece(), &calls);
