@@ -69,9 +69,23 @@ impl Days {
     }
 }
 
-fn dated_window(days: &[MetricDay]) -> Vec<&MetricDay> {
+const BAR_WIDTH: u16 = 3;
+const BAR_GAP: u16 = 1;
+const WINDOW_DAYS: usize = 14;
+
+/// How many bars fit in `inner_width`. Callers take this many days from the
+/// end of the series so the newest days survive a narrow pane.
+fn visible_span(inner_width: u16, bar_width: u16, bar_gap: u16) -> usize {
+    let stride = bar_width.saturating_add(bar_gap).max(1);
+    usize::from(inner_width.saturating_add(bar_gap) / stride).min(WINDOW_DAYS)
+}
+
+/// The last `span` days the coordinator actually served. Reconstructed
+/// placeholder days carry no date and are dropped before the window is taken,
+/// so a narrow pane spends its bars on real days rather than a synthetic floor.
+fn dated_window(days: &[MetricDay], span: usize) -> Vec<&MetricDay> {
     let dated = dated(days);
-    let skip = dated.len().saturating_sub(14);
+    let skip = dated.len().saturating_sub(span);
     dated.into_iter().skip(skip).collect()
 }
 
@@ -79,77 +93,93 @@ fn spend_bar(day: &MetricDay) -> u64 {
     day.spend_micro_usd
 }
 
+fn chart_block(title: impl Into<String>) -> Block<'static> {
+    Block::default().borders(Borders::ALL).border_style(palette::border()).style(palette::body()).title(title.into())
+}
+
 fn render_spend(frame: &mut Frame<'_>, area: Rect, days: &[MetricDay], ceiling: Option<u64>) {
-    let window = dated_window(days);
+    let window = dated_window(days, visible_span(area.width.saturating_sub(2), BAR_WIDTH, BAR_GAP));
+    let title =
+        ceiling.map_or_else(|| "SPEND".to_owned(), |ceiling| format!("SPEND  ceiling {}", format_micro_usd(ceiling)));
+    if window.is_empty() || window.iter().all(|day| spend_bar(day) == 0) {
+        frame.render_widget(
+            Paragraph::new("no priced spend in this window")
+                .block(chart_block(title))
+                .style(palette::body().add_modifier(Modifier::DIM)),
+            area,
+        );
+        return;
+    }
     let labels: Vec<String> = window.iter().map(|day| bar_label(day)).collect();
     let data: Vec<(&str, u64)> =
         labels.iter().zip(window.iter()).map(|(label, day)| (label.as_str(), spend_bar(day))).collect();
-    let title =
-        ceiling.map_or_else(|| "SPEND".to_owned(), |ceiling| format!("SPEND  ceiling {}", format_micro_usd(ceiling)));
     let chart = BarChart::default()
-        .block(
-            Block::default().borders(Borders::ALL).border_style(palette::border()).style(palette::body()).title(title),
-        )
+        .block(chart_block(title))
         .data(&data)
-        .bar_width(3)
-        .bar_gap(1)
+        .bar_width(BAR_WIDTH)
+        .bar_gap(BAR_GAP)
         .bar_style(palette::paint(Role::Working));
     frame.render_widget(chart, area);
 }
 
 fn render_landed(frame: &mut Frame<'_>, area: Rect, days: &[MetricDay]) {
-    let window = dated_window(days);
+    let window = dated_window(days, visible_span(area.width.saturating_sub(2), BAR_WIDTH, BAR_GAP));
+    if window.is_empty() || window.iter().all(|day| day.landed == 0) {
+        frame.render_widget(
+            Paragraph::new("no landings recorded in this window")
+                .block(chart_block("LANDED".to_owned()))
+                .style(palette::body().add_modifier(Modifier::DIM)),
+            area,
+        );
+        return;
+    }
     let labels: Vec<String> = window.iter().map(|day| bar_label(day)).collect();
     let data: Vec<(&str, u64)> =
         labels.iter().zip(window.iter()).map(|(label, day)| (label.as_str(), day.landed)).collect();
     let chart = BarChart::default()
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(palette::border())
-                .style(palette::body())
-                .title("LANDED"),
-        )
+        .block(chart_block("LANDED".to_owned()))
         .data(&data)
-        .bar_width(3)
-        .bar_gap(1)
+        .bar_width(BAR_WIDTH)
+        .bar_gap(BAR_GAP)
         .bar_style(palette::paint(Role::Settled));
     frame.render_widget(chart, area);
 }
 
 fn render_cycle(frame: &mut Frame<'_>, area: Rect, days: &[MetricDay]) {
-    let window = dated_window(days);
-    let mut line = String::from("cycle  ");
-    for day in &window {
-        match day.cycle_time_millis {
-            Some(millis) => {
-                let _ = write!(line, "{} ", format_duration(millis));
+    let window = dated_window(days, visible_span(area.width.saturating_sub(2), BAR_WIDTH, BAR_GAP));
+    let line = if window.is_empty() || window.iter().all(|day| day.cycle_time_millis.is_none()) {
+        "no cycle time recorded in this window".to_owned()
+    } else {
+        let mut line = String::from("cycle  ");
+        for day in window {
+            match day.cycle_time_millis {
+                Some(millis) => {
+                    let _ = write!(line, "{} ", format_duration(millis));
+                }
+                None => line.push_str("· "),
             }
-            None => line.push_str("· "),
+            if day.quiesced {
+                line.push_str("Q ");
+            }
         }
-        if day.quiesced {
-            line.push_str("Q ");
-        }
-    }
-    if window.is_empty() {
-        line.push_str("(no days)");
-    }
+        line
+    };
     frame.render_widget(
         Paragraph::new(line)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(palette::border())
-                    .style(palette::body())
-                    .title("CYCLE TIME"),
-            )
+            .block(chart_block("CYCLE TIME".to_owned()))
             .style(palette::body().add_modifier(Modifier::DIM)),
         area,
     );
 }
 
 fn bar_label(day: &MetricDay) -> String {
-    let base = day.label.rsplit('/').next().unwrap_or(&day.label);
+    let after_slash = day.label.rsplit('/').next().unwrap_or(&day.label);
+    let after_dash = after_slash.rsplit('-').next().unwrap_or(after_slash);
+    let base = if after_dash.is_empty() || after_dash.len() > 3 {
+        after_slash
+    } else {
+        after_dash
+    };
     if day.quiesced {
         format!("{base}Q")
     } else {
@@ -159,12 +189,37 @@ fn bar_label(day: &MetricDay) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Days, dated_window, spend_bar};
+    use super::{Days, bar_label, dated_window, spend_bar, visible_span};
     use crate::dto::MetricDay;
     use crate::keys::{Outcome, assert_footer_honest};
     use crate::nav::Nav;
     use crate::shell::Shell;
+    use crate::store::Store;
     use crossterm::event::KeyEvent;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use std::time::Duration;
+
+    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        let area = buffer.area();
+        let mut out = String::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn paint_days(days: Vec<MetricDay>) -> String {
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_days(Ok(days));
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("test backend");
+        terminal.draw(|frame| Days::new().render(frame, frame.area(), &store)).expect("draw");
+        buffer_text(&terminal)
+    }
 
     #[test]
     fn days_footer_keys_are_handled() {
@@ -192,9 +247,56 @@ mod tests {
                 ..MetricDay::default()
             },
         ];
-        let window = dated_window(&days);
+        let window = dated_window(&days, 14);
         assert_eq!(window.len(), 1);
         assert_eq!(window[0].label, "bloomery/daily/2026-08-19");
         assert_eq!(spend_bar(window[0]), 0);
+    }
+
+    #[test]
+    fn a_bar_label_fits_the_bar_width() {
+        // Tripwire: a label wider than BAR_WIDTH is truncated by ratatui to a
+        // meaningless prefix.
+        let day = MetricDay { label: "bloomery/daily/2026-08-20".into(), ..MetricDay::default() };
+        assert_eq!(bar_label(&day), "20");
+        let quiesced = MetricDay { quiesced: true, ..day };
+        assert_eq!(bar_label(&quiesced), "20Q");
+    }
+
+    #[test]
+    fn visible_span_never_overflows_the_pane() {
+        // Tripwire: fourteen bars at width 3 with gap 1 need 56 columns; a
+        // narrower pane used to drop overflow bars with no marker.
+        assert_eq!(visible_span(58, 3, 1), 14);
+        assert_eq!(visible_span(20, 3, 1), 5);
+        assert_eq!(visible_span(0, 3, 1), 0);
+        assert_eq!(visible_span(200, 3, 1), 14);
+    }
+
+    #[test]
+    fn the_spend_chart_does_not_plot_the_dispatch_count() {
+        // Tripwire: spend_micro_usd.max(dispatches) plotted dispatch counts
+        // under a dollar-ceiling title whenever spend was unpriced.
+        let text = paint_days(vec![MetricDay {
+            label: "bloomery/daily/2026-08-20".into(),
+            spend_micro_usd: 0,
+            dispatches: 900,
+            ..MetricDay::default()
+        }]);
+        assert!(text.contains("no priced spend in this window"), "{text}");
+        assert!(!text.contains('█'), "{text}");
+    }
+
+    #[test]
+    fn an_empty_cycle_series_says_so() {
+        // Tripwire: a day with no cycle_time_millis used to paint `·` and
+        // look the same as a recorded zero.
+        let text = paint_days(vec![MetricDay {
+            label: "bloomery/daily/2026-08-20".into(),
+            cycle_time_millis: None,
+            ..MetricDay::default()
+        }]);
+        assert!(text.contains("no cycle time recorded"), "{text}");
+        assert!(!text.contains("· ·"), "{text}");
     }
 }
