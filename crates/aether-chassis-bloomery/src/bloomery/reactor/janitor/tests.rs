@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use aether_bloomery::testing::{draft, event, membership};
-use aether_bloomery::{BloomId, Digest, Fact, Forecast};
+use aether_bloomery::testing::{draft, event, membership, splice_bloom};
+use aether_bloomery::{BloomId, BloomStatus, Digest, Fact, Forecast, ResolvedConfigs, Snapshot, SpendWindow, reduce};
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{GitSource, MainlineRef, candidate_ref_name};
 use aether_data::wire::to_vec;
@@ -26,12 +26,29 @@ use crate::bloomery::SourceShell;
 use crate::bloomery::{
     CapturedObjects, LaneOccupancy, LocalExecutorError, RunLifecycle, RunProcess, RunSpec, TransformRunner,
 };
+use crate::store::membership::replay_snapshot;
 use crate::store::{JournalWrite, OutstandingOrder, SqliteStore, StoreBackend};
 
+/// Admit `fact` the way the coordinator does: decide it against the board the
+/// journal currently describes, and record that decision on the row.
 fn journal(store: &mut SqliteStore, key: &str, fact: Fact) {
-    let bytes = to_vec(&event(key, fact)).expect("the event encodes");
+    let board = replay_snapshot(store).expect("the journal replays");
+    journal_decided_against(store, key, fact, &board);
+}
+
+/// Admit `fact` against a stated board rather than the journal's own — the
+/// coordinator's position at admission, for a row whose recorded decision a
+/// later replay could not arrive at by re-deciding it.
+fn journal_decided_against(store: &mut SqliteStore, key: &str, fact: Fact, board: &Snapshot) {
+    let event = event(key, fact);
+    let decisions = reduce(board, &event, &ResolvedConfigs::default(), &SpendWindow::default());
     store
-        .append_event(&JournalWrite { idempotency_key: key, event: &bytes, decisions: &[], decider: "test" })
+        .append_event(&JournalWrite {
+            idempotency_key: key,
+            event: &to_vec(&event).expect("the event encodes"),
+            decisions: &to_vec(&decisions).expect("the decisions encode"),
+            decider: "test",
+        })
         .expect("the journal appends");
 }
 
@@ -242,6 +259,59 @@ fn a_session_tree_outlives_its_launches_and_dies_with_the_work_bound_to_it() {
         "the session no live member is bound to loses its tree; the sealed bloom's member keeps its own",
     );
     assert!(live.is_dir(), "a live member's session tree is still there for its next launch");
+}
+
+#[test]
+fn a_live_members_session_tree_survives_a_journal_this_reducer_would_re_decide() {
+    // #5431. Between one lap's order clearing and the next one registering,
+    // the membership walk is the only thing that can vouch for a member, and
+    // it walks the snapshot the sweep rebuilt. Rebuilding it by re-deciding
+    // the journal reconstructs a different board than the one the coordinator
+    // is walking: the seal door admits one active bloom per mainline, so the
+    // first row this binary's reducer no longer reproduces costs the replay
+    // every seal after it, and the walking bloom is simply not there. Observed
+    // on the coordinator at de5d4bbaa, where a 3166-row journal re-decided to
+    // 8 blooms instead of the 108 its rows recorded, and five members lost,
+    // between laps, the checkouts their harness sessions are welded to.
+    //
+    // The fixture is that journal in miniature: a predecessor that held the
+    // active slot, and a successor sealed once it had left. The successor's
+    // row records the decision the coordinator made — `Sealed` — while a
+    // re-decision, which never got the predecessor out of the slot, refuses it
+    // as `ActiveBloomExists` and loses the live bloom the same way.
+    let scratch = tempfile::tempdir().expect("a scratch dir is created");
+    let tree = scratch.path().join("sessions").join("s-live").join("tree");
+    fs::create_dir_all(&tree).expect("the live session's tree is created");
+
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
+    let predecessor = draft(0, vec![membership("wp-predecessor", 1)]).seal();
+    journal(&mut store, "seal-predecessor", Fact::Seal(predecessor.clone()));
+
+    let mut board = Snapshot::default();
+    splice_bloom(&mut board, &predecessor, BloomStatus::Landed);
+    let live = draft(0, vec![membership("wp", 1)]).seal();
+    journal_decided_against(&mut store, "seal-live", Fact::Seal(live.clone()), &board);
+    store.record_session_slug(live.id().0.as_bytes(), "wp", "s-live").expect("the live member's slug records");
+
+    // No outstanding order: the lap that was running has pushed its candidate
+    // and the next has not registered yet. The member is what is live here.
+    let released = Released(Arc::new(Mutex::new(Vec::new())));
+    let runner = StubRunner { registered: vec![tree.clone()], released: Released(Arc::clone(&released.0)) };
+    let keep = policy(7, u64::MAX);
+    let report = run(&mut SweepRequest {
+        store: &mut store,
+        runner: &runner,
+        source: None,
+        worktree_base: scratch.path(),
+        target_base: scratch.path(),
+        lanes: &idle,
+        policy: &keep,
+        now: SystemTime::now(),
+    });
+
+    assert_eq!(report.worktrees, 0, "a non-withdrawn member of an active bloom keeps its tree between laps");
+    assert!(released.0.lock().expect("the release log is not poisoned").is_empty());
+    assert!(tree.is_dir(), "the next lap resumes the conversation in the directory it was born in");
 }
 
 #[test]

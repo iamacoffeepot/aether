@@ -11,15 +11,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::time::SystemTime;
 
-use aether_bloomery::{
-    BloomId, BloomStatus, Digest, Event, ResolvedConfigs, Snapshot, SpendWindow, is_active_unlanded, reduce,
-};
-use aether_data::wire::from_bytes;
+use aether_bloomery::{BloomId, BloomStatus, Digest, Snapshot, is_active_unlanded};
 
 use crate::bloomery::LaneOccupancy;
 use crate::bloomery::SourceShell;
 use crate::bloomery::TransformRunner;
-use crate::store::StoreBackend;
+use crate::store::{StoreBackend, membership};
 
 /// The suffix a dispatch's evidence directory carries under the scratch root —
 /// the same spelling [`LocalExecutor`](crate::bloomery::LocalExecutor) uses.
@@ -110,12 +107,23 @@ pub struct SweepRequest<'a> {
 /// throughout: a dir git refuses or a ref the source cannot delete is logged
 /// and stepped over, never a reason to skip the rest of the pass.
 ///
+/// The snapshot comes from the shared replay that folds each row's *recorded*
+/// decisions (ADR-0190), not from re-deciding the journal with this binary's
+/// reducer. Every reclaim here is a statement about the board the coordinator
+/// is actually walking, and a re-decision reconstructs a different board: a
+/// row whose recorded outcome this reducer no longer reproduces sends the
+/// replay off the real history, and because the seal door admits one active
+/// bloom per mainline, a landing lost that way refuses every seal after it.
+/// The live bloom then does not exist as far as the sweep can see, and the
+/// checkouts, evidence, and refs its members are still standing in read as
+/// nobody's.
+///
 /// # Errors
-/// The store could not be read. A journal that does not decode is logged and
-/// treated as empty rather than failed — a torn record must not take the
+/// The store could not be read. A journal row that does not decode is logged
+/// and left out rather than failed — a torn record must not take the
 /// coordinator's janitor down.
 pub fn sweep(request: &mut SweepRequest<'_>) -> rusqlite::Result<SweepReport> {
-    let snapshot = replay_snapshot(request.store)?;
+    let snapshot = membership::replay_snapshot(request.store)?;
     let outstanding = request.store.list_outstanding_nonces()?;
     let live: HashSet<&str> = outstanding.iter().map(String::as_str).collect();
     let owners = dispatch_owners(request.store, &outstanding)?;
@@ -126,31 +134,6 @@ pub fn sweep(request: &mut SweepRequest<'_>) -> rusqlite::Result<SweepReport> {
     let refs = request.source.map_or(0, |source| prune_terminal_refs(source, &snapshot));
     let target_dirs = sweep_targets(request.target_base, request.policy.lane_target_budget_bytes, request.lanes);
     Ok(SweepReport { worktrees, evidence_dirs, refs, target_dirs })
-}
-
-fn replay_snapshot(store: &mut dyn StoreBackend) -> rusqlite::Result<Snapshot> {
-    let mut configs = ResolvedConfigs::default();
-    for record in store.load_configs()? {
-        let Some(address) = Digest::from_slice(&record.digest) else {
-            continue;
-        };
-        configs.insert(address, record.kind, record.bytes);
-    }
-
-    let mut snapshot = Snapshot::default();
-    for record in store.replay_journal()? {
-        let Ok(event) = from_bytes::<Event>(&record.event) else {
-            tracing::warn!(
-                target: "aether_chassis_bloomery::janitor",
-                sequence = record.sequence,
-                "janitor: journal record did not decode; skipping",
-            );
-            continue;
-        };
-        let decisions = reduce(&snapshot, &event, &configs, &SpendWindow::default());
-        snapshot = snapshot.apply(&event, &decisions, &configs);
-    }
-    Ok(snapshot)
 }
 
 /// Nonce → owning bloom, from outstanding rows and the durable owner table.
