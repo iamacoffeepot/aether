@@ -2599,7 +2599,20 @@ fn parse_claimed_subject(bytes: &[u8]) -> Option<Digest> {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::usable_target_base;
+    use aether_bloomery::SCOPE_FILL_COMMAND;
+
+    use super::{LaneGates, usable_target_base};
+
+    #[test]
+    fn the_scope_lane_is_neither_construct_nor_verify() {
+        // Tripwire: `is_verify` is a `starts_with("verify.")` prefix test; a
+        // later widening that swept `scope.` into the construct arm would give
+        // this lane a candidate gate it can never satisfy, and every run would
+        // fail with `produced_candidate: false`.
+        let gates = LaneGates::of(SCOPE_FILL_COMMAND);
+        assert!(!gates.is_construct);
+        assert!(!gates.is_verify);
+    }
 
     /// The scratch root these cases are stated against, absolute the way a
     /// production one is.

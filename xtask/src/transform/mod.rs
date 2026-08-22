@@ -33,12 +33,13 @@ mod review;
 mod review_mcp;
 mod review_reports;
 mod sccache;
+mod scope;
 mod scratch;
 mod verify;
 
 use std::path::{Path, PathBuf};
 
-use aether_bloomery::{Harness, VerifyFailureSet};
+use aether_bloomery::{Harness, SCOPE_FILL_COMMAND, VerifyFailureSet};
 use anyhow::{Result, bail};
 use clap::Args;
 use serde::Serialize;
@@ -54,8 +55,8 @@ use crate::transform::verify::{Excused, SuppressionRequest, VERIFY_BASE, VERIFY_
 
 #[derive(Args, Clone)]
 pub struct TransformArgs {
-    /// Typed command id — a `verify.*` mechanical id, `construct.implement`, or
-    /// `review.critic`.
+    /// Typed command id — a `verify.*` mechanical id, `construct.implement`,
+    /// `review.critic`, or `scope.fill`.
     command: String,
     /// Directory evidence bytes are written to (created if missing).
     #[arg(long)]
@@ -309,6 +310,9 @@ pub fn run(args: &TransformArgs) -> Result<()> {
     }
     if args.command == REVIEW_CRITIC {
         return review::run_review(args);
+    }
+    if args.command == SCOPE_FILL_COMMAND {
+        return scope::run_scope(args);
     }
     if args.command == REVIEW_REPORT {
         return review_mcp::serve(&args.out);
