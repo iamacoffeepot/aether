@@ -45,17 +45,31 @@ pub struct Shell {
     workspace: Workspace,
     stack: Vec<Screen>,
     keys_overlay: bool,
+    ascii_mark: bool,
 }
 
 impl Shell {
     #[must_use]
-    pub fn new<'scope>(scope: &'scope thread::Scope<'scope, '_>, endpoint: Endpoint, view_cadence: Duration) -> Self {
+    pub fn new<'scope>(
+        scope: &'scope thread::Scope<'scope, '_>,
+        endpoint: Endpoint,
+        view_cadence: Duration,
+        ascii_mark: bool,
+    ) -> Self {
         let endpoint_label = endpoint.label();
-        Self::assemble(endpoint_label, Store::new(view_cadence), Some(FetchLanes::spawn(scope, endpoint)))
+        Self::assemble(endpoint_label, Store::new(view_cadence), Some(FetchLanes::spawn(scope, endpoint)), ascii_mark)
     }
 
-    fn assemble(endpoint_label: String, store: Store, fetch: Option<FetchLanes>) -> Self {
-        Self { endpoint_label, store, fetch, workspace: Workspace::new(), stack: Vec::new(), keys_overlay: false }
+    fn assemble(endpoint_label: String, store: Store, fetch: Option<FetchLanes>, ascii_mark: bool) -> Self {
+        Self {
+            endpoint_label,
+            store,
+            fetch,
+            workspace: Workspace::new(),
+            stack: Vec::new(),
+            keys_overlay: false,
+            ascii_mark,
+        }
     }
 
     /// Drain finished fetches and issue any due subscriptions. No HTTP.
@@ -113,7 +127,13 @@ impl Shell {
             .split(frame.area());
         let dashboard = compose(&self.store);
         frame.render_widget(
-            chrome::header(&self.endpoint_label, self.store.view(), Some(&dashboard), frame.area().width),
+            chrome::header(
+                &self.endpoint_label,
+                self.store.view(),
+                Some(&dashboard),
+                frame.area().width,
+                self.ascii_mark,
+            ),
             chunks[0],
         );
         if self.stack.is_empty() {
@@ -350,7 +370,7 @@ impl Shell {
 impl Shell {
     fn harness(view_cadence: Duration) -> (Self, FetchProbe) {
         let (fetch, probe) = FetchLanes::pair();
-        (Self::assemble("127.0.0.1:8910".to_owned(), Store::new(view_cadence), Some(fetch)), probe)
+        (Self::assemble("127.0.0.1:8910".to_owned(), Store::new(view_cadence), Some(fetch), false), probe)
     }
 
     pub(crate) fn showing(view: &ViewDocument, error: Option<&str>) -> Self {
@@ -359,7 +379,7 @@ impl Shell {
         if let Some(error) = error {
             store.apply_view(Err(error.to_owned()));
         }
-        let mut shell = Self::assemble("127.0.0.1:8910".to_owned(), store, None);
+        let mut shell = Self::assemble("127.0.0.1:8910".to_owned(), store, None, false);
         shell.reseat_top();
         shell
     }
@@ -395,7 +415,7 @@ impl Shell {
     }
 
     pub(crate) fn probe(nav: Nav) -> Self {
-        let mut shell = Self::assemble("127.0.0.1:8910".to_owned(), Store::new(Duration::from_secs(1)), None);
+        let mut shell = Self::assemble("127.0.0.1:8910".to_owned(), Store::new(Duration::from_secs(1)), None, false);
         shell.push_nav(nav);
         shell
     }
@@ -619,8 +639,12 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a silent coordinator");
         let addr = listener.local_addr().expect("addr");
         thread::scope(|scope| {
-            let mut shell =
-                Shell::new(scope, Endpoint { host: addr.ip().to_string(), port: addr.port() }, Duration::from_secs(1));
+            let mut shell = Shell::new(
+                scope,
+                Endpoint { host: addr.ip().to_string(), port: addr.port() },
+                Duration::from_secs(1),
+                false,
+            );
 
             let start = Instant::now();
             shell.pump();
@@ -866,7 +890,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 frame.render_widget(
-                    chrome::header("127.0.0.1:8910", &view, Some(&dashboard), frame.area().width),
+                    chrome::header("127.0.0.1:8910", &view, Some(&dashboard), frame.area().width, false),
                     frame.area(),
                 );
             })
@@ -1363,6 +1387,22 @@ mod tests {
         assert_eq!(shell.stack_depth(), 1);
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Esc)), Outcome::Handled);
         assert_eq!(shell.stack_depth(), 0);
+    }
+
+    #[test]
+    fn the_header_opens_with_the_blossom_lockup() {
+        // Names the bug: a mark painted in body ink is a glyph, not a lockup —
+        // the one saturated cell is the whole point.
+        let mut shell = Shell::showing(&ViewDocument::default(), None);
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        let text = buffer_text(&terminal);
+        let first = text.lines().next().unwrap_or("").to_owned();
+        assert!(first.starts_with("\u{2740} bloomery"), "{first}");
+        assert!(!first.contains("bloomery-console"), "{first}");
+        assert_eq!(role_of(buffer[(0, 0)].fg), Role::Focus, "the mark cell is not the blossom");
+        assert_ne!(role_of(buffer[(2, 0)].fg), Role::Focus, "the wordmark is body ink, not petal");
     }
 
     #[test]

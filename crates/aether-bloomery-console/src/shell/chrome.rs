@@ -47,6 +47,26 @@ const SPARKLINE_MIN_WIDTH: u16 = 100;
 // body rather than a second screen.
 const OVERLAY_MAX_WIDTH: u16 = 40;
 
+/// The blossom the console opens with.
+pub const MARK: &str = "\u{2740}";
+/// What a terminal whose font has no `\u{2740}` paints instead — one cell either
+/// way, so the header row's budget does not move.
+pub const MARK_ASCII: &str = "*";
+
+/// The mark cell. Its petal colour is the palette's Blossom role, the one
+/// saturated thing the header carries.
+#[must_use]
+pub fn mark_span(ascii: bool) -> Span<'static> {
+    Span::styled(
+        if ascii {
+            MARK_ASCII
+        } else {
+            MARK
+        },
+        palette::paint(Role::Focus),
+    )
+}
+
 /// Identity, endpoint, sample age, then staleness (deliberately before the metrics), then metrics and sparklines.
 #[must_use]
 pub fn header(
@@ -54,10 +74,12 @@ pub fn header(
     view: &Cell<ViewDocument>,
     dashboard: Option<&Dashboard>,
     width: u16,
+    ascii_mark: bool,
 ) -> Paragraph<'static> {
     let age = format_age(view.sample_age());
     let mut spans = vec![
-        Span::styled("bloomery-console", palette::body().add_modifier(Modifier::BOLD)),
+        mark_span(ascii_mark),
+        Span::styled(" bloomery", palette::body().add_modifier(Modifier::BOLD)),
         Span::raw(format!("  {endpoint_label}  sample {age}")),
     ];
     if view.is_stale() {
@@ -249,8 +271,9 @@ pub fn footer(trail: &str, hints: &[KeyHint], width: u16) -> Paragraph<'static> 
 
 #[cfg(test)]
 mod tests {
-    use super::{format_age, format_seal, format_status, needs_you_window};
+    use super::{MARK, MARK_ASCII, format_age, format_seal, format_status, mark_span, needs_you_window};
     use crate::dto::{DigestHex, SpendQuiesce, ViewDocument};
+    use crate::palette::{self, Role};
     use crate::warroom::{Focus, NeedsYouRow, Severity};
     use std::time::Duration;
 
@@ -265,6 +288,18 @@ mod tests {
             happened: "park".to_owned(),
             action: "accept or defer".to_owned(),
             severity: Severity::Attention,
+        }
+    }
+
+    #[test]
+    fn the_mark_is_one_cell_in_both_forms() {
+        // The plausible bug: a fallback wider than the glyph it replaces,
+        // which shifts every span behind it and pushes the sparklines over
+        // the header row's budget.
+        assert_eq!(MARK.chars().count(), 1);
+        assert_eq!(MARK_ASCII.chars().count(), 1);
+        for ascii in [false, true] {
+            assert_eq!(mark_span(ascii).style.fg, Some(palette::color(Role::Focus)), "ascii={ascii}");
         }
     }
 
