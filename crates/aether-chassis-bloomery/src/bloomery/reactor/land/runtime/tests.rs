@@ -5,12 +5,13 @@
 //! turns a land decision into a landing proposal, merges that proposal once
 //! the structural gates hold, and admits the `Fact::Land` it then observes.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use aether_bloomery::testing::digest;
 use aether_bloomery::{
     Adjudication, Admit, BloomId, Correspondence, Decisions, Digest, Disposition, Event, Fact, IdempotencyKey,
-    LandPayload, Outcome, SourceReplicaPayload, StageId, Topic,
+    LandPayload, Observation, Outcome, Provenance, SourceReplicaPayload, StageId, Statement, Topic, WorkpieceId,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -19,9 +20,9 @@ use aether_bloomery_github::{
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::receipt::fixtures::seed_dispatch;
-use super::{drain_and_land, drain_and_land_emitting};
+use super::{RECONCILE_CLOSES_PER_PASS, drain_and_land, drain_and_land_emitting, reconcile_terminal_commissions};
 use crate::bloomery::outbox::TopicOutbox;
-use crate::store::{AppendOutcome, JournalWrite, SqliteStore, StoreBackend};
+use crate::store::{AppendOutcome, CommissionBackend, JournalWrite, SqliteStore, StoreBackend};
 
 // A fake-GitHub-backed source shell with the land gate set explicitly, so a
 // test drives the same shell the running reactor holds.
@@ -481,8 +482,7 @@ fn landing_marks_member_commissions_landed_before_any_replica_close() {
     // Local status is the authority. A land that closed GitHub first and then
     // failed to stamp the commission would leave the replica open as the
     // record of a landed workpiece.
-    use crate::store::CommissionBackend;
-    use aether_bloomery::{CommissionStatus, Observation, Provenance, Statement, WorkpieceId};
+    use aether_bloomery::CommissionStatus;
 
     let (fake, base) = seeded();
     let new_head = digest(90);
@@ -512,6 +512,120 @@ fn landing_marks_member_commissions_landed_before_any_replica_close() {
     let last: aether_bloomery::CommissionProjection =
         from_bytes(&queued.last().unwrap().payload).expect("landed projection");
     assert_eq!(last.status, "landed");
+}
+
+fn seed_commission(store: &mut SqliteStore, workpiece: &str) {
+    store
+        .create(
+            &WorkpieceId(workpiece.to_owned()),
+            &Statement {
+                words: format!("intent for {workpiece}").into_bytes(),
+                provenance: Provenance::ObservationAttestation(Observation { source: "test".to_owned() }),
+                parents: Vec::new(),
+            },
+        )
+        .unwrap();
+}
+
+#[test]
+fn a_landed_commission_whose_issue_is_open_is_closed_by_the_reconcile_pass() {
+    // Tripwire: a bloom that landed before the close path existed leaves an
+    // issue nothing will ever close. The outbox cannot repair the past.
+    let fake = FakeGithub::new();
+    fake.seed_issue(4242, "landed in an earlier process");
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    seed_commission(&mut store, "issue-4242");
+    store.mark_landed(&WorkpieceId("issue-4242".to_owned())).unwrap();
+    let mut reconciled = BTreeSet::new();
+
+    let closed = reconcile_terminal_commissions(&mut store, source.as_ref(), &mut reconciled);
+
+    assert_eq!(closed, 1);
+    assert_eq!(fake.issue_is_closed(4242), Some(true));
+    assert_eq!(fake.comments_on(4242).len(), 1, "the catch-up close writes one marker-keyed comment");
+}
+
+#[test]
+fn a_second_pass_writes_nothing() {
+    // The reconciled set exists so a pass that already closed an issue does not
+    // re-close it every five minutes — a standing API bill for no change.
+    let fake = FakeGithub::new();
+    fake.seed_issue(4242, "landed in an earlier process");
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    seed_commission(&mut store, "issue-4242");
+    store.mark_landed(&WorkpieceId("issue-4242".to_owned())).unwrap();
+    let mut reconciled = BTreeSet::new();
+
+    let first = reconcile_terminal_commissions(&mut store, source.as_ref(), &mut reconciled);
+    assert_eq!(first, 1);
+    let comments = fake.comment_count();
+
+    let second = reconcile_terminal_commissions(&mut store, source.as_ref(), &mut reconciled);
+
+    assert_eq!(second, 0);
+    assert_eq!(fake.comments_on(4242).len(), 1);
+    assert_eq!(fake.comment_count(), comments, "a second pass adds no comment");
+}
+
+#[test]
+fn an_open_commission_is_left_alone() {
+    let fake = FakeGithub::new();
+    fake.seed_issue(4242, "still open on the board");
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    seed_commission(&mut store, "issue-4242");
+    let mut reconciled = BTreeSet::new();
+
+    let closed = reconcile_terminal_commissions(&mut store, source.as_ref(), &mut reconciled);
+
+    assert_eq!(closed, 0);
+    assert_eq!(fake.issue_is_closed(4242), Some(false));
+    assert!(fake.comments_on(4242).is_empty());
+}
+
+#[test]
+fn a_commission_with_no_github_home_is_skipped() {
+    let fake = FakeGithub::new();
+    fake.seed_issue(1, "must not be guessed from wp-1");
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    seed_commission(&mut store, "wp-1");
+    store.mark_landed(&WorkpieceId("wp-1".to_owned())).unwrap();
+    let mut reconciled = BTreeSet::new();
+
+    let closed = reconcile_terminal_commissions(&mut store, source.as_ref(), &mut reconciled);
+
+    assert_eq!(closed, 0);
+    assert_eq!(fake.issue_is_closed(1), Some(false));
+    assert_eq!(fake.comment_count(), 0);
+}
+
+#[test]
+fn a_pass_closes_at_most_its_cap() {
+    // The handler blocks the dispatcher for the length of the pass. Without the
+    // cap, a cold board of hundreds of terminal commissions would stall it on
+    // hundreds of round trips.
+    let fake = FakeGithub::new();
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    for number in 5001..=5025 {
+        fake.seed_issue(number, "historical land");
+        let id = format!("issue-{number}");
+        seed_commission(&mut store, &id);
+        store.mark_landed(&WorkpieceId(id)).unwrap();
+    }
+    let mut reconciled = BTreeSet::new();
+
+    let first = reconcile_terminal_commissions(&mut store, source.as_ref(), &mut reconciled);
+    assert_eq!(first, RECONCILE_CLOSES_PER_PASS);
+    let closed_after_first = (5001..=5025).filter(|&number| fake.issue_is_closed(number) == Some(true)).count();
+    assert_eq!(closed_after_first, RECONCILE_CLOSES_PER_PASS);
+
+    let second = reconcile_terminal_commissions(&mut store, source.as_ref(), &mut reconciled);
+    assert_eq!(second, 5, "the second pass finishes the remainder");
+    assert!((5001..=5025).all(|number| fake.issue_is_closed(number) == Some(true)));
 }
 
 // The number of the proposal the drain opened for `bloom`.

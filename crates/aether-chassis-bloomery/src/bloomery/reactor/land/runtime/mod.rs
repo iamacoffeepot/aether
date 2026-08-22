@@ -61,14 +61,15 @@
 //! zero-secret dev boot neither errors nor spins; the land outbox accumulates
 //! until a token is supplied.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
-    Admit, AdmitResult, BloomId, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, LandPayload,
-    SourceReplicaPayload, WorkpieceId,
+    Admit, AdmitResult, BloomId, CommissionStatus, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey,
+    LandPayload, SourceReplicaPayload, WorkpieceId,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId};
@@ -103,6 +104,15 @@ mod receipt;
 #[kind(name = "aether.bloomery.land.land_tick")]
 pub struct LandTick {}
 
+/// Catch-up cadence for closing GitHub issues named by terminal commissions.
+///
+/// At the 5-second default poll interval (`bloomery/config.rs`), 60 ticks is one
+/// pass every five minutes. The per-pass cap exists because this handler makes
+/// its GitHub calls inline on the dispatcher: an unbounded sweep over a cold
+/// board would stall it for the length of every round trip.
+const RECONCILE_EVERY_TICKS: u32 = 60;
+const RECONCILE_CLOSES_PER_PASS: usize = 20;
+
 /// Runtime state for [`LandReactorCapability`]. The shell + store are `Some` only
 /// when configured; a disabled reactor holds neither and spawns no timer.
 pub struct LandReactorState {
@@ -115,6 +125,8 @@ pub struct LandReactorState {
     // stops + joins the thread on teardown.
     _timer: Option<TimerHandle>,
     emit_source_replica: bool,
+    reconcile_countdown: u32,
+    reconciled: BTreeSet<u64>,
 }
 
 impl LandReactorState {
@@ -137,6 +149,8 @@ impl LandReactorState {
             self_mailbox,
             _timer: None,
             emit_source_replica: false,
+            reconcile_countdown: RECONCILE_EVERY_TICKS,
+            reconciled: BTreeSet::new(),
         }
     }
 }
@@ -548,6 +562,83 @@ fn close_member_source_issues(
     }
 }
 
+/// Close GitHub issues named by terminal commissions that the live land path
+/// never saw: a land that happened while the mirror was mounted disabled, or
+/// an ack that already passed so the outbox cannot redrive the close.
+///
+/// Lists landed then cancelled commissions, maps each id through
+/// [`canonical_issue_number`], skips numbers already in `reconciled`, and
+/// closes at most [`RECONCILE_CLOSES_PER_PASS`] of the remainder. A per-issue
+/// error is warned and the number is left out of the set so the next pass
+/// retries it. A list error is warned and the pass returns 0 — a store fault
+/// must not cost the drain its tick.
+fn reconcile_terminal_commissions(
+    store: &mut SqliteStore,
+    source: &dyn LandingSource,
+    reconciled: &mut BTreeSet<u64>,
+) -> usize {
+    let landed = match store.list(Some(CommissionStatus::Landed)) {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::land",
+                %error,
+                "could not list landed commissions for issue reconcile; skipping this pass",
+            );
+            return 0;
+        }
+    };
+    let cancelled = match store.list(Some(CommissionStatus::Cancelled)) {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::land",
+                %error,
+                "could not list cancelled commissions for issue reconcile; skipping this pass",
+            );
+            return 0;
+        }
+    };
+
+    let candidates: Vec<_> = landed
+        .into_iter()
+        .chain(cancelled)
+        .filter_map(|head| {
+            let number = canonical_issue_number(&head.id.0)?;
+            (!reconciled.contains(&number)).then_some((head, number))
+        })
+        .take(RECONCILE_CLOSES_PER_PASS)
+        .collect();
+
+    let mut closed = 0;
+    for (head, number) in candidates {
+        let key = format!("commission:{}:reconciled", head.id.0);
+        let comment = reconciled_comment(&head.id.0, head.status.as_str());
+        match source.close_issue(number, &key, &comment) {
+            Ok(()) => {
+                reconciled.insert(number);
+                closed += 1;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::land",
+                    workpiece = head.id.0.as_str(),
+                    number,
+                    %error,
+                    "failed to close a terminal commission's source issue; will retry next pass",
+                );
+            }
+        }
+    }
+    closed
+}
+
+/// The one-line catch-up close: this issue's commission is terminal on the
+/// board, so the issue is being closed to match.
+fn reconciled_comment(workpiece: &str, status: &str) -> String {
+    format!("This issue's commission (`{workpiece}`) is {status} on the board, so the issue is being closed to match.")
+}
+
 /// Mark each member commission landed before the replica is projected. Local
 /// status is the authority; a missing commission or a store fault is warned
 /// and dropped so the land itself still admits. The mirror then projects
@@ -605,6 +696,8 @@ impl NativeActor for LandReactorCapability {
                 self_mailbox,
                 _timer: None,
                 emit_source_replica: false,
+                reconcile_countdown: RECONCILE_EVERY_TICKS,
+                reconciled: BTreeSet::new(),
             });
         };
 
@@ -633,6 +726,8 @@ impl NativeActor for LandReactorCapability {
             self_mailbox,
             _timer: Some(timer),
             emit_source_replica: config.emit_source_replica,
+            reconcile_countdown: RECONCILE_EVERY_TICKS,
+            reconciled: BTreeSet::new(),
         })
     }
 
@@ -646,8 +741,10 @@ impl NativeActor for LandReactorCapability {
 
     /// Poll wake: drain + land the land topic, acking the journal-confirmed
     /// prefix and forwarding each still-uncommitted `Fact::Land` to the control
-    /// core. The GitHub call runs inline on the dispatcher (the poll cadence
-    /// spaces them).
+    /// core, then (on cadence) reconcile terminal commissions onto closed source
+    /// issues. The GitHub call runs inline on the dispatcher (the poll cadence
+    /// spaces them). Reconcile follows the drain: the drain is the live path and
+    /// must not wait behind a catch-up sweep.
     #[handler::single]
     fn on_land_tick(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: LandTick) {
         let Some(source) = state.source.clone() else {
@@ -674,6 +771,19 @@ impl NativeActor for LandReactorCapability {
             }
             Err(error) => {
                 tracing::warn!(target: "aether_chassis_bloomery::land", %error, "land drain failed");
+            }
+        }
+
+        state.reconcile_countdown = state.reconcile_countdown.saturating_sub(1);
+        if state.reconcile_countdown == 0 {
+            state.reconcile_countdown = RECONCILE_EVERY_TICKS;
+            let closed = reconcile_terminal_commissions(store, source.as_ref(), &mut state.reconciled);
+            if closed > 0 {
+                tracing::info!(
+                    target: "aether_chassis_bloomery::land",
+                    closed,
+                    "reconciled terminal commissions onto closed source issues",
+                );
             }
         }
     }
