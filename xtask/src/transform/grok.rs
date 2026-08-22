@@ -14,12 +14,16 @@
 //! carrying only a `GROK_CODE_XAI_API_KEY` both resolve their own credential —
 //! the lane handles no secret, exactly as the Claude arm does not.
 
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::{env, fs};
 
 use anyhow::Result;
 
 use crate::transform::TransformArgs;
-use crate::transform::lane::{capture, capture_resumed, resumed_prompt, without_resume, write_prompt};
+use crate::transform::lane::{
+    capture, capture_resumed, export_build_dir, resumed_prompt, without_resume, write_prompt,
+};
 use crate::transform::messages::derive_result_record;
 use crate::transform::peak_memory::PeakMemory;
 use crate::transform::sccache::{self, CompilerCache};
@@ -102,12 +106,26 @@ const DISALLOWED_TOOLS: &[&str] = &[
 /// still a headless single turn, it just starts with the prior conversation in
 /// context. Absent on a cold launch.
 ///
+/// `--cwd` states the checkout this lane is working in rather than leaving it to
+/// whatever directory the process was forked in. The two agree — the coordinator
+/// spawns the lane with `current_dir` set to the member's checkout — and saying
+/// it is what makes the working directory a property of the dispatch instead of
+/// an inheritance, which is the thing a session handle is bound to.
+///
 /// No turn cap rides here: nothing upstream seals one, and a number invented at
 /// the arm would truncate a long repair lap into a `no_result` row.
-fn grok_argv(prompt_file: &str, model: Option<&str>, effort: Option<&str>, resume: Option<&str>) -> Vec<String> {
+fn grok_argv(
+    prompt_file: &str,
+    cwd: &Path,
+    model: Option<&str>,
+    effort: Option<&str>,
+    resume: Option<&str>,
+) -> Vec<String> {
     let mut argv = vec![
         "--prompt-file".to_owned(),
         prompt_file.to_owned(),
+        "--cwd".to_owned(),
+        cwd.to_string_lossy().into_owned(),
         "--output-format".to_owned(),
         "streaming-messages-json".to_owned(),
         "--permission-mode".to_owned(),
@@ -178,32 +196,181 @@ fn launch(
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
 ) -> Result<Option<String>> {
-    let prompt_file = write_prompt(&args.out, &resumed_prompt(prompt, args.resume.as_deref()))?;
+    let cwd = env::current_dir()?;
+    let resume = usable_resume(&cwd, args.resume.as_deref(), grok_sessions_root().as_deref());
+    let prompt_file = write_prompt(&args.out, &resumed_prompt(prompt, resume))?;
     let mut command = peak.command(program);
     command
-        .args(grok_argv(
-            &prompt_file.to_string_lossy(),
-            args.model.as_deref(),
-            args.effort.as_deref(),
-            args.resume.as_deref(),
-        ))
+        .args(grok_argv(&prompt_file.to_string_lossy(), &cwd, args.model.as_deref(), args.effort.as_deref(), resume))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     scratch.export(&mut command);
     sccache::export(cache, &mut command);
+    export_build_dir(&mut command);
 
-    if args.resume.is_some() {
+    if resume.is_some() {
         return capture_resumed(command, &args.out, GROK, peak);
     }
     capture(command, &args.out, GROK, peak).map(Some)
+}
+
+/// The resume handle this launch may actually use: `session` when Grok will
+/// continue it *here*, `None` when it would continue it somewhere else.
+///
+/// Measured, not assumed. Grok stores a session under the directory it was born
+/// in (`~/.grok/sessions/<percent-encoded cwd>/<session id>`) and a resume by id
+/// returns to that directory — it announces `found locally (originally in …)`
+/// and works there — whatever `--cwd` says. So a resumed lap launched against a
+/// different checkout does not fail: it silently edits the tree of whatever the
+/// old directory now holds, leaves its own checkout clean, and is recorded as a
+/// lane that produced nothing (dispatch-2374 / dispatch-2379).
+///
+/// With the checkout keyed to the workpiece (#5425) every lane of a member is
+/// born and resumed in one directory, so this refuses nothing on the ordinary
+/// path. It is the backstop for the case that made the shape visible, and it is
+/// deliberately one-directional: a handle whose home cannot be established —
+/// no session root, an unreadable one, a layout that is not this one — is used
+/// as given, because refusing on an unrecognized layout would launch every lap
+/// cold on the strength of a guess.
+fn usable_resume<'a>(cwd: &Path, session: Option<&'a str>, sessions_root: Option<&Path>) -> Option<&'a str> {
+    let session = session?;
+    let Some(home) = sessions_root.and_then(|root| session_home(root, session)) else {
+        return Some(session);
+    };
+    if same_directory(&home, cwd) {
+        return Some(session);
+    }
+    eprintln!(
+        "grok lane: session {session} belongs to {} and would resume there rather than in {}; launching fresh",
+        home.display(),
+        cwd.display(),
+    );
+    None
+}
+
+/// Where Grok would resume `session`: the directory its session store is keyed
+/// by, decoded from the store's own layout. `None` when no directory under the
+/// store holds it, which includes every case where the store is not readable in
+/// the shape this knows.
+fn session_home(sessions_root: &Path, session: &str) -> Option<PathBuf> {
+    fs::read_dir(sessions_root)
+        .ok()?
+        .flatten()
+        .find(|entry| entry.path().join(session).is_dir())
+        .and_then(|entry| decode_session_key(entry.file_name().to_str()?))
+}
+
+/// The root Grok keys its session directories under.
+///
+/// `HOME` is a process-level location, not capability config: it names where
+/// this host's user keeps its agent state, and no bloom seals it.
+#[allow(clippy::disallowed_methods, reason = "HOME is a host location, not a capability's configuration")]
+fn grok_sessions_root() -> Option<PathBuf> {
+    env::var_os("GROK_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".grok")))
+        .map(|root| root.join("sessions"))
+}
+
+/// Decode one session-directory name back into the path it stands for. The
+/// encoding is percent-escaping over the absolute path, so a name that does not
+/// decode is not one of these.
+fn decode_session_key(name: &str) -> Option<PathBuf> {
+    let mut decoded = Vec::with_capacity(name.len());
+    let mut bytes = name.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte != b'%' {
+            decoded.push(byte);
+            continue;
+        }
+        let high = char::from(bytes.next()?).to_digit(16)?;
+        let low = char::from(bytes.next()?).to_digit(16)?;
+        decoded.push(u8::try_from(high * 16 + low).ok()?);
+    }
+    let path = PathBuf::from(String::from_utf8(decoded).ok()?);
+    path.is_absolute().then_some(path)
+}
+
+/// Whether two paths name the same directory, resolved through symlinks where
+/// they exist. A path that cannot be canonicalized is compared as written.
+fn same_directory(left: &Path, right: &Path) -> bool {
+    let resolve = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    resolve(left) == resolve(right)
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
 
-    use super::{DISALLOWED_TOOLS, grok_argv, grok_effort, run_at};
+    use std::path::{Path, PathBuf};
+    use std::{env, process};
+
+    use super::{DISALLOWED_TOOLS, decode_session_key, grok_argv, grok_effort, run_at, usable_resume};
+
+    // One session store laid out the way Grok lays one out: a directory per
+    // working directory, percent-encoded, holding a directory per session. Under
+    // a process-and-sequence-tagged root, the sibling lanes' convention, so
+    // concurrent tests never collide.
+    fn sessions_root(tag: &str, entries: &[(&str, &str)]) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let root = env::temp_dir().join(format!("aether-grok-sessions-{tag}-{}-{seq}", process::id())).join("sessions");
+        for (key, session) in entries {
+            fs::create_dir_all(root.join(key).join(session)).expect("the session store fixture writes");
+        }
+        root
+    }
+
+    #[test]
+    fn a_resume_handle_born_in_another_checkout_is_dropped() {
+        // Tripwire (#5425): Grok resumes a session in the directory it was born
+        // in whatever `--cwd` says — measured, not assumed: it announces `found
+        // locally (originally in …)` and writes there. So a lap resumed against
+        // a different checkout edits someone else's tree and leaves its own
+        // clean, which reads downstream as a lane that produced nothing
+        // (dispatch-2374 / dispatch-2379). Launching cold is the only honest
+        // answer left.
+        let root = sessions_root("born-elsewhere", &[("%2Fruns%2Fworktrees%2Fissue-5140", "sess-1")]);
+
+        assert_eq!(
+            usable_resume(Path::new("/runs/worktrees/issue-5140"), Some("sess-1"), Some(&root)),
+            Some("sess-1"),
+            "a session born in this checkout resumes here",
+        );
+        assert_eq!(
+            usable_resume(Path::new("/runs/worktrees/issue-5141"), Some("sess-1"), Some(&root)),
+            None,
+            "a session that would resume in another member's checkout is not used",
+        );
+    }
+
+    #[test]
+    fn an_unrecognized_session_store_leaves_the_handle_alone() {
+        // Tripwire: the guard is one-directional. A store this cannot read —
+        // absent, a different layout, a session it does not hold — must leave
+        // the handle as given, or an unrecognized layout would launch every lap
+        // cold at full price on the strength of a guess.
+        let root = sessions_root("unrecognized", &[("not-percent-encoded", "sess-1")]);
+
+        assert_eq!(usable_resume(Path::new("/runs/a"), Some("sess-1"), Some(&root)), Some("sess-1"));
+        assert_eq!(usable_resume(Path::new("/runs/a"), Some("sess-2"), Some(&root)), Some("sess-2"));
+        assert_eq!(usable_resume(Path::new("/runs/a"), Some("sess-1"), None), Some("sess-1"));
+    }
+
+    #[test]
+    fn a_session_directory_name_decodes_to_the_path_it_stands_for() {
+        // Tripwire: the key is the whole basis for deciding where a handle
+        // would resume. A decoder that dropped the escapes would compare
+        // `%2Fruns%2Fa` against `/runs/a` and refuse every resume.
+        assert_eq!(
+            decode_session_key("%2Fruns%2Fworktrees%2Fissue-5140").as_deref(),
+            Some(Path::new("/runs/worktrees/issue-5140"))
+        );
+        assert_eq!(decode_session_key("relative%2Fpath"), None, "a session key is an absolute path");
+        assert_eq!(decode_session_key("%2"), None, "a truncated escape is not a key");
+    }
     use crate::transform::TransformArgs;
     use crate::transform::construct::CONSTRUCT_IMPLEMENT;
     use crate::transform::harness_stub::{self, Stub};
@@ -214,7 +381,15 @@ mod tests {
 
     #[test]
     fn argv_runs_headless_and_carries_the_resolved_profile() {
-        let argv = grok_argv("/run/prompt.md", Some("grok-4.6"), Some("high"), None);
+        let argv =
+            grok_argv("/run/prompt.md", Path::new("/runs/worktrees/issue-5140"), Some("grok-4.6"), Some("high"), None);
+        // Tripwire (#5425): the lane states the checkout it works in. Without
+        // it the working directory is whatever the fork inherited, which is the
+        // one property a resumed session is bound to.
+        assert!(
+            argv.windows(2).any(|w| w == ["--cwd", "/runs/worktrees/issue-5140"]),
+            "the lane names the checkout it is working in",
+        );
         assert!(
             argv.windows(2).any(|w| w == ["--prompt-file", "/run/prompt.md"]),
             "the prompt is read from the file, never handed to argv",
@@ -248,7 +423,7 @@ mod tests {
 
     #[test]
     fn argv_omits_the_profile_flags_when_none_falls_back_to_ambient() {
-        let argv = grok_argv("/run/prompt.md", None, None, None);
+        let argv = grok_argv("/run/prompt.md", Path::new("/runs/worktrees/issue-5140"), None, None, None);
         assert!(!argv.iter().any(|flag| flag == "--model"), "no resolved model means the operator's default");
         assert!(!argv.iter().any(|flag| flag == "--reasoning-effort"), "no resolved effort means the same");
         assert!(argv.windows(2).any(|w| w == ["--prompt-file", "/run/prompt.md"]), "still headless");
@@ -261,7 +436,13 @@ mod tests {
     // candidate rather than as a broken invocation.
     #[test]
     fn argv_threads_the_resume_handle_alongside_the_prompt_file() {
-        let argv = grok_argv("/run/prompt.md", Some("grok-4.6"), Some("high"), Some("sess-1"));
+        let argv = grok_argv(
+            "/run/prompt.md",
+            Path::new("/runs/worktrees/issue-5140"),
+            Some("grok-4.6"),
+            Some("high"),
+            Some("sess-1"),
+        );
         assert!(argv.windows(2).any(|w| w == ["--resume", "sess-1"]), "the handle follows its flag");
         assert!(argv.windows(2).any(|w| w == ["--prompt-file", "/run/prompt.md"]), "a resumed lap still has a turn");
         // Tripwire: an argv without `--verbatim` is delivered as an excerpt plus a self-read.

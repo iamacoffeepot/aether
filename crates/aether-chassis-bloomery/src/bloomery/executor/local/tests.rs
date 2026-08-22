@@ -2504,101 +2504,11 @@ fn order_on(mut order: aether_bloomery::WorkOrder, checkout: Digest) -> aether_b
     order
 }
 
-#[test]
-fn a_dependent_construct_prefers_the_predecessors_slot() {
-    // Acceptance: B lands in A's slot when free. Lowest-free would take 0 once
-    // the holder is gone; preferring 1 is the only way B hits the warm target
-    // dir A already compiled.
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let base = TempDir::new().unwrap();
-    let holder = test_nonce("hold");
-    let exec = LocalExecutor::new(
-        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(holder.clone())),
-        correspondence(),
-        base.path(),
-    );
-
-    let holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
-    let first = exec.submit(&claude_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
-    let refs = exec.stream_evidence(&first).unwrap();
-    let checkout = refs[0].candidate.expect("A captured").checkout;
-    exec.cancel(&holding).unwrap();
-
-    let second = exec.submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), checkout)).unwrap();
-    exec.stream_evidence(&second).unwrap();
-
-    let stamped = stamped_evidence(&base, &test_nonce("B"));
-    assert_eq!(stamped["slot_affinity"]["preferred"], 1);
-    assert_eq!(stamped["slot_affinity"]["assigned"], 1);
-    assert_eq!(stamped["slot_affinity"]["reason"], "preferred");
-    assert_eq!(
-        seen.lock().unwrap().last().and_then(|seen| seen.worktree.clone()),
-        Some(slot_path(&base, 1)),
-        "B built in A's slot, not the newly-freed lowest index"
-    );
-}
-
-#[test]
-fn a_dependent_construct_falls_back_when_the_preferred_slot_is_busy() {
-    // Acceptance: preference is never a wait. A still occupies slot 1; B
-    // takes the lowest free (0) and journals `busy`.
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let base = TempDir::new().unwrap();
-    let holder = test_nonce("hold");
-    let exec = LocalExecutor::new(
-        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(holder.clone())),
-        correspondence(),
-        base.path(),
-    );
-
-    let _holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
-    let first = exec.submit(&claude_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
-    let refs = exec.stream_evidence(&first).unwrap();
-    let checkout = refs[0].candidate.expect("A captured").checkout;
-
-    // Re-occupy A's slot so B cannot have it.
-    let occupier = test_nonce("occupy");
-    let occupying = exec.submit(&construct_order(digest(5), &occupier)).unwrap();
-    // occupier exits immediately (not held), so slot 1 is free again unless we
-    // don't stream it and... it already exited, retire happens on stream, not
-    // on exit. Slot stays held until stream_evidence or cancel.
-    let _ = occupying;
-
-    let second = exec.submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), checkout)).unwrap();
-    exec.stream_evidence(&second).unwrap();
-
-    let stamped = stamped_evidence(&base, &test_nonce("B"));
-    assert_eq!(stamped["slot_affinity"]["preferred"], 1);
-    assert_eq!(stamped["slot_affinity"]["reason"], "busy");
-    assert_ne!(stamped["slot_affinity"]["assigned"], 1, "B must not wait on A's occupied slot");
-}
-
-fn canned_commit_hex() -> String {
-    "cc".repeat(20)
-}
-
-fn fold_digest() -> Digest {
-    digest(0xF0)
-}
-
-fn fold_hex() -> String {
-    to_hex(&fold_digest())
-}
-
-fn integration_hex() -> String {
-    "11".repeat(20)
-}
-
-fn decoy_hex() -> String {
-    "dd".repeat(20)
-}
-
-fn correspondence_with_fold() -> Arc<FakeGithub> {
-    let fake = FakeGithub::new();
-    fake.seed_git_object(&digest(0xC0));
-    fake.seed_git_object(&digest(0xB0));
-    fake.seed_git_object(&fold_digest());
-    Arc::new(fake)
+// The checkout a member builds in under a scratch root (#5425) — the tree every
+// lane of that member shares, and the assertion target wherever a test says
+// which member's work a dispatch was standing in.
+fn member_checkout(base: &TempDir, workpiece: &str) -> PathBuf {
+    base.path().join("worktrees").join(workpiece)
 }
 
 fn assigned_slot(base: &TempDir, nonce: &str) -> usize {
@@ -2609,165 +2519,152 @@ fn assigned_slot(base: &TempDir, nonce: &str) -> usize {
         .expect("the slot record is an index")
 }
 
-fn fold_parents(integration: String, candidate: String) -> (String, Vec<String>) {
-    (fold_hex(), vec![integration, candidate])
+fn started_worktrees(seen: &Arc<Mutex<Vec<SeenSpec>>>) -> Vec<Option<PathBuf>> {
+    seen.lock().unwrap().iter().map(|spec| spec.worktree.clone()).collect()
 }
 
 #[test]
-fn a_fold_checkout_prefers_the_captured_candidates_slot() {
-    // Acceptance (#5077): B's checkout is the synthetic fold
-    // `fold(integration, captured candidate)`, not the candidate itself.
-    // Exact-key affinity misses; the direct candidate parent must still
-    // land B in A's slot even though slot 0 is free.
+fn every_lane_of_one_member_builds_in_that_members_own_checkout() {
+    // Acceptance for #5425: construct and the verify that follows it stand in
+    // the same tree, and that tree is named for the member rather than for
+    // whichever slot each lane happened to be handed. Pre-fix each lane built
+    // in `slot-<index>`, so a member whose two lanes landed in different slots
+    // verified a tree its construct had never written to — and a resumed model
+    // session, which is bound to the directory it was born in, edited the old
+    // slot's tree instead of its own (dispatch-2374 / dispatch-2379).
     let seen = Arc::new(Mutex::new(Vec::new()));
     let base = TempDir::new().unwrap();
+    let store = store_dir();
     let holder = test_nonce("hold");
-    let (fold, parents) = fold_parents(integration_hex(), canned_commit_hex());
+    let construct = test_nonce("A-construct");
+    let verify = test_nonce("A-verify");
     let exec = LocalExecutor::new(
-        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(holder.clone()).with_parents(fold, parents)),
-        correspondence_with_fold(),
-        base.path(),
-    );
-
-    let holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
-    let first = exec.submit(&claude_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
-    exec.stream_evidence(&first).unwrap();
-    exec.cancel(&holding).unwrap();
-
-    let second = exec.submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), fold_digest())).unwrap();
-    exec.stream_evidence(&second).unwrap();
-
-    let stamped = stamped_evidence(&base, &test_nonce("B"));
-    assert_eq!(stamped["slot_affinity"]["preferred"], 1);
-    assert_eq!(stamped["slot_affinity"]["assigned"], 1);
-    assert_eq!(stamped["slot_affinity"]["reason"], "preferred");
-    assert_eq!(
-        seen.lock().unwrap().last().and_then(|seen| seen.worktree.clone()),
-        Some(slot_path(&base, 1)),
-        "B built in A's slot, not the newly-freed lowest index",
-    );
-}
-
-#[test]
-fn a_fold_checkout_falls_back_when_the_preferred_slot_is_busy() {
-    // Preference is never a wait, including across a fold parent. A still
-    // occupies slot 1; B takes the lowest free and journals `busy`.
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let base = TempDir::new().unwrap();
-    let holder = test_nonce("hold");
-    let (fold, parents) = fold_parents(integration_hex(), canned_commit_hex());
-    let exec = LocalExecutor::new(
-        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(holder.clone()).with_parents(fold, parents)),
-        correspondence_with_fold(),
-        base.path(),
-    );
-
-    let _holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
-    let first = exec.submit(&claude_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
-    exec.stream_evidence(&first).unwrap();
-    let occupying = exec.submit(&construct_order(digest(5), &test_nonce("occupy"))).unwrap();
-    let _ = occupying;
-
-    let second = exec.submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), fold_digest())).unwrap();
-    exec.stream_evidence(&second).unwrap();
-
-    let stamped = stamped_evidence(&base, &test_nonce("B"));
-    assert_eq!(stamped["slot_affinity"]["preferred"], 1);
-    assert_eq!(stamped["slot_affinity"]["reason"], "busy");
-    assert_ne!(stamped["slot_affinity"]["assigned"], 1, "B must not wait on A's occupied slot");
-}
-
-#[test]
-fn a_mapped_ancestor_that_is_not_a_direct_parent_is_ignored() {
-    // Walking past the fold's direct parents would prefer a stale historical
-    // builder. Integration's parent is the captured candidate, but B must
-    // not consult it.
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let base = TempDir::new().unwrap();
-    let holder = test_nonce("hold");
-    let exec = LocalExecutor::new(
-        Arc::new(
-            ReuseRunner::new(Arc::clone(&seen))
-                .holding(holder.clone())
-                .with_parents(fold_hex(), vec![integration_hex(), decoy_hex()])
-                .with_parents(integration_hex(), vec![canned_commit_hex()]),
-        ),
-        correspondence_with_fold(),
-        base.path(),
-    );
-
-    let holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
-    let first = exec.submit(&claude_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
-    exec.stream_evidence(&first).unwrap();
-    exec.cancel(&holding).unwrap();
-
-    let second = exec.submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), fold_digest())).unwrap();
-    exec.stream_evidence(&second).unwrap();
-
-    let stamped = stamped_evidence(&base, &test_nonce("B"));
-    assert!(stamped.get("slot_affinity").is_none(), "no predecessor slot: the mapped ancestor is not a direct parent");
-    assert_eq!(assigned_slot(&base, &test_nonce("B")), 0, "B takes the lowest free slot");
-}
-
-#[test]
-fn an_exact_checkout_match_wins_over_a_mapped_parent() {
-    // Exact-key affinity is still first. The checkout itself is mapped to
-    // A's slot; a parent mapped to another slot must not steal the choice.
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let base = TempDir::new().unwrap();
-    fs::write(base.path().join("edge-slots"), format!("{} 2\n", decoy_hex())).unwrap();
-    let holder = test_nonce("hold");
-    let exec = LocalExecutor::new(
-        Arc::new(
-            ReuseRunner::new(Arc::clone(&seen))
-                .holding(holder.clone())
-                .with_parents(canned_commit_hex(), vec![decoy_hex()]),
-        ),
+        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(holder.clone())),
         correspondence(),
         base.path(),
+    )
+    .with_message_store(member_store(
+        &store,
+        &[
+            member_order_at(&holder, "issue-H", StageId::Construct),
+            member_order_at(&construct, "issue-A", StageId::Construct),
+            member_order_at(&verify, "issue-A", StageId::Verify),
+        ],
+    ));
+
+    // The two lanes are driven into different slots on purpose: the holder
+    // keeps slot 0 while the construct takes slot 1, and slot 1 is occupied
+    // again by the time the verify dispatches, so the verify lands on 0. That
+    // is the arrangement a slot-keyed checkout cannot survive — the member's
+    // second lane stands in a tree its first one never wrote to.
+    let _holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
+    exec.stream_evidence(&exec.submit(&claude_order(digest(5), &construct, "issue-A")).unwrap()).unwrap();
+    let _occupying = exec.submit(&construct_order(digest(5), &test_nonce("occupy"))).unwrap();
+    exec.stream_evidence(&exec.submit(&construct_order(digest(5), &verify)).unwrap()).unwrap();
+
+    assert_ne!(assigned_slot(&base, &construct), assigned_slot(&base, &verify), "the two lanes did move slots");
+    assert_eq!(
+        started_worktrees(&seen),
+        [
+            Some(member_checkout(&base, "issue-H")),
+            Some(member_checkout(&base, "issue-A")),
+            Some(slot_path(&base, 1)),
+            Some(member_checkout(&base, "issue-A")),
+        ],
+        "both of the member's lanes stand in its own checkout however the slots moved under them",
     );
+}
+
+#[test]
+fn a_dispatch_that_names_no_member_still_builds_in_its_lane_slot() {
+    // Tripwire: an aggregate lane's order names no workpiece, and a backend
+    // built without a store can read no order at all. Both must keep the slot
+    // path they always had — a checkout keyed on an empty name would put every
+    // unnameable dispatch in one shared directory.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let exec = LocalExecutor::new(Arc::new(ReuseRunner::new(Arc::clone(&seen))), correspondence(), base.path());
+
+    exec.stream_evidence(&exec.submit(&construct_order(digest(5), &test_nonce("aggregate"))).unwrap()).unwrap();
+
+    assert_eq!(started_worktrees(&seen), [Some(slot_path(&base, 0))]);
+}
+
+#[test]
+fn a_members_next_lane_prefers_the_slot_that_last_built_it() {
+    // Acceptance: the member's verify lands in the slot its construct built in,
+    // even though slot 0 is free by then. Lowest-free would take 0, and this
+    // member's workspace crates are compiled only in slot 1's target — the
+    // edge-keyed lookup this replaced asked after the construct's checkout hex,
+    // which the capture had already superseded, and fell through to 0.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let store = store_dir();
+    let holder = test_nonce("hold");
+    let construct = test_nonce("A-construct");
+    let verify = test_nonce("A-verify");
+    let exec = LocalExecutor::new(
+        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(holder.clone())),
+        correspondence(),
+        base.path(),
+    )
+    .with_message_store(member_store(
+        &store,
+        &[
+            member_order_at(&holder, "issue-H", StageId::Construct),
+            member_order_at(&construct, "issue-A", StageId::Construct),
+            member_order_at(&verify, "issue-A", StageId::Verify),
+        ],
+    ));
 
     let holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
-    let first = exec.submit(&claude_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
-    let refs = exec.stream_evidence(&first).unwrap();
-    let checkout = refs[0].candidate.expect("A captured").checkout;
+    exec.stream_evidence(&exec.submit(&claude_order(digest(5), &construct, "issue-A")).unwrap()).unwrap();
     exec.cancel(&holding).unwrap();
+    exec.stream_evidence(&exec.submit(&construct_order(digest(5), &verify)).unwrap()).unwrap();
 
-    let second = exec.submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), checkout)).unwrap();
-    exec.stream_evidence(&second).unwrap();
-
-    let stamped = stamped_evidence(&base, &test_nonce("B"));
+    let stamped = stamped_evidence(&base, &verify);
     assert_eq!(stamped["slot_affinity"]["preferred"], 1);
     assert_eq!(stamped["slot_affinity"]["assigned"], 1);
     assert_eq!(stamped["slot_affinity"]["reason"], "preferred");
 }
 
 #[test]
-fn an_unreadable_fold_parent_list_falls_back_without_refusing_the_order() {
-    // Parent inspection is diagnostic. A git miss must not refuse B; it
-    // degrades to the ordinary lowest-free allocator.
+fn a_members_preferred_slot_that_is_busy_never_waits() {
+    // Acceptance: preference is never a wait. The slot that built the member is
+    // occupied again by the time its next lane dispatches, so that lane takes
+    // the lowest free index and journals `busy` rather than queueing behind
+    // whoever holds it now.
     let seen = Arc::new(Mutex::new(Vec::new()));
     let base = TempDir::new().unwrap();
+    let store = store_dir();
     let holder = test_nonce("hold");
+    let construct = test_nonce("A-construct");
+    let verify = test_nonce("A-verify");
     let exec = LocalExecutor::new(
-        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(holder.clone()).failing_parents()),
-        correspondence_with_fold(),
+        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(holder.clone())),
+        correspondence(),
         base.path(),
-    );
+    )
+    .with_message_store(member_store(
+        &store,
+        &[
+            member_order_at(&holder, "issue-H", StageId::Construct),
+            member_order_at(&construct, "issue-A", StageId::Construct),
+            member_order_at(&verify, "issue-A", StageId::Verify),
+        ],
+    ));
 
-    let holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
-    let first = exec.submit(&claude_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
-    exec.stream_evidence(&first).unwrap();
-    exec.cancel(&holding).unwrap();
+    let _holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
+    exec.stream_evidence(&exec.submit(&claude_order(digest(5), &construct, "issue-A")).unwrap()).unwrap();
+    // Re-occupy slot 1: a terminal run holds its slot until its evidence is
+    // streamed, so leaving this one unread is what keeps the slot spoken for.
+    let _occupying = exec.submit(&construct_order(digest(5), &test_nonce("occupy"))).unwrap();
+    exec.stream_evidence(&exec.submit(&construct_order(digest(5), &verify)).unwrap()).unwrap();
 
-    let second = exec
-        .submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), fold_digest()))
-        .expect("an unreadable parent list must not refuse dispatch");
-    exec.stream_evidence(&second).unwrap();
-
-    let stamped = stamped_evidence(&base, &test_nonce("B"));
-    assert!(stamped.get("slot_affinity").is_none(), "fallback is no preference, not a refused order");
-    assert_eq!(assigned_slot(&base, &test_nonce("B")), 0);
+    let stamped = stamped_evidence(&base, &verify);
+    assert_eq!(stamped["slot_affinity"]["preferred"], 1);
+    assert_eq!(stamped["slot_affinity"]["reason"], "busy");
+    assert_ne!(stamped["slot_affinity"]["assigned"], 1, "the member must not wait on its own busy slot");
 }
 
 #[test]
@@ -2796,7 +2693,10 @@ fn a_cross_seat_dependent_never_resumes_the_predecessors_session() {
     exec.stream_evidence(&second).unwrap();
 
     let stamped = stamped_evidence(&base, &test_nonce("B"));
-    assert_eq!(stamped["slot_affinity"]["reason"], "preferred", "B still prefers A's slot");
+    // Affinity is the member's own (ADR-0196 as amended): B has never built, so
+    // it names no preference at all and the stamp is absent. What the seat rule
+    // has to hold regardless is below — B launches cold whatever slot it lands in.
+    assert!(stamped["slot_affinity"].is_null(), "a member with no prior slot states no preference");
     assert_eq!(stamped["session_reuse"]["arm"], "fresh");
     assert_eq!(stamped["session_reuse"]["edge"], false);
     assert!(seen.lock().unwrap().last().unwrap().resume.is_none());
@@ -2870,37 +2770,6 @@ fn dispatch_evidence_carries_fresh_or_resumed_and_token_figures() {
     let resumed = stamped_evidence(&base, &test_nonce("A2"));
     assert_eq!(resumed["session_reuse"]["arm"], "resumed");
     assert_eq!(resumed["session_reuse"]["input_tokens"], 1_000);
-}
-
-#[test]
-fn a_dependent_construct_resumes_the_predecessors_session_and_is_told_about_the_splice() {
-    // Host path for the edge: B's first lap is cold on its own key, so without
-    // the predecessor lookup it would relaunch. The resumed prompt must name
-    // the splice — the reset statement the pool already adds is about files
-    // this session edited, which is the wrong fact along an edge.
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let base = TempDir::new().unwrap();
-    let sessions = super::SessionReuse::memory();
-    sessions.set_head_hash("head-A");
-    sessions.set_now(1_000);
-    let exec = LocalExecutor::new(Arc::new(ReuseRunner::new(Arc::clone(&seen))), correspondence(), base.path())
-        .with_session_reuse(sessions);
-
-    let first = exec.submit(&claude_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
-    let refs = exec.stream_evidence(&first).unwrap();
-    let checkout = refs[0].candidate.expect("A captured").checkout;
-
-    let second = exec.submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), checkout)).unwrap();
-    exec.stream_evidence(&second).unwrap();
-
-    let stamped = stamped_evidence(&base, &test_nonce("B"));
-    assert_eq!(stamped["session_reuse"]["arm"], "resumed");
-    assert_eq!(stamped["session_reuse"]["edge"], true);
-    assert_eq!(seen.lock().unwrap()[1].resume.as_deref(), Some("sess-1"));
-    assert!(
-        seen.lock().unwrap()[1].task.as_deref().is_some_and(|task| task.contains("spliced dependency candidate")),
-        "the resumed prompt must state what was spliced, not only that the tree was reset"
-    );
 }
 
 fn member_store(dir: &TempDir, orders: &[OutstandingOrder]) -> SqliteStore {
@@ -3048,8 +2917,9 @@ fn a_dependent_construct_resumes_the_journaled_predecessor_session() {
 
 #[test]
 fn a_missing_predecessor_session_does_not_fall_through_to_the_pool() {
-    // Acceptance: a graph with no journaled handle launches fresh. Falling
-    // through to the slot-edge pool would still resume A and hide the miss.
+    // Acceptance: a graph with no journaled handle launches fresh. The pool is
+    // keyed by the member's own thread, so there is nothing left for a miss to
+    // fall through to — which is the point (#5427).
     let seen = Arc::new(Mutex::new(Vec::new()));
     let base = TempDir::new().unwrap();
     let store = store_dir();

@@ -106,6 +106,7 @@ pub fn run<I: IntoIterator<Item = String>>(args: I, worktree: &Path) -> Result<i
             subject: args.subject.clone(),
             diff_base: args.diff_base.clone(),
             task: args.task.clone(),
+            worktree: Some(worktree.display().to_string()),
         },
     )?;
 

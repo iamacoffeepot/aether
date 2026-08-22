@@ -273,25 +273,6 @@ impl TransformRunner for ProcessTransformRunner {
             .ok_or_else(|| LocalExecutorError::Worktree(format!("malformed capture tree sha `{}`", tree_hex.trim())))?;
         Ok(Some(CapturedObjects { commit, tree, diff: capture_diff(worktree_dir) }))
     }
-
-    fn checkout_parents(&self, checkout_hex: &str) -> Result<Vec<String>, LocalExecutorError> {
-        commit_parents(&self.repo, checkout_hex)
-    }
-}
-
-/// Direct parents of `checkout_hex` in the repository at `repo_dir`, in git
-/// parent order. A non-commit object has none — a tree or blob is not a fold
-/// and cannot name a warm predecessor. An object the repository cannot
-/// inspect is an error the caller treats as no preference.
-fn commit_parents(repo_dir: &Path, checkout_hex: &str) -> Result<Vec<String>, LocalExecutorError> {
-    if git_in(repo_dir, &["cat-file", "-t", checkout_hex])?.trim() != "commit" {
-        return Ok(Vec::new());
-    }
-    Ok(git_in(repo_dir, &["rev-list", "--parents", "-n", "1", checkout_hex])?
-        .split_whitespace()
-        .skip(1)
-        .map(str::to_owned)
-        .collect())
 }
 
 /// The capture commit's own diff against the checkout it was built on (#4959) —
@@ -783,7 +764,6 @@ mod tests {
     use std::process::Command;
     #[cfg(target_os = "linux")]
     use std::process::Stdio;
-    use std::slice;
     #[cfg(unix)]
     use std::thread;
     #[cfg(unix)]
@@ -799,7 +779,7 @@ mod tests {
     use super::super::runner::{RunLifecycle, RunSpec};
     use super::{
         CaptureIdentity, FALLBACK_CAPTURE_SUBJECT, FALLBACK_IDENTITY, ProcessTransformRunner, SETTINGS_PATH,
-        TransformRunner, capture_subject, commit_parents, commitish_for, decode_object_hex, fetch_order_identities,
+        TransformRunner, capture_subject, commitish_for, decode_object_hex, fetch_order_identities,
         fetch_subject_if_absent, git_in, materialize_checkout, neutralize_hooks, reclaim_worktree_path, reset_checkout,
         resolved_git_common_dir, strip_hooks, work_order_args,
     };
@@ -1281,47 +1261,6 @@ mod tests {
             git_in(&slot, &["rev-parse", "HEAD^"]).unwrap().trim(),
             first,
             "the capture keeps its real parent; a wrapper would be parentless",
-        );
-    }
-
-    #[test]
-    fn a_fold_commits_direct_parents_are_listed_and_a_tree_has_none() {
-        // Tripwire (#5077): affinity consults only direct parents of the
-        // checkout. A fold's second parent is the captured candidate; a tree
-        // (or any non-commit) has no parents to prefer. Walking further would
-        // pick a stale historical builder.
-        let (repo, _scratch, first, second) = repo_with_two_commits();
-        let tree = git_in(repo.path(), &["show", "-s", "--format=%T", &second]).unwrap().trim().to_owned();
-        let fold = {
-            let output = Command::new("git")
-                .current_dir(repo.path())
-                .args(["commit-tree", &tree, "-p", &first, "-p", &second, "-m", "fold"])
-                .output()
-                .unwrap();
-            assert!(output.status.success(), "commit-tree fold: {}", String::from_utf8_lossy(&output.stderr));
-            String::from_utf8_lossy(&output.stdout).trim().to_owned()
-        };
-
-        assert_eq!(
-            commit_parents(repo.path(), &fold).expect("a fold commit lists its parents"),
-            [first.clone(), second.clone()],
-            "git parent order: integration first, captured candidate second",
-        );
-        assert_eq!(
-            commit_parents(repo.path(), &second).expect("a linear commit lists its parent").as_slice(),
-            slice::from_ref(&first),
-        );
-        assert!(
-            commit_parents(repo.path(), &first).expect("a root commit has no parents").is_empty(),
-            "a parentless commit is not a miss — it has nothing to prefer",
-        );
-        assert!(
-            commit_parents(repo.path(), &tree).expect("a tree is not a lookup failure").is_empty(),
-            "a bare-tree checkout has no commit parents",
-        );
-        assert!(
-            commit_parents(repo.path(), &"0".repeat(40)).is_err(),
-            "an absent object is unreadable, not an empty parent list",
         );
     }
 

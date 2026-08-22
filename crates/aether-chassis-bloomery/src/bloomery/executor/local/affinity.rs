@@ -1,13 +1,15 @@
-//! Edge-affinity slot choice (ADR-0196).
+//! Member-affinity slot choice (ADR-0196, as amended for #5425).
 //!
-//! When member B depends on member A, B's construct prefers the lane slot that
-//! built A: that slot's target directory has already compiled the spliced base.
-//! Preference, never a requirement — a busy or quarantined slot falls back to
-//! the lowest free index the allocator already uses.
+//! A member's next lane prefers the lane slot its last one ran in: that slot's
+//! target directory has already compiled this workpiece's own crates, and no
+//! other slot has. Preference, never a requirement — a busy or quarantined slot
+//! falls back to the lowest free index the allocator already uses.
 //!
-//! The lookup key is the checkout hex B will build on. After A's construct
-//! captures, that hex *is* A's candidate commit — the unique-maximum ancestor's
-//! tree the splice path materializes as B's base. No graph walk lives here.
+//! The lookup key is the workpiece. It was the checkout hex, which named the
+//! edge a dispatch entered on, and that key expired at every capture: a
+//! member's own second lane checks out the commit its first one produced, so it
+//! asked after a hex no slot had recorded and fell through to lowest-free. The
+//! member id does not expire, and it is what the target is warm for.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -16,11 +18,12 @@ use std::path::{Path, PathBuf};
 /// Why a dispatch landed in the slot it did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotChoice {
-    /// No predecessor slot to prefer — lowest free, as before the graph.
+    /// No slot has built this member yet — lowest free.
     Lowest,
-    /// The predecessor's slot was free and this dispatch took it.
+    /// The member's previous slot was free and this dispatch took it.
     Preferred,
-    /// The predecessor's slot was held or quarantined; fell back to lowest free.
+    /// The member's previous slot was held or quarantined; fell back to lowest
+    /// free.
     Busy,
 }
 
@@ -38,7 +41,7 @@ impl SlotChoice {
 /// The slot decision remembered on a run so evidence can stamp it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlotAffinity {
-    /// The predecessor slot this dispatch wanted, when one was known.
+    /// The slot that last built this member, when one had.
     pub preferred: Option<usize>,
     /// The slot actually claimed.
     pub assigned: usize,
@@ -54,8 +57,8 @@ impl SlotAffinity {
     }
 }
 
-/// Pick a slot index given a preferred predecessor and the indices that cannot
-/// be handed out.
+/// Pick a slot index given the member's preferred slot and the indices that
+/// cannot be handed out.
 ///
 /// The search is still total: there is always a larger index that is neither
 /// held nor quarantined. Preferred is consulted first and only first — a busy
@@ -89,8 +92,8 @@ fn lowest_free(held: &HashSet<usize>, quarantined: &HashSet<usize>) -> usize {
     slot
 }
 
-/// Durable checkout-hex → builder-slot map, sitting beside the slot checkouts
-/// so a coordinator restart still prefers the slot that compiled A.
+/// Durable workpiece → builder-slot map, sitting beside the lane checkouts so
+/// a coordinator restart still prefers the slot that compiled the member.
 pub struct BuilderSlots {
     path: PathBuf,
     slots: HashMap<String, usize>,
@@ -100,42 +103,42 @@ impl BuilderSlots {
     /// Load whatever the previous process left under `base_dir`, or start empty.
     #[must_use]
     pub fn load(base_dir: &Path) -> Self {
-        let path = base_dir.join("edge-slots");
-        let slots = fs::read_to_string(&path).ok().as_deref().map(parse_edge_slots).unwrap_or_default();
+        let path = base_dir.join("member-slots");
+        let slots = fs::read_to_string(&path).ok().as_deref().map(parse_member_slots).unwrap_or_default();
         Self { path, slots }
     }
 
-    /// The slot that captured `checkout_hex`, when one has.
+    /// The slot that last built `workpiece`, when one has.
     #[must_use]
-    pub fn preferred(&self, checkout_hex: &str) -> Option<usize> {
-        self.slots.get(checkout_hex).copied()
+    pub fn preferred(&self, workpiece: &str) -> Option<usize> {
+        self.slots.get(workpiece).copied()
     }
 
-    /// Remember that `slot` produced the candidate at `checkout_hex`.
-    pub fn record(&mut self, checkout_hex: String, slot: usize) {
-        self.slots.insert(checkout_hex, slot);
-        persist_edge_slots(&self.path, &self.slots);
+    /// Remember that `slot` is building `workpiece`.
+    pub fn record(&mut self, workpiece: String, slot: usize) {
+        self.slots.insert(workpiece, slot);
+        persist_member_slots(&self.path, &self.slots);
     }
 }
 
-fn parse_edge_slots(text: &str) -> HashMap<String, usize> {
+fn parse_member_slots(text: &str) -> HashMap<String, usize> {
     let mut slots = HashMap::new();
     for line in text.lines() {
         let mut parts = line.split_whitespace();
-        let Some(hex) = parts.next() else {
+        let Some(workpiece) = parts.next() else {
             continue;
         };
         let Some(slot) = parts.next().and_then(|slot| slot.parse().ok()) else {
             continue;
         };
-        if !hex.is_empty() {
-            slots.insert(hex.to_owned(), slot);
+        if !workpiece.is_empty() {
+            slots.insert(workpiece.to_owned(), slot);
         }
     }
     slots
 }
 
-fn persist_edge_slots(path: &Path, slots: &HashMap<String, usize>) {
+fn persist_member_slots(path: &Path, slots: &HashMap<String, usize>) {
     let mut text = String::new();
     let mut entries: Vec<_> = slots.iter().collect();
     entries.sort_by(|a, b| a.0.cmp(b.0));
@@ -149,7 +152,7 @@ fn persist_edge_slots(path: &Path, slots: &HashMap<String, usize>) {
         tracing::warn!(
             path = %path.display(),
             %error,
-            "local executor backend: could not persist edge-affinity slot map",
+            "local executor backend: could not persist member-affinity slot map",
         );
     }
 }
@@ -177,7 +180,7 @@ pub fn stamp_slot_affinity(bytes: &[u8], affinity: &SlotAffinity) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SlotChoice, choose_slot, parse_edge_slots, stamp_slot_affinity};
+    use super::{SlotChoice, choose_slot, parse_member_slots, stamp_slot_affinity};
     use std::collections::HashSet;
 
     fn held(slots: &[usize]) -> HashSet<usize> {
@@ -187,9 +190,10 @@ mod tests {
     #[test]
     fn a_free_preferred_slot_wins_over_the_lowest_free() {
         // Tripwire: without affinity the allocator always hands out the lowest
-        // free index, so B would miss the warm target dir in A's slot whenever
-        // a lower index happened to be idle. The plausible bug is treating
-        // preference as a tie-break instead of the first choice.
+        // free index, so a member's second lane would miss the warm target dir
+        // its first one left whenever a lower index happened to be idle. The
+        // plausible bug is treating preference as a tie-break instead of the
+        // first choice.
         let (slot, reason) = choose_slot(Some(1), &held(&[0]), &HashSet::new());
         assert_eq!((slot, reason), (1, SlotChoice::Preferred));
 
@@ -199,8 +203,9 @@ mod tests {
 
     #[test]
     fn a_busy_preferred_slot_falls_back_to_lowest_free() {
-        // Preference is never a wait. A busy (or quarantined) predecessor slot
-        // must not park B behind A-the-next-occupant; it takes any free slot.
+        // Preference is never a wait. A busy (or quarantined) previous slot must
+        // not park the member behind whoever holds it now; it takes any free
+        // slot.
         let (slot, reason) = choose_slot(Some(0), &held(&[0]), &HashSet::new());
         assert_eq!((slot, reason), (1, SlotChoice::Busy));
 
@@ -215,13 +220,12 @@ mod tests {
     }
 
     #[test]
-    fn the_edge_slot_file_is_last_write_wins_per_checkout() {
-        // A refine of A produces a new capture; B must prefer the slot that
-        // built the capture it will actually check out, not the first one A
-        // ever ran in.
-        let slots = parse_edge_slots("deadbeef 0\ndeadbeef 1\ncafe 2\n");
-        assert_eq!(slots.get("deadbeef").copied(), Some(1));
-        assert_eq!(slots.get("cafe").copied(), Some(2));
+    fn the_member_slot_file_is_last_write_wins_per_workpiece() {
+        // A member that moved slots is preferred back to where it last built,
+        // not to where it first did — the older line is the colder target.
+        let slots = parse_member_slots("issue-5140 0\nissue-5140 1\nissue-5141 2\n");
+        assert_eq!(slots.get("issue-5140").copied(), Some(1));
+        assert_eq!(slots.get("issue-5141").copied(), Some(2));
     }
 
     #[test]

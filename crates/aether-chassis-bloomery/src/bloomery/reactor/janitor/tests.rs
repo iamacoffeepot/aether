@@ -197,6 +197,51 @@ fn a_killed_runs_worktree_is_reclaimed_once_its_bloom_is_terminal() {
 }
 
 #[test]
+fn a_member_checkout_outlives_its_lanes_and_dies_with_its_member() {
+    // Acceptance for #5425. A member's checkout is created on its first
+    // dispatch and reused by every lane of that member, so nothing inside the
+    // member's own life may remove it — its construct finishing is not the end
+    // of it, and the verify that follows is entitled to the tree construct
+    // left. What ends it is the member ending, which is a fact only the journal
+    // holds.
+    //
+    // Both directions in one pass, because getting either alone is easy and the
+    // pair is the whole rule: the live bloom's member keeps its tree, and one no
+    // live bloom names loses it.
+    let scratch = tempfile::tempdir().expect("a scratch dir is created");
+    let live = scratch.path().join("worktrees").join("wp");
+    let terminal = scratch.path().join("worktrees").join("wp-landed");
+    fs::create_dir_all(&live).expect("the live member's checkout is created");
+    fs::create_dir_all(&terminal).expect("the terminal member's checkout is created");
+
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
+    journal_sealed(&mut store);
+
+    let released = Released(Arc::new(Mutex::new(Vec::new())));
+    let runner =
+        StubRunner { registered: vec![live.clone(), terminal.clone()], released: Released(Arc::clone(&released.0)) };
+    let keep = policy(7, u64::MAX);
+    let report = run(&mut SweepRequest {
+        store: &mut store,
+        runner: &runner,
+        source: None,
+        worktree_base: scratch.path(),
+        target_base: scratch.path(),
+        lanes: &idle,
+        policy: &keep,
+        now: SystemTime::now(),
+    });
+
+    assert_eq!(report.worktrees, 1, "one checkout went and one stayed");
+    assert_eq!(
+        released.0.lock().expect("the release log is not poisoned").as_slice(),
+        [terminal],
+        "the member no live bloom names loses its tree; the sealed bloom's member keeps its own",
+    );
+    assert!(live.is_dir(), "a live member's checkout is still there for its next lane");
+}
+
+#[test]
 fn a_lane_slots_checkout_is_never_reclaimed() {
     // Slot checkouts are the host's build paths, reused across dispatches.
     // Reclaiming one because no nonce names it would undo the cache layout

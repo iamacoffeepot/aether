@@ -50,30 +50,53 @@ use crate::store::{CommissionBackend, SqliteStore, StoreBackend};
 /// it is what that one attempt produced.
 const EVIDENCE_SUFFIX: &str = "-evidence";
 
-/// The prefix a lane slot's canonical checkout directory carries under the
-/// scratch root, completed by the slot's index (`slot-0`, `slot-1`, …).
+/// The directory under the scratch root that holds the per-workpiece lane
+/// checkouts, one child per member (`worktrees/issue-5140`).
 ///
-/// The build path is what makes this a name rather than a nonce (#4904).
-/// `sccache` keys every compilation partly by the paths cargo names on the
-/// `rustc` invocation — `--out-dir`, `-L dependency=…` — so a dispatch that
-/// builds at a path no dispatch built at before misses the cache on its whole
-/// dependency tree, however much of that tree an earlier lane already compiled.
-/// A slot's dispatches all build at the slot's own path, so the second one hits
-/// what the first paid for.
+/// A checkout belongs to the **workpiece** being built (#5425). Every lane of
+/// one member — construct, verify, review, refine, and the retries of each —
+/// runs against the tree the lane before it left, so the tree has to be the
+/// member's own; and a model session a later lap resumes is bound to the
+/// directory it was born in, which a checkout that moved between dispatches
+/// silently breaks. Created on the member's first dispatch, reset to that
+/// dispatch's subject at every launch, and removed by the janitor when the
+/// member reaches a terminal state.
+const WORKTREES_DIR: &str = "worktrees";
+
+/// The prefix a fallback lane-slot checkout directory carries under the scratch
+/// root, completed by the slot's index (`slot-0`, `slot-1`, …).
+///
+/// The fallback rather than the rule (#5425): a dispatch this backend can name
+/// a workpiece for builds under [`WORKTREES_DIR`], and this path is what is
+/// left for one it cannot — an aggregate lane, whose order names no member, and
+/// a backend built without a store, which can read no order at all. Both are
+/// single-tree dispatches with no successor lane waiting on the tree they
+/// leave, so the slot is a sufficient key for them.
 const SLOT_PREFIX: &str = "slot-";
 
 /// The suffix a lane slot's cargo target directory carries, completing the slot's
 /// own name (`slot-0-target`, `slot-1-target`) under the target base.
 ///
-/// Per slot for the reason the checkout is (#4912): cargo takes an exclusive lock
-/// on a build directory, so lanes sharing one build strictly one at a time
-/// however many slots the ceiling allows, and its fingerprints are keyed by
-/// source path, so a directory shared across divergent checkouts both grows
-/// without bound and can surface a dependency last compiled from another slot's
-/// source as a failure that reads as a regression.
+/// The target is what the slot still owns (#5425). With the checkout keyed to
+/// the workpiece, a slot is two things and neither of them is the work: a
+/// concurrency token — one dispatch at a time under the ceiling — and a warm
+/// cargo target directory lent to whoever holds it.
+///
+/// Per slot rather than per workpiece, for the reason it was always per slot
+/// (#4912): cargo takes an exclusive lock on a build directory, so lanes
+/// sharing one would build strictly one at a time however many slots the
+/// ceiling allows, and a target per member would multiply the largest directory
+/// on the host by the member count instead of by the concurrency. `sccache`
+/// keys a compilation partly on the paths cargo names on the `rustc`
+/// invocation — `--out-dir`, `-L dependency=…` — and those are the target's, so
+/// the dependency tree one lane compiled is still hit by the next dispatch to
+/// hold the slot whatever workpiece it is building. What is genuinely
+/// per-workpiece now is the workspace crates, whose source paths differ per
+/// member: each slot target accumulates a set of them, which is what the
+/// janitor's budget eviction is there to bound.
 ///
 /// A **sibling** of the checkout rather than a directory inside it. A dispatch
-/// resets its slot with `git clean --force --force -d -x` (see
+/// resets its checkout with `git clean --force --force -d -x` (see
 /// `materialize_checkout`), which removes ignored files — an in-tree `target`
 /// would be deleted once per dispatch, and the warm dependency tree that makes a
 /// repair lap recompile nine crates instead of ninety-six is exactly what would
@@ -111,9 +134,10 @@ struct Run {
     // this process cannot name the checkout it is running in, and guessing would
     // hand another dispatch's live build path to a stranger.
     slot: Option<usize>,
-    // The slot checkout the run builds in — the same path every dispatch in that
-    // slot uses, reset to the dispatch's own tree as it starts rather than
-    // created fresh. `None` alongside a `None` slot.
+    // The checkout the run builds in — the workpiece's own tree, shared with
+    // every other lane of that member and reset to this dispatch's subject as it
+    // starts rather than created fresh. `None` for a run re-adopted at boot
+    // whose slot could not be recovered.
     worktree_dir: Option<PathBuf>,
     evidence_dir: PathBuf,
     // The digest the intake broker binds the evidence to, per `evidence_subject`.
@@ -189,7 +213,11 @@ struct PendingRun {
     task: Option<String>,
     subject: Digest,
     gates: LaneGates,
-    // The slot the predecessor that produced this checkout ran in, when known.
+    // The member this dispatch belongs to, when the order row names one. The
+    // checkout's key; `None` for an aggregate lane or a store-less backend,
+    // which fall back to the slot path.
+    workpiece: Option<String>,
+    // The slot that last built this member, when one has.
     preferred: Option<usize>,
     // Which band this dispatch queues in, from the stage its order names.
     priority: DispatchPriority,
@@ -367,7 +395,9 @@ impl LocalExecutor {
     /// stub runner, and [`from_config`](Self::from_config) drives with the
     /// production [`ProcessTransformRunner`]. `base_dir` is the scratch root;
     /// each run writes its evidence to `base_dir/<nonce>-evidence` and builds in
-    /// the canonical checkout of the lane slot it holds, `base_dir/slot-<index>`.
+    /// its member's checkout, `base_dir/worktrees/<workpiece>` — falling back to
+    /// the lane slot's own `base_dir/slot-<index>` for a dispatch that names no
+    /// member.
     /// Unthrottled — every submit spawns immediately until
     /// [`with_max_concurrent_lanes`](Self::with_max_concurrent_lanes) sets a
     /// ceiling, which is what [`from_config`](Self::from_config) does.
@@ -551,10 +581,18 @@ impl LocalExecutor {
         absolute(self.base_dir.join(format!("{nonce}{EVIDENCE_SUFFIX}")))
     }
 
-    // The canonical checkout one lane slot builds in, reused by every dispatch
-    // that holds the slot. Absolute for the reason the evidence dir is.
-    fn slot_dir(&self, slot: usize) -> io::Result<PathBuf> {
-        absolute(self.base_dir.join(format!("{SLOT_PREFIX}{slot}")))
+    // The checkout one dispatch builds in: the workpiece's own tree when the
+    // order names a member, the lane slot's own path when it does not. Absolute
+    // for the reason the evidence dir is.
+    //
+    // The two cases are one function because both sides of the layout read it
+    // backwards — the janitor recognizes a member checkout by this shape, and
+    // boot reconciliation recovers a run's tree from the slot it recorded.
+    fn checkout_dir(&self, workpiece: Option<&str>, slot: usize) -> io::Result<PathBuf> {
+        absolute(workpiece.filter(|workpiece| is_checkout_name(workpiece)).map_or_else(
+            || self.base_dir.join(format!("{SLOT_PREFIX}{slot}")),
+            |workpiece| self.base_dir.join(WORKTREES_DIR).join(workpiece),
+        ))
     }
 
     // The cargo target directory one lane slot builds into, reused by every
@@ -629,12 +667,14 @@ impl LocalExecutor {
         // the review lane's `status`-stamped evidence must not ride.
         let gates = LaneGates::of(&order.transformation.command);
         let is_model_lane = is_model_lane(&order.transformation.command);
-        let preferred = self.preferred_builder_slot(&checkout_hex);
-        // Resolved here, once, rather than at every pump: the stage lives in the
-        // outstanding-order row this nonce resolves, and reading it under the
-        // registry lock would put a database query inside the decision every
-        // freed slot makes.
-        let priority = priority_of(self.order_identity(&nonce).map(|(_, _, stage)| stage));
+        // One store lookup for both, resolved here rather than at every pump: the
+        // order row names the member this dispatch belongs to and the stage it
+        // runs, and reading it under the registry lock would put a database query
+        // inside the decision every freed slot makes.
+        let identity = self.order_identity(&nonce);
+        let priority = priority_of(identity.as_ref().map(|(_, _, stage)| *stage));
+        let workpiece = identity.map(|(_, workpiece, _)| workpiece).filter(|workpiece| is_checkout_name(workpiece));
+        let preferred = workpiece.as_deref().and_then(|workpiece| self.preferred_slot_of(workpiece));
         // The stage's resolved agent profile, overlaid onto the order by the
         // dispatching host (ADR-0149 §The line) — never a backend-local config
         // knob, which would let a run's model diverge from the profile its bloom
@@ -657,37 +697,33 @@ impl LocalExecutor {
             task: is_model_lane.then_some(order.transformation.description.clone()).flatten(),
             subject: evidence_subject(&order.transformation),
             gates,
+            workpiece,
             preferred,
             priority,
         })
     }
 
-    fn preferred_builder_slot(&self, checkout_hex: &str) -> Option<usize> {
-        let exact = self.builders.lock().unwrap_or_else(PoisonError::into_inner).preferred(checkout_hex);
-        if let Some(slot) = exact {
-            return Some(slot);
-        }
-        let parents = match self.runner.checkout_parents(checkout_hex) {
-            Ok(parents) => parents,
-            Err(error) => {
-                tracing::warn!(
-                    target: "aether_chassis_bloomery::executor",
-                    checkout = checkout_hex,
-                    %error,
-                    "local executor backend: checkout parents unreadable; slot affinity falls back",
-                );
-                return None;
-            }
-        };
-        let builders = self.builders.lock().unwrap_or_else(PoisonError::into_inner);
-        parents.iter().find_map(|parent| builders.preferred(parent))
+    // The slot that last built this member, when one has (ADR-0196 as amended
+    // for #5425).
+    //
+    // Member-keyed, because what is worth preferring is the slot whose target
+    // directory already holds this workpiece's own compilation units — a fact
+    // about the member, not about the edge it entered on. The edge-keyed form
+    // this replaces looked the checkout hex up, and a member's checkout hex
+    // changes at every capture, so its own second lane asked after a hex no slot
+    // had ever recorded and fell through to lowest-free.
+    fn preferred_slot_of(&self, workpiece: &str) -> Option<usize> {
+        self.builders.lock().unwrap_or_else(PoisonError::into_inner).preferred(workpiece)
     }
 
-    fn remember_builder(&self, checkout: &Digest, slot: usize) {
-        let Ok(Some(object)) = self.correspondence.resolve_backend_object(checkout) else {
-            return;
-        };
-        self.builders.lock().unwrap_or_else(PoisonError::into_inner).record(render_object_hex(&object), slot);
+    // Remember that `slot` is building `workpiece`, so the member's next lane
+    // prefers the target that already holds its crates.
+    //
+    // Recorded as the dispatch starts rather than when it captures: the target
+    // is warmed by the build, and a lane that compiled the member and then
+    // failed has warmed it exactly as much as one that passed.
+    fn remember_builder(&self, workpiece: &str, slot: usize) {
+        self.builders.lock().unwrap_or_else(PoisonError::into_inner).record(workpiece.to_owned(), slot);
     }
 
     // Claim a lane slot for a dispatch that may start right now, or report that it
@@ -1020,9 +1056,28 @@ impl LocalExecutor {
         slot: usize,
         reason: SlotChoice,
     ) -> Result<(), LocalExecutorError> {
-        let worktree_dir = self.slot_dir(slot).map_err(LocalExecutorError::Io)?;
-        let target_dir = self.slot_target_dir(slot).map_err(LocalExecutorError::Io)?;
+        // Resolved through the reservation rather than past it: an early `?` here
+        // would leave `starting` incremented and the slot claimed with no run
+        // behind either, and the ceiling would shrink by one for the life of the
+        // process.
+        let paths = self
+            .checkout_dir(pending.workpiece.as_deref(), slot)
+            .and_then(|worktree| self.slot_target_dir(slot).map(|target| (worktree, target)));
+        let (worktree_dir, target_dir) = match paths {
+            Ok(paths) => paths,
+            Err(error) => {
+                {
+                    let mut registry = self.lock();
+                    registry.starting -= 1;
+                    registry.release_slot(Some(slot));
+                }
+                return Err(LocalExecutorError::Io(error));
+            }
+        };
         record_slot(&pending.evidence_dir, slot);
+        if let Some(workpiece) = pending.workpiece.as_deref() {
+            self.remember_builder(workpiece, slot);
+        }
         let reuse = self.acquire_reuse(&pending, &worktree_dir);
         if reuse.as_ref().is_some_and(|plan| plan.edge) {
             pending.task = Some(
@@ -1163,12 +1218,17 @@ impl LocalExecutor {
             return false;
         }
         let slot = recorded_slot(&evidence_dir).filter(|slot| registry.claim_slot(*slot));
+        // The member the order names, so a re-adopted run points at the same
+        // checkout the dying process was building in. A slot the record lost
+        // leaves the tree unnameable either way: this process must not reset or
+        // capture a checkout it cannot prove belongs to the run.
+        let workpiece = self.order_identity(&nonce.0).map(|(_, workpiece, _)| workpiece);
         registry.runs.insert(
             nonce.0.clone(),
             Run {
                 process: Box::new(OrphanedRun::new(nonce.clone(), &evidence_dir)),
                 slot,
-                worktree_dir: slot.and_then(|slot| self.slot_dir(slot).ok()),
+                worktree_dir: slot.and_then(|slot| self.checkout_dir(workpiece.as_deref(), slot).ok()),
                 evidence_dir,
                 subject: evidence_subject(&dispatch.transformation),
                 gates: LaneGates::of(&dispatch.transformation.command),
@@ -1334,9 +1394,7 @@ impl LocalExecutor {
     ) -> Vec<EvidenceRef> {
         let candidate =
             is_construct.then(|| self.construct_capture(worktree_dir, &handle.nonce, false, None)).flatten();
-        if let (Some(candidate), Some(slot)) = (candidate.as_ref(), slot) {
-            self.remember_builder(&candidate.checkout, slot);
-        }
+        let _ = slot;
         self.retire(&handle.nonce.0);
         self.pump();
         vec![executor_fault_ref(
@@ -1678,9 +1736,6 @@ impl LocalExecutor {
         // this. Only for a candidate that was actually captured, so the row and
         // the candidate arrive together and a lane that produced nothing cannot
         // leave a message behind for the next one.
-        if let (Some(candidate), Some(slot)) = (candidate.as_ref(), slot) {
-            self.remember_builder(&candidate.checkout, slot);
-        }
         if concluded
             && candidate.is_some()
             && let Some(message) = commit_message.as_deref()
@@ -2272,6 +2327,20 @@ fn file_progress_unix_millis(path: &Path) -> Option<u64> {
 /// Exact rather than prefix-loose: the sweep reads this to decide what it must
 /// *not* reclaim, and a nonce that merely began with the prefix would otherwise
 /// leave an abandoned checkout on disk forever.
+/// Whether a workpiece id may be used as a directory name under the scratch
+/// root.
+///
+/// A workpiece id is operator-supplied text and this turns it into a path, so
+/// the accepted set is stated rather than sanitized: the ids in use are drawn
+/// from it (`issue-5140`, `wp-0`), and anything outside it — a separator, a
+/// parent-directory hop, a leading dot — falls back to the slot path instead of
+/// being rewritten into some name that might be another member's.
+fn is_checkout_name(workpiece: &str) -> bool {
+    !workpiece.is_empty()
+        && !workpiece.starts_with('.')
+        && workpiece.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
 fn is_slot_directory(name: &str) -> bool {
     name.strip_prefix(SLOT_PREFIX)
         .is_some_and(|index| !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit()))

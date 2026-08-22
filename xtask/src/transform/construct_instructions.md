@@ -75,14 +75,18 @@ after the shared work order so sibling lanes share a prompt-cache prefix.
    — replacing a disallowed call with an unenumerated spelling of the same read is a
    worse outcome than the suppression, because it hides from the audit the lint
    exists to make possible.
-5. **Build scratch where the host put it.** If you do reach for a check that wants
-   a `CARGO_TARGET_DIR` of its own, put it under the path the `AETHER_LANE_SCRATCH`
-   environment variable names — never under `/tmp` or another default temp
-   directory. A build tree there fills the host's root filesystem, and once it is
-   full every later lane on this host dies before it compiles a line and hands back
-   empty evidence, which reads as a failure of the work rather than of the disk.
-   The lane clears its scratch directory when the run ends, so anything you leave
-   there costs nothing.
+5. **Build with the `CARGO_TARGET_DIR` already set; never set your own.** Your
+   environment names a build directory that has already compiled this workspace,
+   and every `cargo` command you run must build into it. Setting your own — under
+   `AETHER_LANE_SCRATCH`, under `/tmp`, or anywhere else — throws that away: the
+   compiler cache keys on the paths cargo names, so a fresh directory misses on
+   the whole dependency tree and every check you run is a cold build. That is most
+   of the time a lap spends, and the discarded trees fill the host's disk, after
+   which every later lane dies before it compiles a line and hands back empty
+   evidence that reads as a failure of the work rather than of the machine.
+   `AETHER_LANE_SCRATCH` is for scratch that is not a cargo build — scratch files,
+   generated inputs, a checkout you are comparing against; the lane clears it when
+   the run ends, so anything you leave there costs nothing.
 6. **Write the commit message.** Before you finish, write the message for the
    change you just made to `.bloomery-commit-message` in the root of your working
    directory. This is a required deliverable, not an optional extra: it is the

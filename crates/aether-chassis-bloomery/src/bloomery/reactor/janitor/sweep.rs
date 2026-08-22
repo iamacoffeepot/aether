@@ -25,8 +25,13 @@ use crate::store::StoreBackend;
 /// the same spelling [`LocalExecutor`](crate::bloomery::LocalExecutor) uses.
 const EVIDENCE_SUFFIX: &str = "-evidence";
 
-/// The prefix a lane slot's checkout or target directory carries.
+/// The prefix a lane slot's fallback checkout or target directory carries.
 const SLOT_PREFIX: &str = "slot-";
+
+/// The directory under the scratch root holding the per-workpiece lane
+/// checkouts — the same spelling
+/// [`LocalExecutor`](crate::bloomery::LocalExecutor) lays them out under.
+const WORKTREES_DIR: &str = "worktrees";
 
 /// The suffix a lane slot's cargo target directory carries.
 const TARGET_SUFFIX: &str = "-target";
@@ -51,7 +56,9 @@ pub struct JanitorPolicy {
 /// What one sweep pass reclaimed, for the log line and for tests.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SweepReport {
-    /// Nonce-keyed worktrees released because their owning run is terminal.
+    /// Checkouts released because the work they belong to is terminal: a
+    /// nonce-keyed one whose owning run is over, and a workpiece-keyed one
+    /// whose member has landed, been withdrawn, or left with its bloom.
     pub worktrees: usize,
     /// Consumed evidence directories past the retention window.
     pub evidence_dirs: usize,
@@ -112,7 +119,8 @@ pub fn sweep(request: &mut SweepRequest<'_>) -> rusqlite::Result<SweepReport> {
     let live: HashSet<&str> = outstanding.iter().map(String::as_str).collect();
     let owners = dispatch_owners(request.store, &outstanding)?;
 
-    let worktrees = reclaim_worktrees(request.runner, request.worktree_base, &live, &owners, &snapshot);
+    let worktrees = reclaim_worktrees(request.runner, request.worktree_base, &live, &owners, &snapshot)
+        + reclaim_member_checkouts(request.runner, request.worktree_base, &snapshot);
     let evidence_dirs = reclaim_evidence(request, &live, &owners, &snapshot);
     let refs = request.source.map_or(0, |source| prune_terminal_refs(source, &snapshot));
     let target_dirs = sweep_targets(request.target_base, request.policy.lane_target_budget_bytes, request.lanes);
@@ -212,6 +220,88 @@ fn reclaim_worktrees(
         }
     }
     reclaimed
+}
+
+/// Release the per-workpiece lane checkouts of members that have reached a
+/// terminal state (#5425).
+///
+/// A member's checkout is created on its first dispatch and reused by every
+/// lane of that member, so nothing inside the member's own life may remove it —
+/// its last lane is not the end of it, and the next stage is entitled to the
+/// tree the previous one left. What ends it is the member itself ending: landed
+/// with its bloom, withdrawn from it, or carried out of the walking set when
+/// the bloom was superseded or cancelled. Everything not in the live set is
+/// reclaimable, which is also what clears the checkouts of a bloom this process
+/// never saw walk.
+///
+/// The candidates are the repository's *registered* worktrees, filtered to
+/// children of `<base>/worktrees`, for the reason
+/// [`reclaim_worktrees`] filters to children of the base: the scratch root is a
+/// configured path, and a registration is the only positive proof a directory
+/// under it is one of ours.
+///
+/// The member's compiled artifacts inside each slot target are deliberately
+/// *not* chased here. Cargo names its fingerprint and incremental directories
+/// by a metadata hash this process cannot derive from the source path, and a
+/// hand-removal of part of a target directory is not an operation cargo
+/// supports — a half-removed fingerprint set fails the next build in ways that
+/// read as a regression in the candidate. What bounds that growth instead is
+/// the budget eviction below, which takes a whole target out atomically.
+fn reclaim_member_checkouts(runner: &dyn TransformRunner, worktree_base: &Path, snapshot: &Snapshot) -> usize {
+    let Ok(base) = fs::canonicalize(worktree_base.join(WORKTREES_DIR)) else {
+        return 0;
+    };
+    let registered = match runner.registered_worktrees() {
+        Ok(registered) => registered,
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::janitor",
+                %error,
+                "janitor: worktree registrations unreadable; terminal member checkouts not reclaimed",
+            );
+            return 0;
+        }
+    };
+    let live = live_workpieces(snapshot);
+
+    let mut reclaimed = 0;
+    for worktree in registered {
+        let Some(workpiece) = child_name_of(&base, &worktree) else {
+            continue;
+        };
+        if live.contains(workpiece.as_str()) {
+            continue;
+        }
+        tracing::info!(
+            target: "aether_chassis_bloomery::janitor",
+            %workpiece,
+            worktree = %worktree.display(),
+            "janitor: reclaiming the lane checkout of a member that has reached a terminal state",
+        );
+        if reclaim_checkout(runner, &worktree) {
+            reclaimed += 1;
+        }
+    }
+    reclaimed
+}
+
+/// Every workpiece still entitled to its checkout: a member of a bloom that is
+/// active and unlanded, and not itself withdrawn from it.
+fn live_workpieces(snapshot: &Snapshot) -> HashSet<String> {
+    snapshot
+        .blooms
+        .values()
+        .filter(|record| is_active_unlanded(record.status))
+        .flat_map(|record| {
+            record
+                .spec
+                .members()
+                .iter()
+                .map(|member| &member.workpiece)
+                .filter(|workpiece| !record.withdrawn.contains_key(*workpiece))
+                .map(|workpiece| workpiece.0.clone())
+        })
+        .collect()
 }
 
 fn reclaim_evidence(
@@ -402,11 +492,17 @@ fn is_slot_directory(name: &str) -> bool {
 }
 
 fn scratch_nonce_of(base: &Path, worktree: &Path) -> Option<String> {
-    let parent = fs::canonicalize(worktree.parent()?).ok()?;
+    child_name_of(base, worktree)
+}
+
+/// The file name of `path` when its parent is exactly `base`, canonicalized on
+/// both sides — the discriminator both checkout sweeps read their key with.
+fn child_name_of(base: &Path, path: &Path) -> Option<String> {
+    let parent = fs::canonicalize(path.parent()?).ok()?;
     if parent != *base {
         return None;
     }
-    Some(worktree.file_name()?.to_str()?.to_owned())
+    Some(path.file_name()?.to_str()?.to_owned())
 }
 
 fn evidence_nonce_of(path: &Path) -> Option<String> {

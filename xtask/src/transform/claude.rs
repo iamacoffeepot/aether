@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 
 use aether_bloomery::split_lane_identity;
 
-use crate::transform::lane::{execute, resume_handle_rejected, resumed_prompt, without_resume};
+use crate::transform::lane::{execute, export_build_dir, resume_handle_rejected, resumed_prompt, without_resume};
 use crate::transform::messages::derive_result_record;
 use crate::transform::peak_memory::PeakMemory;
 use crate::transform::review::REVIEW_CRITIC;
@@ -211,6 +211,7 @@ fn run_headless_claude_at(
     claude.args(flags);
     scratch.export(&mut claude);
     sccache::export(cache, &mut claude);
+    export_build_dir(&mut claude);
     // Piped stdin + streamed stdout share the lane primitive: the child is
     // reaped before any pipe-thread error returns, and a nonzero exit keeps
     // precedence over a broken prompt pipe.
