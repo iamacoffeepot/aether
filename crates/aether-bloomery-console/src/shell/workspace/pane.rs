@@ -4,8 +4,7 @@ use ratatui::widgets::{Block, Borders};
 
 use crate::palette;
 
-/// A focus stop on the root workspace. `fleet` is bordered and titled but is
-/// not in this ring — it has one line and no cursor.
+/// A focus stop on the root workspace.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaneId {
     Board,

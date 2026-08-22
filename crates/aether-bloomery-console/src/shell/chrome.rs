@@ -1,7 +1,7 @@
 //! Application chrome: header, status, needs-you band, footer.
 //!
-//! Owned by the workspace panes: fleet paints the header, needs-you the
-//! merged queue, quiet the status, today, and rest-count lines.
+//! The header and footer are shell chrome. Needs-you paints the merged
+//! queue; quiet paints the status, today, and rest-count lines.
 
 use std::time::Duration;
 
@@ -33,22 +33,36 @@ pub fn format_age(age: Option<Duration>) -> String {
     format!("{}h", mins / 60)
 }
 
+// Three 14-cell series plus the metrics do not fit a narrower row, so the decoration goes before the facts.
+const SPARKLINE_MIN_WIDTH: u16 = 100;
+
+/// Identity, endpoint, sample age, then staleness (deliberately before the metrics), then metrics and sparklines.
 #[must_use]
-pub fn header(endpoint_label: &str, view: &Cell<ViewDocument>, dashboard: Option<&Dashboard>) -> Paragraph<'static> {
+pub fn header(
+    endpoint_label: &str,
+    view: &Cell<ViewDocument>,
+    dashboard: Option<&Dashboard>,
+    width: u16,
+) -> Paragraph<'static> {
     let age = format_age(view.sample_age());
-    let mut spans = vec![Span::styled("bloomery-console", palette::body().add_modifier(Modifier::BOLD))];
+    let mut spans = vec![
+        Span::styled("bloomery-console", palette::body().add_modifier(Modifier::BOLD)),
+        Span::raw(format!("  {endpoint_label}  sample {age}")),
+    ];
     if view.is_stale() {
         spans.push(Span::styled("  STALE", palette::paint(Role::Loud).add_modifier(Modifier::BOLD)));
         if let Some(error) = &view.error {
             spans.push(Span::raw(format!("  {error}")));
         }
     }
-    spans.push(Span::raw(format!("  {endpoint_label}  sample {age}")));
     if let Some(dashboard) = dashboard {
-        spans.push(Span::raw(format!(
-            "  ${}  L{}  W{}",
-            dashboard.spend_spark, dashboard.landed_spark, dashboard.wedge_spark
-        )));
+        spans.push(Span::raw(format!("  {}", dashboard.footer)));
+        if width >= SPARKLINE_MIN_WIDTH {
+            spans.push(Span::raw(format!(
+                "  ${}  L{}  W{}",
+                dashboard.spend_spark, dashboard.landed_spark, dashboard.wedge_spark
+            )));
+        }
     }
     Paragraph::new(Line::from(spans)).style(palette::body())
 }

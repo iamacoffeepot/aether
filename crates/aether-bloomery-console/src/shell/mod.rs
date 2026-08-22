@@ -1,8 +1,8 @@
-//! Shell: endpoint, store, fetch lanes, a four-pane workspace, and pushed frames.
+//! Shell: endpoint, store, fetch lanes, a three-pane workspace, and pushed frames.
 //!
 //! Screens receive the store read-only and cannot fetch or mutate it.
-//! At rest the workspace owns the operator's seat; a drill-in replaces it
-//! with the top pushed frame. The one-line footer stays in both cases.
+//! The header and the one-line footer are shell chrome. Only the middle
+//! band swaps between the workspace and the top pushed frame.
 
 pub mod chrome;
 mod workspace;
@@ -91,15 +91,19 @@ impl Shell {
         frame.render_widget(Block::default().style(palette::body()), frame.area());
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(1)])
+            .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)])
             .split(frame.area());
-        if self.stack.is_empty() {
-            self.workspace.render(frame, chunks[0], &self.store, &self.endpoint_label);
-        } else if let Some(screen) = self.stack.last_mut() {
-            screen.render(frame, chunks[0], &self.store);
-        }
         let dashboard = compose(&self.store);
-        frame.render_widget(chrome::footer(&self.footer_hints(), Some(&dashboard.footer)), chunks[1]);
+        frame.render_widget(
+            chrome::header(&self.endpoint_label, self.store.view(), Some(&dashboard), frame.area().width),
+            chunks[0],
+        );
+        if self.stack.is_empty() {
+            self.workspace.render(frame, chunks[1], &self.store);
+        } else if let Some(screen) = self.stack.last_mut() {
+            screen.render(frame, chunks[1], &self.store);
+        }
+        frame.render_widget(chrome::footer(&self.footer_hints(), None), chunks[2]);
     }
 
     fn drain_replies(&mut self) {
@@ -381,6 +385,7 @@ impl Shell {
 mod tests {
     use super::PaneId;
     use super::Shell;
+    use super::chrome;
     use crate::dto::{
         BloomDispatchView, BloomDispatchesView, BloomStatus, BloomView, CompositionCursorView, CompositionFinding,
         CompositionView, DigestHex, ExecutorFaultView, HostFaultView, LandingBlock, MemberView, OperatorHoldView,
@@ -391,8 +396,8 @@ mod tests {
     use crate::keys::{Outcome, assert_footer_honest, footer_line};
     use crate::nav::Nav;
     use crate::palette::{Role, depth};
-    use crate::screen::RowId;
-    use crate::store::ResourceKey;
+    use crate::screen::{Dashboard, RowId};
+    use crate::store::{Cell, ResourceKey};
     use crate::warroom::Focus;
     use crossterm::event::{KeyCode, KeyEvent};
     use ratatui::Terminal;
@@ -738,12 +743,13 @@ mod tests {
         );
         assert!(empty_text.contains("needs you"), "empty workspace dropped needs you:\n{empty_text}");
         assert!(empty_text.contains("quiet"), "empty workspace dropped quiet:\n{empty_text}");
+        assert!(!empty_text.contains("fleet"), "fleet box still occupies the workspace:\n{empty_text}");
     }
 
     #[test]
     fn a_pushed_frame_replaces_the_workspace() {
         // The plausible bug: a drill-in still paints workspace chrome, or
-        // popping it fails to restore the four panes.
+        // popping it fails to restore the three panes.
         let view = bloom_with(
             vec![MemberView { workpiece: "issue-1".to_owned(), wedge: Some(Present {}), ..MemberView::default() }],
             |bloom| bloom.review_park = Some(ReviewParkView::default()),
@@ -758,6 +764,59 @@ mod tests {
         assert!(text.contains("needs you"), "pop did not restore the workspace:\n{text}");
         assert!(text.contains("accept or defer"), "{text}");
         assert!(text.contains("widen the surface or eject"), "{text}");
+    }
+
+    #[test]
+    fn the_header_survives_a_pushed_frame() {
+        // The plausible bug: Shell::render paints only the pushed screen into
+        // the body, so the endpoint and sample age leave the display.
+        let view = bloom_with(
+            vec![MemberView { workpiece: "issue-1".to_owned(), wedge: Some(Present {}), ..MemberView::default() }],
+            |bloom| bloom.review_park = Some(ReviewParkView::default()),
+        );
+        let mut shell = Shell::showing(&view, None);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
+        let text = draw(&mut shell);
+        assert!(text.contains("127.0.0.1:8910"), "endpoint missing under a pushed frame:\n{text}");
+        assert!(text.contains("sample"), "sample age missing under a pushed frame:\n{text}");
+    }
+
+    #[test]
+    fn the_header_spans_the_full_width() {
+        // Tripwire: the header being a half-width pane — any content past
+        // column 50 is clipped when it is.
+        let text = draw(&mut Shell::showing(&ViewDocument::default(), None));
+        let line = text.lines().next().expect("header row");
+        assert!(
+            line.find("lanes").expect("lanes missing from header") >= 50,
+            "metrics did not reach past the halfway point on:\n{line}"
+        );
+    }
+
+    #[test]
+    fn a_narrow_header_drops_the_sparklines_not_the_error() {
+        // Tripwire: the drop order — if the row ever elides right-to-left by
+        // truncation instead, the error goes first.
+        let mut view = Cell::<ViewDocument>::default();
+        view.apply_err("connection refused");
+        let dashboard = Dashboard {
+            spend_spark: "▁▂▃▄▅▆▇█▇▆▅▄▃▂".to_owned(),
+            footer: "landed 0  cycle —  flight 0  lanes 0/0".to_owned(),
+            ..Dashboard::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(80, 1)).expect("test backend");
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    chrome::header("127.0.0.1:8910", &view, Some(&dashboard), frame.area().width),
+                    frame.area(),
+                );
+            })
+            .expect("draw");
+        let text = buffer_text(&terminal);
+        assert!(text.contains("STALE"), "{text}");
+        assert!(text.contains("connection refused"), "{text}");
+        assert!(!text.contains(&dashboard.spend_spark), "sparkline survived a narrow header:\n{text}");
     }
 
     #[test]
