@@ -112,21 +112,49 @@ consequences:
   unchanged in semantics. The graph shrinks Reconcile's caseload; it does
   not retire the stage.
 
-### Session and slot affinity along edges
+### Session and slot affinity
 
-An edge is the unit of reuse. When member B depends on member A:
+Two kinds of reuse were once both keyed to the edge. They have different
+subjects and have been separated (amended 2026-08-22, #5425/#5427).
 
-- **Slot affinity.** B's construct prefers the lane slot that built A: the
-  per-slot target directory (#4917) has already compiled the base tree, so
-  B's builds run warm.
-- **Session affinity.** B's construct may resume the session of A's
-  construct, under the standing rules the session pool already enforces:
-  same harness and model seat only; the pool keys sessions by slot path and
-  resumes only in the same slot (a resumed harness misbehaves if its cwd
-  changed); the resumed prompt states that the tree was reset and what was
-  spliced; two failed resumes fall back to fresh. **A judge never resumes a
-  builder's session** — review independence outranks any saving, so Review
-  and AggregateReview seats always start fresh.
+- **Slot affinity is the member's own.** A member's next lane prefers the lane
+  slot its last one ran in: that slot's target directory (#4917) has already
+  compiled *this workpiece's* crates, and no other slot has. Keying it to the
+  edge was the wrong axis twice over — a member's own second lane is the
+  commonest case and had no preference at all, and the lookup key (the checkout
+  hex the lane would build on) changed at every capture, so even a dependent's
+  lookup mostly missed. The preference is never a wait: a busy or quarantined
+  slot falls back to the lowest free index.
+
+  A slot is now a concurrency token and a warm target, and nothing else. The
+  **checkout** belongs to the workpiece (#5425): every lane of one member —
+  construct, verify, review, refine — runs in `<scratch>/worktrees/<workpiece>`,
+  created on the member's first dispatch, reset to each dispatch's subject as it
+  launches, and removed by the janitor when the member reaches a terminal state.
+  A lane's tree has to be the tree the lane before it left, and a model session
+  resumes in the directory it was born in whatever the launch says; a slot-keyed
+  checkout satisfied neither.
+
+- **Session affinity follows the thread, and only the graph widens it.** A
+  session belongs to one thread — one (workpiece x role). A member's own retry
+  laps continue their own session; a dependent's *first* construct may resume
+  the journaled session of a predecessor it declares an edge to, under the rules
+  the pool already enforces: same harness and model seat only, the same slot
+  guard, a resumed prompt that states the tree was reset and what was spliced,
+  and two failed resumes falling back to fresh. **A judge never resumes a
+  builder's session** — review independence outranks any saving, so Review and
+  AggregateReview seats always start fresh.
+
+  What is retired is the slot fallback (#5427): the pool also kept the last
+  builder session deposited *at each slot path* and handed it to any cold
+  construct that landed in that slot with a matching seat, with no workpiece
+  check and no declared edge. Two unrelated members dispatched into one slot
+  six minutes apart therefore shared a conversation — the second opened
+  carrying the first's whole history and then deposited the first's session id
+  as its own. A directory was never a member identity, and with the checkout
+  keyed to the workpiece it is not even a stable one. A first construct with no
+  session of its own is fresh unless the graph says otherwise, and the deposit
+  refuses a session id another member of the bloom already holds.
 - **Honest economics.** Every dispatch journals `fresh` or `resumed` with
   the per-call token evidence, priced from the sealed PriceTable — never the
   harness's self-reported figure. The acquire decision is computed from
@@ -189,9 +217,10 @@ and what trees they stand on; it does not change what lands or how.
   beyond the appended edge value.
 - Wedge blast radius shrinks from the whole bloom to a subtree, which makes
   large blooms operationally safe — the precondition for board-sized seals.
-- Session and build-cache reuse get a principled trigger (the edge) instead
-  of a global default, with journaled evidence either paying for the policy
-  or retiring it.
+- Session reuse gets a principled trigger (the thread, widened by the edge)
+  instead of a global default, with journaled evidence either paying for the
+  policy or retiring it. Build-cache reuse gets its own: the member, which is
+  what the warm target actually holds.
 - Follow-on work: the edge vocabulary and seal-door resolver; the readiness
   scheduler; splice-based lane provisioning; edge-affinity acquisition in
   the session pool; `xtask bloom seal` authoring for edges; a validation
