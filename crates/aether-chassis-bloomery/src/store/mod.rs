@@ -89,7 +89,7 @@ pub use commission::{
     CreateCommission, CreateCommissionResult, EnqueueScopeRun, EnqueueScopeRunResult, ListCommissions,
     ListCommissionsResult, ListedCommission, LoadCommission, LoadCommissionResult, RecordCommissionApproval,
     RecordCommissionApprovalResult, RecordCommissionProjection, RecordCommissionProjectionResult, ReopenCommission,
-    ReopenCommissionResult, WriteScopeRevision, WriteScopeRevisionResult,
+    ReopenCommissionResult, RevisionEvidence, WriteScopeRevision, WriteScopeRevisionResult,
 };
 
 // Reading the reducer's per-member answers (which members resolved, which

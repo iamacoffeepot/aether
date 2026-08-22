@@ -14,7 +14,7 @@ use super::commission::{
     CreateCommissionResult, EnqueueScopeRun, EnqueueScopeRunResult, ListCommissions, ListCommissionsResult,
     ListedCommission, LoadCommission, LoadCommissionResult, RecordCommissionApproval, RecordCommissionApprovalResult,
     RecordCommissionProjection, RecordCommissionProjectionResult, ReopenCommission, ReopenCommissionResult,
-    WriteScopeRevision, WriteScopeRevisionResult,
+    RevisionEvidence, WriteScopeRevision, WriteScopeRevisionResult,
 };
 use super::kinds::{
     AckOutbox, AckOutboxResult, AppendEvent, AppendEventResult, BloomDispatchLive, BloomDispatchRollup, ClaimSeal,
@@ -31,8 +31,7 @@ use aether_actor::runtime;
 use aether_bloomery::{
     CommissionStatus, Commit, CommitResult, ConfigRecord, DECISIONS_SCHEMA, Decision, Digest, Event, JournalRecord,
     LoadConfigs, LoadConfigsResult, MembershipMutation, MetricDispatch, MetricsLedger, OutboxPayload, ReplayJournal,
-    ReplayJournalResult, ScopeRevision, ScopeVerifyInput, Statement, SuppressionRequest, Topic, WorkpieceId,
-    decode_recorded_decisions,
+    ReplayJournalResult, ScopeRevision, Statement, SuppressionRequest, Topic, WorkpieceId, decode_recorded_decisions,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use std::iter::repeat_n;
@@ -2766,23 +2765,16 @@ impl NativeActor for StoreCapability {
         _ctx: &mut NativeCtx<'_>,
         mail: WriteScopeRevision,
     ) -> WriteScopeRevisionResult {
-        let WriteScopeRevision { canonical, scope_verify } = mail;
+        let WriteScopeRevision { canonical, evidence } = mail;
         let revision = match ScopeRevision::from_canonical(&canonical) {
             Ok(revision) => revision,
             Err(error) => return write_revision_error(CommissionError::from(error)),
         };
-        // Empty bytes are absent, not an empty projection: a hand-authored
-        // revision carries no field records, and absence is reported rather
-        // than passed.
-        let projection = if scope_verify.is_empty() {
-            None
-        } else {
-            match ScopeVerifyInput::from_canonical(&scope_verify) {
-                Ok(projection) => Some(projection),
-                Err(error) => return write_revision_error(CommissionError::from(error)),
-            }
+        let evidence = match RevisionEvidence::decode(&evidence) {
+            Ok(evidence) => evidence,
+            Err(error) => return write_revision_error(error),
         };
-        match state.backend.write_revision_verified(&revision, projection.as_ref()) {
+        match state.backend.write_revision(&revision, &evidence) {
             Ok(digest) => WriteScopeRevisionResult::Ok { digest: digest.as_bytes().to_vec() },
             Err(error) => write_revision_error(error),
         }

@@ -10,8 +10,8 @@ use super::Endpoint;
 use super::dto::{
     ApprovalStoredView, BloomSpec, BloomView, CancelCommissionRequest, CommissionCancelledView, CommissionReopenedView,
     CommissionShowView, ConfigRequest, ConfigValueView, ConfigView, DraftPatch, DraftView, JournalEntry, JournalView,
-    OutcomeView, ReopenCommissionRequest, RetryRequest, ScopeRevisionWrittenView, SealRequest, SupersedeRequest,
-    ViewDocument, WithdrawRequest,
+    OutcomeView, ReopenCommissionRequest, RetryRequest, RevisionEvidence, ScopeRevisionWrittenView, SealRequest,
+    SupersedeRequest, ViewDocument, WithdrawRequest, WriteRevisionRequest,
 };
 use super::http;
 use super::plan::spec_id;
@@ -95,13 +95,19 @@ impl<'a> Client<'a> {
         self.get(&format!("/commissions/{id}"))
     }
 
-    /// Write `revision` as the commission's next scope revision.
+    /// Write `revision` as the commission's next scope revision, with sidecar
+    /// evidence about it. The revision's bytes stay the signed subject.
     ///
     /// Serializes the typed value rather than a rendering: the REST edge
     /// accepts a digest as either hex or the canonical byte array, so the
     /// successor's stored bytes are exactly what the widening produced.
-    pub fn write_revision(&self, id: &str, revision: &ScopeRevision) -> Result<ScopeRevisionWrittenView> {
-        self.send("POST", &format!("/commissions/{id}/revisions"), revision)
+    pub fn write_revision(
+        &self,
+        id: &str,
+        revision: &ScopeRevision,
+        evidence: &RevisionEvidence,
+    ) -> Result<ScopeRevisionWrittenView> {
+        self.send("POST", &format!("/commissions/{id}/revisions"), &WriteRevisionRequest { revision, evidence })
     }
 
     /// Submit `statement` as an approval of the commission's current revision.

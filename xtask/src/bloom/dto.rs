@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use aether_bloomery::{
-    BloomStatus, Digest, EvidenceKind, Forecast, ScopeRevision, ScopeRouting, Statement, WorkpieceId,
+    BloomStatus, Digest, EvidenceKind, Forecast, ScopeRevision, ScopeRouting, ScopeVerifyInput, Statement, WorkpieceId,
 };
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -219,6 +219,22 @@ impl ScopeRevisionView {
 pub struct StatementView {
     #[serde(default)]
     pub words: Vec<u8>,
+}
+
+/// `POST /commissions/{id}/revisions` body: the signed revision and sidecar
+/// evidence about it. The revision's bytes are the signed subject; nothing in
+/// [`evidence`](Self::evidence) is hashed into them.
+#[derive(Debug, Serialize)]
+pub struct WriteRevisionRequest<'a> {
+    pub revision: &'a ScopeRevision,
+    pub evidence: &'a RevisionEvidence,
+}
+
+/// What is known about a revision without being part of it.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RevisionEvidence {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope_verify: Option<ScopeVerifyInput>,
 }
 
 /// `POST /commissions/{id}/revisions` — the written revision's address.

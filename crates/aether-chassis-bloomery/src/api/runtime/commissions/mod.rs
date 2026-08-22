@@ -18,7 +18,7 @@ use super::state::{ApiCapabilityState, Routed};
 use crate::api::dto::{
     CancelCommissionRequest, CommissionApprovalView, CommissionCancelledView, CommissionCreatedView,
     CommissionHeadView, CommissionReopenedView, CommissionShowView, CommissionsView, CreateCommissionRequest,
-    ReopenCommissionRequest, RevisionProjection, ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest,
+    ReopenCommissionRequest, ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, WriteRevisionRequest,
 };
 use crate::bloomery::{StatementRejected, precheck_statement, verified_statement_approval};
 use crate::signing::{SigningCapability, Verify, VerifyResult, authority_bytes};
@@ -138,26 +138,17 @@ impl ApiCapabilityState {
         if let Err(response) = authorize(request, &self.control_token) {
             return Routed::Reply(response);
         }
-        let revision: ScopeRevision = match hex::from_slice(&request.body) {
-            Ok(revision) => revision,
-            Err(error) => return Routed::Reply(error_response(400, &format!("invalid scope revision: {error}"))),
+        let body: WriteRevisionRequest = match hex::from_slice(&request.body) {
+            Ok(body) => body,
+            Err(error) => return Routed::Reply(error_response(400, &format!("invalid revision body: {error}"))),
         };
-        if revision.workpiece.0 != id {
+        if body.revision.workpiece.0 != id {
             return Routed::Reply(error_response(400, "scope revision workpiece does not match the path"));
         }
-        // The projection rides beside the revision rather than inside it: the
-        // revision's bytes are the signed subject and cannot grow a field, and a
-        // body that omits `scope_verify` is a hand-authored freeze with no
-        // records to check. Decoded from the same body separately for that
-        // reason — the two values have independent lifetimes downstream.
-        let projection: RevisionProjection = match hex::from_slice(&request.body) {
-            Ok(projection) => projection,
-            Err(error) => {
-                return Routed::Reply(error_response(400, &format!("invalid scope-verify projection: {error}")));
-            }
-        };
-        let scope_verify = projection.scope_verify.map(|input| input.to_canonical()).unwrap_or_default();
-        Routed::WriteScopeRevision(WriteScopeRevision { canonical: revision.to_canonical(), scope_verify })
+        Routed::WriteScopeRevision(WriteScopeRevision {
+            canonical: body.revision.to_canonical(),
+            evidence: body.evidence.encode(),
+        })
     }
 
     /// `POST /commissions/{id}/approvals` — precheck, then verify, then store.

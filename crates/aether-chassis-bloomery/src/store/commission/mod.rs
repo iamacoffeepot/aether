@@ -15,6 +15,7 @@ use aether_bloomery::{
 };
 use aether_data::wire::{from_bytes, to_vec};
 use rusqlite::{Connection, OptionalExtension, Transaction};
+use serde::{Deserialize, Serialize};
 
 use super::SqliteStore;
 use super::membership;
@@ -319,6 +320,39 @@ pub struct CommissionView {
     pub scope_verify: Option<ScopeVerifyReport>,
 }
 
+/// What is known about a revision without being part of it.
+///
+/// The revision's own bytes are the signed subject; nothing here is hashed
+/// into them. Today's only field is the freeze-check projection (ADR-0208);
+/// the next slice adds a field here rather than a parameter to the write.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevisionEvidence {
+    /// The workpiece's field records projected for the freeze check.
+    /// `None` for a hand-authored revision, which writes no report.
+    #[serde(default)]
+    pub scope_verify: Option<ScopeVerifyInput>,
+}
+
+impl RevisionEvidence {
+    /// Canonical aether-wire bytes of this sidecar.
+    ///
+    /// # Panics
+    /// Panics if the value exceeds the ADR-0118 `u32` wire-length ceiling,
+    /// which no revision sidecar does.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        to_vec(self).expect("revision evidence never exceeds the ADR-0118 u32 wire-length ceiling")
+    }
+
+    /// Decode sidecar bytes.
+    ///
+    /// # Errors
+    /// [`CommissionError::MalformedCanonical`] when the bytes are not this type.
+    pub fn decode(bytes: &[u8]) -> Result<Self, CommissionError> {
+        from_bytes(bytes).map_err(|_| CommissionError::MalformedCanonical)
+    }
+}
+
 /// Authoring and query transactions for signed commissions.
 ///
 /// Separate from the journal [`StoreBackend`](super::StoreBackend) so that
@@ -333,30 +367,29 @@ pub trait CommissionBackend {
     /// Store an immutable scope revision and advance `current` in one
     /// transaction. Index columns are filled from the decoded bytes.
     ///
-    /// # Errors
-    /// Missing commission, not open, stale predecessor, ordinal skip, malformed
-    /// bytes, or a duplicate digest that is not already the current tip.
-    fn write_revision(&mut self, revision: &ScopeRevision) -> Result<Digest, CommissionError>;
-
-    /// [`write_revision`](Self::write_revision), with the workpiece's projected
-    /// field records checked against its own declared surface first (ADR-0208).
+    /// `evidence` is what is known about the revision without being part of it.
+    /// The revision's own bytes are the signed subject; nothing in `evidence`
+    /// is hashed into them.
     ///
+    /// When `evidence.scope_verify` is `Some`, the workpiece's projected field
+    /// records are checked against its own declared surface first (ADR-0208).
     /// The check is the freeze's, not the seal's: a refusal here costs an edit,
     /// where the same contradiction discovered at Member-Verify costs a whole
-    /// construct budget. `projection` is `None` for a hand-authored revision,
-    /// which has no records to check — that writes no report, and absence is
-    /// reported rather than passed.
+    /// construct budget. `None` is a hand-authored revision, which has no
+    /// records to check — that writes no report, and absence is reported
+    /// rather than passed.
     ///
     /// A refusal rolls the revision back and commits its report on its own, so
     /// the refusal survives the repaired re-freeze that follows it.
     ///
     /// # Errors
-    /// Everything [`write_revision`](Self::write_revision) refuses, plus
+    /// Missing commission, not open, stale predecessor, ordinal skip, malformed
+    /// bytes, a duplicate digest that is not already the current tip, or
     /// [`CommissionError::SurfaceGap`] when a named path is uncovered.
-    fn write_revision_verified(
+    fn write_revision(
         &mut self,
         revision: &ScopeRevision,
-        projection: Option<&ScopeVerifyInput>,
+        evidence: &RevisionEvidence,
     ) -> Result<Digest, CommissionError>;
 
     /// Verify (when signed) and insert an approval for the current revision,
@@ -441,16 +474,12 @@ impl CommissionBackend for SqliteStore {
         create_commission(&mut self.conn, id, intent)
     }
 
-    fn write_revision(&mut self, revision: &ScopeRevision) -> Result<Digest, CommissionError> {
-        write_revision(&mut self.conn, revision, None)
-    }
-
-    fn write_revision_verified(
+    fn write_revision(
         &mut self,
         revision: &ScopeRevision,
-        projection: Option<&ScopeVerifyInput>,
+        evidence: &RevisionEvidence,
     ) -> Result<Digest, CommissionError> {
-        write_revision(&mut self.conn, revision, projection)
+        write_revision(&mut self.conn, revision, evidence)
     }
 
     fn insert_approval(&mut self, statement: &Statement, keys: &dyn KeyProvider) -> Result<Digest, CommissionError> {
@@ -516,6 +545,13 @@ impl CommissionBackend for SqliteStore {
     }
 }
 
+impl SqliteStore {
+    /// The report journaled for `revision`, or `None` when none was written.
+    pub fn load_scope_verify_report(&self, revision: Digest) -> Result<Option<ScopeVerifyReport>, CommissionError> {
+        load_scope_verify_report(&self.conn, revision)
+    }
+}
+
 fn create_commission(conn: &mut Connection, id: &WorkpieceId, intent: &Statement) -> Result<Digest, CommissionError> {
     let intent_digest = digest_of(intent);
     let intent_bytes = encode_statement(intent);
@@ -546,7 +582,7 @@ fn create_commission(conn: &mut Connection, id: &WorkpieceId, intent: &Statement
 fn write_revision(
     conn: &mut Connection,
     revision: &ScopeRevision,
-    projection: Option<&ScopeVerifyInput>,
+    evidence: &RevisionEvidence,
 ) -> Result<Digest, CommissionError> {
     let canonical = revision.to_canonical();
     let decoded = decode_revision(&canonical)?;
@@ -569,7 +605,7 @@ fn write_revision(
         return Err(CommissionError::DuplicateRevision);
     }
 
-    let report = projection.map(verify_scope);
+    let report = evidence.scope_verify.as_ref().map(verify_scope);
     if let Some(report) = &report
         && report.refused()
     {
