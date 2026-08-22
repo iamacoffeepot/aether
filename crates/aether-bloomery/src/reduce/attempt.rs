@@ -1070,6 +1070,39 @@ mod tests {
         assert!(!after.blooms[&bloom].wedged.contains_key(&workpiece), "a parked member is not wedged");
     }
 
+    // The plausible bug: a member parked, then granted attempts, resumes while
+    // three readers still call it legitimately stopped — the park is inserted
+    // and was removed nowhere.
+    #[test]
+    fn a_granted_member_no_longer_carries_its_park() {
+        let (snapshot, bloom) = sealed();
+        let workpiece = WorkpieceId("wp".into());
+        let (parked, _) = step(&snapshot, &decline_construct(bloom, "c-decline", digest(91)));
+        assert!(parked.member_park(&bloom, &workpiece).is_some(), "the park is what this grant has to lift");
+
+        let (after, _) = step(
+            &parked,
+            &event(
+                "grant",
+                Fact::GrantAttempts { bloom, workpiece: workpiece.clone(), stage: StageId::Construct, attempts: 1 },
+            ),
+        );
+        assert_eq!(after.member_park(&bloom, &workpiece), None, "a grant of attempts redeems the park");
+    }
+
+    // The plausible bug: a member parked, then integrated, is still excused as
+    // waiting — the park outlives the fact that made it false.
+    #[test]
+    fn an_integrated_member_no_longer_carries_its_park() {
+        let (snapshot, bloom) = sealed();
+        let workpiece = WorkpieceId("wp".into());
+        let (parked, _) = step(&snapshot, &decline_construct(bloom, "c-decline", digest(91)));
+        assert!(parked.member_park(&bloom, &workpiece).is_some(), "the park is what this integrate has to lift");
+
+        let (after, _) = step(&parked, &event("integrate", Fact::Integrate { bloom, claim: claim("wp", 10, 51) }));
+        assert_eq!(after.member_park(&bloom, &workpiece), None, "an integration redeems the park");
+    }
+
     // The plausible bug: inferring a park from `candidate: None` would convert
     // a genuine crash retry into a park and strand a member that would have
     // succeeded on a second attempt.

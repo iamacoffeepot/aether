@@ -23,7 +23,9 @@
 
 use std::fmt::Write as _;
 
-use aether_bloomery::{BloomStatus, ViewDocument};
+use aether_bloomery::{BloomStatus, Excuse, ViewDocument};
+
+use super::member_carries;
 
 /// Everything a poll observes about whether the coordinator is doing anything.
 ///
@@ -111,19 +113,7 @@ pub fn classify(document: &ViewDocument, outstanding: &[String]) -> Quiescence {
             BloomStatus::Sealed => {}
         }
         for member in &bloom.members {
-            if member.resolution.is_none()
-                && member.wedge.is_none()
-                && member.host_fault.is_none()
-                && member.park.is_none()
-                && member.awaiting_surface.is_none()
-                // A withdrawn member is an accountable stop with a named
-                // decider, not a member the machinery lost (#5327).
-                && member.withdrawn.is_none()
-                // An evicted member names the sibling and the file it waits
-                // behind (ADR-0204); it re-dispatches on that sibling's
-                // integration.
-                && member.evicted_by.is_none()
-            {
+            if !Excuse::ALL.iter().copied().any(|excuse| member_carries(excuse, member)) {
                 unresolved.push(format!("{:?}/{}", bloom.id, member.workpiece.0));
             }
         }
@@ -131,18 +121,21 @@ pub fn classify(document: &ViewDocument, outstanding: &[String]) -> Quiescence {
 
     if unresolved.is_empty() {
         let statuses: Vec<String> = document.blooms.iter().map(|bloom| format!("{:?}", bloom.status)).collect();
-        // A sealed bloom whose every member carries a wedge has stopped for a
-        // recorded reason; a bloom that reached a terminal status has stopped
-        // because it is done. A bloom at its aggregate-review executor-fault
-        // ceiling (ADR-0176) is the first stop of the recorded kind that is not
-        // a *member's*: every member resolved and the fold is still held, so
-        // without this it reads as a bloom that finished.
+        // A sealed bloom whose every member carries a recorded hold has stopped
+        // for a reason; a bloom that reached a terminal status has stopped
+        // because it is done. [`Excuse::keeps_quiescence_wedged`] is that
+        // split: claim, withdrawal, and eviction are named stops but they are
+        // done (or waiting on a sibling the bloom already folded). A bloom at
+        // its aggregate-review executor-fault ceiling (ADR-0176) is the first
+        // stop of the recorded kind that is not a *member's*: every member
+        // resolved and the fold is still held, so without this it reads as a
+        // bloom that finished.
         let wedged = document.blooms.iter().any(|bloom| {
             bloom.members.iter().any(|member| {
-                member.wedge.is_some()
-                    || member.host_fault.is_some()
-                    || member.park.is_some()
-                    || member.awaiting_surface.is_some()
+                Excuse::ALL
+                    .iter()
+                    .copied()
+                    .any(|excuse| excuse.keeps_quiescence_wedged() && member_carries(excuse, member))
             }) || bloom.executor_fault.is_some_and(|fault| fault.terminal)
                 || bloom.operator_hold.is_some()
                 || bloom.review_park.is_some()

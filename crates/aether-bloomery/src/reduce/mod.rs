@@ -73,8 +73,8 @@ pub use outcome::{
 };
 pub use seal::is_active_unlanded;
 pub use snapshot::{
-    AggregateReviewFault, AwaitingSurface, BloomRecord, BloomStatus, FileLease, FoldedIntegration, HostFaultHold,
-    LeaseEviction, MemberMachineryFault, MemberPark, Snapshot, StageProgress,
+    AggregateReviewFault, AwaitingSurface, BloomRecord, BloomStatus, Excuse, FileLease, FoldedIntegration,
+    HostFaultHold, LeaseEviction, MemberMachineryFault, MemberPark, Snapshot, StageProgress,
 };
 pub use view::view_of;
 pub use why::why_of;
