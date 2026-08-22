@@ -8,11 +8,11 @@
 //! push on the remote strands the estate with main advanced and tomorrow uncut,
 //! which is the one outcome the roll's ordering exists to prevent.
 
-use super::shell::Shell;
+use super::shell::{Repo, Shell};
 
 /// Push one ref to the replica, best-effort, naming whatever did not replicate.
-pub fn push(shell: &impl Shell, remote: &str, refname: &str) {
-    let run = match shell.capture("git", &["push", remote, refname]) {
+pub fn push(shell: &impl Shell, repo: &Repo, remote: &str, refname: &str) {
+    let run = match repo.capture(shell, &["push", remote, refname]) {
         Ok(run) => run,
         Err(error) => return report(refname, &error.to_string()),
     };

@@ -46,6 +46,50 @@ impl Shell for Host {
     }
 }
 
+/// The fleet repository every roll `git` runs against (#5414).
+///
+/// The refs the roll reads and writes — the day branch, `refs/heads/main`, the
+/// sync commit it builds over them — live in the fleet repository and nowhere
+/// else. A call that inherits the process cwd therefore answers about whatever
+/// checkout the operator happened to be standing in, which is how a roll driven
+/// from a plain clone died on `unknown revision` with every ref it needed
+/// sitting intact one directory away. Rooting each call at the repository makes
+/// the answer a property of the repository named on the command line.
+pub struct Repo(String);
+
+impl Repo {
+    /// Root the roll's git at `path` — the fleet repository, bare or a worktree
+    /// of it.
+    pub fn new(path: impl Into<String>) -> Self {
+        Self(path.into())
+    }
+
+    /// `git -C <repo> <args…>`, captured, failing with git's own words.
+    ///
+    /// # Errors
+    /// The program could not be spawned, or it exited non-zero.
+    pub fn checked(&self, shell: &impl Shell, args: &[&str]) -> Result<String> {
+        checked(shell, "git", &self.rooted(args))
+    }
+
+    /// `git -C <repo> <args…>`, captured, with a non-zero exit left for the
+    /// caller to read off [`Run::success`] — the shape a probe wants.
+    ///
+    /// # Errors
+    /// The program could not be spawned.
+    pub fn capture(&self, shell: &impl Shell, args: &[&str]) -> Result<Run> {
+        shell.capture("git", &self.rooted(args))
+    }
+
+    fn rooted<'a>(&'a self, args: &[&'a str]) -> Vec<&'a str> {
+        let mut rooted = Vec::with_capacity(args.len() + 2);
+        rooted.push("-C");
+        rooted.push(self.0.as_str());
+        rooted.extend_from_slice(args);
+        rooted
+    }
+}
+
 /// Run, and fail with the program's own diagnosis when it exits non-zero.
 ///
 /// A roll step that fails has already said why — `git` names the ref it could
