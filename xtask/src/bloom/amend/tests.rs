@@ -27,7 +27,12 @@ fn scratch(tag: &str) -> PathBuf {
 }
 
 fn member(awaiting: Option<AwaitingSurfaceView>) -> MemberView {
-    MemberView { workpiece: "example-a".to_owned(), scope_revision: digest(1), awaiting_surface: awaiting }
+    MemberView {
+        workpiece: "example-a".to_owned(),
+        scope_revision: digest(1),
+        awaiting_surface: awaiting,
+        withdrawn: None,
+    }
 }
 
 fn awaiting(revision: DigestHex, paths: &[(&str, &str)]) -> AwaitingSurfaceView {

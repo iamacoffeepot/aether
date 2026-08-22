@@ -80,7 +80,18 @@ pub struct MemberView {
     /// a coordinator that predates the field, so `#[serde(default)]`.
     #[serde(default)]
     pub awaiting_surface: Option<AwaitingSurfaceView>,
+    /// Why the member left the line, once it was withdrawn (#5327). Absent
+    /// from a coordinator that predates the field, so `#[serde(default)]`.
+    #[serde(default)]
+    pub withdrawn: Option<WithdrawnView>,
 }
+
+/// A member the day withdrew, as `/view` renders it (#5327). The projection
+/// names the cause, the stranded ancestor, the reason and the operator; every
+/// one of them answers "this member never integrates" the same way, so the
+/// mirror keeps the presence and reads nothing out of the body.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WithdrawnView {}
 
 /// A member's journaled surface request, as `/view` renders it (ADR-0207).
 #[derive(Debug, Clone, Deserialize)]

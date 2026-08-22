@@ -3,7 +3,8 @@
 //! A landed workpiece is covered only by an `Integrate` claim whose evidence
 //! is a `VerificationResult`. Inherited or fixture evidence, or no integrate
 //! fact at all, leaves the workpiece on the hold list. Superseded blooms never
-//! reached main and are not required.
+//! reached main and are not required, and neither is a member the day withdrew:
+//! it left the line before integration, so no receipt for it can ever exist.
 
 use std::collections::BTreeSet;
 
@@ -13,13 +14,15 @@ use serde_json::Value;
 
 use crate::bloom::dto::{IntegrateClaimView, JournalView, ViewDocument};
 
-/// Landed workpieces minus those with a `VerificationResult` integrate claim.
+/// Standing landed workpieces minus those with a `VerificationResult` integrate claim.
 pub fn day_coverage(view: &ViewDocument, journal: &JournalView) -> DayCoverage {
     let required: BTreeSet<String> = view
         .blooms
         .iter()
         .filter(|bloom| bloom.status == BloomStatus::Landed)
-        .flat_map(|bloom| bloom.members.iter().map(|member| member.workpiece.clone()))
+        .flat_map(|bloom| {
+            bloom.members.iter().filter(|member| member.withdrawn.is_none()).map(|member| member.workpiece.clone())
+        })
         .collect();
     let covered: BTreeSet<String> = journal
         .records
@@ -78,6 +81,7 @@ mod tests {
                             workpiece: (*workpiece).to_owned(),
                             scope_revision: DigestHex::from_bytes([7; 32]),
                             awaiting_surface: None,
+                            withdrawn: None,
                         })
                         .collect(),
                 })
@@ -139,6 +143,44 @@ mod tests {
                 ]),
                 &journal([integrate("issue-landed", EvidenceKind::VerificationResult)]),
             ),
+            DayCoverage::green()
+        );
+    }
+
+    #[test]
+    fn a_withdrawn_member_owes_no_receipt() {
+        // Tripwire: bloom 79137ad910a6 landed with the one member that stayed,
+        // after fifteen were withdrawn. Requiring a receipt from every
+        // `members[]` entry held the roll on fifteen members that never
+        // integrated and so can never hold an integrate claim. The view is
+        // decoded the way the edge renders it, so a mirror that drops the
+        // withdrawal fails here too.
+        let view: ViewDocument = serde_json::from_value(json!({
+            "mainline": DigestHex::from_bytes([1; 32]),
+            "observed": DigestHex::from_bytes([2; 32]),
+            "blooms": [{
+                "id": DigestHex::from_bytes([3; 32]),
+                "status": "Landed",
+                "superseded_by": null,
+                "members": [
+                    { "workpiece": "issue-resolved", "scope_revision": DigestHex::from_bytes([7; 32]) },
+                    {
+                        "workpiece": "issue-withdrawn",
+                        "scope_revision": DigestHex::from_bytes([7; 32]),
+                        "withdrawn": {
+                            "cause": "operator",
+                            "depends_on": null,
+                            "reason": "the day no longer needs it",
+                            "operator": "operator-eve"
+                        }
+                    }
+                ]
+            }]
+        }))
+        .expect("the view decodes");
+
+        assert_eq!(
+            day_coverage(&view, &journal([integrate("issue-resolved", EvidenceKind::VerificationResult)])),
             DayCoverage::green()
         );
     }

@@ -69,6 +69,7 @@ mod tests {
                         workpiece: "wp-1".to_owned(),
                         scope_revision: digest(7),
                         awaiting_surface: None,
+                        withdrawn: None,
                     }],
                 },
                 BloomView {
@@ -79,6 +80,7 @@ mod tests {
                         workpiece: "wp-1".to_owned(),
                         scope_revision: digest(7),
                         awaiting_surface: None,
+                        withdrawn: None,
                     }],
                 },
             ],
