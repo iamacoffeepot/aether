@@ -825,9 +825,35 @@ impl NativeActor for ControlCore {
 
     /// The `aether.bloomery.query` read surface: one [`QuerySelector`], one
     /// [`QueryResult`] arm, all read off the live snapshot.
+    ///
+    /// Refused until the boot fold has finished, for the reason
+    /// [`on_admit`](Self::on_admit) and [`on_observe_tick`](Self::on_observe_tick)
+    /// hold: before [`on_replay_result`](Self::on_replay_result) the snapshot is
+    /// `Snapshot::default()`, and serving it answers a well-formed projection
+    /// that says the coordinator knows of no bloom at all. A reader cannot tell
+    /// that from a genuinely quiet fleet. The notification reactor, whose own
+    /// `wire` fires a boot tick straight into this window, is what the ambiguity
+    /// costs: it differenced its ledger against the empty document, forgot every
+    /// recorded key, and re-posted the whole standing set on the next pass. Only
+    /// this core knows the snapshot is not yet the one the journal describes, so
+    /// the refusal belongs here rather than in each reader's own guesswork.
+    ///
+    /// Refused rather than held the way an admit is. An admit carries a fact
+    /// that must survive to be decided against the restored snapshot, so
+    /// deferring it loses nothing; a read carries a question whose answer is
+    /// what a poller acts on, and during boot the honest answer is that the
+    /// world cannot be read yet.
     #[handler::manual]
     fn on_query(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, mail: Query) {
         let inbound = ctx.take_inbound();
+        if !state.replayed {
+            inbound.reply(&QueryResult::Err {
+                error: "the boot journal replay has not finished; the projection is not yet the one the journal \
+                        describes"
+                    .to_owned(),
+            });
+            return;
+        }
         let result = match mail.selector {
             QuerySelector::Document => document_response(&state.snapshot),
             QuerySelector::Bloom { digest } => bloom_response(&state.snapshot, &digest),

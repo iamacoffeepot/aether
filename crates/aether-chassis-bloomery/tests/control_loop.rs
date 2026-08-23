@@ -199,12 +199,20 @@ fn query_until_blooms(stream: &mut TcpStream, cid_base: u64, control: MailboxId,
     let mut cid = cid_base;
     loop {
         let read = Query { selector: QuerySelector::Document };
-        let document = match call::<_, QueryResult>(stream, cid, control, &read) {
-            QueryResult::Document { document } => from_bytes::<ViewDocument>(&document).expect("document decodes"),
+        match call::<_, QueryResult>(stream, cid, control, &read) {
+            QueryResult::Document { document } => {
+                let document = from_bytes::<ViewDocument>(&document).expect("document decodes");
+                if document.blooms.len() == want || Instant::now() >= deadline {
+                    return document;
+                }
+            }
+            // The read landed inside the boot window: the core refuses it rather
+            // than answering off the empty boot snapshot, so it is one more lap
+            // of the very wait this helper exists to run.
+            QueryResult::Err { .. } => {
+                assert!(Instant::now() < deadline, "the projection stayed unreadable for the whole budget");
+            }
             other => panic!("expected a document reply, got {other:?}"),
-        };
-        if document.blooms.len() == want || Instant::now() >= deadline {
-            return document;
         }
         cid += 1;
         thread::sleep(Duration::from_millis(100));
@@ -347,6 +355,86 @@ fn every_selector_reaches_its_own_reply_arm() {
     let selector = QuerySelector::Calibration;
     let calibration = call::<_, QueryResult>(&mut stream, 24, control, &Query { selector });
     assert!(matches!(calibration, QueryResult::Calibration { .. }), "Calibration reads the ledger: {calibration:?}");
+}
+
+/// How many refusal rows the planted journal carries beneath its one sealed
+/// row. The window this test observes is the one the control core spends idle
+/// between the store reads its `wire` issues and the fold that answers them, so
+/// it is the store's read of the journal that has to be wide enough to reach
+/// from another process. Every filler row records a refusal, so the fold
+/// applies nothing and the rebuilt projection is exactly the one sealed bloom.
+const PRE_REPLAY_FILLER_ROWS: usize = 20_000;
+
+#[test]
+fn the_view_is_not_served_before_the_journal_has_replayed() {
+    // The plausible bug: `on_query` reads `state.snapshot` without the
+    // `replayed` gate `on_admit` and `on_observe_tick` carry, so a read landing
+    // in the boot window is answered off `Snapshot::default()` — a well-formed,
+    // wholly empty projection that a reader cannot tell from a coordinator with
+    // nothing in flight. The notification reactor is the live victim: it fires a
+    // boot tick from its own `wire`, differences its ledger against that empty
+    // document, forgets every recorded key, and re-posts the entire standing set
+    // on the next pass. Only the core knows the snapshot is not yet the one the
+    // journal describes, so the refusal has to come from here.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("bloomery.db");
+    let db = db.to_str().unwrap();
+
+    let sealed = seal_event("seal-visible", 0, "wp");
+    let decided = reduce(&Snapshot::default(), &sealed, &ResolvedConfigs::default(), &SpendWindow::default());
+    assert!(matches!(decided.outcome, Outcome::Sealed(_)), "fixture control: the planted row seals");
+    let refusal = Decisions { outcome: Outcome::SealRejected(SealError::EmptyMembership), effects: Vec::new() };
+
+    {
+        let mut store = SqliteStore::open(db).unwrap();
+        store
+            .append_event(&JournalWrite {
+                idempotency_key: "seal-visible",
+                event: &to_vec(&sealed).unwrap(),
+                decisions: &to_vec(&decided).unwrap(),
+                decider: "control-loop-test",
+            })
+            .unwrap();
+        let filler = to_vec(&seal_event("filler", 1, "wp-filler")).unwrap();
+        let refused = to_vec(&refusal).unwrap();
+        for row in 0..PRE_REPLAY_FILLER_ROWS {
+            store
+                .append_event(&JournalWrite {
+                    idempotency_key: &format!("filler-{row}"),
+                    event: &filler,
+                    decisions: &refused,
+                    decider: "control-loop-test",
+                })
+                .unwrap();
+        }
+    }
+
+    let (_coordinator, mut stream) = spawn_with_store(db, "control-loop-test");
+    let control = control_mailbox();
+
+    let deadline = Instant::now() + Duration::from_mins(2);
+    let mut refusals = 0_u32;
+    let mut cid = 10;
+    loop {
+        let read = Query { selector: QuerySelector::Document };
+        match call::<_, QueryResult>(&mut stream, cid, control, &read) {
+            QueryResult::Document { document } => {
+                let view = from_bytes::<ViewDocument>(&document).expect("document decodes");
+                assert_eq!(
+                    view.blooms.len(),
+                    1,
+                    "the projection was served from the boot snapshot before the journal replayed \
+                     (after {refusals} refusals): {view:?}",
+                );
+                break;
+            }
+            QueryResult::Err { .. } => refusals += 1,
+            other => panic!("expected a document or a refusal, got {other:?}"),
+        }
+        assert!(Instant::now() < deadline, "the projection never rebuilt from the planted journal");
+        cid += 1;
+    }
+    assert!(refusals > 0, "fixture control: no read reached the boot window, so nothing above was proved");
 }
 
 /// Read the calibration document, retrying until the ledger has measured
