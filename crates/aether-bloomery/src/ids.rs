@@ -43,6 +43,78 @@ impl WorkpieceId {
     pub fn is_composition(&self) -> bool {
         self.0 == Self::COMPOSITION
     }
+
+    /// The namespace every **conflict workpiece** id sits under (ADR-0210): the
+    /// synthetic subject minted when two resolved candidates that each verified
+    /// green alone refuse to compile together on the fold.
+    ///
+    /// A namespace rather than one reserved constant, because a bloom can hold
+    /// more than one such collision at a time and each is a different subject
+    /// with different parents. The composition's reasoning otherwise carries
+    /// over unchanged: a conflict workpiece takes a stage cursor in
+    /// [`BloomRecord::progress`](crate::BloomRecord::progress), a wedge in
+    /// [`BloomRecord::wedged`](crate::BloomRecord::wedged), and a dispatch slot
+    /// through the same maps a member does, and the seal door refuses a
+    /// membership that names one
+    /// ([`SealError::ReservedWorkpieceId`](crate::SealError::ReservedWorkpieceId)).
+    pub const CONFLICT_NAMESPACE: &'static str = "aether.bloomery.conflict:";
+
+    /// The separator between the two parent ids inside a conflict workpiece id.
+    ///
+    /// A character no workpiece id carries, so the parents are recoverable from
+    /// the id by splitting rather than by a side table the journal would have
+    /// to keep in step.
+    const CONFLICT_JOIN: char = '+';
+
+    /// The conflict workpiece id for one pair of parents.
+    ///
+    /// The pair is sorted, so the id names the collision rather than the order
+    /// the coordinator happened to notice it in: whichever member was being
+    /// verified when the fold refused, the same two candidates mint the same
+    /// subject, and a second refusal of the same pair lands on the workpiece
+    /// that is already repairing it.
+    #[must_use]
+    pub fn conflict(first: &Self, second: &Self) -> Self {
+        let (low, high) = if first <= second {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        Self(alloc::format!("{}{}{}{}", Self::CONFLICT_NAMESPACE, low.0, Self::CONFLICT_JOIN, high.0))
+    }
+
+    /// Whether this id names a conflict workpiece rather than a sealed member.
+    #[must_use]
+    pub fn is_conflict(&self) -> bool {
+        self.0.starts_with(Self::CONFLICT_NAMESPACE)
+    }
+
+    /// The two parents a conflict workpiece id names, or [`None`] for any other
+    /// id.
+    ///
+    /// Fails closed on a malformed id — a missing separator, or a parent half
+    /// that is empty — rather than returning a half-populated pair: a reader
+    /// that cannot recover both parents cannot report who caused the collision,
+    /// which is the whole reason the id carries them.
+    #[must_use]
+    pub fn conflict_parents(&self) -> Option<(Self, Self)> {
+        let (first, second) = self.0.strip_prefix(Self::CONFLICT_NAMESPACE)?.split_once(Self::CONFLICT_JOIN)?;
+        if first.is_empty() || second.is_empty() {
+            return None;
+        }
+        Some((Self(String::from(first)), Self(String::from(second))))
+    }
+
+    /// Whether this id names a synthetic subject — the composition or a
+    /// conflict workpiece — rather than a sealed member.
+    ///
+    /// The question every door that refuses a reserved id asks, so both
+    /// namespaces are refused by one call and a later synthetic cannot be added
+    /// to one door and forgotten at another.
+    #[must_use]
+    pub fn is_synthetic(&self) -> bool {
+        self.is_composition() || self.is_conflict()
+    }
 }
 
 /// A sealed bloom's identity: the digest of its canonical [`BloomSpec`]

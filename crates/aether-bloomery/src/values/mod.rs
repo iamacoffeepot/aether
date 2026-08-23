@@ -13,6 +13,7 @@ mod bloom;
 mod commission;
 mod composition;
 mod config;
+mod conflict;
 mod fields;
 mod finding;
 mod lane;
@@ -38,7 +39,7 @@ mod workpiece_builder;
 pub use adr::{ADR_SCHEMA, ADR_TRANSITION_SCHEMA, Adr, AdrStatus, AdrTransition, AdrValueError};
 pub use approval::{
     ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, TierVerdict, gate_widening, path_in_surface, surface_additions,
-    surface_intersection, tier_verdict,
+    surface_intersection, surface_union, tier_verdict,
 };
 pub use base_verify::{BaseReceipt, BaseVerdict};
 pub use bloom::{
@@ -54,6 +55,7 @@ pub use config::{
     ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, ResolvedConfigs, Unproducible, config_address,
     decode_config,
 };
+pub use conflict::{ConflictAttribution, ConflictRefusal, FoldContribution, attribute_conflict};
 pub use fields::{FieldKind, WorkpieceFact, WorkpieceFields};
 pub use finding::{
     CHECK_KEY, CRITICAL_KEY, ClassifiedFinding, ClassifiedFindings, FindingClass, JUDGMENT_TAG, MECHANICAL_TAG,
