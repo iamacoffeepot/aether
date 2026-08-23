@@ -56,9 +56,9 @@ pub(super) struct Refusal<'a> {
     pub implicated: &'a [WorkpieceId],
 }
 
-/// The composition's cursor, or `None` before its first weave repair.
-fn cursor(record: &BloomRecord) -> Option<StageProgress> {
-    record.progress.get(&WorkpieceId::composition()).copied()
+/// One composition's cursor, or `None` before its first repair.
+fn cursor(record: &BloomRecord, composition: &WorkpieceId) -> Option<StageProgress> {
+    record.progress.get(composition).copied()
 }
 
 /// The weave-repair attempt allowance: the sealed catalog's `Refine` budget, the
@@ -144,7 +144,7 @@ pub(super) fn reweave(record: &BloomRecord, bloom: &BloomId, refusal: &Refusal<'
     // tree; a second would double-spend the weave budget and set two lanes
     // writing one seam. So the second files its finding — the verdict is real
     // and belongs on the channel — and stops there.
-    if cursor(record).is_some_and(|progress| {
+    if cursor(record, &composition).is_some_and(|progress| {
         progress.stage == StageId::Refine && progress.candidate.is_some_and(|weave| weave.tree == refusal.tree)
     }) {
         return Decisions {
@@ -153,8 +153,9 @@ pub(super) fn reweave(record: &BloomRecord, bloom: &BloomId, refusal: &Refusal<'
         };
     }
 
-    let spent =
-        cursor(record).filter(|progress| progress.stage == StageId::Refine).map_or(0, |progress| progress.attempts);
+    let spent = cursor(record, &composition)
+        .filter(|progress| progress.stage == StageId::Refine)
+        .map_or(0, |progress| progress.attempts);
     let attempt = spent + 1;
     if attempt > repair_budget(record) {
         effects.push(Decision::RecordWedge {
@@ -193,6 +194,43 @@ pub(super) fn reweave(record: &BloomRecord, bloom: &BloomId, refusal: &Refusal<'
     }
 }
 
+/// Put the member whose verdict minted `composition` back on its own Verify,
+/// against the tree the repair produced (ADR-0210).
+///
+/// Empty when the snapshot holds no narrowing for this composition, when the
+/// member has since left the membership, or when it is no longer sitting at the
+/// Verify its verdict came from — each of those is a member that has already
+/// moved, and re-entering it would overwrite a cursor somebody else set.
+fn reverify_after_repair(
+    snapshot: &Snapshot,
+    record: &BloomRecord,
+    bloom: &BloomId,
+    composition: &WorkpieceId,
+    repaired: CandidateRef,
+) -> Vec<Decision> {
+    let Some(narrowed) = snapshot.narrowed_compositions_of(bloom).find(|(id, _)| *id == composition).map(|(_, it)| it)
+    else {
+        return Vec::new();
+    };
+    let Some(member) = record.spec.members().iter().find(|member| member.workpiece == narrowed.verified) else {
+        return Vec::new();
+    };
+    if record.progress.get(&narrowed.verified).is_none_or(|progress| progress.stage != StageId::Verify) {
+        return Vec::new();
+    }
+
+    move_effects_with_candidate(
+        *bloom,
+        &narrowed.verified,
+        member.scope_revision,
+        composition_progress(StageId::Verify, 1, repaired),
+        DispatchTargets { subject: repaired.tree, checkout: repaired.checkout },
+        Some(repaired.tree),
+        SealedLine::of(record, member),
+    )
+    .to_vec()
+}
+
 /// Reduce a weave-repair completion — a [`Fact::AttemptCompleted`](crate::Fact::AttemptCompleted)
 /// naming the composition workpiece.
 ///
@@ -205,16 +243,17 @@ pub(super) fn reweave(record: &BloomRecord, bloom: &BloomId, refusal: &Refusal<'
 pub(super) fn reduce_composition_attempt(
     snapshot: &Snapshot,
     bloom: &BloomId,
+    composition: &WorkpieceId,
     stage: StageId,
     passed: bool,
     evidence: &Evidence,
     captured: Option<CandidateRef>,
 ) -> Decisions {
-    let composition = WorkpieceId::composition();
+    let composition = composition.clone();
     let Some(record) = snapshot.blooms.get(bloom).filter(|record| record.status == BloomStatus::Sealed) else {
         return Decisions::rejected(Outcome::AttemptCompletedRejected(AttemptCompletedError::UnknownOrInactiveBloom));
     };
-    let Some(current) = cursor(record) else {
+    let Some(current) = cursor(record, &composition) else {
         return Decisions::rejected(Outcome::AttemptCompletedRejected(AttemptCompletedError::NotDispatched(
             composition,
         )));
@@ -230,6 +269,32 @@ pub(super) fn reduce_composition_attempt(
     }
 
     let mut effects = alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }];
+
+    // A narrowed composition holds no fold of its own, so its pass re-gates
+    // nothing: it advances onto its own Verify like any other candidate, and
+    // the tree it produced is judged before anything adopts it. The whole-bloom
+    // instance below *is* the fold, which is why its pass hands the woven tree
+    // straight to the composite gates.
+    if let Some(repaired) = captured.filter(|_| passed && composition.composition_parents().is_some()) {
+        effects.extend(move_effects_with_candidate(
+            *bloom,
+            &composition,
+            record.spec.base(),
+            composition_progress(StageId::Verify, 1, repaired),
+            DispatchTargets { subject: repaired.tree, checkout: repaired.checkout },
+            Some(repaired.tree),
+            composition_line(record),
+        ));
+        // The member whose verdict minted this narrowing judged a tree it does
+        // not own, and that tree has now been redone. Leaving it holding that
+        // refusal strands it: it is neither resolved nor wedged and nothing is
+        // in flight for it, which is the shape the liveness oracle exists to
+        // catch. So it goes back to its own Verify against the repaired tree —
+        // no attempt charged for the collision, because the lap it is being
+        // given is the one its original verdict should have judged.
+        effects.extend(reverify_after_repair(snapshot, record, bloom, &composition, repaired));
+        return Decisions { outcome: Outcome::CompositionRepaired { bloom: *bloom, tree: repaired.tree }, effects };
+    }
 
     // A repair that passed without capturing anything produced no weave, so
     // there is nothing to re-gate; it falls through to the retry path rather

@@ -261,7 +261,7 @@ pub(super) fn reduce_attempt_completed(
     // membership, so it is routed before the member lookup that would otherwise
     // refuse it as a stranger (ADR-0191).
     if workpiece.is_composition() {
-        return reduce_composition_attempt(snapshot, bloom, stage, passed, evidence, captured);
+        return reduce_composition_attempt(snapshot, bloom, workpiece, stage, passed, evidence, captured);
     }
     let Some(record) = snapshot.blooms.get(bloom) else {
         return Decisions::rejected(Outcome::AttemptCompletedRejected(AttemptCompletedError::UnknownOrInactiveBloom));

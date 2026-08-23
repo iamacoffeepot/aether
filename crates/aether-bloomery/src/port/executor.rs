@@ -20,7 +20,8 @@ use alloc::vec::Vec;
 
 use crate::ids::Nonce;
 use crate::values::{
-    CandidateRef, StudyCall, StudyCost, SuppressionRequest, SurfaceRequest, Transformation, VerifyFailureSet,
+    CandidateRef, CompositionParents, StudyCall, StudyCost, SuppressionRequest, SurfaceRequest, Transformation,
+    VerifyFailureSet,
 };
 
 /// A fully-resolved unit of work to dispatch. The [`Transformation`] already
@@ -172,6 +173,15 @@ pub struct LaneObservation {
     /// data channel. Empty from the name-only Actions backend, from every
     /// mechanical run that stated none, and from every model lane.
     pub suppression_requests: Vec<SuppressionRequest>,
+    /// The candidates a failing fold narrows to (ADR-0210), when the host could
+    /// read one off this verdict.
+    ///
+    /// Host-recorded state riding the reference like `surface_request`, and for
+    /// the same reason: it is a parent list, a path list and a glob list, and an
+    /// artifact name is not a data channel. `None` from every passing run, from
+    /// every verdict whose diagnostic the member's own delta accounts for, and
+    /// from the name-only Actions backend.
+    pub narrowing: Option<CompositionParents>,
 }
 
 /// A reference to one piece of evidence a run uploaded — the transport-level

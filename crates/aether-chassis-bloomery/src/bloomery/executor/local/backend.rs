@@ -9,12 +9,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_bloomery::{
-    BackendObjectId, CandidateRef, Conclusion, ConfigRegistry, ConfigScopes, Digest, EvidenceRef, ExecutionStatus,
-    ExecutorBackend, LaneObservation, Nonce, ObservedLaneWrites, PriceTable, ResolvedModel, SessionSlug,
-    SharedCorrespondence, StageId, StageVerdict, StudyCost, SuppressionRequest, SurfaceRequest, Transformation,
-    VerifyFailureSet, WorkHandle, WorkOrder, is_model_lane,
+    BackendObjectId, BloomId, CandidateRef, CompositionParents, Conclusion, ConfigRegistry, ConfigScopes, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, FoldContribution, LaneObservation, Nonce, ObservedLaneWrites, PriceTable, ResolvedModel, SessionSlug, SharedCorrespondence, StageId, StageVerdict, StudyCost, SuppressionRequest, SurfaceRequest, Transformation, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, is_model_lane, narrow_composition,
 };
 use aether_bloomery_git::command;
+use aether_bloomery_git::source::candidate_ref_name;
 use aether_bloomery_github::parse_study;
 use aether_data::Kind;
 use aether_data::wire::from_bytes;
@@ -40,7 +38,8 @@ use crate::bloomery::KitReport;
 use crate::bloomery::executor::{LaneOccupancy, OutstandingDispatch, ReconcileLanes, ReconcileReport};
 use crate::bloomery::intake::{DispatchRecord, NameEvidenceClaims};
 use crate::bloomery::triage::MAX_TRIAGED_DIFF_BYTES;
-use crate::bloomery::verify::{apply_containment, candidate_violations};
+use crate::bloomery::triage::named_surface;
+use crate::bloomery::verify::{apply_containment, candidate_delta_base, candidate_violations, changed_paths};
 use crate::bloomery::{candidate_tree_digest, capture_commit_digest};
 use crate::session::SessionConfig;
 use crate::store::{CommissionBackend, SqliteStore, StoreBackend};
@@ -1706,6 +1705,111 @@ impl LocalExecutor {
         violations
     }
 
+    /// The candidates this failing fold narrows to (ADR-0210), or [`None`] when
+    /// it does not narrow.
+    ///
+    /// Runs here rather than at intake because every input is in the checkout:
+    /// the verdict's own findings, the fold's candidate refs, and — through this
+    /// backend's store handle — each candidate's sealed declared surface. The
+    /// intake broker holds a journal handle and nothing else, so a classifier
+    /// there would need the repository shipped to it.
+    ///
+    /// The trigger is the member's own delta failing to account for the
+    /// diagnostic: a failure inside the member's own work is the member's, and
+    /// this returns [`None`] so the ordinary `VerifyFailed` arm keeps it. Only
+    /// when the diagnostic points somewhere the member never wrote does the fold
+    /// get read for who did.
+    ///
+    /// Every step degrades to [`None`] rather than to a guess. A narrowing that
+    /// names the wrong parents dispatches a lane against two candidates with
+    /// nothing to do with the defect, which is worse than the member-shaped
+    /// verdict this replaces.
+    fn narrowing(
+        &self,
+        nonce: &str,
+        worktree: Option<&Path>,
+        diff_base: Option<&str>,
+        bytes: &[u8],
+    ) -> Option<CompositionParents> {
+        let worktree = worktree?;
+        let base = diff_base?;
+        if self.order_stage(nonce) != Some(StageId::Verify) {
+            return None;
+        }
+        let (bloom, verified, _) = self.order_identity(nonce)?;
+        let bloom = BloomId(Digest::from_slice(&bloom)?);
+
+        let named = named_surface(&parse_findings(bytes)?).paths;
+        if named.is_empty() {
+            return None;
+        }
+        // The member's own delta, the same range containment judges. A
+        // diagnostic this accounts for is the member's own defect.
+        let own =
+            candidate_delta_base(worktree).and_then(|from| changed_paths(worktree, &from).ok()).unwrap_or_default();
+        if named.iter().any(|path| own.iter().any(|changed| changed == path)) {
+            return None;
+        }
+
+        let contributions = self.fold_contributions(worktree, &bloom, base);
+        match narrow_composition(&WorkpieceId(verified), &named, &contributions) {
+            Ok(parents) => Some(parents),
+            Err(refusal) => {
+                tracing::info!(
+                    target: "aether_chassis_bloomery::executor",
+                    %nonce,
+                    ?refusal,
+                    "member verify: the failing fold did not narrow; the verdict stays where it was",
+                );
+                None
+            }
+        }
+    }
+
+    /// Every candidate in this bloom's fold, with the paths it changed against
+    /// `base` and the surface it was approved at.
+    ///
+    /// The candidates are read from the refs the capture push writes, one per
+    /// member that has produced one, so the set is exactly what is in the tree
+    /// under judgement — a member still constructing has no ref and contributes
+    /// nothing, which is correct, because nothing of its work is in the fold.
+    /// A ref whose diff or whose commission cannot be read is skipped: a partial
+    /// contribution list can only refuse a narrowing, never widen one.
+    fn fold_contributions(&self, worktree: &Path, bloom: &BloomId, base: &str) -> Vec<FoldContribution> {
+        let prefix = candidate_ref_prefix(bloom);
+        let listed = command::run_ok(worktree, &["for-each-ref", "--format=%(refname)", &format!("{prefix}*")]).ok();
+
+        listed
+            .into_iter()
+            .flat_map(|refs| refs.lines().map(str::to_owned).collect::<Vec<_>>())
+            .filter_map(|reference| {
+                let workpiece = reference.strip_prefix(&prefix)?.to_owned();
+                let changed = command::name_only_paths(worktree, base, &reference).ok()?;
+                let surface = self.sealed_surface(&workpiece)?;
+                Some(FoldContribution { workpiece: WorkpieceId(workpiece), changed, surface })
+            })
+            .collect()
+    }
+
+    /// One member's sealed declared surface, read through the commission store.
+    ///
+    /// The commission's current revision rather than a second copy: the seal
+    /// door refuses a member whose commission has moved off the revision the
+    /// bloom sealed, so for a member of a walking bloom these are the same
+    /// value, and reading the one that exists avoids a table that could drift.
+    fn sealed_surface(&self, workpiece: &str) -> Option<Vec<String>> {
+        let store = self.messages.as_ref()?;
+        // The guard is bound so it drops with this statement rather than living
+        // to the end of the function: the surface is read one member at a time,
+        // and holding the store lock across the caller's loop would serialize
+        // every other reader behind a walk of the whole fold.
+        let commission = {
+            let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
+            store.load(&WorkpieceId(workpiece.to_owned())).ok()?
+        };
+        Some(commission?.current?.declared_surface)
+    }
+
     /// The stage the order under `nonce` was dispatched for.
     fn order_stage(&self, nonce: &str) -> Option<StageId> {
         let store = self.messages.as_ref()?;
@@ -1947,10 +2051,24 @@ impl LocalExecutor {
             // own writes the same channel. A lane that stated none yields an
             // empty set, which is the absence the reviewer surfaces read.
             suppression_requests: SuppressionRequest::normalize(parse_suppression_requests(bytes)),
+            // Only a failing terminal Verify can narrow: a pass has no
+            // diagnostic, and no other stage judges the fold.
+            narrowing: (is_verify && !passed)
+                .then(|| self.narrowing(&handle.nonce.0, worktree_dir.as_deref(), diff_base_hex.as_deref(), bytes))
+                .flatten(),
         };
 
         vec![judged_evidence_ref(handle, &subject, bytes, candidate, judgement)]
     }
+}
+
+/// The ref namespace one bloom's candidate captures are pushed under.
+///
+/// Spelled from `candidate_ref_name`'s own formatter so the reader and the
+/// writer cannot drift: taking the name of a workpiece that cannot exist leaves
+/// exactly the prefix every real one shares.
+fn candidate_ref_prefix(bloom: &BloomId) -> String {
+    candidate_ref_name(bloom, "")
 }
 
 /// How a clean worktree reads on this capture: a passed run that produced
@@ -2048,6 +2166,8 @@ struct Judgement {
     surface_request: Option<SurfaceRequest>,
     /// The suppressions the candidate states a case for (ADR-0193).
     suppression_requests: Vec<SuppressionRequest>,
+    /// The candidates this failing fold narrows to (ADR-0210).
+    narrowing: Option<CompositionParents>,
 }
 
 fn judged_evidence_ref(
@@ -2057,7 +2177,8 @@ fn judged_evidence_ref(
     candidate: Option<CandidateRef>,
     judgement: Judgement,
 ) -> EvidenceRef {
-    let Judgement { verdict, failed_verifiers, violating_paths, surface_request, suppression_requests } = judgement;
+    let Judgement { verdict, failed_verifiers, violating_paths, surface_request, suppression_requests, narrowing } =
+        judgement;
     let overlay = apply_containment(verdict, failed_verifiers, parse_findings(bytes), &violating_paths);
     let detail = Digest::of_wire_bytes(bytes);
     EvidenceRef {
@@ -2086,6 +2207,7 @@ fn judged_evidence_ref(
             violating_paths,
             surface_request,
             suppression_requests,
+            narrowing,
         },
     }
 }

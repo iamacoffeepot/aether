@@ -132,7 +132,7 @@ pub struct Snapshot {
     /// its own fact, so no new [`Decision`] enters the frozen graph.
     /// `#[serde(default)]` is the `surface_requests` precedent.
     #[serde(default)]
-    pub narrowed_compositions: BTreeMap<BloomId, BTreeMap<WorkpieceId, CompositionParents>>,
+    pub narrowed_compositions: BTreeMap<BloomId, BTreeMap<WorkpieceId, NarrowedComposition>>,
     /// The per-file write leases a bloom's construct lanes hold (ADR-0204),
     /// keyed by bloom then repository path. Folded from
     /// [`Fact::LaneWritesObserved`] the way a surface request is folded from
@@ -692,6 +692,22 @@ pub struct AwaitingSurface {
     pub requests: u32,
 }
 
+/// One narrowed composition as the snapshot holds it (ADR-0210): the parents it
+/// is over, and the member whose verdict minted it.
+///
+/// The verified member is kept because its verdict judged a tree it does not
+/// own: once the repair exists, that member has to be put back on the line
+/// against the repaired tree rather than left holding a refusal about work that
+/// has been redone.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct NarrowedComposition {
+    /// The parents, the diagnostic paths, and the derived bound.
+    pub parents: CompositionParents,
+    /// The member whose Verify produced the verdict, and which owes nothing for
+    /// it.
+    pub verified: WorkpieceId,
+}
+
 /// One member's exclusive write lease on one repository path (ADR-0204).
 ///
 /// Projection state, not a journal row: the durable write is
@@ -1207,7 +1223,13 @@ impl Snapshot {
         let Outcome::CompositionNarrowed { workpiece, .. } = &decisions.outcome else {
             return;
         };
-        self.narrowed_compositions.entry(*bloom).or_default().insert(workpiece.clone(), attribution.clone());
+        let Fact::CompositionNarrowed { verified, .. } = &event.fact else {
+            return;
+        };
+        self.narrowed_compositions.entry(*bloom).or_default().insert(
+            workpiece.clone(),
+            NarrowedComposition { parents: attribution.clone(), verified: verified.clone() },
+        );
     }
 
     /// The collisions `bloom` has minted a subject for, in minted-subject
@@ -1215,7 +1237,7 @@ impl Snapshot {
     pub fn narrowed_compositions_of(
         &self,
         bloom: &BloomId,
-    ) -> impl Iterator<Item = (&WorkpieceId, &CompositionParents)> {
+    ) -> impl Iterator<Item = (&WorkpieceId, &NarrowedComposition)> {
         self.narrowed_compositions.get(bloom).into_iter().flatten()
     }
 

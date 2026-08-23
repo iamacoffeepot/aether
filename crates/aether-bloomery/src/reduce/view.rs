@@ -286,11 +286,11 @@ fn composition_view(record: &BloomRecord) -> Option<CompositionView> {
 fn narrowed_composition_views(record: &BloomRecord, snapshot: &Snapshot) -> Vec<NarrowedCompositionView> {
     snapshot
         .narrowed_compositions_of(&record.spec.id())
-        .map(|(workpiece, attribution)| NarrowedCompositionView {
+        .map(|(workpiece, narrowed)| NarrowedCompositionView {
             workpiece: workpiece.clone(),
-            parents: attribution.parents.clone(),
-            paths: attribution.paths.clone(),
-            bound: attribution.bound.clone(),
+            parents: narrowed.parents.parents.clone(),
+            paths: narrowed.parents.paths.clone(),
+            bound: narrowed.parents.bound.clone(),
             cursor: stage_cursor(record, workpiece),
             wedge: record.wedged.get(workpiece).copied(),
         })

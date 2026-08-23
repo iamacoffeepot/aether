@@ -28,15 +28,10 @@ use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{CandidateRef, CompositionParents, Evidence, VerifyFailureSet, Wedge};
 
 /// The repair allowance a narrowed composition gets: the sealed catalog's
-/// `Construct` budget.
-///
-/// `Construct` rather than `Refine`, because a narrowed composition authors a
-/// candidate from nothing rather than repairing one of its own — its first lap
-/// is a first attempt at the only thing it will ever do. The whole-bloom
-/// composition's weave repair takes the `Refine` budget for the mirror-image
-/// reason: by then it already holds a weave to repair.
+/// `Refine` budget — the same allowance the whole-bloom composition's weave
+/// repair takes, because it is the same repair at a different arity.
 fn repair_budget(record: &BloomRecord) -> u32 {
-    record.stage_catalog.retry_budget_of(StageId::Construct).unwrap_or(1)
+    record.stage_catalog.retry_budget_of(StageId::Refine).unwrap_or(1)
 }
 
 /// The line a narrowed composition dispatches under: the bloom's own
@@ -124,7 +119,7 @@ pub(super) fn reduce_composition_narrowed(
             bloom: *bloom,
             workpiece: workpiece.clone(),
             wedge: Wedge {
-                stage: StageId::Construct,
+                stage: StageId::Refine,
                 evidence: evidence.detail,
                 repeated_verifiers: VerifyFailureSet::EMPTY,
             },
@@ -140,7 +135,7 @@ pub(super) fn reduce_composition_narrowed(
         *bloom,
         &workpiece,
         record.spec.base(),
-        composition_progress(StageId::Construct, attempt, subject),
+        composition_progress(StageId::Refine, attempt, subject),
         DispatchTargets { subject: subject.tree, checkout: subject.checkout },
         Some(subject.tree),
         narrowed_line(record),
@@ -260,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn the_repair_enters_at_construct_against_the_refused_tree() {
+    fn the_repair_enters_at_the_same_stage_the_whole_bloom_repair_does() {
         // The subject is the fold that refused, not either parent's candidate:
         // the objective is that both intents coexist *on that tree*, so a lap
         // aimed anywhere else would be reconciling something nobody refused.
@@ -284,7 +279,7 @@ mod tests {
             })
             .expect("the mint dispatches");
 
-        assert_eq!(dispatched.0, StageId::Construct);
+        assert_eq!(dispatched.0, StageId::Refine, "one merge mechanism means one repair stage");
         assert_eq!(dispatched.1.checkout, digest(0xF1), "the lap checks out the commit carrying the refused tree");
     }
 

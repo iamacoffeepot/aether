@@ -1174,6 +1174,7 @@ fn aggregate_verify_findings_persist_on_the_composition_and_clear_on_a_pass() {
             },
             ..Default::default()
         },
+
     };
 
     let mut failing = dispatch_record("n-av-fail", bloom, &WorkpieceId(String::new()), tree, tree);
@@ -1615,6 +1616,29 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
 
     use super::{NameEvidenceClaims, attempt_artifact_name};
 
+    /// A reference carrying nothing but the name under test, so the assertions
+    /// read as the round trip rather than as a wall of empty channels.
+    fn reference(name: String, nonce: Nonce, artifact_id: u64, failed_verifiers: VerifyFailureSet) -> EvidenceRef {
+        EvidenceRef {
+            name,
+            nonce,
+            artifact_id,
+            size_bytes: 10,
+            candidate: None,
+            findings: None,
+            failed_verifiers,
+            cost: None,
+            calls: None,
+            session_reuse_arm: None,
+            session_reuse_saved_micro_usd: None,
+            peak_resident_bytes: None,
+            violating_paths: Vec::new(),
+            surface_request: None,
+            suppression_requests: Vec::new(),
+            narrowing: None,
+        }
+    }
+
     let claims = NameEvidenceClaims;
     let cases = [
         (StageVerdict::Approved, 5u8, 9u8),
@@ -1829,6 +1853,7 @@ fn verify_findings_persist_on_a_failing_verify_and_clear_on_a_pass() {
             },
             ..Default::default()
         },
+
     };
 
     record_dispatch(&mut store, &dispatch_record("n-f1", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate))

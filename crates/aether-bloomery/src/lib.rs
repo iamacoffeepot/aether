@@ -265,6 +265,7 @@ pub use reduce::MemberExecutorFaultError;
 pub use reduce::MemberMachineryFault;
 pub use reduce::MemberPark;
 pub use reduce::NarrowCompositionError;
+pub use reduce::NarrowedComposition;
 pub use reduce::OperatorHoldError;
 pub use reduce::OperatorRepairError;
 pub use reduce::OrphanClaimReleaseError;
