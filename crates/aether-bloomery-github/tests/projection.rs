@@ -75,6 +75,7 @@ fn one_bloom(id: BloomId, members: Vec<MemberView>) -> ViewDocument {
         operator_hold: None,
         blocker: None,
         leases: Vec::new(),
+        narrowed_compositions: Vec::new(),
     };
     ViewDocument {
         mainline: digest(0),
