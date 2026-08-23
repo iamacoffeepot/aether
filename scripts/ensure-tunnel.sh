@@ -6,16 +6,21 @@
 #
 # The tunnel (`aether-tunnel`, iamacoffeepot/aether#1212 PR 2) binds :8890 —
 # the port `.mcp.json` targets — and forks + supervises `aether-mcp` (:8891)
-# and the hub (:8901) behind it. This script is the idempotent bootstrap:
+# and the hub (:8901) behind it. This script is the idempotent bootstrap.
+# `tunnel_health` classifies an answering port; the outcomes are:
 #
-#   - If :8890 already answers, it is a no-op (the common case).
-#   - Otherwise it launches the tunnel detached and waits, bounded, for the
-#     port to come up.
+#   - healthy: no-op, exit 0 (the common case).
+#   - degraded: reap and relaunch (exit 0), or exit 1 when the listener
+#     cannot be named (`lsof`).
+#   - unidentified holder: leave the port untouched, exit 1.
+#   - otherwise: launch the tunnel detached and wait, bounded, for the
+#     port to come up; exit 0.
 #
-# Bounded wait (so a cold build can't hang the caller indefinitely) and
-# never-fatal (always exits 0 on the best-effort path): `set -e` is on
-# inside the work, but the launch / probe path is guarded so a failed probe
-# or launch can't propagate a non-zero exit.
+# Bounded wait (so a cold build can't hang the caller indefinitely). `set -e`
+# is on inside the work, but the launch / probe path is guarded so a failed
+# build or probe can't propagate a non-zero exit. The two refusal arms
+# (degraded without a named listener, unidentified holder) exit 1
+# deliberately.
 
 set -euo pipefail
 

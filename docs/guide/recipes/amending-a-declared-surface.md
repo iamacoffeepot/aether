@@ -28,7 +28,10 @@ the seal door refuses a member whose tip carries no approval — and any
 supersede that still names the old digest is refused as stale. The command
 announces the write before it makes it, and every step after it is
 check-then-act over a deterministic signature, so re-running the identical
-command after a failure converges rather than compounding.
+command after a failure converges rather than compounding. A re-run reads its
+own handiwork: a tip already declaring the surface the amendment would write is
+approved and sealed where it stands, which is how a run that failed downstream
+of the write gets finished rather than blamed on a human who moved the scope.
 
 **The amended member restarts.** A successor member carries no stage cursor, so
 the amended lane re-enters at `Construct`. The park's progress is the price of
@@ -68,9 +71,19 @@ cargo xtask bloom amend <bloom-id> \
 ```
 
 `--dry-run` runs every read — the request, the commission tips, the policy, the
-tier verdict, the sibling overlaps the widening creates — and writes nothing.
-It prints the same table a refusal carries, so the operator sees which path
-costs them the amendment before spending anything.
+granularity each path is admitted at, the tier verdict, the sibling overlaps the
+widening creates — and writes nothing. It prints the same table a refusal
+carries, so the operator sees which path costs them the amendment before
+spending anything.
+
+A blocked lane names the file it stopped on, and the seal door admits a
+declared-surface entry naming one file only when a file-granular
+approval-policy rule names that same file. So the amendment widens the ask to
+the glob covering it — `crates/<crate>/**`, `docs/<book>/**`,
+`.github/<area>/**`, or the top-level tree anything else lives in — and prints
+the ask beside the grant. The same rewrite runs over the entries the current
+revision carries, so a raw file entry sealed before the request arrived leaves
+with it.
 
 Drop `--dry-run` to grant it. `--path` unions extra globs into the lane's
 request, and is required when the member carries no request at all — amending a
@@ -85,11 +98,13 @@ keys (ADR-0149 §The boundary), so every approval at every tier is signed here.
 
 | Check | Refusal |
 |---|---|
-| The bloom, the member, and its `awaiting_surface` | no such bloom or member; no request and no `--path` |
+| The bloom, the member, and its `awaiting_surface` | no such bloom or member; the member itself was withdrawn; no request and no `--path` |
 | Every requested path is inside the declared-surface grammar | names the first glob outside it — the lane is untrusted, and a glob would widen the appeal past the refusal that prompted it |
 | The request names the revision the bloom sealed the member at | a human moved the scope; re-scope rather than amend |
-| Every *sibling* is at its own commission tip and carries an approval | refused now, because the successor seal would refuse after the key had signed |
-| The additions are not already covered | exits successfully, having written nothing |
+| The commission tip is the sealed revision, or already carries the surface this amendment would write | a human moved the scope; re-scope rather than amend |
+| Every *standing sibling* is at its own commission tip and carries an approval | refused now, because the successor seal would refuse after the key had signed. A withdrawn member is no sibling here: it never integrates, so its commission is free to have been re-scoped into a later bloom, and the successor leaves it out |
+| Every path is at a granularity the seal admits | a path naming one file no approval-policy rule names is widened to the glob covering it — its crate, or the tree it lives in — and both spellings are printed. A repository-root file the policy does not name has no tree to widen to, and is refused in the same words the seal door uses |
+| The additions are already covered | granted anyway: the tip is approved and sealed as it stands, so a run after a downstream failure finishes the amendment instead of declining it |
 | The policy the successor's seal will use | a sealed policy that will not read or parse |
 | The tier gate over the delta | above `--accept-tier`, naming each offending path |
 | Sibling surface overlaps the widening creates | advisory — the seal journals them and may derive a dependency edge |

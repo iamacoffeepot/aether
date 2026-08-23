@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use aether_actor::runtime;
 use aether_bloomery::{
     BackendObjectId, BloomId, BloomStatus, Digest, Event, Fact, ResolvedConfigs, SharedCorrespondence, Snapshot, Topic,
-    decode_recorded_decisions,
+    WorkpieceId, decode_recorded_decisions, is_active_unlanded,
 };
 use aether_bloomery_github::GitObjectId;
 use aether_data::wire::from_bytes;
@@ -22,7 +22,7 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
 use serde::{Deserialize, Serialize};
 
-use super::invariants::{DoctorReport, LiveState, OpenDispatch, ReplicaObservation, evaluate};
+use super::invariants::{DoctorReport, LiveState, OpenDispatch, ReplicaObservation, SurfaceParkObservation, evaluate};
 use super::{DoctorReactorCapability, DoctorReactorSetup};
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::bloomery::{ExecutorShell, SourceShell};
@@ -93,6 +93,7 @@ pub struct DoctorReactorState {
     board: DoctorBoard,
     replica_seen: BTreeMap<u64, Instant>,
     replica_passes: BTreeMap<u64, u32>,
+    surface_seen: BTreeMap<(BloomId, WorkpieceId), Instant>,
     mailer: Arc<Mailer>,
     self_mailbox: MailboxId,
     _timer: Option<TimerHandle>,
@@ -133,6 +134,7 @@ impl NativeActor for DoctorReactorCapability {
             board: config.board,
             replica_seen: BTreeMap::new(),
             replica_passes: BTreeMap::new(),
+            surface_seen: BTreeMap::new(),
             mailer,
             self_mailbox,
             _timer: Some(timer),
@@ -160,6 +162,7 @@ impl NativeActor for DoctorReactorCapability {
             lanes_running,
             replica_seen: &mut state.replica_seen,
             replica_passes: &mut state.replica_passes,
+            surface_seen: &mut state.surface_seen,
             now: Instant::now(),
         }) {
             Ok(report) => state.board.publish(report),
@@ -180,6 +183,7 @@ struct CollectRequest<'a> {
     lanes_running: bool,
     replica_seen: &'a mut BTreeMap<u64, Instant>,
     replica_passes: &'a mut BTreeMap<u64, u32>,
+    surface_seen: &'a mut BTreeMap<(BloomId, WorkpieceId), Instant>,
     now: Instant,
 }
 
@@ -215,6 +219,7 @@ fn collect_and_evaluate(request: &mut CollectRequest<'_>) -> rusqlite::Result<Do
     });
     let replica_topics = request.store.drain_outbox(Some(Topic::SourceReplica.as_str()))?;
     let replica = observe_replica(&replica_topics, request.replica_seen, request.replica_passes, request.now);
+    let surface_parks = observe_surface_parks(&replayed.snapshot, request.surface_seen, request.now);
     let ancestry = |from: &Digest, to: &Digest| request.source.and_then(|source| source.is_fast_forward(from, to).ok());
 
     Ok(evaluate(&LiveState {
@@ -228,6 +233,7 @@ fn collect_and_evaluate(request: &mut CollectRequest<'_>) -> rusqlite::Result<Do
         journaled_heads: &replayed.journaled_heads,
         ancestry: Some(&ancestry),
         replica: &replica,
+        surface_parks: &surface_parks,
         outstanding: &outstanding,
         lanes_running: request.lanes_running,
         evidence_nonces: &evidence_refs,
@@ -372,6 +378,52 @@ fn observe_replica(
             sequence,
             age: now.saturating_duration_since(first),
             consecutive_failures: passes.get(&sequence).copied().unwrap_or(1),
+        })
+        .collect()
+}
+
+/// Age every member awaiting a surface amendment against this process's own
+/// clock, the way [`observe_replica`] ages an undelivered topic: a member seen
+/// for the first time starts now, one seen before keeps its first sighting,
+/// and one whose park has cleared is dropped so a later park starts fresh.
+///
+/// Only a member that can still be answered is observed. A landed or
+/// superseded bloom's parked entry is history, and a withdrawn member's
+/// request has nobody left to answer it (#5327) — the reducer clears the entry
+/// when the member *moves*, not when it leaves, so reporting either would
+/// leave a row nobody can ever clear.
+fn observe_surface_parks(
+    snapshot: &Snapshot,
+    seen: &mut BTreeMap<(BloomId, WorkpieceId), Instant>,
+    now: Instant,
+) -> Vec<SurfaceParkObservation> {
+    let answerable = snapshot.surface_requests.iter().filter_map(|(bloom, members)| {
+        let record = snapshot.blooms.get(bloom)?;
+        is_active_unlanded(record.status).then(move || {
+            members
+                .keys()
+                .filter(move |workpiece| !record.withdrawn.contains_key(*workpiece))
+                .map(|workpiece| (*bloom, workpiece.clone()))
+        })
+    });
+
+    let live: BTreeMap<(BloomId, WorkpieceId), Instant> = answerable
+        .flatten()
+        .map(|key| {
+            let first = seen.get(&key).copied().unwrap_or(now);
+            (key, first)
+        })
+        .collect();
+    seen.retain(|key, _| live.contains_key(key));
+    for (key, first) in &live {
+        seen.insert(key.clone(), *first);
+    }
+
+    live.into_iter()
+        .map(|((bloom, workpiece), first)| SurfaceParkObservation {
+            bloom,
+            workpiece,
+            age: now.saturating_duration_since(first),
         })
         .collect()
 }

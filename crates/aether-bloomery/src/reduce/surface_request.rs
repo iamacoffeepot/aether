@@ -1,6 +1,6 @@
 //! A declining lane asked for the surface its work requires (ADR-0207).
 //!
-//! The request half: the lane returned machine-readable paths, and the reducer
+//! The lane returned machine-readable paths, and the reducer
 //! parks the member awaiting a surface amendment. Nothing about the member's
 //! work moves — no attempt, no repair roll, no cursor, no candidate — because
 //! the remedy is a person widening a boundary, and another lap would reproduce
@@ -99,10 +99,14 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
+    use aether_data::wire::from_bytes;
+
     use super::reduce_surface_requested;
-    use crate::digest::Digest;
+    use crate::digest::{Digest, decode_hex};
     use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
-    use crate::reduce::{Event, Fact, Outcome, Snapshot, SurfaceRequestedError, reduce};
+    use crate::reduce::{
+        DECISIONS_SCHEMA, Event, Fact, Outcome, Snapshot, SurfaceRequestedError, decode_recorded_decisions, reduce,
+    };
     use crate::testing::{draft, membership};
     use crate::values::{Evidence, EvidenceKind, ResolvedConfigs, SpendWindow, SurfaceRequest};
 
@@ -263,5 +267,105 @@ mod tests {
 
         let snapshot = snapshot.apply(&fact("surface-2"), &second, &ResolvedConfigs::default());
         assert_eq!(snapshot.awaiting_surface(&bloom, &workpiece).unwrap().requests, 2);
+    }
+
+    /// The `event` blob of production journal record 3279
+    /// (`aether.bloomery.surface_request:dispatch-2712`), as the coordinator
+    /// wrote it — a retired [`Fact::SurfaceGranted`] at wire discriminant 37.
+    const RETIRED_GRANT_EVENT: &str = concat!(
+        "2d0000006165746865722e626c6f6f6d6572792e737572666163655f726571756573743a64697370617463682d323731",
+        "32250000004321ab200028c57285882dbaf357909502abac3cc876cce63bd27a142fce83340a00000069737375652d35",
+        "3433390300000065962c49c79310a0b4863256c8cd99f9ab0702efa8f796e3aef813352de79814010000000a00000073",
+        "6372697074732f2a2aa06ad00155e661eb549bb14d8eee96897d6d7ea62650456271b680902ae0c9b80a000000afffeb",
+        "8820849806fe22984bfaa333e53c154d5df469bac7330e1666234e9c24",
+    );
+
+    /// The `decisions` blob of the same record, stamped [`DECISIONS_SCHEMA`] —
+    /// a retired [`Outcome::SurfaceGranted`] at wire discriminant 88, carrying
+    /// the three effects that grant decided.
+    const RETIRED_GRANT_DECISIONS: &str = concat!(
+        "580000004321ab200028c57285882dbaf357909502abac3cc876cce63bd27a142fce83340a00000069737375652d3534",
+        "333965962c49c79310a0b4863256c8cd99f9ab0702efa8f796e3aef813352de79814010000000a000000736372697074",
+        "732f2a2a03000000040000004321ab200028c57285882dbaf357909502abac3cc876cce63bd27a142fce8334a06ad001",
+        "55e661eb549bb14d8eee96897d6d7ea62650456271b680902ae0c9b80a000000afffeb8820849806fe22984bfaa333e5",
+        "3c154d5df469bac7330e1666234e9c240c0000004321ab200028c57285882dbaf357909502abac3cc876cce63bd27a14",
+        "2fce83340a00000069737375652d3534333903000000010000000000000000000000000000000b0000004321ab200028",
+        "c57285882dbaf357909502abac3cc876cce63bd27a142fce83340a00000069737375652d353433390300000013000000",
+        "636f6e7374727563742e696d706c656d656e740100000065962c49c79310a0b4863256c8cd99f9ab0702efa8f796e3ae",
+        "f813352de7981475fa7fda22f43909708b27023d01783b272d7130069a95bf295858fefeb037ca00010000000d000000",
+        "726573756c745f7265636f72641700000069616d612f636f6e7374727563742d636c617564653a314038000000000000",
+        "01000000000065962c49c79310a0b4863256c8cd99f9ab0702efa8f796e3aef813352de7981400020000001a0000006d",
+        "7573652d737061726b2d312e322d636f6e7472696275746f720200000002000000030000001b0000006165746865722e",
+        "626c6f6f6d6572792e70726963655f7461626c65b11b8f1857319f2c02a2eda50b37a691dc1096bee97257b00c19ffb9",
+        "db997a501d0000006165746865722e626c6f6f6d6572792e73746167655f636174616c6f6747a6fc1551841dd328611c",
+        "f1600131c4d069a58c24da9f3c8d1a092b619767a71e0000006165746865722e626c6f6f6d6572792e6d6f64656c5f6f",
+        "76657272696465b100d9c9dd9b5b04bb055e6a3e1c1a8706e1b09081cdca0bec82110468f7d80a",
+    );
+
+    fn wire(hex: &str) -> Vec<u8> {
+        decode_hex(hex).expect("the fixture is lowercase hex")
+    }
+
+    #[test]
+    fn a_retired_grant_still_replays_off_the_journal() {
+        // Tripwire: the exact bytes a live coordinator wrote, so this fails the
+        // moment either shape that decodes them moves. Dropping
+        // `Fact::SurfaceGranted` or `Outcome::SurfaceGranted` from the end of
+        // its enum renumbers nothing and looks free, and boot replay then
+        // fatal-aborts on the record already in the journal — the crash loop
+        // this fixture exists to catch before a deploy does.
+        let event: Event = from_bytes(&wire(RETIRED_GRANT_EVENT)).expect("a retired grant decodes as an event");
+        let Fact::SurfaceGranted { stage, added, .. } = &event.fact else {
+            panic!("record 3279 is the retired grant: {:?}", event.fact);
+        };
+        assert_eq!(*stage, StageId::Construct);
+        assert_eq!(added, &["scripts/**".to_string()]);
+
+        let decisions = decode_recorded_decisions(&wire(RETIRED_GRANT_DECISIONS), Some(DECISIONS_SCHEMA))
+            .expect("its recorded decisions decode under the schema they were stamped with");
+        assert!(
+            matches!(decisions.outcome, Outcome::SurfaceGranted { .. }),
+            "the recorded outcome is the retired one: {:?}",
+            decisions.outcome,
+        );
+
+        // And it folds. Replay applies what the record decided rather than
+        // re-deciding it (ADR-0190), which is what keeps the three journal
+        // records written after this one — the lane the grant re-dispatched —
+        // describing a snapshot they still agree with.
+        let _ = Snapshot::new(digest(0)).apply(&event, &decisions, &ResolvedConfigs::default());
+    }
+
+    #[test]
+    fn a_retired_grant_reaching_the_reducer_decides_nothing() {
+        // The other half of the retirement: the shape stays so old bytes read,
+        // and the machinery stays retracted. A grant admitted today must not
+        // move a pin or buy a lap — a widening is an operator's decision.
+        let (snapshot, bloom, workpiece, scope_revision) = sealed();
+        let before = snapshot.blooms[&bloom].progress[&workpiece];
+        let event = Event {
+            idempotency_key: IdempotencyKey("granted".into()),
+            fact: Fact::SurfaceGranted {
+                bloom,
+                workpiece: workpiece.clone(),
+                stage: StageId::Construct,
+                revision: digest(0x9A),
+                added: vec!["xtask/**".to_string()],
+                evidence: evidence(scope_revision),
+            },
+        };
+
+        let decided = reduce(&snapshot, &event, &ResolvedConfigs::default(), &SpendWindow::default());
+
+        assert!(
+            matches!(decided.outcome, Outcome::SurfaceGrantRejected(SurfaceRequestedError::GrantRetired)),
+            "a retired fact is refused by name: {:?}",
+            decided.outcome,
+        );
+        assert!(decided.effects.is_empty(), "a retired grant decides no effects");
+
+        let after = snapshot.apply(&event, &decided, &ResolvedConfigs::default());
+        assert_eq!(after.blooms[&bloom].progress[&workpiece], before, "no re-pin, no re-dispatch");
+        assert!(after.seen.contains(&event.idempotency_key), "the key is still recorded");
     }
 }

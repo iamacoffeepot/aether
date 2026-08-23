@@ -33,7 +33,11 @@ use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::to_hex;
 use aether_data::wire::to_vec;
 
-#[cfg(target_os = "linux")]
+// Unconditional: the live-process cases below are Linux-gated because they read
+// `/proc/<pid>/stat`, but the recorded-identity case is a plain struct literal
+// written to a file and runs everywhere. Gating the import with them made this
+// crate's whole test target refuse to compile off Linux, so no test in it could
+// be run on a developer's machine at all.
 use super::identity::ProcessIdentity;
 use super::orphan::OrphanedRun;
 use super::quarantine;
@@ -1848,6 +1852,13 @@ fn an_orphan_does_not_invent_a_signal_or_a_wait_fault() {
     ProcessIdentity { pid: u32::MAX, pgid: u32::MAX, starttime: 1, boot_id: "recorded".to_owned() }
         .write(&evidence_dir)
         .unwrap();
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            clippy::redundant_clone,
+            reason = "the Linux-gated block below reuses `nonce`; off Linux it is compiled out and this read is the last"
+        )
+    )]
     let mut departed = OrphanedRun::new(Nonce(nonce.clone()), &evidence_dir);
     assert_eq!(
         departed.poll(),

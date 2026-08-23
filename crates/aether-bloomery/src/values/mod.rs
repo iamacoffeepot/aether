@@ -15,9 +15,11 @@ mod composition;
 mod config;
 mod fields;
 mod finding;
+mod granularity;
 mod lane;
 mod lease;
 mod model_override;
+mod narrowing;
 mod operator;
 mod orphan_claim;
 mod price;
@@ -38,7 +40,7 @@ mod workpiece_builder;
 pub use adr::{ADR_SCHEMA, ADR_TRANSITION_SCHEMA, Adr, AdrStatus, AdrTransition, AdrValueError};
 pub use approval::{
     ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, TierVerdict, gate_widening, path_in_surface, surface_additions,
-    surface_intersection, tier_verdict,
+    surface_intersection, surface_union, tier_verdict,
 };
 pub use base_verify::{BaseReceipt, BaseVerdict};
 pub use bloom::{
@@ -59,9 +61,11 @@ pub use finding::{
     CHECK_KEY, CRITICAL_KEY, ClassifiedFinding, ClassifiedFindings, FindingClass, JUDGMENT_TAG, MECHANICAL_TAG,
     classify_findings,
 };
+pub use granularity::{Widening, coarsen, rewrites, widen};
 pub use lane::{LANE_WORKPIECE_HEADER, pin_workpiece_description, split_lane_identity};
 pub use lease::{EvictedHolder, MAX_OBSERVED_WRITES, normalize_write_paths};
 pub use model_override::{AgentSelection, ModelOverride, OverrideError, ResolvedModel, StageOverride};
+pub use narrowing::{CompositionParents, FoldContribution, NarrowingRefusal, narrow_composition};
 pub use operator::{Adjudication, Disposition, OperatorHold, OperatorRepair, Withdrawal, WithdrawalCause};
 pub use orphan_claim::{
     ORPHAN_CLAIM_RELEASE_WORDS, OrphanClaimRelease, OrphanClaimReleaseCompletion, OrphanClaimReleaseRecord,

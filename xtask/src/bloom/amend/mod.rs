@@ -23,6 +23,7 @@
 
 mod request;
 mod revision;
+mod surface;
 mod tier;
 
 #[cfg(test)]
@@ -31,12 +32,15 @@ mod tests;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use aether_bloomery::{KeyId, Tier, TierVerdict, gate_widening, surface_additions, surface_intersection, tier_verdict};
+use aether_bloomery::{
+    ApprovalPolicy, KeyId, ScopeRevision, Tier, TierVerdict, digest_of, gate_widening, surface_intersection,
+    tier_verdict,
+};
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 
 use super::client::{Client, bloom_in};
-use super::dto::{BloomSpec, BloomView, CommissionShowView, DigestHex, ScopeRevisionView};
+use super::dto::{BloomSpec, BloomView, CommissionShowView, DigestHex, MemberView, ScopeRevisionView};
 use super::{ProjectionArgs, plan, render_outcome};
 
 use request::Requested;
@@ -109,9 +113,21 @@ pub struct AmendArgs {
 struct AmendPlan {
     workpiece: String,
     spec: BloomSpec,
+    /// Predecessor members the day withdrew. They never integrate and their
+    /// commissions are free to move on, so the successor leaves them out
+    /// instead of sealing them again at a revision they have already left.
+    withdrawn: Vec<String>,
+    /// The commission tip, which the successor seals against when the widened
+    /// surface turns out to be what the tip already declares.
+    tip: DigestHex,
     current: ScopeRevisionView,
     commission: CommissionShowView,
     requested: Requested,
+    /// Requested paths the policy does not name, and the glob each is admitted
+    /// as, so the plan shows the ask beside the grant.
+    coarsened: Vec<(String, String)>,
+    /// The same rewrite over entries the current revision already carries.
+    inherited: Vec<(String, String)>,
     added: Vec<String>,
     widened: Vec<String>,
     verdict: TierVerdict,
@@ -122,10 +138,21 @@ struct AmendPlan {
     new_overlaps: Vec<(String, Vec<String>)>,
 }
 
+impl AmendPlan {
+    /// The successor revision: the tip's bytes with the declared surface
+    /// replaced.
+    ///
+    /// Replaced rather than appended, because widening an entry the tip already
+    /// carries has to drop the file-granular spelling — appending the covering
+    /// glob beside it would leave the entry the seal door refuses on.
+    fn widened_revision(&self) -> ScopeRevision {
+        let current = self.current.to_revision();
+        ScopeRevision { predecessor: Some(digest_of(&current)), declared_surface: self.widened.clone(), ..current }
+    }
+}
+
 pub fn run(client: &Client<'_>, args: &AmendArgs, policy_file: &Path) -> Result<String> {
-    let Some(plan) = preflight(client, args, policy_file)? else {
-        return Ok(format!("member {} already holds every requested path; nothing to amend\n", args.workpiece));
-    };
+    let plan = preflight(client, args, policy_file)?;
 
     let mut out = describe(&plan, args.accept_tier.tier());
     if args.dry_run {
@@ -138,9 +165,16 @@ pub fn run(client: &Client<'_>, args: &AmendArgs, policy_file: &Path) -> Result<
         args.seed_file.as_deref().context("--seed-file is required to sign the amendment's approval")?,
     )?;
 
-    let widened = plan.current.to_revision().with_widened_surface(&plan.added);
-    out.push_str("writing the widened revision; the commission tip advances here\n");
-    let scope = revision::write_widened(client, &plan.workpiece, &widened)?;
+    // A re-run whose ask the tip already declares still has to finish: the
+    // member is parked until a successor seals it, and there is nothing left to
+    // write, so the tip itself is what gets approved and sealed.
+    let scope = if plan.widened == plan.current.declared_surface {
+        out.push_str("the tip already declares this surface; approving and sealing it as it stands\n");
+        plan.tip
+    } else {
+        out.push_str("writing the widened revision; the commission tip advances here\n");
+        revision::write_widened(client, &plan.workpiece, &plan.widened_revision())?
+    };
     let _ = writeln!(out, "revision   {scope}");
 
     if revision::approve(client, &plan.commission, &plan.workpiece, scope, &key)? {
@@ -153,11 +187,21 @@ pub fn run(client: &Client<'_>, args: &AmendArgs, policy_file: &Path) -> Result<
     Ok(out)
 }
 
-/// P1 – P8. Entirely reads; `None` means the request is already covered.
-fn preflight(client: &Client<'_>, args: &AmendArgs, policy_file: &Path) -> Result<Option<AmendPlan>> {
+/// P1 – P8. Entirely reads, and the last point at which a refusal is free:
+/// past here the commission tip has advanced and the operator's key has signed,
+/// so the same refusal costs both. Every refusal the successor seal would make
+/// is therefore made here, in the seal door's own words.
+fn preflight(client: &Client<'_>, args: &AmendArgs, policy_file: &Path) -> Result<AmendPlan> {
     let view = client.view()?;
     let bloom = bloom_in(&view, &args.bloom_id)?;
     let member = request::member(bloom, &args.workpiece)?;
+    if member.withdrawn.is_some() {
+        bail!(
+            "member {} was withdrawn from bloom {}; re-scope it into a later bloom rather than amend it here",
+            args.workpiece,
+            args.bloom_id,
+        );
+    }
     request::binding_holds(member)?;
     let requested = request::collect(member, &args.paths)?;
 
@@ -169,7 +213,13 @@ fn preflight(client: &Client<'_>, args: &AmendArgs, policy_file: &Path) -> Resul
     let tip = commission
         .current_revision
         .with_context(|| format!("commission {} names no current revision digest", args.workpiece))?;
-    if tip != member.scope_revision {
+
+    let spec = client.spec_for(&args.bloom_id)?;
+    let (policy, source) = tier::resolve_policy(client, &spec, policy_file)?;
+    let widening = surface::widen(&policy, &current.declared_surface, &requested.globs)
+        .map_err(|glob| anyhow::anyhow!("requested path `{glob}` is outside the declared-surface grammar"))?;
+
+    if tip_standing(tip, member.scope_revision, &current.declared_surface, &widening.widened) == TipStanding::Moved {
         bail!(
             "commission {} is at revision {tip} but the bloom sealed member {} at {}; a human moved the scope — \
              re-scope and supersede rather than amend",
@@ -180,15 +230,7 @@ fn preflight(client: &Client<'_>, args: &AmendArgs, policy_file: &Path) -> Resul
     }
     siblings_are_sealable(client, bloom, &args.workpiece)?;
 
-    let added = surface_additions(&current.declared_surface, &requested.globs)
-        .map_err(|glob| anyhow::anyhow!("requested path `{glob}` is outside the declared-surface grammar"))?;
-    if added.is_empty() {
-        return Ok(None);
-    }
-
-    let spec = client.spec_for(&args.bloom_id)?;
-    let (policy, source) = tier::resolve_policy(client, &spec, policy_file)?;
-    let verdict = tier_verdict(&policy, &current.declared_surface, &added);
+    let verdict = tier_verdict(&policy, &widening.existing, &widening.added);
     if let Err(offending) = gate_widening(&verdict, args.accept_tier.tier()) {
         bail!(
             "{}\nthe amendment is refused: {} above --accept-tier {:?}. The member stays parked.",
@@ -198,22 +240,47 @@ fn preflight(client: &Client<'_>, args: &AmendArgs, policy_file: &Path) -> Resul
         );
     }
 
-    let mut widened_surface = current.declared_surface.clone();
-    widened_surface.extend(added.iter().cloned());
-    let new_overlaps = overlaps(client, bloom, &args.workpiece, &widened_surface)?;
+    granularity_holds(&policy, &args.workpiece, &widening.widened)?;
+    let new_overlaps = overlaps(client, bloom, &args.workpiece, &widening.widened)?;
 
-    Ok(Some(AmendPlan {
+    Ok(AmendPlan {
         workpiece: args.workpiece.clone(),
         spec,
+        withdrawn: withdrawn(bloom),
+        tip,
         current,
         commission,
         requested,
-        added,
-        widened: widened_surface,
+        coarsened: widening.coarsened,
+        inherited: widening.inherited,
+        added: widening.added,
+        widened: widening.widened,
         verdict,
         source,
         new_overlaps,
-    }))
+    })
+}
+
+/// P7: the granularity the seal door admits, in the door's own words.
+///
+/// Coarsening leaves nothing for this to catch on a path that has a tree to
+/// widen to, so what it actually guards is the path that has none — a
+/// repository-root file the policy does not name. Asked here, the operator
+/// learns it while the member is still parked; asked at the seal, they learn it
+/// with the tip already advanced and the signature already spent.
+fn granularity_holds(policy: &ApprovalPolicy, workpiece: &str, surface: &[String]) -> Result<()> {
+    if let Some(glob) = policy.unnamed_file_entries(surface).first() {
+        bail!(
+            "member {workpiece} declared surface {glob:?} names one file and no approval-policy rule names that \
+             file; widen it to a crate glob such as crates/<crate>/src/**",
+        );
+    }
+    Ok(())
+}
+
+/// The predecessor members the day withdrew.
+fn withdrawn(bloom: &BloomView) -> Vec<String> {
+    bloom.members.iter().filter(|member| member.withdrawn.is_some()).map(|member| member.workpiece.clone()).collect()
 }
 
 /// P4: every sibling must be at its own commission tip and carry an approval.
@@ -222,25 +289,70 @@ fn preflight(client: &Client<'_>, args: &AmendArgs, policy_file: &Path) -> Resul
 /// stale sibling scope or a missing sibling approval — and by then the
 /// operator's key has already signed and the commission tip has already moved.
 fn siblings_are_sealable(client: &Client<'_>, bloom: &BloomView, amended: &str) -> Result<()> {
-    for member in &bloom.members {
-        if member.workpiece == amended {
-            continue;
-        }
-        let sibling = client.commission(&member.workpiece)?;
-        match sibling.current_revision {
-            Some(tip) if tip == member.scope_revision => {}
-            Some(tip) => bail!(
-                "sibling {} is sealed at {} but its commission is at {tip}; the successor seal would refuse as stale",
-                member.workpiece,
-                member.scope_revision,
-            ),
-            None => bail!("sibling {} has no current scope revision", member.workpiece),
-        }
-        if sibling.approvals.is_empty() {
-            bail!("sibling {} carries no stored approval; the successor seal would refuse it", member.workpiece);
-        }
+    for member in siblings(bloom, amended) {
+        sibling_is_sealable(member, &client.commission(&member.workpiece)?)?;
     }
     Ok(())
+}
+
+/// The members the successor still carries beside `amended`.
+///
+/// A withdrawn member left the line before integration, so the successor does
+/// not seal it and its commission is free to have been re-scoped into a later
+/// bloom. Reasoning over one refuses the amendment on a revision no seal will
+/// ever read.
+fn siblings<'a>(bloom: &'a BloomView, amended: &'a str) -> impl Iterator<Item = &'a MemberView> {
+    bloom.members.iter().filter(move |member| member.workpiece != amended && member.withdrawn.is_none())
+}
+
+/// One sibling's half of P4, over the commission the edge returned.
+fn sibling_is_sealable(member: &MemberView, sibling: &CommissionShowView) -> Result<()> {
+    match sibling.current_revision {
+        Some(tip) if tip == member.scope_revision => {}
+        Some(tip) => bail!(
+            "sibling {} is sealed at {} but its commission is at {tip}; the successor seal would refuse as stale",
+            member.workpiece,
+            member.scope_revision,
+        ),
+        None => bail!("sibling {} has no current scope revision", member.workpiece),
+    }
+    if sibling.approvals.is_empty() {
+        bail!("sibling {} carries no stored approval; the successor seal would refuse it", member.workpiece);
+    }
+    Ok(())
+}
+
+/// Where the commission's tip stands relative to the revision the bloom sealed
+/// the member at.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TipStanding {
+    /// The tip is the revision the bloom sealed the member at.
+    Sealed,
+    /// The tip is past the sealed revision and already declares exactly the
+    /// surface this amendment would write.
+    AlreadyWidened,
+    /// The tip is past the sealed revision and declares something else.
+    Moved,
+}
+
+/// Where the tip stands, which is what decides whether the amendment writes a
+/// successor revision, seals the tip as it stands, or refuses.
+///
+/// The command advances the tip itself, so a run that failed downstream of the
+/// revision write leaves the tip ahead of the sealed revision with nothing
+/// wrong: re-reading that as a human's re-scope parks the member forever, since
+/// every re-run reproduces the same mismatch. What separates the two is the
+/// surface — a tip declaring exactly what this amendment would write is this
+/// command's own half-finished work, and anything else is a scope somebody
+/// moved for a reason this command cannot see.
+fn tip_standing(tip: DigestHex, sealed: DigestHex, tip_surface: &[String], widened: &[String]) -> TipStanding {
+    if tip == sealed {
+        TipStanding::Sealed
+    } else if tip_surface == widened {
+        TipStanding::AlreadyWidened
+    } else {
+        TipStanding::Moved
+    }
 }
 
 /// P8: advisory report of the sibling surfaces the widening now touches.
@@ -251,10 +363,7 @@ fn overlaps(
     widened: &[String],
 ) -> Result<Vec<(String, Vec<String>)>> {
     let mut found = Vec::new();
-    for member in &bloom.members {
-        if member.workpiece == amended {
-            continue;
-        }
+    for member in siblings(bloom, amended) {
         let Some(sibling) = client.commission(&member.workpiece)?.current else {
             continue;
         };
@@ -281,6 +390,7 @@ fn supersede(
 
     let mut patch = plan::successor_patch(&plan.spec, base, plan.spec.configs.clone());
     let proposals = patch.proposals.get_or_insert_with(Vec::new);
+    proposals.retain(|member| !plan.withdrawn.contains(&member.workpiece));
     plan::pin_revisions(proposals, &[(plan.workpiece.clone(), scope)])?;
 
     let draft = client.open_draft()?;
@@ -310,9 +420,23 @@ fn describe(plan: &AmendPlan, ceiling: Tier) -> String {
         let _ = writeln!(out, "  lane asked for {path}: {reason}");
     }
 
+    for (path, glob) in &plan.inherited {
+        let _ = writeln!(out, "coarsened  {path} -> {glob} (already declared)");
+    }
+
     out.push_str("added\n");
     for glob in &plan.added {
-        let _ = writeln!(out, "  + {glob}");
+        let asked = plan
+            .coarsened
+            .iter()
+            .filter(|(_, admitted)| admitted == glob)
+            .map(|(path, _)| path.as_str())
+            .collect::<Vec<_>>();
+        if asked.is_empty() {
+            let _ = writeln!(out, "  + {glob}");
+        } else {
+            let _ = writeln!(out, "  + {glob} (requested {})", asked.join(", "));
+        }
     }
 
     out.push_str(&tier::render(&plan.verdict, &plan.source, ceiling));

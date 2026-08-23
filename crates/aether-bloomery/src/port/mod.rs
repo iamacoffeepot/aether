@@ -35,8 +35,8 @@ pub use executor::{
 pub use projection::{
     AwaitingSurfaceView, BaseAlertView, BloomView, CommissionProjection, CompositionCursorView, CompositionView,
     ExecutorFaultView, HostFaultView, LandingBlock, LeaseEvictionView, LeaseView, MAX_TITLE_CHARS, MemberView,
-    MemberWhy, PendingDecisionView, ProjectedReceipt, ProjectionBackend, ReviewParkView, TransitionWhy, ViewDocument,
-    WedgeCause, WhyDocument, WhyState, WithdrawnView, intent_title,
+    MemberWhy, NarrowedCompositionView, PendingDecisionView, ProjectedReceipt, ProjectionBackend, ReviewParkView,
+    TransitionWhy, ViewDocument, WedgeCause, WhyDocument, WhyState, WithdrawnView, intent_title,
 };
 pub use source::{
     Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome, IntegrateOutcome,

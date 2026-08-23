@@ -3,8 +3,8 @@
 
 use aether_bloomery::testing::approved;
 use aether_bloomery::{
-    BloomDraft, BloomSpec, CandidateRef, ConfigRegistry, Digest, Evidence, EvidenceKind, Membership, Nonce,
-    VerifyFailureSet, WorkpieceId,
+    BloomDraft, BloomSpec, CandidateRef, CompositionParents, ConfigRegistry, Digest, Evidence, EvidenceKind,
+    Membership, Nonce, VerifyFailureSet, WorkpieceId,
 };
 use aether_chassis_bloomery::bloomery::{ScriptedUpload, ScriptedVerdict};
 use aether_chassis_bloomery::store::OutstandingOrder;
@@ -54,6 +54,7 @@ pub fn verdict(order: &OutstandingOrder, verdict: ScriptedVerdict) -> ScriptedUp
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
         calls: None,
+        narrowing: None,
     }
 }
 
@@ -68,6 +69,32 @@ pub fn passed(order: &OutstandingOrder) -> ScriptedUpload {
 #[must_use]
 pub fn failed(order: &OutstandingOrder, failed: VerifyFailureSet) -> ScriptedUpload {
     ScriptedUpload { failed_verifiers: failed, ..verdict(order, ScriptedVerdict::VerificationFailed) }
+}
+
+/// A failing verdict the fold narrows to `parents`, bounded by the union of
+/// their declared surfaces (ADR-0210).
+///
+/// What the classifier produces on a real host when a fold refuses over a
+/// disagreement between two candidates and the verified member's own delta
+/// accounts for none of it. Scripted here because the classifier reads git and
+/// a scripted lane has no worktree; what the scenario proves is the half that
+/// is the coordinator's — that no member is charged for it.
+#[must_use]
+pub fn narrowed(order: &OutstandingOrder, parents: &[&str], paths: &[&str], bound: &[&str]) -> ScriptedUpload {
+    // Sorted the way `narrow_composition` leaves them, so a scripted narrowing
+    // is byte-identical to a classified one and a scenario cannot pass against
+    // a shape the classifier never produces.
+    let mut parents: Vec<WorkpieceId> = parents.iter().map(|name| WorkpieceId((*name).to_owned())).collect();
+    parents.sort();
+    let mut paths: Vec<String> = paths.iter().map(|path| (*path).to_owned()).collect();
+    paths.sort();
+    let mut bound: Vec<String> = bound.iter().map(|glob| (*glob).to_owned()).collect();
+    bound.sort();
+
+    ScriptedUpload {
+        narrowing: Some(CompositionParents { parents, paths, bound }),
+        ..verdict(order, ScriptedVerdict::VerificationFailed)
+    }
 }
 
 /// A verdict the lane could not reach — what a gate whose scan refused to run

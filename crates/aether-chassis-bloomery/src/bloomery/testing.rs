@@ -33,7 +33,8 @@
 //! [`admit_uploaded`]: crate::bloomery::admit_uploaded
 
 use aether_bloomery::{
-    CandidateRef, Digest, LaneObservation, Nonce, StageVerdict, StudyCall, StudyCost, VerifyFailureSet,
+    CandidateRef, CompositionParents, Digest, LaneObservation, Nonce, StageVerdict, StudyCall, StudyCost,
+    VerifyFailureSet,
 };
 use serde::{Deserialize, Serialize};
 
@@ -109,6 +110,16 @@ pub struct ScriptedUpload {
     /// Per-call usage when a scenario measures a banded dispatch.
     #[serde(default)]
     pub calls: Option<Vec<StudyCall>>,
+    /// The candidates a failing fold narrows to (ADR-0210).
+    ///
+    /// Scripted rather than classified, because the classifier reads git — the
+    /// fold's candidate refs and each candidate's delta — and a scripted lane
+    /// has no worktree. The scenario that drives this is about what the
+    /// coordinator does with a narrowing, which is the half no unit test over
+    /// the classifier can reach; the classifier's own git behaviour is proved
+    /// against real repositories beside it.
+    #[serde(default)]
+    pub narrowing: Option<CompositionParents>,
 }
 
 impl ScriptedUpload {
@@ -126,6 +137,7 @@ impl ScriptedUpload {
                 failed_verifiers: self.failed_verifiers,
                 cost: self.cost,
                 calls: self.calls,
+                narrowing: self.narrowing,
                 ..LaneObservation::default()
             },
         }

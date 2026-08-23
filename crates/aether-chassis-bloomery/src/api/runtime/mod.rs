@@ -78,8 +78,8 @@ use std::sync::Arc;
 use crate::store::{ListBloomDispatchesResult, LookupDispatchResult};
 use aether_actor::{Manual, runtime};
 use aether_bloomery::{
-    AdmitResult, EnumerateClaimsResult, LoadConfigsResult, MetricsQueryResult, QueryResult, ResolvedConfigs,
-    SpendQueryResult,
+    AdmitResult, EnumerateClaimsResult, LoadConfigsResult, MetricsQueryResult, QueryResult, QuerySelector,
+    ResolvedConfigs, SpendQueryResult,
 };
 use aether_http as http;
 use aether_http::{HttpServerResponse, RegisterRouteResult};
@@ -452,14 +452,14 @@ impl NativeActor for BloomeryApiCapability {
     /// `GET /blooms` — read the whole live projection.
     #[http::route(Get, "/blooms")]
     fn on_get_blooms(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
-        let routed = ApiCapabilityState::query(None);
+        let routed = ApiCapabilityState::query(QuerySelector::Document);
         finish(state, ctx, routed)
     }
 
     /// `GET /view` — read the whole live projection (the `GET /blooms` alias).
     #[http::route(Get, "/view")]
     fn on_get_view(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
-        let routed = ApiCapabilityState::query(None);
+        let routed = ApiCapabilityState::query(QuerySelector::Document);
         finish(state, ctx, routed)
     }
 

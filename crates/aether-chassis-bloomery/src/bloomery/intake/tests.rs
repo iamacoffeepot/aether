@@ -9,11 +9,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use aether_bloomery::{
-    BloomDraft, BloomId, BloomRecord, CandidateRef, Conclusion, ConfigRegistry, Decision, Digest, Event, Evidence,
-    EvidenceKind, EvidenceRef, ExecutionLimits, ExecutionStatus, Fact, Forecast, IdempotencyKey, LaneObservation,
-    Membership, NetworkProfile, Nonce, Observation, Outcome, Provenance, ResolvedConfigs, Snapshot, SpendWindow,
-    StageCatalog, StageId, StageVerdict, Statement, StudyCall, StudyCost, SuppressionRequest, SurfacePathRequest,
-    SurfaceRequest, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, reduce,
+    BloomDraft, BloomId, BloomRecord, CandidateRef, CompositionParents, Conclusion, ConfigRegistry, Decision, Digest,
+    Event, Evidence, EvidenceKind, EvidenceRef, ExecutionLimits, ExecutionStatus, Fact, Forecast, IdempotencyKey,
+    LaneObservation, Membership, NetworkProfile, Nonce, Observation, Outcome, Provenance, ResolvedConfigs, Snapshot,
+    SpendWindow, StageCatalog, StageId, StageVerdict, Statement, StudyCall, StudyCost, SuppressionRequest,
+    SurfacePathRequest, SurfaceRequest, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder,
+    WorkpieceId, reduce,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -645,6 +646,11 @@ fn claim_for_carries_the_whole_observation() {
             lint: "allow(clippy::disallowed_methods)".into(),
             reason: "operator tooling, not cap config".into(),
         }],
+        narrowing: Some(CompositionParents {
+            parents: vec![WorkpieceId("wp-left".to_owned()), WorkpieceId("wp-right".to_owned())],
+            paths: vec!["crates/collided/src/lib.rs".into()],
+            bound: vec!["crates/collided/**".into()],
+        }),
     };
     let name = NameEvidenceClaims::attempt_artifact_name(
         &nonce,

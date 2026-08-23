@@ -37,6 +37,7 @@ mod integrate;
 mod land;
 mod landing;
 mod lease;
+mod narrowing;
 mod observe;
 mod operator;
 mod operator_hold;
@@ -59,9 +60,9 @@ pub use decision::Decision;
 pub use error::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError,
     AttemptCompletedError, BaseMismatch, FoldConflictError, GrantAttemptsError, HostFaultError, IntegrateError,
-    LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError, OperatorHoldError,
-    OperatorRepairError, OrphanClaimReleaseError, ResolveError, SealConflict, SealError, SpliceError, SupersedeError,
-    SuppressionDispositionError, SurfaceRequestedError, VerifyFailedError, WithdrawError,
+    LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError, NarrowCompositionError,
+    OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ResolveError, SealConflict, SealError,
+    SpliceError, SupersedeError, SuppressionDispositionError, SurfaceRequestedError, VerifyFailedError, WithdrawError,
 };
 pub use event::{Event, Fact};
 pub use gate::{
@@ -74,7 +75,7 @@ pub use outcome::{
 pub use seal::is_active_unlanded;
 pub use snapshot::{
     AggregateReviewFault, AwaitingSurface, BloomRecord, BloomStatus, Excuse, FileLease, FoldedIntegration,
-    HostFaultHold, LeaseEviction, MemberMachineryFault, MemberPark, Snapshot, StageProgress,
+    HostFaultHold, LeaseEviction, MemberMachineryFault, MemberPark, NarrowedComposition, Snapshot, StageProgress,
 };
 pub use view::view_of;
 pub use why::why_of;
@@ -92,6 +93,7 @@ use integrate::{reduce_integrate, reduce_resolve};
 use land::reduce_land;
 use landing::reduce_landing_rejected;
 use lease::reduce_lane_writes_observed;
+use narrowing::reduce_composition_narrowed;
 use observe::{reduce_observe_mainline, reduce_observe_mainline_diverged};
 use operator::{reduce_operator_adjudication, reduce_operator_repair};
 use operator_hold::{reduce_operator_hold, reduce_operator_release};
@@ -204,6 +206,17 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         }
         Fact::BaseVerifyCompleted { base, tree, passed, evidence, failed } => {
             reduce_base_verify_completed(snapshot, *base, *tree, *passed, evidence, *failed)
+        }
+        Fact::CompositionNarrowed { bloom, verified, tree, head, evidence, attribution } => {
+            reduce_composition_narrowed(snapshot, bloom, verified, *tree, *head, evidence, attribution)
+        }
+        // Retired: the journal holds grants the machinery decided before a
+        // widening became an operator's decision, and those records replay
+        // through their own recorded decisions (ADR-0190) rather than through
+        // here. Nothing admits the fact any more, so the live path is a named
+        // refusal that decides nothing — no pin moves, no lane is dispatched.
+        Fact::SurfaceGranted { .. } => {
+            Decisions::rejected(Outcome::SurfaceGrantRejected(SurfaceRequestedError::GrantRetired))
         }
     }
 }

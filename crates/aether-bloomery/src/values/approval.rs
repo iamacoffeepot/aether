@@ -206,7 +206,7 @@ pub struct TierVerdict {
 }
 
 /// Resolve `policy` over the widened surface and over each added glob alone
-/// (ADR-0207 §the tier ladder decides who grants it).
+/// (ADR-0207 §An operator decides every widening).
 #[must_use]
 pub fn tier_verdict(policy: &ApprovalPolicy, existing: &[String], added: &[String]) -> TierVerdict {
     let mut widened_surface: Vec<String> = existing.to_vec();
@@ -273,6 +273,42 @@ pub fn surface_intersection(left: &[String], right: &[String]) -> Vec<String> {
         }
     }
     shared.into_iter().collect()
+}
+
+/// Every path the declared surfaces of one bloom's members permit, as the
+/// smallest glob list that permits exactly them (ADR-0210).
+///
+/// An approval authorizes a path *in a bloom*, not a path-to-member pairing:
+/// every member lands into one tree, so a path some member was approved at is a
+/// path the bloom may write. The union is what a repairing lane is allowed to
+/// edit, which is why it is derived from sealed surfaces and never declared —
+/// nothing a lane or an operator says can put a glob in here that no member's
+/// signed revision already carries.
+///
+/// A glob a broader sibling covers is dropped, so the answer contains no
+/// redundant entry and reads as the boundary it is. Sorted, so one membership
+/// answers the same list however the surfaces were ordered. A glob outside the
+/// surface grammar is skipped — the admission doors refuse it first, and the
+/// fail-closed parse here matches [`surface_intersection`]'s.
+///
+/// Quadratic in the globs handed to it, over the members of one bloom each
+/// declaring a short list. That is the same shape and the same bound the seal
+/// door's pairwise overlap scan already runs at.
+#[must_use]
+pub fn surface_union(surfaces: &[&[String]]) -> Vec<String> {
+    let patterns: Vec<SurfacePattern> =
+        surfaces.iter().flat_map(|surface| surface.iter()).filter_map(|glob| SurfacePattern::parse(glob)).collect();
+
+    let mut widest = BTreeSet::new();
+    for (index, pattern) in patterns.iter().enumerate() {
+        // A duplicate covers itself, so the equality guard is what keeps two
+        // members declaring the same crate from cancelling each other out.
+        if !patterns.iter().enumerate().any(|(peer, other)| peer != index && other != pattern && other.covers(pattern))
+        {
+            widest.insert(pattern.to_glob());
+        }
+    }
+    widest.into_iter().collect()
 }
 
 /// Whether `path` matches any declared-surface glob.
@@ -778,7 +814,7 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use super::{ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, surface_intersection};
+    use super::{ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, surface_intersection, surface_union};
 
     /// The reference tier policy — the same rules `test-surface-match.py`'s
     /// `POLICY` used, so the resolver is checked against the same cases.
@@ -945,6 +981,42 @@ mod tests {
         // it contributes nothing rather than matching by raw string equality.
         // The seal door refuses such a glob before this check runs.
         assert!(surface_intersection(&surface(&["docs/*"]), &surface(&["docs/*"])).is_empty());
+    }
+
+    #[test]
+    fn a_union_keeps_the_widest_glob_and_drops_what_it_covers() {
+        // The bound a conflict repair is given is what two parents were
+        // approved at together. A narrower glob left beside the subtree that
+        // covers it would read to an operator as a second, separate grant.
+        assert_eq!(
+            surface_union(&[
+                &surface(&["crates/aether-bloomery/**", "crates/aether-bloomery/src/lib.rs"]),
+                &surface(&["xtask/**"]),
+            ]),
+            surface(&["crates/aether-bloomery/**", "xtask/**"]),
+        );
+    }
+
+    #[test]
+    fn a_glob_two_surfaces_both_declare_survives_the_union() {
+        // Tripwire: dropping every glob some *other* glob covers deletes a
+        // duplicate entirely, because each copy covers the other. Two members
+        // declaring the same crate is the overlap case the union exists for,
+        // so losing it would hand the repair a bound narrower than either
+        // parent held alone.
+        assert_eq!(
+            surface_union(&[&surface(&["crates/shared/**"]), &surface(&["crates/shared/**", "xtask/**"])]),
+            surface(&["crates/shared/**", "xtask/**"]),
+        );
+    }
+
+    #[test]
+    fn an_out_of_grammar_glob_contributes_nothing_to_a_union() {
+        // The same fail-closed parse the intersection scan applies: a glob the
+        // admission doors refuse names no pattern, so it cannot widen a bound
+        // by surviving as a raw string.
+        assert_eq!(surface_union(&[&surface(&["docs/*", "docs/guide/**"])]), surface(&["docs/guide/**"]));
+        assert!(surface_union(&[]).is_empty());
     }
 
     #[test]

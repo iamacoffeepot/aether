@@ -618,6 +618,32 @@ pub enum MemberExecutorFaultError {
     },
 }
 
+/// Why an attribution of a failing fold to two parents was refused
+/// (ADR-0210).
+///
+/// Every arm leaves the verdict where the host found it. A mint over a
+/// membership that cannot support the attribution would hand a repair lane two
+/// candidates the bloom does not hold, which is worse than no attribution at
+/// all.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum NarrowCompositionError {
+    /// No active bloom with this id.
+    UnknownOrInactiveBloom,
+    /// The attribution names some number of parents other than two. A
+    /// collision has exactly two sides; anything else is a guess wearing a
+    /// subject's clothes.
+    NotTwoParents(usize),
+    /// A named parent is not a member of this bloom.
+    NotAMember(WorkpieceId),
+    /// A named parent was withdrawn, so its candidate is not in the fold and
+    /// its surface no longer bounds anything here.
+    ParentWithdrawn(WorkpieceId),
+    /// The member whose Verify produced the verdict is itself a parent. Its own
+    /// Verify is where that finding belongs, and routing it to a synthetic
+    /// would hide a defect the member owns.
+    VerifiedIsParent(WorkpieceId),
+}
+
 /// Why a surface-request admission was refused (ADR-0207).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum SurfaceRequestedError {
@@ -649,6 +675,13 @@ pub enum SurfaceRequestedError {
     /// Reconcile) — the only stages whose lane can decline for want of
     /// surface.
     NotAConstructFamilyStage(StageId),
+    /// The machinery no longer grants a surface: an increase is an operator's
+    /// decision, taken through `cargo xtask bloom amend`. The one answer a
+    /// retired [`Fact::SurfaceGranted`](crate::Fact::SurfaceGranted) gets if
+    /// one ever reaches the reducer. Appended past
+    /// [`NotAConstructFamilyStage`](Self::NotAConstructFamilyStage) so the
+    /// prior refusals keep their wire discriminants.
+    GrantRetired,
 }
 
 /// Why a member withdrawal was refused (#5327).

@@ -43,8 +43,13 @@
 mod diff;
 mod names;
 
+/// The path extractor the fold narrowing reads a compiler diagnostic with
+/// (ADR-0210) — the same reader the repair-lap triage checks a finding against,
+/// so the two cannot disagree about what a diagnostic named.
+pub(super) use names::named_surface;
+
 use diff::changed_surface;
-use names::{named_check_surface, named_surface};
+use names::named_check_surface;
 
 /// The largest repair diff the triage will read. Past it the lap passes
 /// untriaged: a bounded mechanical check that cannot afford to be wrong does not

@@ -11,6 +11,7 @@ use aether_bloomery::{
     classify_findings, normalize_stage_result,
 };
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
+use std::fmt::Write as _;
 
 use super::admission_key::AdmissionKey;
 use super::dispatch::DispatchRecord;
@@ -261,6 +262,54 @@ fn persist_aggregate_findings(
         }
     }
     Ok(())
+}
+
+/// Author the work order a narrowed composition repairs against (ADR-0210).
+///
+/// A narrowed composition is minted by the coordinator rather than sealed by an
+/// operator, so nothing has written it a work order and the dispatch would park
+/// as a subject-only lane. What it needs stating is exactly what the narrowing
+/// already knows: whose candidates have to coexist, which paths the gate named,
+/// and what it may edit — plus the objective, which is the same at every arity
+/// and is the one thing a repair lane must not be left to infer.
+///
+/// Written on the store's review-findings channel because that is the channel
+/// the composition Refine already reads, so no second overlay path exists to
+/// drift from this one.
+fn persist_narrowed_work_order(
+    store: &mut dyn StoreBackend,
+    record: &DispatchRecord,
+    upload: &UploadedEvidence,
+) -> rusqlite::Result<()> {
+    let Some(narrowing) = &upload.observation.narrowing else {
+        return Ok(());
+    };
+    let Some(composition) = narrowing.workpiece() else {
+        return Ok(());
+    };
+
+    let mut order = String::from(
+        "Make these candidates coexist on one tree. Every intent survives, the workspace builds, and what each \
+         parent passed alone still passes. Author nothing new and touch nothing no parent touched. If the intents \
+         cannot coexist, state which parent's intent had to give and stop.\n\n## Parents\n\n",
+    );
+    for parent in &narrowing.parents {
+        let _ = writeln!(order, "- {}", parent.0);
+    }
+    order.push_str("\n## Paths the gate named\n\n");
+    for path in &narrowing.paths {
+        let _ = writeln!(order, "- {path}");
+    }
+    order.push_str("\n## You may edit\n\n");
+    for glob in &narrowing.bound {
+        let _ = writeln!(order, "- {glob}");
+    }
+    if let Some(findings) = &upload.observation.findings {
+        order.push_str("\n## The gate's own words\n\n");
+        order.push_str(findings);
+    }
+
+    store.record_review_findings(record.bloom.0.as_bytes(), &composition.0, &order)
 }
 
 /// Persist a consumed aggregate-verify verdict's findings on the composition
@@ -534,6 +583,20 @@ fn verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Ev
                 evidence,
                 findings: upload.observation.findings.clone().unwrap_or_default(),
             }
+        } else if let Some(narrowing) = upload.observation.narrowing.clone() {
+            // The verdict is real and the member is not who owes it: the failing
+            // diagnostic is accounted for by two other candidates in the same fold
+            // (ADR-0210). Routing it to `VerifyFailed` here is what charged an
+            // innocent member a repair lap it would decline, so the fold's own
+            // narrowing takes precedence over both arms below.
+            Fact::CompositionNarrowed {
+                bloom: record.bloom,
+                verified: record.workpiece.clone(),
+                tree: record.candidate,
+                head: record.candidate,
+                evidence,
+                attribution: narrowing,
+            }
         } else if upload.observation.failed_verifiers.contains(VerifyFailure::Containment) {
             Fact::ContainmentRefused {
                 bloom: record.bloom,
@@ -587,6 +650,9 @@ fn out_of_stage_refusal(stage: StageId, upload: &UploadedEvidence) -> Option<Int
 /// (ADR-0207): the reducer parks the member awaiting a surface amendment
 /// rather than spending an attempt on a lap that would reproduce the same
 /// refusal.
+/// The fact a declining lane's surface request admits as (ADR-0207): a park
+/// naming the paths the work needs, which an operator answers by amending the
+/// member's scope revision and superseding the bloom onto it.
 fn surface_requested_event(record: &DispatchRecord, evidence: Evidence, request: SurfaceRequest) -> Event {
     Event {
         idempotency_key: AdmissionKey::SurfaceRequest.of(&record.nonce.0),
@@ -878,6 +944,9 @@ fn persist_consumed(
             &record.workpiece.0,
             &upload.observation.suppression_requests,
         )?;
+        // A member Verify that narrowed carries the work order for the
+        // composition it minted, not for the member that produced the verdict.
+        persist_narrowed_work_order(store, record, upload)?;
     } else if record.stage == StageId::AggregateVerify {
         persist_aggregate_verify_findings(store, record, upload)?;
     } else if record.stage == StageId::AggregateReview && upload.verdict != StageVerdict::ExecutorFault {

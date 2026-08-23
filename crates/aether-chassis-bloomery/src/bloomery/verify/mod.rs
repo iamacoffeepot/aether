@@ -39,7 +39,7 @@ pub use batch::{
     run_batch_gate,
 };
 pub use closure::{ClosureKey, ClosureKeyError, closure_key};
-pub use containment::{apply_containment, changed_paths, out_of_surface, path_in_surface};
+pub use containment::{apply_containment, candidate_delta_base, candidate_violations, changed_paths, path_in_surface};
 #[cfg(feature = "runtime")]
 pub use facts::record_proof_facts;
 pub use facts::{DiscriminatedFact, DiscriminatedFacts, ProofResult, ProofSource, RunnerReport, discriminate};

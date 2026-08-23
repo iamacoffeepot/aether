@@ -24,6 +24,8 @@ use serde::{Deserialize, Serialize};
 use client::ControlApi;
 use scope::load_revision;
 
+pub use scope::task_text;
+
 use crate::bloomery::load_policy;
 
 /// Default REST port when `--http-port` is omitted — the same default the

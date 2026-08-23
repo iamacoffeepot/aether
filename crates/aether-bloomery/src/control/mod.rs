@@ -967,48 +967,63 @@ pub enum AdmitResult {
 
 /// Read the live projection (ADR-0149 §The boundary). The control actor is the
 /// single owner of the live [`Snapshot`](crate::reduce::Snapshot), so reads
-/// come from here rather than rebuilding a snapshot per request. With `bloom`
-/// unset the reply carries the whole [`ViewDocument`](crate::port::ViewDocument);
-/// with `bloom` set to a bloom-id's digest bytes it carries that one bloom's
-/// [`BloomView`](crate::port::BloomView).
+/// come from here rather than rebuilding a snapshot per request. What to read
+/// is named by one [`QuerySelector`], and the answer is the [`QueryResult`] arm
+/// that matches it.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.bloomery.query")]
 pub struct Query {
-    /// The bloom to read, as its digest bytes; unset reads the whole document.
-    pub bloom: Option<Vec<u8>>,
-    /// An orphan-claim release request to read, as its digest bytes (ADR-0179).
+    /// Which resource this read asks for.
+    pub selector: QuerySelector,
+}
+
+/// Which resource a [`Query`] reads — exactly one, by construction.
+///
+/// A selector rather than a set of independent fields, because a reader asks
+/// for a bloom or a release or the calibration ledger and never for two at
+/// once. The resolver gets one arm per variant with no precedence to arbitrate,
+/// and a read that would have nothing to name — a why with no bloom — cannot be
+/// built. The variants mirror [`QueryResult`]'s arms so a request and its reply
+/// read as a pair.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum QuerySelector {
+    /// The whole [`ViewDocument`](crate::port::ViewDocument).
+    Document,
+    /// One bloom's [`BloomView`](crate::port::BloomView).
+    Bloom {
+        /// The bloom to read, as its bloom-id digest bytes.
+        #[serde(with = "aether_data::bytes")]
+        digest: Vec<u8>,
+    },
+    /// Why one bloom is not advancing (#5281): the stored-fact chain from the
+    /// land down to member dispatch, plus one answer per member.
     ///
-    /// Its own field rather than a second meaning for `bloom` because the two
-    /// name different things — a bloom id and a release request digest — and a
-    /// shared field would make an unrecognised digest ambiguous between "no such
-    /// bloom" and "no such release". Takes precedence when both are set; a
-    /// request digest is the more specific read.
-    #[serde(default)]
-    pub release: Option<Vec<u8>>,
-    /// Read the calibration document instead of a projection (ADR-0184): the
-    /// capability ledger the control core folded beside its snapshot, paired
-    /// with the forecast grade of every bloom in it.
+    /// Its own variant rather than a flag on [`Bloom`](Self::Bloom) because the
+    /// two render the same subject as two different documents, and one reply
+    /// arm cannot answer for both. It carries the digest it explains, so the
+    /// question always has a subject.
+    Why {
+        /// The bloom to explain, as its bloom-id digest bytes.
+        #[serde(with = "aether_data::bytes")]
+        digest: Vec<u8>,
+    },
+    /// One orphan-claim release request's journal-derived state (ADR-0179).
     ///
-    /// A flag rather than a third digest field because it selects a whole-fleet
-    /// read with nothing to name. It takes precedence over
-    /// [`bloom`](Self::bloom) and yields to [`release`](Self::release), which is
-    /// the same most-specific-first order those two already resolve in.
-    #[serde(default)]
-    pub calibration: bool,
-    /// Answer "why is this bloom not advancing" instead of projecting its view
-    /// (#5281): the stored-fact chain from the land down to member dispatch,
-    /// plus one answer per member.
+    /// Its own variant rather than a second meaning for [`Bloom`](Self::Bloom)
+    /// because the two name different things — a bloom id and a release request
+    /// digest — and a shared variant would make an unrecognised digest
+    /// ambiguous between "no such bloom" and "no such release".
+    Release {
+        /// The release request to read, as its digest bytes.
+        #[serde(with = "aether_data::bytes")]
+        digest: Vec<u8>,
+    },
+    /// The calibration document (ADR-0184): the capability ledger the control
+    /// core folded beside its snapshot, paired with the forecast grade of every
+    /// bloom in it.
     ///
-    /// A flag paired with [`bloom`](Self::bloom) rather than a fourth digest
-    /// field, because it selects a different *rendering* of the same subject
-    /// the bloom id already names. It yields to [`release`](Self::release) and
-    /// [`calibration`](Self::calibration), which name whole other subjects, and
-    /// is answered before the view document is projected — that document would
-    /// be built and thrown away. Without a `bloom` it has nothing to explain
-    /// and is ignored. Trailing and `#[serde(default)]` so a reader that
-    /// predates the field still decodes.
-    #[serde(default)]
-    pub why: bool,
+    /// Fieldless because it selects a whole-fleet read with nothing to name.
+    Calibration,
 }
 
 /// Reply to [`Query`]: the requested projection as canonical
@@ -1053,7 +1068,7 @@ pub enum QueryResult {
     /// (ADR-0179).
     ///
     /// Its own variant rather than a second meaning for [`NotFound`](Self::NotFound)
-    /// for the same reason [`Query::release`] is its own field: the reply is what
+    /// for the same reason [`QuerySelector::Release`] is its own variant: the reply is what
     /// the reader renders, so collapsing the two makes an unrecognised digest
     /// name the wrong resource — a missing release would report "no bloom". The
     /// [`Query`] doc already refuses that ambiguity on the request side; this

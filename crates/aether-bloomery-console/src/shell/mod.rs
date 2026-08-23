@@ -148,7 +148,15 @@ impl Shell {
         if self.stack.is_empty() {
             self.workspace.render(frame, chunks[3], &self.store);
         } else if let Some(screen) = self.stack.last_mut() {
-            screen.render(frame, chunks[3], &self.store);
+            let body = chunks[3];
+            if let Some(title) = screen.reading_title() {
+                let block = chrome::pane_block(title, true);
+                let inner = block.inner(body);
+                frame.render_widget(block, body);
+                screen.render(frame, inner, &self.store);
+            } else {
+                screen.render(frame, body, &self.store);
+            }
         }
         let hints = self.footer_hints();
         if self.keys_overlay {
@@ -1419,6 +1427,64 @@ mod tests {
         let buffer = terminal.backend().buffer();
         assert_eq!(title_border_symbol(buffer, "board"), "┌");
         assert_eq!(title_border_symbol(buffer, "needs you"), "┏");
+    }
+
+    /// The body rect's first row: the header, the breadcrumb and the rule each
+    /// take one row above it.
+    const BODY_TOP: u16 = 3;
+
+    #[test]
+    fn a_pushed_artifact_reads_inside_a_titled_pane() {
+        // Names the bug: served JSON painted edge to edge with nothing saying
+        // what it is.
+        let digest = digest(0xab);
+        let mut shell = Shell::probe(Nav::focus(Focus::artifact(digest)));
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, BODY_TOP)].symbol(), "┏");
+        let body_first = buffer_text(&terminal).lines().nth(BODY_TOP as usize).unwrap_or("").to_owned();
+        assert!(body_first.contains("artifact"), "reading title missing from body first row:\n{body_first}");
+        let prefix = digest.prefix();
+        let mut inner = String::new();
+        for x in 1..buffer.area().width {
+            inner.push_str(buffer[(x, BODY_TOP + 1)].symbol());
+        }
+        assert!(
+            inner.starts_with(&format!("artifact  {prefix}")),
+            "artifact first line should start one column inside the border, got:\n{inner}"
+        );
+        assert_ne!(buffer[(0, BODY_TOP + 1)].symbol(), "a", "artifact text started at the body left edge");
+    }
+
+    #[test]
+    fn a_chart_frame_is_not_double_framed() {
+        // Tripwire: reading_title's None arm is the only thing separating a
+        // reading frame from a chart frame; a later `_ => Some(...)` catch-all
+        // would silently box every screen.
+        let mut shell = Shell::probe(Nav::days());
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        for (x, y) in [(0, BODY_TOP), (99, BODY_TOP), (0, 21), (99, 21)] {
+            assert_ne!(
+                buffer[(x, y)].symbol(),
+                "┏",
+                "thick corner at the body rect ({x},{y}); days gained an outer frame"
+            );
+        }
+    }
+
+    #[test]
+    fn the_reading_pane_does_not_move_the_scroll() {
+        // Names the bug: a two-row-shorter rect silently re-clamping the
+        // reader's position on every frame.
+        let mut shell = Shell::probe(Nav::focus(Focus::record(42)));
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('j'))), Outcome::Handled);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('j'))), Outcome::Handled);
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        assert_eq!(shell.top_scroll(), 0);
     }
 
     #[test]

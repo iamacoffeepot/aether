@@ -36,9 +36,9 @@ use std::time::{Duration, Instant};
 use aether_bloomery::{
     Admit, AdmitResult, BloomDraft, BloomId, CONTROL_CORE_NAMESPACE, CalibrationDocument, CandidateRef, ConfigKind,
     ConfigRegistry, Decision, Decisions, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership,
-    ModelOverride, OperatorHold, OperatorRepair, OperatorRepairError, Outcome, Query, QueryResult, ResolutionClaim,
-    ResolvedConfigs, SealError, Snapshot, SpendWindow, StageCatalog, StageId, StudyCost, StudyRecord, Unproducible,
-    VerifyFailureSet, ViewDocument, WorkpieceId, decode_recorded_decisions, digest_of, reduce,
+    ModelOverride, OperatorHold, OperatorRepair, OperatorRepairError, Outcome, Query, QueryResult, QuerySelector,
+    ResolutionClaim, ResolvedConfigs, SealError, Snapshot, SpendWindow, StageCatalog, StageId, StudyCost, StudyRecord,
+    Unproducible, VerifyFailureSet, ViewDocument, WorkpieceId, decode_recorded_decisions, digest_of, reduce,
 };
 use aether_chassis_bloomery::artifacts::{ArtifactsCapabilityState, PutResult};
 use aether_chassis_bloomery::store::{JournalWrite, RecordConfig, RecordConfigResult, SqliteStore, StoreBackend};
@@ -198,17 +198,21 @@ fn query_until_blooms(stream: &mut TcpStream, cid_base: u64, control: MailboxId,
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut cid = cid_base;
     loop {
-        let document = match call::<_, QueryResult>(
-            stream,
-            cid,
-            control,
-            &Query { bloom: None, release: None, calibration: false, why: false },
-        ) {
-            QueryResult::Document { document } => from_bytes::<ViewDocument>(&document).expect("document decodes"),
+        let read = Query { selector: QuerySelector::Document };
+        match call::<_, QueryResult>(stream, cid, control, &read) {
+            QueryResult::Document { document } => {
+                let document = from_bytes::<ViewDocument>(&document).expect("document decodes");
+                if document.blooms.len() == want || Instant::now() >= deadline {
+                    return document;
+                }
+            }
+            // The read landed inside the boot window: the core refuses it rather
+            // than answering off the empty boot snapshot, so it is one more lap
+            // of the very wait this helper exists to run.
+            QueryResult::Err { .. } => {
+                assert!(Instant::now() < deadline, "the projection stayed unreadable for the whole budget");
+            }
             other => panic!("expected a document reply, got {other:?}"),
-        };
-        if document.blooms.len() == want || Instant::now() >= deadline {
-            return document;
         }
         cid += 1;
         thread::sleep(Duration::from_millis(100));
@@ -313,6 +317,126 @@ fn control_loop_converges_across_a_restart() {
     assert!(matches!(second, Outcome::SealRejected(_)), "the overlapping seal is refused: {second:?}");
 }
 
+#[test]
+fn every_selector_reaches_its_own_reply_arm() {
+    // Tripwire: `QuerySelector` and `QueryResult` are two enums that have to
+    // stay parallel. A selector with no reply arm of its own answers as
+    // whichever arm it falls into, which is what the precedence ladder these
+    // variants replaced used to hide — a `why` with no bloom read back as a
+    // projection, a release digest read back as a missing bloom.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("bloomery.db");
+    let db = db.to_str().unwrap();
+
+    let (_coordinator, mut stream) = spawn_with_store(db, "control-loop-test");
+    let control = control_mailbox();
+
+    let sealed = admit(&mut stream, 2, control, &seal_event("seal-1", 0, "wp"));
+    assert!(matches!(sealed, Outcome::Sealed(_)), "the fixture seal admits: {sealed:?}");
+    let bloom = query_until_blooms(&mut stream, 10, control, 1).blooms[0].id.0.as_bytes().to_vec();
+
+    let projection = call::<_, QueryResult>(&mut stream, 20, control, &Query { selector: QuerySelector::Document });
+    assert!(matches!(projection, QueryResult::Document { .. }), "Document reads the projection: {projection:?}");
+
+    let selector = QuerySelector::Bloom { digest: bloom.clone() };
+    let view = call::<_, QueryResult>(&mut stream, 21, control, &Query { selector });
+    assert!(matches!(view, QueryResult::Bloom { .. }), "Bloom reads that bloom's view: {view:?}");
+
+    let selector = QuerySelector::Why { digest: bloom.clone() };
+    let why = call::<_, QueryResult>(&mut stream, 22, control, &Query { selector });
+    assert!(matches!(why, QueryResult::Why { .. }), "Why explains the same bloom: {why:?}");
+
+    // A bloom id is not a release request digest, and the reply says so in
+    // release's own words rather than reporting a missing bloom.
+    let selector = QuerySelector::Release { digest: bloom };
+    let release = call::<_, QueryResult>(&mut stream, 23, control, &Query { selector });
+    assert!(matches!(release, QueryResult::ReleaseNotFound), "Release names releases: {release:?}");
+
+    let selector = QuerySelector::Calibration;
+    let calibration = call::<_, QueryResult>(&mut stream, 24, control, &Query { selector });
+    assert!(matches!(calibration, QueryResult::Calibration { .. }), "Calibration reads the ledger: {calibration:?}");
+}
+
+/// How many refusal rows the planted journal carries beneath its one sealed
+/// row. The window this test observes is the one the control core spends idle
+/// between the store reads its `wire` issues and the fold that answers them, so
+/// it is the store's read of the journal that has to be wide enough to reach
+/// from another process. Every filler row records a refusal, so the fold
+/// applies nothing and the rebuilt projection is exactly the one sealed bloom.
+const PRE_REPLAY_FILLER_ROWS: usize = 20_000;
+
+#[test]
+fn the_view_is_not_served_before_the_journal_has_replayed() {
+    // The plausible bug: `on_query` reads `state.snapshot` without the
+    // `replayed` gate `on_admit` and `on_observe_tick` carry, so a read landing
+    // in the boot window is answered off `Snapshot::default()` — a well-formed,
+    // wholly empty projection that a reader cannot tell from a coordinator with
+    // nothing in flight. The notification reactor is the live victim: it fires a
+    // boot tick from its own `wire`, differences its ledger against that empty
+    // document, forgets every recorded key, and re-posts the entire standing set
+    // on the next pass. Only the core knows the snapshot is not yet the one the
+    // journal describes, so the refusal has to come from here.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("bloomery.db");
+    let db = db.to_str().unwrap();
+
+    let sealed = seal_event("seal-visible", 0, "wp");
+    let decided = reduce(&Snapshot::default(), &sealed, &ResolvedConfigs::default(), &SpendWindow::default());
+    assert!(matches!(decided.outcome, Outcome::Sealed(_)), "fixture control: the planted row seals");
+    let refusal = Decisions { outcome: Outcome::SealRejected(SealError::EmptyMembership), effects: Vec::new() };
+
+    {
+        let mut store = SqliteStore::open(db).unwrap();
+        store
+            .append_event(&JournalWrite {
+                idempotency_key: "seal-visible",
+                event: &to_vec(&sealed).unwrap(),
+                decisions: &to_vec(&decided).unwrap(),
+                decider: "control-loop-test",
+            })
+            .unwrap();
+        let filler = to_vec(&seal_event("filler", 1, "wp-filler")).unwrap();
+        let refused = to_vec(&refusal).unwrap();
+        for row in 0..PRE_REPLAY_FILLER_ROWS {
+            store
+                .append_event(&JournalWrite {
+                    idempotency_key: &format!("filler-{row}"),
+                    event: &filler,
+                    decisions: &refused,
+                    decider: "control-loop-test",
+                })
+                .unwrap();
+        }
+    }
+
+    let (_coordinator, mut stream) = spawn_with_store(db, "control-loop-test");
+    let control = control_mailbox();
+
+    let deadline = Instant::now() + Duration::from_mins(2);
+    let mut refusals = 0_u32;
+    let mut cid = 10;
+    loop {
+        let read = Query { selector: QuerySelector::Document };
+        match call::<_, QueryResult>(&mut stream, cid, control, &read) {
+            QueryResult::Document { document } => {
+                let view = from_bytes::<ViewDocument>(&document).expect("document decodes");
+                assert_eq!(
+                    view.blooms.len(),
+                    1,
+                    "the projection was served from the boot snapshot before the journal replayed \
+                     (after {refusals} refusals): {view:?}",
+                );
+                break;
+            }
+            QueryResult::Err { .. } => refusals += 1,
+            other => panic!("expected a document or a refusal, got {other:?}"),
+        }
+        assert!(Instant::now() < deadline, "the projection never rebuilt from the planted journal");
+        cid += 1;
+    }
+    assert!(refusals > 0, "fixture control: no read reached the boot window, so nothing above was proved");
+}
+
 /// Read the calibration document, retrying until the ledger has measured
 /// something — boot replay runs asynchronously after a component load, so a read
 /// issued immediately races the rebuild exactly as `query_until_blooms` does.
@@ -320,7 +444,7 @@ fn calibration_until_measured(stream: &mut TcpStream, cid_base: u64, control: Ma
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut cid = cid_base;
     loop {
-        let read = Query { bloom: None, release: None, calibration: true, why: false };
+        let read = Query { selector: QuerySelector::Calibration };
         let document = match call::<_, QueryResult>(stream, cid, control, &read) {
             QueryResult::Calibration { document } => {
                 from_bytes::<CalibrationDocument>(&document).expect("calibration document decodes")
@@ -455,17 +579,13 @@ fn a_calibration_read_fills_cost_columns_from_a_resolved_study_artifact() {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut cid = 10;
     let document = loop {
-        let document = match call::<_, QueryResult>(
-            &mut stream,
-            cid,
-            control,
-            &Query { bloom: None, release: None, calibration: true, why: false },
-        ) {
-            QueryResult::Calibration { document } => {
-                from_bytes::<CalibrationDocument>(&document).expect("calibration document decodes")
-            }
-            other => panic!("expected a calibration reply, got {other:?}"),
-        };
+        let document =
+            match call::<_, QueryResult>(&mut stream, cid, control, &Query { selector: QuerySelector::Calibration }) {
+                QueryResult::Calibration { document } => {
+                    from_bytes::<CalibrationDocument>(&document).expect("calibration document decodes")
+                }
+                other => panic!("expected a calibration reply, got {other:?}"),
+            };
         if document.ledger.cells.iter().any(|cell| cell.samples > 0) || Instant::now() >= deadline {
             break document;
         }

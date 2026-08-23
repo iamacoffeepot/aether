@@ -10,9 +10,9 @@ use super::gate::RecordedRefusal;
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
-    Adjudication, BloomSpec, CandidateRef, ConfigRegistry, Evidence, MemberDependency, OperatorHold, OperatorRepair,
-    OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim, Statement, SuppressionDisposition,
-    SurfaceRequest, VerifyFailureSet, Withdrawal,
+    Adjudication, BloomSpec, CandidateRef, CompositionParents, ConfigRegistry, Evidence, MemberDependency,
+    OperatorHold, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim, Statement,
+    SuppressionDisposition, SurfaceRequest, VerifyFailureSet, Withdrawal,
 };
 
 /// An admitted fact plus its idempotency key (ADR-0149 §The control core).
@@ -751,6 +751,65 @@ pub enum Fact {
         evidence: Evidence,
         /// The verifier identities that failed together. Empty on a pass.
         failed: VerifyFailureSet,
+    },
+    /// The host attributed a failing fold to the two candidates that collide
+    /// on it (ADR-0210).
+    ///
+    /// The classification is the host's because the inputs are: the failing
+    /// diagnostic's paths and each candidate's diff against the sealed base
+    /// live in the checkout, not in the journal. What the reducer does with it
+    /// is the decision — mint the synthetic subject, and leave the member whose
+    /// Verify happened to produce the verdict exactly where it was.
+    ///
+    /// Appended past [`Fact::BaseVerifyCompleted`] so every prior fact keeps its
+    /// wire discriminant.
+    CompositionNarrowed {
+        /// The bloom whose fold refused.
+        bloom: BloomId,
+        /// The member whose Verify produced the verdict. Named so the reducer
+        /// can prove it is untouched, and so an operator reading the journal
+        /// can see which lane paid for discovering the collision.
+        verified: WorkpieceId,
+        /// The refused tree — the conflict workpiece's subject.
+        tree: Digest,
+        /// The commit carrying that tree, which the repair checks out.
+        head: Digest,
+        /// The refusing verdict.
+        evidence: Evidence,
+        /// The two parents, the diagnostic paths, and the union bound, already
+        /// through [`narrow_composition`](crate::narrow_composition).
+        attribution: CompositionParents,
+    },
+    /// **Retired.** The machinery once granted a member the surface its lane
+    /// asked for and re-pinned it mid-bloom. A widening is an operator's
+    /// decision now — taken through `cargo xtask bloom amend` and delivered as
+    /// a [`Fact::Supersede`] — so nothing admits this fact any more.
+    ///
+    /// It keeps its place because the journal already holds records written
+    /// under it, and ADR-0187 never rewrites sealed history: those bytes have
+    /// to go on decoding under the shape that wrote them. Last in declaration
+    /// order, so every prior fact keeps its wire discriminant.
+    ///
+    /// Boot replay folds each record's *recorded* decisions rather than
+    /// re-deciding it (ADR-0190), so a historical grant still folds exactly as
+    /// it did live and the member it moved stays where the journal put it. The
+    /// reducer arm this variant reaches today refuses with
+    /// `SurfaceRequestedError::GrantRetired` and decides no effects, so a fact
+    /// arriving here now can neither re-pin nor re-dispatch.
+    SurfaceGranted {
+        /// The bloom the member belongs to.
+        bloom: BloomId,
+        /// The member whose surface grew.
+        workpiece: WorkpieceId,
+        /// The stage its lane declined at, and the stage it re-entered.
+        stage: StageId,
+        /// The stored successor revision, already carrying the widened surface
+        /// and its approval.
+        revision: Digest,
+        /// The globs the grant added, at the granularity the seal admits.
+        added: Vec<String>,
+        /// The declining evidence the grant answered.
+        evidence: Evidence,
     },
 }
 

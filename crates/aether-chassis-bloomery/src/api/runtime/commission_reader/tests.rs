@@ -84,7 +84,11 @@ fn a_verified_row_materializes_the_workpiece_and_the_frozen_projection() {
     assert_eq!(admitted.workpiece.id.0, "wp-1");
     assert_eq!(admitted.workpiece.scope_revision, digest);
     assert_eq!(admitted.projection.declared_surface, ["docs/guide/**"]);
-    assert_eq!(admitted.description, "advisory");
+    // The advisory body is the revision's own, and the surface block under it
+    // is rendered from `declared_surface` rather than trusted from the text: an
+    // amendment widens the field and carries the body forward unchanged, so the
+    // field is what the work order has to state.
+    assert_eq!(admitted.description, "advisory\n\n## Declared surface\n\ndocs/guide/**\n");
     assert!(admitted.projection.signed_statement.is_none(), "an auto row is not a signed statement");
 }
 

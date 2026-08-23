@@ -6,8 +6,9 @@
 use aether_actor::Manual;
 use aether_bloomery::{
     Adjudication, Admit, AdmitResult, AuthorityDoor, BloomId, BloomView, CandidateRef, Digest, Disposition, Event,
-    Evidence, EvidenceKind, Fact, IdempotencyKey, OperatorHold, OperatorRepair, Outcome, Query, QueryResult, Statement,
-    SuppressionDisposition, ViewDocument, WhyDocument, Withdrawal, WithdrawalCause, WorkpieceId, digest_of,
+    Evidence, EvidenceKind, Fact, IdempotencyKey, OperatorHold, OperatorRepair, Outcome, Query, QueryResult,
+    QuerySelector, StageId, Statement, SuppressionDisposition, SurfacePathRequest, ViewDocument, WhyDocument,
+    Withdrawal, WithdrawalCause, WorkpieceId, digest_of,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_http::HttpServerResponse;
@@ -529,16 +530,18 @@ impl ApiCapabilityState {
         }
     }
 
-    /// `GET /blooms` and `GET /view` — read the whole live projection.
-    pub(super) fn query(bloom: Option<Vec<u8>>) -> Routed {
-        Routed::Query(Query { bloom, release: None, calibration: false, why: false })
+    /// The control-core read every live-read route here defers: one selector,
+    /// one [`QueryResult`] arm. `GET /blooms` and `GET /view` pass
+    /// [`QuerySelector::Document`].
+    pub(super) fn query(selector: QuerySelector) -> Routed {
+        Routed::Query(Query { selector })
     }
 
     /// `GET /blooms/{id}` — read one bloom's live view by hex id.
     pub(super) fn query_bloom(id: &str) -> Routed {
         digest_from_hex(id).map_or_else(
             || Routed::Reply(error_response(400, "bloom id is not a 32-byte hex digest")),
-            |digest| Self::query(Some(digest.as_bytes().to_vec())),
+            |digest| Self::query(QuerySelector::Bloom { digest: digest.as_bytes().to_vec() }),
         )
     }
 
@@ -551,14 +554,7 @@ impl ApiCapabilityState {
     pub(super) fn query_why(id: &str) -> Routed {
         digest_from_hex(id).map_or_else(
             || Routed::Reply(error_response(400, "bloom id is not a 32-byte hex digest")),
-            |digest| {
-                Routed::Query(Query {
-                    bloom: Some(digest.as_bytes().to_vec()),
-                    release: None,
-                    calibration: false,
-                    why: true,
-                })
-            },
+            |digest| Self::query(QuerySelector::Why { digest: digest.as_bytes().to_vec() }),
         )
     }
 }
@@ -723,7 +719,9 @@ fn admitted_response(outcome: Outcome) -> HttpServerResponse {
 pub(super) fn query_response(result: QueryResult, doctor: Option<&DoctorReport>) -> HttpServerResponse {
     match result {
         QueryResult::Document { document } => match from_bytes::<ViewDocument>(&document) {
-            Ok(document) => json(200, &ViewWithDoctor { document: &document, doctor }),
+            Ok(document) => {
+                json(200, &ViewWithDoctor { surface_alerts: surface_alerts(&document), document: &document, doctor })
+            }
             Err(error) => error_response(500, &format!("view document decode failed: {error}")),
         },
         QueryResult::Bloom { view } => match from_bytes::<BloomView>(&view) {
@@ -747,23 +745,81 @@ pub(super) fn query_response(result: QueryResult, doctor: Option<&DoctorReport>)
     }
 }
 
-/// `GET /view` is the journal projection plus the doctor's latest pass. The
-/// doctor is not a [`ViewDocument`] field: that document is wire-encoded in
-/// the outbox, and a trailing optional there would break queued payloads.
+/// `GET /view` is the journal projection plus the doctor's latest pass and the
+/// surface parks lifted out of it. Neither is a [`ViewDocument`] field: that
+/// document is wire-encoded in the outbox, and a trailing optional there would
+/// break queued payloads.
 #[derive(Serialize)]
 struct ViewWithDoctor<'a> {
     #[serde(flatten)]
     document: &'a ViewDocument,
     #[serde(skip_serializing_if = "Option::is_none")]
     doctor: Option<&'a DoctorReport>,
+    /// Every member awaiting a surface amendment (ADR-0207), derived host-side
+    /// from the decoded document and named beside `doctor` rather than left
+    /// where it sits.
+    ///
+    /// An operator reading `/view` must not have to walk into a bloom and then
+    /// into a member to discover the estate is waiting on *them*: a park that
+    /// only renders eleven optional fields deep is a park nobody sees, and the
+    /// remedy — a person widening a boundary — is the one thing no lap can
+    /// supply for itself. Omitted entirely when nothing is parked, so an
+    /// ordinary `/view` is unchanged.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    surface_alerts: Vec<SurfaceAlert<'a>>,
+}
+
+/// One member's surface park, flattened to the top of `/view`: which member of
+/// which bloom, the stage that declined, how many times it has asked, and the
+/// paths it asked for with the line justifying each.
+///
+/// The whole `AwaitingSurfaceView` is not re-rendered here — the scope
+/// revision and the evidence digest are the amendment's working material and
+/// stay on the member, where an operator who has decided to act reads them.
+/// This alert carries only what decides *whether* to act.
+#[derive(Serialize)]
+struct SurfaceAlert<'a> {
+    /// The bloom the parked member belongs to.
+    bloom: &'a BloomId,
+    /// The parked member.
+    workpiece: &'a WorkpieceId,
+    /// The stage that declined.
+    stage: StageId,
+    /// Requests this member has made in this bloom — a second one is a lane
+    /// restating a need the first request did not get answered.
+    requests: u32,
+    /// The requested paths, each with its one-line reason.
+    paths: &'a [SurfacePathRequest],
+}
+
+/// Walk the decoded document for members awaiting a surface amendment, in
+/// bloom then sealed-member order — the order `/view` already renders them in,
+/// so the alert list and the document read the same way down.
+fn surface_alerts(document: &ViewDocument) -> Vec<SurfaceAlert<'_>> {
+    document
+        .blooms
+        .iter()
+        .flat_map(|bloom| {
+            bloom.members.iter().filter_map(|member| {
+                member.awaiting_surface.as_ref().map(|awaiting| SurfaceAlert {
+                    bloom: &bloom.id,
+                    workpiece: &member.workpiece,
+                    stage: awaiting.stage,
+                    requests: awaiting.requests,
+                    paths: &awaiting.paths,
+                })
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use aether_bloomery::{
-        AdjudicationError, BloomId, Digest, Event, Fact, GrantAttemptsError, MemberDependency, OperatorHoldError,
-        OperatorRepairError, Outcome, QueryResult, SpendQuiesce, ViewDocument, WorkpieceId,
+        AdjudicationError, AwaitingSurfaceView, BloomId, BloomView, Digest, Event, Fact, GrantAttemptsError,
+        MemberDependency, MemberView, OperatorHoldError, OperatorRepairError, Outcome, QueryResult, SpendQuiesce,
+        StageId, SurfacePathRequest, ViewDocument, WorkpieceId,
     };
     use aether_data::wire::{from_bytes, to_vec};
 
@@ -829,6 +885,55 @@ mod tests {
         assert!(body.contains("refs/bloomery/claims/issue-5175"), "the claim ref is named: {body}");
         assert!(body.contains("Landed"), "the holder status is named: {body}");
     }
+
+    // The plausible bug: a member awaiting a surface amendment renders only
+    // inside the member that asked, eleven optional fields deep, so the one
+    // stop that waits on a *person* is invisible on the surface an operator
+    // actually reads — which is how a park sits for hours with nobody knowing.
+    #[test]
+    fn query_response_lifts_a_surface_park_to_the_top_of_the_document() {
+        let document = ViewDocument {
+            mainline: Digest::from_bytes([1; 32]),
+            observed: Digest::from_bytes([2; 32]),
+            spend_quiesce: None,
+            blooms: vec![BloomView {
+                id: BloomId(Digest::from_bytes([9; 32])),
+                members: vec![MemberView {
+                    workpiece: WorkpieceId("issue-5207".to_owned()),
+                    awaiting_surface: Some(AwaitingSurfaceView {
+                        stage: StageId::Construct,
+                        scope_revision: Digest::from_bytes([3; 32]),
+                        evidence: Digest::from_bytes([4; 32]),
+                        paths: vec![SurfacePathRequest {
+                            path: "crates/aether-render/src/pass.rs".to_owned(),
+                            reason: "the refusal this fixes is raised there".to_owned(),
+                        }],
+                        summary: "the declared surface excludes the file the fix needs".to_owned(),
+                        requests: 2,
+                    }),
+                    ..MemberView::default()
+                }],
+                ..BloomView::default()
+            }],
+            base_alert: None,
+        };
+
+        let response = query_response(QueryResult::Document { document: to_vec(&document).unwrap() }, None);
+        assert_eq!(response.status, 200);
+        let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+
+        let alert = &body.get("surface_alerts").expect("the park is named at the top level of /view")[0];
+        assert_eq!(alert["bloom"], "09".repeat(32), "the bloom is named");
+        assert_eq!(alert["workpiece"], "issue-5207", "the member is named");
+        assert_eq!(alert["stage"], "Construct", "the stage that declined is named");
+        assert_eq!(alert["requests"], 2, "the request count is named");
+        assert_eq!(alert["paths"][0]["path"], "crates/aether-render/src/pass.rs", "the requested path is named");
+        assert_eq!(
+            alert["paths"][0]["reason"], "the refusal this fixes is raised there",
+            "and the reason that justifies it"
+        );
+    }
+
     /// A finding digest in the same spelling.
     const FINDING: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 

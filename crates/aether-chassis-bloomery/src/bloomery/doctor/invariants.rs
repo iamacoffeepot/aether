@@ -19,6 +19,15 @@ use serde::{Deserialize, Serialize};
 /// violation rather than a retry still in flight.
 pub const REPLICA_AGE_BOUND: Duration = Duration::from_mins(5);
 
+/// How long a member may await a surface amendment (ADR-0207) before the wait
+/// is a violation rather than an operator on their way.
+///
+/// Five minutes is the line between the two readings: anything shorter is an
+/// operator who has not looked yet, and anything longer is an estate waiting
+/// on nobody — the park needs a person to widen a boundary, so no amount of
+/// further waiting produces one.
+pub const SURFACE_PARK_AGE_BOUND: Duration = Duration::from_mins(5);
+
 /// How many consecutive doctor passes may observe the same undelivered
 /// replica topic before a deterministic retry is reported as a violation.
 pub const DETERMINISTIC_RETRY_BOUND: u32 = 20;
@@ -46,6 +55,8 @@ pub enum Invariant {
     ReplicaTopicAge,
     /// A non-terminal member has a live lane or a pending dispatch.
     NonterminalMemberHasLaneOrDispatch,
+    /// No member has awaited a surface amendment past [`SURFACE_PARK_AGE_BOUND`].
+    SurfaceRequestUnanswered,
     /// A deterministic failure retried past [`DETERMINISTIC_RETRY_BOUND`].
     DeterministicRetryBound,
     /// An evidence directory exists for every open dispatch.
@@ -65,6 +76,7 @@ impl Invariant {
         Self::JournalDigestsResolve,
         Self::ReplicaTopicAge,
         Self::NonterminalMemberHasLaneOrDispatch,
+        Self::SurfaceRequestUnanswered,
         Self::DeterministicRetryBound,
         Self::OpenDispatchHasEvidence,
     ];
@@ -83,6 +95,7 @@ impl Invariant {
             Self::JournalDigestsResolve => "journal_digests_resolve",
             Self::ReplicaTopicAge => "replica_topic_age",
             Self::NonterminalMemberHasLaneOrDispatch => "nonterminal_member_has_lane_or_dispatch",
+            Self::SurfaceRequestUnanswered => "surface_request_unanswered",
             Self::DeterministicRetryBound => "deterministic_retry_bound",
             Self::OpenDispatchHasEvidence => "open_dispatch_has_evidence",
         }
@@ -110,6 +123,9 @@ impl Invariant {
             Self::NonterminalMemberHasLaneOrDispatch => {
                 "every member in a non-terminal stage has a live lane process or a pending dispatch"
             }
+            Self::SurfaceRequestUnanswered => {
+                "no member has waited past a bounded age for the surface amendment it asked a person for"
+            }
             Self::DeterministicRetryBound => {
                 "a deterministic failure retried beyond a bounded count is reported as a violation rather than continuing at warn"
             }
@@ -131,6 +147,7 @@ impl Invariant {
             Self::JournalDigestsResolve => journal_digests_resolve(live),
             Self::ReplicaTopicAge => replica_topic_age(live),
             Self::NonterminalMemberHasLaneOrDispatch => nonterminal_member_has_lane_or_dispatch(live),
+            Self::SurfaceRequestUnanswered => surface_request_unanswered(live),
             Self::DeterministicRetryBound => deterministic_retry_bound(live),
             Self::OpenDispatchHasEvidence => open_dispatch_has_evidence(live),
         }
@@ -199,6 +216,23 @@ pub struct ReplicaObservation {
     pub consecutive_failures: u32,
 }
 
+/// One member awaiting a surface amendment as the doctor observed it.
+///
+/// [`Snapshot::awaiting_surface`] carries no timestamp and the snapshot has no
+/// clock, so the age is process-local — the same shape [`ReplicaObservation`]
+/// gives an undelivered topic, and for the same reason: a wall-clock field on
+/// the wire would be a new projection field for a question the doctor can
+/// answer from its own passes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SurfaceParkObservation {
+    /// The bloom the parked member belongs to.
+    pub bloom: BloomId,
+    /// The parked member.
+    pub workpiece: WorkpieceId,
+    /// How long this process has seen the member parked.
+    pub age: Duration,
+}
+
 /// One dispatch the journal still considers open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OpenDispatch<'a> {
@@ -239,6 +273,8 @@ pub struct LiveState<'a> {
     pub ancestry: Option<&'a Ancestry<'a>>,
     /// Undelivered source-replica topics this process has been watching.
     pub replica: &'a [ReplicaObservation],
+    /// Members awaiting a surface amendment this process has been watching.
+    pub surface_parks: &'a [SurfaceParkObservation],
     /// Outstanding journal dispatches.
     pub outstanding: &'a [OpenDispatch<'a>],
     /// Whether any lane process is in flight on this host.
@@ -541,6 +577,29 @@ fn member_carries_excuse(
     }
 }
 
+/// The gap [`Invariant::NonterminalMemberHasLaneOrDispatch`] opens by name.
+///
+/// That check excuses an awaiting member on purpose — no lane can move it and
+/// dispatching one would reproduce the same refusal — which leaves the one
+/// stop that waits on a *person* as the one stop the doctor was structurally
+/// silent about. A park inside the bound is an operator on their way; past it,
+/// the estate is waiting on nobody and the wait itself is the divergence.
+fn surface_request_unanswered(live: &LiveState<'_>) -> Vec<String> {
+    live.surface_parks
+        .iter()
+        .filter(|park| park.age > SURFACE_PARK_AGE_BOUND)
+        .map(|park| {
+            format!(
+                "member {} on bloom {} has awaited a surface amendment for {} secs (bound {})",
+                park.workpiece.0,
+                hex_of(&park.bloom.0),
+                park.age.as_secs(),
+                SURFACE_PARK_AGE_BOUND.as_secs()
+            )
+        })
+        .collect()
+}
+
 fn deterministic_retry_bound(live: &LiveState<'_>) -> Vec<String> {
     live.replica
         .iter()
@@ -619,10 +678,15 @@ fn hex_of(digest: &Digest) -> String {
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery::testing::{digest, draft, membership, splice_bloom};
-    use aether_bloomery::{BloomStatus, ClaimHolder, ClaimRefKind, ClaimRefState, Snapshot, WorkpieceId};
+    use std::time::Duration;
 
-    use super::{DETERMINISTIC_RETRY_BOUND, Invariant, LiveState, OpenDispatch, ReplicaObservation, evaluate};
+    use aether_bloomery::testing::{digest, draft, membership, splice_bloom};
+    use aether_bloomery::{BloomId, BloomStatus, ClaimHolder, ClaimRefKind, ClaimRefState, Snapshot, WorkpieceId};
+
+    use super::{
+        DETERMINISTIC_RETRY_BOUND, Invariant, LiveState, OpenDispatch, ReplicaObservation, SURFACE_PARK_AGE_BOUND,
+        SurfaceParkObservation, evaluate,
+    };
 
     fn live<'a>(snapshot: &'a Snapshot, claims: &'a [ClaimRefState]) -> LiveState<'a> {
         LiveState {
@@ -636,6 +700,7 @@ mod tests {
             journaled_heads: &[],
             ancestry: None,
             replica: &[],
+            surface_parks: &[],
             outstanding: &[],
             lanes_running: false,
             evidence_nonces: &[],
@@ -689,7 +754,7 @@ mod tests {
     fn a_clean_fixture_passes_every_seed_invariant() {
         // The other half of the acceptance: an empty journal with no live
         // refs, no replica backlog, and no open dispatch must not invent a
-        // violation. The twelve names are the contract the report walks.
+        // violation. The seed names are the contract the report walks.
         let snapshot = Snapshot::default();
         let report = evaluate(&live(&snapshot, &[]));
         assert_eq!(report.checks.len(), Invariant::ALL.len(), "every seed invariant is reported");
@@ -714,6 +779,47 @@ mod tests {
             report.named(Invariant::DeterministicRetryBound.name()).expect("the seed list includes retry bound");
         assert!(!check.passed, "a retry past the bound is a violation: {check:?}");
         assert!(check.divergences.join(" ").contains('7'), "the sequence is named: {:?}", check.divergences);
+    }
+
+    #[test]
+    fn a_fresh_surface_park_is_not_a_violation() {
+        // The other side of the bound: a member that asked a minute ago is an
+        // operator who has not looked yet, and reporting it would train the
+        // reader to ignore the row that matters.
+        let snapshot = Snapshot::default();
+        let parks = [surface_park("issue-5207", Duration::from_mins(1))];
+        let mut state = live(&snapshot, &[]);
+        state.surface_parks = &parks;
+
+        let report = evaluate(&state);
+        let check =
+            report.named(Invariant::SurfaceRequestUnanswered.name()).expect("the seed list includes surface parks");
+        assert!(check.passed, "a park inside the bound is an operator on their way: {check:?}");
+    }
+
+    #[test]
+    fn a_surface_park_past_the_bound_is_named() {
+        // The plausible bug: a member waiting on a *person* is the one stop
+        // the doctor was structurally silent about, because the only check
+        // that would have noticed it — nonterminal_member_has_lane_or_dispatch
+        // — excuses an awaiting member by name.
+        let snapshot = Snapshot::default();
+        let parks = [surface_park("issue-5207", SURFACE_PARK_AGE_BOUND + Duration::from_secs(1))];
+        let mut state = live(&snapshot, &[]);
+        state.surface_parks = &parks;
+
+        let report = evaluate(&state);
+        let check =
+            report.named(Invariant::SurfaceRequestUnanswered.name()).expect("the seed list includes surface parks");
+        assert!(!check.passed, "a park past the bound is a violation: {check:?}");
+        let named = check.divergences.join(" ");
+        assert!(named.contains("issue-5207"), "the parked member is named: {named}");
+        assert!(named.contains(&hex_of(&digest(7))), "the bloom is named: {named}");
+    }
+
+    /// One member parked on bloom `digest(7)` for `age`.
+    fn surface_park(workpiece: &str, age: Duration) -> SurfaceParkObservation {
+        SurfaceParkObservation { bloom: BloomId(digest(7)), workpiece: WorkpieceId(workpiece.to_owned()), age }
     }
 
     #[test]

@@ -14,8 +14,8 @@ use super::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,
     AggregateVerifyError, AttemptCompletedError, Decision, FoldConflictError, GrantAttemptsError, HostFaultError,
     IntegrateError, LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError,
-    OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ResolveError, SealError, SpliceError,
-    SupersedeError, SuppressionDispositionError, SurfaceRequestedError, VerifyFailedError, WithdrawError,
+    NarrowCompositionError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ResolveError, SealError,
+    SpliceError, SupersedeError, SuppressionDispositionError, SurfaceRequestedError, VerifyFailedError, WithdrawError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -796,6 +796,66 @@ pub enum Outcome {
         /// The verifier identities that failed together.
         failed: VerifyFailureSet,
     },
+    /// A failing fold was attributed to two candidates and the synthetic
+    /// subject that repairs their coexistence was minted (ADR-0210). Appended
+    /// so every prior outcome keeps its wire discriminant.
+    CompositionNarrowed {
+        /// The bloom whose fold refused.
+        bloom: BloomId,
+        /// The minted subject.
+        workpiece: WorkpieceId,
+        /// Its two parents, in canonical id order.
+        parents: Vec<WorkpieceId>,
+        /// The union of the parents' declared surfaces — what its repair may
+        /// edit, recorded here because it is derived rather than sealed and so
+        /// has to be readable after the fact.
+        bound: Vec<String>,
+        /// Which repair lap this is.
+        attempt: u32,
+    },
+    /// A second verdict refused a fold a narrowed composition is already
+    /// repairing. The verdict is filed; no second lane is bought.
+    CompositionRepairAlreadyInFlight {
+        /// The bloom.
+        bloom: BloomId,
+        /// The subject already repairing that tree.
+        workpiece: WorkpieceId,
+    },
+    /// A narrowed composition exhausted its repair budget. Its parents' intents could not
+    /// be made to coexist inside the laps the catalog allows.
+    NarrowCompositionWedged {
+        /// The bloom.
+        bloom: BloomId,
+        /// The wedged subject.
+        workpiece: WorkpieceId,
+        /// The verdict that spent the last lap.
+        question: Digest,
+    },
+    /// An attribution of a failing fold was refused.
+    NarrowCompositionRejected(NarrowCompositionError),
+    /// **Retired**, and kept for the same reason
+    /// [`Fact::SurfaceGranted`](super::Fact::SurfaceGranted) is: journaled
+    /// [`Decisions`] blobs already carry it, so removing it stops those rows
+    /// decoding. Last but one in declaration order, so every prior outcome
+    /// keeps its wire discriminant.
+    ///
+    /// A member's surface request was granted by the machinery and the member
+    /// re-entered the line. Nothing produces it now.
+    SurfaceGranted {
+        /// The bloom.
+        bloom: BloomId,
+        /// The member whose surface grew.
+        workpiece: WorkpieceId,
+        /// The successor revision it dispatched under.
+        revision: Digest,
+        /// The globs the grant added.
+        added: Vec<String>,
+    },
+    /// A surface grant was refused. **Retired** as an admission outcome, and
+    /// the answer the reducer now gives a retired
+    /// [`Fact::SurfaceGranted`](super::Fact::SurfaceGranted) that reaches it:
+    /// [`SurfaceRequestedError::GrantRetired`], with no effects.
+    SurfaceGrantRejected(SurfaceRequestedError),
 }
 
 impl Outcome {

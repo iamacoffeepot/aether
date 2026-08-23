@@ -7,8 +7,8 @@ use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
 use crate::port::{
     AwaitingSurfaceView, BaseAlertView, BloomView, CompositionCursorView, CompositionView, ExecutorFaultView,
-    HostFaultView, LandingBlock, LeaseEvictionView, LeaseView, MemberView, PendingDecisionView, ReviewParkView,
-    ViewDocument, WedgeCause, WithdrawnView,
+    HostFaultView, LandingBlock, LeaseEvictionView, LeaseView, MemberView, NarrowedCompositionView,
+    PendingDecisionView, ReviewParkView, ViewDocument, WedgeCause, WithdrawnView,
 };
 use crate::values::BaseVerdict;
 use crate::values::{Question, Withdrawal, WithdrawalCause};
@@ -71,6 +71,7 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
                 operator_hold: record.operator_hold.clone(),
                 blocker: snapshot.fold_refusal(&record.spec.id()).cloned(),
                 leases: lease_views(record, snapshot),
+                narrowed_compositions: narrowed_composition_views(record, snapshot),
             }
         })
         .collect();
@@ -273,6 +274,27 @@ fn composition_view(record: &BloomRecord) -> Option<CompositionView> {
     let wedge = record.wedged.get(&WorkpieceId::composition()).copied();
     let findings = record.open_composition_findings().cloned().collect::<Vec<_>>();
     (cursor.is_some() || wedge.is_some() || !findings.is_empty()).then_some(CompositionView { cursor, wedge, findings })
+}
+
+/// Every composition this bloom narrowed to a subset of its candidates, with
+/// where each stands now.
+///
+/// Read off the snapshot's own table rather than recomputed from the parents'
+/// current surfaces: the bound a composition actually ran under is history, and
+/// re-deriving it would let a later re-scope rewrite what an operator is told
+/// was authorized.
+fn narrowed_composition_views(record: &BloomRecord, snapshot: &Snapshot) -> Vec<NarrowedCompositionView> {
+    snapshot
+        .narrowed_compositions_of(&record.spec.id())
+        .map(|(workpiece, narrowed)| NarrowedCompositionView {
+            workpiece: workpiece.clone(),
+            parents: narrowed.parents.parents.clone(),
+            paths: narrowed.parents.paths.clone(),
+            bound: narrowed.parents.bound.clone(),
+            cursor: stage_cursor(record, workpiece),
+            wedge: record.wedged.get(workpiece).copied(),
+        })
+        .collect()
 }
 
 /// The operator-facing cursor: stage, attempts, candidate. `None` until the
@@ -547,6 +569,7 @@ mod tests {
             operator_hold: None,
             blocker: None,
             leases: Vec::new(),
+            narrowed_compositions: Vec::new(),
         }
     }
 

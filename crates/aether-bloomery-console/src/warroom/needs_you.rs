@@ -82,6 +82,7 @@ fn action_clause(kind: InterruptKind) -> &'static str {
     match kind {
         InterruptKind::Park | InterruptKind::Findings => "accept or defer",
         InterruptKind::Decision => "answer",
+        InterruptKind::Surface => "amend the surface",
         InterruptKind::Terminal | InterruptKind::Landing => "eject or re-approve",
         InterruptKind::Wedge => "widen the surface or eject",
         InterruptKind::Quiesce => "raise the ceiling or stand down",

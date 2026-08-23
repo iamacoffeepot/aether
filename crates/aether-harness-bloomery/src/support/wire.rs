@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use aether_actor::Addressable;
 use aether_bloomery::{
-    Admit, AdmitResult, BloomId, BloomView, Event, Fact, IdempotencyKey, Outcome, Query, QueryResult, ViewDocument,
+    Admit, AdmitResult, BloomId, BloomView, Event, Fact, IdempotencyKey, Outcome, Query, QueryResult, QuerySelector,
+    ViewDocument,
 };
 use aether_chassis_bloomery::ControlCore;
 use aether_chassis_bloomery::bloomery::DoctorReport;
@@ -83,7 +84,7 @@ impl Wire {
     /// # Panics
     /// The query was refused or its reply did not decode.
     pub fn view(&mut self) -> ViewDocument {
-        let query = Query { bloom: None, release: None, calibration: false, why: false };
+        let query = Query { selector: QuerySelector::Document };
         match self.call::<_, QueryResult>(control_mailbox(), &query) {
             QueryResult::Document { document } => from_bytes(&document).expect("the projection decodes"),
             other => panic!("expected a document reply, got {other:?}"),

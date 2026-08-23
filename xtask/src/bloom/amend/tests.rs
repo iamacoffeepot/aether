@@ -8,11 +8,13 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{env, process};
 
-use aether_bloomery::KeyId;
+use aether_bloomery::{ApprovalPolicy, ApprovalRule, BloomStatus, KeyId, Tier};
 
-use super::request;
 use super::revision::OperatorKey;
-use crate::bloom::dto::{AwaitingSurfaceView, DigestHex, MemberView, SurfacePathRequest};
+use super::{TipStanding, request, sibling_is_sealable, siblings, surface, tip_standing};
+use crate::bloom::dto::{
+    AwaitingSurfaceView, BloomView, CommissionShowView, DigestHex, MemberView, SurfacePathRequest, WithdrawnView,
+};
 
 fn digest(seed: u8) -> DigestHex {
     DigestHex::from_bytes([seed; 32])
@@ -33,6 +35,38 @@ fn member(awaiting: Option<AwaitingSurfaceView>) -> MemberView {
         awaiting_surface: awaiting,
         withdrawn: None,
         cursor: None,
+    }
+}
+
+fn sibling(withdrawn: Option<WithdrawnView>) -> MemberView {
+    MemberView {
+        workpiece: "example-b".to_owned(),
+        scope_revision: digest(2),
+        awaiting_surface: None,
+        withdrawn,
+        cursor: None,
+    }
+}
+
+fn bloom(members: Vec<MemberView>) -> BloomView {
+    BloomView { id: digest(0), status: BloomStatus::Sealed, superseded_by: None, members }
+}
+
+fn commission(tip: DigestHex) -> CommissionShowView {
+    CommissionShowView {
+        intent: digest(0),
+        status: "sealed".to_owned(),
+        current_revision: Some(tip),
+        current: None,
+        approvals: Vec::new(),
+    }
+}
+
+/// A policy whose only file-granular rules name `named`.
+fn policy(named: &[&str]) -> ApprovalPolicy {
+    ApprovalPolicy {
+        default: Tier::Auto,
+        rules: named.iter().map(|glob| ApprovalRule { glob: (*glob).to_owned(), tier: Tier::Human }).collect(),
     }
 }
 
@@ -87,6 +121,96 @@ fn the_lanes_paths_come_first_and_the_operators_union_in() {
 
     assert_eq!(requested.globs, ["crates/example-b/src/lib.rs", "crates/example-c/**"]);
     assert_eq!(requested.reasons.len(), 1, "only the lane's paths carry a reason");
+}
+
+// Tripwire: a withdrawn member is re-scoped for a later bloom, so its
+// commission tip legitimately leaves the revision this bloom sealed it at.
+// Checking it as a sibling refused every amendment in a bloom that had
+// withdrawn anything, over a scope the successor seal never reads.
+#[test]
+fn a_withdrawn_siblings_moved_commission_does_not_refuse_the_amendment() {
+    let left = bloom(vec![member(None), sibling(Some(WithdrawnView {}))]);
+    assert!(siblings(&left, "example-a").next().is_none(), "a withdrawn member is no sibling to check");
+
+    let standing = bloom(vec![member(None), sibling(None)]);
+    let checked = siblings(&standing, "example-a").next().expect("a standing sibling is still checked");
+    let error = sibling_is_sealable(checked, &commission(digest(7))).expect_err("a moved commission is refused");
+    assert!(error.to_string().contains("stale"), "the refusal names what the seal would do: {error}");
+}
+
+// Tripwire: the seal door admits an entry naming one file only when a
+// file-granular policy rule names that file, and a blocked lane asks for the
+// file it stopped on. Sealing the raw path refuses the successor after the key
+// has signed and the commission tip has already moved.
+#[test]
+fn a_file_the_policy_does_not_name_is_coarsened_to_the_glob_covering_it() {
+    let policy = policy(&["docs/guide/testing.md"]);
+    let widening = surface::widen(
+        &policy,
+        &["crates/example-b/**".to_owned()],
+        &[
+            "xtask/src/transform/verify/mod.rs".to_owned(),
+            "crates/example-b/src/lib.rs".to_owned(),
+            "crates/example-c/src/read.rs".to_owned(),
+            "docs/guide/recipes/amending.md".to_owned(),
+            ".github/workflows/ci.yml".to_owned(),
+            // A file the policy names is what the policy meant to be named.
+            "docs/guide/testing.md".to_owned(),
+        ],
+    )
+    .expect("every request is inside the grammar");
+
+    assert_eq!(
+        widening.widened,
+        [
+            "crates/example-b/**",
+            "xtask/**",
+            "crates/example-c/**",
+            "docs/guide/**",
+            ".github/workflows/**",
+            "docs/guide/testing.md",
+        ],
+    );
+    assert_eq!(
+        policy.unnamed_file_entries(&widening.widened),
+        Vec::<String>::new(),
+        "the surface the successor declares is one the seal door admits",
+    );
+}
+
+// Tripwire: a revision sealed before the request arrived can already carry the
+// raw file entry, so the successor has to widen what it inherits as well as
+// what it adds — otherwise the amendment writes a fresh revision the seal door
+// refuses for exactly the reason it refused the last one.
+#[test]
+fn a_file_entry_the_current_surface_carries_is_coarsened_too() {
+    let current =
+        ["xtask/src/transform/verify/mod.rs".to_owned(), "xtask/**".to_owned(), "crates/example-b/**".to_owned()];
+    let widening = surface::widen(&policy(&[]), &current, &[]).expect("an empty request is inside the grammar");
+
+    assert_eq!(widening.widened, ["xtask/**", "crates/example-b/**"]);
+    assert_eq!(
+        widening.inherited,
+        [("xtask/src/transform/verify/mod.rs".to_owned(), "xtask/**".to_owned())],
+        "the plan reports the entry it rewrote out from under the operator",
+    );
+}
+
+// Tripwire: this command advances the tip itself, so a run that failed after
+// the revision write leaves the tip ahead of the sealed revision through no
+// human's doing. Reading that as a re-scope refuses every re-run, and the
+// member — parked until a successor seals it — can never be finished.
+#[test]
+fn a_tip_this_command_wrote_is_sealed_rather_than_blamed_on_a_human() {
+    let widened = ["crates/example-b/**".to_owned(), "xtask/**".to_owned()];
+
+    assert_eq!(tip_standing(digest(1), digest(1), &widened[..1], &widened), TipStanding::Sealed);
+    assert_eq!(tip_standing(digest(4), digest(1), &widened, &widened), TipStanding::AlreadyWidened);
+    assert_eq!(
+        tip_standing(digest(4), digest(1), &["crates/example-c/**".to_owned()], &widened),
+        TipStanding::Moved,
+        "a tip declaring anything else is still a scope somebody moved",
+    );
 }
 
 // Tripwire: a signing seed another account on the host can read is a key that
