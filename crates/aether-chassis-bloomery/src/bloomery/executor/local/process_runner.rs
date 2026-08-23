@@ -1569,8 +1569,12 @@ mod tests {
         let runner = ProcessTransformRunner::new(CaptureIdentity::default(), LaneProgram::default(), &authority);
         let listed = runner.registered_worktrees().expect("list the authority's worktrees");
 
+        // Compare resolved paths: git reports a worktree by its real path, and a
+        // temp directory is reached through a symlink on some hosts, so the raw
+        // strings differ while naming one directory.
+        let slot = slot.canonicalize().expect("the materialized slot exists");
         assert!(
-            listed.iter().any(|path| path == &slot),
+            listed.iter().filter_map(|path| path.canonicalize().ok()).any(|path| path == slot),
             "the configured repository's worktree is listed, not whatever cwd happens to be: {listed:?}"
         );
     }
