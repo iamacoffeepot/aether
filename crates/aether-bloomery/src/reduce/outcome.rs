@@ -833,6 +833,22 @@ pub enum Outcome {
     },
     /// An attribution of a failing fold was refused.
     NarrowCompositionRejected(NarrowCompositionError),
+    /// A member's surface request was granted by the machinery and the member
+    /// re-entered the line (ADR-0207). Appended so every prior outcome keeps its
+    /// wire discriminant.
+    SurfaceGranted {
+        /// The bloom.
+        bloom: BloomId,
+        /// The member whose surface grew.
+        workpiece: WorkpieceId,
+        /// The successor revision it now dispatches under.
+        revision: Digest,
+        /// The globs the grant added — what an operator reads to see what the
+        /// machinery authorized without being asked.
+        added: Vec<String>,
+    },
+    /// A surface grant was refused.
+    SurfaceGrantRejected(SurfaceRequestedError),
 }
 
 impl Outcome {

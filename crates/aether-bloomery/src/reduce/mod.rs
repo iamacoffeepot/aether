@@ -74,7 +74,8 @@ pub use outcome::{
 };
 pub use seal::is_active_unlanded;
 pub use snapshot::{
-    AggregateReviewFault, AwaitingSurface, BloomRecord, BloomStatus, Excuse, FileLease, FoldedIntegration, HostFaultHold, LeaseEviction, MemberMachineryFault, MemberPark, NarrowedComposition, Snapshot, StageProgress,
+    AggregateReviewFault, AwaitingSurface, BloomRecord, BloomStatus, Excuse, FileLease, FoldedIntegration,
+    HostFaultHold, LeaseEviction, MemberMachineryFault, MemberPark, NarrowedComposition, Snapshot, StageProgress,
 };
 pub use view::view_of;
 pub use why::why_of;
@@ -101,7 +102,7 @@ use readiness::reduce_splice_assembled;
 use review::{reduce_aggregate_review_completed, reduce_aggregate_review_executor_fault};
 use seal::{reduce_seal, reduce_supersede, reduce_surface_overlap};
 use suppression::reduce_suppression_disposition;
-use surface_request::reduce_surface_requested;
+use surface_request::{reduce_surface_granted, reduce_surface_requested};
 use verify::{reduce_resume_host_fault, reduce_verify_failed, reduce_verify_host_fault};
 use withdraw::reduce_withdraw;
 
@@ -208,6 +209,9 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         }
         Fact::CompositionNarrowed { bloom, verified, tree, head, evidence, attribution } => {
             reduce_composition_narrowed(snapshot, bloom, verified, *tree, *head, evidence, attribution)
+        }
+        Fact::SurfaceGranted { bloom, workpiece, stage, revision, added, evidence } => {
+            reduce_surface_granted(snapshot, bloom, workpiece, *stage, *revision, added, evidence)
         }
     }
 }

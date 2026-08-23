@@ -13,8 +13,11 @@
 
 use alloc::vec;
 
+use alloc::string::String;
+
+use super::attempt::{DispatchTargets, SealedLine, move_effects_with_candidate};
 use super::{BloomStatus, Decision, Decisions, Outcome, Snapshot, SurfaceRequestedError};
-use crate::digest::digest_of;
+use crate::digest::{Digest, digest_of};
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{Evidence, SurfaceRequest};
 
@@ -92,17 +95,88 @@ pub(super) fn reduce_surface_requested(
     }
 }
 
+/// Reduce a granted surface amendment (ADR-0207).
+///
+/// The mirror of [`reduce_surface_requested`]: the same ladder, and then the
+/// opposite outcome — the member's pin moves to the successor revision and its
+/// lane re-enters at the stage that declined, rather than parking on a person.
+///
+/// The grant costs no attempt. The lap it buys is the one the declining lap
+/// should have been able to run, and charging for the estate's own
+/// under-scoping would spend a member's budget on a boundary it did not draw.
+pub(super) fn reduce_surface_granted(
+    snapshot: &Snapshot,
+    bloom: &BloomId,
+    workpiece: &WorkpieceId,
+    stage: StageId,
+    revision: Digest,
+    added: &[String],
+    evidence: &Evidence,
+) -> Decisions {
+    let Some(record) = snapshot.blooms.get(bloom).filter(|record| record.status == BloomStatus::Sealed) else {
+        return Decisions::rejected(Outcome::SurfaceGrantRejected(SurfaceRequestedError::UnknownOrInactiveBloom));
+    };
+    let Some(member) = record.spec.members().iter().find(|member| member.workpiece == *workpiece) else {
+        return Decisions::rejected(Outcome::SurfaceGrantRejected(SurfaceRequestedError::NotAMember(
+            workpiece.clone(),
+        )));
+    };
+    let Some(cursor) = record.progress.get(workpiece).copied() else {
+        return Decisions::rejected(Outcome::SurfaceGrantRejected(SurfaceRequestedError::NotDispatched(
+            workpiece.clone(),
+        )));
+    };
+    if cursor.stage != stage {
+        return Decisions::rejected(Outcome::SurfaceGrantRejected(SurfaceRequestedError::StageMismatch {
+            expected: cursor.stage,
+            got: stage,
+        }));
+    }
+    if !is_construct_family(stage) {
+        return Decisions::rejected(Outcome::SurfaceGrantRejected(SurfaceRequestedError::NotAConstructFamilyStage(
+            stage,
+        )));
+    }
+
+    let targets = DispatchTargets {
+        subject: cursor.candidate.map_or(revision, |candidate| candidate.tree),
+        checkout: cursor.candidate.map_or_else(|| record.spec.base(), |candidate| candidate.checkout),
+    };
+    // The pin folds straight off the fact, the way this member's park already
+    // does, so no new decision enters the wire-frozen graph for it.
+    let mut effects = vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }];
+    effects.extend(move_effects_with_candidate(
+        *bloom,
+        workpiece,
+        revision,
+        cursor,
+        targets,
+        cursor.candidate.map(|candidate| candidate.tree),
+        SealedLine::of(record, member),
+    ));
+
+    Decisions {
+        outcome: Outcome::SurfaceGranted {
+            bloom: *bloom,
+            workpiece: workpiece.clone(),
+            revision,
+            added: added.to_vec(),
+        },
+        effects,
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use alloc::string::ToString as _;
+    use alloc::string::{String, ToString as _};
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use super::reduce_surface_requested;
+    use super::{reduce_surface_granted, reduce_surface_requested};
     use crate::digest::Digest;
     use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
-    use crate::reduce::{Event, Fact, Outcome, Snapshot, SurfaceRequestedError, reduce};
+    use crate::reduce::{Decision, Event, Fact, Outcome, Snapshot, SurfaceRequestedError, reduce};
     use crate::testing::{draft, membership};
     use crate::values::{Evidence, EvidenceKind, ResolvedConfigs, SpendWindow, SurfaceRequest};
 
@@ -138,6 +212,80 @@ mod tests {
 
     fn evidence(subject: Digest) -> Evidence {
         Evidence { subject, kind: EvidenceKind::ConstructDeclined, detail: digest(9) }
+    }
+
+    #[test]
+    fn a_granted_request_moves_the_pin_and_puts_the_member_back_on_the_line() {
+        // Tripwire: the whole point of the auto tier. A delta the owner's policy
+        // already marked as needing nobody must not stop the estate — the park
+        // it would otherwise take costs a person's attention for a decision the
+        // policy has already made, which is what left a member sitting for three
+        // hours.
+        let (snapshot, bloom, workpiece, scope_revision) = sealed();
+        let granted = digest(0x9A);
+        let before = snapshot.blooms[&bloom].progress[&workpiece];
+
+        let decisions = reduce_surface_granted(
+            &snapshot,
+            &bloom,
+            &workpiece,
+            StageId::Construct,
+            granted,
+            &[String::from("xtask/**")],
+            &evidence(scope_revision),
+        );
+
+        let Outcome::SurfaceGranted { revision, added, .. } = &decisions.outcome else {
+            panic!("an auto-tier delta is granted: {:?}", decisions.outcome);
+        };
+        assert_eq!(*revision, granted);
+        assert_eq!(added, &[String::from("xtask/**")]);
+
+        let dispatched = decisions
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                Decision::DispatchAttempt { workpiece, stage, scope_revision, .. } => {
+                    Some((workpiece.clone(), *stage, *scope_revision))
+                }
+                _ => None,
+            })
+            .expect("a grant puts the member back on the line");
+        assert_eq!(dispatched.0, workpiece);
+        assert_eq!(dispatched.1, StageId::Construct, "it re-enters at the stage that declined");
+        assert_eq!(dispatched.2, granted, "and it dispatches under the widened revision, not the sealed one");
+
+        let advanced = decisions
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                Decision::AdvanceStage { progress, .. } => Some(*progress),
+                _ => None,
+            })
+            .expect("the cursor moves with the dispatch");
+        assert_eq!(
+            advanced.attempts, before.attempts,
+            "the lap a grant buys is the one the declining lap should have run, so it costs no attempt",
+        );
+
+        // And the pin is durable: the next dispatch reads the granted revision
+        // off the record rather than the membership's sealed one.
+        let event = Event {
+            idempotency_key: IdempotencyKey("granted".into()),
+            fact: Fact::SurfaceGranted {
+                bloom,
+                workpiece: workpiece.clone(),
+                stage: StageId::Construct,
+                revision: granted,
+                added: vec![String::from("xtask/**")],
+                evidence: evidence(scope_revision),
+            },
+        };
+        let after = snapshot.apply(&event, &decisions, &ResolvedConfigs::default());
+        let record = &after.blooms[&bloom];
+        let member = record.spec.members().iter().find(|member| member.workpiece == workpiece).unwrap();
+        assert_eq!(record.scope_revision_of(member), granted);
+        assert!(after.awaiting_surface(&bloom, &workpiece).is_none(), "a granted member is not parked");
     }
 
     #[test]

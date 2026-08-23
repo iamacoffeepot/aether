@@ -10,7 +10,8 @@ use std::collections::{BTreeSet, HashSet};
 use std::time::Duration;
 
 use aether_bloomery::{
-    BackendObjectId, BloomId, BloomRecord, BloomStatus, ClaimHolder, ClaimRefKind, ClaimRefState, Digest, Excuse, Snapshot, WorkpieceId, is_active_unlanded,
+    BackendObjectId, BloomId, BloomRecord, BloomStatus, ClaimHolder, ClaimRefKind, ClaimRefState, Digest, Excuse,
+    Snapshot, WorkpieceId, is_active_unlanded,
 };
 use serde::{Deserialize, Serialize};
 

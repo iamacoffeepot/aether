@@ -9,11 +9,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use aether_bloomery::{
-    BloomDraft, BloomId, BloomRecord, CandidateRef, Conclusion, ConfigRegistry, Decision, Digest, Event, Evidence,
-    EvidenceKind, EvidenceRef, ExecutionLimits, ExecutionStatus, Fact, Forecast, IdempotencyKey, LaneObservation,
-    Membership, NetworkProfile, Nonce, Observation, Outcome, Provenance, ResolvedConfigs, Snapshot, SpendWindow,
-    StageCatalog, StageId, StageVerdict, Statement, StudyCall, StudyCost, SuppressionRequest, SurfacePathRequest,
-    SurfaceRequest, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, reduce,
+    BloomDraft, BloomId, BloomRecord, CandidateRef, CompositionParents, Conclusion, ConfigRegistry, Decision, Digest,
+    Event, Evidence, EvidenceKind, EvidenceRef, ExecutionLimits, ExecutionStatus, Fact, Forecast, IdempotencyKey,
+    LaneObservation, Membership, NetworkProfile, Nonce, Observation, Outcome, Provenance, ResolvedConfigs, Snapshot,
+    SpendWindow, StageCatalog, StageId, StageVerdict, Statement, StudyCall, StudyCost, SuppressionRequest,
+    SurfaceGrant, SurfacePathRequest, SurfaceRequest, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle,
+    WorkOrder, WorkpieceId, reduce,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -645,6 +646,15 @@ fn claim_for_carries_the_whole_observation() {
             lint: "allow(clippy::disallowed_methods)".into(),
             reason: "operator tooling, not cap config".into(),
         }],
+        narrowing: Some(CompositionParents {
+            parents: vec![WorkpieceId("wp-left".to_owned()), WorkpieceId("wp-right".to_owned())],
+            paths: vec!["crates/collided/src/lib.rs".into()],
+            bound: vec!["crates/collided/**".into()],
+        }),
+        surface_grant: Some(SurfaceGrant {
+            revision: Digest::from_bytes([19; 32]),
+            added: vec!["crates/needed/**".into()],
+        }),
     };
     let name = NameEvidenceClaims::attempt_artifact_name(
         &nonce,
@@ -1174,7 +1184,6 @@ fn aggregate_verify_findings_persist_on_the_composition_and_clear_on_a_pass() {
             },
             ..Default::default()
         },
-
     };
 
     let mut failing = dispatch_record("n-av-fail", bloom, &WorkpieceId(String::new()), tree, tree);
@@ -1616,29 +1625,6 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
 
     use super::{NameEvidenceClaims, attempt_artifact_name};
 
-    /// A reference carrying nothing but the name under test, so the assertions
-    /// read as the round trip rather than as a wall of empty channels.
-    fn reference(name: String, nonce: Nonce, artifact_id: u64, failed_verifiers: VerifyFailureSet) -> EvidenceRef {
-        EvidenceRef {
-            name,
-            nonce,
-            artifact_id,
-            size_bytes: 10,
-            candidate: None,
-            findings: None,
-            failed_verifiers,
-            cost: None,
-            calls: None,
-            session_reuse_arm: None,
-            session_reuse_saved_micro_usd: None,
-            peak_resident_bytes: None,
-            violating_paths: Vec::new(),
-            surface_request: None,
-            suppression_requests: Vec::new(),
-            narrowing: None,
-        }
-    }
-
     let claims = NameEvidenceClaims;
     let cases = [
         (StageVerdict::Approved, 5u8, 9u8),
@@ -1853,7 +1839,6 @@ fn verify_findings_persist_on_a_failing_verify_and_clear_on_a_pass() {
             },
             ..Default::default()
         },
-
     };
 
     record_dispatch(&mut store, &dispatch_record("n-f1", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate))

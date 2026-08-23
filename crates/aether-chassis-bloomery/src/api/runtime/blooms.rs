@@ -5,7 +5,10 @@
 
 use aether_actor::Manual;
 use aether_bloomery::{
-    Adjudication, Admit, AdmitResult, AuthorityDoor, BloomId, BloomView, CandidateRef, Digest, Disposition, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, OperatorHold, OperatorRepair, Outcome, Query, QueryResult, StageId, Statement, SuppressionDisposition, SurfacePathRequest, ViewDocument, WhyDocument, Withdrawal, WithdrawalCause, WorkpieceId, digest_of,
+    Adjudication, Admit, AdmitResult, AuthorityDoor, BloomId, BloomView, CandidateRef, Digest, Disposition, Event,
+    Evidence, EvidenceKind, Fact, IdempotencyKey, OperatorHold, OperatorRepair, Outcome, Query, QueryResult, StageId,
+    Statement, SuppressionDisposition, SurfacePathRequest, ViewDocument, WhyDocument, Withdrawal, WithdrawalCause,
+    WorkpieceId, digest_of,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_http::HttpServerResponse;

@@ -15,6 +15,7 @@ mod composition;
 mod config;
 mod fields;
 mod finding;
+mod granularity;
 mod lane;
 mod lease;
 mod model_override;
@@ -60,6 +61,7 @@ pub use finding::{
     CHECK_KEY, CRITICAL_KEY, ClassifiedFinding, ClassifiedFindings, FindingClass, JUDGMENT_TAG, MECHANICAL_TAG,
     classify_findings,
 };
+pub use granularity::{Widening, coarsen, rewrites, widen};
 pub use lane::{LANE_WORKPIECE_HEADER, pin_workpiece_description, split_lane_identity};
 pub use lease::{EvictedHolder, MAX_OBSERVED_WRITES, normalize_write_paths};
 pub use model_override::{AgentSelection, ModelOverride, OverrideError, ResolvedModel, StageOverride};
@@ -86,7 +88,7 @@ pub use statement::{Observation, Provenance, StageReceipt, Statement};
 pub use statement::{signed_approval, signed_cancel, signed_reopen};
 pub use study::{StudyCall, StudyCost, StudyRecord};
 pub use suppression::{SuppressionDisposition, SuppressionRequest, SuppressionVerdict};
-pub use surface::{SurfacePathRequest, SurfaceRequest};
+pub use surface::{SurfaceGrant, SurfacePathRequest, SurfaceRequest};
 pub use timeout::TimeoutRecord;
 pub use verify::{VerifyFailure, VerifyFailureSet};
 pub use workpiece_builder::{FIELD_ENTRY_SCHEMA, FieldEntry, WorkpieceBuilder, WorkpieceRefusal};

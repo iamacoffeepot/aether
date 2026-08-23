@@ -33,7 +33,8 @@
 //! [`admit_uploaded`]: crate::bloomery::admit_uploaded
 
 use aether_bloomery::{
-    CandidateRef, CompositionParents, Digest, LaneObservation, Nonce, StageVerdict, StudyCall, StudyCost, VerifyFailureSet,
+    CandidateRef, CompositionParents, Digest, LaneObservation, Nonce, StageVerdict, StudyCall, StudyCost,
+    VerifyFailureSet,
 };
 use serde::{Deserialize, Serialize};
 

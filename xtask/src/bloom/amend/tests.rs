@@ -39,7 +39,13 @@ fn member(awaiting: Option<AwaitingSurfaceView>) -> MemberView {
 }
 
 fn sibling(withdrawn: Option<WithdrawnView>) -> MemberView {
-    MemberView { workpiece: "example-b".to_owned(), scope_revision: digest(2), awaiting_surface: None, withdrawn }
+    MemberView {
+        workpiece: "example-b".to_owned(),
+        scope_revision: digest(2),
+        awaiting_surface: None,
+        withdrawn,
+        cursor: None,
+    }
 }
 
 fn bloom(members: Vec<MemberView>) -> BloomView {

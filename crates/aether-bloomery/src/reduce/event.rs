@@ -780,6 +780,32 @@ pub enum Fact {
         /// through [`narrow_composition`](crate::narrow_composition).
         attribution: CompositionParents,
     },
+    /// The machinery granted a member the surface its lane asked for
+    /// (ADR-0207 §The existing tier ladder decides who grants it).
+    ///
+    /// Admitted only for a delta every added glob of which resolves
+    /// [`Tier::Auto`](crate::Tier) under the bloom's own sealed approval
+    /// policy. The successor revision is already written and approved when this
+    /// arrives — the host does that first, because a pin the commission cannot
+    /// produce is a pin the seal door would refuse.
+    ///
+    /// Appended past [`Fact::CompositionNarrowed`] so every prior fact keeps its
+    /// wire discriminant.
+    SurfaceGranted {
+        /// The bloom the member belongs to.
+        bloom: BloomId,
+        /// The member whose surface grew.
+        workpiece: WorkpieceId,
+        /// The stage its lane declined at, and the stage it re-enters.
+        stage: StageId,
+        /// The stored successor revision, already carrying the widened surface
+        /// and its approval.
+        revision: Digest,
+        /// The globs the grant added, at the granularity the seal admits.
+        added: Vec<String>,
+        /// The declining evidence the grant answers.
+        evidence: Evidence,
+    },
 }
 
 impl Fact {

@@ -369,13 +369,19 @@ pub(super) fn reduce_attempt_completed(
     let (targets, construct_checkpoint_base) = if assembling && passed {
         (
             DispatchTargets {
-                subject: member.scope_revision,
+                subject: record.scope_revision_of(member),
                 checkout: candidate.map_or(construct_base, |current| current.checkout),
             },
             None,
         )
     } else {
-        reconcile_or_line_targets(member.scope_revision, construct_base, candidate, fold_checkpoint, member_checkpoint)
+        reconcile_or_line_targets(
+            record.scope_revision_of(member),
+            construct_base,
+            candidate,
+            fold_checkpoint,
+            member_checkpoint,
+        )
     };
     let ctx = CompletionCtx {
         bloom: *bloom,
@@ -437,7 +443,7 @@ pub(super) fn reduce_member_executor_fault(
             got: stage,
         }));
     }
-    let subject = cursor.candidate.map_or(member.scope_revision, |current| current.tree);
+    let subject = cursor.candidate.map_or_else(|| record.scope_revision_of(member), |current| current.tree);
     if !evidence.validates(&subject) {
         return Decisions::rejected(Outcome::MemberExecutorFaultRejected(MemberExecutorFaultError::EvidenceNotBound {
             expected: subject,
@@ -475,7 +481,7 @@ pub(super) fn reduce_member_executor_fault(
 
     let fold_checkpoint = cursor.fold_checkpoint.filter(|_| stage == StageId::Reconcile);
     let (targets, construct_checkpoint_base) = reconcile_or_line_targets(
-        member.scope_revision,
+        record.scope_revision_of(member),
         member_construct_base(record, workpiece),
         cursor.candidate,
         fold_checkpoint,
@@ -484,7 +490,7 @@ pub(super) fn reduce_member_executor_fault(
     effects.extend(move_effects_with_checkpoint(
         *bloom,
         workpiece,
-        member.scope_revision,
+        record.scope_revision_of(member),
         cursor,
         (targets, construct_checkpoint_base),
         cursor.candidate.map(|current| current.tree),
@@ -541,7 +547,7 @@ fn advance_after_pass(
     {
         let claim = ResolutionClaim {
             workpiece: workpiece.clone(),
-            scope_revision: member.scope_revision,
+            scope_revision: record.scope_revision_of(member),
             candidate: current.tree,
             evidence: proof.evidence.clone(),
         };
@@ -557,7 +563,7 @@ fn advance_after_pass(
     effects.extend(move_effects_with_checkpoint(
         bloom,
         workpiece,
-        member.scope_revision,
+        record.scope_revision_of(member),
         progress,
         (targets, construct_checkpoint_base),
         candidate.map(|current| current.tree),
@@ -594,7 +600,7 @@ fn retry_or_wedge(
         effects.extend(move_effects_with_checkpoint(
             bloom,
             workpiece,
-            member.scope_revision,
+            record.scope_revision_of(member),
             progress,
             (targets, construct_checkpoint_base),
             candidate.map(|current| current.tree),
