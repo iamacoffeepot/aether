@@ -265,8 +265,8 @@ pub struct LiveState<'a> {
     /// record evidence — unknown-era stays fail-closed.
     pub land_sequences: &'a [(BloomId, u64)],
     /// Journaled `Fact::ObserveMainline` and `Fact::Land` heads, with the
-    /// sequence they were recorded at. The current-era cut is the earliest
-    /// of these whose head is an ancestor of the live daily.
+    /// sequence they were recorded at, in sequence order. The current-era
+    /// anchor is the newest of these whose head the live daily still carries.
     pub journaled_heads: &'a [(Digest, u64)],
     /// Whether `to` is `from` or a descendant. `None` when the source cannot
     /// answer ancestry (unconfigured, or a digest has no correspondence).
@@ -401,9 +401,10 @@ fn landed_resolution_is_ancestor(live: &LiveState<'_>) -> Vec<String> {
             })
             .collect();
     };
+    let anchor = newest_anchored_sequence(live, daily, ancestry);
     let mut divergences = Vec::new();
     for (bloom, head) in live.landed_heads {
-        if !landed_in_current_era(live, bloom, daily, ancestry) {
+        if !landed_in_current_era(live, bloom, daily, ancestry, anchor) {
             continue;
         }
         match ancestry(head, &daily) {
@@ -427,41 +428,57 @@ fn landed_resolution_is_ancestor(live: &LiveState<'_>) -> Vec<String> {
 
 /// Whether this Landed bloom belongs to the current daily ref's history.
 ///
-/// A land compare-and-swaps against the bloom's sealed base, so a base that
-/// is not an ancestor of the current daily head sits on a previous day's
-/// chain. The day roll rewrites history across the cut: those resolutions are
-/// structurally never ancestors of the new head, and their ancestry was
-/// notarized by that day's sync-back. [`Invariant::ViewMainlineCorresponds`] and
+/// Two exclusions, both read off records the journal already keeps. A land
+/// compare-and-swaps against the bloom's sealed base, so a base the current
+/// daily head does not carry sat on a chain the ref has left and nothing
+/// sealed on it can be judged here. And a Land journaled before
+/// [`newest_anchored_sequence`] is history the ref has already superseded: the
+/// day roll advances mainline by syncing the previous day's tree as one
+/// commit, so those resolutions are structurally never ancestors of the new
+/// head, and their ancestry was notarized by that day's sync-back.
+///
+/// Base ancestry only ever excludes; it can never admit. The roll carries each
+/// day's base onto mainline along with everything else that day built, so a
+/// previous day's base stays an ancestor of every later daily head and would
+/// read as current-era forever — which is the whole population the check used
+/// to alert on after a roll. [`Invariant::ViewMainlineCorresponds`] and
 /// [`Invariant::ObservedHeadEqualsDailyHead`] compare live pointers, not historical lands
 /// — a post-roll mismatch there is a missed observation, not rewritten
 /// history, and stays in scope. Unknown era (missing record, ancestry that
-/// does not resolve) stays in the check so a current-era defect cannot hide,
-/// unless the Land fact itself was journaled before the current daily's cut —
-/// the earliest journaled head that is an ancestor of the live daily. A pre-cut
-/// Land is pre-roll by record even when its objects no longer resolve; no such
-/// record evidence stays fail-closed.
-fn landed_in_current_era(live: &LiveState<'_>, bloom: &BloomId, daily: Digest, ancestry: &Ancestry<'_>) -> bool {
-    live.snapshot
-        .blooms
-        .get(bloom)
-        .and_then(|record| ancestry(&record.spec.base(), &daily))
-        .unwrap_or_else(|| !land_is_pre_cut(live, bloom, daily, ancestry))
+/// does not resolve, no anchor yet) stays in the check so a current-era defect
+/// cannot hide behind objects that no longer answer.
+fn landed_in_current_era(
+    live: &LiveState<'_>,
+    bloom: &BloomId,
+    daily: Digest,
+    ancestry: &Ancestry<'_>,
+    anchor: Option<u64>,
+) -> bool {
+    let base_off_chain =
+        live.snapshot.blooms.get(bloom).and_then(|record| ancestry(&record.spec.base(), &daily)) == Some(false);
+    !base_off_chain && !land_precedes_anchor(live, bloom, anchor)
 }
 
-/// A Land journaled before the current daily's cut is pre-roll by record.
-/// No Land sequence, or no current-era journaled head, is not evidence.
-fn land_is_pre_cut(live: &LiveState<'_>, bloom: &BloomId, daily: Digest, ancestry: &Ancestry<'_>) -> bool {
-    let Some(cut) = current_era_cut(live, daily, ancestry) else {
+/// A Land journaled before the anchor is a resolution the live ref has already
+/// superseded. No anchor, or no Land sequence, is not evidence.
+fn land_precedes_anchor(live: &LiveState<'_>, bloom: &BloomId, anchor: Option<u64>) -> bool {
+    let Some(anchor) = anchor else {
         return false;
     };
-    live.land_sequences.iter().find(|(id, _)| id == bloom).is_some_and(|(_, sequence)| *sequence < cut)
+    live.land_sequences.iter().find(|(id, _)| id == bloom).is_some_and(|(_, sequence)| *sequence < anchor)
 }
 
-fn current_era_cut(live: &LiveState<'_>, daily: Digest, ancestry: &Ancestry<'_>) -> Option<u64> {
+/// The journal sequence of the newest head the live daily ref still carries —
+/// the point past which the coordinator's record and the ref part company.
+///
+/// [`LiveState::journaled_heads`] is in sequence order, so the newest such head
+/// is the last one to answer the ancestry question with yes, and the walk stops
+/// there instead of asking the source about every head it ever recorded.
+fn newest_anchored_sequence(live: &LiveState<'_>, daily: Digest, ancestry: &Ancestry<'_>) -> Option<u64> {
     live.journaled_heads
         .iter()
-        .filter_map(|(head, sequence)| (ancestry(head, &daily) == Some(true)).then_some(*sequence))
-        .min()
+        .rev()
+        .find_map(|(head, sequence)| (ancestry(head, &daily) == Some(true)).then_some(*sequence))
 }
 
 fn observed_head_equals_daily_head(live: &LiveState<'_>) -> Vec<String> {
@@ -947,6 +964,46 @@ mod tests {
         assert!(named.contains(&hex_of(&missing.id().0)), "no land-record evidence stays in scope: {named}");
         assert!(named.contains(&hex_of(&post.id().0)), "a post-cut record stays in scope: {named}");
         assert!(!named.contains(&hex_of(&pre.id().0)), "a pre-cut land is not named: {named}");
+    }
+
+    #[test]
+    fn a_previous_day_land_whose_base_survived_the_roll_is_out_of_jurisdiction() {
+        // The live shape the 2026-08-23 boot alerted on. The day roll advances
+        // main by syncing the previous day's tree as one commit, so the base
+        // those blooms sealed against stays on main and stays an ancestor of
+        // the new daily head while their resolutions structurally never can be.
+        // Base ancestry therefore separates no eras at all — the journal's own
+        // record of how far the live ref still agrees with it does.
+        let yesterday = draft(1, vec![membership("issue-5332", 1)]).seal();
+        let lost = draft(9, vec![membership("issue-today", 1)]).seal();
+        let mut snapshot = Snapshot::default();
+        splice_bloom(&mut snapshot, &yesterday, BloomStatus::Landed);
+        splice_bloom(&mut snapshot, &lost, BloomStatus::Landed);
+        let landed = [(yesterday.id(), digest(2)), (lost.id(), digest(3))];
+        let land_sequences = [(yesterday.id(), 20), (lost.id(), 80)];
+        let journaled_heads = [(digest(1), 5), (digest(2), 20), (digest(9), 60), (digest(3), 80)];
+        let ancestry = rolled_day_chain();
+        let mut state = live(&snapshot, &[]);
+        state.actual_head = Some(digest(10));
+        state.landed_heads = &landed;
+        state.land_sequences = &land_sequences;
+        state.journaled_heads = &journaled_heads;
+        state.ancestry = Some(&ancestry);
+
+        let report = evaluate(&state);
+        let check =
+            report.named(Invariant::LandedResolutionIsAncestor.name()).expect("the seed list includes landed ancestry");
+        assert!(!check.passed, "a land the ref should still carry and does not is a violation: {check:?}");
+        let named = check.divergences.join(" ");
+        assert!(named.contains(&hex_of(&lost.id().0)), "a land past the newest anchored head is named: {named}");
+        assert!(!named.contains(&hex_of(&yesterday.id().0)), "a pre-roll land is not named: {named}");
+    }
+
+    /// Today's daily ref is `9 → 10`, cut from a main the roll advanced by
+    /// syncing yesterday's tree onto it. Yesterday's base `1` rode that sync and
+    /// is still an ancestor of today's head; yesterday's resolution `2` is not.
+    fn rolled_day_chain() -> impl Fn(&aether_bloomery::Digest, &aether_bloomery::Digest) -> Option<bool> {
+        |from, to| Some(*from == *to || (*to == digest(10) && (*from == digest(1) || *from == digest(9))))
     }
 
     /// Today's daily ref is `9 → 10`. Yesterday's `1 → 2` is a parallel history
