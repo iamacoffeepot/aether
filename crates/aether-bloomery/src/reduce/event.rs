@@ -780,6 +780,37 @@ pub enum Fact {
         /// through [`narrow_composition`](crate::narrow_composition).
         attribution: CompositionParents,
     },
+    /// **Retired.** The machinery once granted a member the surface its lane
+    /// asked for and re-pinned it mid-bloom. A widening is an operator's
+    /// decision now — taken through `cargo xtask bloom amend` and delivered as
+    /// a [`Fact::Supersede`] — so nothing admits this fact any more.
+    ///
+    /// It keeps its place because the journal already holds records written
+    /// under it, and ADR-0187 never rewrites sealed history: those bytes have
+    /// to go on decoding under the shape that wrote them. Last in declaration
+    /// order, so every prior fact keeps its wire discriminant.
+    ///
+    /// Boot replay folds each record's *recorded* decisions rather than
+    /// re-deciding it (ADR-0190), so a historical grant still folds exactly as
+    /// it did live and the member it moved stays where the journal put it. The
+    /// reducer arm this variant reaches today refuses with
+    /// `SurfaceRequestedError::GrantRetired` and decides no effects, so a fact
+    /// arriving here now can neither re-pin nor re-dispatch.
+    SurfaceGranted {
+        /// The bloom the member belongs to.
+        bloom: BloomId,
+        /// The member whose surface grew.
+        workpiece: WorkpieceId,
+        /// The stage its lane declined at, and the stage it re-entered.
+        stage: StageId,
+        /// The stored successor revision, already carrying the widened surface
+        /// and its approval.
+        revision: Digest,
+        /// The globs the grant added, at the granularity the seal admits.
+        added: Vec<String>,
+        /// The declining evidence the grant answered.
+        evidence: Evidence,
+    },
 }
 
 impl Fact {

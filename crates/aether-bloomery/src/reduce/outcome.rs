@@ -833,6 +833,29 @@ pub enum Outcome {
     },
     /// An attribution of a failing fold was refused.
     NarrowCompositionRejected(NarrowCompositionError),
+    /// **Retired**, and kept for the same reason
+    /// [`Fact::SurfaceGranted`](super::Fact::SurfaceGranted) is: journaled
+    /// [`Decisions`] blobs already carry it, so removing it stops those rows
+    /// decoding. Last but one in declaration order, so every prior outcome
+    /// keeps its wire discriminant.
+    ///
+    /// A member's surface request was granted by the machinery and the member
+    /// re-entered the line. Nothing produces it now.
+    SurfaceGranted {
+        /// The bloom.
+        bloom: BloomId,
+        /// The member whose surface grew.
+        workpiece: WorkpieceId,
+        /// The successor revision it dispatched under.
+        revision: Digest,
+        /// The globs the grant added.
+        added: Vec<String>,
+    },
+    /// A surface grant was refused. **Retired** as an admission outcome, and
+    /// the answer the reducer now gives a retired
+    /// [`Fact::SurfaceGranted`](super::Fact::SurfaceGranted) that reaches it:
+    /// [`SurfaceRequestedError::GrantRetired`], with no effects.
+    SurfaceGrantRejected(SurfaceRequestedError),
 }
 
 impl Outcome {

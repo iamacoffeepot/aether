@@ -675,6 +675,13 @@ pub enum SurfaceRequestedError {
     /// Reconcile) — the only stages whose lane can decline for want of
     /// surface.
     NotAConstructFamilyStage(StageId),
+    /// The machinery no longer grants a surface: an increase is an operator's
+    /// decision, taken through `cargo xtask bloom amend`. The one answer a
+    /// retired [`Fact::SurfaceGranted`](crate::Fact::SurfaceGranted) gets if
+    /// one ever reaches the reducer. Appended past
+    /// [`NotAConstructFamilyStage`](Self::NotAConstructFamilyStage) so the
+    /// prior refusals keep their wire discriminants.
+    GrantRetired,
 }
 
 /// Why a member withdrawal was refused (#5327).

@@ -210,5 +210,13 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         Fact::CompositionNarrowed { bloom, verified, tree, head, evidence, attribution } => {
             reduce_composition_narrowed(snapshot, bloom, verified, *tree, *head, evidence, attribution)
         }
+        // Retired: the journal holds grants the machinery decided before a
+        // widening became an operator's decision, and those records replay
+        // through their own recorded decisions (ADR-0190) rather than through
+        // here. Nothing admits the fact any more, so the live path is a named
+        // refusal that decides nothing — no pin moves, no lane is dispatched.
+        Fact::SurfaceGranted { .. } => {
+            Decisions::rejected(Outcome::SurfaceGrantRejected(SurfaceRequestedError::GrantRetired))
+        }
     }
 }
