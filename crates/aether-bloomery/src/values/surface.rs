@@ -46,22 +46,6 @@ pub struct SurfaceRequest {
     pub summary: String,
 }
 
-/// A granted surface amendment (ADR-0207): the stored successor revision the
-/// member now dispatches under, and what the grant added.
-///
-/// Produced by the host, which is the only side that can write a revision and
-/// approve it; carried to the reducer, which is the only side that can move a
-/// member's pin. Neither half can grant alone, and that is deliberate — the
-/// commission and the bloom have to agree about what was authorized.
-#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct SurfaceGrant {
-    /// The stored successor revision, already carrying the widened surface and
-    /// its auto-tier approval.
-    pub revision: Digest,
-    /// The globs the grant added, at the granularity the seal admits.
-    pub added: Vec<String>,
-}
-
 impl ContentAddressed for SurfaceRequest {
     const DOMAIN: &'static str = "aether.bloomery.surface_request";
 }

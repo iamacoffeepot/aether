@@ -13,8 +13,8 @@ use aether_bloomery::{
     Event, Evidence, EvidenceKind, EvidenceRef, ExecutionLimits, ExecutionStatus, Fact, Forecast, IdempotencyKey,
     LaneObservation, Membership, NetworkProfile, Nonce, Observation, Outcome, Provenance, ResolvedConfigs, Snapshot,
     SpendWindow, StageCatalog, StageId, StageVerdict, Statement, StudyCall, StudyCost, SuppressionRequest,
-    SurfaceGrant, SurfacePathRequest, SurfaceRequest, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle,
-    WorkOrder, WorkpieceId, reduce,
+    SurfacePathRequest, SurfaceRequest, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder,
+    WorkpieceId, reduce,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -650,10 +650,6 @@ fn claim_for_carries_the_whole_observation() {
             parents: vec![WorkpieceId("wp-left".to_owned()), WorkpieceId("wp-right".to_owned())],
             paths: vec!["crates/collided/src/lib.rs".into()],
             bound: vec!["crates/collided/**".into()],
-        }),
-        surface_grant: Some(SurfaceGrant {
-            revision: Digest::from_bytes([19; 32]),
-            added: vec!["crates/needed/**".into()],
         }),
     };
     let name = NameEvidenceClaims::attempt_artifact_name(

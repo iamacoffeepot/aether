@@ -206,7 +206,7 @@ pub struct TierVerdict {
 }
 
 /// Resolve `policy` over the widened surface and over each added glob alone
-/// (ADR-0207 §the tier ladder decides who grants it).
+/// (ADR-0207 §An operator decides every widening).
 #[must_use]
 pub fn tier_verdict(policy: &ApprovalPolicy, existing: &[String], added: &[String]) -> TierVerdict {
     let mut widened_surface: Vec<String> = existing.to_vec();

@@ -14,6 +14,7 @@
 
 use aether_bloomery::{
     BloomId, BloomSpec, Digest, Fact, OperatorHold, OperatorRepair, Outcome, Withdrawal, WithdrawalCause, WorkpieceId,
+    digest_of,
 };
 
 use super::ScenarioHarness;
@@ -107,6 +108,57 @@ impl ScenarioHarness {
         };
 
         self.admit(&key, fact)
+    }
+
+    /// Answer a parked surface request the way an operator does (ADR-0207):
+    /// widen `workpiece`'s current revision by `added`, store the widened
+    /// successor and the operator's approval of it, and supersede `bloom` with
+    /// the member re-pinned there. Returns the successor bloom, which is where
+    /// the re-armed member walks.
+    ///
+    /// The three writes `cargo xtask bloom amend` performs, in its order and
+    /// through the same store rows and the same [`Fact::Supersede`]: the
+    /// coordinator never widens a surface on its own, so every scenario about a
+    /// widening drives it from here. The tier ladder the command applies to the
+    /// delta is the operator's own preflight and has no counterpart in the
+    /// store, so nothing here stands in for it.
+    ///
+    /// The work orders are rendered before the fact is admitted, exactly as the
+    /// supersede door renders them: the successor is a new bloom id, so its
+    /// members' dispatch-description rows are its own, and the amended member's
+    /// row is what carries the widened surface to the lane.
+    ///
+    /// # Panics
+    /// Nothing has been sealed, `workpiece` is not a member of what was, or the
+    /// commission store holds no revision at the member's pin.
+    pub fn amend_surface(&mut self, bloom: BloomId, workpiece: &str, added: &[&str]) -> BloomId {
+        let workpiece = WorkpieceId(workpiece.to_owned());
+        let sealed = self.sealed.as_ref().expect("an amendment supersedes a sealed bloom; seal one first");
+        let pinned = sealed
+            .members()
+            .iter()
+            .find(|member| member.workpiece == workpiece)
+            .unwrap_or_else(|| panic!("{workpiece:?} is not a member of the sealed bloom"))
+            .scope_revision;
+        let current = self
+            .scope_revision(pinned)
+            .unwrap_or_else(|| panic!("{workpiece:?} is pinned at a revision the commission store does not hold"));
+
+        let widened = current.with_widened_surface(&added.iter().map(|glob| (*glob).to_owned()).collect::<Vec<_>>());
+        let revision = self.approve_widened_revision(&widened);
+        assert_eq!(revision, digest_of(&widened), "the store addresses the successor by its own content");
+
+        let spec = self.amended_spec(&workpiece, revision);
+        let successor = spec.id();
+        self.persist_work_orders(&spec);
+        let outcome = self.admit(
+            &format!("operator-amend-{}-{}", workpiece.0, revision.to_hex()),
+            Fact::Supersede { predecessor: bloom, successor: spec.clone() },
+        );
+        assert!(matches!(outcome, Outcome::Superseded { .. }), "the amendment supersedes: {outcome:?}");
+        self.sealed = Some(spec);
+
+        successor
     }
 
     /// The successor spec an amendment seals: the sealed bloom's members, with

@@ -20,8 +20,8 @@ use alloc::vec::Vec;
 
 use crate::ids::Nonce;
 use crate::values::{
-    CandidateRef, CompositionParents, StudyCall, StudyCost, SuppressionRequest, SurfaceGrant, SurfaceRequest,
-    Transformation, VerifyFailureSet,
+    CandidateRef, CompositionParents, StudyCall, StudyCost, SuppressionRequest, SurfaceRequest, Transformation,
+    VerifyFailureSet,
 };
 
 /// A fully-resolved unit of work to dispatch. The [`Transformation`] already
@@ -182,11 +182,6 @@ pub struct LaneObservation {
     /// every verdict whose diagnostic the member's own delta accounts for, and
     /// from the name-only Actions backend.
     pub narrowing: Option<CompositionParents>,
-    /// The surface amendment the machinery granted this declining lane
-    /// (ADR-0207), when the whole delta resolved `auto` under the bloom's own
-    /// sealed policy. `None` when there was nothing to grant, and — the case
-    /// that matters — when the delta needs a person.
-    pub surface_grant: Option<SurfaceGrant>,
 }
 
 /// A reference to one piece of evidence a run uploaded — the transport-level

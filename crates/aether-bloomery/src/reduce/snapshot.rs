@@ -18,9 +18,9 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
     Adjudication, BaseReceipt, BloomSpec, CandidateRef, CompositionFinding, CompositionParents, ConfigScopes,
-    DispatchKey, Evidence, EvidenceKind, MemberDependency, Membership, OperatorHold, OperatorRepair,
-    OrphanClaimReleaseRecord, ResolutionClaim, ResolvedConfigs, SpendQuiesce, StageCatalog, SuppressionDisposition,
-    SurfaceRequest, VerifiedTree, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Withdrawal,
+    DispatchKey, Evidence, EvidenceKind, MemberDependency, OperatorHold, OperatorRepair, OrphanClaimReleaseRecord,
+    ResolutionClaim, ResolvedConfigs, SpendQuiesce, StageCatalog, SuppressionDisposition, SurfaceRequest, VerifiedTree,
+    VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Withdrawal,
 };
 // Only [`Snapshot::with_green_base`] names it, and that door is behind the same cfg.
 // A plain import would be an unused one on a lib-scoped build, where the fixture
@@ -651,19 +651,6 @@ pub struct BloomRecord {
     /// that predates the field.
     #[serde(default)]
     pub withdrawn: BTreeMap<WorkpieceId, Withdrawal>,
-    /// The successor scope revision each member has been granted mid-bloom
-    /// (ADR-0207 §Admission accepts a grown surface without a new bloom), keyed
-    /// by member.
-    ///
-    /// A sealed spec is immutable, so a grant cannot rewrite the membership's
-    /// pin — and it does not need to: the pin the line reads is
-    /// [`scope_revision_of`](Self::scope_revision_of), which prefers a grant
-    /// when one exists. The revision named here is a real stored successor of
-    /// the sealed one, written and approved before the fact was admitted, so
-    /// the commission and the bloom agree about what was authorized.
-    /// `#[serde(default)]` is the [`withdrawn`](Self::withdrawn) precedent.
-    #[serde(default)]
-    pub granted_surfaces: BTreeMap<WorkpieceId, Digest>,
     /// If superseded, the successor that replaced this bloom.
     pub superseded_by: Option<BloomId>,
 }
@@ -1035,7 +1022,6 @@ impl Snapshot {
         next.record_refusals(decisions);
         next.record_surface_request(event, decisions);
         next.record_narrowed_composition(event, decisions);
-        next.record_surface_grant(event, decisions);
         next.record_file_leases(event, decisions);
         next.record_suppression_disposition(event, decisions);
         next
@@ -1219,25 +1205,6 @@ impl Snapshot {
                 }
             }
             _ => {}
-        }
-    }
-
-    /// Pin a granted successor revision on the member it was granted to
-    /// (ADR-0207).
-    ///
-    /// Gated on [`Outcome::SurfaceGranted`] so a refused grant cannot move a
-    /// pin the reducer rejected. The entry is never cleared: it is the pin the
-    /// member dispatches under for the rest of the bloom, and a bloom that
-    /// finishes drops the whole record with it.
-    fn record_surface_grant(&mut self, event: &Event, decisions: &Decisions) {
-        let Fact::SurfaceGranted { bloom, workpiece, revision, .. } = &event.fact else {
-            return;
-        };
-        if !matches!(decisions.outcome, Outcome::SurfaceGranted { .. }) {
-            return;
-        }
-        if let Some(record) = self.blooms.get_mut(bloom) {
-            record.granted_surfaces.insert(workpiece.clone(), *revision);
         }
     }
 
@@ -1959,18 +1926,6 @@ impl BloomRecord {
     /// The one 30-field literal. Production sealed-record construction and every
     /// test fixture fill from here, so a new field has a single home rather than
     /// steering placement across four test copies.
-    /// The scope revision `member` currently dispatches under: the successor a
-    /// mid-bloom grant pinned, or the one the bloom sealed.
-    ///
-    /// Every path into the line reads the pin through here rather than off the
-    /// membership, so a grant reaches the next dispatch, the containment gate,
-    /// and the receipt together — a grant only half the line could see would
-    /// authorize a lane to write files its own Verify would then refuse.
-    #[must_use]
-    pub fn scope_revision_of(&self, member: &Membership) -> Digest {
-        self.granted_surfaces.get(&member.workpiece).copied().unwrap_or(member.scope_revision)
-    }
-
     #[must_use]
     pub fn empty(spec: BloomSpec) -> Self {
         Self {
@@ -2004,7 +1959,6 @@ impl BloomRecord {
             host_faults: BTreeMap::new(),
             vehicles: BTreeMap::new(),
             withdrawn: BTreeMap::new(),
-            granted_surfaces: BTreeMap::new(),
             superseded_by: None,
         }
     }

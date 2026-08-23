@@ -9,12 +9,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_bloomery::{
-    ApprovalPolicy, BackendObjectId, BloomId, CandidateRef, CompositionParents, Conclusion, ConfigRegistry,
-    ConfigScopes, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, FoldContribution, KeyProvider,
-    LaneObservation, Nonce, Observation, ObservedLaneWrites, PriceTable, Provenance, ResolvedModel, ScopeRevision,
-    SessionSlug, SharedCorrespondence, SignatureEnvelope, StageId, StageVerdict, Statement, StudyCost,
-    SuppressionRequest, SurfaceGrant, SurfaceRequest, Tier, Transformation, VerifyFailureSet, WorkHandle, WorkOrder,
-    WorkpieceId, digest_of, gate_widening, is_model_lane, narrow_composition, tier_verdict, widen,
+    BackendObjectId, BloomId, CandidateRef, CompositionParents, Conclusion, ConfigRegistry, ConfigScopes, Digest,
+    EvidenceRef, ExecutionStatus, ExecutorBackend, FoldContribution, LaneObservation, Nonce, ObservedLaneWrites,
+    PriceTable, ResolvedModel, SessionSlug, SharedCorrespondence, StageId, StageVerdict, StudyCost, SuppressionRequest,
+    SurfaceRequest, Transformation, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, is_model_lane,
+    narrow_composition,
 };
 use aether_bloomery_git::command;
 use aether_bloomery_git::source::candidate_ref_name;
@@ -42,14 +41,12 @@ use crate::bloomery::CoordinatorConfig;
 use crate::bloomery::KitReport;
 use crate::bloomery::executor::{LaneOccupancy, OutstandingDispatch, ReconcileLanes, ReconcileReport};
 use crate::bloomery::intake::{DispatchRecord, NameEvidenceClaims};
-use crate::bloomery::load_policy;
 use crate::bloomery::triage::MAX_TRIAGED_DIFF_BYTES;
 use crate::bloomery::triage::named_surface;
 use crate::bloomery::verify::{apply_containment, candidate_delta_base, candidate_violations, changed_paths};
 use crate::bloomery::{candidate_tree_digest, capture_commit_digest};
 use crate::session::SessionConfig;
-use crate::store::resolve_config;
-use crate::store::{CommissionBackend, RevisionEvidence, SqliteStore, StoreBackend};
+use crate::store::{CommissionBackend, SqliteStore, StoreBackend};
 
 /// The suffix distinguishing a run's evidence directory from the lane slot
 /// checkouts under the same base dir. Evidence stays per dispatch (nonce-keyed):
@@ -432,12 +429,6 @@ pub struct LocalExecutor {
     // a dispatched lane inherits; a test names a directory of stand-in
     // binaries so a missing-tool refusal does not depend on this host.
     kit_path: Option<OsString>,
-    // The host's file-loaded tier policy — what a bloom that seals none of its
-    // own is gated against, at the seal door and at `grant_surface` alike.
-    // `None` for a backend built without one (the seam tests) and for a host
-    // whose policy file is absent or malformed, which grants nothing rather
-    // than granting against a policy nobody wrote.
-    file_policy: Option<ApprovalPolicy>,
 }
 
 impl LocalExecutor {
@@ -472,7 +463,6 @@ impl LocalExecutor {
             builders,
             kit_gate: false,
             kit_path: None,
-            file_policy: None,
         }
     }
 
@@ -532,20 +522,6 @@ impl LocalExecutor {
         self
     }
 
-    /// Mount the host's file-loaded fallback tier policy — the one a bloom that
-    /// sealed no `aether.bloomery.approval_policy` is gated against.
-    ///
-    /// The seal door loads the same file into the api capability and resolves
-    /// sealed-then-file (`gate_policy`). The surface grant has to resolve it the
-    /// same way or the two doors answer with different policies: a bloom
-    /// admitted under the file policy would then have its auto-tier delta parked
-    /// for a person its own admission already said it did not need.
-    #[must_use]
-    pub fn with_file_policy(mut self, policy: ApprovalPolicy) -> Self {
-        self.file_policy = Some(policy);
-        self
-    }
-
     /// Inspect the lane-host kit on every submit and refuse when a required
     /// tool is missing (#5035). Off by default so seam tests and a mock-lane
     /// program keep dispatching; [`from_config`](Self::from_config) turns it
@@ -601,23 +577,6 @@ impl LocalExecutor {
                     path = %session.store_path(),
                     %error,
                     "local executor backend: session pool unavailable; every lap launches cold",
-                );
-                backend
-            }
-        };
-        // The same file the api capability's pre-seal gate loads, from the same
-        // config knob, so the admission door and the grant door read one policy.
-        // An unreadable or malformed file is not a boot failure: it leaves the
-        // backend fallback-less, and a bloom that sealed no policy of its own
-        // then grants nothing, which is the fail-closed posture the seal door
-        // takes on the same miss.
-        let backend = match load_policy(Path::new(&config.approval_policy_file)) {
-            Ok(policy) => backend.with_file_policy(policy),
-            Err(error) => {
-                tracing::warn!(
-                    path = %config.approval_policy_file,
-                    %error,
-                    "local executor backend: fallback approval policy unavailable; a bloom sealing none grants no surface",
                 );
                 backend
             }
@@ -1855,221 +1814,6 @@ impl LocalExecutor {
         Some(commission?.current?.declared_surface)
     }
 
-    /// The tier policy this grant is judged against: the
-    /// `aether.bloomery.approval_policy` the bloom sealed bloom-wide, and this
-    /// host's file-loaded fallback when it sealed none — the resolution the
-    /// seal door's own `gate_policy` makes.
-    ///
-    /// [`None`] is a refusal whose reason is already in the journal. A sealed
-    /// address whose content cannot be produced never falls through to the
-    /// file: defaulting past a sealed entry would judge against a policy the
-    /// bloom never attested. A host that loaded no fallback grants nothing
-    /// rather than granting against a policy nobody wrote.
-    fn grant_policy(&self, nonce: &str, configs: &ConfigRegistry, store: &mut SqliteStore) -> Option<ApprovalPolicy> {
-        match resolve_config::<ApprovalPolicy>(store, ConfigScopes::bloom_wide(configs)) {
-            Ok(Some(sealed)) => Some(sealed),
-            Ok(None) => {
-                if self.file_policy.is_none() {
-                    tracing::warn!(
-                        target: "aether_chassis_bloomery::executor",
-                        %nonce,
-                        "surface request: the bloom sealed no approval policy and this host loaded no fallback file; parking it for a person",
-                    );
-                }
-                self.file_policy.clone()
-            }
-            Err(error) => {
-                tracing::warn!(
-                    target: "aether_chassis_bloomery::executor",
-                    %nonce,
-                    %error,
-                    "surface request: the bloom's sealed approval policy is unresolvable; parking it for a person",
-                );
-                None
-            }
-        }
-    }
-
-    /// The revision a surface request amends, or [`None`] with the reason
-    /// journaled — the store failed, or it holds no revision under the digest
-    /// the request named.
-    fn amended_revision(nonce: &str, revision: Digest, store: &mut SqliteStore) -> Option<ScopeRevision> {
-        match store.load_revision(revision) {
-            Ok(Some(current)) => Some(current),
-            Ok(None) => {
-                tracing::warn!(
-                    target: "aether_chassis_bloomery::executor",
-                    %nonce,
-                    revision = %revision.to_hex(),
-                    "surface request: the revision it amends is not in the commission store; parking it for a person",
-                );
-                None
-            }
-            Err(error) => {
-                tracing::warn!(
-                    target: "aether_chassis_bloomery::executor",
-                    %nonce,
-                    %error,
-                    revision = %revision.to_hex(),
-                    "surface request: the revision it amends is unreadable; parking it for a person",
-                );
-                None
-            }
-        }
-    }
-
-    /// Grant a declining lane the surface it asked for, when the whole delta
-    /// resolves `auto` under the policy this bloom is gated against (ADR-0207).
-    ///
-    /// Returns the stored successor revision and the globs it added, or [`None`]
-    /// when the estate must ask a person instead. The successor is written and
-    /// approved *here*, before the fact is admitted, because a pin the
-    /// commission cannot produce is a pin the seal door refuses — the commission
-    /// and the bloom have to agree about what was authorized, which is the whole
-    /// reason a grant is a revision rather than a flag.
-    ///
-    /// The approval it writes carries an observation attestation and no
-    /// signature, which is what makes this safe rather than a hole: the store
-    /// files that as `auto` tier, and a `judge` or `human` delta needs a signed
-    /// statement this host cannot mint. So the machinery can only ever grant
-    /// itself what the owner's policy already marked as needing nobody.
-    ///
-    /// The policy is resolved exactly as the seal door's own `gate_policy`
-    /// resolves it: the `aether.bloomery.approval_policy` the bloom sealed
-    /// bloom-wide, and this host's file-loaded fallback when it sealed none.
-    /// The two doors have to answer with the same policy — a bloom admitted
-    /// under the file policy and then granted against nothing is a member
-    /// parked for a person its own admission already said it did not need, and
-    /// no real bloom seals a policy, so that fall-through is the ordinary case
-    /// rather than the exotic one. A sealed address whose content cannot be
-    /// produced still refuses rather than falling through: defaulting past a
-    /// sealed entry would grant against a policy the bloom never attested.
-    ///
-    /// A member sealing its own approval policy is refused at the seal door,
-    /// which is the only place that distinction survives — the registry an
-    /// order carries is the member's layered over the bloom's, already
-    /// flattened by the reducer, so there is nothing here to tell one from the
-    /// other.
-    ///
-    /// Every refusal below says so in the journal. A grant that declines
-    /// silently leaves a parked member with a remedy nobody can name, which is
-    /// the same information loss the request itself exists to end.
-    fn grant_surface(&self, nonce: &str, request: &SurfaceRequest) -> Option<(Digest, Vec<String>)> {
-        let Some(configs) = self.order_configs(nonce) else {
-            tracing::warn!(
-                target: "aether_chassis_bloomery::executor",
-                %nonce,
-                "surface request: the order's configuration registry is unreadable; parking it for a person",
-            );
-            return None;
-        };
-        let Some(store) = self.messages.as_ref() else {
-            tracing::warn!(
-                target: "aether_chassis_bloomery::executor",
-                %nonce,
-                "surface request: this backend mounts no commission store; parking it for a person",
-            );
-            return None;
-        };
-
-        // The guard is bound so it drops with this block: the reads below are
-        // pure and the writes take the lock again, and holding it across the
-        // policy resolution would put a config decode inside every other
-        // reader's wait.
-        let (policy, current) = {
-            let mut guard = store.lock().unwrap_or_else(PoisonError::into_inner);
-            let policy = self.grant_policy(nonce, &configs, &mut guard);
-            let current = Self::amended_revision(nonce, request.scope_revision, &mut guard);
-            drop(guard);
-            (policy?, current?)
-        };
-
-        let requested: Vec<String> = request.paths.iter().map(|entry| entry.path.clone()).collect();
-        let widening = match widen(&policy, &current.declared_surface, &requested) {
-            Ok(widening) => widening,
-            Err(glob) => {
-                tracing::warn!(
-                    target: "aether_chassis_bloomery::executor",
-                    %nonce,
-                    %glob,
-                    "surface request: a requested path is outside the declared-surface grammar; parking it for a person",
-                );
-                return None;
-            }
-        };
-        if widening.added.is_empty() {
-            tracing::info!(
-                target: "aether_chassis_bloomery::executor",
-                %nonce,
-                "surface request: every requested path is already inside the declared surface; there is nothing to widen",
-            );
-            return None;
-        }
-        let verdict = tier_verdict(&policy, &widening.existing, &widening.added);
-        if let Err(offending) = gate_widening(&verdict, Tier::Auto) {
-            tracing::info!(
-                target: "aether_chassis_bloomery::executor",
-                %nonce,
-                ?offending,
-                "surface request is above auto tier; parking it for a person rather than granting it",
-            );
-            return None;
-        }
-
-        // Replaced rather than appended: widening an entry the current revision
-        // already carries has to drop the file-granular spelling, or the
-        // successor keeps the entry the seal door refuses on.
-        let successor =
-            ScopeRevision { predecessor: Some(digest_of(&current)), declared_surface: widening.widened, ..current };
-        let approval = Statement {
-            words: digest_of(&successor).as_bytes().to_vec(),
-            provenance: Provenance::ObservationAttestation(Observation {
-                source: String::from("aether.bloomery.surface_grant"),
-            }),
-            parents: Vec::new(),
-        };
-
-        let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
-        let written = store
-            .write_revision(&successor, &RevisionEvidence::default())
-            .and_then(|revision| store.insert_approval(&approval, &NoKeys).map(|_| revision));
-        drop(store);
-        let revision = match written {
-            Ok(revision) => revision,
-            Err(error) => {
-                tracing::warn!(
-                    target: "aether_chassis_bloomery::executor",
-                    %nonce,
-                    %error,
-                    added = ?widening.added,
-                    "surface request: the successor revision could not be written and approved; parking it for a person",
-                );
-                return None;
-            }
-        };
-
-        tracing::info!(
-            target: "aether_chassis_bloomery::executor",
-            %nonce,
-            revision = %revision.to_hex(),
-            added = ?widening.added,
-            "surface request granted by the machinery; the member re-enters on the widened revision",
-        );
-        Some((revision, widening.added))
-    }
-
-    /// The configuration registry the order under `nonce` dispatched with.
-    fn order_configs(&self, nonce: &str) -> Option<ConfigRegistry> {
-        let store = self.messages.as_ref()?;
-        let order = {
-            let mut guard = store.lock().unwrap_or_else(PoisonError::into_inner);
-            let order = guard.lookup_order(nonce).ok().flatten();
-            drop(guard);
-            order
-        }?;
-        Some(DispatchRecord::from_stored(&order)?.configs)
-    }
-
     /// The stage the order under `nonce` was dispatched for.
     fn order_stage(&self, nonce: &str) -> Option<StageId> {
         let store = self.messages.as_ref()?;
@@ -2122,7 +1866,24 @@ impl LocalExecutor {
     fn surface_request(&self, nonce: &str, bytes: &[u8]) -> Option<SurfaceRequest> {
         let (summary, claimed) = parse_surface_request(bytes)?;
         let (scope_revision, surface) = self.order_scope(nonce)?;
-        SurfaceRequest::normalize(scope_revision, surface.as_deref().unwrap_or_default(), &summary, claimed)
+        let surface = surface.unwrap_or_default();
+        let asked: Vec<String> = claimed.iter().map(|(path, _)| path.clone()).collect();
+        let request = SurfaceRequest::normalize(scope_revision, &surface, &summary, claimed);
+        if request.is_none() {
+            // A lane that names paths and keeps none of them declined over
+            // surface it already had. The park that follows carries no remedy,
+            // so this line is the only place the contradiction is legible —
+            // and its usual cause is a work order that states a narrower
+            // surface than the revision it was dispatched under.
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                %nonce,
+                requested = ?asked,
+                surface = ?surface,
+                "surface request: every requested path is already inside the current surface; the decline parks with nothing to widen",
+            );
+        }
+        request
     }
 
     fn unread_evidence(
@@ -2301,12 +2062,6 @@ impl LocalExecutor {
         } else {
             Vec::new()
         };
-        // Resolved before the judgement takes the request: a grant answers this
-        // exact request, so the two are decided together or not at all.
-        let surface_grant = surface_request
-            .as_ref()
-            .and_then(|request| self.grant_surface(&handle.nonce.0, request))
-            .map(|(revision, added)| SurfaceGrant { revision, added });
         let judgement = Judgement {
             verdict,
             failed_verifiers: failed_verifiers.unwrap_or_default(),
@@ -2319,29 +2074,12 @@ impl LocalExecutor {
             suppression_requests: SuppressionRequest::normalize(parse_suppression_requests(bytes)),
             // Only a failing terminal Verify can narrow: a pass has no
             // diagnostic, and no other stage judges the fold.
-            surface_grant,
             narrowing: (is_verify && !passed)
                 .then(|| self.narrowing(&handle.nonce.0, worktree_dir.as_deref(), diff_base_hex.as_deref(), bytes))
                 .flatten(),
         };
 
         vec![judged_evidence_ref(handle, &subject, bytes, candidate, judgement)]
-    }
-}
-
-/// A key provider that authorizes nothing.
-///
-/// The grant path files an observation attestation, which the commission store
-/// classifies as `auto` tier and never asks a provider about. Handing it a
-/// provider that verifies nothing rather than the permissive stub means that if
-/// this path ever produced a *signed* statement — a `judge` or `human` delta
-/// escaping the gate above — the store would refuse it instead of admitting a
-/// signature nobody checked.
-struct NoKeys;
-
-impl KeyProvider for NoKeys {
-    fn verify(&self, _envelope: &SignatureEnvelope, _message: &[u8]) -> bool {
-        false
     }
 }
 
@@ -2451,8 +2189,6 @@ struct Judgement {
     suppression_requests: Vec<SuppressionRequest>,
     /// The candidates this failing fold narrows to (ADR-0210).
     narrowing: Option<CompositionParents>,
-    /// The surface amendment the machinery granted (ADR-0207).
-    surface_grant: Option<SurfaceGrant>,
 }
 
 fn judged_evidence_ref(
@@ -2462,15 +2198,8 @@ fn judged_evidence_ref(
     candidate: Option<CandidateRef>,
     judgement: Judgement,
 ) -> EvidenceRef {
-    let Judgement {
-        verdict,
-        failed_verifiers,
-        violating_paths,
-        surface_request,
-        suppression_requests,
-        narrowing,
-        surface_grant,
-    } = judgement;
+    let Judgement { verdict, failed_verifiers, violating_paths, surface_request, suppression_requests, narrowing } =
+        judgement;
     let overlay = apply_containment(verdict, failed_verifiers, parse_findings(bytes), &violating_paths);
     let detail = Digest::of_wire_bytes(bytes);
     EvidenceRef {
@@ -2500,7 +2229,6 @@ fn judged_evidence_ref(
             surface_request,
             suppression_requests,
             narrowing,
-            surface_grant,
         },
     }
 }

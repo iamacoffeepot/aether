@@ -409,7 +409,6 @@ pub use values::StudyRecord;
 pub use values::SuppressionDisposition;
 pub use values::SuppressionRequest;
 pub use values::SuppressionVerdict;
-pub use values::SurfaceGrant;
 pub use values::SurfacePathRequest;
 pub use values::SurfacePattern;
 pub use values::SurfaceRequest;

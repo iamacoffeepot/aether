@@ -51,7 +51,7 @@ This supersedes the attribution half of both and leaves the rest of each standin
 
 **ADR-0207** keeps the surface request, the park, the tier ladder over a delta, the budget, and the literal-paths rule. What it no longer covers is a fold collision. Its worked example — a member declining to edit outside its surface, and the request that follows — is this collision seen from inside one member, and answering it by widening that member's surface records the wrong thing about who did the work. A surface request is now the answer for a path no member of the bloom can reach, not for a path a sibling already holds.
 
-ADR-0207's own unimplemented half stands and is required: an `auto`-tier delta is granted by the machinery and journaled, without a person. Only a delta resolving above `auto` reaches a desk, and when it does it is loud — top-level on `/view` beside the base alert, its own class in the console, and a doctor invariant that fails once the park outlives a bounded age. A stop nobody can see is what turned three minutes of work into three hours.
+ADR-0207's own unfinished half stands and is required, with one correction: no delta is granted by the machinery, at any tier. Every widening is an operator's decision, made and signed through `cargo xtask bloom amend`. What the estate owes is that the park reach a desk loudly — top-level on `/view` beside the base alert, its own class in the console, and a doctor invariant that fails once the park outlives a bounded age. A stop nobody can see is what turned three minutes of work into three hours.
 
 ## Consequences
 

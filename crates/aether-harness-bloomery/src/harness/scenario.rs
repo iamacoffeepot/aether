@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 use aether_actor::Addressable;
 use aether_bloomery::{
     BackendObjectId, BloomDraft, BloomId, BloomSpec, BloomStatus, BloomView, CandidateRef, ConfigKind, ConfigRegistry,
-    Correspondence, Digest, Evidence, EvidenceKind, Fact, MemberDependency, Membership, Observation, Outcome,
-    Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, Snapshot, StageCatalog, StageId, Statement,
-    VerifyFailureSet, ViewDocument, WorkpieceId,
+    Correspondence, Digest, Evidence, EvidenceKind, Fact, FakeKeyProvider, KeyId, MemberDependency, Membership,
+    Observation, Outcome, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, Snapshot, StageCatalog,
+    StageId, Statement, VerifyFailureSet, ViewDocument, WorkpieceId, signed_approval,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{GitDataApi, PullRequestApi, candidate_ref_name, landing_branch, short_hex, to_hex};
@@ -24,6 +24,7 @@ use aether_chassis_bloomery::bloomery::{
     DoctorTick, ExecutorReactorCapability, GithubConnectionConfig, IntegrateReactorCapability, IntegrateTick,
     LandReactorCapability, LandTick, NotifyConfig, ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload,
 };
+use aether_chassis_bloomery::commission::task_text;
 use aether_chassis_bloomery::control::ObserveTick;
 use aether_chassis_bloomery::session::SessionConfig;
 use aether_chassis_bloomery::signing::SigningConfig;
@@ -55,9 +56,12 @@ const QUIESCENCE: Duration = Duration::from_secs(12);
 /// Between polls of a forked coordinator's projection.
 const SETTLE_POLL: Duration = Duration::from_millis(250);
 
-/// The file name [`HarnessBuilder::file_approval_policy`] writes the fallback
-/// tier policy under, inside the scratch-worktree base.
-const APPROVAL_POLICY_FILE: &str = "approval-policy.toml";
+/// The signing seed the harness's operator answers a surface request with.
+///
+/// A fixture, like every other key in a test tree: what the scenario needs is
+/// a statement whose provenance is an author signature rather than the
+/// estate's own observation, and the bytes behind it are nobody's secret.
+const OPERATOR_SEED: [u8; 32] = [0x0A; 32];
 
 /// A live scenario: a booted coordinator, the backend it runs against, and the
 /// wire connection that drives and observes it.
@@ -119,7 +123,9 @@ impl ScenarioHarness {
             owned_runs = Some(runs);
         }
 
-        stage_scratch_inputs(&builder, &worktree_base);
+        if let Some(script) = &builder.script {
+            script.write_to(Path::new(&worktree_base)).expect("the mock-lane script writes");
+        }
 
         let repo = match builder.backend {
             Backend::Fixture => None,
@@ -339,10 +345,10 @@ impl ScenarioHarness {
     ///
     /// Most scenarios seal a member at a bare digest, because nothing they
     /// exercise reads the revision behind it. A scenario about a surface
-    /// *amendment* needs the real record: the grant loads the current revision,
-    /// widens its declared surface, and writes the successor back through the
-    /// same commission store, so a member sealed at a digest no revision stands
-    /// behind can only ever park.
+    /// *amendment* needs the real record: the operator loads the current
+    /// revision, widens its declared surface, and writes the successor back
+    /// through the same commission store, so a member sealed at a digest no
+    /// revision stands behind can only ever park.
     ///
     /// # Panics
     /// The commission store could not be opened, or the commission and its
@@ -374,6 +380,12 @@ impl ScenarioHarness {
             declared_crates: Vec::new(),
             declared_reads: Vec::new(),
         };
+
+        // Rendered rather than left empty, because the work order a lane reads
+        // is this text: the seal door renders it once and the dispatch replays
+        // it, so a revision with no description produces a subject-only prompt
+        // that states no surface at all.
+        let revision = ScopeRevision { description: task_text(&revision), ..revision };
         store.write_revision(&revision, &RevisionEvidence::default()).expect("the scope revision writes")
     }
 
@@ -476,10 +488,58 @@ impl ScenarioHarness {
         // harness's bloom, and an amendment against it would supersede
         // something that does not exist.
         if matches!(outcome, Outcome::Sealed(_)) {
+            self.persist_work_orders(&spec);
             self.sealed = Some(spec);
         }
 
         (bloom, outcome)
+    }
+
+    /// Persist each member's work order the way the seal and supersede doors do.
+    ///
+    /// `admit_member` renders the admitted revision through `task_text`, and the
+    /// door writes the result to the dispatch-description row every construct
+    /// prompt is assembled from — keyed by the sealed bloom's id, so a
+    /// supersession mints its own rows rather than inheriting the
+    /// predecessor's. A scenario that seals at a bare digest has no revision
+    /// behind it to render, and keeps the subject-only prompt it had.
+    ///
+    /// # Panics
+    /// The store could not be opened, or a row could not be written.
+    pub(super) fn persist_work_orders(&self, spec: &BloomSpec) {
+        let mut store = SqliteStore::open(&self.store_path).expect("the store opens for writing");
+        for member in spec.members() {
+            let Ok(Some(revision)) = store.load_revision(member.scope_revision) else {
+                continue;
+            };
+            store
+                .record_dispatch_description(spec.id().0.as_bytes(), &member.workpiece.0, &task_text(&revision))
+                .expect("the member's work order records");
+        }
+    }
+
+    /// Write `widened` as the commission's next revision and store the
+    /// operator's approval of it — the two store writes `cargo xtask bloom
+    /// amend` performs before it supersedes (ADR-0207).
+    ///
+    /// The approval carries an author signature rather than an observation
+    /// attestation, because that is what a widening is: an operator's decision,
+    /// signed with a key the coordinator does not hold. Custody here is the
+    /// harness's, so the seed is a fixture and the verifier is the stub one.
+    ///
+    /// # Panics
+    /// The store could not be opened, or the revision and its approval could
+    /// not be written.
+    pub(super) fn approve_widened_revision(&self, widened: &ScopeRevision) -> Digest {
+        let mut store = SqliteStore::open(&self.store_path).expect("the commission store opens for writing");
+        let revision = store.write_revision(widened, &RevisionEvidence::default()).expect("the successor writes");
+        store
+            .insert_approval(
+                &signed_approval(KeyId(String::from("operator")), &OPERATOR_SEED, revision),
+                &FakeKeyProvider,
+            )
+            .expect("the operator's approval stores");
+        revision
     }
 
     /// Pass a queued `verify.base` so a scenario that is not about base
@@ -718,19 +778,6 @@ impl ScenarioHarness {
     }
 }
 
-/// The files a boot lays down in the scratch-worktree base before the
-/// coordinator reads them: the mock-lane script, and the fallback tier policy
-/// when the cell named one.
-fn stage_scratch_inputs(builder: &HarnessBuilder, worktree_base: &str) {
-    if let Some(script) = &builder.script {
-        script.write_to(Path::new(worktree_base)).expect("the mock-lane script writes");
-    }
-    if let Some(policy) = &builder.file_approval_policy {
-        fs::write(Path::new(worktree_base).join(APPROVAL_POLICY_FILE), policy)
-            .expect("the fallback approval policy writes");
-    }
-}
-
 fn in_process_env(
     builder: &HarnessBuilder,
     store_path: &str,
@@ -749,13 +796,6 @@ fn in_process_env(
 
     let defaults = CoordinatorConfig::default();
     let scripted = builder.lane == Lane::Scripted;
-    // The default is a repository-relative name the test process's cwd does not
-    // hold, which is the honest "this host loaded no fallback" state; a scenario
-    // that wants one names its text and gets the file the boot wrote.
-    let approval_policy_file = match &builder.file_approval_policy {
-        Some(_) => Path::new(worktree_base).join(APPROVAL_POLICY_FILE).to_string_lossy().into_owned(),
-        None => defaults.approval_policy_file.clone(),
-    };
     let coordinator = CoordinatorConfig {
         store_path: store_path.to_owned(),
         artifacts_root: Some(artifacts_root.to_owned()),
@@ -795,7 +835,6 @@ fn in_process_env(
             .authority_path
             .as_ref()
             .map_or(defaults.authority_repo, |path| path.to_string_lossy().into_owned()),
-        approval_policy_file,
         ..defaults
     };
 

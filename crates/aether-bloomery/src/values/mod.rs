@@ -88,7 +88,7 @@ pub use statement::{Observation, Provenance, StageReceipt, Statement};
 pub use statement::{signed_approval, signed_cancel, signed_reopen};
 pub use study::{StudyCall, StudyCost, StudyRecord};
 pub use suppression::{SuppressionDisposition, SuppressionRequest, SuppressionVerdict};
-pub use surface::{SurfaceGrant, SurfacePathRequest, SurfaceRequest};
+pub use surface::{SurfacePathRequest, SurfaceRequest};
 pub use timeout::TimeoutRecord;
 pub use verify::{VerifyFailure, VerifyFailureSet};
 pub use workpiece_builder::{FIELD_ENTRY_SCHEMA, FieldEntry, WorkpieceBuilder, WorkpieceRefusal};

@@ -7,8 +7,8 @@ use std::fmt;
 
 use aether_bloomery::{
     Admit, BloomId, Digest, Event, Evidence, EvidenceKind, Fact, InwardError, LaneObservation, Nonce, ResolutionClaim,
-    StageCatalog, StageId, StageResult, StageVerdict, SurfaceGrant, SurfaceRequest, VerifyFailure, VerifyFailureSet,
-    WorkpieceId, classify_findings, normalize_stage_result,
+    StageCatalog, StageId, StageResult, StageVerdict, SurfaceRequest, VerifyFailure, VerifyFailureSet, WorkpieceId,
+    classify_findings, normalize_stage_result,
 };
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 use std::fmt::Write as _;
@@ -650,35 +650,20 @@ fn out_of_stage_refusal(stage: StageId, upload: &UploadedEvidence) -> Option<Int
 /// (ADR-0207): the reducer parks the member awaiting a surface amendment
 /// rather than spending an attempt on a lap that would reproduce the same
 /// refusal.
-/// The fact a declining lane's surface request admits as: a grant when the
-/// machinery already answered it, a park when it needs a person (ADR-0207).
-///
-/// One admission key either way, because it is one answer to one request —
-/// whichever way it went, the lane asked once and the estate replied once.
-fn surface_requested_event(
-    record: &DispatchRecord,
-    evidence: Evidence,
-    request: SurfaceRequest,
-    grant: Option<SurfaceGrant>,
-) -> Event {
-    let fact = match grant {
-        Some(grant) => Fact::SurfaceGranted {
-            bloom: record.bloom,
-            workpiece: record.workpiece.clone(),
-            stage: record.stage,
-            revision: grant.revision,
-            added: grant.added,
-            evidence,
-        },
-        None => Fact::SurfaceRequested {
+/// The fact a declining lane's surface request admits as (ADR-0207): a park
+/// naming the paths the work needs, which an operator answers by amending the
+/// member's scope revision and superseding the bloom onto it.
+fn surface_requested_event(record: &DispatchRecord, evidence: Evidence, request: SurfaceRequest) -> Event {
+    Event {
+        idempotency_key: AdmissionKey::SurfaceRequest.of(&record.nonce.0),
+        fact: Fact::SurfaceRequested {
             bloom: record.bloom,
             workpiece: record.workpiece.clone(),
             stage: record.stage,
             evidence,
             request,
         },
-    };
-    Event { idempotency_key: AdmissionKey::SurfaceRequest.of(&record.nonce.0), fact }
+    }
 }
 
 fn admits_as_attempt_completed(stage: StageId) -> bool {
@@ -806,7 +791,7 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
         && let Some(request) = upload.observation.surface_request.clone()
         && admits_as_attempt_completed(record.stage)
     {
-        surface_requested_event(&record, evidence, request, upload.observation.surface_grant.clone())
+        surface_requested_event(&record, evidence, request)
     } else if evidence.kind == EvidenceKind::ConstructDeclined && admits_as_attempt_completed(record.stage) {
         Event {
             idempotency_key: AdmissionKey::Attempt.of(&record.nonce.0),
