@@ -42,7 +42,7 @@ use aether_bloomery::control::{
     ClaimResult, ClaimSeal, Commit, CommitResult, CompleteReleaseResult, DispatchPayload, EnumerateClaims,
     EnumerateClaimsResult, HealOp, IntegratePayload, LandPayload, LoadConfigs, LoadConfigsResult,
     MemberClaimReleasePayload, MembershipMutation, MetricsQuery, MetricsQueryResult, MetricsView, ObserveMainline,
-    ObserveMainlineResult, OrphanClaimReleasePayload, OutboxPayload, Query, QueryResult, ReconcileOp,
+    ObserveMainlineResult, OrphanClaimReleasePayload, OutboxPayload, Query, QueryResult, QuerySelector, ReconcileOp,
     RedispatchPayload, ReplayJournal, ReplayJournalResult, ReviewPass, SpendQuery, SpendQueryResult, SplicePayload,
     Topic, TransferSeal, held_to_seal_error, held_to_supersede_error, plan_heals, reconcile_op, release_seal_mail,
     seal_claim_mail, transfer_seal_mail,
@@ -823,54 +823,19 @@ impl NativeActor for ControlCore {
         }
     }
 
-    /// The `aether.bloomery.query` read surface. With `bloom` unset, reply the
-    /// whole [`ViewDocument`]; with `bloom` set to a digest, reply that one
-    /// bloom's [`BloomView`](aether_bloomery::BloomView) (or
-    /// [`QueryResult::NotFound`]). Reads off the live snapshot.
+    /// The `aether.bloomery.query` read surface: one [`QuerySelector`], one
+    /// [`QueryResult`] arm, all read off the live snapshot.
     #[handler::manual]
     fn on_query(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, mail: Query) {
         let inbound = ctx.take_inbound();
-        // A release-request read is answered off the snapshot's own record map
-        // rather than the view document — the document projects blooms, and an
-        // orphan release belongs to no bloom by construction (ADR-0179).
-        if let Some(request) = mail.release {
-            inbound.reply(&release_response(&state.snapshot, &request));
-            return;
-        }
-        // Calibration is a whole-fleet read over the folded ledger and every
-        // bloom's grade, so it answers before the view document is projected at
-        // all — the document would be built and thrown away (ADR-0184).
-        if mail.calibration {
-            inbound.reply(&calibration_response(&state.calibration, &state.snapshot, state.artifacts.as_mut()));
-            return;
-        }
-        // The why chain answers before the view document is projected for the
-        // same reason calibration does: it reads the snapshot directly, so
-        // building the document first would build one and throw it away
-        // (#5281).
-        if mail.why {
-            inbound.reply(&why_response(&state.snapshot, mail.bloom.as_deref()));
-            return;
-        }
-        // The live-read path holds no artifact access, so it resolves no question
-        // bytes: a held member surfaces its pending decision only on the outward
-        // mirror path. The digest-only hold still gates resolution in the reducer.
-        let document = view_of(&state.snapshot, |_| None);
-        // On an encode failure reply the error path rather than substituting an
-        // empty payload a reader would decode as a valid-but-blank projection.
-        let result = match mail.bloom {
-            None => match to_vec(&document) {
-                Ok(document) => QueryResult::Document { document },
-                Err(error) => QueryResult::Err { error: format!("document encode failed: {error}") },
-            },
-            Some(bytes) => document
-                .blooms
-                .iter()
-                .find(|view| view.id.0.as_bytes().as_slice() == bytes.as_slice())
-                .map_or(QueryResult::NotFound, |view| match to_vec(view) {
-                    Ok(view) => QueryResult::Bloom { view },
-                    Err(error) => QueryResult::Err { error: format!("bloom view encode failed: {error}") },
-                }),
+        let result = match mail.selector {
+            QuerySelector::Document => document_response(&state.snapshot),
+            QuerySelector::Bloom { digest } => bloom_response(&state.snapshot, &digest),
+            QuerySelector::Why { digest } => why_response(&state.snapshot, &digest),
+            QuerySelector::Release { digest } => release_response(&state.snapshot, &digest),
+            QuerySelector::Calibration => {
+                calibration_response(&state.calibration, &state.snapshot, state.artifacts.as_mut())
+            }
         };
         inbound.reply(&result);
     }
@@ -1304,14 +1269,40 @@ fn open_artifacts(configured: Option<&str>) -> Option<ArtifactsCapabilityState> 
     }
 }
 
-/// Answer an orphan-claim release-status read from the snapshot's record map
-/// (ADR-0179). A digest that is not 32 bytes, or names no admitted request, is
+/// The whole live projection, wire-encoded.
+///
+/// The live-read path holds no artifact access, so it resolves no question
+/// bytes: a held member surfaces its pending decision only on the outward
+/// mirror path. The digest-only hold still gates resolution in the reducer.
+fn document_response(snapshot: &Snapshot) -> QueryResult {
+    // On an encode failure reply the error path rather than substituting an
+    // empty payload a reader would decode as a valid-but-blank projection.
+    match to_vec(&view_of(snapshot, |_| None)) {
+        Ok(document) => QueryResult::Document { document },
+        Err(error) => QueryResult::Err { error: format!("document encode failed: {error}") },
+    }
+}
+
+/// One bloom's view off the same projection [`document_response`] reads, or
+/// [`QueryResult::NotFound`] when the digest names no bloom the snapshot knows.
+fn bloom_response(snapshot: &Snapshot, bloom: &[u8]) -> QueryResult {
+    let projection = view_of(snapshot, |_| None);
+    let Some(view) = projection.blooms.iter().find(|view| view.id.0.as_bytes().as_slice() == bloom) else {
+        return QueryResult::NotFound;
+    };
+    match to_vec(view) {
+        Ok(view) => QueryResult::Bloom { view },
+        Err(error) => QueryResult::Err { error: format!("bloom view encode failed: {error}") },
+    }
+}
+
 /// Why one bloom is not advancing (#5281), or the bloom-shaped miss.
 ///
-/// A `why` with no bloom named is the same miss: the question is about one
-/// bloom, and answering it for the whole fleet would be a different route.
-fn why_response(snapshot: &Snapshot, bloom: Option<&[u8]>) -> QueryResult {
-    let Some(bloom) = bloom.and_then(Digest::from_slice).map(BloomId) else {
+/// A digest that is not 32 bytes, or names no bloom the snapshot knows, is
+/// [`QueryResult::NotFound`] — the same miss [`bloom_response`] reports, because
+/// the two selectors name the same subject.
+fn why_response(snapshot: &Snapshot, bloom: &[u8]) -> QueryResult {
+    let Some(bloom) = Digest::from_slice(bloom).map(BloomId) else {
         return QueryResult::NotFound;
     };
     let Some(document) = why_of(snapshot, &bloom) else {
@@ -1323,6 +1314,8 @@ fn why_response(snapshot: &Snapshot, bloom: Option<&[u8]>) -> QueryResult {
     }
 }
 
+/// Answer an orphan-claim release-status read from the snapshot's record map
+/// (ADR-0179). A digest that is not 32 bytes, or names no admitted request, is
 /// [`QueryResult::ReleaseNotFound`] — a release-shaped miss, not the bloom-shaped
 /// [`QueryResult::NotFound`], so the reader can name the resource the caller
 /// actually asked for.

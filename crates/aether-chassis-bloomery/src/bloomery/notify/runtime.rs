@@ -27,7 +27,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aether_actor::Addressable;
 use aether_actor::runtime;
-use aether_bloomery::{Query, QueryResult, ViewDocument};
+use aether_bloomery::{Query, QueryResult, QuerySelector, ViewDocument};
 use aether_bloomery_github::WebhookSink;
 use aether_data::wire::from_bytes;
 use aether_data::{Kind, MailboxId};
@@ -248,7 +248,7 @@ impl NativeActor for NotifyReactorCapability {
         if state.sink.is_none() {
             return;
         }
-        let query = Query { bloom: None, release: None, calibration: false, why: false };
+        let query = Query { selector: QuerySelector::Document };
         // Fire-and-forget: a dropped read costs one poll interval, and the
         // ledger makes the next pass produce exactly the same difference.
         let _ = ctx.send_envelope_detached(state.control_mailbox, Query::ID, &query.encode_into_bytes());

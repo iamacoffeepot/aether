@@ -123,6 +123,7 @@ pub use control::OrphanClaimReleasePayload;
 pub use control::OutboxPayload;
 pub use control::Query;
 pub use control::QueryResult;
+pub use control::QuerySelector;
 pub use control::RedispatchPayload;
 pub use control::ReleaseSeal;
 pub use control::ReplayJournal;

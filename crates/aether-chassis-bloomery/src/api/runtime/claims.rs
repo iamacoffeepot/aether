@@ -24,7 +24,7 @@
 use aether_actor::Manual;
 use aether_bloomery::{
     AuthorityDoor, ClaimRefState, EnumerateClaims, EnumerateClaimsResult, Event, Fact, IdempotencyKey,
-    OrphanClaimRelease, OrphanClaimReleaseRecord, Query, QueryResult,
+    OrphanClaimRelease, OrphanClaimReleaseRecord, QueryResult, QuerySelector,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_http::HttpServerResponse;
@@ -102,14 +102,7 @@ impl ApiCapabilityState {
     pub(super) fn query_claim_release(digest: &str) -> Routed {
         digest_from_hex(digest).map_or_else(
             || Routed::Reply(error_response(400, "release id is not a 32-byte hex digest")),
-            |digest| {
-                Routed::Query(Query {
-                    bloom: None,
-                    release: Some(digest.as_bytes().to_vec()),
-                    calibration: false,
-                    why: false,
-                })
-            },
+            |digest| Self::query(QuerySelector::Release { digest: digest.as_bytes().to_vec() }),
         )
     }
 }

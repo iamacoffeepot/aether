@@ -6,9 +6,9 @@
 use aether_actor::Manual;
 use aether_bloomery::{
     Adjudication, Admit, AdmitResult, AuthorityDoor, BloomId, BloomView, CandidateRef, Digest, Disposition, Event,
-    Evidence, EvidenceKind, Fact, IdempotencyKey, OperatorHold, OperatorRepair, Outcome, Query, QueryResult, StageId,
-    Statement, SuppressionDisposition, SurfacePathRequest, ViewDocument, WhyDocument, Withdrawal, WithdrawalCause,
-    WorkpieceId, digest_of,
+    Evidence, EvidenceKind, Fact, IdempotencyKey, OperatorHold, OperatorRepair, Outcome, Query, QueryResult,
+    QuerySelector, StageId, Statement, SuppressionDisposition, SurfacePathRequest, ViewDocument, WhyDocument,
+    Withdrawal, WithdrawalCause, WorkpieceId, digest_of,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_http::HttpServerResponse;
@@ -530,16 +530,18 @@ impl ApiCapabilityState {
         }
     }
 
-    /// `GET /blooms` and `GET /view` — read the whole live projection.
-    pub(super) fn query(bloom: Option<Vec<u8>>) -> Routed {
-        Routed::Query(Query { bloom, release: None, calibration: false, why: false })
+    /// The control-core read every live-read route here defers: one selector,
+    /// one [`QueryResult`] arm. `GET /blooms` and `GET /view` pass
+    /// [`QuerySelector::Document`].
+    pub(super) fn query(selector: QuerySelector) -> Routed {
+        Routed::Query(Query { selector })
     }
 
     /// `GET /blooms/{id}` — read one bloom's live view by hex id.
     pub(super) fn query_bloom(id: &str) -> Routed {
         digest_from_hex(id).map_or_else(
             || Routed::Reply(error_response(400, "bloom id is not a 32-byte hex digest")),
-            |digest| Self::query(Some(digest.as_bytes().to_vec())),
+            |digest| Self::query(QuerySelector::Bloom { digest: digest.as_bytes().to_vec() }),
         )
     }
 
@@ -552,14 +554,7 @@ impl ApiCapabilityState {
     pub(super) fn query_why(id: &str) -> Routed {
         digest_from_hex(id).map_or_else(
             || Routed::Reply(error_response(400, "bloom id is not a 32-byte hex digest")),
-            |digest| {
-                Routed::Query(Query {
-                    bloom: Some(digest.as_bytes().to_vec()),
-                    release: None,
-                    calibration: false,
-                    why: true,
-                })
-            },
+            |digest| Self::query(QuerySelector::Why { digest: digest.as_bytes().to_vec() }),
         )
     }
 }
