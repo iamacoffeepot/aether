@@ -126,6 +126,26 @@ impl Screen {
         }
     }
 
+    /// The three frames that paint one scrolling paragraph of served text
+    /// read inside a titled pane; the list and chart frames carry their own
+    /// structure and must not be double-framed, so the `None` arm is spelled
+    /// out rather than defaulted.
+    #[must_use]
+    pub fn reading_title(&self) -> Option<String> {
+        match self {
+            Self::Artifact(_) | Self::Record(_) | Self::Transcript(_) => Some(self.label()),
+            Self::Board(_)
+            | Self::Detail(_)
+            | Self::DispatchList(_)
+            | Self::Journal(_)
+            | Self::Timeline(_)
+            | Self::Days(_)
+            | Self::Cost(_)
+            | Self::Backlog(_)
+            | Self::Workpiece(_) => None,
+        }
+    }
+
     #[must_use]
     pub fn scroll(&self) -> usize {
         match self {
