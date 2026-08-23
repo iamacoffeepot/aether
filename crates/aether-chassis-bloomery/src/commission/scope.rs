@@ -92,11 +92,73 @@ fn parse_declaration(sections: &BTreeMap<String, String>) -> Result<(Vec<String>
 /// A stored advisory description wins when the operator put one on the
 /// revision. Otherwise the signed managed headings are rendered. A GitHub
 /// issue body is never an input.
+///
+/// The surface declaration is the exception: it is always rendered from the
+/// revision's own fields, over whatever block the stored description carries.
+/// [`declared_surface`](ScopeRevision::declared_surface) is what the seal door
+/// and the containment gate read, so it is the authority and the block is its
+/// rendering. An operator answering a parked surface request writes the
+/// successor as the current revision with a widened field and every other field
+/// — the description included — carried unchanged
+/// ([`with_widened_surface`](ScopeRevision::with_widened_surface), the shape
+/// `cargo xtask bloom amend` re-pins the member at). A renderer that echoed a
+/// description frozen one revision ago would hand the re-dispatched lane the
+/// exact surface it had just declined against.
+#[must_use]
 pub fn task_text(revision: &ScopeRevision) -> String {
-    if !revision.description.trim().is_empty() {
-        return revision.description.clone();
+    if revision.description.trim().is_empty() {
+        return render_work_order(revision);
     }
-    render_work_order(revision)
+    retarget_declaration(&revision.description, revision)
+}
+
+/// `body` with its managed surface-declaration blocks replaced by the ones
+/// `revision` renders to, spliced in where the first of them stood.
+///
+/// A body that declares no surface at all gets the declaration appended, which
+/// is the honest rendering of a revision whose field says something the text
+/// never did.
+fn retarget_declaration(body: &str, revision: &ScopeRevision) -> String {
+    let mut declaration = String::new();
+    push_declaration(&mut declaration, revision);
+
+    let mut out = String::with_capacity(body.len() + declaration.len());
+    let mut spliced = false;
+    let mut dropping = false;
+    for line in body.split_inclusive('\n') {
+        if let Some(name) = line.trim_end_matches(['\n', '\r']).strip_prefix("## ") {
+            dropping = matches!(name, SURFACE | CRATES | PROTECTED);
+            if dropping && !spliced {
+                splice(&mut out, &declaration);
+                spliced = true;
+            }
+        }
+        if !dropping {
+            out.push_str(line);
+        }
+    }
+    if !spliced {
+        splice(&mut out, &declaration);
+    }
+    out
+}
+
+/// Append `declaration` to `out` with exactly one blank line before it.
+///
+/// `declaration` opens with the newline [`push_list`] emits, so what varies is
+/// how much whitespace the text it lands after already ended with.
+fn splice(out: &mut String, declaration: &str) {
+    if out.is_empty() {
+        out.push_str(declaration.trim_start_matches('\n'));
+        return;
+    }
+    while out.ends_with("\n\n") {
+        out.pop();
+    }
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(declaration);
 }
 
 fn render_work_order(revision: &ScopeRevision) -> String {
@@ -122,20 +184,7 @@ fn render_work_order(revision: &ScopeRevision) -> String {
             out.push('\n');
         }
     }
-    // A crate-declared scope renders the blocks it was written with, not the
-    // globs they expanded to: the derived surface is a machine artifact of the
-    // workspace graph, and re-rendering it as the operator's own declaration
-    // would turn the next edit of this work order into a hand-maintained file
-    // list — the thing the crate block exists to stop.
-    if revision.declared_crates.is_empty() {
-        push_list(&mut out, SURFACE, &revision.declared_surface);
-    } else {
-        push_list(&mut out, CRATES, &revision.declared_crates);
-        let protected = protected_files(&revision.declared_surface);
-        if !protected.is_empty() {
-            push_list(&mut out, PROTECTED, &protected);
-        }
-    }
+    push_declaration(&mut out, revision);
     if !revision.declared_reads.is_empty() {
         push_list(&mut out, READS, &revision.declared_reads);
     }
@@ -144,6 +193,25 @@ fn render_work_order(revision: &ScopeRevision) -> String {
         push_section(&mut out, DOGFOOD, &revision.dogfood_brief);
     }
     out
+}
+
+/// The surface-declaration blocks a revision renders to.
+///
+/// A crate-declared scope renders the blocks it was written with, not the globs
+/// they expanded to: the derived surface is a machine artifact of the workspace
+/// graph, and re-rendering it as the operator's own declaration would turn the
+/// next edit of this work order into a hand-maintained file list — the thing the
+/// crate block exists to stop.
+fn push_declaration(out: &mut String, revision: &ScopeRevision) {
+    if revision.declared_crates.is_empty() {
+        push_list(out, SURFACE, &revision.declared_surface);
+    } else {
+        push_list(out, CRATES, &revision.declared_crates);
+        let protected = protected_files(&revision.declared_surface);
+        if !protected.is_empty() {
+            push_list(out, PROTECTED, &protected);
+        }
+    }
 }
 
 fn push_list(out: &mut String, name: &str, entries: &[String]) {
@@ -427,6 +495,29 @@ Create then show.\n"
         assert!(task.contains("## Design notes") && task.contains("Separate binary."), "{task}");
         assert!(task.contains("**Size:** m") && task.contains("**Implementation model:** sonnet"), "{task}");
         assert!(task.contains("crates/aether-chassis-bloomery/src/commission/**"), "{task}");
+    }
+
+    #[test]
+    fn a_widened_revision_renders_its_own_surface_over_the_body_it_carried() {
+        // Tripwire: an amendment writes its successor as the current revision
+        // with a widened `declared_surface` and every other field — the
+        // description included — carried unchanged. A renderer that echoed that
+        // description would hand the re-dispatched lane the exact surface it had
+        // just declined against, and the lane would decline again.
+        let revision =
+            parse_revision("issue-5047", fixture(), None).unwrap_or_else(|error| panic!("the fixture parses: {error}"));
+        let widened = revision.with_widened_surface(&["scripts/**".to_owned()]);
+        assert!(!widened.description.contains("scripts/**"), "the amendment carries the body it inherited unchanged");
+
+        let task = task_text(&widened);
+        assert!(task.contains("scripts/**"), "the rendered order states the widened field: {task}");
+        assert!(
+            task.contains("crates/aether-chassis-bloomery/src/commission/**"),
+            "widening keeps what the surface already carried: {task}"
+        );
+        assert_eq!(task.matches("## Declared surface").count(), 1, "one declaration block, not two: {task}");
+        assert!(task.contains("Ship bloomery-commission."), "the rest of the order survives the splice: {task}");
+        assert!(task.contains("## Dogfood brief") && task.contains("Create then show."), "{task}");
     }
 
     #[test]
