@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use aether_bloomery::{BloomStatus, ViewDocument};
+use aether_bloomery::{BloomStatus, Excuse, MemberView, ViewDocument};
 use aether_chassis_bloomery::bloomery::DoctorReport;
 
 pub mod liveness;
@@ -97,20 +97,10 @@ fn termination(document: &ViewDocument, outstanding: &[String]) -> Result<(), Vi
             continue;
         }
         for member in &bloom.members {
-            // Each of these is an accountable stop with a name on it: a
-            // resolution, a wedge, a sick host, a construct that declined, a
-            // surface amendment a person owes (ADR-0207), an operator's
-            // withdrawal (#5327), or an eviction waiting on the sibling that
-            // took its file (ADR-0204). A member with none of them and no lane is
-            // the nameless wait this oracle exists to catch.
-            let named = member.resolution.is_some()
-                || member.wedge.is_some()
-                || member.host_fault.is_some()
-                || member.park.is_some()
-                || member.awaiting_surface.is_some()
-                || member.withdrawn.is_some()
-                || member.evicted_by.is_some();
-            if !named {
+            // Each excuse in `Excuse::ALL` is an accountable stop with a name
+            // on it. A member with none of them and no lane is the nameless
+            // wait this oracle exists to catch.
+            if !Excuse::ALL.iter().copied().any(|excuse| member_carries(excuse, member)) {
                 return Err(Violation {
                     bloom: Some(bloom.id.0.to_hex()),
                     member: Some(member.workpiece.0.clone()),
@@ -121,4 +111,16 @@ fn termination(document: &ViewDocument, outstanding: &[String]) -> Result<(), Vi
         }
     }
     Ok(())
+}
+
+fn member_carries(excuse: Excuse, member: &MemberView) -> bool {
+    match excuse {
+        Excuse::Wedge => member.wedge.is_some(),
+        Excuse::Claim => member.resolution.is_some(),
+        Excuse::HostFault => member.host_fault.is_some(),
+        Excuse::Park => member.park.is_some(),
+        Excuse::AwaitingSurface => member.awaiting_surface.is_some(),
+        Excuse::LeaseEviction => member.evicted_by.is_some(),
+        Excuse::Withdrawal => member.withdrawn.is_some(),
+    }
 }

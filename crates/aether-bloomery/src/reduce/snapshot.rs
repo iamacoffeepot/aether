@@ -732,6 +732,96 @@ pub struct HostFaultHold {
     pub evidence: Digest,
 }
 
+/// Declares the closed [`Excuse`] vocabulary and its complete, duplicate-free
+/// [`Excuse::ALL`] from one variant list, so the set and the array cannot
+/// drift: a new excuse kind extends both in lockstep, and every reader that
+/// walks `ALL` picks it up rather than relying on a hand-maintained parallel
+/// list (the `topic_vocabulary!` idiom).
+macro_rules! excuse_vocabulary {
+    ($($(#[$vmeta:meta])* $variant:ident),+ $(,)?) => {
+        /// One named reason a member is legitimately waiting — the doctor and
+        /// both liveness oracles read these as "this member is not lost".
+        ///
+        /// An excuse is redeemed by a specific event, and leaving one standing
+        /// would leave the member excused forever, waiting on a resume that
+        /// cannot come. [`resolver`](Self::resolver) names that event (or that
+        /// the excuse is one-way). This is a read-side enumeration over stored
+        /// maps that keep their existing shapes; it is not itself persisted.
+        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+        pub enum Excuse {
+            $($(#[$vmeta])* $variant),+
+        }
+
+        impl Excuse {
+            /// Every member-excuse kind. Generated with the enum from the same
+            /// variant list, so it is complete and duplicate-free by
+            /// construction: a new kind cannot be silently omitted from a
+            /// reader that walks this array.
+            pub const ALL: &'static [Excuse] = &[$(Excuse::$variant),+];
+        }
+    };
+}
+
+excuse_vocabulary! {
+    /// A wedge: the member exhausted a budget. Redeemed by
+    /// [`Fact::GrantAttempts`].
+    Wedge,
+    /// A resolution claim: a successful stop. The member is integrated, not
+    /// waiting on a resume of its own.
+    Claim,
+    /// A host-fault hold: the host could not run the gates. Redeemed by
+    /// [`Fact::ResumeHostFault`].
+    HostFault,
+    /// A construct park: the lane declined without a candidate. Redeemed by
+    /// [`Fact::AttemptCompleted`] `{ passed: true }`, [`Fact::Integrate`], or
+    /// [`Fact::GrantAttempts`].
+    Park,
+    /// Awaiting a surface amendment (ADR-0207). Redeemed by a later passing
+    /// attempt, integration, or verify failure.
+    AwaitingSurface,
+    /// Evicted off a contended file (ADR-0204). Redeemed by the evicting
+    /// member's integration.
+    LeaseEviction,
+    /// An operator's withdrawal (#5327). One-way: there is no resume.
+    Withdrawal,
+}
+
+impl Excuse {
+    /// The fact or decision that lifts this excuse, named so a reader can
+    /// tell a redeemable wait from a one-way stop without re-deriving the
+    /// fold.
+    #[must_use]
+    pub fn resolver(self) -> &'static str {
+        match self {
+            Self::Wedge => "Fact::GrantAttempts",
+            Self::Claim => "never: a claim is a successful stop",
+            Self::HostFault => "Fact::ResumeHostFault",
+            Self::Park => "Fact::AttemptCompleted { passed: true }, Fact::Integrate, or Fact::GrantAttempts",
+            Self::AwaitingSurface => "Fact::AttemptCompleted { passed: true }, Fact::Integrate, or Fact::VerifyFailed",
+            Self::LeaseEviction => "the evicting member's Fact::Integrate",
+            Self::Withdrawal => "never: a withdrawal is one-way",
+        }
+    }
+
+    /// Whether this excuse is never lifted. Only [`Self::Withdrawal`] is:
+    /// a wrongly withdrawn member is re-scoped into a later bloom.
+    #[must_use]
+    pub fn is_one_way(self) -> bool {
+        matches!(self, Self::Withdrawal)
+    }
+
+    /// Whether this excuse keeps a quiescent bloom classified as wedged
+    /// rather than terminal. A claim is a successful stop, a withdrawal is
+    /// one-way and done, and an eviction waits on a sibling the bloom
+    /// already folded; none of those keep a sealed bloom from reading as
+    /// finished. A wedge, host-fault, park, or surface wait is a recorded
+    /// reason the bloom has not finished.
+    #[must_use]
+    pub fn keeps_quiescence_wedged(self) -> bool {
+        matches!(self, Self::Wedge | Self::HostFault | Self::Park | Self::AwaitingSurface)
+    }
+}
+
 /// A bloom's run of aggregate-review executor faults against one held fold
 /// (ADR-0176) — how many times the dispatched review could not judge that exact
 /// tree, and what the latest of them reported.
@@ -933,30 +1023,48 @@ impl Snapshot {
         self.member_checkpoints.entry(*bloom).or_default().insert(workpiece.clone(), *checkpoint);
     }
 
-    /// Record a construct that concluded without a candidate as a member park.
+    /// Record (or clear) a construct that concluded without a candidate as a
+    /// member park.
     ///
-    /// Gated on [`Outcome::AttemptParked`]: a refused completion cannot plant
-    /// a park the reducer rejected, and a dead construct that retried or
-    /// wedged is not this case. Raises no hold and does not write the stage
-    /// cursor — attempts and repair rolls stay where they were.
+    /// Gated on [`Outcome::AttemptParked`] for the insert: a refused completion
+    /// cannot plant a park the reducer rejected, and a dead construct that
+    /// retried or wedged is not this case. Raises no hold and does not write
+    /// the stage cursor — attempts and repair rolls stay where they were.
+    ///
+    /// A park is an excuse — the doctor and both liveness oracles read it as
+    /// "this member is legitimately waiting" — and it is redeemed by a
+    /// passing attempt, an integration, or a grant of attempts. Leaving one
+    /// standing would leave the member excused forever, waiting on a resume
+    /// that cannot come: those three facts make the park false, so the entry
+    /// is dropped. Mirrors [`Self::record_surface_request`]'s clear list,
+    /// with [`Fact::GrantAttempts`] in place of [`Fact::VerifyFailed`].
     fn record_construct_park(&mut self, event: &Event, decisions: &Decisions) {
-        let Outcome::AttemptParked { bloom, workpiece, stage, reason } = &decisions.outcome else {
-            return;
-        };
-        // No stage gate here: the declining lane is `construct.implement`,
-        // which `StageCatalog` maps from Construct, Refine and Reconcile
-        // alike, so a declining repair lap parks the same way a first
-        // construct does. The outcome carries the stage the reducer accepted.
-        let Fact::AttemptCompleted { passed: false, evidence, .. } = &event.fact else {
-            return;
-        };
-        if evidence.kind != EvidenceKind::ConstructDeclined {
-            return;
+        match &event.fact {
+            Fact::AttemptCompleted { passed: false, evidence, .. } => {
+                let Outcome::AttemptParked { bloom, workpiece, stage, reason } = &decisions.outcome else {
+                    return;
+                };
+                // No stage gate here: the declining lane is `construct.implement`,
+                // which `StageCatalog` maps from Construct, Refine and Reconcile
+                // alike, so a declining repair lap parks the same way a first
+                // construct does. The outcome carries the stage the reducer accepted.
+                if evidence.kind != EvidenceKind::ConstructDeclined {
+                    return;
+                }
+                self.member_parks
+                    .entry(*bloom)
+                    .or_default()
+                    .insert(workpiece.clone(), MemberPark { stage: *stage, evidence: *reason });
+            }
+            Fact::AttemptCompleted { bloom, workpiece, passed: true, .. }
+            | Fact::Integrate { bloom, claim: ResolutionClaim { workpiece, .. } }
+            | Fact::GrantAttempts { bloom, workpiece, .. } => {
+                if let Some(members) = self.member_parks.get_mut(bloom) {
+                    members.remove(workpiece);
+                }
+            }
+            _ => {}
         }
-        self.member_parks
-            .entry(*bloom)
-            .or_default()
-            .insert(workpiece.clone(), MemberPark { stage: *stage, evidence: *reason });
     }
 
     /// Record (or clear) a fold refusal from the admitted fact (ADR-0206).

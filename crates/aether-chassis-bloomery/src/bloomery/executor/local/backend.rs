@@ -10,9 +10,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_bloomery::{
     BackendObjectId, CandidateRef, Conclusion, ConfigRegistry, ConfigScopes, Digest, EvidenceRef, ExecutionStatus,
-    ExecutorBackend, Nonce, ObservedLaneWrites, PriceTable, ResolvedModel, SharedCorrespondence, StageId, StageVerdict,
-    StudyCost, SuppressionRequest, SurfaceRequest, Transformation, VerifyFailureSet, WorkHandle, WorkOrder,
-    is_model_lane,
+    ExecutorBackend, LaneObservation, Nonce, ObservedLaneWrites, PriceTable, ResolvedModel, SessionSlug,
+    SharedCorrespondence, StageId, StageVerdict, StudyCost, SuppressionRequest, SurfaceRequest, Transformation,
+    VerifyFailureSet, WorkHandle, WorkOrder, is_model_lane,
 };
 use aether_bloomery_git::command;
 use aether_bloomery_github::parse_study;
@@ -50,30 +50,63 @@ use crate::store::{CommissionBackend, SqliteStore, StoreBackend};
 /// it is what that one attempt produced.
 const EVIDENCE_SUFFIX: &str = "-evidence";
 
-/// The prefix a lane slot's canonical checkout directory carries under the
-/// scratch root, completed by the slot's index (`slot-0`, `slot-1`, …).
+/// The directory under the scratch root that holds one checkout per reusable
+/// harness session: `sessions/<slug>/tree`.
 ///
-/// The build path is what makes this a name rather than a nonce (#4904).
-/// `sccache` keys every compilation partly by the paths cargo names on the
-/// `rustc` invocation — `--out-dir`, `-L dependency=…` — so a dispatch that
-/// builds at a path no dispatch built at before misses the cache on its whole
-/// dependency tree, however much of that tree an earlier lane already compiled.
-/// A slot's dispatches all build at the slot's own path, so the second one hits
-/// what the first paid for.
+/// A checkout belongs to the **session** that works in it (#5425). Every
+/// harness binds a conversation permanently to the directory it was born in —
+/// grok stores sessions under a percent-encoded working directory and ignores
+/// `--cwd` on a resume, Claude Code keys `~/.claude/projects/<encoded cwd>` the
+/// same way — so a lap that resumes anywhere else either edits the tree it was
+/// born in or starts over. The session is therefore what the directory is for,
+/// and the coordinator mints its [`SessionSlug`] before the cold launch,
+/// because the harness's own id does not exist until after it.
+///
+/// Not the workpiece, and not the lane slot. One session carries several
+/// workpieces along declared edges (A then B then C), each reset in place, so a
+/// workpiece-keyed tree would split one conversation across directories; a
+/// slot-keyed one moves the tree out from under a session the moment the
+/// allocator hands that slot to someone else.
+const SESSIONS_DIR: &str = "sessions";
+
+/// The working tree inside one session's directory. A child of the session
+/// directory rather than the directory itself, so anything else the session
+/// accumulates has somewhere to live that a `git clean` will not take.
+const SESSION_TREE_DIR: &str = "tree";
+
+/// The prefix a fallback lane-slot checkout directory carries under the scratch
+/// root, completed by the slot's index (`slot-0`, `slot-1`, …).
+///
+/// The fallback rather than the rule (#5425): a dispatch that resolves a
+/// session builds under [`SESSIONS_DIR`], and this path is what is left for one
+/// that cannot — an aggregate lane, whose order names no member, and a backend
+/// built without a store, which can read no order at all. Neither resumes a
+/// conversation, so neither needs a directory a conversation is bound to.
 const SLOT_PREFIX: &str = "slot-";
 
 /// The suffix a lane slot's cargo target directory carries, completing the slot's
 /// own name (`slot-0-target`, `slot-1-target`) under the target base.
 ///
-/// Per slot for the reason the checkout is (#4912): cargo takes an exclusive lock
-/// on a build directory, so lanes sharing one build strictly one at a time
-/// however many slots the ceiling allows, and its fingerprints are keyed by
-/// source path, so a directory shared across divergent checkouts both grows
-/// without bound and can surface a dependency last compiled from another slot's
-/// source as a failure that reads as a regression.
+/// The target is what the slot still owns (#5425). With the checkout keyed to
+/// the workpiece, a slot is two things and neither of them is the work: a
+/// concurrency token — one dispatch at a time under the ceiling — and a warm
+/// cargo target directory lent to whoever holds it.
+///
+/// Per slot rather than per workpiece, for the reason it was always per slot
+/// (#4912): cargo takes an exclusive lock on a build directory, so lanes
+/// sharing one would build strictly one at a time however many slots the
+/// ceiling allows, and a target per member would multiply the largest directory
+/// on the host by the member count instead of by the concurrency. `sccache`
+/// keys a compilation partly on the paths cargo names on the `rustc`
+/// invocation — `--out-dir`, `-L dependency=…` — and those are the target's, so
+/// the dependency tree one lane compiled is still hit by the next dispatch to
+/// hold the slot whatever workpiece it is building. What is genuinely
+/// per-workpiece now is the workspace crates, whose source paths differ per
+/// member: each slot target accumulates a set of them, which is what the
+/// janitor's budget eviction is there to bound.
 ///
 /// A **sibling** of the checkout rather than a directory inside it. A dispatch
-/// resets its slot with `git clean --force --force -d -x` (see
+/// resets its checkout with `git clean --force --force -d -x` (see
 /// `materialize_checkout`), which removes ignored files — an in-tree `target`
 /// would be deleted once per dispatch, and the warm dependency tree that makes a
 /// repair lap recompile nine crates instead of ninety-six is exactly what would
@@ -96,9 +129,10 @@ const TRANSCRIPT_FILE: &str = "transcript.jsonl";
 /// under the same rules: metadata only, never touched by the coordinator.
 const HEARTBEAT_FILE: &str = "heartbeat";
 
-/// The file a dispatch records its lane slot in, inside its own evidence
-/// directory — the durable half of the slot assignment, read back by boot
-/// reconciliation (see [`recorded_slot`]).
+/// The file a dispatch records its lane in, inside its own evidence directory:
+/// the slot it borrowed and the session whose tree it is working in — the
+/// durable half of both, read back by boot reconciliation (see
+/// [`recorded_lane`]).
 const SLOT_RECORD: &str = "slot";
 
 /// One tracked run: the spawned child, the lane slot it holds, where its
@@ -111,9 +145,10 @@ struct Run {
     // this process cannot name the checkout it is running in, and guessing would
     // hand another dispatch's live build path to a stranger.
     slot: Option<usize>,
-    // The slot checkout the run builds in — the same path every dispatch in that
-    // slot uses, reset to the dispatch's own tree as it starts rather than
-    // created fresh. `None` alongside a `None` slot.
+    // The checkout the run builds in — the workpiece's own tree, shared with
+    // every other lane of that member and reset to this dispatch's subject as it
+    // starts rather than created fresh. `None` for a run re-adopted at boot
+    // whose slot could not be recovered.
     worktree_dir: Option<PathBuf>,
     evidence_dir: PathBuf,
     // The digest the intake broker binds the evidence to, per `evidence_subject`.
@@ -132,6 +167,30 @@ struct Run {
     // containment gate reads `base..HEAD` from the slot checkout. `None` when
     // the order named none, or a re-adopted run whose base would not resolve.
     diff_base_hex: Option<String>,
+}
+
+/// What a failed queued start has to keep in order to be recorded as a host
+/// fault: everything the tracked [`Run`] it becomes needs, taken before the
+/// [`PendingRun`] is moved into the start that consumed it.
+struct FailedStart {
+    nonce: String,
+    evidence_dir: PathBuf,
+    subject: Digest,
+    gates: LaneGates,
+}
+
+/// The stand-in process of a dispatch that never launched: terminal from the
+/// first poll, and unkillable because there is nothing to kill.
+struct UnlaunchedRun;
+
+impl RunProcess for UnlaunchedRun {
+    fn poll(&mut self) -> RunLifecycle {
+        RunLifecycle::Exited { success: false }
+    }
+
+    fn kill(&mut self) -> Result<(), LocalExecutorError> {
+        Ok(())
+    }
 }
 
 /// Snapshot of a tracked run taken under the registry lock so evidence
@@ -189,7 +248,14 @@ struct PendingRun {
     task: Option<String>,
     subject: Digest,
     gates: LaneGates,
-    // The slot the predecessor that produced this checkout ran in, when known.
+    // The member this dispatch belongs to, when the order row names one.
+    // `None` for an aggregate lane or a store-less backend.
+    workpiece: Option<String>,
+    // The session this dispatch works in — the checkout's key, minted before
+    // the launch and resolved from the member's own row or from the predecessor
+    // whose conversation it inherits. `None` alongside a `None` workpiece.
+    slug: Option<SessionSlug>,
+    // The slot that last built this member, when one has.
     preferred: Option<usize>,
     // Which band this dispatch queues in, from the stage its order names.
     priority: DispatchPriority,
@@ -367,7 +433,9 @@ impl LocalExecutor {
     /// stub runner, and [`from_config`](Self::from_config) drives with the
     /// production [`ProcessTransformRunner`]. `base_dir` is the scratch root;
     /// each run writes its evidence to `base_dir/<nonce>-evidence` and builds in
-    /// the canonical checkout of the lane slot it holds, `base_dir/slot-<index>`.
+    /// its session's tree, `base_dir/sessions/<slug>/tree` — falling back to
+    /// the lane slot's own `base_dir/slot-<index>` for a dispatch that resolves
+    /// no session.
     /// Unthrottled — every submit spawns immediately until
     /// [`with_max_concurrent_lanes`](Self::with_max_concurrent_lanes) sets a
     /// ceiling, which is what [`from_config`](Self::from_config) does.
@@ -551,10 +619,61 @@ impl LocalExecutor {
         absolute(self.base_dir.join(format!("{nonce}{EVIDENCE_SUFFIX}")))
     }
 
-    // The canonical checkout one lane slot builds in, reused by every dispatch
-    // that holds the slot. Absolute for the reason the evidence dir is.
-    fn slot_dir(&self, slot: usize) -> io::Result<PathBuf> {
-        absolute(self.base_dir.join(format!("{SLOT_PREFIX}{slot}")))
+    // The checkout one dispatch works in: its session's tree when the dispatch
+    // resolves a session, the lane slot's own path when it does not. Absolute
+    // for the reason the evidence dir is.
+    //
+    // The one spelling of the layout, because three sides read it: the dispatch
+    // resolves it forward, boot reconciliation resolves it again from the slug
+    // the run recorded, and the janitor recognizes a session tree by this shape.
+    fn checkout_dir(&self, slug: Option<&SessionSlug>, slot: usize) -> io::Result<PathBuf> {
+        absolute(slug.filter(|slug| slug.is_nameable()).map_or_else(
+            || self.base_dir.join(format!("{SLOT_PREFIX}{slot}")),
+            |slug| self.base_dir.join(SESSIONS_DIR).join(&slug.0).join(SESSION_TREE_DIR),
+        ))
+    }
+
+    // The session this dispatch works in, minted before it launches.
+    //
+    // Three answers in order, and the order is the whole rule. The member's own
+    // row names one once it has dispatched — every later lap of that member is
+    // the same conversation in the same tree. A member that has never dispatched
+    // inherits the slug of a declared predecessor that has, because the edge
+    // resume continues *that* conversation and a harness continues it only in
+    // the directory it was born in; the inheritance is written onto this
+    // member's row, so its own later laps resolve directly. Everything else
+    // mints a fresh slug from the dispatch nonce.
+    //
+    // Store-only, and deliberately so: it runs before the pool acquire, because
+    // the acquire needs the tree (it hashes the static prefix out of it) and the
+    // tree needs the slug.
+    fn session_slug(&self, nonce: &str, bloom: &[u8], workpiece: &str) -> Option<SessionSlug> {
+        let messages = self.messages.as_ref()?;
+        let (slug, recorded) = {
+            let mut store = messages.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Ok(Some(slug)) = store.lookup_session_slug(bloom, workpiece) {
+                return Some(SessionSlug(slug));
+            }
+            let inherited = store
+                .lookup_predecessors(bloom, workpiece)
+                .ok()
+                .into_iter()
+                .flatten()
+                .find_map(|predecessor| store.lookup_session_slug(bloom, &predecessor).ok().flatten());
+            let slug = inherited.map_or_else(|| SessionSlug::minted_from(nonce), SessionSlug);
+            let recorded = store.record_session_slug(bloom, workpiece, &slug.0);
+            drop(store);
+            (slug, recorded)
+        };
+        if let Err(error) = recorded {
+            tracing::warn!(
+                nonce,
+                workpiece,
+                %error,
+                "local executor backend: the session slug did not record; this member's next lap opens a new session",
+            );
+        }
+        Some(slug)
     }
 
     // The cargo target directory one lane slot builds into, reused by every
@@ -629,12 +748,18 @@ impl LocalExecutor {
         // the review lane's `status`-stamped evidence must not ride.
         let gates = LaneGates::of(&order.transformation.command);
         let is_model_lane = is_model_lane(&order.transformation.command);
-        let preferred = self.preferred_builder_slot(&checkout_hex);
-        // Resolved here, once, rather than at every pump: the stage lives in the
-        // outstanding-order row this nonce resolves, and reading it under the
-        // registry lock would put a database query inside the decision every
-        // freed slot makes.
-        let priority = priority_of(self.order_identity(&nonce).map(|(_, _, stage)| stage));
+        // One store lookup for both, resolved here rather than at every pump: the
+        // order row names the member this dispatch belongs to and the stage it
+        // runs, and reading it under the registry lock would put a database query
+        // inside the decision every freed slot makes.
+        let identity = self.order_identity(&nonce);
+        let priority = priority_of(identity.as_ref().map(|(_, _, stage)| *stage));
+        let slug = identity
+            .as_ref()
+            .filter(|(_, workpiece, _)| !workpiece.is_empty())
+            .and_then(|(bloom, workpiece, _)| self.session_slug(&nonce, bloom, workpiece));
+        let workpiece = identity.map(|(_, workpiece, _)| workpiece).filter(|workpiece| !workpiece.is_empty());
+        let preferred = workpiece.as_deref().and_then(|workpiece| self.preferred_slot_of(workpiece));
         // The stage's resolved agent profile, overlaid onto the order by the
         // dispatching host (ADR-0149 §The line) — never a backend-local config
         // knob, which would let a run's model diverge from the profile its bloom
@@ -657,37 +782,34 @@ impl LocalExecutor {
             task: is_model_lane.then_some(order.transformation.description.clone()).flatten(),
             subject: evidence_subject(&order.transformation),
             gates,
+            workpiece,
+            slug,
             preferred,
             priority,
         })
     }
 
-    fn preferred_builder_slot(&self, checkout_hex: &str) -> Option<usize> {
-        let exact = self.builders.lock().unwrap_or_else(PoisonError::into_inner).preferred(checkout_hex);
-        if let Some(slot) = exact {
-            return Some(slot);
-        }
-        let parents = match self.runner.checkout_parents(checkout_hex) {
-            Ok(parents) => parents,
-            Err(error) => {
-                tracing::warn!(
-                    target: "aether_chassis_bloomery::executor",
-                    checkout = checkout_hex,
-                    %error,
-                    "local executor backend: checkout parents unreadable; slot affinity falls back",
-                );
-                return None;
-            }
-        };
-        let builders = self.builders.lock().unwrap_or_else(PoisonError::into_inner);
-        parents.iter().find_map(|parent| builders.preferred(parent))
+    // The slot that last built this member, when one has (ADR-0196 as amended
+    // for #5425).
+    //
+    // Member-keyed, because what is worth preferring is the slot whose target
+    // directory already holds this workpiece's own compilation units — a fact
+    // about the member, not about the edge it entered on. The edge-keyed form
+    // this replaces looked the checkout hex up, and a member's checkout hex
+    // changes at every capture, so its own second lane asked after a hex no slot
+    // had ever recorded and fell through to lowest-free.
+    fn preferred_slot_of(&self, workpiece: &str) -> Option<usize> {
+        self.builders.lock().unwrap_or_else(PoisonError::into_inner).preferred(workpiece)
     }
 
-    fn remember_builder(&self, checkout: &Digest, slot: usize) {
-        let Ok(Some(object)) = self.correspondence.resolve_backend_object(checkout) else {
-            return;
-        };
-        self.builders.lock().unwrap_or_else(PoisonError::into_inner).record(render_object_hex(&object), slot);
+    // Remember that `slot` is building `workpiece`, so the member's next lane
+    // prefers the target that already holds its crates.
+    //
+    // Recorded as the dispatch starts rather than when it captures: the target
+    // is warmed by the build, and a lane that compiled the member and then
+    // failed has warmed it exactly as much as one that passed.
+    fn remember_builder(&self, workpiece: &str, slot: usize) {
+        self.builders.lock().unwrap_or_else(PoisonError::into_inner).record(workpiece.to_owned(), slot);
     }
 
     // Claim a lane slot for a dispatch that may start right now, or report that it
@@ -959,6 +1081,28 @@ impl LocalExecutor {
                     if stage != StageId::Construct {
                         return Ok(());
                     }
+                    // One session, one member (#5427). An edge resume reads the
+                    // predecessor's conversation and forks it, so what comes
+                    // back is this member's own handle; a handle another member
+                    // already holds means the fork did not happen, and filing
+                    // it would leave two members resuming one thread — the
+                    // shape dispatch-2318 and dispatch-2321 landed in, where
+                    // the second construct opened carrying the first's whole
+                    // history.
+                    if let Some(holder) = store
+                        .construct_session_holder(&order.bloom, &session_id)?
+                        .filter(|held| *held != order.workpiece)
+                    {
+                        tracing::warn!(
+                            nonce,
+                            workpiece = %order.workpiece,
+                            holder = %holder,
+                            session = %session_id,
+                            "local executor backend: this session already belongs to another member; \
+                             not filing it, so the two do not resume one conversation",
+                        );
+                        return Ok(());
+                    }
                     let deposited_unix =
                         self.sessions.as_ref().map_or_else(unix_now_secs, super::session_reuse::SessionReuse::unix_now);
                     store.record_construct_session_at(
@@ -1020,9 +1164,28 @@ impl LocalExecutor {
         slot: usize,
         reason: SlotChoice,
     ) -> Result<(), LocalExecutorError> {
-        let worktree_dir = self.slot_dir(slot).map_err(LocalExecutorError::Io)?;
-        let target_dir = self.slot_target_dir(slot).map_err(LocalExecutorError::Io)?;
-        record_slot(&pending.evidence_dir, slot);
+        // Resolved through the reservation rather than past it: an early `?` here
+        // would leave `starting` incremented and the slot claimed with no run
+        // behind either, and the ceiling would shrink by one for the life of the
+        // process.
+        let paths = self
+            .checkout_dir(pending.slug.as_ref(), slot)
+            .and_then(|worktree| self.slot_target_dir(slot).map(|target| (worktree, target)));
+        let (worktree_dir, target_dir) = match paths {
+            Ok(paths) => paths,
+            Err(error) => {
+                {
+                    let mut registry = self.lock();
+                    registry.starting -= 1;
+                    registry.release_slot(Some(slot));
+                }
+                return Err(LocalExecutorError::Io(error));
+            }
+        };
+        record_lane(&pending.evidence_dir, slot, pending.slug.as_ref());
+        if let Some(workpiece) = pending.workpiece.as_deref() {
+            self.remember_builder(workpiece, slot);
+        }
         let reuse = self.acquire_reuse(&pending, &worktree_dir);
         if reuse.as_ref().is_some_and(|plan| plan.edge) {
             pending.task = Some(
@@ -1083,21 +1246,64 @@ impl LocalExecutor {
     // a slot frees.
     //
     // A queued start that fails has no caller left to refuse it — its dispatch
-    // acked as submitted cycles ago — so it is logged and dropped rather than
-    // retried: the order stays outstanding with no run behind it and resolves
-    // through the reactor's deadline sweep, and a head that fails every time can
-    // never block the lanes queued behind it.
+    // acked as submitted cycles ago — so the failure is recorded as the host
+    // fault it is (#5422) and the member is re-dispatched on the intake's next
+    // poll. Dropping it, which is what this did, left the order outstanding with
+    // no run behind it: on 2026-08-21 eight queued constructs failed to start on
+    // `No space left on device` and their members sat idle for the whole four-hour
+    // deadline with four lane slots free.
+    //
+    // A head that fails every time still cannot block the lanes queued behind
+    // it: the failed start releases its slot before this records anything, and
+    // the loop moves on to the next waiting dispatch.
     fn pump(&self) {
         while let Some((pending, slot, reason)) = self.take_waiting() {
-            let nonce = pending.nonce.clone();
+            let failed = FailedStart {
+                nonce: pending.nonce.clone(),
+                evidence_dir: pending.evidence_dir.clone(),
+                subject: pending.subject,
+                gates: pending.gates,
+            };
             if let Err(error) = self.start_reserved(pending, slot, reason) {
-                tracing::error!(
-                    %nonce,
-                    %error,
-                    "local executor backend: a queued dispatch failed to start; its order will expire at its deadline",
-                );
+                self.record_failed_start(failed, &error);
             }
         }
+    }
+
+    // Stand a dispatch that never launched in the registry as an already-terminal
+    // run, so the next intake poll reads it the way it reads every other run that
+    // left no evidence: a synthesized `ExecutorFault`, a machinery roll, and a
+    // fresh order for the same stage (ADR-0195 §§1–2).
+    //
+    // Nothing is written to disk. The launch failed for a host reason — out of
+    // space is the one that happened — and a recovery path that has to write a
+    // file first is a recovery path that fails for the same reason the dispatch
+    // did. The missing-evidence route needs no file: the run is terminal and its
+    // evidence is unreadable, which is the whole of what it reads.
+    fn record_failed_start(&self, failed: FailedStart, error: &LocalExecutorError) {
+        tracing::error!(
+            nonce = %failed.nonce,
+            %error,
+            "local executor backend: a queued dispatch failed to start; recording a host fault so its member re-dispatches",
+        );
+        let FailedStart { nonce, evidence_dir, subject, gates } = failed;
+        self.lock().runs.insert(
+            nonce,
+            Run {
+                process: Box::new(UnlaunchedRun),
+                // No slot and no checkout: the start released the one it had
+                // reserved, and there is no tree to capture from a run that never
+                // began.
+                slot: None,
+                worktree_dir: None,
+                evidence_dir,
+                subject,
+                gates,
+                reuse: None,
+                affinity: SlotAffinity::readopted(None),
+                diff_base_hex: None,
+            },
+        );
     }
 
     // Take the next waiting dispatch against a free slot, reserving that slot.
@@ -1162,13 +1368,18 @@ impl LocalExecutor {
         if registry.runs.contains_key(&nonce.0) {
             return false;
         }
-        let slot = recorded_slot(&evidence_dir).filter(|slot| registry.claim_slot(*slot));
+        let (recorded, slug) = recorded_lane(&evidence_dir);
+        let slot = recorded.filter(|slot| registry.claim_slot(*slot));
+        // The slug the dying process recorded, resolved forward through the same
+        // function the dispatch resolved it with, so a re-adopted run points at
+        // the tree its child is actually working in rather than at whichever
+        // slot directory the index happens to name.
         registry.runs.insert(
             nonce.0.clone(),
             Run {
                 process: Box::new(OrphanedRun::new(nonce.clone(), &evidence_dir)),
                 slot,
-                worktree_dir: slot.and_then(|slot| self.slot_dir(slot).ok()),
+                worktree_dir: slot.and_then(|slot| self.checkout_dir(slug.as_ref(), slot).ok()),
                 evidence_dir,
                 subject: evidence_subject(&dispatch.transformation),
                 gates: LaneGates::of(&dispatch.transformation.command),
@@ -1334,9 +1545,7 @@ impl LocalExecutor {
     ) -> Vec<EvidenceRef> {
         let candidate =
             is_construct.then(|| self.construct_capture(worktree_dir, &handle.nonce, false, None)).flatten();
-        if let (Some(candidate), Some(slot)) = (candidate.as_ref(), slot) {
-            self.remember_builder(&candidate.checkout, slot);
-        }
+        let _ = slot;
         self.retire(&handle.nonce.0);
         self.pump();
         vec![executor_fault_ref(
@@ -1678,9 +1887,6 @@ impl LocalExecutor {
         // this. Only for a candidate that was actually captured, so the row and
         // the candidate arrive together and a lane that produced nothing cannot
         // leave a message behind for the next one.
-        if let (Some(candidate), Some(slot)) = (candidate.as_ref(), slot) {
-            self.remember_builder(&candidate.checkout, slot);
-        }
         if concluded
             && candidate.is_some()
             && let Some(message) = commit_message.as_deref()
@@ -1865,17 +2071,19 @@ fn judged_evidence_ref(
         // claim and the size is the file's length.
         artifact_id: 0,
         size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-        candidate,
-        findings: overlay.findings,
-        failed_verifiers: overlay.failed_verifiers,
-        cost: parse_cost(bytes),
-        calls: parse_calls(bytes),
-        session_reuse_arm: parse_session_reuse_arm(bytes),
-        session_reuse_saved_micro_usd: parse_session_reuse_saved(bytes),
-        peak_resident_bytes: parse_peak_resident_bytes(bytes),
-        violating_paths,
-        surface_request,
-        suppression_requests,
+        observation: LaneObservation {
+            candidate,
+            findings: overlay.findings,
+            failed_verifiers: overlay.failed_verifiers,
+            cost: parse_cost(bytes),
+            calls: parse_calls(bytes),
+            session_reuse_arm: parse_session_reuse_arm(bytes),
+            session_reuse_saved_micro_usd: parse_session_reuse_saved(bytes),
+            peak_resident_bytes: parse_peak_resident_bytes(bytes),
+            violating_paths,
+            surface_request,
+            suppression_requests,
+        },
     }
 }
 
@@ -1900,17 +2108,16 @@ fn executor_fault_ref(
         nonce: handle.nonce.clone(),
         artifact_id: 0,
         size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-        candidate,
-        findings,
-        failed_verifiers: VerifyFailureSet::EMPTY,
-        cost,
-        calls,
-        session_reuse_arm: parse_session_reuse_arm(bytes),
-        session_reuse_saved_micro_usd: parse_session_reuse_saved(bytes),
-        peak_resident_bytes: parse_peak_resident_bytes(bytes),
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation {
+            candidate,
+            findings,
+            cost,
+            calls,
+            session_reuse_arm: parse_session_reuse_arm(bytes),
+            session_reuse_saved_micro_usd: parse_session_reuse_saved(bytes),
+            peak_resident_bytes: parse_peak_resident_bytes(bytes),
+            ..LaneObservation::default()
+        },
     }
 }
 
@@ -2205,20 +2412,24 @@ impl ReconcileLanes for LocalExecutor {
     }
 }
 
-/// Record which lane slot a dispatch is running in, beside that dispatch's own
-/// evidence.
+/// Record what a dispatch is running on, beside that dispatch's own evidence:
+/// the lane slot it borrowed and the session whose tree it is working in.
 ///
-/// The slot decides the build path and the path is reused, so a coordinator that
-/// restarts mid-dispatch has to be able to find the slot a surviving child is
-/// building in — otherwise the next dispatch claims that slot and resets the
-/// checkout out from under it. The record lives in the evidence directory
-/// because that is per dispatch and is already where boot reconciliation looks.
+/// Both, because they answer different questions and a restart needs both
+/// (#5425). The slot is the lent target and the concurrency token — the next
+/// dispatch must not claim one a surviving child still holds. The slug is the
+/// *directory*, and a run re-adopted with only a slot would attach to whatever
+/// the slot path names rather than to the tree its child is actually in.
+///
+/// Two lines, slot then slug, so the record stays readable by eye and a
+/// pre-slug record still parses as a slot with no session.
 ///
 /// Best-effort: a record that cannot be written costs a re-adopted run its
 /// checkout (it captures nothing and fails closed), never the dispatch itself.
-fn record_slot(evidence_dir: &Path, slot: usize) {
+fn record_lane(evidence_dir: &Path, slot: usize, slug: Option<&SessionSlug>) {
+    let record = format!("{slot}\n{}\n", slug.map_or("", |slug| slug.0.as_str()));
     if let Err(error) =
-        fs::create_dir_all(evidence_dir).and_then(|()| fs::write(evidence_dir.join(SLOT_RECORD), slot.to_string()))
+        fs::create_dir_all(evidence_dir).and_then(|()| fs::write(evidence_dir.join(SLOT_RECORD), record))
     {
         tracing::warn!(
             evidence = %evidence_dir.display(),
@@ -2228,11 +2439,21 @@ fn record_slot(evidence_dir: &Path, slot: usize) {
     }
 }
 
-/// The lane slot a dispatch recorded in its evidence directory, or `None` when
-/// it recorded none (a dispatch from before this layout, or one whose record
-/// could not be written) or recorded text that is not a slot index.
-fn recorded_slot(evidence_dir: &Path) -> Option<usize> {
-    fs::read_to_string(evidence_dir.join(SLOT_RECORD)).ok()?.trim().parse().ok()
+/// What a dispatch recorded in its evidence directory: the lane slot, and the
+/// session whose tree it is working in.
+///
+/// Either half is `None` when it was not recorded (a dispatch from before that
+/// half of the layout, or one whose record could not be written) or when what
+/// was recorded is not that shape. The caller resolves the pair forward through
+/// `checkout_dir`, the same function the dispatch resolved it with.
+fn recorded_lane(evidence_dir: &Path) -> (Option<usize>, Option<SessionSlug>) {
+    let Ok(record) = fs::read_to_string(evidence_dir.join(SLOT_RECORD)) else {
+        return (None, None);
+    };
+    let mut lines = record.lines();
+    let slot = lines.next().and_then(|line| line.trim().parse().ok());
+    let slug = lines.next().map(|line| SessionSlug(line.trim().to_owned())).filter(SessionSlug::is_nameable);
+    (slot, slug)
 }
 
 /// The newest usable modification time among the files a live lane writes —
@@ -2315,7 +2536,7 @@ fn usable_target_base(configured: &str, scratch_root: &Path) -> PathBuf {
 ///
 /// Read off the path rather than the filesystem: the checkouts a slot will use
 /// are named by construction (`slot-<index>` under the root, see
-/// [`LocalExecutor::slot_dir`]) and most of them do not exist yet at boot, so a
+/// [`LocalExecutor::checkout_dir`]) and most of them do not exist yet at boot, so a
 /// check that asked the disk would pass and then be wrong on the first dispatch.
 /// Both sides are resolved against the cwd first, since the scratch root ships
 /// relative and a deployment states its target volume absolute — comparing the
@@ -2599,7 +2820,20 @@ fn parse_claimed_subject(bytes: &[u8]) -> Option<Digest> {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::usable_target_base;
+    use aether_bloomery::SCOPE_FILL_COMMAND;
+
+    use super::{LaneGates, usable_target_base};
+
+    #[test]
+    fn the_scope_lane_is_neither_construct_nor_verify() {
+        // Tripwire: `is_verify` is a `starts_with("verify.")` prefix test; a
+        // later widening that swept `scope.` into the construct arm would give
+        // this lane a candidate gate it can never satisfy, and every run would
+        // fail with `produced_candidate: false`.
+        let gates = LaneGates::of(SCOPE_FILL_COMMAND);
+        assert!(!gates.is_construct);
+        assert!(!gates.is_verify);
+    }
 
     /// The scratch root these cases are stated against, absolute the way a
     /// production one is.

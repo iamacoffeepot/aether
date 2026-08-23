@@ -6,9 +6,9 @@ use std::error::Error;
 use std::fmt;
 
 use aether_bloomery::{
-    Admit, BloomId, CandidateRef, Digest, Event, Evidence, EvidenceKind, Fact, InwardError, Nonce, ResolutionClaim,
-    StageCatalog, StageId, StageResult, StageVerdict, StudyCall, StudyCost, SuppressionRequest, SurfaceRequest,
-    VerifyFailure, VerifyFailureSet, WorkpieceId, classify_findings, normalize_stage_result,
+    Admit, BloomId, Digest, Event, Evidence, EvidenceKind, Fact, InwardError, LaneObservation, Nonce, ResolutionClaim,
+    StageCatalog, StageId, StageResult, StageVerdict, SurfaceRequest, VerifyFailure, VerifyFailureSet, WorkpieceId,
+    classify_findings, normalize_stage_result,
 };
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 
@@ -45,47 +45,9 @@ pub struct UploadedEvidence {
     pub verdict: StageVerdict,
     /// The supporting artifact (the check output, the review record).
     pub detail: Digest,
-    /// The candidate the run captured (ADR-0152), authoritative from the port
-    /// reference like the nonce — host-recorded state, never name-decoded.
-    pub candidate: Option<CandidateRef>,
-    /// The review critic's findings prose (#3656), authoritative from the port
-    /// reference like the candidate. Persisted keyed by the order's member on a
-    /// failing review so a Refine re-entry is directed by it.
-    pub findings: Option<String>,
-    /// The exact failed `verify.check` members (ADR-0178), decoded from the
-    /// artifact name's mask — the same value the backend projected onto the
-    /// port reference, which either composes that mask (local) or reads it
-    /// (Actions). Nonempty only for a failed member Verify or `AggregateVerify` —
-    /// the invariant `verifier_failure_refusal` below is what enforces that.
-    pub failed_verifiers: VerifyFailureSet,
-    /// What the attempt cost (#4679), authoritative from the port reference like
-    /// the candidate. The study lane admits it against the same order — but
-    /// *without* consuming, before the verdict admit below consumes — so an
-    /// attempt's price is recorded whatever its verdict was. `None` is an
-    /// unmeasured attempt, which writes no row rather than a zero one.
-    pub cost: Option<StudyCost>,
-    /// Per-call usage when the harness reported it. Rides with `cost` into the
-    /// study admit so a banded price row can charge each call, not the sum.
-    pub calls: Option<Vec<StudyCall>>,
-    /// Session-reuse arm from `evidence.json`, when the backend read it.
-    pub session_reuse_arm: Option<String>,
-    /// Micro-USD saved by the reuse arm against its counterfactual.
-    pub session_reuse_saved_micro_usd: Option<u64>,
-    /// Peak resident bytes from `evidence.json`.
-    pub peak_resident_bytes: Option<u64>,
-    /// Paths the candidate changed that no declared-surface glob covers
-    /// (ADR-0209). Host-recorded state copied off the port reference, like
-    /// `findings`. Empty unless the containment overlay named a violation.
-    pub violating_paths: Vec<String>,
-    /// The declining lane's normalized surface request (ADR-0207),
-    /// authoritative from the port reference like `candidate` / `findings`.
-    /// `None` from a lane that named nothing, from a claim that did not
-    /// survive normalization, and from the name-only Actions transport.
-    pub surface_request: Option<SurfaceRequest>,
-    /// The suppressions the candidate states a case for (ADR-0193),
-    /// authoritative from the port reference like `findings`. Empty from a
-    /// candidate that stated none and from the name-only Actions transport.
-    pub suppression_requests: Vec<SuppressionRequest>,
+    /// Host-recorded state copied off the port reference, carried unchanged
+    /// from the executor backend.
+    pub observation: LaneObservation,
 }
 
 /// Why the broker refused an upload without touching the reducer.
@@ -233,12 +195,12 @@ fn verdict_passed(verdict: StageVerdict) -> bool {
 fn verifier_failure_refusal(stage: StageId, upload: &UploadedEvidence) -> Option<IntakeRefusal> {
     let valid = match (stage, upload.verdict) {
         (StageId::Verify | StageId::AggregateVerify | StageId::BaseVerify, StageVerdict::VerificationFailed) => true,
-        _ => upload.failed_verifiers.is_empty(),
+        _ => upload.observation.failed_verifiers.is_empty(),
     };
     (!valid).then_some(IntakeRefusal::InvalidVerifierFailures {
         stage,
         verdict: upload.verdict,
-        failed_verifiers: upload.failed_verifiers,
+        failed_verifiers: upload.observation.failed_verifiers,
     })
 }
 
@@ -256,7 +218,7 @@ fn aggregate_decomposition(
     if passed {
         return Ok(None);
     }
-    let Some(findings) = upload.findings.as_deref() else {
+    let Some(findings) = upload.observation.findings.as_deref() else {
         return Ok(None);
     };
     let members: Vec<String> = store
@@ -284,7 +246,7 @@ fn persist_aggregate_findings(
     if verdict_passed(upload.verdict) {
         return store.clear_review_findings(record.bloom.0.as_bytes(), "");
     }
-    let Some(findings) = &upload.findings else {
+    let Some(findings) = &upload.observation.findings else {
         return Ok(());
     };
     let frozen = store
@@ -313,7 +275,7 @@ fn persist_aggregate_verify_findings(
     if verdict_passed(upload.verdict) {
         return store.clear_review_findings(record.bloom.0.as_bytes(), WorkpieceId::COMPOSITION);
     }
-    let Some(findings) = &upload.findings else {
+    let Some(findings) = &upload.observation.findings else {
         return Ok(());
     };
     store.record_review_findings(record.bloom.0.as_bytes(), WorkpieceId::COMPOSITION, findings)
@@ -407,7 +369,11 @@ fn aggregate_review_event(
 /// non-passing verdict, is untouched.
 fn advisory_evidence(upload: &UploadedEvidence, passed: bool, evidence: Evidence) -> Evidence {
     let advisory = passed
-        && upload.findings.as_deref().is_some_and(|prose| classify_findings(prose).advisories().next().is_some());
+        && upload
+            .observation
+            .findings
+            .as_deref()
+            .is_some_and(|prose| classify_findings(prose).advisories().next().is_some());
 
     if advisory {
         Evidence { kind: EvidenceKind::ReviewAdvisory, ..evidence }
@@ -530,7 +496,7 @@ fn base_verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidenc
             tree: record.displayed_digest,
             passed: verdict_passed(upload.verdict),
             evidence,
-            failed: upload.failed_verifiers,
+            failed: upload.observation.failed_verifiers,
         },
     }
 }
@@ -561,27 +527,27 @@ fn verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Ev
     // accounted for; the fact is what distinguishes the cause.
     Event {
         idempotency_key: AdmissionKey::VerifyFailed.of(&record.nonce.0),
-        fact: if upload.failed_verifiers == VerifyFailureSet::one(VerifyFailure::Preflight) {
+        fact: if upload.observation.failed_verifiers == VerifyFailureSet::one(VerifyFailure::Preflight) {
             Fact::VerifyHostFault {
                 bloom: record.bloom,
                 workpiece: record.workpiece.clone(),
                 evidence,
-                findings: upload.findings.clone().unwrap_or_default(),
+                findings: upload.observation.findings.clone().unwrap_or_default(),
             }
-        } else if upload.failed_verifiers.contains(VerifyFailure::Containment) {
+        } else if upload.observation.failed_verifiers.contains(VerifyFailure::Containment) {
             Fact::ContainmentRefused {
                 bloom: record.bloom,
                 workpiece: record.workpiece.clone(),
                 evidence,
-                failed_verifiers: upload.failed_verifiers,
-                violating_paths: upload.violating_paths.clone(),
+                failed_verifiers: upload.observation.failed_verifiers,
+                violating_paths: upload.observation.violating_paths.clone(),
             }
         } else {
             Fact::VerifyFailed {
                 bloom: record.bloom,
                 workpiece: record.workpiece.clone(),
                 evidence,
-                failed_verifiers: upload.failed_verifiers,
+                failed_verifiers: upload.observation.failed_verifiers,
             }
         },
     }
@@ -756,7 +722,7 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     // through to the plain park below — losing the park is the failure this
     // whole path exists to remove.
     let event = if upload.verdict == StageVerdict::SurfaceRequested
-        && let Some(request) = upload.surface_request.clone()
+        && let Some(request) = upload.observation.surface_request.clone()
         && admits_as_attempt_completed(record.stage)
     {
         surface_requested_event(&record, evidence, request)
@@ -798,7 +764,7 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
                 } else {
                     evidence
                 },
-                candidate: upload.candidate,
+                candidate: upload.observation.candidate,
             },
         }
     } else if record.stage == StageId::AggregateReview {
@@ -898,7 +864,7 @@ fn persist_consumed(
     if record.stage == StageId::Verify && upload.verdict != StageVerdict::ExecutorFault {
         if verdict_passed(upload.verdict) {
             store.clear_review_findings(record.bloom.0.as_bytes(), &record.workpiece.0)?;
-        } else if let Some(findings) = &upload.findings {
+        } else if let Some(findings) = &upload.observation.findings {
             store.record_review_findings(record.bloom.0.as_bytes(), &record.workpiece.0, findings)?;
         }
         // The member's standing suppression requests are whatever its newest
@@ -910,7 +876,7 @@ fn persist_consumed(
         store.record_suppression_requests(
             record.bloom.0.as_bytes(),
             &record.workpiece.0,
-            &upload.suppression_requests,
+            &upload.observation.suppression_requests,
         )?;
     } else if record.stage == StageId::AggregateVerify {
         persist_aggregate_verify_findings(store, record, upload)?;

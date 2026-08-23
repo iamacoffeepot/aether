@@ -134,6 +134,21 @@ pub struct CoordinatorConfig {
     /// coordinator cadence.
     #[config(default = 5)]
     pub poll_interval_secs: u64,
+    /// The hourly REST allowance the GitHub-touching reactors pace themselves
+    /// against — GitHub's authenticated limit for one account or installation
+    /// (#5412).
+    ///
+    /// The cadence is derived from this rather than trusted to
+    /// `AETHER_GITHUB_POLL_INTERVAL_SECS` alone. A one-second interval looks
+    /// like responsiveness and is really a request rate: the mirror poll plus
+    /// the executor's per-tick inspects spent 5000 calls in well under an hour,
+    /// after which every reactor got `403 API rate limit exceeded` for the
+    /// remainder of the window. Configurable because the allowance is not
+    /// universal — a GitHub App installation is metered differently, and a
+    /// deployment sharing an account with something else has less of it than
+    /// the number here.
+    #[config(default = 5000)]
+    pub hourly_request_budget: u32,
     /// The `SQLite` store path the executor dispatch reactor ([`super::ExecutorReactorCapability`])
     /// opens its own connection to, to drive the intake registry directly (#3505).
     /// The same journal [`StoreConfig`](crate::store::StoreConfig) opens:
@@ -432,6 +447,7 @@ impl Default for CoordinatorConfig {
     fn default() -> Self {
         Self {
             poll_interval_secs: 5,
+            hourly_request_budget: 5000,
             store_path: ":memory:".to_owned(),
             approval_policy_file: "approval-policy.toml".to_owned(),
             local_lane_enabled: true,
@@ -458,6 +474,14 @@ impl Default for CoordinatorConfig {
         }
     }
 }
+
+/// How many GitHub REST calls one coordinator tick costs, summed over the
+/// reactors that reach the API — the mirror's outbox projection, the land and
+/// integrate polls, the executor's per-handle inspects, the janitor and doctor
+/// sweeps. An estimate rather than a count, and deliberately a modest one: it
+/// is the divisor of the hourly allowance, so guessing low buys a faster
+/// cadence and an exhausted window, which is the failure it exists to prevent.
+const GITHUB_REQUESTS_PER_TICK: u32 = 6;
 
 impl CoordinatorConfig {
     /// The resolved mainline ref, normalized into the forms the source port
@@ -498,6 +522,22 @@ impl CoordinatorConfig {
         } else {
             "origin".to_owned()
         }
+    }
+
+    /// The cadence a GitHub-touching reactor actually polls at: the configured
+    /// interval, floored by what the hourly allowance affords (#5412).
+    ///
+    /// One tick of the coordinator costs `GITHUB_REQUESTS_PER_TICK` calls
+    /// across the reactors that reach the API, so the shortest interval the
+    /// allowance sustains for an hour is that many calls divided into the
+    /// budget. Below it the account is exhausted before the window ends and
+    /// every reactor spends the remainder being refused, which is strictly
+    /// worse than the slower cadence — the poll that was made faster stops
+    /// answering at all.
+    #[must_use]
+    pub fn github_poll_interval_secs(&self) -> u64 {
+        let per_hour = 3_600 * u64::from(GITHUB_REQUESTS_PER_TICK);
+        self.poll_interval_secs.max(1).max(per_hour.div_ceil(u64::from(self.hourly_request_budget.max(1))))
     }
 
     #[must_use]
@@ -795,6 +835,25 @@ xAtw6HCuoUIzjbWZe1H+wS8KmJmYkTvf8f70x0/jMYRUyvMQy3beUUQ=
         let path = key_file.path().to_str().expect("the temp path is UTF-8").to_owned();
         let with_key = configured(12345, &path, 42);
         assert!(with_key.connect_client().is_ok(), "App path builds a client from a present key");
+    }
+
+    // Tripwire: the GitHub poll cadence is computed from the hourly allowance,
+    // not taken from the operator's interval. A one-second interval is a request
+    // rate, and at 6 calls a tick it exhausts 5000 in under fifteen minutes —
+    // after which every reactor is refused for the rest of the window (#5412).
+    // The numbers are pinned because the floor is only a bar if a change to the
+    // divisor or the budget has to be stated.
+    #[test]
+    fn the_github_poll_cadence_is_floored_by_the_hourly_allowance() {
+        let at = |poll_interval_secs, hourly_request_budget| {
+            CoordinatorConfig { poll_interval_secs, hourly_request_budget, ..CoordinatorConfig::default() }
+                .github_poll_interval_secs()
+        };
+
+        assert_eq!(at(1, 5000), 5, "1s is below what 5000/hour affords at 6 calls a tick");
+        assert_eq!(at(30, 5000), 30, "a slower configured cadence is left alone");
+        assert_eq!(at(1, 100), 216, "a smaller allowance buys a slower floor");
+        assert!(at(1, 0) > 0, "a zero allowance is a slow poll, never a divide by zero");
     }
 
     #[test]

@@ -29,7 +29,8 @@ mod projection;
 mod source;
 
 pub use executor::{
-    Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend, ObservedLaneWrites, WorkHandle, WorkOrder,
+    BackendId, Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend, LaneObservation, ObservedLaneWrites,
+    WorkHandle, WorkOrder,
 };
 pub use projection::{
     AwaitingSurfaceView, BaseAlertView, BloomView, CommissionProjection, CompositionCursorView, CompositionView,

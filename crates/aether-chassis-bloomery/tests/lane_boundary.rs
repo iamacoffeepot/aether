@@ -15,8 +15,9 @@
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, reason = "a scenario that cannot set up its coordinator reports it by panicking")]
 
+use std::collections::BTreeSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -68,6 +69,48 @@ fn a_bloom_whose_lanes_all_pass_resolves_its_member() {
         "the construct lane ran as a real subprocess: {commands:?}",
     );
     assert!(commands.contains(&VERIFY_CHECK_COMMAND.to_owned()), "the verify lane ran too: {commands:?}");
+}
+
+#[test]
+fn every_launch_of_one_session_stands_in_that_sessions_tree() {
+    // Acceptance for #5425, below the spawn seam: construct and the verify that
+    // judges what it built run in one tree, and that tree belongs to the session
+    // the construct opened rather than to whichever lane slot each launch was
+    // handed.
+    //
+    // Pre-fix every lane built in `<scratch>/slot-<index>`. A harness binds a
+    // conversation permanently to the directory it was born in — grok stores
+    // sessions under a percent-encoded working directory and ignores `--cwd` on
+    // a resume — so a member whose launches landed in different slots had its
+    // resumed lap edit whatever was in the old slot while its own checkout
+    // stayed clean, which reads downstream as a lane that produced nothing
+    // (dispatch-2374, dispatch-2379).
+    let mut harness = LaneHarness::start_with(&LaneScript::all_passing(), "wp-own-tree");
+    harness
+        .settle("the member resolves", |bloom| bloom.members.first().is_some_and(|member| member.resolution.is_some()));
+
+    let sessions = harness.runs_dir().join("sessions");
+    let member_lanes: Vec<(String, String)> = harness
+        .ledger()
+        .into_iter()
+        .filter_map(|run| run.worktree.map(|worktree| (run.command, worktree)))
+        .filter(|(_, worktree)| worktree.contains("/sessions/"))
+        .collect();
+
+    let commands: BTreeSet<&str> = member_lanes.iter().map(|(command, _)| command.as_str()).collect();
+    assert!(commands.len() > 1, "more than one of the member's stages ran: {member_lanes:?}");
+    let trees: BTreeSet<&str> = member_lanes.iter().map(|(_, worktree)| worktree.as_str()).collect();
+    assert_eq!(trees.len(), 1, "every one of them stood in one tree: {member_lanes:?}");
+    let tree = Path::new(trees.iter().next().unwrap());
+    assert_eq!(tree.file_name().and_then(|name| name.to_str()), Some("tree"));
+    assert_eq!(tree.parent().and_then(Path::parent), Some(sessions.as_path()), "and it is a session's: {tree:?}");
+
+    let session_dirs: Vec<String> = fs::read_dir(&sessions)
+        .expect("the session root exists")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(session_dirs.len(), 1, "one member's line opened one session: {session_dirs:?}");
 }
 
 #[test]
@@ -264,7 +307,7 @@ fn an_expired_real_process_lane_is_cancelled_as_a_host_fault() {
         LaneHarness::start_with_wall_clock(&LaneScript::all_passing().with_default(LaneMode::NeverExits), 5);
     harness.wait_for_runs(1);
     thread::sleep(Duration::from_secs(7));
-    assert_scratch_checkouts_are_lane_slots(&harness, "an expired child leaves no checkout of its own");
+    assert_scratch_checkouts_are_named_for_work(&harness, "an expired child leaves no checkout of its own");
 }
 
 #[test]
@@ -385,7 +428,7 @@ fn a_lane_that_never_exits_is_cancelled_as_a_host_fault() {
     thread::sleep(Duration::from_secs(7));
     let bloom = harness.view();
     assert!(bloom.blooms[0].members[0].resolution.is_none(), "a lane that never answered resolves nothing");
-    assert_scratch_checkouts_are_lane_slots(&harness, "a cancelled run leaves no checkout of its own behind");
+    assert_scratch_checkouts_are_named_for_work(&harness, "a cancelled run leaves no checkout of its own behind");
 }
 
 #[test]
@@ -406,7 +449,7 @@ fn a_lane_that_goes_silent_is_cancelled_before_its_wall_clock() {
 
     let bloom = harness.view();
     assert!(bloom.blooms[0].members[0].resolution.is_none(), "a silent lane resolves nothing");
-    assert_scratch_checkouts_are_lane_slots(&harness, "a silenced run leaves no checkout of its own behind");
+    assert_scratch_checkouts_are_named_for_work(&harness, "a silenced run leaves no checkout of its own behind");
 }
 
 #[test]
@@ -441,7 +484,7 @@ fn a_continuously_noisy_lane_still_dies_at_its_absolute_deadline() {
 
     let bloom = harness.view();
     assert!(bloom.blooms[0].members[0].resolution.is_none(), "a noisy hung lane resolves nothing");
-    assert_scratch_checkouts_are_lane_slots(&harness, "a deadline-killed noisy run leaves no checkout of its own");
+    assert_scratch_checkouts_are_named_for_work(&harness, "a deadline-killed noisy run leaves no checkout of its own");
 }
 
 // Every checkout git has registered under the harness's run directories.
@@ -460,26 +503,33 @@ fn registered_scratch_checkouts(harness: &LaneHarness) -> Vec<PathBuf> {
         .collect()
 }
 
-// The scratch checkouts are the lane slots' and nothing else.
+// Every scratch checkout belongs to a session or to a lane slot, and none is
+// named for an order.
 //
 // A worktree per order, accumulating forever, is the leak this catches — and it
 // is invisible to any double mounted above the spawn, because there is no
-// worktree to leak. What a dispatch registers is its lane slot's canonical
-// checkout (#4904), reused by every dispatch that holds the slot afterwards, so
-// the registered set is bounded by the lane ceiling however many orders run.
-// Anything named after an order is the leak, and the name is what says so.
-fn assert_scratch_checkouts_are_lane_slots(harness: &LaneHarness, context: &str) {
+// worktree to leak. What a dispatch registers is its session's tree
+// (`sessions/<slug>/tree`, #5425), or the lane slot's own checkout (#4904) when
+// the order resolves no session, and either way it is reused by every launch
+// that follows. The registered set is therefore bounded by the live session
+// count plus the lane ceiling, however many orders run. Anything named after an
+// order is the leak, and the shape is what says so.
+fn assert_scratch_checkouts_are_named_for_work(harness: &LaneHarness, context: &str) {
+    let sessions = fs::canonicalize(harness.runs_dir()).unwrap().join("sessions");
     for checkout in registered_scratch_checkouts(harness) {
         let name = checkout.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_owned();
+        let slot = name.strip_prefix("slot-").is_some_and(|index| index.chars().all(|digit| digit.is_ascii_digit()));
+        let session = name == "tree" && checkout.parent().and_then(Path::parent) == Some(sessions.as_path());
         assert!(
-            name.strip_prefix("slot-").is_some_and(|index| index.chars().all(|digit| digit.is_ascii_digit())),
-            "{context}: {name} is not a lane slot's checkout, so something registered one per order",
+            slot || session,
+            "{context}: {} belongs to neither a session nor a lane slot, so something registered one per order",
+            checkout.display(),
         );
     }
 }
 
 #[test]
-fn the_only_scratch_checkouts_a_bloom_leaves_are_its_lane_slots() {
+fn the_only_scratch_checkouts_a_bloom_leaves_are_named_for_its_work() {
     // The green path's half of the same invariant: a bloom that runs a construct
     // lane, a verify lane, and a critic against one member registers the slot
     // checkouts those dispatches shared, and never a directory per order.
@@ -488,5 +538,8 @@ fn the_only_scratch_checkouts_a_bloom_leaves_are_its_lane_slots() {
     harness
         .settle("the member resolves", |bloom| bloom.members.first().is_some_and(|member| member.resolution.is_some()));
 
-    assert_scratch_checkouts_are_lane_slots(&harness, "a resolved member's dispatches shared their slots' checkouts");
+    assert_scratch_checkouts_are_named_for_work(
+        &harness,
+        "a resolved member's dispatches shared their slots' checkouts",
+    );
 }

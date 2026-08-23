@@ -1,6 +1,6 @@
 //! Structural completeness of the golden fixture beside it (#4960).
 //!
-//! The pinned bytes in `main.rs` freeze the shape of every position the
+//! The pinned bytes in `fixtures/` freeze the shape of every position the
 //! representative actually reaches, and nothing else. A family the
 //! representative omits is free to gain a field, encode wider on every new row,
 //! and still leave those bytes untouched — so the fixture's coverage is as
@@ -36,7 +36,7 @@ use aether_data::schema::{EnumVariant, LabelNode, SchemaType, VariantLabel};
 use aether_data::wire::to_vec;
 use serde_json::Value;
 
-use super::representative;
+use aether_bloomery::testing::representative;
 
 /// The decisions graph is a few hundred positions deep in total. A walk that
 /// exhausts this has desynchronized from the schema rather than found a big

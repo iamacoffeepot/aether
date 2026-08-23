@@ -7,7 +7,7 @@
 //! store write.
 
 use aether_actor::Manual;
-use aether_bloomery::{AuthorityDoor, Digest, ScopeRevision, ScopeVerifyReport, Statement, WorkpieceId};
+use aether_bloomery::{AuthorityDoor, Digest, Provenance, ScopeRevision, ScopeVerifyReport, Statement, WorkpieceId};
 use aether_data::wire::{from_bytes, to_vec};
 use aether_http::{HttpHeader, HttpServerRequest, HttpServerResponse};
 use aether_substrate::actor::native::NativeCtx;
@@ -17,15 +17,16 @@ use super::response::{error_response, json};
 use super::state::{ApiCapabilityState, Routed};
 use crate::api::dto::{
     CancelCommissionRequest, CommissionApprovalView, CommissionCancelledView, CommissionCreatedView,
-    CommissionHeadView, CommissionShowView, CommissionsView, CreateCommissionRequest, RevisionProjection,
-    ScopeRevisionWrittenView,
+    CommissionHeadView, CommissionReopenedView, CommissionShowView, CommissionsView, CreateCommissionRequest,
+    ReopenCommissionRequest, ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, WriteRevisionRequest,
 };
 use crate::bloomery::{StatementRejected, precheck_statement, verified_statement_approval};
 use crate::signing::{SigningCapability, Verify, VerifyResult, authority_bytes};
 use crate::store::{
-    CancelCommission, CancelCommissionResult, CreateCommission, CreateCommissionResult, ListCommissions,
-    ListCommissionsResult, ListedCommission, LoadCommission, LoadCommissionResult, RecordCommissionApproval,
-    RecordCommissionApprovalResult, StoreCapability, WriteScopeRevision, WriteScopeRevisionResult,
+    CancelCommission, CancelCommissionResult, CreateCommission, CreateCommissionResult, EnqueueScopeRun,
+    EnqueueScopeRunResult, ListCommissions, ListCommissionsResult, ListedCommission, LoadCommission,
+    LoadCommissionResult, RecordCommissionApproval, RecordCommissionApprovalResult, ReopenCommission,
+    ReopenCommissionResult, StoreCapability, WriteScopeRevision, WriteScopeRevisionResult,
 };
 
 #[cfg(test)]
@@ -49,6 +50,16 @@ pub(super) enum CommissionWrite {
         statement: Statement,
         /// Operator context for the cancel. Never authority: the signature and
         /// the intent digest decide, and this field changes nothing about that.
+        reason: String,
+    },
+    /// Restore a stranded commission after the signature verifies.
+    Reopen {
+        /// The workpiece the path named.
+        id: WorkpieceId,
+        /// The submitted reopen statement.
+        statement: Statement,
+        /// Operator context for the reopen. Never authority, exactly as the
+        /// cancel's is not.
         reason: String,
     },
 }
@@ -110,31 +121,34 @@ impl ApiCapabilityState {
         Routed::CreateCommission(CreateCommission { id: body.id.0, intent })
     }
 
+    /// `POST /commissions/{id}/scope-runs` — open a pre-bloom scoping run.
+    pub(super) fn enqueue_scope_run(&self, request: &HttpServerRequest, id: &str) -> Routed {
+        if let Err(response) = authorize(request, &self.control_token) {
+            return Routed::Reply(response);
+        }
+        let body: ScopeRunRequest = match hex::from_slice(&request.body) {
+            Ok(body) => body,
+            Err(error) => return Routed::Reply(error_response(400, &format!("invalid scope-run body: {error}"))),
+        };
+        Routed::EnqueueScopeRun(EnqueueScopeRun { id: id.to_owned(), base: body.base.as_bytes().to_vec() })
+    }
+
     /// `POST /commissions/{id}/revisions` — write a scope revision.
     pub(super) fn write_commission_revision(&self, request: &HttpServerRequest, id: &str) -> Routed {
         if let Err(response) = authorize(request, &self.control_token) {
             return Routed::Reply(response);
         }
-        let revision: ScopeRevision = match hex::from_slice(&request.body) {
-            Ok(revision) => revision,
-            Err(error) => return Routed::Reply(error_response(400, &format!("invalid scope revision: {error}"))),
+        let body: WriteRevisionRequest = match hex::from_slice(&request.body) {
+            Ok(body) => body,
+            Err(error) => return Routed::Reply(error_response(400, &format!("invalid revision body: {error}"))),
         };
-        if revision.workpiece.0 != id {
+        if body.revision.workpiece.0 != id {
             return Routed::Reply(error_response(400, "scope revision workpiece does not match the path"));
         }
-        // The projection rides beside the revision rather than inside it: the
-        // revision's bytes are the signed subject and cannot grow a field, and a
-        // body that omits `scope_verify` is a hand-authored freeze with no
-        // records to check. Decoded from the same body separately for that
-        // reason — the two values have independent lifetimes downstream.
-        let projection: RevisionProjection = match hex::from_slice(&request.body) {
-            Ok(projection) => projection,
-            Err(error) => {
-                return Routed::Reply(error_response(400, &format!("invalid scope-verify projection: {error}")));
-            }
-        };
-        let scope_verify = projection.scope_verify.map(|input| input.to_canonical()).unwrap_or_default();
-        Routed::WriteScopeRevision(WriteScopeRevision { canonical: revision.to_canonical(), scope_verify })
+        Routed::WriteScopeRevision(WriteScopeRevision {
+            canonical: body.revision.to_canonical(),
+            evidence: body.evidence.encode(),
+        })
     }
 
     /// `POST /commissions/{id}/approvals` — precheck, then verify, then store.
@@ -216,6 +230,38 @@ impl ApiCapabilityState {
         }
     }
 
+    /// `POST /commissions/{id}/reopen` — verify a reopen envelope, then restore.
+    ///
+    /// The store decides whether the commission may come back: this door proves
+    /// only that an authorized operator asked for it at the Reopen door, bound
+    /// to this commission's own intent.
+    pub(super) fn reopen_commission(
+        &self,
+        ctx: &NativeCtx<'_, Manual>,
+        request: &HttpServerRequest,
+        id: &str,
+    ) -> Routed {
+        if let Err(response) = authorize(request, &self.control_token) {
+            return Routed::Reply(response);
+        }
+        let (statement, intent, reason) = match reopen_request(&request.body) {
+            Ok(parsed) => parsed,
+            Err(response) => return Routed::Reply(response),
+        };
+        let encoded = match to_vec(&statement) {
+            Ok(encoded) => encoded,
+            Err(error) => return Routed::Reply(error_response(500, &format!("reopen encode failed: {error}"))),
+        };
+        let correlation = self.send_tracked(
+            ctx.actor::<SigningCapability>(),
+            &Verify { statement: encoded, authority: authority_bytes(AuthorityDoor::Reopen, intent) },
+        );
+        Routed::DeferredCommissionVerify {
+            correlation,
+            write: CommissionWrite::Reopen { id: WorkpieceId(id.to_owned()), statement, reason },
+        }
+    }
+
     /// Resolve a held commission verify: persist on a verified signature, or
     /// answer `400` so a refusal is not a transport error.
     pub(super) fn resolve_commission_verify(&mut self, ctx: &NativeCtx<'_, Manual>, result: VerifyResult) {
@@ -271,6 +317,27 @@ fn persist_verified(
             );
             Ok(state.send_tracked(ctx.actor::<StoreCapability>(), &CancelCommission { id: id.0, statement }))
         }
+        CommissionWrite::Reopen { id, statement, reason } => {
+            // The one durable trace of who restored this commission: the
+            // statement is not filed (see the store's `reopen_commission`), so
+            // the log line carries the signer the door verified.
+            let signer = match &statement.provenance {
+                Provenance::AuthorSignature(envelope) => envelope.signer.0.clone(),
+                // The door refuses everything else before the verification is
+                // even spent, so these cannot reach a persisted write.
+                Provenance::ObservationAttestation(_) | Provenance::StageReceipt(_) => "unsigned".to_owned(),
+            };
+            let statement =
+                to_vec(&statement).map_err(|error| error_response(500, &format!("reopen encode failed: {error}")))?;
+            tracing::info!(
+                target: "aether_chassis_bloomery::api",
+                commission = %id.0,
+                signer = %signer,
+                reason = %reason,
+                "commission reopen authorized"
+            );
+            Ok(state.send_tracked(ctx.actor::<StoreCapability>(), &ReopenCommission { id: id.0, statement }))
+        }
     }
 }
 
@@ -287,16 +354,39 @@ fn cancel_request(body: &[u8]) -> Result<(Statement, Digest, String), HttpServer
         Ok(request) => request,
         Err(error) => return Err(error_response(400, &format!("invalid cancel body: {error}"))),
     };
-    if request.reason.trim().is_empty() {
-        return Err(error_response(400, "cancel reason is required"));
-    }
-    let Some(intent) = Digest::from_slice(&request.statement.words) else {
-        return Err(error_response(400, "cancel words are not an intent digest"));
+    intent_door_request(request.statement, request.reason, "cancel")
+}
+
+fn reopen_request(body: &[u8]) -> Result<(Statement, Digest, String), HttpServerResponse> {
+    let request: ReopenCommissionRequest = match hex::from_slice(body) {
+        Ok(request) => request,
+        Err(error) => return Err(error_response(400, &format!("invalid reopen body: {error}"))),
     };
-    if let Err(rejected) = precheck_statement(intent, &request.statement) {
+    intent_door_request(request.statement, request.reason, "reopen")
+}
+
+/// The checks an intent-bound door runs before it spends a signature
+/// verification: the operator said why, the words are a digest at all, and the
+/// statement is shaped like an author signature over them.
+///
+/// `door` names the caller in the refusals, because a message that says
+/// "reason is required" without saying which act was refused sends the operator
+/// back to the route table.
+fn intent_door_request(
+    statement: Statement,
+    reason: String,
+    door: &str,
+) -> Result<(Statement, Digest, String), HttpServerResponse> {
+    if reason.trim().is_empty() {
+        return Err(error_response(400, &format!("{door} reason is required")));
+    }
+    let Some(intent) = Digest::from_slice(&statement.words) else {
+        return Err(error_response(400, &format!("{door} words are not an intent digest")));
+    };
+    if let Err(rejected) = precheck_statement(intent, &statement) {
         return Err(approval_rejected(rejected));
     }
-    Ok((request.statement, intent, request.reason))
+    Ok((statement, intent, reason))
 }
 
 fn query_status(query: &str) -> Option<String> {
@@ -469,6 +559,26 @@ fn head_view(listed: ListedCommission) -> Result<CommissionHeadView, HttpServerR
     })
 }
 
+/// Render [`EnqueueScopeRunResult`].
+pub(super) fn scope_run_response(result: EnqueueScopeRunResult) -> HttpServerResponse {
+    match result {
+        EnqueueScopeRunResult::Ok { id, ordinal, sequence, subject } => match digest_of_bytes(&subject) {
+            Ok(subject) => json(201, &ScopeRunOpenedView { id: WorkpieceId(id), ordinal, sequence, subject }),
+            Err(response) => response,
+        },
+        EnqueueScopeRunResult::Missing { id } => error_response(404, &format!("no commission named {id}")),
+        EnqueueScopeRunResult::NotOpen => error_response(409, "commission is not open"),
+        EnqueueScopeRunResult::AlreadyInFlight { ordinal } => {
+            error_response(409, &format!("scoping run {ordinal} is already in flight"))
+        }
+        EnqueueScopeRunResult::AlreadyFrozen => error_response(409, "commission already has a frozen scope revision"),
+        EnqueueScopeRunResult::Exhausted { attempts } => {
+            error_response(409, &format!("scoping run retry budget spent ({attempts} attempts)"))
+        }
+        EnqueueScopeRunResult::Err { error } => error_response(500, &format!("scope-run enqueue failed: {error}")),
+    }
+}
+
 /// Render [`CancelCommissionResult`].
 pub(super) fn cancel_response(result: CancelCommissionResult) -> HttpServerResponse {
     match result {
@@ -482,5 +592,24 @@ pub(super) fn cancel_response(result: CancelCommissionResult) -> HttpServerRespo
         CancelCommissionResult::NotOpen => error_response(409, "commission is not open"),
         CancelCommissionResult::WrongSubject => error_response(400, "cancel words are not the intent digest"),
         CancelCommissionResult::Err { error } => error_response(500, &format!("commission cancel failed: {error}")),
+    }
+}
+
+/// Render [`ReopenCommissionResult`].
+pub(super) fn reopen_response(result: ReopenCommissionResult) -> HttpServerResponse {
+    match result {
+        ReopenCommissionResult::Ok { id, digest } => match digest_of_bytes(&digest) {
+            Ok(digest) => json(200, &CommissionReopenedView { digest, id: WorkpieceId(id), status: "open".to_owned() }),
+            Err(response) => response,
+        },
+        ReopenCommissionResult::Missing { id } => error_response(404, &format!("no commission named {id}")),
+        ReopenCommissionResult::NotLanded { status } => {
+            error_response(409, &format!("commission is {status}, not landed"))
+        }
+        ReopenCommissionResult::Resolved { bloom } => {
+            error_response(409, &format!("bloom {bloom} resolved this workpiece; its landing stands"))
+        }
+        ReopenCommissionResult::WrongSubject => error_response(400, "reopen words are not the intent digest"),
+        ReopenCommissionResult::Err { error } => error_response(500, &format!("commission reopen failed: {error}")),
     }
 }

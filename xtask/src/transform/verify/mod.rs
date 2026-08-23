@@ -21,13 +21,14 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use crate::cargo::{self, WASM_TARGET, run_captured, write_json_pretty};
+use crate::fixtures::annotate_findings;
 use crate::transform::peak_memory::{self, PeakMemory};
 use crate::transform::sccache::{self, CompilerCache, Counters};
 use crate::transform::verify::closure::Closure;
 use crate::transform::verify::scope::Scope;
 pub(super) use crate::transform::verify::triage::Excused;
 use crate::transform::verify::triage::ReplayVerdict;
-use crate::transform::{Evidence, GateTiming, TransformArgs, build_evidence};
+use crate::transform::{ChannelKind, Channels, Evidence, EvidenceChannel, GateTiming, TransformArgs, build_evidence};
 
 /// One CI-mirroring invocation for a `verify.*` command id, plus the tools it
 /// needs present to run at all (#4706).
@@ -95,9 +96,8 @@ struct VerifyInvocation {
     /// above: the scan ran, it found something, and it is telling the lane that
     /// the candidate stated its case rather than hiding it. The member passes —
     /// no identity is added to `failed_verifiers`, so ADR-0178's arithmetic is
-    /// untouched — and the request rides out on
-    /// [`MemberRun::suppression_requests`] for the two reviewer surfaces to
-    /// render.
+    /// untouched — and the request rides out on the suppression-requests
+    /// evidence channel for the two reviewer surfaces to render.
     ///
     /// Only `verify.suppress` states one. A member that declines to judge
     /// without a place to send the question would just be a silent pass.
@@ -749,7 +749,7 @@ fn umbrella_status(outcomes: &[MemberOutcome]) -> &'static str {
 /// judged something the candidate cannot reach has said nothing about it
 /// either, and the host is the one being reported on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum MemberOutcome {
+pub(super) enum MemberOutcome {
     /// The member ran and found nothing.
     Passed,
     /// The member ran and reported a defect in the candidate.
@@ -912,6 +912,56 @@ fn operational_failure_notice(id: &str, invocation: &VerifyInvocation, code: Opt
          states a finding with ({stated}). A verdict it could not reach is a host or tooling fault, so this \
          run is accounted to {} rather than to {id}.\n",
         invocation.program,
+        VerifyFailure::Preflight,
+    )
+}
+
+/// The exact phrases a toolchain child uses to report that it died rather than
+/// judged — the whole basis for reading an arm's failure as the host's.
+///
+/// Three, each one a specific program's own wording, because the scan runs over
+/// captured build output and a looser pattern would read a test's own stdout as
+/// a host condition:
+///
+/// - `terminated with signal` is what `rustc` prints when the linker it forked
+///   was killed (`ld terminated with signal 7 [Bus error]`, dispatch-2366).
+/// - `(signal: ` is what cargo appends when `rustc` itself was killed
+///   (`could not compile … (signal: 9, SIGKILL: kill)`) — the out-of-memory
+///   shape.
+/// - `No space left on device` is ENOSPC from any of them.
+///
+/// A false positive here costs a retry on another slot; a false negative costs
+/// a paid repair lap against a candidate nobody read, and then the repeated
+/// identity that wedges the member. The scan is deliberately calibrated toward
+/// the first, which is the direction the exit-code table already fails in.
+const HOST_FAULT_PHRASES: [&str; 3] = ["terminated with signal", "(signal: ", "No space left on device"];
+
+/// The host condition `captured` reports, when it reports one.
+///
+/// The line rather than the phrase: an operator reading the evidence needs to
+/// know which toolchain process died and how, and the phrase alone says
+/// neither.
+fn host_fault_in(captured: &str) -> Option<String> {
+    captured
+        .lines()
+        .find(|line| HOST_FAULT_PHRASES.iter().any(|phrase| line.contains(phrase)))
+        .map(|line| line.trim().to_owned())
+}
+
+/// The line a member's log opens with when a toolchain process inside it died
+/// rather than reporting on the candidate (#5422).
+///
+/// The same work [`operational_failure_notice`] does, for the case its exit-code
+/// reading cannot see: the arm's own program exited with a code it states a
+/// finding with, and the thing that actually happened is one level down — a
+/// linker killed by a signal, a `rustc` killed for memory, a write that ran out
+/// of disk. Read as a finding, that dump is handed to a repair lap, which then
+/// edits working code until a host condition it cannot see stops happening.
+fn host_fault_notice(id: &str, condition: &str) -> String {
+    format!(
+        "error: {id} reported nothing about the candidate — a toolchain process it ran died rather than \
+         finishing: {condition}. That is a host condition, so this run is accounted to {} rather than to \
+         {id}, and no repair lap is dispatched for it.\n",
         VerifyFailure::Preflight,
     )
 }
@@ -1099,7 +1149,18 @@ fn run_member(
     };
 
     let code = output.code;
-    let outcome = member_outcome(invocation, derived_pass, code);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Read only against a run that would otherwise be charged to the candidate.
+    // A member already accounted to the host needs no promotion, and a passing
+    // one is not being blamed for anything.
+    let host_fault = (member_outcome(invocation, derived_pass, code) == MemberOutcome::Failed)
+        .then(|| host_fault_in(&rendered).or_else(|| host_fault_in(&stderr)))
+        .flatten();
+    let outcome = if host_fault.is_some() {
+        MemberOutcome::Operational
+    } else {
+        member_outcome(invocation, derived_pass, code)
+    };
 
     let mut log = Vec::new();
     // The narrowing states itself where the reader is: a log that names a
@@ -1111,8 +1172,12 @@ fn run_member(
     if let Some(notice) = unjudged {
         log.extend_from_slice(notice.as_bytes());
     }
-    if outcome == MemberOutcome::Operational {
-        log.extend_from_slice(operational_failure_notice(id, invocation, code).as_bytes());
+    match &host_fault {
+        Some(condition) => log.extend_from_slice(host_fault_notice(id, condition).as_bytes()),
+        None if outcome == MemberOutcome::Operational => {
+            log.extend_from_slice(operational_failure_notice(id, invocation, code).as_bytes());
+        }
+        None => {}
     }
     log.extend_from_slice(rendered.as_bytes());
     log.extend_from_slice(&output.stderr);
@@ -1121,38 +1186,21 @@ fn run_member(
 }
 
 /// One member's contribution to the umbrella: what it concluded, the log the
-/// evidence directory keeps, the findings a repair lap is directed by, and the
-/// environment observation the lane reports *instead of* handing over.
+/// evidence directory keeps, and the [`EvidenceChannel`] set it produced.
 ///
-/// The two prose channels are separate on purpose (#4895). Findings are work: a
-/// `Refine` re-entry is told to fix them. An observation is a receipt: it names
-/// what this run declined to blame the candidate for, so a misclassification is
-/// visible to a reader instead of being a silence.
-struct MemberRun {
+/// The repair-work / receipt distinction lives on the channel, not here.
+pub(super) struct MemberRun {
     id: String,
     outcome: MemberOutcome,
     log: Vec<u8>,
     exit_code: i32,
-    findings: Option<String>,
-    observation: Option<String>,
-    /// Tests this run excused because a same-input replay cleared them.
-    flakes: Vec<Excused>,
-    /// Tests this run excused because they were already red at the base.
-    inherited: Vec<Excused>,
-    /// Suppressions this run declined to judge, each with the reason the lane
-    /// stated for it (ADR-0193).
-    suppression_requests: Vec<SuppressionRequest>,
-    /// What the symbol pass flagged for the review seat (#5185). Its own
-    /// channel for the reason the request channel is its own: a flag is a
-    /// question about design, and a repair lap handed one spends its budget
-    /// renaming a symbol rather than answering it.
-    review_flags: Option<String>,
+    channels: Channels,
 }
 
 impl MemberRun {
     /// A member whose log the distillers read as they always have — everything
     /// but a `verify.test` run whose failures were classified.
-    fn plain(id: &str, outcome: MemberOutcome, log: Vec<u8>, exit_code: i32) -> Self {
+    pub(super) fn plain(id: &str, outcome: MemberOutcome, log: Vec<u8>, exit_code: i32) -> Self {
         let rendered = String::from_utf8_lossy(&log);
         let findings = matches!(outcome, MemberOutcome::Failed | MemberOutcome::Operational)
             .then(|| distil_member(id, &rendered))
@@ -1161,7 +1209,7 @@ impl MemberRun {
         // requested run passes, and reading the marker off every passing
         // member's log would hand the reviewer whatever prose happened to
         // resemble it.
-        let suppression_requests = if id == SUPPRESS_MEMBER && exit_code == SUPPRESSION_REQUESTED_EXIT {
+        let requests = if id == SUPPRESS_MEMBER && exit_code == SUPPRESSION_REQUESTED_EXIT {
             parse_suppression_requests(&rendered)
         } else {
             Vec::new()
@@ -1172,15 +1220,44 @@ impl MemberRun {
             outcome,
             log,
             exit_code,
-            findings,
-            observation: None,
-            flakes: Vec::new(),
-            inherited: Vec::new(),
-            suppression_requests,
-            // Set by the caller that knows the work order's diff base; a
-            // member with no base has no introduced set to read.
-            review_flags: None,
+            channels: Channels::new(
+                findings
+                    .map(EvidenceChannel::findings)
+                    .into_iter()
+                    .chain((!requests.is_empty()).then(|| EvidenceChannel::suppression_requests(requests))),
+            ),
         }
+    }
+
+    pub(super) fn set(&mut self, channel: EvidenceChannel) {
+        self.channels.set(channel);
+    }
+
+    fn findings(&self) -> Option<&str> {
+        self.channels.text(ChannelKind::Findings)
+    }
+
+    fn observation(&self) -> Option<&str> {
+        self.channels.text(ChannelKind::Environment)
+    }
+
+    fn review_flags(&self) -> Option<&str> {
+        self.channels.text(ChannelKind::ReviewFlags)
+    }
+
+    fn suppression_requests(&self) -> &[SuppressionRequest] {
+        self.channels.get(ChannelKind::SuppressionRequests).and_then(EvidenceChannel::requests).unwrap_or(&[])
+    }
+}
+
+#[cfg(test)]
+impl MemberRun {
+    fn flakes(&self) -> &[Excused] {
+        self.channels.excused(ChannelKind::Flakes)
+    }
+
+    fn inherited(&self) -> &[Excused] {
+        self.channels.excused(ChannelKind::InheritedFailures)
     }
 }
 
@@ -1271,7 +1348,9 @@ fn run_member_discriminated(
     let (outcome, log, exit_code) = run_member(id, invocation, scope, diff_base, runner)?;
     let Some(classified) = classify_failures(id, outcome, &log, closure) else {
         let mut run = MemberRun::plain(id, outcome, log, exit_code);
-        run.review_flags = symbol_flags(id, diff_base);
+        if let Some(flags) = symbol_flags(id, diff_base) {
+            run.set(flags);
+        }
         return Ok(run);
     };
 
@@ -1303,13 +1382,19 @@ fn run_member_discriminated(
             } else {
                 exit_code
             },
-            findings,
-            observation: join_observations(classified.observation(), triaged.observation()),
-            flakes: triaged.flakes,
-            inherited: triaged.inherited,
-            // Only `verify.suppress` states one, and this arm is `verify.test`.
-            suppression_requests: Vec::new(),
-            review_flags: None,
+            channels: Channels::new(
+                findings
+                    .map(EvidenceChannel::findings)
+                    .into_iter()
+                    .chain(
+                        join_observations(classified.observation(), triaged.observation())
+                            .map(EvidenceChannel::environment),
+                    )
+                    .chain((!triaged.flakes.is_empty()).then(|| EvidenceChannel::flakes(triaged.flakes)))
+                    .chain(
+                        (!triaged.inherited.is_empty()).then(|| EvidenceChannel::inherited_failures(triaged.inherited)),
+                    ),
+            ),
         });
     }
 
@@ -1339,12 +1424,12 @@ fn run_member_discriminated(
         outcome,
         log: [log, rerun_notice(id).into_bytes(), repeat_log].concat(),
         exit_code: repeat_exit,
-        findings,
-        observation: rerun_observation(outcome, classified.observation()),
-        flakes: Vec::new(),
-        inherited: Vec::new(),
-        suppression_requests: Vec::new(),
-        review_flags: None,
+        channels: Channels::new(
+            findings
+                .map(EvidenceChannel::findings)
+                .into_iter()
+                .chain(rerun_observation(outcome, classified.observation()).map(EvidenceChannel::environment)),
+        ),
     })
 }
 
@@ -1435,14 +1520,15 @@ fn effective_exit_code(passed: bool, exit_code: Option<i32>) -> i32 {
 }
 
 /// Run `invocation`'s prepare step, when it has one. `None` is a member clear to
-/// run; `Some((log, exit_code))` is a prepare that failed, already framed as the
-/// member's log by [`prepare_failure_log`].
+/// run; `Some((log, exit_code, outcome))` is a prepare that failed, already framed
+/// as the member's log by [`prepare_failure_log`] and already charged to the
+/// candidate or to the host.
 fn run_prepare(
     id: &str,
     invocation: &VerifyInvocation,
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
-) -> Result<Option<(String, i32)>> {
+) -> Result<PrepareFailure> {
     let Some(prepare) = invocation.prepare else {
         return Ok(None);
     };
@@ -1464,7 +1550,20 @@ fn run_prepare(
 
     let mut captured = String::from_utf8_lossy(&output.stdout).into_owned();
     captured.push_str(&String::from_utf8_lossy(&stderr));
-    Ok(Some((prepare_failure_log(id, prepare, &captured), output.status.code().unwrap_or(1))))
+    // The pre-build is a cargo invocation like any other, and it fails the same
+    // two ways: the candidate broke its own build, or a toolchain process under
+    // it died. The second is the host's — including when the prepare child
+    // itself was signalled, which leaves no exit code at all.
+    let condition = output
+        .status
+        .code()
+        .map_or_else(|| Some(String::from("the pre-build was terminated by a signal")), |_| host_fault_in(&captured));
+    let framed = prepare_failure_log(id, prepare, &captured);
+    let (outcome, log) = match &condition {
+        Some(condition) => (MemberOutcome::Operational, format!("{}{framed}", host_fault_notice(id, condition))),
+        None => (MemberOutcome::Failed, framed),
+    };
+    Ok(Some((log, output.status.code().unwrap_or(1), outcome)))
 }
 
 /// Wall-clock milliseconds since `started`, saturating at `u64::MAX` so a
@@ -1473,8 +1572,9 @@ fn elapsed_millis(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-/// A failed prepare's framed member log and exit code. `None` is clear to run.
-type PrepareFailure = Option<(String, i32)>;
+/// A failed prepare's framed member log, exit code, and which side it is
+/// charged to. `None` is clear to run.
+type PrepareFailure = Option<(String, i32, MemberOutcome)>;
 
 /// Prepare-step result plus its own wall-clock share.
 ///
@@ -1554,17 +1654,23 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
     // a `verify.suppress` run alone states its requests on the same channel the
     // umbrella states them on, so the two paths hand the reviewer one shape.
     let mut run = MemberRun::plain(&args.command, outcome, log_bytes, exit_code);
-    run.review_flags = symbol_flags(&args.command, args.diff_base.as_deref());
-    let findings = (!passed).then(|| verify_findings(from_ref(&run))).flatten();
-    let requests = stated_requests(from_ref(&run));
+    if let Some(flags) = symbol_flags(&args.command, args.diff_base.as_deref()) {
+        run.set(flags);
+    }
 
     let failures = outcome.failure(&args.command).map(VerifyFailureSet::one);
-    let mut evidence =
-        build_evidence(&args.command, args.nonce.clone(), passed, Some(exit_code), log_name, findings, failures)
-            .measured_by(cache.as_ref(), &peak)
-            .timed(duration_millis);
-    evidence.suppression_requests = requests;
-    evidence.review_flags = review_flags(from_ref(&run));
+    let evidence = build_evidence(&args.command, args.nonce.clone(), passed, Some(exit_code), log_name, None, failures)
+        .measured_by(cache.as_ref(), &peak)
+        .timed(duration_millis)
+        .with_channels(
+            [
+                (!passed).then(|| verify_findings(from_ref(&run))).flatten(),
+                stated_requests(from_ref(&run)),
+                review_flags(from_ref(&run)),
+            ]
+            .into_iter()
+            .flatten(),
+        );
     write_json_pretty(&args.out.join("evidence.json"), &evidence)?;
 
     if passed {
@@ -1689,7 +1795,7 @@ fn distil_member(id: &str, log: &str) -> Option<String> {
     if id == "verify.test"
         && let Some(failures) = nextest::classify(log, None).as_ref().and_then(nextest::ClassifiedRun::findings)
     {
-        return Some(failures);
+        return Some(annotate_findings(&failures));
     }
 
     distil_diagnostics(log)
@@ -1737,20 +1843,20 @@ fn tail_lines(log: &str) -> Vec<&str> {
 /// A member that reported an environment fault contributes nothing here, by
 /// construction rather than by filter: its findings channel is empty, because
 /// what it saw was never the candidate's to fix (#4895).
-fn verify_findings(members: &[MemberRun]) -> Option<String> {
+pub(super) fn verify_findings(members: &[MemberRun]) -> Option<EvidenceChannel> {
     let failed: Vec<String> = members
         .iter()
-        .filter_map(|member| member.findings.as_ref().map(|body| format!("### {}\n\n{body}", member.id)))
+        .filter_map(|member| member.findings().map(|body| format!("### {}\n\n{body}", member.id)))
         .collect();
     if failed.is_empty() {
         return None;
     }
 
-    Some(format!(
+    Some(EvidenceChannel::findings(format!(
         "The previous candidate failed verification. It already carries the work order's change; \
          what follows is what verification said is wrong with it. Fix these.\n\n{}",
         failed.join("\n\n")
-    ))
+    )))
 }
 
 /// One of the two per-test excusal ledgers, gathered across the members that
@@ -1759,9 +1865,17 @@ fn verify_findings(members: &[MemberRun]) -> Option<String> {
 /// Absent rather than empty when nothing was excused, so the channel stays
 /// presence-driven: a reader distinguishes "nothing was excused" from "this
 /// build predates the ledgers" by whether the key is there at all.
-fn excused(members: &[MemberRun], of: impl Fn(&MemberRun) -> &Vec<Excused>) -> Option<Vec<Excused>> {
-    let gathered: Vec<Excused> = members.iter().flat_map(|member| of(member).iter().cloned()).collect();
-    (!gathered.is_empty()).then_some(gathered)
+fn excused(members: &[MemberRun], kind: ChannelKind) -> Option<EvidenceChannel> {
+    let gathered: Vec<Excused> =
+        members.iter().flat_map(|member| member.channels.excused(kind).iter().cloned()).collect();
+    if gathered.is_empty() {
+        return None;
+    }
+    match kind {
+        ChannelKind::Flakes => Some(EvidenceChannel::flakes(gathered)),
+        ChannelKind::InheritedFailures => Some(EvidenceChannel::inherited_failures(gathered)),
+        _ => None,
+    }
 }
 
 /// Append one line per excused flake to the run's flake log — the durable
@@ -1793,18 +1907,18 @@ fn append_flake_log(out: &Path, flakes: &[Excused]) {
 /// one question at two granularities and a reviewer reading "is this already
 /// written" wants both verdicts under one identity. ADR-0178's arithmetic is
 /// untouched either way: this returns prose, never an outcome.
-fn symbol_flags(id: &str, diff_base: Option<&str>) -> Option<String> {
-    (id == DUP_MEMBER).then(|| symbols::flags(diff_base)).flatten()
+fn symbol_flags(id: &str, diff_base: Option<&str>) -> Option<EvidenceChannel> {
+    (id == DUP_MEMBER).then(|| symbols::flags(diff_base)).flatten().map(EvidenceChannel::review_flags)
 }
 
 /// Gather the members' review flags into the evidence's own channel.
-fn review_flags(members: &[MemberRun]) -> Option<String> {
+fn review_flags(members: &[MemberRun]) -> Option<EvidenceChannel> {
     let flagged: Vec<String> = members
         .iter()
-        .filter_map(|member| member.review_flags.as_ref().map(|body| format!("### {}\n\n{body}", member.id)))
+        .filter_map(|member| member.review_flags().map(|body| format!("### {}\n\n{body}", member.id)))
         .collect();
 
-    (!flagged.is_empty()).then(|| flagged.join("\n\n"))
+    (!flagged.is_empty()).then(|| EvidenceChannel::review_flags(flagged.join("\n\n")))
 }
 
 /// Gather the requests the members stated, for the evidence's own channel.
@@ -1812,10 +1926,10 @@ fn review_flags(members: &[MemberRun]) -> Option<String> {
 /// Presence-driven like the excusal ledgers: absent when nothing was requested,
 /// so a reader tells "this candidate asked for nothing" from "this build
 /// predates the channel" by whether the key is there at all.
-fn stated_requests(members: &[MemberRun]) -> Option<Vec<SuppressionRequest>> {
+pub(super) fn stated_requests(members: &[MemberRun]) -> Option<EvidenceChannel> {
     let gathered: Vec<SuppressionRequest> =
-        members.iter().flat_map(|member| member.suppression_requests.iter().cloned()).collect();
-    (!gathered.is_empty()).then_some(gathered)
+        members.iter().flat_map(|member| member.suppression_requests().iter().cloned()).collect();
+    (!gathered.is_empty()).then(|| EvidenceChannel::suppression_requests(gathered))
 }
 
 /// Assemble the members' environment observations into the evidence's own
@@ -1824,13 +1938,13 @@ fn stated_requests(members: &[MemberRun]) -> Option<Vec<SuppressionRequest>> {
 ///
 /// Deliberately not merged into `findings`: these are reported *on the lane*,
 /// and a `Refine` re-entry handed them would spend its lap chasing a host.
-fn environment_observations(members: &[MemberRun]) -> Option<String> {
+fn environment_observations(members: &[MemberRun]) -> Option<EvidenceChannel> {
     let observed: Vec<String> = members
         .iter()
-        .filter_map(|member| member.observation.as_ref().map(|body| format!("### {}\n\n{body}", member.id)))
+        .filter_map(|member| member.observation().map(|body| format!("### {}\n\n{body}", member.id)))
         .collect();
 
-    (!observed.is_empty()).then(|| observed.join("\n\n"))
+    (!observed.is_empty()).then(|| EvidenceChannel::environment(observed.join("\n\n")))
 }
 
 /// The `verify.check` / `verify.base` umbrella (#3626): runs every member in
@@ -1857,7 +1971,6 @@ pub(super) fn run_verify_check(args: &TransformArgs, full: bool) -> Result<()> {
     missing.extend(tools::preflight_targets(&required_targets()));
     if !missing.is_empty() {
         let evidence = Evidence {
-            findings: Some(tools::missing_findings(&missing)),
             failed_verifiers: Some(VerifyFailureSet::one(VerifyFailure::Preflight)),
             // A run that refused before its first member compiled nothing, so
             // there is nothing for a cache to have served and nothing whose
@@ -1877,11 +1990,7 @@ pub(super) fn run_verify_check(args: &TransformArgs, full: bool) -> Result<()> {
             status: "fail",
             exit_code: Some(1),
             log: String::new(),
-            environment: None,
-            flakes: None,
-            inherited_failures: None,
-            suppression_requests: None,
-            review_flags: None,
+            channels: Channels::new([EvidenceChannel::findings(tools::missing_findings(&missing))]),
         };
         write_json_pretty(&args.out.join("evidence.json"), &evidence)?;
         process::exit(1);
@@ -1893,7 +2002,6 @@ pub(super) fn run_verify_check(args: &TransformArgs, full: bool) -> Result<()> {
     let status = umbrella_status(&runs.iter().map(|run| run.outcome).collect::<Vec<MemberOutcome>>());
     let failures = failed_verifiers(runs.iter().map(|run| (run.id.as_str(), run.outcome)));
     let evidence = Evidence {
-        findings: verify_findings(&runs),
         failed_verifiers: (!failures.is_empty()).then_some(failures),
         sccache: sccache_served,
         peak_resident_bytes,
@@ -1909,15 +2017,22 @@ pub(super) fn run_verify_check(args: &TransformArgs, full: bool) -> Result<()> {
         status,
         exit_code: Some(first_failure_code.unwrap_or(0)),
         log: log_names.join(", "),
-        environment: environment_observations(&runs),
-        flakes: excused(&runs, |run| &run.flakes),
-        inherited_failures: excused(&runs, |run| &run.inherited),
-        suppression_requests: stated_requests(&runs),
-        review_flags: review_flags(&runs),
+        channels: Channels::new(
+            [
+                verify_findings(&runs),
+                environment_observations(&runs),
+                excused(&runs, ChannelKind::Flakes),
+                excused(&runs, ChannelKind::InheritedFailures),
+                stated_requests(&runs),
+                review_flags(&runs),
+            ]
+            .into_iter()
+            .flatten(),
+        ),
     }
     .timed(elapsed_millis(umbrella_started))
     .with_gates(gates);
-    append_flake_log(&args.out, evidence.flakes.as_deref().unwrap_or_default());
+    append_flake_log(&args.out, evidence.flakes());
     write_json_pretty(&args.out.join("evidence.json"), &evidence)?;
 
     if status == "pass" {
@@ -1994,10 +2109,15 @@ fn check_pass(args: &TransformArgs, logs: &Path, full: bool) -> Result<CheckPass
         // it is already covered — the preflight checks the cross-target the
         // pre-build needs — so what is left is the candidate breaking its own
         // build.
+        //
+        // Unless the pre-build did not fail so much as die (#5422): a linker
+        // killed by a signal, a `rustc` killed for memory, a write out of disk.
+        // The candidate cannot repair any of those, and `run_prepare` charges
+        // them to the host instead.
         let gate_started = Instant::now();
         let (prepare_failure, prepare_millis) = run_timed_prepare(id, &invocation, cache.as_ref(), &peak)?;
         let run = match prepare_failure {
-            Some((log, code)) => MemberRun::plain(id, MemberOutcome::Failed, log.into_bytes(), code),
+            Some((log, code, outcome)) => MemberRun::plain(id, outcome, log.into_bytes(), code),
             None => run_member_discriminated(
                 id,
                 &invocation,
@@ -2034,12 +2154,13 @@ fn check_pass(args: &TransformArgs, logs: &Path, full: bool) -> Result<CheckPass
 #[cfg(test)]
 mod tests {
     use super::{
-        BASE_SET_SUBJECT, Captured, MAX_FINDING_LINES, MemberOutcome, MemberRun, MemberRunner, SUPPRESS_MEMBER, Scope,
-        VERIFY_BASE, VERIFY_CHECK, VerifyInvocation, clippy_verdict, closure, distil_diagnostics, effective_exit_code,
-        environment_observations, failed_verifiers, member_diff_base, member_outcome, member_scope_notice,
-        operational_failure_notice, package_name, preflight_tools, prepare_failure_log, render_diagnostics,
-        required_targets, required_tools, run_member_discriminated, run_timed_prepare, umbrella_status,
-        unjudged_notice, verify_check_members, verify_command, verify_findings, workflow,
+        BASE_SET_SUBJECT, Captured, EvidenceChannel, MAX_FINDING_LINES, MemberOutcome, MemberRun, MemberRunner,
+        SUPPRESS_MEMBER, Scope, VERIFY_BASE, VERIFY_CHECK, VerifyInvocation, clippy_verdict, closure,
+        distil_diagnostics, effective_exit_code, environment_observations, failed_verifiers, host_fault_in,
+        member_diff_base, member_outcome, member_scope_notice, operational_failure_notice, package_name,
+        preflight_tools, prepare_failure_log, render_diagnostics, required_targets, required_tools, run_member,
+        run_member_discriminated, run_timed_prepare, umbrella_status, unjudged_notice, verify_check_members,
+        verify_command, verify_findings, workflow,
     };
     use std::iter;
 
@@ -2159,6 +2280,52 @@ mod tests {
     fn passing_run() -> String {
         " Starting 900 tests across 312 binaries\n     Summary [  71.2s] 900 tests run: 900 passed, 0 skipped\n"
             .to_owned()
+    }
+
+    #[test]
+    fn a_toolchain_process_killed_mid_arm_is_charged_to_the_host_not_the_candidate() {
+        // Acceptance for #5422. In dispatch-2366 the linker `verify.test`'s
+        // pre-build forked died on `ld terminated with signal 7 [Bus error]`;
+        // cargo exited 101, which is a code `verify.test` states findings with,
+        // so the arm was read as a verdict: `status: fail`,
+        // `failed_verifiers: ["verify.test"]`, and the linker dump handed to a
+        // Refine lap as findings for a model to repair. Nothing in that dump is
+        // repairable from inside the candidate.
+        let invocation = verify_command("verify.test").expect("verify.test mapped");
+        let log = "error: linking with `cc` failed\n  = note: ld terminated with signal 7 [Bus error]\n";
+        let mut runner = ScriptedRunner::new(&[(log, 101)]);
+
+        let (outcome, rendered, _) =
+            run_member("verify.test", &invocation, &Scope::resolve(None), None, &mut runner).expect("the member runs");
+
+        assert_eq!(outcome, MemberOutcome::Operational, "a linker that died reported nothing about the candidate");
+        assert_eq!(
+            failed_verifiers([("verify.test", outcome)]),
+            VerifyFailureSet::one(VerifyFailure::Preflight),
+            "a preflight-only set is the shape intake raises a host fault from: the member retries on another \
+             slot with no lap charged and no Refine dispatched",
+        );
+        let rendered = String::from_utf8_lossy(&rendered);
+        assert!(rendered.contains("ld terminated with signal 7"), "the evidence names the condition: {rendered}");
+        assert!(rendered.contains("verify.test"), "and the arm it happened in: {rendered}");
+    }
+
+    #[test]
+    fn only_a_toolchain_death_reads_as_a_host_condition() {
+        // Tripwire: this scan runs over captured build output, so a looser
+        // pattern would start reading a failing test's own words as a host
+        // condition and retire real findings as retries. Each phrase kept here
+        // is one program's own wording for "I died"; a candidate defect and a
+        // failing test must both stay the candidate's.
+        assert!(host_fault_in("  = note: ld terminated with signal 7 [Bus error]").is_some());
+        assert!(host_fault_in("error: could not compile `aether-render` (lib) (signal: 9, SIGKILL: kill)").is_some());
+        assert!(host_fault_in("error: failed to write: No space left on device (os error 28)").is_some());
+        assert_eq!(
+            host_fault_in("thread 'test' panicked at crates/somewhere/src/lib.rs:9:9:\nassertion failed"),
+            None,
+            "an ordinary panic is the candidate's",
+        );
+        assert_eq!(host_fault_in(&failing_run(&["aether-render::a_test"])), None, "and so is a failing test");
     }
 
     #[test]
@@ -2814,7 +2981,9 @@ mod tests {
             member("verify.clippy", MemberOutcome::Failed, "error[E0308]: mismatched types"),
         ];
 
-        let findings = verify_findings(&members).expect("a failing member yields findings");
+        let findings = verify_findings(&members)
+            .and_then(|channel| channel.text().map(str::to_owned))
+            .expect("a failing member yields findings");
 
         assert!(findings.contains("### verify.clippy"), "the failing member is named");
         assert!(!findings.contains("verify.fmt"), "a passing member contributes nothing");
@@ -2824,7 +2993,9 @@ mod tests {
     fn a_suppression_location_survives_findings_distillation() {
         let log = "scanning diff\ncrates/demo/src/lib.rs:17 — allow(clippy::all) — #[allow(clippy::all)]\ndone";
 
-        let findings = verify_findings(&[member("verify.suppress", MemberOutcome::Failed, log)]).expect("findings");
+        let findings = verify_findings(&[member("verify.suppress", MemberOutcome::Failed, log)])
+            .and_then(|channel| channel.text().map(str::to_owned))
+            .expect("findings");
 
         assert!(findings.contains("### verify.suppress"));
         assert!(findings.contains("crates/demo/src/lib.rs:17 — allow(clippy::all)"));
@@ -2849,12 +3020,34 @@ AETHER_REQUIRE_RUNTIME=1 but aether_test_fixtures_bundle wasm not pre-built
 error: test run failed
 ";
 
-        let findings = verify_findings(&[member("verify.test", MemberOutcome::Failed, log)]).expect("findings");
+        let findings = verify_findings(&[member("verify.test", MemberOutcome::Failed, log)])
+            .and_then(|channel| channel.text().map(str::to_owned))
+            .expect("findings");
 
         assert!(findings.contains("### verify.test"));
         assert!(findings.contains("asset_rides_a_named_custom_section_byte_exact"), "the test is named");
         assert!(findings.contains("crates/aether-actor/tests/asset_sections.rs:85:9"), "with its file and line");
         assert!(findings.contains("wasm not pre-built"), "and what it said");
+    }
+
+    #[test]
+    fn a_stale_golden_fixture_names_the_regen_command() {
+        let log = "\
+        FAIL [   0.008s] ( 156/3737) aether-bloomery::golden_decisions decisions_wire_bytes_match_pinned_golden
+
+--- STDERR:              aether-bloomery::golden_decisions decisions_wire_bytes_match_pinned_golden ---
+thread 'decisions_wire_bytes_match_pinned_golden' panicked at crates/aether-bloomery/tests/golden_decisions/main.rs:46:5:
+assertion `left == right` failed
+
+     Summary [  74.644s] 3737 tests run: 3736 passed, 1 failed, 20 skipped
+error: test run failed
+";
+
+        let findings = verify_findings(&[member("verify.test", MemberOutcome::Failed, log)])
+            .and_then(|channel| channel.text().map(str::to_owned))
+            .expect("findings");
+
+        assert!(findings.contains("run `cargo xtask fixtures regen decisions`"));
     }
 
     #[test]
@@ -2871,7 +3064,9 @@ error[E0308]: mismatched types
 error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previous error
 ";
 
-        let findings = verify_findings(&[member("verify.test", MemberOutcome::Failed, log)]).expect("findings");
+        let findings = verify_findings(&[member("verify.test", MemberOutcome::Failed, log)])
+            .and_then(|channel| channel.text().map(str::to_owned))
+            .expect("findings");
 
         assert!(findings.contains("error[E0308]: mismatched types"));
         assert!(findings.contains("--> crates/aether-actor/tests/asset_sections.rs:85:9"));
@@ -2896,32 +3091,19 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         // that wedged both real runs.
         let members = [member("verify.clippy", MemberOutcome::Failed, "error[E0308]: mismatched types")];
 
-        let findings = verify_findings(&members).expect("findings");
+        let findings =
+            verify_findings(&members).and_then(|channel| channel.text().map(str::to_owned)).expect("findings");
 
         assert!(findings.contains("failed verification"), "the re-entry is told its candidate failed");
         assert!(findings.contains("already carries"), "and that the change being present is expected");
     }
 
     #[test]
-    fn verify_check_members_are_the_ci_parity_ids_in_order() {
+    fn every_verify_check_member_resolves_via_verify_command() {
         // Tripwire: every id verify.check fans out to must resolve via
-        // verify_command, and the order must match ci.yml's job order — a drift
-        // here breaks the umbrella-membership invariant. All eight of CI's
-        // required gates, because a member CI enforces and the lane skips is a
-        // false green that surfaces at the landing pull request (#4706).
-        assert_eq!(
-            verify_check_members(),
-            &[
-                "verify.suppress",
-                "verify.fmt",
-                "verify.clippy",
-                "verify.docs",
-                "verify.test",
-                "verify.dup",
-                "verify.deps",
-                "verify.lock",
-            ],
-        );
+        // verify_command. A member the umbrella names and the dispatcher cannot
+        // run is a silent skip. Ordering against the workflow is already proven
+        // by `the_umbrella_covers_every_required_ci_job`.
         for &id in verify_check_members() {
             assert!(verify_command(id).is_some(), "{id} must resolve via verify_command");
         }
@@ -2985,9 +3167,9 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
 
         assert_eq!(runner.runs, 2, "an out-of-closure-only run is repeated exactly once");
         assert_eq!(run.outcome, MemberOutcome::Passed);
-        assert!(run.findings.is_none(), "a repair lap must not be handed failures the candidate cannot reach");
+        assert!(run.findings().is_none(), "a repair lap must not be handed failures the candidate cannot reach");
         assert!(run.outcome.failure(&run.id).is_none(), "and no verifier identity is charged for a recovered host");
-        let observation = run.observation.expect("the block is reported on the lane");
+        let observation = run.observation().expect("the block is reported on the lane");
         assert!(observation.contains("aether-actor"), "the observation names what was classified out");
         assert!(observation.contains("did not repeat"), "and what the repeat then said");
         assert!(
@@ -3024,11 +3206,11 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
 
         assert_eq!(runner.runs, 1, "a run that found a real defect is not repeated");
         assert_eq!(run.outcome, MemberOutcome::Failed);
-        let findings = run.findings.expect("the in-closure defect is handed over");
+        let findings = run.findings().expect("the in-closure defect is handed over");
         assert!(findings.contains("blend_state_survives_a_resize"), "the in-closure failure reaches the repair lap");
         assert!(!findings.contains("spawn_headless_connects"), "and the out-of-closure block does not");
         assert!(
-            run.observation.expect("the block is still reported").contains("spawn_headless_connects"),
+            run.observation().expect("the block is still reported").contains("spawn_headless_connects"),
             "the out-of-closure half is an observation, not silence",
         );
     }
@@ -3057,10 +3239,10 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
 
         assert_eq!(runner.runs, 2, "the repeat is bounded at one — a broken host is not retried forever");
         assert_eq!(run.outcome, MemberOutcome::Environment);
-        assert!(run.findings.is_none(), "nothing here judged the candidate");
+        assert!(run.findings().is_none(), "nothing here judged the candidate");
         assert!(run.outcome.failure(&run.id).is_none(), "so nothing is charged to a verifier identity");
         assert_eq!(umbrella_status(&[MemberOutcome::Passed, run.outcome]), "environment");
-        let observation = run.observation.expect("the escalation states its grounds");
+        let observation = run.observation().expect("the escalation states its grounds");
         assert!(observation.contains("aether-component"), "naming the block it escalated on");
         assert!(observation.contains("environment fault"), "and what it escalated as");
     }
@@ -3101,13 +3283,13 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
             "and it replays exactly the failing test, on the candidate's own tree",
         );
         assert_eq!(run.outcome, MemberOutcome::Passed);
-        assert!(run.findings.is_none(), "a disappeared failure must not become repair work");
+        assert!(run.findings().is_none(), "a disappeared failure must not become repair work");
         assert!(run.outcome.failure(&run.id).is_none(), "and no verifier identity is charged for a flake");
-        assert_eq!(run.flakes.len(), 1, "the excusal is recorded");
-        assert_eq!(run.flakes[0].test, "aether-component::replace_drop_reply_routing");
-        assert!(run.inherited.is_empty(), "and it is a flake, not an inherited failure");
+        assert_eq!(run.flakes().len(), 1, "the excusal is recorded");
+        assert_eq!(run.flakes()[0].test, "aether-component::replace_drop_reply_routing");
+        assert!(run.inherited().is_empty(), "and it is a flake, not an inherited failure");
         assert!(
-            run.observation.expect("the excusal is on the lane's receipt channel").contains("same input"),
+            run.observation().expect("the excusal is on the lane's receipt channel").contains("same input"),
             "the receipt says what was replayed",
         );
     }
@@ -3129,12 +3311,12 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
 
         assert_eq!(runner.runs, 1, "the whole member earns no recheck");
         assert_eq!(run.outcome, MemberOutcome::Failed);
-        let findings = run.findings.expect("a property-test failure that repeats is repair work");
+        let findings = run.findings().expect("a property-test failure that repeats is repair work");
         assert!(
             findings.contains("a_generated_scenario_never_silences_a_member"),
             "the failing property is named in the findings a Refine is handed",
         );
-        assert!(run.flakes.is_empty(), "a counterexample that reproduces is not a flake");
+        assert!(run.flakes().is_empty(), "a counterexample that reproduces is not a flake");
     }
 
     #[test]
@@ -3166,10 +3348,10 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
             "the same-input replay comes first, and only a repeat earns the base run",
         );
         assert_eq!(run.outcome, MemberOutcome::Passed);
-        assert!(run.findings.is_none(), "a failure the base already had is not this candidate's to fix");
-        assert_eq!(run.inherited.len(), 1, "the excusal is recorded against the base it was red at");
-        assert_eq!(run.inherited[0].replayed, "deadbeef");
-        assert!(run.flakes.is_empty(), "and it is an inherited failure, not a flake");
+        assert!(run.findings().is_none(), "a failure the base already had is not this candidate's to fix");
+        assert_eq!(run.inherited().len(), 1, "the excusal is recorded against the base it was red at");
+        assert_eq!(run.inherited()[0].replayed, "deadbeef");
+        assert!(run.flakes().is_empty(), "and it is an inherited failure, not a flake");
     }
 
     #[test]
@@ -3192,9 +3374,9 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
 
         assert_eq!(run.outcome, MemberOutcome::Failed);
         assert_eq!(run.outcome.failure(&run.id), VerifyFailure::from_name("verify.test"));
-        let findings = run.findings.expect("the candidate-only failure is handed to the repair lap");
+        let findings = run.findings().expect("the candidate-only failure is handed to the repair lap");
         assert!(findings.contains("fleetharness_asset_window"));
-        assert!(run.flakes.is_empty() && run.inherited.is_empty(), "nothing was excused");
+        assert!(run.flakes().is_empty() && run.inherited().is_empty(), "nothing was excused");
         assert_eq!(umbrella_status(&[MemberOutcome::Passed, run.outcome]), "fail");
     }
 
@@ -3223,8 +3405,8 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         .expect("the policy runs");
 
         assert_eq!(run.outcome, MemberOutcome::Failed, "an unreached base step is not an excuse");
-        assert!(run.findings.is_some());
-        assert!(run.inherited.is_empty(), "and nothing is written into the inherited ledger");
+        assert!(run.findings().is_some());
+        assert!(run.inherited().is_empty(), "and nothing is written into the inherited ledger");
     }
 
     #[test]
@@ -3244,11 +3426,11 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
             .expect("the policy runs");
 
         assert_eq!(run.outcome, MemberOutcome::Failed);
-        let findings = run.findings.expect("the persistent failure is handed to the repair lap");
+        let findings = run.findings().expect("the persistent failure is handed to the repair lap");
         assert!(findings.contains("fleetharness_asset_window"), "the test that repeated reaches the findings");
         assert!(!findings.contains("client_scenario"), "the one that cleared does not");
-        assert_eq!(run.flakes.len(), 1, "and the cleared one is on the flake ledger");
-        assert_eq!(run.flakes[0].test, "aether-kit-sim::client_scenario");
+        assert_eq!(run.flakes().len(), 1, "and the cleared one is on the flake ledger");
+        assert_eq!(run.flakes()[0].test, "aether-kit-sim::client_scenario");
     }
 
     #[test]
@@ -3259,9 +3441,11 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         // the candidate cannot reach, which is the whole failure #4895 exists to
         // end.
         let mut failing = member("verify.test", MemberOutcome::Failed, "error: something in closure");
-        failing.observation = Some("36 failing tests lie outside the closure".to_owned());
+        failing.set(EvidenceChannel::environment("36 failing tests lie outside the closure".to_owned()));
 
-        let observations = environment_observations(&[failing]).expect("the observation is reported");
+        let observations = environment_observations(&[failing])
+            .and_then(|channel| channel.text().map(str::to_owned))
+            .expect("the observation is reported");
 
         assert!(observations.contains("### verify.test"), "attributed to the member that made it");
         assert!(observations.contains("outside the closure"));
@@ -3354,7 +3538,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         let log = "suppression scan refused: cannot resolve --base 0000000000000000000000000000000000000000: \
                    git exited 128";
         let run = MemberRun::plain("verify.suppress", MemberOutcome::Environment, log.as_bytes().to_vec(), 3);
-        assert!(run.findings.is_none(), "the refusal is not a finding a Refine is handed");
+        assert!(run.findings().is_none(), "the refusal is not a finding a Refine is handed");
         assert!(verify_findings(&[run]).is_none(), "so the umbrella dispatches no refine");
         assert_eq!(umbrella_status(&[MemberOutcome::Environment]), "environment");
     }
@@ -3413,8 +3597,9 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
             operational_failure_notice("verify.suppress", &suppress, Some(2)),
         );
 
-        let findings =
-            verify_findings(&[member("verify.suppress", MemberOutcome::Operational, &log)]).expect("findings");
+        let findings = verify_findings(&[member("verify.suppress", MemberOutcome::Operational, &log)])
+            .and_then(|channel| channel.text().map(str::to_owned))
+            .expect("findings");
 
         assert!(findings.contains("reported nothing about the candidate"), "the member's silence is stated");
         assert!(findings.contains("exited 2"), "with the code that said so");

@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use aether_bloomery::{
-    BloomStatus, Digest, EvidenceKind, Forecast, ScopeRevision, ScopeRouting, Statement, WorkpieceId,
+    BloomStatus, Digest, EvidenceKind, Forecast, ScopeRevision, ScopeRouting, ScopeVerifyInput, Statement, WorkpieceId,
 };
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -84,6 +84,37 @@ pub struct MemberView {
     /// from a coordinator that predates the field, so `#[serde(default)]`.
     #[serde(default)]
     pub withdrawn: Option<WithdrawnView>,
+    /// The member's stage cursor: where it is and what it is carrying. Absent
+    /// for a member that has never entered the line, and from a coordinator
+    /// that predates the field, so `#[serde(default)]`.
+    #[serde(default)]
+    pub cursor: Option<MemberCursorView>,
+}
+
+/// A member's stage cursor, as `/view` renders it — the two facts a retry has
+/// to name: which stage to run again, and the subject the fault binds to.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MemberCursorView {
+    /// The stage token exactly as the coordinator spells it. Carried as text
+    /// and handed straight back on the retry body rather than parsed into a
+    /// local vocabulary, so the CLI holds no second copy of the stage list to
+    /// drift from the sealed one.
+    pub stage: String,
+    /// The candidate the member is carrying, when it has captured one.
+    #[serde(default)]
+    pub candidate: Option<CandidateRefView>,
+}
+
+/// A candidate the member holds, as `/view` renders it.
+///
+/// Only the tree is mirrored. The capture commit is the reducer's to resolve,
+/// and what a retry names is the subject its fault evidence binds to — which is
+/// the tree.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CandidateRefView {
+    /// The produced tree — the candidate's identity, and the subject a member
+    /// stage past Construct is judged against.
+    pub tree: DigestHex,
 }
 
 /// A member the day withdrew, as `/view` renders it (#5327). The projection
@@ -190,6 +221,22 @@ pub struct StatementView {
     pub words: Vec<u8>,
 }
 
+/// `POST /commissions/{id}/revisions` body: the signed revision and sidecar
+/// evidence about it. The revision's bytes are the signed subject; nothing in
+/// [`evidence`](Self::evidence) is hashed into them.
+#[derive(Debug, Serialize)]
+pub struct WriteRevisionRequest<'a> {
+    pub revision: &'a ScopeRevision,
+    pub evidence: &'a RevisionEvidence,
+}
+
+/// What is known about a revision without being part of it.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RevisionEvidence {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope_verify: Option<ScopeVerifyInput>,
+}
+
 /// `POST /commissions/{id}/revisions` — the written revision's address.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScopeRevisionWrittenView {
@@ -214,6 +261,20 @@ pub struct CancelCommissionRequest {
 /// `POST /commissions/{id}/cancel` reply.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CommissionCancelledView {
+    pub digest: DigestHex,
+    pub status: String,
+}
+
+/// `POST /commissions/{id}/reopen` body: the cancel's shape at the Reopen door.
+#[derive(Debug, Serialize)]
+pub struct ReopenCommissionRequest {
+    pub statement: Statement,
+    pub reason: String,
+}
+
+/// `POST /commissions/{id}/reopen` reply.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommissionReopenedView {
     pub digest: DigestHex,
     pub status: String,
 }
@@ -394,6 +455,15 @@ pub struct SupersedeRequest {
     pub descriptions: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub edges: Vec<DependencyEdge>,
+}
+
+/// `POST /blooms/{id}/members/{workpiece}/retry` body (#5423).
+#[derive(Debug, Serialize)]
+pub struct RetryRequest {
+    pub stage: String,
+    pub subject: DigestHex,
+    pub reason: String,
+    pub operator: String,
 }
 
 /// `POST /blooms/{id}/members/{workpiece}/withdraw` body (#5327).

@@ -4,7 +4,7 @@
 use std::error::Error;
 use std::fmt;
 
-use aether_bloomery::{Admit, ExecutionStatus, Nonce, StageVerdict, VerifyFailureSet, WorkHandle};
+use aether_bloomery::{Admit, BackendId, ExecutionStatus, LaneObservation, Nonce, StageVerdict, WorkHandle};
 use aether_data::wire::to_vec;
 
 use super::admit::{Admission, AdmitDecision, IntakeError, IntakeRefusal, UploadedEvidence, admit_uploaded};
@@ -46,15 +46,27 @@ pub struct CycleReport {
     /// without another `inspect`. Completed-evidence-first ordering is unchanged:
     /// a `Completed` handle is streamed here and never appears in `pending`.
     pub pending: Vec<(Nonce, ExecutionStatus)>,
+    /// Handles this cycle never resolved because the backend arm holding them
+    /// faulted (#5412) — inspected-and-errored, or skipped after an earlier
+    /// handle on the same arm errored.
+    ///
+    /// Load-bearing to the caller's deadline and silence sweeps, not merely
+    /// informational: "still pending" for one of these nonces means "never
+    /// asked", and cancelling on that reading destroys a lane that finished
+    /// well inside its budget. A nonce here carries no `pending` entry and was
+    /// never counted `completed`.
+    pub unobserved: Vec<Nonce>,
 }
 
-/// A fault during an intake cycle.
+/// A fault that abandons a whole intake cycle.
+///
+/// Only the broker: it writes the registry every admission consumes, so a store
+/// or encode fault under it makes every remaining decision this cycle would
+/// take unsound. A *backend* fault is not here — it is isolated to the arm that
+/// raised it and reported as [`CycleReport::unobserved`], because one arm's
+/// transport says nothing about another's finished work.
 #[derive(Debug)]
 pub enum CycleError {
-    /// Inspecting a run faulted.
-    Inspect(ExecutorPortError),
-    /// Streaming a run's evidence faulted.
-    Stream(ExecutorPortError),
     /// The broker faulted on the registry or an event encode.
     Intake(IntakeError),
 }
@@ -62,8 +74,6 @@ pub enum CycleError {
 impl fmt::Display for CycleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Inspect(error) => write!(f, "intake inspect failed: {error}"),
-            Self::Stream(error) => write!(f, "intake stream_evidence failed: {error}"),
             Self::Intake(error) => write!(f, "intake broker failed: {error}"),
         }
     }
@@ -72,7 +82,6 @@ impl fmt::Display for CycleError {
 impl Error for CycleError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Inspect(error) | Self::Stream(error) => Some(error),
             Self::Intake(error) => Some(error),
         }
     }
@@ -90,15 +99,27 @@ impl Error for CycleError {
 /// sees it and a lane that finished in time is never cancelled for being late to
 /// be observed. Only an order still pending after this cycle can expire.
 ///
-/// # Errors
-/// [`CycleError`] if inspecting a run, streaming its evidence, or the broker
-/// faulted; a clean broker refusal is counted, not an error.
+/// # Backend isolation (#5412)
 ///
-/// An error abandons the loop, so the handles after the faulting one were never
-/// inspected at all. That makes the returned error load-bearing to the caller's
-/// sweep and not merely something to log: a caller must not read "no completion
-/// observed" off a failed cycle and cancel on it, because the run it would
-/// cancel may have finished inside its budget and simply not been asked.
+/// The handles are grouped by the backend arm that will actually answer for
+/// them ([`ExecutorShell::backend_for`]), and a fault is isolated to its arm:
+/// the fault is logged, the rest of that arm's handles are skipped for this
+/// tick, and every other arm is still inspected and still admits. An arm
+/// holding none of these handles is not asked at all.
+///
+/// One flat list cost a whole afternoon of local lane results: a shared-runner
+/// API answering `403 API rate limit exceeded` aborted the cycle before it
+/// reached the local lane beside it, once a second for twenty-eight minutes,
+/// and a reconcile that had finished with a candidate was never admitted. The
+/// arms fail independently, so they must be asked independently.
+///
+/// Skipped handles come back as [`CycleReport::unobserved`], which the caller's
+/// sweeps must honour: a nonce there is "never asked", not "still pending".
+///
+/// # Errors
+/// [`CycleError`] if the broker faulted; a clean broker refusal is counted, not
+/// an error. A broker fault does abandon the loop — it is the registry every
+/// admission consumes.
 pub fn run_intake_cycle(
     store: &mut dyn StoreBackend,
     shell: &ExecutorShell,
@@ -109,14 +130,33 @@ pub fn run_intake_cycle(
 ) -> Result<CycleReport, CycleError> {
     let mut report = CycleReport::default();
     let mut artifacts = artifacts;
+    let mut faulted: Vec<BackendId> = Vec::new();
     for handle in handles {
-        let status = shell.inspect(handle).map_err(CycleError::Inspect)?;
+        let backend = shell.backend_for(handle);
+        if faulted.contains(&backend) {
+            report.unobserved.push(handle.nonce.clone());
+            continue;
+        }
+        let status = match shell.inspect(handle) {
+            Ok(status) => status,
+            Err(error) => {
+                skip_backend(&mut report, &mut faulted, backend, handle, &error, "inspect");
+                continue;
+            }
+        };
         if !matches!(status, ExecutionStatus::Completed { .. }) {
             report.pending.push((handle.nonce.clone(), status));
             continue;
         }
         report.completed += 1;
-        for reference in shell.stream_evidence(handle).map_err(CycleError::Stream)? {
+        let references = match shell.stream_evidence(handle) {
+            Ok(references) => references,
+            Err(error) => {
+                skip_backend(&mut report, &mut faulted, backend, handle, &error, "stream_evidence");
+                continue;
+            }
+        };
+        for reference in references {
             let Some(upload) = claims.claim_for(&reference) else {
                 continue;
             };
@@ -166,6 +206,33 @@ pub fn run_intake_cycle(
     Ok(report)
 }
 
+/// Log one arm's port fault, mark the arm faulted for the rest of this cycle,
+/// and record `handle` as unobserved.
+///
+/// The arm is marked rather than merely stepped over so a rate-limited API is
+/// asked once per tick instead of once per outstanding handle — retrying the
+/// same refusal across a whole tracked list is how the budget was spent in the
+/// first place.
+fn skip_backend(
+    report: &mut CycleReport,
+    faulted: &mut Vec<BackendId>,
+    backend: BackendId,
+    handle: &WorkHandle,
+    error: &ExecutorPortError,
+    message: &'static str,
+) {
+    tracing::warn!(
+        target: "aether_chassis_bloomery::intake",
+        nonce = %handle.nonce.0,
+        backend = %backend,
+        %error,
+        call = message,
+        "executor arm faulted; skipping its remaining handles this cycle, other arms admit normally",
+    );
+    faulted.push(backend);
+    report.unobserved.push(handle.nonce.clone());
+}
+
 /// A completed run whose evidence bound the wrong digest cannot retry that
 /// upload. Admit an executor fault against the order's displayed digest so
 /// the member's machinery series moves instead of waiting forever.
@@ -184,17 +251,10 @@ fn recover_completed_mismatch(
         subject: record.displayed_digest,
         verdict: StageVerdict::ExecutorFault,
         detail: refused.detail,
-        candidate: None,
-        findings: Some("lane bound evidence to a digest the order did not display".into()),
-        failed_verifiers: VerifyFailureSet::EMPTY,
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation {
+            findings: Some("lane bound evidence to a digest the order did not display".into()),
+            ..LaneObservation::default()
+        },
     };
     match admit_uploaded(store, &fault).map_err(CycleError::Intake)? {
         AdmitDecision::Admitted(admission) => Ok(Some(admission)),
@@ -222,17 +282,17 @@ fn record_cost(
     artifacts: Option<&mut ArtifactsCapabilityState>,
     upload: &UploadedEvidence,
 ) -> Option<StudyAdmission> {
-    let (Some(cost), Some(artifacts)) = (upload.cost, artifacts) else {
+    let (Some(cost), Some(artifacts)) = (upload.observation.cost, artifacts) else {
         return None;
     };
     let record = UploadedStudyRecord {
         nonce: upload.nonce.clone(),
         subject: upload.subject,
         cost,
-        calls: upload.calls.clone(),
-        session_reuse_arm: upload.session_reuse_arm.clone(),
-        session_reuse_saved_micro_usd: upload.session_reuse_saved_micro_usd,
-        peak_resident_bytes: upload.peak_resident_bytes,
+        calls: upload.observation.calls.clone(),
+        session_reuse_arm: upload.observation.session_reuse_arm.clone(),
+        session_reuse_saved_micro_usd: upload.observation.session_reuse_saved_micro_usd,
+        peak_resident_bytes: upload.observation.peak_resident_bytes,
     };
 
     match admit_study(store, artifacts, &record) {

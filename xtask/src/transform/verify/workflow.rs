@@ -1,11 +1,15 @@
-//! The `.github/workflows/ci.yml` reader behind the CI-parity tripwire.
+//! The `.github/workflows/ci.yml` reader behind the CI-parity tripwire, and
+//! the `.github/workflows/transform.yml` reader behind the verifier-bit one.
 //!
 //! [`super::verify_command`]'s argv exists to reproduce, off Actions, the
 //! command each gate runs. Asserting it against a second Rust literal proves
 //! only that xtask agrees with itself: the workflow is the sole copy Actions
 //! executes, so it could be trimmed — back to default features, or without a
 //! flag — while every assertion in this crate stayed green (#4843). Reading
-//! the workflow makes the gate the source and the argv the assertion.
+//! the workflow makes the gate the source and the argv the assertion. The
+//! transform workflow's jq ladder is the same move for a second file:
+//! [`aether_bloomery::VerifyFailure::ALL`] is the source, and a transcribed
+//! table is what drifted when containment was appended.
 //!
 //! Enough YAML to reach `jobs.<job>.steps[].{name,run,env}` and no more: plain
 //! scalars including the multi-line plain form, folded and literal block
@@ -14,10 +18,18 @@
 //! reader cannot follow has to fail the tripwire loudly instead of passing it
 //! vacuously.
 
+use aether_bloomery::{VerifyFailure, VerifyFailureSet};
+
 /// The workflow Actions runs, embedded at compile time — `include_str!`
 /// registers it as a build input, so editing the gate rebuilds this crate and
 /// re-runs the tripwire.
 const CI_WORKFLOW: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../.github/workflows/ci.yml"));
+
+/// The transform workflow's verifier-bit ladder is the second copy of
+/// [`VerifyFailure::ALL`]; embedding it rebuilds this crate when the table is
+/// edited, the same way [`CI_WORKFLOW`] rebuilds when a gate's argv changes.
+const TRANSFORM_WORKFLOW: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../.github/workflows/transform.yml"));
 
 /// One `steps:` entry of a workflow job, reduced to the keys the tripwire
 /// compares against a [`super::VerifyInvocation`].
@@ -211,4 +223,58 @@ fn indentation(line: &str) -> usize {
 fn structural(line: &str) -> bool {
     let trimmed = line.trim();
     !trimmed.is_empty() && !trimmed.starts_with('#')
+}
+
+/// The jq `verifier_bit` function body Actions runs, rendered from
+/// [`VerifyFailure::ALL`]. Paste over the matching block in
+/// `.github/workflows/transform.yml` when an identity is appended.
+#[must_use]
+pub fn verifier_bit_table() -> String {
+    let mut lines = Vec::with_capacity(VerifyFailure::ALL.len() + 3);
+    lines.push("            def verifier_bit:".to_owned());
+    for (index, identity) in VerifyFailure::ALL.into_iter().enumerate() {
+        let keyword = if index == 0 {
+            "if"
+        } else {
+            "elif"
+        };
+        // `bit` is crate-private; the public set stores that same value and
+        // `to_mask` hex-encodes it.
+        let bit = u16::from_str_radix(&VerifyFailureSet::one(identity).to_mask(), 16)
+            .expect("VerifyFailureSet::to_mask is four lowercase hex digits");
+        lines.push(format!(r#"              {keyword} . == "{}" then {bit}"#, identity.as_str()));
+    }
+    lines.push(r#"              else error("unknown verifier failure")"#.to_owned());
+    lines.push("              end;".to_owned());
+    lines.join("\n")
+}
+
+/// The `def verifier_bit: … end;` block in `workflow`, if the file still
+/// carries one. The tripwire compares this to [`verifier_bit_table`].
+fn checked_in_verifier_bit_table(workflow: &str) -> Option<String> {
+    let def = "def verifier_bit:";
+    let start = workflow.find(def)?;
+    let line_start = workflow[..start].rfind('\n').map_or(0, |index| index + 1);
+    let rest = &workflow[line_start..];
+    let close = "end;";
+    Some(rest[..rest.find(close)? + close.len()].to_owned())
+}
+
+mod tests {
+    use super::{TRANSFORM_WORKFLOW, checked_in_verifier_bit_table, verifier_bit_table};
+
+    #[test]
+    fn the_checked_in_verifier_bit_table_is_what_the_emitter_renders() {
+        // Tripwire: the pinned value is computed from VerifyFailure::ALL, so
+        // appending an identity moves the emitted table while the workflow's
+        // stays put — which is precisely how verify.containment started
+        // erroring the evidence gate instead of recording a verdict.
+        let emitted = verifier_bit_table();
+        assert_eq!(
+            checked_in_verifier_bit_table(TRANSFORM_WORKFLOW)
+                .expect("transform.yml must carry a def verifier_bit: … end; block"),
+            emitted,
+            "paste the emitted verifier_bit table into .github/workflows/transform.yml:\n{emitted}",
+        );
+    }
 }

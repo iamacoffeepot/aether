@@ -11,9 +11,10 @@
 use super::StoreCapability;
 use super::commission::{
     CancelCommission, CancelCommissionResult, CommissionBackend, CommissionError, CreateCommission,
-    CreateCommissionResult, ListCommissions, ListCommissionsResult, ListedCommission, LoadCommission,
-    LoadCommissionResult, RecordCommissionApproval, RecordCommissionApprovalResult, RecordCommissionProjection,
-    RecordCommissionProjectionResult, WriteScopeRevision, WriteScopeRevisionResult,
+    CreateCommissionResult, EnqueueScopeRun, EnqueueScopeRunResult, ListCommissions, ListCommissionsResult,
+    ListedCommission, LoadCommission, LoadCommissionResult, RecordCommissionApproval, RecordCommissionApprovalResult,
+    RecordCommissionProjection, RecordCommissionProjectionResult, ReopenCommission, ReopenCommissionResult,
+    RevisionEvidence, WriteScopeRevision, WriteScopeRevisionResult,
 };
 use super::kinds::{
     AckOutbox, AckOutboxResult, AppendEvent, AppendEventResult, BloomDispatchLive, BloomDispatchRollup, ClaimSeal,
@@ -28,14 +29,15 @@ use aether_actor::runtime;
 // package cycle (the actor lives there; host depends on it). Host imports them
 // inward for its `StoreCapability` handlers (issue #3497).
 use aether_bloomery::{
-    Commit, CommitResult, ConfigRecord, DECISIONS_SCHEMA, Decision, Digest, Event, JournalRecord, LoadConfigs,
-    LoadConfigsResult, MembershipMutation, MetricDispatch, MetricsLedger, OutboxPayload, ReplayJournal,
-    ReplayJournalResult, ScopeRevision, ScopeVerifyInput, Statement, SuppressionRequest, Topic, WorkpieceId,
-    decode_recorded_decisions,
+    CommissionStatus, Commit, CommitResult, ConfigRecord, DECISIONS_SCHEMA, Decision, Digest, Event, JournalRecord,
+    LoadConfigs, LoadConfigsResult, MembershipMutation, MetricDispatch, MetricsLedger, OutboxPayload, ReplayJournal,
+    ReplayJournalResult, ScopeRevision, Statement, SuppressionRequest, Topic, WorkpieceId, decode_recorded_decisions,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use std::iter::repeat_n;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use crate::bloomery::{ScopeRunRefusal, open_scope_run};
 
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
@@ -469,8 +471,12 @@ pub trait StoreBackend: Send {
         session_id: &str,
         context_tokens: u64,
     ) -> rusqlite::Result<()>;
-    /// The construct session recorded for (`bloom`, `workpiece`), or `None`
-    /// when construct never journaled a handle — Refine then launches fresh.
+    /// The harness session recorded for (`bloom`, `workpiece`), or `None` when
+    /// construct never journaled a handle — Refine then launches fresh.
+    ///
+    /// A row minted for its slug alone carries no handle yet, and reads as
+    /// `None`: the slug names where the session will live, and says nothing
+    /// about a conversation that has not started.
     fn lookup_construct_session(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<(String, u64)>>;
     /// The construct session plus its deposit time, for a predecessor-resume
     /// warmth gate (#5178). `deposited_unix` is `None` on a pre-column row.
@@ -479,6 +485,22 @@ pub trait StoreBackend: Send {
         bloom: &[u8],
         workpiece: &str,
     ) -> rusqlite::Result<Option<(String, u64, Option<u64>)>>;
+    /// The coordinator-minted slug naming the checkout this member's session
+    /// lives in, when one has been minted (#5425). `None` for a member that has
+    /// never dispatched, and for a row written before the slug existed.
+    fn lookup_session_slug(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<String>>;
+    /// Record the slug a dispatch is about to run in, before the harness has
+    /// reported anything. Idempotent per (`bloom`, `workpiece`).
+    fn record_session_slug(&mut self, bloom: &[u8], workpiece: &str, slug: &str) -> rusqlite::Result<()>;
+    /// The member of `bloom` already holding `session_id`, when one does
+    /// (#5427).
+    ///
+    /// A session belongs to exactly one member. An edge resume hands a
+    /// dependent the predecessor's conversation to read, and the lap forks it so
+    /// what the dependent deposits is its own; a deposit that collides anyway
+    /// means the fork did not happen, and recording it would give two members
+    /// one thread — each later lap of either resuming the other's history.
+    fn construct_session_holder(&mut self, bloom: &[u8], session_id: &str) -> rusqlite::Result<Option<String>>;
     /// Record the construct session at an explicit unix-seconds deposit time —
     /// the clock the warmth gate compares.
     fn record_construct_session_at(
@@ -784,7 +806,20 @@ impl SqliteStore {
 /// and nothing is backfilled — a revision authored by hand through the REST
 /// door was not produced by a scoping run, and inventing a run for it would put
 /// a lane's name on an operator's work.
-const SCHEMA_VERSION: i64 = 13;
+///
+/// `14` is the per-transition uniqueness on that ledger: `UNIQUE (commission,
+/// ordinal, kind)`. A v13 store created the table without it; this version
+/// installs the matching unique index so a second `enqueued` (or `verdict`)
+/// for one ordinal cannot land twice.
+///
+/// `15` is the session's checkout slug (#5425): `construct_session` gains
+/// `slug`, and its `session_id` column is renamed `harness_session_id` —
+/// the coordinator now mints the name of the checkout a member works in,
+/// and the harness's own id becomes an attribute of that row rather than
+/// the thing it is about. No backfill — a pre-existing row names no
+/// checkout, so the member it belongs to mints a slug on its next dispatch
+/// and starts a session of its own.
+const SCHEMA_VERSION: i64 = 15;
 
 /// Bring a store opened at [`MIGRATIONS`] up to [`SCHEMA_VERSION`], or refuse it.
 ///
@@ -902,6 +937,14 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
         migration.execute_batch(super::commission::SCOPE_RUNS_TABLE)?;
     }
 
+    // Version 14: one transition per (commission, ordinal). New stores take
+    // this from the table's UNIQUE; a v13 file needs the index installed.
+    if has_table(&migration, "scope_runs")? {
+        migration.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS scope_runs_unique_transition ON scope_runs (commission, ordinal, kind);",
+        )?;
+    }
+
     // Version 9 (ADR-0201): architecture decision records. Empty on
     // creation; a pre-existing store has no signed ADRs to invent from
     // markdown files.
@@ -923,6 +966,17 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     }
     if !has_table(&migration, "member_dependency")? {
         migration.execute_batch(MEMBER_DEPENDENCY_TABLE)?;
+    }
+
+    // Version 15 (#5425): the coordinator-minted session slug, and the harness's
+    // own id demoted to an attribute of the row it keys. No backfill — a
+    // pre-existing row names no checkout, so the member it belongs to mints a
+    // slug on its next dispatch and starts a session of its own.
+    if has_column(&migration, "construct_session", "session_id")? {
+        migration.execute_batch("ALTER TABLE construct_session RENAME COLUMN session_id TO harness_session_id;")?;
+    }
+    if !has_column(&migration, "construct_session", "slug")? {
+        migration.execute_batch("ALTER TABLE construct_session ADD COLUMN slug TEXT;")?;
     }
 
     migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -1130,11 +1184,12 @@ CREATE TABLE IF NOT EXISTS metric_cursor (
     through_sequence INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS construct_session (
-    bloom           BLOB NOT NULL,
-    workpiece       TEXT NOT NULL,
-    session_id      TEXT NOT NULL,
-    context_tokens  INTEGER NOT NULL,
-    deposited_unix  INTEGER,
+    bloom               BLOB NOT NULL,
+    workpiece           TEXT NOT NULL,
+    harness_session_id  TEXT NOT NULL,
+    context_tokens      INTEGER NOT NULL,
+    deposited_unix      INTEGER,
+    slug                TEXT,
     PRIMARY KEY (bloom, workpiece)
 );
 CREATE TABLE IF NOT EXISTS member_dependency (
@@ -1165,11 +1220,12 @@ CREATE TABLE IF NOT EXISTS proof_facts (
 /// The per-member construct session a same-member refine resumes (#5177).
 const CONSTRUCT_SESSION_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS construct_session (
-    bloom           BLOB NOT NULL,
-    workpiece       TEXT NOT NULL,
-    session_id      TEXT NOT NULL,
-    context_tokens  INTEGER NOT NULL,
-    deposited_unix  INTEGER,
+    bloom               BLOB NOT NULL,
+    workpiece           TEXT NOT NULL,
+    harness_session_id  TEXT NOT NULL,
+    context_tokens      INTEGER NOT NULL,
+    deposited_unix      INTEGER,
+    slug                TEXT,
     PRIMARY KEY (bloom, workpiece)
 );
 ";
@@ -1609,9 +1665,17 @@ impl StoreBackend for SqliteStore {
         context_tokens: u64,
         deposited_unix: u64,
     ) -> rusqlite::Result<()> {
+        // An upsert rather than a replace: the slug on this row was minted
+        // before the dispatch launched and names the checkout the session lives
+        // in, so a deposit that overwrote the whole row would lose the directory
+        // its own conversation is bound to.
         self.conn.execute(
-            "INSERT OR REPLACE INTO construct_session \
-             (bloom, workpiece, session_id, context_tokens, deposited_unix) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO construct_session \
+             (bloom, workpiece, harness_session_id, context_tokens, deposited_unix) VALUES (?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT(bloom, workpiece) DO UPDATE SET \
+             harness_session_id = excluded.harness_session_id, \
+             context_tokens = excluded.context_tokens, \
+             deposited_unix = excluded.deposited_unix",
             rusqlite::params![
                 bloom,
                 workpiece,
@@ -1619,6 +1683,35 @@ impl StoreBackend for SqliteStore {
                 i64::try_from(context_tokens).unwrap_or(i64::MAX),
                 i64::try_from(deposited_unix).unwrap_or(i64::MAX),
             ],
+        )?;
+        Ok(())
+    }
+
+    fn construct_session_holder(&mut self, bloom: &[u8], session_id: &str) -> rusqlite::Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT workpiece FROM construct_session \
+                 WHERE bloom = ?1 AND harness_session_id = ?2 AND harness_session_id <> '' LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![bloom, session_id], |row| row.get::<_, String>(0))?;
+        rows.next().transpose()
+    }
+
+    fn lookup_session_slug(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<String>> {
+        let mut stmt = self.conn.prepare("SELECT slug FROM construct_session WHERE bloom = ?1 AND workpiece = ?2")?;
+        let mut rows = stmt.query_map(rusqlite::params![bloom, workpiece], |row| row.get::<_, Option<String>>(0))?;
+        Ok(rows.next().transpose()?.flatten())
+    }
+
+    fn record_session_slug(&mut self, bloom: &[u8], workpiece: &str, slug: &str) -> rusqlite::Result<()> {
+        // The slug is minted before the harness has said anything, so the row
+        // may not exist yet and its `harness_session_id` may still be unknown:
+        // the empty string stands for "this session has not reported its own id",
+        // which the deposit fills in and every reader treats as no handle.
+        self.conn.execute(
+            "INSERT INTO construct_session (bloom, workpiece, harness_session_id, context_tokens, slug) \
+             VALUES (?1, ?2, '', 0, ?3) \
+             ON CONFLICT(bloom, workpiece) DO UPDATE SET slug = excluded.slug",
+            rusqlite::params![bloom, workpiece, slug],
         )?;
         Ok(())
     }
@@ -1633,8 +1726,8 @@ impl StoreBackend for SqliteStore {
         workpiece: &str,
     ) -> rusqlite::Result<Option<(String, u64, Option<u64>)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT session_id, context_tokens, deposited_unix FROM construct_session \
-             WHERE bloom = ?1 AND workpiece = ?2",
+            "SELECT harness_session_id, context_tokens, deposited_unix FROM construct_session \
+             WHERE bloom = ?1 AND workpiece = ?2 AND harness_session_id <> ''",
         )?;
         let mut rows = stmt.query_map(rusqlite::params![bloom, workpiece], |row| {
             let session_id = row.get::<_, String>(0)?;
@@ -2409,7 +2502,7 @@ fn encode_metric<T: serde::Serialize>(value: &T) -> rusqlite::Result<Vec<u8>> {
     })
 }
 
-fn resolved_configs(store: &mut SqliteStore) -> rusqlite::Result<aether_bloomery::ResolvedConfigs> {
+pub fn resolved_configs(store: &mut dyn StoreBackend) -> rusqlite::Result<aether_bloomery::ResolvedConfigs> {
     let mut configs = aether_bloomery::ResolvedConfigs::default();
     for record in store.load_configs()? {
         let Some(address) = Digest::from_slice(&record.digest) else {
@@ -2672,23 +2765,16 @@ impl NativeActor for StoreCapability {
         _ctx: &mut NativeCtx<'_>,
         mail: WriteScopeRevision,
     ) -> WriteScopeRevisionResult {
-        let WriteScopeRevision { canonical, scope_verify } = mail;
+        let WriteScopeRevision { canonical, evidence } = mail;
         let revision = match ScopeRevision::from_canonical(&canonical) {
             Ok(revision) => revision,
             Err(error) => return write_revision_error(CommissionError::from(error)),
         };
-        // Empty bytes are absent, not an empty projection: a hand-authored
-        // revision carries no field records, and absence is reported rather
-        // than passed.
-        let projection = if scope_verify.is_empty() {
-            None
-        } else {
-            match ScopeVerifyInput::from_canonical(&scope_verify) {
-                Ok(projection) => Some(projection),
-                Err(error) => return write_revision_error(CommissionError::from(error)),
-            }
+        let evidence = match RevisionEvidence::decode(&evidence) {
+            Ok(evidence) => evidence,
+            Err(error) => return write_revision_error(error),
         };
-        match state.backend.write_revision_verified(&revision, projection.as_ref()) {
+        match state.backend.write_revision(&revision, &evidence) {
             Ok(digest) => WriteScopeRevisionResult::Ok { digest: digest.as_bytes().to_vec() },
             Err(error) => write_revision_error(error),
         }
@@ -2747,7 +2833,7 @@ impl NativeActor for StoreCapability {
         let ListCommissions { status } = mail;
         let status = match status.as_deref() {
             None => None,
-            Some(raw) => match aether_bloomery::CommissionStatus::parse(raw) {
+            Some(raw) => match CommissionStatus::parse(raw) {
                 Some(status) => Some(status),
                 None => return ListCommissionsResult::Err { error: format!("unknown commission status `{raw}`") },
             },
@@ -2789,6 +2875,28 @@ impl NativeActor for StoreCapability {
     }
 
     #[handler::single]
+    fn on_reopen_commission(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: ReopenCommission,
+    ) -> ReopenCommissionResult {
+        let statement: Statement = match from_bytes(&mail.statement) {
+            Ok(statement) => statement,
+            Err(error) => return ReopenCommissionResult::Err { error: error.to_string() },
+        };
+        match state.backend.reopen(&WorkpieceId(mail.id.clone()), &statement) {
+            Ok(digest) => ReopenCommissionResult::Ok { id: mail.id, digest: digest.as_bytes().to_vec() },
+            Err(CommissionError::MissingCommission(id)) => ReopenCommissionResult::Missing { id },
+            Err(CommissionError::NotLanded(status)) => {
+                ReopenCommissionResult::NotLanded { status: status.as_str().to_owned() }
+            }
+            Err(CommissionError::Resolved(bloom)) => ReopenCommissionResult::Resolved { bloom: bloom.0.to_hex() },
+            Err(CommissionError::WrongSubject) => ReopenCommissionResult::WrongSubject,
+            Err(error) => ReopenCommissionResult::Err { error: error.to_string() },
+        }
+    }
+
+    #[handler::single]
     fn on_record_commission_projection(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -2799,6 +2907,42 @@ impl NativeActor for StoreCapability {
             Err(CommissionError::MissingCommission(id)) => RecordCommissionProjectionResult::Missing { id },
             Err(error) => RecordCommissionProjectionResult::Err { error: error.to_string() },
         }
+    }
+
+    #[handler::single]
+    fn on_enqueue_scope_run(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: EnqueueScopeRun,
+    ) -> EnqueueScopeRunResult {
+        enqueue_scope_run_mail(&mut state.backend, mail)
+    }
+}
+
+fn enqueue_scope_run_mail(store: &mut SqliteStore, mail: EnqueueScopeRun) -> EnqueueScopeRunResult {
+    let Some(base) = Digest::from_slice(&mail.base) else {
+        return EnqueueScopeRunResult::Err { error: "base is not a 32-byte digest".to_owned() };
+    };
+    let id = WorkpieceId(mail.id.clone());
+    let view = match store.load(&id) {
+        Ok(None) => return EnqueueScopeRunResult::Missing { id: mail.id },
+        Ok(Some(view)) => view,
+        Err(error) => return EnqueueScopeRunResult::Err { error: error.to_string() },
+    };
+    if view.head.status != CommissionStatus::Open {
+        return EnqueueScopeRunResult::NotOpen;
+    }
+    match open_scope_run(store, &id, view.head.intent, base) {
+        Ok(opened) => EnqueueScopeRunResult::Ok {
+            id: mail.id,
+            ordinal: opened.ordinal,
+            sequence: opened.sequence,
+            subject: opened.subject.as_bytes().to_vec(),
+        },
+        Err(ScopeRunRefusal::AlreadyInFlight { ordinal }) => EnqueueScopeRunResult::AlreadyInFlight { ordinal },
+        Err(ScopeRunRefusal::AlreadyFrozen) => EnqueueScopeRunResult::AlreadyFrozen,
+        Err(ScopeRunRefusal::Exhausted { attempts }) => EnqueueScopeRunResult::Exhausted { attempts },
+        Err(ScopeRunRefusal::Encode(error) | ScopeRunRefusal::Store(error)) => EnqueueScopeRunResult::Err { error },
     }
 }
 

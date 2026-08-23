@@ -32,13 +32,45 @@ impl KeyHint {
     }
 }
 
-/// Compact keys the footer keeps inline so the trail has the rest of the row.
+/// Overlay key and quit; the footer never elides these.
 pub const INLINE_HINTS: &[KeyHint] = &[KeyHint { keys: "?", action: "keys" }, KeyHint { keys: "q", action: "quit" }];
 
 /// Render hints the way the footer paints them.
 #[must_use]
 pub fn footer_line(hints: &[KeyHint]) -> String {
     hints.iter().map(|hint| format!("{} {}", hint.keys, hint.action)).collect::<Vec<_>>().join("   ")
+}
+
+/// Screen hints in declared order, then the unelidable `tail`. A screen hint
+/// whose `keys` matches a tail entry is dropped so quit is not painted twice.
+/// The longest prefix that fits `budget` (once the tail and, when anything
+/// was dropped, a `…` marker are reserved) is kept; a budget too small for
+/// the tail alone returns the tail, which `footer_row` then clips.
+#[must_use]
+pub fn footer_keys(screen: &[KeyHint], tail: &[KeyHint], budget: usize) -> String {
+    let tail_line = footer_line(tail);
+    let screen: Vec<KeyHint> =
+        screen.iter().copied().filter(|hint| tail.iter().all(|entry| entry.keys != hint.keys)).collect();
+
+    if screen.is_empty() {
+        return tail_line;
+    }
+    let full = format!("{}   {tail_line}", footer_line(&screen));
+    if full.chars().count() <= budget {
+        return full;
+    }
+
+    (0..screen.len())
+        .map(|end| {
+            if end == 0 {
+                format!("…   {tail_line}")
+            } else {
+                format!("{}   …   {tail_line}", footer_line(&screen[..end]))
+            }
+        })
+        .take_while(|candidate| candidate.chars().count() <= budget)
+        .last()
+        .unwrap_or(tail_line)
 }
 
 /// One footer line: `trail` on the left, `keys` flush right. A trail that
@@ -122,9 +154,22 @@ fn parse_key_token(token: &str) -> KeyCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{KeyHint, assert_footer_honest, footer_line, footer_row, overlay_lines};
+    use super::{INLINE_HINTS, KeyHint, assert_footer_honest, footer_keys, footer_line, footer_row, overlay_lines};
     use crossterm::event::KeyCode;
     use std::panic::catch_unwind;
+
+    const BOARD_HINTS: [KeyHint; 10] = [
+        KeyHint { keys: "j/k", action: "select" },
+        KeyHint { keys: "Enter", action: "open" },
+        KeyHint { keys: "h", action: "history" },
+        KeyHint { keys: "l", action: "journal" },
+        KeyHint { keys: "t", action: "timeline" },
+        KeyHint { keys: "d", action: "days" },
+        KeyHint { keys: "c", action: "cost" },
+        KeyHint { keys: "b", action: "backlog" },
+        KeyHint { keys: "r", action: "refresh" },
+        KeyHint { keys: "q", action: "quit" },
+    ];
 
     #[test]
     fn footer_line_matches_the_board_chrome() {
@@ -158,6 +203,26 @@ mod tests {
         assert!(row.ends_with("q quit"), "{row}");
         assert!(row.starts_with('…'), "{row}");
         assert!(row.contains("dispatch-1"), "the deepest crumb is the one that survives: {row}");
+    }
+
+    #[test]
+    fn footer_keys_keeps_the_overlay_key_and_drops_the_rare_tail() {
+        // Names the bug: an elision that eats the navigation keys and keeps
+        // the housekeeping ones inverts the wish.
+        let rendered = footer_keys(&BOARD_HINTS, INLINE_HINTS, 60);
+        assert!(rendered.ends_with("? keys   q quit"), "{rendered}");
+        assert!(rendered.starts_with("j/k select"), "{rendered}");
+        assert!(rendered.contains('…'), "{rendered}");
+        assert!(!rendered.contains("b backlog"), "{rendered}");
+        assert!(rendered.chars().count() <= 60, "{rendered}");
+    }
+
+    #[test]
+    fn footer_keys_paints_quit_once() {
+        // Tripwire: the tail and the screen lists overlap by construction, so
+        // the dedupe is the only thing keeping a duplicated key out of the row.
+        let rendered = footer_keys(&BOARD_HINTS, INLINE_HINTS, 200);
+        assert_eq!(rendered.matches("q quit").count(), 1, "{rendered}");
     }
 
     #[test]

@@ -9,20 +9,23 @@ use std::error::Error;
 use std::fmt;
 
 use aether_bloomery::{
-    AuthorityDoor, CommissionApprovalTier, CommissionProjection, CommissionStatementRole, CommissionStatus,
+    AuthorityDoor, BloomId, CommissionApprovalTier, CommissionProjection, CommissionStatementRole, CommissionStatus,
     CommissionValueError, Digest, KeyProvider, Observation, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision,
     ScopeVerifyInput, ScopeVerifyReport, Statement, Topic, WorkpieceId, digest_of, intent_title, verify_scope,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use rusqlite::{Connection, OptionalExtension, Transaction};
+use serde::{Deserialize, Serialize};
 
 use super::SqliteStore;
+use super::membership;
 
 mod kinds;
 pub use kinds::{
-    CancelCommission, CancelCommissionResult, CreateCommission, CreateCommissionResult, ListCommissions,
-    ListCommissionsResult, ListedCommission, LoadCommission, LoadCommissionResult, RecordCommissionApproval,
-    RecordCommissionApprovalResult, RecordCommissionProjection, RecordCommissionProjectionResult, WriteScopeRevision,
+    CancelCommission, CancelCommissionResult, CreateCommission, CreateCommissionResult, EnqueueScopeRun,
+    EnqueueScopeRunResult, ListCommissions, ListCommissionsResult, ListedCommission, LoadCommission,
+    LoadCommissionResult, RecordCommissionApproval, RecordCommissionApprovalResult, RecordCommissionProjection,
+    RecordCommissionProjectionResult, ReopenCommission, ReopenCommissionResult, WriteScopeRevision,
     WriteScopeRevisionResult,
 };
 
@@ -162,7 +165,8 @@ CREATE TABLE IF NOT EXISTS scope_runs (
     subject    BLOB,
     verdict    TEXT,
     evidence   BLOB,
-    revision   BLOB
+    revision   BLOB,
+    UNIQUE (commission, ordinal, kind)
 );
 CREATE INDEX IF NOT EXISTS scope_runs_by_commission ON scope_runs (commission, ordinal);
 CREATE INDEX IF NOT EXISTS scope_runs_by_nonce ON scope_runs (nonce);
@@ -223,6 +227,12 @@ pub enum CommissionError {
     Store(String),
     /// The commission is not open, so a revision, approval, or cancel cannot land.
     NotOpen,
+    /// The commission is not landed, so a reopen has nothing to restore.
+    NotLanded(CommissionStatus),
+    /// A bloom resolved this workpiece, so its landing is the ordinary one and
+    /// the work it names is in mainline. Reopening it would put resolved work
+    /// back in the line.
+    Resolved(BloomId),
     /// The workpiece's plan steps or inverse searches name paths its own
     /// declared surface does not cover (ADR-0208). The revision is not stored;
     /// its report is.
@@ -253,6 +263,8 @@ impl fmt::Display for CommissionError {
             Self::WrongProvenance => write!(f, "approval provenance is neither signed nor auto"),
             Self::Store(message) => write!(f, "commission store: {message}"),
             Self::NotOpen => write!(f, "commission is not open"),
+            Self::NotLanded(status) => write!(f, "commission is {}, not landed", status.as_str()),
+            Self::Resolved(bloom) => write!(f, "bloom {} resolved this workpiece", bloom.0.to_hex()),
             Self::SurfaceGap { paths } => {
                 write!(f, "declared surface does not cover {}", paths.join(", "))
             }
@@ -308,6 +320,39 @@ pub struct CommissionView {
     pub scope_verify: Option<ScopeVerifyReport>,
 }
 
+/// What is known about a revision without being part of it.
+///
+/// The revision's own bytes are the signed subject; nothing here is hashed
+/// into them. Today's only field is the freeze-check projection (ADR-0208);
+/// the next slice adds a field here rather than a parameter to the write.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevisionEvidence {
+    /// The workpiece's field records projected for the freeze check.
+    /// `None` for a hand-authored revision, which writes no report.
+    #[serde(default)]
+    pub scope_verify: Option<ScopeVerifyInput>,
+}
+
+impl RevisionEvidence {
+    /// Canonical aether-wire bytes of this sidecar.
+    ///
+    /// # Panics
+    /// Panics if the value exceeds the ADR-0118 `u32` wire-length ceiling,
+    /// which no revision sidecar does.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        to_vec(self).expect("revision evidence never exceeds the ADR-0118 u32 wire-length ceiling")
+    }
+
+    /// Decode sidecar bytes.
+    ///
+    /// # Errors
+    /// [`CommissionError::MalformedCanonical`] when the bytes are not this type.
+    pub fn decode(bytes: &[u8]) -> Result<Self, CommissionError> {
+        from_bytes(bytes).map_err(|_| CommissionError::MalformedCanonical)
+    }
+}
+
 /// Authoring and query transactions for signed commissions.
 ///
 /// Separate from the journal [`StoreBackend`](super::StoreBackend) so that
@@ -322,30 +367,29 @@ pub trait CommissionBackend {
     /// Store an immutable scope revision and advance `current` in one
     /// transaction. Index columns are filled from the decoded bytes.
     ///
-    /// # Errors
-    /// Missing commission, not open, stale predecessor, ordinal skip, malformed
-    /// bytes, or a duplicate digest that is not already the current tip.
-    fn write_revision(&mut self, revision: &ScopeRevision) -> Result<Digest, CommissionError>;
-
-    /// [`write_revision`](Self::write_revision), with the workpiece's projected
-    /// field records checked against its own declared surface first (ADR-0208).
+    /// `evidence` is what is known about the revision without being part of it.
+    /// The revision's own bytes are the signed subject; nothing in `evidence`
+    /// is hashed into them.
     ///
+    /// When `evidence.scope_verify` is `Some`, the workpiece's projected field
+    /// records are checked against its own declared surface first (ADR-0208).
     /// The check is the freeze's, not the seal's: a refusal here costs an edit,
     /// where the same contradiction discovered at Member-Verify costs a whole
-    /// construct budget. `projection` is `None` for a hand-authored revision,
-    /// which has no records to check — that writes no report, and absence is
-    /// reported rather than passed.
+    /// construct budget. `None` is a hand-authored revision, which has no
+    /// records to check — that writes no report, and absence is reported
+    /// rather than passed.
     ///
     /// A refusal rolls the revision back and commits its report on its own, so
     /// the refusal survives the repaired re-freeze that follows it.
     ///
     /// # Errors
-    /// Everything [`write_revision`](Self::write_revision) refuses, plus
+    /// Missing commission, not open, stale predecessor, ordinal skip, malformed
+    /// bytes, a duplicate digest that is not already the current tip, or
     /// [`CommissionError::SurfaceGap`] when a named path is uncovered.
-    fn write_revision_verified(
+    fn write_revision(
         &mut self,
         revision: &ScopeRevision,
-        projection: Option<&ScopeVerifyInput>,
+        evidence: &RevisionEvidence,
     ) -> Result<Digest, CommissionError>;
 
     /// Verify (when signed) and insert an approval for the current revision,
@@ -395,6 +439,18 @@ pub trait CommissionBackend {
     /// Missing commission, not open, or words that are not the intent digest.
     fn cancel(&mut self, id: &WorkpieceId, statement: &Statement) -> Result<Digest, CommissionError>;
 
+    /// Put a landed commission back in the line, when no bloom ever resolved
+    /// its workpiece.
+    ///
+    /// The status is the only thing that moves: the intent, every revision, and
+    /// every approval are already immutable rows, so a restored commission is
+    /// the one that was stranded rather than a new one wearing its id.
+    ///
+    /// # Errors
+    /// Missing commission, a status that is not landed, a workpiece some bloom
+    /// resolved, or words that are not the intent digest.
+    fn reopen(&mut self, id: &WorkpieceId, statement: &Statement) -> Result<Digest, CommissionError>;
+
     /// Mark an open commission landed and enqueue its replica projection.
     /// Missing or already-closed commissions are a no-op so a bloom that
     /// mixed local and GitHub-era workpieces can land without failing closed.
@@ -418,16 +474,12 @@ impl CommissionBackend for SqliteStore {
         create_commission(&mut self.conn, id, intent)
     }
 
-    fn write_revision(&mut self, revision: &ScopeRevision) -> Result<Digest, CommissionError> {
-        write_revision(&mut self.conn, revision, None)
-    }
-
-    fn write_revision_verified(
+    fn write_revision(
         &mut self,
         revision: &ScopeRevision,
-        projection: Option<&ScopeVerifyInput>,
+        evidence: &RevisionEvidence,
     ) -> Result<Digest, CommissionError> {
-        write_revision(&mut self.conn, revision, projection)
+        write_revision(&mut self.conn, revision, evidence)
     }
 
     fn insert_approval(&mut self, statement: &Statement, keys: &dyn KeyProvider) -> Result<Digest, CommissionError> {
@@ -462,6 +514,24 @@ impl CommissionBackend for SqliteStore {
         cancel_commission(&mut self.conn, id, statement)
     }
 
+    fn reopen(&mut self, id: &WorkpieceId, statement: &Statement) -> Result<Digest, CommissionError> {
+        // Read the head first: an unknown or not-landed commission is answered
+        // from one row, and the journal replay behind the resolution guard is
+        // only worth paying for once the commission is a candidate to restore.
+        // The transaction below re-reads both, so this read is a filter and
+        // never the authority.
+        let Some(head) = load_head(&self.conn, &id.0)? else {
+            return Err(CommissionError::MissingCommission(id.0.clone()));
+        };
+        if head.status != CommissionStatus::Landed {
+            return Err(CommissionError::NotLanded(head.status));
+        }
+        if let Some(bloom) = membership::resolving_bloom(self, id)? {
+            return Err(CommissionError::Resolved(bloom));
+        }
+        reopen_commission(&mut self.conn, id, statement)
+    }
+
     fn mark_landed(&mut self, id: &WorkpieceId) -> Result<(), CommissionError> {
         mark_landed(&mut self.conn, id)
     }
@@ -472,6 +542,13 @@ impl CommissionBackend for SqliteStore {
 
     fn load_projection(&mut self, id: &WorkpieceId) -> Result<Option<u64>, CommissionError> {
         load_projection(&self.conn, id)
+    }
+}
+
+impl SqliteStore {
+    /// The report journaled for `revision`, or `None` when none was written.
+    pub fn load_scope_verify_report(&self, revision: Digest) -> Result<Option<ScopeVerifyReport>, CommissionError> {
+        load_scope_verify_report(&self.conn, revision)
     }
 }
 
@@ -505,7 +582,7 @@ fn create_commission(conn: &mut Connection, id: &WorkpieceId, intent: &Statement
 fn write_revision(
     conn: &mut Connection,
     revision: &ScopeRevision,
-    projection: Option<&ScopeVerifyInput>,
+    evidence: &RevisionEvidence,
 ) -> Result<Digest, CommissionError> {
     let canonical = revision.to_canonical();
     let decoded = decode_revision(&canonical)?;
@@ -528,7 +605,7 @@ fn write_revision(
         return Err(CommissionError::DuplicateRevision);
     }
 
-    let report = projection.map(verify_scope);
+    let report = evidence.scope_verify.as_ref().map(verify_scope);
     if let Some(report) = &report
         && report.refused()
     {
@@ -702,6 +779,43 @@ fn cancel_commission(
     txn.execute(
         "UPDATE commissions SET status = ?1 WHERE id = ?2",
         rusqlite::params![CommissionStatus::Cancelled.as_str(), id.0],
+    )?;
+    enqueue_projection(&txn, &id.0)?;
+    txn.commit()?;
+    Ok(statement_digest)
+}
+
+/// Flip a landed commission back to open under one transaction, re-checking
+/// the status and the intent binding the caller filtered on.
+///
+/// The reopen statement is not filed beside the intent and the cancel:
+/// `commission_statements.role` is a closed `CHECK` on a table that already
+/// exists on every live journal, so adding a role means migrating a running
+/// coordinator's store to record an act that restores rather than concludes.
+/// The signature is verified at the Reopen door before this is reached and the
+/// route logs the signer and the reason, so what a stored row would add is a
+/// second copy of an authorization that has already been checked.
+fn reopen_commission(
+    conn: &mut Connection,
+    id: &WorkpieceId,
+    statement: &Statement,
+) -> Result<Digest, CommissionError> {
+    let intent = Digest::from_slice(&statement.words).ok_or(CommissionError::WrongSubject)?;
+    let statement_digest = digest_of(statement);
+    let txn = conn.transaction()?;
+    let Some(head) = load_head(&txn, &id.0)? else {
+        return Err(CommissionError::MissingCommission(id.0.clone()));
+    };
+    if head.status != CommissionStatus::Landed {
+        return Err(CommissionError::NotLanded(head.status));
+    }
+    if head.intent != intent {
+        return Err(CommissionError::WrongSubject);
+    }
+
+    txn.execute(
+        "UPDATE commissions SET status = ?1 WHERE id = ?2",
+        rusqlite::params![CommissionStatus::Open.as_str(), id.0],
     )?;
     enqueue_projection(&txn, &id.0)?;
     txn.commit()?;

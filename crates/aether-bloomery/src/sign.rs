@@ -76,6 +76,12 @@ pub enum AuthorityDoor {
     /// Accepting an architecture decision record, bound to that ADR's digest.
     /// Appended past [`Self::Cancel`] so existing door discriminants stay put.
     Accept,
+    /// Putting a commission stranded outside `open` back into the line, bound
+    /// to that commission's intent digest. Its own door rather than
+    /// [`Self::Cancel`]'s: restoring and retiring are opposite acts, and one
+    /// envelope must not be replayable at the other. Appended past
+    /// [`Self::Accept`] so existing door discriminants stay put.
+    Reopen,
 }
 
 /// The subject an author signature actually covers (ADR-0182): the door, the

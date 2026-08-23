@@ -47,8 +47,9 @@ use aether_actor::runtime;
 use aether_bloomery::{
     Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, BaseVerifyPayload, BloomId,
     CancelDispatchPayload, CandidateRef, ConfigRegistry, ConfigScopes, Digest, DispatchPayload, Event, ExecutionStatus,
-    Fact, ModelOverride, Nonce, RedispatchPayload, ReviewPass, SharedCorrespondence, StageId, StageVerdict,
-    TimeoutRecord, Topic, VerifyFailureSet, WorkHandle, WorkpieceId, normalize_write_paths, pin_workpiece_description,
+    Fact, LaneObservation, ModelOverride, Nonce, RedispatchPayload, ReviewPass, SharedCorrespondence, StageId,
+    StageVerdict, TimeoutRecord, Topic, VerifyFailureSet, WorkHandle, WorkpieceId, normalize_write_paths,
+    pin_workpiece_description,
 };
 use aether_bloomery_git::command;
 use aether_bloomery_github::{GitObjectId, candidate_ref_name, member_checkpoint_ref_name, short_hex};
@@ -379,10 +380,15 @@ enum TerminationCause {
     HeartbeatSilence,
 }
 
+/// Terminate every order past its sealed deadline, except the ones whose
+/// backend arm faulted this cycle (`unobserved`, #5412): those were never
+/// asked, so their "still pending" is unearned and cancelling on it would
+/// destroy a lane that finished inside its budget.
 fn expire_overdue_orders(
     stores: Stores<'_>,
     executor: &ExecutorShell,
     tracked: &mut Vec<TrackedHandle>,
+    unobserved: &[Nonce],
     now_unix_millis: u64,
 ) -> Vec<Admit> {
     let Stores { store, mut artifacts } = stores;
@@ -396,6 +402,9 @@ fn expire_overdue_orders(
 
     let mut admits = Vec::new();
     for order in expired {
+        if unobserved.iter().any(|nonce| nonce.0 == order.nonce) {
+            continue;
+        }
         if let Some(admit) =
             terminate_live_order(store, artifacts.as_deref_mut(), executor, tracked, &order, TerminationCause::Deadline)
         {
@@ -503,17 +512,7 @@ fn terminate_live_order(
         subject: record.displayed_digest,
         verdict,
         detail,
-        candidate: None,
-        findings: None,
-        failed_verifiers,
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation { failed_verifiers, ..LaneObservation::default() },
     };
     match admit_uploaded(store, &upload) {
         Ok(AdmitDecision::Admitted(admission)) => {
@@ -652,6 +651,7 @@ fn expire_silent_orders(
     executor: &ExecutorShell,
     tracked: &mut Vec<TrackedHandle>,
     pending: &[(Nonce, ExecutionStatus)],
+    unobserved: &[Nonce],
     now_unix_millis: u64,
     silence_millis: u64,
 ) -> Vec<Admit> {
@@ -661,6 +661,11 @@ fn expire_silent_orders(
     let mut admits = Vec::new();
     let nonces: Vec<Nonce> = tracked.iter().map(|tracked_handle| tracked_handle.handle.nonce.clone()).collect();
     for nonce in nonces {
+        // A handle whose arm faulted was not observed silent — it was not
+        // observed at all (#5412).
+        if unobserved.contains(&nonce) {
+            continue;
+        }
         let order = match store.lookup_order(&nonce.0) {
             Ok(Some(order)) => order,
             Ok(None) => continue,
@@ -2510,19 +2515,21 @@ fn pull_and_admit(
     // Only now that completion has been observed and consumed: terminate what is
     // still pending past its sealed deadline.
     //
-    // And only if it *was* observed. `run_intake_cycle` abandons its loop on the
-    // first handle whose inspect or evidence stream faults, so a failed cycle
-    // leaves the handles behind it uninspected — "still pending" then means
-    // "never asked", not "not finished". Sweeping on that reading cancels a lane
-    // that completed well inside its budget and admits a synthesised failure over
-    // real passing evidence, spending a retry to hide a transport blip. A
-    // deferred sweep costs one poll interval and the transport re-drives; a wrong
-    // sweep destroys the attempt.
+    // And only over what *was* observed. A broker fault abandons the whole cycle,
+    // so nothing was looked at; a backend arm's fault costs only that arm, and
+    // the handles it skipped come back as `report.unobserved` (#5412). Either
+    // way "still pending" for an unasked handle means "never asked", not "not
+    // finished". Sweeping on that reading cancels a lane that completed well
+    // inside its budget and admits a synthesised failure over real passing
+    // evidence, spending a retry to hide a transport blip. A deferred sweep
+    // costs one poll interval and the transport re-drives; a wrong sweep
+    // destroys the attempt.
     let timed_out = if completion_was_observed {
         expire_overdue_orders(
             Stores { store, artifacts: artifacts.as_deref_mut() },
             executor,
             tracked,
+            &report.unobserved,
             clock.now_unix_millis,
         )
     } else {
@@ -2538,6 +2545,7 @@ fn pull_and_admit(
             executor,
             tracked,
             &report.pending,
+            &report.unobserved,
             clock.now_unix_millis,
             clock.heartbeat_silence_millis,
         )
@@ -2626,16 +2634,16 @@ fn admit_scripted(state: &mut ExecutorReactorState, encoded: &[u8]) -> (Scripted
     // test harness discards. So a scripted study that does not record stops the
     // call and names which of the three it was.
     let mut admits = Vec::new();
-    match (upload.cost, state.artifacts.as_mut()) {
+    match (upload.observation.cost, state.artifacts.as_mut()) {
         (Some(cost), Some(artifacts)) => {
             let record = UploadedStudyRecord {
                 nonce: upload.nonce.clone(),
                 subject: upload.subject,
                 cost,
-                calls: upload.calls.clone(),
-                session_reuse_arm: upload.session_reuse_arm.clone(),
-                session_reuse_saved_micro_usd: upload.session_reuse_saved_micro_usd,
-                peak_resident_bytes: upload.peak_resident_bytes,
+                calls: upload.observation.calls.clone(),
+                session_reuse_arm: upload.observation.session_reuse_arm.clone(),
+                session_reuse_saved_micro_usd: upload.observation.session_reuse_saved_micro_usd,
+                peak_resident_bytes: upload.observation.peak_resident_bytes,
             };
             match admit_study(store, artifacts, &record) {
                 Ok(StudyAdmitDecision::Admitted(admission)) => {

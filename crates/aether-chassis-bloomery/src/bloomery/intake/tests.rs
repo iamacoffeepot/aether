@@ -9,10 +9,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use aether_bloomery::{
-    BloomDraft, BloomId, BloomRecord, ConfigRegistry, Decision, Digest, Event, Evidence, EvidenceKind, EvidenceRef,
-    ExecutionLimits, ExecutionStatus, Fact, Forecast, IdempotencyKey, Membership, NetworkProfile, Nonce, Outcome,
-    ResolvedConfigs, Snapshot, SpendWindow, StageCatalog, StageId, StageVerdict, Transformation, VerifyFailure,
-    VerifyFailureSet, WorkHandle, WorkpieceId, reduce,
+    BloomDraft, BloomId, BloomRecord, CandidateRef, Conclusion, ConfigRegistry, Decision, Digest, Event, Evidence,
+    EvidenceKind, EvidenceRef, ExecutionLimits, ExecutionStatus, Fact, Forecast, IdempotencyKey, LaneObservation,
+    Membership, NetworkProfile, Nonce, Observation, Outcome, Provenance, ResolvedConfigs, Snapshot, SpendWindow,
+    StageCatalog, StageId, StageVerdict, Statement, StudyCall, StudyCost, SuppressionRequest, SurfacePathRequest,
+    SurfaceRequest, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, reduce,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -26,10 +27,14 @@ use tracing::{Event as TracingEvent, Metadata, Subscriber};
 
 use super::{
     Admission, AdmitDecision, AdmitSink, DispatchError, DispatchRecord, EvidenceClaims, IntakeRefusal,
-    UploadedEvidence, admit_uploaded, dispatch_and_record, record_dispatch, run_intake_cycle,
+    UploadedEvidence, admit_uploaded, dispatch_and_record, dispatch_nonce, record_dispatch, run_intake_cycle,
 };
-use crate::bloomery::{ExecutorPortError, ExecutorShell, LocalExecutorError};
-use crate::store::{SqliteStore, StoreBackend};
+use crate::bloomery::open_scope_run;
+use crate::bloomery::{
+    ExecutorPortError, ExecutorShell, LocalExecutorError, OutstandingDispatch, ReconcileLanes, ReconcileReport,
+    RoutingExecutor,
+};
+use crate::store::{CommissionBackend, SqliteStore, StoreBackend};
 
 const WORKFLOW: &str = "bloomery-transform.yml";
 const MODEL_WORKFLOW: &str = "bloomery-transform-model.yml";
@@ -213,17 +218,7 @@ fn a_matching_upload_admits_a_bound_integrate_fact() {
         subject: candidate,
         verdict: StageVerdict::VerificationPassed,
         detail: Digest::from_bytes([7; 32]),
-        candidate: None,
-        findings: None,
-        failed_verifiers: VerifyFailureSet::EMPTY,
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation::default(),
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching upload is admitted");
@@ -262,17 +257,7 @@ fn a_parked_upload_admits_a_question_evidence_fact_and_consumes_the_order() {
         subject: candidate,
         verdict: StageVerdict::Parked,
         detail: Digest::from_bytes([8; 32]),
-        candidate: None,
-        findings: None,
-        failed_verifiers: VerifyFailureSet::EMPTY,
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation::default(),
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching parked upload is admitted");
@@ -301,17 +286,7 @@ fn an_unknown_nonce_is_refused() {
         subject: Digest::from_bytes([5; 32]),
         verdict: StageVerdict::VerificationPassed,
         detail: Digest::from_bytes([7; 32]),
-        candidate: None,
-        findings: None,
-        failed_verifiers: VerifyFailureSet::EMPTY,
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation::default(),
     };
     assert!(matches!(
         admit_uploaded(&mut store, &upload).unwrap(),
@@ -336,17 +311,7 @@ fn a_right_nonce_with_the_wrong_digest_is_refused_and_the_order_stays_live() {
         subject: Digest::from_bytes([9; 32]),
         verdict: StageVerdict::VerificationPassed,
         detail: Digest::from_bytes([7; 32]),
-        candidate: None,
-        findings: None,
-        failed_verifiers: VerifyFailureSet::EMPTY,
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation::default(),
     };
     match admit_uploaded(&mut store, &lying).unwrap() {
         AdmitDecision::Refused(IntakeRefusal::DigestMismatch { displayed, claimed }) => {
@@ -404,7 +369,7 @@ struct JournalReadingExecutor {
 impl aether_bloomery::ExecutorBackend for JournalReadingExecutor {
     type Error = ExecutorPortError;
 
-    fn submit(&self, order: &aether_bloomery::WorkOrder) -> Result<WorkHandle, Self::Error> {
+    fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
         let mut store = SqliteStore::open(&self.store_path).expect("the lane's own connection opens the journal");
         let found = store.lookup_order(&order.nonce.0).expect("the lookup runs").is_some();
         *self.resolved.lock().unwrap() = Some(found);
@@ -546,17 +511,7 @@ fn intake_cycle_admits_a_matching_upload_and_the_reducer_integrates_it() {
             subject: candidate,
             verdict: StageVerdict::VerificationPassed,
             detail: Digest::from_bytes([7; 32]),
-            candidate: None,
-            findings: None,
-            failed_verifiers: VerifyFailureSet::EMPTY,
-            cost: None,
-            calls: None,
-            session_reuse_arm: None,
-            session_reuse_saved_micro_usd: None,
-            peak_resident_bytes: None,
-            violating_paths: Vec::new(),
-            surface_request: None,
-            suppression_requests: Vec::new(),
+            observation: LaneObservation::default(),
         },
     );
     let claims = SeededClaims(claims);
@@ -567,6 +522,204 @@ fn intake_cycle_admits_a_matching_upload_and_the_reducer_integrates_it() {
     assert_eq!(sink.0.len(), 1);
 
     // The reducer oracle: the admitted event integrates its member.
+    match reduce(&snapshot, &sink.0[0].event, &ResolvedConfigs::default(), &SpendWindow::default()).outcome {
+        Outcome::Integrated { bloom: integrated, workpiece: member } => {
+            assert_eq!(integrated, bloom);
+            assert_eq!(member, workpiece);
+        }
+        other => panic!("expected Integrated, got {other:?}"),
+    }
+}
+
+/// The Actions arm under GitHub's hourly limit: every call answers
+/// `403 API rate limit exceeded`. Submitting still works — the dispatch it
+/// answers for went out before the budget ran down, which is exactly the state
+/// the coordinator was in.
+struct RateLimitedActions;
+
+impl RateLimitedActions {
+    fn refusal() -> ExecutorError {
+        ExecutorError::Github(GithubError::Status { status: 403, body: "API rate limit exceeded".to_owned() })
+    }
+}
+
+impl aether_bloomery::ExecutorBackend for RateLimitedActions {
+    type Error = ExecutorError;
+
+    fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
+        Ok(WorkHandle::new(order.nonce.clone()))
+    }
+
+    fn inspect(&self, _handle: &WorkHandle) -> Result<ExecutionStatus, Self::Error> {
+        Err(Self::refusal())
+    }
+
+    fn cancel(&self, _handle: &WorkHandle) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn stream_evidence(&self, _handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
+        Err(Self::refusal())
+    }
+}
+
+/// A local arm whose dispatched lane finished and left one evidence reference
+/// — the reconcile lane that produced a candidate while the Actions API was
+/// refusing.
+struct FinishedLocalLane(Vec<EvidenceRef>);
+
+impl ReconcileLanes for FinishedLocalLane {
+    fn reconcile(&self, _live: &[OutstandingDispatch]) -> ReconcileReport {
+        ReconcileReport { readopted: Vec::new(), reclaimed: 0 }
+    }
+}
+
+impl aether_bloomery::ExecutorBackend for FinishedLocalLane {
+    type Error = LocalExecutorError;
+
+    fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
+        Ok(WorkHandle::new(order.nonce.clone()))
+    }
+
+    fn inspect(&self, _handle: &WorkHandle) -> Result<ExecutionStatus, Self::Error> {
+        Ok(ExecutionStatus::Completed { conclusion: Conclusion::Success })
+    }
+
+    fn cancel(&self, _handle: &WorkHandle) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn stream_evidence(&self, _handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
+        Ok(self.0.clone())
+    }
+}
+
+fn local_evidence(nonce: &str) -> EvidenceRef {
+    EvidenceRef {
+        name: format!("evidence-{nonce}-log"),
+        nonce: Nonce(nonce.to_owned()),
+        artifact_id: 1,
+        size_bytes: 10,
+        observation: LaneObservation::default(),
+    }
+}
+
+#[test]
+fn claim_for_carries_the_whole_observation() {
+    // Tripwire: the hand-copy at `claims.rs` was the only thing keeping
+    // EvidenceRef and UploadedEvidence in step, and its failure mode is silent —
+    // a dropped field keeps its default, so nothing fails to compile and no
+    // existing test notices.
+    use super::NameEvidenceClaims;
+
+    let nonce = Nonce("dispatch-obs".to_owned());
+    let subject = Digest::from_bytes([3; 32]);
+    let detail = Digest::from_bytes([4; 32]);
+    let observation = LaneObservation {
+        candidate: Some(CandidateRef { tree: Digest::from_bytes([5; 32]), checkout: Digest::from_bytes([6; 32]) }),
+        findings: Some("critic findings".into()),
+        failed_verifiers: VerifyFailureSet::one(VerifyFailure::Fmt),
+        cost: Some(StudyCost {
+            cost_micro_usd: 7,
+            turns: 8,
+            duration_millis: 9,
+            input_tokens: 10,
+            ..StudyCost::default()
+        }),
+        calls: Some(vec![StudyCall { input_tokens: 11, output_tokens: 12, ..StudyCall::default() }]),
+        session_reuse_arm: Some("resumed".into()),
+        session_reuse_saved_micro_usd: Some(13),
+        peak_resident_bytes: Some(14),
+        violating_paths: vec!["crates/other/src/lib.rs".into()],
+        surface_request: Some(SurfaceRequest {
+            scope_revision: Digest::from_bytes([15; 32]),
+            paths: vec![SurfacePathRequest {
+                path: "crates/needed/src/lib.rs".into(),
+                reason: "the work touches it".into(),
+            }],
+            summary: "the sealed surface is missing a path".into(),
+        }),
+        suppression_requests: vec![SuppressionRequest {
+            path: "crates/needed/src/lib.rs".into(),
+            line: 16,
+            lint: "allow(clippy::disallowed_methods)".into(),
+            reason: "operator tooling, not cap config".into(),
+        }],
+    };
+    let name = NameEvidenceClaims::attempt_artifact_name(
+        &nonce,
+        &subject,
+        StageVerdict::VerificationFailed,
+        observation.failed_verifiers,
+        &detail,
+    );
+    let reference = EvidenceRef { name, nonce, artifact_id: 17, size_bytes: 18, observation: observation.clone() };
+
+    let admitted = NameEvidenceClaims.claim_for(&reference).expect("a well-formed attempt name decodes");
+    assert_eq!(admitted.observation, observation);
+}
+
+#[test]
+fn a_rate_limited_arm_does_not_withhold_another_arms_finished_result() {
+    // #5412. From 18:29 the Actions API answered `403 API rate limit exceeded`
+    // to every inspect, once a second for twenty-eight minutes. The cycle
+    // walked one flat handle list, abandoned it on that first fault, and never
+    // reached the local reconcile lane that had finished with a candidate at
+    // 18:34 — the member sat at Reconcile@1 with no dispatch and no fault. The
+    // two arms fail independently, so a fault on one must cost only that one.
+    let workpiece = WorkpieceId("wp-return".to_owned());
+    let scope_revision = Digest::from_bytes([2; 32]);
+    let (snapshot, bloom) = sealed_snapshot(&workpiece, scope_revision);
+    let candidate = Digest::from_bytes([5; 32]);
+
+    let router = RoutingExecutor::new(
+        Arc::new(RateLimitedActions),
+        Arc::new(FinishedLocalLane(vec![local_evidence("n-local")])),
+        vec!["construct.".to_owned()],
+    );
+    let shell = ExecutorShell::new(Arc::new(router));
+    let mut store = store();
+
+    // The verify lane routes to Actions, the construct lane to local, and the
+    // refusing one is inspected first.
+    let mut actions_record = dispatch_record("n-actions", bloom, &workpiece, scope_revision, candidate);
+    actions_record.transformation.command = "verify.clippy".to_owned();
+    let mut local_record = dispatch_record("n-local", bloom, &workpiece, scope_revision, candidate);
+    local_record.transformation.command = "construct.implement".to_owned();
+    let handles = vec![
+        dispatch_and_record(&shell, &mut store, &actions_record, NOW_UNIX_MILLIS).unwrap(),
+        dispatch_and_record(&shell, &mut store, &local_record, NOW_UNIX_MILLIS).unwrap(),
+    ];
+
+    let mut claims = HashMap::new();
+    claims.insert(
+        "n-local".to_owned(),
+        UploadedEvidence {
+            nonce: Nonce("n-local".to_owned()),
+            subject: candidate,
+            verdict: StageVerdict::VerificationPassed,
+            detail: Digest::from_bytes([7; 32]),
+            observation: LaneObservation::default(),
+        },
+    );
+    let claims = SeededClaims(claims);
+    let mut sink = Collector::default();
+
+    let report = run_intake_cycle(&mut store, &shell, &handles, &claims, None, &mut sink).unwrap();
+
+    assert_eq!(
+        (report.completed, report.admitted, report.refused),
+        (1, 1, 0),
+        "the finished local lane is admitted on the same tick the Actions arm refused",
+    );
+    assert_eq!(
+        report.unobserved,
+        vec![Nonce("n-actions".to_owned())],
+        "and only the refusing arm's handle is reported unobserved, so the sweeps leave it alone",
+    );
+    assert!(report.pending.is_empty(), "an unobserved handle is not pending — it was never asked");
+
+    // The reducer oracle: what got through is the real verdict, not a synthesised one.
     match reduce(&snapshot, &sink.0[0].event, &ResolvedConfigs::default(), &SpendWindow::default()).outcome {
         Outcome::Integrated { bloom: integrated, workpiece: member } => {
             assert_eq!(integrated, bloom);
@@ -604,17 +757,7 @@ fn intake_cycle_refuses_a_mismatched_upload_and_the_reducer_is_untouched() {
             subject: Digest::from_bytes([9; 32]),
             verdict: StageVerdict::VerificationPassed,
             detail: Digest::from_bytes([7; 32]),
-            candidate: None,
-            findings: None,
-            failed_verifiers: VerifyFailureSet::EMPTY,
-            cost: None,
-            calls: None,
-            session_reuse_arm: None,
-            session_reuse_saved_micro_usd: None,
-            peak_resident_bytes: None,
-            violating_paths: Vec::new(),
-            surface_request: None,
-            suppression_requests: Vec::new(),
+            observation: LaneObservation::default(),
         },
     );
     let claims = SeededClaims(claims);
@@ -724,17 +867,7 @@ fn a_non_terminal_construct_result_admits_attempt_completed_and_the_reducer_adva
         subject: candidate,
         verdict: StageVerdict::VerificationPassed,
         detail: Digest::from_bytes([7; 32]),
-        candidate: None,
-        findings: None,
-        failed_verifiers: VerifyFailureSet::EMPTY,
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation::default(),
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching Construct upload is admitted");
@@ -786,20 +919,10 @@ fn a_reconcile_result_admits_attempt_completed_not_out_of_line() {
         subject: candidate,
         verdict: StageVerdict::VerificationPassed,
         detail: Digest::from_bytes([7; 32]),
-        candidate: Some(aether_bloomery::CandidateRef {
-            tree: Digest::from_bytes([8; 32]),
-            checkout: Digest::from_bytes([9; 32]),
-        }),
-        findings: None,
-        failed_verifiers: VerifyFailureSet::EMPTY,
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation {
+            candidate: Some(CandidateRef { tree: Digest::from_bytes([8; 32]), checkout: Digest::from_bytes([9; 32]) }),
+            ..Default::default()
+        },
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching Reconcile upload is admitted");
@@ -831,17 +954,10 @@ fn a_failing_terminal_verify_admits_typed_verify_failed_not_integrate() {
         subject: candidate,
         verdict: StageVerdict::VerificationFailed,
         detail: Digest::from_bytes([7; 32]),
-        candidate: None,
-        findings: None,
-        failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation {
+            failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
+            ..Default::default()
+        },
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching failing-verify upload is admitted (the gate decides its fate, not the broker)");
@@ -876,17 +992,11 @@ fn a_containment_refusal_admits_as_containment_refused_with_the_violating_paths(
         subject: candidate,
         verdict: StageVerdict::VerificationFailed,
         detail: Digest::from_bytes([7; 32]),
-        candidate: None,
-        findings: None,
-        failed_verifiers: VerifyFailureSet::one(VerifyFailure::Containment),
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: paths.clone(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation {
+            failed_verifiers: VerifyFailureSet::one(VerifyFailure::Containment),
+            violating_paths: paths.clone(),
+            ..Default::default()
+        },
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching containment-carrying upload is admitted");
@@ -919,17 +1029,7 @@ fn an_unjudged_verify_naming_no_verifier_is_admitted_rather_than_refused() {
         subject: candidate,
         verdict: StageVerdict::VerificationFailed,
         detail: Digest::from_bytes([7; 32]),
-        candidate: None,
-        findings: None,
-        failed_verifiers: VerifyFailureSet::EMPTY,
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation::default(),
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("an unjudged failing-verify upload is admitted; the reducer decides what it means");
@@ -959,17 +1059,11 @@ fn a_preflight_only_verify_admits_as_a_host_fault_not_a_candidate_failure() {
         subject: candidate,
         verdict: StageVerdict::VerificationFailed,
         detail: Digest::from_bytes([7; 32]),
-        candidate: None,
-        findings: Some(findings.to_owned()),
-        failed_verifiers: VerifyFailureSet::one(VerifyFailure::Preflight),
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation {
+            findings: Some(findings.to_owned()),
+            failed_verifiers: VerifyFailureSet::one(VerifyFailure::Preflight),
+            ..Default::default()
+        },
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a preflight-only verify is admitted so the reducer can hold it");
@@ -1010,17 +1104,7 @@ fn invalid_verifier_sets_are_refused_without_consuming_the_order() {
             subject: candidate,
             verdict,
             detail: Digest::from_bytes([7; 32]),
-            candidate: None,
-            findings: None,
-            failed_verifiers,
-            cost: None,
-            calls: None,
-            session_reuse_arm: None,
-            session_reuse_saved_micro_usd: None,
-            peak_resident_bytes: None,
-            violating_paths: Vec::new(),
-            surface_request: None,
-            suppression_requests: Vec::new(),
+            observation: LaneObservation { failed_verifiers, ..Default::default() },
         };
 
         assert!(matches!(
@@ -1049,17 +1133,10 @@ fn a_failing_aggregate_verify_admits_its_typed_set_as_a_bloom_level_failure() {
         subject: tree,
         verdict: StageVerdict::VerificationFailed,
         detail: Digest::from_bytes([7; 32]),
-        candidate: None,
-        findings: None,
-        failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation {
+            failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
+            ..Default::default()
+        },
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching failing AggregateVerify upload is admitted");
@@ -1088,21 +1165,15 @@ fn aggregate_verify_findings_persist_on_the_composition_and_clear_on_a_pass() {
         subject: tree,
         verdict,
         detail: Digest::from_bytes([7; 32]),
-        candidate: None,
-        findings: findings.map(str::to_owned),
-        failed_verifiers: if verdict == StageVerdict::VerificationFailed {
-            VerifyFailureSet::one(VerifyFailure::Clippy)
-        } else {
-            VerifyFailureSet::EMPTY
+        observation: LaneObservation {
+            findings: findings.map(str::to_owned),
+            failed_verifiers: if verdict == StageVerdict::VerificationFailed {
+                VerifyFailureSet::one(VerifyFailure::Clippy)
+            } else {
+                VerifyFailureSet::EMPTY
+            },
+            ..Default::default()
         },
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
     };
 
     let mut failing = dispatch_record("n-av-fail", bloom, &WorkpieceId(String::new()), tree, tree);
@@ -1153,17 +1224,10 @@ fn an_aggregate_review_verdict_admits_a_bloom_level_completion() {
         subject: tree,
         verdict: StageVerdict::ReviewFinding,
         detail: Digest::from_bytes([7; 32]),
-        candidate: None,
-        findings: Some("pillar 2: the members disagree about the tick order".to_owned()),
-        failed_verifiers: VerifyFailureSet::EMPTY,
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation {
+            findings: Some("pillar 2: the members disagree about the tick order".to_owned()),
+            ..Default::default()
+        },
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &failing).unwrap() else {
         panic!("a matching aggregate verdict is admitted");
@@ -1189,17 +1253,7 @@ fn an_aggregate_review_verdict_admits_a_bloom_level_completion() {
         subject: tree,
         verdict: StageVerdict::Approved,
         detail: Digest::from_bytes([8; 32]),
-        candidate: None,
-        findings: None,
-        failed_verifiers: VerifyFailureSet::EMPTY,
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation::default(),
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &passing).unwrap() else {
         panic!("the passing aggregate verdict is admitted");
@@ -1231,17 +1285,7 @@ fn attributed_aggregate_findings_narrow_the_implication_and_slice_per_member() {
         subject: tree,
         verdict: StageVerdict::ReviewFinding,
         detail: Digest::from_bytes([7; 32]),
-        candidate: None,
-        findings: Some(findings.to_owned()),
-        failed_verifiers: VerifyFailureSet::EMPTY,
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation { findings: Some(findings.to_owned()), ..Default::default() },
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &failing).unwrap() else {
         panic!("a matching aggregate verdict is admitted");
@@ -1274,17 +1318,7 @@ fn attributed_aggregate_findings_narrow_the_implication_and_slice_per_member() {
         subject: tree,
         verdict: StageVerdict::ReviewFinding,
         detail: Digest::from_bytes([8; 32]),
-        candidate: None,
-        findings: Some("[wp-a] Still leaking.".to_owned()),
-        failed_verifiers: VerifyFailureSet::EMPTY,
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation { findings: Some("[wp-a] Still leaking.".to_owned()), ..Default::default() },
     };
     assert!(matches!(admit_uploaded(&mut store, &delta_fail).unwrap(), AdmitDecision::Admitted(_)));
     assert_eq!(
@@ -1315,17 +1349,10 @@ fn an_aggregate_review_executor_fault_admits_its_own_fact_and_touches_no_finding
         subject: tree,
         verdict: StageVerdict::ExecutorFault,
         detail: Digest::from_bytes([9; 32]),
-        candidate: None,
-        findings: Some("the sandbox refused to start.\nVERDICT: environment".to_owned()),
-        failed_verifiers: VerifyFailureSet::EMPTY,
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation {
+            findings: Some("the sandbox refused to start.\nVERDICT: environment".to_owned()),
+            ..Default::default()
+        },
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &fault).unwrap() else {
         panic!("a matching aggregate fault is admitted");
@@ -1372,17 +1399,10 @@ fn a_member_executor_fault_admits_its_own_fact_and_consumes_the_order_once() {
             subject,
             verdict: StageVerdict::ExecutorFault,
             detail: Digest::from_bytes([9; 32]),
-            candidate: None,
-            findings: Some("the sandbox refused to start.\nVERDICT: environment".to_owned()),
-            failed_verifiers: VerifyFailureSet::EMPTY,
-            cost: None,
-            calls: None,
-            session_reuse_arm: None,
-            session_reuse_saved_micro_usd: None,
-            peak_resident_bytes: None,
-            violating_paths: Vec::new(),
-            surface_request: None,
-            suppression_requests: Vec::new(),
+            observation: LaneObservation {
+                findings: Some("the sandbox refused to start.\nVERDICT: environment".to_owned()),
+                ..Default::default()
+            },
         };
         let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
             panic!("{stage:?} member fault should be admitted");
@@ -1430,17 +1450,7 @@ fn an_executor_fault_on_a_stage_without_a_lifecycle_is_refused_and_the_order_sta
             subject,
             verdict: StageVerdict::ExecutorFault,
             detail: Digest::from_bytes([9; 32]),
-            candidate: None,
-            findings: None,
-            failed_verifiers: VerifyFailureSet::EMPTY,
-            cost: None,
-            calls: None,
-            session_reuse_arm: None,
-            session_reuse_saved_micro_usd: None,
-            peak_resident_bytes: None,
-            violating_paths: Vec::new(),
-            surface_request: None,
-            suppression_requests: Vec::new(),
+            observation: LaneObservation::default(),
         };
         assert!(
             matches!(
@@ -1472,17 +1482,7 @@ fn a_base_verify_that_reached_no_verdict_admits_as_an_unproven_base() {
         subject,
         verdict: StageVerdict::ExecutorFault,
         detail: Digest::from_bytes([9; 32]),
-        candidate: None,
-        findings: None,
-        failed_verifiers: VerifyFailureSet::EMPTY,
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation::default(),
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a base verify that reached no verdict must admit, not refuse");
@@ -1513,17 +1513,7 @@ fn a_surface_request_on_a_non_construct_stage_is_refused_and_the_order_stays_liv
             subject,
             verdict: StageVerdict::SurfaceRequested,
             detail: Digest::from_bytes([9; 32]),
-            candidate: None,
-            findings: None,
-            failed_verifiers: VerifyFailureSet::EMPTY,
-            cost: None,
-            calls: None,
-            session_reuse_arm: None,
-            session_reuse_saved_micro_usd: None,
-            peak_resident_bytes: None,
-            violating_paths: Vec::new(),
-            surface_request: None,
-            suppression_requests: Vec::new(),
+            observation: LaneObservation::default(),
         };
 
         assert!(
@@ -1559,17 +1549,7 @@ fn an_out_of_line_stage_is_refused_and_the_order_stays_live() {
         subject: candidate,
         verdict: StageVerdict::VerificationPassed,
         detail: Digest::from_bytes([7; 32]),
-        candidate: None,
-        findings: None,
-        failed_verifiers: VerifyFailureSet::EMPTY,
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation::default(),
     };
     match admit_uploaded(&mut store, &upload).unwrap() {
         AdmitDecision::Refused(IntakeRefusal::OutOfLineStage(stage)) => {
@@ -1580,6 +1560,47 @@ fn an_out_of_line_stage_is_refused_and_the_order_stays_live() {
     // The order stayed live — the refusal precedes the consume, so a corrected
     // dispatch could still land it.
     assert!(store.lookup_order("n-off").unwrap().is_some(), "an out-of-line refusal leaves the order live");
+}
+
+#[test]
+fn a_scope_result_is_admitted_and_readable_off_its_ordinal() {
+    // Pre-fix: admit_uploaded's ladder had no Scope arm and the final else
+    // returned IntakeRefusal::OutOfLineStage(StageId::Scope). After the arm
+    // the same upload is admitted onto the run ledger, keyed by the ordinal
+    // the drain recorded against this nonce.
+    let mut store = store();
+    let commission = WorkpieceId("wp-scope".to_owned());
+    let intent = Statement {
+        words: b"scope this workpiece".to_vec(),
+        provenance: Provenance::ObservationAttestation(Observation { source: "test".to_owned() }),
+        parents: Vec::new(),
+    };
+    let intent_digest = store.create(&commission, &intent).expect("create commission");
+    let base = Digest::from_bytes([2; 32]);
+    let opened = open_scope_run(&mut store, &commission, intent_digest, base).expect("open");
+    let nonce = dispatch_nonce(opened.sequence);
+    let mut record =
+        dispatch_record(&nonce.0, BloomId(Digest::from_bytes([1; 32])), &commission, opened.subject, opened.subject);
+    record.stage = StageId::Scope;
+    record_dispatch(&mut store, &record).unwrap();
+    store.record_scope_dispatch(&commission.0, opened.ordinal, &nonce.0).expect("record dispatch");
+
+    let upload = UploadedEvidence {
+        nonce: nonce.clone(),
+        subject: opened.subject,
+        verdict: StageVerdict::VerificationPassed,
+        detail: Digest::from_bytes([7; 32]),
+        observation: LaneObservation::default(),
+    };
+    match admit_uploaded(&mut store, &upload).unwrap() {
+        AdmitDecision::Recorded => {}
+        other => panic!("a scope result must land on the run ledger, got {other:?}"),
+    }
+    assert!(store.lookup_order(&nonce.0).unwrap().is_none(), "the admitted order is consumed");
+    let rows = store.list_scope_runs(&commission.0).expect("list");
+    let verdict = rows.iter().find(|row| row.kind == "verdict" && row.ordinal == opened.ordinal);
+    let verdict = verdict.expect("the verdict is readable off the run's ordinal");
+    assert_eq!(verdict.verdict.as_deref(), Some("VerificationPassed"));
 }
 
 // Tripwire: the attempt-artifact name codec round-trips (#3505). The wrapper
@@ -1612,17 +1633,7 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
             nonce: nonce.clone(),
             artifact_id: 1,
             size_bytes: 10,
-            candidate: None,
-            findings: None,
-            failed_verifiers: VerifyFailureSet::EMPTY,
-            cost: None,
-            calls: None,
-            session_reuse_arm: None,
-            session_reuse_saved_micro_usd: None,
-            peak_resident_bytes: None,
-            violating_paths: Vec::new(),
-            surface_request: None,
-            suppression_requests: Vec::new(),
+            observation: LaneObservation::default(),
         };
 
         let decoded = claims.claim_for(&reference).expect("a well-formed attempt name decodes");
@@ -1630,7 +1641,7 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
         assert_eq!(decoded.subject, subject);
         assert_eq!(decoded.verdict, verdict);
         assert_eq!(decoded.detail, detail);
-        assert!(decoded.failed_verifiers.is_empty());
+        assert!(decoded.observation.failed_verifiers.is_empty());
     }
 
     let nonce = Nonce("dispatch-mask".to_owned());
@@ -1649,28 +1660,24 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
         nonce,
         artifact_id: 3,
         size_bytes: 10,
-        candidate: None,
-        findings: None,
-        failed_verifiers: failures,
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation { failed_verifiers: failures, ..Default::default() },
     };
-    assert_eq!(claims.claim_for(&reference).expect("typed mask decodes").failed_verifiers, failures);
+    assert_eq!(claims.claim_for(&reference).expect("typed mask decodes").observation.failed_verifiers, failures);
 
     // `0080` is the eighth identity's mask (ADR-0181), so it is a well-formed
     // token that must decode rather than be refused. Both projections carry it,
     // so a decode that dropped bit 7 could not hide behind the agreement check
     // below.
     let suppressed = VerifyFailureSet::one(VerifyFailure::Suppress);
-    let eighth =
-        EvidenceRef { name: name.replacen(".000a.", ".0080.", 1), failed_verifiers: suppressed, ..reference.clone() };
-    assert_eq!(claims.claim_for(&eighth).expect("the eighth identity's mask decodes").failed_verifiers, suppressed);
+    let eighth = EvidenceRef {
+        name: name.replacen(".000a.", ".0080.", 1),
+        observation: LaneObservation { failed_verifiers: suppressed, ..reference.observation.clone() },
+        ..reference.clone()
+    };
+    assert_eq!(
+        claims.claim_for(&eighth).expect("the eighth identity's mask decodes").observation.failed_verifiers,
+        suppressed
+    );
 
     // Tripwire: a malformed mask token must be refused by the name decode itself
     // rather than incidentally by the body/name agreement check. Each case pairs
@@ -1684,7 +1691,7 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
     {
         let malformed = EvidenceRef {
             name: name.replacen(".000a.", &format!(".{malformed_mask}."), 1),
-            failed_verifiers: lax_reading,
+            observation: LaneObservation { failed_verifiers: lax_reading, ..reference.observation.clone() },
             ..reference.clone()
         };
         assert!(claims.claim_for(&malformed).is_none(), "mask `{malformed_mask}` must not become an upload");
@@ -1696,17 +1703,7 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
         nonce: Nonce("dispatch-42".to_owned()),
         artifact_id: 2,
         size_bytes: 3,
-        candidate: None,
-        findings: None,
-        failed_verifiers: VerifyFailureSet::EMPTY,
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation::default(),
     };
     assert!(claims.claim_for(&stray).is_none(), "a non-attempt name yields no claim");
 }
@@ -1735,20 +1732,10 @@ fn a_four_digit_mask_attempt_name_claims_an_upload() {
         nonce: nonce.clone(),
         artifact_id: 4,
         size_bytes: 10,
-        candidate: None,
-        findings: None,
-        failed_verifiers: failures,
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation { failed_verifiers: failures, ..Default::default() },
     };
     let decoded = NameEvidenceClaims.claim_for(&reference).expect("a four-digit mask claims an upload");
-    assert_eq!(decoded.failed_verifiers, failures);
+    assert_eq!(decoded.observation.failed_verifiers, failures);
     assert_eq!(decoded.nonce, nonce);
     assert_eq!(decoded.subject, subject);
 }
@@ -1833,21 +1820,15 @@ fn verify_findings_persist_on_a_failing_verify_and_clear_on_a_pass() {
         subject: candidate,
         verdict,
         detail: Digest::from_bytes([7; 32]),
-        candidate: None,
-        findings: findings.map(str::to_owned),
-        failed_verifiers: if verdict == StageVerdict::VerificationFailed {
-            VerifyFailureSet::one(VerifyFailure::Clippy)
-        } else {
-            VerifyFailureSet::EMPTY
+        observation: LaneObservation {
+            findings: findings.map(str::to_owned),
+            failed_verifiers: if verdict == StageVerdict::VerificationFailed {
+                VerifyFailureSet::one(VerifyFailure::Clippy)
+            } else {
+                VerifyFailureSet::EMPTY
+            },
+            ..Default::default()
         },
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
     };
 
     record_dispatch(&mut store, &dispatch_record("n-f1", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate))
@@ -2016,7 +1997,7 @@ fn second_attempt(
     workpiece: &WorkpieceId,
     scope_revision: Digest,
     nonce: &str,
-    claimed: Option<(Digest, aether_bloomery::StudyCost)>,
+    claimed: Option<(Digest, StudyCost)>,
 ) -> (WorkHandle, SeededClaims) {
     let candidate = Digest::from_bytes([5; 32]);
     let record = dispatch_record(nonce, bloom, workpiece, scope_revision, candidate);
@@ -2028,7 +2009,7 @@ fn second_attempt(
     (handle, seeded_claim(nonce, subject, cost))
 }
 
-fn seeded_claim(nonce: &str, subject: Digest, cost: Option<aether_bloomery::StudyCost>) -> SeededClaims {
+fn seeded_claim(nonce: &str, subject: Digest, cost: Option<StudyCost>) -> SeededClaims {
     let mut claims = HashMap::new();
     claims.insert(
         nonce.to_owned(),
@@ -2037,17 +2018,7 @@ fn seeded_claim(nonce: &str, subject: Digest, cost: Option<aether_bloomery::Stud
             subject,
             verdict: StageVerdict::VerificationPassed,
             detail: Digest::from_bytes([7; 32]),
-            candidate: None,
-            findings: None,
-            failed_verifiers: VerifyFailureSet::EMPTY,
-            cost,
-            calls: None,
-            session_reuse_arm: None,
-            session_reuse_saved_micro_usd: None,
-            peak_resident_bytes: None,
-            violating_paths: Vec::new(),
-            surface_request: None,
-            suppression_requests: Vec::new(),
+            observation: LaneObservation { cost, ..Default::default() },
         },
     );
     SeededClaims(claims)
@@ -2090,7 +2061,7 @@ fn composition_reweaving(
         aether_bloomery::StageProgress {
             stage: StageId::Refine,
             attempts: attempt,
-            candidate: Some(aether_bloomery::CandidateRef { tree: weave, checkout: weave }),
+            candidate: Some(CandidateRef { tree: weave, checkout: weave }),
             repair_rolls: 0,
             seen_verify_failures: VerifyFailureSet::EMPTY,
             fold_checkpoint: None,
@@ -2127,20 +2098,10 @@ fn repair_upload(nonce: &str, subject: Digest) -> UploadedEvidence {
         subject,
         verdict: StageVerdict::VerificationPassed,
         detail: Digest::from_bytes([7; 32]),
-        candidate: Some(aether_bloomery::CandidateRef {
-            tree: Digest::from_bytes([8; 32]),
-            checkout: Digest::from_bytes([9; 32]),
-        }),
-        findings: None,
-        failed_verifiers: VerifyFailureSet::EMPTY,
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation {
+            candidate: Some(CandidateRef { tree: Digest::from_bytes([8; 32]), checkout: Digest::from_bytes([9; 32]) }),
+            ..Default::default()
+        },
     }
 }
 
@@ -2378,17 +2339,7 @@ fn a_passing_review_carrying_advisories_is_kinded_as_one() {
             subject: tree,
             verdict: StageVerdict::Approved,
             detail: Digest::from_bytes([9; 32]),
-            candidate: None,
-            findings: findings.map(str::to_owned),
-            failed_verifiers: VerifyFailureSet::EMPTY,
-            cost: None,
-            calls: None,
-            session_reuse_arm: None,
-            session_reuse_saved_micro_usd: None,
-            peak_resident_bytes: None,
-            violating_paths: Vec::new(),
-            surface_request: None,
-            suppression_requests: Vec::new(),
+            observation: LaneObservation { findings: findings.map(str::to_owned), ..Default::default() },
         };
         let AdmitDecision::Admitted(admission) = admit_uploaded(store, &upload).unwrap() else {
             panic!("a matching passing aggregate verdict is admitted");

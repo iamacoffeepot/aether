@@ -208,6 +208,12 @@ pub struct LaneRun {
     pub diff_base: Option<String>,
     /// The advisory work order (`--task`), when one was threaded.
     pub task: Option<String>,
+    /// The directory this run was standing in — the checkout the coordinator
+    /// spawned it in, which is the one fact a scenario cannot recover any other
+    /// way (#5425). `#[serde(default)]` so a ledger written before the field
+    /// still reads.
+    #[serde(default)]
+    pub worktree: Option<String>,
 }
 
 /// Append `run` to the ledger in `dir`.
@@ -295,6 +301,7 @@ mod tests {
             subject: None,
             diff_base: None,
             task: None,
+            worktree: None,
         };
 
         append_run(dir.path(), &run("verify.check", "n-1")).unwrap();

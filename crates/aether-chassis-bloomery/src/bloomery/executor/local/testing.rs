@@ -3,7 +3,6 @@
 //! whole seam, without a real repo or Claude credential. Shared by this module's
 //! unit tests and the executor-reactor runtime test.
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -46,12 +45,6 @@ pub struct FixedRunner {
     /// subject from, recorded so a test can assert the lane's own message
     /// reached the capture rather than the flat literal.
     pub captured_messages: Arc<Mutex<Vec<Option<String>>>>,
-    /// Direct parents `checkout_parents` reports for a checkout hex. A missing
-    /// key is an empty parent list — the same answer as the trait default.
-    pub parents: HashMap<String, Vec<String>>,
-    /// When set, `checkout_parents` fails rather than returning a list — the
-    /// fixture for a checkout the production adapter cannot inspect.
-    pub fail_parents: bool,
 }
 
 impl FixedRunner {
@@ -61,14 +54,7 @@ impl FixedRunner {
     /// capture.
     #[must_use]
     pub fn new(evidence: &str, lifecycle: RunLifecycle, captures: bool) -> Self {
-        Self {
-            evidence: evidence.to_owned(),
-            lifecycle,
-            captures,
-            captured_messages: Arc::new(Mutex::new(Vec::new())),
-            parents: HashMap::new(),
-            fail_parents: false,
-        }
+        Self { evidence: evidence.to_owned(), lifecycle, captures, captured_messages: Arc::new(Mutex::new(Vec::new())) }
     }
 }
 
@@ -96,13 +82,6 @@ impl TransformRunner for FixedRunner {
     ) -> Result<Option<CapturedObjects>, LocalExecutorError> {
         self.captured_messages.lock().unwrap_or_else(PoisonError::into_inner).push(message.map(str::to_owned));
         Ok(self.captures.then(canned_capture))
-    }
-
-    fn checkout_parents(&self, checkout_hex: &str) -> Result<Vec<String>, LocalExecutorError> {
-        if self.fail_parents {
-            return Err(LocalExecutorError::Worktree("checkout parents unreadable".to_owned()));
-        }
-        Ok(self.parents.get(checkout_hex).cloned().unwrap_or_default())
     }
 }
 

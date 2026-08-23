@@ -14,12 +14,16 @@
 //! carrying only a `GROK_CODE_XAI_API_KEY` both resolve their own credential —
 //! the lane handles no secret, exactly as the Claude arm does not.
 
+use std::env;
+use std::path::Path;
 use std::process::Stdio;
 
 use anyhow::Result;
 
 use crate::transform::TransformArgs;
-use crate::transform::lane::{capture, capture_resumed, resumed_prompt, without_resume, write_prompt};
+use crate::transform::lane::{
+    capture, capture_resumed, export_build_dir, resumed_prompt, without_resume, write_prompt,
+};
 use crate::transform::messages::derive_result_record;
 use crate::transform::peak_memory::PeakMemory;
 use crate::transform::sccache::{self, CompilerCache};
@@ -102,12 +106,34 @@ const DISALLOWED_TOOLS: &[&str] = &[
 /// still a headless single turn, it just starts with the prior conversation in
 /// context. Absent on a cold launch.
 ///
+/// `--cwd` rides the **cold** launch and only the cold launch (#5425). A cold
+/// launch is where a session is born, and where it is born is the one thing
+/// about it that is permanent: Grok stores a session under a percent-encoded
+/// working directory and a resume returns to that directory — measured, it
+/// announces `found locally (originally in …)` and works there — whatever
+/// `--cwd` says. Stating the directory on the birth call is therefore the only
+/// moment it means anything, and passing it on a resume would state something
+/// the harness ignores, which reads as a guarantee this lane cannot make.
+///
+/// The coordinator has already put the child in that directory (the lane runs
+/// with `current_dir` set to `sessions/<slug>/tree`); the flag makes it a
+/// property of the launch rather than an inheritance.
+///
 /// No turn cap rides here: nothing upstream seals one, and a number invented at
 /// the arm would truncate a long repair lap into a `no_result` row.
-fn grok_argv(prompt_file: &str, model: Option<&str>, effort: Option<&str>, resume: Option<&str>) -> Vec<String> {
-    let mut argv = vec![
-        "--prompt-file".to_owned(),
-        prompt_file.to_owned(),
+fn grok_argv(
+    prompt_file: &str,
+    cwd: &Path,
+    model: Option<&str>,
+    effort: Option<&str>,
+    resume: Option<&str>,
+) -> Vec<String> {
+    let mut argv = vec!["--prompt-file".to_owned(), prompt_file.to_owned()];
+    if resume.is_none() {
+        argv.push("--cwd".to_owned());
+        argv.push(cwd.to_string_lossy().into_owned());
+    }
+    argv.extend([
         "--output-format".to_owned(),
         "streaming-messages-json".to_owned(),
         "--permission-mode".to_owned(),
@@ -119,7 +145,7 @@ fn grok_argv(prompt_file: &str, model: Option<&str>, effort: Option<&str>, resum
         "--verbatim".to_owned(),
         "--disallowed-tools".to_owned(),
         DISALLOWED_TOOLS.join(","),
-    ];
+    ]);
     if let Some(model) = model {
         argv.push("--model".to_owned());
         argv.push(model.to_owned());
@@ -178,22 +204,20 @@ fn launch(
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
 ) -> Result<Option<String>> {
-    let prompt_file = write_prompt(&args.out, &resumed_prompt(prompt, args.resume.as_deref()))?;
+    let cwd = env::current_dir()?;
+    let resume = args.resume.as_deref();
+    let prompt_file = write_prompt(&args.out, &resumed_prompt(prompt, resume))?;
     let mut command = peak.command(program);
     command
-        .args(grok_argv(
-            &prompt_file.to_string_lossy(),
-            args.model.as_deref(),
-            args.effort.as_deref(),
-            args.resume.as_deref(),
-        ))
+        .args(grok_argv(&prompt_file.to_string_lossy(), &cwd, args.model.as_deref(), args.effort.as_deref(), resume))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     scratch.export(&mut command);
     sccache::export(cache, &mut command);
+    export_build_dir(&mut command);
 
-    if args.resume.is_some() {
+    if resume.is_some() {
         return capture_resumed(command, &args.out, GROK, peak);
     }
     capture(command, &args.out, GROK, peak).map(Some)
@@ -202,6 +226,7 @@ fn launch(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::Path;
 
     use super::{DISALLOWED_TOOLS, grok_argv, grok_effort, run_at};
     use crate::transform::TransformArgs;
@@ -214,7 +239,20 @@ mod tests {
 
     #[test]
     fn argv_runs_headless_and_carries_the_resolved_profile() {
-        let argv = grok_argv("/run/prompt.md", Some("grok-4.6"), Some("high"), None);
+        let argv = grok_argv(
+            "/run/prompt.md",
+            Path::new("/runs/sessions/s-dispatch-1/tree"),
+            Some("grok-4.6"),
+            Some("high"),
+            None,
+        );
+        // Tripwire (#5425): a cold launch states the directory the session is
+        // being born in, because where it is born is the one thing about it
+        // that is permanent.
+        assert!(
+            argv.windows(2).any(|w| w == ["--cwd", "/runs/sessions/s-dispatch-1/tree"]),
+            "a cold launch names the directory its session is born in",
+        );
         assert!(
             argv.windows(2).any(|w| w == ["--prompt-file", "/run/prompt.md"]),
             "the prompt is read from the file, never handed to argv",
@@ -248,7 +286,7 @@ mod tests {
 
     #[test]
     fn argv_omits_the_profile_flags_when_none_falls_back_to_ambient() {
-        let argv = grok_argv("/run/prompt.md", None, None, None);
+        let argv = grok_argv("/run/prompt.md", Path::new("/runs/sessions/s-dispatch-1/tree"), None, None, None);
         assert!(!argv.iter().any(|flag| flag == "--model"), "no resolved model means the operator's default");
         assert!(!argv.iter().any(|flag| flag == "--reasoning-effort"), "no resolved effort means the same");
         assert!(argv.windows(2).any(|w| w == ["--prompt-file", "/run/prompt.md"]), "still headless");
@@ -261,11 +299,21 @@ mod tests {
     // candidate rather than as a broken invocation.
     #[test]
     fn argv_threads_the_resume_handle_alongside_the_prompt_file() {
-        let argv = grok_argv("/run/prompt.md", Some("grok-4.6"), Some("high"), Some("sess-1"));
+        let argv = grok_argv(
+            "/run/prompt.md",
+            Path::new("/runs/sessions/s-dispatch-1/tree"),
+            Some("grok-4.6"),
+            Some("high"),
+            Some("sess-1"),
+        );
         assert!(argv.windows(2).any(|w| w == ["--resume", "sess-1"]), "the handle follows its flag");
         assert!(argv.windows(2).any(|w| w == ["--prompt-file", "/run/prompt.md"]), "a resumed lap still has a turn");
         // Tripwire: an argv without `--verbatim` is delivered as an excerpt plus a self-read.
         assert!(argv.contains(&"--verbatim".to_owned()));
+        // Tripwire (#5425): a resumed lap states no directory. Grok resumes in
+        // the directory the session was born in whatever `--cwd` says — measured
+        // — so naming one here would state a guarantee this lane cannot make.
+        assert!(!argv.iter().any(|flag| flag == "--cwd"), "a resumed lap names no working directory");
     }
 
     // Tripwire: `search_tool` and `use_tool` are the MCP bridge; denying them

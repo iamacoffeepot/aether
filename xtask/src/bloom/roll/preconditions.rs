@@ -13,17 +13,19 @@ use anyhow::{Result, bail};
 
 use super::MAIN;
 use super::day::Day;
-use super::shell::{Shell, checked};
+use super::shell::{Repo, Shell};
 use crate::bloom::dto::ViewDocument;
 
 /// Refuse unless every precondition of the day roll holds.
-pub fn screen(view: &ViewDocument, shell: &impl Shell, day: &Day, remote: &str) -> Result<()> {
-    if let Some(notice) = unwritable_replica(shell, remote)? {
+pub fn screen(view: &ViewDocument, shell: &impl Shell, repo: &Repo, day: &Day, remote: &str) -> Result<()> {
+    if let Some(notice) = unwritable_replica(shell, repo, remote)? {
         println!("{notice}");
     }
 
-    let refusals: Vec<String> =
-        [undrained(view), dirty_tree(shell)?, already_cut(shell, day, remote)?].into_iter().flatten().collect();
+    let refusals: Vec<String> = [undrained(view), dirty_tree(shell, repo)?, already_cut(shell, repo, day, remote)?]
+        .into_iter()
+        .flatten()
+        .collect();
     if refusals.is_empty() {
         return Ok(());
     }
@@ -45,17 +47,23 @@ fn undrained(view: &ViewDocument) -> Option<String> {
 
 /// A dirty working tree, which the cut would carry into tomorrow's branch or
 /// lose to a checkout.
-fn dirty_tree(shell: &impl Shell) -> Result<Option<String>> {
-    let porcelain = checked(shell, "git", PORCELAIN_STATUS)?;
+fn dirty_tree(shell: &impl Shell, repo: &Repo) -> Result<Option<String>> {
+    // A bare fleet repository has no working tree to be dirty, and every ref the
+    // roll writes is written without one.
+    if repo.checked(shell, &["rev-parse", "--is-bare-repository"])? == "true" {
+        return Ok(None);
+    }
+
+    let porcelain = repo.checked(shell, PORCELAIN_STATUS)?;
     let entries = command::split_nul(&porcelain);
     Ok((!entries.is_empty()).then(|| format!("the working tree is dirty:\n      {}", entries.join("\n      "))))
 }
 
 /// Tomorrow's branch already on the remote, which means this day was rolled
 /// already and a second roll would push onto someone else's cut.
-fn already_cut(shell: &impl Shell, day: &Day, remote: &str) -> Result<Option<String>> {
+fn already_cut(shell: &impl Shell, repo: &Repo, day: &Day, remote: &str) -> Result<Option<String>> {
     let branch = day.branch();
-    let listed = checked(shell, "git", &["ls-remote", "--heads", remote, &branch])?;
+    let listed = repo.checked(shell, &["ls-remote", "--heads", remote, &branch])?;
     Ok((!listed.is_empty()).then(|| format!("{branch} already exists on {remote}")))
 }
 
@@ -63,8 +71,8 @@ fn already_cut(shell: &impl Shell, day: &Day, remote: &str) -> Result<Option<Str
 /// refusal — ADR-0203 makes GitHub an output of the roll, never a gate — but an
 /// operator should learn the mirror will lag here, before the advance runs,
 /// rather than from a line in the middle of the log.
-fn unwritable_replica(shell: &impl Shell, remote: &str) -> Result<Option<String>> {
-    let run = shell.capture("git", &["push", "--dry-run", remote, MAIN])?;
+fn unwritable_replica(shell: &impl Shell, repo: &Repo, remote: &str) -> Result<Option<String>> {
+    let run = repo.capture(shell, &["push", "--dry-run", remote, MAIN])?;
     Ok((!run.success).then(|| {
         let reason = if run.stderr.is_empty() {
             &run.stdout
@@ -82,6 +90,7 @@ mod tests {
     use super::screen;
     use crate::bloom::dto::{BloomView, DigestHex, MemberView, ViewDocument};
     use crate::bloom::roll::day::Day;
+    use crate::bloom::roll::shell::Repo;
     use crate::bloom::roll::shell::Run;
     use crate::bloom::roll::shell::fake::Fake;
 
@@ -101,6 +110,7 @@ mod tests {
                         scope_revision: DigestHex::from_bytes([7; 32]),
                         awaiting_surface: None,
                         withdrawn: None,
+                        cursor: None,
                     }],
                 })
                 .collect(),
@@ -111,11 +121,15 @@ mod tests {
         Day::parse("2026-08-15").expect("a well-formed day")
     }
 
+    fn repo() -> Repo {
+        Repo::new("/mnt/dev/bloomery/fleet.git")
+    }
+
     #[test]
     fn a_drained_day_with_a_clean_tree_passes_the_screen() {
         let shell = Fake::new(|_| Run::ok(""));
 
-        screen(&view(&[BloomStatus::Landed, BloomStatus::Superseded]), &shell, &day(), "origin")
+        screen(&view(&[BloomStatus::Landed, BloomStatus::Superseded]), &shell, &repo(), &day(), "origin")
             .expect("a drained day rolls");
     }
 
@@ -126,12 +140,12 @@ mod tests {
     #[test]
     fn every_failing_precondition_is_named_at_once() {
         let shell = Fake::new(|line| match line {
-            line if line.starts_with("git status") => Run::ok(" M crates/aether-bloomery/src/lib.rs"),
-            line if line.starts_with("git ls-remote") => Run::ok("cafe\trefs/heads/bloomery/daily/2026-08-15"),
+            line if line.contains(" status ") => Run::ok(" M crates/aether-bloomery/src/lib.rs"),
+            line if line.contains(" ls-remote ") => Run::ok("cafe\trefs/heads/bloomery/daily/2026-08-15"),
             _ => Run::ok(""),
         });
 
-        let refusal = screen(&view(&[BloomStatus::Sealed, BloomStatus::Resolved]), &shell, &day(), "origin")
+        let refusal = screen(&view(&[BloomStatus::Sealed, BloomStatus::Resolved]), &shell, &repo(), &day(), "origin")
             .expect_err("an undrained, dirty, already-cut day is refused")
             .to_string();
 

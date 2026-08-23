@@ -6,9 +6,9 @@ use std::fs;
 
 use anyhow::{Context, Result, bail};
 
-use aether_bloomery::split_lane_identity;
+use aether_bloomery::{SCOPE_FILL_COMMAND, split_lane_identity};
 
-use crate::transform::lane::{execute, resume_handle_rejected, resumed_prompt, without_resume};
+use crate::transform::lane::{execute, export_build_dir, resume_handle_rejected, resumed_prompt, without_resume};
 use crate::transform::messages::derive_result_record;
 use crate::transform::peak_memory::PeakMemory;
 use crate::transform::review::REVIEW_CRITIC;
@@ -30,10 +30,15 @@ const CONSTRUCT_SETTINGS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/trans
 /// (#5172). Same argv shape as construct; no Edit, Write, or cargo.
 const REVIEW_SETTINGS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/transform/claude-review.settings.json");
 
+/// Absolute path to the scoping lane's read-only Claude permission policy.
+/// Same git reads the other two share, plus the setter; no Edit.
+const SCOPE_SETTINGS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/transform/claude-scope.settings.json");
+
 // Compile-time presence: a missing policy is a build error, not a headless
 // session that cannot write.
 const _: &str = include_str!("claude-construct.settings.json");
 const _: &str = include_str!("claude-review.settings.json");
+const _: &str = include_str!("claude-scope.settings.json");
 
 /// The headless-Claude argv the `construct.implement` lane runs (#3511): `-p`
 /// non-interactive, emitting the stream-json transcript the in-repo
@@ -52,6 +57,13 @@ fn construct_argv(model: Option<&str>, effort: Option<&str>, resume: Option<&str
 /// the blanket write gate; it must not keep it.
 fn review_argv(model: Option<&str>, effort: Option<&str>, resume: Option<&str>) -> Vec<String> {
     claude_argv(model, effort, resume, REVIEW_SETTINGS)
+}
+
+/// The scoping lane's argv: read-only over the tree plus the setter. A
+/// non-interactive session denies every unlisted tool, so a missing setter
+/// rule ends the run with nothing written (#4874).
+fn scope_argv(model: Option<&str>, effort: Option<&str>, resume: Option<&str>) -> Vec<String> {
+    claude_argv(model, effort, resume, SCOPE_SETTINGS)
 }
 
 /// Shared headless-Claude argv. `--settings` is the write gate: the named
@@ -199,6 +211,8 @@ fn run_headless_claude_at(
     let mut claude = peak.command(program);
     let mut flags = if args.command == REVIEW_CRITIC {
         review_argv(args.model.as_deref(), args.effort.as_deref(), args.resume.as_deref())
+    } else if args.command == SCOPE_FILL_COMMAND {
+        scope_argv(args.model.as_deref(), args.effort.as_deref(), args.resume.as_deref())
     } else {
         construct_argv(args.model.as_deref(), args.effort.as_deref(), args.resume.as_deref())
     };
@@ -211,6 +225,7 @@ fn run_headless_claude_at(
     claude.args(flags);
     scratch.export(&mut claude);
     sccache::export(cache, &mut claude);
+    export_build_dir(&mut claude);
     // Piped stdin + streamed stdout share the lane primitive: the child is
     // reaped before any pipe-thread error returns, and a nonzero exit keeps
     // precedence over a broken prompt pipe.
@@ -253,7 +268,10 @@ mod tests {
     use std::str;
     use std::{env, fs, process};
 
-    use super::{CONSTRUCT_SETTINGS, REVIEW_SETTINGS, construct_argv, review_argv, run_headless_claude_at, tail};
+    use super::{
+        CONSTRUCT_SETTINGS, REVIEW_SETTINGS, SCOPE_SETTINGS, construct_argv, review_argv, run_headless_claude_at,
+        scope_argv, tail,
+    };
     use crate::transform::TransformArgs;
     use crate::transform::construct::CONSTRUCT_IMPLEMENT;
     use crate::transform::harness_stub::{self, Stub};
@@ -320,16 +338,34 @@ mod tests {
     fn construct_settings_allow_worktree_writes_and_review_settings_do_not() {
         let construct = settings_allow(include_str!("claude-construct.settings.json"));
         let review = settings_allow(include_str!("claude-review.settings.json"));
+        let scope = settings_allow(include_str!("claude-scope.settings.json"));
         for rule in ["Edit(./**)", "Bash(cargo:*)"] {
             assert!(construct.iter().any(|entry| entry == rule), "construct must allow {rule}");
             assert!(review.iter().all(|entry| entry != rule), "review must not allow {rule}");
+            assert!(scope.iter().all(|entry| entry != rule), "scope must not allow {rule}");
         }
+        assert!(scope.iter().any(|entry| entry == "Bash(cargo xtask scope set:*)"), "scope must allow the setter");
         // Claude's file-permission check only matches Edit(path); a Write(...)
         // rule is ignored and warns on every launch. Edit(./**) is the write
         // gate for both the Edit and Write tools.
         assert!(
             construct.iter().all(|entry| !entry.starts_with("Write(")),
             "Write(...) rules are not file-permission checks; Edit(./**) covers both tools"
+        );
+        assert!(
+            scope.iter().all(|entry| !entry.starts_with("Edit(") && !entry.starts_with("Write(")),
+            "the scoping lane's contract is that it edits nothing"
+        );
+    }
+
+    #[test]
+    fn scope_argv_pins_the_setter_policy_and_not_the_write_gate() {
+        let argv = scope_argv(Some("claude-opus-4-8"), Some("high"), None);
+        let settings_at = argv.iter().position(|a| a == "--settings").expect("scope pins its settings file");
+        assert_eq!(argv[settings_at + 1], SCOPE_SETTINGS, "the scoper rides the setter policy, not construct's");
+        assert!(
+            !argv.iter().any(|a| a == "--dangerously-skip-permissions"),
+            "the scoper must not inherit the blanket bypass"
         );
     }
 
