@@ -12,10 +12,10 @@ use serde::{Deserialize, Serialize};
 use super::decisions_v1::DecisionsV1;
 use super::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,
-    AggregateVerifyError, AttemptCompletedError, Decision, FoldConflictError, GrantAttemptsError, HostFaultError,
-    IntegrateError, LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError,
-    OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ResolveError, SealError, SpliceError,
-    SupersedeError, SuppressionDispositionError, SurfaceRequestedError, VerifyFailedError, WithdrawError,
+    AggregateVerifyError, AttemptCompletedError, ConflictAttributedError, Decision, FoldConflictError,
+    GrantAttemptsError, HostFaultError, IntegrateError, LandError, LandingRejectedError, LeaseObservationError,
+    MemberExecutorFaultError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ResolveError, SealError,
+    SpliceError, SupersedeError, SuppressionDispositionError, SurfaceRequestedError, VerifyFailedError, WithdrawError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -796,6 +796,43 @@ pub enum Outcome {
         /// The verifier identities that failed together.
         failed: VerifyFailureSet,
     },
+    /// A failing fold was attributed to two candidates and the synthetic
+    /// subject that repairs their coexistence was minted (ADR-0210). Appended
+    /// so every prior outcome keeps its wire discriminant.
+    ConflictMinted {
+        /// The bloom whose fold refused.
+        bloom: BloomId,
+        /// The minted subject.
+        workpiece: WorkpieceId,
+        /// Its two parents, in canonical id order.
+        parents: Vec<WorkpieceId>,
+        /// The union of the parents' declared surfaces — what its repair may
+        /// edit, recorded here because it is derived rather than sealed and so
+        /// has to be readable after the fact.
+        bound: Vec<String>,
+        /// Which repair lap this is.
+        attempt: u32,
+    },
+    /// A second verdict refused a fold a conflict workpiece is already
+    /// repairing. The verdict is filed; no second lane is bought.
+    ConflictRepairInFlight {
+        /// The bloom.
+        bloom: BloomId,
+        /// The subject already repairing that tree.
+        workpiece: WorkpieceId,
+    },
+    /// A conflict workpiece exhausted its repair budget. Both intents could not
+    /// be made to coexist inside the laps the catalog allows.
+    ConflictWedged {
+        /// The bloom.
+        bloom: BloomId,
+        /// The wedged subject.
+        workpiece: WorkpieceId,
+        /// The verdict that spent the last lap.
+        question: Digest,
+    },
+    /// An attribution of a failing fold was refused.
+    ConflictRejected(ConflictAttributedError),
 }
 
 impl Outcome {

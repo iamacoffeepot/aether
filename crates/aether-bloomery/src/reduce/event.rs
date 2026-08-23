@@ -10,9 +10,9 @@ use super::gate::RecordedRefusal;
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
-    Adjudication, BloomSpec, CandidateRef, ConfigRegistry, Evidence, MemberDependency, OperatorHold, OperatorRepair,
-    OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim, Statement, SuppressionDisposition,
-    SurfaceRequest, VerifyFailureSet, Withdrawal,
+    Adjudication, BloomSpec, CandidateRef, ConfigRegistry, ConflictAttribution, Evidence, MemberDependency,
+    OperatorHold, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim, Statement,
+    SuppressionDisposition, SurfaceRequest, VerifyFailureSet, Withdrawal,
 };
 
 /// An admitted fact plus its idempotency key (ADR-0149 §The control core).
@@ -751,6 +751,34 @@ pub enum Fact {
         evidence: Evidence,
         /// The verifier identities that failed together. Empty on a pass.
         failed: VerifyFailureSet,
+    },
+    /// The host attributed a failing fold to the two candidates that collide
+    /// on it (ADR-0210).
+    ///
+    /// The classification is the host's because the inputs are: the failing
+    /// diagnostic's paths and each candidate's diff against the sealed base
+    /// live in the checkout, not in the journal. What the reducer does with it
+    /// is the decision — mint the synthetic subject, and leave the member whose
+    /// Verify happened to produce the verdict exactly where it was.
+    ///
+    /// Appended past [`Fact::BaseVerifyCompleted`] so every prior fact keeps its
+    /// wire discriminant.
+    ConflictAttributed {
+        /// The bloom whose fold refused.
+        bloom: BloomId,
+        /// The member whose Verify produced the verdict. Named so the reducer
+        /// can prove it is untouched, and so an operator reading the journal
+        /// can see which lane paid for discovering the collision.
+        verified: WorkpieceId,
+        /// The refused tree — the conflict workpiece's subject.
+        tree: Digest,
+        /// The commit carrying that tree, which the repair checks out.
+        head: Digest,
+        /// The refusing verdict.
+        evidence: Evidence,
+        /// The two parents, the diagnostic paths, and the union bound, already
+        /// through [`attribute_conflict`](crate::attribute_conflict).
+        attribution: ConflictAttribution,
     },
 }
 

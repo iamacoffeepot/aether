@@ -157,6 +157,49 @@ pub struct BloomView {
     /// field still decodes.
     #[serde(default)]
     pub leases: Vec<LeaseView>,
+    /// Every fold collision this bloom has minted a conflict workpiece for
+    /// (ADR-0210), in minted-subject order. Empty for a bloom whose members
+    /// have never collided.
+    ///
+    /// Bloom-level rather than hung off either parent, because the whole point
+    /// of the subject is that the collision belongs to neither of them. This is
+    /// also the only place the derived bound is readable, so "what was that
+    /// repair allowed to touch, and on whose approval" has an answer without
+    /// opening the journal. Trailing and `#[serde(default)]` so a reader that
+    /// predates the field still decodes.
+    #[serde(default)]
+    pub conflicts: Vec<ConflictView>,
+}
+
+/// One fold collision's outward line (ADR-0210): the synthetic subject
+/// repairing it, the two parents that caused it, the paths the diagnostic
+/// named, the bound the repair runs under, and where that repair stands.
+///
+/// Every field serializes in declaration order even when it is `None` or
+/// empty, for the reason [`CompositionView`] states: `aether_data::wire`
+/// encodes structs positionally, so omitting a slot shifts the next value's
+/// bytes into it.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ConflictView {
+    /// The minted subject.
+    pub workpiece: WorkpieceId,
+    /// Its two parents, in canonical id order — the answer to "who caused
+    /// this", which is the question a member-shaped attribution could not
+    /// answer honestly.
+    pub parents: Vec<WorkpieceId>,
+    /// The diagnostic paths the collision was read off.
+    pub paths: Vec<String>,
+    /// The union of the parents' declared surfaces: what the repair may edit.
+    /// Derived, never signed — every glob in it is a surface one parent's own
+    /// approval already carries.
+    pub bound: Vec<String>,
+    /// Where the repair stands, once it has been dispatched.
+    #[serde(default)]
+    pub cursor: Option<CompositionCursorView>,
+    /// Why the repair stopped, once it has wedged — both intents could not be
+    /// made to coexist inside the laps the catalog allows.
+    #[serde(default)]
+    pub wedge: Option<Wedge>,
 }
 
 /// One held write lease, rendered with everything ADR-0198 asks a lease

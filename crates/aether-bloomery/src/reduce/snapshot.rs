@@ -17,9 +17,9 @@ use super::{Decision, Decisions, Event, Fact, Outcome};
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
-    Adjudication, BaseReceipt, BloomSpec, CandidateRef, CompositionFinding, ConfigScopes, DispatchKey, Evidence,
-    EvidenceKind, MemberDependency, OperatorHold, OperatorRepair, OrphanClaimReleaseRecord, ResolutionClaim,
-    ResolvedConfigs, SpendQuiesce, StageCatalog, SuppressionDisposition, SurfaceRequest, VerifiedTree,
+    Adjudication, BaseReceipt, BloomSpec, CandidateRef, CompositionFinding, ConfigScopes, ConflictAttribution,
+    DispatchKey, Evidence, EvidenceKind, MemberDependency, OperatorHold, OperatorRepair, OrphanClaimReleaseRecord,
+    ResolutionClaim, ResolvedConfigs, SpendQuiesce, StageCatalog, SuppressionDisposition, SurfaceRequest, VerifiedTree,
     VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Withdrawal,
 };
 // Only [`Snapshot::with_green_base`] names it, and that door is behind the same cfg.
@@ -120,6 +120,19 @@ pub struct Snapshot {
     /// frozen graph. `#[serde(default)]` is the `member_parks` precedent.
     #[serde(default)]
     pub surface_requests: BTreeMap<BloomId, BTreeMap<WorkpieceId, AwaitingSurface>>,
+    /// The fold collisions a bloom has minted a conflict workpiece for
+    /// (ADR-0210), keyed by bloom then by the minted subject.
+    ///
+    /// The bound is derived from the parents' surfaces rather than sealed
+    /// anywhere, so this table is the only durable record of what a repair was
+    /// allowed to edit — which is why it is folded rather than recomputed: a
+    /// later re-scope of either parent would otherwise silently rewrite the
+    /// history of a bound that had already been used. Folded from
+    /// [`Fact::ConflictAttributed`] the way a surface request is folded from
+    /// its own fact, so no new [`Decision`] enters the frozen graph.
+    /// `#[serde(default)]` is the `surface_requests` precedent.
+    #[serde(default)]
+    pub conflicts: BTreeMap<BloomId, BTreeMap<WorkpieceId, ConflictAttribution>>,
     /// The per-file write leases a bloom's construct lanes hold (ADR-0204),
     /// keyed by bloom then repository path. Folded from
     /// [`Fact::LaneWritesObserved`] the way a surface request is folded from
@@ -992,6 +1005,7 @@ impl Snapshot {
         next.record_fold_refusal(event, decisions);
         next.record_refusals(decisions);
         next.record_surface_request(event, decisions);
+        next.record_conflict(event, decisions);
         next.record_file_leases(event, decisions);
         next.record_suppression_disposition(event, decisions);
         next
@@ -1176,6 +1190,30 @@ impl Snapshot {
             }
             _ => {}
         }
+    }
+
+    /// Record a minted conflict workpiece's parents and bound (ADR-0210).
+    ///
+    /// Gated on [`Outcome::ConflictMinted`] so a refused attribution cannot
+    /// plant a subject the reducer rejected, and keyed by the minted workpiece
+    /// so a bloom holding two collisions at once keeps them apart. A later
+    /// attribution of the same pair replaces the entry: the parents are the
+    /// same by construction, and the bound and paths are the newest reading of
+    /// what the repair is answering.
+    fn record_conflict(&mut self, event: &Event, decisions: &Decisions) {
+        let Fact::ConflictAttributed { bloom, attribution, .. } = &event.fact else {
+            return;
+        };
+        let Outcome::ConflictMinted { workpiece, .. } = &decisions.outcome else {
+            return;
+        };
+        self.conflicts.entry(*bloom).or_default().insert(workpiece.clone(), attribution.clone());
+    }
+
+    /// The collisions `bloom` has minted a subject for, in minted-subject
+    /// order.
+    pub fn conflicts_of(&self, bloom: &BloomId) -> impl Iterator<Item = (&WorkpieceId, &ConflictAttribution)> {
+        self.conflicts.get(bloom).into_iter().flatten()
     }
 
     /// Append a reviewer's answer to the member it answered (ADR-0193).

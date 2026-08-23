@@ -6,9 +6,9 @@ use super::{AwaitingSurface, BloomRecord, BloomStatus, LeaseEviction, Snapshot};
 use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
 use crate::port::{
-    AwaitingSurfaceView, BaseAlertView, BloomView, CompositionCursorView, CompositionView, ExecutorFaultView,
-    HostFaultView, LandingBlock, LeaseEvictionView, LeaseView, MemberView, PendingDecisionView, ReviewParkView,
-    ViewDocument, WedgeCause, WithdrawnView,
+    AwaitingSurfaceView, BaseAlertView, BloomView, CompositionCursorView, CompositionView, ConflictView,
+    ExecutorFaultView, HostFaultView, LandingBlock, LeaseEvictionView, LeaseView, MemberView, PendingDecisionView,
+    ReviewParkView, ViewDocument, WedgeCause, WithdrawnView,
 };
 use crate::values::BaseVerdict;
 use crate::values::{Question, Withdrawal, WithdrawalCause};
@@ -71,6 +71,7 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
                 operator_hold: record.operator_hold.clone(),
                 blocker: snapshot.fold_refusal(&record.spec.id()).cloned(),
                 leases: lease_views(record, snapshot),
+                conflicts: conflict_views(record, snapshot),
             }
         })
         .collect();
@@ -273,6 +274,27 @@ fn composition_view(record: &BloomRecord) -> Option<CompositionView> {
     let wedge = record.wedged.get(&WorkpieceId::composition()).copied();
     let findings = record.open_composition_findings().cloned().collect::<Vec<_>>();
     (cursor.is_some() || wedge.is_some() || !findings.is_empty()).then_some(CompositionView { cursor, wedge, findings })
+}
+
+/// Every collision this bloom minted a subject for, with where that subject
+/// stands now.
+///
+/// Read off the snapshot's own conflict table rather than recomputed from the
+/// parents' current surfaces: the bound a repair actually ran under is history,
+/// and re-deriving it would let a later re-scope rewrite what an operator is
+/// told was authorized.
+fn conflict_views(record: &BloomRecord, snapshot: &Snapshot) -> Vec<ConflictView> {
+    snapshot
+        .conflicts_of(&record.spec.id())
+        .map(|(workpiece, attribution)| ConflictView {
+            workpiece: workpiece.clone(),
+            parents: attribution.parents.clone(),
+            paths: attribution.paths.clone(),
+            bound: attribution.bound.clone(),
+            cursor: stage_cursor(record, workpiece),
+            wedge: record.wedged.get(workpiece).copied(),
+        })
+        .collect()
 }
 
 /// The operator-facing cursor: stage, attempts, candidate. `None` until the
@@ -547,6 +569,7 @@ mod tests {
             operator_hold: None,
             blocker: None,
             leases: Vec::new(),
+            conflicts: Vec::new(),
         }
     }
 
