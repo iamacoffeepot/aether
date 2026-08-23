@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 use aether_actor::Addressable;
 use aether_bloomery::{
     BackendObjectId, BloomDraft, BloomId, BloomSpec, BloomStatus, BloomView, CandidateRef, ConfigKind, ConfigRegistry,
-    Correspondence, Digest, Evidence, EvidenceKind, Fact, MemberDependency, Membership, Outcome, Snapshot,
-    StageCatalog, StageId, VerifyFailureSet, ViewDocument, WorkpieceId,
+    Correspondence, Digest, Evidence, EvidenceKind, Fact, MemberDependency, Membership, Observation, Outcome,
+    Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, Snapshot, StageCatalog, StageId, Statement,
+    VerifyFailureSet, ViewDocument, WorkpieceId,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{GitDataApi, PullRequestApi, candidate_ref_name, landing_branch, short_hex, to_hex};
@@ -26,7 +27,9 @@ use aether_chassis_bloomery::bloomery::{
 use aether_chassis_bloomery::control::ObserveTick;
 use aether_chassis_bloomery::session::SessionConfig;
 use aether_chassis_bloomery::signing::SigningConfig;
-use aether_chassis_bloomery::store::{OutstandingOrder, SqliteCorrespondence, SqliteStore, StoreBackend, StoreConfig};
+use aether_chassis_bloomery::store::{
+    CommissionBackend, OutstandingOrder, RevisionEvidence, SqliteCorrespondence, SqliteStore, StoreBackend, StoreConfig,
+};
 use aether_data::Kind;
 use aether_data::wire::{from_bytes, to_vec};
 use aether_http::HttpServerHandle;
@@ -51,6 +54,10 @@ const QUIESCENCE: Duration = Duration::from_secs(12);
 
 /// Between polls of a forked coordinator's projection.
 const SETTLE_POLL: Duration = Duration::from_millis(250);
+
+/// The file name [`HarnessBuilder::file_approval_policy`] writes the fallback
+/// tier policy under, inside the scratch-worktree base.
+const APPROVAL_POLICY_FILE: &str = "approval-policy.toml";
 
 /// A live scenario: a booted coordinator, the backend it runs against, and the
 /// wire connection that drives and observes it.
@@ -112,9 +119,7 @@ impl ScenarioHarness {
             owned_runs = Some(runs);
         }
 
-        if let Some(script) = &builder.script {
-            script.write_to(Path::new(&worktree_base)).expect("the mock-lane script writes");
-        }
+        stage_scratch_inputs(&builder, &worktree_base);
 
         let repo = match builder.backend {
             Backend::Fixture => None,
@@ -326,6 +331,63 @@ impl ScenarioHarness {
         self.doctor_tick();
         Oracle::check(&self.view(), self.doctor().as_ref(), &self.outstanding())
             .unwrap_or_else(|violation| panic!("{context}{violation}"));
+    }
+
+    /// Author `workpiece`'s commission and freeze one scope revision declaring
+    /// `surface`, returning the revision's digest — the value a member is then
+    /// sealed at.
+    ///
+    /// Most scenarios seal a member at a bare digest, because nothing they
+    /// exercise reads the revision behind it. A scenario about a surface
+    /// *amendment* needs the real record: the grant loads the current revision,
+    /// widens its declared surface, and writes the successor back through the
+    /// same commission store, so a member sealed at a digest no revision stands
+    /// behind can only ever park.
+    ///
+    /// # Panics
+    /// The commission store could not be opened, or the commission and its
+    /// first revision could not be written.
+    #[must_use]
+    pub fn author_scope_revision(&self, workpiece: &str, surface: &[&str]) -> Digest {
+        let mut store = SqliteStore::open(&self.store_path).expect("the commission store opens for writing");
+        let workpiece = WorkpieceId(workpiece.to_owned());
+        let intent = Statement {
+            words: format!("scope {}", workpiece.0).into_bytes(),
+            provenance: Provenance::ObservationAttestation(Observation { source: String::from("bloomery harness") }),
+            parents: Vec::new(),
+        };
+        store.create(&workpiece, &intent).expect("the commission is created");
+
+        let revision = ScopeRevision {
+            schema: SCOPE_REVISION_SCHEMA,
+            workpiece,
+            predecessor: None,
+            problem: String::from("the harness authored this scope"),
+            design: String::new(),
+            plan: String::new(),
+            declared_surface: surface.iter().map(|glob| (*glob).to_owned()).collect(),
+            dogfood_brief: String::new(),
+            routing: ScopeRouting { size: String::from("S"), model: String::new() },
+            dependencies: Vec::new(),
+            description: String::new(),
+            implements: Vec::new(),
+            declared_crates: Vec::new(),
+            declared_reads: Vec::new(),
+        };
+        store.write_revision(&revision, &RevisionEvidence::default()).expect("the scope revision writes")
+    }
+
+    /// The scope revision the commission store holds under `digest`, or `None`
+    /// when it holds none.
+    ///
+    /// # Panics
+    /// The commission store could not be opened or read.
+    #[must_use]
+    pub fn scope_revision(&self, digest: Digest) -> Option<ScopeRevision> {
+        SqliteStore::open(&self.store_path)
+            .expect("the commission store opens for reading")
+            .load_revision(digest)
+            .expect("the commission store reads")
     }
 
     /// Seal a single-member bloom on the observed mainline and return its id.
@@ -656,6 +718,19 @@ impl ScenarioHarness {
     }
 }
 
+/// The files a boot lays down in the scratch-worktree base before the
+/// coordinator reads them: the mock-lane script, and the fallback tier policy
+/// when the cell named one.
+fn stage_scratch_inputs(builder: &HarnessBuilder, worktree_base: &str) {
+    if let Some(script) = &builder.script {
+        script.write_to(Path::new(worktree_base)).expect("the mock-lane script writes");
+    }
+    if let Some(policy) = &builder.file_approval_policy {
+        fs::write(Path::new(worktree_base).join(APPROVAL_POLICY_FILE), policy)
+            .expect("the fallback approval policy writes");
+    }
+}
+
 fn in_process_env(
     builder: &HarnessBuilder,
     store_path: &str,
@@ -674,6 +749,13 @@ fn in_process_env(
 
     let defaults = CoordinatorConfig::default();
     let scripted = builder.lane == Lane::Scripted;
+    // The default is a repository-relative name the test process's cwd does not
+    // hold, which is the honest "this host loaded no fallback" state; a scenario
+    // that wants one names its text and gets the file the boot wrote.
+    let approval_policy_file = match &builder.file_approval_policy {
+        Some(_) => Path::new(worktree_base).join(APPROVAL_POLICY_FILE).to_string_lossy().into_owned(),
+        None => defaults.approval_policy_file.clone(),
+    };
     let coordinator = CoordinatorConfig {
         store_path: store_path.to_owned(),
         artifacts_root: Some(artifacts_root.to_owned()),
@@ -713,6 +795,7 @@ fn in_process_env(
             .authority_path
             .as_ref()
             .map_or(defaults.authority_repo, |path| path.to_string_lossy().into_owned()),
+        approval_policy_file,
         ..defaults
     };
 

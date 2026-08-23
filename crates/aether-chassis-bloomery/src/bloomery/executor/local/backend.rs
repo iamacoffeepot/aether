@@ -42,6 +42,7 @@ use crate::bloomery::CoordinatorConfig;
 use crate::bloomery::KitReport;
 use crate::bloomery::executor::{LaneOccupancy, OutstandingDispatch, ReconcileLanes, ReconcileReport};
 use crate::bloomery::intake::{DispatchRecord, NameEvidenceClaims};
+use crate::bloomery::load_policy;
 use crate::bloomery::triage::MAX_TRIAGED_DIFF_BYTES;
 use crate::bloomery::triage::named_surface;
 use crate::bloomery::verify::{apply_containment, candidate_delta_base, candidate_violations, changed_paths};
@@ -431,6 +432,12 @@ pub struct LocalExecutor {
     // a dispatched lane inherits; a test names a directory of stand-in
     // binaries so a missing-tool refusal does not depend on this host.
     kit_path: Option<OsString>,
+    // The host's file-loaded tier policy — what a bloom that seals none of its
+    // own is gated against, at the seal door and at `grant_surface` alike.
+    // `None` for a backend built without one (the seam tests) and for a host
+    // whose policy file is absent or malformed, which grants nothing rather
+    // than granting against a policy nobody wrote.
+    file_policy: Option<ApprovalPolicy>,
 }
 
 impl LocalExecutor {
@@ -465,6 +472,7 @@ impl LocalExecutor {
             builders,
             kit_gate: false,
             kit_path: None,
+            file_policy: None,
         }
     }
 
@@ -524,6 +532,20 @@ impl LocalExecutor {
         self
     }
 
+    /// Mount the host's file-loaded fallback tier policy — the one a bloom that
+    /// sealed no `aether.bloomery.approval_policy` is gated against.
+    ///
+    /// The seal door loads the same file into the api capability and resolves
+    /// sealed-then-file (`gate_policy`). The surface grant has to resolve it the
+    /// same way or the two doors answer with different policies: a bloom
+    /// admitted under the file policy would then have its auto-tier delta parked
+    /// for a person its own admission already said it did not need.
+    #[must_use]
+    pub fn with_file_policy(mut self, policy: ApprovalPolicy) -> Self {
+        self.file_policy = Some(policy);
+        self
+    }
+
     /// Inspect the lane-host kit on every submit and refuse when a required
     /// tool is missing (#5035). Off by default so seam tests and a mock-lane
     /// program keep dispatching; [`from_config`](Self::from_config) turns it
@@ -579,6 +601,23 @@ impl LocalExecutor {
                     path = %session.store_path(),
                     %error,
                     "local executor backend: session pool unavailable; every lap launches cold",
+                );
+                backend
+            }
+        };
+        // The same file the api capability's pre-seal gate loads, from the same
+        // config knob, so the admission door and the grant door read one policy.
+        // An unreadable or malformed file is not a boot failure: it leaves the
+        // backend fallback-less, and a bloom that sealed no policy of its own
+        // then grants nothing, which is the fail-closed posture the seal door
+        // takes on the same miss.
+        let backend = match load_policy(Path::new(&config.approval_policy_file)) {
+            Ok(policy) => backend.with_file_policy(policy),
+            Err(error) => {
+                tracing::warn!(
+                    path = %config.approval_policy_file,
+                    %error,
+                    "local executor backend: fallback approval policy unavailable; a bloom sealing none grants no surface",
                 );
                 backend
             }
@@ -1816,8 +1855,71 @@ impl LocalExecutor {
         Some(commission?.current?.declared_surface)
     }
 
+    /// The tier policy this grant is judged against: the
+    /// `aether.bloomery.approval_policy` the bloom sealed bloom-wide, and this
+    /// host's file-loaded fallback when it sealed none — the resolution the
+    /// seal door's own `gate_policy` makes.
+    ///
+    /// [`None`] is a refusal whose reason is already in the journal. A sealed
+    /// address whose content cannot be produced never falls through to the
+    /// file: defaulting past a sealed entry would judge against a policy the
+    /// bloom never attested. A host that loaded no fallback grants nothing
+    /// rather than granting against a policy nobody wrote.
+    fn grant_policy(&self, nonce: &str, configs: &ConfigRegistry, store: &mut SqliteStore) -> Option<ApprovalPolicy> {
+        match resolve_config::<ApprovalPolicy>(store, ConfigScopes::bloom_wide(configs)) {
+            Ok(Some(sealed)) => Some(sealed),
+            Ok(None) => {
+                if self.file_policy.is_none() {
+                    tracing::warn!(
+                        target: "aether_chassis_bloomery::executor",
+                        %nonce,
+                        "surface request: the bloom sealed no approval policy and this host loaded no fallback file; parking it for a person",
+                    );
+                }
+                self.file_policy.clone()
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::executor",
+                    %nonce,
+                    %error,
+                    "surface request: the bloom's sealed approval policy is unresolvable; parking it for a person",
+                );
+                None
+            }
+        }
+    }
+
+    /// The revision a surface request amends, or [`None`] with the reason
+    /// journaled — the store failed, or it holds no revision under the digest
+    /// the request named.
+    fn amended_revision(nonce: &str, revision: Digest, store: &mut SqliteStore) -> Option<ScopeRevision> {
+        match store.load_revision(revision) {
+            Ok(Some(current)) => Some(current),
+            Ok(None) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::executor",
+                    %nonce,
+                    revision = %revision.to_hex(),
+                    "surface request: the revision it amends is not in the commission store; parking it for a person",
+                );
+                None
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::executor",
+                    %nonce,
+                    %error,
+                    revision = %revision.to_hex(),
+                    "surface request: the revision it amends is unreadable; parking it for a person",
+                );
+                None
+            }
+        }
+    }
+
     /// Grant a declining lane the surface it asked for, when the whole delta
-    /// resolves `auto` under this bloom's own sealed policy (ADR-0207).
+    /// resolves `auto` under the policy this bloom is gated against (ADR-0207).
     ///
     /// Returns the stored successor revision and the globs it added, or [`None`]
     /// when the estate must ask a person instead. The successor is written and
@@ -1832,13 +1934,43 @@ impl LocalExecutor {
     /// statement this host cannot mint. So the machinery can only ever grant
     /// itself what the owner's policy already marked as needing nobody.
     ///
-    /// A bloom that sealed no approval policy grants nothing. The fallback file
-    /// is the *admission* door's, read at seal time; reaching for it here would
-    /// let a grant resolve against a policy the bloom never attested, which is
-    /// exactly the substitution the sealed registry exists to prevent.
+    /// The policy is resolved exactly as the seal door's own `gate_policy`
+    /// resolves it: the `aether.bloomery.approval_policy` the bloom sealed
+    /// bloom-wide, and this host's file-loaded fallback when it sealed none.
+    /// The two doors have to answer with the same policy — a bloom admitted
+    /// under the file policy and then granted against nothing is a member
+    /// parked for a person its own admission already said it did not need, and
+    /// no real bloom seals a policy, so that fall-through is the ordinary case
+    /// rather than the exotic one. A sealed address whose content cannot be
+    /// produced still refuses rather than falling through: defaulting past a
+    /// sealed entry would grant against a policy the bloom never attested.
+    ///
+    /// A member sealing its own approval policy is refused at the seal door,
+    /// which is the only place that distinction survives — the registry an
+    /// order carries is the member's layered over the bloom's, already
+    /// flattened by the reducer, so there is nothing here to tell one from the
+    /// other.
+    ///
+    /// Every refusal below says so in the journal. A grant that declines
+    /// silently leaves a parked member with a remedy nobody can name, which is
+    /// the same information loss the request itself exists to end.
     fn grant_surface(&self, nonce: &str, request: &SurfaceRequest) -> Option<(Digest, Vec<String>)> {
-        let configs = self.order_configs(nonce)?;
-        let store = self.messages.as_ref()?;
+        let Some(configs) = self.order_configs(nonce) else {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                %nonce,
+                "surface request: the order's configuration registry is unreadable; parking it for a person",
+            );
+            return None;
+        };
+        let Some(store) = self.messages.as_ref() else {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                %nonce,
+                "surface request: this backend mounts no commission store; parking it for a person",
+            );
+            return None;
+        };
 
         // The guard is bound so it drops with this block: the reads below are
         // pure and the writes take the lock again, and holding it across the
@@ -1846,16 +1978,31 @@ impl LocalExecutor {
         // reader's wait.
         let (policy, current) = {
             let mut guard = store.lock().unwrap_or_else(PoisonError::into_inner);
-            let policy =
-                resolve_config::<ApprovalPolicy>(&mut *guard, ConfigScopes::bloom_wide(&configs)).ok().flatten();
-            let current = guard.load_revision(request.scope_revision).ok().flatten();
+            let policy = self.grant_policy(nonce, &configs, &mut guard);
+            let current = Self::amended_revision(nonce, request.scope_revision, &mut guard);
             drop(guard);
-            policy.zip(current)
-        }?;
+            (policy?, current?)
+        };
 
         let requested: Vec<String> = request.paths.iter().map(|entry| entry.path.clone()).collect();
-        let widening = widen(&policy, &current.declared_surface, &requested).ok()?;
+        let widening = match widen(&policy, &current.declared_surface, &requested) {
+            Ok(widening) => widening,
+            Err(glob) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::executor",
+                    %nonce,
+                    %glob,
+                    "surface request: a requested path is outside the declared-surface grammar; parking it for a person",
+                );
+                return None;
+            }
+        };
         if widening.added.is_empty() {
+            tracing::info!(
+                target: "aether_chassis_bloomery::executor",
+                %nonce,
+                "surface request: every requested path is already inside the declared surface; there is nothing to widen",
+            );
             return None;
         }
         let verdict = tier_verdict(&policy, &widening.existing, &widening.added);
@@ -1883,9 +2030,23 @@ impl LocalExecutor {
         };
 
         let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
-        let revision = store.write_revision(&successor, &RevisionEvidence::default()).ok()?;
-        store.insert_approval(&approval, &NoKeys).ok()?;
+        let written = store
+            .write_revision(&successor, &RevisionEvidence::default())
+            .and_then(|revision| store.insert_approval(&approval, &NoKeys).map(|_| revision));
         drop(store);
+        let revision = match written {
+            Ok(revision) => revision,
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::executor",
+                    %nonce,
+                    %error,
+                    added = ?widening.added,
+                    "surface request: the successor revision could not be written and approved; parking it for a person",
+                );
+                return None;
+            }
+        };
 
         tracing::info!(
             target: "aether_chassis_bloomery::executor",

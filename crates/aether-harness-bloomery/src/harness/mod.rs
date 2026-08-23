@@ -163,6 +163,7 @@ pub struct HarnessBuilder {
     wall_clock_secs: Option<u64>,
     heartbeat_silence_secs: Option<u64>,
     script: Option<LaneScript>,
+    file_approval_policy: Option<String>,
     repo: Option<Repo>,
     authority_path: Option<PathBuf>,
     shared_store: Option<String>,
@@ -190,6 +191,7 @@ impl HarnessBuilder {
             wall_clock_secs: None,
             heartbeat_silence_secs: None,
             script: None,
+            file_approval_policy: None,
             repo: None,
             authority_path: None,
             shared_store: None,
@@ -217,6 +219,7 @@ impl HarnessBuilder {
             wall_clock_secs: None,
             heartbeat_silence_secs: None,
             script: Some(script.clone()),
+            file_approval_policy: None,
             repo: None,
             authority_path: None,
             shared_store: None,
@@ -246,6 +249,7 @@ impl HarnessBuilder {
             wall_clock_secs: None,
             heartbeat_silence_secs: None,
             script: Some(LaneScript::all_passing()),
+            file_approval_policy: None,
             repo: None,
             authority_path: Some(repo.path().to_owned()),
             shared_store: None,
@@ -320,6 +324,20 @@ impl HarnessBuilder {
     #[must_use]
     pub fn script(mut self, script: &LaneScript) -> Self {
         self.script = Some(script.clone());
+        self
+    }
+
+    /// The fallback tier policy this coordinator loads, as `approval-policy.toml`
+    /// text (the in-process cell).
+    ///
+    /// The host's file policy is what a bloom that seals no
+    /// `aether.bloomery.approval_policy` of its own is gated against, at the
+    /// seal door and at the machinery's own surface grant alike. A scenario
+    /// about either states the tiers it depends on here rather than inheriting
+    /// whatever policy file the test process happens to be standing next to.
+    #[must_use]
+    pub fn file_approval_policy(mut self, policy: impl Into<String>) -> Self {
+        self.file_approval_policy = Some(policy.into());
         self
     }
 
