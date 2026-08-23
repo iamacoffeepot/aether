@@ -3043,7 +3043,9 @@ assertion `left == right` failed
 error: test run failed
 ";
 
-        let findings = verify_findings(&[member("verify.test", MemberOutcome::Failed, log)]).expect("findings");
+        let findings = verify_findings(&[member("verify.test", MemberOutcome::Failed, log)])
+            .and_then(|channel| channel.text().map(str::to_owned))
+            .expect("findings");
 
         assert!(findings.contains("run `cargo xtask fixtures regen decisions`"));
     }
