@@ -10,7 +10,7 @@ use super::gate::RecordedRefusal;
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
-    Adjudication, BloomSpec, CandidateRef, ConfigRegistry, ConflictAttribution, Evidence, MemberDependency,
+    Adjudication, BloomSpec, CandidateRef, CompositionParents, ConfigRegistry, Evidence, MemberDependency,
     OperatorHold, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim, Statement,
     SuppressionDisposition, SurfaceRequest, VerifyFailureSet, Withdrawal,
 };
@@ -763,7 +763,7 @@ pub enum Fact {
     ///
     /// Appended past [`Fact::BaseVerifyCompleted`] so every prior fact keeps its
     /// wire discriminant.
-    ConflictAttributed {
+    CompositionNarrowed {
         /// The bloom whose fold refused.
         bloom: BloomId,
         /// The member whose Verify produced the verdict. Named so the reducer
@@ -777,8 +777,8 @@ pub enum Fact {
         /// The refusing verdict.
         evidence: Evidence,
         /// The two parents, the diagnostic paths, and the union bound, already
-        /// through [`attribute_conflict`](crate::attribute_conflict).
-        attribution: ConflictAttribution,
+        /// through [`narrow_composition`](crate::narrow_composition).
+        attribution: CompositionParents,
     },
 }
 

@@ -1,6 +1,7 @@
 //! The typed identifiers of the value vocabulary.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
@@ -15,105 +16,103 @@ use crate::digest::Digest;
 pub struct WorkpieceId(pub String);
 
 impl WorkpieceId {
-    /// The reserved id of a bloom's **composition workpiece** (ADR-0191): the
-    /// synthetic subject whose candidate is the weave of every member's
-    /// candidate, and which walks the same line members walk.
+    /// The reserved id of a bloom's **composition over every live member**
+    /// (ADR-0191): the subject whose candidate is the weave of all of them.
     ///
     /// A reserved id rather than a second identifier type, because the whole
-    /// point of ADR-0191 is one ontology: the composition takes a stage cursor
-    /// in [`BloomRecord::progress`](crate::BloomRecord::progress), a wedge in
+    /// point of ADR-0191 is one ontology: a composition takes a stage cursor in
+    /// [`BloomRecord::progress`](crate::BloomRecord::progress), a wedge in
     /// [`BloomRecord::wedged`](crate::BloomRecord::wedged), and a slot in the
     /// dispatch ledger through the same maps a member does, keyed the same way.
     /// It is namespaced so a real workpiece cannot collide with it by accident,
     /// and the seal door refuses a membership that names it anyway
     /// ([`SealError::ReservedWorkpieceId`](crate::SealError::ReservedWorkpieceId)),
-    /// so the collision is a refusal rather than a member silently sharing the
+    /// so the collision is a refusal rather than a member silently sharing a
     /// composition's cursor.
+    ///
+    /// This is the arity-N instance: its parents are every live member, read
+    /// off the bloom rather than carried in the id, because that set changes as
+    /// members withdraw and an id may not.
     pub const COMPOSITION: &'static str = "aether.bloomery.composition";
 
-    /// The composition workpiece's id.
+    /// The whole-bloom composition's id.
     #[must_use]
     pub fn composition() -> Self {
         Self(String::from(Self::COMPOSITION))
     }
 
-    /// Whether this id names the synthetic composition workpiece rather than a
+    /// The separator between an explicit parent list and the composition
+    /// namespace it sits under.
+    const PARENTS_JOIN: char = ':';
+
+    /// The separator between two parent ids inside a composition id.
+    ///
+    /// A character no workpiece id carries, so the parents are recoverable from
+    /// the id by splitting rather than through a side table the journal would
+    /// have to keep in step.
+    const PARENT_JOIN: char = '+';
+
+    /// The composition over an explicit parent set (ADR-0210).
+    ///
+    /// The same subject as [`Self::composition`] at a narrower arity: when the
+    /// whole-bloom weave refuses and the failure is accounted for by a subset of
+    /// the candidates in it, the composition of exactly those candidates is what
+    /// repairs it. One mechanism, parameterized by its parents; the arity is the
+    /// length of the list.
+    ///
+    /// The parents are sorted and deduplicated, so the id names the collision
+    /// rather than the order the coordinator happened to notice it in: whichever
+    /// member was being verified when the fold refused, the same candidates name
+    /// the same subject, and a second refusal lands on the composition already
+    /// repairing it. A parent list that is empty, or that reduces to the whole
+    /// membership, is the caller's business — this only spells the id.
+    #[must_use]
+    pub fn composition_of(parents: &[Self]) -> Self {
+        let mut names: Vec<&str> = parents.iter().map(|parent| parent.0.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+
+        let mut id = String::from(Self::COMPOSITION);
+        id.push(Self::PARENTS_JOIN);
+        for (index, name) in names.iter().enumerate() {
+            if index > 0 {
+                id.push(Self::PARENT_JOIN);
+            }
+            id.push_str(name);
+        }
+        Self(id)
+    }
+
+    /// Whether this id names a composition — at any arity — rather than a
     /// sealed member.
+    ///
+    /// One predicate for both spellings, so every door that already refuses,
+    /// filters, or routes the whole-bloom composition picks up a narrower one
+    /// without a second special case.
     #[must_use]
     pub fn is_composition(&self) -> bool {
         self.0 == Self::COMPOSITION
+            || self.0.strip_prefix(Self::COMPOSITION).is_some_and(|rest| rest.starts_with(Self::PARENTS_JOIN))
     }
 
-    /// The namespace every **conflict workpiece** id sits under (ADR-0210): the
-    /// synthetic subject minted when two resolved candidates that each verified
-    /// green alone refuse to compile together on the fold.
+    /// The parents this id names explicitly, or [`None`] when it names none.
     ///
-    /// A namespace rather than one reserved constant, because a bloom can hold
-    /// more than one such collision at a time and each is a different subject
-    /// with different parents. The composition's reasoning otherwise carries
-    /// over unchanged: a conflict workpiece takes a stage cursor in
-    /// [`BloomRecord::progress`](crate::BloomRecord::progress), a wedge in
-    /// [`BloomRecord::wedged`](crate::BloomRecord::wedged), and a dispatch slot
-    /// through the same maps a member does, and the seal door refuses a
-    /// membership that names one
-    /// ([`SealError::ReservedWorkpieceId`](crate::SealError::ReservedWorkpieceId)).
-    pub const CONFLICT_NAMESPACE: &'static str = "aether.bloomery.conflict:";
-
-    /// The separator between the two parent ids inside a conflict workpiece id.
+    /// [`None`] covers both the whole-bloom composition — whose parents are
+    /// every live member and are read off the bloom — and any id that is not a
+    /// composition at all. A caller that needs the distinction asks
+    /// [`Self::is_composition`] first.
     ///
-    /// A character no workpiece id carries, so the parents are recoverable from
-    /// the id by splitting rather than by a side table the journal would have
-    /// to keep in step.
-    const CONFLICT_JOIN: char = '+';
-
-    /// The conflict workpiece id for one pair of parents.
-    ///
-    /// The pair is sorted, so the id names the collision rather than the order
-    /// the coordinator happened to notice it in: whichever member was being
-    /// verified when the fold refused, the same two candidates mint the same
-    /// subject, and a second refusal of the same pair lands on the workpiece
-    /// that is already repairing it.
+    /// Fails closed on a malformed id: a parent list with an empty entry yields
+    /// [`None`] rather than a half-populated set, because a reader that cannot
+    /// recover every parent cannot report who caused the collision, which is the
+    /// whole reason the id carries them.
     #[must_use]
-    pub fn conflict(first: &Self, second: &Self) -> Self {
-        let (low, high) = if first <= second {
-            (first, second)
-        } else {
-            (second, first)
-        };
-        Self(alloc::format!("{}{}{}{}", Self::CONFLICT_NAMESPACE, low.0, Self::CONFLICT_JOIN, high.0))
-    }
-
-    /// Whether this id names a conflict workpiece rather than a sealed member.
-    #[must_use]
-    pub fn is_conflict(&self) -> bool {
-        self.0.starts_with(Self::CONFLICT_NAMESPACE)
-    }
-
-    /// The two parents a conflict workpiece id names, or [`None`] for any other
-    /// id.
-    ///
-    /// Fails closed on a malformed id — a missing separator, or a parent half
-    /// that is empty — rather than returning a half-populated pair: a reader
-    /// that cannot recover both parents cannot report who caused the collision,
-    /// which is the whole reason the id carries them.
-    #[must_use]
-    pub fn conflict_parents(&self) -> Option<(Self, Self)> {
-        let (first, second) = self.0.strip_prefix(Self::CONFLICT_NAMESPACE)?.split_once(Self::CONFLICT_JOIN)?;
-        if first.is_empty() || second.is_empty() {
+    pub fn composition_parents(&self) -> Option<Vec<Self>> {
+        let listed = self.0.strip_prefix(Self::COMPOSITION)?.strip_prefix(Self::PARENTS_JOIN)?;
+        if listed.is_empty() || listed.split(Self::PARENT_JOIN).any(str::is_empty) {
             return None;
         }
-        Some((Self(String::from(first)), Self(String::from(second))))
-    }
-
-    /// Whether this id names a synthetic subject — the composition or a
-    /// conflict workpiece — rather than a sealed member.
-    ///
-    /// The question every door that refuses a reserved id asks, so both
-    /// namespaces are refused by one call and a later synthetic cannot be added
-    /// to one door and forgotten at another.
-    #[must_use]
-    pub fn is_synthetic(&self) -> bool {
-        self.is_composition() || self.is_conflict()
+        Some(listed.split(Self::PARENT_JOIN).map(|name| Self(String::from(name))).collect())
     }
 }
 

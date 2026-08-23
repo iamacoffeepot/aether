@@ -1,54 +1,54 @@
-//! The conflict workpiece (ADR-0210): the synthetic subject minted when two
-//! candidates that each verified green alone refuse to build together.
+//! Narrowing a composition to the candidates that actually collide (ADR-0210).
 //!
-//! ADR-0191 gave the fold a subject — the composition — for defects discovered
-//! in the woven tree as a whole. A collision between exactly two candidates is
-//! narrower than that and needs a narrower owner: the weave is fine, the two
-//! intents are fine, and only their coexistence is not. Charging it to the
-//! composition would put the whole bloom's tree under repair for a two-file
-//! disagreement; charging it to whichever member happened to be verified on the
-//! fold puts a lane in front of code it never wrote, which is the refusal the
-//! estate spent three hours on.
+//! There is one way candidates are merged: a composition over a parent set. The
+//! bloom's fold is the composition whose parents are every live member; when
+//! that one refuses and the failure is accounted for by a subset of the
+//! candidates in it, the composition of exactly that subset is what repairs it.
+//! Same record, same lane, same bound rule, same session rule — the arity is
+//! what varies.
 //!
-//! So the collision gets its own subject. It takes the same maps a member takes
-//! — a cursor in [`BloomRecord::progress`], a wedge in [`BloomRecord::wedged`],
-//! a dispatch slot — keyed by a [`WorkpieceId::conflict`] id that names both
-//! parents. It has no commission and needs no approval: its bound is the union
-//! of what its two parents were already approved at, so it reaches no path an
-//! approval does not already cover.
+//! Narrowing is what makes the difference worth having. Repairing a two-file
+//! disagreement at arity N puts the whole bloom's tree under one lane and hands
+//! it every member's surface; repairing it at arity two hands one lane exactly
+//! the two candidates that have to coexist and exactly the paths their two
+//! approvals already cover.
 //!
 //! What this deliberately does *not* emit is the point. No cursor move for the
 //! member whose Verify produced the verdict, no revoked resolution, and no
-//! dispatch naming either parent. The parents are finished; the collision is
-//! somebody else's job.
+//! dispatch naming a parent. The parents are finished; making them coexist is
+//! the composition's job, at whatever arity the failure calls for.
 
 use alloc::vec::Vec;
 
 use super::attempt::{DispatchTargets, SealedLine, move_effects_with_candidate};
 use super::composition::composition_progress;
-use super::{BloomRecord, BloomStatus, ConflictAttributedError, Decision, Decisions, Outcome, Snapshot};
+use super::{BloomRecord, BloomStatus, Decision, Decisions, NarrowCompositionError, Outcome, Snapshot};
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::{CandidateRef, ConflictAttribution, Evidence, VerifyFailureSet, Wedge};
+use crate::values::{CandidateRef, CompositionParents, Evidence, VerifyFailureSet, Wedge};
 
-/// The repair allowance one collision gets: the sealed catalog's `Construct`
-/// budget.
+/// The repair allowance a narrowed composition gets: the sealed catalog's
+/// `Construct` budget.
 ///
-/// `Construct` rather than `Refine`, because the conflict workpiece authors a
+/// `Construct` rather than `Refine`, because a narrowed composition authors a
 /// candidate from nothing rather than repairing one of its own — its first lap
-/// is a first attempt at the only thing it will ever do. The composition's
-/// weave repair takes the `Refine` budget for the mirror-image reason.
+/// is a first attempt at the only thing it will ever do. The whole-bloom
+/// composition's weave repair takes the `Refine` budget for the mirror-image
+/// reason: by then it already holds a weave to repair.
 fn repair_budget(record: &BloomRecord) -> u32 {
     record.stage_catalog.retry_budget_of(StageId::Construct).unwrap_or(1)
 }
 
-/// The line a conflict workpiece dispatches under: the bloom's own
-/// configuration and sealed catalog, over the base both parents built onto.
+/// The line a narrowed composition dispatches under: the bloom's own
+/// configuration and sealed catalog, over the base its parents built onto.
+///
+/// The same line `composition_line` gives the whole-bloom instance, for the same
+/// reason — one merge mechanism means one line.
 ///
 /// Bloom-wide rather than layered with either parent's registry. Layering one
 /// parent's would give that parent's model override standing over a subject
 /// whose whole objective is to favour neither.
-fn conflict_line(record: &BloomRecord) -> SealedLine<'_> {
+fn narrowed_line(record: &BloomRecord) -> SealedLine<'_> {
     SealedLine {
         configs: record.spec.configs().clone(),
         catalog: &record.stage_catalog,
@@ -68,41 +68,43 @@ fn conflict_line(record: &BloomRecord) -> SealedLine<'_> {
 /// support it.
 ///
 /// Past the ladder the effects are: the verdict on the journal, then either the
-/// conflict workpiece's cursor move plus its dispatch, or — when its budget is
+/// narrowed composition's cursor move plus its dispatch, or — when its budget is
 /// already spent — its wedge. A second attribution of the same tree onto the
 /// same pair files only the verdict: one refused fold buys one repair lap, and
 /// a second dispatch would set two lanes on one seam.
-pub(super) fn reduce_conflict_attributed(
+pub(super) fn reduce_composition_narrowed(
     snapshot: &Snapshot,
     bloom: &BloomId,
     verified: &WorkpieceId,
     tree: Digest,
     head: Digest,
     evidence: &Evidence,
-    attribution: &ConflictAttribution,
+    attribution: &CompositionParents,
 ) -> Decisions {
     let Some(record) = snapshot.blooms.get(bloom) else {
-        return Decisions::rejected(Outcome::ConflictRejected(ConflictAttributedError::UnknownOrInactiveBloom));
+        return Decisions::rejected(Outcome::NarrowCompositionRejected(NarrowCompositionError::UnknownOrInactiveBloom));
     };
     if record.status != BloomStatus::Sealed {
-        return Decisions::rejected(Outcome::ConflictRejected(ConflictAttributedError::UnknownOrInactiveBloom));
+        return Decisions::rejected(Outcome::NarrowCompositionRejected(NarrowCompositionError::UnknownOrInactiveBloom));
     }
     let Some(workpiece) = attribution.workpiece() else {
-        return Decisions::rejected(Outcome::ConflictRejected(ConflictAttributedError::NotTwoParents(
+        return Decisions::rejected(Outcome::NarrowCompositionRejected(NarrowCompositionError::NotTwoParents(
             attribution.parents.len(),
         )));
     };
     for parent in &attribution.parents {
         if !record.spec.members().iter().any(|member| member.workpiece == *parent) {
-            return Decisions::rejected(Outcome::ConflictRejected(ConflictAttributedError::NotAMember(parent.clone())));
+            return Decisions::rejected(Outcome::NarrowCompositionRejected(NarrowCompositionError::NotAMember(
+                parent.clone(),
+            )));
         }
         if record.withdrawn.contains_key(parent) {
-            return Decisions::rejected(Outcome::ConflictRejected(ConflictAttributedError::ParentWithdrawn(
+            return Decisions::rejected(Outcome::NarrowCompositionRejected(NarrowCompositionError::ParentWithdrawn(
                 parent.clone(),
             )));
         }
         if parent == verified {
-            return Decisions::rejected(Outcome::ConflictRejected(ConflictAttributedError::VerifiedIsParent(
+            return Decisions::rejected(Outcome::NarrowCompositionRejected(NarrowCompositionError::VerifiedIsParent(
                 parent.clone(),
             )));
         }
@@ -113,7 +115,7 @@ pub(super) fn reduce_conflict_attributed(
 
     let cursor = record.progress.get(&workpiece).copied();
     if cursor.is_some_and(|progress| progress.candidate.is_some_and(|current| current.tree == tree)) {
-        return Decisions { outcome: Outcome::ConflictRepairInFlight { bloom: *bloom, workpiece }, effects };
+        return Decisions { outcome: Outcome::CompositionRepairAlreadyInFlight { bloom: *bloom, workpiece }, effects };
     }
 
     let attempt = cursor.map_or(0, |progress| progress.attempts) + 1;
@@ -128,7 +130,7 @@ pub(super) fn reduce_conflict_attributed(
             },
         });
         return Decisions {
-            outcome: Outcome::ConflictWedged { bloom: *bloom, workpiece, question: evidence.detail },
+            outcome: Outcome::NarrowCompositionWedged { bloom: *bloom, workpiece, question: evidence.detail },
             effects,
         };
     }
@@ -141,11 +143,11 @@ pub(super) fn reduce_conflict_attributed(
         composition_progress(StageId::Construct, attempt, subject),
         DispatchTargets { subject: subject.tree, checkout: subject.checkout },
         Some(subject.tree),
-        conflict_line(record),
+        narrowed_line(record),
     ));
 
     Decisions {
-        outcome: Outcome::ConflictMinted {
+        outcome: Outcome::CompositionNarrowed {
             bloom: *bloom,
             workpiece,
             parents: attribution.parents.clone(),
@@ -163,12 +165,12 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use super::reduce_conflict_attributed;
+    use super::reduce_composition_narrowed;
     use crate::digest::Digest;
     use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
-    use crate::reduce::{ConflictAttributedError, Decision, Event, Fact, Outcome, Snapshot, reduce};
+    use crate::reduce::{Decision, Event, Fact, NarrowCompositionError, Outcome, Snapshot, reduce};
     use crate::testing::{draft, membership};
-    use crate::values::{ConflictAttribution, Evidence, EvidenceKind, ResolvedConfigs, SpendWindow};
+    use crate::values::{CompositionParents, Evidence, EvidenceKind, ResolvedConfigs, SpendWindow};
 
     const FIRST: &str = "wp-0";
     const SECOND: &str = "wp-1";
@@ -182,8 +184,8 @@ mod tests {
         values.iter().map(|value| (*value).to_string()).collect()
     }
 
-    fn attribution(parents: &[&str]) -> ConflictAttribution {
-        ConflictAttribution {
+    fn attribution(parents: &[&str]) -> CompositionParents {
+        CompositionParents {
             parents: parents.iter().map(|name| WorkpieceId((*name).to_string())).collect(),
             paths: strings(&["xtask/src/transform/verify/mod.rs"]),
             bound: strings(&["crates/example/**", "xtask/**"]),
@@ -209,7 +211,7 @@ mod tests {
     }
 
     #[test]
-    fn a_minted_conflict_dispatches_itself_and_moves_no_member() {
+    fn a_narrowed_composition_dispatches_itself_and_moves_no_member() {
         // Tripwire: the entire defect. Every lever the reducer holds is
         // member-shaped, so a fold verdict lands on whichever member produced
         // it — a member that wrote none of the failing file, will decline the
@@ -217,7 +219,7 @@ mod tests {
         let (snapshot, bloom) = sealed();
         let verified = WorkpieceId(VERIFIED.to_string());
 
-        let decisions = reduce_conflict_attributed(
+        let decisions = reduce_composition_narrowed(
             &snapshot,
             &bloom,
             &verified,
@@ -227,11 +229,15 @@ mod tests {
             &attribution(&[FIRST, SECOND]),
         );
 
-        let Outcome::ConflictMinted { workpiece, parents, bound, attempt, .. } = &decisions.outcome else {
-            panic!("a two-parent attribution mints a subject: {:?}", decisions.outcome);
+        let Outcome::CompositionNarrowed { workpiece, parents, bound, attempt, .. } = &decisions.outcome else {
+            panic!("a two-parent narrowing mints a composition: {:?}", decisions.outcome);
         };
-        assert!(workpiece.is_conflict());
-        assert_eq!(workpiece.conflict_parents().unwrap().0.0, FIRST);
+        assert!(workpiece.is_composition(), "a narrowed composition is still a composition: {workpiece:?}");
+        assert_eq!(
+            workpiece.composition_parents().expect("a narrowed composition names its parents in its id"),
+            *parents,
+            "the id carries the same parent set the outcome reports",
+        );
         assert_eq!(parents.len(), 2);
         assert_eq!(bound, &strings(&["crates/example/**", "xtask/**"]));
         assert_eq!(*attempt, 1);
@@ -248,7 +254,7 @@ mod tests {
             .collect();
         assert!(!moved.is_empty(), "the minted subject dispatches: {:?}", decisions.effects);
         assert!(
-            moved.iter().all(|target| target.is_conflict()),
+            moved.iter().all(|target| target.is_composition()),
             "no member's cursor moves for a collision it did not cause: {moved:?}",
         );
     }
@@ -259,7 +265,7 @@ mod tests {
         // the objective is that both intents coexist *on that tree*, so a lap
         // aimed anywhere else would be reconciling something nobody refused.
         let (snapshot, bloom) = sealed();
-        let decisions = reduce_conflict_attributed(
+        let decisions = reduce_composition_narrowed(
             &snapshot,
             &bloom,
             &WorkpieceId(VERIFIED.to_string()),
@@ -289,7 +295,7 @@ mod tests {
         // seam.
         let (snapshot, bloom) = sealed();
         let verified = WorkpieceId(VERIFIED.to_string());
-        let first = reduce_conflict_attributed(
+        let first = reduce_composition_narrowed(
             &snapshot,
             &bloom,
             &verified,
@@ -310,7 +316,7 @@ mod tests {
         let mut after = snapshot;
         after.blooms.get_mut(&bloom).expect("the bloom is sealed").progress.insert(advance.0, advance.1);
 
-        let second = reduce_conflict_attributed(
+        let second = reduce_composition_narrowed(
             &after,
             &bloom,
             &verified,
@@ -320,7 +326,7 @@ mod tests {
             &attribution(&[FIRST, SECOND]),
         );
 
-        assert!(matches!(second.outcome, Outcome::ConflictRepairInFlight { .. }), "{:?}", second.outcome);
+        assert!(matches!(second.outcome, Outcome::CompositionRepairAlreadyInFlight { .. }), "{:?}", second.outcome);
         assert!(
             !second.effects.iter().any(|effect| matches!(effect, Decision::DispatchAttempt { .. })),
             "the second verdict files itself and dispatches nothing: {:?}",
@@ -329,11 +335,11 @@ mod tests {
     }
 
     #[test]
-    fn an_attribution_naming_the_verified_member_is_refused() {
+    fn a_parent_set_naming_the_verified_member_is_refused() {
         // The guard against the mint becoming a laundry: a member that wrote
         // the failing file owns that finding at its own Verify.
         let (snapshot, bloom) = sealed();
-        let decisions = reduce_conflict_attributed(
+        let decisions = reduce_composition_narrowed(
             &snapshot,
             &bloom,
             &WorkpieceId(FIRST.to_string()),
@@ -345,18 +351,20 @@ mod tests {
 
         assert_eq!(
             decisions.outcome,
-            Outcome::ConflictRejected(ConflictAttributedError::VerifiedIsParent(WorkpieceId(FIRST.to_string()))),
+            Outcome::NarrowCompositionRejected(NarrowCompositionError::VerifiedIsParent(WorkpieceId(
+                FIRST.to_string()
+            ))),
         );
         assert!(decisions.effects.is_empty(), "a refused attribution changes nothing");
     }
 
     #[test]
-    fn an_attribution_naming_a_stranger_or_the_wrong_count_is_refused() {
+    fn a_parent_set_naming_a_stranger_or_the_wrong_count_is_refused() {
         let (snapshot, bloom) = sealed();
         let verified = WorkpieceId(VERIFIED.to_string());
 
         assert_eq!(
-            reduce_conflict_attributed(
+            reduce_composition_narrowed(
                 &snapshot,
                 &bloom,
                 &verified,
@@ -366,11 +374,13 @@ mod tests {
                 &attribution(&[FIRST, "wp-elsewhere"]),
             )
             .outcome,
-            Outcome::ConflictRejected(ConflictAttributedError::NotAMember(WorkpieceId("wp-elsewhere".to_string()))),
+            Outcome::NarrowCompositionRejected(NarrowCompositionError::NotAMember(WorkpieceId(
+                "wp-elsewhere".to_string()
+            ))),
         );
 
         assert_eq!(
-            reduce_conflict_attributed(
+            reduce_composition_narrowed(
                 &snapshot,
                 &bloom,
                 &verified,
@@ -380,7 +390,7 @@ mod tests {
                 &attribution(&[FIRST]),
             )
             .outcome,
-            Outcome::ConflictRejected(ConflictAttributedError::NotTwoParents(1)),
+            Outcome::NarrowCompositionRejected(NarrowCompositionError::NotTwoParents(1)),
         );
     }
 }

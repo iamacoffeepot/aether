@@ -13,12 +13,12 @@ mod bloom;
 mod commission;
 mod composition;
 mod config;
-mod conflict;
 mod fields;
 mod finding;
 mod lane;
 mod lease;
 mod model_override;
+mod narrowing;
 mod operator;
 mod orphan_claim;
 mod price;
@@ -55,7 +55,6 @@ pub use config::{
     ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, ResolvedConfigs, Unproducible, config_address,
     decode_config,
 };
-pub use conflict::{ConflictAttribution, ConflictRefusal, FoldContribution, attribute_conflict};
 pub use fields::{FieldKind, WorkpieceFact, WorkpieceFields};
 pub use finding::{
     CHECK_KEY, CRITICAL_KEY, ClassifiedFinding, ClassifiedFindings, FindingClass, JUDGMENT_TAG, MECHANICAL_TAG,
@@ -64,6 +63,7 @@ pub use finding::{
 pub use lane::{LANE_WORKPIECE_HEADER, pin_workpiece_description, split_lane_identity};
 pub use lease::{EvictedHolder, MAX_OBSERVED_WRITES, normalize_write_paths};
 pub use model_override::{AgentSelection, ModelOverride, OverrideError, ResolvedModel, StageOverride};
+pub use narrowing::{CompositionParents, FoldContribution, NarrowingRefusal, narrow_composition};
 pub use operator::{Adjudication, Disposition, OperatorHold, OperatorRepair, Withdrawal, WithdrawalCause};
 pub use orphan_claim::{
     ORPHAN_CLAIM_RELEASE_WORDS, OrphanClaimRelease, OrphanClaimReleaseCompletion, OrphanClaimReleaseRecord,

@@ -157,46 +157,52 @@ pub struct BloomView {
     /// field still decodes.
     #[serde(default)]
     pub leases: Vec<LeaseView>,
-    /// Every fold collision this bloom has minted a conflict workpiece for
-    /// (ADR-0210), in minted-subject order. Empty for a bloom whose members
-    /// have never collided.
+    /// Every composition this bloom narrowed to a subset of its candidates
+    /// (ADR-0210), in composition-id order. Empty for a bloom whose fold never
+    /// needed narrowing — [`Self::composition`] is the arity-N instance and is
+    /// rendered there.
     ///
     /// Bloom-level rather than hung off either parent, because the whole point
-    /// of the subject is that the collision belongs to neither of them. This is
-    /// also the only place the derived bound is readable, so "what was that
-    /// repair allowed to touch, and on whose approval" has an answer without
-    /// opening the journal. Trailing and `#[serde(default)]` so a reader that
-    /// predates the field still decodes.
+    /// of a composition is that it belongs to none of them. This is also the
+    /// only place a derived bound is readable, so "what was that repair allowed
+    /// to touch, and on whose approval" has an answer without opening the
+    /// journal. Trailing and `#[serde(default)]` so a reader that predates the
+    /// field still decodes.
     #[serde(default)]
-    pub conflicts: Vec<ConflictView>,
+    pub narrowed_compositions: Vec<NarrowedCompositionView>,
 }
 
-/// One fold collision's outward line (ADR-0210): the synthetic subject
-/// repairing it, the two parents that caused it, the paths the diagnostic
-/// named, the bound the repair runs under, and where that repair stands.
+/// One narrowed composition's outward line (ADR-0210): the subject, the
+/// parents it is over, the paths the diagnostic named, the bound it runs under,
+/// and where it stands.
+///
+/// The same shape [`CompositionView`] carries for the whole-bloom instance,
+/// plus the parent set and bound an arity-N composition reads off the bloom
+/// instead of off its id.
 ///
 /// Every field serializes in declaration order even when it is `None` or
 /// empty, for the reason [`CompositionView`] states: `aether_data::wire`
 /// encodes structs positionally, so omitting a slot shifts the next value's
 /// bytes into it.
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct ConflictView {
-    /// The minted subject.
+pub struct NarrowedCompositionView {
+    /// The composition's own id.
     pub workpiece: WorkpieceId,
-    /// Its two parents, in canonical id order — the answer to "who caused
-    /// this", which is the question a member-shaped attribution could not
-    /// answer honestly.
+    /// The candidates it is over, in canonical id order — the answer to "who
+    /// caused this", which is the question a member-shaped attribution could
+    /// not answer honestly. Its length is the composition's arity.
     pub parents: Vec<WorkpieceId>,
     /// The diagnostic paths the collision was read off.
     pub paths: Vec<String>,
-    /// The union of the parents' declared surfaces: what the repair may edit.
-    /// Derived, never signed — every glob in it is a surface one parent's own
-    /// approval already carries.
+    /// The union of the parents' declared surfaces: what it may edit. Derived,
+    /// never signed — every glob in it is a surface one parent's own approval
+    /// already carries, so the bound needs no signature of its own and its tier
+    /// is the strictest parent's.
     pub bound: Vec<String>,
-    /// Where the repair stands, once it has been dispatched.
+    /// Where it stands, once it has been dispatched.
     #[serde(default)]
     pub cursor: Option<CompositionCursorView>,
-    /// Why the repair stopped, once it has wedged — both intents could not be
+    /// Why it stopped, once it has wedged — its parents' intents could not be
     /// made to coexist inside the laps the catalog allows.
     #[serde(default)]
     pub wedge: Option<Wedge>,

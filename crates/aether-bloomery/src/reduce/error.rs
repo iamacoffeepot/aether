@@ -626,7 +626,7 @@ pub enum MemberExecutorFaultError {
 /// candidates the bloom does not hold, which is worse than no attribution at
 /// all.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum ConflictAttributedError {
+pub enum NarrowCompositionError {
     /// No active bloom with this id.
     UnknownOrInactiveBloom,
     /// The attribution names some number of parents other than two. A

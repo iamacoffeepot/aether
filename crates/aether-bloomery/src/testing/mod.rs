@@ -239,7 +239,7 @@ impl Default for BloomView {
             operator_hold: None,
             blocker: None,
             leases: Vec::new(),
-            conflicts: Vec::new(),
+            narrowed_compositions: Vec::new(),
         }
     }
 }

@@ -1,5 +1,5 @@
-//! Who caused a fold collision, and what the repair of it is allowed to touch
-//! (ADR-0210).
+//! Which candidates a narrower composition is over, and what it is allowed
+//! to touch (ADR-0210).
 //!
 //! Two members construct in parallel against one sealed base, each verifies
 //! green alone, and the tree that holds both refuses to build. The failure
@@ -8,16 +8,17 @@
 //! verified on the fold first. That member then declined to repair code it
 //! never wrote, correctly, and the bloom stopped.
 //!
-//! The attribution here is the first half of the answer: read the failing
-//! diagnostic's paths against what each candidate actually changed, and name the
-//! two members whose work has to coexist. The second half is the synthetic
-//! subject the reducer mints from it, which repairs the collision without
-//! touching either parent.
+//! Narrowing is the first half of the answer: read the failing diagnostic's
+//! paths against what each candidate actually changed, and name the candidates
+//! whose work has to coexist. The second half is the composition the reducer
+//! dispatches over exactly those parents, which repairs their coexistence
+//! without touching either of them.
 //!
 //! Everything in this module is a pure read over values the host already holds.
-//! The host extracts the diagnostic paths and the per-member changed sets; the
-//! judgement about whether those add up to a collision, and about what the
-//! repair may edit, is here so the reducer and the classifier cannot drift.
+//! The host extracts the diagnostic paths and the per-candidate changed sets;
+//! the judgement about whether those add up to a narrower composition, and about
+//! what that composition may edit, is here so the reducer and the classifier
+//! cannot drift.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -43,71 +44,72 @@ pub struct FoldContribution {
     pub surface: Vec<String>,
 }
 
-/// The two members one fold collision belongs to, and the bound their repair
-/// runs under.
+/// The candidates a narrowed composition is over, and the bound it runs under.
 ///
-/// `bound` is [`surface_union`] over exactly the two parents' declared surfaces
-/// — derived, never signed. It grants no path no approval already covered: each
-/// glob in it is a surface some parent's own signed revision carries, and both
-/// parents were admitted under the same bloom-wide policy, so the tier ladder
-/// was satisfied for every path here before the collision existed. The repair's
-/// tier is therefore the stricter parent's, which is what
+/// `bound` is [`surface_union`] over exactly those parents' declared surfaces —
+/// derived, never signed. It grants no path no approval already covered: each
+/// glob in it is a surface some parent's own signed revision carries, and every
+/// parent was admitted under the same bloom-wide policy, so the tier ladder was
+/// satisfied for every path here before the collision existed. The composition's
+/// tier is therefore the strictest parent's, which is what
 /// [`ApprovalPolicy::resolve_surface`](super::ApprovalPolicy::resolve_surface)
 /// answers over `bound` directly — most-restrictive-wins over a union is the
 /// maximum over its operands.
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct ConflictAttribution {
-    /// The two parents, in canonical id order. Exactly two by construction:
-    /// [`attribute_conflict`] refuses every other count rather than minting a
-    /// subject whose ownership is a guess.
+pub struct CompositionParents {
+    /// The parents, in canonical id order — the composition's arity is this
+    /// list's length. Exactly two by construction here: [`narrow_composition`]
+    /// refuses every other count rather than naming a parent set that is a
+    /// guess, and the whole-bloom instance reads its parents off the bloom
+    /// rather than through this value.
     pub parents: Vec<WorkpieceId>,
     /// The diagnostic paths the collision was read off, sorted and deduplicated.
     pub paths: Vec<String>,
-    /// The union of the two parents' declared surfaces — what the repair may
+    /// The union of the parents' declared surfaces — what the composition may
     /// edit and nothing more.
     pub bound: Vec<String>,
 }
 
-impl ConflictAttribution {
-    /// The synthetic subject this attribution mints.
+impl CompositionParents {
+    /// The composition this parent set names.
     #[must_use]
     pub fn workpiece(&self) -> Option<WorkpieceId> {
         match self.parents.as_slice() {
-            [first, second] => Some(WorkpieceId::conflict(first, second)),
+            [first, second] => Some(WorkpieceId::composition_of(&[first.clone(), second.clone()])),
             _ => None,
         }
     }
 }
 
-/// Why a failing fold is not a two-parent collision.
+/// Why a failing fold does not narrow to a two-candidate composition.
 ///
 /// Every arm is a reason to leave the failure where it already was rather than
-/// mint a subject: an attribution that guesses is worse than none, because the
-/// synthetic it mints would be handed two candidates that have nothing to do
-/// with the defect and told to make them coexist.
+/// narrow: a parent set that guesses is worse than none, because the composition
+/// it names would be handed two candidates with nothing to do with the defect
+/// and told to make them coexist.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub enum ConflictRefusal {
+pub enum NarrowingRefusal {
     /// The verdict named no paths, so there is nothing to attribute.
     NoDiagnosticPaths,
     /// One member's candidate accounts for every named path. That is an
     /// ordinary finding against that member, not a collision between two.
     SingleOwner(WorkpieceId),
     /// The member under verification is itself one of the writers. Its own
-    /// Verify is the right place for that, and re-routing it to a synthetic
+    /// Verify is the right place for that, and re-routing it to a composition
     /// would hide a defect the member owns.
     VerifiedMemberWrote(WorkpieceId),
     /// No pair of candidates accounts for the named paths — a path nobody in
     /// this bloom wrote, or a collision wider than two. Find the real owner
     /// before inventing one.
     NoCoveringPair,
-    /// A named path sits outside the union of the two parents' surfaces, so the
-    /// repair could not legally edit the file the diagnostic points at. A
+    /// A named path sits outside the union of the parents' surfaces, so the
+    /// composition could not legally edit the file the diagnostic points at. A
     /// collision the parents' approvals do not reach is not their collision.
     OutsideTheUnion(Vec<String>),
 }
 
-/// Attribute a failing fold to the pair of members whose candidates collide, or
-/// refuse to attribute it (ADR-0210).
+/// Narrow a failing fold to the pair of candidates that collide on it, or
+/// refuse to narrow it (ADR-0210).
 ///
 /// `verified` is the member whose Verify produced the verdict — the one this
 /// exists to leave untouched. `paths` are the repository-relative paths the
@@ -115,7 +117,7 @@ pub enum ConflictRefusal {
 /// candidate is in the tree under test.
 ///
 /// The pair is found by exhaustive search over pairs rather than by a general
-/// minimum-set-cover: only a cover of size two mints anything, so checking every
+/// minimum-set-cover: only a cover of size two narrows anything, so checking every
 /// pair is both exact and cheap. That is `O(m² · p)` membership tests over a
 /// membership the seal door caps and a diagnostic path list a verdict bounds —
 /// tens of members against tens of paths, evaluated once per failing fold, not
@@ -125,24 +127,24 @@ pub enum ConflictRefusal {
 /// the membership was ordered.
 ///
 /// # Errors
-/// A [`ConflictRefusal`] naming why this fold is not a two-parent collision.
-pub fn attribute_conflict(
+/// A [`NarrowingRefusal`] naming why this fold does not narrow to two parents.
+pub fn narrow_composition(
     verified: &WorkpieceId,
     paths: &[String],
     contributions: &[FoldContribution],
-) -> Result<ConflictAttribution, ConflictRefusal> {
+) -> Result<CompositionParents, NarrowingRefusal> {
     let mut paths: Vec<String> = paths.to_vec();
     paths.sort();
     paths.dedup();
     if paths.is_empty() {
-        return Err(ConflictRefusal::NoDiagnosticPaths);
+        return Err(NarrowingRefusal::NoDiagnosticPaths);
     }
 
     if let Some(writer) = contributions.iter().find(|entry| entry.workpiece == *verified && wrote_any(entry, &paths)) {
-        return Err(ConflictRefusal::VerifiedMemberWrote(writer.workpiece.clone()));
+        return Err(NarrowingRefusal::VerifiedMemberWrote(writer.workpiece.clone()));
     }
     if let Some(sole) = contributions.iter().find(|entry| covers(entry, &paths)) {
-        return Err(ConflictRefusal::SingleOwner(sole.workpiece.clone()));
+        return Err(NarrowingRefusal::SingleOwner(sole.workpiece.clone()));
     }
 
     let mut ordered: Vec<&FoldContribution> =
@@ -154,12 +156,12 @@ pub fn attribute_conflict(
         .enumerate()
         .flat_map(|(index, first)| ordered[index + 1..].iter().map(move |second| (*first, *second)))
         .find(|(first, second)| paths.iter().all(|path| wrote(first, path) || wrote(second, path)))
-        .ok_or(ConflictRefusal::NoCoveringPair)?;
+        .ok_or(NarrowingRefusal::NoCoveringPair)?;
 
     let bound = surface_union(&[pair.0.surface.as_slice(), pair.1.surface.as_slice()]);
     let outside: Vec<String> = paths.iter().filter(|path| !path_in_surface(&bound, path)).map(String::clone).collect();
     if !outside.is_empty() {
-        return Err(ConflictRefusal::OutsideTheUnion(outside));
+        return Err(NarrowingRefusal::OutsideTheUnion(outside));
     }
 
     let (low, high) = if pair.0.workpiece <= pair.1.workpiece {
@@ -167,7 +169,7 @@ pub fn attribute_conflict(
     } else {
         (pair.1, pair.0)
     };
-    Ok(ConflictAttribution { parents: alloc::vec![low.workpiece.clone(), high.workpiece.clone()], paths, bound })
+    Ok(CompositionParents { parents: alloc::vec![low.workpiece.clone(), high.workpiece.clone()], paths, bound })
 }
 
 /// Whether `entry`'s candidate changed `path`.
@@ -191,7 +193,7 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use super::{ConflictRefusal, FoldContribution, attribute_conflict};
+    use super::{FoldContribution, NarrowingRefusal, narrow_composition};
     use crate::ids::WorkpieceId;
 
     /// The two files the night's `E0599` named: the use site the first member
@@ -244,7 +246,7 @@ mod tests {
         // every member-shaped lever the reducer holds points at 5417 — and 5417
         // wrote none of the failing file. An attribution that lands on it costs
         // a repair lap the member will decline and stops the bloom.
-        let attribution = attribute_conflict(&workpiece("issue-5417"), &the_diagnostic(), &the_night())
+        let attribution = narrow_composition(&workpiece("issue-5417"), &the_diagnostic(), &the_night())
             .expect("two candidates account for the failing path");
 
         assert_eq!(attribution.parents, vec![workpiece("issue-5344"), workpiece("issue-5346")]);
@@ -260,7 +262,7 @@ mod tests {
         // signature — every glob in it is a surface one parent was approved at.
         // Folding in a third member's surface, or the bloom's whole membership,
         // would grant the repair paths no approval on this collision covers.
-        let attribution = attribute_conflict(&workpiece("issue-5417"), &the_diagnostic(), &the_night())
+        let attribution = narrow_composition(&workpiece("issue-5417"), &the_diagnostic(), &the_night())
             .expect("the collision attributes");
 
         assert_eq!(attribution.bound, strings(&["crates/aether-bloomery/**", "xtask/**"]));
@@ -277,15 +279,15 @@ mod tests {
         // workpiece already repairing it. An id that carried the parents in
         // discovery order would mint a second subject and set two lanes on one
         // seam.
-        let forward = attribute_conflict(&workpiece("issue-5417"), &the_diagnostic(), &the_night())
+        let forward = narrow_composition(&workpiece("issue-5417"), &the_diagnostic(), &the_night())
             .expect("the collision attributes");
         let mut reversed = the_night();
         reversed.reverse();
-        let backward = attribute_conflict(&workpiece("issue-5417"), &the_diagnostic(), &reversed)
+        let backward = narrow_composition(&workpiece("issue-5417"), &the_diagnostic(), &reversed)
             .expect("the collision attributes");
 
         assert_eq!(forward.workpiece(), backward.workpiece());
-        assert!(forward.workpiece().expect("a two-parent attribution mints a subject").is_conflict());
+        assert!(forward.workpiece().expect("a two-parent attribution mints a subject").is_composition());
     }
 
     #[test]
@@ -294,12 +296,12 @@ mod tests {
         // synthetic for it would hand a repair lane one parent and nothing to
         // reconcile it against.
         assert_eq!(
-            attribute_conflict(
+            narrow_composition(
                 &workpiece("issue-5417"),
                 &strings(&["crates/aether-bloomery/src/values/proof.rs"]),
                 &the_night()
             ),
-            Err(ConflictRefusal::SingleOwner(workpiece("issue-5346"))),
+            Err(NarrowingRefusal::SingleOwner(workpiece("issue-5346"))),
         );
     }
 
@@ -309,20 +311,20 @@ mod tests {
         // own defect onto a synthetic: if the member under test wrote the file
         // the diagnostic names, its own Verify is where that belongs.
         assert_eq!(
-            attribute_conflict(&workpiece("issue-5344"), &the_diagnostic(), &the_night()),
-            Err(ConflictRefusal::VerifiedMemberWrote(workpiece("issue-5344"))),
+            narrow_composition(&workpiece("issue-5344"), &the_diagnostic(), &the_night()),
+            Err(NarrowingRefusal::VerifiedMemberWrote(workpiece("issue-5344"))),
         );
     }
 
     #[test]
     fn a_path_no_pair_accounts_for_is_refused_rather_than_attributed() {
         assert_eq!(
-            attribute_conflict(&workpiece("issue-5417"), &strings(&["crates/aether-render/src/pass.rs"]), &the_night()),
-            Err(ConflictRefusal::NoCoveringPair),
+            narrow_composition(&workpiece("issue-5417"), &strings(&["crates/aether-render/src/pass.rs"]), &the_night()),
+            Err(NarrowingRefusal::NoCoveringPair),
         );
         assert_eq!(
-            attribute_conflict(&workpiece("issue-5417"), &[], &the_night()),
-            Err(ConflictRefusal::NoDiagnosticPaths),
+            narrow_composition(&workpiece("issue-5417"), &[], &the_night()),
+            Err(NarrowingRefusal::NoDiagnosticPaths),
         );
     }
 
@@ -338,11 +340,11 @@ mod tests {
         ];
 
         assert_eq!(
-            attribute_conflict(&workpiece("issue-c"), &strings(&["Cargo.lock"]), &contributions),
-            Err(ConflictRefusal::SingleOwner(workpiece("issue-a"))),
+            narrow_composition(&workpiece("issue-c"), &strings(&["Cargo.lock"]), &contributions),
+            Err(NarrowingRefusal::SingleOwner(workpiece("issue-a"))),
         );
         assert_eq!(
-            attribute_conflict(
+            narrow_composition(
                 &workpiece("issue-c"),
                 &strings(&["Cargo.lock", "crates/example-a/src/lib.rs"]),
                 &[
@@ -350,7 +352,7 @@ mod tests {
                     contribution("issue-b", &["crates/example-a/src/lib.rs"], &["crates/example-b/**"]),
                 ]
             ),
-            Err(ConflictRefusal::OutsideTheUnion(strings(&["Cargo.lock"]))),
+            Err(NarrowingRefusal::OutsideTheUnion(strings(&["Cargo.lock"]))),
         );
     }
 }

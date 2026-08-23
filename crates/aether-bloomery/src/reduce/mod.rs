@@ -24,7 +24,6 @@ mod attempt;
 mod base_verify;
 mod boundary;
 mod composition;
-mod conflict;
 mod decision;
 mod decisions_v1;
 mod error;
@@ -38,6 +37,7 @@ mod integrate;
 mod land;
 mod landing;
 mod lease;
+mod narrowing;
 mod observe;
 mod operator;
 mod operator_hold;
@@ -59,8 +59,8 @@ mod withdraw;
 pub use decision::Decision;
 pub use error::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError,
-    AttemptCompletedError, BaseMismatch, ConflictAttributedError, FoldConflictError, GrantAttemptsError,
-    HostFaultError, IntegrateError, LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError,
+    AttemptCompletedError, BaseMismatch, FoldConflictError, GrantAttemptsError, HostFaultError, IntegrateError,
+    LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError, NarrowCompositionError,
     OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ResolveError, SealConflict, SealError,
     SpliceError, SupersedeError, SuppressionDispositionError, SurfaceRequestedError, VerifyFailedError, WithdrawError,
 };
@@ -85,7 +85,6 @@ use crate::values::{ResolvedConfigs, SpendWindow};
 use aggregate_verify::reduce_aggregate_verify_completed;
 use attempt::{reduce_attempt_completed, reduce_member_executor_fault};
 use base_verify::reduce_base_verify_completed;
-use conflict::reduce_conflict_attributed;
 use evidence::{reduce_admit_evidence, reduce_adopt_answer};
 use fold_conflict::reduce_fold_conflict;
 use fold_refusal::reduce_fold_refused;
@@ -94,6 +93,7 @@ use integrate::{reduce_integrate, reduce_resolve};
 use land::reduce_land;
 use landing::reduce_landing_rejected;
 use lease::reduce_lane_writes_observed;
+use narrowing::reduce_composition_narrowed;
 use observe::{reduce_observe_mainline, reduce_observe_mainline_diverged};
 use operator::{reduce_operator_adjudication, reduce_operator_repair};
 use operator_hold::{reduce_operator_hold, reduce_operator_release};
@@ -207,8 +207,8 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         Fact::BaseVerifyCompleted { base, tree, passed, evidence, failed } => {
             reduce_base_verify_completed(snapshot, *base, *tree, *passed, evidence, *failed)
         }
-        Fact::ConflictAttributed { bloom, verified, tree, head, evidence, attribution } => {
-            reduce_conflict_attributed(snapshot, bloom, verified, *tree, *head, evidence, attribution)
+        Fact::CompositionNarrowed { bloom, verified, tree, head, evidence, attribution } => {
+            reduce_composition_narrowed(snapshot, bloom, verified, *tree, *head, evidence, attribution)
         }
     }
 }
