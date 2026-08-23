@@ -40,7 +40,7 @@ use crate::bloomery::KitReport;
 use crate::bloomery::executor::{LaneOccupancy, OutstandingDispatch, ReconcileLanes, ReconcileReport};
 use crate::bloomery::intake::{DispatchRecord, NameEvidenceClaims};
 use crate::bloomery::triage::MAX_TRIAGED_DIFF_BYTES;
-use crate::bloomery::verify::{apply_containment, changed_paths, out_of_surface};
+use crate::bloomery::verify::{apply_containment, candidate_violations};
 use crate::bloomery::{candidate_tree_digest, capture_commit_digest};
 use crate::session::SessionConfig;
 use crate::store::{CommissionBackend, SqliteStore, StoreBackend};
@@ -1671,14 +1671,21 @@ impl LocalExecutor {
         }
     }
 
-    // Paths the candidate changed against the member's base that sit outside
-    // the declared surface, or `None` when the gate cannot run (no checkout,
-    // no base, no sealed surface). Missing inputs skip rather than fail open
-    // on a guessed empty set — a stub test has no surface to enforce, and a
-    // production Verify always has the order, the base, and the checkout.
+    // Paths the candidate's own delta changed that sit outside the declared
+    // surface, or `None` when the gate cannot run (no checkout, no base, no
+    // sealed surface). Missing inputs skip rather than fail open on a guessed
+    // empty set — a stub test has no surface to enforce, and a production
+    // Verify always has the order, the base, and the checkout.
+    //
+    // The range is the candidate's own delta — its capture commit against the
+    // tree the lane that wrote it was given — and only falls back to the range
+    // the work order named when the checkout has no first parent to read. A
+    // member the coordinator dispatched onto the fold produces a candidate
+    // whose history runs back through every sibling already folded in, so the
+    // order's own base charges it with paths those siblings changed and the
+    // repair lane is then told to revert its siblings' work.
     fn surface_violations(&self, nonce: &str, worktree: Option<&Path>, diff_base: Option<&str>) -> Option<Vec<String>> {
         let worktree = worktree?;
-        let diff_base = diff_base?;
         // Containment is a terminal-Verify gate: only that stage judges a
         // finished candidate against the declared surface. The guard lives
         // here rather than inside `order_scope`, which a declining
@@ -1688,19 +1695,15 @@ impl LocalExecutor {
         }
         let (_, surface) = self.order_scope(nonce)?;
         let surface = surface?;
-        let changed = match changed_paths(worktree, diff_base) {
-            Ok(changed) => changed,
-            Err(error) => {
-                tracing::warn!(
-                    target: "aether_chassis_bloomery::executor",
-                    %nonce,
-                    %error,
-                    "member verify: candidate changed-path set unreadable; skipping containment",
-                );
-                return None;
-            }
-        };
-        Some(out_of_surface(changed.iter().map(String::as_str), &surface))
+        let violations = candidate_violations(worktree, diff_base, &surface);
+        if violations.is_none() {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                %nonce,
+                "member verify: candidate changed-path set unreadable; skipping containment",
+            );
+        }
+        violations
     }
 
     /// The stage the order under `nonce` was dispatched for.
