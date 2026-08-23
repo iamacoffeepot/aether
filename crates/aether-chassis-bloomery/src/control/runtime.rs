@@ -1375,7 +1375,7 @@ fn event_bloom(event: &Event) -> Option<BloomId> {
         | Fact::Withdraw { bloom, .. }
         | Fact::LaneWritesObserved { bloom, .. }
         | Fact::SuppressionDisposition { bloom, .. }
-        | Fact::ConflictAttributed { bloom, .. } => Some(*bloom),
+        | Fact::CompositionNarrowed { bloom, .. } => Some(*bloom),
         Fact::ObserveMainline { .. }
         | Fact::ObserveMainlineDiverged { .. }
         | Fact::RequestOrphanClaimRelease { .. }

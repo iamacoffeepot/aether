@@ -15,11 +15,12 @@ pub struct Interrupt {
     pub stage: Option<StageId>,
 }
 
-/// The eight source fields the queue is built from.
+/// The source fields the queue is built from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InterruptKind {
     Park,
     Decision,
+    Surface,
     Findings,
     Terminal,
     Wedge,
@@ -35,6 +36,7 @@ impl InterruptKind {
         match self {
             Self::Park => "park",
             Self::Decision => "decision",
+            Self::Surface => "surface",
             Self::Findings => "findings",
             Self::Terminal => "terminal",
             Self::Wedge => "wedge",
@@ -61,10 +63,41 @@ pub fn interrupts(view: &ViewDocument) -> Vec<Interrupt> {
             stage: None,
         });
     }
+    push_surface_interrupts(&mut entries, view);
     for bloom in &view.blooms {
         push_bloom_interrupts(&mut entries, bloom);
     }
     entries
+}
+
+/// Every member awaiting a surface amendment (ADR-0207), at the document level
+/// and ahead of the per-bloom walk.
+///
+/// Its own kind rather than an [`InterruptKind::Decision`]: an ADR-0151
+/// question is settled by an answer, and this is settled only by a person
+/// widening a boundary — labelling it `decision` sends an operator looking for
+/// a question to answer, and there is none. Document-level rather than
+/// per-member because the remedy is not the bloom's to produce: it sorts with
+/// the other stops that wait on somebody outside the estate, instead of
+/// sitting among the per-member rows a lap can still clear. The focus stays on
+/// the member, so selecting the entry still lands where the request was made.
+fn push_surface_interrupts(entries: &mut Vec<Interrupt>, view: &ViewDocument) {
+    for bloom in &view.blooms {
+        for member in &bloom.members {
+            // A withdrawn member interrupts nobody (#5327), here for the same
+            // reason the per-member walk skips it: an operator already decided
+            // it, so its request has no one left to answer it.
+            if member.withdrawn.is_some() || member.awaiting_surface.is_none() {
+                continue;
+            }
+            entries.push(Interrupt {
+                kind: InterruptKind::Surface,
+                detail: member_detail(bloom, &member.workpiece),
+                focus: Focus::member(bloom.id, member.workpiece.clone()),
+                stage: None,
+            });
+        }
+    }
 }
 
 fn quiesce_entry(quiesce: &SpendQuiesce) -> Interrupt {
@@ -163,17 +196,6 @@ fn push_bloom_interrupts(entries: &mut Vec<Interrupt>, bloom: &BloomView) {
                 stage: None,
             });
         }
-        // A member waiting on a surface amendment is blocked on a *person*
-        // (ADR-0207), so it belongs on the same list as a pending decision:
-        // more attempts cannot move it.
-        if member.awaiting_surface.is_some() {
-            entries.push(Interrupt {
-                kind: InterruptKind::Decision,
-                detail: member_detail(bloom, &member.workpiece),
-                focus: Focus::member(bloom.id, member.workpiece.clone()),
-                stage: None,
-            });
-        }
     }
 }
 
@@ -187,8 +209,11 @@ fn member_detail(bloom: &BloomView, workpiece: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::interrupts;
-    use crate::dto::{BloomView, DigestHex, ExecutorFaultView, HostFaultView, LandingBlock, MemberView, ViewDocument};
+    use super::{InterruptKind, interrupts};
+    use crate::dto::{
+        AwaitingSurfaceView, BloomView, DigestHex, ExecutorFaultView, HostFaultView, LandingBlock, MemberView,
+        ReviewParkView, ViewDocument,
+    };
 
     fn digest(byte: u8) -> DigestHex {
         DigestHex::from_bytes([byte; 32])
@@ -213,5 +238,37 @@ mod tests {
             ..ViewDocument::default()
         };
         assert!(interrupts(&view).is_empty());
+    }
+
+    #[test]
+    fn a_surface_park_is_its_own_kind_ahead_of_the_per_bloom_entries() {
+        // The plausible bug: a member awaiting a surface amendment is filed as
+        // `decision`, which invites an operator to look for a question to
+        // answer — there is none, and only a person widening a boundary
+        // settles it. Buried among the per-member rows, it also reads as one
+        // more thing a lap might clear.
+        let view = ViewDocument {
+            blooms: vec![BloomView {
+                id: digest(1),
+                review_park: Some(ReviewParkView::default()),
+                members: vec![MemberView {
+                    workpiece: "issue-1".to_owned(),
+                    awaiting_surface: Some(AwaitingSurfaceView::default()),
+                    ..MemberView::default()
+                }],
+                ..BloomView::default()
+            }],
+            ..ViewDocument::default()
+        };
+
+        let entries = interrupts(&view);
+        let surface: Vec<_> = entries.iter().filter(|entry| entry.kind == InterruptKind::Surface).collect();
+        assert_eq!(surface.len(), 1, "the park is one entry: {entries:?}");
+        assert_eq!(surface[0].detail, "issue-1", "and it names the member it focuses");
+        assert!(
+            !entries.iter().any(|entry| entry.kind == InterruptKind::Decision),
+            "a surface park is not a question anyone can answer: {entries:?}",
+        );
+        assert_eq!(entries[0].kind, InterruptKind::Surface, "it sorts ahead of the per-bloom walk: {entries:?}");
     }
 }
