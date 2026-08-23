@@ -44,15 +44,12 @@ pub struct WriteScopeRevision {
     /// Canonical [`aether_bloomery::ScopeRevision`] bytes.
     #[serde(with = "aether_data::bytes")]
     pub canonical: Vec<u8>,
-    /// Canonical [`aether_bloomery::ScopeVerifyInput`] bytes — the workpiece's
-    /// own field records projected for the freeze check (ADR-0208).
-    ///
-    /// Empty means the caller had no projection to check, which is what a
-    /// hand-authored revision carries. An encoded input is never empty (its
-    /// schema field alone is four bytes), so empty is unambiguously absent, and
-    /// absent writes no report rather than a clean one.
+    /// Encoded [`super::RevisionEvidence`] — what is known about the revision
+    /// without being part of it. Optionality lives inside the sidecar's own
+    /// fields; these bytes are always an encoding of that type, never empty as
+    /// a stand-in for absence.
     #[serde(with = "aether_data::bytes")]
-    pub scope_verify: Vec<u8>,
+    pub evidence: Vec<u8>,
 }
 
 /// Reply to [`WriteScopeRevision`].
@@ -300,6 +297,113 @@ pub enum CancelCommissionResult {
     NotOpen,
     /// The statement's words are not the stored intent digest.
     WrongSubject,
+    /// The write failed.
+    Err {
+        /// A human-readable failure reason.
+        error: String,
+    },
+}
+
+/// Put a commission stranded outside `open` back into the line.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.store.reopen_commission")]
+pub struct ReopenCommission {
+    /// The workpiece this commission is.
+    pub id: String,
+    /// Wire-encoded reopen [`aether_bloomery::Statement`]. Verified at the
+    /// Reopen door before it arrives here; the store re-checks only that its
+    /// words are this commission's intent digest.
+    #[serde(with = "aether_data::bytes")]
+    pub statement: Vec<u8>,
+}
+
+/// Reply to [`ReopenCommission`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.store.reopen_commission_result")]
+pub enum ReopenCommissionResult {
+    /// The commission is open again.
+    Ok {
+        /// The workpiece this commission is.
+        id: String,
+        /// Digest of the reopen statement that authorized it.
+        #[serde(with = "aether_data::bytes")]
+        digest: Vec<u8>,
+    },
+    /// No commission exists under this workpiece id.
+    Missing {
+        /// The workpiece id that was missing.
+        id: String,
+    },
+    /// The commission is not landed, so there is nothing to restore. An
+    /// already-open commission answers here rather than succeeding quietly:
+    /// a reopen that reports success over a commission it did not move would
+    /// read as evidence the workpiece is free when nothing checked.
+    NotLanded {
+        /// The status the commission is actually in.
+        status: String,
+    },
+    /// A bloom resolved this workpiece, so the landing is the ordinary one and
+    /// the work is in mainline.
+    Resolved {
+        /// Hex digest of the bloom that resolved it.
+        bloom: String,
+    },
+    /// The statement's words are not the stored intent digest.
+    WrongSubject,
+    /// The write failed.
+    Err {
+        /// A human-readable failure reason.
+        error: String,
+    },
+}
+
+/// Open a pre-bloom scoping run (ADR-0208, #5304): write its `enqueued` row
+/// and its `Topic::ScopeDispatch` outbox row in one transaction.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.store.enqueue_scope_run")]
+pub struct EnqueueScopeRun {
+    /// The workpiece this commission is.
+    pub id: String,
+    /// The observed mainline the run reads code at — `Snapshot.mainline`.
+    #[serde(with = "aether_data::bytes")]
+    pub base: Vec<u8>,
+}
+
+/// Reply to [`EnqueueScopeRun`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.store.enqueue_scope_run_result")]
+pub enum EnqueueScopeRunResult {
+    /// The run was journaled and its outbox row landed at `sequence`.
+    Ok {
+        /// The workpiece this commission is.
+        id: String,
+        /// The attempt ordinal opened, from `1`.
+        ordinal: u64,
+        /// The outbox sequence the drain will mint a nonce from.
+        sequence: u64,
+        /// The run's content-addressed subject.
+        #[serde(with = "aether_data::bytes")]
+        subject: Vec<u8>,
+    },
+    /// No commission exists under this workpiece id.
+    Missing {
+        /// The workpiece id that was missing.
+        id: String,
+    },
+    /// The commission is not open.
+    NotOpen,
+    /// A run on this commission is already dispatched and unanswered.
+    AlreadyInFlight {
+        /// The ordinal already in flight.
+        ordinal: u64,
+    },
+    /// This commission's scoping already froze a revision.
+    AlreadyFrozen,
+    /// The `Scope` binding's retry budget is spent.
+    Exhausted {
+        /// How many attempts were spent.
+        attempts: u64,
+    },
     /// The write failed.
     Err {
         /// A human-readable failure reason.

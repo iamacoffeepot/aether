@@ -143,6 +143,7 @@ mod tests {
                         scope_revision: DigestHex::from_bytes([7; 32]),
                         awaiting_surface: None,
                         withdrawn: None,
+                        cursor: None,
                     }],
                 })
                 .collect(),

@@ -32,7 +32,9 @@ use super::state::{
     admit,
 };
 use crate::api::dto::{MemberProjection, SealRequest};
-use crate::bloomery::{AdmissionRequest, Decision, Gate, precheck_statement, verified_statement_approval};
+use crate::bloomery::{
+    AdmissionRequest, Decision, Gate, precheck_statement, projection_digest, verified_statement_approval,
+};
 use crate::control::ControlCore;
 use crate::signing::{SigningCapability, Verify, VerifyResult, authority_bytes};
 use crate::store::{LoadCommission, LoadCommissionResult, RecordDispatchDescription, StoreCapability};
@@ -564,6 +566,22 @@ impl ApiCapabilityState {
 /// index, scope-revision digest, and signed statement — Pass 1's carry into Pass 2.
 type PendingVerification = (usize, Digest, Statement);
 
+/// Build the gate request from a stored membership and its projection, then
+/// bind `projection_digest` over the fields the gate will evaluate.
+fn admission_request(proposal: &Membership, projection: &MemberProjection) -> AdmissionRequest {
+    let mut admission = AdmissionRequest {
+        subject: proposal.subject(),
+        declared_surface: projection.declared_surface.clone(),
+        declared_crates: projection.declared_crates.clone(),
+        completeness: projection.completeness,
+        adr_touch: projection.adr_touch,
+        pre_approved: projection.pre_approved,
+        projection_digest: Digest::default(),
+    };
+    admission.projection_digest = projection_digest(&admission);
+    admission
+}
+
 /// Pass 1 of a seal: resolve every draft membership synchronously against the
 /// `gate`. An auto member is gate-formed in place; an above-auto member has its
 /// signed statement pre-checked and is queued (its `(index, scope_revision,
@@ -621,24 +639,10 @@ fn resolve_seal_memberships(
                 ),
             ));
         }
-        // The digest binds the approval to the projection as evaluated. It is
-        // computed over the canonical wire re-encoding of the decoded struct, not
-        // the raw request slice: the JSON body carries no per-projection byte
-        // boundaries, and the canonical form is reproducible from the shared DTO by
-        // any party rather than sensitive to the sender's whitespace and field order.
-        let projection_digest = match to_vec(projection) {
-            Ok(bytes) => Digest::of_wire_bytes(&bytes),
-            Err(error) => return Err(error_response(500, &format!("projection encode failed: {error}"))),
-        };
-        let admission = AdmissionRequest {
-            subject: proposal.subject(),
-            declared_surface: projection.declared_surface.clone(),
-            declared_crates: projection.declared_crates.clone(),
-            completeness: projection.completeness,
-            adr_touch: projection.adr_touch,
-            pre_approved: projection.pre_approved,
-            projection_digest,
-        };
+        // The digest binds the approval to the fields the gate evaluated, named
+        // by `projection_digest` — not the transport DTO — so a field appended to
+        // `MemberProjection` re-keys nothing unless it is also fed to the gate.
+        let admission = admission_request(proposal, projection);
         match gate.evaluate(&admission) {
             Decision::AutoApproved(approval) => {
                 let mut sealed = proposal.clone();
@@ -908,14 +912,14 @@ fn seal_dependency_resolution(
 mod tests {
     use aether_bloomery::{
         ApprovalPolicy, BloomDraft, BloomId, ConfigRegistry, Digest, Evidence, EvidenceKind, Fact, MemberDependency,
-        Membership, Tier, WorkpieceId,
+        Membership, Observation, Provenance, Statement, Tier, WorkpieceId,
     };
 
     use super::{
-        MemberProjection, SealRequest, admission_fact, parse_optional_body, resolve_seal_graph,
+        MemberProjection, SealRequest, admission_fact, admission_request, parse_optional_body, resolve_seal_graph,
         resolve_seal_memberships, surface_overlaps,
     };
-    use crate::bloomery::{AdrTouch, Completeness, Gate};
+    use crate::bloomery::{AdrTouch, Completeness, Decision, Gate};
 
     /// A sealed member at `revision`. Only its workpiece and scope revision are
     /// read by the overlap scan; the rest is what a member is made of.
@@ -1312,5 +1316,70 @@ mod tests {
         let body = String::from_utf8_lossy(&error.body);
         assert_eq!(error.status, 422);
         assert!(body.contains("wp-b"), "refusal names the unmatched member: {body}");
+    }
+
+    /// A fully populated projection: every DTO field is set, including the two
+    /// the gate never reads, so a revert to hashing the transport struct moves
+    /// the pin.
+    fn pinned_projection() -> MemberProjection {
+        MemberProjection {
+            declared_crates: vec!["aether-bloomery".to_owned()],
+            adr_touch: AdrTouch::ProposedOnly,
+            pre_approved: true,
+            signed_statement: Some(Statement {
+                words: b"fixture statement".to_vec(),
+                provenance: Provenance::ObservationAttestation(Observation { source: "fixture".to_owned() }),
+                parents: Vec::new(),
+            }),
+            ..projection("wp-a", 1, &["crates/aether-bloomery/**"])
+        }
+    }
+
+    #[test]
+    fn the_projection_digest_is_pinned() {
+        // Tripwire: the pinned value is computed from the gate inputs, so it
+        // moves exactly when what an auto approval binds moves — which is the
+        // event this member exists to make visible.
+        let policy = ApprovalPolicy { default: Tier::Auto, rules: Vec::new() };
+        let gate = Gate::new(&policy);
+        let members = [member("wp-a", 1)];
+        let projections = [pinned_projection()];
+
+        let (sealed, pending) = resolve_seal_memberships(&gate, &policy, &members, &projections)
+            .expect("a complete auto-tier member admits");
+        assert!(pending.is_empty(), "pre-approved auto forms inline");
+
+        let admission = admission_request(&members[0], &projections[0]);
+        assert_eq!(
+            admission.projection_digest.to_hex(),
+            "f40f0733dc88a1cdc6eddd52ef19c500544e92aa4423e9eb1d35c872de055a53",
+            "the named gate-input digest moved; an auto approval now binds different facts",
+        );
+        let Decision::AutoApproved(expected) = gate.evaluate(&admission) else {
+            panic!("pinned fixture resolves auto");
+        };
+        assert_eq!(sealed[0].approval, expected, "the door folded the named-field digest");
+    }
+
+    #[test]
+    fn a_field_the_gate_never_reads_does_not_rekey_the_approval() {
+        // Two slices in a row appended a field (`declared_crates`, then
+        // `declared_reads`) and silently re-keyed every auto approval formed
+        // afterwards, because the door hashed the whole transport DTO.
+        let policy = ApprovalPolicy { default: Tier::Auto, rules: Vec::new() };
+        let gate = Gate::new(&policy);
+        let members = [member("wp-a", 1)];
+        let empty_reads = [pinned_projection()];
+        let mut with_reads = pinned_projection();
+        with_reads.declared_reads = vec!["aether-data".to_owned()];
+
+        let (without, _) =
+            resolve_seal_memberships(&gate, &policy, &members, &empty_reads).expect("empty reads admits");
+        let (with, _) =
+            resolve_seal_memberships(&gate, &policy, &members, &[with_reads]).expect("declared reads still admits");
+        assert_eq!(
+            without[0].approval.detail, with[0].approval.detail,
+            "declared_reads is outside the approval digest",
+        );
     }
 }

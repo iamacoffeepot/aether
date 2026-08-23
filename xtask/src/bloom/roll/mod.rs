@@ -25,7 +25,7 @@ use anyhow::{Result, bail};
 use clap::Args;
 
 use self::day::Day;
-use self::shell::Shell;
+use self::shell::{Repo, Shell};
 use crate::bloom::client::Client;
 use crate::bloom::dto::ViewDocument;
 
@@ -47,6 +47,20 @@ pub struct RollArgs {
     /// The GitHub replica the advanced main and the new daily are pushed to.
     #[arg(long, default_value = "origin")]
     remote: String,
+
+    /// The fleet repository whose refs the roll reads and writes — the
+    /// coordinator's `AETHER_BLOOMERY_AUTHORITY_REPO`, or any worktree of it.
+    /// Defaults to the current directory, which is right only when the roll is
+    /// driven from inside the fleet repository.
+    #[arg(long, default_value = ".")]
+    repo: String,
+
+    /// Replay the day commit by commit instead of syncing its tree as one
+    /// commit. Keeps the day's authored history, and is only available to a day
+    /// with no bloom folds in it — a fold-bearing day cannot be replayed
+    /// linearly at all (#5414).
+    #[arg(long)]
+    replay: bool,
 }
 
 pub fn run(client: &Client<'_>, args: &RollArgs) -> Result<String> {
@@ -61,9 +75,10 @@ pub fn run(client: &Client<'_>, args: &RollArgs) -> Result<String> {
 
 fn roll(view: &ViewDocument, shell: &impl Shell, coverage: &DayCoverage, args: &RollArgs) -> Result<String> {
     let from = sync_from(&args.from)?;
-    preconditions::screen(view, shell, &args.date, &args.remote)?;
-    let synced = sync::merge(shell, &args.remote, &from, coverage)?;
-    cut::create(shell, &args.remote, &args.date)?;
+    let repo = Repo::new(args.repo.clone());
+    preconditions::screen(view, shell, &repo, &args.date, &args.remote)?;
+    let synced = sync::merge(shell, &repo, &args.remote, &from, coverage, args.replay)?;
+    cut::create(shell, &repo, &args.remote, &args.date)?;
     Ok(handoff(&args.date, &synced))
 }
 
@@ -132,6 +147,7 @@ mod tests {
                     scope_revision: DigestHex::from_bytes([7; 32]),
                     awaiting_surface: None,
                     withdrawn: None,
+                    cursor: None,
                 }],
             }],
         }
@@ -142,11 +158,14 @@ mod tests {
             date: Day::parse("2026-08-15").expect("a well-formed day"),
             from: from.to_owned(),
             remote: "origin".to_owned(),
+            repo: "/mnt/dev/bloomery/fleet.git".to_owned(),
+            replay: false,
         }
     }
 
     fn green() -> Fake<'static> {
         Fake::new(|line| match line {
+            line if line.contains("commit-tree") => Run::ok("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
             line if line.contains("rev-parse") && line.contains("^{tree}") => Run::ok("tree-day"),
             line if line.contains("rev-parse") && line.contains("refs/heads/main") => {
                 Run::ok("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
@@ -166,7 +185,7 @@ mod tests {
 
         let calls = shell.calls();
         let advanced = calls.iter().position(|line| line.contains("update-ref")).expect("the day advances onto main");
-        let cut = calls.iter().position(|line| line.starts_with("git branch")).expect("tomorrow is cut");
+        let cut = calls.iter().position(|line| line.contains(" branch ")).expect("tomorrow is cut");
         assert!(advanced < cut, "the cut is taken after fleet main advances: {calls:?}");
         assert!(
             !calls.iter().any(|line| line.contains("FETCH_HEAD") || line.contains("git fetch")),
@@ -208,9 +227,9 @@ mod tests {
 
         let calls = shell.calls();
         assert!(!calls.iter().any(|line| line.contains("update-ref")), "fleet main is not swapped: {calls:?}");
-        assert!(!calls.iter().any(|line| line.starts_with("git branch")), "tomorrow is not cut: {calls:?}");
+        assert!(!calls.iter().any(|line| line.contains(" branch ")), "tomorrow is not cut: {calls:?}");
         assert!(
-            !calls.iter().any(|line| line.starts_with("git push") && !line.contains("--dry-run")),
+            !calls.iter().any(|line| line.contains(" push ") && !line.contains("--dry-run")),
             "nothing is pushed: {calls:?}"
         );
     }
@@ -231,7 +250,7 @@ mod tests {
         assert!(refusal.contains("not green"), "the refusal names the coverage bar: {refusal}");
         let calls = shell.calls();
         assert!(!calls.iter().any(|line| line.contains("update-ref")), "a held map does not swap main: {calls:?}");
-        assert!(!calls.iter().any(|line| line.starts_with("git branch")), "tomorrow is not cut: {calls:?}");
+        assert!(!calls.iter().any(|line| line.contains(" branch ")), "tomorrow is not cut: {calls:?}");
     }
 
     // The operator copies the day off the coordinator's `AETHER_BLOOMERY_MAINLINE_REF`,

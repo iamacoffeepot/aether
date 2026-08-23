@@ -96,6 +96,12 @@ dogfood brief, and optional side findings. The Plan ends with exact `Size`,
 `Implementation model`, and `Routing reason` lines. Those body lines—not labels—
 select the implementation route.
 
+Plan steps and acceptance criteria cite the symbol that defines a protocol
+value, never the value itself — exit codes, wire discriminants, ports, and
+limits. The value is free to move; naming the symbol is what makes the move
+greppable, and a pinned numeral that later means something else is a silent
+mis-implementation.
+
 The declared surface bounds approval-policy resolution and the eventual PR
 diff. Declare it at crate granularity — `crates/<crate>/src/**` plus
 `crates/<crate>/tests/**` — and narrow to a module glob only when one crate

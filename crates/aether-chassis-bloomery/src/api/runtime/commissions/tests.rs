@@ -5,12 +5,12 @@ use aether_http::{HttpHeader, HttpServerRequest, HttpServerResponse};
 
 use super::{
     approval_response, authorize, cancel_request, cancel_response, create_response, list_response, query_status,
-    revision_response, show_response,
+    reopen_request, reopen_response, revision_response, scope_run_response, show_response,
 };
-use crate::api::dto::CancelCommissionRequest;
+use crate::api::dto::{CancelCommissionRequest, ReopenCommissionRequest};
 use crate::store::{
-    CancelCommissionResult, CreateCommissionResult, ListCommissionsResult, LoadCommissionResult,
-    RecordCommissionApprovalResult, WriteScopeRevisionResult,
+    CancelCommissionResult, CreateCommissionResult, EnqueueScopeRunResult, ListCommissionsResult, LoadCommissionResult,
+    RecordCommissionApprovalResult, ReopenCommissionResult, WriteScopeRevisionResult,
 };
 
 fn request(authorization: Option<&str>) -> HttpServerRequest {
@@ -95,6 +95,16 @@ fn every_route_result_has_a_success_status() {
     );
     assert_eq!(revision_response(WriteScopeRevisionResult::Ok { digest: digest.clone() }).status, 201);
     assert_eq!(
+        scope_run_response(EnqueueScopeRunResult::Ok {
+            id: "wp-1".to_owned(),
+            ordinal: 1,
+            sequence: 1,
+            subject: digest.clone(),
+        })
+        .status,
+        201
+    );
+    assert_eq!(
         show_response(LoadCommissionResult::Ok {
             id: "wp-1".to_owned(),
             intent: digest.clone(),
@@ -111,6 +121,8 @@ fn every_route_result_has_a_success_status() {
     assert_eq!(list_response(ListCommissionsResult::Ok { commissions: Vec::new() }).status, 200);
     assert_eq!(cancel_response(CancelCommissionResult::Ok { id: "wp-1".to_owned(), digest }).status, 200);
     assert_eq!(create_response(CreateCommissionResult::Duplicate { id: "wp-1".to_owned() }).status, 409);
+    assert_eq!(scope_run_response(EnqueueScopeRunResult::Missing { id: "wp-1".to_owned() }).status, 404);
+    assert_eq!(scope_run_response(EnqueueScopeRunResult::AlreadyInFlight { ordinal: 1 }).status, 409);
     assert_eq!(show_response(LoadCommissionResult::Missing { id: "wp-1".to_owned() }).status, 404);
 }
 
@@ -165,4 +177,41 @@ fn a_cancel_whose_words_are_not_a_digest_is_refused() {
     let response = refused_cancel(cancel_request(&encode_cancel(&statement, "landed elsewhere")));
     assert_eq!(response.status, 400);
     assert!(error_text(&response).contains("cancel words are not an intent digest"), "{}", error_text(&response));
+}
+
+#[test]
+fn a_reopen_refusal_carries_the_status_the_operator_needs_to_act_on() {
+    // A 409 that says only "refused" sends the operator back to the board to
+    // work out which of the two guards stopped them. Each refusal names the
+    // thing that decided it.
+    let resolved = reopen_response(ReopenCommissionResult::Resolved { bloom: "abcd".to_owned() });
+    let not_landed = reopen_response(ReopenCommissionResult::NotLanded { status: "cancelled".to_owned() });
+
+    assert_eq!(resolved.status, 409);
+    assert!(error_text(&resolved).contains("abcd"), "the resolving bloom is named: {}", error_text(&resolved));
+    assert_eq!(not_landed.status, 409);
+    assert!(
+        error_text(&not_landed).contains("cancelled"),
+        "the status it is actually in is named: {}",
+        error_text(&not_landed)
+    );
+    assert_eq!(reopen_response(ReopenCommissionResult::Missing { id: "wp-1".to_owned() }).status, 404);
+    assert_eq!(reopen_response(ReopenCommissionResult::WrongSubject).status, 400);
+    assert_eq!(reopen_response(ReopenCommissionResult::Err { error: "disk".to_owned() }).status, 500);
+}
+
+#[test]
+fn a_reopen_with_a_blank_reason_is_refused_before_the_signature_is_read() {
+    // The same door-side check the cancel runs, and the refusal says which act
+    // it refused rather than leaving the operator to guess the route.
+    let statement = signed_cancel_of(Digest::from_bytes([3; 32]));
+    let body = serde_json::to_vec(&ReopenCommissionRequest { statement, reason: " \t".to_owned() })
+        .expect("reopen body encodes");
+
+    let Err(response) = reopen_request(&body) else {
+        panic!("expected a refused reopen request");
+    };
+
+    assert_eq!(response.status, 400);
+    assert!(error_text(&response).contains("reopen reason is required"), "{}", error_text(&response));
 }

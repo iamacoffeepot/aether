@@ -1591,25 +1591,42 @@ fn project(decisions: &Decisions) -> Result<ProjectedAxes, WireError> {
 /// The outbox row one effect enqueues, or `None` for a snapshot-only effect that
 /// carries no durable row.
 ///
-/// Split from [`project`] so the membership axes and the outbox axis are read
-/// separately: the two membership arms mutate a table, every arm here serializes
-/// a payload under a topic, and the classification of which effects are
+/// The topic is [`Topic::of_decision`]'s to name; this match's only job is the
+/// payload encoding. A new effectful decision is added here for its bytes and in
+/// `Topic::of_decision` for its topic, and the two cannot disagree about which
+/// topic that is. Split from [`project`] so the membership axes and the outbox
+/// axis are read separately: the two membership arms mutate a table, every arm
+/// here serializes a payload, and the classification of which effects are
 /// snapshot-only is one list rather than a tail on a longer match.
 fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError> {
+    let Some(topic) = Topic::of_decision(effect) else {
+        return Ok(None);
+    };
+    let bytes = outbox_payload_bytes(effect)?;
+    debug_assert!(
+        bytes.is_some(),
+        "Topic::of_decision mapped {effect:?} to {topic:?} but the payload arm returned None"
+    );
+    Ok(bytes.map(|payload| OutboxPayload::new(topic, payload)))
+}
+
+fn outbox_payload_bytes(effect: &Decision) -> Result<Option<Vec<u8>>, WireError> {
     Ok(match effect {
         // The landing-receipt topic carries the receipt *and* the landed
         // bloom's membership: the receipt value names no members, so a
         // payload without them cannot reach the objects it belongs on after
         // a restart drains it (ADR-0149 §The receipt carries its members).
-        Decision::EmitReceipt(projected) => Some(OutboxPayload::new(Topic::LandingReceipt, to_vec(projected)?)),
-        Decision::RedispatchStage { bloom, question, answer, words } => Some(OutboxPayload::new(
-            Topic::Redispatch,
-            to_vec(&RedispatchPayload { bloom: bloom.0, question: *question, answer: *answer, words: words.clone() })?,
-        )),
+        Decision::EmitReceipt(projected) => Some(to_vec(projected)?),
+        Decision::RedispatchStage { bloom, question, answer, words } => Some(to_vec(&RedispatchPayload {
+            bloom: bloom.0,
+            question: *question,
+            answer: *answer,
+            words: words.clone(),
+        })?),
         Decision::DispatchAttempt { .. } => dispatch_attempt_outbox(effect)?,
         Decision::DispatchLand { bloom, expected_base, new_head } => {
             let payload = LandPayload { bloom: bloom.0, expected_base: *expected_base, new_head: *new_head };
-            Some(OutboxPayload::new(Topic::Land, to_vec(&payload)?))
+            Some(to_vec(&payload)?)
         }
         Decision::DispatchIntegration { bloom, base, members, adopt_from } => {
             let payload = IntegratePayload {
@@ -1618,43 +1635,34 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
                 members: members.clone(),
                 adopt_from: adopt_from.map(|predecessor| predecessor.0),
             };
-            Some(OutboxPayload::new(Topic::Integrate, to_vec(&payload)?))
+            Some(to_vec(&payload)?)
         }
         Decision::DispatchSplice { .. } => splice_outbox(effect)?,
-        Decision::DispatchAggregateReview { bloom, transformation, roll, profile, configs } => {
-            let payload = AggregateReviewPayload {
-                profile: profile.clone(),
-                bloom: bloom.0,
-                transformation: transformation.clone(),
-                pass: ReviewPass::from_roll(*roll),
-                configs: configs.clone(),
-            };
-            Some(OutboxPayload::new(Topic::AggregateReview, to_vec(&payload)?))
-        }
+        Decision::DispatchAggregateReview { .. } => aggregate_review_outbox(effect)?,
         Decision::DispatchAggregateVerify { bloom, transformation, profile, roll: _ } => {
             let payload = AggregateVerifyPayload {
                 profile: profile.clone(),
                 bloom: bloom.0,
                 transformation: transformation.clone(),
             };
-            Some(OutboxPayload::new(Topic::AggregateVerify, to_vec(&payload)?))
+            Some(to_vec(&payload)?)
         }
         Decision::DispatchOrphanClaimRelease { request, target } => {
             let payload = OrphanClaimReleasePayload { request: *request, target: target.clone() };
-            Some(OutboxPayload::new(Topic::OrphanClaimRelease, to_vec(&payload)?))
+            Some(to_vec(&payload)?)
         }
         Decision::DispatchBaseVerify { base, transformation, profile } => {
             let payload =
                 BaseVerifyPayload { base: *base, transformation: transformation.clone(), profile: profile.clone() };
-            Some(OutboxPayload::new(Topic::BaseVerify, to_vec(&payload)?))
+            Some(to_vec(&payload)?)
         }
         Decision::CancelDispatch { bloom, workpiece } => {
             let payload = CancelDispatchPayload { bloom: bloom.0, workpiece: workpiece.clone() };
-            Some(OutboxPayload::new(Topic::CancelDispatch, to_vec(&payload)?))
+            Some(to_vec(&payload)?)
         }
         Decision::ReleaseMemberClaimRef { bloom, workpiece } => {
             let payload = MemberClaimReleasePayload { bloom: bloom.0, workpiece: workpiece.clone() };
-            Some(OutboxPayload::new(Topic::MemberClaimRelease, to_vec(&payload)?))
+            Some(to_vec(&payload)?)
         }
         Decision::ClaimMembership { .. }
         | Decision::ReleaseMembership { .. }
@@ -1700,7 +1708,7 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
     })
 }
 
-fn dispatch_attempt_outbox(effect: &Decision) -> Result<Option<OutboxPayload>, WireError> {
+fn dispatch_attempt_outbox(effect: &Decision) -> Result<Option<Vec<u8>>, WireError> {
     let Decision::DispatchAttempt {
         bloom,
         workpiece,
@@ -1724,10 +1732,24 @@ fn dispatch_attempt_outbox(effect: &Decision) -> Result<Option<OutboxPayload>, W
         profile: profile.clone(),
         configs: configs.clone(),
     };
-    Ok(Some(OutboxPayload::new(Topic::Dispatch, to_vec(&payload)?)))
+    Ok(Some(to_vec(&payload)?))
 }
 
-fn splice_outbox(effect: &Decision) -> Result<Option<OutboxPayload>, WireError> {
+fn aggregate_review_outbox(effect: &Decision) -> Result<Option<Vec<u8>>, WireError> {
+    let Decision::DispatchAggregateReview { bloom, transformation, roll, profile, configs } = effect else {
+        return Ok(None);
+    };
+    let payload = AggregateReviewPayload {
+        profile: profile.clone(),
+        bloom: bloom.0,
+        transformation: transformation.clone(),
+        pass: ReviewPass::from_roll(*roll),
+        configs: configs.clone(),
+    };
+    Ok(Some(to_vec(&payload)?))
+}
+
+fn splice_outbox(effect: &Decision) -> Result<Option<Vec<u8>>, WireError> {
     let Decision::DispatchSplice { bloom, workpiece, base, members, adopt_from } = effect else {
         return Ok(None);
     };
@@ -1738,7 +1760,7 @@ fn splice_outbox(effect: &Decision) -> Result<Option<OutboxPayload>, WireError> 
         members: members.clone(),
         adopt_from: adopt_from.map(|predecessor| predecessor.0),
     };
-    Ok(Some(OutboxPayload::new(Topic::Splice, to_vec(&payload)?)))
+    Ok(Some(to_vec(&payload)?))
 }
 
 /// Commit a just-reduced admit, or reply immediately when it needs no new row.

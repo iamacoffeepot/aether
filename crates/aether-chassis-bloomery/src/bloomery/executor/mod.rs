@@ -34,7 +34,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use aether_bloomery::{
-    EvidenceRef, ExecutionStatus, ExecutorBackend, ObservedLaneWrites, SharedCorrespondence, WorkHandle, WorkOrder,
+    BackendId, EvidenceRef, ExecutionStatus, ExecutorBackend, ObservedLaneWrites, SharedCorrespondence, WorkHandle,
+    WorkOrder,
 };
 use aether_bloomery_github::{ActionsExecutor, ExecutorError, GithubError, LaneWorkflows};
 
@@ -51,6 +52,15 @@ pub use local::{
 };
 pub use reconcile::{LaneOccupancy, LocalLane, OutstandingDispatch, ReconcileLanes, ReconcileReport};
 pub use routing::RoutingExecutor;
+
+/// The zero-secret shared-runner arm, as a handle's owner (#5412). One of the
+/// two names [`RoutingExecutor`] answers `backend_for` with, so an intake cycle
+/// can isolate a rate-limited Actions API from the local lanes beside it.
+pub const ACTIONS_BACKEND: BackendId = BackendId("actions");
+
+/// The operator-machine arm (ADR-0150), the other name [`RoutingExecutor`]
+/// answers `backend_for` with.
+pub const LOCAL_BACKEND: BackendId = BackendId("local");
 
 /// A backend that always fails with a missing-GitHub-configuration error.
 /// Used when the reactor mounts local-only (GitHub unconfigured but
@@ -93,6 +103,10 @@ impl ExecutorBackend for UnconfiguredActionsBackend {
 
     fn stream_evidence(&self, handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
         Err(ExecutorError::NoRunForNonce(handle.nonce.clone()))
+    }
+
+    fn backend_for(&self, _handle: &WorkHandle) -> BackendId {
+        ACTIONS_BACKEND
     }
 }
 
@@ -184,6 +198,10 @@ where
 
     fn observe_writes(&self) -> Vec<ObservedLaneWrites> {
         self.0.observe_writes()
+    }
+
+    fn backend_for(&self, handle: &WorkHandle) -> BackendId {
+        self.0.backend_for(handle)
     }
 }
 
@@ -359,5 +377,13 @@ impl ExecutorShell {
     #[must_use]
     pub fn observe_writes(&self) -> Vec<ObservedLaneWrites> {
         self.backend.observe_writes()
+    }
+
+    /// Which arm of the mounted backend owns `handle` (#5412) — how the intake
+    /// cycle groups the handles it holds so one arm's fault costs it only that
+    /// arm's tick.
+    #[must_use]
+    pub fn backend_for(&self, handle: &WorkHandle) -> BackendId {
+        self.backend.backend_for(handle)
     }
 }

@@ -206,6 +206,21 @@ fn projection_shell(github: &GithubConnectionConfig, configured: bool) -> Result
     configured.then(|| ProjectionShell::connect(github)).transpose().map_err(|error| BootError::Other(Box::new(error)))
 }
 
+/// The cadence every reactor that reaches the GitHub API runs at (#5412): the
+/// configured interval, floored by what the hourly REST allowance affords.
+///
+/// Local-authority operation spends no allowance and keeps the configured
+/// interval — the floor exists to stop a fast poll from emptying a budget, and
+/// an unconfigured connection has no budget to empty.
+#[cfg(feature = "github")]
+fn github_cadence_secs(coordinator: &CoordinatorConfig, configured: bool) -> u64 {
+    if configured {
+        coordinator.github_poll_interval_secs()
+    } else {
+        coordinator.poll_interval_secs
+    }
+}
+
 #[cfg(feature = "github")]
 fn actor_setups(
     github: &GithubConnectionConfig,
@@ -236,6 +251,7 @@ fn actor_setups(
         (cfg!(any(test, feature = "testing")) || github.uses_fixture()) && !coordinator.uses_local_authority();
     let pusher = candidate_push_at(refuse_origin, repo.clone(), coordinator.candidate_remote());
     let doctor_board = DoctorBoard::default();
+    let github_poll_interval_secs = github_cadence_secs(coordinator, configured);
 
     Ok(BloomeryActorSetups {
         mirror: MirrorReactorSetup {
@@ -249,7 +265,7 @@ fn actor_setups(
                     &github.token,
                 )
             }),
-            poll_interval_secs: coordinator.poll_interval_secs,
+            poll_interval_secs: github_poll_interval_secs,
             repository: repository.clone(),
         },
         executor: ExecutorReactorSetup {
@@ -257,7 +273,7 @@ fn actor_setups(
             correspondence: executor_correspondence,
             store_path: coordinator.store_path.clone(),
             artifacts_root: coordinator.artifacts_root.clone(),
-            poll_interval_secs: coordinator.poll_interval_secs,
+            poll_interval_secs: github_poll_interval_secs,
             stale_warn_after_secs: coordinator.stale_warn_after_secs,
             heartbeat_silence_secs: coordinator.heartbeat_silence_secs()?,
             repository: repository.clone(),
@@ -275,7 +291,7 @@ fn actor_setups(
         land: LandReactorSetup {
             source: land_reactor_source(github, coordinator, &source, Arc::clone(&correspondence), configured)?,
             store_path: coordinator.store_path.clone(),
-            poll_interval_secs: coordinator.poll_interval_secs,
+            poll_interval_secs: github_poll_interval_secs,
             repository: repository.clone(),
             cas_land_enabled: github.cas_land_enabled,
             emit_source_replica: replica_enabled,
@@ -284,13 +300,13 @@ fn actor_setups(
             source: source_configured.then(|| source.clone()),
             store_path: coordinator.store_path.clone(),
             artifacts_root: coordinator.artifacts_root.clone(),
-            poll_interval_secs: coordinator.poll_interval_secs,
+            poll_interval_secs: github_poll_interval_secs,
             repository,
         },
         claim_release: ClaimReleaseReactorSetup {
             source: source_configured.then(|| source.clone()),
             store_path: coordinator.store_path.clone(),
-            poll_interval_secs: coordinator.poll_interval_secs,
+            poll_interval_secs: github_poll_interval_secs,
         },
         // Independent of every GitHub knob: the operator channel answers "is
         // anything stuck" whether or not a projection backend is configured,
@@ -308,7 +324,7 @@ fn actor_setups(
             target_base: coordinator.lane_target_base.clone(),
             lane_target_budget_bytes: coordinator.lane_target_budget_bytes,
             evidence_retention_days: coordinator.evidence_retention_days,
-            poll_interval_secs: coordinator.poll_interval_secs,
+            poll_interval_secs: github_poll_interval_secs,
             repo: repo.display().to_string(),
         },
         doctor: DoctorReactorSetup {
@@ -317,7 +333,7 @@ fn actor_setups(
             correspondence: Some(Arc::clone(&correspondence)),
             store_path: coordinator.store_path.clone(),
             worktree_base: coordinator.local_worktree_base.clone(),
-            poll_interval_secs: coordinator.poll_interval_secs,
+            poll_interval_secs: github_poll_interval_secs,
             board: doctor_board.clone(),
         },
         source: SourceSetup { shell: source, claims_enabled: source_configured, mainline: coordinator.mainline() },

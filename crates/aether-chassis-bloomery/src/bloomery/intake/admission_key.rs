@@ -65,6 +65,14 @@ pub enum AdmissionKey {
     /// study row landing must not mark the dispatch complete — the verdict
     /// is what consumes the order. Excluded from [`Self::ALL`].
     Study,
+    /// A pre-bloom scoping run's verdict (ADR-0208). Dispatch-accounting like
+    /// the rest: the order is consumed and the verdict reached the run
+    /// ledger, so a Scope admission missing from [`Self::ALL`] would make a
+    /// completed run look stranded. The strand check reads the ledger row
+    /// rather than a journal event — there is no bloom for a `Fact` to be
+    /// about — but the key still belongs in the closed vocabulary so a
+    /// later journal-shaped accounting cannot forget the shape.
+    Scope,
 }
 
 impl AdmissionKey {
@@ -72,7 +80,7 @@ impl AdmissionKey {
     /// of these is the durable statement that the dispatch reached the
     /// reducer as a verdict. [`Self::Study`] is deliberately absent: it
     /// rides the same nonce but must not satisfy the strand check.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Attempt,
         Self::Integrate,
         Self::VerifyFailed,
@@ -83,6 +91,7 @@ impl AdmissionKey {
         Self::BaseVerify,
         Self::MemberExecutorFault,
         Self::SurfaceRequest,
+        Self::Scope,
     ];
 
     /// The key's stable prefix — the half of the key that is not the nonce.
@@ -100,6 +109,7 @@ impl AdmissionKey {
             Self::LeaseObservation => "aether.bloomery.lease_observation",
             Self::SurfaceRequest => "aether.bloomery.surface_request",
             Self::Study => "aether.bloomery.study",
+            Self::Scope => "aether.bloomery.scope",
         }
     }
 

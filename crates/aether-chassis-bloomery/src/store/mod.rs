@@ -86,10 +86,16 @@ mod commission;
 #[cfg(feature = "runtime")]
 pub use commission::{
     CancelCommission, CancelCommissionResult, CommissionBackend, CommissionError, CommissionHead, CommissionView,
-    CreateCommission, CreateCommissionResult, ListCommissions, ListCommissionsResult, ListedCommission, LoadCommission,
-    LoadCommissionResult, RecordCommissionApproval, RecordCommissionApprovalResult, RecordCommissionProjection,
-    RecordCommissionProjectionResult, WriteScopeRevision, WriteScopeRevisionResult,
+    CreateCommission, CreateCommissionResult, EnqueueScopeRun, EnqueueScopeRunResult, ListCommissions,
+    ListCommissionsResult, ListedCommission, LoadCommission, LoadCommissionResult, RecordCommissionApproval,
+    RecordCommissionApprovalResult, RecordCommissionProjection, RecordCommissionProjectionResult, ReopenCommission,
+    ReopenCommissionResult, RevisionEvidence, WriteScopeRevision, WriteScopeRevisionResult,
 };
+
+// Reading the reducer's per-member answers (which members resolved, which
+// bloom resolved a workpiece) back out of the journal.
+#[cfg(feature = "runtime")]
+pub(crate) mod membership;
 
 #[cfg(feature = "runtime")]
 mod runtime;

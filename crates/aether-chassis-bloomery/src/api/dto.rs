@@ -26,10 +26,11 @@ use serde::{Deserialize, Serialize};
 use aether_bloomery::{BloomId, ClaimHolder, ClaimRefKind};
 use aether_bloomery::{
     CandidateRef, ConfigRegistry, Digest, Disposition, Event, Forecast, MemberDependency, Membership, Outcome,
-    ScopeRevision, ScopeVerifyInput, ScopeVerifyReport, StageId, Statement, SuppressionVerdict, Workpiece, WorkpieceId,
+    ScopeRevision, ScopeVerifyReport, StageId, Statement, SuppressionVerdict, Workpiece, WorkpieceId,
 };
 
 use crate::bloomery::{AdrTouch, Completeness};
+use crate::store::RevisionEvidence;
 
 /// A draft plus its server-minted handle. The handle keys the in-memory
 /// shaping state, so a subsequent `PATCH` / `seal` names the draft by it.
@@ -104,8 +105,10 @@ pub struct MemberProjection {
     /// change those crates, and into nothing at all when no co-member does.
     ///
     /// The gate never reads this: a read is not authority, so it lifts no
-    /// tier and widens no surface. Defaulted so a projection written before
-    /// the block existed reads back as declaring no reads.
+    /// tier and widens no surface. It is therefore outside the approval digest,
+    /// which is why this field may be appended to freely. Defaulted so a
+    /// projection written before the block existed reads back as declaring no
+    /// reads.
     #[serde(default)]
     pub declared_reads: Vec<String>,
     /// The nine completeness facts the gate fails closed on.
@@ -117,7 +120,8 @@ pub struct MemberProjection {
     pub pre_approved: bool,
     /// The owner-signed statement for an above-`auto` member. Consumed by the
     /// deferred-verify enforcement (its live wiring is the follow-up child #3599);
-    /// an above-`auto` member fails closed until then.
+    /// an above-`auto` member fails closed until then. The gate never reads this,
+    /// so it is outside the approval digest and may be appended to freely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signed_statement: Option<Statement>,
 }
@@ -327,6 +331,35 @@ pub struct WithdrawRequest {
     pub cascade: bool,
     /// Override the admit idempotency key; defaults to the withdrawal's own
     /// content, so a resend is a duplicate rather than a second act.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+/// `POST /blooms/{id}/members/{workpiece}/retry` body — re-dispatch one member's
+/// current stage on the candidate it already holds (#5423).
+///
+/// The operator states the stage and the subject it read them off the view at,
+/// and the reducer refuses both if the member has moved since: a retry aimed
+/// from a stale read must not spend a machinery roll on a stage the member is no
+/// longer sitting at, or bind a fault to a candidate it no longer holds.
+///
+/// Unauthenticated on the host-local bind like every other bloom operator route,
+/// and gated by the same mandatory non-blank `reason` + `operator`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryRequest {
+    /// The stage to re-dispatch — the member's current cursor stage. A mismatch
+    /// is refused rather than applied to wherever the member actually is.
+    pub stage: StageId,
+    /// The subject the retry binds its fault evidence to: the member's candidate
+    /// tree, or its scope revision when it holds no candidate yet.
+    pub subject: Digest,
+    /// Why this stage is being run again, in the operator's own words. Required
+    /// and non-blank; a blank one is `422`.
+    pub reason: String,
+    /// Who is deciding. Recorded as the decider; required and non-blank.
+    pub operator: String,
+    /// Override the admit idempotency key; defaults to the retry's own content,
+    /// so a resend is a duplicate rather than a second roll.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
 }
@@ -578,19 +611,19 @@ pub struct CreateCommissionRequest {
     pub intent: Statement,
 }
 
-/// `POST /commissions/{id}/revisions` body, read for the projection only.
+/// `POST /commissions/{id}/revisions` body — the signed revision and sidecar
+/// evidence about it.
 ///
-/// The same body also decodes as a bare [`ScopeRevision`]; this shape reads the
-/// one field beside it. Kept separate rather than flattened onto the revision
-/// because the revision's bytes are the signed subject and must stay exactly
-/// what the encoder writes.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RevisionProjection {
-    /// The workpiece's field records projected for the freeze check
-    /// (ADR-0208). Absent for a hand-authored revision, which carries no
-    /// records — absence writes no report, never a clean one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scope_verify: Option<ScopeVerifyInput>,
+/// The revision's own bytes are the signed subject and must stay exactly what
+/// the encoder writes; [`evidence`](Self::evidence) rides beside them and is
+/// never hashed in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriteRevisionRequest {
+    /// The revision being stored.
+    pub revision: ScopeRevision,
+    /// What is known about the revision without being part of it.
+    #[serde(default)]
+    pub evidence: RevisionEvidence,
 }
 
 /// `POST /commissions` reply.
@@ -692,6 +725,52 @@ pub struct CommissionCancelledView {
     pub id: WorkpieceId,
     /// Always `"cancelled"`.
     pub status: String,
+}
+
+/// `POST /commissions/{id}/reopen` body: the same shape a cancel submits, at
+/// the Reopen door. The signature is the authority; the reason is the
+/// operator's own words and is recorded in the coordinator log, never in the
+/// signed bytes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReopenCommissionRequest {
+    /// The Reopen-door statement bound to the commission's intent digest.
+    pub statement: Statement,
+    /// Operator context for the reopen. Never authority.
+    pub reason: String,
+}
+
+/// `POST /commissions/{id}/reopen` reply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommissionReopenedView {
+    /// Digest of the reopen statement that authorized it.
+    pub digest: Digest,
+    /// The workpiece this commission is.
+    pub id: WorkpieceId,
+    /// Always `"open"`.
+    pub status: String,
+}
+
+/// `POST /commissions/{id}/scope-runs` body: the observed mainline the run
+/// reads code at. The coordinator does not invent a tree; this is
+/// `Snapshot.mainline` as the CLI (or a caller that has just read `GET /view`)
+/// observed it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopeRunRequest {
+    /// The observed mainline head.
+    pub base: Digest,
+}
+
+/// `POST /commissions/{id}/scope-runs` reply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopeRunOpenedView {
+    /// The workpiece this commission is.
+    pub id: WorkpieceId,
+    /// The attempt ordinal opened, from `1`.
+    pub ordinal: u64,
+    /// The outbox sequence the drain will mint a nonce from.
+    pub sequence: u64,
+    /// The run's content-addressed subject.
+    pub subject: Digest,
 }
 
 /// One journald entry as the coordinator log route renders it.

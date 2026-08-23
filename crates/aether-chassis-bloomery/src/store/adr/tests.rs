@@ -84,7 +84,7 @@ fn a_v8_store_gains_empty_adr_tables() {
     let mut store = SqliteStore::open(path).expect("a v8 store migrates");
     assert!(store.list().expect("list").is_empty(), "migration invents no ADRs");
     let flags: i64 = store.conn.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("user_version");
-    assert_eq!(flags, 13, "the open stamps the current schema");
+    assert_eq!(flags, 15, "the open stamps the current schema");
 }
 
 #[test]

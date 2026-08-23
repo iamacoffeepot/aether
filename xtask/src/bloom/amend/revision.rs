@@ -12,11 +12,14 @@ use std::fs;
 use std::path::Path;
 use std::str;
 
-use aether_bloomery::{Digest, KeyId, ScopeRevision, Statement, digest_of, signed_approval, signed_cancel};
+use aether_bloomery::{
+    Digest, KeyId, SCOPE_VERIFY_SCHEMA, ScopeRevision, ScopeVerifyInput, Statement, digest_of, signed_approval,
+    signed_cancel, signed_reopen,
+};
 use anyhow::{Context, Result, bail};
 
 use crate::bloom::client::Client;
-use crate::bloom::dto::{CommissionShowView, DigestHex};
+use crate::bloom::dto::{CommissionShowView, DigestHex, RevisionEvidence};
 
 /// The operator's Approve-door signing key, loaded from a seed file.
 ///
@@ -68,6 +71,14 @@ impl OperatorKey {
     pub fn cancel_of(&self, intent: Digest) -> Statement {
         signed_cancel(self.signer.clone(), &self.seed, intent)
     }
+
+    /// The Reopen-door statement over `intent`.
+    ///
+    /// Deterministic for the same reason [`Self::cancel_of`] is; the store's
+    /// not-landed refusal is what a second attempt hits.
+    pub fn reopen_of(&self, intent: Digest) -> Statement {
+        signed_reopen(self.signer.clone(), &self.seed, intent)
+    }
 }
 
 fn decode_seed(bytes: &[u8]) -> Result<[u8; 32]> {
@@ -109,8 +120,16 @@ fn refuse_loose_mode(_path: &Path) -> Result<()> {
 /// answers with the same digest, so a re-run after a downstream failure does
 /// not advance the commission a second time.
 pub fn write_widened(client: &Client<'_>, workpiece: &str, widened: &ScopeRevision) -> Result<DigestHex> {
+    let evidence = RevisionEvidence {
+        scope_verify: Some(ScopeVerifyInput {
+            schema: SCOPE_VERIFY_SCHEMA,
+            named_paths: Vec::new(),
+            named_symbols: Vec::new(),
+            declared_surface: widened.declared_surface.clone(),
+        }),
+    };
     let expected = DigestHex::from_bytes(*digest_of(widened).as_bytes());
-    match client.write_revision(workpiece, widened) {
+    match client.write_revision(workpiece, widened, &evidence) {
         Ok(written) => {
             if written.digest != expected {
                 bail!("the coordinator stored {} for a revision addressed {expected}", written.digest);

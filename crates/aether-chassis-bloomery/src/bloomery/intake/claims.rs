@@ -75,58 +75,39 @@ impl EvidenceClaims for NameEvidenceClaims {
         let mut fields = rest.splitn(5, '.');
         let verdict = verdict_from_token(fields.next()?)?;
         let mask_or_subject = fields.next()?;
-        let (failed_verifiers, subject, detail, _named_nonce) =
-            if mask_or_subject.len() == 2 || mask_or_subject.len() == 4 {
-                // A two- or four-character token sits in the mask position, so it
-                // must be a canonical ADR-0178/ADR-0209 mask; anything else is a
-                // malformed attempt name and buys no upload. A subject is 64 hex,
-                // so neither width is ambiguous against it.
-                (
-                    VerifyFailureSet::from_mask(mask_or_subject)?,
-                    Digest::from_hex(fields.next()?)?,
-                    Digest::from_hex(fields.next()?)?,
-                    fields.next()?,
-                )
-            } else {
-                // The credential-bearing model wrapper is outside the mechanical
-                // ADR-0178 lane and still emits the pre-mask name shape. Preserve
-                // that non-Verify transport as an empty failure set; a malformed
-                // short mask cannot take this path because a subject is 64 hex.
-                (
-                    VerifyFailureSet::EMPTY,
-                    Digest::from_hex(mask_or_subject)?,
-                    Digest::from_hex(fields.next()?)?,
-                    fields.next()?,
-                )
-            };
-        // The nonce, candidate, findings, and cost are authoritative from the
-        // reference (what the port matched the run by / what the backend read
-        // out of the run's own evidence), not the name. The failure set is the
-        // name's, and the reference's own copy is no second opinion to check it
-        // against: the Actions backend derives that copy from this very name
-        // token, and the local backend composes the name from the copy it
-        // reports, so the pair is one value on both transports. What does guard
-        // the set is elsewhere — the malformed-mask refusal above, the local
-        // backend's fail-closed body decode, the nonce binding a body to its
-        // order, the artifact digest binding the bytes, and intake's
-        // `verifier_failure_refusal`, which refuses a set that disagrees with
-        // the order's stage and the claimed verdict.
+        let (subject, detail, _named_nonce) = if mask_or_subject.len() == 2 || mask_or_subject.len() == 4 {
+            // A two- or four-character token sits in the mask position, so it
+            // must be a canonical ADR-0178/ADR-0209 mask; anything else is a
+            // malformed attempt name and buys no upload. A subject is 64 hex,
+            // so neither width is ambiguous against it. The decoded set itself
+            // is not kept: the observation rides the reference wholesale.
+            VerifyFailureSet::from_mask(mask_or_subject)?;
+            (Digest::from_hex(fields.next()?)?, Digest::from_hex(fields.next()?)?, fields.next()?)
+        } else {
+            // The credential-bearing model wrapper is outside the mechanical
+            // ADR-0178 lane and still emits the pre-mask name shape. A
+            // malformed short mask cannot take this path because a subject is
+            // 64 hex.
+            (Digest::from_hex(mask_or_subject)?, Digest::from_hex(fields.next()?)?, fields.next()?)
+        };
+        // The nonce is authoritative from the reference (what the port matched
+        // the run by). The observation rides the reference wholesale so a new
+        // channel reaches intake by construction. The name still validates the
+        // failure-mask token — a malformed mask is not an upload — but that
+        // decoded set is not a second copy: the Actions backend derives the
+        // reference's set from this same token, and the local backend composes
+        // the name from the copy it reports, so the pair is one value on both
+        // transports. What does guard the set is elsewhere — the malformed-mask
+        // refusal above, the local backend's fail-closed body decode, the nonce
+        // binding a body to its order, the artifact digest binding the bytes,
+        // and intake's `verifier_failure_refusal`, which refuses a set that
+        // disagrees with the order's stage and the claimed verdict.
         Some(UploadedEvidence {
             nonce: reference.nonce.clone(),
             subject,
             verdict,
             detail,
-            failed_verifiers,
-            candidate: reference.candidate,
-            findings: reference.findings.clone(),
-            cost: reference.cost,
-            calls: reference.calls.clone(),
-            session_reuse_arm: reference.session_reuse_arm.clone(),
-            session_reuse_saved_micro_usd: reference.session_reuse_saved_micro_usd,
-            peak_resident_bytes: reference.peak_resident_bytes,
-            violating_paths: reference.violating_paths.clone(),
-            surface_request: reference.surface_request.clone(),
-            suppression_requests: reference.suppression_requests.clone(),
+            observation: reference.observation.clone(),
         })
     }
 }

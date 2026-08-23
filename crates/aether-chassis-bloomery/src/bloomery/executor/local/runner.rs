@@ -209,24 +209,6 @@ pub trait TransformRunner: Send + Sync {
         worktree_dir: &Path,
         message: Option<&str>,
     ) -> Result<Option<CapturedObjects>, LocalExecutorError>;
-
-    /// Direct commit parents of a checkout, in git parent order.
-    ///
-    /// The backend consults this after an exact builder-slot miss so a
-    /// synthetic fold commit can still prefer the slot that captured its
-    /// dependency parent. A non-commit checkout reports no parents; an
-    /// unreadable one is `Err`. Both degrade to no preference rather than
-    /// refusing the order.
-    ///
-    /// The default reports none — a stub that does not inspect Git. Production
-    /// reads the source repository; the fixed runner supplies deterministic
-    /// fixtures.
-    ///
-    /// # Errors
-    /// The object could not be inspected (a git shell-out failed).
-    fn checkout_parents(&self, _checkout_hex: &str) -> Result<Vec<String>, LocalExecutorError> {
-        Ok(Vec::new())
-    }
 }
 
 /// What [`TransformRunner::capture`] produced: the capture commit wrapping the

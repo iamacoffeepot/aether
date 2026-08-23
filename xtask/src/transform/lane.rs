@@ -14,12 +14,13 @@
 //! closed, which reads as a critic *finding* rather than a harness bug — so the
 //! arms converge here rather than each assembling their own.
 
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::thread;
-use std::{fs, io};
+use std::{env, fs, io};
 
 use anyhow::{Context, Result, bail};
 
@@ -117,6 +118,37 @@ pub(super) fn record(terminal: Option<Terminal>, session: Option<String>) -> ser
 /// non-Claude arms hand their child a prompt file rather than piping stdin, so
 /// neither repeats the pipe-on-a-thread dance the Claude arm needs, and the
 /// exact prompt a run received stays on disk beside its transcript.
+/// The cargo build directory a model lane's child must build into: the slot
+/// target the coordinator lent this dispatch, stated on the child's environment
+/// rather than left to inheritance (#5425).
+///
+/// The lane is handed the slot's target as `CARGO_TARGET_DIR` and the child has
+/// to build into that one. Anything else is a cold build: `sccache` keys a
+/// compilation partly on the paths cargo names on the `rustc` invocation, so a
+/// per-run target directory misses on the whole dependency tree — measured at
+/// 600–1500 misses per lap, most of the in-lap wall clock, and the disk that
+/// filled on 2026-08-21. `AETHER_LANE_SCRATCH` remains what it was for
+/// everything that is not a cargo build.
+///
+/// `None` when the lane itself has none, which is a developer running the arm by
+/// hand: cargo's own default is the honest answer there, not a directory this
+/// invented.
+pub(super) fn build_dir(inherited: Option<OsString>) -> Option<OsString> {
+    inherited.filter(|dir| !dir.is_empty())
+}
+
+/// Point `command`'s child at the lane's own build directory.
+///
+/// `CARGO_TARGET_DIR` is a host-supplied location rather than a capability's
+/// configuration: the coordinator hands it to this process, and this passes the
+/// same value on.
+#[allow(clippy::disallowed_methods)] // the lane's own build directory is handed down by the host, not cap config.
+pub(super) fn export_build_dir(command: &mut Command) {
+    if let Some(dir) = build_dir(env::var_os("CARGO_TARGET_DIR")) {
+        command.env("CARGO_TARGET_DIR", dir);
+    }
+}
+
 pub(super) fn write_prompt(out: &Path, prompt: &str) -> Result<PathBuf> {
     fs::create_dir_all(out).with_context(|| format!("create {}", out.display()))?;
     let path = out.join("prompt.md");
@@ -366,7 +398,25 @@ mod tests {
     use std::time::{Duration, Instant};
     use std::{env, fs, process, thread};
 
-    use super::{Terminal, Usage, capture, capture_resumed, record, resume_handle_rejected, resumed_prompt};
+    use std::ffi::{OsStr, OsString};
+
+    use super::{Terminal, Usage, build_dir, capture, capture_resumed, record, resume_handle_rejected, resumed_prompt};
+
+    #[test]
+    fn a_model_lane_child_builds_into_the_slot_target_the_lane_was_lent() {
+        // Tripwire (#5425): the slot's target is warm — it has already compiled
+        // this workspace — and lending it is the whole reason the slot outlived
+        // the checkout. A child that built anywhere else would miss the compiler
+        // cache on the entire dependency tree, which is measured at 600–1500
+        // misses a lap and most of the time a lap spends.
+        assert_eq!(
+            build_dir(Some(OsString::from("/runs/slot-1-target"))).as_deref(),
+            Some(OsStr::new("/runs/slot-1-target")),
+            "the lane hands its own build directory down rather than letting the child pick one",
+        );
+        assert_eq!(build_dir(None), None, "a lane with none names none: cargo's default is the honest answer");
+        assert_eq!(build_dir(Some(OsString::new())), None, "and so is an empty one");
+    }
     use crate::transform::peak_memory;
 
     // Tripwire: the envelope's two cross-lane fields. `result_record.is_error`

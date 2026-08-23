@@ -13,6 +13,8 @@
 //! nothing" into a non-problem by construction. `cancel` / `inspect` /
 //! `stream_evidence` all take the handle and re-resolve the run from its nonce.
 
+use core::fmt;
+
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -98,20 +100,10 @@ pub enum Conclusion {
     Neutral,
 }
 
-/// A reference to one piece of evidence a run uploaded — the transport-level
-/// list `stream_evidence` returns, filtered to the order's nonce. Decoding the
-/// referenced bytes into a reducer attempt-result is the sibling
-/// evidence-return path, not this port: the port returns *references*.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct EvidenceRef {
-    /// The uploaded artifact's name.
-    pub name: String,
-    /// The nonce this evidence belongs to (the order's).
-    pub nonce: Nonce,
-    /// The backend-assigned artifact id, for a later fetch.
-    pub artifact_id: u64,
-    /// The artifact's size in bytes.
-    pub size_bytes: u64,
+/// Host-recorded state riding a reference, carried unchanged from the executor
+/// backend to intake. A new evidence channel is a field here and nowhere else.
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub struct LaneObservation {
     /// The candidate the run captured (ADR-0152) — reported by a backend that
     /// commits a model-lane run's work itself (the local executor); `None` from
     /// a zero-secret backend (the Actions lane captures nothing) and from every
@@ -182,6 +174,24 @@ pub struct EvidenceRef {
     pub suppression_requests: Vec<SuppressionRequest>,
 }
 
+/// A reference to one piece of evidence a run uploaded — the transport-level
+/// list `stream_evidence` returns, filtered to the order's nonce. Decoding the
+/// referenced bytes into a reducer attempt-result is the sibling
+/// evidence-return path, not this port: the port returns *references*.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct EvidenceRef {
+    /// The uploaded artifact's name.
+    pub name: String,
+    /// The nonce this evidence belongs to (the order's).
+    pub nonce: Nonce,
+    /// The backend-assigned artifact id, for a later fetch.
+    pub artifact_id: u64,
+    /// The artifact's size in bytes.
+    pub size_bytes: u64,
+    /// Host-recorded state riding this reference, carried unchanged to intake.
+    pub observation: LaneObservation,
+}
+
 /// One live construct lane's working tree, as the executor last read it
 /// (ADR-0204).
 ///
@@ -198,6 +208,28 @@ pub struct ObservedLaneWrites {
     /// [`normalize_write_paths`](crate::normalize_write_paths) before the fact
     /// is admitted.
     pub paths: Vec<String>,
+}
+
+/// Which mounted backend a dispatch went to (#5412) — the unit an intake cycle
+/// isolates a fault to.
+///
+/// A short static name rather than an enum because the port fronts an open set:
+/// the host mounts whichever backends it composes, and the core has no business
+/// enumerating them. The value is only ever compared and logged, never parsed,
+/// so a name a backend states about itself is the whole contract.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct BackendId(pub &'static str);
+
+impl BackendId {
+    /// What a backend fronting no others answers — a bare mount has one arm and
+    /// nothing to distinguish it from.
+    pub const SOLE: Self = Self("executor");
+}
+
+impl fmt::Display for BackendId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0)
+    }
 }
 
 /// The disposable-worker boundary (ADR-0149 §The boundary). Exactly the four
@@ -248,6 +280,28 @@ pub trait ExecutorBackend {
     /// Backend-defined — e.g. no run resolves for the nonce, or the artifact
     /// surface is unreachable.
     fn stream_evidence(&self, handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error>;
+
+    /// Which arm of this backend owns `handle` (#5412).
+    ///
+    /// Defaulted to [`BackendId::SOLE`] rather than required: a backend fronting
+    /// no others has one arm, and the answer carries no information. A composite
+    /// — the host's lane router — overrides it so a caller can group the handles
+    /// it holds by the arm each will actually be asked on.
+    ///
+    /// The caller that grouping exists for is the intake cycle, which must not
+    /// let one arm's transport fault cost it the other arm's finished results:
+    /// a rate-limited shared-runner API blocked every local lane's admission for
+    /// twenty-eight minutes because the cycle inspected one flat handle list and
+    /// abandoned it on the first fault. Grouped, the faulting arm is skipped for
+    /// the rest of the tick and the other arms are still asked — and an arm
+    /// holding no outstanding dispatch is never asked at all.
+    ///
+    /// Infallible and cheap on purpose: it is answered from what the backend
+    /// already knows about the nonce, never over the wire.
+    fn backend_for(&self, handle: &WorkHandle) -> BackendId {
+        let _ = handle;
+        BackendId::SOLE
+    }
 
     /// What each live construct lane has written into its working tree so far
     /// (ADR-0204) — the observation per-file write leases are acquired from.

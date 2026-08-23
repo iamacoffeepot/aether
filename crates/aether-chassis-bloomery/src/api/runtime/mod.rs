@@ -107,9 +107,9 @@ use crate::bloomery::load_policy;
 use crate::bloomery::{CandidatePush, DoctorBoard};
 use crate::signing::VerifyResult;
 use crate::store::{
-    CancelCommissionResult, CreateCommissionResult, ListCommissionsResult, LoadCommissionResult, PageJournal,
-    PageJournalResult, RecordCommissionApprovalResult, RecordConfigResult, RecordDispatchDescriptionResult,
-    WriteScopeRevisionResult,
+    CancelCommissionResult, CreateCommissionResult, EnqueueScopeRunResult, ListCommissionsResult, LoadCommissionResult,
+    PageJournal, PageJournalResult, RecordCommissionApprovalResult, RecordConfigResult,
+    RecordDispatchDescriptionResult, ReopenCommissionResult, WriteScopeRevisionResult,
 };
 use state::{CommissionHttp, CommissionHttpRender};
 
@@ -337,6 +337,30 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, routed)
     }
 
+    /// `POST /commissions/{id}/reopen` — verify a reopen envelope and restore.
+    #[http::route(Post, "/commissions/{id}/reopen")]
+    fn on_post_commission_reopen(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = state.reopen_commission(&ctx, ctx.request(), &id);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /commissions/{id}/scope-runs` — open a pre-bloom scoping run.
+    #[http::route(Post, "/commissions/{id}/scope-runs")]
+    fn on_post_commission_scope_run(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = state.enqueue_scope_run(ctx.request(), &id);
+        finish(state, ctx, routed)
+    }
+
     /// `POST /workpieces` — stage a workpiece for later draft membership.
     #[http::route(Post, "/workpieces")]
     fn on_post_workpieces(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
@@ -554,6 +578,23 @@ impl NativeActor for BloomeryApiCapability {
         let id = id.0;
         let workpiece = workpiece.0;
         let routed = ApiCapabilityState::withdraw(&id, &workpiece, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /blooms/{id}/members/{workpiece}/retry` — run the member's current
+    /// stage again on the candidate it already holds (#5423). No new revision and
+    /// no supersede: the retry rides the member's machinery roll budget, which is
+    /// where a stage that did not judge its subject belongs.
+    #[http::route(Post, "/blooms/{id}/members/{workpiece}/retry")]
+    fn on_retry(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+        workpiece: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let workpiece = workpiece.0;
+        let routed = ApiCapabilityState::retry(&id, &workpiece, &ctx.request().body);
         finish(state, ctx, routed)
     }
 
@@ -1000,6 +1041,15 @@ impl NativeActor for BloomeryApiCapability {
     }
 
     #[http::reply]
+    fn on_enqueue_scope_run_result(
+        _state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: EnqueueScopeRunResult,
+    ) -> HttpServerResponse {
+        commissions::scope_run_response(mail)
+    }
+
+    #[http::reply]
     fn on_write_scope_revision_result(
         _state: &mut ApiCapabilityState,
         _ctx: &mut NativeCtx<'_, Manual>,
@@ -1061,6 +1111,15 @@ impl NativeActor for BloomeryApiCapability {
         mail: CancelCommissionResult,
     ) {
         state.answer_commission_write(ctx, &commissions::cancel_response(mail));
+    }
+
+    #[handler::manual]
+    fn on_reopen_commission_result(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Manual>,
+        mail: ReopenCommissionResult,
+    ) {
+        state.answer_commission_write(ctx, &commissions::reopen_response(mail));
     }
 
     /// The store's reply to the boot configuration read (#4616). Fills the

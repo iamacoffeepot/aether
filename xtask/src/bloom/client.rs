@@ -8,9 +8,10 @@ use serde_json::Value;
 
 use super::Endpoint;
 use super::dto::{
-    ApprovalStoredView, BloomSpec, BloomView, CancelCommissionRequest, CommissionCancelledView, CommissionShowView,
-    ConfigRequest, ConfigValueView, ConfigView, DraftPatch, DraftView, JournalEntry, JournalView, OutcomeView,
-    ScopeRevisionWrittenView, SealRequest, SupersedeRequest, ViewDocument, WithdrawRequest,
+    ApprovalStoredView, BloomSpec, BloomView, CancelCommissionRequest, CommissionCancelledView, CommissionReopenedView,
+    CommissionShowView, ConfigRequest, ConfigValueView, ConfigView, DraftPatch, DraftView, JournalEntry, JournalView,
+    OutcomeView, ReopenCommissionRequest, RetryRequest, RevisionEvidence, ScopeRevisionWrittenView, SealRequest,
+    SupersedeRequest, ViewDocument, WithdrawRequest, WriteRevisionRequest,
 };
 use super::http;
 use super::plan::spec_id;
@@ -84,18 +85,29 @@ impl<'a> Client<'a> {
         self.send("POST", &format!("/blooms/{bloom_id}/members/{workpiece}/withdraw"), request)
     }
 
+    /// Run one member's current stage again on the candidate it holds (#5423).
+    pub fn retry(&self, bloom_id: &str, workpiece: &str, request: &RetryRequest) -> Result<OutcomeView> {
+        self.send("POST", &format!("/blooms/{bloom_id}/members/{workpiece}/retry"), request)
+    }
+
     /// One commission's tip, typed, plus the approvals stored against it.
     pub fn commission(&self, id: &str) -> Result<CommissionShowView> {
         self.get(&format!("/commissions/{id}"))
     }
 
-    /// Write `revision` as the commission's next scope revision.
+    /// Write `revision` as the commission's next scope revision, with sidecar
+    /// evidence about it. The revision's bytes stay the signed subject.
     ///
     /// Serializes the typed value rather than a rendering: the REST edge
     /// accepts a digest as either hex or the canonical byte array, so the
     /// successor's stored bytes are exactly what the widening produced.
-    pub fn write_revision(&self, id: &str, revision: &ScopeRevision) -> Result<ScopeRevisionWrittenView> {
-        self.send("POST", &format!("/commissions/{id}/revisions"), revision)
+    pub fn write_revision(
+        &self,
+        id: &str,
+        revision: &ScopeRevision,
+        evidence: &RevisionEvidence,
+    ) -> Result<ScopeRevisionWrittenView> {
+        self.send("POST", &format!("/commissions/{id}/revisions"), &WriteRevisionRequest { revision, evidence })
     }
 
     /// Submit `statement` as an approval of the commission's current revision.
@@ -106,6 +118,11 @@ impl<'a> Client<'a> {
     /// Close an open commission with a signed cancel envelope.
     pub fn cancel(&self, id: &str, request: &CancelCommissionRequest) -> Result<CommissionCancelledView> {
         self.send("POST", &format!("/commissions/{id}/cancel"), request)
+    }
+
+    /// Put a landed commission back in the line with a signed reopen envelope.
+    pub fn reopen(&self, id: &str, request: &ReopenCommissionRequest) -> Result<CommissionReopenedView> {
+        self.send("POST", &format!("/commissions/{id}/reopen"), request)
     }
 
     /// A stored configuration, decoded through its kind's schema.

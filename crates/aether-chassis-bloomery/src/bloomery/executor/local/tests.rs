@@ -4,9 +4,9 @@
 //! round-trips through [`NameEvidenceClaims`], so an admitted local run binds
 //! exactly as a wrapper-uploaded one would.
 
-use std::collections::HashMap;
 use std::fmt::{Debug, Write as _};
 use std::fs;
+use std::io::{Error as IoError, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -24,8 +24,8 @@ use tracing::{Event, Metadata, Subscriber};
 use aether_bloomery::testing::digest;
 use aether_bloomery::{
     BackendObjectId, Conclusion, Correspondence, CorrespondenceError, Digest, ExecutionStatus, ExecutorBackend,
-    Harness, Nonce, ReasoningEffort, ResolvedModel, StageCatalog, StageId, StageVerdict, Transformation, VerifyFailure,
-    VerifyFailureSet, WorkHandle,
+    Harness, Nonce, ReasoningEffort, ResolvedModel, SessionSlug, StageCatalog, StageId, StageVerdict, Transformation,
+    VerifyFailure, VerifyFailureSet, WorkHandle,
 };
 use tempfile::TempDir;
 
@@ -218,8 +218,11 @@ fn a_verify_status_field_drives_the_verdict() {
     );
     assert_eq!(upload.subject, subject);
     let expected = [VerifyFailure::Fmt, VerifyFailure::Test].into_iter().collect::<VerifyFailureSet>();
-    assert_eq!(refs[0].failed_verifiers, expected, "the reference carries the body-derived canonical set");
-    assert_eq!(upload.failed_verifiers, expected, "the body-derived set reaches the upload through the name");
+    assert_eq!(refs[0].observation.failed_verifiers, expected, "the reference carries the body-derived canonical set");
+    assert_eq!(
+        upload.observation.failed_verifiers, expected,
+        "the body-derived set reaches the upload through the name"
+    );
 }
 
 #[test]
@@ -240,8 +243,8 @@ fn a_passing_verify_body_projects_the_empty_failure_set() {
     let reference = exec.stream_evidence(&exec.submit(&order).unwrap()).unwrap().remove(0);
     let upload = NameEvidenceClaims.claim_for(&reference).expect("canonical local name decodes");
 
-    assert!(reference.failed_verifiers.is_empty());
-    assert!(upload.failed_verifiers.is_empty());
+    assert!(reference.observation.failed_verifiers.is_empty());
+    assert!(upload.observation.failed_verifiers.is_empty());
     assert_eq!(upload.verdict, StageVerdict::VerificationPassed);
 }
 
@@ -268,7 +271,7 @@ fn a_malformed_body_failure_set_fails_closed() {
         StageVerdict::ExecutorFault,
         "a verify body whose typed set does not decode rendered no judgment",
     );
-    assert!(upload.failed_verifiers.is_empty(), "invalid body data is never projected as a typed claim");
+    assert!(upload.observation.failed_verifiers.is_empty(), "invalid body data is never projected as a typed claim");
 }
 
 #[test]
@@ -297,7 +300,10 @@ fn an_environment_status_yields_an_executor_fault_rather_than_a_failing_review()
 
     assert_eq!(upload.verdict, StageVerdict::ExecutorFault);
     assert_eq!(upload.subject, subject, "a fault still binds the exact digest the order displayed");
-    assert!(upload.failed_verifiers.is_empty(), "a fault names no verifier identity — nothing was verified");
+    assert!(
+        upload.observation.failed_verifiers.is_empty(),
+        "a fault names no verifier identity — nothing was verified"
+    );
 }
 
 #[test]
@@ -326,8 +332,11 @@ fn a_verify_lane_environment_status_is_an_executor_fault() {
 
     assert_eq!(upload.verdict, StageVerdict::ExecutorFault);
     assert_eq!(upload.subject, subject, "an unjudged verify still binds the exact digest the order displayed");
-    assert!(reference.failed_verifiers.is_empty(), "the reference carries the already-decoded empty set");
-    assert!(upload.failed_verifiers.is_empty(), "no verifier judged the candidate, so none is charged for it");
+    assert!(reference.observation.failed_verifiers.is_empty(), "the reference carries the already-decoded empty set");
+    assert!(
+        upload.observation.failed_verifiers.is_empty(),
+        "no verifier judged the candidate, so none is charged for it"
+    );
     assert_eq!(
         upload.detail,
         Digest::of_wire_bytes(evidence.as_bytes()),
@@ -411,7 +420,7 @@ fn a_signal_killed_run_with_no_evidence_is_a_host_fault() {
     let upload = NameEvidenceClaims.claim_for(&refs[0]).expect("the synthesized fault decodes");
     assert_eq!(upload.verdict, StageVerdict::ExecutorFault);
     assert_eq!(upload.subject, subject);
-    assert!(upload.failed_verifiers.is_empty());
+    assert!(upload.observation.failed_verifiers.is_empty());
     assert_eq!(
         upload.detail,
         Digest::of_wire_bytes(&synthesized_fault_bytes(nonce, subject, "signaled", Some(9))),
@@ -449,7 +458,7 @@ fn a_valid_authored_failure_is_kept_after_a_nonzero_exit() {
 
     let upload = NameEvidenceClaims.claim_for(&exec.stream_evidence(&handle).unwrap()[0]).unwrap();
     assert_eq!(upload.verdict, StageVerdict::VerificationFailed);
-    assert_eq!(upload.failed_verifiers, VerifyFailureSet::one(VerifyFailure::Fmt));
+    assert_eq!(upload.observation.failed_verifiers, VerifyFailureSet::one(VerifyFailure::Fmt));
     assert_eq!(upload.detail, Digest::of_wire_bytes(evidence.as_bytes()));
 }
 
@@ -467,7 +476,7 @@ fn a_valid_authored_failure_is_kept_after_a_terminating_signal() {
         StageVerdict::VerificationFailed,
         "a bound authored fail is still a judgment after SIGKILL",
     );
-    assert_eq!(upload.failed_verifiers, VerifyFailureSet::one(VerifyFailure::Clippy));
+    assert_eq!(upload.observation.failed_verifiers, VerifyFailureSet::one(VerifyFailure::Clippy));
 }
 
 #[test]
@@ -671,9 +680,9 @@ fn evidence_for_a_different_nonce_fails_closed_before_its_claims_are_read() {
     let upload = NameEvidenceClaims.claim_for(&refs[0]).expect("the synthesized ref decodes");
     assert_eq!(upload.verdict, StageVerdict::ExecutorFault, "a stale body cannot advance this order");
     assert_eq!(refs[0].nonce, Nonce(expected.to_owned()), "the authoritative handle remains the claim nonce");
-    assert!(refs[0].candidate.is_none(), "a stale construct body cannot trigger capture");
-    assert!(refs[0].findings.is_none(), "a stale body cannot direct a repair lap");
-    assert!(refs[0].cost.is_none(), "a stale body cannot enter study accounting");
+    assert!(refs[0].observation.candidate.is_none(), "a stale construct body cannot trigger capture");
+    assert!(refs[0].observation.findings.is_none(), "a stale body cannot direct a repair lap");
+    assert!(refs[0].observation.cost.is_none(), "a stale body cannot enter study accounting");
     assert_eq!(exec.inspect(&handle).unwrap(), ExecutionStatus::Unknown, "the terminal stale body is consumed");
 }
 
@@ -698,7 +707,7 @@ fn a_declined_construct_keeps_the_lane_findings_on_the_evidence_ref() {
     let upload = NameEvidenceClaims.claim_for(&refs[0]).expect("the synthesized ref decodes");
     assert_eq!(upload.verdict, StageVerdict::Declined);
     assert_eq!(
-        refs[0].findings.as_deref(),
+        refs[0].observation.findings.as_deref(),
         Some("the work lies outside the declared surface"),
         "the lane's stated reason has to ride the ref so a park can name it",
     );
@@ -718,7 +727,7 @@ fn a_decline_whose_request_cannot_be_bound_degrades_to_a_plain_park() {
 
     let refs = exec.stream_evidence(&handle).unwrap();
 
-    assert!(refs[0].surface_request.is_none(), "an unbindable request rides nothing");
+    assert!(refs[0].observation.surface_request.is_none(), "an unbindable request rides nothing");
     assert_eq!(
         NameEvidenceClaims.claim_for(&refs[0]).expect("the synthesized ref decodes").verdict,
         StageVerdict::Declined,
@@ -1377,7 +1386,7 @@ fn a_passing_construct_run_captures_its_candidate() {
     let handle = exec.submit(&construct_order(digest(5), "n-cap")).unwrap();
     let refs = exec.stream_evidence(&handle).unwrap();
 
-    let candidate = refs[0].candidate.expect("a passed construct run reports its capture");
+    let candidate = refs[0].observation.candidate.expect("a passed construct run reports its capture");
     let captured = canned_capture();
     assert_eq!(
         store.resolve_backend_object(&candidate.tree).unwrap().as_ref(),
@@ -1392,7 +1401,7 @@ fn a_passing_construct_run_captures_its_candidate() {
     assert_ne!(candidate.tree, candidate.checkout, "the two axes are domain-separated digests");
     let upload = NameEvidenceClaims.claim_for(&refs[0]).unwrap();
     assert_eq!(upload.verdict, StageVerdict::VerificationPassed);
-    assert_eq!(upload.candidate, Some(candidate), "the claim carries the capture to the intake");
+    assert_eq!(upload.observation.candidate, Some(candidate), "the claim carries the capture to the intake");
 }
 
 // The lane's commit message reaches both places the host uses it: the capture
@@ -1415,7 +1424,7 @@ fn a_captured_candidates_message_reaches_the_capture_and_its_member_row() {
         .with_message_store(open_store(&store, &member_order("n-msg", "issue-4242")));
 
     let handle = exec.submit(&construct_order(digest(5), "n-msg")).unwrap();
-    assert!(exec.stream_evidence(&handle).unwrap()[0].candidate.is_some(), "the run captured a candidate");
+    assert!(exec.stream_evidence(&handle).unwrap()[0].observation.candidate.is_some(), "the run captured a candidate");
 
     assert_eq!(
         captured_messages.lock().unwrap().as_slice(),
@@ -1450,7 +1459,7 @@ fn a_run_that_captured_nothing_files_no_message() {
     .with_message_store(open_store(&store, &member_order("n-void-msg", "issue-4242")));
 
     let handle = exec.submit(&construct_order(digest(5), "n-void-msg")).unwrap();
-    assert!(exec.stream_evidence(&handle).unwrap()[0].candidate.is_none(), "nothing was captured");
+    assert!(exec.stream_evidence(&handle).unwrap()[0].observation.candidate.is_none(), "nothing was captured");
 
     assert_eq!(
         SqliteStore::open(store.path().join("bloomery.sqlite").to_str().unwrap())
@@ -1510,7 +1519,7 @@ fn a_passing_construct_run_with_nothing_to_capture_fails_closed() {
     let handle = exec.submit(&construct_order(digest(5), "n-void")).unwrap();
     let refs = exec.stream_evidence(&handle).unwrap();
 
-    assert!(refs[0].candidate.is_none());
+    assert!(refs[0].observation.candidate.is_none());
     let upload = NameEvidenceClaims.claim_for(&refs[0]).unwrap();
     assert_eq!(upload.verdict, StageVerdict::VerificationFailed, "a lost capture is a failed attempt");
 }
@@ -1530,13 +1539,13 @@ fn a_killed_construct_captures_its_partial_worktree_and_still_fails() {
     let handle = exec.submit(&construct_order(digest(5), "n-kill")).unwrap();
     let refs = exec.stream_evidence(&handle).unwrap();
 
-    let candidate = refs[0].candidate.expect("a killed construct that wrote something reports its capture");
+    let candidate = refs[0].observation.candidate.expect("a killed construct that wrote something reports its capture");
     let captured = canned_capture();
     assert_eq!(store.resolve_backend_object(&candidate.tree).unwrap().as_ref(), Some(&captured.tree));
     assert_eq!(store.resolve_backend_object(&candidate.checkout).unwrap().as_ref(), Some(&captured.commit));
     let upload = NameEvidenceClaims.claim_for(&refs[0]).unwrap();
     assert_eq!(upload.verdict, StageVerdict::VerificationFailed, "a populated candidate cannot flip passed");
-    assert_eq!(upload.candidate, Some(candidate), "the claim carries the checkpoint to the intake");
+    assert_eq!(upload.observation.candidate, Some(candidate), "the claim carries the checkpoint to the intake");
 }
 
 // A killed lane that died before writing anything captures nothing and does
@@ -1553,7 +1562,7 @@ fn a_killed_construct_with_a_clean_worktree_captures_nothing_and_does_not_warn()
     let handle = exec.submit(&construct_order(digest(5), "n-clean-die")).unwrap();
     let refs = with_default(EventRecorder(Arc::clone(&events)), || exec.stream_evidence(&handle).unwrap());
 
-    assert!(refs[0].candidate.is_none(), "a clean death is not a checkpoint");
+    assert!(refs[0].observation.candidate.is_none(), "a clean death is not a checkpoint");
     let upload = NameEvidenceClaims.claim_for(&refs[0]).unwrap();
     assert_eq!(upload.verdict, StageVerdict::VerificationFailed);
     let rendered = events.rendered();
@@ -1600,7 +1609,7 @@ fn a_capture_whose_correspondence_write_faults_fails_closed() {
     let handle = exec.submit(&construct_order(digest(5), "n-fault")).unwrap();
     let refs = exec.stream_evidence(&handle).unwrap();
 
-    assert!(refs[0].candidate.is_none(), "an unrecordable capture carries no candidate");
+    assert!(refs[0].observation.candidate.is_none(), "an unrecordable capture carries no candidate");
     let upload = NameEvidenceClaims.claim_for(&refs[0]).unwrap();
     assert_eq!(upload.verdict, StageVerdict::VerificationFailed, "an unrecordable capture is a failed attempt");
 }
@@ -1918,7 +1927,7 @@ fn a_readopted_run_that_recorded_no_slot_captures_nothing_rather_than_guessing()
     assert_eq!(report.readopted, vec![Nonce(nonce.clone())], "the evidence dir is still the footprint");
 
     let refs = exec.stream_evidence(&WorkHandle::new(Nonce(nonce))).unwrap();
-    assert!(refs[0].candidate.is_none(), "a run whose checkout cannot be named captures nothing");
+    assert!(refs[0].observation.candidate.is_none(), "a run whose checkout cannot be named captures nothing");
     assert_eq!(
         NameEvidenceClaims.claim_for(&refs[0]).expect("the synthesized ref decodes").verdict,
         StageVerdict::VerificationFailed,
@@ -2252,10 +2261,8 @@ struct ReuseRunner {
     /// A nonce that stays `Running` so its slot stays held — the fixture for
     /// forcing a predecessor into a non-lowest slot.
     hold: Option<String>,
-    /// Direct parents `checkout_parents` reports for a checkout hex.
-    parents: HashMap<String, Vec<String>>,
-    /// When set, `checkout_parents` fails rather than returning a list.
-    fail_parents: bool,
+    /// A nonce whose `start` fails the way a host out of disk fails it.
+    fail_start: Option<String>,
 }
 
 impl ReuseRunner {
@@ -2266,8 +2273,7 @@ impl ReuseRunner {
             session_id: "sess-1".to_owned(),
             reject_resume: None,
             hold: None,
-            parents: HashMap::new(),
-            fail_parents: false,
+            fail_start: None,
         }
     }
 
@@ -2286,13 +2292,8 @@ impl ReuseRunner {
         self
     }
 
-    fn with_parents(mut self, checkout: impl Into<String>, parents: Vec<String>) -> Self {
-        self.parents.insert(checkout.into(), parents);
-        self
-    }
-
-    fn failing_parents(mut self) -> Self {
-        self.fail_parents = true;
+    fn failing_start(mut self, nonce: impl Into<String>) -> Self {
+        self.fail_start = Some(nonce.into());
         self
     }
 }
@@ -2311,6 +2312,9 @@ impl TransformRunner for ReuseRunner {
             worktree: Some(spec.worktree_dir.to_owned()),
             task: spec.task.map(str::to_owned),
         });
+        if self.fail_start.as_deref() == Some(spec.nonce) {
+            return Err(LocalExecutorError::Io(IoError::from(ErrorKind::StorageFull)));
+        }
         if spec.resume.is_some() && spec.resume == self.reject_resume.as_deref() {
             return Err(LocalExecutorError::Worktree(format!(
                 "No conversation found with session ID {}",
@@ -2346,13 +2350,90 @@ impl TransformRunner for ReuseRunner {
     ) -> Result<Option<CapturedObjects>, LocalExecutorError> {
         Ok(Some(canned_capture()))
     }
+}
 
-    fn checkout_parents(&self, checkout_hex: &str) -> Result<Vec<String>, LocalExecutorError> {
-        if self.fail_parents {
-            return Err(LocalExecutorError::Worktree("checkout parents unreadable".to_owned()));
-        }
-        Ok(self.parents.get(checkout_hex).cloned().unwrap_or_default())
-    }
+#[test]
+fn a_queued_dispatch_whose_launch_fails_becomes_a_host_fault_rather_than_a_deadline() {
+    // Acceptance for #5422: a dispatch that was waiting on the lane ceiling and
+    // then failed to launch is a host fault the member re-dispatches from, not
+    // an order left outstanding until its deadline.
+    //
+    // Pre-fix the failure was logged and the pending run dropped: on 2026-08-21
+    // eight queued constructs failed to start on `No space left on device` and
+    // their members sat idle for four hours with lane slots free. The registry
+    // then held nothing for the nonce, so the intake's next `stream_evidence`
+    // answered `NoRunForNonce` — no verdict, no fault, nothing to re-dispatch on.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let holder = test_nonce("hold");
+    let queued = test_nonce("queued");
+    let exec = LocalExecutor::new(
+        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(holder.clone()).failing_start(queued.clone())),
+        correspondence(),
+        base.path(),
+    )
+    .with_max_concurrent_lanes(1);
+
+    // The holder occupies the only lane, so the second dispatch queues rather
+    // than failing in front of its caller — the shape the incident had.
+    let holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
+    let waiting = exec.submit(&construct_order(digest(5), &queued)).unwrap();
+    exec.cancel(&holding).unwrap();
+
+    let refs = exec.stream_evidence(&waiting).expect("a failed launch leaves a run to read, not an unknown nonce");
+    let claimed = NameEvidenceClaims
+        .claim_for(refs.first().expect("one synthesized fault"))
+        .expect("the synthesized fault is a well-formed attempt claim");
+    assert_eq!(claimed.verdict, StageVerdict::ExecutorFault, "a launch that never happened judged nothing");
+    assert!(
+        claimed.observation.failed_verifiers.is_empty(),
+        "and named no verifier, so no repair lap is dispatched for it"
+    );
+    assert!(
+        exec.lane_occupancy().slots.is_empty(),
+        "the failed launch hands its lane slot back rather than shrinking the ceiling",
+    );
+}
+
+#[test]
+fn a_session_another_member_already_holds_is_not_filed_as_this_ones() {
+    // Acceptance for #5427: an edge resume hands a dependent the predecessor's
+    // conversation to read and forks it, so what the dependent deposits is its
+    // own handle. When the fork does not happen the lap comes back carrying the
+    // predecessor's id — and filing it would leave two members resuming one
+    // thread, which is how dispatch-2321's construct opened with dispatch-2318's
+    // whole history loaded (188k of context against 79k).
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let store_dir = store_dir();
+    let first = test_nonce("A-construct");
+    let second = test_nonce("B-construct");
+    // Both laps report the same session id — the runner's fixed handle stands in
+    // for the un-forked resume that returns the predecessor's.
+    let exec = LocalExecutor::new(Arc::new(ReuseRunner::new(Arc::clone(&seen))), correspondence(), base.path())
+        .with_message_store(member_store(
+            &store_dir,
+            &[
+                member_order_at(&first, "issue-A", StageId::Construct),
+                member_order_at(&second, "issue-B", StageId::Construct),
+            ],
+        ));
+
+    exec.stream_evidence(&exec.submit(&claude_order(digest(5), &first, "issue-A")).unwrap()).unwrap();
+    exec.stream_evidence(&exec.submit(&claude_order(digest(5), &second, "issue-B")).unwrap()).unwrap();
+
+    let mut store = SqliteStore::open(store_dir.path().join("bloomery.sqlite").to_str().unwrap()).unwrap();
+    let bloom = vec![1; 32];
+    assert_eq!(
+        store.lookup_construct_session(&bloom, "issue-A").unwrap().map(|(id, _)| id).as_deref(),
+        Some("sess-1"),
+        "the member that opened the conversation keeps it",
+    );
+    assert_eq!(
+        store.lookup_construct_session(&bloom, "issue-B").unwrap(),
+        None,
+        "and the second member files nothing rather than claiming the same thread",
+    );
 }
 
 #[test]
@@ -2504,270 +2585,174 @@ fn order_on(mut order: aether_bloomery::WorkOrder, checkout: Digest) -> aether_b
     order
 }
 
-#[test]
-fn a_dependent_construct_prefers_the_predecessors_slot() {
-    // Acceptance: B lands in A's slot when free. Lowest-free would take 0 once
-    // the holder is gone; preferring 1 is the only way B hits the warm target
-    // dir A already compiled.
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let base = TempDir::new().unwrap();
-    let holder = test_nonce("hold");
-    let exec = LocalExecutor::new(
-        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(holder.clone())),
-        correspondence(),
-        base.path(),
-    );
-
-    let holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
-    let first = exec.submit(&claude_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
-    let refs = exec.stream_evidence(&first).unwrap();
-    let checkout = refs[0].candidate.expect("A captured").checkout;
-    exec.cancel(&holding).unwrap();
-
-    let second = exec.submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), checkout)).unwrap();
-    exec.stream_evidence(&second).unwrap();
-
-    let stamped = stamped_evidence(&base, &test_nonce("B"));
-    assert_eq!(stamped["slot_affinity"]["preferred"], 1);
-    assert_eq!(stamped["slot_affinity"]["assigned"], 1);
-    assert_eq!(stamped["slot_affinity"]["reason"], "preferred");
-    assert_eq!(
-        seen.lock().unwrap().last().and_then(|seen| seen.worktree.clone()),
-        Some(slot_path(&base, 1)),
-        "B built in A's slot, not the newly-freed lowest index"
-    );
-}
-
-#[test]
-fn a_dependent_construct_falls_back_when_the_preferred_slot_is_busy() {
-    // Acceptance: preference is never a wait. A still occupies slot 1; B
-    // takes the lowest free (0) and journals `busy`.
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let base = TempDir::new().unwrap();
-    let holder = test_nonce("hold");
-    let exec = LocalExecutor::new(
-        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(holder.clone())),
-        correspondence(),
-        base.path(),
-    );
-
-    let _holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
-    let first = exec.submit(&claude_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
-    let refs = exec.stream_evidence(&first).unwrap();
-    let checkout = refs[0].candidate.expect("A captured").checkout;
-
-    // Re-occupy A's slot so B cannot have it.
-    let occupier = test_nonce("occupy");
-    let occupying = exec.submit(&construct_order(digest(5), &occupier)).unwrap();
-    // occupier exits immediately (not held), so slot 1 is free again unless we
-    // don't stream it and... it already exited, retire happens on stream, not
-    // on exit. Slot stays held until stream_evidence or cancel.
-    let _ = occupying;
-
-    let second = exec.submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), checkout)).unwrap();
-    exec.stream_evidence(&second).unwrap();
-
-    let stamped = stamped_evidence(&base, &test_nonce("B"));
-    assert_eq!(stamped["slot_affinity"]["preferred"], 1);
-    assert_eq!(stamped["slot_affinity"]["reason"], "busy");
-    assert_ne!(stamped["slot_affinity"]["assigned"], 1, "B must not wait on A's occupied slot");
-}
-
-fn canned_commit_hex() -> String {
-    "cc".repeat(20)
-}
-
-fn fold_digest() -> Digest {
-    digest(0xF0)
-}
-
-fn fold_hex() -> String {
-    to_hex(&fold_digest())
-}
-
-fn integration_hex() -> String {
-    "11".repeat(20)
-}
-
-fn decoy_hex() -> String {
-    "dd".repeat(20)
-}
-
-fn correspondence_with_fold() -> Arc<FakeGithub> {
-    let fake = FakeGithub::new();
-    fake.seed_git_object(&digest(0xC0));
-    fake.seed_git_object(&digest(0xB0));
-    fake.seed_git_object(&fold_digest());
-    Arc::new(fake)
+// The checkout one session works in under a scratch root (#5425) — the tree
+// every launch of that conversation shares, and the assertion target wherever a
+// test says which session a dispatch was standing in.
+fn session_tree(base: &TempDir, opened_by: &str) -> PathBuf {
+    base.path().join("sessions").join(SessionSlug::minted_from(opened_by).0).join("tree")
 }
 
 fn assigned_slot(base: &TempDir, nonce: &str) -> usize {
     fs::read_to_string(base.path().join(format!("{nonce}-evidence/slot")))
-        .expect("every dispatched run records its slot")
+        .expect("every dispatched run records its lane")
+        .lines()
+        .next()
+        .expect("the lane record leads with the slot")
         .trim()
         .parse()
         .expect("the slot record is an index")
 }
 
-fn fold_parents(integration: String, candidate: String) -> (String, Vec<String>) {
-    (fold_hex(), vec![integration, candidate])
+fn started_worktrees(seen: &Arc<Mutex<Vec<SeenSpec>>>) -> Vec<Option<PathBuf>> {
+    seen.lock().unwrap().iter().map(|spec| spec.worktree.clone()).collect()
 }
 
 #[test]
-fn a_fold_checkout_prefers_the_captured_candidates_slot() {
-    // Acceptance (#5077): B's checkout is the synthetic fold
-    // `fold(integration, captured candidate)`, not the candidate itself.
-    // Exact-key affinity misses; the direct candidate parent must still
-    // land B in A's slot even though slot 0 is free.
+fn every_lane_of_one_member_works_in_that_members_session_tree() {
+    // Acceptance for #5425: construct and the verify that follows it stand in
+    // the same tree, and that tree belongs to the session the member opened
+    // rather than to whichever slot each lane happened to be handed.
+    //
+    // Pre-fix each lane built in `slot-<index>`. A harness binds a conversation
+    // permanently to the directory it was born in — grok stores sessions under a
+    // percent-encoded working directory and ignores `--cwd` on a resume — so a
+    // member whose lanes landed in different slots had its resumed lap edit the
+    // old slot's tree while its own checkout stayed clean and read downstream as
+    // a lane that produced nothing (dispatch-2374 / dispatch-2379).
     let seen = Arc::new(Mutex::new(Vec::new()));
     let base = TempDir::new().unwrap();
+    let store = store_dir();
     let holder = test_nonce("hold");
-    let (fold, parents) = fold_parents(integration_hex(), canned_commit_hex());
+    let construct = test_nonce("A-construct");
+    let verify = test_nonce("A-verify");
     let exec = LocalExecutor::new(
-        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(holder.clone()).with_parents(fold, parents)),
-        correspondence_with_fold(),
-        base.path(),
-    );
-
-    let holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
-    let first = exec.submit(&claude_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
-    exec.stream_evidence(&first).unwrap();
-    exec.cancel(&holding).unwrap();
-
-    let second = exec.submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), fold_digest())).unwrap();
-    exec.stream_evidence(&second).unwrap();
-
-    let stamped = stamped_evidence(&base, &test_nonce("B"));
-    assert_eq!(stamped["slot_affinity"]["preferred"], 1);
-    assert_eq!(stamped["slot_affinity"]["assigned"], 1);
-    assert_eq!(stamped["slot_affinity"]["reason"], "preferred");
-    assert_eq!(
-        seen.lock().unwrap().last().and_then(|seen| seen.worktree.clone()),
-        Some(slot_path(&base, 1)),
-        "B built in A's slot, not the newly-freed lowest index",
-    );
-}
-
-#[test]
-fn a_fold_checkout_falls_back_when_the_preferred_slot_is_busy() {
-    // Preference is never a wait, including across a fold parent. A still
-    // occupies slot 1; B takes the lowest free and journals `busy`.
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let base = TempDir::new().unwrap();
-    let holder = test_nonce("hold");
-    let (fold, parents) = fold_parents(integration_hex(), canned_commit_hex());
-    let exec = LocalExecutor::new(
-        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(holder.clone()).with_parents(fold, parents)),
-        correspondence_with_fold(),
-        base.path(),
-    );
-
-    let _holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
-    let first = exec.submit(&claude_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
-    exec.stream_evidence(&first).unwrap();
-    let occupying = exec.submit(&construct_order(digest(5), &test_nonce("occupy"))).unwrap();
-    let _ = occupying;
-
-    let second = exec.submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), fold_digest())).unwrap();
-    exec.stream_evidence(&second).unwrap();
-
-    let stamped = stamped_evidence(&base, &test_nonce("B"));
-    assert_eq!(stamped["slot_affinity"]["preferred"], 1);
-    assert_eq!(stamped["slot_affinity"]["reason"], "busy");
-    assert_ne!(stamped["slot_affinity"]["assigned"], 1, "B must not wait on A's occupied slot");
-}
-
-#[test]
-fn a_mapped_ancestor_that_is_not_a_direct_parent_is_ignored() {
-    // Walking past the fold's direct parents would prefer a stale historical
-    // builder. Integration's parent is the captured candidate, but B must
-    // not consult it.
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let base = TempDir::new().unwrap();
-    let holder = test_nonce("hold");
-    let exec = LocalExecutor::new(
-        Arc::new(
-            ReuseRunner::new(Arc::clone(&seen))
-                .holding(holder.clone())
-                .with_parents(fold_hex(), vec![integration_hex(), decoy_hex()])
-                .with_parents(integration_hex(), vec![canned_commit_hex()]),
-        ),
-        correspondence_with_fold(),
-        base.path(),
-    );
-
-    let holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
-    let first = exec.submit(&claude_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
-    exec.stream_evidence(&first).unwrap();
-    exec.cancel(&holding).unwrap();
-
-    let second = exec.submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), fold_digest())).unwrap();
-    exec.stream_evidence(&second).unwrap();
-
-    let stamped = stamped_evidence(&base, &test_nonce("B"));
-    assert!(stamped.get("slot_affinity").is_none(), "no predecessor slot: the mapped ancestor is not a direct parent");
-    assert_eq!(assigned_slot(&base, &test_nonce("B")), 0, "B takes the lowest free slot");
-}
-
-#[test]
-fn an_exact_checkout_match_wins_over_a_mapped_parent() {
-    // Exact-key affinity is still first. The checkout itself is mapped to
-    // A's slot; a parent mapped to another slot must not steal the choice.
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let base = TempDir::new().unwrap();
-    fs::write(base.path().join("edge-slots"), format!("{} 2\n", decoy_hex())).unwrap();
-    let holder = test_nonce("hold");
-    let exec = LocalExecutor::new(
-        Arc::new(
-            ReuseRunner::new(Arc::clone(&seen))
-                .holding(holder.clone())
-                .with_parents(canned_commit_hex(), vec![decoy_hex()]),
-        ),
+        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(holder.clone())),
         correspondence(),
         base.path(),
+    )
+    .with_message_store(member_store(
+        &store,
+        &[
+            member_order_at(&holder, "issue-H", StageId::Construct),
+            member_order_at(&construct, "issue-A", StageId::Construct),
+            member_order_at(&verify, "issue-A", StageId::Verify),
+        ],
+    ));
+
+    // The two lanes are driven into different slots on purpose: the holder
+    // keeps slot 0 while the construct takes slot 1, and slot 1 is occupied
+    // again by the time the verify dispatches, so the verify lands on 0. That
+    // is the arrangement a slot-keyed checkout cannot survive — the member's
+    // second lane stands in a tree its first one never wrote to.
+    let _holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
+    exec.stream_evidence(&exec.submit(&claude_order(digest(5), &construct, "issue-A")).unwrap()).unwrap();
+    let _occupying = exec.submit(&construct_order(digest(5), &test_nonce("occupy"))).unwrap();
+    exec.stream_evidence(&exec.submit(&construct_order(digest(5), &verify)).unwrap()).unwrap();
+
+    assert_ne!(assigned_slot(&base, &construct), assigned_slot(&base, &verify), "the two lanes did move slots");
+    assert_eq!(
+        started_worktrees(&seen),
+        [
+            Some(session_tree(&base, &holder)),
+            Some(session_tree(&base, &construct)),
+            Some(slot_path(&base, 1)),
+            Some(session_tree(&base, &construct)),
+        ],
+        "both of the member's lanes stand in the session its construct opened, however the slots moved under them",
     );
+}
+
+#[test]
+fn a_dispatch_that_resolves_no_session_still_builds_in_its_lane_slot() {
+    // Tripwire: an aggregate lane's order names no workpiece, and a backend
+    // built without a store can read no order at all. Neither resumes a
+    // conversation, so neither needs a directory one is bound to — and a
+    // checkout keyed on an empty slug would put every such dispatch in one
+    // shared directory.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let exec = LocalExecutor::new(Arc::new(ReuseRunner::new(Arc::clone(&seen))), correspondence(), base.path());
+
+    exec.stream_evidence(&exec.submit(&construct_order(digest(5), &test_nonce("aggregate"))).unwrap()).unwrap();
+
+    assert_eq!(started_worktrees(&seen), [Some(slot_path(&base, 0))]);
+}
+
+#[test]
+fn a_members_next_lane_prefers_the_slot_that_last_built_it() {
+    // Acceptance: the member's verify lands in the slot its construct built in,
+    // even though slot 0 is free by then. Lowest-free would take 0, and this
+    // member's workspace crates are compiled only in slot 1's target — the
+    // edge-keyed lookup this replaced asked after the construct's checkout hex,
+    // which the capture had already superseded, and fell through to 0.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let store = store_dir();
+    let holder = test_nonce("hold");
+    let construct = test_nonce("A-construct");
+    let verify = test_nonce("A-verify");
+    let exec = LocalExecutor::new(
+        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(holder.clone())),
+        correspondence(),
+        base.path(),
+    )
+    .with_message_store(member_store(
+        &store,
+        &[
+            member_order_at(&holder, "issue-H", StageId::Construct),
+            member_order_at(&construct, "issue-A", StageId::Construct),
+            member_order_at(&verify, "issue-A", StageId::Verify),
+        ],
+    ));
 
     let holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
-    let first = exec.submit(&claude_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
-    let refs = exec.stream_evidence(&first).unwrap();
-    let checkout = refs[0].candidate.expect("A captured").checkout;
+    exec.stream_evidence(&exec.submit(&claude_order(digest(5), &construct, "issue-A")).unwrap()).unwrap();
     exec.cancel(&holding).unwrap();
+    exec.stream_evidence(&exec.submit(&construct_order(digest(5), &verify)).unwrap()).unwrap();
 
-    let second = exec.submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), checkout)).unwrap();
-    exec.stream_evidence(&second).unwrap();
-
-    let stamped = stamped_evidence(&base, &test_nonce("B"));
+    let stamped = stamped_evidence(&base, &verify);
     assert_eq!(stamped["slot_affinity"]["preferred"], 1);
     assert_eq!(stamped["slot_affinity"]["assigned"], 1);
     assert_eq!(stamped["slot_affinity"]["reason"], "preferred");
 }
 
 #[test]
-fn an_unreadable_fold_parent_list_falls_back_without_refusing_the_order() {
-    // Parent inspection is diagnostic. A git miss must not refuse B; it
-    // degrades to the ordinary lowest-free allocator.
+fn a_members_preferred_slot_that_is_busy_never_waits() {
+    // Acceptance: preference is never a wait. The slot that built the member is
+    // occupied again by the time its next lane dispatches, so that lane takes
+    // the lowest free index and journals `busy` rather than queueing behind
+    // whoever holds it now.
     let seen = Arc::new(Mutex::new(Vec::new()));
     let base = TempDir::new().unwrap();
+    let store = store_dir();
     let holder = test_nonce("hold");
+    let construct = test_nonce("A-construct");
+    let verify = test_nonce("A-verify");
     let exec = LocalExecutor::new(
-        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(holder.clone()).failing_parents()),
-        correspondence_with_fold(),
+        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(holder.clone())),
+        correspondence(),
         base.path(),
-    );
+    )
+    .with_message_store(member_store(
+        &store,
+        &[
+            member_order_at(&holder, "issue-H", StageId::Construct),
+            member_order_at(&construct, "issue-A", StageId::Construct),
+            member_order_at(&verify, "issue-A", StageId::Verify),
+        ],
+    ));
 
-    let holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
-    let first = exec.submit(&claude_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
-    exec.stream_evidence(&first).unwrap();
-    exec.cancel(&holding).unwrap();
+    let _holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
+    exec.stream_evidence(&exec.submit(&claude_order(digest(5), &construct, "issue-A")).unwrap()).unwrap();
+    // Re-occupy slot 1: a terminal run holds its slot until its evidence is
+    // streamed, so leaving this one unread is what keeps the slot spoken for.
+    let _occupying = exec.submit(&construct_order(digest(5), &test_nonce("occupy"))).unwrap();
+    exec.stream_evidence(&exec.submit(&construct_order(digest(5), &verify)).unwrap()).unwrap();
 
-    let second = exec
-        .submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), fold_digest()))
-        .expect("an unreadable parent list must not refuse dispatch");
-    exec.stream_evidence(&second).unwrap();
-
-    let stamped = stamped_evidence(&base, &test_nonce("B"));
-    assert!(stamped.get("slot_affinity").is_none(), "fallback is no preference, not a refused order");
-    assert_eq!(assigned_slot(&base, &test_nonce("B")), 0);
+    let stamped = stamped_evidence(&base, &verify);
+    assert_eq!(stamped["slot_affinity"]["preferred"], 1);
+    assert_eq!(stamped["slot_affinity"]["reason"], "busy");
+    assert_ne!(stamped["slot_affinity"]["assigned"], 1, "the member must not wait on its own busy slot");
 }
 
 #[test]
@@ -2789,14 +2774,17 @@ fn a_cross_seat_dependent_never_resumes_the_predecessors_session() {
     let holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
     let first = exec.submit(&grok_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
     let refs = exec.stream_evidence(&first).unwrap();
-    let checkout = refs[0].candidate.expect("A captured").checkout;
+    let checkout = refs[0].observation.candidate.expect("A captured").checkout;
     exec.cancel(&holding).unwrap();
 
     let second = exec.submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), checkout)).unwrap();
     exec.stream_evidence(&second).unwrap();
 
     let stamped = stamped_evidence(&base, &test_nonce("B"));
-    assert_eq!(stamped["slot_affinity"]["reason"], "preferred", "B still prefers A's slot");
+    // Affinity is the member's own (ADR-0196 as amended): B has never built, so
+    // it names no preference at all and the stamp is absent. What the seat rule
+    // has to hold regardless is below — B launches cold whatever slot it lands in.
+    assert!(stamped["slot_affinity"].is_null(), "a member with no prior slot states no preference");
     assert_eq!(stamped["session_reuse"]["arm"], "fresh");
     assert_eq!(stamped["session_reuse"]["edge"], false);
     assert!(seen.lock().unwrap().last().unwrap().resume.is_none());
@@ -2870,37 +2858,6 @@ fn dispatch_evidence_carries_fresh_or_resumed_and_token_figures() {
     let resumed = stamped_evidence(&base, &test_nonce("A2"));
     assert_eq!(resumed["session_reuse"]["arm"], "resumed");
     assert_eq!(resumed["session_reuse"]["input_tokens"], 1_000);
-}
-
-#[test]
-fn a_dependent_construct_resumes_the_predecessors_session_and_is_told_about_the_splice() {
-    // Host path for the edge: B's first lap is cold on its own key, so without
-    // the predecessor lookup it would relaunch. The resumed prompt must name
-    // the splice — the reset statement the pool already adds is about files
-    // this session edited, which is the wrong fact along an edge.
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let base = TempDir::new().unwrap();
-    let sessions = super::SessionReuse::memory();
-    sessions.set_head_hash("head-A");
-    sessions.set_now(1_000);
-    let exec = LocalExecutor::new(Arc::new(ReuseRunner::new(Arc::clone(&seen))), correspondence(), base.path())
-        .with_session_reuse(sessions);
-
-    let first = exec.submit(&claude_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
-    let refs = exec.stream_evidence(&first).unwrap();
-    let checkout = refs[0].candidate.expect("A captured").checkout;
-
-    let second = exec.submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), checkout)).unwrap();
-    exec.stream_evidence(&second).unwrap();
-
-    let stamped = stamped_evidence(&base, &test_nonce("B"));
-    assert_eq!(stamped["session_reuse"]["arm"], "resumed");
-    assert_eq!(stamped["session_reuse"]["edge"], true);
-    assert_eq!(seen.lock().unwrap()[1].resume.as_deref(), Some("sess-1"));
-    assert!(
-        seen.lock().unwrap()[1].task.as_deref().is_some_and(|task| task.contains("spliced dependency candidate")),
-        "the resumed prompt must state what was spliced, not only that the tree was reset"
-    );
 }
 
 fn member_store(dir: &TempDir, orders: &[OutstandingOrder]) -> SqliteStore {
@@ -3019,7 +2976,7 @@ fn a_dependent_construct_resumes_the_journaled_predecessor_session() {
     let holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
     let first = exec.submit(&claude_order(digest(5), &predecessor, "issue-A")).unwrap();
     let refs = exec.stream_evidence(&first).unwrap();
-    let checkout = refs[0].candidate.expect("A captured").checkout;
+    let checkout = refs[0].observation.candidate.expect("A captured").checkout;
     let occupying = exec.submit(&construct_order(digest(5), &occupier)).unwrap();
     let _ = occupying;
 
@@ -3048,8 +3005,9 @@ fn a_dependent_construct_resumes_the_journaled_predecessor_session() {
 
 #[test]
 fn a_missing_predecessor_session_does_not_fall_through_to_the_pool() {
-    // Acceptance: a graph with no journaled handle launches fresh. Falling
-    // through to the slot-edge pool would still resume A and hide the miss.
+    // Acceptance: a graph with no journaled handle launches fresh. The pool is
+    // keyed by the member's own thread, so there is nothing left for a miss to
+    // fall through to — which is the point (#5427).
     let seen = Arc::new(Mutex::new(Vec::new()));
     let base = TempDir::new().unwrap();
     let store = store_dir();
@@ -3069,7 +3027,7 @@ fn a_missing_predecessor_session_does_not_fall_through_to_the_pool() {
 
     let first = exec.submit(&claude_order(digest(5), &predecessor, "issue-A")).unwrap();
     let refs = exec.stream_evidence(&first).unwrap();
-    let checkout = refs[0].candidate.expect("A captured").checkout;
+    let checkout = refs[0].observation.candidate.expect("A captured").checkout;
 
     exec.stream_evidence(&exec.submit(&order_on(claude_order(digest(5), &dependent, "issue-B"), checkout)).unwrap())
         .unwrap();

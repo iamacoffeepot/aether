@@ -3,16 +3,19 @@
 use std::collections::BTreeMap;
 
 use aether_bloomery::control::ScopeDispatchPayload;
+use aether_bloomery::testing::{claim, draft, event as decided_event, membership as member_of};
 use aether_bloomery::{
-    AuthorityDoor, CommissionProjection, CommissionStatus, Digest, Ed25519KeyProvider, FakeKeyProvider, KeyId,
-    NamedPath, Observation, PathOrigin, Provenance, SCOPE_FILL_COMMAND, SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA,
-    ScopeRevision, ScopeRouting, ScopeVerifyInput, SignatureEnvelope, StageId, Statement, Topic, WorkpieceId,
-    authorization_message, digest_of,
+    AuthorityDoor, BloomId, CommissionProjection, CommissionStatus, Decision, Decisions, Digest, Ed25519KeyProvider,
+    Fact, FakeKeyProvider, KeyId, NamedPath, Observation, Outcome, PathOrigin, Provenance, SCOPE_FILL_COMMAND,
+    SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA, ScopeRevision, ScopeRouting, ScopeVerifyInput, SignatureEnvelope,
+    StageId, Statement, Topic, WorkpieceId, authorization_message, digest_of,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use ed25519_dalek::{Signer, SigningKey};
 
-use super::{CommissionBackend, CommissionError, RecordCommissionApproval, RecordCommissionApprovalResult};
+use super::{
+    CommissionBackend, CommissionError, RecordCommissionApproval, RecordCommissionApprovalResult, RevisionEvidence,
+};
 use crate::bloomery::{ScopeRunRefusal, TopicOutbox, open_scope_run};
 use crate::store::runtime::{SqliteStore, StoreBackend, StoreCapabilityState};
 use crate::store::{JournalWrite, now_unix_millis};
@@ -93,6 +96,45 @@ fn cancel_of(intent: Digest) -> Statement {
     }
 }
 
+/// A reopen statement over `intent`. The signature is checked at the Reopen
+/// door before the store is reached, so the store's own guard is the binding:
+/// these are the bytes it must match against the stored intent.
+fn reopen_of(intent: Digest) -> Statement {
+    Statement {
+        words: intent.as_bytes().to_vec(),
+        provenance: Provenance::AuthorSignature(SignatureEnvelope {
+            signer: KeyId("owner".to_owned()),
+            signature: vec![4, 5, 6],
+        }),
+        parents: Vec::new(),
+    }
+}
+
+/// Journal one sealed bloom that resolved `id`, and return its bloom id.
+///
+/// A resolution reaches a member as a recorded decision, so the fixture states
+/// the decision the coordinator would have written rather than a fact.
+fn journal_resolution(store: &mut SqliteStore, id: &str) -> BloomId {
+    let spec = draft(0, vec![member_of(id, 1)]).seal();
+    let bloom = spec.id();
+    let event = decided_event("seal", Fact::Seal(spec));
+    let bytes = to_vec(&event).expect("the event encodes");
+    let decisions = to_vec(&Decisions {
+        outcome: Outcome::Sealed(bloom),
+        effects: vec![Decision::RecordResolution { bloom, claim: claim(id, 1, 50) }],
+    })
+    .expect("the decisions encode");
+    store
+        .append_event(&JournalWrite {
+            idempotency_key: &event.idempotency_key.0,
+            event: &bytes,
+            decisions: &decisions,
+            decider: "test",
+        })
+        .expect("the journal appends");
+    bloom
+}
+
 /// A stand-in mainline head for a scoping run — any digest, since nothing on
 /// this path resolves it against a repository.
 fn base() -> Digest {
@@ -104,7 +146,11 @@ fn seed(store: &mut SqliteStore, id: &str) -> Digest {
 }
 
 fn write(store: &mut SqliteStore, id: &str, predecessor: Option<Digest>) -> Digest {
-    store.write_revision(&revision(id, predecessor)).expect("write revision")
+    store.write_revision(&revision(id, predecessor), &RevisionEvidence::default()).expect("write revision")
+}
+
+fn evidence(input: ScopeVerifyInput) -> RevisionEvidence {
+    RevisionEvidence { scope_verify: Some(input) }
 }
 
 #[test]
@@ -133,7 +179,7 @@ fn a_v6_store_gains_empty_commission_tables() {
     let mut store = SqliteStore::open(path).expect("a v6 store migrates");
     assert!(store.list(None).expect("list").is_empty(), "migration invents no commissions");
     let flags: i64 = store.conn.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("user_version");
-    assert_eq!(flags, 13, "the open stamps the current schema");
+    assert_eq!(flags, 15, "the open stamps the current schema");
     assert!(
         store.load_projection(&workpiece("wp-1")).expect("load").is_none(),
         "migration invents no replica-issue numbers"
@@ -214,7 +260,7 @@ fn a_revision_round_trips_the_implemented_adr_list() {
     seed(&mut store, "wp-1");
     let mut revision = revision("wp-1", None);
     revision.implements = vec![Digest::from_bytes([9; 32])];
-    let digest = store.write_revision(&revision).expect("write");
+    let digest = store.write_revision(&revision, &RevisionEvidence::default()).expect("write");
     let loaded = store.load_revision(digest).expect("load").expect("row");
     assert_eq!(loaded.implements, revision.implements);
     assert_eq!(digest_of(&loaded), digest);
@@ -320,7 +366,7 @@ fn a_first_revision_after_one_exists_is_an_ordinal_violation() {
     let mut skipped = revision("wp-1", None);
     skipped.problem = "a different first revision".to_owned();
     assert_eq!(
-        store.write_revision(&skipped),
+        store.write_revision(&skipped, &RevisionEvidence::default()),
         Err(CommissionError::OrdinalViolation { expected: 2 }),
         "a second first-revision must not land"
     );
@@ -404,7 +450,7 @@ fn a_tampered_signed_approval_is_unverified() {
 fn write_revision_for_an_unknown_commission_is_refused() {
     let mut store = memory();
     assert_eq!(
-        store.write_revision(&revision("missing", None)),
+        store.write_revision(&revision("missing", None), &RevisionEvidence::default()),
         Err(CommissionError::MissingCommission("missing".to_owned()))
     );
 }
@@ -457,7 +503,7 @@ fn write_revision_on_a_cancelled_commission_is_not_open() {
     store.cancel(&workpiece("wp-1"), &cancel_of(intent)).expect("cancel");
     let mut next = revision("wp-1", Some(first));
     next.problem = "after cancel".to_owned();
-    assert_eq!(store.write_revision(&next), Err(CommissionError::NotOpen));
+    assert_eq!(store.write_revision(&next, &RevisionEvidence::default()), Err(CommissionError::NotOpen));
     let view = store.load(&workpiece("wp-1")).expect("load").expect("exists");
     assert_eq!(view.head.current_revision, Some(first), "the refused write must not advance current");
     assert_eq!(view.head.status, CommissionStatus::Cancelled);
@@ -554,7 +600,7 @@ fn unresolved_dependencies_name_uncommissioned_ids_once() {
     seed(&mut store, "wp-1");
     let mut missing = revision("wp-1", None);
     missing.dependencies = vec![workpiece("ghost"), workpiece("ghost"), workpiece("wp-2")];
-    let digest = store.write_revision(&missing).expect("write");
+    let digest = store.write_revision(&missing, &RevisionEvidence::default()).expect("write");
     assert_eq!(
         store.unresolved_dependencies(digest).expect("probe"),
         vec![workpiece("ghost"), workpiece("wp-2")],
@@ -564,7 +610,7 @@ fn unresolved_dependencies_name_uncommissioned_ids_once() {
     store.create(&workpiece("wp-2"), &Statement { words: b"ship wp-2".to_vec(), ..intent() }).expect("create wp-2");
     let mut present = revision("wp-1", Some(digest));
     present.dependencies = vec![workpiece("wp-2")];
-    let next = store.write_revision(&present).expect("write successor");
+    let next = store.write_revision(&present, &RevisionEvidence::default()).expect("write successor");
     assert!(
         store.unresolved_dependencies(next).expect("probe").is_empty(),
         "a created commission is not an unresolved dependency"
@@ -580,7 +626,7 @@ fn the_live_approve_door_refuses_uncommissioned_dependencies() {
     seed(&mut store, "wp-1");
     let mut missing = revision("wp-1", None);
     missing.dependencies = vec![workpiece("ghost")];
-    let scope = store.write_revision(&missing).expect("write");
+    let scope = store.write_revision(&missing, &RevisionEvidence::default()).expect("write");
     let statement = auto_approval(scope);
     let mut state = StoreCapabilityState::new(store);
     match state.record_commission_approval(RecordCommissionApproval {
@@ -600,7 +646,7 @@ fn the_live_approve_door_refuses_uncommissioned_dependencies() {
     seed(&mut store, "wp-1");
     let mut open = revision("wp-1", None);
     open.dependencies = vec![workpiece("wp-dep")];
-    let scope = store.write_revision(&open).expect("write");
+    let scope = store.write_revision(&open, &RevisionEvidence::default()).expect("write");
     let statement = auto_approval(scope);
     let mut state = StoreCapabilityState::new(store);
     match state.record_commission_approval(RecordCommissionApproval {
@@ -651,9 +697,9 @@ fn a_workpiece_naming_a_path_outside_its_surface_is_refused_at_the_freeze() {
     seed(&mut store, "issue-5256");
     let surface = &["crates/aether-bloomery/src/**"];
     let revision = revision_with_surface("issue-5256", None, surface);
-    let refused = store.write_revision_verified(
+    let refused = store.write_revision(
         &revision,
-        Some(&projection(&[("crates/aether-chassis-bloomery/src/api/runtime/seal.rs", 2)], surface)),
+        &evidence(projection(&[("crates/aether-chassis-bloomery/src/api/runtime/seal.rs", 2)], surface)),
     );
 
     assert_eq!(
@@ -678,13 +724,13 @@ fn a_refusal_outlives_the_repaired_re_freeze() {
     let refused_revision = revision_with_surface("issue-5256", None, narrow);
     let named = &[("crates/aether-chassis-bloomery/src/api/runtime/seal.rs", 2)];
     store
-        .write_revision_verified(&refused_revision, Some(&projection(named, narrow)))
+        .write_revision(&refused_revision, &evidence(projection(named, narrow)))
         .expect_err("the narrow surface is refused");
 
     let wide = &["crates/aether-bloomery/src/**", "crates/aether-chassis-bloomery/src/**"];
     let repaired = revision_with_surface("issue-5256", None, wide);
     let stored =
-        store.write_revision_verified(&repaired, Some(&projection(named, wide))).expect("the widened surface freezes");
+        store.write_revision(&repaired, &evidence(projection(named, wide))).expect("the widened surface freezes");
 
     let reports = stored_reports(&store, "issue-5256");
     assert_eq!(reports.len(), 2, "both the refusal and the pass are journaled");
@@ -710,6 +756,35 @@ fn a_freeze_with_no_projection_reads_as_absent_rather_than_clean() {
     let view = store.load(&workpiece("issue-hand")).expect("load").expect("exists");
     assert!(view.current.is_some(), "the revision itself froze");
     assert_eq!(view.scope_verify, None, "absence is absence, not a clean report");
+}
+
+#[test]
+fn default_evidence_encodes_as_a_value_not_as_absence() {
+    // Tripwire: empty bytes were the old absent convention. The sidecar is
+    // always an encoding of RevisionEvidence; an empty vector is malformed.
+    let bytes = RevisionEvidence::default().encode();
+    assert!(!bytes.is_empty(), "default evidence must encode as a value");
+    assert_eq!(RevisionEvidence::decode(&bytes).expect("default evidence decodes"), RevisionEvidence::default());
+}
+
+#[test]
+fn the_sidecar_never_enters_the_signed_digest() {
+    // Tripwire: the digest is what an approval signs; a sidecar that leaked
+    // into digest_of would silently invalidate every approval over that
+    // revision.
+    let revision = revision("wp-1", None);
+    let populated = evidence(projection(&[("crates/aether-bloomery/src/lib.rs", 1)], &["crates/aether-bloomery/**"]));
+
+    let mut blank = memory();
+    seed(&mut blank, "wp-1");
+    let empty = blank.write_revision(&revision, &RevisionEvidence::default()).expect("empty sidecar");
+
+    let mut filled = memory();
+    seed(&mut filled, "wp-1");
+    let with_evidence = filled.write_revision(&revision, &populated).expect("populated sidecar");
+
+    assert_eq!(empty, with_evidence);
+    assert_eq!(empty, digest_of(&revision));
 }
 
 #[test]
@@ -754,8 +829,9 @@ fn a_scope_run_writes_its_ledger_row_and_its_outbox_row_together() {
     let commission = workpiece("wp-scope");
     let intent_digest = seed(&mut store, "wp-scope");
 
-    let sequence = open_scope_run(&mut store, &commission, intent_digest, base())
+    let opened = open_scope_run(&mut store, &commission, intent_digest, base())
         .expect("a fresh commission opens its first scoping run");
+    let sequence = opened.sequence;
 
     let entries = store.drain_topic(Topic::ScopeDispatch).expect("drain");
     assert_eq!(entries.len(), 1, "one enqueued run, one outbox row");
@@ -821,4 +897,108 @@ fn a_dispatched_run_is_reachable_from_its_nonce() {
 
     assert_eq!(store.lookup_scope_run("dispatch-7").expect("lookup"), Some((commission.0.clone(), 1)));
     assert_eq!(store.lookup_scope_run("dispatch-8").expect("lookup"), None);
+}
+
+#[test]
+fn enqueuing_a_scope_run_is_one_transaction() {
+    // Names the bug: a run journaled but never dispatched, or dispatched with
+    // no record of why. The `enqueued` row and the outbox row share one
+    // transaction, so forcing the outbox insert to abort must leave neither.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("scope.db");
+    let path = path.to_str().expect("utf-8 path");
+    let mut store = SqliteStore::open(path).expect("open");
+    let commission = workpiece("wp-atomic");
+    let intent_digest = seed(&mut store, "wp-atomic");
+    drop(store);
+
+    rusqlite::Connection::open(path)
+        .expect("schema connection")
+        .execute_batch(
+            "CREATE TRIGGER abort_scope_outbox AFTER INSERT ON outbox \
+             WHEN NEW.topic = 'topic:scope_dispatch' \
+             BEGIN SELECT RAISE(ABORT, 'forced'); END;",
+        )
+        .expect("install abort trigger");
+
+    let mut store = SqliteStore::open(path).expect("reopen");
+    let opened = open_scope_run(&mut store, &commission, intent_digest, base());
+    assert!(opened.is_err(), "the aborted outbox insert must refuse the open: {opened:?}");
+    assert!(
+        store.list_scope_runs(&commission.0).expect("list").is_empty(),
+        "the enqueued row must not survive the aborted transaction",
+    );
+    assert!(
+        store.drain_topic(Topic::ScopeDispatch).expect("drain").is_empty(),
+        "the outbox row must not survive the aborted transaction",
+    );
+}
+
+#[test]
+fn a_landed_commission_no_bloom_resolved_reopens_and_projects_the_restored_status() {
+    // The stranding this door exists for (#5428): the commission was stamped
+    // landed by a bloom that never ran its member, so nothing of it is in
+    // mainline and it must be able to go round again.
+    let mut store = memory();
+    let intent = seed(&mut store, "wp-1");
+    store.mark_landed(&workpiece("wp-1")).expect("mark landed");
+    let _ = store.drain_topic(Topic::Commission).expect("drain the projections so far");
+
+    let statement = reopen_of(intent);
+    let digest = store.reopen(&workpiece("wp-1"), &statement).expect("a stranded commission reopens");
+
+    assert_eq!(digest, digest_of(&statement), "the reply addresses the statement that authorized it");
+    let view = store.load(&workpiece("wp-1")).expect("load").expect("the commission remains");
+    assert_eq!(view.head.status, CommissionStatus::Open, "the workpiece is back in the line");
+    let queued = store.drain_topic(Topic::Commission).expect("drain");
+    let projected: CommissionProjection =
+        from_bytes(&queued.last().expect("the reopen enqueues a projection").payload).expect("projection decodes");
+    assert_eq!(projected.status, "open", "the replica is told the commission is open again");
+}
+
+#[test]
+fn a_landed_commission_a_bloom_resolved_is_refused_at_the_reopen_door() {
+    // The case that must never reopen: this workpiece's work is in mainline,
+    // and putting it back in the line would re-run a landed change.
+    let mut store = memory();
+    let intent = seed(&mut store, "wp-1");
+    let bloom = journal_resolution(&mut store, "wp-1");
+    store.mark_landed(&workpiece("wp-1")).expect("mark landed");
+
+    match store.reopen(&workpiece("wp-1"), &reopen_of(intent)) {
+        Err(CommissionError::Resolved(named)) => assert_eq!(named, bloom, "the refusal names the resolving bloom"),
+        other => panic!("a resolved workpiece must not reopen: {other:?}"),
+    }
+    let view = store.load(&workpiece("wp-1")).expect("load").expect("the commission remains");
+    assert_eq!(view.head.status, CommissionStatus::Landed, "a refused reopen writes nothing");
+}
+
+#[test]
+fn an_open_commission_has_nothing_to_reopen() {
+    // Answered rather than shrugged at: a reopen that reported success over a
+    // commission it did not move would read as evidence the workpiece was
+    // checked and freed when nothing checked anything.
+    let mut store = memory();
+    let intent = seed(&mut store, "wp-1");
+
+    match store.reopen(&workpiece("wp-1"), &reopen_of(intent)) {
+        Err(CommissionError::NotLanded(status)) => assert_eq!(status, CommissionStatus::Open),
+        other => panic!("an open commission is not reopenable: {other:?}"),
+    }
+}
+
+#[test]
+fn a_reopen_bound_to_another_commissions_intent_is_refused() {
+    // The words are the binding the operator signed. A statement minted over a
+    // different commission's intent must not move this one.
+    let mut store = memory();
+    seed(&mut store, "wp-1");
+    store.mark_landed(&workpiece("wp-1")).expect("mark landed");
+
+    match store.reopen(&workpiece("wp-1"), &reopen_of(Digest::from_bytes([9; 32]))) {
+        Err(CommissionError::WrongSubject) => {}
+        other => panic!("a mis-bound reopen must be refused: {other:?}"),
+    }
+    let view = store.load(&workpiece("wp-1")).expect("load").expect("the commission remains");
+    assert_eq!(view.head.status, CommissionStatus::Landed, "a refused reopen writes nothing");
 }

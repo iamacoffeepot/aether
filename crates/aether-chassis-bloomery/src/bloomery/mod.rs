@@ -43,7 +43,7 @@ mod verify;
 
 pub use approve::{
     AdmissionRequest, AdrTouch, ApprovalPolicy, Completeness, Decision, Gate, Incompleteness, PolicyError,
-    StatementRejected, Tier, approval_from_statement, load_policy, parse_policy, precheck_statement,
+    StatementRejected, Tier, approval_from_statement, load_policy, parse_policy, precheck_statement, projection_digest,
     verified_statement_approval,
 };
 pub use chassis::{BloomeryChassis, BloomeryEnv, DEFAULT_RPC_PORT, RpcPortConfig};
@@ -98,7 +98,8 @@ pub use repair::{candidate_tree_digest, capture_commit_digest};
 pub use replica::{SourceReplicaShell, github_push_url, writer_marker_present};
 #[cfg(feature = "runtime")]
 pub use scope_run::{
-    ScopeRunRefusal, ScopeRunState, open_scope_run, scope_dispatch_payload, scope_run_state, scope_run_subject,
+    OpenedScopeRun, ScopeRunRefusal, ScopeRunState, open_scope_run, scope_dispatch_payload, scope_run_state,
+    scope_run_subject,
 };
 #[cfg(feature = "github")]
 pub use source::SourceShell;

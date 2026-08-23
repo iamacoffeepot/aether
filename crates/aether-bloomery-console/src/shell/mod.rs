@@ -1,8 +1,8 @@
 //! Shell: endpoint, store, fetch lanes, a three-pane workspace, and pushed frames.
 //!
 //! Screens receive the store read-only and cannot fetch or mutate it.
-//! The header and the one-line footer are shell chrome. Only the middle
-//! band swaps between the workspace and the top pushed frame.
+//! The header, breadcrumb, rules, and one-line footer are shell chrome. Only
+//! the middle band swaps between the workspace and the top pushed frame.
 
 pub mod chrome;
 mod workspace;
@@ -18,7 +18,7 @@ use ratatui::widgets::{Block, Clear};
 
 use crate::fetch::{FetchLanes, FetchReply, ResourceBody};
 use crate::http::Endpoint;
-use crate::keys::{INLINE_HINTS, KeyHint, Outcome};
+use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
 use crate::palette;
 use crate::screen::{Screen, compose};
@@ -123,7 +123,14 @@ impl Shell {
         frame.render_widget(Block::default().style(palette::body()), frame.area());
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)])
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(3),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
             .split(frame.area());
         let dashboard = compose(&self.store);
         frame.render_widget(
@@ -136,17 +143,21 @@ impl Shell {
             ),
             chunks[0],
         );
+        frame.render_widget(chrome::breadcrumb(&self.breadcrumb_trail()), chunks[1]);
+        frame.render_widget(chrome::rule(frame.area().width), chunks[2]);
         if self.stack.is_empty() {
-            self.workspace.render(frame, chunks[1], &self.store);
+            self.workspace.render(frame, chunks[3], &self.store);
         } else if let Some(screen) = self.stack.last_mut() {
-            screen.render(frame, chunks[1], &self.store);
+            screen.render(frame, chunks[3], &self.store);
         }
+        let hints = self.footer_hints();
         if self.keys_overlay {
-            let (area, overlay) = chrome::keys_overlay(&self.footer_hints(), chunks[1]);
+            let (area, overlay) = chrome::keys_overlay(&hints, chunks[3]);
             frame.render_widget(Clear, area);
             frame.render_widget(overlay, area);
         }
-        frame.render_widget(chrome::footer(&self.footer_trail(), INLINE_HINTS, chunks[2].width), chunks[2]);
+        frame.render_widget(chrome::rule(frame.area().width), chunks[4]);
+        frame.render_widget(chrome::footer(&hints, chunks[5].width), chunks[5]);
     }
 
     fn drain_replies(&mut self) {
@@ -343,13 +354,9 @@ impl Shell {
         }
     }
 
-    /// Path from the workspace through each pushed frame, painted in the footer.
-    fn footer_trail(&self) -> String {
-        if self.stack.is_empty() {
-            String::new()
-        } else {
-            once("board".to_owned()).chain(self.stack.iter().map(Screen::label)).collect::<Vec<_>>().join(" › ")
-        }
+    /// Path from the workspace through each pushed frame, painted on the breadcrumb row.
+    fn breadcrumb_trail(&self) -> String {
+        once("board".to_owned()).chain(self.stack.iter().map(Screen::label)).collect::<Vec<_>>().join(" › ")
     }
 
     fn footer_hints(&self) -> Vec<KeyHint> {
@@ -445,7 +452,7 @@ mod tests {
     };
     use crate::fetch::{FetchReply, ResourceBody};
     use crate::http::Endpoint;
-    use crate::keys::{INLINE_HINTS, Outcome, assert_footer_honest, footer_line};
+    use crate::keys::{Outcome, assert_footer_honest, footer_line};
     use crate::nav::Nav;
     use crate::palette::{Role, depth};
     use crate::screen::{Dashboard, RowId};
@@ -974,26 +981,65 @@ mod tests {
             },
         );
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
-        let last = draw(&mut shell).lines().last().unwrap_or("").to_owned();
-        assert!(last.contains("board › bloom "), "{last}");
-        assert!(last.contains("› member issue-1"), "{last}");
-        assert!(last.contains("› transcript"), "{last}");
+        let text = draw(&mut shell);
+        let crumb = text.lines().nth(1).unwrap_or("").to_owned();
+        let last = text.lines().last().unwrap_or("").to_owned();
+        assert!(crumb.contains("board › bloom "), "{crumb}");
+        assert!(crumb.contains("› member issue-1"), "{crumb}");
+        assert!(crumb.contains("› transcript"), "{crumb}");
         assert!(last.trim_end().ends_with("q quit"), "{last}");
     }
 
     #[test]
+    fn the_breadcrumb_reads_board_at_the_root() {
+        // Names the bug: a path that is blank at the root, which is the wish's
+        // first half.
+        let mut root = Shell::showing(&ViewDocument::default(), None);
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).expect("test backend");
+        terminal.draw(|frame| root.render(frame)).expect("draw");
+        let row1 = buffer_text(&terminal).lines().nth(1).unwrap_or("").to_owned();
+        assert!(row1.starts_with("board"), "{row1}");
+
+        let mut days = Shell::probe(Nav::days());
+        terminal.draw(|frame| days.render(frame)).expect("draw");
+        let row1 = buffer_text(&terminal).lines().nth(1).unwrap_or("").to_owned();
+        assert_eq!(row1.trim(), "board › days", "{row1}");
+    }
+
+    #[test]
+    fn the_chrome_rules_bracket_the_body() {
+        // Tripwire: the body's origin is what every screen's own render tests
+        // assume; a rule painted into the body's rect instead of its own would
+        // overwrite the first content line.
+        let mut shell = Shell::showing(&ViewDocument::default(), None);
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let text = buffer_text(&terminal);
+        let lines: Vec<&str> = text.lines().collect();
+        let rule = "─".repeat(100);
+        assert_eq!(lines.get(2).copied().unwrap_or(""), rule, "top rule:\n{text}");
+        assert_eq!(lines.iter().rev().nth(1).copied().unwrap_or(""), rule, "bottom rule:\n{text}");
+        assert!(lines.last().is_some_and(|last| last.contains("? keys")), "footer:\n{text}");
+        let body = lines.get(3).copied().unwrap_or("");
+        assert_ne!(body, rule, "first body row is a rule:\n{text}");
+        assert!(body.contains('┏') || body.contains('┌'), "first body row:\n{body}");
+    }
+
+    #[test]
     fn at_rest_the_footer_carries_the_keys_alone() {
-        // Tripwire: the workspace is the root; a `board` crumb at rest is
+        // Tripwire: the trail has its own row; a crumb on the footer is
         // noise on every frame.
         let mut shell = Shell::showing(&ViewDocument::default(), None);
         let last = draw(&mut shell).lines().last().unwrap_or("").to_owned();
-        assert_eq!(last.trim(), footer_line(INLINE_HINTS));
+        assert!(!last.contains('›'), "{last}");
+        assert!(last.contains("? keys"), "{last}");
+        assert!(last.trim_end().ends_with("q quit"), "{last}");
     }
 
     #[test]
     fn a_deep_trail_is_elided_from_the_left_and_keeps_the_keys() {
-        // The plausible bug: a trail longer than the frame is clipped from
-        // the right, so the deepest crumb and q quit vanish together.
+        // The plausible bug: a long trail still shares the footer, so q quit
+        // is the token that goes.
         let mut shell = Shell::showing(&ViewDocument::default(), None);
         for _ in 0..12 {
             shell.push_nav(Nav::days());
@@ -1002,10 +1048,10 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(60, 24)).expect("test backend");
         terminal.draw(|frame| shell.render(frame)).expect("draw");
         let last = buffer_text(&terminal).lines().last().unwrap_or("").to_owned();
-        assert!(last.starts_with('…'), "{last}");
+        assert!(!last.starts_with('…'), "{last}");
         assert!(last.chars().count() <= 60, "{last}");
-        assert!(last.contains("deep-crumb"), "{last}");
         assert!(last.trim_end().ends_with("q quit"), "{last}");
+        assert!(last.contains("? keys"), "{last}");
     }
 
     #[test]
@@ -1417,24 +1463,44 @@ mod tests {
         assert!(last.trim_end().ends_with("q quit"), "{last}");
         assert!(last.contains("? keys"), "{last}");
         assert!(!last.contains("landed "), "the metrics live in the header now: {last}");
-        assert!(!last.contains("j/k select"), "the full hint list is behind `?`: {last}");
+    }
+
+    #[test]
+    fn the_footer_paints_the_screen_keys() {
+        // Names the bug: the footer painting a constant instead of the current
+        // screen's set, which is the whole issue.
+        let mut days = Shell::probe(Nav::days());
+        let mut terminal = Terminal::new(TestBackend::new(120, 16)).expect("test backend");
+        terminal.draw(|frame| days.render(frame)).expect("draw");
+        let last = buffer_text(&terminal).lines().last().unwrap_or("").to_owned();
+        assert!(last.contains("r refresh"), "{last}");
+        assert!(last.contains("q quit"), "{last}");
+        assert!(last.contains("? keys"), "{last}");
+
+        let mut root = Shell::showing(&ViewDocument::default(), None);
+        terminal.draw(|frame| root.render(frame)).expect("draw");
+        let last = buffer_text(&terminal).lines().last().unwrap_or("").to_owned();
+        assert!(last.contains("Tab pane"), "{last}");
+        assert!(last.contains("Enter open"), "{last}");
     }
 
     #[test]
     fn the_overlay_lists_every_key_the_seat_advertises() {
-        // Tripwire: the overlay is now the only thing that advertises those
-        // keys — an overlay built from a shorter list re-hides exactly what
-        // the trimmed footer stopped painting.
+        // Tripwire: the overlay lists the full seat; a shorter list hides a
+        // key the footer may already have elided for width.
         let mut shell = Shell::showing(&parked_blooms(3), None);
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('?'))), Outcome::Handled);
-        let text = draw(&mut shell);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let text = buffer_text(&terminal);
         for hint in shell.footer_hints() {
             let line = format!("{}  {}", hint.keys, hint.action);
             assert!(text.contains(&line), "overlay is missing {line:?}:\n{text}");
         }
 
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Esc)), Outcome::Handled);
-        let text = draw(&mut shell);
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let text = buffer_text(&terminal);
         for hint in shell.footer_hints() {
             let line = format!("{}  {}", hint.keys, hint.action);
             assert!(!text.contains(&line), "the overlay survives dismissal: {line:?}\n{text}");
@@ -1478,7 +1544,9 @@ mod tests {
     }
 
     fn title_y(text: &str, title: &str) -> usize {
-        text.lines().position(|line| line.contains(title)).unwrap_or_else(|| panic!("missing {title} in:\n{text}"))
+        text.lines()
+            .position(|line| line.contains(title) && (line.contains('┏') || line.contains('┌')))
+            .unwrap_or_else(|| panic!("missing {title} in:\n{text}"))
     }
 
     fn left_column(terminal: &Terminal<TestBackend>) -> String {
@@ -1530,6 +1598,10 @@ mod tests {
                     continue;
                 }
                 let border_x = x.saturating_sub(1);
+                let symbol = buffer[(border_x, y)].symbol();
+                if symbol != "┏" && symbol != "┌" {
+                    continue;
+                }
                 return role_of(buffer[(border_x, y)].fg);
             }
         }
@@ -1544,7 +1616,11 @@ mod tests {
                     continue;
                 }
                 let border_x = x.saturating_sub(1);
-                return buffer[(border_x, y)].symbol().to_owned();
+                let symbol = buffer[(border_x, y)].symbol();
+                if symbol != "┏" && symbol != "┌" {
+                    continue;
+                }
+                return symbol.to_owned();
             }
         }
         panic!("title {title:?} not found");

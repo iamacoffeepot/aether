@@ -33,15 +33,17 @@ mod review;
 mod review_mcp;
 mod review_reports;
 mod sccache;
+mod scope;
 mod scratch;
 mod verify;
 
 use std::path::{Path, PathBuf};
 
-use aether_bloomery::{Harness, VerifyFailureSet};
+use aether_bloomery::{Harness, SCOPE_FILL_COMMAND, VerifyFailureSet};
 use anyhow::{Result, bail};
 use clap::Args;
 use serde::Serialize;
+use serde::ser::{SerializeStruct, Serializer};
 
 use crate::cargo::write_json_pretty;
 use crate::transform::construct::CONSTRUCT_IMPLEMENT;
@@ -54,8 +56,8 @@ use crate::transform::verify::{Excused, SuppressionRequest, VERIFY_BASE, VERIFY_
 
 #[derive(Args, Clone)]
 pub struct TransformArgs {
-    /// Typed command id — a `verify.*` mechanical id, `construct.implement`, or
-    /// `review.critic`.
+    /// Typed command id — a `verify.*` mechanical id, `construct.implement`,
+    /// `review.critic`, or `scope.fill`.
     command: String,
     /// Directory evidence bytes are written to (created if missing).
     #[arg(long)]
@@ -115,44 +117,209 @@ pub struct TransformArgs {
     seeded: Option<String>,
 }
 
+/// Who reads an evidence channel and what they do with it. Declared once; both
+/// [`Evidence`] and the umbrella's `MemberRun` hold this rather than restating
+/// six fields and the repair-work / receipt distinction on each.
+///
+/// Serialization stays on the envelope: [`Evidence`] emits the same six
+/// top-level keys [`ChannelKind::key`] names, with the same presence-driven
+/// omission. A new channel is a [`ChannelKind`] variant, not a field plus a
+/// seventh paragraph.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum EvidenceChannel {
+    /// Work a repair lap is owed. Findings are handed to a Refine re-entry as
+    /// work; the lap is told to fix them.
+    RepairWork(ChannelKind, ChannelBody),
+    /// A receipt for a reader who is not a repair lap. Findings are handed to a
+    /// repair lap as work; this is a receipt for the lane, and a model given it
+    /// would spend a bounded repair roll on a host it cannot reach. A request
+    /// routed into findings would be repaired away by the next model that read
+    /// it — which is exactly the refine lap this mechanism exists to stop buying.
+    Receipt(ChannelKind, ChannelBody),
+}
+
+/// Which of the six envelope keys a channel serializes as. [`Self::key`] is the
+/// only place a key name is spelled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChannelKind {
+    /// Distilled diagnostics a Refine re-entry is directed by.
+    Findings,
+    /// What the run declined to charge the candidate for, and why.
+    Environment,
+    /// Tests a same-input replay cleared.
+    Flakes,
+    /// Tests already red at the work order's base.
+    InheritedFailures,
+    /// Suppressions the candidate states a case for, which the lane declined to judge.
+    SuppressionRequests,
+    /// What the symbol pass flagged for the review seat.
+    ReviewFlags,
+}
+
+impl ChannelKind {
+    /// The JSON key the chassis, the evidence list route, the mock lane, and
+    /// `transform.yml`'s jq read.
+    const fn key(self) -> &'static str {
+        match self {
+            Self::Findings => "findings",
+            Self::Environment => "environment",
+            Self::Flakes => "flakes",
+            Self::InheritedFailures => "inherited_failures",
+            Self::SuppressionRequests => "suppression_requests",
+            Self::ReviewFlags => "review_flags",
+        }
+    }
+
+    /// Whether this kind is repair work rather than a receipt.
+    const fn is_repair_work(self) -> bool {
+        matches!(self, Self::Findings)
+    }
+}
+
+/// The two payload shapes a channel carries today: prose, or a typed ledger
+/// whose element type is the kind's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ChannelBody {
+    Text(String),
+    Ledger(Ledger),
+}
+
+/// A `Vec<T>` ledger, with `T` the kind's item.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Ledger {
+    Excused(Vec<Excused>),
+    Requests(Vec<SuppressionRequest>),
+}
+
+impl EvidenceChannel {
+    /// Construct the arm [`ChannelKind::is_repair_work`] selects, so a kind
+    /// cannot be filed as the other party.
+    fn of(kind: ChannelKind, body: ChannelBody) -> Self {
+        if kind.is_repair_work() {
+            Self::RepairWork(kind, body)
+        } else {
+            Self::Receipt(kind, body)
+        }
+    }
+
+    fn findings(body: String) -> Self {
+        Self::of(ChannelKind::Findings, ChannelBody::Text(body))
+    }
+
+    fn environment(body: String) -> Self {
+        Self::of(ChannelKind::Environment, ChannelBody::Text(body))
+    }
+
+    fn flakes(body: Vec<Excused>) -> Self {
+        Self::of(ChannelKind::Flakes, ChannelBody::Ledger(Ledger::Excused(body)))
+    }
+
+    fn inherited_failures(body: Vec<Excused>) -> Self {
+        Self::of(ChannelKind::InheritedFailures, ChannelBody::Ledger(Ledger::Excused(body)))
+    }
+
+    fn suppression_requests(body: Vec<SuppressionRequest>) -> Self {
+        Self::of(ChannelKind::SuppressionRequests, ChannelBody::Ledger(Ledger::Requests(body)))
+    }
+
+    fn review_flags(body: String) -> Self {
+        Self::of(ChannelKind::ReviewFlags, ChannelBody::Text(body))
+    }
+
+    fn kind(&self) -> ChannelKind {
+        match self {
+            Self::RepairWork(kind, _) | Self::Receipt(kind, _) => *kind,
+        }
+    }
+
+    fn body(&self) -> &ChannelBody {
+        match self {
+            Self::RepairWork(_, body) | Self::Receipt(_, body) => body,
+        }
+    }
+
+    fn text(&self) -> Option<&str> {
+        match self.body() {
+            ChannelBody::Text(text) => Some(text),
+            ChannelBody::Ledger(_) => None,
+        }
+    }
+
+    fn excused(&self) -> Option<&[Excused]> {
+        match self.body() {
+            ChannelBody::Ledger(Ledger::Excused(items)) => Some(items),
+            _ => None,
+        }
+    }
+
+    fn requests(&self) -> Option<&[SuppressionRequest]> {
+        match self.body() {
+            ChannelBody::Ledger(Ledger::Requests(items)) => Some(items),
+            _ => None,
+        }
+    }
+}
+
+/// The channels one envelope — or one member's contribution to it — carries.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Channels(Vec<EvidenceChannel>);
+
+impl Channels {
+    fn new(channels: impl IntoIterator<Item = EvidenceChannel>) -> Self {
+        let mut this = Self::default();
+        for channel in channels {
+            this.set(channel);
+        }
+        this
+    }
+
+    fn set(&mut self, channel: EvidenceChannel) {
+        let kind = channel.kind();
+        self.0.retain(|existing| existing.kind() != kind);
+        self.0.push(channel);
+    }
+
+    fn get(&self, kind: ChannelKind) -> Option<&EvidenceChannel> {
+        self.0.iter().find(|channel| channel.kind() == kind)
+    }
+
+    fn text(&self, kind: ChannelKind) -> Option<&str> {
+        self.get(kind).and_then(EvidenceChannel::text)
+    }
+
+    fn excused(&self, kind: ChannelKind) -> &[Excused] {
+        self.get(kind).and_then(EvidenceChannel::excused).unwrap_or(&[])
+    }
+
+    fn serialize_into<S: SerializeStruct>(&self, state: &mut S, kind: ChannelKind) -> Result<(), S::Error> {
+        let Some(channel) = self.get(kind) else {
+            return Ok(());
+        };
+        match channel.body() {
+            ChannelBody::Text(text) => state.serialize_field(kind.key(), text),
+            ChannelBody::Ledger(Ledger::Excused(items)) => state.serialize_field(kind.key(), items),
+            ChannelBody::Ledger(Ledger::Requests(items)) => state.serialize_field(kind.key(), items),
+        }
+    }
+}
+
 /// `<out>/evidence.json` schema for the verify lane — the untrusted claim a
 /// broker validates by `nonce` and re-checks against `status`.
-#[derive(Serialize)]
 struct Evidence {
     command: String,
     nonce: Option<String>,
     status: &'static str,
     exit_code: Option<i32>,
     log: String,
-    /// A failing run's distilled diagnostics (#4641), read back host-side and
-    /// persisted per member so a `Refine` re-entry is directed by them — the
-    /// same top-level `findings` channel the review critic stamps.
-    ///
-    /// Absent on a pass, and absent on a lane that produces no diagnostics, so
-    /// the channel stays presence-driven rather than needing a lane flag.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    findings: Option<String>,
     /// The exact failed `verify.check` members (ADR-0178). Absent on a pass;
     /// present and nonempty on a failed umbrella run.
-    #[serde(skip_serializing_if = "Option::is_none")]
     failed_verifiers: Option<VerifyFailureSet>,
-    /// What the run declined to charge the candidate for, and why (#4895): the
-    /// failures it read as the host's rather than the work's, the closure it
-    /// judged them against, and what the rerun then said.
-    ///
-    /// Its own channel rather than a section of `findings`, because the two are
-    /// read by different parties. Findings are handed to a repair lap as work;
-    /// this is a receipt for the lane, and a model given it would spend a
-    /// bounded repair roll on a host it cannot reach.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    environment: Option<String>,
     /// What sccache served this run's compilations (#4894) — the receipts that
     /// make the reclaimed seconds countable rather than anecdotal.
     ///
     /// Absent on a host with no sccache, where the lane builds exactly as it did
     /// before: a zeroed reading there would say the cache served nothing, which
     /// is the opposite conclusion about the host from the true one.
-    #[serde(skip_serializing_if = "Option::is_none")]
     sccache: Option<Counters>,
     /// The largest resident set any of this run's commands reached, in bytes
     /// (#4912) — what the lane concurrency ceiling is calibrated from, measured
@@ -161,7 +328,6 @@ struct Evidence {
     /// Absent on a host whose `/usr/bin/time` cannot report it, for the reason
     /// the counters above are absent without sccache: a zero would claim a run
     /// that allocated nothing.
-    #[serde(skip_serializing_if = "Option::is_none")]
     peak_resident_bytes: Option<u64>,
     /// Wall-clock milliseconds this run spent doing work (#5111).
     ///
@@ -171,51 +337,46 @@ struct Evidence {
     /// a single-command path it is that one gate. Absent on a preflight-refused
     /// umbrella that executed no gate: a zero there would claim the refuse was
     /// free.
-    #[serde(skip_serializing_if = "Option::is_none")]
     duration_millis: Option<u64>,
     /// Per-gate wall-clock receipts for the `verify.check` umbrella (#5111).
     ///
     /// Absent on the single-command path — the record *is* that one gate — and
     /// on a preflight-refused run that executed none.
-    #[serde(skip_serializing_if = "Option::is_none")]
     gates: Option<Vec<GateTiming>>,
-    /// Tests a same-input replay cleared, so the run declined to charge them to
-    /// the candidate (FIX-4b).
-    ///
-    /// Its own ledger rather than prose in `environment`, because this is the
-    /// channel a flake is *counted* on: a test that appears here run after run
-    /// is a test to fix or delete, and that is only visible if the records are
-    /// machine-readable. Absent when nothing was excused this way.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    flakes: Option<Vec<Excused>>,
-    /// Tests already red at the work order's base, so this candidate is not why
-    /// (FIX-4b). Its own ledger for the reason `flakes` is. Absent when nothing
-    /// was excused this way.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    inherited_failures: Option<Vec<Excused>>,
-    /// Suppressions the candidate states a case for, which the lane declined to
-    /// judge (ADR-0193). Each names the file, the line, the lint, and the
-    /// reason the lane gave.
-    ///
-    /// A separate channel from `findings` deliberately, and this is the one
-    /// place the distinction bites hardest: findings are handed to a repair lap
-    /// as work, so a request routed there would be repaired away by the next
-    /// model that read it — which is exactly the refine lap this mechanism
-    /// exists to stop buying. Absent when the candidate asked for nothing.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    suppression_requests: Option<Vec<SuppressionRequest>>,
-    /// What the symbol pass flagged for the review seat (#5185): a name the
-    /// candidate introduced that the workspace already has, or a primitive it
-    /// re-derived where one is owned.
-    ///
-    /// Flagged, never failed. "Similar-looking, genuinely different
-    /// responsibility" is real, and only judgment separates it from
-    /// re-derivation — so this is a dossier for the review stage rather than a
-    /// finding for a repair lap, which would spend its budget renaming the
-    /// symbol instead of answering the question. Absent when the pass found
-    /// nothing, and on a run with no diff base to read an introduced set from.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    review_flags: Option<String>,
+    channels: Channels,
+}
+
+impl Serialize for Evidence {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut state = serializer.serialize_struct("Evidence", 16)?;
+        state.serialize_field("command", &self.command)?;
+        state.serialize_field("nonce", &self.nonce)?;
+        state.serialize_field("status", &self.status)?;
+        state.serialize_field("exit_code", &self.exit_code)?;
+        state.serialize_field("log", &self.log)?;
+        self.channels.serialize_into(&mut state, ChannelKind::Findings)?;
+        if let Some(failures) = &self.failed_verifiers {
+            state.serialize_field("failed_verifiers", failures)?;
+        }
+        self.channels.serialize_into(&mut state, ChannelKind::Environment)?;
+        if let Some(counters) = &self.sccache {
+            state.serialize_field("sccache", counters)?;
+        }
+        if let Some(bytes) = self.peak_resident_bytes {
+            state.serialize_field("peak_resident_bytes", &bytes)?;
+        }
+        if let Some(millis) = self.duration_millis {
+            state.serialize_field("duration_millis", &millis)?;
+        }
+        if let Some(gates) = &self.gates {
+            state.serialize_field("gates", gates)?;
+        }
+        self.channels.serialize_into(&mut state, ChannelKind::Flakes)?;
+        self.channels.serialize_into(&mut state, ChannelKind::InheritedFailures)?;
+        self.channels.serialize_into(&mut state, ChannelKind::SuppressionRequests)?;
+        self.channels.serialize_into(&mut state, ChannelKind::ReviewFlags)?;
+        state.end()
+    }
 }
 
 /// One umbrella member's wall-clock share: everything run under that gate's
@@ -256,6 +417,17 @@ impl Evidence {
         self.gates = (!gates.is_empty()).then_some(gates);
         self
     }
+
+    fn with_channels(mut self, channels: impl IntoIterator<Item = EvidenceChannel>) -> Self {
+        for channel in channels {
+            self.channels.set(channel);
+        }
+        self
+    }
+
+    fn flakes(&self) -> &[Excused] {
+        self.channels.excused(ChannelKind::Flakes)
+    }
 }
 
 /// Assembles the evidence record from a captured run's status — pure
@@ -270,22 +442,16 @@ fn build_evidence(
     failed_verifiers: Option<VerifyFailureSet>,
 ) -> Evidence {
     Evidence {
-        findings,
         failed_verifiers,
-        // The single-command path discriminates nothing: only the umbrella
-        // resolves a closure, so only the umbrella can report against one.
-        environment: None,
         sccache: None,
         peak_resident_bytes: None,
         duration_millis: None,
         gates: None,
-        flakes: None,
-        // The single-command path has one member's word for everything it
-        // reports, and only the umbrella's `verify.suppress` member can state a
-        // request — `run_single` fills this in itself for that one case.
-        inherited_failures: None,
-        suppression_requests: None,
-        review_flags: None,
+        // The single-command path discriminates nothing: only the umbrella
+        // resolves a closure, so only the umbrella can report against one —
+        // and only `verify.suppress` can state a request, which `run_single`
+        // fills in itself.
+        channels: Channels::new(findings.map(EvidenceChannel::findings)),
         command: command.to_string(),
         nonce,
         status: if passed {
@@ -309,6 +475,9 @@ pub fn run(args: &TransformArgs) -> Result<()> {
     }
     if args.command == REVIEW_CRITIC {
         return review::run_review(args);
+    }
+    if args.command == SCOPE_FILL_COMMAND {
+        return scope::run_scope(args);
     }
     if args.command == REVIEW_REPORT {
         return review_mcp::serve(&args.out);
@@ -419,7 +588,10 @@ impl Measurements {
 
 #[cfg(test)]
 mod tests {
-    use super::{GateTiming, build_evidence};
+    use super::{
+        ChannelKind, EvidenceChannel, Excused, GateTiming, SuppressionRequest, build_evidence,
+        verify::{MemberOutcome, MemberRun, stated_requests, verify_findings},
+    };
 
     #[test]
     fn evidence_assembly_carries_status_nonce_and_exit_code() {
@@ -512,5 +684,110 @@ mod tests {
         assert_eq!(umbrella["gates"][0]["command"], "verify.fmt");
         assert_eq!(umbrella["gates"][1]["prepare_millis"], 50);
         assert!(umbrella.get("prepare_millis").is_none(), "the umbrella has no prepare of its own");
+    }
+
+    #[test]
+    fn the_evidence_envelope_keys_do_not_move() {
+        // Tripwire: the JSON is read by key name by the chassis (backend.rs:2400,
+        // :2424, :2474-2479), by the evidence list route, by the mock lane and by
+        // transform.yml's jq — the pinned value is computed from the serializer,
+        // so it moves exactly when the contract moves, which this refactor must
+        // never do.
+        let populated = build_evidence(
+            "verify.check",
+            Some("nonce-1".to_string()),
+            false,
+            Some(1),
+            "verify.check.log".to_string(),
+            Some("error: clippy".to_string()),
+            None,
+        )
+        .with_channels([
+            EvidenceChannel::environment("host fault".to_string()),
+            EvidenceChannel::flakes(vec![Excused {
+                test: "aether-data::wire_roundtrip".to_string(),
+                replayed: "an identical invocation".to_string(),
+            }]),
+            EvidenceChannel::inherited_failures(vec![Excused {
+                test: "aether-actor::asset_sections".to_string(),
+                replayed: "deadbeef".to_string(),
+            }]),
+            EvidenceChannel::suppression_requests(vec![SuppressionRequest {
+                path: "crates/demo/src/lib.rs".to_string(),
+                line: 17,
+                lint: "clippy::unwrap_used".to_string(),
+                reason: "test fixture".to_string(),
+            }]),
+            EvidenceChannel::review_flags("a name the workspace already has".to_string()),
+        ]);
+        let pretty = serde_json::to_string_pretty(&populated).expect("evidence serializes");
+        assert_eq!(
+            top_level_pretty_keys(&pretty),
+            [
+                "command",
+                "nonce",
+                "status",
+                "exit_code",
+                "log",
+                "findings",
+                "environment",
+                "flakes",
+                "inherited_failures",
+                "suppression_requests",
+                "review_flags",
+            ]
+        );
+
+        let empty = serde_json::to_value(build_evidence(
+            "verify.fmt",
+            None,
+            true,
+            Some(0),
+            "verify.fmt.log".to_string(),
+            None,
+            None,
+        ))
+        .expect("evidence serializes");
+        for key in ["findings", "environment", "flakes", "inherited_failures", "suppression_requests", "review_flags"] {
+            assert!(empty.get(key).is_none(), "{key} must stay absent when the channel is empty");
+        }
+    }
+
+    #[test]
+    fn a_receipt_is_never_folded_into_repair_work() {
+        // Names the bug the docs call the one that bites hardest: a suppression
+        // request routed into findings, which the next repair lap repairs away.
+        let findings = EvidenceChannel::findings("error: clippy".to_string());
+        let requests = EvidenceChannel::suppression_requests(vec![SuppressionRequest {
+            path: "crates/demo/src/lib.rs".to_string(),
+            line: 17,
+            lint: "clippy::unwrap_used".to_string(),
+            reason: "test fixture".to_string(),
+        }]);
+        assert!(matches!(findings, EvidenceChannel::RepairWork(ChannelKind::Findings, _)), "Findings is repair work");
+        assert!(ChannelKind::Findings.is_repair_work());
+        assert!(
+            matches!(requests, EvidenceChannel::Receipt(ChannelKind::SuppressionRequests, _)),
+            "SuppressionRequests is a receipt"
+        );
+        assert!(!ChannelKind::SuppressionRequests.is_repair_work());
+
+        let mut member = MemberRun::plain("verify.suppress", MemberOutcome::Failed, Vec::new(), 1);
+        member.set(findings);
+        member.set(requests);
+        let members = [member];
+        let folded_findings = verify_findings(&members).expect("findings fold");
+        let folded_requests = stated_requests(&members).expect("requests fold");
+        assert!(matches!(folded_findings, EvidenceChannel::RepairWork(ChannelKind::Findings, _)));
+        assert!(folded_findings.text().expect("prose").contains("error: clippy"));
+        assert!(!folded_findings.text().expect("prose").contains("test fixture"));
+        assert!(matches!(folded_requests, EvidenceChannel::Receipt(ChannelKind::SuppressionRequests, _)));
+        assert_eq!(folded_requests.requests().expect("ledger")[0].reason, "test fixture");
+    }
+
+    /// Top-level keys in the order `to_string_pretty` emitted them, so the pin
+    /// tracks serializer order rather than `BTreeMap` iteration.
+    fn top_level_pretty_keys(pretty: &str) -> Vec<&str> {
+        pretty.lines().filter_map(|line| line.strip_prefix("  \"").and_then(|rest| rest.split('"').next())).collect()
     }
 }

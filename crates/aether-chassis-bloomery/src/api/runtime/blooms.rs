@@ -5,9 +5,9 @@
 
 use aether_actor::Manual;
 use aether_bloomery::{
-    Adjudication, Admit, AdmitResult, AuthorityDoor, BloomId, BloomView, CandidateRef, Disposition, Event, Fact,
-    IdempotencyKey, OperatorHold, OperatorRepair, Outcome, Query, QueryResult, Statement, SuppressionDisposition,
-    ViewDocument, WhyDocument, Withdrawal, WithdrawalCause, WorkpieceId, digest_of,
+    Adjudication, Admit, AdmitResult, AuthorityDoor, BloomId, BloomView, CandidateRef, Digest, Disposition, Event,
+    Evidence, EvidenceKind, Fact, IdempotencyKey, OperatorHold, OperatorRepair, Outcome, Query, QueryResult, Statement,
+    SuppressionDisposition, ViewDocument, WhyDocument, Withdrawal, WithdrawalCause, WorkpieceId, digest_of,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_http::HttpServerResponse;
@@ -19,8 +19,8 @@ use super::hex::{self, digest_from_hex, hex_encode};
 use super::response::{error_response, json};
 use super::state::{ApiCapabilityState, Routed, VerifyPending, admit};
 use crate::api::dto::{
-    AdjudicateRequest, GrantRequest, HoldRequest, OutcomeView, ReleaseAcceptedView, RepairRequest, SupersedeRequest,
-    SuppressionAnswerRequest, WithdrawRequest,
+    AdjudicateRequest, GrantRequest, HoldRequest, OutcomeView, ReleaseAcceptedView, RepairRequest, RetryRequest,
+    SupersedeRequest, SuppressionAnswerRequest, WithdrawRequest,
 };
 use crate::bloomery::DoctorReport;
 use crate::control::ControlCore;
@@ -249,6 +249,56 @@ impl ApiCapabilityState {
         });
 
         admit(&Event { idempotency_key: IdempotencyKey(key), fact: Fact::OperatorRepair { bloom, repair } })
+    }
+
+    /// `POST /blooms/{id}/members/{workpiece}/retry` — run the member's current
+    /// stage again on the candidate it already holds (#5423).
+    ///
+    /// Journal-first like its siblings: the route appends one
+    /// `Fact::MemberExecutorFault` and nothing else. That is the fact that says
+    /// "this stage did not judge the subject", which is exactly what an operator
+    /// asserts by retrying — so the reducer's own machinery path carries it: the
+    /// cursor does not move, `attempts` and `repair_rolls` are untouched, no
+    /// Refine is dispatched, and the retry is counted against the member's
+    /// machinery roll budget, wedging at the sealed ceiling like any other
+    /// machinery series.
+    ///
+    /// Not the grant door. `Fact::GrantAttempts` hands budget *back* and only to
+    /// a member that has already wedged; this spends a roll on one that has not,
+    /// which is the opposite direction and a different precondition. Nothing is
+    /// re-scoped and nothing is superseded: the member keeps its scope revision,
+    /// its candidate, and its bloom.
+    pub(super) fn retry(id: &str, workpiece: &str, body: &[u8]) -> Routed {
+        let bloom = match digest_from_hex(id) {
+            Some(digest) => BloomId(digest),
+            None => return Routed::Reply(error_response(400, "bloom id is not a 32-byte hex bloom id")),
+        };
+        let request: RetryRequest = match hex::from_slice(body) {
+            Ok(request) => request,
+            Err(error) => return Routed::Reply(error_response(400, &format!("invalid retry body: {error}"))),
+        };
+        let RetryRequest { stage, subject, reason, operator, idempotency_key } = request;
+        if let Some(refusal) = unstated(&reason, &operator) {
+            return Routed::Reply(refusal);
+        }
+
+        // The operator's words are the artifact: there is no lane output behind a
+        // retry, so what an evidence reader gets is the reason it was asked for.
+        let detail = Digest::of_wire_bytes(format!("retry\n{workpiece}\n{stage:?}\n{operator}\n{reason}").as_bytes());
+        let evidence = Evidence { subject, kind: EvidenceKind::ExecutorFault, detail };
+        let key = idempotency_key.unwrap_or_else(|| {
+            format!(
+                "aether.bloomery.retry:{}:{}:{}",
+                hex_encode(bloom.0.as_bytes()),
+                workpiece,
+                hex_encode(detail.as_bytes()),
+            )
+        });
+
+        admit(&Event {
+            idempotency_key: IdempotencyKey(key),
+            fact: Fact::MemberExecutorFault { bloom, workpiece: WorkpieceId(workpiece.to_owned()), stage, evidence },
+        })
     }
 
     /// `POST /blooms/{id}/hold` — freeze the `{id}` bloom's dispatch (#4976).

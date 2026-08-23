@@ -27,8 +27,10 @@ mod bloom;
 mod cargo;
 mod dev_component;
 mod dist;
+mod fixtures;
 mod inventory;
 mod package;
+mod scope;
 mod symbols;
 mod transform;
 
@@ -39,7 +41,9 @@ use crate::affected::AffectedArgs;
 use crate::bloom::BloomArgs;
 use crate::dev_component::DevComponentArgs;
 use crate::dist::DistArgs;
+use crate::fixtures::FixturesArgs;
 use crate::package::PackageArgs;
+use crate::scope::ScopeArgs;
 use crate::symbols::SymbolsArgs;
 use crate::transform::TransformArgs;
 
@@ -56,6 +60,8 @@ enum Commands {
     DevComponent(DevComponentArgs),
     /// Build component wasm + chassis bins into `dist/` with a manifest.
     Dist(DistArgs),
+    /// Rewrite or check pinned golden fixture files.
+    Fixtures(FixturesArgs),
     /// Emit the shippable depot layout (ADR-0163 §1): the chassis binary,
     /// a persisted `pack/manifest`, and content-addressed component
     /// objects under `pack/objects/<sha256>`. The Steam depot is this
@@ -77,6 +83,9 @@ enum Commands {
     /// Workspace symbol inventory: build a deterministic table, find by
     /// name, or diff a working tree against a stored base table.
     Symbols(SymbolsArgs),
+    /// Append one field write to a `scope.fill` run's call log. The value
+    /// arrives by file so multi-paragraph prose survives the transport.
+    Scope(ScopeArgs),
 }
 
 fn main() -> Result<()> {
@@ -84,10 +93,12 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::DevComponent(args) => dev_component::run(&args),
         Commands::Dist(args) => dist::run(&args),
+        Commands::Fixtures(args) => fixtures::run(&args),
         Commands::Package(args) => package::run(&args),
         Commands::Transform(args) => transform::run(&args),
         Commands::Affected(args) => affected::run(&args),
         Commands::Bloom(args) => bloom::run(&args),
         Commands::Symbols(args) => symbols::run(&args),
+        Commands::Scope(args) => scope::run(&args),
     }
 }

@@ -55,8 +55,8 @@ use crate::control::ControlCore;
 #[cfg(feature = "github")]
 use crate::source::SourceCapability;
 use crate::store::{
-    CreateCommission, ListBloomDispatches, ListCommissions, LoadCommission, LoadCommissionResult, LookupDispatch,
-    PageJournal, RecordConfig, StoreCapability, WriteScopeRevision,
+    CreateCommission, EnqueueScopeRun, ListBloomDispatches, ListCommissions, LoadCommission, LoadCommissionResult,
+    LookupDispatch, PageJournal, RecordConfig, StoreCapability, WriteScopeRevision,
 };
 
 /// Per-process ceilings on the pre-seal shaping maps. Staged workpieces and
@@ -378,6 +378,8 @@ pub(super) enum Routed {
     DeferredSeal(Box<PendingSealSetup>),
     /// Relay a commission create to the store.
     CreateCommission(CreateCommission),
+    /// Relay a pre-bloom scoping-run enqueue to the store.
+    EnqueueScopeRun(EnqueueScopeRun),
     /// Relay a scope-revision write to the store.
     WriteScopeRevision(WriteScopeRevision),
     /// Relay a commission load to the store.
@@ -493,6 +495,7 @@ pub(super) fn finish(
             http::Outcome::Deferred
         }
         Routed::CreateCommission(request) => ctx.defer(&request).to::<StoreCapability>(),
+        Routed::EnqueueScopeRun(request) => ctx.defer(&request).to::<StoreCapability>(),
         Routed::WriteScopeRevision(request) => ctx.defer(&request).to::<StoreCapability>(),
         Routed::LoadCommission(request) => hold_commission_http(state, &mut ctx, &request, CommissionHttpRender::Show),
         Routed::ListCommissions(request) => hold_commission_http(state, &mut ctx, &request, CommissionHttpRender::List),
