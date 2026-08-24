@@ -9,10 +9,24 @@ on:
     branches-ignore:
       - 'bloomery/daily/**'
   push:
-    branches: [ main ]
-  # The full-suite lane runs only on a push to `main`, so without a
-  # manual trigger there is no way to exercise a change to it before
-  # merging it. A dispatch takes the same non-pull-request path: the
+    # `bloomery/daily/**` is ADR-0186's preferred backstop posture
+    # (iamacoffeepot/aether#4946). A bloom lands on the day's ref without a
+    # pull request, so until sync-back nothing exercised the repository-wide
+    # suite over it: an affected-set or scoping miss stayed green inside its
+    # wave and accumulated for the rest of the day. Running the full suite at
+    # each landing caps that at about one bloom.
+    #
+    # It is a backstop, not a gate. Nothing here is a required check, no
+    # branch protection changes, and a red run is read by an operator — the
+    # quarantine and repair-bloom reaction stays deliberately outside this
+    # workflow, because workflow credentials must not become an unreviewed
+    # coordinator-control channel.
+    branches:
+      - main
+      - 'bloomery/daily/**'
+  # The full-suite lane runs only on a push to `main` or a daily ref, so
+  # without a manual trigger there is no way to exercise a change to it
+  # before merging it. A dispatch takes the same non-pull-request path: the
   # GitHub-hosted runner, the sharded full suite, and no affected-package
   # narrowing.
   workflow_dispatch:
@@ -23,15 +37,20 @@ permissions:
 
 # A push to a branch supersedes that branch's in-flight run: cancel it
 # instead of letting it hold 8-vCPU runners to completion (the account
-# spot quota is the scarce resource). Main is exempt — every main push
-# is a distinct merge whose full run carries the cache-save and scan
-# signal — and each main push gets its own group (keyed by sha):
-# GitHub allows only one running + one queued run per group, so a
-# shared main group would serialize back-to-back merges and silently
-# cancel the intermediate runs.
+# spot quota is the scarce resource).
+#
+# Integration pushes — `main` and the day's bloomery ref — are exempt, and
+# each gets its own group keyed by sha. Every one of them is a distinct
+# landing whose full run carries the cache-save and scan signal, and GitHub
+# allows only one running + one queued run per group, so a shared group
+# would serialize back-to-back landings and silently cancel the intermediate
+# runs. On the daily ref that cancellation is the whole failure mode the
+# backstop exists to prevent: a branch-ref group would let bloom N+1 cancel
+# bloom N's run and erase the first red landing, which is exactly the commit
+# an operator needs named.
 concurrency:
-  group: ci-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ci-${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/bloomery/daily/')) && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/bloomery/daily/') }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -44,12 +63,18 @@ jobs:
       # A manual dispatch is an explicit request to run the suite, and it
       # carries no diff base for the filter to reason from, so it bypasses
       # the filter rather than being classified by it.
-      code: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.code == 'true' }}
+      #
+      # A daily landing bypasses it too, and for the opposite reason: the
+      # backstop exists specifically to catch a wave whose affected set was
+      # wrong (iamacoffeepot/aether#4946), so classifying it by the same kind
+      # of path selection would let the miss it is hunting decide whether it
+      # runs at all.
+      code: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/heads/bloomery/daily/') || steps.filter.outputs.code == 'true' }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
         id: filter
-        if: github.event_name != 'workflow_dispatch'
+        if: github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/heads/bloomery/daily/')
         with:
           filters: |
             code:
