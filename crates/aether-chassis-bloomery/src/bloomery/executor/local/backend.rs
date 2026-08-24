@@ -56,8 +56,10 @@ const EVIDENCE_SUFFIX: &str = "-evidence";
 /// The directory under the scratch root that holds one checkout per reusable
 /// harness session: `sessions/<slug>/tree`.
 ///
-/// A checkout belongs to the **session** that works in it (#5425). Every
-/// harness binds a conversation permanently to the directory it was born in —
+/// A checkout belongs to the **session** that works in it (#5425) whenever a
+/// session is what works in it — the model-driven lanes, which carry a
+/// conversation. Every harness binds a conversation permanently to the
+/// directory it was born in —
 /// grok stores sessions under a percent-encoded working directory and ignores
 /// `--cwd` on a resume, Claude Code keys `~/.claude/projects/<encoded cwd>` the
 /// same way — so a lap that resumes anywhere else either edits the tree it was
@@ -83,14 +85,19 @@ const SESSIONS_DIR: &str = "sessions";
 /// accumulates has somewhere to live that a `git clean` will not take.
 const SESSION_TREE_DIR: &str = "tree";
 
-/// The prefix a fallback lane-slot checkout directory carries under the scratch
-/// root, completed by the slot's index (`slot-0`, `slot-1`, …).
+/// The prefix a lane-slot checkout directory carries under the scratch root,
+/// completed by the slot's index (`slot-0`, `slot-1`, …).
 ///
-/// The fallback rather than the rule (#5425): a dispatch that resolves a
-/// session builds under [`SESSIONS_DIR`], and this path is what is left for one
-/// that cannot — an aggregate lane, whose order names no member, and a backend
-/// built without a store, which can read no order at all. Neither resumes a
-/// conversation, so neither needs a directory a conversation is bound to.
+/// Where every lane that carries no conversation builds: a mechanical lane
+/// (verify and its kin), an aggregate lane whose order names no member, and a
+/// backend built without a store, which can read no order at all. None of them
+/// resumes a conversation, so none needs a directory a conversation is bound
+/// to — and the slot path is the one that makes their builds warm. It is the
+/// same small set of paths forever, so `sccache` hits what an earlier lane in
+/// this slot compiled, and the reset touches only the files that differ from
+/// the subject that slot last held, so cargo recompiles that difference rather
+/// than the workspace. A dispatch that does resolve a session builds under
+/// [`SESSIONS_DIR`] instead.
 const SLOT_PREFIX: &str = "slot-";
 
 /// The suffix a lane slot's cargo target directory carries, completing the slot's
@@ -109,10 +116,18 @@ const SLOT_PREFIX: &str = "slot-";
 /// keys a compilation partly on the paths cargo names on the `rustc`
 /// invocation — `--out-dir`, `-L dependency=…` — and those are the target's, so
 /// the dependency tree one lane compiled is still hit by the next dispatch to
-/// hold the slot whatever workpiece it is building. What is genuinely
-/// per-workpiece now is the workspace crates, whose source paths differ per
-/// member: each slot target accumulates a set of them, which is what the
-/// janitor's budget eviction is there to bound.
+/// hold the slot whatever workpiece it is building.
+///
+/// The target and the checkout it is warm for are a pair, and the mechanical
+/// lanes keep them one: `slot-<index>` builds into `slot-<index>-target`. That
+/// is what makes the warmth sound as well as fast — cargo decides a source file
+/// is unchanged by finding it older than the artifact built from it, so a
+/// target lent to a tree whose files were written before that artifact would
+/// reuse the artifact instead of the file. The reset a slot's own dispatch runs
+/// rewrites every path that differs from the subject the slot last held, which
+/// is what keeps the mtimes ahead of the artifacts they invalidate. A model
+/// lane still builds its session tree against the slot's target; the gate that
+/// judges the candidate no longer does.
 ///
 /// A **sibling** of the checkout rather than a directory inside it. A dispatch
 /// resets its checkout with `git clean --force --force -d -x` (see
@@ -803,10 +818,26 @@ impl LocalExecutor {
         // inside the decision every freed slot makes.
         let identity = self.order_identity(&nonce);
         let priority = priority_of(identity.as_ref().map(|(_, _, stage)| *stage));
-        let slug = identity
-            .as_ref()
-            .filter(|(_, workpiece, _)| !workpiece.is_empty())
-            .and_then(|(bloom, workpiece, _)| self.session_slug(&nonce, bloom, workpiece));
+        // Only a lane that carries a conversation resolves a session, because
+        // the session is what a conversation's directory is for (#5425) and a
+        // mechanical lane has none. A verify lane materializes its tree from the
+        // order's own checkout object, so it is reproducible at any path — and
+        // the path it stands in is what decides whether it compiles or reuses.
+        // Cargo judges a source file by mtime against the artifact built from
+        // it, and `sccache` keys a compilation on the paths named in the `rustc`
+        // invocation; a per-session tree is a path no earlier lane ever built
+        // at, so every workspace crate both recompiles and misses the cache. In
+        // the slot's own checkout the reset rewrites only the files that differ
+        // between one member's subject and the next, and the paths are the ones
+        // that slot has always built at.
+        let slug = is_model_lane
+            .then(|| {
+                identity
+                    .as_ref()
+                    .filter(|(_, workpiece, _)| !workpiece.is_empty())
+                    .and_then(|(bloom, workpiece, _)| self.session_slug(&nonce, bloom, workpiece))
+            })
+            .flatten();
         let workpiece = identity.map(|(_, workpiece, _)| workpiece).filter(|workpiece| !workpiece.is_empty());
         let preferred = workpiece.as_deref().and_then(|workpiece| self.preferred_slot_of(workpiece));
         // The stage's resolved agent profile, overlaid onto the order by the

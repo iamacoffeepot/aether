@@ -2623,9 +2623,9 @@ fn started_worktrees(seen: &Arc<Mutex<Vec<SeenSpec>>>) -> Vec<Option<PathBuf>> {
 
 #[test]
 fn every_lane_of_one_member_works_in_that_members_session_tree() {
-    // Acceptance for #5425: construct and the verify that follows it stand in
-    // the same tree, and that tree belongs to the session the member opened
-    // rather than to whichever slot each lane happened to be handed.
+    // Acceptance for #5425: every model-driven lap of one member stands in the
+    // same tree, and that tree belongs to the session the member opened rather
+    // than to whichever slot each lap happened to be handed.
     //
     // Pre-fix each lane built in `slot-<index>`. A harness binds a conversation
     // permanently to the directory it was born in — grok stores sessions under a
@@ -2673,6 +2673,41 @@ fn every_lane_of_one_member_works_in_that_members_session_tree() {
             Some(session_tree(&base, &construct)),
         ],
         "both of the member's lanes stand in the session its construct opened, however the slots moved under them",
+    );
+}
+
+#[test]
+fn a_mechanical_lane_of_a_member_builds_in_its_lane_slot_not_the_session_tree() {
+    // The other half of #5425's rule: a session is where a *conversation*
+    // works, and a verify lane carries none. It materializes its tree from the
+    // order's checkout object, so it is reproducible at any path — and the path
+    // decides what it has to compile. A per-session tree is a path no earlier
+    // lane built at, so cargo finds every source file newer than the artifact
+    // built from it and `sccache`, which keys on the paths named in the `rustc`
+    // invocation, misses every workspace crate: the gate pays a from-scratch
+    // workspace build once per member. In the slot's own checkout the reset
+    // rewrites only what differs from the subject that slot last held.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let store = store_dir();
+    let construct = test_nonce("A-construct");
+    let verify = test_nonce("A-verify");
+    let exec = LocalExecutor::new(Arc::new(ReuseRunner::new(Arc::clone(&seen))), correspondence(), base.path())
+        .with_message_store(member_store(
+            &store,
+            &[
+                member_order_at(&construct, "issue-A", StageId::Construct),
+                member_order_at(&verify, "issue-A", StageId::Verify),
+            ],
+        ));
+
+    exec.stream_evidence(&exec.submit(&claude_order(digest(5), &construct, "issue-A")).unwrap()).unwrap();
+    exec.stream_evidence(&exec.submit(&verify_order(digest(5), &verify)).unwrap()).unwrap();
+
+    assert_eq!(
+        started_worktrees(&seen),
+        [Some(session_tree(&base, &construct)), Some(slot_path(&base, 0))],
+        "the member's conversation keeps its tree; the gate that judges its candidate builds where the slot always builds",
     );
 }
 
@@ -3189,10 +3224,7 @@ impl TransformRunner for ContainmentRunner {
             git(spec.worktree_dir, &["clean", "--force", "--force", "-d", "-x"]);
             fs::write(
                 spec.evidence_dir.join("evidence.json"),
-                format!(
-                    r#"{{"command":"construct.implement","nonce":"{}","produced_candidate":true,"result_record":{{"schema":1,"is_error":false,"result":{{"num_turns":1}}}}}}"#,
-                    spec.nonce
-                ),
+                format!(r#"{{"command":"verify.check","nonce":"{}","status":"pass"}}"#, spec.nonce),
             )
             .map_err(LocalExecutorError::Io)?;
         } else {
@@ -3290,7 +3322,7 @@ fn contained_member_store(dir: &TempDir, verify: &str, queued: &str) -> SqliteSt
         declared_reads: Vec::new(),
     };
     let scope = store.write_revision(&revision, &RevisionEvidence::default()).unwrap();
-    for (nonce, stage) in [(verify, StageId::Verify), (queued, StageId::Construct)] {
+    for (nonce, stage) in [(verify, StageId::Verify), (queued, StageId::Verify)] {
         let transformation =
             Transformation::for_member_stage(&StageCatalog::binding_of(stage), digest(5), digest(0xC0), digest(0xB0));
         store
@@ -3315,9 +3347,11 @@ fn contained_member_store(dir: &TempDir, verify: &str, queued: &str) -> SqliteSt
 #[test]
 fn containment_reads_the_finishing_lanes_own_tree() {
     // Retiring the finishing verify used to pump the queued sibling first, and
-    // the sibling's `materialize_checkout` reset the shared session tree before
+    // the sibling's `materialize_checkout` reset the tree they share before
     // containment read it. The gate then either admitted a real breach or
-    // charged this member with paths it never wrote.
+    // charged this member with paths it never wrote. Two mechanical lanes share
+    // a directory whenever they take the same slot, which under a ceiling of
+    // one is every time.
     let base = TempDir::new().unwrap();
     let store = store_dir();
     let verify = test_nonce("verify");
@@ -3328,7 +3362,7 @@ fn containment_reads_the_finishing_lanes_own_tree() {
             .with_max_concurrent_lanes(1);
 
     let finishing = exec.submit(&verify_order(digest(5), &verify)).unwrap();
-    let _waiting = exec.submit(&construct_order(digest(5), &queued)).unwrap();
+    let _waiting = exec.submit(&verify_order(digest(5), &queued)).unwrap();
     let refs = exec.stream_evidence(&finishing).unwrap();
     assert_eq!(
         refs[0].observation.violating_paths,
