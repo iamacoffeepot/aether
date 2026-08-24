@@ -26,7 +26,7 @@ pub use backlog::Backlog;
 pub use board::{BloomRow, Board, BoardLane, BoardRow, MemberRow, RowId, member_status_state};
 pub use detail::Detail;
 pub use metrics::{Breakdown, Dashboard, Days, Timeline, compose};
-pub use partition::{MemberState, is_history_status, is_live_status};
+pub use partition::{MemberState, is_history_status, is_live_status, live_blooms};
 pub use quiet::{QuietLine, quiet_lines};
 pub use transcript::{LineBuffer, Transcript};
 
