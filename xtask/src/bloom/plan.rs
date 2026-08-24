@@ -16,8 +16,8 @@ use sha2::{Digest as _, Sha256};
 
 use super::client::Client;
 use super::dto::{
-    AdrTouch, Approval, BloomSpec, Completeness, ConfigRegistry, DependencyEdge, DigestHex, DraftPatch,
-    MemberProjection, SealRequest, SupersedeRequest, ViewDocument,
+    AdrTouch, Approval, BloomSpec, CandidateRefRequest, Completeness, ConfigRegistry, DependencyEdge, DigestHex,
+    DraftPatch, MemberProjection, SealRequest, SupersedeRequest, ViewDocument,
 };
 use super::dto::{ConfigRegistry as WireRegistry, Membership as WireMembership};
 
@@ -458,6 +458,34 @@ mod revision_flag_tests {
     }
 }
 
+#[cfg(test)]
+mod candidate_flag_tests {
+    use crate::bloom::dto::DigestHex;
+
+    #[test]
+    fn parse_candidate_flag_reads_tree_then_checkout() {
+        // `--candidate <tree>:<checkout>`, in that order. Swapping the sides
+        // journals a repair whose identity is the capture commit and whose
+        // checkout is a tree — the verifying lane then checks out something
+        // that is not a commit, having already spent the operator's override.
+        let tree = DigestHex::from_bytes([0xab; 32]);
+        let checkout = DigestHex::from_bytes([0xcd; 32]);
+        let parsed =
+            super::parse_candidate_flag(&format!("{}:{}", tree.as_hex(), checkout.as_hex())).expect("well-formed pair");
+        assert_eq!(parsed.tree, tree);
+        assert_eq!(parsed.checkout, checkout);
+
+        let unpaired = super::parse_candidate_flag(&tree.as_hex()).expect_err("one half is not a pair");
+        assert!(unpaired.contains("tree:checkout"), "the error states the shape: {unpaired}");
+        let bad_tree =
+            super::parse_candidate_flag(&format!("not-a-digest:{}", checkout.as_hex())).expect_err("malformed tree");
+        assert!(bad_tree.contains("not-a-digest"), "the error names the offending half: {bad_tree}");
+        let bad_checkout =
+            super::parse_candidate_flag(&format!("{}:not-a-digest", tree.as_hex())).expect_err("malformed checkout");
+        assert!(bad_checkout.contains("not-a-digest"), "the error names the offending half: {bad_checkout}");
+    }
+}
+
 pub fn parse_edge_flag(raw: &str) -> Result<(String, String), String> {
     let (member, depends_on) = raw.split_once('=').ok_or_else(|| "expected dependent=dependency".to_owned())?;
     if member.is_empty() || depends_on.is_empty() {
@@ -483,6 +511,28 @@ pub fn parse_revision_flag(raw: &str) -> Result<(String, DigestHex), String> {
     }
     let bytes = super::hex::decode(hex).ok_or_else(|| format!("{hex} is not a 32-byte hex digest"))?;
     Ok((member.to_owned(), DigestHex::from_bytes(bytes)))
+}
+
+/// `--candidate <tree>:<checkout>` — the low-level candidate pair a repair
+/// names when the operator pushed the ref themselves.
+///
+/// Both halves are required and both are digests. A single flag rather than two
+/// because the pair is one value: a `--tree` accepted without its `--checkout`
+/// would journal a repair whose verifying lane has nothing to check out.
+pub fn parse_candidate_flag(raw: &str) -> Result<CandidateRefRequest, String> {
+    let Some((tree, checkout)) = raw.split_once(':') else {
+        return Err(format!("expected tree:checkout, both 64-hex digests, got {raw}"));
+    };
+    let tree = super::hex::decode(tree).ok_or_else(|| format!("candidate tree {tree} is not a 32-byte hex digest"))?;
+    let checkout = super::hex::decode(checkout)
+        .ok_or_else(|| format!("candidate checkout {checkout} is not a 32-byte hex digest"))?;
+    Ok(CandidateRefRequest { tree: DigestHex::from_bytes(tree), checkout: DigestHex::from_bytes(checkout) })
+}
+
+/// `--request <64-hex>` — one suppression request digest the reviewer is
+/// answering.
+pub fn parse_digest_flag(raw: &str) -> Result<DigestHex, String> {
+    super::hex::decode(raw).map(DigestHex::from_bytes).ok_or_else(|| format!("{raw} is not a 32-byte hex digest"))
 }
 
 pub fn parse_bloom_id(raw: &str) -> Result<String, String> {

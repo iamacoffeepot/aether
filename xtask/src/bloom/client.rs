@@ -10,8 +10,8 @@ use super::Endpoint;
 use super::dto::{
     ApprovalStoredView, BloomSpec, BloomView, CancelCommissionRequest, CommissionCancelledView, CommissionReopenedView,
     CommissionShowView, ConfigRequest, ConfigValueView, ConfigView, DraftPatch, DraftView, JournalEntry, JournalView,
-    OutcomeView, ReopenCommissionRequest, RetryRequest, RevisionEvidence, ScopeRevisionWrittenView, SealRequest,
-    SupersedeRequest, ViewDocument, WithdrawRequest, WriteRevisionRequest,
+    OutcomeView, ReopenCommissionRequest, RepairRequest, RetryRequest, RevisionEvidence, ScopeRevisionWrittenView,
+    SealRequest, SupersedeRequest, SuppressionAnswerRequest, ViewDocument, WithdrawRequest, WriteRevisionRequest,
 };
 use super::http;
 use super::plan::spec_id;
@@ -88,6 +88,23 @@ impl<'a> Client<'a> {
     /// Run one member's current stage again on the candidate it holds (#5423).
     pub fn retry(&self, bloom_id: &str, workpiece: &str, request: &RetryRequest) -> Result<OutcomeView> {
         self.send("POST", &format!("/blooms/{bloom_id}/members/{workpiece}/retry"), request)
+    }
+
+    /// Hand a wedged member the candidate the operator supplied and let the
+    /// ordinary gates judge it (#4957).
+    pub fn repair(&self, bloom_id: &str, workpiece: &str, request: &RepairRequest) -> Result<OutcomeView> {
+        self.send("POST", &format!("/blooms/{bloom_id}/members/{workpiece}/repair"), request)
+    }
+
+    /// Answer the suppression requests a member's candidate is carrying
+    /// (ADR-0193 §5).
+    pub fn suppression(
+        &self,
+        bloom_id: &str,
+        workpiece: &str,
+        request: &SuppressionAnswerRequest,
+    ) -> Result<OutcomeView> {
+        self.send("POST", &format!("/blooms/{bloom_id}/members/{workpiece}/suppression"), request)
     }
 
     /// One commission's tip, typed, plus the approvals stored against it.

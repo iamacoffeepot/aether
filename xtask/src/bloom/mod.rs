@@ -116,6 +116,12 @@ enum BloomCommand {
     Withdraw(WithdrawArgs),
     /// Run one member's current stage again on the candidate it already holds.
     Retry(RetryArgs),
+    /// Hand a wedged member a candidate you produced yourself and let the
+    /// ordinary gates judge it (#4957).
+    Repair(RepairArgs),
+    /// Answer the suppression requests a member's candidate is carrying
+    /// (ADR-0193).
+    Suppression(SuppressionArgs),
     /// Retire an open commission whose work landed outside its bloom.
     Cancel(CancelArgs),
     /// Put a landed commission whose member never resolved back in the line.
@@ -165,6 +171,73 @@ struct RetryArgs {
     reason: String,
 
     /// Who is deciding. Recorded as the decider.
+    #[arg(long, default_value = "operator")]
+    operator: String,
+}
+
+#[derive(Args, Debug)]
+struct RepairArgs {
+    /// The bloom the member belongs to (64 hex characters).
+    #[arg(value_parser = plan::parse_bloom_id)]
+    bloom_id: String,
+
+    /// The member to repair. The reserved composition id is accepted here too:
+    /// a composition whose weave repair wedged is repaired the same way.
+    workpiece: String,
+
+    /// The candidate you already pushed, as `tree:checkout` — two 64-hex
+    /// digests. Name exactly one of this, `--from-commit`, or
+    /// `--from-worktree`.
+    #[arg(long, value_parser = plan::parse_candidate_flag)]
+    candidate: Option<dto::CandidateRefRequest>,
+
+    /// A commit the coordinator's repository can already reach. It derives the
+    /// candidate, pushes the ref, and records correspondence for you.
+    #[arg(long)]
+    from_commit: Option<String>,
+
+    /// A worktree whose `HEAD` the coordinator's repository can already see.
+    /// Resolved to a commit, then treated as `--from-commit`.
+    #[arg(long)]
+    from_worktree: Option<String>,
+
+    /// Why you took the lap yourself. Required; a blank one is refused at the
+    /// door.
+    #[arg(long)]
+    reason: String,
+
+    /// Who is deciding. Recorded as the decider.
+    #[arg(long, default_value = "operator")]
+    operator: String,
+}
+
+#[derive(Args, Debug)]
+struct SuppressionArgs {
+    /// The bloom the member belongs to (64 hex characters).
+    #[arg(value_parser = plan::parse_bloom_id)]
+    bloom_id: String,
+
+    /// The member whose candidate is carrying the requests.
+    workpiece: String,
+
+    /// One suppression request digest you are answering (64 hex characters).
+    /// Repeatable, and at least one is required: an answer that closes nothing
+    /// is not an answer, and there is deliberately no "everything standing"
+    /// spelling.
+    #[arg(long = "request", value_parser = plan::parse_digest_flag)]
+    requests: Vec<dto::DigestHex>,
+
+    /// The answer. `granted` lets the candidate keep its suppressions; `denied`
+    /// bounces the member to a repair lap at its own budget's expense.
+    #[arg(long, value_enum)]
+    verdict: dto::SuppressionVerdict,
+
+    /// Why. Required; for a denial it is what the repair lap is told, and for a
+    /// grant it is the record of the judgment.
+    #[arg(long)]
+    reason: String,
+
+    /// Who answered. Recorded as the decider.
     #[arg(long, default_value = "operator")]
     operator: String,
 }
@@ -347,19 +420,29 @@ fn run_on_with_policy(endpoint: &Endpoint, command: &BloomCommand, approval_poli
         BloomCommand::Amend(args) => amend::run(&client, args, approval_policy),
         BloomCommand::Withdraw(args) => run_withdraw(&client, args),
         BloomCommand::Retry(args) => run_retry(&client, args),
+        BloomCommand::Repair(args) => run_repair(&client, args),
+        BloomCommand::Suppression(args) => run_suppression(&client, args),
         BloomCommand::Cancel(args) => run_cancel(&client, args),
         BloomCommand::Reopen(args) => run_reopen(&client, args),
     }
 }
 
+/// Refuse a bloom or a member the live view does not carry, before any write.
+///
+/// The read-first discipline every member verb here follows: a mistyped
+/// workpiece is an operator's typo, and the coordinator's own refusal for it
+/// arrives after the override has already been composed and sent.
+fn require_member(client: &Client<'_>, bloom_id: &str, workpiece: &str) -> Result<()> {
+    if !bloom_in(&client.view()?, bloom_id)?.members.iter().any(|member| member.workpiece == workpiece) {
+        bail!("bloom {bloom_id} has no member {workpiece}");
+    }
+    Ok(())
+}
+
 /// Withdraw one member, naming an unknown bloom or workpiece locally before
 /// any write — the same read-first shape `run_supersede` uses.
 fn run_withdraw(client: &Client<'_>, args: &WithdrawArgs) -> Result<String> {
-    let view = client.view()?;
-    let bloom = bloom_in(&view, &args.bloom_id)?;
-    if !bloom.members.iter().any(|member| member.workpiece == args.workpiece) {
-        bail!("bloom {} has no member {}", args.bloom_id, args.workpiece);
-    }
+    require_member(client, &args.bloom_id, &args.workpiece)?;
 
     let request =
         dto::WithdrawRequest { reason: args.reason.clone(), operator: args.operator.clone(), cascade: args.cascade };
@@ -407,6 +490,67 @@ fn run_retry(client: &Client<'_>, args: &RetryArgs) -> Result<String> {
         operator: args.operator.clone(),
     };
     Ok(render_outcome(&client.retry(&args.bloom_id, &args.workpiece, &request)?.outcome))
+}
+
+/// Hand a wedged member the candidate the operator produced and let the
+/// ordinary gates judge it (#4957) — the read-first shape `run_withdraw` uses,
+/// plus the one choice a repair body has to make.
+///
+/// The three sources are exclusive at the route, which answers `400` to zero or
+/// two of them. Refusing here instead spends a message rather than a round trip,
+/// and the local refusal can name what the operator actually typed.
+fn run_repair(client: &Client<'_>, args: &RepairArgs) -> Result<String> {
+    require_member(client, &args.bloom_id, &args.workpiece)?;
+
+    Ok(render_outcome(&client.repair(&args.bloom_id, &args.workpiece, &repair_body(args)?)?.outcome))
+}
+
+/// The repair body, or the refusal for a request that names no source, more
+/// than one, or no reason.
+fn repair_body(args: &RepairArgs) -> Result<dto::RepairRequest> {
+    if args.reason.trim().is_empty() {
+        bail!("repair reason is required");
+    }
+    let named = usize::from(args.candidate.is_some())
+        + usize::from(args.from_commit.is_some())
+        + usize::from(args.from_worktree.is_some());
+    if named != 1 {
+        bail!("repair needs exactly one of --candidate, --from-commit, or --from-worktree; {named} were given");
+    }
+
+    Ok(dto::RepairRequest {
+        candidate: args.candidate,
+        from_commit: args.from_commit.clone(),
+        from_worktree: args.from_worktree.clone(),
+        reason: args.reason.clone(),
+        operator: args.operator.clone(),
+    })
+}
+
+/// Answer the suppression requests a member's candidate is carrying (ADR-0193
+/// §5) — the read-first shape `run_withdraw` uses.
+///
+/// The request digests come off the candidate's review evidence rather than off
+/// `/view`, which carries no suppression channel, so there is nothing local to
+/// check them against. What is checked here is what the route would refuse for
+/// the same reason it refuses a blank reason: an answer that closes nothing has
+/// answered nothing.
+fn run_suppression(client: &Client<'_>, args: &SuppressionArgs) -> Result<String> {
+    require_member(client, &args.bloom_id, &args.workpiece)?;
+    if args.requests.is_empty() {
+        bail!("a suppression answer must name at least one --request; one that closes nothing is not an answer");
+    }
+    if args.reason.trim().is_empty() {
+        bail!("suppression reason is required");
+    }
+
+    let request = dto::SuppressionAnswerRequest {
+        requests: args.requests.clone(),
+        verdict: args.verdict,
+        reason: args.reason.clone(),
+        operator: args.operator.clone(),
+    };
+    Ok(render_outcome(&client.suppression(&args.bloom_id, &args.workpiece, &request)?.outcome))
 }
 
 /// Cancel one commission, naming an unknown or already-closed workpiece locally
@@ -547,7 +691,11 @@ mod tests {
     };
     use serde_json::{Value, json};
 
-    use super::{BloomCommand, CancelArgs, Endpoint, ReopenArgs, SealArgs, SupersedeArgs, run_on};
+    use super::{
+        BloomCommand, CancelArgs, Endpoint, ReopenArgs, RepairArgs, SealArgs, SupersedeArgs, SuppressionArgs,
+        repair_body, run_on,
+    };
+    use crate::bloom::dto;
     use crate::bloom::dto::{AdrTouch, DigestHex};
     use crate::bloom::hex;
     use crate::bloom::plan::{self, BaseChoice};
@@ -1594,5 +1742,188 @@ mod tests {
         fs::remove_file(&path).ok();
         assert!(error.to_string().contains("0600"), "the refusal names the fix: {error}");
         assert!(posted(&log).is_empty(), "a loose seed must not write: {log:?}");
+    }
+
+    fn view_with_member(bloom_id: &str, workpiece: &str) -> Value {
+        json!({
+            "mainline": hex_of(digest(1)),
+            "observed": hex_of(digest(2)),
+            "blooms": [{
+                "id": bloom_id,
+                "status": "Sealed",
+                "superseded_by": null,
+                "members": [{ "workpiece": workpiece, "scope_revision": hex_of(digest(7)) }]
+            }]
+        })
+    }
+
+    fn repair_args(bloom_id: &str, workpiece: &str) -> RepairArgs {
+        RepairArgs {
+            bloom_id: bloom_id.to_owned(),
+            workpiece: workpiece.to_owned(),
+            candidate: None,
+            from_commit: None,
+            from_worktree: None,
+            reason: "the lane could not produce a tree that builds".to_owned(),
+            operator: "operator".to_owned(),
+        }
+    }
+
+    #[test]
+    fn repair_body_takes_exactly_one_source() {
+        // Tripwire: the route answers 400 to zero or two sources, so a body
+        // built without this check spends a round trip and a stale board read
+        // to learn what the operator's own argv already said.
+        let bloom_id = hex_of(digest(0xab));
+        let none = repair_body(&repair_args(&bloom_id, "wp-1")).expect_err("no source");
+        assert!(none.to_string().contains("exactly one"), "the refusal states the rule: {none}");
+
+        let two = repair_body(&RepairArgs {
+            from_commit: Some("abc123".to_owned()),
+            from_worktree: Some("/tmp/wt".to_owned()),
+            ..repair_args(&bloom_id, "wp-1")
+        })
+        .expect_err("two sources");
+        assert!(two.to_string().contains("2 were given"), "the refusal counts what it found: {two}");
+
+        let one = repair_body(&RepairArgs { from_commit: Some("abc123".to_owned()), ..repair_args(&bloom_id, "wp-1") })
+            .expect("one source");
+        assert_eq!(one.from_commit.as_deref(), Some("abc123"));
+        assert!(one.candidate.is_none() && one.from_worktree.is_none());
+
+        let blank =
+            repair_body(&RepairArgs { reason: "   ".to_owned(), ..repair_args(&bloom_id, "wp-1") }).expect_err("blank");
+        assert!(blank.to_string().contains("reason"), "a blank reason is refused before the source: {blank}");
+    }
+
+    #[test]
+    fn repair_reads_the_member_then_posts_only_the_source_it_was_given() {
+        // The unset sources stay off the wire entirely. A `null` sent for the
+        // two the operator did not name reads as a third spelling the moment
+        // the route counts keys rather than `Option`s.
+        let bloom_id = hex_of(digest(0xab));
+        let bloom_for_view = bloom_id.clone();
+        let (output, log) = with_fake(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/view") => (200, view_with_member(&bloom_for_view, "wp-1")),
+                ("POST", path) if path.ends_with("/members/wp-1/repair") => {
+                    (200, json!({ "outcome": { "Admitted": { "sequence": 12 } } }))
+                }
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                run_on(
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
+                    &BloomCommand::Repair(RepairArgs {
+                        from_worktree: Some("/srv/lanes/wp-1".to_owned()),
+                        ..repair_args(&bloom_id, "wp-1")
+                    }),
+                )
+                .expect("repair against the fake coordinator")
+            },
+        );
+
+        let body = find(&log, "POST", "/members/wp-1/repair").body.as_ref().expect("repair body").clone();
+        assert_eq!(body["from_worktree"], "/srv/lanes/wp-1");
+        assert!(body.get("candidate").is_none(), "an unnamed source is absent, not null: {body}");
+        assert!(body.get("from_commit").is_none(), "an unnamed source is absent, not null: {body}");
+        assert_eq!(body["operator"], "operator");
+        assert!(output.contains("Admitted"), "the outcome is printed: {output}");
+    }
+
+    #[test]
+    fn repair_refuses_an_unknown_member_without_writing() {
+        let bloom_id = hex_of(digest(0xab));
+        let bloom_for_view = bloom_id.clone();
+        let (error, log) = with_fake(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/view") => (200, view_with_member(&bloom_for_view, "wp-1")),
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                run_on(
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
+                    &BloomCommand::Repair(RepairArgs {
+                        from_commit: Some("abc123".to_owned()),
+                        ..repair_args(&bloom_id, "wp-typo")
+                    }),
+                )
+                .expect_err("an unknown member is refused")
+            },
+        );
+        assert!(error.to_string().contains("wp-typo"), "the refusal names the member: {error}");
+        assert!(posted(&log).is_empty(), "a mistyped member must not journal an override: {log:?}");
+    }
+
+    #[test]
+    fn suppression_posts_every_named_request_under_one_verdict() {
+        // The digests are what the answer closes, so they must reach the wire
+        // in the spelling the route decodes and in the order given. Dropping
+        // one silently leaves a request standing that the reviewer believes
+        // they answered.
+        let bloom_id = hex_of(digest(0xab));
+        let bloom_for_view = bloom_id.clone();
+        let first = DigestHex::from_bytes([0x11; 32]);
+        let second = DigestHex::from_bytes([0x22; 32]);
+        let (output, log) = with_fake(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/view") => (200, view_with_member(&bloom_for_view, "wp-1")),
+                ("POST", path) if path.ends_with("/members/wp-1/suppression") => {
+                    (200, json!({ "outcome": { "Admitted": { "sequence": 13 } } }))
+                }
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                run_on(
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
+                    &BloomCommand::Suppression(SuppressionArgs {
+                        bloom_id: bloom_id.clone(),
+                        workpiece: "wp-1".to_owned(),
+                        requests: vec![first, second],
+                        verdict: dto::SuppressionVerdict::Denied,
+                        reason: "the allow hides the bug the gate caught".to_owned(),
+                        operator: "reviewer".to_owned(),
+                    }),
+                )
+                .expect("suppression against the fake coordinator")
+            },
+        );
+
+        let body = find(&log, "POST", "/members/wp-1/suppression").body.as_ref().expect("suppression body").clone();
+        assert_eq!(body["requests"], json!([first.as_hex(), second.as_hex()]));
+        assert_eq!(body["verdict"], "Denied", "the verdict is the wire spelling the route decodes");
+        assert_eq!(body["operator"], "reviewer");
+        assert!(output.contains("Admitted"), "the outcome is printed: {output}");
+    }
+
+    #[test]
+    fn suppression_refuses_an_answer_that_closes_nothing_without_writing() {
+        // The route refuses an empty set for the reason it exists: there is no
+        // "everything standing" spelling, so an empty one would either answer
+        // nothing or answer a request the reviewer never read.
+        let bloom_id = hex_of(digest(0xab));
+        let bloom_for_view = bloom_id.clone();
+        let (error, log) = with_fake(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/view") => (200, view_with_member(&bloom_for_view, "wp-1")),
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                run_on(
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
+                    &BloomCommand::Suppression(SuppressionArgs {
+                        bloom_id: bloom_id.clone(),
+                        workpiece: "wp-1".to_owned(),
+                        requests: Vec::new(),
+                        verdict: dto::SuppressionVerdict::Granted,
+                        reason: "looks fine".to_owned(),
+                        operator: "reviewer".to_owned(),
+                    }),
+                )
+                .expect_err("an empty answer is refused")
+            },
+        );
+        assert!(error.to_string().contains("--request"), "the refusal names the flag: {error}");
+        assert!(posted(&log).is_empty(), "an empty answer must not write: {log:?}");
     }
 }
