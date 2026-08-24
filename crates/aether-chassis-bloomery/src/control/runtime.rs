@@ -886,16 +886,38 @@ impl NativeActor for ControlCore {
     }
 
     /// `GET /metrics/*` — bounded reads off the folded metrics ledger.
+    ///
+    /// Refused until the boot fold has finished, for the reason
+    /// [`on_query`](Self::on_query) states.
     #[handler::manual]
     fn on_metrics_query(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, mail: MetricsQuery) {
         let inbound = ctx.take_inbound();
+        if !state.replayed {
+            inbound.reply(&MetricsQueryResult::Err {
+                error: "the boot journal replay has not finished; the projection is not yet the one the journal \
+                        describes"
+                    .to_owned(),
+            });
+            return;
+        }
         inbound.reply(&metrics_response(state, mail));
     }
 
     /// `GET /spend` — the window `measure` already computes, previously unserved.
+    ///
+    /// Refused until the boot fold has finished, for the reason
+    /// [`on_query`](Self::on_query) states.
     #[handler::manual]
     fn on_spend_query(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, _mail: SpendQuery) {
         let inbound = ctx.take_inbound();
+        if !state.replayed {
+            inbound.reply(&SpendQueryResult::Err {
+                error: "the boot journal replay has not finished; the projection is not yet the one the journal \
+                        describes"
+                    .to_owned(),
+            });
+            return;
+        }
         inbound.reply(&spend_response(&state.spend));
     }
 }
