@@ -144,6 +144,16 @@ pub trait ReconcileLanes: Send + Sync {
     fn lane_occupancy(&self) -> LaneOccupancy {
         LaneOccupancy::default()
     }
+
+    /// The nonces this host has started a local lane for — the run registry's
+    /// keys, not the store's outstanding set.
+    ///
+    /// A queued dispatch and an Actions-routed one are not in this set, because
+    /// this host never created their evidence directories. Default is empty:
+    /// backends with no local children (Actions) start no local lanes.
+    fn started_nonces(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// The local lane as the router fronts it: the executor port plus the
