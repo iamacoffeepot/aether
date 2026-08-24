@@ -30,6 +30,10 @@ use super::script::LaneMode;
 /// coordinator's `git status --porcelain` sees a candidate to capture.
 pub const CANDIDATE_FILE: &str = "mock-lane-candidate.txt";
 
+/// The harness session id a [`LaneMode::MismatchedNonce`] construct stamps —
+/// well-formed, and belonging to no order this bloom dispatched.
+pub const FOREIGN_SESSION_ID: &str = "sess-foreign";
+
 /// The path a [`LaneMode::DeclinesRequestingSurface`] run asks for (ADR-0207).
 ///
 /// A crate the fixture project has and no scenario's member surface covers, so
@@ -196,6 +200,20 @@ fn construct_outcome(
                 "paths": [{ "path": REQUESTED_PATH, "reason": "the caller this change must update lives here" }],
             }),
         );
+    }
+    if mode == LaneMode::MismatchedNonce
+        && let Some(record) = evidence.get_mut("result_record")
+    {
+        // A well-formed session id on an unbound body is what used to file a
+        // foreign conversation as this member's. The nonce gate must refuse
+        // that claim, so the mock carries one.
+        record["session_id"] = json!(FOREIGN_SESSION_ID);
+        record["calls"] = json!([{
+            "input": 900,
+            "cache_read": 4_000,
+            "cache_write": 100,
+            "output": 250
+        }]);
     }
     stamp_claimed_subject(&mut evidence, mode, subject);
     Outcome {

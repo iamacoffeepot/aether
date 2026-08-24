@@ -25,8 +25,9 @@ use aether_bloomery::{
     BloomStatus, BloomView, CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND, VERIFY_CHECK_COMMAND, VerifyFailure,
     VerifyFailureSet,
 };
-use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneScript};
-use aether_harness_bloomery::{LaneHarness, while_pumping};
+use aether_chassis_bloomery::bloomery::mock_lane::{FOREIGN_SESSION_ID, LaneMode, LaneScript};
+use aether_chassis_bloomery::store::{SqliteStore, StoreBackend};
+use aether_harness_bloomery::{HarnessBuilder, HarnessRoots, LaneHarness, while_pumping};
 
 /// Whether the bloom's single member has come to rest either way — resolved, or
 /// wedged. The predicate most scenarios wait on, because what separates them is
@@ -250,6 +251,44 @@ fn wrong_nonce_evidence_never_advances_a_member() {
         harness.ledger().iter().all(|run| run.command == CONSTRUCT_IMPLEMENT_COMMAND),
         "stale construct evidence never captures a candidate or advances to verification",
     );
+}
+
+#[test]
+fn wrong_nonce_evidence_leaves_no_session_behind() {
+    // The same unbound body used to file its session id as this member's and
+    // deposit it in the pool before the nonce gate ran. A later refine then
+    // resumed a conversation that belonged to another lane.
+    let roots = HarnessRoots::create();
+    let mut harness = HarnessBuilder::lane(&LaneScript::all_passing().with_default(LaneMode::MismatchedNonce))
+        .roots(&roots)
+        .start("wrong-nonce-session");
+    let deadline = Instant::now() + Duration::from_secs(90);
+    while harness.ledger().iter().filter(|run| run.command == CONSTRUCT_IMPLEMENT_COMMAND).count() < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "the machinery series never dispatched a second construct; ledger={:?}",
+            harness.ledger().iter().map(|run| run.command.as_str()).collect::<Vec<_>>(),
+        );
+        thread::sleep(Duration::from_millis(250));
+    }
+
+    let bloom = harness.view();
+    let bloom_id = bloom.blooms[0].id;
+    let mut store = SqliteStore::open(&roots.store_path()).expect("the journal opens");
+    assert_eq!(
+        store.lookup_construct_session(bloom_id.0.as_bytes(), "wp").expect("the construct-session row reads"),
+        None,
+        "an unbound body must not file a construct session for the member",
+    );
+
+    let store_path = roots.store_path();
+    let parent = Path::new(&store_path).parent().expect("the journal has a directory");
+    let deposited = ["sessions.sqlite", "sessions.sqlite-wal"].iter().any(|name| {
+        fs::read(parent.join(name)).is_ok_and(|bytes| {
+            bytes.windows(FOREIGN_SESSION_ID.len()).any(|window| window == FOREIGN_SESSION_ID.as_bytes())
+        })
+    });
+    assert!(!deposited, "an unbound body must not deposit its session in the pool");
 }
 
 #[test]

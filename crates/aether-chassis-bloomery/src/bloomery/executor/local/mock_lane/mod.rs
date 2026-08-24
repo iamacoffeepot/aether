@@ -26,7 +26,7 @@ pub mod evidence;
 pub mod script;
 
 pub use argv::{ArgvError, LaneArgs};
-pub use evidence::{CANDIDATE_FILE, REQUESTED_PATH};
+pub use evidence::{CANDIDATE_FILE, FOREIGN_SESSION_ID, REQUESTED_PATH};
 pub use script::{LaneMode, LaneRun, LaneScript, LaneStep, read_ledger};
 
 /// Why a mock run could not do its job. Distinct from a lane *failing*, which is
