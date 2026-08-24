@@ -30,6 +30,19 @@ jobs:
   changes:
     name: Detect dispatch-path changes
     runs-on: ubuntu-latest
+    permissions:
+      # `paths-filter` reads the PR's changed files from
+      # `GET /repos/{owner}/{repo}/pulls/{number}/files`, which is a
+      # pull-requests-scoped endpoint. The repository's default workflow token
+      # is the restricted one (contents + metadata + packages, read), so the
+      # job leaned on public-repo readability for a scope it never held, and a
+      # run that evaluated the endpoint strictly answered `403 Resource not
+      # accessible by integration` — iamacoffeepot/aether#5336, where the step
+      # failed before it listed a single file. Stated here, next to the step
+      # that needs it, the way the `compare` job states the token for its
+      # comment.
+      contents: read
+      pull-requests: read
     outputs:
       perf: ${{ steps.filter.outputs.perf }}
     steps:
