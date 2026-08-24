@@ -13,7 +13,7 @@ use crate::dto::{
 };
 
 /// Newest dispatch rows the board keeps. Matches the coordinator page ceiling so one catch-up page fills the bound.
-const DISPATCH_RETENTION: usize = METRICS_MAX_LIMIT as usize;
+const DISPATCH_RETENTION: u64 = METRICS_MAX_LIMIT;
 
 /// Which coordinator resource a screen can subscribe to.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -354,13 +354,13 @@ impl Store {
     #[must_use]
     pub fn cadence(&self, key: &ResourceKey) -> Duration {
         match key {
+            ResourceKey::Transcript(query) if query.live => self.view_cadence,
             ResourceKey::View
             | ResourceKey::MetricsSummary
             | ResourceKey::MetricsDays
             | ResourceKey::Spend
-            | ResourceKey::MetricsDispatches => self.view_cadence,
-            ResourceKey::Transcript(query) if query.live => self.view_cadence,
-            ResourceKey::Commissions => self.view_cadence,
+            | ResourceKey::MetricsDispatches
+            | ResourceKey::Commissions => self.view_cadence,
             ResourceKey::Journal(_)
             | ResourceKey::Artifact(_)
             | ResourceKey::Transcript(_)
@@ -530,7 +530,7 @@ impl Store {
                 if let Some(highest) = page.iter().map(|row| row.sequence).max() {
                     self.dispatch_cursor = self.dispatch_cursor.max(highest);
                 }
-                self.dispatch_page_full = page.len() >= DISPATCH_RETENTION;
+                self.dispatch_page_full = u64::try_from(page.len()).is_ok_and(|len| len >= DISPATCH_RETENTION);
                 let retained = self.dispatches.value.take().unwrap_or_default();
                 self.dispatches.apply_ok(merge_dispatch_page(retained, page));
             }
@@ -601,7 +601,10 @@ fn merge_dispatch_page(retained: Vec<MetricDispatch>, page: Vec<MetricDispatch>)
         by_sequence.insert(row.sequence, row);
     }
     let mut rows: Vec<MetricDispatch> = by_sequence.into_values().collect();
-    let excess = rows.len().saturating_sub(DISPATCH_RETENTION);
+    let Ok(bound) = usize::try_from(DISPATCH_RETENTION) else {
+        return rows;
+    };
+    let excess = rows.len().saturating_sub(bound);
     if excess > 0 {
         rows.drain(..excess);
     }
@@ -613,6 +616,7 @@ mod tests {
     use super::{CommissionCapability, PromptQuery, ResourceKey, Store};
     use crate::dto::{BloomView, DigestHex, MemberView, MetricDispatch, ViewDocument};
     use aether_bloomery::METRICS_MAX_LIMIT;
+    use std::thread;
     use std::time::Duration;
 
     fn digest(byte: u8) -> DigestHex {
@@ -722,7 +726,7 @@ mod tests {
         let mut store = Store::new(cadence);
         store.apply_err(&ResourceKey::MetricsDispatches, "connection refused");
         assert!(!store.due(&ResourceKey::MetricsDispatches));
-        std::thread::sleep(Duration::from_millis(40));
+        thread::sleep(Duration::from_millis(40));
         assert!(store.due(&ResourceKey::MetricsDispatches));
     }
 }
