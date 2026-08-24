@@ -186,9 +186,36 @@ pub(super) fn owed_aggregates(record: &BloomRecord, bloom: BloomId) -> Vec<Decis
     owed
 }
 
+/// Which of the two dispatch brakes an owed-dispatch door is entitled to lift.
+///
+/// The two release doors each lift the brake they themselves clear in the same
+/// decision set. A host-fault resume clears neither.
+#[derive(Clone, Copy)]
+enum LiftedBrake {
+    /// The operator hold. [`owed_dispatch`] for [`reduce_operator_release`].
+    Operator,
+    /// The unproven-base brake. [`owed_base_dispatch`] for a green receipt.
+    Base,
+    /// Neither. [`owed_resume_dispatch`] for a host-fault resume.
+    Neither,
+}
+
+impl LiftedBrake {
+    fn apply(self, line: SealedLine<'_>) -> SealedLine<'_> {
+        match self {
+            Self::Operator => line.released(),
+            Self::Base => line.base_released(),
+            Self::Neither => line,
+        }
+    }
+}
+
 /// The advance-and-dispatch pair one owed workpiece is due, aimed from the
 /// cursor it currently holds — or `None` when the record holds no position to
 /// dispatch it from.
+///
+/// The door is [`reduce_operator_release`]: it lifts the operator brake because
+/// the same decision set records the release that clears it.
 ///
 /// The cursor is re-emitted unchanged: a release buys no attempt and spends
 /// none, so the only thing that moves is the work order the hold withheld. The
@@ -210,18 +237,37 @@ pub(super) fn owed_dispatch(
     workpiece: &WorkpieceId,
     member_checkpoint: Option<CandidateRef>,
 ) -> Option<[Decision; 2]> {
-    owed_dispatch_lifted(record, bloom, workpiece, member_checkpoint, true)
+    owed_dispatch_lifted(record, bloom, workpiece, member_checkpoint, LiftedBrake::Operator)
 }
 
 /// The same re-derived dispatch as [`owed_dispatch`], lifting the base brake
 /// rather than the operator brake.
+///
+/// The door is a green base receipt ([`super::base_verify`]): it must not lift
+/// an operator hold.
 pub(super) fn owed_base_dispatch(
     record: &BloomRecord,
     bloom: BloomId,
     workpiece: &WorkpieceId,
     member_checkpoint: Option<CandidateRef>,
 ) -> Option<[Decision; 2]> {
-    owed_dispatch_lifted(record, bloom, workpiece, member_checkpoint, false)
+    owed_dispatch_lifted(record, bloom, workpiece, member_checkpoint, LiftedBrake::Base)
+}
+
+/// The same re-derived dispatch as [`owed_dispatch`], lifting neither brake.
+///
+/// The door is a host-fault resume
+/// ([`super::verify::reduce_resume_host_fault`]): it clears the host condition,
+/// not an operator hold or an unproven base. A held record therefore defers the
+/// re-probe, and the release that actually lifts the brake is the one that later
+/// dispatches it.
+pub(super) fn owed_resume_dispatch(
+    record: &BloomRecord,
+    bloom: BloomId,
+    workpiece: &WorkpieceId,
+    member_checkpoint: Option<CandidateRef>,
+) -> Option<[Decision; 2]> {
+    owed_dispatch_lifted(record, bloom, workpiece, member_checkpoint, LiftedBrake::Neither)
 }
 
 fn owed_dispatch_lifted(
@@ -229,7 +275,7 @@ fn owed_dispatch_lifted(
     bloom: BloomId,
     workpiece: &WorkpieceId,
     member_checkpoint: Option<CandidateRef>,
-    operator_release: bool,
+    lift: LiftedBrake,
 ) -> Option<[Decision; 2]> {
     let cursor = record.progress.get(workpiece).copied()?;
     let candidate = cursor.candidate;
@@ -245,11 +291,7 @@ fn owed_dispatch_lifted(
             cursor,
             DispatchTargets { subject: weave.tree, checkout: weave.checkout },
             Some(weave.tree),
-            if operator_release {
-                composition_line(record).released()
-            } else {
-                composition_line(record).base_released()
-            },
+            lift.apply(composition_line(record)),
         ));
     }
     let member = record.spec.members().iter().find(|member| member.workpiece == *workpiece)?;
@@ -268,10 +310,6 @@ fn owed_dispatch_lifted(
         cursor,
         (targets, construct_checkpoint_base),
         candidate.map(|current| current.tree),
-        if operator_release {
-            SealedLine::of(record, member).released()
-        } else {
-            SealedLine::of(record, member).base_released()
-        },
+        lift.apply(SealedLine::of(record, member)),
     ))
 }

@@ -6,7 +6,7 @@
 use alloc::vec::Vec;
 
 use super::attempt::{DispatchTargets, SealedLine, move_effects, wedged};
-use super::operator_hold::owed_dispatch;
+use super::operator_hold::owed_resume_dispatch;
 use super::{
     BloomRecord, BloomStatus, Decision, Decisions, HostFaultError, Outcome, Snapshot, StageProgress, VerifyFailedError,
 };
@@ -251,7 +251,7 @@ pub(super) fn reduce_resume_host_fault(snapshot: &Snapshot, bloom: &BloomId, wor
     }
 
     let mut effects = alloc::vec![Decision::ClearHostFault { bloom: *bloom, workpiece: workpiece.clone() }];
-    if let Some(owed) = owed_dispatch(record, *bloom, workpiece, snapshot.member_checkpoint(bloom, workpiece)) {
+    if let Some(owed) = owed_resume_dispatch(record, *bloom, workpiece, snapshot.member_checkpoint(bloom, workpiece)) {
         effects.extend(owed);
     }
     Decisions { outcome: Outcome::HostFaultResumed { bloom: *bloom, workpiece: workpiece.clone() }, effects }
