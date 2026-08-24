@@ -169,6 +169,73 @@ fn call_boot_reads(
     )
 }
 
+/// Issue the three reads together until each is served from the restored ledgers.
+/// Returns how many times each was refused first; a zero means that read missed
+/// the boot window and the caller proved nothing.
+fn poll_boot_reads_until_served(
+    stream: &mut TcpStream,
+    control: MailboxId,
+    summary: &MetricsQuery,
+    timeline: &MetricsQuery,
+) -> (u32, u32, u32) {
+    let deadline = Instant::now() + Duration::from_mins(2);
+    let mut summary_refusals = 0_u32;
+    let mut timeline_refusals = 0_u32;
+    let mut spend_refusals = 0_u32;
+    let mut summary_served = false;
+    let mut timeline_served = false;
+    let mut spend_served = false;
+    let mut cid = 10;
+    loop {
+        let (summary_reply, timeline_reply, spend_reply) =
+            call_boot_reads(stream, (cid, cid + 1, cid + 2), control, summary, timeline);
+        match summary_reply {
+            MetricsQueryResult::Err { error } => {
+                assert!(
+                    error.contains("boot journal replay has not finished"),
+                    "summary refused for a reason other than replay: {error}"
+                );
+                summary_refusals += 1;
+            }
+            MetricsQueryResult::Ok { .. } => summary_served = true,
+            MetricsQueryResult::NotFound => {
+                panic!("summary answered NotFound; that arm is a bloom denial, not a boot refusal")
+            }
+        }
+        match timeline_reply {
+            MetricsQueryResult::Err { error } => {
+                assert!(
+                    error.contains("boot journal replay has not finished"),
+                    "timeline refused for a reason other than replay: {error}"
+                );
+                timeline_refusals += 1;
+            }
+            MetricsQueryResult::Ok { .. } => timeline_served = true,
+            MetricsQueryResult::NotFound => {
+                panic!(
+                    "the timeline was served as NotFound before the journal replayed \
+                     (after {timeline_refusals} refusals) — a positive denial that the planted bloom exists"
+                )
+            }
+        }
+        match spend_reply {
+            SpendQueryResult::Err { error } => {
+                assert!(
+                    error.contains("boot journal replay has not finished"),
+                    "spend refused for a reason other than replay: {error}"
+                );
+                spend_refusals += 1;
+            }
+            SpendQueryResult::Ok { .. } => spend_served = true,
+        }
+        if summary_served && timeline_served && spend_served {
+            return (summary_refusals, timeline_refusals, spend_refusals);
+        }
+        assert!(Instant::now() < deadline, "metrics and spend never rebuilt from the planted journal");
+        cid += 3;
+    }
+}
+
 /// The native control-core capability's mailbox — mounted into the chassis at
 /// boot under `aether.bloomery.control`, addressed by its lineage path.
 fn control_mailbox() -> MailboxId {
@@ -434,6 +501,33 @@ fn every_selector_reaches_its_own_reply_arm() {
 /// applies nothing and the rebuilt projection is exactly the one sealed bloom.
 const PRE_REPLAY_FILLER_ROWS: usize = 20_000;
 
+/// One sealed row plus [`PRE_REPLAY_FILLER_ROWS`] refusals, wide enough that a
+/// read from another process can land before the restarted core finishes the fold.
+fn plant_pre_replay_journal(db: &str, sealed: &Event, decided: &Decisions) {
+    let refusal = Decisions { outcome: Outcome::SealRejected(SealError::EmptyMembership), effects: Vec::new() };
+    let mut store = SqliteStore::open(db).unwrap();
+    store
+        .append_event(&JournalWrite {
+            idempotency_key: "seal-visible",
+            event: &to_vec(sealed).unwrap(),
+            decisions: &to_vec(decided).unwrap(),
+            decider: "control-loop-test",
+        })
+        .unwrap();
+    let filler = to_vec(&seal_event("filler", 1, "wp-filler")).unwrap();
+    let refused = to_vec(&refusal).unwrap();
+    for row in 0..PRE_REPLAY_FILLER_ROWS {
+        store
+            .append_event(&JournalWrite {
+                idempotency_key: &format!("filler-{row}"),
+                event: &filler,
+                decisions: &refused,
+                decider: "control-loop-test",
+            })
+            .unwrap();
+    }
+}
+
 #[test]
 fn the_view_is_not_served_before_the_journal_has_replayed() {
     // The plausible bug: `on_query` reads `state.snapshot` without the
@@ -452,31 +546,7 @@ fn the_view_is_not_served_before_the_journal_has_replayed() {
     let sealed = seal_event("seal-visible", 0, "wp");
     let decided = reduce(&Snapshot::default(), &sealed, &ResolvedConfigs::default(), &SpendWindow::default());
     assert!(matches!(decided.outcome, Outcome::Sealed(_)), "fixture control: the planted row seals");
-    let refusal = Decisions { outcome: Outcome::SealRejected(SealError::EmptyMembership), effects: Vec::new() };
-
-    {
-        let mut store = SqliteStore::open(db).unwrap();
-        store
-            .append_event(&JournalWrite {
-                idempotency_key: "seal-visible",
-                event: &to_vec(&sealed).unwrap(),
-                decisions: &to_vec(&decided).unwrap(),
-                decider: "control-loop-test",
-            })
-            .unwrap();
-        let filler = to_vec(&seal_event("filler", 1, "wp-filler")).unwrap();
-        let refused = to_vec(&refusal).unwrap();
-        for row in 0..PRE_REPLAY_FILLER_ROWS {
-            store
-                .append_event(&JournalWrite {
-                    idempotency_key: &format!("filler-{row}"),
-                    event: &filler,
-                    decisions: &refused,
-                    decider: "control-loop-test",
-                })
-                .unwrap();
-        }
-    }
+    plant_pre_replay_journal(db, &sealed, &decided);
 
     let (_coordinator, mut stream) = spawn_with_store(db, "control-loop-test");
     let control = control_mailbox();
@@ -524,31 +594,7 @@ fn metrics_and_spend_are_not_served_before_the_journal_has_replayed() {
         Outcome::Sealed(bloom) => *bloom,
         other => panic!("fixture control: the planted row seals: {other:?}"),
     };
-    let refusal = Decisions { outcome: Outcome::SealRejected(SealError::EmptyMembership), effects: Vec::new() };
-
-    {
-        let mut store = SqliteStore::open(db).unwrap();
-        store
-            .append_event(&JournalWrite {
-                idempotency_key: "seal-visible",
-                event: &to_vec(&sealed).unwrap(),
-                decisions: &to_vec(&decided).unwrap(),
-                decider: "control-loop-test",
-            })
-            .unwrap();
-        let filler = to_vec(&seal_event("filler", 1, "wp-filler")).unwrap();
-        let refused = to_vec(&refusal).unwrap();
-        for row in 0..PRE_REPLAY_FILLER_ROWS {
-            store
-                .append_event(&JournalWrite {
-                    idempotency_key: &format!("filler-{row}"),
-                    event: &filler,
-                    decisions: &refused,
-                    decider: "control-loop-test",
-                })
-                .unwrap();
-        }
-    }
+    plant_pre_replay_journal(db, &sealed, &decided);
 
     let (_coordinator, mut stream) = spawn_with_store(db, "control-loop-test");
     let control = control_mailbox();
@@ -563,62 +609,8 @@ fn metrics_and_spend_are_not_served_before_the_journal_has_replayed() {
         notice: None,
     };
 
-    let deadline = Instant::now() + Duration::from_mins(2);
-    let mut summary_refusals = 0_u32;
-    let mut timeline_refusals = 0_u32;
-    let mut spend_refusals = 0_u32;
-    let mut summary_served = false;
-    let mut timeline_served = false;
-    let mut spend_served = false;
-    let mut cid = 10;
-    loop {
-        let (summary_reply, timeline_reply, spend_reply) =
-            call_boot_reads(&mut stream, (cid, cid + 1, cid + 2), control, &summary, &timeline);
-        match summary_reply {
-            MetricsQueryResult::Err { error } => {
-                assert!(
-                    error.contains("boot journal replay has not finished"),
-                    "summary refused for a reason other than replay: {error}"
-                );
-                summary_refusals += 1;
-            }
-            MetricsQueryResult::Ok { .. } => summary_served = true,
-            MetricsQueryResult::NotFound => {
-                panic!("summary answered NotFound; that arm is a bloom denial, not a boot refusal")
-            }
-        }
-        match timeline_reply {
-            MetricsQueryResult::Err { error } => {
-                assert!(
-                    error.contains("boot journal replay has not finished"),
-                    "timeline refused for a reason other than replay: {error}"
-                );
-                timeline_refusals += 1;
-            }
-            MetricsQueryResult::Ok { .. } => timeline_served = true,
-            MetricsQueryResult::NotFound => {
-                panic!(
-                    "the timeline was served as NotFound before the journal replayed \
-                     (after {timeline_refusals} refusals) — a positive denial that the planted bloom exists"
-                )
-            }
-        }
-        match spend_reply {
-            SpendQueryResult::Err { error } => {
-                assert!(
-                    error.contains("boot journal replay has not finished"),
-                    "spend refused for a reason other than replay: {error}"
-                );
-                spend_refusals += 1;
-            }
-            SpendQueryResult::Ok { .. } => spend_served = true,
-        }
-        if summary_served && timeline_served && spend_served {
-            break;
-        }
-        assert!(Instant::now() < deadline, "metrics and spend never rebuilt from the planted journal");
-        cid += 3;
-    }
+    let (summary_refusals, timeline_refusals, spend_refusals) =
+        poll_boot_reads_until_served(&mut stream, control, &summary, &timeline);
     assert!(
         summary_refusals > 0,
         "fixture control: no summary read reached the boot window, so nothing above was proved"
