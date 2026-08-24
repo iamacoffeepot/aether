@@ -16,7 +16,7 @@ use aether_actor::actor;
 use crate::bloomery::{ExecutorShell, SourceShell};
 
 pub use runtime::{JanitorReactorState, JanitorTick};
-pub use sweep::{JanitorPolicy, SweepReport, SweepRequest, sweep};
+pub use sweep::{JanitorPolicy, SweepReport, SweepRequest, WorkingRefPruner, sweep};
 
 /// Composer-supplied parts for the janitor reactor.
 pub struct JanitorReactorSetup {

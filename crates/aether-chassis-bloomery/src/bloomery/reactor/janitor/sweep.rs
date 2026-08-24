@@ -12,10 +12,12 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 use aether_bloomery::{BloomId, BloomStatus, Digest, Snapshot, is_active_unlanded};
+use aether_bloomery_github::SourceError;
 
 use crate::bloomery::LaneOccupancy;
 use crate::bloomery::SourceShell;
 use crate::bloomery::TransformRunner;
+use crate::bloomery::config::JANITOR_REF_PRUNES_PER_TICK;
 use crate::store::{StoreBackend, membership};
 
 /// The suffix a dispatch's evidence directory carries under the scratch root —
@@ -69,6 +71,22 @@ pub struct SweepReport {
     pub target_dirs: usize,
 }
 
+/// The prune seam one janitor tick talks to. [`SourceShell`] is the production
+/// implementor; tests stub it to count and fail calls.
+pub trait WorkingRefPruner {
+    /// Delete `bloom`'s candidate, integration, and checkpoint refs.
+    ///
+    /// # Errors
+    /// A transport or backend fault other than an already-absent ref.
+    fn prune_working_refs(&self, bloom: &BloomId) -> Result<usize, SourceError>;
+}
+
+impl WorkingRefPruner for SourceShell {
+    fn prune_working_refs(&self, bloom: &BloomId) -> Result<usize, SourceError> {
+        Self::prune_working_refs(self, bloom)
+    }
+}
+
 /// The seams one sweep pass reads and writes.
 pub struct SweepRequest<'a> {
     /// The journal the snapshot is rebuilt from, and the outstanding-order /
@@ -77,7 +95,7 @@ pub struct SweepRequest<'a> {
     /// The spawn seam that lists registered worktrees and tears them down.
     pub runner: &'a dyn TransformRunner,
     /// The source that deletes working refs. `None` skips ref prune.
-    pub source: Option<&'a SourceShell>,
+    pub source: Option<&'a dyn WorkingRefPruner>,
     /// Scratch-worktree base: nonce-keyed checkouts and `*-evidence` dirs.
     pub worktree_base: &'a Path,
     /// Per-slot cargo target directory root.
@@ -99,6 +117,11 @@ pub struct SweepRequest<'a> {
     /// [`SystemTime::now`]; tests pin it so a suite is not a function of when
     /// it ran.
     pub now: SystemTime,
+    /// Blooms this process has already pruned working refs for. A successful
+    /// prune is recorded so a later tick does not pay for it again; a fault is
+    /// left out so the next tick retries, matching the warn the prune already
+    /// logs.
+    pub pruned: &'a mut HashSet<BloomId>,
 }
 
 /// Rebuild the snapshot from the journal, then reclaim terminal worktrees,
@@ -131,7 +154,7 @@ pub fn sweep(request: &mut SweepRequest<'_>) -> rusqlite::Result<SweepReport> {
     let worktrees = reclaim_worktrees(request.runner, request.worktree_base, &live, &owners, &snapshot)
         + reclaim_session_trees(request.runner, request.worktree_base, request.store, &snapshot, &outstanding)?;
     let evidence_dirs = reclaim_evidence(request, &live, &owners, &snapshot);
-    let refs = request.source.map_or(0, |source| prune_terminal_refs(source, &snapshot));
+    let refs = request.source.map_or(0, |source| prune_terminal_refs(source, &snapshot, request.pruned));
     let target_dirs = sweep_targets(request.target_base, request.policy.lane_target_budget_bytes, request.lanes);
     Ok(SweepReport { worktrees, evidence_dirs, refs, target_dirs })
 }
@@ -374,25 +397,39 @@ fn reclaim_evidence(
 }
 
 fn evidence_is_protected(live: &HashSet<&str>, snapshot: &Snapshot, nonce: &str, owner: Option<&BloomId>) -> bool {
-    // Intake has not consumed this directory. A live bloom still needs it;
-    // a terminal bloom's abandoned leftover is eligible once the window
-    // passes (a kill/crash never reached intake).
+    // An outstanding order is the narrowest durable evidence that a lane may
+    // still be standing in this directory. The journal cannot speak for a
+    // dispatch whose owner is not a sealed bloom — the pre-bloom scoping run
+    // (ADR-0208) is exactly that shape — and whether that order is abandoned is
+    // not this sweep's question: the executor reconciles the outstanding set
+    // against its own runs at boot, re-adopting the ones it recognizes and
+    // reclaiming the rest, and faults an order whose lane is gone. The
+    // directory becomes eligible when the order stops being outstanding.
     if live.contains(nonce) {
-        return owner.is_some_and(|bloom| bloom_is_live(snapshot, bloom));
+        return true;
     }
     // Consumed, but the bloom is still working — keep for forensics and
     // the calibration window until that bloom itself is terminal.
     owner.is_some_and(|bloom| bloom_is_live(snapshot, bloom))
 }
 
-fn prune_terminal_refs(source: &SourceShell, snapshot: &Snapshot) -> usize {
+fn prune_terminal_refs(source: &dyn WorkingRefPruner, snapshot: &Snapshot, already: &mut HashSet<BloomId>) -> usize {
     let mut pruned = 0;
+    let mut attempted = 0;
     for (bloom, record) in &snapshot.blooms {
         if !matches!(record.status, BloomStatus::Landed | BloomStatus::Superseded) {
             continue;
         }
+        if already.contains(bloom) {
+            continue;
+        }
+        if attempted >= JANITOR_REF_PRUNES_PER_TICK {
+            break;
+        }
+        attempted += 1;
         match source.prune_working_refs(bloom) {
             Ok(count) => {
+                already.insert(*bloom);
                 if count > 0 {
                     tracing::info!(
                         target: "aether_chassis_bloomery::janitor",
