@@ -2441,6 +2441,72 @@ fn resuming_a_host_fault_re_dispatches_verify_without_a_grant() {
     assert_eq!(cursor.repair_rolls, 0, "and no repair roll");
 }
 
+// The plausible bug: a host-fault resume on a frozen bloom lifts the operator
+// brake and dispatches paid Verify the operator explicitly stopped. The resume
+// clears the host condition; it is not the door that lifts the hold.
+#[test]
+fn resuming_a_host_fault_on_a_frozen_bloom_defers_the_dispatch() {
+    let (snapshot, bloom) = at_verify("wp");
+    let (faulted, _) = step(
+        &snapshot,
+        &event(
+            "preflight",
+            Fact::VerifyHostFault {
+                bloom,
+                workpiece: workpiece("wp"),
+                evidence: Evidence { subject: digest(10), kind: EvidenceKind::VerificationResult, detail: digest(71) },
+                findings: "missing `jscpd`".into(),
+            },
+        ),
+    );
+    let (frozen, _) = step(&faulted, &held(bloom, "hold", "stop spending until the fixture is honest"));
+    let (after, decided) = step(&frozen, &event("resume", Fact::ResumeHostFault { bloom, workpiece: workpiece("wp") }));
+
+    assert!(
+        matches!(decided.outcome, Outcome::HostFaultResumed { .. }),
+        "the cadence resume is its own outcome: {:?}",
+        decided.outcome,
+    );
+    assert!(
+        decided
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Decision::ClearHostFault { workpiece: wp, .. } if *wp == workpiece("wp"))),
+        "the host condition still lifts: {:?}",
+        decided.effects,
+    );
+    assert!(
+        decided.effects.iter().any(|effect| matches!(effect, Decision::DeferDispatch { .. })),
+        "a frozen bloom records the re-probe as owed: {:?}",
+        decided.effects,
+    );
+    assert!(member_dispatches(&decided).is_empty(), "and does not start paid work: {:?}", decided.effects);
+
+    let record = after.blooms.get(&bloom).unwrap();
+    assert!(record.host_faults.is_empty(), "the host condition lifts");
+    assert!(record.operator_hold.is_some(), "the brake stays on");
+    assert!(
+        record.deferred_dispatches.contains(&workpiece("wp")),
+        "the re-probe is still owed: {:?}",
+        record.deferred_dispatches,
+    );
+
+    let (_, let_go) = step(&after, &released(bloom, "release", "the freeze is lifted"));
+    assert!(
+        matches!(
+            let_go.outcome,
+            Outcome::BloomReleased { ref dispatched, .. } if *dispatched == vec![workpiece("wp")]
+        ),
+        "the release still owes the re-probe: {:?}",
+        let_go.outcome,
+    );
+    assert_eq!(
+        member_dispatches(&let_go),
+        vec![(workpiece("wp"), StageId::Verify)],
+        "and it is the Verify the resume deferred, not a free extra lap",
+    );
+}
+
 #[test]
 fn resuming_a_member_that_is_not_held_is_refused() {
     let (snapshot, bloom) = at_verify("wp");
