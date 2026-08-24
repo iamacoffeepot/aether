@@ -563,15 +563,11 @@ impl<C: GitDataApi> GitSource<C> {
 
     /// Copy the first remaining bloom-namespace candidate for `workpiece` onto
     /// `target`. The immediate predecessor has already been tried and missed;
-    /// this is the rest of the supersession chain, bounded so a large ref
-    /// listing cannot run unbounded.
+    /// this searches the whole bloom namespace and copies the first match.
+    /// A truncated listing is the backend's error to raise, not a clean absence.
     fn adopt_from_chain(&self, target: &str, workpiece: &str) -> Result<bool, SourceError> {
-        const ADOPTION_CHAIN_BUDGET: usize = 256;
         let suffix = format!("/candidate/{}", sanitize_ref_segment(workpiece));
-        for (index, git_ref) in self.client.list_matching_refs("heads/bloom/")?.into_iter().enumerate() {
-            if index >= ADOPTION_CHAIN_BUDGET {
-                break;
-            }
+        for git_ref in self.client.list_matching_refs("heads/bloom/")? {
             if !git_ref.name.ends_with(&suffix) || git_ref.name == target {
                 continue;
             }
@@ -1549,7 +1545,38 @@ mod tests {
     }
 
     #[test]
+    fn an_inherited_candidate_is_adopted_from_a_crowded_namespace() {
+        // Tripwire: a listing-position cap on the already-materialized bloom
+        // namespace answers Ok(false) for a candidate that is present past the
+        // cutoff — the same answer as genuine absence, which turns a later
+        // successor's fold into a permanent refusal. The scan has to walk the
+        // whole listing.
+        let (fake, successor, _base) = seeded();
+        let source = git_source(&fake, false);
+        let parent = bloom_id(2);
+        let grandparent = bloom_id(3);
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let filler = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        for index in 0..300 {
+            fake.seed_ref(&format!("heads/bloom/{index:012x}/unrelated"), filler);
+        }
+        fake.seed_ref(candidate_ref_name(&grandparent, "wp-0").trim_start_matches("refs/"), sha);
+
+        assert!(
+            source.adopt_candidate(&parent, &successor, "wp-0").unwrap(),
+            "the grandparent's ref is adopted past the crowding"
+        );
+        assert_eq!(
+            fake.ref_target(candidate_ref_name(&successor, "wp-0").trim_start_matches("refs/")).as_deref(),
+            Some(sha),
+        );
+    }
+
+    #[test]
     fn adopt_candidate_still_refuses_when_the_ref_exists_nowhere() {
+        // Absence answers false. A crowded namespace that still holds the
+        // candidate does not — that is the sibling of this test, not this
+        // answer.
         let (fake, successor, _base) = seeded();
         let source = git_source(&fake, false);
         assert!(
