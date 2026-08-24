@@ -9,7 +9,7 @@ use aether_bloomery::{
     HostFaultView, LeaseEvictionView, MemberPark, MemberView, StageId, VerifyFailureSet, ViewDocument, Wedge,
     WithdrawnView, WorkpieceId,
 };
-use aether_harness_bloomery::{Oracle, Quiescence, classify};
+use aether_harness_bloomery::{Oracle, Progress, Quiescence, classify, is_answerable};
 
 fn member(resolved: bool, wedge: Option<Wedge>) -> MemberView {
     MemberView {
@@ -47,6 +47,20 @@ fn a_sealed_bloom_with_nothing_in_flight_is_a_failure() {
     let stalled = classify(&document(BloomStatus::Sealed, vec![member(false, None)]), &[]);
 
     assert!(matches!(stalled, Quiescence::Stalled(_)), "quiescence with work owed must fail: {stalled:?}");
+}
+
+#[test]
+fn a_still_world_with_a_lane_in_flight_is_not_answerable() {
+    // Tripwire: a running lane sits in the outstanding set while nothing else
+    // in the fingerprint changes. Three still polls of that world used to call
+    // classify, which reports every non-empty outstanding set as an order that
+    // never completed.
+    let in_flight =
+        Progress::observe(&document(BloomStatus::Sealed, vec![member(false, None)]), vec!["n-running".to_owned()], 0);
+    let still = Progress::observe(&document(BloomStatus::Sealed, vec![member(false, None)]), Vec::new(), 0);
+
+    assert!(!is_answerable(&in_flight), "a lane in flight is not a standstill: {in_flight:?}");
+    assert!(is_answerable(&still), "nothing outstanding is the standstill classify answers");
 }
 
 #[test]

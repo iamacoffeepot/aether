@@ -33,7 +33,7 @@ pub use harness::{
     while_pumping,
 };
 pub use oracle::liveness::{Progress, Quiescence, classify};
-pub use oracle::{Oracle, Violation};
+pub use oracle::{Oracle, Violation, is_answerable};
 pub use scenario::{LaneScript, MemberSpec, OperatorMove, Scenario, Supersede};
 pub use support::client;
 pub use support::correspondence::MapCorrespondence;

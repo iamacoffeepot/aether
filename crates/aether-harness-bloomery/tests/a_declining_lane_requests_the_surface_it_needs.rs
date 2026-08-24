@@ -25,9 +25,9 @@
 #![allow(clippy::unwrap_used)]
 
 use aether_bloomery::testing::digest;
-use aether_bloomery::{CONSTRUCT_IMPLEMENT_COMMAND, StageId, WorkpieceId, digest_of};
+use aether_bloomery::{CONSTRUCT_IMPLEMENT_COMMAND, Outcome, StageId, WorkpieceId, digest_of};
 use aether_chassis_bloomery::bloomery::mock_lane::REQUESTED_PATH;
-use aether_harness_bloomery::{BloomeryHarness, HarnessBuilder, LaneScript, Oracle, Repo};
+use aether_harness_bloomery::{BloomeryHarness, HarnessBuilder, LaneScript, OperatorMove, Oracle, Repo};
 
 #[test]
 fn a_declining_lane_requests_the_surface_it_needs() {
@@ -139,5 +139,91 @@ fn an_amended_surface_reaches_the_re_dispatched_lane() {
     assert!(
         amended.contains("crates/example-b/**"),
         "the re-dispatched lap's work order declares the amended surface: {amended}",
+    );
+}
+
+#[test]
+fn an_operator_amend_reaches_the_re_dispatched_lane() {
+    // The operator-move entry point used to lower Amend to a bare supersede
+    // and skip the work-order render, so the successor had no
+    // dispatch-description row and the re-dispatched lane got a subject-only
+    // prompt.
+    let repo = Repo::with_example_project();
+    let mut harness = HarnessBuilder::local_authority(&repo).hold_repo(repo).start("bloomery-harness");
+    harness.script_lane(&WorkpieceId("wp".into()), StageId::Construct, &[LaneScript::DeclineRequestingSurface]);
+
+    let sealed = harness.author_scope_revision("wp", &["crates/example-a/**"]);
+    let bloom = harness.seal_member("wp", sealed);
+    harness.run_until(|harness| harness.bloom(bloom).members[0].awaiting_surface.is_some(), 40);
+
+    let widened = harness
+        .scope_revision(sealed)
+        .expect("the sealed revision is in the commission store")
+        .with_widened_surface(&["crates/example-b/**".to_owned()]);
+    let revision = harness.approve_widened_revision(&widened);
+    let successor = match harness.apply_operator(
+        bloom,
+        &OperatorMove::Amend { at_tick: 0, workpiece: WorkpieceId("wp".into()), scope_revision: revision },
+    ) {
+        Outcome::Superseded { successor, .. } => successor,
+        other => panic!("the operator amend supersedes: {other:?}"),
+    };
+
+    let mut member = harness.bloom(successor).members[0].clone();
+    for _ in 0..60 {
+        if member.cursor.as_ref().is_some_and(|cursor| cursor.candidate.is_some()) {
+            break;
+        }
+        harness.tick();
+        member = harness.bloom(successor).members[0].clone();
+    }
+
+    let orders: Vec<String> = harness
+        .ledger()
+        .into_iter()
+        .filter(|run| run.command == CONSTRUCT_IMPLEMENT_COMMAND)
+        .filter_map(|run| run.task)
+        .collect();
+    assert!(orders.len() >= 2, "the amendment re-dispatched the member: {orders:?}");
+    let amended = orders.last().expect("the re-armed member re-entered construct with a work order");
+    assert!(
+        amended.contains("crates/example-b/**"),
+        "the re-dispatched lap's work order declares the amended surface: {amended}",
+    );
+}
+
+#[test]
+fn a_second_operator_amend_carries_the_first_widened_revision() {
+    // A second Amend used to rebuild the successor from the pre-amendment
+    // spec, re-pinning the first-amended member at its original scope.
+    let mut harness = BloomeryHarness::start();
+    let bloom = harness.seal_members(&[("wp-a", digest(0x51)), ("wp-b", digest(0x52))]);
+
+    let first_revision = digest(0xA1);
+    let first = match harness.apply_operator(
+        bloom,
+        &OperatorMove::Amend { at_tick: 0, workpiece: WorkpieceId("wp-a".into()), scope_revision: first_revision },
+    ) {
+        Outcome::Superseded { successor, .. } => successor,
+        other => panic!("the first amendment supersedes: {other:?}"),
+    };
+
+    let second = match harness.apply_operator(
+        first,
+        &OperatorMove::Amend { at_tick: 1, workpiece: WorkpieceId("wp-b".into()), scope_revision: digest(0xB1) },
+    ) {
+        Outcome::Superseded { successor, .. } => successor,
+        other => panic!("the second amendment supersedes: {other:?}"),
+    };
+
+    let view = harness.bloom(second);
+    let member_a = view
+        .members
+        .iter()
+        .find(|member| member.workpiece.0 == "wp-a")
+        .expect("wp-a remains a member of the successor");
+    assert_eq!(
+        member_a.scope_revision, first_revision,
+        "the second successor still carries the first's widened revision: {view:?}"
     );
 }

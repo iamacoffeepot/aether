@@ -41,7 +41,7 @@ use tempfile::TempDir;
 use super::digest;
 use super::drive::{member, passed};
 use super::{BOOT_BUDGET, Backend, CoordinatorKind, HARNESS_STARTED, HarnessBuilder, Lane, POLL};
-use crate::oracle::{Oracle, liveness};
+use crate::oracle::{Oracle, is_answerable, liveness};
 use crate::scenario::{LaneScript, Scenario};
 use crate::support::client::connect_and_handshake;
 use crate::support::repo::Repo;
@@ -293,29 +293,30 @@ impl ScenarioHarness {
     }
 
     /// Tick until `predicate` holds or `ticks` is exhausted, checking
-    /// [`Oracle`] whenever the world has gone still.
+    /// [`Oracle`] only when the world has gone still with nothing in flight.
     ///
     /// # Panics
     /// The oracle objected, or `ticks` elapsed before the predicate held.
     pub fn run_until(&mut self, predicate: impl Fn(&mut Self) -> bool, ticks: u32) {
-        let mut last: Option<(String, Vec<String>, usize)> = None;
+        let mut last: Option<liveness::Progress> = None;
         let mut still = 0_u32;
         for _ in 0..ticks {
             self.tick();
-            let document = self.view();
-            let outstanding = self.outstanding();
-            let progress = (format!("{document:?}"), outstanding.clone(), self.ledger().len());
+            let progress = liveness::Progress::observe(&self.view(), self.outstanding(), self.ledger().len());
             if last.as_ref() == Some(&progress) {
                 still += 1;
             } else {
-                last = Some(progress);
+                last = Some(progress.clone());
                 still = 0;
             }
-            if still >= 2 {
+            if still >= 2 && is_answerable(&progress) {
                 self.check_oracle("");
             }
             if predicate(self) {
-                self.check_oracle("");
+                let progress = liveness::Progress::observe(&self.view(), self.outstanding(), self.ledger().len());
+                if is_answerable(&progress) {
+                    self.check_oracle("");
+                }
                 return;
             }
         }
@@ -530,7 +531,8 @@ impl ScenarioHarness {
     /// # Panics
     /// The store could not be opened, or the revision and its approval could
     /// not be written.
-    pub(super) fn approve_widened_revision(&self, widened: &ScopeRevision) -> Digest {
+    #[must_use]
+    pub fn approve_widened_revision(&self, widened: &ScopeRevision) -> Digest {
         let mut store = SqliteStore::open(&self.store_path).expect("the commission store opens for writing");
         let revision = store.write_revision(widened, &RevisionEvidence::default()).expect("the successor writes");
         store
@@ -654,11 +656,10 @@ impl ScenarioHarness {
             }
 
             let progress = liveness::Progress::observe(&document, self.outstanding(), self.ledger().len());
-            let in_flight = !progress.outstanding.is_empty();
             if last.as_ref() != Some(&progress) {
                 last = Some(progress);
                 still_since = Instant::now();
-            } else if !in_flight && still_since.elapsed() >= QUIESCENCE {
+            } else if is_answerable(&progress) && still_since.elapsed() >= QUIESCENCE {
                 self.judge_quiescence(label, &document);
                 panic!(
                     "{label}: the coordinator settled into a legitimate stop without reaching it — {:?}",
