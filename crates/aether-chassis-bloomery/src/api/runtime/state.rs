@@ -276,6 +276,15 @@ pub(super) enum CommissionHttpRender {
     List,
     /// `GET /workpieces`.
     Workpieces,
+    /// `POST /commissions/{id}/approvals/auto` — the load is not the answer
+    /// here (#5325). It is how the door reaches the stored revision's declared
+    /// surface, which is the only thing that can say whether this commission is
+    /// an `auto` one; the reply is the store write that follows.
+    AutoApproval {
+        /// The workpiece the path named, carried through so the write can be
+        /// addressed and a refusal can name it.
+        id: WorkpieceId,
+    },
 }
 
 /// A commission HTTP read waiting on the store.
@@ -384,6 +393,14 @@ pub(super) enum Routed {
     WriteScopeRevision(WriteScopeRevision),
     /// Relay a commission load to the store.
     LoadCommission(LoadCommission),
+    /// Load a commission, resolve its stored revision's tier, and mint the
+    /// unsigned `auto` approval when the ladder allows it (#5325).
+    AutoApproveCommission {
+        /// The store read that fetches the revision the tier is resolved from.
+        request: LoadCommission,
+        /// The workpiece the path named.
+        id: WorkpieceId,
+    },
     /// Relay a commission list to the store.
     ListCommissions(ListCommissions),
     /// Relay an open-commission list rendered as workpieces.
@@ -498,6 +515,9 @@ pub(super) fn finish(
         Routed::EnqueueScopeRun(request) => ctx.defer(&request).to::<StoreCapability>(),
         Routed::WriteScopeRevision(request) => ctx.defer(&request).to::<StoreCapability>(),
         Routed::LoadCommission(request) => hold_commission_http(state, &mut ctx, &request, CommissionHttpRender::Show),
+        Routed::AutoApproveCommission { request, id } => {
+            hold_commission_http(state, &mut ctx, &request, CommissionHttpRender::AutoApproval { id })
+        }
         Routed::ListCommissions(request) => hold_commission_http(state, &mut ctx, &request, CommissionHttpRender::List),
         Routed::ListOpenWorkpieces(request) => {
             hold_commission_http(state, &mut ctx, &request, CommissionHttpRender::Workpieces)
