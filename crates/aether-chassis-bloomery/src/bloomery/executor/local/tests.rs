@@ -3183,9 +3183,9 @@ impl TransformRunner for ContainmentRunner {
     fn start(&self, spec: &RunSpec<'_>) -> Result<Box<dyn RunProcess>, LocalExecutorError> {
         fs::create_dir_all(spec.worktree_dir).map_err(LocalExecutorError::Io)?;
         fs::create_dir_all(spec.evidence_dir).map_err(LocalExecutorError::Io)?;
-        let mut seed = self.seed.lock().unwrap();
-        if let Some(sha) = seed.as_deref() {
-            git(spec.worktree_dir, &["checkout", "--detach", "--force", sha]);
+        let planted = self.seed.lock().unwrap().clone();
+        if let Some(sha) = planted {
+            git(spec.worktree_dir, &["checkout", "--detach", "--force", &sha]);
             git(spec.worktree_dir, &["clean", "--force", "--force", "-d", "-x"]);
             fs::write(
                 spec.evidence_dir.join("evidence.json"),
@@ -3199,7 +3199,7 @@ impl TransformRunner for ContainmentRunner {
             git_init(spec.worktree_dir);
             rewrite(spec.worktree_dir, "crates/owned/src/lib.rs", "pub fn owned() -> u8 { 1 }\n");
             git_commit(spec.worktree_dir, "seed");
-            *seed = Some(git_head(spec.worktree_dir));
+            *self.seed.lock().unwrap() = Some(git_head(spec.worktree_dir));
             rewrite(spec.worktree_dir, OUT_OF_SURFACE_PATH, "pub fn other() -> u8 { 2 }\n");
             git_commit(spec.worktree_dir, "stray");
             fs::write(
