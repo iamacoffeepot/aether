@@ -28,9 +28,10 @@ pub const BLOOMERY_COMMITTER: [(&str, &str); 3] = [
     ("GIT_COMMITTER_DATE", "@0 +0000"),
 ];
 
-/// The oldest git that ships `merge-tree --write-tree`. Fail boot below this
-/// rather than building a temporary-index fallback.
-pub const MIN_GIT: (u32, u32, u32) = (2, 38, 0);
+/// The oldest git that honours the `attr.tree` source `merge()` depends on.
+/// Fail boot below this rather than paying for the driver's absence one fold
+/// at a time.
+pub const MIN_GIT: (u32, u32, u32) = (2, 40, 0);
 
 /// Flags every name-only diff that feeds closure or containment logic carries.
 ///
@@ -262,12 +263,12 @@ fn leading_digits(part: &str) -> String {
 /// Refuse a git older than [`MIN_GIT`], naming the version we found.
 ///
 /// # Errors
-/// `have` is below the merge-tree floor.
+/// `have` is below the attribute-source floor.
 pub fn require_min(have: (u32, u32, u32)) -> Result<(), GitDataError> {
     if have < MIN_GIT {
         return Err(GitDataError::Command(format!(
-            "git 2.38 or newer is required for merge-tree --write-tree; found {}.{}.{}",
-            have.0, have.1, have.2
+            "git {}.{} or newer is required for the merge-tree attribute source; found {}.{}.{}",
+            MIN_GIT.0, MIN_GIT.1, have.0, have.1, have.2
         )));
     }
     Ok(())
@@ -455,20 +456,21 @@ pub fn is_ancestor(repo: &Path, ancestor: &str, commit: &str) -> Result<bool, Gi
     }
 }
 
-/// Paths `git merge-tree --name-only` names as colliding. Spawn failure or a
-/// missing object yields an empty list — the caller already classified the
-/// merge itself.
+/// Paths `git merge-tree --name-only` names as colliding.
+///
+/// `--no-messages` suppresses the informational section git would otherwise
+/// emit on conflict (`Auto-merging`, `CONFLICT (content)`), so the listing is
+/// only the colliding paths plus the leading tree id the oid filter drops.
+/// `-z` makes the listing a NUL split rather than a parse — git quotes
+/// unusual bytes in line mode. Spawn failure or a missing object yields an
+/// empty list — the caller already classified the merge itself.
 #[must_use]
 pub fn conflicted_paths(repo: &Path, base: &str, head: &str) -> Vec<String> {
-    let Ok(output) = run(repo, &["merge-tree", "--write-tree", "--name-only", base, head]) else {
+    let Ok(output) = run(repo, &["merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", base, head])
+    else {
         return Vec::new();
     };
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !is_git_oid(line))
-        .map(ToOwned::to_owned)
-        .collect()
+    split_nul(&String::from_utf8_lossy(&output.stdout)).into_iter().filter(|path| !is_git_oid(path)).collect()
 }
 
 fn is_git_oid(line: &str) -> bool {
@@ -534,15 +536,15 @@ mod tests {
     fn parse_version_reads_plain_and_suffixed_git_version_lines() {
         assert_eq!(parse_version("git version 2.43.0\n").expect("plain"), (2, 43, 0));
         assert_eq!(parse_version("git version 2.39.5 (Apple Git-154)").expect("suffixed"), (2, 39, 5));
-        assert_eq!(parse_version("git version 2.38.0").expect("floor"), MIN_GIT);
+        assert_eq!(parse_version("git version 2.40.0").expect("floor"), MIN_GIT);
     }
 
     #[test]
     fn require_min_names_a_too_old_version() {
-        let error = require_min((2, 37, 0)).expect_err("too old");
+        let error = require_min((2, 39, 5)).expect_err("too old");
         let text = error.to_string();
-        assert!(text.contains("2.38"), "{text}");
-        assert!(text.contains("2.37.0"), "{text}");
+        assert!(text.contains("2.40"), "{text}");
+        assert!(text.contains("2.39.5"), "{text}");
     }
 
     #[test]

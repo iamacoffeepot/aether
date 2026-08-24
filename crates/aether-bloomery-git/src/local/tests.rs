@@ -579,7 +579,7 @@ fn a_change_that_is_not_an_insertion_still_conflicts() {
 
     match fold(&local, base, ours, theirs) {
         MergeResult::Conflict { paths, .. } => {
-            assert!(paths.iter().any(|path| path.contains("lib.rs")), "{paths:?}");
+            assert_eq!(paths, ["crates/example/src/lib.rs"]);
         }
         other => panic!("a rewritten line must not be resolved, got {other:?}"),
     }
@@ -597,8 +597,33 @@ fn a_conflicting_block_that_is_not_a_reexport_list_still_conflicts() {
 
     match fold(&local, base, ours, theirs) {
         MergeResult::Conflict { paths, .. } => {
-            assert!(paths.iter().any(|path| path.contains("lib.rs")), "{paths:?}");
+            assert_eq!(paths, ["crates/example/src/lib.rs"]);
         }
         other => panic!("a non-re-export block must not be resolved, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_conflicted_merge_names_only_the_files_that_conflicted() {
+    // Pre-fix: merge-tree's informational section (`Auto-merging`,
+    // `CONFLICT (content)`) and the cleanly merged file survived into
+    // `Conflict.paths`. The repair work order then serializes siblings that
+    // share only a clean auto-merge.
+    let (_root, local) = open_temp();
+    let tree = |a: &str, common: &str| {
+        let a_blob = git(&local, &["hash-object", "-w", "--stdin"], a);
+        let common_blob = git(&local, &["hash-object", "-w", "--stdin"], common);
+        git(&local, &["mktree"], &format!("100644 blob {a_blob}\ta.txt\n100644 blob {common_blob}\tcommon.txt\n"))
+    };
+
+    let base = local.create_commit("base", &tree("base-a", "base-common"), &[]).expect("base").sha;
+    let ours = local.create_commit("ours", &tree("ours-a", "new-common"), from_ref(&base)).expect("ours").sha;
+    let theirs = local.create_commit("theirs", &tree("theirs-a", "new-common"), from_ref(&base)).expect("theirs").sha;
+    local.create_ref("heads/base", &ours).expect("base");
+    local.create_ref("heads/side", &theirs).expect("side");
+
+    match local.merge("heads/base", "heads/side", "fold").expect("conflict is Ok") {
+        MergeResult::Conflict { paths, .. } => assert_eq!(paths, ["a.txt"]),
+        other => panic!("expected Conflict, got {other:?}"),
     }
 }
