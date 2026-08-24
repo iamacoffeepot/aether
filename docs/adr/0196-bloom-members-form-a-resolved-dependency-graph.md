@@ -140,6 +140,23 @@ which the lane resets to the dependent's own base and splice in place; the
 resumed prompt states the reset and what was spliced. That is why the tree
 cannot be keyed to a workpiece either.
 
+**One dependent per session, because a tree holds one lane** (amended
+2026-08-24, #5425). The graph fans out, and a chain is only its narrow case: a
+predecessor with edges to two members unblocks both on one admission and they
+dispatch in the same tick. The inheritance is therefore exclusive — the first
+dependent to prepare continues the predecessor's session in its tree, and a
+sibling that finds that slug already bound to another member mints its own and
+launches cold. The check and the record share one lock scope over the journal,
+so two dispatches racing cannot both read the slug as free, and the answer is
+durable rather than in-memory: a restarted coordinator reads the same owner
+instead of re-deciding it. The resume follows the tree rather than the edge —
+a harness edits the directory its conversation was born in whatever `--cwd`
+says — so a sibling that did not inherit the tree does not resume the handle
+bound to it either, and journals `session_taken` as its miss. What that sibling
+pays is one cold launch. What it would otherwise lose is its work: two lanes in
+one checkout reset and clean over each other, and the capture that follows can
+commit the union of two members' edits as one candidate.
+
 The harness-specific surface is only the per-harness argv builder, and it
 exposes two shapes: a cold launch, which states the directory the session is
 born in, and a resume, which states the harness session id and no directory.

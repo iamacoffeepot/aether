@@ -2269,9 +2269,10 @@ struct ReuseRunner {
     session_id: String,
     /// A resume handle that fails `start` the way a missing harness session does.
     reject_resume: Option<String>,
-    /// A nonce that stays `Running` so its slot stays held — the fixture for
-    /// forcing a predecessor into a non-lowest slot.
-    hold: Option<String>,
+    /// Nonces that stay `Running` so their slots stay held — the fixture for
+    /// forcing a predecessor into a non-lowest slot, and for holding two
+    /// sibling lanes live at the same time.
+    hold: Vec<String>,
     /// A nonce whose `start` fails the way a host out of disk fails it.
     fail_start: Option<String>,
 }
@@ -2283,7 +2284,7 @@ impl ReuseRunner {
             input_tokens: 1_000,
             session_id: "sess-1".to_owned(),
             reject_resume: None,
-            hold: None,
+            hold: Vec::new(),
             fail_start: None,
         }
     }
@@ -2299,7 +2300,7 @@ impl ReuseRunner {
     }
 
     fn holding(mut self, nonce: impl Into<String>) -> Self {
-        self.hold = Some(nonce.into());
+        self.hold.push(nonce.into());
         self
     }
 
@@ -2338,7 +2339,7 @@ impl TransformRunner for ReuseRunner {
             reuse_evidence(spec.nonce, &self.session_id, self.input_tokens),
         )
         .map_err(LocalExecutorError::Io)?;
-        let lifecycle = if self.hold.as_deref() == Some(spec.nonce) {
+        let lifecycle = if self.hold.iter().any(|held| held == spec.nonce) {
             RunLifecycle::Running
         } else {
             RunLifecycle::Exited { success: true }
@@ -3089,4 +3090,80 @@ fn a_refused_predecessor_session_falls_back_to_a_fresh_dispatch() {
     let stamped = stamped_evidence(&base, &dependent);
     assert_eq!(stamped["session_reuse"]["arm"], "fresh");
     assert_eq!(stamped["session_reuse"]["miss"], "resume_refused");
+}
+
+// A store carrying several declared edges at once — the fan-out `dependent_store`
+// cannot express, because `record_member_dependencies` replaces the whole graph.
+fn fan_out_store(dir: &TempDir, orders: &[OutstandingOrder], edges: &[(&str, &str)]) -> SqliteStore {
+    let mut store = member_store(dir, orders);
+    let edges: Vec<(String, String)> =
+        edges.iter().map(|(member, depends_on)| ((*member).to_owned(), (*depends_on).to_owned())).collect();
+    store.record_member_dependencies(&[1; 32], &edges).unwrap();
+    store
+}
+
+#[test]
+fn two_dependents_of_one_predecessor_never_share_a_checkout() {
+    // Acceptance: A -> B and A -> C fan out from one predecessor, and both
+    // dependents unblock on the same admission. B continues A's session in A's
+    // tree; C, dispatched in the same tick and still live, has to stand
+    // somewhere else.
+    //
+    // Pre-fix every sibling inherited the slug of the first declared
+    // predecessor that had one, `checkout_dir` mapped a nameable slug straight
+    // to `sessions/<slug>/tree` whatever slot it was handed, and nothing at
+    // dispatch asked whether a live run already held that path. Both lanes then
+    // ran `git checkout --detach --force` + `git clean -ffdx` in one working
+    // tree and edited it concurrently: C's reset deleted B's in-progress work,
+    // and a capture could commit the union of two members' edits as one
+    // candidate.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let store = store_dir();
+    let predecessor = test_nonce("A");
+    let first = test_nonce("B");
+    let second = test_nonce("C");
+    let sessions = super::SessionReuse::memory();
+    sessions.set_head_hash("head-A");
+    sessions.set_now(1_000);
+    let exec = LocalExecutor::new(
+        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(first.clone()).holding(second.clone())),
+        correspondence(),
+        base.path(),
+    )
+    .with_session_reuse(sessions)
+    .with_message_store(fan_out_store(
+        &store,
+        &[
+            member_order_at(&predecessor, "issue-A", StageId::Construct),
+            member_order_at(&first, "issue-B", StageId::Construct),
+            member_order_at(&second, "issue-C", StageId::Construct),
+        ],
+        &[("issue-B", "issue-A"), ("issue-C", "issue-A")],
+    ));
+
+    exec.stream_evidence(&exec.submit(&claude_order(digest(5), &predecessor, "issue-A")).unwrap()).unwrap();
+    // Neither dependent's evidence is streamed, so both stay tracked and live
+    // for the whole of the other's lane — the concurrency the defect needs.
+    let _live_first = exec.submit(&claude_order(digest(5), &first, "issue-B")).unwrap();
+    let _live_second = exec.submit(&claude_order(digest(5), &second, "issue-C")).unwrap();
+
+    let worktrees = started_worktrees(&seen);
+    assert_ne!(worktrees[1], worktrees[2], "two live sibling lanes must never stand in one checkout");
+    assert_eq!(
+        worktrees[1],
+        Some(session_tree(&base, &predecessor)),
+        "the sibling that got there first continues the predecessor's session in the predecessor's tree",
+    );
+    assert_eq!(
+        worktrees[2],
+        Some(session_tree(&base, &second)),
+        "the sibling that arrives second opens its own session rather than resetting a live checkout",
+    );
+    let resumes: Vec<Option<String>> = seen.lock().unwrap().iter().map(|spec| spec.resume.clone()).collect();
+    assert_eq!(resumes[1].as_deref(), Some("sess-1"), "the continuing sibling resumes the conversation");
+    assert!(
+        resumes[2].is_none(),
+        "the sibling that did not inherit the tree must not resume a conversation bound to it",
+    );
 }

@@ -66,10 +66,16 @@ const EVIDENCE_SUFFIX: &str = "-evidence";
 /// because the harness's own id does not exist until after it.
 ///
 /// Not the workpiece, and not the lane slot. One session carries several
-/// workpieces along declared edges (A then B then C), each reset in place, so a
+/// workpieces along declared edges (A then B, each reset in place), so a
 /// workpiece-keyed tree would split one conversation across directories; a
 /// slot-keyed one moves the tree out from under a session the moment the
 /// allocator hands that slot to someone else.
+///
+/// A chain is the narrow case of a graph, and the width is what bounds this:
+/// one session is continued by **one** dependent, because one directory holds
+/// one live lane. A predecessor with edges to both B and C unblocks them
+/// together, so the second of them opens its own session rather than inheriting
+/// this one — see `session_slug`.
 const SESSIONS_DIR: &str = "sessions";
 
 /// The working tree inside one session's directory. A child of the session
@@ -647,6 +653,18 @@ impl LocalExecutor {
     // member's row, so its own later laps resolve directly. Everything else
     // mints a fresh slug from the dispatch nonce.
     //
+    // The inheritance is **exclusive**, and that is what makes the slug an
+    // address rather than a hint (#5425 fan-out). The member graph is a DAG: a
+    // predecessor with edges to both B and C unblocks them on one admission and
+    // they dispatch in the same tick. A sibling-blind inheritance handed both
+    // the same slug, and the checkout is a pure function of the slug, so two
+    // live lanes reset and built one working tree at once — the second's
+    // `git clean` taking the first's work with it. Only one dependent continues
+    // the predecessor's session; a sibling that finds the slug already held by
+    // another member mints its own, which costs a cold launch and keeps its
+    // work. The check and the record share one lock scope, so two concurrent
+    // dispatches cannot both read the slug as free.
+    //
     // Store-only, and deliberately so: it runs before the pool acquire, because
     // the acquire needs the tree (it hashes the static prefix out of it) and the
     // tree needs the slug.
@@ -657,12 +675,40 @@ impl LocalExecutor {
             if let Ok(Some(slug)) = store.lookup_session_slug(bloom, workpiece) {
                 return Some(SessionSlug(slug));
             }
-            let inherited = store
-                .lookup_predecessors(bloom, workpiece)
-                .ok()
-                .into_iter()
-                .flatten()
-                .find_map(|predecessor| store.lookup_session_slug(bloom, &predecessor).ok().flatten());
+            let inherited =
+                store.lookup_predecessors(bloom, workpiece).ok().into_iter().flatten().find_map(|predecessor| {
+                    let slug = store.lookup_session_slug(bloom, &predecessor).ok().flatten()?;
+                    match store.session_slug_holder(bloom, &slug, &predecessor) {
+                        Ok(None) => Some(slug),
+                        // A held slug is not a failure: this member opens its
+                        // own session and the next declared predecessor, if it
+                        // has one, is still considered.
+                        Ok(Some(sibling)) => {
+                            tracing::info!(
+                                nonce,
+                                workpiece,
+                                predecessor,
+                                sibling,
+                                "local executor backend: a sibling already continues this predecessor's session; \
+                                 opening a fresh one so the two do not build in one checkout",
+                            );
+                            None
+                        }
+                        // Fail closed onto a fresh session: a slug this cannot
+                        // prove is free may be live under another member.
+                        Err(error) => {
+                            tracing::warn!(
+                                nonce,
+                                workpiece,
+                                predecessor,
+                                %error,
+                                "local executor backend: could not read who holds this predecessor's session; \
+                                 opening a fresh one",
+                            );
+                            None
+                        }
+                    }
+                });
             let slug = inherited.map_or_else(|| SessionSlug::minted_from(nonce), SessionSlug);
             let recorded = store.record_session_slug(bloom, workpiece, &slug.0);
             drop(store);
@@ -1027,6 +1073,13 @@ impl LocalExecutor {
 
     /// Predecessor sessions this Construct may resume. `None` when the member
     /// has no graph or already journaled its own handle (a retry uses the pool).
+    ///
+    /// Each candidate carries whether this dispatch stands in that
+    /// predecessor's tree — its slug is the one this member inherited. The
+    /// resume and the tree are one decision, because a resumed conversation
+    /// edits the directory it was born in whatever `--cwd` says: the dependent
+    /// that inherited the tree resumes there, and the sibling that opened its
+    /// own session launches cold in its own (#5425).
     fn predecessor_resume_candidates(&self, bloom: &[u8], workpiece: &str) -> Option<Vec<PredecessorCandidate>> {
         let messages = self.messages.as_ref()?;
         let mut store = messages.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1037,12 +1090,15 @@ impl LocalExecutor {
         if predecessors.is_empty() {
             return None;
         }
+        let own_slug = store.lookup_session_slug(bloom, workpiece).ok().flatten();
         let candidates = predecessors
             .iter()
             .filter_map(|predecessor| {
                 let (session_id, context_tokens, deposited_unix) =
                     store.lookup_construct_session_meta(bloom, predecessor).ok().flatten()?;
-                Some(PredecessorCandidate { session_id, context_tokens, deposited_unix })
+                let continues_tree =
+                    own_slug.is_some() && store.lookup_session_slug(bloom, predecessor).ok().flatten() == own_slug;
+                Some(PredecessorCandidate { session_id, context_tokens, deposited_unix, continues_tree })
             })
             .collect();
         drop(store);
