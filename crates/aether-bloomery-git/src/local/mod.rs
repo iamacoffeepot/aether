@@ -211,22 +211,7 @@ impl GitDataApi for LocalGitData {
     }
 
     fn create_commit(&self, message: &str, tree: &str, parents: &[String]) -> Result<GitCommit, GitDataError> {
-        let mut args = vec!["commit-tree".to_owned(), tree.to_owned()];
-        for parent in parents {
-            args.push("-p".to_owned());
-            args.push(parent.clone());
-        }
-        args.push("-m".to_owned());
-        args.push(message.to_owned());
-        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-        let output = command::run_env(&self.repo, &borrowed, &command::BLOOMERY_IDENTITY)?;
-        if !output.status.success() {
-            return Err(GitDataError::Command(format!(
-                "git commit-tree {tree}: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
-        let sha = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let sha = command::commit_tree(&self.repo, message, tree, parents)?;
         Ok(GitCommit { sha, tree: tree.to_owned(), message: message.to_owned() })
     }
 

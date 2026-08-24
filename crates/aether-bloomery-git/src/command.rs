@@ -12,15 +12,17 @@ use std::process::{Command, Output, Stdio};
 
 use crate::client::{GitCommit, GitDataError};
 
-/// The identity every locally minted commit carries. Pinned so a retry of
-/// `create_commit` with the same `(message, tree, parents)` hashes to the same
-/// object — `GitSource::integrate` recovers from a fault between commit and
-/// ref update only because of that. Shared with the object-repo fake so the
-/// two backends mint the same sha for the same inputs.
-pub const BLOOMERY_IDENTITY: [(&str, &str); 6] = [
-    ("GIT_AUTHOR_NAME", "bloomery"),
-    ("GIT_AUTHOR_EMAIL", "bloomery@aether.invalid"),
-    ("GIT_AUTHOR_DATE", "@0 +0000"),
+/// Who a locally minted commit is authored by. The bloomery is its own author,
+/// at an address that resolves: the roll keeps the author side verbatim when it
+/// linearizes the day onto main, so this is what a reader of landed history
+/// sees, and an `.invalid` domain renders there as an unattributed commit.
+pub const BLOOMERY_AUTHOR: (&str, &str) = ("bloomery", "bloomery@iamateapot.dev");
+
+/// Who a locally minted commit is committed by, timestamp included. Pinned, and
+/// never seen: the roll rewrites the committer side onto the operator identity
+/// and the real moment of the linearization, so this value reaches no landed
+/// commit. Holding it fixed is half of what keeps a re-mint byte-identical.
+pub const BLOOMERY_COMMITTER: [(&str, &str); 3] = [
     ("GIT_COMMITTER_NAME", "bloomery"),
     ("GIT_COMMITTER_EMAIL", "bloomery@aether.invalid"),
     ("GIT_COMMITTER_DATE", "@0 +0000"),
@@ -343,6 +345,76 @@ fn spawn_err(repo: Option<&Path>, args: &[&str], source: io::Error) -> GitComman
 
 fn failed(args: &[&str], output: &Output) -> GitCommandError {
     GitCommandError::Failed { args: format!("{args:?}"), stderr: trim_bytes(&output.stderr) }
+}
+
+/// Mint `message` over `tree` with `parents` as a commit object in `repo`,
+/// returning its sha. The one implementation the local backend and the
+/// object-repo fake both commit through, so the two cannot mint different shas
+/// for one input.
+///
+/// The author date is inherited from the parents rather than read from the
+/// clock, because the sha has to stay a pure function of
+/// `(message, tree, parents)`: `GitSource::integrate` recovers from a fault
+/// between its commit and its ref update only because the retry re-creates a
+/// byte-identical commit and git hands back the same sha.
+///
+/// # Errors
+/// Spawn failed, or `commit-tree` refused the tree or one of the parents.
+pub fn commit_tree(repo: &Path, message: &str, tree: &str, parents: &[String]) -> Result<String, GitDataError> {
+    let mut args = vec!["commit-tree".to_owned(), tree.to_owned()];
+    for parent in parents {
+        args.push("-p".to_owned());
+        args.push(parent.clone());
+    }
+    args.extend(["-m".to_owned(), message.to_owned()]);
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    let authored = format!("@{} +0000", inherited_author_secs(repo, parents));
+    let identity = [
+        ("GIT_AUTHOR_NAME", BLOOMERY_AUTHOR.0),
+        ("GIT_AUTHOR_EMAIL", BLOOMERY_AUTHOR.1),
+        ("GIT_AUTHOR_DATE", authored.as_str()),
+        BLOOMERY_COMMITTER[0],
+        BLOOMERY_COMMITTER[1],
+        BLOOMERY_COMMITTER[2],
+    ];
+    let output = run_env(repo, &borrowed, &identity)?;
+    if !output.status.success() {
+        return Err(GitDataError::Command(format!(
+            "git commit-tree {tree}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(trim_bytes(&output.stdout))
+}
+
+/// The moment a commit over `parents` is authored at: the newest one already
+/// recorded on a parent, in whole seconds since the epoch.
+///
+/// A real moment that is nonetheless a pure function of the inputs — the two
+/// properties otherwise in tension here, since a clock read would mint a second
+/// commit on every retry. A fold's merge inherits the lane capture it merges
+/// in, which is when the work was actually produced; a tree-replace integrate
+/// inherits the branch it extends. Taking the newest rather than a fixed side
+/// is what keeps the dates along a branch from going backwards.
+///
+/// A parentless commit has nothing to inherit and stays at the epoch. The only
+/// ones are the claim registry's holds and their tombstones, which live on
+/// `bloomery/claims/*` and never reach landed history.
+fn inherited_author_secs(repo: &Path, parents: &[String]) -> i64 {
+    parents.iter().filter_map(|parent| newest_stamp(repo, parent)).max().unwrap_or(0)
+}
+
+/// The later of `sha`'s author and committer timestamps, or `None` when `sha`
+/// names no commit. Both sides are read because either can be the real one: a
+/// bloomery-minted parent's committer date is the pinned epoch, and a rebased
+/// parent's author date predates its committer date.
+fn newest_stamp(repo: &Path, sha: &str) -> Option<i64> {
+    run_ok(repo, &["show", "--no-patch", "--format=%at %ct", sha, "--"])
+        .ok()?
+        .split_whitespace()
+        .filter_map(|stamp| stamp.parse::<i64>().ok())
+        .max()
 }
 
 /// Read commit object `sha` (`cat-file`). A missing or non-commit object is
