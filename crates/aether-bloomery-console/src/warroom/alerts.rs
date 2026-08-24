@@ -6,6 +6,7 @@
 
 use super::Focus;
 use crate::dto::{BloomView, MemberView, ViewDocument};
+use crate::screen::live_blooms;
 
 /// One loud condition. Display text lives on the folded needs-you row.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,7 +31,7 @@ pub enum AlertKind {
 #[must_use]
 pub fn alerts(view: &ViewDocument) -> Vec<Alert> {
     let mut alerts = Vec::new();
-    for bloom in &view.blooms {
+    for bloom in live_blooms(view) {
         let prefix = bloom.id.prefix();
         if bloom.review_park.is_some() {
             alerts.push(Alert { kind: AlertKind::Park, detail: prefix.clone(), focus: Focus::bloom(bloom.id) });
