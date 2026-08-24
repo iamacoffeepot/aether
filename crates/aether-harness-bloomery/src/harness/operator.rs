@@ -103,7 +103,7 @@ impl ScenarioHarness {
                 cascade: *cascade,
             },
             OperatorMove::Amend { workpiece, scope_revision, .. } => {
-                Fact::Supersede { predecessor: bloom, successor: self.amended_spec(workpiece, *scope_revision) }
+                return self.admit_amendment(bloom, workpiece, *scope_revision).1;
             }
         };
 
@@ -148,17 +148,37 @@ impl ScenarioHarness {
         let revision = self.approve_widened_revision(&widened);
         assert_eq!(revision, digest_of(&widened), "the store addresses the successor by its own content");
 
-        let spec = self.amended_spec(&workpiece, revision);
+        let (successor, outcome) = self.admit_amendment(bloom, &workpiece, revision);
+        assert!(matches!(outcome, Outcome::Superseded { .. }), "the amendment supersedes: {outcome:?}");
+        successor
+    }
+
+    /// Render the successor's work orders, admit the supersession, and adopt it
+    /// as the sealed spec.
+    ///
+    /// The work orders are rendered before the fact is admitted, exactly as the
+    /// supersede door renders them: the successor is a new bloom id, so its
+    /// members' dispatch-description rows are its own, and the amended member's
+    /// row is what carries the widened surface to the lane. Adopting the
+    /// successor as `sealed` is what a second amendment in the same scenario
+    /// derives membership from.
+    fn admit_amendment(
+        &mut self,
+        predecessor: BloomId,
+        workpiece: &WorkpieceId,
+        scope_revision: Digest,
+    ) -> (BloomId, Outcome) {
+        let spec = self.amended_spec(workpiece, scope_revision);
         let successor = spec.id();
+
         self.persist_work_orders(&spec);
         let outcome = self.admit(
-            &format!("operator-amend-{}-{}", workpiece.0, revision.to_hex()),
-            Fact::Supersede { predecessor: bloom, successor: spec.clone() },
+            &format!("operator-amend-{}-{}", workpiece.0, scope_revision.to_hex()),
+            Fact::Supersede { predecessor, successor: spec.clone() },
         );
-        assert!(matches!(outcome, Outcome::Superseded { .. }), "the amendment supersedes: {outcome:?}");
         self.sealed = Some(spec);
 
-        successor
+        (successor, outcome)
     }
 
     /// The successor spec an amendment seals: the sealed bloom's members, with
