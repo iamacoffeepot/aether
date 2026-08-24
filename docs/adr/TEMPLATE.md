@@ -11,6 +11,8 @@ What problem are we solving? What constraints, prior decisions, or forces are at
 
 What we decided, stated plainly.
 
+When this decision leans on a mechanism another ADR describes, name the symbol it leans on — the function, type, variant, or route — beside the citation. A later change that removes the mechanism is then greppable from here, so this ADR cannot go on describing a route that no longer exists.
+
 ## Consequences
 
 What changes as a result — positive, negative, and neutral. Include follow-on work this decision creates or forecloses.
