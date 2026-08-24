@@ -2612,6 +2612,10 @@ impl ReconcileLanes for LocalExecutor {
         drop(registry);
         LaneOccupancy { slots, unattributed }
     }
+
+    fn started_nonces(&self) -> Vec<String> {
+        self.lock().runs.keys().cloned().collect()
+    }
 }
 
 /// Record what a dispatch is running on, beside that dispatch's own evidence:

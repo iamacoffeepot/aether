@@ -191,6 +191,10 @@ impl ReconcileLanes for RoutingExecutor {
     fn lane_occupancy(&self) -> LaneOccupancy {
         self.local.lane_occupancy()
     }
+
+    fn started_nonces(&self) -> Vec<String> {
+        self.local.started_nonces()
+    }
 }
 
 #[cfg(test)]

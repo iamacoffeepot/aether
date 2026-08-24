@@ -10,7 +10,7 @@ mod runtime;
 
 pub use invariants::{
     Ancestry, CheckResult, DETERMINISTIC_RETRY_BOUND, DoctorReport, Invariant, LiveState, OpenDispatch,
-    REPLICA_AGE_BOUND, ReplicaObservation, SURFACE_PARK_AGE_BOUND, evaluate,
+    REPLICA_AGE_BOUND, ReplicaObservation, SURFACE_PARK_AGE_BOUND, UNRESOLVED_HEAD_AGE_BOUND, evaluate,
 };
 #[cfg(feature = "github")]
 pub use runtime::{DoctorBoard, DoctorReactorState, DoctorTick};

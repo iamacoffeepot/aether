@@ -331,6 +331,14 @@ impl ExecutorShell {
         self.reconciler.as_ref().map_or_else(LaneOccupancy::default, |reconciler| reconciler.lane_occupancy())
     }
 
+    /// The nonces this host has started a local lane for. Empty when this
+    /// shell has no reconciliation face (a bare Actions mount never creates a
+    /// local evidence directory).
+    #[must_use]
+    pub fn started_nonces(&self) -> Vec<String> {
+        self.reconciler.as_ref().map_or_else(Vec::new, |reconciler| reconciler.started_nonces())
+    }
+
     /// Submit a fully-resolved work order, returning the nonce-carrying handle.
     ///
     /// # Errors
