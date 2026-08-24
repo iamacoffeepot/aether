@@ -2333,6 +2333,10 @@ mod tests {
         tokens.iter().map(|token| (*token).to_owned()).collect()
     }
 
+    fn borrowed(tokens: &[String]) -> Vec<&str> {
+        tokens.iter().map(String::as_str).collect()
+    }
+
     fn owned_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs.iter().map(|(key, value)| ((*key).to_owned(), (*value).to_owned())).collect()
     }
@@ -2481,62 +2485,94 @@ mod tests {
         assert_eq!(host_fault_in(&failing_run(&["aether-render::a_test"])), None, "and so is a failing test");
     }
 
+    /// The six mechanical gates, each with the job that runs it and the exact
+    /// words that job spells to reach the arm.
+    ///
+    /// Five go through the `cargo xtask` alias. `lock-freshness` spells the
+    /// executor's own build out with `--locked`, because building it is the
+    /// first thing in that job to resolve the dependency graph and an unlocked
+    /// build would regenerate the very lockfile the arm is about to judge — the
+    /// gate would then pass over a lock it had just repaired in place.
+    ///
+    /// `test` is deliberately absent. Its job keeps the native nextest spelling
+    /// so it can carry the affected-package selection and the shard partition,
+    /// neither of which the arm accepts; it is asserted on its own below.
+    const XTASK_GATES: &[(&str, &str, &[&str])] = &[
+        ("fmt", "verify.fmt", &["cargo", "xtask", "transform", "verify.fmt"]),
+        ("clippy", "verify.clippy", &["cargo", "xtask", "transform", "verify.clippy"]),
+        ("docs", "verify.docs", &["cargo", "xtask", "transform", "verify.docs"]),
+        ("dup-check", "verify.dup", &["cargo", "xtask", "transform", "verify.dup"]),
+        ("unused-deps", "verify.deps", &["cargo", "xtask", "transform", "verify.deps"]),
+        (
+            "lock-freshness",
+            "verify.lock",
+            &["cargo", "run", "--locked", "--quiet", "--package", "xtask", "--", "transform", "verify.lock"],
+        ),
+    ];
+
     #[test]
-    fn ci_parity_argv_matches_the_command_the_workflow_runs() {
-        // Tripwire: every argv here is a second spelling of a command Actions
-        // runs, and only `.github/workflows/ci.yml` is the copy the gate
-        // executes. Comparing the two Rust literals proved nothing about that
-        // — the workflow could be trimmed back to default features, or lose a
-        // flag, with the whole suite still green (#4843). Each assertion below
-        // reads the workflow, so drift on either side fails here.
-        let fmt = verify_command("verify.fmt").expect("verify.fmt mapped");
-        assert_eq!(argv(&fmt), workflow::gate_step("fmt", &["cargo", "fmt"]).run);
+    fn every_mechanical_gate_invokes_its_own_verify_arm() {
+        // Tripwire: the calibration each of these gates applies — the jscpd
+        // threshold, the machete flags, the rustdoc lints, clippy's feature
+        // set — now lives in exactly one place, the arm. The drift worth
+        // catching is no longer two argv spellings disagreeing but a gate
+        // quietly leaving the executor: a job that stopped invoking its arm, or
+        // invoked a different one, would run a check the lane cannot predict
+        // while the whole suite stayed green (#4843, #4856, #4863).
+        for (job, id, invoker) in XTASK_GATES {
+            assert!(verify_command(id).is_some(), "`{id}` must be a mapped arm for `jobs.{job}` to invoke");
 
-        // The duplicate-code gate states its whole calibration on the argv
-        // (#4856), so the argv is the gate: a lane running a different format,
-        // threshold, or min-tokens predicts a different check than CI applies.
-        // Selected on `npx` alone, since every token that carries calibration
-        // has to stay on the asserted side rather than the selecting side.
-        let dup = verify_command("verify.dup").expect("verify.dup mapped");
-        assert_eq!(argv(&dup), workflow::gate_step("dup-check", &["npx"]).run);
+            let spelled = workflow::steps_running(job, invoker);
+            assert_eq!(
+                spelled.len(),
+                1,
+                "`jobs.{job}` must reach its arm exactly once as `{}`, found {} such steps",
+                invoker.join(" "),
+                spelled.len(),
+            );
 
-        // The lane asks cargo for JSON diagnostics and deliberately does not
-        // deny (#4706); `clippy_verdict` applies the same fail-on-any-warning
-        // predicate over the complete list a non-denying run produces. That
-        // trailing `-- -D warnings` is the whole permitted divergence —
-        // everything before it is the shared invocation.
-        let clippy = verify_command("verify.clippy").expect("verify.clippy mapped");
-        let ci_clippy = workflow::gate_step("clippy", &["cargo", "clippy"]).run;
-        let (shared, deny) = ci_clippy.split_at(ci_clippy.len() - 3);
-        assert_eq!(
-            deny,
-            owned(&["--", "-D", "warnings"]),
-            "CI's clippy gate denies through a trailing `-- -D warnings`"
-        );
-        assert_eq!(argv(&clippy), [shared.to_vec(), owned(&["--message-format=json"])].concat());
+            // And by no other spelling. The count above is about the words this
+            // gate is required to use; this one is about the arm being run once
+            // whatever words reach it, so a second invocation appended beside
+            // the first cannot hide behind a different prefix.
+            let arms = workflow::steps_running(job, &["transform", id]);
+            assert_eq!(arms.len(), 1, "`jobs.{job}` must run `{id}` exactly once, found {}", arms.len());
+        }
+    }
 
-        // Docs is a straight mirror, env included: RUSTDOCFLAGS is what
-        // escalates the tracked lints to failures, so a lint denied on one
-        // side and not the other is a gate the lane cannot predict.
-        let docs = verify_command("verify.docs").expect("verify.docs mapped");
-        let ci_docs = workflow::gate_step("docs", &["cargo", "doc"]);
-        assert_eq!(argv(&docs), ci_docs.run);
-        assert_eq!(owned_pairs(docs.env), ci_docs.env);
+    #[test]
+    fn no_mechanical_gate_still_spells_its_own_calibrated_command() {
+        // Tripwire: the other half of the move. An arm invocation added beside
+        // a raw `cargo clippy … -D warnings` or a raw `npx jscpd -t 0.5` would
+        // satisfy every assertion above while restoring the two-site edit the
+        // executor exists to end — and the second copy is the one Actions would
+        // judge by. The arm's own argv is what must not reappear in the job
+        // that invokes it.
+        for (job, id, _) in XTASK_GATES {
+            let invocation = verify_command(id).unwrap_or_else(|| panic!("{id} mapped"));
+            let calibrated = argv(&invocation);
+            let restated = workflow::steps_running(job, &borrowed(&calibrated));
+            assert!(
+                restated.is_empty(),
+                "`jobs.{job}` spells `{}` itself; that calibration belongs to `{id}` alone",
+                calibrated.join(" "),
+            );
+        }
+    }
 
-        // cargo-machete is invoked as the binary rather than through `cargo
-        // machete`, which hands the subcommand its own name as argv[1] and
-        // walks a nonexistent `machete/` alongside `crates/` (#4706). The
-        // directories it scans are still CI's, and they are not optional.
-        let deps = verify_command("verify.deps").expect("verify.deps mapped");
-        let ci_deps = workflow::gate_step("unused-deps", &["cargo", "machete"]).run;
-        assert_eq!(deps.program, "cargo-machete", "going through `cargo machete` re-adds the bogus path");
-        assert_eq!(owned(deps.args), ci_deps[2..].to_vec());
-
-        // The test member drops CI's shard partition — the lane runs the suite
-        // whole — and keeps every flag before it, `--all-features` above all: a
-        // lane running fewer tests than the gate it predicts is a false green
-        // that surfaces at the landing pull request. The wasm pre-build its
-        // scenario tests load is CI's own step, in the same job.
+    #[test]
+    fn the_test_gate_keeps_the_native_spelling_its_scheduling_needs() {
+        // Tripwire: `test` is the one mechanical gate still spelled in YAML,
+        // and the reason is its scheduling — an affected-package selection on
+        // pull requests and a three-way shard partition on everything else,
+        // neither of which the arm accepts. So the two argv stay two, and the
+        // parity between them is asserted the old way.
+        //
+        // The member drops CI's partition — the lane runs the suite whole — and
+        // keeps every flag before it, `--all-features` above all: a lane
+        // running fewer tests than the gate it predicts is a false green that
+        // surfaces at the landing pull request. The wasm pre-build its scenario
+        // tests load is CI's own step, in the same job.
         let test = verify_command("verify.test").expect("verify.test mapped");
         let ci_test = workflow::named_step("test", "Run tests (workspace, parallel)");
         let partition = ci_test.run.iter().position(|token| token == "--partition").expect("CI shards the full suite");
@@ -2548,6 +2584,50 @@ mod tests {
         for pair in &ci_test.env {
             assert!(owned_pairs(test.env).contains(pair), "CI sets {pair:?} for the gate, so the lane must too");
         }
+
+        // The affected selection is the second half of that scheduling, and it
+        // is why the job cannot simply become an arm invocation.
+        assert_eq!(
+            workflow::named_step("test", "Compute affected packages (PR only)").run,
+            owned(&["cargo", "xtask", "affected", "--base", "HEAD^1", "--github-output"]),
+        );
+        assert!(
+            workflow::steps_running("test", &["transform", "verify.test"]).is_empty(),
+            "routing the shards through the arm would discard the affected subset and cross-build the wasm per shard",
+        );
+    }
+
+    #[test]
+    fn the_suppression_gate_runs_the_base_branchs_scanner_not_the_candidates() {
+        // Tripwire: this is the one gate that must not become an arm. The arm
+        // runs `python3 scripts/check-suppressions.py` out of the tree it is
+        // checking, which on Actions is the tree under review — a candidate
+        // could then ship a scanner that approves its own suppressions. CI
+        // materializes the scanner from the event base instead and runs that
+        // blob, and the lane's arm is the local-only spelling of the same scan.
+        let suppress = verify_command("verify.suppress").expect("verify.suppress mapped");
+        assert_eq!(suppress.program, "python3");
+        assert_eq!(owned(suppress.args), owned(&["scripts/check-suppressions.py"]));
+
+        assert_eq!(
+            workflow::steps_running("suppressions", &["git", "show", "\"${BASE_SHA}:scripts/check-suppressions.py\""])
+                .len(),
+            1,
+            "the scanner CI executes has to come out of the event base",
+        );
+        assert_eq!(
+            workflow::steps_running("suppressions", &["python3", "\"${SCANNER_PATH}\""]).len(),
+            1,
+            "and the run has to be of that materialized blob",
+        );
+        assert!(
+            workflow::steps_running("suppressions", &borrowed(&argv(&suppress))).is_empty(),
+            "running the tree's own scanner would let a candidate judge itself",
+        );
+        assert!(
+            workflow::steps_running("suppressions", &["transform", "verify.suppress"]).is_empty(),
+            "and so would the arm, which reads the same tree",
+        );
     }
 
     #[test]
@@ -2623,15 +2703,14 @@ mod tests {
         );
 
         // Tripwire: narrowing is a package selection and nothing else. The
-        // scoped argv is what a member actually dispatches, and the CI-parity
-        // assertions above pin only the unscoped one — so a flag dropped on
-        // this path would leave the member predicting a gate CI does not run
-        // while every parity test stayed green (#5411). Read from the workflow
-        // rather than from a literal, so drift on either side fails here.
-        let ci_clippy = workflow::gate_step("clippy", &["cargo", "clippy"]).run;
-        let flags: Vec<String> =
-            ci_clippy[2..ci_clippy.len() - 3].iter().filter(|flag| *flag != "--workspace").cloned().collect();
-        assert_eq!(args[1..=flags.len()], flags[..], "the member must carry every CI flag but the selection");
+        // scoped argv is what a member actually dispatches, and the parity
+        // assertions above pin only which arm each gate invokes — so a flag
+        // dropped on this path would leave the member predicting a gate CI does
+        // not run while every parity test stayed green (#5411). Read off the
+        // unscoped invocation rather than restated, so the two move together.
+        let unscoped: Vec<String> = owned(clippy.args);
+        let flags: Vec<String> = unscoped.iter().filter(|flag| *flag != "--workspace").cloned().collect();
+        assert_eq!(args[..flags.len()], flags[..], "narrowing may drop the selection and no other flag");
 
         // nextest states no `--workspace` at all — the workspace is its own
         // default — so there the package flags are the entire narrowing.
@@ -3021,19 +3100,25 @@ mod tests {
     }
 
     #[test]
-    fn the_lock_member_runs_the_lock_freshness_gate_command() {
-        // Parity with the gate, which wraps the command in an `if !` so its
-        // stdout can be discarded — the argv is a contiguous run inside that
-        // script rather than its first words.
-        let lock = verify_command("verify.lock").expect("verify.lock mapped");
-        let argv = argv(&lock);
-        let step =
-            workflow::named_step("lock-freshness", "Resolve the dependency graph against the committed lock").run;
+    fn the_lock_gate_builds_its_executor_against_the_lock_it_judges() {
+        // Tripwire: this is the one gate whose invocation spelling is itself
+        // load-bearing. `cargo xtask` is an alias, and the build behind it is
+        // the first thing in the job to resolve the dependency graph — an
+        // unlocked one would regenerate the very lockfile the arm then judges,
+        // so the gate would pass over a lock it had just repaired in place.
+        // `--locked` on the executor's own build is what stops that.
+        let step = workflow::named_step("lock-freshness", "Cargo lock freshness gate").run;
+        let build = step
+            .iter()
+            .position(|token| token == "transform")
+            .expect("the lock-freshness step must reach an arm through `transform`");
 
-        assert!(
-            step.windows(argv.len()).any(|window| window == argv.as_slice()),
-            "the lock-freshness step must run {argv:?}, found {step:?}",
+        assert_eq!(
+            step[build - 7..build],
+            owned(&["cargo", "run", "--locked", "--quiet", "--package", "xtask", "--"])[..],
+            "the executor's own build has to carry --locked: {step:?}",
         );
+        assert_eq!(step[build + 1], "verify.lock", "and the arm it reaches is the lock member's");
     }
 
     #[test]
