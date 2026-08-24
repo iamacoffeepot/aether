@@ -8,17 +8,17 @@
 //! nonce-keyed checkouts). These tests pin that the sweep reads the journal
 //! and the stub runner, not the child's exit status.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use aether_bloomery::testing::{draft, event, membership, splice_bloom};
 use aether_bloomery::{BloomId, BloomStatus, Digest, Fact, Forecast, ResolvedConfigs, Snapshot, SpendWindow, reduce};
 use aether_bloomery_github::testing::FakeGithub;
-use aether_bloomery_github::{GitSource, MainlineRef, candidate_ref_name};
+use aether_bloomery_github::{GitSource, MainlineRef, SourceError, candidate_ref_name};
 use aether_data::wire::to_vec;
 
 use super::sweep::{JanitorPolicy, SweepRequest, retention_duration, sweep};
@@ -207,6 +207,7 @@ fn a_killed_runs_worktree_is_reclaimed_once_its_bloom_is_terminal() {
         lanes: &idle,
         policy: &keep,
         now,
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.worktrees, 1, "the killed run's checkout is reclaimed");
@@ -250,6 +251,7 @@ fn a_session_tree_outlives_its_launches_and_dies_with_the_work_bound_to_it() {
         lanes: &idle,
         policy: &keep,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.worktrees, 1, "one tree went and one stayed");
@@ -307,6 +309,7 @@ fn a_live_members_session_tree_survives_a_journal_this_reducer_would_re_decide()
         lanes: &idle,
         policy: &keep,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.worktrees, 0, "a non-withdrawn member of an active bloom keeps its tree between laps");
@@ -347,6 +350,7 @@ fn a_session_tree_is_kept_while_its_own_order_is_outstanding() {
         lanes: &idle,
         policy: &keep,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.worktrees, 0, "a session with an outstanding order keeps its tree");
@@ -378,6 +382,7 @@ fn a_lane_slots_checkout_is_never_reclaimed() {
         lanes: &idle,
         policy: &keep,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.worktrees, 0);
@@ -410,6 +415,7 @@ fn a_live_blooms_outstanding_worktree_is_spared() {
         lanes: &idle,
         policy: &keep,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.worktrees, 0, "a live bloom's outstanding checkout stays");
@@ -443,6 +449,7 @@ fn consumed_evidence_of_a_terminal_bloom_is_kept_inside_the_retention_window() {
         lanes: &idle,
         policy: &keep,
         now,
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.evidence_dirs, 0);
@@ -475,10 +482,46 @@ fn consumed_evidence_of_a_terminal_bloom_is_reclaimed_after_the_retention_window
         lanes: &idle,
         policy: &keep,
         now,
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.evidence_dirs, 1);
     assert!(!evidence.exists(), "evidence past the window of a terminal bloom is reclaimed");
+}
+
+#[test]
+fn an_outstanding_dispatch_keeps_its_evidence() {
+    // An outstanding order is the durable fact a lane may still be writing this
+    // directory: the slot record, transcript, and heartbeat the silence
+    // watchdog reads. Asking the journal whether the owner is a sealed bloom
+    // cannot speak for a pre-bloom scoping run (ADR-0208) — a real lane under
+    // a reserved digest nothing ever seals — and with retention zero the age
+    // test does not save it. The outstanding nonce is protection enough.
+    let scratch = tempfile::tempdir().expect("a scratch dir is created");
+    let nonce = "scope-nonce";
+    let evidence = scratch.path().join(format!("{nonce}-evidence"));
+    fs::create_dir_all(&evidence).expect("the evidence dir is created");
+
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
+    let pre_bloom = BloomId(Digest::of_domain_tagged("aether.bloomery.scope_run_bloom", b"scope-run"));
+    store.record_order(&order_for(nonce, &pre_bloom)).expect("the order is recorded");
+
+    let runner = StubRunner { registered: vec![], released: Released(Arc::new(Mutex::new(Vec::new()))) };
+    let drop_now = policy(0, u64::MAX);
+    let report = run(&mut SweepRequest {
+        store: &mut store,
+        runner: &runner,
+        source: None,
+        worktree_base: scratch.path(),
+        target_base: scratch.path(),
+        lanes: &idle,
+        policy: &drop_now,
+        now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
+    });
+
+    assert_eq!(report.evidence_dirs, 0, "an outstanding dispatch's evidence is not reclaimed");
+    assert!(evidence.is_dir(), "the running lane still finds the directory it was born in");
 }
 
 #[test]
@@ -498,6 +541,7 @@ fn target_dirs_are_swept_when_over_budget_and_idle() {
         lanes: &idle,
         policy: &tight,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.target_dirs, 1);
@@ -527,6 +571,7 @@ fn an_over_budget_sweep_evicts_only_far_enough_to_get_under_budget() {
         lanes: &idle,
         policy: &tight,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.target_dirs, 1, "one eviction clears the overage");
@@ -551,6 +596,7 @@ fn a_running_slots_target_dir_is_never_evicted() {
         lanes: &slot_zero_busy,
         policy: &tight,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.target_dirs, 0);
@@ -579,6 +625,7 @@ fn an_idle_slot_is_evicted_while_its_busy_neighbour_is_spared() {
         lanes: &slot_zero_busy,
         policy: &tight,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.target_dirs, 1);
@@ -606,6 +653,7 @@ fn a_lane_child_in_an_unrecoverable_slot_blocks_every_eviction() {
         lanes: &busy_in_an_unknown_slot,
         policy: &tight,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.target_dirs, 0);
@@ -647,6 +695,7 @@ fn a_slot_claimed_after_the_budget_was_measured_is_not_evicted() {
         lanes: &lanes,
         policy: &tight,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.target_dirs, 0);
@@ -681,6 +730,7 @@ fn a_target_dir_that_could_not_be_removed_is_not_counted_and_is_retried() {
         lanes: &idle,
         policy: &tight,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.target_dirs, 1, "only the directory that actually went is counted");
@@ -701,6 +751,7 @@ fn a_target_dir_that_could_not_be_removed_is_not_counted_and_is_retried() {
         lanes: &idle,
         policy: &tight,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(retry.target_dirs, 1);
@@ -739,15 +790,17 @@ fn terminal_bloom_working_refs_are_pruned_and_claim_refs_are_spared() {
 
     let runner = StubRunner { registered: vec![], released: Released(Arc::new(Mutex::new(Vec::new()))) };
     let keep = policy(7, u64::MAX);
+    let prune = |bloom: &BloomId| source.prune_working_refs(bloom);
     let report = run(&mut SweepRequest {
         store: &mut store,
         runner: &runner,
-        source: Some(&source),
+        source: Some(&prune),
         worktree_base: scratch.path(),
         target_base: scratch.path(),
         lanes: &idle,
         policy: &keep,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.refs, 3, "candidate + integration + checkpoint of the terminal bloom");
@@ -757,6 +810,100 @@ fn terminal_bloom_working_refs_are_pruned_and_claim_refs_are_spared() {
     assert!(fake.ref_exists(&landing), "the landing branch is not this issue's to delete");
     assert!(fake.ref_exists("bloomery/admission/mainline"), "claim refs have their own reactor");
     assert!(fake.ref_exists("bloomery/claims/wp"), "a workpiece claim is untouched");
+}
+
+#[test]
+fn a_terminal_bloom_is_pruned_once() {
+    // The snapshot's terminal set is monotonic, and prune_working_refs is a
+    // full-price list on the GitHub-authoritative path. Without a memo the
+    // janitor re-asks for every landed bloom every tick, and the shared
+    // client's budget guard then withholds land, integrate, and inspects.
+    let scratch = tempfile::tempdir().expect("a scratch dir is created");
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
+    journal_superseded(&mut store);
+
+    let calls = AtomicUsize::new(0);
+    let prune = |_bloom: &BloomId| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        Ok(0)
+    };
+    let runner = StubRunner { registered: vec![], released: Released(Arc::new(Mutex::new(Vec::new()))) };
+    let keep = policy(7, u64::MAX);
+    let mut pruned = HashSet::new();
+    let first = run(&mut SweepRequest {
+        store: &mut store,
+        runner: &runner,
+        source: Some(&prune),
+        worktree_base: scratch.path(),
+        target_base: scratch.path(),
+        lanes: &idle,
+        policy: &keep,
+        now: SystemTime::now(),
+        pruned: &mut pruned,
+    });
+    let second = run(&mut SweepRequest {
+        store: &mut store,
+        runner: &runner,
+        source: Some(&prune),
+        worktree_base: scratch.path(),
+        target_base: scratch.path(),
+        lanes: &idle,
+        policy: &keep,
+        now: SystemTime::now(),
+        pruned: &mut pruned,
+    });
+
+    assert_eq!(first.refs, 0);
+    assert_eq!(second.refs, 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "the second tick does not re-prune a bloom the first tick already did");
+}
+
+#[test]
+fn a_failed_prune_is_retried_on_the_next_tick() {
+    // A prune that errors is not remembered, so the next tick retries — the
+    // same promise the warn already made when the call failed.
+    let scratch = tempfile::tempdir().expect("a scratch dir is created");
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
+    journal_superseded(&mut store);
+
+    let calls = AtomicUsize::new(0);
+    let fail = AtomicBool::new(true);
+    let prune = |_bloom: &BloomId| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        if fail.load(Ordering::SeqCst) {
+            return Err(SourceError::Malformed("injected prune fault".to_owned()));
+        }
+        Ok(0)
+    };
+    let runner = StubRunner { registered: vec![], released: Released(Arc::new(Mutex::new(Vec::new()))) };
+    let keep = policy(7, u64::MAX);
+    let mut pruned = HashSet::new();
+    run(&mut SweepRequest {
+        store: &mut store,
+        runner: &runner,
+        source: Some(&prune),
+        worktree_base: scratch.path(),
+        target_base: scratch.path(),
+        lanes: &idle,
+        policy: &keep,
+        now: SystemTime::now(),
+        pruned: &mut pruned,
+    });
+    fail.store(false, Ordering::SeqCst);
+    run(&mut SweepRequest {
+        store: &mut store,
+        runner: &runner,
+        source: Some(&prune),
+        worktree_base: scratch.path(),
+        target_base: scratch.path(),
+        lanes: &idle,
+        policy: &keep,
+        now: SystemTime::now(),
+        pruned: &mut pruned,
+    });
+
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "a failed prune is retried rather than remembered as done");
+    assert_eq!(pruned.len(), 1, "the successful retry is what the memo records");
 }
 
 fn short_hex(bloom: &BloomId) -> String {

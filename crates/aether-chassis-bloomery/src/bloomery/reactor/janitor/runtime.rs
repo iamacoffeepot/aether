@@ -1,11 +1,14 @@
 //! The runtime for the janitor reactor: a poll-driven loop that rebuilds the
 //! snapshot from the journal and sweeps terminal artefacts.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use aether_actor::runtime;
+use aether_bloomery::BloomId;
+use aether_bloomery_github::SourceError;
 use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -37,6 +40,10 @@ pub struct JanitorReactorState {
     worktree_base: PathBuf,
     target_base: PathBuf,
     policy: JanitorPolicy,
+    /// Blooms whose working refs this process has already pruned successfully.
+    /// Process-local: a restart walks the terminal set again, one bloom per
+    /// tick, and a prune that errors is left out so the next tick retries.
+    pruned: HashSet<BloomId>,
     mailer: Arc<Mailer>,
     self_mailbox: MailboxId,
     _timer: Option<TimerHandle>,
@@ -95,6 +102,7 @@ impl NativeActor for JanitorReactorCapability {
                 lane_target_budget_bytes: config.lane_target_budget_bytes,
                 evidence_retention_days: config.evidence_retention_days,
             },
+            pruned: HashSet::new(),
             mailer,
             self_mailbox,
             _timer: Some(timer),
@@ -121,18 +129,29 @@ impl NativeActor for JanitorReactorCapability {
         let executor = state.executor.clone();
         let lanes = || executor.as_ref().map_or_else(LaneOccupancy::default, ExecutorShell::lane_occupancy);
 
+        let source = state.source.clone();
+        let prune_closure;
+        let prune: Option<&dyn Fn(&BloomId) -> Result<usize, SourceError>> = match source.as_ref() {
+            Some(shell) => {
+                prune_closure = |bloom: &BloomId| shell.prune_working_refs(bloom);
+                Some(&prune_closure)
+            }
+            None => None,
+        };
+
         let Some(store) = state.store.as_mut() else {
             return;
         };
         match sweep(&mut SweepRequest {
             store,
             runner: state.runner.as_ref(),
-            source: state.source.as_ref(),
+            source: prune,
             worktree_base: &state.worktree_base,
             target_base: &state.target_base,
             lanes: &lanes,
             policy: &state.policy,
             now: SystemTime::now(),
+            pruned: &mut state.pruned,
         }) {
             Ok(report) => {
                 if report.worktrees + report.evidence_dirs + report.refs + report.target_dirs > 0 {
