@@ -656,7 +656,7 @@ mod tests {
         thread::scope(|scope| {
             let mut shell = Shell::new(
                 scope,
-                Endpoint { host: addr.ip().to_string(), port: addr.port() },
+                Endpoint { host: addr.ip().to_string(), port: addr.port(), token: None },
                 Duration::from_secs(1),
                 false,
             );
