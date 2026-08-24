@@ -115,23 +115,18 @@ fn a_fold_two_candidates_refuse_narrows_to_a_composition_over_them() {
     assert_eq!(stage_of(&repair), StageId::Refine, "one merge mechanism means one repair stage");
 
     // And it finishes: the repair produces a candidate that makes both intents
-    // coexist, and it is verified like any other candidate — the bloom moved
-    // without a person and without either parent being reopened.
+    // coexist. The composition does not dispatch its own Verify — no admitted
+    // fact can complete a composition at that stage — and the member whose
+    // verdict minted the narrowing is put back on its own Verify against the
+    // repaired tree. Its original refusal judged a tree that has since been
+    // redone, so leaving it holding one would strand it with nothing in flight.
     let repair_capture = harness.seed_capture(bloom, &repair.workpiece, digest(0xCF), digest(0xDF));
     harness.upload_admitted(&captured(&repair, repair_capture));
-    // Two orders go out on that capture: the composition verifies the tree it
-    // produced, and the member whose verdict minted the narrowing is put back on
-    // its own Verify against that same repaired tree — its original refusal
-    // judged a tree that has since been redone, so leaving it holding one would
-    // strand it with nothing in flight.
-    let after_repair = harness.await_orders(2);
-    let repair_verify = named(&after_repair, &repair.workpiece);
-    assert_eq!(stage_of(repair_verify), StageId::Verify);
-    let reverify = named(&after_repair, VERIFIED);
-    assert_eq!(stage_of(reverify), StageId::Verify, "the innocent member is back on the line: {reverify:?}");
+    let reverify = harness.await_order();
+    assert_eq!(reverify.workpiece, VERIFIED, "the only dispatch is the verified member's: {reverify:?}");
+    assert_eq!(stage_of(&reverify), StageId::Verify, "the innocent member is back on the line: {reverify:?}");
 
-    harness.upload_admitted(&passed(repair_verify));
-    harness.upload_admitted(&passed(reverify));
+    harness.upload_admitted(&passed(&reverify));
 
     for member in &harness.bloom(bloom).members {
         assert!(member.wedge.is_none(), "no member wedged over a collision the composition owned: {member:?}");

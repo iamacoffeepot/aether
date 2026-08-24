@@ -236,9 +236,12 @@ fn reverify_after_repair(
 ///
 /// The composition's `Refine` is the only stage dispatched through this door: its
 /// `Construct` is the fold (driven by [`Decision::DispatchIntegration`] and
-/// completing at [`Fact::Resolve`](crate::Fact::Resolve)), and its `Verify` and
-/// `Review` complete through the two aggregate facts. A pass hands the re-woven
-/// tree straight back to the composite gate run; a failure retries the repair
+/// completing at [`Fact::Resolve`](crate::Fact::Resolve)). The two instances then
+/// diverge. The whole-bloom composition's `Verify` and `Review` complete through
+/// the two aggregate facts, and a pass hands the re-woven tree straight back to
+/// the composite gate run. A narrowed composition's line ends at its repair: the
+/// cursor advances to record the tree it produced, and the member that refused
+/// the original fold is the one that judges it. A failure retries the repair
 /// inside its budget and wedges the composition once that is spent.
 pub(super) fn reduce_composition_attempt(
     snapshot: &Snapshot,
@@ -271,20 +274,18 @@ pub(super) fn reduce_composition_attempt(
     let mut effects = alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }];
 
     // A narrowed composition holds no fold of its own, so its pass re-gates
-    // nothing: it advances onto its own Verify like any other candidate, and
-    // the tree it produced is judged before anything adopts it. The whole-bloom
-    // instance below *is* the fold, which is why its pass hands the woven tree
-    // straight to the composite gates.
+    // nothing: it advances the cursor to Verify as a record of the repair and
+    // does not dispatch. No admitted fact can complete a composition at that
+    // stage. The member that minted the narrowing re-verifies the repaired
+    // tree — that is the only worker whose verdict a door can take. The
+    // whole-bloom instance below *is* the fold, which is why its pass hands
+    // the woven tree straight to the composite gates.
     if let Some(repaired) = captured.filter(|_| passed && composition.composition_parents().is_some()) {
-        effects.extend(move_effects_with_candidate(
-            *bloom,
-            &composition,
-            record.spec.base(),
-            composition_progress(StageId::Verify, 1, repaired),
-            DispatchTargets { subject: repaired.tree, checkout: repaired.checkout },
-            Some(repaired.tree),
-            composition_line(record),
-        ));
+        effects.push(Decision::AdvanceStage {
+            bloom: *bloom,
+            workpiece: composition.clone(),
+            progress: composition_progress(StageId::Verify, 1, repaired),
+        });
         // The member whose verdict minted this narrowing judged a tree it does
         // not own, and that tree has now been redone. Leaving it holding that
         // refusal strands it: it is neither resolved nor wedged and nothing is
