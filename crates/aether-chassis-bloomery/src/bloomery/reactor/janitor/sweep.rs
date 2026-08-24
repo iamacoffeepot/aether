@@ -417,7 +417,7 @@ fn prune_terminal_refs(source: &dyn WorkingRefPruner, snapshot: &Snapshot, alrea
     let mut pruned = 0;
     let mut attempted = 0;
     for (bloom, record) in &snapshot.blooms {
-        if !matches!(record.status, BloomStatus::Landed | BloomStatus::Superseded) {
+        if !refs_are_reclaimable(snapshot, bloom, record.status) {
             continue;
         }
         if already.contains(bloom) {
@@ -448,6 +448,72 @@ fn prune_terminal_refs(source: &dyn WorkingRefPruner, snapshot: &Snapshot, alrea
         }
     }
     pruned
+}
+
+/// Whether a terminal bloom's working refs are this pass's to delete.
+///
+/// A landed bloom's are: mainline carries its tree and no fold reaches back
+/// into its namespace again. A *superseded* bloom's are not, not yet. The
+/// invariant is that a superseded bloom's working refs stay live state until
+/// every bloom in its successor chain that could still adopt from it is itself
+/// terminal, because adoption happens at fold time and not at supersession: a
+/// successor holding an inherited claim has no candidate ref of its own for
+/// that member, so the fold's `adopt_candidate` copies the predecessor's ref
+/// into the successor's namespace as the fold dispatches, walking the
+/// grandparents for a member carried through two supersessions. Deleted
+/// beforehand, the ref exists nowhere to adopt from, the fold refuses at
+/// `candidate_ref_present`, and no later tick can put it back — the successor
+/// can never land, and recovery means hand-restoring refs from unreachable
+/// objects.
+///
+/// The window looks empty because an ordinary supersede folds within a second
+/// of the seal. An amend (ADR-0207) that widens a member's surface makes that
+/// member re-run before the fold may dispatch, which holds the chain open for
+/// however long the re-run takes — minutes — and the ten-second janitor tick
+/// wins that race every time. Bloom 85bb7225 lost its predecessor's sixteen
+/// refs to a tick twenty-five minutes ahead of the fold that needed them.
+fn refs_are_reclaimable(snapshot: &Snapshot, bloom: &BloomId, status: BloomStatus) -> bool {
+    match status {
+        BloomStatus::Landed => true,
+        BloomStatus::Superseded => successor_chain_is_terminal(snapshot, bloom),
+        _ => false,
+    }
+}
+
+/// Whether every bloom that could still adopt from `bloom` has finished: the
+/// end of its supersession chain is landed or withdrawn rather than
+/// active-and-unlanded.
+///
+/// Walks the chain rather than one link of it, for the reason the adoption
+/// walks it — a member carried through two supersessions is parked under the
+/// grandparent, so the live bloom reaching for it may be several links down.
+/// Iterative and visited-guarded, so a journal that somehow recorded a cycle
+/// costs this pass rather than the coordinator's stack.
+///
+/// An end this snapshot cannot resolve reads as live: a `Superseded` record
+/// naming no successor, or naming one the snapshot does not hold, is a lineage
+/// the pass cannot prove nobody is standing on. Keeping refs a closed chain no
+/// longer needs costs ref storage the next pass reclaims once the chain
+/// closes; deleting refs a fold still needs costs that bloom its landing.
+fn successor_chain_is_terminal(snapshot: &Snapshot, bloom: &BloomId) -> bool {
+    let mut seen = HashSet::new();
+    let mut next = Some(*bloom);
+    while let Some(current) = next {
+        if !seen.insert(current) {
+            return false;
+        }
+        let Some(record) = snapshot.blooms.get(&current) else {
+            return false;
+        };
+        if is_active_unlanded(record.status) {
+            return false;
+        }
+        if record.status != BloomStatus::Superseded {
+            return true;
+        }
+        next = record.superseded_by;
+    }
+    false
 }
 
 /// One slot target directory as the eviction ranks it.

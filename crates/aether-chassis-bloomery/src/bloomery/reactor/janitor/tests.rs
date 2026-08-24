@@ -15,8 +15,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use aether_bloomery::testing::{draft, event, membership, splice_bloom};
-use aether_bloomery::{BloomId, BloomStatus, Digest, Fact, Forecast, ResolvedConfigs, Snapshot, SpendWindow, reduce};
+use aether_bloomery::testing::{digest, draft, event, membership, splice_bloom};
+use aether_bloomery::{
+    BloomId, BloomSpec, BloomStatus, Digest, Fact, Forecast, ResolvedConfigs, Snapshot, SpendWindow, reduce,
+};
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{GitSource, MainlineRef, SourceError, candidate_ref_name};
 use aether_data::wire::to_vec;
@@ -54,8 +56,16 @@ fn journal_decided_against(store: &mut SqliteStore, key: &str, fact: Fact, board
 
 /// Seal a predecessor and supersede it, so the journal describes one terminal
 /// bloom and one live successor. The predecessor is the kill/crash leak case:
-/// its dispatches are done and its dirs/refs are reclaimable.
+/// its dispatches are done and its dirs are reclaimable. Its *refs* are not —
+/// the live successor may still adopt from them.
 fn journal_superseded(store: &mut SqliteStore) -> (BloomId, BloomId) {
+    let (predecessor, successor) = journal_superseded_specs(store);
+    (predecessor.id(), successor.id())
+}
+
+/// [`journal_superseded`] keeping the specs, for a fixture that has to go on
+/// deciding facts about the successor.
+fn journal_superseded_specs(store: &mut SqliteStore) -> (BloomSpec, BloomSpec) {
     // Base 0 is `Snapshot::GENESIS_MAINLINE`, so a successor that keeps the
     // same base is not a rebase and does not need an observed head.
     let predecessor = draft(0, vec![membership("wp", 1)]).seal();
@@ -64,13 +74,48 @@ fn journal_superseded(store: &mut SqliteStore) -> (BloomId, BloomId) {
     let successor = successor.seal();
     journal(store, "seal", Fact::Seal(predecessor.clone()));
     journal(store, "supersede", Fact::Supersede { predecessor: predecessor.id(), successor: successor.clone() });
+    (predecessor, successor)
+}
+
+/// Seal a predecessor, supersede it, and land the successor: a supersession
+/// chain whose end is terminal, so no fold can reach back into the
+/// predecessor's namespace and its working refs are reclaimable.
+fn journal_landed_chain(store: &mut SqliteStore) -> (BloomId, BloomId) {
+    let (predecessor, successor) = journal_superseded_specs(store);
+    journal_land(store, &successor);
     (predecessor.id(), successor.id())
 }
 
+/// Seal one bloom and land it — the terminal bloom with no supersession chain
+/// behind it, so it is the only reclaimable bloom the snapshot holds.
+fn journal_landed(store: &mut SqliteStore) -> BloomId {
+    let spec = journal_sealed_spec(store);
+    journal_land(store, &spec);
+    spec.id()
+}
+
+/// Journal `spec`'s landing.
+///
+/// The row is decided against the board the coordinator would hold once the
+/// fold had resolved the bloom — the land door takes a `Resolved` bloom on a
+/// mainline still at its sealed base — rather than against the journal's own,
+/// which still has it sealed.
+fn journal_land(store: &mut SqliteStore, spec: &BloomSpec) {
+    let mut board = Snapshot::default();
+    splice_bloom(&mut board, spec, BloomStatus::Resolved);
+    journal_decided_against(store, "land", Fact::Land { bloom: spec.id(), new_head: digest(9) }, &board);
+}
+
 fn journal_sealed(store: &mut SqliteStore) -> BloomId {
+    journal_sealed_spec(store).id()
+}
+
+/// [`journal_sealed`] keeping the spec, for a fixture that has to go on
+/// deciding facts about the bloom.
+fn journal_sealed_spec(store: &mut SqliteStore) -> BloomSpec {
     let spec = draft(0, vec![membership("wp", 1)]).seal();
     journal(store, "seal", Fact::Seal(spec.clone()));
-    spec.id()
+    spec
 }
 
 fn order_for(nonce: &str, bloom: &BloomId) -> OutstandingOrder {
@@ -788,16 +833,16 @@ fn moved_aside(base: &Path) -> Option<PathBuf> {
 fn terminal_bloom_working_refs_are_pruned_and_claim_refs_are_spared() {
     let scratch = tempfile::tempdir().expect("a scratch dir is created");
     let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
-    let (predecessor, _) = journal_superseded(&mut store);
+    let landed = journal_landed(&mut store);
 
     let fake = FakeGithub::new();
-    let candidate = candidate_ref_name(&predecessor, "wp").trim_start_matches("refs/").to_owned();
+    let candidate = candidate_ref_name(&landed, "wp").trim_start_matches("refs/").to_owned();
     fake.seed_ref(&candidate, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     let source =
         SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake.clone()), true, MainlineRef::default())));
-    let integration = format!("heads/bloom/{}/integration", short_hex(&predecessor));
-    let checkpoint = format!("heads/bloom/{}/checkpoint/{}", short_hex(&predecessor), "00".repeat(32));
-    let landing = format!("heads/bloom/{}/landing", short_hex(&predecessor));
+    let integration = format!("heads/bloom/{}/integration", short_hex(&landed));
+    let checkpoint = format!("heads/bloom/{}/checkpoint/{}", short_hex(&landed), "00".repeat(32));
+    let landing = format!("heads/bloom/{}/landing", short_hex(&landed));
     fake.seed_ref(&integration, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
     fake.seed_ref(&checkpoint, "cccccccccccccccccccccccccccccccccccccccc");
     fake.seed_ref(&landing, "dddddddddddddddddddddddddddddddddddddddd");
@@ -806,6 +851,7 @@ fn terminal_bloom_working_refs_are_pruned_and_claim_refs_are_spared() {
 
     let runner = StubRunner { registered: vec![], released: Released(Arc::new(Mutex::new(Vec::new()))) };
     let keep = policy(7, u64::MAX);
+    let mut pruned = HashSet::new();
     let report = run(&mut SweepRequest {
         store: &mut store,
         runner: &runner,
@@ -815,7 +861,7 @@ fn terminal_bloom_working_refs_are_pruned_and_claim_refs_are_spared() {
         lanes: &idle,
         policy: &keep,
         now: SystemTime::now(),
-        pruned: &mut HashSet::new(),
+        pruned: &mut pruned,
     });
 
     assert_eq!(report.refs, 3, "candidate + integration + checkpoint of the terminal bloom");
@@ -835,7 +881,7 @@ fn a_terminal_bloom_is_pruned_once() {
     // client's budget guard then withholds land, integrate, and inspects.
     let scratch = tempfile::tempdir().expect("a scratch dir is created");
     let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
-    journal_superseded(&mut store);
+    journal_landed(&mut store);
 
     let prune = CountingPruner { calls: AtomicUsize::new(0), fail: AtomicBool::new(false) };
     let runner = StubRunner { registered: vec![], released: Released(Arc::new(Mutex::new(Vec::new()))) };
@@ -879,7 +925,7 @@ fn a_failed_prune_is_retried_on_the_next_tick() {
     // same promise the warn already made when the call failed.
     let scratch = tempfile::tempdir().expect("a scratch dir is created");
     let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
-    journal_superseded(&mut store);
+    journal_landed(&mut store);
 
     let prune = CountingPruner { calls: AtomicUsize::new(0), fail: AtomicBool::new(true) };
     let runner = StubRunner { registered: vec![], released: Released(Arc::new(Mutex::new(Vec::new()))) };
@@ -911,6 +957,85 @@ fn a_failed_prune_is_retried_on_the_next_tick() {
 
     assert_eq!(prune.calls.load(Ordering::SeqCst), 2, "a failed prune is retried rather than remembered as done");
     assert_eq!(pruned.len(), 1, "the successful retry is what the memo records");
+}
+
+#[test]
+fn a_superseded_blooms_working_refs_survive_while_a_successor_can_still_adopt_from_them() {
+    // The predecessor's candidate ref is the successor's only copy of every
+    // member it inherited: the fold's `adopt_candidate` copies it across when
+    // the fold dispatches, not when the supersession is journalled. Pruning it
+    // in that gap wedges the successor definitively — its fold refuses at
+    // `candidate_ref_present` and no later tick can put the ref back. An
+    // ordinary supersede folds within a second and never shows the gap; an
+    // amend whose widened member has to re-run holds it open for minutes,
+    // which the ten-second tick wins every time.
+    let scratch = tempfile::tempdir().expect("a scratch dir is created");
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
+    let (predecessor, _) = journal_superseded(&mut store);
+
+    let fake = FakeGithub::new();
+    let candidate = candidate_ref_name(&predecessor, "wp").trim_start_matches("refs/").to_owned();
+    let integration = format!("heads/bloom/{}/integration", short_hex(&predecessor));
+    fake.seed_ref(&candidate, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    fake.seed_ref(&integration, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    let source =
+        SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake.clone()), true, MainlineRef::default())));
+
+    let runner = StubRunner { registered: vec![], released: Released(Arc::new(Mutex::new(Vec::new()))) };
+    let keep = policy(7, u64::MAX);
+    let mut pruned = HashSet::new();
+    let report = run(&mut SweepRequest {
+        store: &mut store,
+        runner: &runner,
+        source: Some(&source),
+        worktree_base: scratch.path(),
+        target_base: scratch.path(),
+        lanes: &idle,
+        policy: &keep,
+        now: SystemTime::now(),
+        pruned: &mut pruned,
+    });
+
+    assert_eq!(report.refs, 0, "a supersession chain that has not closed yet is not a reclaim");
+    assert!(fake.ref_exists(&candidate), "the inherited member's candidate is the successor's only copy of it");
+    assert!(fake.ref_exists(&integration), "and the rest of the namespace goes with it");
+}
+
+#[test]
+fn a_superseded_blooms_working_refs_are_reclaimed_once_the_chain_behind_them_closes() {
+    // The other half of the invariant: holding the refs is a delay, not a
+    // permanent exemption. Once the successor lands, nothing can adopt from the
+    // predecessor again and its namespace is the janitor's like any other
+    // terminal bloom's. Swept twice because a closed chain is two reclaimable
+    // blooms and one tick may only get to one of them.
+    let scratch = tempfile::tempdir().expect("a scratch dir is created");
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
+    let (predecessor, _) = journal_landed_chain(&mut store);
+
+    let fake = FakeGithub::new();
+    let candidate = candidate_ref_name(&predecessor, "wp").trim_start_matches("refs/").to_owned();
+    fake.seed_ref(&candidate, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    let source =
+        SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake.clone()), true, MainlineRef::default())));
+
+    let runner = StubRunner { registered: vec![], released: Released(Arc::new(Mutex::new(Vec::new()))) };
+    let keep = policy(7, u64::MAX);
+    let mut pruned = HashSet::new();
+    for _ in 0..2 {
+        run(&mut SweepRequest {
+            store: &mut store,
+            runner: &runner,
+            source: Some(&source),
+            worktree_base: scratch.path(),
+            target_base: scratch.path(),
+            lanes: &idle,
+            policy: &keep,
+            now: SystemTime::now(),
+            pruned: &mut pruned,
+        });
+    }
+
+    assert!(!fake.ref_exists(&candidate), "a chain that has closed leaves nothing to adopt and nothing to keep");
 }
 
 fn short_hex(bloom: &BloomId) -> String {
