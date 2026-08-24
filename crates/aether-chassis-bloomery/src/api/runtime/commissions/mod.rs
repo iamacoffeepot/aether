@@ -177,7 +177,17 @@ impl ApiCapabilityState {
         };
         let correlation = self.send_tracked(
             ctx.actor::<SigningCapability>(),
-            &Verify { statement: encoded, authority: authority_bytes(AuthorityDoor::Approve, scope) },
+            // No tier requirement: this door records an approval row, and it
+            // holds no declared surface to resolve a tier from. The tier→signer
+            // binding is applied where the tier exists — the seal gate, which
+            // resolves each member's surface and refuses a row signed below it
+            // (#5324) — so a row stored here still faces that check before it
+            // ever admits a member.
+            &Verify {
+                statement: encoded,
+                authority: authority_bytes(AuthorityDoor::Approve, scope),
+                required_tier: None,
+            },
         );
         Routed::DeferredCommissionVerify {
             correlation,
@@ -222,7 +232,11 @@ impl ApiCapabilityState {
         };
         let correlation = self.send_tracked(
             ctx.actor::<SigningCapability>(),
-            &Verify { statement: encoded, authority: authority_bytes(AuthorityDoor::Cancel, intent) },
+            &Verify {
+                statement: encoded,
+                authority: authority_bytes(AuthorityDoor::Cancel, intent),
+                required_tier: None,
+            },
         );
         Routed::DeferredCommissionVerify {
             correlation,
@@ -254,7 +268,11 @@ impl ApiCapabilityState {
         };
         let correlation = self.send_tracked(
             ctx.actor::<SigningCapability>(),
-            &Verify { statement: encoded, authority: authority_bytes(AuthorityDoor::Reopen, intent) },
+            &Verify {
+                statement: encoded,
+                authority: authority_bytes(AuthorityDoor::Reopen, intent),
+                required_tier: None,
+            },
         );
         Routed::DeferredCommissionVerify {
             correlation,
@@ -283,6 +301,16 @@ impl ApiCapabilityState {
             }
             VerifyResult::Err { error } => {
                 inbound.reply(&error_response(400, &format!("signed statement did not verify: {error}")));
+            }
+            // Unreachable: none of these doors names a `required_tier`, so the
+            // signing cap has no ladder to refuse against. Answered rather than
+            // ignored, so a door that later starts naming one cannot lose its
+            // refusal to a silent fall-through.
+            VerifyResult::BelowTier { required, ceiling } => {
+                inbound.reply(&error_response(
+                    400,
+                    &format!("signer is authorized to {ceiling:?} tier, below the {required:?} tier required"),
+                ));
             }
         }
     }
@@ -346,6 +374,10 @@ fn approval_rejected(rejected: StatementRejected) -> HttpServerResponse {
         StatementRejected::WrongSubject => error_response(400, "approval words are not the scope digest"),
         StatementRejected::NotAnAuthorSignature => error_response(400, "approval is not an author signature"),
         StatementRejected::Unverified => error_response(400, "approval signature did not verify"),
+        StatementRejected::BelowTier { required, ceiling } => error_response(
+            403,
+            &format!("approval signer is authorized to {ceiling:?} tier, below the {required:?} tier required"),
+        ),
     }
 }
 

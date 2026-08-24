@@ -9,7 +9,7 @@
 //! serde-encoded but not `Schema`, and this capability has no reason to key or
 //! filter on any of its fields.
 
-use aether_bloomery::{AuthorityDoor, Digest};
+use aether_bloomery::{AuthorityDoor, Digest, Tier};
 use aether_data::wire::to_vec;
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +36,21 @@ pub struct Verify {
     /// digest the signature must be bound to. Build it with [`authority_bytes`].
     #[serde(with = "aether_data::bytes")]
     pub authority: Vec<u8>,
+    /// The tier the caller's own policy resolved for what this signature would
+    /// approve, or `None` at a door that has no tier ladder (#5324).
+    ///
+    /// Deliberately **outside** [`authority`](Self::authority): that field is
+    /// the signed subject, and the tier is not part of what anyone signed.
+    /// Re-hashing it into the authorization message would invalidate every
+    /// envelope ever minted and would let a caller move a signature's meaning
+    /// by restating the tier. It rides beside instead, as a question the
+    /// capability answers from the allowlist — is this signer authorized this
+    /// high — after the signature itself has held.
+    ///
+    /// `None` asks only the signature question, which is what the cancel,
+    /// reopen, answer, and claim-release doors want: they are authorized by an
+    /// allowlisted signature, not by an approval tier.
+    pub required_tier: Option<Tier>,
 }
 
 /// Encode the `(door, binding)` authority a [`Verify`] carries.
@@ -67,6 +82,19 @@ pub enum VerifyResult {
     Ok {
         /// Whether the author signature verified.
         verified: bool,
+    },
+    /// The signature verified, but the signer is not authorized that high: the
+    /// caller's `required_tier` is above this signer's allowlist ceiling
+    /// (#5324). Its own variant rather than `Ok { verified: false }` because
+    /// the two are different facts with different repairs — one says the
+    /// envelope is no good, this one says the envelope is fine and the wrong
+    /// person signed it, and only a refusal that names both tiers tells an
+    /// operator which.
+    BelowTier {
+        /// The tier the caller's policy resolved for the approved surface.
+        required: Tier,
+        /// The highest tier this signer's allowlist entry authorizes.
+        ceiling: Tier,
     },
     /// The request could not be evaluated — the `statement` bytes did not decode
     /// to a [`aether_bloomery::Statement`], or the `authority` bytes did not

@@ -39,6 +39,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::KeyId;
+use crate::values::Tier;
 
 /// Which door an author signature authorizes (ADR-0182).
 ///
@@ -136,6 +137,22 @@ pub trait KeyProvider {
     /// Does `envelope` verify as a signature by its named signer over
     /// `message`?
     fn verify(&self, envelope: &SignatureEnvelope, message: &[u8]) -> bool;
+
+    /// The highest [`Tier`] `signer` is authorized to approve at, or `None`
+    /// when the signer is not in the key policy at all.
+    ///
+    /// The second half of the key policy, and the one [`Self::verify`] cannot
+    /// answer (#5324). A signature check proves *who* asserted the words; it
+    /// says nothing about whether that signer may stand in for the reader the
+    /// tier policy asked for. Without this, one allowlist entry authorizes
+    /// every tier, so an operator key signs a `human`-tier surface and the gate
+    /// admits it exactly as it would an `auto` one — human tier enforced by the
+    /// human declining to sign rather than by the machine.
+    ///
+    /// Required rather than defaulted: a provider that cannot state a ceiling
+    /// has no business answering the approve gate, and a default would let a
+    /// new provider inherit "authorized at every tier" by writing nothing.
+    fn tier_ceiling(&self, signer: &KeyId) -> Option<Tier>;
 }
 
 /// The v1 stub: every well-formed envelope verifies. With one operator there
@@ -148,6 +165,14 @@ pub struct FakeKeyProvider;
 impl KeyProvider for FakeKeyProvider {
     fn verify(&self, _envelope: &SignatureEnvelope, _message: &[u8]) -> bool {
         true
+    }
+
+    /// Every signer is authorized to the top of the ladder, matching the stub's
+    /// "every well-formed envelope verifies" contract. A stub that admitted the
+    /// signature and then refused the tier would fail every above-auto path in
+    /// the no-key configuration this exists to serve.
+    fn tier_ceiling(&self, _signer: &KeyId) -> Option<Tier> {
+        Some(Tier::Human)
     }
 }
 
@@ -167,16 +192,36 @@ impl KeyProvider for FakeKeyProvider {
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug)]
 pub struct Ed25519KeyProvider {
-    allowlist: BTreeMap<KeyId, VerifyingKey>,
+    allowlist: BTreeMap<KeyId, AuthorizedSigner>,
+}
+
+/// One allowlist entry: the public key a signer signs with, and the highest
+/// [`Tier`] that signer may approve at (#5324).
+///
+/// The two travel together because verifying a signature and admitting an
+/// approval are the same decision seen from two sides — a key with no stated
+/// ceiling is a key whose authority nobody wrote down, and the gate that reads
+/// one without the other admits every tier to every allowlisted signer.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug)]
+pub struct AuthorizedSigner {
+    /// The 32-byte ed25519 verifying key this signer signs with.
+    pub key: VerifyingKey,
+    /// The highest tier this signer may approve at. A statement over a surface
+    /// that resolves above this is refused with both tiers named, however good
+    /// the signature is.
+    pub ceiling: Tier,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Ed25519KeyProvider {
-    /// Build a provider over the `KeyId → verifying-key` allowlist — the set of
-    /// signers authorized to sign in a person's stead (ADR-0151 key policy). An
-    /// empty allowlist verifies nothing.
+    /// Build a provider over the allowlist mapping each [`KeyId`] to its
+    /// [`AuthorizedSigner`] — the
+    /// set of signers authorized to sign in a person's stead, each with the tier
+    /// it may sign up to (ADR-0151 key policy, #5324). An empty allowlist
+    /// verifies nothing and authorizes no tier.
     #[must_use]
-    pub fn new(allowlist: BTreeMap<KeyId, VerifyingKey>) -> Self {
+    pub fn new(allowlist: BTreeMap<KeyId, AuthorizedSigner>) -> Self {
         Self { allowlist }
     }
 }
@@ -184,13 +229,17 @@ impl Ed25519KeyProvider {
 #[cfg(not(target_arch = "wasm32"))]
 impl KeyProvider for Ed25519KeyProvider {
     fn verify(&self, envelope: &SignatureEnvelope, message: &[u8]) -> bool {
-        let Some(key) = self.allowlist.get(&envelope.signer) else {
+        let Some(signer) = self.allowlist.get(&envelope.signer) else {
             return false;
         };
         let Ok(bytes) = <[u8; 64]>::try_from(envelope.signature.as_slice()) else {
             return false;
         };
-        key.verify_strict(message, &Signature::from_bytes(&bytes)).is_ok()
+        signer.key.verify_strict(message, &Signature::from_bytes(&bytes)).is_ok()
+    }
+
+    fn tier_ceiling(&self, signer: &KeyId) -> Option<Tier> {
+        self.allowlist.get(signer).map(|signer| signer.ceiling)
     }
 }
 
@@ -231,10 +280,12 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
 
     use super::{
-        AuthorityDoor, Ed25519KeyProvider, KeyProvider, SignatureEnvelope, authorization_message, sign_authorization,
+        AuthorityDoor, AuthorizedSigner, Ed25519KeyProvider, KeyProvider, SignatureEnvelope, authorization_message,
+        sign_authorization,
     };
     use crate::digest::Digest;
     use crate::ids::KeyId;
+    use crate::values::Tier;
 
     /// A distinct binding digest per seed — two requests to sign for.
     fn binding(seed: u8) -> Digest {
@@ -247,9 +298,19 @@ mod tests {
         SigningKey::from_bytes(&[seed; 32])
     }
 
-    /// A provider trusting exactly `signer` at `key`'s public half.
+    /// A provider trusting exactly `signer` at `key`'s public half, authorized
+    /// to the top of the tier ladder.
     fn provider(signer: &str, key: &SigningKey) -> Ed25519KeyProvider {
-        Ed25519KeyProvider::new(BTreeMap::from([(KeyId(signer.into()), key.verifying_key())]))
+        provider_at(signer, key, Tier::Human)
+    }
+
+    /// A provider trusting exactly `signer` at `key`'s public half, authorized
+    /// no higher than `ceiling`.
+    fn provider_at(signer: &str, key: &SigningKey, ceiling: Tier) -> Ed25519KeyProvider {
+        Ed25519KeyProvider::new(BTreeMap::from([(
+            KeyId(signer.into()),
+            AuthorizedSigner { key: key.verifying_key(), ceiling },
+        )]))
     }
 
     /// An author-signature envelope over `message` by `signer` using `key`.
@@ -351,7 +412,7 @@ mod tests {
         let words = b"the scope revision";
         let envelope = sign_authorization(KeyId("operator".into()), &seed, AuthorityDoor::Approve, binding(1), words);
 
-        let keys = Ed25519KeyProvider::new(BTreeMap::from([(KeyId("operator".into()), key.verifying_key())]));
+        let keys = provider("operator", &key);
         assert!(keys.verify(&envelope, authorization_message(AuthorityDoor::Approve, binding(1), words).as_bytes()));
         assert!(
             !keys.verify(&envelope, authorization_message(AuthorityDoor::Answer, binding(1), words).as_bytes()),

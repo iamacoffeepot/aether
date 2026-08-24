@@ -290,7 +290,8 @@ mod tests {
     use super::{SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting};
     use crate::digest::digest_of;
     use crate::ids::{KeyId, WorkpieceId};
-    use crate::sign::{AuthorityDoor, Ed25519KeyProvider, SignatureEnvelope, authorization_message};
+    use crate::sign::{AuthorityDoor, AuthorizedSigner, Ed25519KeyProvider, SignatureEnvelope, authorization_message};
+    use crate::values::Tier;
     use crate::values::{Provenance, Statement};
 
     /// The fixture a signature may one day cover. Field values are short and
@@ -400,7 +401,10 @@ mod tests {
             "Approve signature drifted; signature={signature:?}"
         );
 
-        let keys = Ed25519KeyProvider::new(BTreeMap::from([(KeyId(String::from("owner")), key.verifying_key())]));
+        let keys = Ed25519KeyProvider::new(BTreeMap::from([(
+            KeyId(String::from("owner")),
+            AuthorizedSigner { key: key.verifying_key(), ceiling: Tier::Human },
+        )]));
         let statement = Statement {
             words: digest.as_bytes().to_vec(),
             provenance: Provenance::AuthorSignature(SignatureEnvelope {
