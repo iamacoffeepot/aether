@@ -705,7 +705,7 @@ pub(super) fn wedged(
 mod tests {
     use super::*;
     use crate::ids::IdempotencyKey;
-    use crate::reduce::{Event, Fact, Outcome, reduce};
+    use crate::reduce::{Event, Fact, GrantAttemptsError, Outcome, reduce};
     use crate::values::{BloomDraft, BloomSpec, EvidenceKind, Membership, OperatorHold, ResolvedConfigs, SpendWindow};
 
     fn digest(seed: u8) -> Digest {
@@ -1070,36 +1070,51 @@ mod tests {
         assert!(!after.blooms[&bloom].wedged.contains_key(&workpiece), "a parked member is not wedged");
     }
 
-    // The plausible bug: a member parked, then granted attempts, resumes while
-    // three readers still call it legitimately stopped — the park is inserted
-    // and was removed nowhere.
+    // The plausible bug: a refused grant aimed at a parked member still
+    // erases the park, so the member has no excuse, no wedge, and no worker,
+    // and a second grant cannot re-plant it.
     #[test]
-    fn a_granted_member_no_longer_carries_its_park() {
+    fn a_refused_grant_leaves_the_park_standing() {
         let (snapshot, bloom) = sealed();
         let workpiece = WorkpieceId("wp".into());
         let (parked, _) = step(&snapshot, &decline_construct(bloom, "c-decline", digest(91)));
-        assert!(parked.member_park(&bloom, &workpiece).is_some(), "the park is what this grant has to lift");
+        assert!(parked.member_park(&bloom, &workpiece).is_some(), "the park is what a grant must not erase");
 
-        let (after, _) = step(
+        let (after, decided) = step(
             &parked,
             &event(
                 "grant",
                 Fact::GrantAttempts { bloom, workpiece: workpiece.clone(), stage: StageId::Construct, attempts: 1 },
             ),
         );
-        assert_eq!(after.member_park(&bloom, &workpiece), None, "a grant of attempts redeems the park");
+        assert!(
+            matches!(
+                decided.outcome,
+                Outcome::GrantAttemptsRejected(GrantAttemptsError::NotWedged(ref wp)) if *wp == workpiece
+            ),
+            "a parked member is not wedged, so the grant is refused: {decided:?}",
+        );
+        assert!(
+            after.member_park(&bloom, &workpiece).is_some(),
+            "a fact the reducer rejected changes nothing in the fold",
+        );
     }
 
-    // The plausible bug: a member parked, then integrated, is still excused as
-    // waiting — the park outlives the fact that made it false.
+    // The plausible bug: gating the park clear on the accepted outcome never
+    // opens, so a park outlives the integration that made it false.
     #[test]
-    fn an_integrated_member_no_longer_carries_its_park() {
+    fn an_integration_still_clears_the_park() {
         let (snapshot, bloom) = sealed();
         let workpiece = WorkpieceId("wp".into());
         let (parked, _) = step(&snapshot, &decline_construct(bloom, "c-decline", digest(91)));
         assert!(parked.member_park(&bloom, &workpiece).is_some(), "the park is what this integrate has to lift");
 
-        let (after, _) = step(&parked, &event("integrate", Fact::Integrate { bloom, claim: claim("wp", 10, 51) }));
+        let (after, decided) =
+            step(&parked, &event("integrate", Fact::Integrate { bloom, claim: claim("wp", 10, 51) }));
+        assert!(
+            matches!(decided.outcome, Outcome::Integrated { .. }),
+            "the gate opens on the accepted integration: {decided:?}",
+        );
         assert_eq!(after.member_park(&bloom, &workpiece), None, "an integration redeems the park");
     }
 
