@@ -331,12 +331,13 @@ struct Evidence {
     peak_resident_bytes: Option<u64>,
     /// Wall-clock milliseconds this run spent doing work (#5111).
     ///
-    /// On `verify.check` this is the umbrella's own total, so the sum of the
-    /// gate receipts is checkable against the whole and the
-    /// scope-resolution/preflight overhead between gates is the difference. On
-    /// a single-command path it is that one gate. Absent on a preflight-refused
-    /// umbrella that executed no gate: a zero there would claim the refuse was
-    /// free.
+    /// On `verify.check` this is the umbrella's own total. The gate receipts
+    /// beside it sum to more than it, and by design: the members that compile
+    /// run in one lane and the members that only read the tree run beside them,
+    /// so the difference is the overlap the umbrella reclaimed rather than
+    /// overhead. On a single-command path it is that one gate. Absent on a
+    /// preflight-refused umbrella that executed no gate: a zero there would
+    /// claim the refuse was free.
     duration_millis: Option<u64>,
     /// Per-gate wall-clock receipts for the `verify.check` umbrella (#5111).
     ///

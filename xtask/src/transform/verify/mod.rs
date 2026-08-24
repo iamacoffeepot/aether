@@ -7,6 +7,7 @@ mod triage;
 #[cfg(test)]
 mod workflow;
 
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt::Write as _;
@@ -14,10 +15,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::slice::from_ref;
+use std::thread;
 use std::time::Instant;
 
 use aether_bloomery::{VerifyFailure, VerifyFailureSet};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 
 use crate::cargo::{self, WASM_TARGET, run_captured, write_json_pretty};
@@ -719,6 +721,28 @@ fn verify_check_members() -> &'static [&'static str] {
         "verify.deps",
         "verify.lock",
     ]
+}
+
+/// The members that build into the lane's `CARGO_TARGET_DIR`, and so cannot run
+/// beside each other.
+///
+/// Cargo takes an exclusive lock on the artifact directory for the whole of a
+/// build — a second invocation against the same one prints "Blocking waiting for
+/// file lock on artifact directory" and waits — so running these three at once
+/// buys nothing and costs the log noise. Giving each its own directory would
+/// undo far more than it bought: clippy, rustdoc and the test build share one
+/// compiled dependency tree, and splitting them makes every one of them rebuild
+/// it. `verify.test`'s prepare builds into the same directory, so it belongs to
+/// the same lane.
+///
+/// Everything else — the formatter, the clone detector, the dependency scan,
+/// the suppression scan, the lockfile freshness check — reads the tree and
+/// never writes an artifact, so it runs alongside the compiles.
+const BUILD_LANE_MEMBERS: [&str; 3] = ["verify.clippy", "verify.docs", "verify.test"];
+
+/// Whether this member holds the cargo artifact lock — see [`BUILD_LANE_MEMBERS`].
+fn builds_artifacts(id: &str) -> bool {
+    BUILD_LANE_MEMBERS.contains(&id)
 }
 
 /// The status the umbrella stamps, from what its members said (ADR-0176's
@@ -2057,6 +2081,74 @@ struct CheckPass {
     peak_resident_bytes: Option<u64>,
 }
 
+/// What every gate of one pass shares: the resolved scope and closure it
+/// narrows to, the host tooling it reports through, and where its log goes.
+#[derive(Clone, Copy)]
+struct GatePass<'a> {
+    args: &'a TransformArgs,
+    full: bool,
+    logs: &'a Path,
+    scope: &'a Scope,
+    closure: Option<&'a Closure>,
+    cache: Option<&'a CompilerCache>,
+    peak: &'a PeakMemory,
+}
+
+/// Run one umbrella member and write its log, returning what it said and what
+/// it cost.
+///
+/// The whole of a gate — its prepare, its run, its triage, its log — so the two
+/// lanes in [`check_pass`] are the same function over different member lists,
+/// and a gate's receipt covers exactly the work done under its identity however
+/// many gates are in flight.
+fn run_gate(id: &'static str, pass: &GatePass<'_>) -> Result<(MemberRun, GateTiming)> {
+    let GatePass { args, full, logs, scope, closure, cache, peak } = *pass;
+    let invocation = verify_command(id).expect("verify_check_members ids all resolve via verify_command");
+    // The member's own prerequisite, run immediately before it rather than once
+    // up front: it belongs to this member, and a member that is one day removed
+    // should take its prepare step with it. A failed prepare fails the member
+    // without running it — see `prepare_failure_log`.
+    //
+    // It is the member's own failure, not an operational one, even though the
+    // member never ran: ADR-0178 rules that "a failed member preparation step
+    // belongs to that member's identity". The host half of it is already
+    // covered — the preflight checks the cross-target the pre-build needs — so
+    // what is left is the candidate breaking its own build.
+    //
+    // Unless the pre-build did not fail so much as die (#5422): a linker killed
+    // by a signal, a `rustc` killed for memory, a write out of disk. The
+    // candidate cannot repair any of those, and `run_prepare` charges them to
+    // the host instead.
+    let gate_started = Instant::now();
+    let (prepare_failure, prepare_millis) = run_timed_prepare(id, &invocation, cache, peak)?;
+    let run = match prepare_failure {
+        Some((log, code, outcome)) => MemberRun::plain(id, outcome, log.into_bytes(), code),
+        None => run_member_discriminated(
+            id,
+            &invocation,
+            scope,
+            closure,
+            member_diff_base(id, args.diff_base.as_deref(), full),
+            &mut SpawnRunner { cache, peak },
+        )?,
+    };
+    let duration_millis = elapsed_millis(gate_started);
+
+    let log_path = logs.join(format!("{id}.log"));
+    fs::write(&log_path, &run.log).with_context(|| format!("write {}", log_path.display()))?;
+
+    Ok((run, GateTiming { command: id.to_owned(), duration_millis, prepare_millis }))
+}
+
+/// What a lane thread carried out of a panic, as a line a caller can report.
+fn panic_message(panicked: &Box<dyn Any + Send>) -> String {
+    panicked
+        .downcast_ref::<&str>()
+        .map(|message| (*message).to_owned())
+        .or_else(|| panicked.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| String::from("a verify lane thread panicked"))
+}
+
 /// Run every member in [`verify_check_members`] over the current tree, in
 /// CI-parity order and without short-circuiting on the first failure.
 ///
@@ -2076,8 +2168,6 @@ fn check_pass(args: &TransformArgs, logs: &Path, full: bool) -> Result<CheckPass
     } else {
         closure::resolve(args.diff_base.as_deref())
     };
-    let mut runner = SpawnRunner { cache: cache.as_ref(), peak: &peak };
-
     // Resolved once, before any member runs, and written out as its own log:
     // the compiling members are only comparable across a run if they all
     // narrowed to the same closure, and a receipt no one can read is not a
@@ -2092,53 +2182,45 @@ fn check_pass(args: &TransformArgs, logs: &Path, full: bool) -> Result<CheckPass
     fs::write(&scope_path, scope.receipt()).with_context(|| format!("write {}", scope_path.display()))?;
     let mut log_names = vec![String::from(SCOPE_LOG)];
 
-    let mut runs = Vec::with_capacity(verify_check_members().len());
-    let mut gates = Vec::with_capacity(verify_check_members().len());
+    // Two lanes, run at once: the members that compile take the cargo artifact
+    // lock and so go one at a time, and everything else runs beside them for
+    // free (see `BUILD_LANE_MEMBERS`). Both keep their own order, so a lane that
+    // dies mid-pass has still run its members in the order the receipts name.
+    let pass =
+        GatePass { args, full, logs, scope: &scope, closure: closure.as_ref(), cache: cache.as_ref(), peak: &peak };
+    let lane = |members: Vec<&'static str>| -> Result<Vec<(MemberRun, GateTiming)>> {
+        members.into_iter().map(|id| run_gate(id, &pass)).collect()
+    };
+    let (compiled, read_only): (Vec<&str>, Vec<&str>) =
+        verify_check_members().iter().partition(|id| builds_artifacts(id));
+    let mut completed = thread::scope(|threads| -> Result<Vec<(MemberRun, GateTiming)>> {
+        let reading = threads.spawn(|| lane(read_only));
+        let compiling = lane(compiled);
+        let read = reading.join().map_err(|panicked| anyhow!(panic_message(&panicked)))?;
+        let mut completed = compiling?;
+        completed.extend(read?);
+        Ok(completed)
+    })?;
+
+    // Reassembled in CI-parity order rather than completion order: the umbrella's
+    // exit code is the *first* failing member's, the evidence `log` field lists
+    // the member logs in that same order, and both would otherwise depend on
+    // which lane happened to finish first.
+    let mut runs = Vec::with_capacity(completed.len());
+    let mut gates = Vec::with_capacity(completed.len());
     let mut first_failure_code: Option<i32> = None;
-
     for &id in verify_check_members() {
-        let invocation = verify_command(id).expect("verify_check_members ids all resolve via verify_command");
-        // The member's own prerequisite, run immediately before it rather than
-        // once up front: it belongs to this member, and a member that is one day
-        // removed should take its prepare step with it. A failed prepare fails
-        // the member without running it — see `prepare_failure_log`.
-        //
-        // It is the member's own failure, not an operational one, even though
-        // the member never ran: ADR-0178 rules that "a failed member
-        // preparation step belongs to that member's identity". The host half of
-        // it is already covered — the preflight checks the cross-target the
-        // pre-build needs — so what is left is the candidate breaking its own
-        // build.
-        //
-        // Unless the pre-build did not fail so much as die (#5422): a linker
-        // killed by a signal, a `rustc` killed for memory, a write out of disk.
-        // The candidate cannot repair any of those, and `run_prepare` charges
-        // them to the host instead.
-        let gate_started = Instant::now();
-        let (prepare_failure, prepare_millis) = run_timed_prepare(id, &invocation, cache.as_ref(), &peak)?;
-        let run = match prepare_failure {
-            Some((log, code, outcome)) => MemberRun::plain(id, outcome, log.into_bytes(), code),
-            None => run_member_discriminated(
-                id,
-                &invocation,
-                &scope,
-                closure.as_ref(),
-                member_diff_base(id, args.diff_base.as_deref(), full),
-                &mut runner,
-            )?,
-        };
-        let duration_millis = elapsed_millis(gate_started);
-
-        let log_name = format!("{id}.log");
-        let log_path = logs.join(&log_name);
-        fs::write(&log_path, &run.log).with_context(|| format!("write {}", log_path.display()))?;
-        log_names.push(log_name);
-
+        let position = completed
+            .iter()
+            .position(|(run, _)| run.id == id)
+            .expect("every member of the umbrella ran in one of the two lanes");
+        let (run, gate) = completed.swap_remove(position);
+        log_names.push(format!("{id}.log"));
         if !run.outcome.passed() && first_failure_code.is_none() {
             first_failure_code = Some(run.exit_code);
         }
         runs.push(run);
-        gates.push(GateTiming { command: id.to_owned(), duration_millis, prepare_millis });
+        gates.push(gate);
     }
 
     Ok(CheckPass {
@@ -2155,7 +2237,7 @@ fn check_pass(args: &TransformArgs, logs: &Path, full: bool) -> Result<CheckPass
 mod tests {
     use super::{
         BASE_SET_SUBJECT, Captured, EvidenceChannel, MAX_FINDING_LINES, MemberOutcome, MemberRun, MemberRunner,
-        SUPPRESS_MEMBER, Scope, VERIFY_BASE, VERIFY_CHECK, VerifyInvocation, clippy_verdict, closure,
+        SUPPRESS_MEMBER, Scope, VERIFY_BASE, VERIFY_CHECK, VerifyInvocation, builds_artifacts, clippy_verdict, closure,
         distil_diagnostics, effective_exit_code, environment_observations, failed_verifiers, host_fault_in,
         member_diff_base, member_outcome, member_scope_notice, operational_failure_notice, package_name,
         preflight_tools, prepare_failure_log, render_diagnostics, required_targets, required_tools, run_member,
@@ -3106,6 +3188,31 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         // by `the_umbrella_covers_every_required_ci_job`.
         for &id in verify_check_members() {
             assert!(verify_command(id).is_some(), "{id} must resolve via verify_command");
+        }
+    }
+
+    #[test]
+    fn every_member_that_compiles_runs_in_the_lane_that_holds_the_build_lock() {
+        // Tripwire: the umbrella runs the read-only members beside the compiling
+        // ones, and cargo locks its artifact directory for the whole of a build.
+        // A member that compiles and is not named in BUILD_LANE_MEMBERS would be
+        // started against a directory another gate holds — it would block on the
+        // lock rather than run, and the receipt would charge it that wait. The
+        // subcommand is the axis: `fmt` and `metadata` read, everything else
+        // here writes artifacts. A prepare step compiles too, whatever the
+        // member's own argv does.
+        const READS_ONLY: [&str; 2] = ["fmt", "metadata"];
+
+        for &id in verify_check_members() {
+            let invocation = verify_command(id).expect("every member resolves");
+            let compiles = invocation.prepare.is_some()
+                || (invocation.program == "cargo" && !READS_ONLY.contains(&invocation.args[0]));
+            assert_eq!(
+                compiles,
+                builds_artifacts(id),
+                "{id} builds artifacts: {compiles}, but the build lane says {}",
+                builds_artifacts(id),
+            );
         }
     }
 
