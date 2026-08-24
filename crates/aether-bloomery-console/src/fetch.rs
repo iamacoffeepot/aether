@@ -23,6 +23,8 @@ const BULK_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FetchRequest {
     pub key: ResourceKey,
+    /// Wire path resolved at send time so a cursor can advance without changing the key.
+    pub path: String,
 }
 
 /// Body a lane decoded. Variants grow with the resource set.
@@ -71,12 +73,12 @@ impl FetchLanes {
         Self { live_tx, bulk_tx, reply_rx }
     }
 
-    pub fn request(&self, key: ResourceKey) -> Result<(), SendError<FetchRequest>> {
-        let tx = match key.lane() {
+    pub fn request(&self, request: FetchRequest) -> Result<(), SendError<FetchRequest>> {
+        let tx = match request.key.lane() {
             Lane::Live => &self.live_tx,
             Lane::Bulk => &self.bulk_tx,
         };
-        tx.send(FetchRequest { key })
+        tx.send(request)
     }
 
     /// Non-blocking drain. Empty or a closed lane both yield no item.
@@ -104,8 +106,8 @@ fn spawn_lane<'scope>(
 fn lane_loop(endpoint: &Endpoint, requests: &Receiver<FetchRequest>, replies: &Sender<FetchReply>, timeout: Duration) {
     loop {
         match requests.recv() {
-            Ok(FetchRequest { key }) => {
-                let outcome = fetch_key(endpoint, &key, timeout);
+            Ok(FetchRequest { key, path }) => {
+                let outcome = fetch_key(endpoint, &key, &path, timeout);
                 if replies.send(FetchReply { key, outcome }).is_err() {
                     return;
                 }
@@ -115,51 +117,50 @@ fn lane_loop(endpoint: &Endpoint, requests: &Receiver<FetchRequest>, replies: &S
     }
 }
 
-fn fetch_key(endpoint: &Endpoint, key: &ResourceKey, timeout: Duration) -> Result<ResourceBody, String> {
-    let path = key.path();
+fn fetch_key(endpoint: &Endpoint, key: &ResourceKey, path: &str, timeout: Duration) -> Result<ResourceBody, String> {
     match key {
-        ResourceKey::View => http::get_json::<ViewDocument>(endpoint, &path, timeout)
+        ResourceKey::View => http::get_json::<ViewDocument>(endpoint, path, timeout)
             .map(ResourceBody::View)
             .map_err(|error| error.to_string()),
-        ResourceKey::Journal(_) => http::get_json::<JournalPage>(endpoint, &path, timeout)
+        ResourceKey::Journal(_) => http::get_json::<JournalPage>(endpoint, path, timeout)
             .map(ResourceBody::Journal)
             .map_err(|error| error.to_string()),
-        ResourceKey::Artifact(_) => http::get_json::<DecodedArtifact>(endpoint, &path, timeout)
+        ResourceKey::Artifact(_) => http::get_json::<DecodedArtifact>(endpoint, path, timeout)
             .map(ResourceBody::Artifact)
             .map_err(|error| error.to_string()),
-        ResourceKey::Transcript(_) => http::get_json::<DispatchFilePage>(endpoint, &path, timeout)
+        ResourceKey::Transcript(_) => http::get_json::<DispatchFilePage>(endpoint, path, timeout)
             .map(ResourceBody::Transcript)
             .map_err(|error| error.to_string()),
-        ResourceKey::Prompt(_) => http::get_json::<DispatchFilePage>(endpoint, &path, timeout)
+        ResourceKey::Prompt(_) => http::get_json::<DispatchFilePage>(endpoint, path, timeout)
             .map(ResourceBody::Prompt)
             .map_err(|error| error.to_string()),
-        ResourceKey::MetricsSummary => http::get_json::<MetricsSummary>(endpoint, &path, timeout)
+        ResourceKey::MetricsSummary => http::get_json::<MetricsSummary>(endpoint, path, timeout)
             .map(ResourceBody::Summary)
             .map_err(|error| error.to_string()),
-        ResourceKey::MetricsDays => http::get_json::<Vec<MetricDay>>(endpoint, &path, timeout)
+        ResourceKey::MetricsDays => http::get_json::<Vec<MetricDay>>(endpoint, path, timeout)
             .map(ResourceBody::Days)
             .map_err(|error| error.to_string()),
-        ResourceKey::MetricsTimeline(_) => http::get_json::<MetricsTimeline>(endpoint, &path, timeout)
+        ResourceKey::MetricsTimeline(_) => http::get_json::<MetricsTimeline>(endpoint, path, timeout)
             .map(ResourceBody::Timeline)
             .map_err(|error| error.to_string()),
-        ResourceKey::MetricsSeats => http::get_json::<Vec<MetricsSeat>>(endpoint, &path, timeout)
+        ResourceKey::MetricsSeats => http::get_json::<Vec<MetricsSeat>>(endpoint, path, timeout)
             .map(ResourceBody::Seats)
             .map_err(|error| error.to_string()),
-        ResourceKey::MetricsDispatches => http::get_json::<Vec<MetricDispatch>>(endpoint, &path, timeout)
+        ResourceKey::MetricsDispatches => http::get_json::<Vec<MetricDispatch>>(endpoint, path, timeout)
             .map(ResourceBody::Dispatches)
             .map_err(|error| error.to_string()),
-        ResourceKey::BloomDispatches(_) => http::get_json::<BloomDispatchesView>(endpoint, &path, timeout)
+        ResourceKey::BloomDispatches(_) => http::get_json::<BloomDispatchesView>(endpoint, path, timeout)
             .map(ResourceBody::BloomDispatches)
             .map_err(|error| error.to_string()),
-        ResourceKey::Spend => http::get_json::<SpendWindowView>(endpoint, &path, timeout)
+        ResourceKey::Spend => http::get_json::<SpendWindowView>(endpoint, path, timeout)
             .map(ResourceBody::Spend)
             .map_err(|error| error.to_string()),
-        ResourceKey::Commissions => match http::get_json_optional::<CommissionsView>(endpoint, &path, timeout) {
+        ResourceKey::Commissions => match http::get_json_optional::<CommissionsView>(endpoint, path, timeout) {
             Ok(None) => Ok(ResourceBody::CommissionsMissing),
             Ok(Some(value)) => Ok(ResourceBody::Commissions(value)),
             Err(error) => Err(error.to_string()),
         },
-        ResourceKey::Commission(_) => http::get_json::<CommissionShowView>(endpoint, &path, timeout)
+        ResourceKey::Commission(_) => http::get_json::<CommissionShowView>(endpoint, path, timeout)
             .map(ResourceBody::Commission)
             .map_err(|error| error.to_string()),
     }
