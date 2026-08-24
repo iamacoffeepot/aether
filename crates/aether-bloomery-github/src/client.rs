@@ -167,10 +167,81 @@ impl RateLimit {
     }
 }
 
-/// The statuses GitHub answers an exhausted allowance with: a secondary-limit
-/// or abuse refusal is `403`, a primary limit under the newer surface is `429`.
-fn is_refusal(status: u16) -> bool {
-    status == 403 || status == 429
+/// What a refusal actually is, read off the response before anything is done
+/// about it.
+///
+/// GitHub answers three unrelated conditions with the same `403`, and each one
+/// wants a different response. Treating the status alone as the signal gets two
+/// of them roughly right and the third badly wrong: a credential the account
+/// may not use is made to serve an hour-long sentence for a condition no amount
+/// of waiting clears, and every unrelated request queued behind the shared
+/// budget serves it too.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Refusal {
+    /// The account's primary allowance is spent. `X-RateLimit-Reset` names the
+    /// instant it refills, and nothing before that instant can succeed.
+    PrimaryLimit {
+        /// `X-RateLimit-Reset`, when the response stated one.
+        reset_unix_secs: Option<u64>,
+    },
+    /// A secondary (abuse-detection) limit: the allowance is not spent, the
+    /// request *rate* is. GitHub states a `Retry-After` when it knows one and
+    /// otherwise asks only that the client ask less often.
+    SecondaryLimit {
+        /// `Retry-After` in seconds, when the response stated one.
+        retry_after_secs: Option<u64>,
+    },
+    /// The credential may not do this — a token missing a scope, an expired or
+    /// revoked one, an installation without the repository, an organization
+    /// whose SSO the token is not authorized for. Terminal for the token: the
+    /// same request with the same credential fails the same way in an hour, so
+    /// the refusal is surfaced now rather than slept on.
+    Credential,
+}
+
+/// `Retry-After` in seconds, when the response stated one as delta-seconds.
+///
+/// GitHub states this header as a count of seconds. The HTTP-date form the RFC
+/// also permits is left unparsed and falls through to the rest of the evidence,
+/// because a misparsed date is a withholding window of arbitrary length.
+fn retry_after_of(response: &HttpResponse) -> Option<u64> {
+    response.header("retry-after").and_then(|value| value.trim().parse().ok())
+}
+
+/// Read the refusal off one response, or `None` when the response is not one.
+///
+/// Ordered by how load-bearing the evidence is. A stated `Retry-After` is
+/// GitHub saying exactly what to do and outranks everything else. A spent
+/// allowance is the header pair that says so. The body's wording is the
+/// fallback for a refusal whose headers stated nothing — GitHub words the
+/// secondary limit and the primary one differently, and both differently from
+/// a permission refusal. What is left is a `403` that claims no limit at all,
+/// which is about the credential.
+fn classify(status: u16, rate: RateLimit, retry_after_secs: Option<u64>, body: &str) -> Option<Refusal> {
+    if status != 403 && status != 429 {
+        return None;
+    }
+    if retry_after_secs.is_some() {
+        return Some(Refusal::SecondaryLimit { retry_after_secs });
+    }
+    if rate.is_exhausted() {
+        return Some(Refusal::PrimaryLimit { reset_unix_secs: rate.reset_unix_secs });
+    }
+
+    let said = body.to_ascii_lowercase();
+    if said.contains("secondary rate limit") || said.contains("abuse detection") {
+        return Some(Refusal::SecondaryLimit { retry_after_secs: None });
+    }
+    if said.contains("rate limit exceeded") {
+        return Some(Refusal::PrimaryLimit { reset_unix_secs: rate.reset_unix_secs });
+    }
+
+    // A bare `429` is a rate the server will not serve even when it names
+    // neither window nor reason; a bare `403` is an identity it will not serve.
+    if status == 429 {
+        return Some(Refusal::SecondaryLimit { retry_after_secs: None });
+    }
+    Some(Refusal::Credential)
 }
 
 /// The first backoff window for a refusal that named no reset instant.
@@ -181,25 +252,32 @@ const BACKOFF_BASE: Duration = Duration::from_secs(30);
 /// caps a server that reports a nonsense reset far in the future.
 const MAX_WITHHOLD: Duration = Duration::from_mins(61);
 
-/// How long to stop issuing requests after one response, or `None` to carry on.
+/// How long to stop issuing requests after one classified refusal, or `None`
+/// when withholding is not the answer to it.
 ///
-/// A refusal that names an exhausted window is waited out to the instant the
-/// window refills: retrying inside it cannot succeed, and each retry is itself
-/// a request the next window will have to pay for. A refusal that names no
-/// window backs off exponentially from [`BACKOFF_BASE`], because the only
-/// honest read of "refused, reason unstated" is "ask less often".
+/// A spent allowance is waited out to the instant it refills: retrying inside
+/// the window cannot succeed, and each retry is itself a request the next
+/// window has to pay for. A stated `Retry-After` is obeyed as stated. A limit
+/// that names no window at all backs off exponentially from [`BACKOFF_BASE`],
+/// because the only honest read of "limited, window unstated" is "ask less
+/// often". A credential refusal withholds nothing — the request that earned it
+/// gets no retry, and the requests behind it are about other things.
 ///
 /// Pure over its inputs so the policy is testable without a clock or a network.
-fn withhold_for(status: u16, rate: RateLimit, now_unix_secs: u64, consecutive_refusals: u32) -> Option<Duration> {
-    if !is_refusal(status) {
-        return None;
-    }
-
-    let window = match (rate.is_exhausted(), rate.reset_unix_secs) {
+fn withhold_for(refusal: Refusal, now_unix_secs: u64, consecutive_refusals: u32) -> Option<Duration> {
+    let window = match refusal {
+        Refusal::Credential => return None,
         // The extra second is the boundary: a reset at exactly `now` has not
         // happened yet from the server's side of the clock.
-        (true, Some(reset)) => Duration::from_secs(reset.saturating_sub(now_unix_secs).saturating_add(1)),
-        _ => BACKOFF_BASE.saturating_mul(1_u32 << consecutive_refusals.min(7)),
+        Refusal::PrimaryLimit { reset_unix_secs: Some(reset) } => {
+            Duration::from_secs(reset.saturating_sub(now_unix_secs).saturating_add(1))
+        }
+        // Floored at a second: a `Retry-After: 0` would put the client straight
+        // back into the rate that earned the refusal.
+        Refusal::SecondaryLimit { retry_after_secs: Some(secs) } => Duration::from_secs(secs.max(1)),
+        Refusal::PrimaryLimit { .. } | Refusal::SecondaryLimit { .. } => {
+            BACKOFF_BASE.saturating_mul(1_u32 << consecutive_refusals.min(7))
+        }
     };
     Some(window.min(MAX_WITHHOLD))
 }
@@ -446,29 +524,48 @@ impl<T: HttpTransport> ReqwestGithub<T> {
         })
     }
 
-    /// Fold one response's rate-limit headers into the budget.
+    /// Classify one response's refusal, then fold what it says into the budget.
+    ///
+    /// In that order, because only two of the three refusals want a wait. A
+    /// credential refusal punished with the shared budget stalls every
+    /// unrelated request behind a condition that will not change on its own,
+    /// and reports the stall to the caller as a rate limit — so the operator
+    /// reads "API rate limit exceeded" while the actual answer is that the
+    /// token needs replacing.
     fn observe(&self, response: &HttpResponse) {
         let rate = RateLimit::of(response);
-        let mut budget = self.lock();
-        let refusals = budget.consecutive_refusals;
-
-        let Some(window) = withhold_for(response.status, rate, unix_secs_now(), refusals) else {
+        let Some(refusal) = classify(response.status, rate, retry_after_of(response), &response.body) else {
+            let mut budget = self.lock();
             budget.consecutive_refusals = 0;
             budget.withhold_until = None;
+            drop(budget);
             return;
         };
 
-        budget.consecutive_refusals = refusals.saturating_add(1);
+        let mut budget = self.lock();
+        let Some(window) = withhold_for(refusal, unix_secs_now(), budget.consecutive_refusals) else {
+            drop(budget);
+            tracing::warn!(
+                target: "aether_bloomery_github::client",
+                status = response.status,
+                "github refused the credential, not the rate; withholding nothing, because the next identical \
+                 request is refused identically",
+            );
+            return;
+        };
+
+        budget.consecutive_refusals = budget.consecutive_refusals.saturating_add(1);
         budget.withhold_until = Some(Instant::now() + window);
         drop(budget);
 
         tracing::warn!(
             target: "aether_bloomery_github::client",
             status = response.status,
+            refusal = ?refusal,
             remaining = ?rate.remaining,
             reset_unix_secs = ?rate.reset_unix_secs,
             withhold_secs = window.as_secs(),
-            "github refused on rate limit; withholding requests until the window refills",
+            "github refused on a rate limit; withholding requests until the window refills",
         );
     }
 
@@ -1312,7 +1409,8 @@ mod tests {
     use super::{
         BACKOFF_BASE, CommissionProjectionApi, GitDataApi, GitDataError, GithubApi, GithubError, HttpRequest,
         HttpResponse, HttpTransport, IssueStateApi, MAX_WITHHOLD, MergeResult, Method, NewComment, NewIssue,
-        NewPullRequest, PullRequestApi, RateLimit, ReqwestGithub, StaticTokenSource, TokenSource, withhold_for,
+        NewPullRequest, PullRequestApi, RateLimit, Refusal, ReqwestGithub, StaticTokenSource, TokenSource, classify,
+        retry_after_of, withhold_for,
     };
 
     // Records the last request and replays a queued response — the seam that
@@ -2112,6 +2210,10 @@ mod tests {
         }
     }
 
+    // The body GitHub answers a permission refusal with: a `403` that claims no
+    // limit of any kind.
+    const FORBIDDEN: &str = r#"{"message":"Resource not accessible by integration"}"#;
+
     // Tripwire: a refusal that names an exhausted window is waited out to the
     // instant that window refills, not retried inside it. Every retry inside
     // the window is a request the *next* window pays for, which is how one
@@ -2120,40 +2222,108 @@ mod tests {
     #[test]
     fn an_exhausted_window_is_waited_out_to_its_reset() {
         let rate = RateLimit { remaining: Some(0), reset_unix_secs: Some(1_700_000_900) };
+        let primary = classify(403, rate, None, r#"{"message":"API rate limit exceeded"}"#)
+            .expect("a spent allowance is a refusal");
 
-        let window = withhold_for(403, rate, 1_700_000_000, 0).expect("an exhausted window withholds");
-
+        assert_eq!(primary, Refusal::PrimaryLimit { reset_unix_secs: Some(1_700_000_900) });
+        let window = withhold_for(primary, 1_700_000_000, 0).expect("an exhausted window withholds");
         assert_eq!(window.as_secs(), 901, "to the reset instant, plus the boundary second");
+        assert_eq!(classify(429, rate, None, "{}"), Some(primary), "429 is the same refusal under the newer surface");
+    }
+
+    // Tripwire: the three conditions GitHub answers with one `403` are told
+    // apart before any of them is punished. A permission refusal punished as a
+    // limit puts the whole client behind an hour-long backoff for a condition
+    // that will not change on its own, and tells the operator it was a rate
+    // limit.
+    #[test]
+    fn one_status_is_split_into_the_three_conditions_it_carries() {
+        let unstated = RateLimit::default();
+
         assert_eq!(
-            withhold_for(429, rate, 1_700_000_000, 0),
-            Some(window),
-            "429 is the same refusal under the newer surface",
+            classify(403, unstated, None, r#"{"message":"You have exceeded a secondary rate limit"}"#),
+            Some(Refusal::SecondaryLimit { retry_after_secs: None }),
+        );
+        assert_eq!(
+            classify(403, unstated, None, r#"{"message":"triggered an abuse detection mechanism"}"#),
+            Some(Refusal::SecondaryLimit { retry_after_secs: None }),
+            "the older wording for the same limit",
+        );
+        assert_eq!(
+            classify(403, unstated, None, r#"{"message":"API rate limit exceeded for user ID 1"}"#),
+            Some(Refusal::PrimaryLimit { reset_unix_secs: None }),
+        );
+        assert_eq!(classify(403, unstated, None, FORBIDDEN), Some(Refusal::Credential));
+        assert_eq!(
+            classify(429, unstated, None, "{}"),
+            Some(Refusal::SecondaryLimit { retry_after_secs: None }),
+            "a bare 429 states a rate, never an identity",
         );
     }
 
-    // A refusal that states no window is still a refusal; the only honest read
-    // of it is to ask less often, doubling until the ceiling.
+    // Tripwire: GitHub saying exactly how long to wait outranks every other
+    // reading of the response, including a `remaining: 0` pair that would
+    // otherwise route the refusal to the reset instant.
+    #[test]
+    fn a_stated_retry_after_is_obeyed_over_the_rest_of_the_evidence() {
+        let spent = RateLimit { remaining: Some(0), reset_unix_secs: Some(1_700_000_900) };
+
+        let refusal = classify(403, spent, Some(45), "{}").expect("a stated retry-after is a refusal");
+
+        assert_eq!(refusal, Refusal::SecondaryLimit { retry_after_secs: Some(45) });
+        assert_eq!(withhold_for(refusal, 1_700_000_000, 0).map(|w| w.as_secs()), Some(45));
+        assert_eq!(
+            withhold_for(Refusal::SecondaryLimit { retry_after_secs: Some(0) }, 0, 0).map(|w| w.as_secs()),
+            Some(1),
+            "floored, so a zero does not put the client straight back into the refused rate",
+        );
+    }
+
+    #[test]
+    fn a_retry_after_that_is_not_delta_seconds_falls_through_to_the_rest() {
+        // The HTTP-date form is left unparsed rather than guessed at: a
+        // misparsed date is a withholding window of arbitrary length.
+        let dated = HttpResponse {
+            status: 403,
+            body: FORBIDDEN.to_owned(),
+            headers: vec![("retry-after".to_owned(), "Wed, 21 Oct 2026 07:28:00 GMT".to_owned())],
+        };
+
+        assert_eq!(retry_after_of(&dated), None);
+        assert_eq!(classify(dated.status, RateLimit::of(&dated), None, &dated.body), Some(Refusal::Credential));
+    }
+
+    // A limit that states no window is still a limit; the only honest read of
+    // it is to ask less often, doubling until the ceiling.
     #[test]
     fn an_unnamed_window_backs_off_exponentially_under_a_ceiling() {
-        let unstated = RateLimit::default();
+        let unstated = Refusal::SecondaryLimit { retry_after_secs: None };
 
-        assert_eq!(withhold_for(403, unstated, 0, 0), Some(BACKOFF_BASE));
-        assert_eq!(withhold_for(403, unstated, 0, 1), Some(BACKOFF_BASE * 2));
-        assert_eq!(withhold_for(403, unstated, 0, 4), Some(BACKOFF_BASE * 16));
-        assert_eq!(withhold_for(403, unstated, 0, 30), Some(MAX_WITHHOLD), "and never past the ceiling");
+        assert_eq!(withhold_for(unstated, 0, 0), Some(BACKOFF_BASE));
+        assert_eq!(withhold_for(unstated, 0, 1), Some(BACKOFF_BASE * 2));
+        assert_eq!(withhold_for(unstated, 0, 4), Some(BACKOFF_BASE * 16));
+        assert_eq!(withhold_for(unstated, 0, 30), Some(MAX_WITHHOLD), "and never past the ceiling");
     }
 
     #[test]
     fn a_reset_far_in_the_future_is_capped() {
-        let nonsense = RateLimit { remaining: Some(0), reset_unix_secs: Some(u64::MAX) };
+        let nonsense = Refusal::PrimaryLimit { reset_unix_secs: Some(u64::MAX) };
 
-        assert_eq!(withhold_for(403, nonsense, 0, 0), Some(MAX_WITHHOLD));
+        assert_eq!(withhold_for(nonsense, 0, 0), Some(MAX_WITHHOLD));
     }
 
     #[test]
-    fn a_served_response_clears_the_withholding() {
-        assert_eq!(withhold_for(200, RateLimit { remaining: Some(4_999), reset_unix_secs: Some(9) }, 0, 3), None);
-        assert_eq!(withhold_for(404, RateLimit::default(), 0, 3), None, "a miss is not a refusal");
+    fn a_credential_refusal_withholds_nothing() {
+        // Waiting is not the remedy: the token needs a scope, a re-mint, or an
+        // SSO authorization, and every second withheld is spent on requests
+        // that have nothing to do with it.
+        assert_eq!(withhold_for(Refusal::Credential, 0, 7), None);
+    }
+
+    #[test]
+    fn a_served_response_is_not_a_refusal() {
+        assert_eq!(classify(200, RateLimit { remaining: Some(4_999), reset_unix_secs: Some(9) }, None, "{}"), None);
+        assert_eq!(classify(404, RateLimit::default(), None, "{}"), None, "a miss is not a refusal");
     }
 
     // Tripwire: the second call inside the window never reaches the transport.
@@ -2178,5 +2348,31 @@ mod tests {
             matches!(&second, GithubError::Status { status: 403, body } if body.contains("withholding")),
             "and the remembered one says so: {second}",
         );
+    }
+
+    // Tripwire: the same `403` status, refused for a reason waiting cannot fix,
+    // withholds nothing. A client that backed off here would stall every later
+    // request — including the ones a differently-scoped credential answers
+    // fine — behind a window that clears nothing, and would report the stall to
+    // its caller as an exhausted allowance.
+    #[test]
+    fn a_credential_refusal_does_not_shut_the_client_for_the_requests_behind_it() {
+        let github = ReqwestGithub::with_transport(
+            CountingTransport::new(HttpResponse::new(403, FORBIDDEN.to_owned())),
+            Arc::new(StaticTokenSource::new("t0ken".to_owned())),
+            "https://api.github.com",
+            "octo/shadow",
+        );
+
+        let first = github.find_comment(7, "marker").expect_err("the token may not read this");
+        let second = github.find_comment(7, "marker").expect_err("and still may not");
+
+        assert_eq!(*github.transport.calls.borrow(), 2, "the second request is issued, not withheld");
+        for refusal in [&first, &second] {
+            assert!(
+                matches!(refusal, GithubError::Status { status: 403, body } if body.contains("not accessible")),
+                "the caller sees GitHub's own reason, not a fabricated rate limit: {refusal}",
+            );
+        }
     }
 }
