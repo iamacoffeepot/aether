@@ -21,7 +21,7 @@ use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{GitSource, MainlineRef, SourceError, candidate_ref_name};
 use aether_data::wire::to_vec;
 
-use super::sweep::{JanitorPolicy, SweepRequest, retention_duration, sweep};
+use super::sweep::{JanitorPolicy, SweepRequest, WorkingRefPruner, retention_duration, sweep};
 use crate::bloomery::SourceShell;
 use crate::bloomery::{
     CapturedObjects, LaneOccupancy, LocalExecutorError, RunLifecycle, RunProcess, RunSpec, TransformRunner,
@@ -128,6 +128,22 @@ impl RunProcess for StubProcess {
 
     fn kill(&mut self) -> Result<(), LocalExecutorError> {
         Ok(())
+    }
+}
+
+/// A source that counts `prune_working_refs` and can fail on command.
+struct CountingPruner {
+    calls: AtomicUsize,
+    fail: AtomicBool,
+}
+
+impl WorkingRefPruner for CountingPruner {
+    fn prune_working_refs(&self, _bloom: &BloomId) -> Result<usize, SourceError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(SourceError::Malformed("injected prune fault".to_owned()));
+        }
+        Ok(0)
     }
 }
 
@@ -790,11 +806,10 @@ fn terminal_bloom_working_refs_are_pruned_and_claim_refs_are_spared() {
 
     let runner = StubRunner { registered: vec![], released: Released(Arc::new(Mutex::new(Vec::new()))) };
     let keep = policy(7, u64::MAX);
-    let prune = |bloom: &BloomId| source.prune_working_refs(bloom);
     let report = run(&mut SweepRequest {
         store: &mut store,
         runner: &runner,
-        source: Some(&prune),
+        source: Some(&source),
         worktree_base: scratch.path(),
         target_base: scratch.path(),
         lanes: &idle,
@@ -822,11 +837,7 @@ fn a_terminal_bloom_is_pruned_once() {
     let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
     journal_superseded(&mut store);
 
-    let calls = AtomicUsize::new(0);
-    let prune = |_bloom: &BloomId| {
-        calls.fetch_add(1, Ordering::SeqCst);
-        Ok(0)
-    };
+    let prune = CountingPruner { calls: AtomicUsize::new(0), fail: AtomicBool::new(false) };
     let runner = StubRunner { registered: vec![], released: Released(Arc::new(Mutex::new(Vec::new()))) };
     let keep = policy(7, u64::MAX);
     let mut pruned = HashSet::new();
@@ -855,7 +866,11 @@ fn a_terminal_bloom_is_pruned_once() {
 
     assert_eq!(first.refs, 0);
     assert_eq!(second.refs, 0);
-    assert_eq!(calls.load(Ordering::SeqCst), 1, "the second tick does not re-prune a bloom the first tick already did");
+    assert_eq!(
+        prune.calls.load(Ordering::SeqCst),
+        1,
+        "the second tick does not re-prune a bloom the first tick already did"
+    );
 }
 
 #[test]
@@ -866,15 +881,7 @@ fn a_failed_prune_is_retried_on_the_next_tick() {
     let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
     journal_superseded(&mut store);
 
-    let calls = AtomicUsize::new(0);
-    let fail = AtomicBool::new(true);
-    let prune = |_bloom: &BloomId| {
-        calls.fetch_add(1, Ordering::SeqCst);
-        if fail.load(Ordering::SeqCst) {
-            return Err(SourceError::Malformed("injected prune fault".to_owned()));
-        }
-        Ok(0)
-    };
+    let prune = CountingPruner { calls: AtomicUsize::new(0), fail: AtomicBool::new(true) };
     let runner = StubRunner { registered: vec![], released: Released(Arc::new(Mutex::new(Vec::new()))) };
     let keep = policy(7, u64::MAX);
     let mut pruned = HashSet::new();
@@ -889,7 +896,7 @@ fn a_failed_prune_is_retried_on_the_next_tick() {
         now: SystemTime::now(),
         pruned: &mut pruned,
     });
-    fail.store(false, Ordering::SeqCst);
+    prune.fail.store(false, Ordering::SeqCst);
     run(&mut SweepRequest {
         store: &mut store,
         runner: &runner,
@@ -902,7 +909,7 @@ fn a_failed_prune_is_retried_on_the_next_tick() {
         pruned: &mut pruned,
     });
 
-    assert_eq!(calls.load(Ordering::SeqCst), 2, "a failed prune is retried rather than remembered as done");
+    assert_eq!(prune.calls.load(Ordering::SeqCst), 2, "a failed prune is retried rather than remembered as done");
     assert_eq!(pruned.len(), 1, "the successful retry is what the memo records");
 }
 

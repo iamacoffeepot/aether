@@ -15,6 +15,7 @@ use aether_bloomery::{BloomId, BloomStatus, Digest, Snapshot, is_active_unlanded
 use aether_bloomery_github::SourceError;
 
 use crate::bloomery::LaneOccupancy;
+use crate::bloomery::SourceShell;
 use crate::bloomery::TransformRunner;
 use crate::bloomery::config::JANITOR_REF_PRUNES_PER_TICK;
 use crate::store::{StoreBackend, membership};
@@ -70,6 +71,22 @@ pub struct SweepReport {
     pub target_dirs: usize,
 }
 
+/// The prune seam one janitor tick talks to. [`SourceShell`] is the production
+/// implementor; tests stub it to count and fail calls.
+pub trait WorkingRefPruner {
+    /// Delete `bloom`'s candidate, integration, and checkpoint refs.
+    ///
+    /// # Errors
+    /// A transport or backend fault other than an already-absent ref.
+    fn prune_working_refs(&self, bloom: &BloomId) -> Result<usize, SourceError>;
+}
+
+impl WorkingRefPruner for SourceShell {
+    fn prune_working_refs(&self, bloom: &BloomId) -> Result<usize, SourceError> {
+        Self::prune_working_refs(self, bloom)
+    }
+}
+
 /// The seams one sweep pass reads and writes.
 pub struct SweepRequest<'a> {
     /// The journal the snapshot is rebuilt from, and the outstanding-order /
@@ -77,10 +94,8 @@ pub struct SweepRequest<'a> {
     pub store: &'a mut dyn StoreBackend,
     /// The spawn seam that lists registered worktrees and tears them down.
     pub runner: &'a dyn TransformRunner,
-    /// Deletes a terminal bloom's working refs. Production binds
-    /// [`SourceShell::prune_working_refs`](crate::bloomery::SourceShell::prune_working_refs);
-    /// tests bind a stub that counts or fails. `None` skips ref prune.
-    pub source: Option<&'a dyn Fn(&BloomId) -> Result<usize, SourceError>>,
+    /// The source that deletes working refs. `None` skips ref prune.
+    pub source: Option<&'a dyn WorkingRefPruner>,
     /// Scratch-worktree base: nonce-keyed checkouts and `*-evidence` dirs.
     pub worktree_base: &'a Path,
     /// Per-slot cargo target directory root.
@@ -398,11 +413,7 @@ fn evidence_is_protected(live: &HashSet<&str>, snapshot: &Snapshot, nonce: &str,
     owner.is_some_and(|bloom| bloom_is_live(snapshot, bloom))
 }
 
-fn prune_terminal_refs(
-    prune: &dyn Fn(&BloomId) -> Result<usize, SourceError>,
-    snapshot: &Snapshot,
-    already: &mut HashSet<BloomId>,
-) -> usize {
+fn prune_terminal_refs(source: &dyn WorkingRefPruner, snapshot: &Snapshot, already: &mut HashSet<BloomId>) -> usize {
     let mut pruned = 0;
     let mut attempted = 0;
     for (bloom, record) in &snapshot.blooms {
@@ -416,7 +427,7 @@ fn prune_terminal_refs(
             break;
         }
         attempted += 1;
-        match prune(bloom) {
+        match source.prune_working_refs(bloom) {
             Ok(count) => {
                 already.insert(*bloom);
                 if count > 0 {

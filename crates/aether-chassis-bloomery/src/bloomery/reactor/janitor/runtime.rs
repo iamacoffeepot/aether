@@ -8,7 +8,6 @@ use std::time::{Duration, SystemTime};
 
 use aether_actor::runtime;
 use aether_bloomery::BloomId;
-use aether_bloomery_github::SourceError;
 use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -16,7 +15,7 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
 use serde::{Deserialize, Serialize};
 
-use super::sweep::{JanitorPolicy, SweepRequest, sweep};
+use super::sweep::{JanitorPolicy, SweepRequest, WorkingRefPruner, sweep};
 use super::{JanitorReactorCapability, JanitorReactorSetup};
 
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
@@ -129,23 +128,13 @@ impl NativeActor for JanitorReactorCapability {
         let executor = state.executor.clone();
         let lanes = || executor.as_ref().map_or_else(LaneOccupancy::default, ExecutorShell::lane_occupancy);
 
-        let source = state.source.clone();
-        let prune_closure;
-        let prune: Option<&dyn Fn(&BloomId) -> Result<usize, SourceError>> = match source.as_ref() {
-            Some(shell) => {
-                prune_closure = |bloom: &BloomId| shell.prune_working_refs(bloom);
-                Some(&prune_closure)
-            }
-            None => None,
-        };
-
         let Some(store) = state.store.as_mut() else {
             return;
         };
         match sweep(&mut SweepRequest {
             store,
             runner: state.runner.as_ref(),
-            source: prune,
+            source: state.source.as_ref().map(|shell| shell as &dyn WorkingRefPruner),
             worktree_base: &state.worktree_base,
             target_base: &state.target_base,
             lanes: &lanes,

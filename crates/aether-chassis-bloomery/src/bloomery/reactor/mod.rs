@@ -55,7 +55,7 @@ pub use executor::{
 pub use integrate::{IntegrateReactorCapability, IntegrateReactorSetup, IntegrateReactorState, IntegrateTick};
 pub use janitor::{
     JanitorPolicy, JanitorReactorCapability, JanitorReactorSetup, JanitorReactorState, JanitorTick, SweepReport,
-    SweepRequest, sweep,
+    SweepRequest, WorkingRefPruner, sweep,
 };
 pub use land::{LandReactorCapability, LandReactorSetup, LandReactorState, LandTick};
 pub use mirror::{DrainTick, MirrorReactorCapability, MirrorReactorSetup, MirrorReactorState};
