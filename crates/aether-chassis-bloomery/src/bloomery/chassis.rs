@@ -314,6 +314,7 @@ fn actor_setups(
         notify: NotifyReactorSetup {
             sink: webhook_sink(notify),
             store_path: coordinator.store_path.clone(),
+            milestones: notify.milestones,
             poll_interval_secs: coordinator.poll_interval_secs,
         },
         janitor: JanitorReactorSetup {

@@ -77,8 +77,8 @@ pub use intake::{
 pub use mirror::ProjectionShell;
 #[cfg(feature = "github")]
 pub use notify::{
-    Delivered, LoudEvent, NotifyConfig, NotifyOverlay, NotifyReactorCapability, NotifyReactorSetup, NotifyReactorState,
-    NotifyTick, deliver, loud_events, webhook_sink,
+    Delivered, NotifyConfig, NotifyEvent, NotifyOverlay, NotifyReactorCapability, NotifyReactorSetup,
+    NotifyReactorState, NotifyTick, Volume, deliver, notify_events, webhook_sink,
 };
 pub use outbox::TopicOutbox;
 #[cfg(feature = "github")]

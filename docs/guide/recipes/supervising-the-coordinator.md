@@ -61,6 +61,16 @@ unattended:
   listing. Give the file mode `600` and keep it outside the checkout. The URL
   never reaches log output at any level.
 
+- **`AETHER_BLOOMERY_NOTIFY_MILESTONES=true`** widens that channel to the quiet
+  half: a bloom entering the line, and each member as it integrates, carrying
+  how many of its siblings have got there too. Loud conditions post either way;
+  this is what lets you tell a healthy night from a dead coordinator, because a
+  bloom that walks cleanly raises no loud condition for hours. Off by default —
+  an alert channel that has always carried only stops should not start carrying
+  progress because someone upgraded. Turning it on is forward-only: the
+  coordinator has been tracking milestone keys all along, so you get the next
+  transition rather than a replay of the day.
+
 The environment file holds no credential of its own. The unit mints
 `GITHUB_TOKEN` from `gh auth token`
 inside its `ExecStart` wrapper at every start, so the token lives in the
