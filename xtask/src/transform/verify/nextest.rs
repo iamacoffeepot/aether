@@ -364,7 +364,7 @@ fn normalize(text: &str) -> String {
     text.split_whitespace().collect::<Vec<&str>>().join(" ")
 }
 
-fn tests_word(count: usize) -> &'static str {
+pub(super) fn tests_word(count: usize) -> &'static str {
     if count == 1 {
         "test"
     } else {

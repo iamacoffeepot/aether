@@ -1346,6 +1346,28 @@ fn classify_failures(
         .flatten()
 }
 
+/// The receipt a per-test triage leaves at the end of the member's own log.
+///
+/// The log a triaged member keeps is the failing run and nothing else, and the
+/// replays that follow it are separate spawns whose output goes to the triage's
+/// own verdicts. So the artifact ends at a summary line and is not written
+/// again until every replay has finished — a base replay compiles the whole
+/// workspace at the base commit, which is minutes. A reader comparing the last
+/// line to the member's reported wall-clock has no way to tell that work from a
+/// gate that stopped, and this is what tells them.
+fn triage_notice(id: &str, tests: usize, base: Option<&str>) -> String {
+    let replays = base.map_or_else(
+        || String::from("replayed against the same input"),
+        |base| format!("replayed against the same input, then run at the work order's base {base}"),
+    );
+    format!(
+        "\n\n{id}: {tests} failing {} triaged after the run above — each {replays}. Those replays are \
+         separate builds whose output is not captured here, so this member's reported wall-clock runs well \
+         past the last line above.\n",
+        nextest::tests_word(tests),
+    )
+}
+
 /// The line separating a member's first run from its out-of-closure repeat
 /// inside the one log the evidence keeps.
 ///
@@ -1428,6 +1450,7 @@ fn run_member_discriminated(
         // Every failing test the candidate is charged with is triaged on its
         // own (FIX-4b): replayed against the same input, then run at the work
         // order's base. Only a test red *only* on the candidate is a finding.
+        let triaged_tests = classified.candidate_tests().len();
         let triaged = triage::triage(&classified, diff_base, |test, at| {
             let captured = runner.replay(invocation, test, at)?;
             Ok(replay_verdict(id, invocation, test, at, &captured))
@@ -1446,7 +1469,7 @@ fn run_member_discriminated(
         return Ok(MemberRun {
             id: id.to_owned(),
             outcome,
-            log,
+            log: [log, triage_notice(id, triaged_tests, diff_base).into_bytes()].concat(),
             exit_code: if outcome.passed() {
                 0
             } else {
@@ -3533,6 +3556,33 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         assert!(findings.contains("fleetharness_asset_window"));
         assert!(run.flakes().is_empty() && run.inherited().is_empty(), "nothing was excused");
         assert_eq!(umbrella_status(&[MemberOutcome::Passed, run.outcome]), "fail");
+    }
+
+    #[test]
+    fn a_triaged_member_says_in_its_own_log_that_replays_followed_the_run() {
+        // Tripwire: a triaged member's log is the failing run and nothing else,
+        // and every replay after it is a separate build — a base replay
+        // compiles the whole workspace at the base commit. Drop this line and
+        // the artifact's last content sits minutes behind the wall-clock the
+        // member reports, which reads as a gate that stopped rather than one
+        // still working.
+        let invocation = verify_command("verify.test").expect("verify.test mapped");
+        let failing = failing_run(&["aether-component::fleetharness_asset_window"]);
+        let mut runner = ScriptedRunner::with_replays(&[(&failing, 100)], &[(&failing, 100), (&passing_run(), 0)]);
+
+        let run = run_member_discriminated(
+            "verify.test",
+            &invocation,
+            &Scope::resolve(None),
+            None,
+            Some("deadbeef"),
+            &mut runner,
+        )
+        .expect("the policy runs");
+
+        let log = String::from_utf8(run.log).expect("a verify log is utf-8");
+        assert!(log.contains("1 failing test triaged after the run above"), "how much was triaged: {log}");
+        assert!(log.contains("the work order's base deadbeef"), "and what the replays ran against: {log}");
     }
 
     #[test]
