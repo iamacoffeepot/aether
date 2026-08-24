@@ -1029,6 +1029,16 @@ trait MemberRunner {
 struct SpawnRunner<'a> {
     cache: Option<&'a CompilerCache>,
     peak: &'a PeakMemory,
+    /// The base checkout this member's replays share, opened by the first one
+    /// that needs it and kept until the member is done.
+    ///
+    /// One tree, not one per replay. Every base replay in a member run is at
+    /// the same commit, and the tree carries a whole cold build with it: its
+    /// own `CARGO_TARGET_DIR` and its own component cross-build, neither of
+    /// which survived the `worktree remove` that used to follow each replay. A
+    /// member with four triaged failures paid for four from-scratch workspace
+    /// builds of the same base.
+    base: Option<BaseCheckout>,
 }
 
 impl MemberRunner for SpawnRunner<'_> {
@@ -1045,18 +1055,59 @@ impl MemberRunner for SpawnRunner<'_> {
         let Some(base) = at else {
             return self.spawn_one(invocation, test, None);
         };
-        // The base run needs a tree at the base commit, and it must not be this
-        // one: stashing would move the candidate out from under a lane that is
-        // mid-verification. A detached worktree is the cheap, side-effect-free
-        // form, removed whichever way the run went.
-        let checkout = BaseCheckout::open(base)?;
-        let captured = self.spawn_one(invocation, test, Some(checkout.path()));
-        checkout.close();
-        captured
+        let path = self.base_checkout(invocation, base)?.to_path_buf();
+        self.spawn_one(invocation, test, Some(&path))
     }
 }
 
-impl SpawnRunner<'_> {
+impl<'a> SpawnRunner<'a> {
+    fn new(cache: Option<&'a CompilerCache>, peak: &'a PeakMemory) -> Self {
+        Self { cache, peak, base: None }
+    }
+
+    /// The tree this member's base replays run in, opened and prepared on the
+    /// first replay that asks for it.
+    ///
+    /// The base run needs a tree at the base commit, and it must not be this
+    /// one: stashing would move the candidate out from under a lane that is
+    /// mid-verification. A detached worktree is the cheap, side-effect-free
+    /// form.
+    ///
+    /// It is prepared here rather than per replay because the preparation
+    /// belongs to the tree: `verify.test` needs the component wasm the prepare
+    /// cross-builds, and without it `AETHER_REQUIRE_RUNTIME=1` turns every
+    /// scenario test red — which this triage would then read as "the base was
+    /// already broken" and use to excuse a real finding.
+    ///
+    /// A replay naming a different base than the open one closes it and opens
+    /// that: the tree is only ever the answer to a commit.
+    fn base_checkout(&mut self, invocation: &VerifyInvocation, base: &str) -> Result<&Path> {
+        if self.base.as_ref().is_none_or(|open| open.base != base) {
+            self.close_base();
+            let checkout = BaseCheckout::open(base)?;
+            if let Some(prepare) = invocation.prepare {
+                let at = checkout.path();
+                let mut step = cargo::command();
+                step.args(prepare.iter().copied()).current_dir(at).env("CARGO_TARGET_DIR", at.join("target"));
+                run_captured(step).with_context(|| format!("prepare the base checkout at {}", at.display()))?;
+            }
+            self.base = Some(checkout);
+        }
+        Ok(self.base.as_ref().expect("the checkout was just opened").path())
+    }
+
+    /// Remove the base checkout this runner opened, if it opened one.
+    ///
+    /// Explicit rather than a destructor for the reason [`BaseCheckout`] itself
+    /// is: removing a worktree can fail, and swallowing that leaves a stale
+    /// entry in `.git/worktrees` that the next `worktree add` at the same path
+    /// refuses.
+    fn close_base(&mut self) {
+        if let Some(checkout) = self.base.take() {
+            checkout.close();
+        }
+    }
+
     /// Spawn `invocation` narrowed to the one `test`, optionally in `at`.
     ///
     /// `PROPTEST_CASES=1` is what replays a property test's *own* counterexample
@@ -1078,17 +1129,9 @@ impl SpawnRunner<'_> {
             // Its own target directory: cargo's incremental cache surfaces a
             // dependency last compiled from the other tree's source otherwise,
             // and a phantom error here would read as a base failure that
-            // excuses a real finding.
+            // excuses a real finding. It is the checkout's, so it lives as long
+            // as the checkout does and every replay after the first is warm.
             command.current_dir(at).env("CARGO_TARGET_DIR", at.join("target"));
-            // And its own prepare. `verify.test` needs the component wasm this
-            // step cross-builds, and without it `AETHER_REQUIRE_RUNTIME=1` turns
-            // every scenario test red — which this triage would then read as
-            // "the base was already broken" and use to excuse a real finding.
-            if let Some(prepare) = invocation.prepare {
-                let mut step = cargo::command();
-                step.args(prepare.iter().copied()).current_dir(at).env("CARGO_TARGET_DIR", at.join("target"));
-                run_captured(step).with_context(|| format!("prepare the base checkout at {}", at.display()))?;
-            }
         } else {
             sccache::export(self.cache, &mut command);
         }
@@ -1119,6 +1162,9 @@ fn nextest_filter(test: &str) -> String {
 /// `git worktree add` at the same path refuses.
 struct BaseCheckout {
     path: PathBuf,
+    /// The commit it stands at, so a replay can tell whether the open checkout
+    /// is the one it needs.
+    base: String,
 }
 
 impl BaseCheckout {
@@ -1132,7 +1178,7 @@ impl BaseCheckout {
         if !added.status.success() {
             bail!("git worktree add at {base} failed: {}", String::from_utf8_lossy(&added.stderr));
         }
-        Ok(Self { path })
+        Ok(Self { path, base: base.to_owned() })
     }
 
     fn path(&self) -> &Path {
@@ -2121,6 +2167,7 @@ fn run_gate(id: &'static str, pass: &GatePass<'_>) -> Result<(MemberRun, GateTim
     // the host instead.
     let gate_started = Instant::now();
     let (prepare_failure, prepare_millis) = run_timed_prepare(id, &invocation, cache, peak)?;
+    let mut runner = SpawnRunner::new(cache, peak);
     let run = match prepare_failure {
         Some((log, code, outcome)) => MemberRun::plain(id, outcome, log.into_bytes(), code),
         None => run_member_discriminated(
@@ -2129,9 +2176,10 @@ fn run_gate(id: &'static str, pass: &GatePass<'_>) -> Result<(MemberRun, GateTim
             scope,
             closure,
             member_diff_base(id, args.diff_base.as_deref(), full),
-            &mut SpawnRunner { cache, peak },
+            &mut runner,
         )?,
     };
+    runner.close_base();
     let duration_millis = elapsed_millis(gate_started);
 
     let log_path = logs.join(format!("{id}.log"));
