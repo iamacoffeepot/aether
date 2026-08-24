@@ -240,6 +240,12 @@ pub enum ObserveMainlineResult {
         /// core admits [`Fact::ObserveMainlineDiverged`](crate::Fact::ObserveMainlineDiverged)
         /// rather than advancing.
         fast_forward: bool,
+        /// The request's [`relative_to`](ObserveMainline::relative_to) — the
+        /// digest this classification was made against. What makes the
+        /// verdict checkable by its reader: a later fold applies only while
+        /// this still names live mainline.
+        #[serde(with = "aether_data::bytes")]
+        relative_to: Vec<u8>,
     },
     /// The observation failed.
     Err {
