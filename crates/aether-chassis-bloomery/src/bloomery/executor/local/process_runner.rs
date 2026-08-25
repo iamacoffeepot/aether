@@ -125,6 +125,9 @@ pub struct ProcessTransformRunner {
     /// Empty means the GitHub `origin` remote; a local authority stores the
     /// absolute repository path (no `file://` prefix).
     fetch_remote: String,
+    /// Tests inject a `HEAD` read so the mismatch arm can fail the start
+    /// without a corrupted checkout. Production is always `None`.
+    head_reader: Option<fn(&Path) -> Result<String, LocalExecutorError>>,
 }
 
 impl ProcessTransformRunner {
@@ -134,7 +137,7 @@ impl ProcessTransformRunner {
     pub fn new(identity: CaptureIdentity, lane_program: LaneProgram, repo: impl Into<PathBuf>) -> Self {
         let repo = repo.into();
         let repo = repo.canonicalize().unwrap_or(repo);
-        Self { identity, lane_program, repo, fetch_remote: String::new() }
+        Self { identity, lane_program, repo, fetch_remote: String::new(), head_reader: None }
     }
 
     /// Fetch missing order identities from `remote` instead of `origin`.
@@ -144,6 +147,15 @@ impl ProcessTransformRunner {
     #[must_use]
     pub fn with_fetch_remote(mut self, remote: impl Into<String>) -> Self {
         self.fetch_remote = remote.into();
+        self
+    }
+
+    /// Read `HEAD` through `reader` instead of git. Tests drive the mismatch
+    /// arm this way; production never sets it.
+    #[cfg(test)]
+    #[must_use]
+    fn with_head_reader(mut self, reader: fn(&Path) -> Result<String, LocalExecutorError>) -> Self {
+        self.head_reader = Some(reader);
         self
     }
 
@@ -172,8 +184,10 @@ impl TransformRunner for ProcessTransformRunner {
         let checkout = commitish_for(&self.repo, spec.checkout_hex)?;
         let diff_base = spec.diff_base_hex.map(|hex| commitish_for(&self.repo, hex)).transpose()?;
         // Bring the slot's checkout to the sealed subject — reset in place when the
-        // slot already holds one, created when it does not.
+        // slot already holds one, created when it does not — then read HEAD back
+        // so a miss cannot launch the lane on a tree nobody can explain.
         materialize_checkout(&self.repo, spec.worktree_dir, &checkout)?;
+        let observed = confirm_checkout_head(spec.worktree_dir, &checkout, self.head_reader.unwrap_or(worktree_head))?;
         // The scratch worktree is a full checkout carrying the repo's interactive
         // `.claude/settings.json` hooks, and the construct lane spawns headless
         // `claude` in it — so the SessionStart worktree-rebind hook would fire and
@@ -215,6 +229,7 @@ impl TransformRunner for ProcessTransformRunner {
         // child's own pid as pgid; no new dependency.
         let child = spawn_isolated(&mut lane).map_err(LocalExecutorError::Spawn)?;
         super::identity::record_spawned(spec.evidence_dir, child.id());
+        super::identity::record_checkout_head(spec.evidence_dir, &observed);
         Ok(Box::new(ChildProcess { child }))
     }
 
@@ -592,6 +607,11 @@ fn resolved_git_common_dir(repo: &Path) -> Option<PathBuf> {
 /// dependency claim that resolved without a capture commit (ADR-0196) — so
 /// [`commitish_for`] resolves it first; both the reset and the re-create
 /// paths then stand on a subject git accepts.
+///
+/// The caller verifies the result. [`ProcessTransformRunner::start`] reads
+/// `HEAD` back immediately after this returns and fails the start when it is
+/// not the commitish the checkout was made from: a silent miss would launch
+/// a lane on a tree nobody can explain.
 fn materialize_checkout(repo_dir: &Path, worktree_dir: &Path, checkout_hex: &str) -> Result<(), LocalExecutorError> {
     let commitish = commitish_for(repo_dir, checkout_hex)?;
     if worktree_dir.exists() && slot_belongs_to_repo(worktree_dir, repo_dir) {
@@ -607,6 +627,33 @@ fn materialize_checkout(repo_dir: &Path, worktree_dir: &Path, checkout_hex: &str
     }
     reclaim_worktree_path(worktree_dir)?;
     add_worktree(repo_dir, worktree_dir, &commitish)
+}
+
+/// The worktree's current `HEAD`, as `git rev-parse` printed it.
+fn worktree_head(worktree_dir: &Path) -> Result<String, LocalExecutorError> {
+    git_in(worktree_dir, &["rev-parse", "HEAD"])
+}
+
+/// Fail the start when the worktree's `HEAD` is not the commitish
+/// [`materialize_checkout`] was asked to stand on.
+///
+/// A mismatch here is a host fault: materialize has already returned, so the
+/// tree should be at `expected`. Launching the lane anyway would spend a lap
+/// on a subject nobody can explain. `read_head` is git in production and a
+/// stub in the mismatch test.
+fn confirm_checkout_head(
+    worktree_dir: &Path,
+    expected: &str,
+    read_head: fn(&Path) -> Result<String, LocalExecutorError>,
+) -> Result<String, LocalExecutorError> {
+    let observed = read_head(worktree_dir)?;
+    if observed == expected {
+        return Ok(observed);
+    }
+    Err(LocalExecutorError::Worktree(format!(
+        "worktree at {} is at `{observed}`, expected `{expected}`",
+        worktree_dir.display(),
+    )))
 }
 
 /// Whether the slot at `worktree_dir` is a worktree of `repo_dir`.
@@ -868,8 +915,8 @@ mod tests {
     #[cfg(unix)]
     use super::link_slot_target;
     use super::{
-        CaptureIdentity, FALLBACK_CAPTURE_SUBJECT, FALLBACK_IDENTITY, ProcessTransformRunner, SETTINGS_PATH,
-        TransformRunner, capture_subject, commitish_for, decode_object_hex, fetch_order_identities,
+        CaptureIdentity, FALLBACK_CAPTURE_SUBJECT, FALLBACK_IDENTITY, LocalExecutorError, ProcessTransformRunner,
+        SETTINGS_PATH, TransformRunner, capture_subject, commitish_for, decode_object_hex, fetch_order_identities,
         fetch_subject_if_absent, git_in, materialize_checkout, neutralize_hooks, reclaim_worktree_path, reset_checkout,
         resolved_git_common_dir, strip_hooks, work_order_args,
     };
@@ -1274,6 +1321,76 @@ mod tests {
             git_in(&slot, &["status", "--porcelain"]).unwrap().trim(),
             "",
             "a reused slot presents exactly as a freshly created checkout, which is what the lane assumes",
+        );
+    }
+
+    #[test]
+    fn a_slot_left_at_another_subject_is_brought_to_this_one_and_the_head_is_recorded() {
+        // The plausible bug: a reused slot is reset to this dispatch's subject
+        // but nothing records the HEAD the lane actually started on, so a later
+        // observer reconstructs occupancy from timestamps. The record is what
+        // makes "did this lane run on its own subject" one field.
+        let (repo, scratch, first, second) = repo_with_two_commits();
+        let slot = scratch.path().join("slot-0");
+        let evidence = scratch.path().join("n-1-evidence");
+        let target = scratch.path().join("slot-0-target");
+        materialize_checkout(repo.path(), &slot, &first).unwrap();
+        assert_eq!(git_in(&slot, &["rev-parse", "HEAD"]).unwrap().trim(), first);
+
+        let runner = ProcessTransformRunner::new(CaptureIdentity::default(), LaneProgram::parse("true"), repo.path());
+        let _child = runner
+            .start(&spec("construct.implement", &second, None, None, &evidence, &slot, &target))
+            .expect("start on the second subject");
+
+        assert_eq!(git_in(&slot, &["rev-parse", "HEAD"]).unwrap().trim(), second, "the slot holds this dispatch's sha");
+        let recorded =
+            super::super::identity::CheckoutHead::read(&evidence).expect("the dispatch records the HEAD it started on");
+        assert_eq!(recorded.head, second, "the recorded head is this dispatch's subject, not the slot's previous one");
+    }
+
+    fn mismatched_head(_: &Path) -> Result<String, LocalExecutorError> {
+        Ok("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into())
+    }
+
+    #[test]
+    fn a_checkout_head_mismatch_fails_the_start_before_spawn() {
+        // A tree the host already knows is wrong must not spend a lap. The
+        // check sits before spawn, so a stubbed HEAD that does not match the
+        // materialized subject fails the start rather than launching the lane.
+        let (repo, scratch, first, _second) = repo_with_two_commits();
+        let slot = scratch.path().join("slot-0");
+        let evidence = scratch.path().join("n-1-evidence");
+        let target = scratch.path().join("slot-0-target");
+        let runner = ProcessTransformRunner::new(
+            CaptureIdentity::default(),
+            LaneProgram::parse("/this/lane/must/not/spawn"),
+            repo.path(),
+        )
+        .with_head_reader(mismatched_head);
+
+        let error = runner
+            .start(&spec("construct.implement", &first, None, None, &evidence, &slot, &target))
+            .err()
+            .expect("a mismatched HEAD must fail the start");
+
+        let detail = format!("{error:?}");
+        assert!(
+            matches!(error, LocalExecutorError::Worktree(_)),
+            "the start fails as a worktree fault, not a spawn: {detail}"
+        );
+        assert!(
+            detail.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            "the failure names the observed HEAD: {detail}"
+        );
+        assert!(detail.contains(&first), "the failure names the expected subject: {detail}");
+        assert!(detail.contains(&slot.display().to_string()), "the failure names the worktree path: {detail}");
+        assert!(
+            super::super::identity::ProcessIdentity::read(&evidence).is_none(),
+            "a failed start must not have spawned a child to record"
+        );
+        assert!(
+            super::super::identity::CheckoutHead::read(&evidence).is_none(),
+            "a failed start records no HEAD: the lane never stood in the tree"
         );
     }
 

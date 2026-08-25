@@ -1,5 +1,6 @@
-//! The process identity a lane child leaves beside its evidence so a later
-//! coordinator can re-attach to it (issue #4999).
+//! The files a dispatch leaves beside its evidence at spawn: the process
+//! identity a later coordinator re-attaches to (issue #4999), and the worktree
+//! `HEAD` the lane was standing in.
 //!
 //! A bare pid is not an identity: the kernel recycles them, and signalling a
 //! recycled one kills a stranger. The identity is the pid plus the process
@@ -24,6 +25,10 @@ use super::error::LocalExecutorError;
 /// evidence directory — the sibling of the `slot` record, read back by boot
 /// reconciliation.
 pub const IDENTITY_RECORD: &str = "identity";
+
+/// The file a dispatch records the worktree `HEAD` it started on, inside its
+/// own evidence directory — the sibling of [`IDENTITY_RECORD`].
+pub const CHECKOUT_HEAD_RECORD: &str = "checkout-head";
 
 /// How long a re-attached kill waits for the process group to disappear after
 /// each signal. SIGTERM is tried first; SIGKILL follows if the group is still
@@ -87,11 +92,7 @@ impl ProcessIdentity {
     /// call site: a record that cannot be written costs a restart its
     /// re-attachment, never the dispatch itself.
     pub fn write(&self, evidence_dir: &Path) -> Result<(), LocalExecutorError> {
-        fs::create_dir_all(evidence_dir).map_err(LocalExecutorError::Io)?;
-        let mut rendered =
-            serde_json::to_string_pretty(self).map_err(|error| LocalExecutorError::Io(io::Error::other(error)))?;
-        rendered.push('\n');
-        fs::write(evidence_dir.join(IDENTITY_RECORD), rendered).map_err(LocalExecutorError::Io)
+        write_json_record(evidence_dir, IDENTITY_RECORD, self)
     }
 
     /// Whether `live` is the same process this record named: start time and
@@ -130,6 +131,30 @@ impl ProcessIdentity {
     }
 }
 
+/// The worktree `HEAD` a dispatch started on, recorded beside its evidence so
+/// an observer can name the tree without reconstructing slot occupancy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckoutHead {
+    /// `git rev-parse HEAD` of the worktree after it was materialized, trimmed.
+    pub head: String,
+}
+
+impl CheckoutHead {
+    /// Read the `HEAD` a dispatch recorded in `evidence_dir`, or `None` when
+    /// the file is missing or unreadable as this shape.
+    #[cfg(test)]
+    #[must_use]
+    pub fn read(evidence_dir: &Path) -> Option<Self> {
+        let body = fs::read_to_string(evidence_dir.join(CHECKOUT_HEAD_RECORD)).ok()?;
+        serde_json::from_str(body.trim()).ok()
+    }
+
+    /// Persist this `HEAD` beside the dispatch's evidence.
+    pub fn write(&self, evidence_dir: &Path) -> Result<(), LocalExecutorError> {
+        write_json_record(evidence_dir, CHECKOUT_HEAD_RECORD, self)
+    }
+}
+
 /// Record the live identity of `pid` beside `evidence_dir`. A `/proc` miss or
 /// a write fault is logged rather than failing the spawn: the child is already
 /// running, and a missing record is the unowned run a restart already knows
@@ -151,6 +176,23 @@ pub fn record_spawned(evidence_dir: &Path, pid: u32) {
             evidence = %evidence_dir.display(),
             %error,
             "local executor backend: could not record the spawned lane child's process identity; a restart will not re-attach to it",
+        );
+    }
+}
+
+/// Record the worktree `HEAD` the lane started on beside `evidence_dir`. A
+/// write fault is logged rather than failing the spawn: the child is already
+/// running, and a missing record is the same gap a restart already knows how
+/// to handle.
+pub fn record_checkout_head(evidence_dir: &Path, head: &str) {
+    let recorded = CheckoutHead { head: head.to_owned() };
+    if let Err(error) = recorded.write(evidence_dir) {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::executor",
+            evidence = %evidence_dir.display(),
+            head,
+            %error,
+            "local executor backend: could not record the worktree HEAD; a later observer cannot name the tree this lane started on",
         );
     }
 }
@@ -242,6 +284,16 @@ fn any_process_in_group(pgid: u32) -> bool {
 
 fn unterminated(detail: impl Into<String>) -> LocalExecutorError {
     LocalExecutorError::Unterminated(detail.into())
+}
+
+/// Pretty-JSON + trailing newline, the shape every evidence-dir record this
+/// module writes.
+fn write_json_record(evidence_dir: &Path, name: &str, value: &impl Serialize) -> Result<(), LocalExecutorError> {
+    fs::create_dir_all(evidence_dir).map_err(LocalExecutorError::Io)?;
+    let mut rendered =
+        serde_json::to_string_pretty(value).map_err(|error| LocalExecutorError::Io(io::Error::other(error)))?;
+    rendered.push('\n');
+    fs::write(evidence_dir.join(name), rendered).map_err(LocalExecutorError::Io)
 }
 
 #[cfg(test)]
