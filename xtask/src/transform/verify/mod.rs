@@ -1457,14 +1457,8 @@ fn run_member_discriminated(
         // own (FIX-4b): replayed against the same input, then run at the work
         // order's base. Only a test red *only* on the candidate is a finding.
         let triaged_tests = classified.candidate_tests().len();
-        // A storm-shaped run — many tests failing together — is its own
-        // diagnosis: that count comes from host-level contention, not from a
-        // candidate that broke this many suites at once, and replaying every
-        // casualty serially prices the answer at one cargo invocation per test
-        // (#5479: forty-five serial minutes on the fleet host). One
-        // whole-member re-run on the settled host answers all of them at once;
-        // only the tests that fail *again* earn the per-test replay, which
-        // then also asks the base as usual.
+        // A storm-shaped run takes a member-scope shortcut first — see
+        // [`triage_shaped`] for the diagnosis and both of its verdicts.
         let triaged = triage_shaped(id, invocation, scope, closure, diff_base, runner, &classified)?;
 
         let kept = classified.retaining(&triaged.findings);
@@ -1537,16 +1531,6 @@ fn run_member_discriminated(
     })
 }
 
-/// Read one replay's captured output as a verdict about the one test it was
-/// asked to run, plus the label the ledger records for it.
-///
-/// Only three answers, and the burden of proof runs one way: a replay that
-/// cleared the test is `Cleared`, one that named it failing again is
-/// `Repeated`, and anything else — a build that would not run, a checkout that
-/// produced no test list, an exit code nextest does not use for a test result —
-/// is `Unreached`. `Unreached` never excuses: a triage step that did not happen
-/// is not evidence, and reading it as one would pass a candidate on the
-/// strength of a run that never judged it.
 /// Triage `classified`'s candidate failures by their shape.
 ///
 /// A storm-shaped set — more than [`STORM_TRIAGE_THRESHOLD`] failures in one
@@ -1556,9 +1540,19 @@ fn run_member_discriminated(
 /// (#5479: forty-five serial minutes on the fleet host). One whole-member
 /// re-run on the settled host answers all of them at once; only the tests
 /// that fail *again* earn the per-test replay, which then also asks the base
-/// as usual. Below the threshold, every failure takes the per-test path
-/// directly. Replays print a numbered heartbeat either way, so a tail is
-/// never silent.
+/// as usual.
+///
+/// A set still storm-shaped on the re-run gets no per-test replays at all.
+/// Two member-scope failures of the same set are the member's verdict — one
+/// systemic cause, not that many independent flakes — so the repeated set is
+/// charged as findings directly. The serial path priced that answer at hours
+/// on the fleet host, long enough for the executor to read the run as stale,
+/// and a per-test replay under a fresher build can clear a test whose
+/// member-scope runs fail deterministically — excusing a systemic breakage
+/// as a pile of flakes and handing the gate a false green.
+///
+/// Below the threshold, every failure takes the per-test path directly.
+/// Replays print a numbered heartbeat either way, so a tail is never silent.
 fn triage_shaped(
     id: &str,
     invocation: &VerifyInvocation,
@@ -1587,22 +1581,45 @@ fn triage_shaped(
     let repeated: BTreeSet<String> = classify_failures(id, rerun_outcome, &rerun_log, closure)
         .map(|second| second.candidate_tests().into_iter().collect())
         .unwrap_or_default();
-    let kept = classified.retaining(&repeated);
-    let mut replays = 0usize;
-    let mut triaged = triage::triage(&kept, diff_base, |test, at| {
-        replays += 1;
-        eprintln!("verify.triage: replay {replays} (of {} repeated tests): {test}", repeated.len());
-        let captured = runner.replay(invocation, test, at)?;
-        Ok(replay_verdict(id, invocation, test, at, &captured))
-    })?;
-    for test in candidates {
-        if !repeated.contains(&test) {
-            triaged.flakes.push(Excused { test, replayed: "a whole-member re-run on the settled host".to_owned() });
-        }
-    }
+    let (still_failing, cleared): (Vec<String>, Vec<String>) =
+        candidates.into_iter().partition(|test| repeated.contains(test));
+    let mut triaged = if still_failing.len() > STORM_TRIAGE_THRESHOLD {
+        eprintln!(
+            "verify.triage: {} of the failures repeated on the whole-member re-run — still storm-shaped, so the \
+             set is charged as findings without per-test replays: two member-scope failures are one systemic \
+             cause, not {} independent flakes",
+            still_failing.len(),
+            still_failing.len(),
+        );
+        triage::Triage { findings: still_failing.into_iter().collect(), ..triage::Triage::default() }
+    } else {
+        let kept = classified.retaining(&repeated);
+        let mut replays = 0usize;
+        triage::triage(&kept, diff_base, |test, at| {
+            replays += 1;
+            eprintln!("verify.triage: replay {replays} (of {} repeated tests): {test}", still_failing.len());
+            let captured = runner.replay(invocation, test, at)?;
+            Ok(replay_verdict(id, invocation, test, at, &captured))
+        })?
+    };
+    triaged.flakes.extend(
+        cleared
+            .into_iter()
+            .map(|test| Excused { test, replayed: "a whole-member re-run on the settled host".to_owned() }),
+    );
     Ok(triaged)
 }
 
+/// Read one replay's captured output as a verdict about the one test it was
+/// asked to run, plus the label the ledger records for it.
+///
+/// Only three answers, and the burden of proof runs one way: a replay that
+/// cleared the test is `Cleared`, one that named it failing again is
+/// `Repeated`, and anything else — a build that would not run, a checkout that
+/// produced no test list, an exit code nextest does not use for a test result —
+/// is `Unreached`. `Unreached` never excuses: a triage step that did not happen
+/// is not evidence, and reading it as one would pass a candidate on the
+/// strength of a run that never judged it.
 fn replay_verdict(
     id: &str,
     invocation: &VerifyInvocation,
@@ -3788,6 +3805,82 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         assert!(!findings.contains("client_scenario"), "the one that cleared does not");
         assert_eq!(run.flakes().len(), 1, "and the cleared one is on the flake ledger");
         assert_eq!(run.flakes()[0].test, "aether-kit-sim::client_scenario");
+    }
+
+    /// Ten failing tests — past [`STORM_TRIAGE_THRESHOLD`], so the triage
+    /// re-runs the member once instead of opening with ten serial replays.
+    fn storm() -> Vec<String> {
+        (0..10).map(|index| format!("aether-kit-commons::scenario_{index}")).collect()
+    }
+
+    #[test]
+    fn a_storm_that_repeats_at_member_scope_is_charged_without_per_test_replays() {
+        // Acceptance for the repeated-storm verdict. On the fleet host a
+        // member-wide breakage (dispatch-3177: 84 scenario tests red on a
+        // stale-baked dist path) repeated wholesale on the re-run, and the
+        // triage then replayed every casualty serially — pricing the verdict
+        // at hours, past the executor's staleness threshold, with each
+        // replay free to clear and excuse the systemic breakage as flakes.
+        // Two member-scope failures of the same set are the verdict.
+        let invocation = verify_command("verify.test").expect("verify.test mapped");
+        let names = storm();
+        let failing = failing_run(&names.iter().map(String::as_str).collect::<Vec<_>>());
+        let mut runner = ScriptedRunner::new(&[(&failing, 100), (&failing, 100)]);
+
+        let run = run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, None, &mut runner)
+            .expect("the policy runs");
+
+        assert_eq!(runner.runs, 2, "the storm earns exactly one whole-member re-run");
+        assert!(runner.replayed.is_empty(), "and a set still storm-shaped after it earns no per-test replays");
+        assert_eq!(run.outcome, MemberOutcome::Failed);
+        let findings = run.findings().expect("a repeated storm is repair work, not a pile of excusals");
+        assert!(findings.contains("scenario_0"), "the repeated tests are named in the findings");
+        assert!(run.flakes().is_empty(), "nothing that failed twice is on the flake ledger");
+        assert!(run.inherited().is_empty(), "and nothing was asked at a base the aggregate does not have");
+    }
+
+    #[test]
+    fn a_storm_that_clears_on_the_member_re_run_is_excused_wholesale() {
+        // The settling-host direction of the same diagnosis: the count came
+        // from contention, the re-run on the settled host comes back green,
+        // and every casualty is excused by that one run — no serial replays.
+        let invocation = verify_command("verify.test").expect("verify.test mapped");
+        let names = storm();
+        let failing = failing_run(&names.iter().map(String::as_str).collect::<Vec<_>>());
+        let mut runner = ScriptedRunner::new(&[(&failing, 100), (&passing_run(), 0)]);
+
+        let run = run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, None, &mut runner)
+            .expect("the policy runs");
+
+        assert_eq!(runner.runs, 2, "one whole-member re-run answers for the whole set");
+        assert!(runner.replayed.is_empty(), "with no replay per casualty");
+        assert_eq!(run.outcome, MemberOutcome::Passed);
+        assert!(run.findings().is_none(), "a storm that settled is not repair work");
+        assert_eq!(run.flakes().len(), names.len(), "every casualty is on the flake ledger");
+    }
+
+    #[test]
+    fn a_storm_survivor_set_below_the_threshold_takes_the_per_test_path() {
+        // The hand-off between the two shapes: the re-run clears most of the
+        // storm, and the few that repeat are no longer storm-shaped — each is
+        // triaged on its own, exactly as a small failure set would have been.
+        let invocation = verify_command("verify.test").expect("verify.test mapped");
+        let names = storm();
+        let failing = failing_run(&names.iter().map(String::as_str).collect::<Vec<_>>());
+        let survivors = failing_run(&[&names[0], &names[1]]);
+        let mut runner = ScriptedRunner::new(&[(&failing, 100), (&survivors, 100)]);
+
+        let run = run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, None, &mut runner)
+            .expect("the policy runs");
+
+        assert_eq!(runner.runs, 2);
+        let replayed: Vec<&str> = runner.replayed.iter().map(|(test, _)| test.as_str()).collect();
+        assert_eq!(replayed.len(), 2, "only the survivors are replayed per test");
+        assert!(replayed.contains(&names[0].as_str()) && replayed.contains(&names[1].as_str()));
+        assert_eq!(run.outcome, MemberOutcome::Failed);
+        let findings = run.findings().expect("survivors that repeat on replay are repair work");
+        assert!(findings.contains(&names[0]) && findings.contains(&names[1]));
+        assert_eq!(run.flakes().len(), names.len() - 2, "the cleared casualties are on the flake ledger");
     }
 
     #[test]
