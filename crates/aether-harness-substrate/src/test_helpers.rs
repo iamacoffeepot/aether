@@ -71,29 +71,45 @@ static TEST_SAVE_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// `crate_name` is the underscore-cased crate name of a top-level
 /// cdylib component (e.g. `"aether_kit_commons"`,
 /// `"aether_test_fixtures_bundle"`), or an example name for an
-/// `[[example]]` cdylib. The
-/// workspace target dir is resolved via
-/// `CARGO_MANIFEST_DIR` of the calling integration test
-/// (`crates/<crate>` → workspace root two levels up); helper's own
-/// `CARGO_MANIFEST_DIR` is irrelevant because the wasm artifacts live
-/// under the shared workspace target dir, which is the same for every
-/// caller.
+/// `[[example]]` cdylib.
+///
+/// The workspace target dir is resolved at run time: the
+/// `CARGO_TARGET_DIR` override when set, else `target/` under the
+/// nearest ancestor of the current directory that is a checkout root
+/// (holds a `Cargo.lock`). Run time rather than
+/// `env!("CARGO_MANIFEST_DIR")`: the lane hosts share one build
+/// directory across many checkouts, so a compiled test binary can
+/// outlive the tree it was compiled in — and a compile-time path then
+/// names a checkout whose `target/` is gone, failing every wasm-loading
+/// scenario in the member at once. Cargo and nextest run every test
+/// with the current directory inside its own package, so the walk up
+/// from there lands on the checkout the test runs in, whose `target/`
+/// (directory or symlink) holds the pre-built wasm. The compile-time
+/// path remains only as the last resort for a caller whose current
+/// directory is outside any checkout.
 ///
 /// # Panics
-/// Panics if `CARGO_MANIFEST_DIR` does not have two ancestor
-/// directories — fail-fast per ADR-0063: this helper only runs from
-/// integration-test binaries (`crates/<crate>/tests/...`), so the
-/// workspace root is always two levels up.
+/// Panics on the compile-time last resort if `CARGO_MANIFEST_DIR` does
+/// not have two ancestor directories — fail-fast per ADR-0063: the
+/// helper crate lives at `crates/<crate>`, so the workspace root is
+/// always two levels up.
 #[must_use]
 // Test-only: CARGO_TARGET_DIR is the standard cargo build-output override, not
 // cap config — honor it so wasm built into an out-of-tree target dir is found.
 #[allow(clippy::disallowed_methods)]
 pub fn locate_component_wasm(crate_name: &str) -> Option<PathBuf> {
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("workspace root reachable from CARGO_MANIFEST_DIR");
-    let target_root = env::var_os("CARGO_TARGET_DIR").map_or_else(|| workspace.join("target"), PathBuf::from);
+    let target_root = env::var_os("CARGO_TARGET_DIR").map_or_else(
+        || {
+            env::current_dir().ok().and_then(|current| runtime_target_root(&current)).unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .and_then(Path::parent)
+                    .expect("workspace root reachable from CARGO_MANIFEST_DIR")
+                    .join("target")
+            })
+        },
+        PathBuf::from,
+    );
     for profile in ["release", "debug"] {
         let base = target_root.join("wasm32-unknown-unknown").join(profile);
         // Top-level cdylib crates land directly under the profile dir.
@@ -109,6 +125,17 @@ pub fn locate_component_wasm(crate_name: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// `target/` under the nearest ancestor of `current` that is a checkout
+/// root (holds a `Cargo.lock`), or `None` when no ancestor is one.
+///
+/// Nearest root, not nearest `target/`: a checkout that has not built
+/// wasm yet must resolve to where its target *would* be, so the
+/// strict-mode panic names the pre-build the caller actually needs to
+/// run — never a leftover target somewhere above the checkout.
+fn runtime_target_root(current: &Path) -> Option<PathBuf> {
+    current.ancestors().find(|dir| dir.join("Cargo.lock").is_file()).map(|root| root.join("target"))
 }
 
 /// Skip-or-panic gate over the wasm artifact alone: locates the wasm
@@ -226,5 +253,32 @@ pub fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
         kind_name: K::NAME.to_owned(),
         payload: mail.encode_into_bytes(),
         count: 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runtime_target_root;
+    use std::{env, fs, process};
+
+    #[test]
+    fn target_resolves_under_the_checkout_the_caller_runs_in() {
+        // The lane hosts share one build directory across many checkouts, so
+        // a test binary can run in a tree it was not compiled in — dispatch
+        // 3181 failed 163 scenarios at once on a compile-time target path
+        // into a checkout whose target was gone. Resolution walks up from
+        // the caller's directory instead: the nearest checkout root wins,
+        // and a directory outside any checkout resolves to nothing rather
+        // than to a guess.
+        let scratch = env::temp_dir().join(format!("aether-target-resolve-{}", process::id()));
+        let checkout = scratch.join("outer").join("checkout");
+        let nested = checkout.join("crates").join("some-crate");
+        fs::create_dir_all(&nested).expect("scratch tree");
+        fs::write(checkout.join("Cargo.lock"), "").expect("checkout marker");
+
+        assert_eq!(runtime_target_root(&nested), Some(checkout.join("target")));
+        assert_eq!(runtime_target_root(&scratch), None, "no ancestor checkout, no resolution");
+
+        fs::remove_dir_all(&scratch).expect("scratch removed");
     }
 }
