@@ -8,20 +8,22 @@
 //! nonce-keyed checkouts). These tests pin that the sweep reads the journal
 //! and the stub runner, not the child's exit status.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use aether_bloomery::testing::{draft, event, membership, splice_bloom};
-use aether_bloomery::{BloomId, BloomStatus, Digest, Fact, Forecast, ResolvedConfigs, Snapshot, SpendWindow, reduce};
+use aether_bloomery::testing::{digest, draft, event, membership, splice_bloom};
+use aether_bloomery::{
+    BloomId, BloomSpec, BloomStatus, Digest, Fact, Forecast, ResolvedConfigs, Snapshot, SpendWindow, reduce,
+};
 use aether_bloomery_github::testing::FakeGithub;
-use aether_bloomery_github::{GitSource, MainlineRef, candidate_ref_name};
+use aether_bloomery_github::{GitSource, MainlineRef, SourceError, candidate_ref_name};
 use aether_data::wire::to_vec;
 
-use super::sweep::{JanitorPolicy, SweepRequest, retention_duration, sweep};
+use super::sweep::{JanitorPolicy, SweepRequest, WorkingRefPruner, retention_duration, sweep};
 use crate::bloomery::SourceShell;
 use crate::bloomery::{
     CapturedObjects, LaneOccupancy, LocalExecutorError, RunLifecycle, RunProcess, RunSpec, TransformRunner,
@@ -54,8 +56,16 @@ fn journal_decided_against(store: &mut SqliteStore, key: &str, fact: Fact, board
 
 /// Seal a predecessor and supersede it, so the journal describes one terminal
 /// bloom and one live successor. The predecessor is the kill/crash leak case:
-/// its dispatches are done and its dirs/refs are reclaimable.
+/// its dispatches are done and its dirs are reclaimable. Its *refs* are not —
+/// the live successor may still adopt from them.
 fn journal_superseded(store: &mut SqliteStore) -> (BloomId, BloomId) {
+    let (predecessor, successor) = journal_superseded_specs(store);
+    (predecessor.id(), successor.id())
+}
+
+/// [`journal_superseded`] keeping the specs, for a fixture that has to go on
+/// deciding facts about the successor.
+fn journal_superseded_specs(store: &mut SqliteStore) -> (BloomSpec, BloomSpec) {
     // Base 0 is `Snapshot::GENESIS_MAINLINE`, so a successor that keeps the
     // same base is not a rebase and does not need an observed head.
     let predecessor = draft(0, vec![membership("wp", 1)]).seal();
@@ -64,13 +74,48 @@ fn journal_superseded(store: &mut SqliteStore) -> (BloomId, BloomId) {
     let successor = successor.seal();
     journal(store, "seal", Fact::Seal(predecessor.clone()));
     journal(store, "supersede", Fact::Supersede { predecessor: predecessor.id(), successor: successor.clone() });
+    (predecessor, successor)
+}
+
+/// Seal a predecessor, supersede it, and land the successor: a supersession
+/// chain whose end is terminal, so no fold can reach back into the
+/// predecessor's namespace and its working refs are reclaimable.
+fn journal_landed_chain(store: &mut SqliteStore) -> (BloomId, BloomId) {
+    let (predecessor, successor) = journal_superseded_specs(store);
+    journal_land(store, &successor);
     (predecessor.id(), successor.id())
 }
 
+/// Seal one bloom and land it — the terminal bloom with no supersession chain
+/// behind it, so it is the only reclaimable bloom the snapshot holds.
+fn journal_landed(store: &mut SqliteStore) -> BloomId {
+    let spec = journal_sealed_spec(store);
+    journal_land(store, &spec);
+    spec.id()
+}
+
+/// Journal `spec`'s landing.
+///
+/// The row is decided against the board the coordinator would hold once the
+/// fold had resolved the bloom — the land door takes a `Resolved` bloom on a
+/// mainline still at its sealed base — rather than against the journal's own,
+/// which still has it sealed.
+fn journal_land(store: &mut SqliteStore, spec: &BloomSpec) {
+    let mut board = Snapshot::default();
+    splice_bloom(&mut board, spec, BloomStatus::Resolved);
+    journal_decided_against(store, "land", Fact::Land { bloom: spec.id(), new_head: digest(9) }, &board);
+}
+
 fn journal_sealed(store: &mut SqliteStore) -> BloomId {
+    journal_sealed_spec(store).id()
+}
+
+/// [`journal_sealed`] keeping the spec, for a fixture that has to go on
+/// deciding facts about the bloom.
+fn journal_sealed_spec(store: &mut SqliteStore) -> BloomSpec {
     let spec = draft(0, vec![membership("wp", 1)]).seal();
     journal(store, "seal", Fact::Seal(spec.clone()));
-    spec.id()
+    spec
 }
 
 fn order_for(nonce: &str, bloom: &BloomId) -> OutstandingOrder {
@@ -128,6 +173,22 @@ impl RunProcess for StubProcess {
 
     fn kill(&mut self) -> Result<(), LocalExecutorError> {
         Ok(())
+    }
+}
+
+/// A source that counts `prune_working_refs` and can fail on command.
+struct CountingPruner {
+    calls: AtomicUsize,
+    fail: AtomicBool,
+}
+
+impl WorkingRefPruner for CountingPruner {
+    fn prune_working_refs(&self, _bloom: &BloomId) -> Result<usize, SourceError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(SourceError::Malformed("injected prune fault".to_owned()));
+        }
+        Ok(0)
     }
 }
 
@@ -207,6 +268,7 @@ fn a_killed_runs_worktree_is_reclaimed_once_its_bloom_is_terminal() {
         lanes: &idle,
         policy: &keep,
         now,
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.worktrees, 1, "the killed run's checkout is reclaimed");
@@ -250,6 +312,7 @@ fn a_session_tree_outlives_its_launches_and_dies_with_the_work_bound_to_it() {
         lanes: &idle,
         policy: &keep,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.worktrees, 1, "one tree went and one stayed");
@@ -307,6 +370,7 @@ fn a_live_members_session_tree_survives_a_journal_this_reducer_would_re_decide()
         lanes: &idle,
         policy: &keep,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.worktrees, 0, "a non-withdrawn member of an active bloom keeps its tree between laps");
@@ -347,6 +411,7 @@ fn a_session_tree_is_kept_while_its_own_order_is_outstanding() {
         lanes: &idle,
         policy: &keep,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.worktrees, 0, "a session with an outstanding order keeps its tree");
@@ -378,6 +443,7 @@ fn a_lane_slots_checkout_is_never_reclaimed() {
         lanes: &idle,
         policy: &keep,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.worktrees, 0);
@@ -410,6 +476,7 @@ fn a_live_blooms_outstanding_worktree_is_spared() {
         lanes: &idle,
         policy: &keep,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.worktrees, 0, "a live bloom's outstanding checkout stays");
@@ -443,6 +510,7 @@ fn consumed_evidence_of_a_terminal_bloom_is_kept_inside_the_retention_window() {
         lanes: &idle,
         policy: &keep,
         now,
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.evidence_dirs, 0);
@@ -475,10 +543,46 @@ fn consumed_evidence_of_a_terminal_bloom_is_reclaimed_after_the_retention_window
         lanes: &idle,
         policy: &keep,
         now,
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.evidence_dirs, 1);
     assert!(!evidence.exists(), "evidence past the window of a terminal bloom is reclaimed");
+}
+
+#[test]
+fn an_outstanding_dispatch_keeps_its_evidence() {
+    // An outstanding order is the durable fact a lane may still be writing this
+    // directory: the slot record, transcript, and heartbeat the silence
+    // watchdog reads. Asking the journal whether the owner is a sealed bloom
+    // cannot speak for a pre-bloom scoping run (ADR-0208) — a real lane under
+    // a reserved digest nothing ever seals — and with retention zero the age
+    // test does not save it. The outstanding nonce is protection enough.
+    let scratch = tempfile::tempdir().expect("a scratch dir is created");
+    let nonce = "scope-nonce";
+    let evidence = scratch.path().join(format!("{nonce}-evidence"));
+    fs::create_dir_all(&evidence).expect("the evidence dir is created");
+
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
+    let pre_bloom = BloomId(Digest::of_domain_tagged("aether.bloomery.scope_run_bloom", b"scope-run"));
+    store.record_order(&order_for(nonce, &pre_bloom)).expect("the order is recorded");
+
+    let runner = StubRunner { registered: vec![], released: Released(Arc::new(Mutex::new(Vec::new()))) };
+    let drop_now = policy(0, u64::MAX);
+    let report = run(&mut SweepRequest {
+        store: &mut store,
+        runner: &runner,
+        source: None,
+        worktree_base: scratch.path(),
+        target_base: scratch.path(),
+        lanes: &idle,
+        policy: &drop_now,
+        now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
+    });
+
+    assert_eq!(report.evidence_dirs, 0, "an outstanding dispatch's evidence is not reclaimed");
+    assert!(evidence.is_dir(), "the running lane still finds the directory it was born in");
 }
 
 #[test]
@@ -498,6 +602,7 @@ fn target_dirs_are_swept_when_over_budget_and_idle() {
         lanes: &idle,
         policy: &tight,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.target_dirs, 1);
@@ -527,6 +632,7 @@ fn an_over_budget_sweep_evicts_only_far_enough_to_get_under_budget() {
         lanes: &idle,
         policy: &tight,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.target_dirs, 1, "one eviction clears the overage");
@@ -551,6 +657,7 @@ fn a_running_slots_target_dir_is_never_evicted() {
         lanes: &slot_zero_busy,
         policy: &tight,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.target_dirs, 0);
@@ -579,6 +686,7 @@ fn an_idle_slot_is_evicted_while_its_busy_neighbour_is_spared() {
         lanes: &slot_zero_busy,
         policy: &tight,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.target_dirs, 1);
@@ -606,6 +714,7 @@ fn a_lane_child_in_an_unrecoverable_slot_blocks_every_eviction() {
         lanes: &busy_in_an_unknown_slot,
         policy: &tight,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.target_dirs, 0);
@@ -647,6 +756,7 @@ fn a_slot_claimed_after_the_budget_was_measured_is_not_evicted() {
         lanes: &lanes,
         policy: &tight,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.target_dirs, 0);
@@ -681,6 +791,7 @@ fn a_target_dir_that_could_not_be_removed_is_not_counted_and_is_retried() {
         lanes: &idle,
         policy: &tight,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(report.target_dirs, 1, "only the directory that actually went is counted");
@@ -701,6 +812,7 @@ fn a_target_dir_that_could_not_be_removed_is_not_counted_and_is_retried() {
         lanes: &idle,
         policy: &tight,
         now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
     });
 
     assert_eq!(retry.target_dirs, 1);
@@ -721,16 +833,16 @@ fn moved_aside(base: &Path) -> Option<PathBuf> {
 fn terminal_bloom_working_refs_are_pruned_and_claim_refs_are_spared() {
     let scratch = tempfile::tempdir().expect("a scratch dir is created");
     let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
-    let (predecessor, _) = journal_superseded(&mut store);
+    let landed = journal_landed(&mut store);
 
     let fake = FakeGithub::new();
-    let candidate = candidate_ref_name(&predecessor, "wp").trim_start_matches("refs/").to_owned();
+    let candidate = candidate_ref_name(&landed, "wp").trim_start_matches("refs/").to_owned();
     fake.seed_ref(&candidate, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     let source =
         SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake.clone()), true, MainlineRef::default())));
-    let integration = format!("heads/bloom/{}/integration", short_hex(&predecessor));
-    let checkpoint = format!("heads/bloom/{}/checkpoint/{}", short_hex(&predecessor), "00".repeat(32));
-    let landing = format!("heads/bloom/{}/landing", short_hex(&predecessor));
+    let integration = format!("heads/bloom/{}/integration", short_hex(&landed));
+    let checkpoint = format!("heads/bloom/{}/checkpoint/{}", short_hex(&landed), "00".repeat(32));
+    let landing = format!("heads/bloom/{}/landing", short_hex(&landed));
     fake.seed_ref(&integration, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
     fake.seed_ref(&checkpoint, "cccccccccccccccccccccccccccccccccccccccc");
     fake.seed_ref(&landing, "dddddddddddddddddddddddddddddddddddddddd");
@@ -739,6 +851,7 @@ fn terminal_bloom_working_refs_are_pruned_and_claim_refs_are_spared() {
 
     let runner = StubRunner { registered: vec![], released: Released(Arc::new(Mutex::new(Vec::new()))) };
     let keep = policy(7, u64::MAX);
+    let mut pruned = HashSet::new();
     let report = run(&mut SweepRequest {
         store: &mut store,
         runner: &runner,
@@ -748,6 +861,7 @@ fn terminal_bloom_working_refs_are_pruned_and_claim_refs_are_spared() {
         lanes: &idle,
         policy: &keep,
         now: SystemTime::now(),
+        pruned: &mut pruned,
     });
 
     assert_eq!(report.refs, 3, "candidate + integration + checkpoint of the terminal bloom");
@@ -757,6 +871,171 @@ fn terminal_bloom_working_refs_are_pruned_and_claim_refs_are_spared() {
     assert!(fake.ref_exists(&landing), "the landing branch is not this issue's to delete");
     assert!(fake.ref_exists("bloomery/admission/mainline"), "claim refs have their own reactor");
     assert!(fake.ref_exists("bloomery/claims/wp"), "a workpiece claim is untouched");
+}
+
+#[test]
+fn a_terminal_bloom_is_pruned_once() {
+    // The snapshot's terminal set is monotonic, and prune_working_refs is a
+    // full-price list on the GitHub-authoritative path. Without a memo the
+    // janitor re-asks for every landed bloom every tick, and the shared
+    // client's budget guard then withholds land, integrate, and inspects.
+    let scratch = tempfile::tempdir().expect("a scratch dir is created");
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
+    journal_landed(&mut store);
+
+    let prune = CountingPruner { calls: AtomicUsize::new(0), fail: AtomicBool::new(false) };
+    let runner = StubRunner { registered: vec![], released: Released(Arc::new(Mutex::new(Vec::new()))) };
+    let keep = policy(7, u64::MAX);
+    let mut pruned = HashSet::new();
+    let first = run(&mut SweepRequest {
+        store: &mut store,
+        runner: &runner,
+        source: Some(&prune),
+        worktree_base: scratch.path(),
+        target_base: scratch.path(),
+        lanes: &idle,
+        policy: &keep,
+        now: SystemTime::now(),
+        pruned: &mut pruned,
+    });
+    let second = run(&mut SweepRequest {
+        store: &mut store,
+        runner: &runner,
+        source: Some(&prune),
+        worktree_base: scratch.path(),
+        target_base: scratch.path(),
+        lanes: &idle,
+        policy: &keep,
+        now: SystemTime::now(),
+        pruned: &mut pruned,
+    });
+
+    assert_eq!(first.refs, 0);
+    assert_eq!(second.refs, 0);
+    assert_eq!(
+        prune.calls.load(Ordering::SeqCst),
+        1,
+        "the second tick does not re-prune a bloom the first tick already did"
+    );
+}
+
+#[test]
+fn a_failed_prune_is_retried_on_the_next_tick() {
+    // A prune that errors is not remembered, so the next tick retries — the
+    // same promise the warn already made when the call failed.
+    let scratch = tempfile::tempdir().expect("a scratch dir is created");
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
+    journal_landed(&mut store);
+
+    let prune = CountingPruner { calls: AtomicUsize::new(0), fail: AtomicBool::new(true) };
+    let runner = StubRunner { registered: vec![], released: Released(Arc::new(Mutex::new(Vec::new()))) };
+    let keep = policy(7, u64::MAX);
+    let mut pruned = HashSet::new();
+    run(&mut SweepRequest {
+        store: &mut store,
+        runner: &runner,
+        source: Some(&prune),
+        worktree_base: scratch.path(),
+        target_base: scratch.path(),
+        lanes: &idle,
+        policy: &keep,
+        now: SystemTime::now(),
+        pruned: &mut pruned,
+    });
+    prune.fail.store(false, Ordering::SeqCst);
+    run(&mut SweepRequest {
+        store: &mut store,
+        runner: &runner,
+        source: Some(&prune),
+        worktree_base: scratch.path(),
+        target_base: scratch.path(),
+        lanes: &idle,
+        policy: &keep,
+        now: SystemTime::now(),
+        pruned: &mut pruned,
+    });
+
+    assert_eq!(prune.calls.load(Ordering::SeqCst), 2, "a failed prune is retried rather than remembered as done");
+    assert_eq!(pruned.len(), 1, "the successful retry is what the memo records");
+}
+
+#[test]
+fn a_superseded_blooms_working_refs_survive_while_a_successor_can_still_adopt_from_them() {
+    // The predecessor's candidate ref is the successor's only copy of every
+    // member it inherited: the fold's `adopt_candidate` copies it across when
+    // the fold dispatches, not when the supersession is journalled. Pruning it
+    // in that gap wedges the successor definitively — its fold refuses at
+    // `candidate_ref_present` and no later tick can put the ref back. An
+    // ordinary supersede folds within a second and never shows the gap; an
+    // amend whose widened member has to re-run holds it open for minutes,
+    // which the ten-second tick wins every time.
+    let scratch = tempfile::tempdir().expect("a scratch dir is created");
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
+    let (predecessor, _) = journal_superseded(&mut store);
+
+    let fake = FakeGithub::new();
+    let candidate = candidate_ref_name(&predecessor, "wp").trim_start_matches("refs/").to_owned();
+    let integration = format!("heads/bloom/{}/integration", short_hex(&predecessor));
+    fake.seed_ref(&candidate, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    fake.seed_ref(&integration, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    let source =
+        SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake.clone()), true, MainlineRef::default())));
+
+    let runner = StubRunner { registered: vec![], released: Released(Arc::new(Mutex::new(Vec::new()))) };
+    let keep = policy(7, u64::MAX);
+    let mut pruned = HashSet::new();
+    let report = run(&mut SweepRequest {
+        store: &mut store,
+        runner: &runner,
+        source: Some(&source),
+        worktree_base: scratch.path(),
+        target_base: scratch.path(),
+        lanes: &idle,
+        policy: &keep,
+        now: SystemTime::now(),
+        pruned: &mut pruned,
+    });
+
+    assert_eq!(report.refs, 0, "a supersession chain that has not closed yet is not a reclaim");
+    assert!(fake.ref_exists(&candidate), "the inherited member's candidate is the successor's only copy of it");
+    assert!(fake.ref_exists(&integration), "and the rest of the namespace goes with it");
+}
+
+#[test]
+fn a_superseded_blooms_working_refs_are_reclaimed_once_the_chain_behind_them_closes() {
+    // The other half of the invariant: holding the refs is a delay, not a
+    // permanent exemption. Once the successor lands, nothing can adopt from the
+    // predecessor again and its namespace is the janitor's like any other
+    // terminal bloom's. Swept twice because a closed chain is two reclaimable
+    // blooms and one tick may only get to one of them.
+    let scratch = tempfile::tempdir().expect("a scratch dir is created");
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
+    let (predecessor, _) = journal_landed_chain(&mut store);
+
+    let fake = FakeGithub::new();
+    let candidate = candidate_ref_name(&predecessor, "wp").trim_start_matches("refs/").to_owned();
+    fake.seed_ref(&candidate, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    let source =
+        SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake.clone()), true, MainlineRef::default())));
+
+    let runner = StubRunner { registered: vec![], released: Released(Arc::new(Mutex::new(Vec::new()))) };
+    let keep = policy(7, u64::MAX);
+    let mut pruned = HashSet::new();
+    for _ in 0..2 {
+        run(&mut SweepRequest {
+            store: &mut store,
+            runner: &runner,
+            source: Some(&source),
+            worktree_base: scratch.path(),
+            target_base: scratch.path(),
+            lanes: &idle,
+            policy: &keep,
+            now: SystemTime::now(),
+            pruned: &mut pruned,
+        });
+    }
+
+    assert!(!fake.ref_exists(&candidate), "a chain that has closed leaves nothing to adopt and nothing to keep");
 }
 
 fn short_hex(bloom: &BloomId) -> String {

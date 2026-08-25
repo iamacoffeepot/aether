@@ -17,14 +17,14 @@ use aether_bloomery::ConfigKind;
 use aether_bloomery::Decisions;
 use aether_bloomery::{
     Adjudication, AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError,
-    Artifact, AttemptCompletedError, BloomId, BloomStatus, CandidateRef, CatalogError, ClaimRefKind, ConfigRegistry,
-    Decision, Digest, DispatchKey, Disposition, Event, Evidence, EvidenceKind, Fact, GrantAttemptsError,
-    HostFaultError, KeyId, LandError, LandingRejectedError, Membership, ORPHAN_CLAIM_RELEASE_WORDS, Observation,
-    OperatorHold, OperatorHoldError, OperatorRepair, OperatorRepairError, OrphanClaimRelease,
-    OrphanClaimReleaseCompletion, OrphanClaimReleaseError, Outcome, Provenance, Question, ResolutionClaim,
-    ResolveError, ResolvedConfigs, SealError, SignatureEnvelope, Snapshot, SpendWindow, StageCatalog, StageId,
-    StageProgress, Statement, SupersedeError, Unproducible, VerifyFailedError, VerifyFailure, VerifyFailureSet, grade,
-    reduce,
+    Artifact, AttemptCompletedError, BloomId, BloomStatus, CandidateRef, CatalogError, ClaimRefKind,
+    CompositionParents, ConfigRegistry, Decision, Digest, DispatchKey, Disposition, Event, Evidence, EvidenceKind,
+    Fact, GrantAttemptsError, HostFaultError, KeyId, LandError, LandingRejectedError, Membership,
+    ORPHAN_CLAIM_RELEASE_WORDS, Observation, OperatorHold, OperatorHoldError, OperatorRepair, OperatorRepairError,
+    OrphanClaimRelease, OrphanClaimReleaseCompletion, OrphanClaimReleaseError, Outcome, Provenance, Question,
+    ResolutionClaim, ResolveError, ResolvedConfigs, SealError, SignatureEnvelope, Snapshot, SpendWindow, StageCatalog,
+    StageId, StageProgress, Statement, SupersedeError, Unproducible, VerifyFailedError, VerifyFailure,
+    VerifyFailureSet, grade, reduce,
 };
 use aether_bloomery::{BloomRecord, WorkpieceId};
 use aether_data::Kind;
@@ -1238,6 +1238,108 @@ fn a_failing_composition_review_repairs_the_weave_and_never_reopens_a_member() {
     ));
 }
 
+// ADR-0210 — a repaired narrowing dispatches only the member re-verify. The
+// composition's own Verify has no admission door (it is not a member), so
+// dispatching it left a lane no fact could complete. Pre-fix a passing weave
+// repair emitted two DispatchAttempts; the composition's was the one no
+// admitted fact could answer.
+#[test]
+fn a_repaired_narrowing_dispatches_only_the_member_re_verify() {
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
+    let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11), membership("gamma", 12)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(
+        &snapshot,
+        &event(
+            "c-gamma",
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("gamma"),
+                stage: StageId::Construct,
+                passed: true,
+                evidence: attempt_evidence(),
+                candidate: None,
+            },
+        ),
+    );
+
+    let attribution = CompositionParents {
+        parents: vec![workpiece("alpha"), workpiece("beta")],
+        paths: vec!["crates/example/src/lib.rs".into()],
+        bound: vec!["crates/example/**".into()],
+    };
+    let composition = WorkpieceId::composition_of(&[workpiece("alpha"), workpiece("beta")]);
+    let (snapshot, minted) = step(
+        &snapshot,
+        &event(
+            "narrow",
+            Fact::CompositionNarrowed {
+                bloom,
+                verified: workpiece("gamma"),
+                tree: digest(40),
+                head: digest(41),
+                evidence: Evidence { subject: digest(40), kind: EvidenceKind::VerificationResult, detail: digest(50) },
+                attribution,
+            },
+        ),
+    );
+    assert!(matches!(minted.outcome, Outcome::CompositionNarrowed { .. }), "{:?}", minted.outcome);
+
+    let (after, decided) = step(
+        &snapshot,
+        &event(
+            "weave",
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: composition.clone(),
+                stage: StageId::Refine,
+                passed: true,
+                evidence: Evidence { subject: digest(40), kind: EvidenceKind::VerificationResult, detail: digest(57) },
+                candidate: Some(CandidateRef { tree: digest(44), checkout: digest(45) }),
+            },
+        ),
+    );
+    assert!(matches!(decided.outcome, Outcome::CompositionRepaired { tree, .. } if tree == digest(44)));
+
+    let dispatches: Vec<_> = decided
+        .effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Decision::DispatchAttempt { workpiece, stage, candidate, transformation, .. } => {
+                Some((workpiece.clone(), *stage, *candidate, transformation.checkout))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(dispatches.len(), 1, "exactly one dispatch: {:?}", decided.effects);
+    assert!(
+        !dispatches.iter().any(|(workpiece, ..)| workpiece.is_composition()),
+        "no dispatch names a composition workpiece: {dispatches:?}"
+    );
+    match &dispatches[..] {
+        [(target, stage, candidate, checkout)] => {
+            assert_eq!(target, &workpiece("gamma"), "the dispatch names the verified member");
+            assert_eq!(*stage, StageId::Verify);
+            assert_eq!(*candidate, Some(digest(44)), "aimed at the repaired tree");
+            assert_eq!(*checkout, digest(45), "checked out at the repaired head");
+        }
+        other => panic!("expected the verified member's re-verify, got {other:?}"),
+    }
+    assert!(
+        decided.effects.iter().any(|effect| matches!(
+            effect,
+            Decision::AdvanceStage { workpiece, progress, .. }
+                if *workpiece == composition && progress.stage == StageId::Verify
+        )),
+        "the composition's cursor still records the repair: {:?}",
+        decided.effects,
+    );
+    let cursor = after.blooms.get(&bloom).unwrap().progress.get(&composition).expect("the composition keeps a cursor");
+    assert_eq!(cursor.stage, StageId::Verify);
+    assert_eq!(cursor.candidate, Some(CandidateRef { tree: digest(44), checkout: digest(45) }));
+}
+
 /// The member cursors as they stood, plus whatever cursor the composition now
 /// carries — so a "no member cursor moved" assertion can compare whole maps
 /// without the composition's own (expected) entry masking a member move.
@@ -2439,6 +2541,72 @@ fn resuming_a_host_fault_re_dispatches_verify_without_a_grant() {
     let cursor = record.progress.get(&workpiece("wp")).unwrap();
     assert_eq!(cursor.attempts, 1, "the resume spends no Verify attempt");
     assert_eq!(cursor.repair_rolls, 0, "and no repair roll");
+}
+
+// The plausible bug: a host-fault resume on a frozen bloom lifts the operator
+// brake and dispatches paid Verify the operator explicitly stopped. The resume
+// clears the host condition; it is not the door that lifts the hold.
+#[test]
+fn resuming_a_host_fault_on_a_frozen_bloom_defers_the_dispatch() {
+    let (snapshot, bloom) = at_verify("wp");
+    let (faulted, _) = step(
+        &snapshot,
+        &event(
+            "preflight",
+            Fact::VerifyHostFault {
+                bloom,
+                workpiece: workpiece("wp"),
+                evidence: Evidence { subject: digest(10), kind: EvidenceKind::VerificationResult, detail: digest(71) },
+                findings: "missing `jscpd`".into(),
+            },
+        ),
+    );
+    let (frozen, _) = step(&faulted, &held(bloom, "hold", "stop spending until the fixture is honest"));
+    let (after, decided) = step(&frozen, &event("resume", Fact::ResumeHostFault { bloom, workpiece: workpiece("wp") }));
+
+    assert!(
+        matches!(decided.outcome, Outcome::HostFaultResumed { .. }),
+        "the cadence resume is its own outcome: {:?}",
+        decided.outcome,
+    );
+    assert!(
+        decided
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Decision::ClearHostFault { workpiece: wp, .. } if *wp == workpiece("wp"))),
+        "the host condition still lifts: {:?}",
+        decided.effects,
+    );
+    assert!(
+        decided.effects.iter().any(|effect| matches!(effect, Decision::DeferDispatch { .. })),
+        "a frozen bloom records the re-probe as owed: {:?}",
+        decided.effects,
+    );
+    assert!(member_dispatches(&decided).is_empty(), "and does not start paid work: {:?}", decided.effects);
+
+    let record = after.blooms.get(&bloom).unwrap();
+    assert!(record.host_faults.is_empty(), "the host condition lifts");
+    assert!(record.operator_hold.is_some(), "the brake stays on");
+    assert!(
+        record.deferred_dispatches.contains(&workpiece("wp")),
+        "the re-probe is still owed: {:?}",
+        record.deferred_dispatches,
+    );
+
+    let (_, let_go) = step(&after, &released(bloom, "release", "the freeze is lifted"));
+    assert!(
+        matches!(
+            let_go.outcome,
+            Outcome::BloomReleased { ref dispatched, .. } if *dispatched == vec![workpiece("wp")]
+        ),
+        "the release still owes the re-probe: {:?}",
+        let_go.outcome,
+    );
+    assert_eq!(
+        member_dispatches(&let_go),
+        vec![(workpiece("wp"), StageId::Verify)],
+        "and it is the Verify the resume deferred, not a free extra lap",
+    );
 }
 
 #[test]

@@ -114,6 +114,9 @@ pub enum MissReason {
     PricingCliff,
     /// The harness refused the resume handle before a billed turn.
     ResumeRefused,
+    /// A sibling dependent already continues this predecessor's session in the
+    /// tree that session is bound to, so this member opened its own.
+    SessionTaken,
 }
 
 impl MissReason {
@@ -127,6 +130,7 @@ impl MissReason {
             Self::SlotMismatch => "slot_mismatch",
             Self::PricingCliff => "pricing_cliff",
             Self::ResumeRefused => "resume_refused",
+            Self::SessionTaken => "session_taken",
         }
     }
 }
@@ -153,6 +157,15 @@ pub struct PredecessorCandidate {
     pub context_tokens: u64,
     /// Deposit time in unix seconds, when the row recorded one.
     pub deposited_unix: Option<u64>,
+    /// Whether this dispatch stands in the tree that session is bound to —
+    /// whether the dependent inherited *this* predecessor's slug (#5425).
+    ///
+    /// A harness binds a conversation to the directory it was born in, and one
+    /// predecessor's tree is inherited by one dependent: a sibling that opened
+    /// its own session cannot resume a handle whose edits would land in someone
+    /// else's live checkout, so its candidate is not eligible however warm and
+    /// cheap the stored context is.
+    pub continues_tree: bool,
 }
 
 /// Decide whether a journaled construct session is worth resuming.
@@ -174,9 +187,10 @@ pub fn decide_refine_resume(session_id: &str) -> RefineResume {
 
 /// Decide whether a dependent construct should resume a predecessor session.
 ///
-/// Empty or unusable ids, a missing deposit time, a deposit older than
-/// `warmth_secs`, and a projection of `context + increment` at or over the
-/// cliff all launch fresh. Among handles that pass, the largest stored
+/// Empty or unusable ids, a session a sibling already continues in the tree it
+/// is bound to, a missing deposit time, a deposit older than `warmth_secs`, and
+/// a projection of `context + increment` at or over the cliff all launch
+/// fresh. Among handles that pass, the largest stored
 /// context wins — the session that already carries the most shared prefix.
 #[must_use]
 pub fn decide_predecessor_resume(
@@ -189,8 +203,13 @@ pub fn decide_predecessor_resume(
     let mut eligible: Vec<&PredecessorCandidate> = Vec::new();
     let mut saw_stale = false;
     let mut saw_cliff = false;
+    let mut saw_taken = false;
     for candidate in candidates {
         if !usable_session_id(&candidate.session_id) {
+            continue;
+        }
+        if !candidate.continues_tree {
+            saw_taken = true;
             continue;
         }
         let Some(deposited) = candidate.deposited_unix else {
@@ -214,6 +233,8 @@ pub fn decide_predecessor_resume(
         RefineResume::Fresh { miss: Some(MissReason::PricingCliff) }
     } else if saw_stale {
         RefineResume::Fresh { miss: Some(MissReason::Age) }
+    } else if saw_taken {
+        RefineResume::Fresh { miss: Some(MissReason::SessionTaken) }
     } else {
         RefineResume::Fresh { miss: None }
     }
@@ -1076,7 +1097,29 @@ mod tests {
     }
 
     fn predecessor(session_id: &str, context_tokens: u64, deposited_unix: Option<u64>) -> super::PredecessorCandidate {
-        super::PredecessorCandidate { session_id: session_id.to_owned(), context_tokens, deposited_unix }
+        super::PredecessorCandidate {
+            session_id: session_id.to_owned(),
+            context_tokens,
+            deposited_unix,
+            continues_tree: true,
+        }
+    }
+
+    #[test]
+    fn a_session_a_sibling_continues_is_not_resumed_however_warm_it_is() {
+        // Plausible bug: the second dependent of one predecessor resumes the
+        // conversation the first one inherited. The handle is warm, under the
+        // cliff, and the cheapest thing on offer — and resuming it would put
+        // this member's edits in the tree that session is bound to, which its
+        // sibling is building in right now.
+        let now = 10_000;
+        let taken = super::PredecessorCandidate { continues_tree: false, ..predecessor("sess-a", 8_000, Some(now)) };
+
+        assert_eq!(
+            super::decide_predecessor_resume(&[taken], now, 55 * 60, 56_000, 200_000),
+            super::RefineResume::Fresh { miss: Some(MissReason::SessionTaken) },
+            "a session bound to a sibling's tree is not this member's to resume",
+        );
     }
 
     #[test]

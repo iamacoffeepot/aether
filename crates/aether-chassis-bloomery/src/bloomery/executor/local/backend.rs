@@ -66,10 +66,16 @@ const EVIDENCE_SUFFIX: &str = "-evidence";
 /// because the harness's own id does not exist until after it.
 ///
 /// Not the workpiece, and not the lane slot. One session carries several
-/// workpieces along declared edges (A then B then C), each reset in place, so a
+/// workpieces along declared edges (A then B, each reset in place), so a
 /// workpiece-keyed tree would split one conversation across directories; a
 /// slot-keyed one moves the tree out from under a session the moment the
 /// allocator hands that slot to someone else.
+///
+/// A chain is the narrow case of a graph, and the width is what bounds this:
+/// one session is continued by **one** dependent, because one directory holds
+/// one live lane. A predecessor with edges to both B and C unblocks them
+/// together, so the second of them opens its own session rather than inheriting
+/// this one — see `session_slug`.
 const SESSIONS_DIR: &str = "sessions";
 
 /// The working tree inside one session's directory. A child of the session
@@ -647,6 +653,18 @@ impl LocalExecutor {
     // member's row, so its own later laps resolve directly. Everything else
     // mints a fresh slug from the dispatch nonce.
     //
+    // The inheritance is **exclusive**, and that is what makes the slug an
+    // address rather than a hint (#5425 fan-out). The member graph is a DAG: a
+    // predecessor with edges to both B and C unblocks them on one admission and
+    // they dispatch in the same tick. A sibling-blind inheritance handed both
+    // the same slug, and the checkout is a pure function of the slug, so two
+    // live lanes reset and built one working tree at once — the second's
+    // `git clean` taking the first's work with it. Only one dependent continues
+    // the predecessor's session; a sibling that finds the slug already held by
+    // another member mints its own, which costs a cold launch and keeps its
+    // work. The check and the record share one lock scope, so two concurrent
+    // dispatches cannot both read the slug as free.
+    //
     // Store-only, and deliberately so: it runs before the pool acquire, because
     // the acquire needs the tree (it hashes the static prefix out of it) and the
     // tree needs the slug.
@@ -657,12 +675,40 @@ impl LocalExecutor {
             if let Ok(Some(slug)) = store.lookup_session_slug(bloom, workpiece) {
                 return Some(SessionSlug(slug));
             }
-            let inherited = store
-                .lookup_predecessors(bloom, workpiece)
-                .ok()
-                .into_iter()
-                .flatten()
-                .find_map(|predecessor| store.lookup_session_slug(bloom, &predecessor).ok().flatten());
+            let inherited =
+                store.lookup_predecessors(bloom, workpiece).ok().into_iter().flatten().find_map(|predecessor| {
+                    let slug = store.lookup_session_slug(bloom, &predecessor).ok().flatten()?;
+                    match store.session_slug_holder(bloom, &slug, &predecessor) {
+                        Ok(None) => Some(slug),
+                        // A held slug is not a failure: this member opens its
+                        // own session and the next declared predecessor, if it
+                        // has one, is still considered.
+                        Ok(Some(sibling)) => {
+                            tracing::info!(
+                                nonce,
+                                workpiece,
+                                predecessor,
+                                sibling,
+                                "local executor backend: a sibling already continues this predecessor's session; \
+                                 opening a fresh one so the two do not build in one checkout",
+                            );
+                            None
+                        }
+                        // Fail closed onto a fresh session: a slug this cannot
+                        // prove is free may be live under another member.
+                        Err(error) => {
+                            tracing::warn!(
+                                nonce,
+                                workpiece,
+                                predecessor,
+                                %error,
+                                "local executor backend: could not read who holds this predecessor's session; \
+                                 opening a fresh one",
+                            );
+                            None
+                        }
+                    }
+                });
             let slug = inherited.map_or_else(|| SessionSlug::minted_from(nonce), SessionSlug);
             let recorded = store.record_session_slug(bloom, workpiece, &slug.0);
             drop(store);
@@ -854,24 +900,19 @@ impl LocalExecutor {
         );
     }
 
-    // Spawn a dispatch into the lane slot it reserved, turning the reservation
-    // into a tracked run. The spawn itself runs off the registry lock — it shells
-    // out to git — and the reservation is what keeps the slot it is spending, and
-    // the build path that comes with it, from being handed to anyone else
-    // meanwhile. A spawn that fails hands the slot straight back.
+    /// Rewrite `evidence.json` with the host-owned reuse and slot-affinity
+    /// annotations. Belongs before the nonce gate: these are not body claims.
     fn stamp_run_evidence(
         &self,
         evidence_path: &Path,
         mut bytes: Vec<u8>,
         reuse: Option<&super::ReusePlan>,
-        lifecycle: RunLifecycle,
         nonce: &str,
         affinity: &SlotAffinity,
     ) -> Vec<u8> {
         if let Some(plan) = reuse {
-            bytes = self.record_session_reuse(evidence_path, &bytes, plan, lifecycle, nonce);
+            bytes = self.stamp_session_reuse(evidence_path, &bytes, plan, nonce);
         }
-        self.file_construct_session(nonce, &bytes);
         if affinity.preferred.is_some() {
             bytes = stamp_slot_affinity(&bytes, affinity);
             let _ = fs::write(evidence_path, &bytes);
@@ -879,40 +920,58 @@ impl LocalExecutor {
         bytes
     }
 
-    fn record_session_reuse(
+    /// Take the body's session claims — the pool deposit and the construct-session
+    /// filing — now that the nonce gate has bound this body to this order.
+    fn commit_bound_evidence(
         &self,
-        evidence_path: &Path,
-        bytes: &[u8],
-        plan: &super::ReusePlan,
-        lifecycle: RunLifecycle,
         nonce: &str,
-    ) -> Vec<u8> {
+        bytes: &[u8],
+        reuse: Option<&super::ReusePlan>,
+        lifecycle: RunLifecycle,
+    ) {
+        if let Some(plan) = reuse {
+            self.deposit_session_reuse(plan, lifecycle, nonce, bytes);
+        }
+        self.file_construct_session(nonce, bytes);
+    }
+
+    /// Stamp reuse actuals onto the evidence file. Host-owned annotation; belongs
+    /// before the nonce gate.
+    fn stamp_session_reuse(&self, evidence_path: &Path, bytes: &[u8], plan: &super::ReusePlan, nonce: &str) -> Vec<u8> {
         let prices = self.sealed_prices(nonce);
         let actuals = super::session_reuse::parse_token_actuals(bytes);
         let calls = parse_calls(bytes);
         let bytes = super::session_reuse::stamp_reuse(bytes, plan, &actuals, &prices, calls.as_deref());
         let _ = fs::write(evidence_path, &bytes);
-        if lifecycle.is_terminal()
-            && let Some(sessions) = self.sessions.as_ref()
-        {
-            sessions.observe(plan, &actuals);
-            if let Some(session_id) = super::session_reuse::parse_session_id(&bytes) {
-                if let Some(context) = super::session_reuse::parse_context_tokens(&bytes) {
-                    let concluded = if plan.is_builder {
-                        matches!(construct_conclusion(&bytes), ConstructConclusion::Candidate)
-                    } else {
-                        parse_status(&bytes) == Some(LaneStatus::Pass)
-                    };
-                    sessions.deposit(plan, &session_id, context, concluded);
-                } else {
-                    tracing::warn!(
-                        nonce,
-                        "local executor backend: result record has no per-call usage; skipping session deposit so an unmeasured lap cannot look empty"
-                    );
-                }
-            }
-        }
         bytes
+    }
+
+    /// Observe and deposit into the session pool. A body claim; belongs after the
+    /// nonce gate, with the same plan and lifecycle the stamp used.
+    fn deposit_session_reuse(&self, plan: &super::ReusePlan, lifecycle: RunLifecycle, nonce: &str, bytes: &[u8]) {
+        if !lifecycle.is_terminal() {
+            return;
+        }
+        let Some(sessions) = self.sessions.as_ref() else {
+            return;
+        };
+        sessions.observe(plan, &super::session_reuse::parse_token_actuals(bytes));
+        let Some(session_id) = super::session_reuse::parse_session_id(bytes) else {
+            return;
+        };
+        let Some(context) = super::session_reuse::parse_context_tokens(bytes) else {
+            tracing::warn!(
+                nonce,
+                "local executor backend: result record has no per-call usage; skipping session deposit so an unmeasured lap cannot look empty"
+            );
+            return;
+        };
+        let concluded = if plan.is_builder {
+            matches!(construct_conclusion(bytes), ConstructConclusion::Candidate)
+        } else {
+            parse_status(bytes) == Some(LaneStatus::Pass)
+        };
+        sessions.deposit(plan, &session_id, context, concluded);
     }
 
     fn acquire_reuse(&self, pending: &PendingRun, worktree_dir: &Path) -> Option<super::ReusePlan> {
@@ -1027,6 +1086,13 @@ impl LocalExecutor {
 
     /// Predecessor sessions this Construct may resume. `None` when the member
     /// has no graph or already journaled its own handle (a retry uses the pool).
+    ///
+    /// Each candidate carries whether this dispatch stands in that
+    /// predecessor's tree — its slug is the one this member inherited. The
+    /// resume and the tree are one decision, because a resumed conversation
+    /// edits the directory it was born in whatever `--cwd` says: the dependent
+    /// that inherited the tree resumes there, and the sibling that opened its
+    /// own session launches cold in its own (#5425).
     fn predecessor_resume_candidates(&self, bloom: &[u8], workpiece: &str) -> Option<Vec<PredecessorCandidate>> {
         let messages = self.messages.as_ref()?;
         let mut store = messages.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1037,12 +1103,15 @@ impl LocalExecutor {
         if predecessors.is_empty() {
             return None;
         }
+        let own_slug = store.lookup_session_slug(bloom, workpiece).ok().flatten();
         let candidates = predecessors
             .iter()
             .filter_map(|predecessor| {
                 let (session_id, context_tokens, deposited_unix) =
                     store.lookup_construct_session_meta(bloom, predecessor).ok().flatten()?;
-                Some(PredecessorCandidate { session_id, context_tokens, deposited_unix })
+                let continues_tree =
+                    own_slug.is_some() && store.lookup_session_slug(bloom, predecessor).ok().flatten() == own_slug;
+                Some(PredecessorCandidate { session_id, context_tokens, deposited_unix, continues_tree })
             })
             .collect();
         drop(store);
@@ -1941,6 +2010,7 @@ impl LocalExecutor {
         host_fault: Option<HostFaultCause>,
         bytes: &[u8],
     ) -> Vec<EvidenceRef> {
+        self.commit_bound_evidence(&handle.nonce.0, bytes, run.reuse.as_ref(), run.lifecycle);
         let StreamedRun {
             subject,
             lifecycle,
@@ -2032,13 +2102,6 @@ impl LocalExecutor {
         {
             return self.fail_closed_host_fault(handle, &subject, worktree_dir, is_construct, cause);
         }
-        // The evidence has been consumed and any candidate captured — evict the
-        // run so the registry tracks only in-flight orders rather than growing for
-        // the process's lifetime, and hand its lane slot back. (The failed-read
-        // path above returns early, keeping both the registry entry and the slot
-        // claim for a later retry, so nothing resets the checkout the retry reads.)
-        self.retire(&handle.nonce.0);
-        self.pump();
         // A declining construct-family lane that named the paths its work
         // requires asks for surface (ADR-0207); one whose claim does not
         // survive normalization degrades to a plain declined park rather than
@@ -2078,6 +2141,14 @@ impl LocalExecutor {
                 .then(|| self.narrowing(&handle.nonce.0, worktree_dir.as_deref(), diff_base_hex.as_deref(), bytes))
                 .flatten(),
         };
+        // Capture, the containment read, and the narrowing read all finish with
+        // this run's checkout still its own. Retire hands the slot — and a
+        // session tree it may share — to pump, which materializes the next
+        // dispatch before this function would otherwise return. (The failed-read
+        // path above returns early, keeping both the registry entry and the slot
+        // claim for a later retry, so nothing resets the checkout the retry reads.)
+        self.retire(&handle.nonce.0);
+        self.pump();
 
         vec![judged_evidence_ref(handle, &subject, bytes, candidate, judgement)]
     }
@@ -2460,14 +2531,7 @@ impl ExecutorBackend for LocalExecutor {
             Ok(bytes) => bytes,
             Err(read_error) => return self.unread_evidence(handle, &run, host_fault, &evidence_path, &read_error),
         };
-        bytes = self.stamp_run_evidence(
-            &evidence_path,
-            bytes,
-            run.reuse.as_ref(),
-            run.lifecycle,
-            &handle.nonce.0,
-            &run.affinity,
-        );
+        bytes = self.stamp_run_evidence(&evidence_path, bytes, run.reuse.as_ref(), &handle.nonce.0, &run.affinity);
         // Evidence must identify the order that produced it before any body claim
         // is trusted. A stale or cross-wired evidence directory is otherwise able
         // to advance a different order merely by carrying a passing verdict.
@@ -2555,6 +2619,10 @@ impl ReconcileLanes for LocalExecutor {
         let unattributed = registry.runs.values().any(|run| run.slot.is_none());
         drop(registry);
         LaneOccupancy { slots, unattributed }
+    }
+
+    fn started_nonces(&self) -> Vec<String> {
+        self.lock().runs.keys().cloned().collect()
     }
 }
 

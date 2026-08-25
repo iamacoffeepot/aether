@@ -14,7 +14,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 #[cfg(target_os = "linux")]
-use std::process::{Child, Command};
+use std::process::Child;
+use std::process::Command;
 
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
@@ -23,9 +24,10 @@ use tracing::{Event, Metadata, Subscriber};
 
 use aether_bloomery::testing::digest;
 use aether_bloomery::{
-    BackendObjectId, Conclusion, Correspondence, CorrespondenceError, Digest, ExecutionStatus, ExecutorBackend,
-    Harness, Nonce, ReasoningEffort, ResolvedModel, SessionSlug, StageCatalog, StageId, StageVerdict, Transformation,
-    VerifyFailure, VerifyFailureSet, WorkHandle,
+    BackendObjectId, Conclusion, ConfigRegistry, Correspondence, CorrespondenceError, Digest, ExecutionStatus,
+    ExecutorBackend, Harness, Nonce, Observation, Provenance, ReasoningEffort, ResolvedModel, SCOPE_REVISION_SCHEMA,
+    ScopeRevision, ScopeRouting, SessionSlug, StageCatalog, StageId, StageVerdict, Statement, Transformation,
+    VerifyFailure, VerifyFailureSet, WorkHandle, WorkpieceId,
 };
 use tempfile::TempDir;
 
@@ -48,7 +50,7 @@ use crate::bloomery::REQUIRED_KIT;
 use crate::bloomery::executor::{OutstandingDispatch, ReconcileLanes};
 use crate::bloomery::intake::{EvidenceClaims, NameEvidenceClaims};
 use crate::session::{SessionKey, SessionManifest};
-use crate::store::{OutstandingOrder, SqliteStore, StoreBackend};
+use crate::store::{CommissionBackend, OutstandingOrder, RevisionEvidence, SqliteStore, StoreBackend};
 
 // A correspondence seeded with the two commits these orders carry — the
 // checkout target (`for_member_stage`'s third arg, `digest(0xC0)`) and the
@@ -2269,9 +2271,10 @@ struct ReuseRunner {
     session_id: String,
     /// A resume handle that fails `start` the way a missing harness session does.
     reject_resume: Option<String>,
-    /// A nonce that stays `Running` so its slot stays held — the fixture for
-    /// forcing a predecessor into a non-lowest slot.
-    hold: Option<String>,
+    /// Nonces that stay `Running` so their slots stay held — the fixture for
+    /// forcing a predecessor into a non-lowest slot, and for holding two
+    /// sibling lanes live at the same time.
+    hold: Vec<String>,
     /// A nonce whose `start` fails the way a host out of disk fails it.
     fail_start: Option<String>,
 }
@@ -2283,7 +2286,7 @@ impl ReuseRunner {
             input_tokens: 1_000,
             session_id: "sess-1".to_owned(),
             reject_resume: None,
-            hold: None,
+            hold: Vec::new(),
             fail_start: None,
         }
     }
@@ -2299,7 +2302,7 @@ impl ReuseRunner {
     }
 
     fn holding(mut self, nonce: impl Into<String>) -> Self {
-        self.hold = Some(nonce.into());
+        self.hold.push(nonce.into());
         self
     }
 
@@ -2338,7 +2341,7 @@ impl TransformRunner for ReuseRunner {
             reuse_evidence(spec.nonce, &self.session_id, self.input_tokens),
         )
         .map_err(LocalExecutorError::Io)?;
-        let lifecycle = if self.hold.as_deref() == Some(spec.nonce) {
+        let lifecycle = if self.hold.iter().any(|held| held == spec.nonce) {
             RunLifecycle::Running
         } else {
             RunLifecycle::Exited { success: true }
@@ -3089,4 +3092,247 @@ fn a_refused_predecessor_session_falls_back_to_a_fresh_dispatch() {
     let stamped = stamped_evidence(&base, &dependent);
     assert_eq!(stamped["session_reuse"]["arm"], "fresh");
     assert_eq!(stamped["session_reuse"]["miss"], "resume_refused");
+}
+
+// A store carrying several declared edges at once — the fan-out `dependent_store`
+// cannot express, because `record_member_dependencies` replaces the whole graph.
+fn fan_out_store(dir: &TempDir, orders: &[OutstandingOrder], edges: &[(&str, &str)]) -> SqliteStore {
+    let mut store = member_store(dir, orders);
+    let edges: Vec<(String, String)> =
+        edges.iter().map(|(member, depends_on)| ((*member).to_owned(), (*depends_on).to_owned())).collect();
+    store.record_member_dependencies(&[1; 32], &edges).unwrap();
+    store
+}
+
+#[test]
+fn two_dependents_of_one_predecessor_never_share_a_checkout() {
+    // Acceptance: A -> B and A -> C fan out from one predecessor, and both
+    // dependents unblock on the same admission. B continues A's session in A's
+    // tree; C, dispatched in the same tick and still live, has to stand
+    // somewhere else.
+    //
+    // Pre-fix every sibling inherited the slug of the first declared
+    // predecessor that had one, `checkout_dir` mapped a nameable slug straight
+    // to `sessions/<slug>/tree` whatever slot it was handed, and nothing at
+    // dispatch asked whether a live run already held that path. Both lanes then
+    // ran `git checkout --detach --force` + `git clean -ffdx` in one working
+    // tree and edited it concurrently: C's reset deleted B's in-progress work,
+    // and a capture could commit the union of two members' edits as one
+    // candidate.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let store = store_dir();
+    let predecessor = test_nonce("A");
+    let first = test_nonce("B");
+    let second = test_nonce("C");
+    let sessions = super::SessionReuse::memory();
+    sessions.set_head_hash("head-A");
+    sessions.set_now(1_000);
+    let exec = LocalExecutor::new(
+        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(first.clone()).holding(second.clone())),
+        correspondence(),
+        base.path(),
+    )
+    .with_session_reuse(sessions)
+    .with_message_store(fan_out_store(
+        &store,
+        &[
+            member_order_at(&predecessor, "issue-A", StageId::Construct),
+            member_order_at(&first, "issue-B", StageId::Construct),
+            member_order_at(&second, "issue-C", StageId::Construct),
+        ],
+        &[("issue-B", "issue-A"), ("issue-C", "issue-A")],
+    ));
+
+    exec.stream_evidence(&exec.submit(&claude_order(digest(5), &predecessor, "issue-A")).unwrap()).unwrap();
+    // Neither dependent's evidence is streamed, so both stay tracked and live
+    // for the whole of the other's lane — the concurrency the defect needs.
+    let _live_first = exec.submit(&claude_order(digest(5), &first, "issue-B")).unwrap();
+    let _live_second = exec.submit(&claude_order(digest(5), &second, "issue-C")).unwrap();
+
+    let worktrees = started_worktrees(&seen);
+    assert_ne!(worktrees[1], worktrees[2], "two live sibling lanes must never stand in one checkout");
+    assert_eq!(
+        worktrees[1],
+        Some(session_tree(&base, &predecessor)),
+        "the sibling that got there first continues the predecessor's session in the predecessor's tree",
+    );
+    assert_eq!(
+        worktrees[2],
+        Some(session_tree(&base, &second)),
+        "the sibling that arrives second opens its own session rather than resetting a live checkout",
+    );
+    let resumes: Vec<Option<String>> = seen.lock().unwrap().iter().map(|spec| spec.resume.clone()).collect();
+    assert_eq!(resumes[1].as_deref(), Some("sess-1"), "the continuing sibling resumes the conversation");
+    assert!(
+        resumes[2].is_none(),
+        "the sibling that did not inherit the tree must not resume a conversation bound to it",
+    );
+}
+
+const OUT_OF_SURFACE_PATH: &str = "crates/other/src/lib.rs";
+
+/// A spawn seam that plants a known out-of-surface path in the finishing
+/// verify's checkout, then resets that same tree when the queued sibling
+/// starts — the production `materialize_checkout` shape.
+struct ContainmentRunner {
+    seed: Mutex<Option<String>>,
+}
+
+impl TransformRunner for ContainmentRunner {
+    fn start(&self, spec: &RunSpec<'_>) -> Result<Box<dyn RunProcess>, LocalExecutorError> {
+        fs::create_dir_all(spec.worktree_dir).map_err(LocalExecutorError::Io)?;
+        fs::create_dir_all(spec.evidence_dir).map_err(LocalExecutorError::Io)?;
+        let planted = self.seed.lock().unwrap().clone();
+        if let Some(sha) = planted {
+            git(spec.worktree_dir, &["checkout", "--detach", "--force", &sha]);
+            git(spec.worktree_dir, &["clean", "--force", "--force", "-d", "-x"]);
+            fs::write(
+                spec.evidence_dir.join("evidence.json"),
+                format!(
+                    r#"{{"command":"construct.implement","nonce":"{}","produced_candidate":true,"result_record":{{"schema":1,"is_error":false,"result":{{"num_turns":1}}}}}}"#,
+                    spec.nonce
+                ),
+            )
+            .map_err(LocalExecutorError::Io)?;
+        } else {
+            git_init(spec.worktree_dir);
+            rewrite(spec.worktree_dir, "crates/owned/src/lib.rs", "pub fn owned() -> u8 { 1 }\n");
+            git_commit(spec.worktree_dir, "seed");
+            *self.seed.lock().unwrap() = Some(git_head(spec.worktree_dir));
+            rewrite(spec.worktree_dir, OUT_OF_SURFACE_PATH, "pub fn other() -> u8 { 2 }\n");
+            git_commit(spec.worktree_dir, "stray");
+            fs::write(
+                spec.evidence_dir.join("evidence.json"),
+                format!(r#"{{"command":"verify.check","nonce":"{}","status":"fail"}}"#, spec.nonce),
+            )
+            .map_err(LocalExecutorError::Io)?;
+        }
+        Ok(Box::new(RecordingProcess { lifecycle: RunLifecycle::Exited { success: true } }))
+    }
+
+    fn release(&self, _worktree_dir: &Path) -> Result<(), LocalExecutorError> {
+        Ok(())
+    }
+
+    fn registered_worktrees(&self) -> Result<Vec<PathBuf>, LocalExecutorError> {
+        Ok(Vec::new())
+    }
+
+    fn capture(
+        &self,
+        _worktree_dir: &Path,
+        _message: Option<&str>,
+    ) -> Result<Option<CapturedObjects>, LocalExecutorError> {
+        Ok(None)
+    }
+}
+
+fn git_init(root: &Path) {
+    git(root, &["init", "--object-format=sha1", "--quiet"]);
+    git(root, &["config", "user.name", "containment"]);
+    git(root, &["config", "user.email", "containment@test"]);
+    git(root, &["config", "commit.gpgsign", "false"]);
+    git(root, &["config", "core.autocrlf", "false"]);
+}
+
+fn git_commit(root: &Path, message: &str) {
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "--quiet", "--message", message]);
+}
+
+fn git_head(root: &Path) -> String {
+    let output = Command::new("git").current_dir(root).args(["rev-parse", "HEAD"]).output().expect("git starts");
+    assert!(output.status.success(), "git rev-parse HEAD failed");
+    String::from_utf8(output.stdout).expect("HEAD is utf-8").trim().to_owned()
+}
+
+fn git(root: &Path, args: &[&str]) {
+    let output = Command::new("git").current_dir(root).args(args).output().expect("git starts");
+    assert!(output.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&output.stderr));
+}
+
+fn rewrite(root: &Path, relative: &str, contents: &str) {
+    let path = root.join(relative);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("the fixture parent dir creates");
+    }
+    fs::write(&path, contents).expect("the fixture file writes");
+}
+
+fn contained_member_store(dir: &TempDir, verify: &str, queued: &str) -> SqliteStore {
+    let mut store = SqliteStore::open(dir.path().join("bloomery.sqlite").to_str().unwrap()).unwrap();
+    let workpiece = WorkpieceId("issue-contain".to_owned());
+    store
+        .create(
+            &workpiece,
+            &Statement {
+                words: b"containment surface".to_vec(),
+                provenance: Provenance::ObservationAttestation(Observation { source: "test".to_owned() }),
+                parents: Vec::new(),
+            },
+        )
+        .unwrap();
+    let revision = ScopeRevision {
+        schema: SCOPE_REVISION_SCHEMA,
+        workpiece: workpiece.clone(),
+        predecessor: None,
+        problem: "problem".to_owned(),
+        design: String::new(),
+        plan: String::new(),
+        declared_surface: vec!["crates/owned/**".to_owned()],
+        dogfood_brief: String::new(),
+        routing: ScopeRouting { size: "S".to_owned(), model: String::new() },
+        dependencies: Vec::new(),
+        description: String::new(),
+        implements: Vec::new(),
+        declared_crates: Vec::new(),
+        declared_reads: Vec::new(),
+    };
+    let scope = store.write_revision(&revision, &RevisionEvidence::default()).unwrap();
+    for (nonce, stage) in [(verify, StageId::Verify), (queued, StageId::Construct)] {
+        let transformation =
+            Transformation::for_member_stage(&StageCatalog::binding_of(stage), digest(5), digest(0xC0), digest(0xB0));
+        store
+            .record_order(&OutstandingOrder {
+                nonce: nonce.to_owned(),
+                bloom: vec![1; 32],
+                workpiece: workpiece.0.clone(),
+                scope_revision: scope.as_bytes().to_vec(),
+                candidate: vec![5; 32],
+                displayed_digest: vec![5; 32],
+                stage: to_vec(&stage).unwrap(),
+                transformation: to_vec(&transformation).unwrap(),
+                configs: to_vec(&ConfigRegistry::default()).unwrap(),
+                profile: to_vec(&StageCatalog::profile_of(stage)).unwrap(),
+                deadline_unix_millis: 1_700_000_000_000,
+            })
+            .unwrap();
+    }
+    store
+}
+
+#[test]
+fn containment_reads_the_finishing_lanes_own_tree() {
+    // Retiring the finishing verify used to pump the queued sibling first, and
+    // the sibling's `materialize_checkout` reset the shared session tree before
+    // containment read it. The gate then either admitted a real breach or
+    // charged this member with paths it never wrote.
+    let base = TempDir::new().unwrap();
+    let store = store_dir();
+    let verify = test_nonce("verify");
+    let queued = test_nonce("queued");
+    let exec =
+        LocalExecutor::new(Arc::new(ContainmentRunner { seed: Mutex::new(None) }), correspondence(), base.path())
+            .with_message_store(contained_member_store(&store, &verify, &queued))
+            .with_max_concurrent_lanes(1);
+
+    let finishing = exec.submit(&verify_order(digest(5), &verify)).unwrap();
+    let _waiting = exec.submit(&construct_order(digest(5), &queued)).unwrap();
+    let refs = exec.stream_evidence(&finishing).unwrap();
+    assert_eq!(
+        refs[0].observation.violating_paths,
+        [OUT_OF_SURFACE_PATH],
+        "containment must name the finishing lane's out-of-surface path, not the sibling's reset tree",
+    );
 }

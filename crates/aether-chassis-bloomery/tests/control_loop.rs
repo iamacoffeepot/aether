@@ -36,8 +36,9 @@ use std::time::{Duration, Instant};
 use aether_bloomery::{
     Admit, AdmitResult, BloomDraft, BloomId, CONTROL_CORE_NAMESPACE, CalibrationDocument, CandidateRef, ConfigKind,
     ConfigRegistry, Decision, Decisions, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership,
-    ModelOverride, OperatorHold, OperatorRepair, OperatorRepairError, Outcome, Query, QueryResult, QuerySelector,
-    ResolutionClaim, ResolvedConfigs, SealError, Snapshot, SpendWindow, StageCatalog, StageId, StudyCost, StudyRecord,
+    MetricsQuery, MetricsQueryResult, MetricsView, ModelOverride, ObserveMainlineResult, OperatorHold, OperatorRepair,
+    OperatorRepairError, Outcome, Query, QueryResult, QuerySelector, ResolutionClaim, ResolvedBloom, ResolvedConfigs,
+    SealError, Snapshot, SpendQuery, SpendQueryResult, SpendWindow, StageCatalog, StageId, StudyCost, StudyRecord,
     Unproducible, VerifyFailureSet, ViewDocument, WorkpieceId, decode_recorded_decisions, digest_of, reduce,
 };
 use aether_chassis_bloomery::artifacts::{ArtifactsCapabilityState, PutResult};
@@ -119,6 +120,120 @@ where
         first.expect("the first cid produced a reply of the expected kind"),
         second.expect("the second cid produced a reply of the expected kind"),
     )
+}
+
+/// Pipeline a summary, a timeline, and a spend read so all three sit in the
+/// mailbox together. Sequential round-trips can straddle the replay flip: the
+/// first refuses, the fold runs, and the later two answer from the restored
+/// ledger — proving nothing about those handlers.
+fn call_boot_reads(
+    stream: &mut TcpStream,
+    cids: (u64, u64, u64),
+    mailbox: MailboxId,
+    summary: &MetricsQuery,
+    timeline: &MetricsQuery,
+) -> (MetricsQueryResult, MetricsQueryResult, SpendQueryResult) {
+    write_frame(stream, &call_frame(cids.0, mailbox, summary)).unwrap();
+    write_frame(stream, &call_frame(cids.1, mailbox, timeline)).unwrap();
+    write_frame(stream, &call_frame(cids.2, mailbox, &SpendQuery)).unwrap();
+
+    let mut summary_reply: Option<MetricsQueryResult> = None;
+    let mut timeline_reply: Option<MetricsQueryResult> = None;
+    let mut spend_reply: Option<SpendQueryResult> = None;
+    let mut ended = 0;
+    while ended < 3 {
+        match read_frame(stream).unwrap() {
+            WireFrame::ReplyEvent { cid, envelope } => {
+                if cid == cids.0 && envelope.kind == MetricsQueryResult::ID {
+                    summary_reply = MetricsQueryResult::decode_from_bytes(&envelope.payload);
+                } else if cid == cids.1 && envelope.kind == MetricsQueryResult::ID {
+                    timeline_reply = MetricsQueryResult::decode_from_bytes(&envelope.payload);
+                } else if cid == cids.2 && envelope.kind == SpendQueryResult::ID {
+                    spend_reply = SpendQueryResult::decode_from_bytes(&envelope.payload);
+                } else if cid != cids.0 && cid != cids.1 && cid != cids.2 {
+                    panic!("ReplyEvent for an unexpected cid {cid}");
+                }
+            }
+            WireFrame::ReplyEnd { cid, result } => {
+                result.unwrap();
+                assert!(cid == cids.0 || cid == cids.1 || cid == cids.2, "ReplyEnd for an unexpected cid {cid}");
+                ended += 1;
+            }
+            other => panic!("unexpected frame during pipelined boot reads: {other:?}"),
+        }
+    }
+    (
+        summary_reply.expect("the summary cid produced a reply of the expected kind"),
+        timeline_reply.expect("the timeline cid produced a reply of the expected kind"),
+        spend_reply.expect("the spend cid produced a reply of the expected kind"),
+    )
+}
+
+/// Issue the three reads together until each is served from the restored ledgers.
+/// Returns how many times each was refused first; a zero means that read missed
+/// the boot window and the caller proved nothing.
+fn poll_boot_reads_until_served(
+    stream: &mut TcpStream,
+    control: MailboxId,
+    summary: &MetricsQuery,
+    timeline: &MetricsQuery,
+) -> (u32, u32, u32) {
+    let deadline = Instant::now() + Duration::from_mins(2);
+    let mut summary_refusals = 0_u32;
+    let mut timeline_refusals = 0_u32;
+    let mut spend_refusals = 0_u32;
+    let mut summary_served = false;
+    let mut timeline_served = false;
+    let mut spend_served = false;
+    let mut cid = 10;
+    loop {
+        let (summary_reply, timeline_reply, spend_reply) =
+            call_boot_reads(stream, (cid, cid + 1, cid + 2), control, summary, timeline);
+        match summary_reply {
+            MetricsQueryResult::Err { error } => {
+                assert!(
+                    error.contains("boot journal replay has not finished"),
+                    "summary refused for a reason other than replay: {error}"
+                );
+                summary_refusals += 1;
+            }
+            MetricsQueryResult::Ok { .. } => summary_served = true,
+            MetricsQueryResult::NotFound => {
+                panic!("summary answered NotFound; that arm is a bloom denial, not a boot refusal")
+            }
+        }
+        match timeline_reply {
+            MetricsQueryResult::Err { error } => {
+                assert!(
+                    error.contains("boot journal replay has not finished"),
+                    "timeline refused for a reason other than replay: {error}"
+                );
+                timeline_refusals += 1;
+            }
+            MetricsQueryResult::Ok { .. } => timeline_served = true,
+            MetricsQueryResult::NotFound => {
+                panic!(
+                    "the timeline was served as NotFound before the journal replayed \
+                     (after {timeline_refusals} refusals) — a positive denial that the planted bloom exists"
+                )
+            }
+        }
+        match spend_reply {
+            SpendQueryResult::Err { error } => {
+                assert!(
+                    error.contains("boot journal replay has not finished"),
+                    "spend refused for a reason other than replay: {error}"
+                );
+                spend_refusals += 1;
+            }
+            SpendQueryResult::Ok { .. } => spend_served = true,
+        }
+        if summary_served && timeline_served && spend_served {
+            return (summary_refusals, timeline_refusals, spend_refusals);
+        }
+        assert!(Instant::now() < deadline, "metrics and spend never rebuilt from the planted journal");
+        cid += 3;
+    }
 }
 
 /// The native control-core capability's mailbox — mounted into the chassis at
@@ -217,6 +332,27 @@ fn query_until_blooms(stream: &mut TcpStream, cid_base: u64, control: MailboxId,
         cid += 1;
         thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// One document read. Unlike [`query_until_blooms`], this does not retry —
+/// the caller has already waited for replay.
+fn query_document(stream: &mut TcpStream, cid: u64, control: MailboxId) -> ViewDocument {
+    match call::<_, QueryResult>(stream, cid, control, &Query { selector: QuerySelector::Document }) {
+        QueryResult::Document { document } => from_bytes(&document).expect("document decodes"),
+        other => panic!("expected a document reply, got {other:?}"),
+    }
+}
+
+/// Issue a `Call` with no cid so the server does not wait for a reply.
+/// [`ObserveMainlineResult`] is a source reply the control core handles
+/// without answering, and a cid-tracked Call would hang on `ReplyEnd`.
+fn deliver_without_reply<Req: Kind + Serialize>(stream: &mut TcpStream, mailbox: MailboxId, request: &Req) {
+    let mut frame = call_frame(0, mailbox, request);
+    let WireFrame::Call { cid, .. } = &mut frame else {
+        panic!("call_frame produced a non-Call");
+    };
+    *cid = None;
+    write_frame(stream, &frame).unwrap();
 }
 
 #[test]
@@ -365,6 +501,33 @@ fn every_selector_reaches_its_own_reply_arm() {
 /// applies nothing and the rebuilt projection is exactly the one sealed bloom.
 const PRE_REPLAY_FILLER_ROWS: usize = 20_000;
 
+/// One sealed row plus [`PRE_REPLAY_FILLER_ROWS`] refusals, wide enough that a
+/// read from another process can land before the restarted core finishes the fold.
+fn plant_pre_replay_journal(db: &str, sealed: &Event, decided: &Decisions) {
+    let refusal = Decisions { outcome: Outcome::SealRejected(SealError::EmptyMembership), effects: Vec::new() };
+    let mut store = SqliteStore::open(db).unwrap();
+    store
+        .append_event(&JournalWrite {
+            idempotency_key: "seal-visible",
+            event: &to_vec(sealed).unwrap(),
+            decisions: &to_vec(decided).unwrap(),
+            decider: "control-loop-test",
+        })
+        .unwrap();
+    let filler = to_vec(&seal_event("filler", 1, "wp-filler")).unwrap();
+    let refused = to_vec(&refusal).unwrap();
+    for row in 0..PRE_REPLAY_FILLER_ROWS {
+        store
+            .append_event(&JournalWrite {
+                idempotency_key: &format!("filler-{row}"),
+                event: &filler,
+                decisions: &refused,
+                decider: "control-loop-test",
+            })
+            .unwrap();
+    }
+}
+
 #[test]
 fn the_view_is_not_served_before_the_journal_has_replayed() {
     // The plausible bug: `on_query` reads `state.snapshot` without the
@@ -383,31 +546,7 @@ fn the_view_is_not_served_before_the_journal_has_replayed() {
     let sealed = seal_event("seal-visible", 0, "wp");
     let decided = reduce(&Snapshot::default(), &sealed, &ResolvedConfigs::default(), &SpendWindow::default());
     assert!(matches!(decided.outcome, Outcome::Sealed(_)), "fixture control: the planted row seals");
-    let refusal = Decisions { outcome: Outcome::SealRejected(SealError::EmptyMembership), effects: Vec::new() };
-
-    {
-        let mut store = SqliteStore::open(db).unwrap();
-        store
-            .append_event(&JournalWrite {
-                idempotency_key: "seal-visible",
-                event: &to_vec(&sealed).unwrap(),
-                decisions: &to_vec(&decided).unwrap(),
-                decider: "control-loop-test",
-            })
-            .unwrap();
-        let filler = to_vec(&seal_event("filler", 1, "wp-filler")).unwrap();
-        let refused = to_vec(&refusal).unwrap();
-        for row in 0..PRE_REPLAY_FILLER_ROWS {
-            store
-                .append_event(&JournalWrite {
-                    idempotency_key: &format!("filler-{row}"),
-                    event: &filler,
-                    decisions: &refused,
-                    decider: "control-loop-test",
-                })
-                .unwrap();
-        }
-    }
+    plant_pre_replay_journal(db, &sealed, &decided);
 
     let (_coordinator, mut stream) = spawn_with_store(db, "control-loop-test");
     let control = control_mailbox();
@@ -435,6 +574,171 @@ fn the_view_is_not_served_before_the_journal_has_replayed() {
         cid += 1;
     }
     assert!(refusals > 0, "fixture control: no read reached the boot window, so nothing above was proved");
+}
+
+#[test]
+fn metrics_and_spend_are_not_served_before_the_journal_has_replayed() {
+    // The plausible bug: `on_metrics_query` and `on_spend_query` answer off
+    // the default ledgers `init` seeds, so a read in the same boot window
+    // `on_query` now refuses is a confident zero (summary, spend) or a
+    // positive denial that a bloom the journal holds does not exist (timeline).
+    // The gate and the sentence live on `on_query`; these two handlers share
+    // them rather than restating the argument.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("bloomery.db");
+    let db = db.to_str().unwrap();
+
+    let sealed = seal_event("seal-visible", 0, "wp");
+    let decided = reduce(&Snapshot::default(), &sealed, &ResolvedConfigs::default(), &SpendWindow::default());
+    let bloom = match &decided.outcome {
+        Outcome::Sealed(bloom) => *bloom,
+        other => panic!("fixture control: the planted row seals: {other:?}"),
+    };
+    plant_pre_replay_journal(db, &sealed, &decided);
+
+    let (_coordinator, mut stream) = spawn_with_store(db, "control-loop-test");
+    let control = control_mailbox();
+    let bloom_bytes = bloom.0.as_bytes().to_vec();
+    let summary =
+        MetricsQuery { view: MetricsView::Summary, bloom: None, from_sequence: None, limit: None, notice: None };
+    let timeline = MetricsQuery {
+        view: MetricsView::Timeline,
+        bloom: Some(bloom_bytes),
+        from_sequence: None,
+        limit: None,
+        notice: None,
+    };
+
+    let (summary_refusals, timeline_refusals, spend_refusals) =
+        poll_boot_reads_until_served(&mut stream, control, &summary, &timeline);
+    assert!(
+        summary_refusals > 0,
+        "fixture control: no summary read reached the boot window, so nothing above was proved"
+    );
+    assert!(
+        timeline_refusals > 0,
+        "fixture control: no timeline read reached the boot window, so nothing above was proved"
+    );
+    assert!(spend_refusals > 0, "fixture control: no spend read reached the boot window, so nothing above was proved");
+}
+
+#[test]
+fn an_observation_classified_against_a_moved_base_is_discarded() {
+    // The plausible bug: `on_observe_mainline_result` folds `fast_forward`
+    // against live mainline without checking that mainline is still the base
+    // the source classified against. A land marks its bloom landed in the
+    // same apply that advances mainline, so a reply that left while the bloom
+    // was in flight arrives with nothing held, a stale true, and a key that
+    // was never journaled — and `reduce_observe_mainline` advances mainline
+    // back onto the pre-land commit, the base a later seal would take.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("bloomery.db");
+    let db = db.to_str().unwrap();
+
+    let sealed = seal_event("seal-stale-obs", 0, "wp-stale-obs");
+    let seal_decided = reduce(&Snapshot::default(), &sealed, &ResolvedConfigs::default(), &SpendWindow::default());
+    let bloom = match &seal_decided.outcome {
+        Outcome::Sealed(bloom) => *bloom,
+        other => panic!("fixture control: the planted seal must seal: {other:?}"),
+    };
+    let landed_head = Digest::from_bytes([0xB1; 32]);
+    let resolved = ResolvedBloom {
+        bloom,
+        tree: landed_head,
+        head: landed_head,
+        lineage: Vec::new(),
+        resolution_claims: Vec::new(),
+    };
+    let resolve = Event {
+        idempotency_key: IdempotencyKey("resolve-stale-obs".into()),
+        fact: Fact::Resolve { bloom, tree: landed_head, head: landed_head, lineage: Vec::new() },
+    };
+    let resolve_decided = Decisions {
+        outcome: Outcome::Resolved(resolved.clone()),
+        effects: vec![Decision::SetResolved { bloom, resolved }],
+    };
+
+    {
+        let mut store = SqliteStore::open(db).unwrap();
+        store
+            .append_event(&JournalWrite {
+                idempotency_key: "seal-stale-obs",
+                event: &to_vec(&sealed).unwrap(),
+                decisions: &to_vec(&seal_decided).unwrap(),
+                decider: "control-loop-test",
+            })
+            .unwrap();
+        store
+            .append_event(&JournalWrite {
+                idempotency_key: "resolve-stale-obs",
+                event: &to_vec(&resolve).unwrap(),
+                decisions: &to_vec(&resolve_decided).unwrap(),
+                decider: "control-loop-test",
+            })
+            .unwrap();
+    }
+
+    let (_coordinator, mut stream) = spawn_with_store(db, "control-loop-test");
+    let control = control_mailbox();
+    let document = query_until_blooms(&mut stream, 10, control, 1);
+    assert_eq!(document.mainline, Snapshot::GENESIS_MAINLINE, "the planted land has not run yet");
+
+    let landed = admit(
+        &mut stream,
+        30,
+        control,
+        &Event {
+            idempotency_key: IdempotencyKey("land-stale-obs".into()),
+            fact: Fact::Land { bloom, new_head: landed_head },
+        },
+    );
+    assert!(matches!(landed, Outcome::Landed(_)), "the land admits and advances mainline: {landed:?}");
+
+    let after_land = query_document(&mut stream, 31, control);
+    assert_eq!(after_land.mainline, landed_head, "fixture control: the land moved mainline");
+    assert_eq!(after_land.observed, landed_head, "fixture control: the land refreshed observed");
+
+    let previous_base = to_vec(&Snapshot::GENESIS_MAINLINE).unwrap();
+    deliver_without_reply(
+        &mut stream,
+        control,
+        &ObserveMainlineResult::Ok { head: previous_base.clone(), fast_forward: true, relative_to: previous_base },
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut cid = 40;
+    loop {
+        let view = query_document(&mut stream, cid, control);
+        assert_eq!(
+            view.mainline, landed_head,
+            "a stale observation classified against the pre-land base regressed mainline"
+        );
+        assert_eq!(
+            view.observed, landed_head,
+            "a stale observation classified against the pre-land base regressed observed"
+        );
+        if Instant::now() >= deadline {
+            break;
+        }
+        cid += 1;
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    let mut store = SqliteStore::open(db).unwrap();
+    let stale_heads: Vec<_> = store
+        .list_events()
+        .unwrap()
+        .into_iter()
+        .filter_map(|bytes| from_bytes::<Event>(&bytes).ok())
+        .filter_map(|event| match event.fact {
+            Fact::ObserveMainline { head } if head == Snapshot::GENESIS_MAINLINE => Some(head),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        stale_heads.is_empty(),
+        "no ObserveMainline fact may be journaled for the stale pre-land head: {stale_heads:?}"
+    );
 }
 
 /// Read the calibration document, retrying until the ledger has measured

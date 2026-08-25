@@ -1,11 +1,13 @@
 //! The runtime for the janitor reactor: a poll-driven loop that rebuilds the
 //! snapshot from the journal and sweeps terminal artefacts.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use aether_actor::runtime;
+use aether_bloomery::BloomId;
 use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -13,7 +15,7 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
 use serde::{Deserialize, Serialize};
 
-use super::sweep::{JanitorPolicy, SweepRequest, sweep};
+use super::sweep::{JanitorPolicy, SweepRequest, WorkingRefPruner, sweep};
 use super::{JanitorReactorCapability, JanitorReactorSetup};
 
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
@@ -37,6 +39,10 @@ pub struct JanitorReactorState {
     worktree_base: PathBuf,
     target_base: PathBuf,
     policy: JanitorPolicy,
+    /// Blooms whose working refs this process has already pruned successfully.
+    /// Process-local: a restart walks the terminal set again, one bloom per
+    /// tick, and a prune that errors is left out so the next tick retries.
+    pruned: HashSet<BloomId>,
     mailer: Arc<Mailer>,
     self_mailbox: MailboxId,
     _timer: Option<TimerHandle>,
@@ -95,6 +101,7 @@ impl NativeActor for JanitorReactorCapability {
                 lane_target_budget_bytes: config.lane_target_budget_bytes,
                 evidence_retention_days: config.evidence_retention_days,
             },
+            pruned: HashSet::new(),
             mailer,
             self_mailbox,
             _timer: Some(timer),
@@ -127,12 +134,13 @@ impl NativeActor for JanitorReactorCapability {
         match sweep(&mut SweepRequest {
             store,
             runner: state.runner.as_ref(),
-            source: state.source.as_ref(),
+            source: state.source.as_ref().map(|shell| shell as &dyn WorkingRefPruner),
             worktree_base: &state.worktree_base,
             target_base: &state.target_base,
             lanes: &lanes,
             policy: &state.policy,
             now: SystemTime::now(),
+            pruned: &mut state.pruned,
         }) {
             Ok(report) => {
                 if report.worktrees + report.evidence_dirs + report.refs + report.target_dirs > 0 {

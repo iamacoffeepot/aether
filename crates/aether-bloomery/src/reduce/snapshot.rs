@@ -802,8 +802,7 @@ excuse_vocabulary! {
     /// [`Fact::ResumeHostFault`].
     HostFault,
     /// A construct park: the lane declined without a candidate. Redeemed by
-    /// [`Fact::AttemptCompleted`] `{ passed: true }`, [`Fact::Integrate`], or
-    /// [`Fact::GrantAttempts`].
+    /// [`Fact::AttemptCompleted`] `{ passed: true }` or [`Fact::Integrate`].
     Park,
     /// Awaiting a surface amendment (ADR-0207). Redeemed by a later passing
     /// attempt, integration, or verify failure.
@@ -825,7 +824,7 @@ impl Excuse {
             Self::Wedge => "Fact::GrantAttempts",
             Self::Claim => "never: a claim is a successful stop",
             Self::HostFault => "Fact::ResumeHostFault",
-            Self::Park => "Fact::AttemptCompleted { passed: true }, Fact::Integrate, or Fact::GrantAttempts",
+            Self::Park => "Fact::AttemptCompleted { passed: true } or Fact::Integrate",
             Self::AwaitingSurface => "Fact::AttemptCompleted { passed: true }, Fact::Integrate, or Fact::VerifyFailed",
             Self::LeaseEviction => "the evicting member's Fact::Integrate",
             Self::Withdrawal => "never: a withdrawal is one-way",
@@ -1056,18 +1055,20 @@ impl Snapshot {
     /// Record (or clear) a construct that concluded without a candidate as a
     /// member park.
     ///
-    /// Gated on [`Outcome::AttemptParked`] for the insert: a refused completion
-    /// cannot plant a park the reducer rejected, and a dead construct that
-    /// retried or wedged is not this case. Raises no hold and does not write
-    /// the stage cursor — attempts and repair rolls stay where they were.
+    /// The park is folded from what the reducer decided, never from what the
+    /// admitter asserted. The insert is gated on [`Outcome::AttemptParked`]: a
+    /// refused completion cannot plant a park the reducer rejected, and a dead
+    /// construct that retried or wedged is not this case. Raises no hold and
+    /// does not write the stage cursor — attempts and repair rolls stay where
+    /// they were.
     ///
     /// A park is an excuse — the doctor and both liveness oracles read it as
     /// "this member is legitimately waiting" — and it is redeemed by a
-    /// passing attempt, an integration, or a grant of attempts. Leaving one
-    /// standing would leave the member excused forever, waiting on a resume
-    /// that cannot come: those three facts make the park false, so the entry
-    /// is dropped. Mirrors [`Self::record_surface_request`]'s clear list,
-    /// with [`Fact::GrantAttempts`] in place of [`Fact::VerifyFailed`].
+    /// passing attempt or an integration. The clear arm takes effect only when
+    /// the decision set carries the outcome the reducer returns when it accepts
+    /// that fact; a fact it rejected changes nothing. Leaving one standing
+    /// would leave the member excused forever, waiting on a resume that cannot
+    /// come.
     fn record_construct_park(&mut self, event: &Event, decisions: &Decisions) {
         match &event.fact {
             Fact::AttemptCompleted { passed: false, evidence, .. } => {
@@ -1086,9 +1087,26 @@ impl Snapshot {
                     .or_default()
                     .insert(workpiece.clone(), MemberPark { stage: *stage, evidence: *reason });
             }
-            Fact::AttemptCompleted { bloom, workpiece, passed: true, .. }
-            | Fact::Integrate { bloom, claim: ResolutionClaim { workpiece, .. } }
-            | Fact::GrantAttempts { bloom, workpiece, .. } => {
+            Fact::AttemptCompleted { bloom, workpiece, passed: true, .. } => {
+                let Outcome::AttemptAdvanced { .. } = &decisions.outcome else {
+                    return;
+                };
+                if let Some(members) = self.member_parks.get_mut(bloom) {
+                    members.remove(workpiece);
+                }
+            }
+            Fact::Integrate { bloom, claim: ResolutionClaim { workpiece, .. } } => {
+                let Outcome::Integrated { .. } = &decisions.outcome else {
+                    return;
+                };
+                if let Some(members) = self.member_parks.get_mut(bloom) {
+                    members.remove(workpiece);
+                }
+            }
+            Fact::GrantAttempts { bloom, workpiece, .. } => {
+                let Outcome::AttemptsGranted { .. } = &decisions.outcome else {
+                    return;
+                };
                 if let Some(members) = self.member_parks.get_mut(bloom) {
                     members.remove(workpiece);
                 }

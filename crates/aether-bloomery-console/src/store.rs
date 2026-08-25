@@ -1,14 +1,19 @@
 //! Per-resource cache. Screens see this read-only.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Display;
 use std::time::{Duration, Instant};
+
+use aether_bloomery::METRICS_MAX_LIMIT;
 
 use crate::dto::{
     BloomDispatchesView, CommissionShowView, CommissionsView, DecodedArtifact, DigestHex, DispatchFilePage,
     JournalPage, JournalRecordView, MetricDay, MetricDispatch, MetricsSeat, MetricsSummary, MetricsTimeline,
     SpendWindowView, ViewDocument,
 };
+
+/// Newest dispatch rows the board keeps. Matches the coordinator page ceiling so one catch-up page fills the bound.
+const DISPATCH_RETENTION: u64 = METRICS_MAX_LIMIT;
 
 /// Which coordinator resource a screen can subscribe to.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -228,6 +233,8 @@ pub struct Store {
     timelines: HashMap<DigestHex, Cell<MetricsTimeline>>,
     seats: Cell<Vec<MetricsSeat>>,
     dispatches: Cell<Vec<MetricDispatch>>,
+    dispatch_cursor: u64,
+    dispatch_page_full: bool,
     bloom_dispatches: HashMap<DigestHex, Cell<BloomDispatchesView>>,
     spend: Cell<SpendWindowView>,
     commission_capability: Option<CommissionCapability>,
@@ -250,6 +257,8 @@ impl Store {
             timelines: HashMap::new(),
             seats: Cell::default(),
             dispatches: Cell::default(),
+            dispatch_cursor: 0,
+            dispatch_page_full: false,
             bloom_dispatches: HashMap::new(),
             spend: Cell::default(),
             commission_capability: None,
@@ -341,23 +350,36 @@ impl Store {
             .find_map(|page| page.records.iter().find(|record| record.sequence == sequence))
     }
 
+    /// Per-resource cadence. `due` encodes the same policy; this method has no callers today.
     #[must_use]
     pub fn cadence(&self, key: &ResourceKey) -> Duration {
         match key {
-            ResourceKey::View | ResourceKey::MetricsSummary | ResourceKey::MetricsDays | ResourceKey::Spend => {
-                self.view_cadence
-            }
             ResourceKey::Transcript(query) if query.live => self.view_cadence,
-            ResourceKey::Commissions => self.view_cadence,
+            ResourceKey::View
+            | ResourceKey::MetricsSummary
+            | ResourceKey::MetricsDays
+            | ResourceKey::Spend
+            | ResourceKey::MetricsDispatches
+            | ResourceKey::Commissions => self.view_cadence,
             ResourceKey::Journal(_)
             | ResourceKey::Artifact(_)
             | ResourceKey::Transcript(_)
             | ResourceKey::Prompt(_)
             | ResourceKey::MetricsTimeline(_)
             | ResourceKey::MetricsSeats
-            | ResourceKey::MetricsDispatches
             | ResourceKey::BloomDispatches(_)
             | ResourceKey::Commission(_) => Duration::ZERO,
+        }
+    }
+
+    /// Wire path for `key`. Dispatch paging lives on the store so the key stays a stable subscription identity.
+    #[must_use]
+    pub fn request_path(&self, key: &ResourceKey) -> String {
+        match key {
+            ResourceKey::MetricsDispatches => {
+                format!("{}?from_sequence={}&limit={}", key.path(), self.dispatch_cursor, METRICS_MAX_LIMIT)
+            }
+            _ => key.path(),
         }
     }
 
@@ -384,7 +406,9 @@ impl Store {
             ResourceKey::MetricsDays => self.polled_due(&self.days),
             ResourceKey::Spend => self.polled_due(&self.spend),
             ResourceKey::MetricsSeats => self.seats.on_demand_due(),
-            ResourceKey::MetricsDispatches => self.dispatches.on_demand_due(),
+            ResourceKey::MetricsDispatches => {
+                (self.dispatch_page_full && !self.dispatches.inflight) || self.polled_due(&self.dispatches)
+            }
             ResourceKey::BloomDispatches(bloom) => self.bloom_dispatches.get(bloom).is_none_or(Cell::on_demand_due),
             ResourceKey::MetricsTimeline(bloom) => self.timelines.get(bloom).is_none_or(Cell::on_demand_due),
             ResourceKey::Commissions => {
@@ -501,7 +525,20 @@ impl Store {
     }
 
     pub fn apply_dispatches(&mut self, result: Result<Vec<MetricDispatch>, String>) {
-        apply(&mut self.dispatches, result);
+        match result {
+            Ok(page) => {
+                if let Some(highest) = page.iter().map(|row| row.sequence).max() {
+                    self.dispatch_cursor = self.dispatch_cursor.max(highest);
+                }
+                self.dispatch_page_full = u64::try_from(page.len()).is_ok_and(|len| len >= DISPATCH_RETENTION);
+                let retained = self.dispatches.value.take().unwrap_or_default();
+                self.dispatches.apply_ok(merge_dispatch_page(retained, page));
+            }
+            Err(error) => {
+                self.dispatch_page_full = false;
+                self.dispatches.apply_err(error);
+            }
+        }
     }
 
     pub fn apply_bloom_dispatches(&mut self, bloom: DigestHex, result: Result<BloomDispatchesView, String>) {
@@ -542,7 +579,7 @@ impl Store {
             ResourceKey::MetricsDays => self.days.apply_err(error),
             ResourceKey::MetricsTimeline(bloom) => self.timelines.entry(*bloom).or_default().apply_err(error),
             ResourceKey::MetricsSeats => self.seats.apply_err(error),
-            ResourceKey::MetricsDispatches => self.dispatches.apply_err(error),
+            ResourceKey::MetricsDispatches => self.apply_dispatches(Err(error.to_string())),
             ResourceKey::BloomDispatches(bloom) => self.bloom_dispatches.entry(*bloom).or_default().apply_err(error),
             ResourceKey::Spend => self.spend.apply_err(error),
             ResourceKey::Commissions => self.commissions.apply_err(error),
@@ -558,14 +595,41 @@ fn apply<T>(cell: &mut Cell<T>, result: Result<T, String>) {
     }
 }
 
+fn merge_dispatch_page(retained: Vec<MetricDispatch>, page: Vec<MetricDispatch>) -> Vec<MetricDispatch> {
+    let mut by_sequence: BTreeMap<u64, MetricDispatch> = retained.into_iter().map(|row| (row.sequence, row)).collect();
+    for row in page {
+        by_sequence.insert(row.sequence, row);
+    }
+    let mut rows: Vec<MetricDispatch> = by_sequence.into_values().collect();
+    let Ok(bound) = usize::try_from(DISPATCH_RETENTION) else {
+        return rows;
+    };
+    let excess = rows.len().saturating_sub(bound);
+    if excess > 0 {
+        rows.drain(..excess);
+    }
+    rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CommissionCapability, PromptQuery, ResourceKey, Store};
-    use crate::dto::{BloomView, DigestHex, MemberView, ViewDocument};
+    use crate::dto::{BloomView, DigestHex, MemberView, MetricDispatch, ViewDocument};
+    use aether_bloomery::METRICS_MAX_LIMIT;
+    use std::thread;
     use std::time::Duration;
 
     fn digest(byte: u8) -> DigestHex {
         DigestHex::from_bytes([byte; 32])
+    }
+
+    fn dispatch_row(sequence: u64) -> MetricDispatch {
+        MetricDispatch {
+            sequence,
+            id: format!("d{sequence}"),
+            workpiece: format!("wp-{sequence}"),
+            ..MetricDispatch::default()
+        }
     }
 
     #[test]
@@ -625,5 +689,44 @@ mod tests {
             PromptQuery { nonce: "dispatch-1".into(), cursor: Some(40) }.path(),
             "/dispatches/dispatch-1/prompt?cursor=40"
         );
+    }
+
+    #[test]
+    fn the_dispatch_page_follows_the_journal_tail() {
+        // The plausible bug: the store asks the bare route and replaces the
+        // sample, so the second page drops the first and the cursor never
+        // advances past the lowest sequences in the ledger.
+        let mut store = Store::new(Duration::from_secs(1));
+        assert_eq!(
+            store.request_path(&ResourceKey::MetricsDispatches),
+            format!("/metrics/dispatches?from_sequence=0&limit={METRICS_MAX_LIMIT}")
+        );
+        store.apply_dispatches(Ok(vec![dispatch_row(3), dispatch_row(7)]));
+        assert_eq!(
+            store.request_path(&ResourceKey::MetricsDispatches),
+            format!("/metrics/dispatches?from_sequence=7&limit={METRICS_MAX_LIMIT}")
+        );
+        store.apply_dispatches(Ok(vec![dispatch_row(8)]));
+        assert_eq!(
+            store.dispatches().value.as_ref().map(|rows| rows.iter().map(|row| row.sequence).collect::<Vec<_>>()),
+            Some(vec![3, 7, 8])
+        );
+        assert_eq!(
+            store.request_path(&ResourceKey::MetricsDispatches),
+            format!("/metrics/dispatches?from_sequence=8&limit={METRICS_MAX_LIMIT}")
+        );
+    }
+
+    #[test]
+    fn a_failed_dispatch_fetch_is_asked_again() {
+        // The plausible bug: apply_err stamps completed_at and due stays
+        // on-demand, so a console started during a coordinator restart never
+        // refetches and AGE/STAGE stay blank all session.
+        let cadence = Duration::from_millis(10);
+        let mut store = Store::new(cadence);
+        store.apply_err(&ResourceKey::MetricsDispatches, "connection refused");
+        assert!(!store.due(&ResourceKey::MetricsDispatches));
+        thread::sleep(Duration::from_millis(40));
+        assert!(store.due(&ResourceKey::MetricsDispatches));
     }
 }

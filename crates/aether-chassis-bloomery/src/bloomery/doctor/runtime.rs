@@ -94,6 +94,7 @@ pub struct DoctorReactorState {
     replica_seen: BTreeMap<u64, Instant>,
     replica_passes: BTreeMap<u64, u32>,
     surface_seen: BTreeMap<(BloomId, WorkpieceId), Instant>,
+    unresolved_head_seen: Option<(String, Instant)>,
     mailer: Arc<Mailer>,
     self_mailbox: MailboxId,
     _timer: Option<TimerHandle>,
@@ -135,6 +136,7 @@ impl NativeActor for DoctorReactorCapability {
             replica_seen: BTreeMap::new(),
             replica_passes: BTreeMap::new(),
             surface_seen: BTreeMap::new(),
+            unresolved_head_seen: None,
             mailer,
             self_mailbox,
             _timer: Some(timer),
@@ -151,6 +153,7 @@ impl NativeActor for DoctorReactorCapability {
     fn on_doctor_tick(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DoctorTick) {
         let executor = state.executor.clone();
         let lanes_running = executor.as_ref().is_some_and(|shell| shell.lane_occupancy().any_running());
+        let started_nonces = executor.as_ref().map_or_else(Vec::new, ExecutorShell::started_nonces);
         let Some(store) = state.store.as_mut() else {
             return;
         };
@@ -160,9 +163,11 @@ impl NativeActor for DoctorReactorCapability {
             correspondence: state.correspondence.as_ref(),
             worktree_base: &state.worktree_base,
             lanes_running,
+            started_nonces: &started_nonces,
             replica_seen: &mut state.replica_seen,
             replica_passes: &mut state.replica_passes,
             surface_seen: &mut state.surface_seen,
+            unresolved_head_seen: &mut state.unresolved_head_seen,
             now: Instant::now(),
         }) {
             Ok(report) => state.board.publish(report),
@@ -181,9 +186,11 @@ struct CollectRequest<'a> {
     correspondence: Option<&'a SharedCorrespondence>,
     worktree_base: &'a Path,
     lanes_running: bool,
+    started_nonces: &'a [String],
     replica_seen: &'a mut BTreeMap<u64, Instant>,
     replica_passes: &'a mut BTreeMap<u64, u32>,
     surface_seen: &'a mut BTreeMap<(BloomId, WorkpieceId), Instant>,
+    unresolved_head_seen: &'a mut Option<(String, Instant)>,
     now: Instant,
 }
 
@@ -206,6 +213,9 @@ fn collect_and_evaluate(request: &mut CollectRequest<'_>) -> rusqlite::Result<Do
     });
     let claims = claims.unwrap_or_default();
     let (actual_head, actual_head_sha) = actual_daily_head(request.source, request.correspondence);
+    let unresolved_head_age =
+        observe_unresolved_head(actual_head, actual_head_sha.as_deref(), request.unresolved_head_seen, request.now);
+    let started_refs: Vec<&str> = request.started_nonces.iter().map(String::as_str).collect();
     let pairs = request.correspondence.as_ref().map_or_else(Vec::new, |store| match store.pairs() {
         Ok(pairs) => pairs,
         Err(error) => {
@@ -235,8 +245,10 @@ fn collect_and_evaluate(request: &mut CollectRequest<'_>) -> rusqlite::Result<Do
         replica: &replica,
         surface_parks: &surface_parks,
         outstanding: &outstanding,
+        started_nonces: &started_refs,
         lanes_running: request.lanes_running,
         evidence_nonces: &evidence_refs,
+        unresolved_head_age,
     }))
 }
 
@@ -357,6 +369,28 @@ fn actual_daily_head(
         }
     });
     (digest, Some(sha))
+}
+
+/// Age a daily sha this process has seen without a correspondence, the way
+/// [`observe_replica`] ages an undelivered topic: a sha seen for the first
+/// time starts now, one seen before keeps its first sighting, and a resolved
+/// head (or a different sha) drops the sighting so a later miss starts fresh.
+fn observe_unresolved_head(
+    actual_head: Option<Digest>,
+    actual_head_sha: Option<&str>,
+    seen: &mut Option<(String, Instant)>,
+    now: Instant,
+) -> Option<Duration> {
+    let Some(sha) = actual_head_sha.filter(|_| actual_head.is_none()) else {
+        *seen = None;
+        return None;
+    };
+    let first = match seen {
+        Some((prev, first)) if prev == sha => *first,
+        _ => now,
+    };
+    *seen = Some((sha.to_owned(), first));
+    Some(now.saturating_duration_since(first))
 }
 
 fn observe_replica(

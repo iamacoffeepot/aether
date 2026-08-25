@@ -43,8 +43,8 @@ impl LocalGitData {
     /// Open `repo` as the local git-data authority.
     ///
     /// `repo` must be an absolute filesystem path (no `file://` prefix). Boot
-    /// asserts the installed git is at least 2.38 and names the version it
-    /// found when it is not.
+    /// asserts the installed git is at least [`crate::command::MIN_GIT`] and names
+    /// the version it found when it is not.
     ///
     /// # Errors
     /// The path is relative, the directory is not a git repository, git is
@@ -211,22 +211,7 @@ impl GitDataApi for LocalGitData {
     }
 
     fn create_commit(&self, message: &str, tree: &str, parents: &[String]) -> Result<GitCommit, GitDataError> {
-        let mut args = vec!["commit-tree".to_owned(), tree.to_owned()];
-        for parent in parents {
-            args.push("-p".to_owned());
-            args.push(parent.clone());
-        }
-        args.push("-m".to_owned());
-        args.push(message.to_owned());
-        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-        let output = command::run_env(&self.repo, &borrowed, &command::BLOOMERY_IDENTITY)?;
-        if !output.status.success() {
-            return Err(GitDataError::Command(format!(
-                "git commit-tree {tree}: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
-        let sha = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let sha = command::commit_tree(&self.repo, message, tree, parents)?;
         Ok(GitCommit { sha, tree: tree.to_owned(), message: message.to_owned() })
     }
 
@@ -247,7 +232,9 @@ impl GitDataApi for LocalGitData {
         // driver named there never runs and a determined re-export fold
         // conflicts anyway. The base side is that source: the attributes that
         // decide a merge are the ones already on the branch being merged into,
-        // never the ones the incoming candidate ships with itself.
+        // never the ones the incoming candidate ships with itself. `MIN_GIT` is
+        // the floor that guarantees `attr.tree` is honoured; an older git
+        // accepts the `-c` key and ignores it.
         let attributes = format!("attr.tree={base_sha}");
         let output =
             command::run(&self.repo, &["-c", &attributes, "merge-tree", "--write-tree", &base_sha, &head_sha])?;

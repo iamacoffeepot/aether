@@ -55,7 +55,7 @@ pub use construct::{CONSTRUCT_IMPLEMENT_COMMAND, dispatch_model};
 pub use doctor::{
     Ancestry, CheckResult, DETERMINISTIC_RETRY_BOUND, DoctorReport, Invariant, KitReport, KitTool, LiveState,
     OpenDispatch, REPLICA_AGE_BOUND, REQUIRED_KIT, ReplicaObservation, ResolvedTool, SURFACE_PARK_AGE_BOUND,
-    ToolStatus, evaluate,
+    ToolStatus, UNRESOLVED_HEAD_AGE_BOUND, evaluate,
 };
 #[cfg(feature = "github")]
 pub use doctor::{DoctorBoard, DoctorReactorCapability, DoctorReactorSetup, DoctorReactorState, DoctorTick};
@@ -90,7 +90,7 @@ pub use reactor::{
     IntegrateReactorCapability, IntegrateReactorSetup, IntegrateReactorState, IntegrateTick, JanitorPolicy,
     JanitorReactorCapability, JanitorReactorSetup, JanitorReactorState, JanitorTick, LandReactorCapability,
     LandReactorSetup, LandReactorState, LandTick, MirrorReactorCapability, MirrorReactorSetup, MirrorReactorState,
-    SweepReport, SweepRequest, sweep,
+    SweepReport, SweepRequest, WorkingRefPruner, sweep,
 };
 #[cfg(feature = "github")]
 pub use repair::{CandidateSource, PrepareError, prepare_candidate};

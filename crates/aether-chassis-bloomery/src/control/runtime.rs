@@ -664,9 +664,13 @@ impl NativeActor for ControlCore {
     /// from under a land the fold has not reached yet — and past
     /// [`on_replay_result`](Self::on_replay_result) the snapshot is always fully
     /// folded, so every later observation is decided against a coherent snapshot
-    /// by construction. What keeps a *continuous* observer safe is already in the
-    /// reducer: the advance is held while a bloom is in flight, so an observation
-    /// can never move mainline out from under an in-flight land.
+    /// by construction. The in-flight hold is not what keeps a *continuous*
+    /// observer safe: a land marks its bloom `Landed` in the same apply that
+    /// advances mainline, so a reply that left while the bloom was in flight can
+    /// arrive with nothing held. The reply carries the base it was classified
+    /// against, and [`on_observe_mainline_result`](Self::on_observe_mainline_result)
+    /// discards it when that base is no longer the live mainline; the next poll
+    /// observes against the base that now holds.
     ///
     /// The observer lives here rather than in the source cap because the source
     /// is stateless between requests and holds no snapshot: which observations
@@ -705,8 +709,8 @@ impl NativeActor for ControlCore {
         ctx: &mut NativeCtx<'_, Manual>,
         mail: ObserveMainlineResult,
     ) {
-        let (head, fast_forward) = match mail {
-            ObserveMainlineResult::Ok { head, fast_forward } => (head, fast_forward),
+        let (head, fast_forward, relative_to) = match mail {
+            ObserveMainlineResult::Ok { head, fast_forward, relative_to } => (head, fast_forward, relative_to),
             ObserveMainlineResult::Err { error } => {
                 tracing::warn!(
                     target: "aether_chassis_bloomery::control",
@@ -727,6 +731,21 @@ impl NativeActor for ControlCore {
                 return;
             }
         };
+        // A classification applies only against the base it was made against.
+        // A land marks its bloom landed in the same apply that advances
+        // mainline, so a reply that left while the bloom was in flight can
+        // arrive with nothing held and a stale `fast_forward`. Discard it;
+        // the next poll observes the base that now holds.
+        let classified_against = from_bytes(&relative_to).unwrap_or(Snapshot::GENESIS_MAINLINE);
+        if classified_against != state.snapshot.mainline {
+            tracing::debug!(
+                target: "aether_chassis_bloomery::control",
+                classified_against = %classified_against.to_hex(),
+                mainline = %state.snapshot.mainline.to_hex(),
+                "discarding mainline observation classified against a base that has moved; the next poll will observe against the base that now holds"
+            );
+            return;
+        }
         // Log hygiene: skip an admit whose (head, mainline) pair is already
         // in `seen`. That pair is the key, so a later recovery against a
         // different mainline is a new admit (#4938). Skipping only when both
@@ -744,7 +763,7 @@ impl NativeActor for ControlCore {
         }
 
         let event = Event {
-            idempotency_key: observe_mainline_key(&head, &state.snapshot.mainline),
+            idempotency_key: observe_mainline_key(&head, &classified_against),
             fact: if fast_forward {
                 Fact::ObserveMainline { head }
             } else {
@@ -867,16 +886,38 @@ impl NativeActor for ControlCore {
     }
 
     /// `GET /metrics/*` — bounded reads off the folded metrics ledger.
+    ///
+    /// Refused until the boot fold has finished, for the reason
+    /// [`on_query`](Self::on_query) states.
     #[handler::manual]
     fn on_metrics_query(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, mail: MetricsQuery) {
         let inbound = ctx.take_inbound();
+        if !state.replayed {
+            inbound.reply(&MetricsQueryResult::Err {
+                error: "the boot journal replay has not finished; the projection is not yet the one the journal \
+                        describes"
+                    .to_owned(),
+            });
+            return;
+        }
         inbound.reply(&metrics_response(state, mail));
     }
 
     /// `GET /spend` — the window `measure` already computes, previously unserved.
+    ///
+    /// Refused until the boot fold has finished, for the reason
+    /// [`on_query`](Self::on_query) states.
     #[handler::manual]
     fn on_spend_query(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, _mail: SpendQuery) {
         let inbound = ctx.take_inbound();
+        if !state.replayed {
+            inbound.reply(&SpendQueryResult::Err {
+                error: "the boot journal replay has not finished; the projection is not yet the one the journal \
+                        describes"
+                    .to_owned(),
+            });
+            return;
+        }
         inbound.reply(&spend_response(&state.spend));
     }
 }
@@ -1977,7 +2018,7 @@ fn observe_mail(mainline: &Digest) -> ObserveMainline {
 }
 
 /// The admit key for one observation: the pair of observed head and the
-/// mainline it was classified against (#4938). A head already seen against a
+/// classification's own base (#4938). A head already seen against a
 /// *different* mainline is a new key, so a regression can recover by
 /// re-observing the true head instead of reducing to `Duplicate` forever.
 fn observe_mainline_key(head: &Digest, mainline: &Digest) -> IdempotencyKey {

@@ -77,6 +77,25 @@ fn git(local: &LocalGitData, args: &[&str], stdin: &str) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
+/// A commit minted under an ambient identity and the host clock — a stand-in
+/// for the operator commit a bloom's base is, or the lane capture a fold merges
+/// in, neither of which the bloomery mints itself.
+fn dated_commit(local: &LocalGitData, tree: &str, message: &str) -> String {
+    let identity = ["-c", "user.name=fixture", "-c", "user.email=fixture@example.test"];
+    git(local, &[&identity[..], &["commit-tree", tree, "-m", message]].concat(), "")
+}
+
+/// `sha`'s committer timestamp in whole seconds since the epoch.
+fn commit_stamp(local: &LocalGitData, sha: &str) -> String {
+    git(local, &["show", "--no-patch", "--format=%ct", sha, "--"], "")
+}
+
+/// `sha`'s raw `author` header line.
+fn author_line(local: &LocalGitData, sha: &str) -> String {
+    let body = git(local, &["cat-file", "commit", sha], "");
+    body.lines().find(|line| line.starts_with("author ")).expect("a commit carries an author line").to_owned()
+}
+
 fn ref_sha(local: &LocalGitData, name: &str) -> String {
     local.get_ref(name).expect("get_ref").expect("ref is present").sha
 }
@@ -202,6 +221,70 @@ fn create_commit_is_deterministic_and_get_commit_reads_it_back() {
     let read = local.get_commit(&first.sha).expect("cat-file");
     assert_eq!(read.tree, EMPTY_TREE);
     assert_eq!(read.message, "same");
+}
+
+#[test]
+fn a_minted_commit_is_authored_by_the_bloomery_at_the_moment_it_inherits() {
+    // Tripwire: the author line is what a reader sees on the landed day — the
+    // roll rewrites the committer side when it linearizes the day onto main and
+    // keeps the author verbatim. An epoch-zero date under an `.invalid` domain
+    // renders there as an unattributed 1970 commit, so both the address and the
+    // moment are pinned. The moment is the parent's, not the clock's, because
+    // the sha has to stay a pure function of the inputs.
+    let (_root, local) = open_temp();
+    let tree = git(&local, &["mktree"], "");
+    let parent = dated_commit(&local, &tree, "base");
+    let stamp = commit_stamp(&local, &parent);
+
+    let commit = local.create_commit("bloomery integrate", &tree, from_ref(&parent)).expect("integrate");
+
+    assert_eq!(
+        author_line(&local, &commit.sha),
+        format!("author bloomery <bloomery@iamateapot.dev> {stamp} +0000"),
+        "the bloomery authors its own commits, at the moment it inherits"
+    );
+    assert_ne!(stamp, "0", "the fixture parent carries a real moment to inherit");
+}
+
+#[test]
+fn re_minting_over_the_same_parent_returns_the_same_sha_and_the_same_date() {
+    // Tripwire: `GitSource::integrate` recovers from a fault between its commit
+    // and its ref update only because the retry re-creates a byte-identical
+    // commit and git hands back the same sha. Two mints a moment apart tie
+    // under a wall-clock date too, so the load-bearing half of this is the
+    // date itself: an inherited one is in the past, a clock-read one is now.
+    let (_root, local) = open_temp();
+    let tree = git(&local, &["mktree"], "");
+    let parent = dated_commit(&local, &tree, "base");
+    let stamp = commit_stamp(&local, &parent);
+
+    let first = local.create_commit("bloomery integrate", &tree, from_ref(&parent)).expect("first");
+    let second = local.create_commit("bloomery integrate", &tree, from_ref(&parent)).expect("second");
+
+    assert_eq!(first.sha, second.sha, "one input mints one commit");
+    assert!(author_line(&local, &first.sha).ends_with(&format!("{stamp} +0000")), "the date is the parent's");
+}
+
+#[test]
+fn a_two_parent_fold_inherits_the_newest_parent_whichever_side_it_is_on() {
+    // Tripwire: a fold's merge carries the branch it advances and the candidate
+    // capture it merges in, and the capture is when the work was actually
+    // produced. Taking the newest is what keeps the dates along a branch from
+    // going backwards; taking a fixed side would stamp the merge with whichever
+    // parent happened to be listed first.
+    let (_root, local) = open_temp();
+    let tree = git(&local, &["mktree"], "");
+    let dated = dated_commit(&local, &tree, "candidate");
+    let stamp = commit_stamp(&local, &dated);
+    let epoch = local.create_commit("integration", EMPTY_TREE, &[]).expect("epoch parent").sha;
+
+    for parents in [[epoch.clone(), dated.clone()], [dated, epoch]] {
+        let commit = local.create_commit("bloomery fold heads/candidate", &tree, &parents).expect("fold");
+        assert!(
+            author_line(&local, &commit.sha).ends_with(&format!("{stamp} +0000")),
+            "the newest parent supplies the moment, listed {parents:?}"
+        );
+    }
 }
 
 #[test]
@@ -496,7 +579,7 @@ fn a_change_that_is_not_an_insertion_still_conflicts() {
 
     match fold(&local, base, ours, theirs) {
         MergeResult::Conflict { paths, .. } => {
-            assert!(paths.iter().any(|path| path.contains("lib.rs")), "{paths:?}");
+            assert_eq!(paths, ["crates/example/src/lib.rs"]);
         }
         other => panic!("a rewritten line must not be resolved, got {other:?}"),
     }
@@ -514,8 +597,33 @@ fn a_conflicting_block_that_is_not_a_reexport_list_still_conflicts() {
 
     match fold(&local, base, ours, theirs) {
         MergeResult::Conflict { paths, .. } => {
-            assert!(paths.iter().any(|path| path.contains("lib.rs")), "{paths:?}");
+            assert_eq!(paths, ["crates/example/src/lib.rs"]);
         }
         other => panic!("a non-re-export block must not be resolved, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_conflicted_merge_names_only_the_files_that_conflicted() {
+    // Pre-fix: merge-tree's informational section (`Auto-merging`,
+    // `CONFLICT (content)`) and the cleanly merged file survived into
+    // `Conflict.paths`. The repair work order then serializes siblings that
+    // share only a clean auto-merge.
+    let (_root, local) = open_temp();
+    let tree = |a: &str, common: &str| {
+        let a_blob = git(&local, &["hash-object", "-w", "--stdin"], a);
+        let common_blob = git(&local, &["hash-object", "-w", "--stdin"], common);
+        git(&local, &["mktree"], &format!("100644 blob {a_blob}\ta.txt\n100644 blob {common_blob}\tcommon.txt\n"))
+    };
+
+    let base = local.create_commit("base", &tree("base-a", "base-common"), &[]).expect("base").sha;
+    let ours = local.create_commit("ours", &tree("ours-a", "new-common"), from_ref(&base)).expect("ours").sha;
+    let theirs = local.create_commit("theirs", &tree("theirs-a", "new-common"), from_ref(&base)).expect("theirs").sha;
+    local.create_ref("heads/base", &ours).expect("base");
+    local.create_ref("heads/side", &theirs).expect("side");
+
+    match local.merge("heads/base", "heads/side", "fold").expect("conflict is Ok") {
+        MergeResult::Conflict { paths, .. } => assert_eq!(paths, ["a.txt"]),
+        other => panic!("expected Conflict, got {other:?}"),
     }
 }

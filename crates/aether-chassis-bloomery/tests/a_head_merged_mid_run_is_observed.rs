@@ -13,12 +13,20 @@
 //! poll-driven observation that displaced it would fail before this scenario's
 //! own subject is reached.
 
+use std::thread;
+use std::time::{Duration, Instant};
+
 use aether_harness_bloomery::{FixtureHarness, digest};
 
 /// The commit a person merges straight to mainline. Recognizable, and no bloom
 /// of this coordinator's ever names it — the point being that the coordinator
 /// learns of a head it did not produce.
 const MERGED: u8 = 0x7E;
+
+/// Longer than the harness step budget: a full-package verify run can spend
+/// the 20s step waiting on a contended scheduler, which reports this
+/// observer as stuck while it is still making progress.
+const OBSERVE_BUDGET: Duration = Duration::from_mins(1);
 
 #[test]
 fn a_head_merged_mid_run_reaches_the_snapshot_without_a_restart() {
@@ -32,5 +40,14 @@ fn a_head_merged_mid_run_reaches_the_snapshot_without_a_restart() {
     // store, or re-runs boot: the same process that read `booted` reads the
     // merge.
     harness.move_mainline(merged);
-    harness.await_mainline(merged);
+    let deadline = Instant::now() + OBSERVE_BUDGET;
+    loop {
+        harness.observe_tick();
+        let mainline = harness.view().mainline;
+        if mainline == merged {
+            return;
+        }
+        assert!(Instant::now() < deadline, "mainline stayed {mainline:?} rather than reaching {merged:?}");
+        thread::sleep(Duration::from_millis(20));
+    }
 }

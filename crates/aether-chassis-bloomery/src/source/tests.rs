@@ -77,9 +77,10 @@ fn observe_mainline_follows_a_rewrite_and_refuses_a_stale_ancestor() {
     fake.seed_fast_forward(&rewritten, None);
     fake.seed_ref_at("heads/main", &rewritten);
     match state.observe_mainline_head(&relative_to_base) {
-        ObserveMainlineResult::Ok { head, fast_forward } => {
+        ObserveMainlineResult::Ok { head, fast_forward, relative_to } => {
             assert!(fast_forward, "a rewritten live ref is followable, not Diverged");
             assert_eq!(from_bytes::<Digest>(&head).unwrap(), rewritten);
+            assert_eq!(relative_to, relative_to_base, "the reply names the base the classification used");
         }
         ObserveMainlineResult::Err { error } => panic!("expected Ok, got Err({error})"),
     }

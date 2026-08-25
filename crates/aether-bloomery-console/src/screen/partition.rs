@@ -24,8 +24,9 @@ pub fn history_blooms(view: &ViewDocument) -> impl Iterator<Item = &BloomView> {
 }
 
 /// One member's standing on the operator ladder. Precedence matches
-/// `scripts/bloomery-operator.py`'s `member_status_state`: wedge, surface
-/// request, hold, resolution, in-flight attempt, blocked, idle.
+/// `scripts/bloomery-operator.py`'s `member_status_state` with the
+/// construct-declined park named rather than swallowed as running: wedge,
+/// surface request, park, hold, resolution, in-flight attempt, blocked, idle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemberState {
     /// An operator took this member out of the bloom (#5327). Ranked first
@@ -37,6 +38,12 @@ pub enum MemberState {
     /// rung rather than folded into `Held`: a hold is an ADR-0151 question an
     /// answer settles, and this is a boundary only an amendment moves.
     AwaitingSurface,
+    /// Stopped by a construct-declined park (#5292 / #5332). Ranked below
+    /// `AwaitingSurface`: both wait on a person, and an awaiting-surface
+    /// member has already named the remedy it needs while a bare park has
+    /// not. What redeems it is a grant of attempts, a passing attempt, or
+    /// an integration.
+    Parked,
     /// Stopped so an earlier-canonical sibling could take a file it held
     /// (ADR-0204). Its own rung rather than `Blocked`: nothing was declared,
     /// the member would have run, and what redeems it is a sibling's
@@ -63,6 +70,9 @@ impl MemberState {
         if member.awaiting_surface.is_some() {
             return Self::AwaitingSurface;
         }
+        if member.park.is_some() {
+            return Self::Parked;
+        }
         if member.evicted_by.is_some() {
             return Self::Evicted;
         }
@@ -87,6 +97,7 @@ impl MemberState {
             Self::Withdrawn => "withdrawn",
             Self::Wedged => "WEDGED",
             Self::AwaitingSurface => "surface",
+            Self::Parked => "parked",
             Self::Evicted => "evicted",
             Self::Held => "held",
             Self::Integrated => "integrated",
@@ -104,7 +115,7 @@ impl MemberState {
         // An evicted member walks: its lane is stopped, but the bloom owes it
         // a resume the moment the sibling that displaced it integrates. Off
         // the live board it would go quiet exactly while it is waiting.
-        matches!(self, Self::Running | Self::Wedged | Self::AwaitingSurface | Self::Evicted | Self::Held)
+        matches!(self, Self::Running | Self::Wedged | Self::AwaitingSurface | Self::Parked | Self::Evicted | Self::Held)
     }
 }
 
@@ -116,7 +127,7 @@ fn attempt_in_flight(member: &MemberView) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{MemberState, is_history_status, is_live_status};
-    use crate::dto::{BloomStatus, LeaseEvictionView, MemberView, Present};
+    use crate::dto::{BloomStatus, CompositionCursorView, LeaseEvictionView, MemberView, Present, StageId};
 
     #[test]
     fn board_and_history_partition_every_status() {
@@ -154,6 +165,7 @@ mod tests {
             MemberState::Withdrawn,
             MemberState::Wedged,
             MemberState::AwaitingSurface,
+            MemberState::Parked,
             MemberState::Held,
             MemberState::Integrated,
             MemberState::Running,
@@ -165,6 +177,7 @@ mod tests {
                 MemberState::Running
                 | MemberState::Wedged
                 | MemberState::AwaitingSurface
+                | MemberState::Parked
                 | MemberState::Evicted
                 | MemberState::Held => {
                     assert!(state.walks(), "{state:?} must walk");
@@ -210,5 +223,21 @@ mod tests {
         assert_eq!(MemberState::of(&evicted), MemberState::Evicted);
         assert_eq!(MemberState::of(&evicted).label(), "evicted");
         assert!(MemberState::of(&evicted).walks());
+    }
+
+    #[test]
+    fn a_parked_member_is_not_running() {
+        // The plausible bug: a construct-declined park leaves the stage cursor
+        // in place with a non-zero attempt count, so attempt_in_flight is true
+        // and the board paints the stopped member as a burning lane.
+        let parked = MemberView {
+            park: Some(Present {}),
+            cursor: Some(CompositionCursorView { stage: Some(StageId::Construct), attempts: 1, candidate: None }),
+            ..MemberView::default()
+        };
+
+        assert_eq!(MemberState::of(&parked), MemberState::Parked);
+        assert_eq!(MemberState::of(&parked).label(), "parked");
+        assert!(MemberState::of(&parked).walks());
     }
 }

@@ -240,10 +240,44 @@ pub enum ObserveMainlineResult {
         /// core admits [`Fact::ObserveMainlineDiverged`](crate::Fact::ObserveMainlineDiverged)
         /// rather than advancing.
         fast_forward: bool,
+        /// The request's [`relative_to`](ObserveMainline::relative_to) — the
+        /// digest this classification was made against. What makes the
+        /// verdict checkable by its reader: a later fold applies only while
+        /// this still names live mainline.
+        #[serde(with = "aether_data::bytes")]
+        relative_to: Vec<u8>,
     },
     /// The observation failed.
     Err {
         /// A human-readable failure reason.
         error: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use aether_data::wire::{from_bytes, to_vec};
+
+    use super::ObserveMainlineResult;
+
+    #[test]
+    fn observe_mainline_result_ok_pins_the_classification_base_on_the_wire() {
+        // Tripwire: `Ok` carries `head`, then `fast_forward`, then the
+        // request's `relative_to` as a trailing bytes field. A dropped or
+        // reordered base means a stale verdict cannot be checked against
+        // live mainline, which is the window this kind exists to close.
+        let value = ObserveMainlineResult::Ok { head: vec![1, 2, 3], fast_forward: true, relative_to: vec![4, 5] };
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&0u32.to_le_bytes());
+        expected.extend_from_slice(&3u32.to_le_bytes());
+        expected.extend_from_slice(&[1, 2, 3]);
+        expected.push(1);
+        expected.extend_from_slice(&2u32.to_le_bytes());
+        expected.extend_from_slice(&[4, 5]);
+        let bytes = to_vec(&value).unwrap();
+        assert_eq!(bytes, expected);
+        assert_eq!(from_bytes::<ObserveMainlineResult>(&bytes).unwrap(), value);
+    }
 }

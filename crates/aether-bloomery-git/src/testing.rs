@@ -1043,28 +1043,10 @@ fn reject_bad_name(name: &str) -> Result<(), GitDataError> {
 /// when the fake is backed by one, the synthetic hash otherwise. The one place
 /// the two modes part company, so `create_commit` and `merge` cannot drift.
 fn mint_commit(repo: Option<&Path>, message: &str, tree: &str, parents: &[String]) -> Result<String, GitDataError> {
-    repo.map_or_else(|| Ok(commit_sha(message, tree, parents)), |repo| real_commit(repo, message, tree, parents))
-}
-
-/// Mint `message` over `tree` with `parents` as a real commit object in `repo`,
-/// returning its git sha. Identity is [`command::BLOOMERY_IDENTITY`] so a retry
-/// through this fake hashes the same as [`crate::LocalGitData`].
-fn real_commit(repo: &Path, message: &str, tree: &str, parents: &[String]) -> Result<String, GitDataError> {
-    let mut args = vec!["commit-tree".to_owned(), tree.to_owned()];
-    for parent in parents {
-        args.push("-p".to_owned());
-        args.push(parent.clone());
-    }
-    args.extend(["-m".to_owned(), message.to_owned()]);
-    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-    let output = command::run_env(repo, &borrowed, &command::BLOOMERY_IDENTITY)?;
-    if !output.status.success() {
-        return Err(GitDataError::Command(format!(
-            "git commit-tree {tree}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    repo.map_or_else(
+        || Ok(commit_sha(message, tree, parents)),
+        |repo| command::commit_tree(repo, message, tree, parents),
+    )
 }
 
 impl FakeGithub {

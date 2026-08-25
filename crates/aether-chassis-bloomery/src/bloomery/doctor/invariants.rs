@@ -32,6 +32,21 @@ pub const SURFACE_PARK_AGE_BOUND: Duration = Duration::from_mins(5);
 /// replica topic before a deterministic retry is reported as a violation.
 pub const DETERMINISTIC_RETRY_BOUND: u32 = 20;
 
+/// How long a daily sha may lack correspondence before the three head
+/// checks treat it as a divergence rather than a restart racing the mirror.
+///
+/// The boot pass runs before the mirror has reconciled, so an unresolved
+/// sha looks like a missing correspondence, an observed-head mismatch, and
+/// one uncheckable landed bloom per land. Seconds is the line between those
+/// two readings: the mirror is a poller on the same cadence, and a sha that
+/// has not resolved past this window is a real fault — the coordinator
+/// cannot say what its own mainline is. [`Invariant::ViewMainlineCorresponds`],
+/// [`Invariant::ObservedHeadEqualsDailyHead`], and
+/// [`Invariant::LandedResolutionIsAncestor`] share this bound; they report
+/// nothing for the unresolved-head case while the sighting is inside it, and
+/// report as they do today past it.
+pub const UNRESOLVED_HEAD_AGE_BOUND: Duration = Duration::from_secs(30);
+
 /// One named state property the doctor evaluates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Invariant {
@@ -59,7 +74,7 @@ pub enum Invariant {
     SurfaceRequestUnanswered,
     /// A deterministic failure retried past [`DETERMINISTIC_RETRY_BOUND`].
     DeterministicRetryBound,
-    /// An evidence directory exists for every open dispatch.
+    /// An evidence directory exists for every open dispatch this host started.
     OpenDispatchHasEvidence,
 }
 
@@ -130,7 +145,7 @@ impl Invariant {
                 "a deterministic failure retried beyond a bounded count is reported as a violation rather than continuing at warn"
             }
             Self::OpenDispatchHasEvidence => {
-                "an evidence directory exists for every dispatch the journal considers open"
+                "an evidence directory exists for every open dispatch this host has started a lane for"
             }
         }
     }
@@ -265,8 +280,8 @@ pub struct LiveState<'a> {
     /// record evidence — unknown-era stays fail-closed.
     pub land_sequences: &'a [(BloomId, u64)],
     /// Journaled `Fact::ObserveMainline` and `Fact::Land` heads, with the
-    /// sequence they were recorded at. The current-era cut is the earliest
-    /// of these whose head is an ancestor of the live daily.
+    /// sequence they were recorded at, in sequence order. The current-era
+    /// anchor is the newest of these whose head the live daily still carries.
     pub journaled_heads: &'a [(Digest, u64)],
     /// Whether `to` is `from` or a descendant. `None` when the source cannot
     /// answer ancestry (unconfigured, or a digest has no correspondence).
@@ -277,10 +292,17 @@ pub struct LiveState<'a> {
     pub surface_parks: &'a [SurfaceParkObservation],
     /// Outstanding journal dispatches.
     pub outstanding: &'a [OpenDispatch<'a>],
+    /// Nonces this host has started a local lane for. Narrower than
+    /// [`Self::outstanding`]: a queued dispatch and an Actions-routed one never
+    /// create a local evidence directory, so they are outside this set.
+    pub started_nonces: &'a [&'a str],
     /// Whether any lane process is in flight on this host.
     pub lanes_running: bool,
     /// Nonces whose `{nonce}-evidence` directory exists on disk.
     pub evidence_nonces: &'a [&'a str],
+    /// How long this process has seen the live daily sha without a
+    /// correspondence. `None` when the head is resolved or there is no sha.
+    pub unresolved_head_age: Option<Duration>,
 }
 
 /// Evaluate every seed invariant against `live`.
@@ -364,6 +386,7 @@ fn view_mainline_corresponds(live: &LiveState<'_>) -> Vec<String> {
             hex_of(&actual),
             sha.map(|sha| format!(" (sha {sha})")).unwrap_or_default()
         )],
+        (None, Some(_)) if unresolved_head_within_grace(live) => Vec::new(),
         (None, Some(sha)) => {
             vec![format!(
                 "/view mainline {} has no correspondence for actual head sha {sha}",
@@ -376,6 +399,9 @@ fn view_mainline_corresponds(live: &LiveState<'_>) -> Vec<String> {
 
 fn landed_resolution_is_ancestor(live: &LiveState<'_>) -> Vec<String> {
     let Some(daily) = live.actual_head else {
+        if unresolved_head_within_grace(live) {
+            return Vec::new();
+        }
         return live
             .landed_heads
             .iter()
@@ -401,9 +427,10 @@ fn landed_resolution_is_ancestor(live: &LiveState<'_>) -> Vec<String> {
             })
             .collect();
     };
+    let anchor = newest_anchored_sequence(live, daily, ancestry);
     let mut divergences = Vec::new();
     for (bloom, head) in live.landed_heads {
-        if !landed_in_current_era(live, bloom, daily, ancestry) {
+        if !landed_in_current_era(live, bloom, daily, ancestry, anchor) {
             continue;
         }
         match ancestry(head, &daily) {
@@ -427,41 +454,57 @@ fn landed_resolution_is_ancestor(live: &LiveState<'_>) -> Vec<String> {
 
 /// Whether this Landed bloom belongs to the current daily ref's history.
 ///
-/// A land compare-and-swaps against the bloom's sealed base, so a base that
-/// is not an ancestor of the current daily head sits on a previous day's
-/// chain. The day roll rewrites history across the cut: those resolutions are
-/// structurally never ancestors of the new head, and their ancestry was
-/// notarized by that day's sync-back. [`Invariant::ViewMainlineCorresponds`] and
+/// Two exclusions, both read off records the journal already keeps. A land
+/// compare-and-swaps against the bloom's sealed base, so a base the current
+/// daily head does not carry sat on a chain the ref has left and nothing
+/// sealed on it can be judged here. And a Land journaled before
+/// [`newest_anchored_sequence`] is history the ref has already superseded: the
+/// day roll advances mainline by syncing the previous day's tree as one
+/// commit, so those resolutions are structurally never ancestors of the new
+/// head, and their ancestry was notarized by that day's sync-back.
+///
+/// Base ancestry only ever excludes; it can never admit. The roll carries each
+/// day's base onto mainline along with everything else that day built, so a
+/// previous day's base stays an ancestor of every later daily head and would
+/// read as current-era forever — which is the whole population the check used
+/// to alert on after a roll. [`Invariant::ViewMainlineCorresponds`] and
 /// [`Invariant::ObservedHeadEqualsDailyHead`] compare live pointers, not historical lands
 /// — a post-roll mismatch there is a missed observation, not rewritten
 /// history, and stays in scope. Unknown era (missing record, ancestry that
-/// does not resolve) stays in the check so a current-era defect cannot hide,
-/// unless the Land fact itself was journaled before the current daily's cut —
-/// the earliest journaled head that is an ancestor of the live daily. A pre-cut
-/// Land is pre-roll by record even when its objects no longer resolve; no such
-/// record evidence stays fail-closed.
-fn landed_in_current_era(live: &LiveState<'_>, bloom: &BloomId, daily: Digest, ancestry: &Ancestry<'_>) -> bool {
-    live.snapshot
-        .blooms
-        .get(bloom)
-        .and_then(|record| ancestry(&record.spec.base(), &daily))
-        .unwrap_or_else(|| !land_is_pre_cut(live, bloom, daily, ancestry))
+/// does not resolve, no anchor yet) stays in the check so a current-era defect
+/// cannot hide behind objects that no longer answer.
+fn landed_in_current_era(
+    live: &LiveState<'_>,
+    bloom: &BloomId,
+    daily: Digest,
+    ancestry: &Ancestry<'_>,
+    anchor: Option<u64>,
+) -> bool {
+    let base_off_chain =
+        live.snapshot.blooms.get(bloom).and_then(|record| ancestry(&record.spec.base(), &daily)) == Some(false);
+    !base_off_chain && !land_precedes_anchor(live, bloom, anchor)
 }
 
-/// A Land journaled before the current daily's cut is pre-roll by record.
-/// No Land sequence, or no current-era journaled head, is not evidence.
-fn land_is_pre_cut(live: &LiveState<'_>, bloom: &BloomId, daily: Digest, ancestry: &Ancestry<'_>) -> bool {
-    let Some(cut) = current_era_cut(live, daily, ancestry) else {
+/// A Land journaled before the anchor is a resolution the live ref has already
+/// superseded. No anchor, or no Land sequence, is not evidence.
+fn land_precedes_anchor(live: &LiveState<'_>, bloom: &BloomId, anchor: Option<u64>) -> bool {
+    let Some(anchor) = anchor else {
         return false;
     };
-    live.land_sequences.iter().find(|(id, _)| id == bloom).is_some_and(|(_, sequence)| *sequence < cut)
+    live.land_sequences.iter().find(|(id, _)| id == bloom).is_some_and(|(_, sequence)| *sequence < anchor)
 }
 
-fn current_era_cut(live: &LiveState<'_>, daily: Digest, ancestry: &Ancestry<'_>) -> Option<u64> {
+/// The journal sequence of the newest head the live daily ref still carries —
+/// the point past which the coordinator's record and the ref part company.
+///
+/// [`LiveState::journaled_heads`] is in sequence order, so the newest such head
+/// is the last one to answer the ancestry question with yes, and the walk stops
+/// there instead of asking the source about every head it ever recorded.
+fn newest_anchored_sequence(live: &LiveState<'_>, daily: Digest, ancestry: &Ancestry<'_>) -> Option<u64> {
     live.journaled_heads
         .iter()
-        .filter_map(|(head, sequence)| (ancestry(head, &daily) == Some(true)).then_some(*sequence))
-        .min()
+        .rev()
+        .find_map(|(head, sequence)| (ancestry(head, &daily) == Some(true)).then_some(*sequence))
 }
 
 fn observed_head_equals_daily_head(live: &LiveState<'_>) -> Vec<String> {
@@ -473,11 +516,23 @@ fn observed_head_equals_daily_head(live: &LiveState<'_>) -> Vec<String> {
             hex_of(&actual),
             sha.map(|sha| format!(" (sha {sha})")).unwrap_or_default()
         )],
+        (None, Some(_)) if unresolved_head_within_grace(live) => Vec::new(),
         (None, Some(sha)) => {
             vec![format!("observed head {} != actual daily sha {sha} (unresolved)", hex_of(&live.snapshot.observed))]
         }
         (None, None) => Vec::new(),
     }
+}
+
+/// Whether the unresolved-head case is still inside [`UNRESOLVED_HEAD_AGE_BOUND`].
+///
+/// A daily sha with no correspondence is not-yet-checkable until it has
+/// stayed that way long enough to be a fault. The three head checks share
+/// this reading so a restart that races the mirror is one policy, not three.
+fn unresolved_head_within_grace(live: &LiveState<'_>) -> bool {
+    live.actual_head.is_none()
+        && live.actual_head_sha.is_some()
+        && live.unresolved_head_age.is_none_or(|age| age <= UNRESOLVED_HEAD_AGE_BOUND)
 }
 
 fn correspondence_is_bijection(live: &LiveState<'_>) -> Vec<String> {
@@ -615,9 +670,10 @@ fn deterministic_retry_bound(live: &LiveState<'_>) -> Vec<String> {
 
 fn open_dispatch_has_evidence(live: &LiveState<'_>) -> Vec<String> {
     let present: BTreeSet<&str> = live.evidence_nonces.iter().copied().collect();
+    let started: BTreeSet<&str> = live.started_nonces.iter().copied().collect();
     live.outstanding
         .iter()
-        .filter(|open| !present.contains(open.nonce))
+        .filter(|open| started.contains(open.nonce) && !present.contains(open.nonce))
         .map(|open| format!("open dispatch {} (member {}) has no evidence directory", open.nonce, open.workpiece))
         .collect()
 }
@@ -685,7 +741,7 @@ mod tests {
 
     use super::{
         DETERMINISTIC_RETRY_BOUND, Invariant, LiveState, OpenDispatch, ReplicaObservation, SURFACE_PARK_AGE_BOUND,
-        SurfaceParkObservation, evaluate,
+        SurfaceParkObservation, UNRESOLVED_HEAD_AGE_BOUND, evaluate,
     };
 
     fn live<'a>(snapshot: &'a Snapshot, claims: &'a [ClaimRefState]) -> LiveState<'a> {
@@ -702,8 +758,10 @@ mod tests {
             replica: &[],
             surface_parks: &[],
             outstanding: &[],
+            started_nonces: &[],
             lanes_running: false,
             evidence_nonces: &[],
+            unresolved_head_age: None,
         }
     }
 
@@ -826,8 +884,10 @@ mod tests {
     fn a_missing_evidence_dir_for_an_open_dispatch_is_named() {
         let snapshot = Snapshot::default();
         let outstanding = [OpenDispatch { nonce: "nonce-1", workpiece: "issue-1" }];
+        let started = ["nonce-1"];
         let mut state = live(&snapshot, &[]);
         state.outstanding = &outstanding;
+        state.started_nonces = &started;
 
         let report = evaluate(&state);
         let check =
@@ -836,6 +896,85 @@ mod tests {
         let named = check.divergences.join(" ");
         assert!(named.contains("nonce-1"), "the nonce is named: {named}");
         assert!(named.contains("issue-1"), "the member is named: {named}");
+    }
+
+    #[test]
+    fn a_queued_dispatch_is_not_a_missing_evidence_directory() {
+        // The plausible bug: a queued or Actions-routed dispatch has no
+        // evidence directory yet (or ever), and the doctor names it as a lost
+        // directory. Only a lane this host started can have lost one.
+        let snapshot = Snapshot::default();
+        let outstanding = [
+            OpenDispatch { nonce: "queued", workpiece: "issue-queued" },
+            OpenDispatch { nonce: "actions", workpiece: "issue-actions" },
+            OpenDispatch { nonce: "started", workpiece: "issue-started" },
+        ];
+        let started = ["started"];
+        let mut state = live(&snapshot, &[]);
+        state.outstanding = &outstanding;
+        state.started_nonces = &started;
+
+        let report = evaluate(&state);
+        let check =
+            report.named(Invariant::OpenDispatchHasEvidence.name()).expect("the seed list includes evidence dirs");
+        assert!(!check.passed, "a started lane with no directory is a violation: {check:?}");
+        assert_eq!(
+            check.divergences.len(),
+            1,
+            "queued and Actions-routed dispatches are outside the question: {:?}",
+            check.divergences
+        );
+        let named = check.divergences.join(" ");
+        assert!(named.contains("started"), "the started nonce is named: {named}");
+        assert!(named.contains("issue-started"), "the started member is named: {named}");
+        assert!(!named.contains("queued"), "a queued dispatch is not named: {named}");
+        assert!(!named.contains("actions"), "an Actions-routed dispatch is not named: {named}");
+    }
+
+    #[test]
+    fn an_unresolved_daily_head_is_not_yet_a_divergence() {
+        // The plausible bug: a boot pass before the mirror has recorded
+        // correspondence for the live daily sha reports three head checks as
+        // diverged, plus one uncheckable landed bloom per land — a restart
+        // storm that trains operators to ignore the doctor.
+        let spec = draft(0, vec![membership("issue-landed", 1)]).seal();
+        let mut snapshot = Snapshot::default();
+        splice_bloom(&mut snapshot, &spec, BloomStatus::Landed);
+        let landed = [(spec.id(), digest(1))];
+        let sha = "0123abcd";
+        let mut state = live(&snapshot, &[]);
+        state.actual_head_sha = Some(sha);
+        state.landed_heads = &landed;
+        state.unresolved_head_age = Some(Duration::from_secs(1));
+
+        let report = evaluate(&state);
+        for name in [
+            Invariant::ViewMainlineCorresponds.name(),
+            Invariant::ObservedHeadEqualsDailyHead.name(),
+            Invariant::LandedResolutionIsAncestor.name(),
+        ] {
+            let check = report.named(name).expect("the seed list includes the head check");
+            assert!(
+                check.passed,
+                "an unresolved head inside the grace window is not yet a divergence ({name}): {check:?}"
+            );
+        }
+
+        state.unresolved_head_age = Some(UNRESOLVED_HEAD_AGE_BOUND + Duration::from_secs(1));
+        let report = evaluate(&state);
+        for name in [
+            Invariant::ViewMainlineCorresponds.name(),
+            Invariant::ObservedHeadEqualsDailyHead.name(),
+            Invariant::LandedResolutionIsAncestor.name(),
+        ] {
+            let check = report.named(name).expect("the seed list includes the head check");
+            assert!(!check.passed, "an unresolved head past the window is a fault ({name}): {check:?}");
+            let named = check.divergences.join(" ");
+            assert!(
+                named.contains(sha) || named.contains("unresolved"),
+                "the unresolved head is named ({name}): {named}"
+            );
+        }
     }
 
     #[test]
@@ -947,6 +1086,46 @@ mod tests {
         assert!(named.contains(&hex_of(&missing.id().0)), "no land-record evidence stays in scope: {named}");
         assert!(named.contains(&hex_of(&post.id().0)), "a post-cut record stays in scope: {named}");
         assert!(!named.contains(&hex_of(&pre.id().0)), "a pre-cut land is not named: {named}");
+    }
+
+    #[test]
+    fn a_previous_day_land_whose_base_survived_the_roll_is_out_of_jurisdiction() {
+        // The live shape the 2026-08-23 boot alerted on. The day roll advances
+        // main by syncing the previous day's tree as one commit, so the base
+        // those blooms sealed against stays on main and stays an ancestor of
+        // the new daily head while their resolutions structurally never can be.
+        // Base ancestry therefore separates no eras at all — the journal's own
+        // record of how far the live ref still agrees with it does.
+        let yesterday = draft(1, vec![membership("issue-5332", 1)]).seal();
+        let lost = draft(9, vec![membership("issue-today", 1)]).seal();
+        let mut snapshot = Snapshot::default();
+        splice_bloom(&mut snapshot, &yesterday, BloomStatus::Landed);
+        splice_bloom(&mut snapshot, &lost, BloomStatus::Landed);
+        let landed = [(yesterday.id(), digest(2)), (lost.id(), digest(3))];
+        let land_sequences = [(yesterday.id(), 20), (lost.id(), 80)];
+        let journaled_heads = [(digest(1), 5), (digest(2), 20), (digest(9), 60), (digest(3), 80)];
+        let ancestry = rolled_day_chain();
+        let mut state = live(&snapshot, &[]);
+        state.actual_head = Some(digest(10));
+        state.landed_heads = &landed;
+        state.land_sequences = &land_sequences;
+        state.journaled_heads = &journaled_heads;
+        state.ancestry = Some(&ancestry);
+
+        let report = evaluate(&state);
+        let check =
+            report.named(Invariant::LandedResolutionIsAncestor.name()).expect("the seed list includes landed ancestry");
+        assert!(!check.passed, "a land the ref should still carry and does not is a violation: {check:?}");
+        let named = check.divergences.join(" ");
+        assert!(named.contains(&hex_of(&lost.id().0)), "a land past the newest anchored head is named: {named}");
+        assert!(!named.contains(&hex_of(&yesterday.id().0)), "a pre-roll land is not named: {named}");
+    }
+
+    /// Today's daily ref is `9 → 10`, cut from a main the roll advanced by
+    /// syncing yesterday's tree onto it. Yesterday's base `1` rode that sync and
+    /// is still an ancestor of today's head; yesterday's resolution `2` is not.
+    fn rolled_day_chain() -> impl Fn(&aether_bloomery::Digest, &aether_bloomery::Digest) -> Option<bool> {
+        |from, to| Some(*from == *to || (*to == digest(10) && (*from == digest(1) || *from == digest(9))))
     }
 
     /// Today's daily ref is `9 → 10`. Yesterday's `1 → 2` is a parallel history

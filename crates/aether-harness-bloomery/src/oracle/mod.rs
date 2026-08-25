@@ -34,6 +34,15 @@ impl fmt::Display for Violation {
     }
 }
 
+/// Whether this observation is of a coordinator that has stopped moving.
+///
+/// [`liveness::classify`] answers that question. A non-empty outstanding set is
+/// a lane still in flight, not a standstill.
+#[must_use]
+pub fn is_answerable(progress: &liveness::Progress) -> bool {
+    progress.outstanding.is_empty()
+}
+
 /// Compose the two existing readers plus bounded termination.
 pub struct Oracle;
 

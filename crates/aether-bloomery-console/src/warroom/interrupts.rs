@@ -1,10 +1,11 @@
 //! Owner-authority stops: nothing moves until a person acts.
-//!
+//! Live blooms only — a terminal bloom's stops have no remedy left.
 //! Narrower than the alert band. A landing still inside budget, a
 //! non-terminal executor fault, and a host fault stay out of this queue.
 
 use super::Focus;
 use crate::dto::{BloomView, SpendQuiesce, StageId, ViewDocument};
+use crate::screen::live_blooms;
 
 /// One row in the interrupt queue.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,7 +65,7 @@ pub fn interrupts(view: &ViewDocument) -> Vec<Interrupt> {
         });
     }
     push_surface_interrupts(&mut entries, view);
-    for bloom in &view.blooms {
+    for bloom in live_blooms(view) {
         push_bloom_interrupts(&mut entries, bloom);
     }
     entries
@@ -82,7 +83,7 @@ pub fn interrupts(view: &ViewDocument) -> Vec<Interrupt> {
 /// sitting among the per-member rows a lap can still clear. The focus stays on
 /// the member, so selecting the entry still lands where the request was made.
 fn push_surface_interrupts(entries: &mut Vec<Interrupt>, view: &ViewDocument) {
-    for bloom in &view.blooms {
+    for bloom in live_blooms(view) {
         for member in &bloom.members {
             // A withdrawn member interrupts nobody (#5327), here for the same
             // reason the per-member walk skips it: an operator already decided
@@ -196,6 +197,14 @@ fn push_bloom_interrupts(entries: &mut Vec<Interrupt>, bloom: &BloomView) {
                 stage: None,
             });
         }
+        if member.park.is_some() {
+            entries.push(Interrupt {
+                kind: InterruptKind::Park,
+                detail: member_detail(bloom, &member.workpiece),
+                focus: Focus::member(bloom.id, member.workpiece.clone()),
+                stage: None,
+            });
+        }
     }
 }
 
@@ -211,9 +220,10 @@ fn member_detail(bloom: &BloomView, workpiece: &str) -> String {
 mod tests {
     use super::{InterruptKind, interrupts};
     use crate::dto::{
-        AwaitingSurfaceView, BloomView, DigestHex, ExecutorFaultView, HostFaultView, LandingBlock, MemberView,
-        ReviewParkView, ViewDocument,
+        AwaitingSurfaceView, BloomStatus, BloomView, DigestHex, ExecutorFaultView, HostFaultView, LandingBlock,
+        MemberView, Present, ReviewParkView, ViewDocument,
     };
+    use crate::warroom::Focus;
 
     fn digest(byte: u8) -> DigestHex {
         DigestHex::from_bytes([byte; 32])
@@ -270,5 +280,49 @@ mod tests {
             "a surface park is not a question anyone can answer: {entries:?}",
         );
         assert_eq!(entries[0].kind, InterruptKind::Surface, "it sorts ahead of the per-bloom walk: {entries:?}");
+    }
+
+    #[test]
+    fn a_superseded_blooms_wedge_leaves_the_band() {
+        // The plausible bug: /view never drops a sealed bloom, so a predecessor
+        // that wedged before supersession keeps a loud wedge row nothing can
+        // clear — superseding is the documented remedy and it is what creates
+        // the permanent row.
+        let view = ViewDocument {
+            blooms: vec![BloomView {
+                id: digest(1),
+                status: Some(BloomStatus::Superseded),
+                members: vec![MemberView {
+                    workpiece: "issue-1".to_owned(),
+                    wedge: Some(Present {}),
+                    ..MemberView::default()
+                }],
+                ..BloomView::default()
+            }],
+            ..ViewDocument::default()
+        };
+        assert!(interrupts(&view).is_empty());
+    }
+
+    #[test]
+    fn a_parked_member_asks_for_the_operator() {
+        // The plausible bug: MemberView.park is decoded and then unread, so a
+        // construct-declined park never raises a needs-you row.
+        let view = ViewDocument {
+            blooms: vec![BloomView {
+                id: digest(1),
+                members: vec![MemberView {
+                    workpiece: "issue-1".to_owned(),
+                    park: Some(Present {}),
+                    ..MemberView::default()
+                }],
+                ..BloomView::default()
+            }],
+            ..ViewDocument::default()
+        };
+        let entries = interrupts(&view);
+        assert_eq!(entries.len(), 1, "the park is one entry: {entries:?}");
+        assert_eq!(entries[0].kind, InterruptKind::Park);
+        assert_eq!(entries[0].focus, Focus::member(digest(1), "issue-1"));
     }
 }

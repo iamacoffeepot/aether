@@ -16,7 +16,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::widgets::{Block, Clear};
 
-use crate::fetch::{FetchLanes, FetchReply, ResourceBody};
+use crate::fetch::{FetchLanes, FetchReply, FetchRequest, ResourceBody};
 use crate::http::Endpoint;
 use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
@@ -305,7 +305,8 @@ impl Shell {
             return;
         };
         self.store.mark_inflight(key);
-        if let Err(error) = fetch.request(key.clone()) {
+        let request = FetchRequest { key: key.clone(), path: self.store.request_path(key) };
+        if let Err(error) = fetch.request(request) {
             self.store.apply_err(key, error);
         }
     }
@@ -656,7 +657,7 @@ mod tests {
         thread::scope(|scope| {
             let mut shell = Shell::new(
                 scope,
-                Endpoint { host: addr.ip().to_string(), port: addr.port() },
+                Endpoint { host: addr.ip().to_string(), port: addr.port(), token: None },
                 Duration::from_secs(1),
                 false,
             );

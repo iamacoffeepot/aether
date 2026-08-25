@@ -501,6 +501,17 @@ pub trait StoreBackend: Send {
     /// means the fork did not happen, and recording it would give two members
     /// one thread — each later lap of either resuming the other's history.
     fn construct_session_holder(&mut self, bloom: &[u8], session_id: &str) -> rusqlite::Result<Option<String>>;
+    /// A member of `bloom` other than `excluding` already bound to `slug`, when
+    /// one is (#5425).
+    ///
+    /// The slug names a directory, and a directory is worked in by one member
+    /// at a time. A dependent inherits its predecessor's slug to continue that
+    /// conversation in the tree it was born in; a *second* dependent of the
+    /// same predecessor inheriting it too would put two live lanes in one
+    /// working tree, each resetting the other's work away. `excluding` is the
+    /// predecessor whose slug is being considered, so what this reports is
+    /// always a sibling that got there first.
+    fn session_slug_holder(&mut self, bloom: &[u8], slug: &str, excluding: &str) -> rusqlite::Result<Option<String>>;
     /// Record the construct session at an explicit unix-seconds deposit time —
     /// the clock the warmth gate compares.
     fn record_construct_session_at(
@@ -1693,6 +1704,15 @@ impl StoreBackend for SqliteStore {
                  WHERE bloom = ?1 AND harness_session_id = ?2 AND harness_session_id <> '' LIMIT 1",
         )?;
         let mut rows = stmt.query_map(rusqlite::params![bloom, session_id], |row| row.get::<_, String>(0))?;
+        rows.next().transpose()
+    }
+
+    fn session_slug_holder(&mut self, bloom: &[u8], slug: &str, excluding: &str) -> rusqlite::Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT workpiece FROM construct_session \
+             WHERE bloom = ?1 AND slug = ?2 AND workpiece <> ?3 LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![bloom, slug, excluding], |row| row.get::<_, String>(0))?;
         rows.next().transpose()
     }
 

@@ -1,7 +1,7 @@
 //! Numbers the five-region dashboard paints from the store.
 
 use crate::dto::{BloomStatus, DigestHex, MetricDay, SpendQuiesce, ViewDocument};
-use crate::screen::partition::live_blooms;
+use crate::screen::partition::{MemberState, live_blooms};
 use crate::store::Store;
 
 use super::bucket::format_duration;
@@ -65,6 +65,10 @@ fn today_line(store: &Store, days: &[MetricDay]) -> String {
     )
 }
 
+/// Footer counters: landed today, mean cycle, blooms in flight, and occupancy.
+/// `lanes {busy}/{total}` counts members whose `MemberState` is `Running` (a
+/// lane is out) over members whose state `walks()` (moving or owed a decision —
+/// the same set the live board shows).
 fn footer_line(store: &Store, days: &[MetricDay], active: Option<u64>, view: Option<&ViewDocument>) -> String {
     let dated = dated(days);
     let landed_today = dated.last().map_or_else(
@@ -86,16 +90,10 @@ fn occupancy(view: Option<&ViewDocument>) -> (usize, usize) {
     let Some(view) = view else {
         return (0, 0);
     };
-    let members: Vec<_> = live_blooms(view).flat_map(|bloom| bloom.members.iter()).collect();
-    let busy = members
-        .iter()
-        .filter(|member| {
-            member.wedge.is_some()
-                || member.pending_decision.is_some()
-                || member.blocked_by.as_deref().is_some_and(|name| !name.is_empty())
-        })
-        .count();
-    (busy, members.len())
+    let states: Vec<_> = live_blooms(view).flat_map(|bloom| bloom.members.iter()).map(MemberState::of).collect();
+    let busy = states.iter().filter(|state| **state == MemberState::Running).count();
+    let total = states.iter().filter(|state| state.walks()).count();
+    (busy, total)
 }
 
 fn mean_cycle(store: &Store) -> Option<u64> {
@@ -134,10 +132,24 @@ fn spend_gauge(spent: u64, ceiling: Option<u64>, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{compose, format_duration};
-    use crate::dto::MetricDay;
+    use super::{compose, format_duration, occupancy};
+    use crate::dto::{
+        BloomStatus, BloomView, CompositionCursorView, MemberView, MetricDay, PendingDecisionView, Present, StageId,
+        ViewDocument,
+    };
     use crate::store::Store;
     use std::time::Duration;
+
+    fn member(workpiece: &str) -> MemberView {
+        MemberView { workpiece: workpiece.to_owned(), ..MemberView::default() }
+    }
+
+    fn live_view(members: Vec<MemberView>) -> ViewDocument {
+        ViewDocument {
+            blooms: vec![BloomView { status: Some(BloomStatus::Sealed), members, ..BloomView::default() }],
+            ..ViewDocument::default()
+        }
+    }
 
     #[test]
     fn the_footer_reads_the_newest_dated_day_not_the_undated_bucket() {
@@ -178,5 +190,33 @@ mod tests {
         assert_eq!(missing.landed_spark, "—");
         assert_eq!(missing.wedge_spark, "—");
         assert!(!missing.spend_spark.chars().all(|ch| ch == '▁'));
+    }
+
+    #[test]
+    fn occupancy_counts_the_members_with_a_lane_out() {
+        // The plausible bug: occupancy treats wedge, hold, and blocked as busy,
+        // so a stalled fleet paints `lanes 3/3` (saturated) and three members
+        // mid-construct paint `lanes 0/3` (idle). Running is a lane out; the
+        // denominator is the live-board set (`walks()`), which blocked is not.
+        let stalled = live_view(vec![
+            MemberView { wedge: Some(Present {}), ..member("wp-wedge") },
+            MemberView { pending_decision: Some(PendingDecisionView::default()), ..member("wp-held") },
+            MemberView { blocked_by: Some("wp-wedge".to_owned()), ..member("wp-block") },
+        ]);
+        assert_eq!(occupancy(Some(&stalled)), (0, 2));
+
+        let running = live_view(
+            (0..3)
+                .map(|index| MemberView {
+                    cursor: Some(CompositionCursorView {
+                        stage: Some(StageId::Construct),
+                        attempts: 1,
+                        candidate: None,
+                    }),
+                    ..member(&format!("wp-{index}"))
+                })
+                .collect(),
+        );
+        assert_eq!(occupancy(Some(&running)), (3, 3));
     }
 }

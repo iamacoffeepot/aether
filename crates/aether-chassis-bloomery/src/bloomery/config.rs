@@ -483,6 +483,20 @@ impl Default for CoordinatorConfig {
 /// cadence and an exhausted window, which is the failure it exists to prevent.
 const GITHUB_REQUESTS_PER_TICK: u32 = 6;
 
+/// How many not-yet-pruned terminal blooms one janitor tick may call
+/// `prune_working_refs` for.
+///
+/// On the GitHub-authoritative path that call is a paginated REST
+/// `list_matching_refs` with no conditional-request handling, so a bloom
+/// pruned days ago still costs a full-price request every tick unless something
+/// remembers it. The janitor's process-local memo makes the steady state free;
+/// this cap makes a cold start against a long journal affordable — the backlog
+/// walks across ticks instead of spending the hourly allowance at once.
+/// One prune is one of the `GITHUB_REQUESTS_PER_TICK` the divisor already
+/// budgets for the janitor; more than that crowds out land, integrate, and
+/// inspects on the shared client.
+pub const JANITOR_REF_PRUNES_PER_TICK: usize = 1;
+
 impl CoordinatorConfig {
     /// The resolved mainline ref, normalized into the forms the source port
     /// addresses it by (ADR-0186).

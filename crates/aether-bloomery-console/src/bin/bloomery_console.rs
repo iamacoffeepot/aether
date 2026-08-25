@@ -38,6 +38,11 @@ struct Args {
     #[arg(long, env = "AETHER_HTTP_PORT", default_value_t = DEFAULT_HTTP_PORT)]
     port: u16,
 
+    /// Bearer token for the coordinator control routes. Defaults to
+    /// `AETHER_HTTP_CONTROL_TOKEN`. Without one the commission routes answer 401.
+    #[arg(long, env = "AETHER_HTTP_CONTROL_TOKEN", hide_env_values = true)]
+    token: Option<String>,
+
     /// How often to poll `GET /view`, in milliseconds.
     #[arg(long, default_value_t = DEFAULT_POLL_MILLIS)]
     poll_millis: u64,
@@ -67,7 +72,7 @@ fn main() -> Result<()> {
         Depth::from_env(args.colorterm.as_deref(), args.term.as_deref())
     };
     palette::install(depth);
-    let endpoint = Endpoint { host: args.host, port: args.port };
+    let endpoint = Endpoint { host: args.host, port: args.port, token: args.token };
     let poll = Duration::from_millis(args.poll_millis);
     run(endpoint, poll, args.ascii_mark)
 }

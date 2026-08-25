@@ -12,10 +12,12 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 use aether_bloomery::{BloomId, BloomStatus, Digest, Snapshot, is_active_unlanded};
+use aether_bloomery_github::SourceError;
 
 use crate::bloomery::LaneOccupancy;
 use crate::bloomery::SourceShell;
 use crate::bloomery::TransformRunner;
+use crate::bloomery::config::JANITOR_REF_PRUNES_PER_TICK;
 use crate::store::{StoreBackend, membership};
 
 /// The suffix a dispatch's evidence directory carries under the scratch root —
@@ -69,6 +71,22 @@ pub struct SweepReport {
     pub target_dirs: usize,
 }
 
+/// The prune seam one janitor tick talks to. [`SourceShell`] is the production
+/// implementor; tests stub it to count and fail calls.
+pub trait WorkingRefPruner {
+    /// Delete `bloom`'s candidate, integration, and checkpoint refs.
+    ///
+    /// # Errors
+    /// A transport or backend fault other than an already-absent ref.
+    fn prune_working_refs(&self, bloom: &BloomId) -> Result<usize, SourceError>;
+}
+
+impl WorkingRefPruner for SourceShell {
+    fn prune_working_refs(&self, bloom: &BloomId) -> Result<usize, SourceError> {
+        Self::prune_working_refs(self, bloom)
+    }
+}
+
 /// The seams one sweep pass reads and writes.
 pub struct SweepRequest<'a> {
     /// The journal the snapshot is rebuilt from, and the outstanding-order /
@@ -77,7 +95,7 @@ pub struct SweepRequest<'a> {
     /// The spawn seam that lists registered worktrees and tears them down.
     pub runner: &'a dyn TransformRunner,
     /// The source that deletes working refs. `None` skips ref prune.
-    pub source: Option<&'a SourceShell>,
+    pub source: Option<&'a dyn WorkingRefPruner>,
     /// Scratch-worktree base: nonce-keyed checkouts and `*-evidence` dirs.
     pub worktree_base: &'a Path,
     /// Per-slot cargo target directory root.
@@ -99,6 +117,11 @@ pub struct SweepRequest<'a> {
     /// [`SystemTime::now`]; tests pin it so a suite is not a function of when
     /// it ran.
     pub now: SystemTime,
+    /// Blooms this process has already pruned working refs for. A successful
+    /// prune is recorded so a later tick does not pay for it again; a fault is
+    /// left out so the next tick retries, matching the warn the prune already
+    /// logs.
+    pub pruned: &'a mut HashSet<BloomId>,
 }
 
 /// Rebuild the snapshot from the journal, then reclaim terminal worktrees,
@@ -131,7 +154,7 @@ pub fn sweep(request: &mut SweepRequest<'_>) -> rusqlite::Result<SweepReport> {
     let worktrees = reclaim_worktrees(request.runner, request.worktree_base, &live, &owners, &snapshot)
         + reclaim_session_trees(request.runner, request.worktree_base, request.store, &snapshot, &outstanding)?;
     let evidence_dirs = reclaim_evidence(request, &live, &owners, &snapshot);
-    let refs = request.source.map_or(0, |source| prune_terminal_refs(source, &snapshot));
+    let refs = request.source.map_or(0, |source| prune_terminal_refs(source, &snapshot, request.pruned));
     let target_dirs = sweep_targets(request.target_base, request.policy.lane_target_budget_bytes, request.lanes);
     Ok(SweepReport { worktrees, evidence_dirs, refs, target_dirs })
 }
@@ -374,25 +397,39 @@ fn reclaim_evidence(
 }
 
 fn evidence_is_protected(live: &HashSet<&str>, snapshot: &Snapshot, nonce: &str, owner: Option<&BloomId>) -> bool {
-    // Intake has not consumed this directory. A live bloom still needs it;
-    // a terminal bloom's abandoned leftover is eligible once the window
-    // passes (a kill/crash never reached intake).
+    // An outstanding order is the narrowest durable evidence that a lane may
+    // still be standing in this directory. The journal cannot speak for a
+    // dispatch whose owner is not a sealed bloom — the pre-bloom scoping run
+    // (ADR-0208) is exactly that shape — and whether that order is abandoned is
+    // not this sweep's question: the executor reconciles the outstanding set
+    // against its own runs at boot, re-adopting the ones it recognizes and
+    // reclaiming the rest, and faults an order whose lane is gone. The
+    // directory becomes eligible when the order stops being outstanding.
     if live.contains(nonce) {
-        return owner.is_some_and(|bloom| bloom_is_live(snapshot, bloom));
+        return true;
     }
     // Consumed, but the bloom is still working — keep for forensics and
     // the calibration window until that bloom itself is terminal.
     owner.is_some_and(|bloom| bloom_is_live(snapshot, bloom))
 }
 
-fn prune_terminal_refs(source: &SourceShell, snapshot: &Snapshot) -> usize {
+fn prune_terminal_refs(source: &dyn WorkingRefPruner, snapshot: &Snapshot, already: &mut HashSet<BloomId>) -> usize {
     let mut pruned = 0;
+    let mut attempted = 0;
     for (bloom, record) in &snapshot.blooms {
-        if !matches!(record.status, BloomStatus::Landed | BloomStatus::Superseded) {
+        if !refs_are_reclaimable(snapshot, bloom, record.status) {
             continue;
         }
+        if already.contains(bloom) {
+            continue;
+        }
+        if attempted >= JANITOR_REF_PRUNES_PER_TICK {
+            break;
+        }
+        attempted += 1;
         match source.prune_working_refs(bloom) {
             Ok(count) => {
+                already.insert(*bloom);
                 if count > 0 {
                     tracing::info!(
                         target: "aether_chassis_bloomery::janitor",
@@ -411,6 +448,72 @@ fn prune_terminal_refs(source: &SourceShell, snapshot: &Snapshot) -> usize {
         }
     }
     pruned
+}
+
+/// Whether a terminal bloom's working refs are this pass's to delete.
+///
+/// A landed bloom's are: mainline carries its tree and no fold reaches back
+/// into its namespace again. A *superseded* bloom's are not, not yet. The
+/// invariant is that a superseded bloom's working refs stay live state until
+/// every bloom in its successor chain that could still adopt from it is itself
+/// terminal, because adoption happens at fold time and not at supersession: a
+/// successor holding an inherited claim has no candidate ref of its own for
+/// that member, so the fold's `adopt_candidate` copies the predecessor's ref
+/// into the successor's namespace as the fold dispatches, walking the
+/// grandparents for a member carried through two supersessions. Deleted
+/// beforehand, the ref exists nowhere to adopt from, the fold refuses at
+/// `candidate_ref_present`, and no later tick can put it back — the successor
+/// can never land, and recovery means hand-restoring refs from unreachable
+/// objects.
+///
+/// The window looks empty because an ordinary supersede folds within a second
+/// of the seal. An amend (ADR-0207) that widens a member's surface makes that
+/// member re-run before the fold may dispatch, which holds the chain open for
+/// however long the re-run takes — minutes — and the ten-second janitor tick
+/// wins that race every time. Bloom 85bb7225 lost its predecessor's sixteen
+/// refs to a tick twenty-five minutes ahead of the fold that needed them.
+fn refs_are_reclaimable(snapshot: &Snapshot, bloom: &BloomId, status: BloomStatus) -> bool {
+    match status {
+        BloomStatus::Landed => true,
+        BloomStatus::Superseded => successor_chain_is_terminal(snapshot, bloom),
+        _ => false,
+    }
+}
+
+/// Whether every bloom that could still adopt from `bloom` has finished: the
+/// end of its supersession chain is landed or withdrawn rather than
+/// active-and-unlanded.
+///
+/// Walks the chain rather than one link of it, for the reason the adoption
+/// walks it — a member carried through two supersessions is parked under the
+/// grandparent, so the live bloom reaching for it may be several links down.
+/// Iterative and visited-guarded, so a journal that somehow recorded a cycle
+/// costs this pass rather than the coordinator's stack.
+///
+/// An end this snapshot cannot resolve reads as live: a `Superseded` record
+/// naming no successor, or naming one the snapshot does not hold, is a lineage
+/// the pass cannot prove nobody is standing on. Keeping refs a closed chain no
+/// longer needs costs ref storage the next pass reclaims once the chain
+/// closes; deleting refs a fold still needs costs that bloom its landing.
+fn successor_chain_is_terminal(snapshot: &Snapshot, bloom: &BloomId) -> bool {
+    let mut seen = HashSet::new();
+    let mut next = Some(*bloom);
+    while let Some(current) = next {
+        if !seen.insert(current) {
+            return false;
+        }
+        let Some(record) = snapshot.blooms.get(&current) else {
+            return false;
+        };
+        if is_active_unlanded(record.status) {
+            return false;
+        }
+        if record.status != BloomStatus::Superseded {
+            return true;
+        }
+        next = record.superseded_by;
+    }
+    false
 }
 
 /// One slot target directory as the eviction ranks it.

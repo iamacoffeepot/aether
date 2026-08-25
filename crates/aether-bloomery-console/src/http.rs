@@ -17,6 +17,12 @@ use serde::de::DeserializeOwned;
 pub struct Endpoint {
     pub host: String,
     pub port: u16,
+    /// Bearer token for the coordinator's control routes, when one is
+    /// configured. `None` — and an empty string, which is what an unset
+    /// `AETHER_HTTP_CONTROL_TOKEN` expands to — sends no `Authorization`
+    /// header at all, which is what every route outside `/commissions`
+    /// expects and what a predating coordinator answers.
+    pub token: Option<String>,
 }
 
 impl Endpoint {
@@ -49,6 +55,12 @@ fn decode_json<T: DeserializeOwned>(path: &str, status: u16, bytes: &[u8]) -> Re
         let detail = serde_json::from_slice::<ErrorBody>(bytes)
             .ok()
             .map_or_else(|| String::from_utf8_lossy(bytes).into_owned(), |body| body.error);
+        if status == 401 {
+            bail!(
+                "GET {path} failed (401): {detail}; this route needs the coordinator control token \
+                 — pass --token or set AETHER_HTTP_CONTROL_TOKEN"
+            );
+        }
         bail!("GET {path} failed ({status}): {detail}");
     }
     serde_json::from_slice(bytes)
@@ -60,8 +72,22 @@ struct ErrorBody {
     error: String,
 }
 
+/// The request head the console puts on the wire.
+///
+/// The commission routes are bearer-gated; every other route ignores the
+/// header, so sending it whenever a token is configured costs nothing and
+/// keeps the caller from having to know which routes need it.
+fn build_request(endpoint: &Endpoint, method: &str, path: &str) -> String {
+    let authorization = endpoint
+        .token
+        .as_deref()
+        .filter(|token| !token.is_empty())
+        .map_or_else(String::new, |token| format!("Authorization: Bearer {token}\r\n"));
+    format!("{method} {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n{authorization}\r\n", endpoint.host)
+}
+
 fn exchange(endpoint: &Endpoint, method: &str, path: &str, timeout: Duration) -> Result<(u16, Vec<u8>)> {
-    let request = format!("{method} {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", endpoint.host);
+    let request = build_request(endpoint, method, path);
     let addr = (endpoint.host.as_str(), endpoint.port)
         .to_socket_addrs()
         .with_context(|| format!("resolve coordinator at {}", endpoint.label()))?
@@ -97,7 +123,47 @@ fn parse_response(response: &[u8]) -> Result<(u16, Vec<u8>)> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_response;
+    use super::{Endpoint, build_request, decode_json, parse_response};
+
+    fn endpoint(token: Option<&str>) -> Endpoint {
+        Endpoint { host: "127.0.0.1".to_owned(), port: 8910, token: token.map(ToOwned::to_owned) }
+    }
+
+    #[test]
+    fn a_configured_token_rides_on_every_request() {
+        // The plausible bug: the console sends no Authorization header, so
+        // every bearer-gated commission route answers 401, the absence probe
+        // never latches, and the backlog pane paints an error for the life of
+        // the session while re-issuing the request at view cadence.
+        let request = build_request(&endpoint(Some("s3cret")), "GET", "/commissions");
+        assert!(request.contains("\r\nAuthorization: Bearer s3cret\r\n"), "{request}");
+        assert!(request.ends_with("\r\n\r\n"), "the header block is unterminated: {request}");
+    }
+
+    #[test]
+    fn an_absent_or_empty_token_sends_no_authorization_header() {
+        // The plausible bug: an unconfigured token still emits the header, so
+        // a coordinator predating the control gate sees `Bearer ` on an open
+        // route. An unset AETHER_HTTP_CONTROL_TOKEN expands to the empty
+        // string, so both spellings of "no token" must stay off the wire.
+        for token in [None, Some("")] {
+            let request = build_request(&endpoint(token), "GET", "/view");
+            assert!(!request.contains("Authorization"), "{token:?} put a header on the wire: {request}");
+            assert!(request.ends_with("\r\n\r\n"), "the header block is unterminated: {request}");
+        }
+    }
+
+    #[test]
+    fn a_401_names_the_remedy_and_other_failures_do_not() {
+        // The plausible bug: the gated routes fail with a bare
+        // "unauthenticated" that tells the operator nothing about the flag
+        // that would fix it.
+        let refused = decode_json::<serde_json::Value>("/commissions", 401, br#"{"error":"unauthenticated"}"#)
+            .expect_err("401 is a failure");
+        assert!(refused.to_string().contains("--token"), "{refused}");
+        let broken = decode_json::<serde_json::Value>("/view", 500, br#"{"error":"boom"}"#).expect_err("500 fails");
+        assert!(!broken.to_string().contains("--token"), "{broken}");
+    }
 
     #[test]
     fn parse_response_splits_status_and_body() {

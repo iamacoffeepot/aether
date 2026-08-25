@@ -112,7 +112,7 @@ impl SourceCapabilityState {
             Err(error) => return ObserveMainlineResult::Err { error },
         };
         match to_vec(&head) {
-            Ok(head) => ObserveMainlineResult::Ok { head, fast_forward },
+            Ok(head) => ObserveMainlineResult::Ok { head, fast_forward, relative_to: relative_to.to_vec() },
             Err(error) => ObserveMainlineResult::Err { error: error.to_string() },
         }
     }
