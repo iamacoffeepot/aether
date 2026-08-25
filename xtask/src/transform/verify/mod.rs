@@ -8,7 +8,7 @@ mod triage;
 mod workflow;
 
 use std::any::Any;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
@@ -463,6 +463,12 @@ fn tree_member(id: &str) -> Option<VerifyInvocation> {
 /// languages with nothing tying them together, and a drift here reads a
 /// requested scan as an operational fault — a `VerifyFailure::Preflight` on a
 /// candidate that did exactly what it was asked to do.
+/// Past this many candidate failures in one member, the failure shape itself
+/// is the diagnosis — host contention, not a candidate that broke this many
+/// suites at once — and the triage answers with one whole-member re-run
+/// instead of a serial replay per casualty (#5479).
+const STORM_TRIAGE_THRESHOLD: usize = 8;
+
 const SUPPRESSION_REQUESTED_EXIT: i32 = 4;
 
 /// The member the symbol pass rides (#5185). jscpd's own member, because the
@@ -1451,10 +1457,15 @@ fn run_member_discriminated(
         // own (FIX-4b): replayed against the same input, then run at the work
         // order's base. Only a test red *only* on the candidate is a finding.
         let triaged_tests = classified.candidate_tests().len();
-        let triaged = triage::triage(&classified, diff_base, |test, at| {
-            let captured = runner.replay(invocation, test, at)?;
-            Ok(replay_verdict(id, invocation, test, at, &captured))
-        })?;
+        // A storm-shaped run — many tests failing together — is its own
+        // diagnosis: that count comes from host-level contention, not from a
+        // candidate that broke this many suites at once, and replaying every
+        // casualty serially prices the answer at one cargo invocation per test
+        // (#5479: forty-five serial minutes on the fleet host). One
+        // whole-member re-run on the settled host answers all of them at once;
+        // only the tests that fail *again* earn the per-test replay, which
+        // then also asks the base as usual.
+        let triaged = triage_shaped(id, invocation, scope, closure, diff_base, runner, &classified)?;
 
         let kept = classified.retaining(&triaged.findings);
         let outcome = if kept.has_candidate_failures() {
@@ -1536,6 +1547,62 @@ fn run_member_discriminated(
 /// is `Unreached`. `Unreached` never excuses: a triage step that did not happen
 /// is not evidence, and reading it as one would pass a candidate on the
 /// strength of a run that never judged it.
+/// Triage `classified`'s candidate failures by their shape.
+///
+/// A storm-shaped set — more than [`STORM_TRIAGE_THRESHOLD`] failures in one
+/// member — is its own diagnosis: that count comes from host-level contention,
+/// not from a candidate that broke that many suites at once, and replaying
+/// every casualty serially prices the answer at one cargo invocation per test
+/// (#5479: forty-five serial minutes on the fleet host). One whole-member
+/// re-run on the settled host answers all of them at once; only the tests
+/// that fail *again* earn the per-test replay, which then also asks the base
+/// as usual. Below the threshold, every failure takes the per-test path
+/// directly. Replays print a numbered heartbeat either way, so a tail is
+/// never silent.
+fn triage_shaped(
+    id: &str,
+    invocation: &VerifyInvocation,
+    scope: &Scope,
+    closure: Option<&Closure>,
+    diff_base: Option<&str>,
+    runner: &mut dyn MemberRunner,
+    classified: &nextest::ClassifiedRun,
+) -> Result<triage::Triage> {
+    let candidates = classified.candidate_tests();
+    if candidates.len() <= STORM_TRIAGE_THRESHOLD {
+        let mut replays = 0usize;
+        return triage::triage(classified, diff_base, |test, at| {
+            replays += 1;
+            eprintln!("verify.triage: replay {replays} (of {} candidate failures): {test}", candidates.len());
+            let captured = runner.replay(invocation, test, at)?;
+            Ok(replay_verdict(id, invocation, test, at, &captured))
+        });
+    }
+    eprintln!(
+        "verify.triage: {} candidate failures is storm-shaped; one whole-member re-run replaces {} serial replays",
+        candidates.len(),
+        candidates.len(),
+    );
+    let (rerun_outcome, rerun_log, _) = run_member(id, invocation, scope, diff_base, runner)?;
+    let repeated: BTreeSet<String> = classify_failures(id, rerun_outcome, &rerun_log, closure)
+        .map(|second| second.candidate_tests().into_iter().collect())
+        .unwrap_or_default();
+    let kept = classified.retaining(&repeated);
+    let mut replays = 0usize;
+    let mut triaged = triage::triage(&kept, diff_base, |test, at| {
+        replays += 1;
+        eprintln!("verify.triage: replay {replays} (of {} repeated tests): {test}", repeated.len());
+        let captured = runner.replay(invocation, test, at)?;
+        Ok(replay_verdict(id, invocation, test, at, &captured))
+    })?;
+    for test in candidates {
+        if !repeated.contains(&test) {
+            triaged.flakes.push(Excused { test, replayed: "a whole-member re-run on the settled host".to_owned() });
+        }
+    }
+    Ok(triaged)
+}
+
 fn replay_verdict(
     id: &str,
     invocation: &VerifyInvocation,
