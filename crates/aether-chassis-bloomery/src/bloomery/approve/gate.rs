@@ -218,8 +218,8 @@ impl<'policy> Gate<'policy> {
     }
 
     /// The policy tier of a declared surface, read the way that surface was
-    /// declared — the rule [`tier_of`](Self::tier_of) applies, reachable
-    /// without an [`AdmissionRequest`] to wrap it in.
+    /// declared — the rule `tier_of` applies, reachable without an
+    /// [`AdmissionRequest`] to wrap it in.
     ///
     /// The seal gate holds a full admission projection; the commission
     /// auto-approval door (#5325) holds a stored revision and nothing else.

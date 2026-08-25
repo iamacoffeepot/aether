@@ -184,9 +184,10 @@ fn owner_signing_key() -> SigningKey {
 }
 
 /// The `AETHER_SIGNING_ALLOWLIST` value trusting `owner` at [`owner_signing_key`]'s
-/// public half (`key-id:hex-public-key`).
+/// public half, at the `human` ceiling — this key stands in for the owner, so
+/// it signs at every tier (`key-id:hex-public-key:tier`, #5324).
 fn owner_allowlist() -> String {
-    format!("owner:{}", aether_bloomery::encode_hex(&owner_signing_key().verifying_key().to_bytes()))
+    format!("owner:{}:human", aether_bloomery::encode_hex(&owner_signing_key().verifying_key().to_bytes()))
 }
 
 /// Fork the `bloomery` bin with the HTTP ingress and control core autoloaded,
