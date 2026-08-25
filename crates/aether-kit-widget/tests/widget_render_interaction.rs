@@ -40,6 +40,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use aether_harness_substrate_capture::{RenderHarnessBuilderExt, RenderHarnessExt};
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -142,10 +143,17 @@ fn nested_child_address(parent: &str, subname: &str) -> String {
     format!("{parent}/{}:{subname}", aether_component::WasmTrampoline::NAMESPACE)
 }
 
-/// The kit's `assets/` dir — where `RobotoMono.ttf` ships, resolved relative
-/// to this crate at build time.
+/// The kit's `assets/` dir — where `RobotoMono.ttf` ships, resolved under
+/// the directory the test runs in (cargo and nextest set that to this
+/// crate's root), falling back to the compile-time path for a caller
+/// running from elsewhere. Runtime-first because a lane-cached test binary
+/// can outlive the checkout it was compiled in (dispatch-3177): its baked
+/// path then names a pruned tree.
 fn assets_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("assets")
+    match env::current_dir().map(|current| current.join("assets")) {
+        Ok(dir) if dir.is_dir() => dir,
+        _ => Path::new(env!("CARGO_MANIFEST_DIR")).join("assets"),
+    }
 }
 
 /// Boot a chassis whose `assets://` points at the kit assets dir (the TTF)
