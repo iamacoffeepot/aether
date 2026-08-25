@@ -459,10 +459,10 @@ fn link_slot_target(worktree_dir: &Path, target_dir: &Path) -> Result<(), LocalE
 fn exclude_slot_target(worktree_dir: &Path) -> Result<(), LocalExecutorError> {
     let printed = git_in(worktree_dir, &["rev-parse", "--git-path", "info/exclude"])?;
     let path = worktree_dir.join(printed.trim());
-    if let Ok(existing) = fs::read_to_string(&path) {
-        if existing.lines().any(|line| line.trim() == "/target") {
-            return Ok(());
-        }
+    if let Ok(existing) = fs::read_to_string(&path)
+        && existing.lines().any(|line| line.trim() == "/target")
+    {
+        return Ok(());
     }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(LocalExecutorError::Io)?;
