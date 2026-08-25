@@ -1036,7 +1036,7 @@ fn single_reply(replies: &[MailEnvelope], label: &str) -> Vec<u8> {
     }
 }
 
-/// Env override for [`dist_dir`]: an explicit path to the `dist/` tree
+/// Env override for the dist-tree resolution: an explicit path to the `dist/` tree
 /// `cargo xtask dist` packages, for pointing the harness at a dist built
 /// somewhere other than the running tree's workspace root.
 pub const DIST_DIR_ENV: &str = "AETHER_DIST_DIR";
