@@ -16,6 +16,8 @@
 //! dispatch. It reaches the lane — and through it every verify gate the lane
 //! spawns — as `CARGO_TARGET_DIR`; see [`export_build_env`].
 
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::{fs, io};
@@ -181,6 +183,15 @@ impl TransformRunner for ProcessTransformRunner {
         // mark the file skip-worktree so the edit neither shows as a candidate nor
         // can be committed.
         neutralize_hooks(spec.worktree_dir)?;
+        // The reset above scrubbed untracked state, the symlink included; put
+        // the slot's target pairing back before anything in the lane builds,
+        // and keep it out of the subject's git view so a candidate capture
+        // never reads the pairing as work.
+        #[cfg(unix)]
+        {
+            link_slot_target(spec.worktree_dir, spec.target_dir)?;
+            exclude_slot_target(spec.worktree_dir)?;
+        }
         // Spawn the same portable entrypoint the wrappers run, in the checked-out
         // worktree, under the ambient local `claude` auth (ADR-0150) — and under
         // the wrapper's environment rather than the coordinator's, which the
@@ -381,10 +392,87 @@ fn work_order_args(spec: &RunSpec<'_>, checkout: &str, diff_base: Option<&str>) 
 /// A `build_jobs` of zero states no cap, leaving cargo's default of one job per
 /// core — an explicit `CARGO_BUILD_JOBS=0` is a cargo error, not "unlimited".
 fn export_build_env(lane: &mut Command, spec: &RunSpec<'_>) {
+    // Unix lanes reach the slot's target through the checkout's `target`
+    // symlink ([`link_slot_target`]) instead of this export: the absolute
+    // out-of-workspace spelling is exactly what the trybuild fixtures cannot
+    // normalize, so exporting it as well would hand every nested cargo the
+    // broken view right back (#5478). Non-unix hosts keep the export — they
+    // run the harnesses, not the fleet's lanes, and the env is the portable
+    // spelling of the same pairing.
+    #[cfg(not(unix))]
     lane.env("CARGO_TARGET_DIR", spec.target_dir);
     if spec.build_jobs > 0 {
         lane.env("CARGO_BUILD_JOBS", spec.build_jobs.to_string());
     }
+}
+
+/// Materialize `<checkout>/target` as a symlink to the slot's cache target.
+///
+/// The lane exported `CARGO_TARGET_DIR` instead until #5478: trybuild
+/// materializes its compile-fail fixture projects under the target dir, and
+/// from an out-of-workspace target the path dependencies back to the
+/// workspace cannot be relative — the compiler prints workspace sources
+/// absolute, the blessed `$WORKSPACE`-relative stderr mismatches, and every
+/// fixture in the workspace fails, but only inside lanes. A `target` symlink
+/// inside the checkout keeps cargo's view workspace-shaped while the
+/// artifacts stay on the slot's cache volume, so the warmth pairing the slot
+/// exists for survives.
+///
+/// Recreated on every start because the reset scrubs untracked state. A
+/// non-symlink `target` occupying the path is foreign state — refused loudly
+/// rather than silently replaced, because the one way it appears is a build
+/// that ran in the checkout without the pairing, and its artifacts are
+/// exactly what the slot's fingerprints must never mix with.
+#[cfg(unix)]
+fn link_slot_target(worktree_dir: &Path, target_dir: &Path) -> Result<(), LocalExecutorError> {
+    let link = worktree_dir.join("target");
+    match fs::symlink_metadata(&link) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            if fs::read_link(&link).map_err(LocalExecutorError::Io)? == target_dir {
+                return Ok(());
+            }
+            fs::remove_file(&link).map_err(LocalExecutorError::Io)?;
+        }
+        Ok(_) => {
+            return Err(LocalExecutorError::Worktree(format!(
+                "the slot checkout holds a real `target` at {}; refusing to replace it with the slot link",
+                link.display()
+            )));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(LocalExecutorError::Io(error)),
+    }
+    fs::create_dir_all(target_dir).map_err(LocalExecutorError::Io)?;
+    symlink(target_dir, &link).map_err(LocalExecutorError::Io)
+}
+
+/// Hide the slot's `target` link from the checkout's git view.
+///
+/// The aether workspace ignores `/target` itself, but the pairing must not
+/// lean on the subject's own `.gitignore`: a subject without the entry would
+/// surface the link as an untracked file in every candidate capture, and a
+/// construct that wrote nothing would read as one that wrote something (the
+/// lane-boundary scenario that caught exactly that). The worktree's private
+/// `info/exclude` is the subject-independent spelling — per-checkout git
+/// state, never part of the tree.
+#[cfg(unix)]
+fn exclude_slot_target(worktree_dir: &Path) -> Result<(), LocalExecutorError> {
+    let printed = git_in(worktree_dir, &["rev-parse", "--git-path", "info/exclude"])?;
+    let path = worktree_dir.join(printed.trim());
+    if let Ok(existing) = fs::read_to_string(&path) {
+        if existing.lines().any(|line| line.trim() == "/target") {
+            return Ok(());
+        }
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(LocalExecutorError::Io)?;
+    }
+    let mut existing = fs::read_to_string(&path).unwrap_or_default();
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        existing.push('\n');
+    }
+    existing.push_str("/target\n");
+    fs::write(&path, existing).map_err(LocalExecutorError::Io)
 }
 
 /// Decode the hex object id `git rev-parse` printed into the opaque bytes the
@@ -777,6 +865,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     use super::super::runner::RunProcess;
     use super::super::runner::{RunLifecycle, RunSpec};
+    #[cfg(unix)]
+    use super::link_slot_target;
     use super::{
         CaptureIdentity, FALLBACK_CAPTURE_SUBJECT, FALLBACK_IDENTITY, ProcessTransformRunner, SETTINGS_PATH,
         TransformRunner, capture_subject, commitish_for, decode_object_hex, fetch_order_identities,
@@ -1593,5 +1683,34 @@ mod tests {
         let detail = format!("{error:?}");
         assert!(detail.contains(&missing), "the failure names the subject: {detail}");
         assert!(!detail.contains("origin"), "a local authority must not name the GitHub remote: {detail}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_slot_target_link_is_created_recreated_and_refuses_a_real_directory() {
+        // The pairing the lane builds through (#5478): `<checkout>/target` is a
+        // symlink to the slot's cache target, recreated after every reset, and
+        // a real directory at that path is foreign artifacts to refuse — the
+        // silent replacement would mix another build's fingerprints into the
+        // slot the pairing exists to keep coherent.
+        let checkout = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let target = cache.path().join("slot-0-target");
+        let link = checkout.path().join("target");
+
+        link_slot_target(checkout.path(), &target).expect("first link");
+        assert_eq!(fs::read_link(&link).unwrap(), target, "the link names the slot's cache target");
+        assert!(target.is_dir(), "the cache target is created for a fresh slot");
+
+        link_slot_target(checkout.path(), &target).expect("an identical link is idempotent");
+
+        let elsewhere = cache.path().join("slot-1-target");
+        link_slot_target(checkout.path(), &elsewhere).expect("a repointed slot replaces its own stale link");
+        assert_eq!(fs::read_link(&link).unwrap(), elsewhere, "the stale link was replaced, not kept");
+
+        fs::remove_file(&link).unwrap();
+        fs::create_dir(&link).unwrap();
+        let refused = link_slot_target(checkout.path(), &target).expect_err("a real directory is refused");
+        assert!(format!("{refused:?}").contains("refusing"), "the refusal says why: {refused:?}");
     }
 }

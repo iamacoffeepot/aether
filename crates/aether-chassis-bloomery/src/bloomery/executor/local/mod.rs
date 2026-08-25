@@ -55,8 +55,9 @@
 //! restart can re-adopt a run without handing its build path to a stranger.
 //!
 //! The slot owns its cargo build directory too (`<base>/slot-<index>-target`,
-//! #4912), exported to the lane and every verify gate under it as
-//! `CARGO_TARGET_DIR`. One directory per slot rather than one for the host:
+//! #4912), reached by the lane and every verify gate under it through a
+//! `target` symlink inside the checkout (a `CARGO_TARGET_DIR` export on hosts
+//! without symlinks; #5478). One directory per slot rather than one for the host:
 //! cargo locks a build directory exclusively, so lanes sharing one build in turn
 //! however many slots are free, and its state is keyed by source path, so a
 //! shared directory accumulates a fresh artifact set per checkout path and can
