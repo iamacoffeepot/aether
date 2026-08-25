@@ -165,6 +165,12 @@ impl Transcript {
         HINTS
     }
 
+    /// Enter expands the selected line in place; it does not push a frame.
+    #[must_use]
+    pub fn enter_pushes() -> bool {
+        false
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, _store: &Store) -> Outcome {
         if self.search.editing {
             return self.handle_search_edit(key);
@@ -526,7 +532,10 @@ impl Transcript {
             items.push(ListItem::new(self.empty_label()));
         }
         let highlight = selected.map(|index| index.saturating_sub(self.scroll));
-        let list = List::new(items).style(palette::body()).highlight_style(palette::cursor()).highlight_symbol("> ");
+        let list = List::new(items)
+            .style(palette::body())
+            .highlight_style(palette::cursor())
+            .highlight_symbol(super::caret(Self::enter_pushes()));
         let mut state = ListState::default().with_selected(highlight);
         frame.render_stateful_widget(list, area, &mut state);
     }

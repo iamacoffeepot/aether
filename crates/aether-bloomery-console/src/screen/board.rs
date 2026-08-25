@@ -162,6 +162,11 @@ impl Board {
     }
 
     #[must_use]
+    pub fn enter_pushes(&self) -> bool {
+        self.selected_focus().is_some()
+    }
+
+    #[must_use]
     pub fn scroll(&self) -> usize {
         self.scroll
     }
@@ -250,7 +255,7 @@ impl Board {
         .style(palette::body())
         .header(header)
         .row_highlight_style(palette::cursor())
-        .highlight_symbol("> ");
+        .highlight_symbol(super::caret(self.enter_pushes()));
         let mut table_state = TableState::default()
             .with_selected(self.cursor.selected_index(rows, BoardRow::id))
             .with_offset(self.scroll);
@@ -396,7 +401,7 @@ mod tests {
     use crate::palette::{Depth, with_depth};
     use crate::shell::Shell;
     use crate::store::Store;
-    use crossterm::event::KeyEvent;
+    use crossterm::event::{KeyCode, KeyEvent};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Cell;
@@ -656,5 +661,22 @@ mod tests {
             let text: String = terminal.backend().buffer().content().iter().map(Cell::symbol).collect();
             assert!(text.contains("WEDGED"), "{text}");
         });
+    }
+
+    #[test]
+    fn a_row_enter_pushes_paints_the_caret() {
+        // The plausible bug: hiding the caret on rows Enter refuses also
+        // hides it where Enter still pushes a frame.
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_view(Ok(ViewDocument {
+            blooms: vec![BloomView { id: digest(1), members: vec![in_flight_construct("wp")], ..BloomView::default() }],
+            ..ViewDocument::default()
+        }));
+        let mut board = Board::new();
+        board.reseat(&store);
+        assert_eq!(board.handle_key(KeyEvent::from(KeyCode::Char('j')), &store), Outcome::Handled);
+        let mut terminal = Terminal::new(TestBackend::new(80, 10)).expect("test backend");
+        terminal.draw(|frame| board.render(frame, frame.area(), &store)).expect("draw");
+        assert_eq!(super::super::row_caret(&terminal, "wp"), "> ");
     }
 }

@@ -35,6 +35,20 @@ use backlog::Workpiece;
 use dispatch::DispatchList;
 use journal::{Journal, Record};
 
+/// Width-stable caret. Two spaces when Enter would not push, so rows do not
+/// shift as the cursor moves.
+const CARET: &str = "> ";
+const NO_CARET: &str = "  ";
+
+#[must_use]
+fn caret(enter_pushes: bool) -> &'static str {
+    if enter_pushes {
+        CARET
+    } else {
+        NO_CARET
+    }
+}
+
 /// One pushed frame. The live board lives in the workspace; History is a
 /// pushed `Board` on this stack.
 pub enum Screen {
@@ -256,6 +270,24 @@ impl Screen {
         }
     }
 
+    /// Whether Enter on the current selection would push a frame.
+    /// Exhaustive so a new screen must say.
+    #[must_use]
+    pub fn enter_pushes(&self, store: &Store) -> bool {
+        match self {
+            Self::Board(board) => board.enter_pushes(),
+            Self::Detail(detail) => detail.enter_pushes(),
+            Self::DispatchList(list) => list.enter_pushes(store),
+            Self::Journal(journal) => journal.enter_pushes(),
+            Self::Workpiece(workpiece) => workpiece.enter_pushes(),
+            Self::Backlog(backlog) => backlog.enter_pushes(store),
+            Self::Transcript(_) => Transcript::enter_pushes(),
+            Self::Timeline(_) => Timeline::enter_pushes(),
+            Self::Cost(_) => Breakdown::enter_pushes(),
+            Self::Record(_) | Self::Artifact(_) | Self::Days(_) => false,
+        }
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, store: &Store) -> Outcome {
         match self {
             Self::Board(board) => board.handle_key(key, store),
@@ -304,4 +336,17 @@ impl Screen {
             Self::Workpiece(workpiece) => workpiece.render(frame, area, store),
         }
     }
+}
+
+#[cfg(test)]
+fn row_caret(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>, needle: &str) -> String {
+    let buffer = terminal.backend().buffer();
+    let area = buffer.area();
+    for y in 0..area.height {
+        let row: String = (0..area.width).map(|x| buffer[(x, y)].symbol()).collect();
+        if row.contains(needle) {
+            return format!("{}{}", buffer[(0, y)].symbol(), buffer[(1, y)].symbol());
+        }
+    }
+    panic!("no row containing {needle}");
 }

@@ -105,6 +105,11 @@ impl Detail {
         self.selected_line().filter(|line| line.openable).and_then(|line| line.digest)
     }
 
+    #[must_use]
+    pub fn enter_pushes(&self) -> bool {
+        self.selected_line().and_then(|line| line.enter.as_ref()).is_some()
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, _store: &Store) -> Outcome {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
@@ -167,7 +172,10 @@ impl Detail {
         };
         let items: Vec<ListItem> =
             self.lines.iter().map(|line| ListItem::new(line.text.clone()).style(muted)).collect();
-        let list = List::new(items).style(palette::body()).highlight_style(palette::cursor()).highlight_symbol("> ");
+        let list = List::new(items)
+            .style(palette::body())
+            .highlight_style(palette::cursor())
+            .highlight_symbol(super::caret(self.enter_pushes()));
         let mut state = ListState::default()
             .with_selected(self.cursor.selected_index(&self.lines, |line| line.key.clone()))
             .with_offset(self.scroll);
@@ -499,6 +507,8 @@ mod tests {
     use crate::store::Store;
     use crate::warroom::Focus;
     use crossterm::event::{KeyCode, KeyEvent};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use std::time::Duration;
 
     fn digest(byte: u8) -> DigestHex {
@@ -579,5 +589,15 @@ mod tests {
         let (mut detail, store) = detail_over(Focus::bloom(digest(1)), view);
         walk_to_digest(&mut detail, &store, question);
         assert_eq!(detail.openable_digest(), Some(question));
+    }
+
+    #[test]
+    fn a_row_enter_refuses_paints_no_caret() {
+        // The plausible bug: highlight_symbol tracks ListState, so a fact
+        // line with no `enter` still paints `>` as if Enter would push.
+        let (mut detail, store) = detail_over(Focus::Seal, ViewDocument::default());
+        let mut terminal = Terminal::new(TestBackend::new(80, 8)).expect("test backend");
+        terminal.draw(|frame| detail.render(frame, frame.area(), &store)).expect("draw");
+        assert_eq!(super::super::row_caret(&terminal, "seal"), "  ");
     }
 }
