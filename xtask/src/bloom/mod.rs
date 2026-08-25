@@ -1,9 +1,11 @@
 //! `cargo xtask bloom` — operator client over the coordinator REST surface.
 //!
-//! Seals and supersedes compose typed bodies (drafts, configs, projections)
-//! instead of hand-rolled JSON. `supersede` defaults the successor onto the
-//! current observed head, reuses the predecessor's sealed configs by digest,
-//! and carries each member's scope revision so the workpiece claim transfers.
+//! Seals and supersedes compose typed bodies (drafts, configs, edges) instead
+//! of hand-rolled JSON. `seal` reads each member's commission before opening a
+//! draft so the membership pins the stored revision. `supersede` defaults the
+//! successor onto the current observed head, reuses the predecessor's sealed
+//! configs by digest, and carries each member's scope revision so the
+//! workpiece claim transfers.
 
 mod amend;
 mod client;
@@ -25,7 +27,7 @@ use clap::{Args, Subcommand};
 
 use crate::bloom::amend::{AmendArgs, OperatorKey};
 use crate::bloom::client::{Client, bloom_in};
-use crate::bloom::plan::{BaseChoice, ProjectionInput};
+use crate::bloom::plan::BaseChoice;
 use crate::bloom::roll::RollArgs;
 use crate::bloom::upgrade::UpgradeArgs;
 
@@ -86,8 +88,8 @@ pub struct BloomArgs {
     token: Option<String>,
 
     /// Approval policy the declared-surface granularity check reads before a
-    /// seal or supersede is sent. The coordinator's seal door is the authority;
-    /// this refuses the same shape earlier and in the same words.
+    /// seal is sent. The coordinator's seal door is the authority; this
+    /// refuses the same shape earlier and in the same words.
     #[arg(long = "approval-policy", global = true, default_value = DEFAULT_POLICY_FILE)]
     approval_policy: PathBuf,
 
@@ -278,6 +280,11 @@ struct ReopenArgs {
     signer: String,
 }
 
+/// Shape and seal a new bloom.
+///
+/// Declared surface, completeness, description, and approval come off each
+/// member's stored revision and its approval rows — the same facts
+/// `seal_draft` loads, and a caller-supplied projection of them is ignored.
 #[derive(Args, Debug)]
 struct SealArgs {
     /// Member work-order description, keyed onto every workpiece.
@@ -306,19 +313,10 @@ struct SealArgs {
     #[arg(long = "edge", value_parser = plan::parse_edge_flag)]
     edges: Vec<(String, String)>,
 
-    /// Per-member declared-surface glob (`member=glob`). Repeatable. A member
-    /// with no `--surface` entry receives `--declared-surface`, including the
-    /// shipped default when neither flag is present.
-    #[arg(long = "surface", value_parser = plan::parse_surface_flag)]
-    surfaces: Vec<(String, String)>,
-
     /// Per-member scope revision (`workpiece=64-hex`). Repeatable. A member
-    /// with no `--revision` entry receives the `--task-file` digest.
+    /// with no `--revision` entry receives the commission's current revision.
     #[arg(long = "revision", value_parser = plan::parse_revision_flag)]
     revisions: Vec<(String, dto::DigestHex)>,
-
-    #[command(flatten)]
-    projection: ProjectionArgs,
 }
 
 #[derive(Args, Debug)]
@@ -357,40 +355,6 @@ struct SupersedeArgs {
     /// with no `--revision` entry keeps the predecessor's revision.
     #[arg(long = "revision", value_parser = plan::parse_revision_flag)]
     revisions: Vec<(String, dto::DigestHex)>,
-
-    #[command(flatten)]
-    projection: ProjectionArgs,
-}
-
-#[derive(Args, Debug)]
-pub struct ProjectionArgs {
-    /// Declared-surface globs. Defaults to the shipped auto-tier surface.
-    #[arg(long = "declared-surface")]
-    declared_surface: Vec<String>,
-
-    /// Completeness JSON file. Absent uses the direct-drive defaults.
-    #[arg(long)]
-    completeness_file: Option<PathBuf>,
-
-    /// ADR-maturity the hard gate routes on.
-    #[arg(long, value_enum, default_value_t = dto::AdrTouch::None)]
-    adr_touch: dto::AdrTouch,
-
-    /// Owner-verified override that waives the tier to `auto`.
-    #[arg(long)]
-    pre_approved: bool,
-}
-
-impl ProjectionArgs {
-    pub(super) fn input(&self, approval_policy: &Path) -> Result<ProjectionInput> {
-        ProjectionInput::resolve(
-            self.declared_surface.clone(),
-            self.completeness_file.as_deref(),
-            self.adr_touch,
-            self.pre_approved,
-            Some(approval_policy),
-        )
-    }
 }
 
 pub fn run(args: &BloomArgs) -> Result<()> {
@@ -414,7 +378,7 @@ fn run_on_with_policy(endpoint: &Endpoint, command: &BloomCommand, approval_poli
     match command {
         BloomCommand::Status => Ok(status::render(&client.view()?)),
         BloomCommand::Seal(args) => run_seal(&client, args, approval_policy),
-        BloomCommand::Supersede(args) => run_supersede(&client, args, approval_policy),
+        BloomCommand::Supersede(args) => run_supersede(&client, args),
         BloomCommand::Roll(args) => roll::run(&client, args),
         BloomCommand::Upgrade(args) => upgrade::run(&client, args),
         BloomCommand::Amend(args) => amend::run(&client, args, approval_policy),
@@ -613,29 +577,57 @@ fn run_seal(client: &Client<'_>, args: &SealArgs, approval_policy: &Path) -> Res
     let task = plan::read_task_file(&args.task_file)?;
     plan::require_task(&task, &args.task_file)?;
     let workpieces = plan::seal_workpieces(&args.workpiece, &args.task_file)?;
+    let mut pins = Vec::with_capacity(workpieces.len());
+    let mut surfaces = Vec::with_capacity(workpieces.len());
+    for workpiece in &workpieces {
+        let (revision, declared_surface) = require_sealable_commission(client, workpiece)?;
+        pins.push((workpiece.clone(), revision));
+        surfaces.push((workpiece.clone(), declared_surface));
+    }
+    if let Some(policy) = plan::load_policy(approval_policy) {
+        for (workpiece, declared_surface) in &surfaces {
+            plan::refuse_unnamed_file_entries(&policy, workpiece, declared_surface)?;
+        }
+    }
+    let default_revision = pins.first().map(|(_, digest)| *digest).context("seal names no members")?;
+    pins.extend(args.revisions.iter().cloned());
+
     let view = client.view()?;
     let base = plan::resolve_base(&args.base, &view);
     let authored = plan::author_profile_and_flags(client, args.profile.as_deref(), &args.configs)?;
-    let scope_revision = plan::file_digest(&args.task_file)?;
     let patch = plan::seal_patch(
         &workpieces,
-        scope_revision,
-        &args.revisions,
+        default_revision,
+        &pins,
         base,
         authored.configs,
         authored.forecast.unwrap_or_default(),
     )?;
     let draft = client.open_draft()?;
     client.patch_draft(&draft.draft_id, &patch)?;
-    let members = patch.proposals.unwrap_or_default();
-    let outcome = client.seal(
-        &draft.draft_id,
-        &plan::seal_request(&members, &task, &args.projection.input(approval_policy)?, &args.edges, &args.surfaces)?,
-    )?;
+    let outcome = client.seal(&draft.draft_id, &plan::seal_request(&args.edges))?;
     Ok(render_outcome(&outcome.outcome))
 }
 
-fn run_supersede(client: &Client<'_>, args: &SupersedeArgs, approval_policy: &Path) -> Result<String> {
+/// One `--workpiece`'s commission, or a local refusal that names it.
+///
+/// The store already holds the revision and its approval; guessing a digest
+/// from the task file can never match. Missing, not-open, and unapproved are
+/// the same facts the door would 422, named here so the draft is never opened.
+fn require_sealable_commission(client: &Client<'_>, workpiece: &str) -> Result<(dto::DigestHex, Vec<String>)> {
+    let shown = client.commission(workpiece).with_context(|| format!("no commission named {workpiece}"))?;
+    if shown.status != "open" {
+        bail!("commission {workpiece} is {}, not open", shown.status);
+    }
+    let revision =
+        shown.current_revision.with_context(|| format!("commission {workpiece} names no current revision"))?;
+    if !shown.approvals.iter().any(|statement| statement.words.as_slice() == revision.as_bytes().as_slice()) {
+        bail!("{workpiece} carries no stored approval over its current revision");
+    }
+    Ok((revision, shown.current.map(|current| current.declared_surface).unwrap_or_default()))
+}
+
+fn run_supersede(client: &Client<'_>, args: &SupersedeArgs) -> Result<String> {
     let task = plan::read_task_file(&args.task_file)?;
     plan::require_task(&task, &args.task_file)?;
     let view = client.view()?;
@@ -654,18 +646,7 @@ fn run_supersede(client: &Client<'_>, args: &SupersedeArgs, approval_policy: &Pa
     plan::pin_revisions(proposals, &args.revisions)?;
     let draft = client.open_draft()?;
     client.patch_draft(&draft.draft_id, &patch)?;
-    let members = patch.proposals.unwrap_or_default();
-    let outcome = client.supersede(
-        &args.bloom_id,
-        &plan::supersede_request(
-            &draft.draft_id,
-            &members,
-            &task,
-            &args.projection.input(approval_policy)?,
-            &args.edges,
-            &[],
-        )?,
-    )?;
+    let outcome = client.supersede(&args.bloom_id, &plan::supersede_request(&draft.draft_id, &args.edges))?;
     Ok(render_outcome(&outcome.outcome))
 }
 
@@ -696,9 +677,9 @@ mod tests {
         repair_body, run_on,
     };
     use crate::bloom::dto;
-    use crate::bloom::dto::{AdrTouch, DigestHex};
+    use crate::bloom::dto::DigestHex;
     use crate::bloom::hex;
-    use crate::bloom::plan::{self, BaseChoice};
+    use crate::bloom::plan::BaseChoice;
 
     #[derive(Clone, Debug)]
     struct Recorded {
@@ -787,8 +768,19 @@ mod tests {
             edges,
             eject,
             revisions,
-            projection: projection_args(),
         })
+    }
+
+    fn seal_args(task: PathBuf, workpiece: Vec<String>) -> SealArgs {
+        SealArgs {
+            task_file: task,
+            configs: Vec::new(),
+            profile: None,
+            base: BaseChoice::Observed,
+            workpiece,
+            edges: Vec::new(),
+            revisions: Vec::new(),
+        }
     }
 
     fn serve_one(mut stream: TcpStream, handler: &impl Fn(&Recorded) -> (u16, Value), log: &Mutex<Vec<Recorded>>) {
@@ -867,13 +859,22 @@ mod tests {
         path
     }
 
-    fn projection_args() -> super::ProjectionArgs {
-        super::ProjectionArgs {
-            declared_surface: Vec::new(),
-            completeness_file: None,
-            adr_touch: AdrTouch::None,
-            pre_approved: false,
-        }
+    fn open_approved(workpiece: &str, revision: Digest) -> Value {
+        json!({
+            "intent": hex_of(digest(1)),
+            "status": "open",
+            "current_revision": hex_of(revision),
+            "current": {
+                "schema": 1,
+                "workpiece": workpiece,
+                "problem": "p",
+                "design": "d",
+                "plan": "p",
+                "declared_surface": ["docs/guide/**"],
+                "routing": { "size": "small", "model": "grok-4.6" }
+            },
+            "approvals": [{ "words": revision.as_bytes().as_slice() }],
+        })
     }
 
     fn find<'a>(log: &'a [Recorded], method: &str, suffix: &str) -> &'a Recorded {
@@ -937,7 +938,6 @@ mod tests {
                         edges: Vec::new(),
                         eject: Vec::new(),
                         revisions: Vec::new(),
-                        projection: projection_args(),
                     }),
                 )
                 .expect("supersede against the fake coordinator")
@@ -956,10 +956,8 @@ mod tests {
         let supersede =
             find(&log, "POST", &format!("/blooms/{bloom_id}/supersede")).body.as_ref().expect("supersede body");
         assert_eq!(supersede["successor_draft"], "1");
-        assert_eq!(supersede["projections"][0]["workpiece"], "wp-1");
-        assert_eq!(supersede["projections"][0]["scope_revision"], revision);
-        assert_eq!(supersede["projections"][0]["completeness"]["model_routing_count"], 1);
-        assert_eq!(supersede["descriptions"]["wp-1"], "recover the wedged member");
+        assert!(supersede.get("projections").is_none(), "the door ignores projections: {supersede}");
+        assert!(supersede.get("descriptions").is_none(), "the door ignores descriptions: {supersede}");
         assert!(supersede.get("edges").is_none(), "an edgeless supersede omits the edges field: {supersede}");
         assert!(output.contains("Superseded"), "outcome is printed: {output}");
     }
@@ -1025,10 +1023,10 @@ mod tests {
     }
 
     #[test]
-    fn supersede_ejects_a_named_predecessor_from_proposals_and_projections() {
-        // `--eject` must drop the named member from the successor draft *and*
-        // from the projections the door gates on. Leaving it in either half
-        // would re-admit the workpiece the operator just tried to leave out.
+    fn supersede_ejects_a_named_predecessor_from_proposals() {
+        // `--eject` must drop the named member from the successor draft.
+        // Leaving it in would re-admit the workpiece the operator just tried
+        // to leave out.
         let (bloom_id, spec_wire) = predecessor_spec_of(&[("wp-1", 7), ("wp-2", 8)]);
         let bloom_id_for_view = bloom_id.clone();
         let spec_for_journal = spec_wire;
@@ -1079,10 +1077,8 @@ mod tests {
 
         let supersede =
             find(&log, "POST", &format!("/blooms/{bloom_id}/supersede")).body.as_ref().expect("supersede body");
-        let projections = supersede["projections"].as_array().expect("projections");
-        assert_eq!(projections.len(), 1, "ejected member is gone from the projections: {supersede}");
-        assert_eq!(projections[0]["workpiece"], "wp-1");
-        assert!(supersede["descriptions"].get("wp-2").is_none(), "ejected member is gone from descriptions");
+        assert_eq!(supersede["successor_draft"], "1");
+        assert!(supersede.get("projections").is_none(), "the door ignores projections: {supersede}");
     }
 
     #[test]
@@ -1200,8 +1196,8 @@ mod tests {
 
         let supersede =
             find(&log, "POST", &format!("/blooms/{bloom_id}/supersede")).body.as_ref().expect("supersede body");
-        assert_eq!(supersede["projections"][0]["scope_revision"], hex_of(digest(7)));
-        assert_eq!(supersede["projections"][1]["scope_revision"], pinned);
+        assert_eq!(supersede["successor_draft"], "1");
+        assert!(supersede.get("projections").is_none(), "the door ignores projections: {supersede}");
     }
 
     #[test]
@@ -1243,17 +1239,25 @@ mod tests {
         assert!(text.contains("wp-1"), "members are listed: {text}");
     }
 
+    fn empty_view() -> Value {
+        json!({ "mainline": hex_of(digest(1)), "observed": hex_of(digest(2)), "blooms": [] })
+    }
+
+    fn commission_route(path: &str) -> Option<&str> {
+        path.strip_prefix("/commissions/")
+    }
+
     #[test]
     fn seal_authors_config_and_sends_typed_bodies() {
         let catalog = hex_of(digest(0xcc));
         let catalog_for_reply = catalog.clone();
+        let stored = hex_of(digest(0xaa));
         let task = temp_task("seal-task", "build the authoring layer");
         let config = temp_task("catalog.json", r#"{"bindings":[]}"#);
         let (output, log) = with_fake(
             move |request| match (request.method.as_str(), request.path.as_str()) {
-                ("GET", "/view") => {
-                    (200, json!({ "mainline": hex_of(digest(1)), "observed": hex_of(digest(2)), "blooms": [] }))
-                }
+                ("GET", path) if let Some(id) = commission_route(path) => (200, open_approved(id, digest(0xaa))),
+                ("GET", "/view") => (200, empty_view()),
                 ("POST", "/configs") => {
                     let body = request.body.as_ref().expect("config body");
                     assert_eq!(body["kind"], "aether.bloomery.stage_catalog");
@@ -1269,15 +1273,8 @@ mod tests {
                 run_on(
                     &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
                     &BloomCommand::Seal(SealArgs {
-                        task_file: task.clone(),
                         configs: vec![("aether.bloomery.stage_catalog".to_owned(), config.clone())],
-                        profile: None,
-                        base: BaseChoice::Observed,
-                        workpiece: vec!["wp-seal".to_owned()],
-                        edges: Vec::new(),
-                        surfaces: Vec::new(),
-                        revisions: Vec::new(),
-                        projection: projection_args(),
+                        ..seal_args(task.clone(), vec!["wp-seal".to_owned()])
                     }),
                 )
                 .expect("seal against the fake coordinator")
@@ -1289,10 +1286,11 @@ mod tests {
         assert_eq!(patch["base"], hex_of(digest(2)), "seal defaults base to observed");
         assert_eq!(patch["configs"]["entries"]["aether.bloomery.stage_catalog"], catalog);
         assert_eq!(patch["proposals"][0]["workpiece"], "wp-seal");
+        assert_eq!(patch["proposals"][0]["scope_revision"], stored);
 
         let seal = find(&log, "POST", "/drafts/3/seal").body.as_ref().expect("seal body");
-        assert_eq!(seal["descriptions"]["wp-seal"], "build the authoring layer");
-        assert_eq!(seal["projections"][0]["declared_surface"][0], "docs/guide/**");
+        assert!(seal.get("projections").is_none(), "the door ignores projections: {seal}");
+        assert!(seal.get("descriptions").is_none(), "the door ignores descriptions: {seal}");
         assert!(seal.get("edges").is_none(), "an edgeless seal omits the edges field: {seal}");
         assert!(output.contains("Sealed"), "outcome is printed: {output}");
     }
@@ -1305,9 +1303,8 @@ mod tests {
         let task = temp_task("seal-edge", "build B on A");
         let (_, log) = with_fake(
             move |request| match (request.method.as_str(), request.path.as_str()) {
-                ("GET", "/view") => {
-                    (200, json!({ "mainline": hex_of(digest(1)), "observed": hex_of(digest(2)), "blooms": [] }))
-                }
+                ("GET", path) if let Some(id) = commission_route(path) => (200, open_approved(id, digest(0xaa))),
+                ("GET", "/view") => (200, empty_view()),
                 ("POST", "/drafts") => (201, json!({ "draft_id": "5", "draft": {} })),
                 ("PATCH", "/drafts/5") => (200, json!({ "draft_id": "5", "draft": {} })),
                 ("POST", "/drafts/5/seal") => (200, json!({ "outcome": { "Sealed": hex_of(digest(4)) } })),
@@ -1317,15 +1314,8 @@ mod tests {
                 run_on(
                     &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
                     &BloomCommand::Seal(SealArgs {
-                        task_file: task.clone(),
-                        configs: Vec::new(),
-                        profile: None,
-                        base: BaseChoice::Observed,
-                        workpiece: vec!["issue-A".to_owned(), "issue-B".to_owned()],
                         edges: vec![("issue-B".to_owned(), "issue-A".to_owned())],
-                        surfaces: Vec::new(),
-                        revisions: Vec::new(),
-                        projection: projection_args(),
+                        ..seal_args(task.clone(), vec!["issue-A".to_owned(), "issue-B".to_owned()])
                     }),
                 )
                 .expect("seal --edge against the fake coordinator")
@@ -1338,65 +1328,92 @@ mod tests {
     }
 
     #[test]
-    fn seal_sends_per_member_declared_surfaces_on_the_typed_body() {
-        // Two workpieces with distinct `--surface` lists must reach the door
-        // as two projections, not a cloned bloom-wide surface. Cloning would
-        // invent a derived overlap edge and serialize independent work.
-        let task = temp_task("seal-surfaces", "build A and B");
+    fn a_seal_takes_each_members_revision_from_the_store() {
+        // Before this change, a member without `--revision` received a bare
+        // sha256 of the task file, which no store row can match. The store's
+        // `current_revision` is the digest the door will admit.
+        let task = temp_task("seal-store-revision", "build A and B");
+        let rev_a = hex_of(digest(0x11));
+        let rev_b = hex_of(digest(0x22));
         let (_, log) = with_fake(
             move |request| match (request.method.as_str(), request.path.as_str()) {
-                ("GET", "/view") => {
-                    (200, json!({ "mainline": hex_of(digest(1)), "observed": hex_of(digest(2)), "blooms": [] }))
-                }
-                ("POST", "/drafts") => (201, json!({ "draft_id": "7", "draft": {} })),
-                ("PATCH", "/drafts/7") => (200, json!({ "draft_id": "7", "draft": {} })),
-                ("POST", "/drafts/7/seal") => (200, json!({ "outcome": { "Sealed": hex_of(digest(4)) } })),
+                ("GET", "/commissions/issue-A") => (200, open_approved("issue-A", digest(0x11))),
+                ("GET", "/commissions/issue-B") => (200, open_approved("issue-B", digest(0x22))),
+                ("GET", "/view") => (200, empty_view()),
+                ("POST", "/drafts") => (201, json!({ "draft_id": "6", "draft": {} })),
+                ("PATCH", "/drafts/6") => (200, json!({ "draft_id": "6", "draft": {} })),
+                ("POST", "/drafts/6/seal") => (200, json!({ "outcome": { "Sealed": hex_of(digest(4)) } })),
                 _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
             },
             |port| {
                 run_on(
                     &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
-                    &BloomCommand::Seal(SealArgs {
-                        task_file: task.clone(),
-                        configs: Vec::new(),
-                        profile: None,
-                        base: BaseChoice::Observed,
-                        workpiece: vec!["issue-A".to_owned(), "issue-B".to_owned()],
-                        edges: Vec::new(),
-                        surfaces: vec![
-                            ("issue-A".to_owned(), "crates/foo/**".to_owned()),
-                            ("issue-B".to_owned(), "xtask/**".to_owned()),
-                        ],
-                        revisions: Vec::new(),
-                        projection: projection_args(),
-                    }),
+                    &BloomCommand::Seal(seal_args(task.clone(), vec!["issue-A".to_owned(), "issue-B".to_owned()])),
                 )
-                .expect("seal --surface against the fake coordinator")
+                .expect("seal against stored commissions")
             },
         );
         fs::remove_file(&task).ok();
-        let seal = find(&log, "POST", "/drafts/7/seal").body.as_ref().expect("seal body");
-        assert_eq!(seal["projections"][0]["workpiece"], "issue-A");
-        assert_eq!(seal["projections"][0]["declared_surface"], json!(["crates/foo/**"]));
-        assert_eq!(seal["projections"][1]["workpiece"], "issue-B");
-        assert_eq!(seal["projections"][1]["declared_surface"], json!(["xtask/**"]));
+        let patch = find(&log, "PATCH", "/drafts/6").body.as_ref().expect("patch body");
+        assert_eq!(patch["proposals"][0]["workpiece"], "issue-A");
+        assert_eq!(patch["proposals"][0]["scope_revision"], rev_a);
+        assert_eq!(patch["proposals"][0]["approval"]["subject"], rev_a);
+        assert_eq!(patch["proposals"][1]["workpiece"], "issue-B");
+        assert_eq!(patch["proposals"][1]["scope_revision"], rev_b);
+        assert_eq!(patch["proposals"][1]["approval"]["subject"], rev_b);
+
+        let seal = find(&log, "POST", "/drafts/6/seal").body.as_ref().expect("seal body");
+        assert!(seal.get("projections").is_none(), "the door ignores projections: {seal}");
+        assert!(log.iter().any(|entry| entry.method == "GET" && entry.path == "/commissions/issue-A"));
+        assert!(log.iter().any(|entry| entry.method == "GET" && entry.path == "/commissions/issue-B"));
+    }
+
+    #[test]
+    fn an_unapproved_member_is_refused_before_the_draft_is_opened() {
+        // An open commission with no approval over the tip is the operator
+        // skipping submit. Naming that here, before POST /drafts, is the
+        // refusal that is worth more than a 422 after the draft is already
+        // open.
+        let task = temp_task("seal-unapproved", "should not dispatch");
+        let (error, log) = with_fake(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/commissions/issue-N") => {
+                    let mut shown = open_approved("issue-N", digest(0x11));
+                    shown["approvals"] = json!([]);
+                    (200, shown)
+                }
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                run_on(
+                    &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
+                    &BloomCommand::Seal(seal_args(task.clone(), vec!["issue-N".to_owned()])),
+                )
+                .expect_err("an unapproved member is refused")
+            },
+        );
+        fs::remove_file(&task).ok();
+        assert!(error.to_string().contains("issue-N"), "the refusal names the workpiece: {error}");
+        assert!(
+            !log.iter().any(|entry| entry.method == "POST" && entry.path.starts_with("/drafts")),
+            "an unapproved member must not open a draft: {log:?}"
+        );
     }
 
     #[test]
     fn seal_sends_per_member_scope_revisions_on_the_patch() {
-        // Two workpieces with distinct `--revision` flags must reach the
-        // draft as two scope revisions, not a cloned task-file digest. The
-        // cloned digest is what the admission door rejects. A member the
-        // flag does not name keeps the file digest.
+        // `--revision` overlays the store default. A member the flag does not
+        // name keeps the commission's current revision.
         let task = temp_task("seal-revisions", "build A and B");
-        let file_digest = plan::file_digest(&task).expect("task digest").as_hex();
         let rev_a = hex_of(digest(0x11));
         let rev_b = hex_of(digest(0x22));
+        let rev_c = hex_of(digest(0x33));
         let (_, log) = with_fake(
             move |request| match (request.method.as_str(), request.path.as_str()) {
-                ("GET", "/view") => {
-                    (200, json!({ "mainline": hex_of(digest(1)), "observed": hex_of(digest(2)), "blooms": [] }))
-                }
+                ("GET", "/commissions/issue-A") => (200, open_approved("issue-A", digest(0x31))),
+                ("GET", "/commissions/issue-B") => (200, open_approved("issue-B", digest(0x32))),
+                ("GET", "/commissions/issue-C") => (200, open_approved("issue-C", digest(0x33))),
+                ("GET", "/view") => (200, empty_view()),
                 ("POST", "/drafts") => (201, json!({ "draft_id": "8", "draft": {} })),
                 ("PATCH", "/drafts/8") => (200, json!({ "draft_id": "8", "draft": {} })),
                 ("POST", "/drafts/8/seal") => (200, json!({ "outcome": { "Sealed": hex_of(digest(4)) } })),
@@ -1406,18 +1423,14 @@ mod tests {
                 run_on(
                     &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
                     &BloomCommand::Seal(SealArgs {
-                        task_file: task.clone(),
-                        configs: Vec::new(),
-                        profile: None,
-                        base: BaseChoice::Observed,
-                        workpiece: vec!["issue-A".to_owned(), "issue-B".to_owned(), "issue-C".to_owned()],
-                        edges: Vec::new(),
-                        surfaces: Vec::new(),
                         revisions: vec![
                             ("issue-A".to_owned(), DigestHex::from_bytes([0x11; 32])),
                             ("issue-B".to_owned(), DigestHex::from_bytes([0x22; 32])),
                         ],
-                        projection: projection_args(),
+                        ..seal_args(
+                            task.clone(),
+                            vec!["issue-A".to_owned(), "issue-B".to_owned(), "issue-C".to_owned()],
+                        )
                     }),
                 )
                 .expect("seal --revision against the fake coordinator")
@@ -1432,13 +1445,8 @@ mod tests {
         assert_eq!(patch["proposals"][1]["scope_revision"], rev_b);
         assert_eq!(patch["proposals"][1]["approval"]["subject"], rev_b);
         assert_eq!(patch["proposals"][2]["workpiece"], "issue-C");
-        assert_eq!(patch["proposals"][2]["scope_revision"], file_digest);
-        assert_eq!(patch["proposals"][2]["approval"]["subject"], file_digest);
-
-        let seal = find(&log, "POST", "/drafts/8/seal").body.as_ref().expect("seal body");
-        assert_eq!(seal["projections"][0]["scope_revision"], rev_a);
-        assert_eq!(seal["projections"][1]["scope_revision"], rev_b);
-        assert_eq!(seal["projections"][2]["scope_revision"], file_digest);
+        assert_eq!(patch["proposals"][2]["scope_revision"], rev_c);
+        assert_eq!(patch["proposals"][2]["approval"]["subject"], rev_c);
     }
 
     #[test]
@@ -1453,9 +1461,8 @@ mod tests {
         let task = temp_task("profile-seal", "seal from a named profile");
         let (output, log) = with_fake(
             move |request| match (request.method.as_str(), request.path.as_str()) {
-                ("GET", "/view") => {
-                    (200, json!({ "mainline": hex_of(digest(1)), "observed": hex_of(digest(2)), "blooms": [] }))
-                }
+                ("GET", path) if let Some(id) = commission_route(path) => (200, open_approved(id, digest(0xaa))),
+                ("GET", "/view") => (200, empty_view()),
                 ("POST", "/configs") => {
                     let body = request.body.as_ref().expect("config body");
                     let kind = body["kind"].as_str().expect("kind");
@@ -1477,15 +1484,8 @@ mod tests {
                 run_on(
                     &Endpoint { host: "127.0.0.1".to_owned(), port, token: None },
                     &BloomCommand::Seal(SealArgs {
-                        task_file: task.clone(),
-                        configs: Vec::new(),
                         profile: Some("opus-high".to_owned()),
-                        base: BaseChoice::Observed,
-                        workpiece: vec!["wp-profile".to_owned()],
-                        edges: Vec::new(),
-                        surfaces: Vec::new(),
-                        revisions: Vec::new(),
-                        projection: projection_args(),
+                        ..seal_args(task.clone(), vec!["wp-profile".to_owned()])
                     }),
                 )
                 .expect("seal --profile against the fake coordinator")

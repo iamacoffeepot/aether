@@ -359,76 +359,6 @@ pub struct ConfigView {
     pub kind: String,
 }
 
-/// The nine completeness facts the pre-seal gate fails closed on.
-///
-/// Flattened groups keep the wire object one level (the gate's field names)
-/// without packing eight independent bools onto a single Rust struct.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct Completeness {
-    #[serde(flatten)]
-    statements: CompletenessStatements,
-    pub referenced_adr_prs_merged: bool,
-    pub model_routing_count: usize,
-    pub blocked: bool,
-    #[serde(flatten)]
-    freshness: CompletenessFreshness,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-struct CompletenessStatements {
-    has_problem_statement: bool,
-    has_design_notes: bool,
-    has_implementation_plan: bool,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-struct CompletenessFreshness {
-    declared_surface_fresh: bool,
-    dependencies_all_closed: bool,
-    umbrella_integrity: bool,
-}
-
-impl Completeness {
-    /// The checklist a first-class direct-drive seal satisfies.
-    pub fn direct_drive() -> Self {
-        Self {
-            statements: CompletenessStatements {
-                has_problem_statement: true,
-                has_design_notes: true,
-                has_implementation_plan: true,
-            },
-            referenced_adr_prs_merged: true,
-            model_routing_count: 1,
-            blocked: false,
-            freshness: CompletenessFreshness {
-                declared_surface_fresh: true,
-                dependencies_all_closed: true,
-                umbrella_integrity: true,
-            },
-        }
-    }
-}
-
-/// ADR-maturity the hard gate routes on.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
-pub enum AdrTouch {
-    #[default]
-    None,
-    NewOrEstablished,
-    ProposedOnly,
-}
-
-/// One member's seal-time projection.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemberProjection {
-    pub workpiece: String,
-    pub scope_revision: DigestHex,
-    pub declared_surface: Vec<String>,
-    pub completeness: Completeness,
-    pub adr_touch: AdrTouch,
-    pub pre_approved: bool,
-}
-
 /// One declared member-dependency edge (`member` depends on `depends_on`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DependencyEdge {
@@ -437,11 +367,15 @@ pub struct DependencyEdge {
 }
 
 /// `POST /drafts/{id}/seal` body.
+///
+/// Scope, approval, description, and completeness are not fields here: the
+/// door loads them from the commission store. A body that still carried
+/// `projections` or `descriptions` would be accepted and ignored.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SealRequest {
-    pub projections: Vec<MemberProjection>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub descriptions: BTreeMap<String, String>,
+    /// Override the admit idempotency key; defaults to the sealed bloom id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub edges: Vec<DependencyEdge>,
 }
@@ -450,9 +384,9 @@ pub struct SealRequest {
 #[derive(Debug, Clone, Serialize)]
 pub struct SupersedeRequest {
     pub successor_draft: String,
-    pub projections: Vec<MemberProjection>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub descriptions: BTreeMap<String, String>,
+    /// Override the admit idempotency key; defaults to the successor bloom id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub edges: Vec<DependencyEdge>,
 }
