@@ -470,6 +470,16 @@ pub struct BloomRecord {
     /// one. Set by [`Decision::SetResolved`], cleared when the bloom leaves the
     /// resolved state.
     pub resolved_head: Option<Digest>,
+    /// The tree [`Self::resolved_head`] carries, held beside it for the same
+    /// reason and over the same window.
+    ///
+    /// The head names a commit; what the gates judged is its tree, and the land
+    /// files its whole-workspace receipt under that. Kept here rather than
+    /// re-read from the fold because the fold is cleared on resolve — the pair
+    /// is one fact about the artifact being landed, so they are set and cleared
+    /// together.
+    #[serde(default)]
+    pub resolved_tree: Option<Digest>,
     /// The bloom-scope park (ADR-0153): the pending-decision question raised
     /// when the delta-confirm still failed at the two-pass ceiling — the
     /// failing review's record artifact digest, held in
@@ -1919,12 +1929,14 @@ impl Snapshot {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.status = BloomStatus::Resolved;
                     record.resolved_head = Some(resolved.head);
+                    record.resolved_tree = Some(resolved.tree);
                 }
             }
             Decision::SetUnresolved { bloom } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.status = BloomStatus::Sealed;
                     record.resolved_head = None;
+                    record.resolved_tree = None;
                 }
             }
             Decision::RecordLandingRoll { bloom, rolls } => {
@@ -1962,6 +1974,7 @@ impl BloomRecord {
             aggregate_passed: BTreeSet::new(),
             landing_rolls: 0,
             resolved_head: None,
+            resolved_tree: None,
             review_park: None,
             verify_proofs: BTreeMap::new(),
             verify_reuses: Vec::new(),
