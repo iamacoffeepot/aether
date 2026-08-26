@@ -45,7 +45,7 @@ use aether_substrate::{InboundMail, Mailer};
 use super::response::error_response;
 use crate::artifacts::{ArtifactsCapability, GetRange};
 #[cfg(feature = "github")]
-use crate::bloomery::{CandidatePush, DoctorBoard};
+use crate::bloomery::{ArchiveRecords, CandidatePush, DoctorBoard, JanitorReactorCapability, ListArchive};
 // The control core is a native sibling cap since the wasm-boundary retirement
 // (ADR-0149 §The boundary, amended), addressed as a typed peer
 // (`ctx.defer(&request).to::<ControlCore>()`) rather than a `resolve_embedded`
@@ -405,10 +405,10 @@ pub(super) enum Routed {
     },
     /// Relay an archive pass to the janitor.
     #[cfg(feature = "github")]
-    ArchiveRecords(crate::bloomery::ArchiveRecords),
+    ArchiveRecords(ArchiveRecords),
     /// Relay a tier listing to the janitor.
     #[cfg(feature = "github")]
-    ListArchive(crate::bloomery::ListArchive),
+    ListArchive(ListArchive),
     /// Relay a commission list to the store.
     ListCommissions(ListCommissions),
     /// Relay an open-commission list rendered as workpieces.
@@ -512,9 +512,9 @@ pub(super) fn finish(
         #[cfg(feature = "github")]
         Routed::EnumerateClaims(request) => ctx.defer(&request).to::<SourceCapability>(),
         #[cfg(feature = "github")]
-        Routed::ArchiveRecords(request) => ctx.defer(&request).to::<crate::bloomery::JanitorReactorCapability>(),
+        Routed::ArchiveRecords(request) => ctx.defer(&request).to::<JanitorReactorCapability>(),
         #[cfg(feature = "github")]
-        Routed::ListArchive(request) => ctx.defer(&request).to::<crate::bloomery::JanitorReactorCapability>(),
+        Routed::ListArchive(request) => ctx.defer(&request).to::<JanitorReactorCapability>(),
         Routed::DeferredVerify { correlation, subject, event } => {
             state.verifying.insert(correlation, VerifyPending { inbound: ctx.take_inbound(), subject, event: *event });
             http::Outcome::Deferred

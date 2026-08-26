@@ -1,9 +1,11 @@
 //! The archive tier: a directory root, one subdirectory per record class, and
 //! the move that puts a record there without unlinking the source first.
 
+use std::error::Error;
 use std::fmt;
 use std::fs;
 use std::io;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
 /// Which class of record a path on the tier holds.
@@ -59,7 +61,7 @@ pub struct ArchiveError {
 }
 
 impl ArchiveError {
-    fn io(path: &Path, error: io::Error) -> Self {
+    fn io(path: &Path, error: &io::Error) -> Self {
         Self { message: format!("{}: {error}", path.display()) }
     }
 
@@ -74,7 +76,7 @@ impl fmt::Display for ArchiveError {
     }
 }
 
-impl std::error::Error for ArchiveError {}
+impl Error for ArchiveError {}
 
 /// A configured archive-tier root.
 #[derive(Clone, Debug)]
@@ -116,12 +118,12 @@ impl ArchiveTier {
             return Err(ArchiveError::message(format!("{} is not a directory", source.display())));
         }
         let class_dir = self.class_dir(class);
-        fs::create_dir_all(&class_dir).map_err(|error| ArchiveError::io(&class_dir, error))?;
+        fs::create_dir_all(&class_dir).map_err(|error| ArchiveError::io(&class_dir, &error))?;
         let dest = unique_dest(&class_dir, name);
         match fs::rename(source, &dest) {
-            Ok(()) => self.confirm(class, name, &dest),
-            Err(error) if is_cross_device(&error) => self.copy_then_remove(class, name, source, &dest),
-            Err(error) => Err(ArchiveError::io(source, error)),
+            Ok(()) => Self::confirm(class, name, &dest),
+            Err(error) if is_cross_device(&error) => Self::copy_then_remove(class, name, source, &dest),
+            Err(error) => Err(ArchiveError::io(source, &error)),
         }
     }
 
@@ -143,7 +145,7 @@ impl ArchiveTier {
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => entries,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(ArchiveError::io(&dir, error)),
+            Err(error) => return Err(ArchiveError::io(&dir, &error)),
         };
         let mut records = Vec::new();
         for entry in entries.flatten() {
@@ -165,7 +167,6 @@ impl ArchiveTier {
     }
 
     fn copy_then_remove(
-        &self,
         class: RecordClass,
         name: &str,
         source: &Path,
@@ -197,12 +198,12 @@ impl ArchiveTier {
         }
         if let Err(error) = fs::remove_dir_all(source) {
             let _ = remove_tree(dest);
-            return Err(ArchiveError::io(source, error));
+            return Err(ArchiveError::io(source, &error));
         }
         Ok(ArchivedRecord { class, name: name.to_owned(), path: dest.to_path_buf(), bytes: dest_bytes })
     }
 
-    fn confirm(&self, class: RecordClass, name: &str, dest: &Path) -> Result<ArchivedRecord, ArchiveError> {
+    fn confirm(class: RecordClass, name: &str, dest: &Path) -> Result<ArchivedRecord, ArchiveError> {
         if !dest.is_dir() {
             return Err(ArchiveError::message(format!("{} is not a directory after the move", dest.display())));
         }
@@ -234,24 +235,24 @@ fn is_cross_device(error: &io::Error) -> bool {
 
 /// Copy `source` onto `dest` iteratively. `dest` must not already exist.
 fn copy_tree(source: &Path, dest: &Path) -> Result<(), ArchiveError> {
-    fs::create_dir(dest).map_err(|error| ArchiveError::io(dest, error))?;
+    fs::create_dir(dest).map_err(|error| ArchiveError::io(dest, &error))?;
     let mut stack = vec![(source.to_path_buf(), dest.to_path_buf())];
     while let Some((from, to)) = stack.pop() {
-        let entries = fs::read_dir(&from).map_err(|error| ArchiveError::io(&from, error))?;
+        let entries = fs::read_dir(&from).map_err(|error| ArchiveError::io(&from, &error))?;
         for entry in entries {
-            let entry = entry.map_err(|error| ArchiveError::io(&from, error))?;
+            let entry = entry.map_err(|error| ArchiveError::io(&from, &error))?;
             let from_child = entry.path();
             let name = entry.file_name();
             let to_child = to.join(&name);
-            let file_type = entry.file_type().map_err(|error| ArchiveError::io(&from_child, error))?;
+            let file_type = entry.file_type().map_err(|error| ArchiveError::io(&from_child, &error))?;
             if file_type.is_dir() {
-                fs::create_dir(&to_child).map_err(|error| ArchiveError::io(&to_child, error))?;
+                fs::create_dir(&to_child).map_err(|error| ArchiveError::io(&to_child, &error))?;
                 stack.push((from_child, to_child));
             } else if file_type.is_symlink() {
-                let target = fs::read_link(&from_child).map_err(|error| ArchiveError::io(&from_child, error))?;
-                std::os::unix::fs::symlink(&target, &to_child).map_err(|error| ArchiveError::io(&to_child, error))?;
+                let target = fs::read_link(&from_child).map_err(|error| ArchiveError::io(&from_child, &error))?;
+                symlink(&target, &to_child).map_err(|error| ArchiveError::io(&to_child, &error))?;
             } else {
-                fs::copy(&from_child, &to_child).map_err(|error| ArchiveError::io(&from_child, error))?;
+                fs::copy(&from_child, &to_child).map_err(|error| ArchiveError::io(&from_child, &error))?;
             }
         }
     }

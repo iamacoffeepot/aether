@@ -1292,7 +1292,6 @@ CREATE TABLE IF NOT EXISTS construct_session (
     slug                TEXT,
     PRIMARY KEY (bloom, workpiece)
 );
-CREATE INDEX IF NOT EXISTS construct_session_by_slug ON construct_session (slug);
 CREATE TABLE IF NOT EXISTS member_dependency (
     bloom      BLOB NOT NULL,
     member     TEXT NOT NULL,

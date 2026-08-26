@@ -7,6 +7,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+#[cfg(test)]
+use std::time::Duration;
 use std::time::SystemTime;
 
 use aether_bloomery::{BloomId, Digest, Snapshot, is_active_unlanded};
@@ -177,8 +179,8 @@ pub(super) fn live_session_slugs(
     Ok(live)
 }
 
-/// Retention window as a [`std::time::Duration`], for tests that age a directory.
+/// Retention window as a [`Duration`], for tests that age a directory.
 #[cfg(test)]
-pub(super) fn retention_duration(days: u64) -> std::time::Duration {
-    std::time::Duration::from_secs(days.saturating_mul(SECS_PER_DAY))
+pub(super) fn retention_duration(days: u64) -> Duration {
+    Duration::from_secs(days.saturating_mul(SECS_PER_DAY))
 }
