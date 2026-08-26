@@ -1,0 +1,15 @@
+error[E0080]: evaluation panicked: storage kind has a read-alias hash collision (ADR-0059 rule 2)
+ --> tests/ui/rejects_storage_alias_collision.rs:3:31
+  |
+3 | #[derive(aether_data::Schema, aether_data::Storage)]
+  |                               ^^^^^^^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
+  |
+note: inside `assert_unique_storage_leaves`
+ --> $RUST/core/src/panic.rs
+  |
+  = note: the failure occurred here
+  |
+ ::: $WORKSPACE/crates/aether-data/src/storage/hash.rs
+  |
+  |                 panic!("storage kind has a read-alias hash collision (ADR-0059 rule 2)");
+  |                 ------------------------------------------------------------------------ in this macro invocation
