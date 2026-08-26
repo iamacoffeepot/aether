@@ -125,9 +125,9 @@ pub struct ProcessTransformRunner {
     /// Empty means the GitHub `origin` remote; a local authority stores the
     /// absolute repository path (no `file://` prefix).
     fetch_remote: String,
-    /// Tests inject a `HEAD` read so the mismatch arm can fail the start
-    /// without a corrupted checkout. Production is always `None`.
-    head_reader: Option<fn(&Path) -> Result<String, LocalExecutorError>>,
+    /// Tests inject a `HEAD` so the mismatch arm can fail the start without
+    /// a corrupted checkout. Production is always `None`.
+    head_override: Option<String>,
 }
 
 impl ProcessTransformRunner {
@@ -137,7 +137,7 @@ impl ProcessTransformRunner {
     pub fn new(identity: CaptureIdentity, lane_program: LaneProgram, repo: impl Into<PathBuf>) -> Self {
         let repo = repo.into();
         let repo = repo.canonicalize().unwrap_or(repo);
-        Self { identity, lane_program, repo, fetch_remote: String::new(), head_reader: None }
+        Self { identity, lane_program, repo, fetch_remote: String::new(), head_override: None }
     }
 
     /// Fetch missing order identities from `remote` instead of `origin`.
@@ -150,12 +150,12 @@ impl ProcessTransformRunner {
         self
     }
 
-    /// Read `HEAD` through `reader` instead of git. Tests drive the mismatch
-    /// arm this way; production never sets it.
+    /// Pretend the worktree's `HEAD` is `head`. Tests drive the mismatch arm
+    /// this way; production never sets it.
     #[cfg(test)]
     #[must_use]
-    fn with_head_reader(mut self, reader: fn(&Path) -> Result<String, LocalExecutorError>) -> Self {
-        self.head_reader = Some(reader);
+    fn with_head_override(mut self, head: impl Into<String>) -> Self {
+        self.head_override = Some(head.into());
         self
     }
 
@@ -165,6 +165,12 @@ impl ProcessTransformRunner {
         } else {
             &self.fetch_remote
         }
+    }
+
+    /// The `HEAD` compared against the sealed subject: git, unless a test
+    /// overrode it so the mismatch arm can fail without a corrupted tree.
+    fn observed_head(&self, worktree_dir: &Path) -> Result<String, LocalExecutorError> {
+        self.head_override.clone().map_or_else(|| worktree_head(worktree_dir), Ok)
     }
 }
 
@@ -187,7 +193,8 @@ impl TransformRunner for ProcessTransformRunner {
         // slot already holds one, created when it does not — then read HEAD back
         // so a miss cannot launch the lane on a tree nobody can explain.
         materialize_checkout(&self.repo, spec.worktree_dir, &checkout)?;
-        let observed = confirm_checkout_head(spec.worktree_dir, &checkout, self.head_reader.unwrap_or(worktree_head))?;
+        let observed = self.observed_head(spec.worktree_dir)?;
+        confirm_checkout_head(spec.worktree_dir, &checkout, &observed)?;
         // The scratch worktree is a full checkout carrying the repo's interactive
         // `.claude/settings.json` hooks, and the construct lane spawns headless
         // `claude` in it — so the SessionStart worktree-rebind hook would fire and
@@ -639,16 +646,10 @@ fn worktree_head(worktree_dir: &Path) -> Result<String, LocalExecutorError> {
 ///
 /// A mismatch here is a host fault: materialize has already returned, so the
 /// tree should be at `expected`. Launching the lane anyway would spend a lap
-/// on a subject nobody can explain. `read_head` is git in production and a
-/// stub in the mismatch test.
-fn confirm_checkout_head(
-    worktree_dir: &Path,
-    expected: &str,
-    read_head: fn(&Path) -> Result<String, LocalExecutorError>,
-) -> Result<String, LocalExecutorError> {
-    let observed = read_head(worktree_dir)?;
+/// on a subject nobody can explain.
+fn confirm_checkout_head(worktree_dir: &Path, expected: &str, observed: &str) -> Result<(), LocalExecutorError> {
     if observed == expected {
-        return Ok(observed);
+        return Ok(());
     }
     Err(LocalExecutorError::Worktree(format!(
         "worktree at {} is at `{observed}`, expected `{expected}`",
@@ -1348,10 +1349,6 @@ mod tests {
         assert_eq!(recorded.head, second, "the recorded head is this dispatch's subject, not the slot's previous one");
     }
 
-    fn mismatched_head(_: &Path) -> Result<String, LocalExecutorError> {
-        Ok("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into())
-    }
-
     #[test]
     fn a_checkout_head_mismatch_fails_the_start_before_spawn() {
         // A tree the host already knows is wrong must not spend a lap. The
@@ -1366,7 +1363,7 @@ mod tests {
             LaneProgram::parse("/this/lane/must/not/spawn"),
             repo.path(),
         )
-        .with_head_reader(mismatched_head);
+        .with_head_override("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
 
         let error = runner
             .start(&spec("construct.implement", &first, None, None, &evidence, &slot, &target))
