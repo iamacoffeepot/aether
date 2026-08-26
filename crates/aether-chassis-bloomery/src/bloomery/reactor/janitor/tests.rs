@@ -248,16 +248,17 @@ fn age_dir(path: &Path, now: SystemTime, days: u64) {
 #[test]
 fn a_killed_runs_worktree_is_reclaimed_once_its_bloom_is_terminal() {
     // The motivating leak: the run ended by kill or crash, so the happy-path
-    // release never ran, and the bloom has since been superseded. The journal
-    // already knows the run is terminal; the sweep must reclaim the checkout
-    // without a coordinator restart.
+    // release never ran, and the bloom has since landed. The journal already
+    // knows the run is terminal; the sweep reclaims the checkout without a
+    // coordinator restart — but only between blooms. A successor still walking
+    // is not that window, even though the killed run's own bloom is terminal.
     let scratch = tempfile::tempdir().expect("a scratch dir is created");
     let nonce = "killed-nonce";
     let worktree = scratch.path().join(nonce);
     fs::create_dir_all(&worktree).expect("the worktree is created");
 
     let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
-    journal_superseded(&mut store);
+    journal_landed(&mut store);
 
     let released = Released(Arc::new(Mutex::new(Vec::new())));
     let runner = StubRunner { registered: vec![worktree.clone()], released: Released(Arc::clone(&released.0)) };
@@ -281,32 +282,20 @@ fn a_killed_runs_worktree_is_reclaimed_once_its_bloom_is_terminal() {
 }
 
 #[test]
-fn a_session_tree_outlives_its_launches_and_dies_with_the_work_bound_to_it() {
-    // Acceptance for #5425. A session's tree is created when the session is
-    // minted and reused by every launch of that conversation — the member's own
-    // retry laps, and a declared-edge dependent that inherits it — so nothing
-    // inside the session's life may remove it. Its construct finishing is not
-    // the end of it; the verify that follows is entitled to the tree that
-    // construct left, and the harness will only resume the conversation in that
-    // directory anyway. What ends it is the work ending, which is a fact only
-    // the journal holds.
-    //
-    // Both directions in one pass, because getting either alone is easy and the
-    // pair is the whole rule: the live bloom's member keeps its tree, and one no
-    // live bloom names loses it.
+fn a_killed_runs_worktree_survives_while_a_successor_walks() {
+    // 2026-08-25: tree reclaim while anything walks is the class that took
+    // board-5435's session. A superseded predecessor's nonce-keyed checkout is
+    // terminal as far as the live-set can see, and that used to be enough.
     let scratch = tempfile::tempdir().expect("a scratch dir is created");
-    let live = scratch.path().join("sessions").join("s-live").join("tree");
-    let terminal = scratch.path().join("sessions").join("s-landed").join("tree");
-    fs::create_dir_all(&live).expect("the live session's tree is created");
-    fs::create_dir_all(&terminal).expect("the terminal session's tree is created");
+    let nonce = "killed-nonce";
+    let worktree = scratch.path().join(nonce);
+    fs::create_dir_all(&worktree).expect("the worktree is created");
 
     let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
-    let bloom = journal_sealed(&mut store);
-    store.record_session_slug(bloom.0.as_bytes(), "wp", "s-live").expect("the live member's slug records");
+    journal_superseded(&mut store);
 
     let released = Released(Arc::new(Mutex::new(Vec::new())));
-    let runner =
-        StubRunner { registered: vec![live.clone(), terminal.clone()], released: Released(Arc::clone(&released.0)) };
+    let runner = StubRunner { registered: vec![worktree.clone()], released: Released(Arc::clone(&released.0)) };
     let keep = policy(7, u64::MAX);
     let report = run(&mut SweepRequest {
         store: &mut store,
@@ -321,13 +310,79 @@ fn a_session_tree_outlives_its_launches_and_dies_with_the_work_bound_to_it() {
         target_readings: &mut TargetReadings::default(),
     });
 
-    assert_eq!(report.worktrees, 1, "one tree went and one stayed");
-    assert_eq!(
-        released.0.lock().expect("the release log is not poisoned").as_slice(),
-        [terminal],
-        "the session no live member is bound to loses its tree; the sealed bloom's member keeps its own",
-    );
-    assert!(live.is_dir(), "a live member's session tree is still there for its next launch");
+    assert_eq!(report.worktrees, 0, "a walking successor is not between blooms");
+    assert!(released.0.lock().expect("the release log is not poisoned").is_empty());
+    assert!(worktree.is_dir(), "the checkout is still there for as long as anything walks");
+}
+
+#[test]
+fn a_session_tree_outlives_its_launches_and_dies_with_the_work_bound_to_it() {
+    // Acceptance for #5425, extended by the 2026-08-25 retention policy. A
+    // session's tree is created when the session is minted and reused by every
+    // launch of that conversation — the member's own retry laps, and a
+    // declared-edge dependent that inherits it — so nothing inside the
+    // session's life may remove it. Its construct finishing is not the end of
+    // it; the verify that follows is entitled to the tree that construct left,
+    // and the harness will only resume the conversation in that directory
+    // anyway.
+    //
+    // What ends it is the work ending, and "the work" is the coordinator being
+    // between blooms, not the live-set derivation that used to decide which
+    // slugs were still named. That derivation missed board-5435 mid-walk
+    // (dispatches 3301/3318). While anything walks, even a tree no live member
+    // is bound to stays: old trees are records of how the work was figured
+    // out. Once nothing is walking, both go.
+    let scratch = tempfile::tempdir().expect("a scratch dir is created");
+    let live = scratch.path().join("sessions").join("s-live").join("tree");
+    let terminal = scratch.path().join("sessions").join("s-landed").join("tree");
+    fs::create_dir_all(&live).expect("the live session's tree is created");
+    fs::create_dir_all(&terminal).expect("the terminal session's tree is created");
+
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
+    let spec = journal_sealed_spec(&mut store);
+    store.record_session_slug(spec.id().0.as_bytes(), "wp", "s-live").expect("the live member's slug records");
+
+    let released = Released(Arc::new(Mutex::new(Vec::new())));
+    let runner =
+        StubRunner { registered: vec![live.clone(), terminal.clone()], released: Released(Arc::clone(&released.0)) };
+    let keep = policy(7, u64::MAX);
+    let walking = run(&mut SweepRequest {
+        store: &mut store,
+        runner: &runner,
+        source: None,
+        worktree_base: scratch.path(),
+        target_base: scratch.path(),
+        lanes: &idle,
+        policy: &keep,
+        now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
+        target_readings: &mut TargetReadings::default(),
+    });
+
+    assert_eq!(walking.worktrees, 0, "a walking bloom holds every session tree, named or not");
+    assert!(released.0.lock().expect("the release log is not poisoned").is_empty());
+    assert!(live.is_dir() && terminal.is_dir(), "both trees are still there for as long as anything walks");
+
+    journal_land(&mut store, &spec);
+    let between = run(&mut SweepRequest {
+        store: &mut store,
+        runner: &runner,
+        source: None,
+        worktree_base: scratch.path(),
+        target_base: scratch.path(),
+        lanes: &idle,
+        policy: &keep,
+        now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
+        target_readings: &mut TargetReadings::default(),
+    });
+
+    assert_eq!(between.worktrees, 2, "once nothing walks, every session tree is reclaimable");
+    let mut gone = released.0.lock().expect("the release log is not poisoned").clone();
+    gone.sort();
+    let mut expected = vec![live, terminal];
+    expected.sort();
+    assert_eq!(gone, expected, "the live member's tree dies with the work; the unbound one goes with it");
 }
 
 #[test]
@@ -536,8 +591,8 @@ fn consumed_evidence_of_a_terminal_bloom_is_reclaimed_after_the_retention_window
     fs::create_dir_all(&evidence).expect("the evidence dir is created");
 
     let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
-    let (predecessor, _) = journal_superseded(&mut store);
-    store.record_order(&order_for(nonce, &predecessor)).expect("the order is recorded");
+    let bloom = journal_landed(&mut store);
+    store.record_order(&order_for(nonce, &bloom)).expect("the order is recorded");
     store.consume_order(nonce).expect("the order is consumed");
 
     let now = SystemTime::now();
@@ -560,6 +615,44 @@ fn consumed_evidence_of_a_terminal_bloom_is_reclaimed_after_the_retention_window
 
     assert_eq!(report.evidence_dirs, 1);
     assert!(!evidence.exists(), "evidence past the window of a terminal bloom is reclaimed");
+}
+
+#[test]
+fn consumed_evidence_survives_while_a_successor_walks() {
+    // Tree and text reclaim skip quietly while anything walks. A predecessor's
+    // consumed evidence past the retention window used to go in that window;
+    // the 2026-08-25 policy keeps text as a record until the coordinator is
+    // between blooms.
+    let scratch = tempfile::tempdir().expect("a scratch dir is created");
+    let nonce = "stale-evidence";
+    let evidence = scratch.path().join(format!("{nonce}-evidence"));
+    fs::create_dir_all(&evidence).expect("the evidence dir is created");
+
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
+    let (predecessor, _) = journal_superseded(&mut store);
+    store.record_order(&order_for(nonce, &predecessor)).expect("the order is recorded");
+    store.consume_order(nonce).expect("the order is consumed");
+
+    let now = SystemTime::now();
+    age_dir(&evidence, now, 8);
+
+    let runner = StubRunner { registered: vec![], released: Released(Arc::new(Mutex::new(Vec::new()))) };
+    let keep = policy(7, u64::MAX);
+    let report = run(&mut SweepRequest {
+        store: &mut store,
+        runner: &runner,
+        source: None,
+        worktree_base: scratch.path(),
+        target_base: scratch.path(),
+        lanes: &idle,
+        policy: &keep,
+        now,
+        pruned: &mut HashSet::new(),
+        target_readings: &mut TargetReadings::default(),
+    });
+
+    assert_eq!(report.evidence_dirs, 0, "a walking successor holds even stale evidence");
+    assert!(evidence.exists(), "text is a record, not a disk-pressure lever");
 }
 
 #[test]
@@ -621,6 +714,37 @@ fn target_dirs_are_swept_when_over_budget_and_idle() {
 
     assert_eq!(report.target_dirs, 1);
     assert!(!target.exists(), "an idle host over budget drops the slot target dir it has to");
+}
+
+#[test]
+fn target_dirs_are_swept_while_a_bloom_walks() {
+    // Disk pressure is the one reclaim that keeps running on every tick. A
+    // future edit that folded sweep_targets under the between-blooms gate
+    // would leave an over-budget host unable to evict for as long as anything
+    // walked — the opposite of the operator's "pressure evicts build dirs,
+    // never trees" split.
+    let scratch = tempfile::tempdir().expect("a scratch dir is created");
+    let target = plant_target(scratch.path(), 0, 64, epoch());
+
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
+    journal_sealed(&mut store);
+    let runner = StubRunner { registered: vec![], released: Released(Arc::new(Mutex::new(Vec::new()))) };
+    let tight = policy(7, 16);
+    let report = run(&mut SweepRequest {
+        store: &mut store,
+        runner: &runner,
+        source: None,
+        worktree_base: scratch.path(),
+        target_base: scratch.path(),
+        lanes: &idle,
+        policy: &tight,
+        now: SystemTime::now(),
+        pruned: &mut HashSet::new(),
+        target_readings: &mut TargetReadings::default(),
+    });
+
+    assert_eq!(report.target_dirs, 1, "a walking bloom does not hold regenerable build state");
+    assert!(!target.exists(), "the idle slot's target dir still goes when the host is over budget");
 }
 
 #[test]

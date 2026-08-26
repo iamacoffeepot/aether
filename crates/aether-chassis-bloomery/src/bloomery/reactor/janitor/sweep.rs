@@ -201,6 +201,20 @@ pub struct SweepRequest<'a> {
 /// checkouts, evidence, and refs its members are still standing in read as
 /// nobody's.
 ///
+/// Tree and text reclaim — nonce-keyed worktrees, session trees, evidence —
+/// run only between blooms: no bloom in that replayed snapshot is
+/// active-and-unlanded, and no order is outstanding. Computed in this pass
+/// from those two sets, never sampled elsewhere or cached across ticks. While
+/// anything walks, those three sweeps skip quietly. On 2026-08-25 the live-set
+/// derivation missed sessions that were still resumable (board-5435; dispatches
+/// 3301/3318), and the janitor reclaimed their trees mid-walk; a later refine
+/// lap resumed into a fresh checkout and declined a phantom empty diff.
+/// Session resumption is protected at all costs: a session checkout lives at
+/// least as long as any work that could resume that session, and old trees are
+/// records of how the work was figured out. Disk pressure is the slot-target
+/// budget eviction, which still runs every tick and evicts only those
+/// directories — regenerable build state, never source trees or text.
+///
 /// # Errors
 /// The store could not be read. A journal row that does not decode is logged
 /// and left out rather than failed — a torn record must not take the
@@ -210,13 +224,32 @@ pub fn sweep(request: &mut SweepRequest<'_>) -> rusqlite::Result<SweepReport> {
     let outstanding = request.store.list_outstanding_nonces()?;
     let live: HashSet<&str> = outstanding.iter().map(String::as_str).collect();
     let owners = dispatch_owners(request.store, &outstanding)?;
+    let between_blooms = between_blooms(&snapshot, &outstanding);
 
-    let worktrees = reclaim_worktrees(request.runner, request.worktree_base, &live, &owners, &snapshot)
-        + reclaim_session_trees(request.runner, request.worktree_base, request.store, &snapshot, &outstanding)?;
-    let evidence_dirs = reclaim_evidence(request, &live, &owners, &snapshot);
+    let worktrees = if between_blooms {
+        reclaim_worktrees(request.runner, request.worktree_base, &live, &owners, &snapshot)
+            + reclaim_session_trees(request.runner, request.worktree_base, request.store, &snapshot, &outstanding)?
+    } else {
+        0
+    };
+    let evidence_dirs = if between_blooms {
+        reclaim_evidence(request, &live, &owners, &snapshot)
+    } else {
+        0
+    };
     let refs = request.source.map_or(0, |source| prune_terminal_refs(source, &snapshot, request.pruned));
     let target_dirs = sweep_targets(request);
     Ok(SweepReport { worktrees, evidence_dirs, refs, target_dirs })
+}
+
+/// Whether the coordinator is between blooms: nothing in the replayed snapshot
+/// is still walking, and no order is outstanding.
+///
+/// Tree and text reclaim run only then. The live-set derivation that used to
+/// decide which session trees were reclaimable is a computed claim racing live
+/// work; this gate does not depend on that computation being right.
+fn between_blooms(snapshot: &Snapshot, outstanding: &[String]) -> bool {
+    outstanding.is_empty() && snapshot.blooms.values().all(|record| !is_active_unlanded(record.status))
 }
 
 /// Nonce → owning bloom, from outstanding rows and the durable owner table.
@@ -290,7 +323,7 @@ fn reclaim_worktrees(
 }
 
 /// Release the checkout of every harness session no live member is bound to
-/// any more (#5425).
+/// any more (#5425) — and only when the coordinator is between blooms.
 ///
 /// A session's tree is created when the session is minted and reused by every
 /// launch of that conversation — a member's own retry laps, and a declared-edge
@@ -300,6 +333,14 @@ fn reclaim_worktrees(
 /// withdrawn from it, or left with it when the bloom was superseded or
 /// cancelled. Everything the live set does not name is reclaimable, which also
 /// clears the trees of a bloom this process never saw walk.
+///
+/// That live set is not the retention policy. On 2026-08-25 it missed sessions
+/// that were still resumable (board-5435; dispatches 3301/3318): the janitor
+/// reclaimed the tree mid-walk, the next refine lap resumed the conversation
+/// into a fresh checkout, and the capture declined a phantom empty diff. The
+/// caller gates this walk on the pass's between-blooms condition; while
+/// anything walks, a session tree stays, named or not. Old trees are records
+/// of how the work was figured out.
 ///
 /// The candidates are the repository's *registered* worktrees, filtered to the
 /// `sessions/<slug>/tree` shape, for the reason [`reclaim_worktrees`] filters to
@@ -589,6 +630,13 @@ struct SlotTarget {
 
 /// Bring the slot target directories back under budget, evicting the coldest
 /// first and only as far as the budget requires.
+///
+/// This is the only disk-pressure lever, and it runs on every tick — tree and
+/// text reclaim wait until the coordinator is between blooms; target
+/// directories are regenerable build state and are what pressure actually
+/// evicts. Occupancy is still re-read live immediately before each eviction,
+/// and unattributed occupancy still refuses the pass; those guards stay
+/// exactly as they are.
 ///
 /// Reclaiming *everything* on an overage — what this did until the 2026-08-14
 /// incident — makes each firing maximally destructive, and a budget set below

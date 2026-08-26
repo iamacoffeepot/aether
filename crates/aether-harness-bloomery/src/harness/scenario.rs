@@ -22,7 +22,8 @@ use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneRun, LaneScript
 use aether_chassis_bloomery::bloomery::{
     BloomeryChassis, BloomeryEnv, Chassis, CoordinatorConfig, DispatchTick, DoctorReactorCapability, DoctorReport,
     DoctorTick, ExecutorReactorCapability, GithubConnectionConfig, IntegrateReactorCapability, IntegrateTick,
-    LandReactorCapability, LandTick, NotifyConfig, ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload,
+    JanitorReactorCapability, JanitorTick, LandReactorCapability, LandTick, NotifyConfig, ScriptedEvidence,
+    ScriptedEvidenceResult, ScriptedUpload,
 };
 use aether_chassis_bloomery::commission::task_text;
 use aether_chassis_bloomery::control::ObserveTick;
@@ -1062,6 +1063,16 @@ impl ScenarioHarness {
     /// Wake the doctor reactor once so `/view` overlays a fresh report.
     pub fn doctor_tick(&mut self) {
         self.wire.tick(<DoctorReactorCapability as Addressable>::resolve(0, ()), &DoctorTick::default());
+    }
+
+    /// Wake the janitor reactor once so a scenario can observe a reclaim pass
+    /// without waiting on its poll timer.
+    ///
+    /// Kept off [`Self::tick`]: a scenario that is not about retention must
+    /// not start reclaiming session trees mid-walk just because it advanced
+    /// the other reactors.
+    pub fn janitor_tick(&mut self) {
+        self.wire.tick(<JanitorReactorCapability as Addressable>::resolve(0, ()), &JanitorTick::default());
     }
 
     /// One round of executor / integrate / land / observe / doctor.
