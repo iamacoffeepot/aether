@@ -59,10 +59,11 @@ mod withdraw;
 pub use decision::Decision;
 pub use error::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError,
-    AttemptCompletedError, BaseMismatch, FoldConflictError, GrantAttemptsError, HostFaultError, IntegrateError,
-    LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError, NarrowCompositionError,
-    OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ResolveError, SealConflict, SealError,
-    SpliceError, SupersedeError, SuppressionDispositionError, SurfaceRequestedError, VerifyFailedError, WithdrawError,
+    AttemptCompletedError, BaseMismatch, BaseReverifyError, FoldConflictError, GrantAttemptsError, HostFaultError,
+    IntegrateError, LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError,
+    NarrowCompositionError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ResolveError,
+    SealConflict, SealError, SpliceError, SupersedeError, SuppressionDispositionError, SurfaceRequestedError,
+    VerifyFailedError, WithdrawError,
 };
 pub use event::{Event, Fact};
 pub use gate::{
@@ -84,7 +85,7 @@ use crate::values::{ResolvedConfigs, SpendWindow};
 
 use aggregate_verify::reduce_aggregate_verify_completed;
 use attempt::{reduce_attempt_completed, reduce_member_executor_fault};
-use base_verify::reduce_base_verify_completed;
+use base_verify::{reduce_base_reverify, reduce_base_verify_completed};
 use evidence::{reduce_admit_evidence, reduce_adopt_answer};
 use fold_conflict::reduce_fold_conflict;
 use fold_refusal::reduce_fold_refused;
@@ -207,6 +208,7 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         Fact::BaseVerifyCompleted { base, tree, passed, evidence, failed } => {
             reduce_base_verify_completed(snapshot, *base, *tree, *passed, evidence, *failed)
         }
+        Fact::BaseReverify(reverify) => reduce_base_reverify(snapshot, reverify),
         Fact::CompositionNarrowed { bloom, verified, tree, head, evidence, attribution } => {
             reduce_composition_narrowed(snapshot, bloom, verified, *tree, *head, evidence, attribution)
         }

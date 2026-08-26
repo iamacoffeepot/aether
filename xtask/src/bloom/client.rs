@@ -10,8 +10,9 @@ use super::Endpoint;
 use super::dto::{
     ApprovalStoredView, BloomView, CancelCommissionRequest, CommissionCancelledView, CommissionReopenedView,
     CommissionShowView, ConfigRequest, ConfigValueView, ConfigView, DraftPatch, DraftView, JournalEntry, JournalView,
-    OutcomeView, ReopenCommissionRequest, RepairRequest, RetryRequest, RevisionEvidence, ScopeRevisionWrittenView,
-    SealRequest, SupersedeRequest, SuppressionAnswerRequest, WithdrawRequest, WriteRevisionRequest,
+    OutcomeView, ReopenCommissionRequest, RepairRequest, RetryRequest, ReverifyBaseRequest, RevisionEvidence,
+    ScopeRevisionWrittenView, SealRequest, SupersedeRequest, SuppressionAnswerRequest, WithdrawRequest,
+    WriteRevisionRequest,
 };
 use super::http;
 use super::plan::spec_id;
@@ -88,6 +89,11 @@ impl<'a> Client<'a> {
     /// Run one member's current stage again on the candidate it holds (#5423).
     pub fn retry(&self, bloom_id: &str, workpiece: &str, request: &RetryRequest) -> Result<OutcomeView> {
         self.send("POST", &format!("/blooms/{bloom_id}/members/{workpiece}/retry"), request)
+    }
+
+    /// Run `verify.base` again on a red receipt.
+    pub fn reverify_base(&self, base: &str, request: &ReverifyBaseRequest) -> Result<OutcomeView> {
+        self.send("POST", &format!("/bases/{base}/reverify"), request)
     }
 
     /// Hand a wedged member the candidate the operator supplied and let the

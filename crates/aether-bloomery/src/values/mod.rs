@@ -46,15 +46,15 @@ pub use api::{
     CoordinatorLogsView, CreateCommissionRequest, DEFAULT_HTTP_PORT, DispatchEvidenceView, DispatchFilePage,
     DispatchProcessView, DraftPatch, DraftView, DraftsView, ErrorView, GrantRequest, HTTP_READ_TIMEOUT, HoldRequest,
     JournalEntry, JournalView, MemberProjection, OutcomeView, ReleaseAcceptedView, ReleaseRequest,
-    ReopenCommissionRequest, RepairRequest, RetryRequest, RevisionEvidence, ScopeRevisionWrittenView,
-    ScopeRunOpenedView, ScopeRunRequest, SealRequest, SupersedeRequest, SuppressionAnswerRequest, WithdrawRequest,
-    WorkpiecesView, WriteRevisionRequest, http_success,
+    ReopenCommissionRequest, RepairRequest, RetryRequest, ReverifyBaseRequest, RevisionEvidence,
+    ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, SealRequest, SupersedeRequest,
+    SuppressionAnswerRequest, WithdrawRequest, WorkpiecesView, WriteRevisionRequest, http_success,
 };
 pub use approval::{
     ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, TierVerdict, gate_widening, path_in_surface, surface_additions,
     surface_intersection, surface_union, tier_verdict,
 };
-pub use base_verify::{BaseReceipt, BaseVerdict};
+pub use base_verify::{BaseReceipt, BaseReverify, BaseVerdict};
 pub use bloom::{
     BloomDraft, BloomSpec, DependencyError, LandingReceipt, MemberCandidate, MemberDependency, MemberSubject,
     Membership, ResolutionClaim, ResolvedBloom, ResolvedDependencies, resolve_member_dependencies,

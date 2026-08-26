@@ -18,9 +18,9 @@ use super::hex;
 pub use aether_bloomery::{
     BloomSpec, BloomView, CancelCommissionRequest, CandidateRef, CommissionCancelledView, CommissionReopenedView,
     CommissionShowView, ConfigRegistry, DraftPatch, DraftView, JournalEntry, JournalView, MemberView, OutcomeView,
-    ReopenCommissionRequest, RepairRequest, RetryRequest, RevisionEvidence, ScopeRevisionWrittenView, SealRequest,
-    SupersedeRequest, SuppressionAnswerRequest, SuppressionVerdict, ViewDocument, WithdrawRequest,
-    WriteRevisionRequest,
+    ReopenCommissionRequest, RepairRequest, RetryRequest, ReverifyBaseRequest, RevisionEvidence,
+    ScopeRevisionWrittenView, SealRequest, SupersedeRequest, SuppressionAnswerRequest, SuppressionVerdict,
+    ViewDocument, WithdrawRequest, WriteRevisionRequest,
 };
 
 /// A digest as the REST edge renders it — CLI flags and operator-facing print.
