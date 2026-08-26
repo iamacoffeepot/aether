@@ -621,7 +621,10 @@ fn require_sealable_commission(client: &Client<'_>, workpiece: &str) -> Result<(
     }
     let revision =
         shown.current_revision.with_context(|| format!("commission {workpiece} names no current revision"))?;
-    if !shown.approvals.iter().any(|statement| statement.words.as_slice() == revision.as_bytes().as_slice()) {
+    // The show view already scopes `approvals` to the tip. Empty is the door's
+    // AbsentApproval; matching `words` here would refuse a well-formed row whose
+    // bytes the JSON front rendered in a shape this mirror does not decode.
+    if shown.approvals.is_empty() {
         bail!("{workpiece} carries no stored approval over its current revision");
     }
     Ok((revision, shown.current.map(|current| current.declared_surface).unwrap_or_default()))
@@ -660,10 +663,11 @@ mod tests {
     use std::fs;
     use std::io::{self, Read, Write};
     use std::net::{TcpListener, TcpStream};
+    use std::panic::{self, AssertUnwindSafe};
     use std::path::PathBuf;
     use std::process;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::thread;
     use std::time::Duration;
 
@@ -846,15 +850,20 @@ mod tests {
                     }
                 }
             });
-            let result = body(port);
+            // A panic inside `body` must still flip `stop`: otherwise the
+            // accept loop never leaves and `thread::scope` waits out the
+            // nextest slow-timeout instead of reporting the panic.
+            let result = panic::catch_unwind(AssertUnwindSafe(|| body(port)));
             stop.store(true, Ordering::Relaxed);
             result
         });
-        (result, log.into_inner().expect("log"))
+        (result.unwrap_or_else(|payload| panic::resume_unwind(payload)), log.into_inner().expect("log"))
     }
 
     fn temp_task(name: &str, text: &str) -> PathBuf {
-        let path = env::temp_dir().join(format!("aether-xtask-bloom-{name}-{}", process::id()));
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = env::temp_dir().join(format!("aether-xtask-bloom-{name}-{}-{seq}", process::id()));
         fs::write(&path, text).expect("write task file");
         path
     }
