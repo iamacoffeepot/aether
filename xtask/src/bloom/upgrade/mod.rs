@@ -135,9 +135,9 @@ mod tests_support {
     use anyhow::{Result, anyhow};
 
     use super::Views;
-    use crate::bloom::dto::ViewDocument;
+    use crate::bloom::dto::{ViewDocument, test_bloom, test_member, test_view};
     use crate::bloom::upgrade::paths::Paths;
-    use aether_bloomery::BloomStatus;
+    use aether_bloomery::{BloomStatus, Digest};
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -156,13 +156,13 @@ mod tests_support {
     }
 
     pub fn drained_view() -> ViewDocument {
-        crate::bloom::dto::test_view(
-            aether_bloomery::Digest::from_bytes([1; 32]),
-            aether_bloomery::Digest::from_bytes([2; 32]),
-            vec![crate::bloom::dto::test_bloom(
-                aether_bloomery::Digest::from_bytes([3; 32]),
+        test_view(
+            Digest::from_bytes([1; 32]),
+            Digest::from_bytes([2; 32]),
+            vec![test_bloom(
+                Digest::from_bytes([3; 32]),
                 BloomStatus::Landed,
-                vec![crate::bloom::dto::test_member("issue-5014", aether_bloomery::Digest::from_bytes([7; 32]))],
+                vec![test_member("issue-5014", Digest::from_bytes([7; 32]))],
             )],
         )
     }
@@ -288,7 +288,7 @@ mod tests {
     use super::shell::fake::Fake;
     use super::tests_support::{Scripted, drained_view, seeded_args, test_args};
     use super::upgrade;
-    use aether_bloomery::BloomStatus;
+    use aether_bloomery::{BloomStatus, Digest};
 
     fn present_candidate(mut args: super::UpgradeArgs) -> super::UpgradeArgs {
         let path = super::tests_support::unique_temp("aether-xtask-upgrade-candidate");
@@ -419,7 +419,7 @@ mod tests {
     #[test]
     fn a_live_observation_during_the_fold_test_is_the_deploy_baseline() {
         let mut later = drained_view();
-        later.observed = aether_bloomery::Digest::from_bytes([4; 32]);
+        later.observed = Digest::from_bytes([4; 32]);
         let expected = format!("observed={}", later.observed);
         let views = Scripted::new(Ok(later), Ok(drained_view()));
         let args = present_candidate(seeded_args(12, 12));
