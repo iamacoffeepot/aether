@@ -12,11 +12,14 @@
 //! Both newtypes are `pub` tuple structs over `Uuid` so existing call
 //! sites that match `EngineId(uuid)` keep working unchanged.
 
+use alloc::borrow::Cow;
+use alloc::vec::Vec;
+
 use serde::{Deserialize, Serialize};
 
 use crate::Schema;
 use crate::schema::{LabelNode, NamedField, SchemaType};
-use alloc::borrow::Cow;
+use crate::wire::{Error as WireError, WireDecode, WireEncode, decode_bytes, encode_bytes};
 
 pub use uuid::Uuid;
 
@@ -35,6 +38,20 @@ impl Schema for EngineId {
     const LABEL_NODE: LabelNode = LabelNode::Anonymous;
 }
 
+impl WireEncode for EngineId {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
+        encode_bytes(out, self.0.as_bytes())
+    }
+}
+
+impl<'de> WireDecode<'de> for EngineId {
+    fn decode(cursor: &mut &'de [u8]) -> Result<Self, WireError> {
+        let bytes = decode_bytes(cursor)?;
+        let uuid_bytes: [u8; 16] = bytes.try_into().map_err(|_| WireError::Length)?;
+        Ok(Self(Uuid::from_bytes(uuid_bytes)))
+    }
+}
+
 /// Hub-minted routing handle for a Claude MCP session. The engine
 /// treats it as opaque bytes: it only echoes tokens the hub handed it
 /// on inbound mail back as the address on a reply. The hub validates
@@ -50,6 +67,20 @@ impl Schema for SessionToken {
     };
     const LABEL: Option<&'static str> = Some("aether.session_token");
     const LABEL_NODE: LabelNode = LabelNode::Anonymous;
+}
+
+impl WireEncode for SessionToken {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
+        encode_bytes(out, self.0.as_bytes())
+    }
+}
+
+impl<'de> WireDecode<'de> for SessionToken {
+    fn decode(cursor: &mut &'de [u8]) -> Result<Self, WireError> {
+        let bytes = decode_bytes(cursor)?;
+        let uuid_bytes: [u8; 16] = bytes.try_into().map_err(|_| WireError::Length)?;
+        Ok(Self(Uuid::from_bytes(uuid_bytes)))
+    }
 }
 
 impl SessionToken {

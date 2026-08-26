@@ -9,7 +9,7 @@
 //! can't silently change the wire without showing up here too. They are
 //! the serde `variant_index` of the matching `SchemaShape`/`VariantShape`
 //! arm, written as a fixed `u32` little-endian selector — so the
-//! const-fn output stays byte-identical to `wire::to_vec(KindShape)`,
+//! const-fn output stays byte-identical to the runtime `wire::to_vec(KindShape)`,
 //! and the substrate/hub `SchemaShape` enum must keep the same order.
 
 use crate::schema::{EnumVariant, Primitive, SchemaCell, SchemaType};

@@ -1,13 +1,14 @@
 //! The aether wire format (ADR-0118) — the owned, schema-driven, fixed-width
 //! encoding for structured (non-cast) kinds.
 //!
-//! The format is defined here. `serde` is a *consumer* that drives it: the
-//! `ser` adapter walks a Rust value through serde and emits the bytes, and the
-//! `de` adapter reads them back. The schema-driven JSON walker (in
-//! `aether-codec`, step 2 of the ADR-0118 arc) is the other consumer over the
-//! same byte layout; the two must emit identical bytes for the same value,
-//! which is why the encoding carries no type or field tags — both ends already
-//! know the shape (the Rust type, or the `SchemaType`).
+//! [`WireEncode`] / [`WireDecode`] are the typed codec. `#[derive(Schema)]`
+//! emits them from the same field list as `SCHEMA` (ADR-0188), so a schema
+//! change is a codec change. The schema-driven JSON walker in `aether-codec`
+//! (`encode_schema` / `decode_schema`) walks the same byte layout from a
+//! `SchemaType` with no Rust type in sight. The serde `ser` / `de` adapters
+//! remain for protocol frames that are not `Schema` types (`WireFrame`,
+//! `PlayerFrame`, the fuzz corpus); they must emit identical bytes for the
+//! same value, which is why the encoding carries no type or field tags.
 //!
 //! Encoding rules (ADR-0118 §The format):
 //! - little-endian, fixed-width scalars (the declared width; no variable-length
@@ -20,10 +21,10 @@
 //!   `variant_index`), then the selected variant's body.
 //!
 //! This module is the workspace's structured wire format (ADR-0118,
-//! shipped): the serde adapter here backs `#[derive(Serialize)]` kinds and
-//! `aether-codec`'s schema walker drives the same primitives from a
-//! `SchemaType`. Both emit identical bytes. The external `postcard` crate
-//! it replaced is gone — no crate in the workspace depends on it.
+//! shipped). Kind encode/decode funnels through [`WireEncode`] /
+//! [`WireDecode`]. The serde adapter still backs `to_vec` / `from_bytes`
+//! for non-Schema protocol frames. The external `postcard` crate it
+//! replaced is gone — no crate in the workspace depends on it.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -35,10 +36,19 @@ use serde::ser::Error as SerError;
 use serde::{Deserialize, Serialize};
 
 mod de;
+mod leaf;
+pub(crate) mod owned;
 mod ser;
+mod vocabulary;
 
 #[cfg(test)]
+mod differential;
+#[cfg(test)]
 mod tests;
+
+pub use owned::{
+    WireDecode, WireEncode, decode_bytes, decode_from_slice, encode_bytes, encode_to_vec, take_from_slice,
+};
 
 /// A wire encode or decode failure. Encoding fails only when a length exceeds
 /// the `u32` ceiling; everything else is a decode-side fault.
@@ -61,6 +71,8 @@ pub enum Error {
     NotSelfDescribing,
     /// A `serde` `custom` message.
     Message(String),
+    /// An enum selector that does not name a declared variant.
+    InvalidEnum(u32),
 }
 
 impl fmt::Display for Error {
@@ -74,6 +86,7 @@ impl fmt::Display for Error {
             Self::TrailingBytes => f.write_str("aether wire: trailing bytes after value"),
             Self::NotSelfDescribing => f.write_str("aether wire: format is not self-describing (deserialize_any)"),
             Self::Message(m) => f.write_str(m),
+            Self::InvalidEnum(selector) => write!(f, "aether wire: invalid enum selector {selector}"),
         }
     }
 }

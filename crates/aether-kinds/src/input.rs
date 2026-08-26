@@ -7,7 +7,10 @@
 
 use alloc::string::String;
 
+use alloc::vec::Vec;
+
 use aether_data::schema::{LabelNode, SchemaType};
+use aether_data::wire::{Error as WireError, WireDecode, WireEncode};
 use aether_data::{MailboxId, Schema};
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
@@ -42,6 +45,18 @@ impl Schema for WindowId {
     const SCHEMA: SchemaType = SchemaType::TypeId(MailboxId::TYPE_ID);
     const LABEL: Option<&'static str> = Some(MailboxId::TYPE_NAME);
     const LABEL_NODE: LabelNode = LabelNode::Anonymous;
+}
+
+impl WireEncode for WindowId {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
+        self.0.encode(out)
+    }
+}
+
+impl<'de> WireDecode<'de> for WindowId {
+    fn decode(cursor: &mut &'de [u8]) -> Result<Self, WireError> {
+        u64::decode(cursor).map(Self)
+    }
 }
 
 /// A single keyboard keypress, identified by the stable codes in

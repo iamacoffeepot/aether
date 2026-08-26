@@ -13,7 +13,7 @@ use core::fmt::Debug;
 
 use aether_codec::encode_schema;
 use aether_data::Schema;
-use aether_data::wire::to_vec;
+use aether_data::wire::{WireEncode, encode_to_vec, to_vec};
 use serde::Serialize;
 
 use super::{ConfigKind, config_address};
@@ -30,13 +30,15 @@ use crate::values::{
 // for one value and fail nothing else.
 fn assert_encoders_agree<K>(value: &K)
 where
-    K: ConfigKind + Schema + Serialize + Debug,
+    K: ConfigKind + Schema + Serialize + WireEncode + Debug,
 {
     let typed = to_vec(value).expect("a fixture config wire-encodes");
+    let derived = encode_to_vec(value).expect("a fixture config owned-encodes");
     let json = serde_json::to_value(value).expect("a fixture config has a JSON form");
     let authored = encode_schema(&json, &K::SCHEMA)
         .unwrap_or_else(|error| panic!("{} JSON form must schema-encode: {error}", K::NAME));
 
+    assert_eq!(typed, derived, "{}: owned codec and serde adapter encodings diverged", K::NAME);
     assert_eq!(typed, authored, "{}: schema-driven and serde-driven encodings diverged", K::NAME);
     assert_eq!(
         value.address(),

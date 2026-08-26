@@ -47,7 +47,7 @@ struct Triangle {
     verts: [Vertex; 3],
 }
 
-#[derive(Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
+#[derive(Serialize, Deserialize, aether_data::Kind, aether_data::Schema, PartialEq, Debug)]
 #[kind(name = "test.note")]
 #[allow(dead_code)]
 struct Note {
@@ -308,4 +308,49 @@ fn qualified_vec_u8_canonicalizes_to_bytes_and_matches_bare_kind_id() {
         <BlobQualified as Kind>::ID,
         "bare Vec<u8> and qualified Vec<core::primitive::u8> must share the same Kind::ID"
     );
+}
+
+#[test]
+fn derived_codec_matches_serde_for_structured_kinds() {
+    use aether_data::wire::{decode_from_slice, encode_to_vec, to_vec};
+
+    let note = Note { body: "hi".into(), tags: vec!["a".into(), "b".into()], optional: Some(7), blob: vec![9, 8, 7] };
+    let derived = encode_to_vec(&note).expect("owned encode");
+    let adapter = to_vec(&note).expect("serde encode");
+    assert_eq!(derived, adapter);
+    let back: Note = decode_from_slice(&derived).expect("owned decode");
+    assert_eq!(back.body, note.body);
+    assert_eq!(back.tags, note.tags);
+    assert_eq!(back.optional, note.optional);
+    assert_eq!(back.blob, note.blob);
+
+    for outcome in [Outcome::Pending, Outcome::Ok(42), Outcome::Err { reason: "boom".into() }] {
+        let derived = encode_to_vec(&outcome).expect("owned encode");
+        let adapter = to_vec(&outcome).expect("serde encode");
+        assert_eq!(derived, adapter);
+        let back: Outcome = decode_from_slice(&derived).expect("owned decode");
+        match (&outcome, &back) {
+            (Outcome::Pending, Outcome::Pending) => {}
+            (Outcome::Ok(a), Outcome::Ok(b)) => assert_eq!(a, b),
+            (Outcome::Err { reason: a }, Outcome::Err { reason: b }) => assert_eq!(a, b),
+            _ => panic!("enum roundtrip swapped variants"),
+        }
+    }
+}
+
+#[test]
+fn fieldless_struct_encodes_as_unit() {
+    use aether_data::wire::encode_to_vec;
+    assert_eq!(encode_to_vec(&Tick).expect("unit encode"), Vec::<u8>::new());
+}
+
+#[test]
+fn tuple_struct_encodes_fields_positionally() {
+    use aether_data::wire::{decode_from_slice, encode_to_vec, to_vec};
+    let value = TupleStruct(7, true);
+    let derived = encode_to_vec(&value).expect("owned encode");
+    assert_eq!(derived, to_vec(&value).expect("serde encode"));
+    let back: TupleStruct = decode_from_slice(&derived).expect("owned decode");
+    assert_eq!(back.0, 7);
+    assert!(back.1);
 }
