@@ -11,7 +11,7 @@ use anyhow::Result;
 
 use crate::transform::claude::assemble_construct_prompt;
 use crate::transform::fixers::{self, Report as FixerReport};
-use crate::transform::{Measurements, TransformArgs, run_model_lane, write_evidence_json};
+use crate::transform::{Measurements, TransformArgs, heartbeat, run_model_lane, write_evidence_json};
 
 /// The typed id of the model-driven construct lane (#3511). Recognized here so
 /// an unknown id stays unmapped exactly as in the verify lane.
@@ -207,6 +207,11 @@ pub(super) fn run_construct(args: &TransformArgs) -> Result<()> {
     // `verify.check` dispatch that follows, which is visible, is the one that
     // records evidence, and is the only pass that decides. Construct ends when
     // the model ends (#5408).
+
+    // Everything below here is the lane still working with nothing reaching the
+    // transcript. The guard drops at the end of the function so the stretch
+    // through `write_evidence_json` is covered.
+    let _beat = heartbeat::Beat::start(&args.out);
     let fixers = fixers::apply(Path::new("."), &args.out);
 
     // Take the commit-message deliverable before the candidate is inspected, and

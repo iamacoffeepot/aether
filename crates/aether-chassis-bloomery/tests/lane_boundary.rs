@@ -19,7 +19,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aether_bloomery::{
     BloomStatus, BloomView, CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND, VERIFY_CHECK_COMMAND, VerifyFailure,
@@ -493,14 +493,66 @@ fn a_lane_that_goes_silent_is_cancelled_before_its_wall_clock() {
         LaneHarness::start_with_heartbeat(&LaneScript::all_passing().with_default(LaneMode::NeverExits), 60, 2);
 
     harness.wait_for_runs(1);
-    for nonce in harness.evidence_nonces() {
-        harness.write_transcript(&nonce, "{}\n");
+    let nonces = harness.evidence_nonces();
+    for nonce in &nonces {
+        harness.write_transcript(nonce, "{}\n");
     }
-    thread::sleep(Duration::from_secs(5));
+    // Wait until the original nonce leaves outstanding: a cancelled run is
+    // admitted as a host fault and redispatched under a new nonce. The
+    // executor tick is the GitHub poll floor, longer than the 2 s allowance.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let outstanding = harness.outstanding();
+        if nonces.iter().all(|nonce| !outstanding.contains(nonce)) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "a silent lane's nonce leaves outstanding rather than occupying the slot; outstanding={outstanding:?} original={nonces:?}"
+        );
+        thread::sleep(Duration::from_millis(200));
+    }
 
     let bloom = harness.view();
     assert!(bloom.blooms[0].members[0].resolution.is_none(), "a silent lane resolves nothing");
     assert_scratch_checkouts_are_named_for_work(&harness, "a silenced run leaves no checkout of its own behind");
+}
+
+#[test]
+fn a_lane_beating_only_its_heartbeat_is_not_silence() {
+    // The transcript falls silent the moment the model ends its turn, and the
+    // lane then stamps `heartbeat` while it compiles. Pre-fix this cancelled
+    // the run ~2s after the single transcript write (#5383).
+    let mut harness =
+        LaneHarness::start_with_heartbeat(&LaneScript::all_passing().with_default(LaneMode::NeverExits), 60, 2);
+
+    harness.wait_for_runs(1);
+    let nonces = harness.evidence_nonces();
+    for nonce in &nonces {
+        harness.write_transcript(nonce, "{}\n");
+        harness.touch_heartbeat(nonce);
+    }
+    let runs = harness.runs_dir();
+    let pumped = nonces.clone();
+    while_pumping(
+        || {
+            for nonce in &pumped {
+                let dir = runs.join(format!("{nonce}-evidence"));
+                let _ = fs::create_dir_all(&dir);
+                let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis());
+                let _ = fs::write(dir.join("heartbeat"), stamp.to_string());
+            }
+        },
+        || thread::sleep(Duration::from_secs(12)),
+    );
+
+    let outstanding = harness.outstanding();
+    for nonce in &nonces {
+        assert!(
+            outstanding.contains(nonce),
+            "a lane beating its heartbeat must keep its original nonce, not be cancelled and redispatched; outstanding={outstanding:?} original={nonces:?}"
+        );
+    }
 }
 
 #[test]
