@@ -11,6 +11,7 @@ use super::runtime::{
     AppendOutcome, CANDIDATE_HASH_OCCASION_SEAL, CommitOutcome, JournalWrite, OutstandingOrder, ProofFactWrite,
     RecordOutcome, SealOutcome, SqliteStore, StoreBackend,
 };
+use aether_bloomery::persisted::DECISIONS;
 use aether_bloomery::{MembershipMutation, OutboxPayload, WorkpieceId};
 
 fn memory() -> SqliteStore {
@@ -156,9 +157,9 @@ fn append_then_replay_round_trips_in_order() {
     assert_eq!(journal[1].event, b"beta");
     assert_eq!(journal[1].decisions, b"decided-2");
     assert_eq!(
-        journal[0].decisions_schema.as_deref(),
-        Some(aether_bloomery::DECISIONS_SCHEMA),
-        "a write after the column exists stamps the writing schema"
+        journal[0].decisions_schema_digest.as_deref(),
+        Some(DECISIONS.current_digest().as_bytes().as_slice()),
+        "a write after the column exists stamps the writing schema digest"
     );
 }
 
@@ -196,22 +197,25 @@ fn a_mismatched_decisions_schema_refuses_replay_by_name() {
     let path = path.to_str().unwrap();
     let mut store = SqliteStore::open(path).unwrap();
     store.append_event(&write("shaped", b"event", b"decided")).unwrap();
+    let unknown = aether_bloomery::Digest::from_bytes([0x11; 32]);
     rusqlite::Connection::open(path)
         .unwrap()
         .execute(
-            "UPDATE journal SET decisions_schema = 'aether.bloomery.decisions.v0' WHERE idempotency_key = 'shaped'",
-            [],
+            "UPDATE journal SET decisions_schema_digest = ?1 WHERE idempotency_key = 'shaped'",
+            rusqlite::params![unknown.as_bytes().as_slice()],
         )
         .unwrap();
 
     let mut store = SqliteStore::open(path).unwrap();
     let record = store.replay_journal().unwrap().pop().expect("the row is still readable");
-    assert_eq!(record.decisions_schema.as_deref(), Some("aether.bloomery.decisions.v0"));
-    let error = aether_bloomery::decode_recorded_decisions(&record.decisions, record.decisions_schema.as_deref())
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("no migration from schema `aether.bloomery.decisions.v0`"), "{error}");
-    assert!(error.contains(aether_bloomery::DECISIONS_SCHEMA), "{error}");
+    assert_eq!(record.decisions_schema_digest.as_deref(), Some(unknown.as_bytes().as_slice()));
+    let error =
+        aether_bloomery::decode_recorded_decisions(&record.decisions, record.decisions_schema_digest.as_deref())
+            .unwrap_err()
+            .to_string();
+    assert!(error.contains(&format!("no migration from schema `{}`", unknown.to_hex())), "{error}");
+    assert!(error.contains(&DECISIONS.current_digest().to_hex()), "{error}");
+    assert!(error.contains("for kind `decisions`"), "{error}");
 }
 
 #[test]
@@ -243,8 +247,8 @@ fn a_v2_decided_row_is_stamped_with_the_current_schema_on_open() {
     assert_eq!(journal.len(), 1);
     assert_eq!(journal[0].decisions, b"\x02");
     assert_eq!(
-        journal[0].decisions_schema.as_deref(),
-        Some(aether_bloomery::DECISIONS_SCHEMA),
+        journal[0].decisions_schema_digest.as_deref(),
+        Some(DECISIONS.current_digest().as_bytes().as_slice()),
         "the migration stamps the implicit current identity"
     );
 }
@@ -1123,7 +1127,7 @@ mod pre_migration_price_table {
         let mut resolved = ResolvedConfigs::default();
         for record in store.load_configs().unwrap() {
             let digest = Digest::from_slice(&record.digest).expect("stored config digest is 32 bytes");
-            resolved.insert(digest, record.kind, record.bytes);
+            resolved.insert(digest, record.kind, record.bytes, record.schema_digest);
         }
         let mut snapshot = Snapshot::default();
         for record in store.replay_journal().unwrap() {
@@ -1194,7 +1198,7 @@ fn a_v4_store_opens_with_null_envelope_stamps_and_new_admissions_carry_one() {
              INSERT INTO journal (idempotency_key, event, decisions, decider, decisions_schema)
              VALUES ('legacy', x'01', x'02', 'old-build', '{schema}');
              PRAGMA user_version = 4;",
-            schema = aether_bloomery::DECISIONS_SCHEMA,
+            schema = "aether.bloomery.decisions.v2",
         ))
         .unwrap();
 
@@ -1514,7 +1518,7 @@ fn a_v11_store_gains_an_empty_scope_verify_ledger() {
         .query_row("SELECT count(*) FROM scope_verify_reports", [], |row| row.get(0))
         .expect("the ledger exists after migration");
     assert_eq!(reports, 0, "migration invents no reports");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 16);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 17);
 }
 
 #[test]
@@ -1546,5 +1550,151 @@ fn a_v15_store_gains_an_empty_candidate_hash_journal() {
         .query_row("SELECT count(*) FROM candidate_hash", [], |row| row.get(0))
         .expect("the journal exists after migration");
     assert_eq!(hashes, 0, "migration invents no hashes");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 16);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 17);
+}
+
+mod schema_digest_migration {
+    use aether_bloomery::persisted::{DECISIONS, EVENT, SPEND_CEILING};
+    use aether_bloomery::{
+        ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, Decisions, Digest, Event, Fact, IdempotencyKey,
+        Outcome, SpendCeiling, decode_recorded_decisions,
+    };
+    use aether_data::Kind;
+    use aether_data::wire::to_vec;
+
+    use super::{SqliteStore, StoreBackend, write};
+    use crate::store::{StoreConfigError, resolve_config};
+
+    fn v16_journal_and_config() -> &'static str {
+        "CREATE TABLE journal (
+             sequence        INTEGER PRIMARY KEY AUTOINCREMENT,
+             idempotency_key TEXT NOT NULL UNIQUE,
+             event           BLOB NOT NULL,
+             decisions       BLOB,
+             decider         TEXT,
+             decisions_schema TEXT,
+             recorded_unix_millis INTEGER
+         );
+         CREATE TABLE config (
+             digest BLOB PRIMARY KEY,
+             kind   TEXT NOT NULL,
+             bytes  BLOB NOT NULL
+         );"
+    }
+
+    fn observe() -> (Vec<u8>, Vec<u8>) {
+        let event = Event {
+            idempotency_key: IdempotencyKey("obs".to_owned()),
+            fact: Fact::ObserveMainline { head: Digest::from_bytes([7; 32]) },
+        };
+        let decisions = Decisions { outcome: Outcome::Duplicate, effects: Vec::new() };
+        (to_vec(&event).unwrap(), to_vec(&decisions).unwrap())
+    }
+
+    #[test]
+    fn a_v16_store_maps_v2_and_unstamped_rows_onto_their_digests() {
+        // A v2 TEXT stamp and an unstamped decided row must keep today's
+        // unstamped-is-v1 read after the digest column lands. Mapping both to
+        // the current digest would re-stamp history.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v16.db").to_str().unwrap().to_owned();
+        let (event, decisions) = observe();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(v16_journal_and_config()).unwrap();
+        conn.execute(
+            "INSERT INTO journal (idempotency_key, event, decisions, decider, decisions_schema)
+             VALUES ('v2', ?1, ?2, 'old-build', 'aether.bloomery.decisions.v2')",
+            rusqlite::params![event, decisions],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO journal (idempotency_key, event, decisions, decider)
+             VALUES ('v1', ?1, ?2, 'old-build')",
+            rusqlite::params![event, decisions],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA user_version = 16;").unwrap();
+        drop(conn);
+
+        let mut store = SqliteStore::open(&path).expect("a v16 store migrates");
+        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 17);
+        let journal = store.replay_journal().unwrap();
+        assert_eq!(journal.len(), 2);
+        let v2 = journal.iter().find(|row| row.idempotency_key == "v2").unwrap();
+        let v1 = journal.iter().find(|row| row.idempotency_key == "v1").unwrap();
+        assert_eq!(v2.decisions_schema_digest.as_deref(), Some(DECISIONS.current_digest().as_bytes().as_slice()));
+        assert_eq!(
+            v1.decisions_schema_digest.as_deref(),
+            Some(DECISIONS.upcast_digest(&DECISIONS.upcasts[0]).as_bytes().as_slice())
+        );
+        assert_eq!(v2.event_schema.as_deref(), Some(EVENT.current_digest().as_bytes().as_slice()));
+        decode_recorded_decisions(&v2.decisions, v2.decisions_schema_digest.as_deref()).expect("v2 row still decodes");
+        decode_recorded_decisions(&v1.decisions, v1.decisions_schema_digest.as_deref()).expect("v1 row still decodes");
+    }
+
+    #[test]
+    fn a_pre_column_config_row_reads_back_under_the_migration_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v16-config.db").to_str().unwrap().to_owned();
+        let ceiling = SpendCeiling { window_micro_usd: Some(1), bloom_micro_usd: None };
+        let bytes = to_vec(&ceiling).unwrap();
+        let address = ceiling.address();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(v16_journal_and_config()).unwrap();
+        conn.execute(
+            "INSERT INTO config (digest, kind, bytes) VALUES (?1, ?2, ?3)",
+            rusqlite::params![address.as_bytes().as_slice(), SpendCeiling::NAME, bytes],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA user_version = 16;").unwrap();
+        drop(conn);
+
+        let mut store = SqliteStore::open(&path).expect("a v16 store migrates");
+        let record = store.load_configs().unwrap().pop().expect("the authored row survived");
+        assert_eq!(record.schema_digest.as_deref(), Some(SPEND_CEILING.current_digest().as_bytes().as_slice()));
+        let mut registry = ConfigRegistry::default();
+        registry.insert::<SpendCeiling>(address);
+        let resolved = resolve_config::<SpendCeiling>(&mut store, ConfigScopes::bloom_wide(&registry)).unwrap();
+        assert_eq!(resolved, Some(ceiling));
+    }
+
+    #[test]
+    fn an_unknown_digest_refuses_by_name_at_replay_and_config_resolution() {
+        let mut store = super::memory();
+        let (event, decisions) = observe();
+        store.append_event(&write("shaped", &event, &decisions)).unwrap();
+        let unknown = Digest::from_bytes([0xee; 32]);
+        store
+            .conn
+            .execute(
+                "UPDATE journal SET decisions_schema_digest = ?1 WHERE idempotency_key = 'shaped'",
+                rusqlite::params![unknown.as_bytes().as_slice()],
+            )
+            .unwrap();
+        let record = store.replay_journal().unwrap().pop().unwrap();
+        let error = decode_recorded_decisions(&record.decisions, record.decisions_schema_digest.as_deref())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&format!("no migration from schema `{}`", unknown.to_hex())), "{error}");
+        assert!(error.contains(&DECISIONS.current_digest().to_hex()), "{error}");
+        assert!(error.contains("for kind `decisions`"), "{error}");
+
+        let ceiling = SpendCeiling { window_micro_usd: Some(2), bloom_micro_usd: None };
+        let address = ceiling.address();
+        store.record_config(address.as_bytes(), SpendCeiling::NAME, &to_vec(&ceiling).unwrap()).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE config SET schema_digest = ?1 WHERE kind = ?2",
+                rusqlite::params![unknown.as_bytes().as_slice(), SpendCeiling::NAME],
+            )
+            .unwrap();
+        let mut registry = ConfigRegistry::default();
+        registry.insert::<SpendCeiling>(address);
+        let error = resolve_config::<SpendCeiling>(&mut store, ConfigScopes::bloom_wide(&registry)).unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains(&format!("no migration from schema `{}`", unknown.to_hex())), "{text}");
+        assert!(text.contains("for kind `aether.bloomery.spend_ceiling`"), "{text}");
+        assert!(matches!(error, StoreConfigError::Content(ConfigResolveError::NoUpcast { .. })), "{error:?}");
+    }
 }

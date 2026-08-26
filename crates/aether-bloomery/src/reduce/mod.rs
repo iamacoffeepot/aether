@@ -25,7 +25,7 @@ mod base_verify;
 mod boundary;
 mod composition;
 mod decision;
-mod decisions_v1;
+pub(crate) mod decisions_v1;
 mod error;
 mod event;
 mod evidence;
@@ -56,6 +56,7 @@ mod view;
 mod why;
 mod withdraw;
 
+pub use crate::persisted::decode_recorded_decisions;
 pub use decision::Decision;
 pub use error::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError,
@@ -70,9 +71,7 @@ pub use gate::{
     AGGREGATE_REVIEW_GATE, AGGREGATE_VERIFY_GATE, DISPATCH_MEMBER_GATE, DRAFT_ADMISSION_GATE, FOLD_GATE, Gate,
     LAND_GATE, Read, RecordedRead, RecordedRefusal, Refusal,
 };
-pub use outcome::{
-    DECISIONS_SCHEMA, DECISIONS_SCHEMA_V1, Decisions, DecisionsSchemaError, Outcome, decode_recorded_decisions,
-};
+pub use outcome::{Decisions, Outcome};
 pub use seal::is_active_unlanded;
 pub use snapshot::{
     AggregateReviewFault, AwaitingSurface, BloomRecord, BloomStatus, Excuse, FileLease, FoldedIntegration,

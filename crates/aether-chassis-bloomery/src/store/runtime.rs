@@ -28,12 +28,15 @@ use aether_actor::runtime;
 // the `ReplayJournal` family — are defined in `aether-bloomery` to avoid a
 // package cycle (the actor lives there; host depends on it). Host imports them
 // inward for its `StoreCapability` handlers (issue #3497).
+use aether_bloomery::persisted::{DECISIONS, EVENT, kind_named};
 use aether_bloomery::{
-    CommissionStatus, Commit, CommitResult, ConfigRecord, DECISIONS_SCHEMA, Decision, Digest, Event, JournalRecord,
-    LoadConfigs, LoadConfigsResult, MembershipMutation, MetricDispatch, MetricsLedger, OutboxPayload, ReplayJournal,
+    CommissionStatus, Commit, CommitResult, ConfigRecord, Decision, Digest, JournalRecord, LoadConfigs,
+    LoadConfigsResult, MembershipMutation, MetricDispatch, MetricsLedger, OutboxPayload, ReplayJournal,
     ReplayJournalResult, ScopeRevision, Statement, SuppressionRequest, Topic, WorkpieceId, decode_recorded_decisions,
+    decode_recorded_event, schema_digest,
 };
 use aether_data::wire::{from_bytes, to_vec};
+use aether_kinds::descriptors;
 use std::iter::repeat_n;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -397,7 +400,7 @@ pub trait StoreBackend: Send {
     /// A `None` here is a *sealed address with no content*, which the caller
     /// must refuse rather than default past — unlike an unsealed kind, which
     /// never reaches this call at all.
-    fn lookup_config(&mut self, digest: &[u8]) -> rusqlite::Result<Option<(String, Vec<u8>)>>;
+    fn lookup_config(&mut self, digest: &[u8]) -> rusqlite::Result<Option<StoredConfigRow>>;
 
     /// Every stored configuration, in address order — the whole-table read the
     /// control core fills its resolved set from (ADR-0174).
@@ -901,7 +904,23 @@ impl SqliteStore {
 /// creation; a store written before this step holds no observed pushes to
 /// invent, and inventing a hash for history that predates the record would
 /// attest a publish no reactor observed.
-const SCHEMA_VERSION: i64 = 16;
+///
+/// `17` is the schema-digest association (ADR-0187): journal rows name the
+/// schema that wrote their event and decisions blobs, and config rows name
+/// the schema that wrote their bytes. Existing rows are stamped with the
+/// identity current at migration — for decisions, a v2 TEXT stamp maps to
+/// the v2 digest and an unstamped decided row maps to v1, preserving the
+/// unstamped-is-v1 read.
+const SCHEMA_VERSION: i64 = 17;
+
+/// Historical TEXT stamp written beside v2 decisions rows before the digest
+/// column existed. Kept only so migration 17 can map it onto the v2 digest.
+const DECISIONS_SCHEMA_V2_STAMP: &str = "aether.bloomery.decisions.v2";
+/// Historical TEXT stamp written beside v1 decisions rows.
+const DECISIONS_SCHEMA_V1_STAMP: &str = "aether.bloomery.decisions.v1";
+
+/// Kind name, canonical bytes, and optional writing-schema digest of one stored configuration.
+pub type StoredConfigRow = (String, Vec<u8>, Option<Vec<u8>>);
 
 /// Bring a store opened at [`MIGRATIONS`] up to [`SCHEMA_VERSION`], or refuse it.
 ///
@@ -970,7 +989,7 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
         migration.execute_batch("ALTER TABLE journal ADD COLUMN decisions_schema TEXT;")?;
         migration.execute(
             "UPDATE journal SET decisions_schema = ?1 WHERE decisions_schema IS NULL AND decisions IS NOT NULL",
-            rusqlite::params![DECISIONS_SCHEMA],
+            rusqlite::params![DECISIONS_SCHEMA_V2_STAMP],
         )?;
     }
 
@@ -1068,6 +1087,8 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
         migration.execute_batch(CANDIDATE_HASH_TABLE)?;
     }
 
+    migrate_schema_digests(&migration)?;
+
     migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     migration.commit()
 }
@@ -1091,6 +1112,72 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let mut names = stmt.query_map([], |row| row.get::<_, String>(1))?;
     names.try_fold(false, |found, name| Ok(found || name? == column))
+}
+
+fn migrate_schema_digests(migration: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+    // ADR-0187 (version 17): persisted rows name the schema that wrote them.
+    // Existing rows are stamped with the identity current at this migration.
+    // Decisions TEXT stamps map onto their pinned digests; an unstamped
+    // decided row stays v1, matching decode_recorded_decisions.
+    if !has_column(migration, "journal", "event_schema")? {
+        migration.execute_batch("ALTER TABLE journal ADD COLUMN event_schema BLOB;")?;
+        let event_digest = EVENT.current_digest();
+        migration.execute(
+            "UPDATE journal SET event_schema = ?1 WHERE event_schema IS NULL",
+            rusqlite::params![event_digest.as_bytes().as_slice()],
+        )?;
+    }
+    if !has_column(migration, "journal", "decisions_schema_digest")? {
+        migration.execute_batch("ALTER TABLE journal ADD COLUMN decisions_schema_digest BLOB;")?;
+        let v2 = DECISIONS.current_digest();
+        let v1 = DECISIONS.upcast_digest(&DECISIONS.upcasts[0]);
+        migration.execute(
+            "UPDATE journal SET decisions_schema_digest = ?1 \
+             WHERE decisions_schema_digest IS NULL AND decisions_schema = ?2",
+            rusqlite::params![v2.as_bytes().as_slice(), DECISIONS_SCHEMA_V2_STAMP],
+        )?;
+        migration.execute(
+            "UPDATE journal SET decisions_schema_digest = ?1 \
+             WHERE decisions_schema_digest IS NULL AND decisions_schema = ?2",
+            rusqlite::params![v1.as_bytes().as_slice(), DECISIONS_SCHEMA_V1_STAMP],
+        )?;
+        migration.execute(
+            "UPDATE journal SET decisions_schema_digest = ?1 \
+             WHERE decisions_schema_digest IS NULL AND decisions IS NOT NULL AND decisions_schema IS NULL",
+            rusqlite::params![v1.as_bytes().as_slice()],
+        )?;
+    }
+    if !has_column(migration, "config", "schema_digest")? {
+        migration.execute_batch("ALTER TABLE config ADD COLUMN schema_digest BLOB;")?;
+        backfill_config_schema_digests(migration)?;
+    }
+    Ok(())
+}
+
+fn backfill_config_schema_digests(conn: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+    let mut kinds = conn.prepare("SELECT DISTINCT kind FROM config WHERE schema_digest IS NULL")?;
+    let named: Vec<String> = kinds.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
+    drop(kinds);
+    for kind in named {
+        let Some(digest) = schema_digest_for_kind(&kind) else {
+            continue;
+        };
+        conn.execute(
+            "UPDATE config SET schema_digest = ?1 WHERE kind = ?2 AND schema_digest IS NULL",
+            rusqlite::params![digest.as_bytes().as_slice(), kind],
+        )?;
+    }
+    Ok(())
+}
+
+fn schema_digest_for_kind(kind: &str) -> Option<Digest> {
+    if let Some(entry) = kind_named(kind) {
+        return Some(entry.current_digest());
+    }
+    descriptors::all()
+        .into_iter()
+        .find(|entry| entry.name == kind)
+        .and_then(|entry| schema_digest(&entry.name, &entry.schema).ok())
 }
 
 fn count_rows(conn: &Connection, table: &str) -> rusqlite::Result<u64> {
@@ -1146,7 +1233,9 @@ CREATE TABLE IF NOT EXISTS journal (
     decisions       BLOB,
     decider         TEXT,
     decisions_schema TEXT,
-    recorded_unix_millis INTEGER
+    recorded_unix_millis INTEGER,
+    event_schema    BLOB,
+    decisions_schema_digest BLOB
 );
 CREATE TABLE IF NOT EXISTS active_membership (
     workpiece TEXT PRIMARY KEY,
@@ -1202,7 +1291,8 @@ CREATE TABLE IF NOT EXISTS dispatch_description (
 CREATE TABLE IF NOT EXISTS config (
     digest BLOB PRIMARY KEY,
     kind   TEXT NOT NULL,
-    bytes  BLOB NOT NULL
+    bytes  BLOB NOT NULL,
+    schema_digest BLOB
 );
 CREATE TABLE IF NOT EXISTS review_findings (
     bloom     BLOB NOT NULL,
@@ -1601,25 +1691,28 @@ impl StoreBackend for SqliteStore {
     }
 
     fn record_config(&mut self, digest: &[u8], kind: &str, bytes: &[u8]) -> rusqlite::Result<()> {
+        let schema = schema_digest_for_kind(kind);
         self.conn.execute(
-            "INSERT OR REPLACE INTO config (digest, kind, bytes) VALUES (?1, ?2, ?3)",
-            rusqlite::params![digest, kind, bytes],
+            "INSERT OR REPLACE INTO config (digest, kind, bytes, schema_digest) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![digest, kind, bytes, schema.as_ref().map(|digest| digest.as_bytes().as_slice())],
         )?;
         Ok(())
     }
 
     fn load_configs(&mut self) -> rusqlite::Result<Vec<ConfigRecord>> {
-        let mut stmt = self.conn.prepare("SELECT digest, kind, bytes FROM config ORDER BY digest")?;
-        let rows =
-            stmt.query_map([], |row| Ok(ConfigRecord { digest: row.get(0)?, kind: row.get(1)?, bytes: row.get(2)? }))?;
+        let mut stmt = self.conn.prepare("SELECT digest, kind, bytes, schema_digest FROM config ORDER BY digest")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ConfigRecord { digest: row.get(0)?, kind: row.get(1)?, bytes: row.get(2)?, schema_digest: row.get(3)? })
+        })?;
 
         rows.collect()
     }
 
-    fn lookup_config(&mut self, digest: &[u8]) -> rusqlite::Result<Option<(String, Vec<u8>)>> {
-        let mut stmt = self.conn.prepare("SELECT kind, bytes FROM config WHERE digest = ?1")?;
-        let mut rows =
-            stmt.query_map(rusqlite::params![digest], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))?;
+    fn lookup_config(&mut self, digest: &[u8]) -> rusqlite::Result<Option<StoredConfigRow>> {
+        let mut stmt = self.conn.prepare("SELECT kind, bytes, schema_digest FROM config WHERE digest = ?1")?;
+        let mut rows = stmt.query_map(rusqlite::params![digest], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, Option<Vec<u8>>>(2)?))
+        })?;
         // The digest is the primary key, so there is at most one row.
         rows.next().transpose()
     }
@@ -2015,17 +2108,22 @@ impl StoreBackend for SqliteStore {
     ) -> rusqlite::Result<CommitOutcome> {
         let tx = self.conn.transaction()?;
         let recorded = recorded_column(now_unix_millis());
+        let event_digest = EVENT.current_digest();
+        let decisions_digest = DECISIONS.current_digest();
         let changed = tx.execute(
             "INSERT OR IGNORE INTO journal \
-             (idempotency_key, event, decisions, decider, decisions_schema, recorded_unix_millis) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (idempotency_key, event, decisions, decider, decisions_schema, recorded_unix_millis, \
+              event_schema, decisions_schema_digest) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 write.idempotency_key,
                 write.event,
                 write.decisions,
                 write.decider,
-                DECISIONS_SCHEMA,
+                DECISIONS_SCHEMA_V2_STAMP,
                 recorded,
+                event_digest.as_bytes().as_slice(),
+                decisions_digest.as_bytes().as_slice(),
             ],
         )?;
         if changed == 0 {
@@ -2075,17 +2173,22 @@ impl StoreBackend for SqliteStore {
 
     fn append_event(&mut self, write: &JournalWrite<'_>) -> rusqlite::Result<AppendOutcome> {
         let recorded = recorded_column(now_unix_millis());
+        let event_digest = EVENT.current_digest();
+        let decisions_digest = DECISIONS.current_digest();
         let changed = self.conn.execute(
             "INSERT OR IGNORE INTO journal \
-             (idempotency_key, event, decisions, decider, decisions_schema, recorded_unix_millis) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (idempotency_key, event, decisions, decider, decisions_schema, recorded_unix_millis, \
+              event_schema, decisions_schema_digest) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 write.idempotency_key,
                 write.event,
                 write.decisions,
                 write.decider,
-                DECISIONS_SCHEMA,
+                DECISIONS_SCHEMA_V2_STAMP,
                 recorded,
+                event_digest.as_bytes().as_slice(),
+                decisions_digest.as_bytes().as_slice(),
             ],
         )?;
         if changed == 0 {
@@ -2234,7 +2337,8 @@ impl StoreBackend for SqliteStore {
 
     fn replay_journal(&mut self) -> rusqlite::Result<Vec<JournalRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT sequence, idempotency_key, event, decisions, decider, decisions_schema, recorded_unix_millis \
+            "SELECT sequence, idempotency_key, event, decisions, decider, decisions_schema, recorded_unix_millis, \
+             event_schema, decisions_schema_digest \
              FROM journal ORDER BY sequence",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -2251,6 +2355,8 @@ impl StoreBackend for SqliteStore {
                 decider: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
                 decisions_schema: row.get(5)?,
                 recorded_unix_millis: recorded_from_column(row.get(6)?),
+                event_schema: row.get(7)?,
+                decisions_schema_digest: row.get(8)?,
             })
         })?;
         rows.collect()
@@ -2385,14 +2491,14 @@ impl StoreBackend for SqliteStore {
         let mut ledger = MetricsLedger::default();
         self.clear_metrics()?;
         for record in &records {
-            let event: Event = from_bytes(&record.event).map_err(|error| {
+            let event = decode_recorded_event(&record.event, record.event_schema.as_deref()).map_err(|error| {
                 rusqlite::Error::SqliteFailure(
                     SqliteFfiError::new(SQLITE_ERROR),
                     Some(format!("metrics fold: event {} did not decode: {error}", record.sequence)),
                 )
             })?;
-            let decisions =
-                decode_recorded_decisions(&record.decisions, record.decisions_schema.as_deref()).map_err(|error| {
+            let decisions = decode_recorded_decisions(&record.decisions, record.decisions_schema_digest.as_deref())
+                .map_err(|error| {
                     rusqlite::Error::SqliteFailure(
                         SqliteFfiError::new(SQLITE_ERROR),
                         Some(format!("metrics fold: record {} {error}", record.sequence)),
@@ -2623,7 +2729,7 @@ impl StoreBackend for SqliteStore {
 
 impl SqliteStore {
     fn persist_member_graph(&mut self, decisions: &[u8]) {
-        let Ok(decoded) = decode_recorded_decisions(decisions, Some(DECISIONS_SCHEMA)) else {
+        let Ok(decoded) = decode_recorded_decisions(decisions, Some(DECISIONS.current_digest().as_bytes())) else {
             return;
         };
         for effect in decoded.effects {
@@ -2656,10 +2762,11 @@ impl SqliteStore {
         write: &JournalWrite<'_>,
         envelope: Option<u64>,
     ) -> rusqlite::Result<()> {
-        let Ok(event) = from_bytes::<Event>(write.event) else {
+        let Ok(event) = decode_recorded_event(write.event, Some(EVENT.current_digest().as_bytes())) else {
             return Ok(());
         };
-        let Ok(decisions) = decode_recorded_decisions(write.decisions, Some(DECISIONS_SCHEMA)) else {
+        let Ok(decisions) = decode_recorded_decisions(write.decisions, Some(DECISIONS.current_digest().as_bytes()))
+        else {
             return Ok(());
         };
         let configs = resolved_configs(self)?;
@@ -2706,7 +2813,7 @@ pub fn resolved_configs(store: &mut dyn StoreBackend) -> rusqlite::Result<aether
         let Some(address) = Digest::from_slice(&record.digest) else {
             continue;
         };
-        configs.insert(address, record.kind, record.bytes);
+        configs.insert(address, record.kind, record.bytes, record.schema_digest);
     }
     Ok(configs)
 }

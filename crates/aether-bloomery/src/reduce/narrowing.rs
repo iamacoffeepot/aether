@@ -83,7 +83,7 @@ pub(super) fn reduce_composition_narrowed(
     }
     let Some(workpiece) = attribution.workpiece() else {
         return Decisions::rejected(Outcome::NarrowCompositionRejected(NarrowCompositionError::EmptyParents(
-            attribution.parents.len(),
+            u64::try_from(attribution.parents.len()).unwrap_or(u64::MAX),
         )));
     };
     for parent in &attribution.parents {

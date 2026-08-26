@@ -16,7 +16,7 @@ use crate::values::{
 };
 
 /// An admitted fact plus its idempotency key (ADR-0149 §The control core).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Event {
     /// The idempotency key — a replayed key reduces to [`Outcome::Duplicate`](crate::Outcome::Duplicate).
     pub idempotency_key: IdempotencyKey,
@@ -26,7 +26,7 @@ pub struct Event {
 
 /// The closed set of admitted facts (ADR-0149 §The line: a closed enum, not a
 /// workflow language).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Fact {
     /// Seal a draft into an active bloom.
     Seal(BloomSpec),

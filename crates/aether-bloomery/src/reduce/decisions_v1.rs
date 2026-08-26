@@ -355,7 +355,7 @@ impl From<DecisionV1> for Decision {
 }
 
 /// Pre-#5330 journaled [`Decisions`] blob.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct DecisionsV1 {
     pub outcome: Outcome,
     pub effects: Vec<DecisionV1>,

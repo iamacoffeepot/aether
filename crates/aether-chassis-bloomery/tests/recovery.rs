@@ -217,7 +217,7 @@ fn wait_for_attempt(stream: &mut TcpStream, cid_base: u64) -> (Event, Decisions)
             ReplayJournalResult::Err { error } => panic!("journal replay failed: {error}"),
         };
         for record in &records {
-            let decisions = decode_recorded_decisions(&record.decisions, record.decisions_schema.as_deref())
+            let decisions = decode_recorded_decisions(&record.decisions, record.decisions_schema_digest.as_deref())
                 .unwrap_or_else(|error| panic!("record {} did not decode: {error}", record.idempotency_key));
             assert!(
                 !matches!(

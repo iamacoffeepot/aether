@@ -1217,7 +1217,7 @@ fn integration_dispatch_count(db: &str) -> usize {
         .unwrap()
         .iter()
         .map(|record| {
-            decode_recorded_decisions(&record.decisions, record.decisions_schema.as_deref())
+            decode_recorded_decisions(&record.decisions, record.decisions_schema_digest.as_deref())
                 .expect("journaled decisions decode")
         })
         .map(|decisions| {

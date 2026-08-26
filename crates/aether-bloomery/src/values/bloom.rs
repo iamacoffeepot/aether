@@ -22,7 +22,7 @@ use crate::values::{ConfigRegistry, ConfigScopes, Evidence, Forecast, surface_in
 /// One workpiece's admission into a bloom: its identity, the exact scope
 /// revision the bloom pins, and the approval evidence bound to that
 /// revision.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Membership {
     /// The admitted workpiece.
     pub workpiece: WorkpieceId,
@@ -47,7 +47,7 @@ pub struct Membership {
 ///
 /// `approval` itself is excluded, since the subject is what the approval is
 /// *of* — including it would be circular.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct MemberSubject {
     /// The workpiece under approval.
     pub workpiece: WorkpieceId,
@@ -216,7 +216,7 @@ fn dependency_cycle(edges: &[MemberDependency]) -> Option<Vec<WorkpieceId>> {
 /// A mutable bloom in shaping: membership proposals, base, and forecast.
 /// Drafts overlap harmlessly and claim nothing (ADR-0149 §The bloom) — only
 /// sealing takes claims.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct BloomDraft {
     /// The proposed memberships, in any order — [`seal`](Self::seal)
     /// canonicalizes them.
@@ -269,7 +269,7 @@ impl BloomDraft {
 /// amends. Changed membership, scope, base, or configuration creates a *successor*
 /// bloom (see [`crate::reduce()`]), never an edit. The only constructors are
 /// [`BloomDraft::seal`] and deserialization (journal replay).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct BloomSpec {
     members: Vec<Membership>,
     base: Digest,

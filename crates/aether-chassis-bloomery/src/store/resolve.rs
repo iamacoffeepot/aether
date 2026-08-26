@@ -17,6 +17,7 @@ use std::error::Error;
 use std::fmt;
 
 use aether_bloomery::{ConfigKind, ConfigResolveError, ConfigScopes, decode_config};
+use aether_data::Schema;
 use serde::de::DeserializeOwned;
 
 use super::StoreBackend;
@@ -64,16 +65,16 @@ impl From<ConfigResolveError> for StoreConfigError {
 /// that do not decode. Each is a refusal rather than a fall-through to the
 /// caller's default. [`StoreConfigError::Store`] when the store itself failed,
 /// which says nothing about the content.
-pub fn resolve_config<K: ConfigKind + DeserializeOwned>(
+pub fn resolve_config<K: ConfigKind + DeserializeOwned + Schema>(
     store: &mut dyn StoreBackend,
     scopes: ConfigScopes<'_>,
 ) -> Result<Option<K>, StoreConfigError> {
     let Some(address) = scopes.address::<K>() else {
         return Ok(None);
     };
-    let Some((stored_kind, bytes)) = store.lookup_config(address.as_bytes())? else {
+    let Some((stored_kind, bytes, schema_digest)) = store.lookup_config(address.as_bytes())? else {
         return Err(ConfigResolveError::Missing { kind: K::NAME }.into());
     };
 
-    Ok(Some(decode_config::<K>(&stored_kind, &bytes)?))
+    Ok(Some(decode_config::<K>(&stored_kind, &bytes, schema_digest.as_deref())?))
 }

@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{env, process};
 
-use super::{FIXTURES, FIXTURES_DIR, check_in, regen_in};
+use aether_bloomery::persisted::DECISIONS;
+
+use super::{FIXTURES, FIXTURES_DIR, annotate_findings, check_in, regen_in};
 
 fn scratch(tag: &str) -> PathBuf {
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -71,9 +73,39 @@ fn regen_is_idempotent_on_a_clean_tree() {
 
     let source = checked_in_fixtures();
     for fixture in FIXTURES {
+        if fixture.mode != super::WriteMode::Overwrite {
+            continue;
+        }
         let written = fs::read(root.join(FIXTURES_DIR).join(fixture.file)).unwrap();
         let pinned = fs::read(source.join(fixture.file)).unwrap();
         let name = fixture.name;
         assert_eq!(written, pinned, "{name} drifted from the checked-in fixture");
     }
+}
+
+#[test]
+fn schema_digest_regen_appends_without_dropping_prior_lines() {
+    // The schema-digest fixture pins a history. Overwriting it would erase the
+    // record of the shape that wrote stored rows, which is the exit the gate
+    // exists to close.
+    let root = scratch("append");
+    let dest = copy_fixtures_into(&root);
+    let prior = "decisions aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n";
+    fs::write(dest.join("schema-digests.txt"), prior).unwrap();
+
+    regen_in(&root, Some("schema-digests")).unwrap();
+
+    let body = fs::read_to_string(dest.join("schema-digests.txt")).unwrap();
+    assert!(body.starts_with("decisions aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"), "{body}");
+    let current = DECISIONS.current_digest().to_hex();
+    assert!(body.contains(&format!("decisions {current}")), "current digest was appended: {body}");
+    assert_eq!(body.matches("decisions ").count(), 2, "the prior line stayed: {body}");
+}
+
+#[test]
+fn schema_digest_failures_are_annotated_without_a_regen_command() {
+    let findings = "thread 'pinned_schema_digests_match_the_registry' panicked";
+    let annotated = annotate_findings(findings);
+    assert!(annotated.contains("append the new digest to `schema-digests.txt` and register an upcast"));
+    assert!(!annotated.contains("fixtures regen"), "{annotated}");
 }

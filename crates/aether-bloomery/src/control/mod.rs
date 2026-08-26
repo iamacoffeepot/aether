@@ -867,6 +867,14 @@ pub struct JournalRecord {
     /// optional so prior replay replies still decode.
     #[serde(default)]
     pub recorded_unix_millis: Option<u64>,
+    /// Digest of the schema that wrote [`event`](Self::event) (ADR-0187).
+    /// `None` is a pre-column row: implicit current-at-migration.
+    #[serde(default)]
+    pub event_schema: Option<Vec<u8>>,
+    /// Digest of the schema that wrote [`decisions`](Self::decisions)
+    /// (ADR-0187). `None` is a pre-column row: implicit v1.
+    #[serde(default)]
+    pub decisions_schema_digest: Option<Vec<u8>>,
 }
 
 /// Reply to [`ReplayJournal`].
@@ -910,6 +918,10 @@ pub struct ConfigRecord {
     /// The configuration's canonical `aether_data::wire` bytes.
     #[serde(with = "aether_data::bytes")]
     pub bytes: Vec<u8>,
+    /// Digest of the schema that wrote [`bytes`](Self::bytes) (ADR-0187).
+    /// `None` is a pre-column row: implicit current-at-migration.
+    #[serde(default)]
+    pub schema_digest: Option<Vec<u8>>,
 }
 
 /// Reply to [`LoadConfigs`].

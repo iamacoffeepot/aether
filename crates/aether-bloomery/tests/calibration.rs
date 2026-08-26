@@ -348,7 +348,12 @@ impl History {
     }
 
     fn publish(&mut self, override_: &ModelOverride) {
-        self.configs.insert(override_.address(), ModelOverride::NAME, to_vec(override_).expect("override encodes"));
+        self.configs.insert(
+            override_.address(),
+            ModelOverride::NAME,
+            to_vec(override_).expect("override encodes"),
+            None,
+        );
     }
 
     fn admit(&mut self, event: Event) -> Decisions {

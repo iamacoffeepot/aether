@@ -136,7 +136,7 @@ fn is_known_process(process: &str) -> bool {
 }
 
 /// Why a caller-authored [`StageCatalog`] cannot be sealed.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum CatalogError {
     /// A stage of the closed vocabulary has no binding.
     UnboundStage(StageId),
@@ -638,7 +638,7 @@ impl StageCatalog {
 /// workpiece then stage and precede every `Bloom` entry. Nothing reads that
 /// order for meaning — the grade sums the whole map — but it makes a rendered
 /// ledger stable across replays.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum DispatchKey {
     /// One workpiece's slot at one stage: `Construct`, `Verify`, the
     /// repair-only `Refine` re-entry, or the fold-conflict `Reconcile`
@@ -667,7 +667,7 @@ pub enum DispatchKey {
 /// One execution of one binding against one subject (ADR-0149 §The line).
 /// Agents return proposed artifacts and evidence only — the reducer alone
 /// advances state.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Attempt {
     /// The binding this attempt executed.
     pub binding: StageId,
