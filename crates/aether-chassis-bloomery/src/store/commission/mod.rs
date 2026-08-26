@@ -527,6 +527,15 @@ impl SqliteStore {
     pub fn load_scope_verify_report(&self, revision: Digest) -> Result<Option<ScopeVerifyReport>, CommissionError> {
         load_scope_verify_report(&self.conn, revision)
     }
+
+    /// The words of the stored statement at `digest`, decoded from the exact
+    /// bytes written — for the intent statement, the commission's sketch text.
+    ///
+    /// # Errors
+    /// A store fault, or canonical bytes that no longer decode as a statement.
+    pub fn load_statement_words(&self, digest: Digest) -> Result<Option<Vec<u8>>, CommissionError> {
+        Ok(load_statement(&self.conn, digest)?.map(|statement| statement.words))
+    }
 }
 
 fn create_commission(conn: &mut Connection, id: &WorkpieceId, intent: &Statement) -> Result<Digest, CommissionError> {

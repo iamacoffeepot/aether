@@ -2952,7 +2952,20 @@ fn enqueue_scope_run_mail(store: &mut SqliteStore, mail: EnqueueScopeRun) -> Enq
     if view.head.status != CommissionStatus::Open {
         return EnqueueScopeRunResult::NotOpen;
     }
-    match open_scope_run(store, &id, view.head.intent, base) {
+    // A run enqueued without its sketch dispatches a lane whose only honest
+    // move is to refuse — it has no claim to ground — so an unreadable intent
+    // refuses here, at the door, before a lane spins up to say the same thing.
+    let sketch = match store.load_statement_words(view.head.intent) {
+        Ok(Some(words)) => String::from_utf8_lossy(&words).into_owned(),
+        Ok(None) => {
+            return EnqueueScopeRunResult::Err {
+                error: "the commission's intent statement is not in the store; a scoping run cannot carry its sketch"
+                    .to_owned(),
+            };
+        }
+        Err(error) => return EnqueueScopeRunResult::Err { error: error.to_string() },
+    };
+    match open_scope_run(store, &id, view.head.intent, base, &sketch) {
         Ok(opened) => EnqueueScopeRunResult::Ok {
             id: mail.id,
             ordinal: opened.ordinal,

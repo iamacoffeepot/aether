@@ -20,6 +20,7 @@ use aether_bloomery::{
     ModelOverride, Nonce, Observation, Provenance, ReasoningEffort, RedispatchPayload, ReviewPass,
     SharedCorrespondence, StageCatalog, StageId, StageOverride, Statement, TimeoutRecord, Topic, Transformation,
     VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, pin_workpiece_description,
+    split_lane_identity,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -523,7 +524,7 @@ fn a_scope_run_drains_with_no_bloom_in_the_store() {
     let backend = Arc::new(CapturingBackend::default());
     let shell = ExecutorShell::new(Arc::clone(&backend));
     let (commission, intent) = seed_commission(&mut store, "wp-scope-drain");
-    let opened = open_scope_run(&mut store, &commission, intent, digest(2)).expect("open");
+    let opened = open_scope_run(&mut store, &commission, intent, digest(2), "scope sketch").expect("open");
 
     let (handles, ack_through, transient) = drain_and_dispatch_scope(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
@@ -542,6 +543,29 @@ fn a_scope_run_drains_with_no_bloom_in_the_store() {
 }
 
 #[test]
+fn the_dispatched_scope_order_carries_the_pinned_sketch() {
+    // The bug that shipped: `Transformation::for_scoping_run` builds with
+    // `description: None` and no producer threaded the intent text on, so
+    // every scope lane came up with no `## Task` and refused — the order's
+    // description is the one channel the lane's sketch rides (#3595).
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let (commission, intent) = seed_commission(&mut store, "wp-scope-sketch");
+    open_scope_run(&mut store, &commission, intent, digest(2), "the sketch body").expect("open");
+
+    drain_and_dispatch_scope(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+
+    let orders = backend.orders();
+    let description = orders[0].transformation.description.as_deref().expect("the order carries the sketch");
+    assert_eq!(
+        split_lane_identity(description),
+        ("the sketch body", Some("Workpiece: wp-scope-sketch")),
+        "the sketch is pinned with the commission id so the lane's ## Lane and ## Task both resolve",
+    );
+}
+
+#[test]
 fn the_member_topic_is_undisturbed() {
     // Tripwire: the shared-topic shortcut is the one a later change takes
     // under time pressure, and the fail-stop decode at drain_and_dispatch
@@ -551,7 +575,7 @@ fn the_member_topic_is_undisturbed() {
     let backend = Arc::new(CapturingBackend::default());
     let shell = ExecutorShell::new(Arc::clone(&backend));
     let (commission, intent) = seed_commission(&mut store, "wp-scope-peer");
-    let opened = open_scope_run(&mut store, &commission, intent, digest(2)).expect("open");
+    let opened = open_scope_run(&mut store, &commission, intent, digest(2), "scope sketch").expect("open");
     let bloom = BloomId(digest(1));
     let (member_sequence, _subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-line", 5);
 
@@ -1035,7 +1059,7 @@ fn an_overdue_scope_order_terminates_once() {
     let backend = Arc::new(CapturingBackend::default());
     let shell = ExecutorShell::new(Arc::clone(&backend));
     let (commission, intent) = seed_commission(&mut store, "wp-scope-overdue");
-    let opened = open_scope_run(&mut store, &commission, intent, digest(2)).expect("open");
+    let opened = open_scope_run(&mut store, &commission, intent, digest(2), "scope sketch").expect("open");
     let (handles, ack_through, _transient) = drain_and_dispatch_scope(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
     store.ack_topic(Topic::ScopeDispatch, ack_through.unwrap()).unwrap();
     let mut tracked = track(handles);
