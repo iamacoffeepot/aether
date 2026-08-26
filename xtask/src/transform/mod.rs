@@ -708,10 +708,12 @@ mod tests {
             EvidenceChannel::flakes(vec![Excused {
                 test: "aether-data::wire_roundtrip".to_string(),
                 replayed: "an identical invocation".to_string(),
+                duration_millis: Some(12),
             }]),
             EvidenceChannel::inherited_failures(vec![Excused {
                 test: "aether-actor::asset_sections".to_string(),
                 replayed: "deadbeef".to_string(),
+                duration_millis: Some(40_000),
             }]),
             EvidenceChannel::suppression_requests(vec![SuppressionRequest {
                 path: "crates/demo/src/lib.rs".to_string(),

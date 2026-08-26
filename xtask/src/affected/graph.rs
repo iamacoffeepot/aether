@@ -69,4 +69,14 @@ impl Workspace {
     pub fn wasm_sources(&self) -> &BTreeSet<String> {
         &self.wasm_sources
     }
+
+    /// Whether `package`'s tests need the `cargo xtask dist` pre-build.
+    ///
+    /// True when the crate compiles to component wasm, or when its tests
+    /// consume a dist artifact (a dep on a wasm source or a dist-resolving
+    /// harness). A crate with neither relationship must not force that
+    /// cross-build.
+    pub fn needs_dist_prepare(&self, package: &str) -> bool {
+        self.wasm_sources.contains(package) || self.wasm_consumers.contains(package)
+    }
 }
