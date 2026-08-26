@@ -136,6 +136,7 @@ fn fact_blooms(fact: &Fact) -> Vec<BloomId> {
         | Fact::SurfaceOverlap { .. }
         | Fact::RequestOrphanClaimRelease { .. }
         | Fact::CompleteOrphanClaimRelease { .. }
-        | Fact::BaseVerifyCompleted { .. } => Vec::new(),
+        | Fact::BaseVerifyCompleted { .. }
+        | Fact::BaseReverify(_) => Vec::new(),
     }
 }

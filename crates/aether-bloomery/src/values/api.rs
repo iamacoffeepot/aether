@@ -458,6 +458,31 @@ pub struct RetryRequest {
     pub idempotency_key: Option<String>,
 }
 
+/// `POST /bases/{base}/reverify` body — run `verify.base` again on a red
+/// receipt whose failure the operator has judged does not describe the tree.
+///
+/// The operator states a reason and an identity, and the reducer refuses a
+/// blank of either, a base that has never been judged, and a receipt that is
+/// not red: a re-verify aimed at a green spends a whole-workspace build on a
+/// settled question, and a pending already has a dispatch outstanding.
+///
+/// Unauthenticated on the host-local bind like every other bloom operator
+/// route, and gated by the same mandatory non-blank `reason` + `operator`.
+/// A blank one is `422`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReverifyBaseRequest {
+    /// Why this red does not describe the tree, in the operator's own words.
+    /// Required and non-blank; a blank one is `422`.
+    pub reason: String,
+    /// Who is deciding. Recorded as the decider; required and non-blank.
+    pub operator: String,
+    /// Override the admit idempotency key; defaults to the act's own content
+    /// under this route's name, so a resend is a duplicate rather than a
+    /// second build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
 /// The reply to a write route: the reducer outcome the admitted event resolved
 /// to (decoded from the control core's wire bytes).
 #[derive(Debug, Clone, Serialize, Deserialize)]

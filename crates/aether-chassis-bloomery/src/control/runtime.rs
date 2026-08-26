@@ -1430,7 +1430,8 @@ fn event_bloom(event: &Event) -> Option<BloomId> {
         | Fact::RequestOrphanClaimRelease { .. }
         | Fact::CompleteOrphanClaimRelease { .. }
         | Fact::SurfaceOverlap { .. }
-        | Fact::BaseVerifyCompleted { .. } => None,
+        | Fact::BaseVerifyCompleted { .. }
+        | Fact::BaseReverify(_) => None,
     }
 }
 

@@ -13,9 +13,9 @@ pub use aether_bloomery::{
     CommissionShowView, CommissionsView, CoordinatorLogEntry, CoordinatorLogsView, CreateCommissionRequest,
     DispatchEvidenceView, DispatchFilePage, DispatchProcessView, DraftPatch, DraftView, DraftsView, ErrorView,
     GrantRequest, HoldRequest, JournalEntry, JournalView, MemberProjection, OutcomeView, ReleaseAcceptedView,
-    ReleaseRequest, ReopenCommissionRequest, RepairRequest, RetryRequest, ScopeRevisionWrittenView, ScopeRunOpenedView,
-    ScopeRunRequest, SealRequest, SupersedeRequest, SuppressionAnswerRequest, WithdrawRequest, WorkpiecesView,
-    WriteRevisionRequest,
+    ReleaseRequest, ReopenCommissionRequest, RepairRequest, RetryRequest, ReverifyBaseRequest,
+    ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, SealRequest, SupersedeRequest,
+    SuppressionAnswerRequest, WithdrawRequest, WorkpiecesView, WriteRevisionRequest,
 };
 
 use serde::{Deserialize, Serialize};

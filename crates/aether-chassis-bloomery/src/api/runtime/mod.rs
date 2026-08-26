@@ -53,6 +53,7 @@
 //! one resource each; [`response`] and [`hex`] hold the shared response
 //! constructors and the bloom-id URL codec.
 
+mod bases;
 mod blooms;
 mod calibration;
 #[cfg(feature = "github")]
@@ -635,6 +636,20 @@ impl NativeActor for BloomeryApiCapability {
     ) -> http::Outcome {
         let id = id.0;
         let routed = ApiCapabilityState::release(&id, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /bases/{base}/reverify` — run `verify.base` again on a red
+    /// receipt whose failure the operator has judged does not describe the
+    /// tree.
+    #[http::route(Post, "/bases/{base}/reverify")]
+    fn on_reverify_base(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        base: http::Path<String>,
+    ) -> http::Outcome {
+        let base = base.0;
+        let routed = ApiCapabilityState::reverify_base(&base, &ctx.request().body);
         finish(state, ctx, routed)
     }
 

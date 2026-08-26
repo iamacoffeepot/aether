@@ -790,3 +790,29 @@ pub enum SuppressionDispositionError {
     /// the dispatch would bill a fresh construct as a repair.
     NoCandidate(WorkpieceId),
 }
+
+/// Why a base re-verify was refused.
+///
+/// The ladder is checked in declaration order, so the first thing wrong with
+/// a request is the thing the operator is told about.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum BaseReverifyError {
+    /// The request states no reason. Refused rather than defaulted: a re-verify
+    /// is an act no verdict produced, so a record of it that says nothing is
+    /// the whole failure.
+    BlankReason,
+    /// The request names no operator, so the record would not say who asked.
+    BlankOperator,
+    /// Nothing has ever judged this base, so there is no red to clear and the
+    /// seal door would have dispatched a run itself. Refused rather than
+    /// absorbed: admitting one would invent a pending receipt for a tree the
+    /// machine has not been asked about.
+    NoReceipt,
+    /// The receipt is not red. A green has nothing to clear and re-running it
+    /// re-spends a whole-workspace build on a settled question; a pending
+    /// already has a dispatch outstanding, which the deadline sweep resolves
+    /// the way it resolves every other overtaken order. Refused rather than
+    /// absorbed so the journal never carries a fact that queued a second run
+    /// beside one already in flight, or spent a build to re-answer a green.
+    NotRed,
+}

@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use super::decisions_v1::DecisionsV1;
 use super::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,
-    AggregateVerifyError, AttemptCompletedError, Decision, FoldConflictError, GrantAttemptsError, HostFaultError,
-    IntegrateError, LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError,
+    AggregateVerifyError, AttemptCompletedError, BaseReverifyError, Decision, FoldConflictError, GrantAttemptsError,
+    HostFaultError, IntegrateError, LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError,
     NarrowCompositionError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ResolveError, SealError,
     SpliceError, SupersedeError, SuppressionDispositionError, SurfaceRequestedError, VerifyFailedError, WithdrawError,
 };
@@ -836,7 +836,7 @@ pub enum Outcome {
     /// **Retired**, and kept for the same reason
     /// [`Fact::SurfaceGranted`](super::Fact::SurfaceGranted) is: journaled
     /// [`Decisions`] blobs already carry it, so removing it stops those rows
-    /// decoding. Last but one in declaration order, so every prior outcome
+    /// decoding. Kept in this declaration position so every prior outcome
     /// keeps its wire discriminant.
     ///
     /// A member's surface request was granted by the machinery and the member
@@ -856,6 +856,9 @@ pub enum Outcome {
     /// [`Fact::SurfaceGranted`](super::Fact::SurfaceGranted) that reaches it:
     /// [`SurfaceRequestedError::GrantRetired`], with no effects.
     SurfaceGrantRejected(SurfaceRequestedError),
+    /// A base re-verify was refused. Appended last so every prior outcome keeps
+    /// its wire discriminant.
+    BaseReverifyRejected(BaseReverifyError),
 }
 
 impl Outcome {
@@ -877,6 +880,7 @@ impl Outcome {
                 | Self::OperatorHoldRejected(_)
                 | Self::WithdrawRejected(_)
                 | Self::SuppressionRejected(_)
+                | Self::BaseReverifyRejected(_)
         )
     }
 }

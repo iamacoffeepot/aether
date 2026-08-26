@@ -114,6 +114,9 @@ enum BloomCommand {
     Withdraw(WithdrawArgs),
     /// Run one member's current stage again on the candidate it already holds.
     Retry(RetryArgs),
+    /// Run `verify.base` again on a red receipt whose failure does not describe
+    /// the tree.
+    Reverify(ReverifyBaseArgs),
     /// Hand a wedged member a candidate you produced yourself and let the
     /// ordinary gates judge it (#4957).
     Repair(RepairArgs),
@@ -165,6 +168,25 @@ struct RetryArgs {
     stage: Option<String>,
 
     /// Why, in your own words. Required; a blank one is refused at the door.
+    #[arg(long)]
+    reason: String,
+
+    /// Who is deciding. Recorded as the decider.
+    #[arg(long, default_value = "operator")]
+    operator: String,
+}
+
+#[derive(Args, Debug)]
+struct ReverifyBaseArgs {
+    /// The base commit to re-verify (64 hex characters). Defaults to the red
+    /// alert's own commit; naming a different one is refused rather than
+    /// applied, so a re-verify aimed from a stale board does not spend a
+    /// whole-workspace build on the wrong tree.
+    #[arg(long, value_parser = plan::parse_digest_flag)]
+    base: Option<dto::DigestHex>,
+
+    /// Why this red does not describe the tree, in your own words. Required;
+    /// a blank one is refused at the door.
     #[arg(long)]
     reason: String,
 
@@ -380,6 +402,7 @@ fn run_on_with_policy(endpoint: &Endpoint, command: &BloomCommand, approval_poli
         BloomCommand::Amend(args) => amend::run(&client, args, approval_policy),
         BloomCommand::Withdraw(args) => run_withdraw(&client, args),
         BloomCommand::Retry(args) => run_retry(&client, args),
+        BloomCommand::Reverify(args) => run_reverify_base(&client, args),
         BloomCommand::Repair(args) => run_repair(&client, args),
         BloomCommand::Suppression(args) => run_suppression(&client, args),
         BloomCommand::Cancel(args) => run_cancel(&client, args),
@@ -455,6 +478,31 @@ fn run_retry(client: &Client<'_>, args: &RetryArgs) -> Result<String> {
         idempotency_key: None,
     };
     Ok(render_outcome(&client.retry(&args.bloom_id, &args.workpiece, &request)?.outcome))
+}
+
+/// Re-run `verify.base` on a red receipt — the read-first shape `run_retry`
+/// uses, defaulting the target to the alert the board is already showing.
+fn run_reverify_base(client: &Client<'_>, args: &ReverifyBaseArgs) -> Result<String> {
+    let view = client.view()?;
+    let Some(alert) = &view.base_alert else {
+        bail!("there is no red base alert to re-verify");
+    };
+    if let Some(named) = args.base
+        && named.digest() != alert.base
+    {
+        bail!("the board's red base is {}, not {named} (failed: {})", alert.base, alert.failed.join(", "));
+    }
+    if args.reason.trim().is_empty() {
+        bail!("reverify reason is required");
+    }
+
+    let base = args.base.map_or(alert.base, dto::DigestHex::digest);
+    let request = dto::ReverifyBaseRequest {
+        reason: args.reason.clone(),
+        operator: args.operator.clone(),
+        idempotency_key: None,
+    };
+    Ok(render_outcome(&client.reverify_base(&base.to_hex(), &request)?.outcome))
 }
 
 /// Hand a wedged member the candidate the operator produced and let the
