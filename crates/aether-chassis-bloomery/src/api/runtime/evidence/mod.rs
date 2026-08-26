@@ -25,6 +25,7 @@ use crate::artifacts::ArtifactsCapabilityState;
 use crate::store::{ListBloomDispatches, ListBloomDispatchesResult, LookupDispatch, LookupDispatchResult};
 
 const EVIDENCE_SUFFIX: &str = "-evidence";
+const ARCHIVE_EVIDENCE_DIR: &str = "evidence";
 const SWEPT_NOTICE: &str = "evidence directory was reclaimed";
 
 /// `GET /blooms/{id}/dispatches`
@@ -37,12 +38,13 @@ pub(in crate::api::runtime) fn list_dispatches(id: &str) -> Result<Routed, Strin
 /// study cost.
 pub(in crate::api::runtime) fn list_response(
     worktree_base: &Path,
+    archive_base: &Path,
     artifacts: Option<&mut ArtifactsCapabilityState>,
     result: ListBloomDispatchesResult,
 ) -> HttpServerResponse {
     match result {
         ListBloomDispatchesResult::Ok { rollup, outstanding } => {
-            json(200, &list::assemble(worktree_base, artifacts, &rollup, &outstanding))
+            json(200, &list::assemble(worktree_base, archive_base, artifacts, &rollup, &outstanding))
         }
         ListBloomDispatchesResult::Err { error } => error_response(500, &error),
     }
@@ -57,10 +59,11 @@ pub(in crate::api::runtime) fn lookup_dispatch(nonce: &str) -> Routed {
 /// named nonce whose directory is gone is `200` with `retained: false`.
 pub(in crate::api::runtime) fn header_response(
     worktree_base: &Path,
+    archive_base: &Path,
     result: LookupDispatchResult,
 ) -> HttpServerResponse {
     match result {
-        LookupDispatchResult::Ok { nonce, .. } => json(200, &header::read(worktree_base, &nonce)),
+        LookupDispatchResult::Ok { nonce, .. } => json(200, &header::read(worktree_base, archive_base, &nonce)),
         LookupDispatchResult::NotFound => error_response(404, "no such dispatch"),
         LookupDispatchResult::Err { error } => error_response(500, &error),
     }
@@ -69,6 +72,7 @@ pub(in crate::api::runtime) fn header_response(
 /// `GET /dispatches/{nonce}/transcript` and `/prompt` — ranged file read.
 pub(in crate::api::runtime) fn file_page(
     worktree_base: &Path,
+    archive_base: &Path,
     nonce: &str,
     file: &str,
     query: &str,
@@ -77,7 +81,7 @@ pub(in crate::api::runtime) fn file_page(
         Ok(parsed) => parsed,
         Err(error) => return error_response(400, &error),
     };
-    match read_named_file(worktree_base, nonce, file, parsed.cursor, parsed.limit) {
+    match read_named_file(worktree_base, archive_base, nonce, file, parsed.cursor, parsed.limit) {
         Ok(page) => {
             let mut page = page;
             page.notice = parsed.notice;
@@ -100,20 +104,20 @@ pub(in crate::api::runtime) fn coordinator_logs(query: &str) -> HttpServerRespon
 
 fn read_named_file(
     worktree_base: &Path,
+    archive_base: &Path,
     nonce: &str,
     file: &str,
     cursor: Option<u64>,
     limit: u64,
 ) -> Result<DispatchFilePage, FileReadError> {
-    for spelling in nonce_spellings(nonce) {
-        let path = evidence_dir(worktree_base, &spelling).join(file);
-        match ranged::read_ranged(&path, cursor, limit) {
-            Ok(page) => return Ok(page),
-            Err(ranged::RangedError::NotFound) => {}
-            Err(ranged::RangedError::Io(error)) => return Err(FileReadError::Io(error)),
-        }
+    let Some(dir) = resolve_evidence_dir(worktree_base, archive_base, nonce) else {
+        return Err(FileReadError::Missing);
+    };
+    match ranged::read_ranged(&dir.join(file), cursor, limit) {
+        Ok(page) => Ok(page),
+        Err(ranged::RangedError::NotFound) => Err(FileReadError::Missing),
+        Err(ranged::RangedError::Io(error)) => Err(FileReadError::Io(error)),
     }
-    Err(FileReadError::Missing)
 }
 
 enum FileReadError {
@@ -125,8 +129,40 @@ fn evidence_dir(worktree_base: &Path, nonce: &str) -> PathBuf {
     worktree_base.join(format!("{nonce}{EVIDENCE_SUFFIX}"))
 }
 
-fn evidence_retained(worktree_base: &Path, nonce: &str) -> bool {
-    evidence_dir(worktree_base, nonce).is_dir()
+fn archived_evidence_dir(archive_base: &Path, nonce: &str) -> PathBuf {
+    archive_base.join(ARCHIVE_EVIDENCE_DIR).join(format!("{nonce}{EVIDENCE_SUFFIX}"))
+}
+
+/// Working root first, then the tier's evidence subdirectory.
+fn resolve_evidence_dir(worktree_base: &Path, archive_base: &Path, nonce: &str) -> Option<PathBuf> {
+    for spelling in nonce_spellings(nonce) {
+        let working = evidence_dir(worktree_base, &spelling);
+        if working.is_dir() {
+            return Some(working);
+        }
+        let archived = archived_evidence_dir(archive_base, &spelling);
+        if archived.is_dir() {
+            return Some(archived);
+        }
+    }
+    None
+}
+
+fn evidence_retained(worktree_base: &Path, archive_base: &Path, nonce: &str) -> bool {
+    resolve_evidence_dir(worktree_base, archive_base, nonce).is_some()
+}
+
+fn archived_location(worktree_base: &Path, archive_base: &Path, nonce: &str) -> Option<PathBuf> {
+    for spelling in nonce_spellings(nonce) {
+        if evidence_dir(worktree_base, &spelling).is_dir() {
+            return None;
+        }
+        let archived = archived_evidence_dir(archive_base, &spelling);
+        if archived.is_dir() {
+            return Some(archived);
+        }
+    }
+    None
 }
 
 fn nonce_spellings(nonce: &str) -> Vec<String> {

@@ -8,6 +8,7 @@
 //! workpiece claim transfers.
 
 mod amend;
+mod archive;
 mod client;
 mod dto;
 mod hex;
@@ -110,6 +111,10 @@ enum BloomCommand {
     /// Answer a parked member's surface request: widen its scope revision,
     /// approve the widening, and seal the successor (ADR-0207).
     Amend(AmendArgs),
+    /// Move aged evidence directories and resolved session trees onto the
+    /// archive tier. Refuses unless the coordinator is between blooms.
+    /// Nothing is ever deleted.
+    Archive(archive::ArchiveArgs),
     /// Take one member out of a walking bloom without superseding it (#5327).
     Withdraw(WithdrawArgs),
     /// Run one member's current stage again on the candidate it already holds.
@@ -400,6 +405,7 @@ fn run_on_with_policy(endpoint: &Endpoint, command: &BloomCommand, approval_poli
         BloomCommand::Roll(args) => roll::run(&client, args),
         BloomCommand::Upgrade(args) => upgrade::run(&client, args),
         BloomCommand::Amend(args) => amend::run(&client, args, approval_policy),
+        BloomCommand::Archive(args) => archive::run(&client, args),
         BloomCommand::Withdraw(args) => run_withdraw(&client, args),
         BloomCommand::Retry(args) => run_retry(&client, args),
         BloomCommand::Reverify(args) => run_reverify_base(&client, args),

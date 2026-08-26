@@ -1,8 +1,9 @@
 #![cfg(all(unix, feature = "github"))]
 
-//! A janitor pass while a bloom is walking must not reclaim a session tree,
-//! even one the live-set derivation does not name; a later pass, once the bloom
-//! is terminal and nothing is outstanding, reclaims it.
+//! A janitor tick must not reclaim a session tree, even one the live-set
+//! derivation does not name, while a bloom walks *or* after it lands.
+//! Session trees are records (ADR-0211): the tick never deletes them; the
+//! archive pass moves them when the operator asks between blooms.
 //!
 //! Production: board-5435, 2026-08-25. The janitor's live set — slug rows of
 //! active-unlanded blooms' non-withdrawn members, plus outstanding orders —
@@ -15,10 +16,10 @@
 //! `s-dispatch-3229` were compiling in their trees.
 //!
 //! Unfixed, this scenario fails the first janitor pass: the planted tree is a
-//! registered `sessions/<slug>/tree` the live set does not name, so
-//! `reclaim_session_trees` releases it while the bloom is still sealed. With
-//! the between-blooms gate it survives every pass until the bloom has landed
-//! and the outstanding set is empty.
+//! registered `sessions/<slug>/tree` the live set does not name, so a tick
+//! that still deleted records would release it while the bloom is still sealed.
+//! The between-blooms gate keeps it through the walk; leaving records on the
+//! tick keeps it after land.
 
 #![allow(clippy::unwrap_used)]
 
@@ -70,23 +71,18 @@ fn a_janitor_pass_spares_session_trees_while_a_bloom_walks() {
         harness.tick();
         harness.janitor_tick();
         let between = harness.bloom(bloom).status == BloomStatus::Landed && harness.outstanding().is_empty();
-        if !tree.is_dir() {
-            assert!(
-                between,
-                "session tree {MISSED_SLUG} was reclaimed while the bloom was still walking: status {:?} outstanding {:?}",
-                harness.bloom(bloom).status,
-                harness.outstanding(),
-            );
-            return;
-        }
+        assert!(
+            tree.is_dir(),
+            "session tree {MISSED_SLUG} was reclaimed by the janitor tick: status {:?} outstanding {:?}",
+            harness.bloom(bloom).status,
+            harness.outstanding(),
+        );
         if between {
             // The view can land on the tick that the janitor sampled as still
-            // walking. One more pass is the between-blooms reclaim the gate is for.
+            // walking. One more pass is the between-blooms window the archive
+            // pass uses; the tick itself must still leave the record in place.
             harness.janitor_tick();
-            assert!(
-                !tree.is_dir(),
-                "once the bloom is terminal and nothing is outstanding, the between-blooms pass reclaims the tree",
-            );
+            still_there(&tree, "the between-blooms tick after the bloom landed");
             return;
         }
     }

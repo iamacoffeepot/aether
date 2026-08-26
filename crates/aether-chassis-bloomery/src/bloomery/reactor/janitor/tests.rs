@@ -88,7 +88,7 @@ fn journal_landed_chain(store: &mut SqliteStore) -> (BloomId, BloomId) {
 
 /// Seal one bloom and land it — the terminal bloom with no supersession chain
 /// behind it, so it is the only reclaimable bloom the snapshot holds.
-fn journal_landed(store: &mut SqliteStore) -> BloomId {
+pub fn journal_landed(store: &mut SqliteStore) -> BloomId {
     let spec = journal_sealed_spec(store);
     journal_land(store, &spec);
     spec.id()
@@ -118,7 +118,7 @@ fn journal_sealed_spec(store: &mut SqliteStore) -> BloomSpec {
     spec
 }
 
-fn order_for(nonce: &str, bloom: &BloomId) -> OutstandingOrder {
+pub fn order_for(nonce: &str, bloom: &BloomId) -> OutstandingOrder {
     OutstandingOrder {
         profile: Vec::new(),
         nonce: nonce.to_owned(),
@@ -134,11 +134,11 @@ fn order_for(nonce: &str, bloom: &BloomId) -> OutstandingOrder {
     }
 }
 
-struct Released(Arc<Mutex<Vec<PathBuf>>>);
+pub struct Released(pub(crate) Arc<Mutex<Vec<PathBuf>>>);
 
-struct StubRunner {
-    registered: Vec<PathBuf>,
-    released: Released,
+pub struct StubRunner {
+    pub(crate) registered: Vec<PathBuf>,
+    pub(crate) released: Released,
 }
 
 impl TransformRunner for StubRunner {
@@ -192,7 +192,7 @@ impl WorkingRefPruner for CountingPruner {
     }
 }
 
-fn policy(retention_days: u64, budget_bytes: u64) -> JanitorPolicy {
+pub fn policy(retention_days: u64, budget_bytes: u64) -> JanitorPolicy {
     JanitorPolicy {
         lane_target_budget_bytes: budget_bytes,
         target_scan_interval_secs: 300,
@@ -201,7 +201,7 @@ fn policy(retention_days: u64, budget_bytes: u64) -> JanitorPolicy {
 }
 
 /// A host with no lane child in flight — every slot's target dir is fair game.
-fn idle() -> LaneOccupancy {
+pub fn idle() -> LaneOccupancy {
     LaneOccupancy::default()
 }
 
@@ -249,7 +249,7 @@ fn run_scan(request: &mut SweepRequest<'_>, scan: &mut TargetScan) -> super::swe
     sweep(request, scan).expect("the sweep reads the in-memory store")
 }
 
-fn age_dir(path: &Path, now: SystemTime, days: u64) {
+pub fn age_dir(path: &Path, now: SystemTime, days: u64) {
     let dest = now.checked_sub(retention_duration(days)).expect("the fixture clock sits after the retention window");
     fs::write(path.join(".aged"), []).expect("the age marker writes");
     fs::File::open(path).expect("the aged directory opens").set_modified(dest).expect("mtime is set");
@@ -325,21 +325,12 @@ fn a_killed_runs_worktree_survives_while_a_successor_walks() {
 
 #[test]
 fn a_session_tree_outlives_its_launches_and_dies_with_the_work_bound_to_it() {
-    // Acceptance for #5425, extended by the 2026-08-25 retention policy. A
-    // session's tree is created when the session is minted and reused by every
-    // launch of that conversation — the member's own retry laps, and a
-    // declared-edge dependent that inherits it — so nothing inside the
-    // session's life may remove it. Its construct finishing is not the end of
-    // it; the verify that follows is entitled to the tree that construct left,
-    // and the harness will only resume the conversation in that directory
-    // anyway.
-    //
-    // What ends it is the work ending, and "the work" is the coordinator being
-    // between blooms, not the live-set derivation that used to decide which
-    // slugs were still named. That derivation missed board-5435 mid-walk
-    // (dispatches 3301/3318). While anything walks, even a tree no live member
-    // is bound to stays: old trees are records of how the work was figured
-    // out. Once nothing is walking, both go.
+    // ADR-0211: session trees are records. The tick used to delete them once
+    // nothing walked; it must now leave them in place for the archive pass.
+    // While anything walks they stay, named or not — board-5435 (dispatches
+    // 3301/3318). Between blooms they still stay: a move is as disruptive as
+    // a delete to a session that can still resume, so only the operator pass
+    // may relocate them.
     let scratch = tempfile::tempdir().expect("a scratch dir is created");
     let live = scratch.path().join("sessions").join("s-live").join("tree");
     let terminal = scratch.path().join("sessions").join("s-landed").join("tree");
@@ -383,12 +374,9 @@ fn a_session_tree_outlives_its_launches_and_dies_with_the_work_bound_to_it() {
         pruned: &mut HashSet::new(),
     });
 
-    assert_eq!(between.worktrees, 2, "once nothing walks, every session tree is reclaimable");
-    let mut gone = released.0.lock().expect("the release log is not poisoned").clone();
-    gone.sort();
-    let mut expected = vec![live, terminal];
-    expected.sort();
-    assert_eq!(gone, expected, "the live member's tree dies with the work; the unbound one goes with it");
+    assert_eq!(between.worktrees, 0, "the tick no longer deletes session trees");
+    assert!(released.0.lock().expect("the release log is not poisoned").is_empty());
+    assert!(live.is_dir() && terminal.is_dir(), "records stay in the working root until an archive pass");
 }
 
 #[test]
@@ -568,7 +556,7 @@ fn consumed_evidence_of_a_terminal_bloom_is_kept_inside_the_retention_window() {
     let runner = StubRunner { registered: vec![], released: Released(Arc::new(Mutex::new(Vec::new()))) };
     let now = SystemTime::now();
     let keep = policy(7, u64::MAX);
-    let report = run(&mut SweepRequest {
+    let _report = run(&mut SweepRequest {
         store: &mut store,
         runner: &runner,
         source: None,
@@ -580,12 +568,14 @@ fn consumed_evidence_of_a_terminal_bloom_is_kept_inside_the_retention_window() {
         pruned: &mut HashSet::new(),
     });
 
-    assert_eq!(report.evidence_dirs, 0);
     assert!(evidence.exists(), "evidence inside the 7-day window is kept");
 }
 
 #[test]
 fn consumed_evidence_of_a_terminal_bloom_is_reclaimed_after_the_retention_window() {
+    // ADR-0211 retires delete-after: aged evidence of a terminal bloom used to
+    // be unlinked on the tick. The tick must now leave it in the working root
+    // so an archive pass can move it rather than the janitor deleting it.
     let scratch = tempfile::tempdir().expect("a scratch dir is created");
     let nonce = "stale-evidence";
     let evidence = scratch.path().join(format!("{nonce}-evidence"));
@@ -613,8 +603,8 @@ fn consumed_evidence_of_a_terminal_bloom_is_reclaimed_after_the_retention_window
         pruned: &mut HashSet::new(),
     });
 
-    assert_eq!(report.evidence_dirs, 1);
-    assert!(!evidence.exists(), "evidence past the window of a terminal bloom is reclaimed");
+    assert_eq!(report.worktrees, 0);
+    assert!(evidence.is_dir(), "aged evidence of a terminal bloom is a record, not a deletion");
 }
 
 #[test]
@@ -638,7 +628,7 @@ fn consumed_evidence_survives_while_a_successor_walks() {
 
     let runner = StubRunner { registered: vec![], released: Released(Arc::new(Mutex::new(Vec::new()))) };
     let keep = policy(7, u64::MAX);
-    let report = run(&mut SweepRequest {
+    let _report = run(&mut SweepRequest {
         store: &mut store,
         runner: &runner,
         source: None,
@@ -650,7 +640,6 @@ fn consumed_evidence_survives_while_a_successor_walks() {
         pruned: &mut HashSet::new(),
     });
 
-    assert_eq!(report.evidence_dirs, 0, "a walking successor holds even stale evidence");
     assert!(evidence.exists(), "text is a record, not a disk-pressure lever");
 }
 
@@ -673,7 +662,7 @@ fn an_outstanding_dispatch_keeps_its_evidence() {
 
     let runner = StubRunner { registered: vec![], released: Released(Arc::new(Mutex::new(Vec::new()))) };
     let drop_now = policy(0, u64::MAX);
-    let report = run(&mut SweepRequest {
+    let _report = run(&mut SweepRequest {
         store: &mut store,
         runner: &runner,
         source: None,
@@ -685,7 +674,6 @@ fn an_outstanding_dispatch_keeps_its_evidence() {
         pruned: &mut HashSet::new(),
     });
 
-    assert_eq!(report.evidence_dirs, 0, "an outstanding dispatch's evidence is not reclaimed");
     assert!(evidence.is_dir(), "the running lane still finds the directory it was born in");
 }
 

@@ -1,7 +1,12 @@
-//! The journal-driven sweep: rebuild the snapshot, then reclaim whatever the
-//! journal says is terminal. Factored out of the reactor so tests drive it
+//! The journal-driven sweep of **working state** (ADR-0211): nonce-keyed
+//! dispatch checkouts, terminal-bloom working refs, and the moved-aside
+//! leavings of past evictions. Factored out of the reactor so tests drive it
 //! against a `SqliteStore` and a stub [`TransformRunner`] without the mail
 //! harness.
+//!
+//! Records — evidence directories and resolved session trees — belong to the
+//! archive pass, not this tick. Caches — cargo target directories — are the
+//! only disk-pressure kill, and still run every tick.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -18,18 +23,10 @@ use crate::bloomery::TransformRunner;
 use crate::bloomery::config::JANITOR_REF_PRUNES_PER_TICK;
 use crate::store::{StoreBackend, membership};
 
-/// The suffix a dispatch's evidence directory carries under the scratch root —
-/// the same spelling [`LocalExecutor`](crate::bloomery::LocalExecutor) uses.
-const EVIDENCE_SUFFIX: &str = "-evidence";
+use super::records::{between_blooms, bloom_is_live, child_name_of, dispatch_owners};
 
 /// The prefix a lane slot's fallback checkout or target directory carries.
 const SLOT_PREFIX: &str = "slot-";
-
-/// The directory under the scratch root holding one checkout per reusable
-/// harness session, and the working tree inside each — the same spelling
-/// [`LocalExecutor`](crate::bloomery::LocalExecutor) lays them out under.
-const SESSIONS_DIR: &str = "sessions";
-const SESSION_TREE_DIR: &str = "tree";
 
 /// The suffix a lane slot's cargo target directory carries.
 const TARGET_SUFFIX: &str = "-target";
@@ -37,10 +34,6 @@ const TARGET_SUFFIX: &str = "-target";
 /// The marker an evicted target directory wears between the rename that takes
 /// it out of the build path and the removal that frees its bytes.
 const EVICTING_SUFFIX: &str = ".evicting-";
-
-/// Seconds in a day — the unit [`JanitorPolicy::evidence_retention_days`] is
-/// stated in.
-const SECS_PER_DAY: u64 = 86_400;
 
 /// Configured retention and budget the sweep applies.
 #[derive(Clone, Copy, Debug)]
@@ -53,7 +46,9 @@ pub struct JanitorPolicy {
     /// evict is allowed to pay for `dir_usage`. `0` measures on every tick
     /// that has a free slot.
     pub target_scan_interval_secs: u64,
-    /// Days to keep consumed evidence of a terminal bloom.
+    /// Days a consumed evidence directory of a terminal bloom must age before
+    /// an archive pass will move it. The tick no longer deletes evidence; the
+    /// field stays on the policy so the pass and the sweep share one struct.
     pub evidence_retention_days: u64,
 }
 
@@ -91,12 +86,10 @@ impl TargetScan {
 /// What one sweep pass reclaimed, for the log line and for tests.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SweepReport {
-    /// Checkouts released because the work they belong to is terminal: a
-    /// nonce-keyed one whose owning run is over, and a session tree no live
-    /// member's conversation is bound to any more.
+    /// Nonce-keyed checkouts released because the work they belong to is
+    /// terminal — an owning run that is over. Session trees are records and
+    /// are not counted here.
     pub worktrees: usize,
-    /// Consumed evidence directories past the retention window.
-    pub evidence_dirs: usize,
     /// Candidate / integration / checkpoint refs deleted for terminal blooms.
     pub refs: usize,
     /// Slot target directories whose bytes this pass actually returned to the
@@ -164,11 +157,11 @@ pub struct SweepRequest<'a> {
     pub pruned: &'a mut HashSet<BloomId>,
 }
 
-/// Rebuild the snapshot from the journal, then reclaim terminal worktrees,
-/// retained-past-window evidence, terminal-bloom working refs, and enough
-/// over-budget target dirs to get back under the budget. Best-effort
-/// throughout: a dir git refuses or a ref the source cannot delete is logged
-/// and stepped over, never a reason to skip the rest of the pass.
+/// Rebuild the snapshot from the journal, then reclaim terminal nonce-keyed
+/// worktrees, terminal-bloom working refs, and enough over-budget target dirs
+/// to get back under the budget. Best-effort throughout: a dir git refuses or
+/// a ref the source cannot delete is logged and stepped over, never a reason
+/// to skip the rest of the pass.
 ///
 /// The snapshot comes from the shared replay that folds each row's *recorded*
 /// decisions (ADR-0190), not from re-deciding the journal with this binary's
@@ -178,23 +171,17 @@ pub struct SweepRequest<'a> {
 /// replay off the real history, and because the seal door admits one active
 /// bloom per mainline, a landing lost that way refuses every seal after it.
 /// The live bloom then does not exist as far as the sweep can see, and the
-/// checkouts, evidence, and refs its members are still standing in read as
-/// nobody's.
+/// checkouts and refs its members are still standing in read as nobody's.
 ///
-/// Tree and text reclaim — nonce-keyed worktrees, session trees, evidence —
-/// run only between blooms: no bloom in that replayed snapshot is
-/// active-and-unlanded, and no order is outstanding. Computed in this pass
-/// from those two sets, never sampled elsewhere or cached across ticks. While
-/// anything walks, those three sweeps skip quietly. On 2026-08-25 the live-set
-/// derivation missed sessions that were still resumable (board-5435; dispatches
-/// 3301/3318), and the janitor reclaimed their trees mid-walk; a later refine
-/// lap resumed into a fresh checkout and declined a phantom empty diff.
-/// Session resumption is protected at all costs: a session checkout lives at
-/// least as long as any work that could resume that session, and old trees are
-/// records of how the work was figured out. Disk pressure is the slot-target
-/// budget eviction, which still runs every tick and evicts only those
-/// directories — regenerable build state, never source trees or text. The
-/// target sweep measures on its own cadence: a size walk runs only when a
+/// Nonce-keyed checkout reclaim runs only between blooms: no bloom in that
+/// replayed snapshot is active-and-unlanded, and no order is outstanding.
+/// Computed in this pass from those two sets, never sampled elsewhere or
+/// cached across ticks. While anything walks, that sweep skips quietly.
+/// Evidence directories and session trees are records (ADR-0211) and are not
+/// deleted here — the operator archive pass moves them. Disk pressure is the
+/// slot-target budget eviction, which still runs every tick and evicts only
+/// those directories — regenerable build state, never source trees or text.
+/// The target sweep measures on its own cadence: a size walk runs only when a
 /// slot is free to evict and either occupancy has changed or the scan
 /// interval has elapsed.
 ///
@@ -211,12 +198,6 @@ pub fn sweep(request: &mut SweepRequest<'_>, scan: &mut TargetScan) -> rusqlite:
 
     let worktrees = if between_blooms {
         reclaim_worktrees(request.runner, request.worktree_base, &live, &owners, &snapshot)
-            + reclaim_session_trees(request.runner, request.worktree_base, request.store, &snapshot, &outstanding)?
-    } else {
-        0
-    };
-    let evidence_dirs = if between_blooms {
-        reclaim_evidence(request, &live, &owners, &snapshot)
     } else {
         0
     };
@@ -224,41 +205,7 @@ pub fn sweep(request: &mut SweepRequest<'_>, scan: &mut TargetScan) -> rusqlite:
     let interval = Duration::from_secs(request.policy.target_scan_interval_secs);
     let now = request.now;
     let (target_dirs, targets_measured) = sweep_targets(request, scan, interval, now);
-    Ok(SweepReport { worktrees, evidence_dirs, refs, target_dirs, targets_measured })
-}
-
-/// Whether the coordinator is between blooms: nothing in the replayed snapshot
-/// is still walking, and no order is outstanding.
-///
-/// Tree and text reclaim run only then. The live-set derivation that used to
-/// decide which session trees were reclaimable is a computed claim racing live
-/// work; this gate does not depend on that computation being right.
-fn between_blooms(snapshot: &Snapshot, outstanding: &[String]) -> bool {
-    outstanding.is_empty() && snapshot.blooms.values().all(|record| !is_active_unlanded(record.status))
-}
-
-/// Nonce → owning bloom, from outstanding rows and the durable owner table.
-fn dispatch_owners(store: &mut dyn StoreBackend, outstanding: &[String]) -> rusqlite::Result<HashMap<String, BloomId>> {
-    let mut owners = HashMap::new();
-    for nonce in outstanding {
-        if let Some(order) = store.lookup_order(nonce)?
-            && let Some(bloom) = Digest::from_slice(&order.bloom).map(BloomId)
-        {
-            owners.insert(nonce.clone(), bloom);
-        }
-    }
-    Ok(owners)
-}
-
-fn bloom_of(store: &mut dyn StoreBackend, nonce: &str, owners: &HashMap<String, BloomId>) -> Option<BloomId> {
-    if let Some(bloom) = owners.get(nonce) {
-        return Some(*bloom);
-    }
-    store.lookup_dispatch_owner(nonce).ok().flatten().and_then(|bytes| Digest::from_slice(&bytes).map(BloomId))
-}
-
-fn bloom_is_live(snapshot: &Snapshot, bloom: &BloomId) -> bool {
-    snapshot.blooms.get(bloom).is_some_and(|record| is_active_unlanded(record.status))
+    Ok(SweepReport { worktrees, refs, target_dirs, targets_measured })
 }
 
 fn reclaim_worktrees(
@@ -305,198 +252,6 @@ fn reclaim_worktrees(
         }
     }
     reclaimed
-}
-
-/// Release the checkout of every harness session no live member is bound to
-/// any more (#5425) — and only when the coordinator is between blooms.
-///
-/// A session's tree is created when the session is minted and reused by every
-/// launch of that conversation — a member's own retry laps, and a declared-edge
-/// dependent that inherits it — so nothing inside the session's life may remove
-/// it. What ends it is the work ending: no order under this slug is outstanding
-/// any more, and every member whose row names it landed with its bloom, was
-/// withdrawn from it, or left with it when the bloom was superseded or
-/// cancelled. Everything the live set does not name is reclaimable, which also
-/// clears the trees of a bloom this process never saw walk.
-///
-/// That live set is not the retention policy. On 2026-08-25 it missed sessions
-/// that were still resumable (board-5435; dispatches 3301/3318): the janitor
-/// reclaimed the tree mid-walk, the next refine lap resumed the conversation
-/// into a fresh checkout, and the capture declined a phantom empty diff. The
-/// caller gates this walk on the pass's between-blooms condition; while
-/// anything walks, a session tree stays, named or not. Old trees are records
-/// of how the work was figured out.
-///
-/// The candidates are the repository's *registered* worktrees, filtered to the
-/// `sessions/<slug>/tree` shape, for the reason [`reclaim_worktrees`] filters to
-/// children of the base: the scratch root is a configured path, and a
-/// registration is the only positive proof a directory under it is one of ours.
-///
-/// The session's compiled artifacts inside each slot target are deliberately
-/// not chased. Cargo names its fingerprint and incremental directories by a
-/// metadata hash this process cannot derive from a source path, and a
-/// hand-removal of part of a target directory is not an operation cargo
-/// supports — a half-removed fingerprint set fails the next build in ways that
-/// read as a regression in the candidate. What bounds that growth is the budget
-/// eviction below, which takes a whole target out atomically.
-///
-/// # Errors
-/// The store could not be read for the live members' slugs.
-fn reclaim_session_trees(
-    runner: &dyn TransformRunner,
-    worktree_base: &Path,
-    store: &mut dyn StoreBackend,
-    snapshot: &Snapshot,
-    outstanding: &[String],
-) -> rusqlite::Result<usize> {
-    let Ok(base) = fs::canonicalize(worktree_base.join(SESSIONS_DIR)) else {
-        return Ok(0);
-    };
-    let registered = match runner.registered_worktrees() {
-        Ok(registered) => registered,
-        Err(error) => {
-            tracing::warn!(
-                target: "aether_chassis_bloomery::janitor",
-                %error,
-                "janitor: worktree registrations unreadable; terminal session trees not reclaimed",
-            );
-            return Ok(0);
-        }
-    };
-    let live = live_session_slugs(store, snapshot, outstanding)?;
-
-    let mut reclaimed = 0;
-    for worktree in registered {
-        let Some(slug) = session_slug_of(&base, &worktree) else {
-            continue;
-        };
-        if live.contains(slug.as_str()) {
-            continue;
-        }
-        tracing::info!(
-            target: "aether_chassis_bloomery::janitor",
-            %slug,
-            worktree = %worktree.display(),
-            "janitor: reclaiming the checkout of a session no live member is bound to",
-        );
-        if reclaim_checkout(runner, &worktree) {
-            reclaimed += 1;
-        }
-    }
-    Ok(reclaimed)
-}
-
-/// The slug a registered worktree belongs to, when it is one of ours: exactly
-/// `<base>/<slug>/tree`, both sides canonicalized.
-fn session_slug_of(base: &Path, worktree: &Path) -> Option<String> {
-    if worktree.file_name()?.to_str()? != SESSION_TREE_DIR {
-        return None;
-    }
-    child_name_of(base, worktree.parent()?)
-}
-
-/// Every session slug still entitled to its tree: one named by a member of a
-/// bloom that is active and unlanded and not itself withdrawn from it, and one
-/// named by an order that is still outstanding.
-///
-/// The second half is not a belt on the first. The journal is keyed by bloom
-/// and only blooms are in it, so a dispatch whose order names no sealed bloom
-/// is invisible to the membership walk however live it is — the pre-bloom
-/// scoping run (ADR-0208) is exactly that shape: a real lane, working in a real
-/// session tree, under a reserved digest nothing ever seals. Reading the
-/// outstanding orders as well is what makes "no live work is bound to this
-/// tree" a statement about the work rather than about the journal's coverage of
-/// it, and an outstanding order is the narrowest durable evidence that a lane
-/// may still be standing in the directory.
-fn live_session_slugs(
-    store: &mut dyn StoreBackend,
-    snapshot: &Snapshot,
-    outstanding: &[String],
-) -> rusqlite::Result<HashSet<String>> {
-    let mut live = HashSet::new();
-    for record in snapshot.blooms.values().filter(|record| is_active_unlanded(record.status)) {
-        let bloom = record.spec.id();
-        for member in record.spec.members() {
-            if record.withdrawn.contains_key(&member.workpiece) {
-                continue;
-            }
-            if let Some(slug) = store.lookup_session_slug(bloom.0.as_bytes(), &member.workpiece.0)? {
-                live.insert(slug);
-            }
-        }
-    }
-
-    for nonce in outstanding {
-        let Some(order) = store.lookup_order(nonce)? else {
-            continue;
-        };
-        if let Some(slug) = store.lookup_session_slug(&order.bloom, &order.workpiece)? {
-            live.insert(slug);
-        }
-    }
-    Ok(live)
-}
-
-fn reclaim_evidence(
-    request: &mut SweepRequest<'_>,
-    live: &HashSet<&str>,
-    owners: &HashMap<String, BloomId>,
-    snapshot: &Snapshot,
-) -> usize {
-    let entries = match fs::read_dir(request.worktree_base) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return 0,
-        Err(error) => {
-            tracing::warn!(
-                target: "aether_chassis_bloomery::janitor",
-                %error,
-                "janitor: evidence root unreadable",
-            );
-            return 0;
-        }
-    };
-
-    let mut reclaimed = 0;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(nonce) = evidence_nonce_of(&path) else {
-            continue;
-        };
-        let owner = bloom_of(request.store, &nonce, owners);
-        if evidence_is_protected(live, snapshot, &nonce, owner.as_ref()) {
-            continue;
-        }
-        if age_days(&path, request.now).is_none_or(|age| age < request.policy.evidence_retention_days) {
-            continue;
-        }
-        tracing::info!(
-            target: "aether_chassis_bloomery::janitor",
-            %nonce,
-            evidence = %path.display(),
-            "janitor: reclaiming a consumed evidence directory past the retention window",
-        );
-        if remove_abandoned(&path) {
-            reclaimed += 1;
-        }
-    }
-    reclaimed
-}
-
-fn evidence_is_protected(live: &HashSet<&str>, snapshot: &Snapshot, nonce: &str, owner: Option<&BloomId>) -> bool {
-    // An outstanding order is the narrowest durable evidence that a lane may
-    // still be standing in this directory. The journal cannot speak for a
-    // dispatch whose owner is not a sealed bloom — the pre-bloom scoping run
-    // (ADR-0208) is exactly that shape — and whether that order is abandoned is
-    // not this sweep's question: the executor reconciles the outstanding set
-    // against its own runs at boot, re-adopting the ones it recognizes and
-    // reclaiming the rest, and faults an order whose lane is gone. The
-    // directory becomes eligible when the order stops being outstanding.
-    if live.contains(nonce) {
-        return true;
-    }
-    // Consumed, but the bloom is still working — keep for forensics and
-    // the calibration window until that bloom itself is terminal.
-    owner.is_some_and(|bloom| bloom_is_live(snapshot, bloom))
 }
 
 fn prune_terminal_refs(source: &dyn WorkingRefPruner, snapshot: &Snapshot, already: &mut HashSet<BloomId>) -> usize {
@@ -772,28 +527,6 @@ fn scratch_nonce_of(base: &Path, worktree: &Path) -> Option<String> {
     child_name_of(base, worktree)
 }
 
-/// The file name of `path` when its parent is exactly `base`, canonicalized on
-/// both sides — the discriminator both checkout sweeps read their key with.
-fn child_name_of(base: &Path, path: &Path) -> Option<String> {
-    let parent = fs::canonicalize(path.parent()?).ok()?;
-    if parent != *base {
-        return None;
-    }
-    Some(path.file_name()?.to_str()?.to_owned())
-}
-
-fn evidence_nonce_of(path: &Path) -> Option<String> {
-    if !path.is_dir() {
-        return None;
-    }
-    path.file_name()?.to_str()?.strip_suffix(EVIDENCE_SUFFIX).filter(|nonce| !nonce.is_empty()).map(str::to_owned)
-}
-
-fn age_days(path: &Path, now: SystemTime) -> Option<u64> {
-    let modified = fs::metadata(path).ok()?.modified().ok()?;
-    now.duration_since(modified).ok().map(|elapsed| elapsed.as_secs() / SECS_PER_DAY)
-}
-
 /// What one directory tree costs and when it was last written.
 struct DirUsage {
     bytes: u64,
@@ -959,6 +692,4 @@ fn hex_of(digest: &Digest) -> String {
 
 /// Retention window as a [`Duration`], for tests that age a directory.
 #[cfg(test)]
-pub(super) fn retention_duration(days: u64) -> Duration {
-    Duration::from_secs(days.saturating_mul(SECS_PER_DAY))
-}
+pub(super) use super::records::retention_duration;

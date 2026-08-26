@@ -550,6 +550,13 @@ pub trait StoreBackend: Send {
     /// Record the slug a dispatch is about to run in, before the harness has
     /// reported anything. Idempotent per (`bloom`, `workpiece`).
     fn record_session_slug(&mut self, bloom: &[u8], workpiece: &str, slug: &str) -> rusqlite::Result<()>;
+    /// The bloom and workpiece a session slug was recorded under, when one
+    /// exists. The reverse of [`Self::lookup_session_slug`].
+    fn lookup_session_owner(&mut self, slug: &str) -> rusqlite::Result<Option<(Vec<u8>, String)>>;
+    /// Whether `workpiece`'s commission is landed or cancelled. A missing
+    /// commission reads as live — unknown is not eligible to leave the
+    /// working root.
+    fn commission_is_resolved(&mut self, workpiece: &str) -> rusqlite::Result<bool>;
     /// The member of `bloom` already holding `session_id`, when one does
     /// (#5427).
     ///
@@ -1053,6 +1060,7 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     if !has_column(&migration, "construct_session", "slug")? {
         migration.execute_batch("ALTER TABLE construct_session ADD COLUMN slug TEXT;")?;
     }
+    migration.execute_batch("CREATE INDEX IF NOT EXISTS construct_session_by_slug ON construct_session (slug);")?;
 
     // Version 16 (ADR-0211): the candidate-hash journal. Empty on creation; a
     // pre-existing store has no observed pushes to invent.
@@ -1336,6 +1344,7 @@ CREATE TABLE IF NOT EXISTS construct_session (
     slug                TEXT,
     PRIMARY KEY (bloom, workpiece)
 );
+CREATE INDEX IF NOT EXISTS construct_session_by_slug ON construct_session (slug);
 ";
 
 /// The sealed member-dependency graph a dependent construct looks up (#5178).
@@ -1892,6 +1901,17 @@ impl StoreBackend for SqliteStore {
             rusqlite::params![bloom, workpiece, slug],
         )?;
         Ok(())
+    }
+
+    fn lookup_session_owner(&mut self, slug: &str) -> rusqlite::Result<Option<(Vec<u8>, String)>> {
+        let mut stmt = self.conn.prepare("SELECT bloom, workpiece FROM construct_session WHERE slug = ?1 LIMIT 1")?;
+        let mut rows =
+            stmt.query_map(rusqlite::params![slug], |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?)))?;
+        rows.next().transpose()
+    }
+
+    fn commission_is_resolved(&mut self, workpiece: &str) -> rusqlite::Result<bool> {
+        super::commission::commission_is_resolved(&self.conn, workpiece)
     }
 
     fn lookup_construct_session(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<(String, u64)>> {

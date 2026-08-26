@@ -61,13 +61,32 @@ fn a_transcript_read_leaves_mtime_untouched() {
 
 #[test]
 fn a_swept_nonce_reports_retained_false_with_a_notice() {
-    // The journal named this nonce; the janitor deleted the directory. A disk
-    // client would 404 and cannot tell absence from "never existed".
+    // The journal named this nonce; the directory is gone from both the
+    // working root and the archive tier. A disk client would 404 and cannot
+    // tell absence from "never existed".
     let dir = tempfile::tempdir().expect("a scratch directory is available");
-    let view = read_header(dir.path(), "dispatch-9");
+    let view = read_header(dir.path(), dir.path(), "dispatch-9");
     assert!(!view.retained);
     assert_eq!(view.notice.as_deref(), Some(SWEPT_NOTICE));
     assert!(view.files.is_empty());
+    assert_eq!(view.archived, None);
+}
+
+#[test]
+fn an_archived_nonce_reads_as_retained_with_its_tier_path() {
+    // ADR-0211: a record that moved to the tier must not read as swept. The
+    // header reports retained, names the tier path, and still lists files.
+    let work = tempfile::tempdir().expect("a working root is available");
+    let archive = tempfile::tempdir().expect("an archive root is available");
+    let evidence = archive.path().join("evidence").join("dispatch-9-evidence");
+    fs::create_dir_all(&evidence).expect("the archived evidence directory is created");
+    fs::write(evidence.join("transcript.jsonl"), "hello\n").expect("the transcript writes");
+
+    let view = read_header(work.path(), archive.path(), "dispatch-9");
+    assert!(view.retained, "an archived record is still here");
+    assert_eq!(view.notice, None, "archived is not swept");
+    assert_eq!(view.archived.as_deref(), Some(evidence.to_str().expect("the archive path is UTF-8")));
+    assert!(view.files.iter().any(|name| name == "transcript.jsonl"));
 }
 
 #[test]
@@ -82,7 +101,7 @@ fn assistant_text_and_commit_message_cap_independently() {
     )
     .expect("the evidence header writes");
 
-    let view = read_header(dir.path(), "dispatch-1");
+    let view = read_header(dir.path(), dir.path(), "dispatch-1");
     assert!(view.retained);
     assert!(view.assistant_text_truncated);
     assert_eq!(view.assistant_text.as_ref().map(String::len), Some(ASSISTANT_TEXT_CAP));
@@ -110,6 +129,7 @@ fn cost_is_null_without_a_study_record_and_never_a_synthesized_zero() {
     .expect("a metric row encodes");
     let view = assemble(
         dir.path(),
+        dir.path(),
         None,
         &[BloomDispatchRollup { nonce: "dispatch-3".to_owned(), sequence: 3, payload }],
         &[],
@@ -136,6 +156,7 @@ fn live_outstanding_joins_the_rollup_and_keeps_its_nonce() {
     })
     .expect("a metric row encodes");
     let view = assemble(
+        dir.path(),
         dir.path(),
         None,
         &[BloomDispatchRollup { nonce: "fold:x".to_owned(), sequence: 3, payload }],

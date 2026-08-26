@@ -85,12 +85,14 @@ pub use outbox::TopicOutbox;
 pub(crate) use reactor::candidate_push_at;
 #[cfg(feature = "github")]
 pub use reactor::{
-    CandidatePush, ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, ClaimReleaseReactorState, ClaimReleaseTick,
-    DispatchTick, DrainTick, ExecutorReactorCapability, ExecutorReactorSetup, ExecutorReactorState,
-    IntegrateReactorCapability, IntegrateReactorSetup, IntegrateReactorState, IntegrateTick, JanitorPolicy,
-    JanitorReactorCapability, JanitorReactorSetup, JanitorReactorState, JanitorTick, LandReactorCapability,
-    LandReactorSetup, LandReactorState, LandTick, MirrorReactorCapability, MirrorReactorSetup, MirrorReactorState,
-    SweepReport, SweepRequest, TargetScan, WorkingRefPruner, sweep,
+    ArchiveFailure, ArchiveFailureView, ArchiveOutcome, ArchiveRecords, ArchiveRecordsResult, ArchiveRequest,
+    ArchiveTier, ArchivedRecord, ArchivedRecordView, CandidatePush, ClaimReleaseReactorCapability,
+    ClaimReleaseReactorSetup, ClaimReleaseReactorState, ClaimReleaseTick, DispatchTick, DrainTick,
+    ExecutorReactorCapability, ExecutorReactorSetup, ExecutorReactorState, IntegrateReactorCapability,
+    IntegrateReactorSetup, IntegrateReactorState, IntegrateTick, JanitorPolicy, JanitorReactorCapability,
+    JanitorReactorSetup, JanitorReactorState, JanitorTick, LandReactorCapability, LandReactorSetup, LandReactorState,
+    LandTick, ListArchive, ListArchiveResult, MirrorReactorCapability, MirrorReactorSetup, MirrorReactorState,
+    SweepReport, SweepRequest, TargetScan, WorkingRefPruner, archive_pass, sweep,
 };
 #[cfg(feature = "github")]
 pub use repair::{CandidateSource, PrepareError, prepare_candidate};

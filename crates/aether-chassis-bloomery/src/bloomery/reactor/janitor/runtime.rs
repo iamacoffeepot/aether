@@ -15,6 +15,10 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
 use serde::{Deserialize, Serialize};
 
+use super::archive::{ArchiveOutcome, ArchiveRequest, ArchiveTier, archive_pass};
+use super::kinds::{
+    ArchiveFailureView, ArchiveRecords, ArchiveRecordsResult, ArchivedRecordView, ListArchive, ListArchiveResult,
+};
 use super::sweep::{JanitorPolicy, SweepRequest, TargetScan, WorkingRefPruner, sweep};
 use super::{JanitorReactorCapability, JanitorReactorSetup};
 
@@ -38,6 +42,7 @@ pub struct JanitorReactorState {
     runner: Arc<dyn TransformRunner>,
     worktree_base: PathBuf,
     target_base: PathBuf,
+    tier: ArchiveTier,
     policy: JanitorPolicy,
     /// Free-slot set and stamp the last size walk was taken against. Reused
     /// across ticks until occupancy changes or the scan interval elapses.
@@ -82,13 +87,19 @@ impl NativeActor for JanitorReactorCapability {
         } else {
             PathBuf::from(config.target_base)
         };
+        let archive_base = if config.archive_base.is_empty() {
+            worktree_base.join("archive")
+        } else {
+            PathBuf::from(config.archive_base)
+        };
         tracing::info!(
             target: "aether_chassis_bloomery::janitor",
             poll_interval_secs = config.poll_interval_secs,
             lane_target_budget_bytes = config.lane_target_budget_bytes,
             target_scan_interval_secs = config.target_scan_interval_secs,
             evidence_retention_days = config.evidence_retention_days,
-            "janitor reactor mounted; sweeping terminal blooms on the coordinator cadence",
+            archive_base = %archive_base.display(),
+            "janitor reactor mounted; sweeping working state on the coordinator cadence; evidence archives after the retention window",
         );
         Ok(JanitorReactorState {
             source: config.source,
@@ -101,6 +112,7 @@ impl NativeActor for JanitorReactorCapability {
             )),
             worktree_base,
             target_base,
+            tier: ArchiveTier::new(archive_base),
             policy: JanitorPolicy {
                 lane_target_budget_bytes: config.lane_target_budget_bytes,
                 target_scan_interval_secs: config.target_scan_interval_secs,
@@ -152,11 +164,10 @@ impl NativeActor for JanitorReactorCapability {
             &mut state.scan,
         ) {
             Ok(report) => {
-                if report.worktrees + report.evidence_dirs + report.refs + report.target_dirs > 0 {
+                if report.worktrees + report.refs + report.target_dirs > 0 {
                     tracing::info!(
                         target: "aether_chassis_bloomery::janitor",
                         worktrees = report.worktrees,
-                        evidence_dirs = report.evidence_dirs,
                         refs = report.refs,
                         target_dirs = report.target_dirs,
                         targets_measured = report.targets_measured,
@@ -170,5 +181,55 @@ impl NativeActor for JanitorReactorCapability {
                 "janitor: sweep failed; will retry next tick",
             ),
         }
+    }
+
+    #[handler::single]
+    fn on_archive_records(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        _mail: ArchiveRecords,
+    ) -> ArchiveRecordsResult {
+        let Some(store) = state.store.as_mut() else {
+            return ArchiveRecordsResult::Errored { error: "janitor store is unavailable".to_owned() };
+        };
+        match archive_pass(&mut ArchiveRequest {
+            store,
+            runner: state.runner.as_ref(),
+            worktree_base: &state.worktree_base,
+            tier: &state.tier,
+            policy: &state.policy,
+            now: SystemTime::now(),
+        }) {
+            Ok(ArchiveOutcome::Archived { records, failures }) => ArchiveRecordsResult::Archived {
+                records: records.into_iter().map(record_view).collect(),
+                failures: failures
+                    .into_iter()
+                    .map(|failure| ArchiveFailureView {
+                        class: failure.class,
+                        name: failure.name,
+                        error: failure.error,
+                    })
+                    .collect(),
+            },
+            Ok(ArchiveOutcome::Refused { reason }) => ArchiveRecordsResult::Refused { reason },
+            Err(error) => ArchiveRecordsResult::Errored { error: error.to_string() },
+        }
+    }
+
+    #[handler::single]
+    fn on_list_archive(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ListArchive) -> ListArchiveResult {
+        match state.tier.list() {
+            Ok(records) => ListArchiveResult::Ok { records: records.into_iter().map(record_view).collect() },
+            Err(error) => ListArchiveResult::Err { error: error.to_string() },
+        }
+    }
+}
+
+fn record_view(record: super::archive::ArchivedRecord) -> ArchivedRecordView {
+    ArchivedRecordView {
+        class: record.class.as_str().to_owned(),
+        name: record.name,
+        path: record.path.display().to_string(),
+        bytes: record.bytes,
     }
 }
