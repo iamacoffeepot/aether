@@ -776,7 +776,7 @@ pub enum Fact {
         head: Digest,
         /// The refusing verdict.
         evidence: Evidence,
-        /// The two parents, the diagnostic paths, and the union bound, already
+        /// The parents, the diagnostic paths, and the union bound, already
         /// through [`narrow_composition`](crate::narrow_composition).
         attribution: CompositionParents,
     },
