@@ -209,6 +209,30 @@ impl VerifyInvocation {
         }
         args
     }
+
+    /// The prepare step this invocation runs under `scope`, or `None` when it
+    /// has none — or when the scope it narrowed to has nothing to prepare for
+    ///.
+    ///
+    /// The one prepare in the lane is `verify.test`'s `cargo xtask dist`, which
+    /// cross-builds every component package in its own cargo invocation and
+    /// then the chassis binaries. What it produces is read only by tests that
+    /// resolve one of those artifacts through the filesystem, so a closure
+    /// containing no such crate is a run with nothing for the cross-build to
+    /// hand it — minutes of the lane's largest compile producing wasm the
+    /// selected tests never open.
+    ///
+    /// Keyed on [`Breadth`] first, like the argv narrowing and for the same
+    /// reason: a member that answers for the whole tree whatever the diff
+    /// touched must keep its stated behaviour whatever the scope says.
+    ///
+    /// This is the call the gate already makes. CI's pull-request lane runs
+    /// `cargo xtask dist` only when the affected selection sets `run_all` or
+    /// `wasm_needed`, so declining it here on the same predicate moves the lane
+    /// towards the job it predicts rather than past it.
+    fn prepare_under(&self, scope: &Scope) -> Option<&'static [&'static str]> {
+        self.prepare.filter(|_| self.breadth != Breadth::Closure || scope.wasm_needed())
+    }
 }
 
 /// Maps a typed `verify.*` command id to the invocation that answers it, in
@@ -1095,6 +1119,13 @@ impl<'a> SpawnRunner<'a> {
     /// replay whose package does need wasm still runs the prepare on this
     /// checkout.
     ///
+    /// The stated prepare, not [`VerifyInvocation::prepare_under`]: a base
+    /// replay runs the member's unnarrowed argv against a tree that is not the
+    /// candidate's, so the candidate's closure says nothing about what this one
+    /// loads. Narrowing the tree's preparation by the other tree's scope is the
+    /// direction that excuses a finding, and this path only runs at all once a
+    /// member has already failed.
+    ///
     /// A replay naming a different base than the open one closes it and opens
     /// that: the tree is only ever the answer to a commit.
     fn base_checkout(&mut self, invocation: &VerifyInvocation, base: &str, prepare: bool) -> Result<&Path> {
@@ -1820,12 +1851,35 @@ fn names_a_minimal_failing_input(log: &str) -> bool {
     log.contains("minimal failing input:")
 }
 
-/// The scope line this member's log opens with, when the member is one the run
-/// narrowed. A workspace-wide member under a narrowed run gets none — claiming
-/// a closure it did not honor would misdirect the reader of a `verify.dup`
-/// failure to crates that were never the reason.
+/// The scope lines this member's log opens with, when the member is one the run
+/// narrowed: what it compiled over, and — for the one member that has a prepare
+/// — whether that prepare ran. A workspace-wide member under a narrowed run
+/// gets none — claiming a closure it did not honor would misdirect the reader of
+/// a `verify.dup` failure to crates that were never the reason.
 fn member_scope_notice(invocation: &VerifyInvocation, scope: &Scope) -> Option<String> {
-    (invocation.breadth == Breadth::Closure).then(|| scope.member_notice()).flatten()
+    if invocation.breadth != Breadth::Closure {
+        return None;
+    }
+
+    let notice: String =
+        [scope.member_notice(), declined_prepare_notice(invocation, scope)].into_iter().flatten().collect();
+    (!notice.is_empty()).then_some(notice)
+}
+
+/// The line a member writes when its scope declined its prepare step — or
+/// `None` when the prepare ran, or when the member has none.
+///
+/// A skipped build is exactly the kind of work that has to state itself: a log
+/// with no cross-build in it and no line saying why reads as a lane that
+/// silently stopped doing something, and a reader chasing a missing artifact
+/// has nowhere to start.
+fn declined_prepare_notice(invocation: &VerifyInvocation, scope: &Scope) -> Option<String> {
+    let prepare = invocation.prepare.filter(|_| invocation.prepare_under(scope).is_none())?;
+    Some(format!(
+        "note: `cargo {}` did not run — no crate in this run's closure resolves a dist artifact by path, so the \
+         cross-build has nothing the selected tests read (see {SCOPE_LOG})\n",
+        prepare.join(" "),
+    ))
 }
 
 /// The run a member records without dispatching, when this run's closure is
@@ -1866,10 +1920,11 @@ fn effective_exit_code(passed: bool, exit_code: Option<i32>) -> i32 {
 fn run_prepare(
     id: &str,
     invocation: &VerifyInvocation,
+    scope: &Scope,
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
 ) -> Result<PrepareFailure> {
-    let Some(prepare) = invocation.prepare else {
+    let Some(prepare) = invocation.prepare_under(scope) else {
         return Ok(None);
     };
 
@@ -1918,26 +1973,28 @@ type PrepareFailure = Option<(String, i32, MemberOutcome)>;
 
 /// Prepare-step result plus its own wall-clock share.
 ///
-/// `(None, None)` is a member with no prepare. `(Some(log), Some(millis))` is
-/// a prepare that failed. `(None, Some(millis))` is a prepare that ran and
-/// left the member clear to run.
+/// `(None, None)` is a member with no prepare to run — either it declares none,
+/// or its scope declined the one it declares. `(Some(log), Some(millis))` is a
+/// prepare that failed. `(None, Some(millis))` is a prepare that ran and left
+/// the member clear to run.
 type TimedPrepare = (PrepareFailure, Option<u64>);
 
-/// Run `invocation`'s prepare step when it has one, and return that step's
-/// own wall-clock share so the gate receipt can split the wasm cross-build
-/// out of the member it precedes.
+/// Run `invocation`'s prepare step when its scope calls for one, and return that
+/// step's own wall-clock share so the gate receipt can split the wasm
+/// cross-build out of the member it precedes.
 fn run_timed_prepare(
     id: &str,
     invocation: &VerifyInvocation,
+    scope: &Scope,
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
 ) -> Result<TimedPrepare> {
-    if invocation.prepare.is_none() {
+    if invocation.prepare_under(scope).is_none() {
         return Ok((None, None));
     }
 
     let started = Instant::now();
-    let failure = run_prepare(id, invocation, cache, peak)?;
+    let failure = run_prepare(id, invocation, scope, cache, peak)?;
     Ok((failure, Some(elapsed_millis(started))))
 }
 
@@ -2463,7 +2520,7 @@ fn run_gate(id: &'static str, pass: &GatePass<'_>) -> Result<(MemberRun, GateTim
     let (run, prepare_millis) = if let Some(run) = empty_closure_run(id, &invocation, scope) {
         (run, None)
     } else {
-        let (prepare_failure, prepare_millis) = run_timed_prepare(id, &invocation, cache, peak)?;
+        let (prepare_failure, prepare_millis) = run_timed_prepare(id, &invocation, scope, cache, peak)?;
         let mut runner = SpawnRunner::new(cache, peak);
         let run = match prepare_failure {
             Some((log, code, outcome)) => MemberRun::plain(id, outcome, log.into_bytes(), code),
@@ -2943,11 +3000,24 @@ mod tests {
         }
     }
 
-    /// A computed closure over two crates, for the argv assertions.
+    /// A computed closure over two crates, for the argv assertions. Nothing in
+    /// it resolves a dist artifact by path, which is the ordinary shape;
+    /// [`dist_consuming_closure_scope`] is the other one.
     fn closure_scope(packages: &[&str]) -> Scope {
+        scope_of(packages, false)
+    }
+
+    /// The same closure, over crates whose tests read what `cargo xtask dist`
+    /// builds.
+    fn dist_consuming_closure_scope(packages: &[&str]) -> Scope {
+        scope_of(packages, true)
+    }
+
+    fn scope_of(packages: &[&str], wasm_needed: bool) -> Scope {
         Scope::Closure {
             packages: packages.iter().map(|name| (*name).to_owned()).collect(),
             skipped: vec![String::from("aether-render")],
+            wasm_needed,
         }
     }
 
@@ -3107,6 +3177,56 @@ mod tests {
                 empty_closure_run("verify.test", &test, &scope).is_none(),
                 "a scope naming crates to compile must dispatch the suite: {scope:?}",
             );
+        }
+    }
+
+    #[test]
+    fn a_scoped_member_runs_its_prepare_only_when_the_closure_reads_what_it_builds() {
+        // Tripwire. `verify.test`'s prepare is the lane's largest
+        // single compile — every component package in its own cargo
+        // invocation, then the chassis binaries — and it ran ahead of every
+        // member however narrow the closure. All three arms are the invariant.
+        // A narrow closure that starts running it again puts back minutes of
+        // cross-build whose output no selected test opens; a closure that reads
+        // a dist artifact and stops running it leaves that test with nothing to
+        // load; and a workspace run that stops running it is the whole suite
+        // without its wasm.
+        let test = verify_command("verify.test").expect("verify.test mapped");
+
+        assert_eq!(
+            test.prepare_under(&closure_scope(&["aether-chassis-bloomery"])),
+            None,
+            "a closure that opens no dist artifact must not pay for the cross-build",
+        );
+        assert_eq!(
+            test.prepare_under(&dist_consuming_closure_scope(&["aether-chassis-desktop"])),
+            test.prepare,
+            "a closure that resolves a dist artifact by path keeps its stated prepare",
+        );
+        assert_eq!(
+            test.prepare_under(&Scope::resolve(None)),
+            test.prepare,
+            "a workspace run selects the suites the pre-build exists for",
+        );
+
+        // A declined build states itself where the reader is. Without the line,
+        // a log with no cross-build in it is indistinguishable from a lane that
+        // quietly stopped preparing.
+        let notice = member_scope_notice(&test, &closure_scope(&["aether-chassis-bloomery"]))
+            .expect("a scoped member qualifies its own log");
+        assert!(notice.contains("cargo xtask dist` did not run"), "{notice}");
+        assert!(
+            !member_scope_notice(&test, &dist_consuming_closure_scope(&["aether-chassis-desktop"]))
+                .expect("a scoped member qualifies its own log")
+                .contains("did not run"),
+            "a prepare that ran must not be reported as declined",
+        );
+
+        // Nothing else in the lane declares a prepare, and the narrowing must
+        // not invent one for them.
+        for &id in verify_check_members().iter().filter(|id| **id != "verify.test") {
+            let invocation = verify_command(id).expect("member mapped");
+            assert_eq!(invocation.prepare_under(&closure_scope(&["aether-math"])), None, "{id} declares no prepare");
         }
     }
 
@@ -3395,8 +3515,9 @@ mod tests {
         // prepare_millis: 0 on every gate that never prepared, which reads as
         // a free wasm cross-build rather than as "this gate has no prepare".
         let invocation = verify_command("verify.fmt").expect("verify.fmt mapped");
-        let (failure, prepare_millis) = run_timed_prepare("verify.fmt", &invocation, None, &peak_memory::detect())
-            .expect("a member with no prepare is a no-op");
+        let (failure, prepare_millis) =
+            run_timed_prepare("verify.fmt", &invocation, &Scope::resolve(None), None, &peak_memory::detect())
+                .expect("a member with no prepare is a no-op");
         assert!(failure.is_none());
         assert!(prepare_millis.is_none(), "a gate that never prepared must not stamp a prepare share");
     }

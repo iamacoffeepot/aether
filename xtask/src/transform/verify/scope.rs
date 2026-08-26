@@ -30,6 +30,16 @@
 //! unrelated flake it meets. That scope is claimed only when every path in the
 //! diff lies outside every workspace crate root, and the members that narrow to
 //! a closure record an explicit empty-closure pass instead of running.
+//!
+//! The closure decides one thing besides the argv: whether `verify.test`'s
+//! `cargo xtask dist` pre-build runs at all. That step cross-builds
+//! every component package in its own cargo invocation, plus the behaviour
+//! variants and the chassis binaries, and it is the single largest compile in
+//! the lane — but what it produces is read only by tests that resolve a dist
+//! artifact through the filesystem. Whether any crate in the closure does that
+//! is the same question `cargo xtask affected` answers as
+//! [`Selection::wasm_needed`](crate::affected::select::Selection::wasm_needed),
+//! so the scope carries that answer through rather than deriving a second one.
 
 use std::collections::BTreeSet;
 use std::process::Command;
@@ -72,6 +82,11 @@ pub(super) enum Scope {
         /// that makes a wrong closure legible: a crate that should have been
         /// reached appears here by name instead of vanishing.
         skipped: Vec<String>,
+        /// Whether any crate in the closure resolves a `cargo xtask dist`
+        /// artifact by filesystem path at test time — the selection's own
+        /// `wasm_needed`, carried rather than recomputed so the lane and the
+        /// gate it predicts cannot answer it two ways.
+        wasm_needed: bool,
     },
     /// The candidate diff entered no workspace crate at all, so the compiling
     /// members have an empty closure and nothing of the candidate's to build.
@@ -137,7 +152,11 @@ impl Scope {
 
         let members = workspace.members();
         let skipped = members.difference(&selection.packages).cloned().collect();
-        Ok(Self::Closure { packages: selection.packages.into_iter().collect(), skipped })
+        Ok(Self::Closure {
+            packages: selection.packages.into_iter().collect(),
+            skipped,
+            wasm_needed: selection.wasm_needed,
+        })
     }
 
     /// The scope a diff the path rules resolved to no package computes.
@@ -185,6 +204,34 @@ impl Scope {
         }
     }
 
+    /// Whether the tests this run selects read a `cargo xtask dist` artifact,
+    /// and so whether `verify.test`'s pre-build has anything to produce for
+    /// them.
+    ///
+    /// A workspace run says yes for the same reason it compiles everything: it
+    /// selects the suites that load component wasm and fork the dist-resolved
+    /// chassis binaries, so the pre-build is theirs. A closure says what its
+    /// selection said — a crate resolving a dist artifact by path is a
+    /// structural property of its dependency list, recomputed from the
+    /// workspace sources on every push by the `affected::invariants` module's
+    /// `dist_consumers` scan rather than trusted to a list here.
+    ///
+    /// Declining the pre-build is the narrow direction, so it is worth naming
+    /// what happens when this is wrong. `verify.test` runs under
+    /// `AETHER_REQUIRE_RUNTIME=1`, which turns a missing artifact into a failed
+    /// test rather than a silent skip — a misclassification is loud on the next
+    /// run, never a candidate integrating on a suite that quietly did not
+    /// execute.
+    pub(super) fn wasm_needed(&self) -> bool {
+        match self {
+            Self::Workspace { .. } => true,
+            Self::Closure { wasm_needed, .. } => *wasm_needed,
+            // A diff that entered no crate compiles nothing; the compiling
+            // members record the empty-closure pass before any prepare runs.
+            Self::Outside { .. } => false,
+        }
+    }
+
     /// Whether a diagnostic this run's compiler emitted about `package` is a
     /// statement about the candidate.
     ///
@@ -219,13 +266,18 @@ impl Scope {
     pub(super) fn receipt(&self) -> String {
         match self {
             Self::Workspace { reason } => format!("verify scope: every workspace crate — {reason}\n"),
-            Self::Closure { packages, skipped } => format!(
+            Self::Closure { packages, skipped, wasm_needed } => format!(
                 "verify scope: the candidate diff's reverse-dependency closure.\n\
-                 crates in ({}): {}\ncrates skipped ({}): {}\n",
+                 crates in ({}): {}\ncrates skipped ({}): {}\ndist pre-build: {}\n",
                 packages.len(),
                 packages.join(" "),
                 skipped.len(),
                 skipped.join(" "),
+                if *wasm_needed {
+                    "needed — a crate in the closure resolves a dist artifact by path"
+                } else {
+                    "not needed — no crate in the closure resolves a dist artifact by path"
+                },
             ),
             Self::Outside { paths } => format!(
                 "verify scope: no workspace crate — every one of the candidate diff's {} path(s) lies outside \
@@ -244,7 +296,7 @@ impl Scope {
     /// empty closure, whose members write [`Self::empty_closure_verdict`]
     /// instead of a log to qualify.
     pub(super) fn member_notice(&self) -> Option<String> {
-        let Self::Closure { packages, skipped } = self else {
+        let Self::Closure { packages, skipped, .. } = self else {
             return None;
         };
         Some(format!(
@@ -428,6 +480,57 @@ mod tests {
             skipped.iter().any(|name| name == "aether-math"),
             "a crate the change cannot reach must be skipped: {skipped:?}",
         );
+    }
+
+    /// A crate that resolves a `cargo xtask dist` artifact by filesystem path,
+    /// and whose own reverse-dependency closure reaches no component crate — so
+    /// the scope narrows instead of failing open and the pre-build question is
+    /// actually asked. Derived rather than assumed: the test below refuses to
+    /// pass on a narrowing that never happened.
+    const DIST_CONSUMING_LEAF: &str = "aether-chassis-desktop";
+
+    /// A crate whose closure reads nothing the pre-build produces — the shape
+    /// every member of a coordinator-side wave has.
+    const DIST_FREE_LEAF: &str = "aether-chassis-bloomery";
+
+    #[test]
+    fn the_dist_prebuild_follows_the_closure_rather_than_the_whole_tree() {
+        // Tripwire. `cargo xtask dist` cross-builds thirteen
+        // component packages in thirteen cargo invocations plus the chassis
+        // binaries, and `verify.test` ran it before every member however narrow
+        // — for a coordinator-side candidate, minutes of cross-build producing
+        // wasm that no test in the closure opens. Both directions are the
+        // invariant. A closure that stops declining the pre-build puts the cost
+        // back; a closure that starts declining one it needs leaves a
+        // dist-resolving test with no artifact, and `AETHER_REQUIRE_RUNTIME=1`
+        // turns that into a red member on a candidate that did nothing wrong.
+        let free = Scope::over_changed(&strings(&[&format!("crates/{DIST_FREE_LEAF}/src/lib.rs")]))
+            .expect("compute the closure over a coordinator-side change");
+        let consuming = Scope::over_changed(&strings(&[&format!("crates/{DIST_CONSUMING_LEAF}/src/lib.rs")]))
+            .expect("compute the closure over a dist-resolving change");
+
+        assert!(free.packages().is_some(), "{DIST_FREE_LEAF} must narrow, or the question is never asked");
+        assert!(consuming.packages().is_some(), "{DIST_CONSUMING_LEAF} must narrow, or the question is never asked");
+        assert!(
+            !free.wasm_needed(),
+            "no crate in {DIST_FREE_LEAF}'s closure opens a dist artifact: {}",
+            free.receipt()
+        );
+        assert!(
+            consuming.wasm_needed(),
+            "{DIST_CONSUMING_LEAF} resolves a dist artifact by path and its closure must say so: {}",
+            consuming.receipt(),
+        );
+
+        // The whole tree keeps the pre-build for the same reason it keeps the
+        // whole argv: it selects the suites that load component wasm and fork
+        // the dist-resolved chassis binaries.
+        assert!(Scope::resolve(None).wasm_needed(), "a workspace run must pre-build");
+
+        // Both halves stated where the reader is, so a run that skipped the
+        // cross-build is read rather than inferred from a missing log.
+        assert!(free.receipt().contains("dist pre-build: not needed"), "{}", free.receipt());
+        assert!(consuming.receipt().contains("dist pre-build: needed"), "{}", consuming.receipt());
     }
 
     #[test]
