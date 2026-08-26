@@ -4,7 +4,6 @@
 //! `encode_to_vec(v) == to_vec(v)`, and each decoder must accept the
 //! other's output. Golden arrays pin the agreed bytes so the pins survive
 //! the adapter's later removal.
-#![allow(clippy::unwrap_used)]
 
 use alloc::borrow::Cow;
 use alloc::collections::BTreeMap;
@@ -26,17 +25,37 @@ use crate::schema::{
 use crate::wire_id::{EngineId, SessionToken, Uuid};
 use crate::{KindId, MailboxId};
 
+fn owned_bytes<T: WireEncode>(value: &T) -> Vec<u8> {
+    match encode_to_vec(value) {
+        Ok(bytes) => bytes,
+        Err(error) => panic!("owned encode: {error}"),
+    }
+}
+
+fn serde_bytes<T: Serialize>(value: &T) -> Vec<u8> {
+    match to_vec(value) {
+        Ok(bytes) => bytes,
+        Err(error) => panic!("serde encode: {error}"),
+    }
+}
+
 fn assert_drivers_agree<T>(value: &T)
 where
     T: WireEncode + for<'de> WireDecode<'de> + Serialize + DeserializeOwned + PartialEq + Debug,
 {
-    let derived = encode_to_vec(value).expect("owned encode");
-    let adapter = to_vec(value).expect("serde encode");
+    let derived = owned_bytes(value);
+    let adapter = serde_bytes(value);
     assert_eq!(derived, adapter, "owned codec and serde adapter diverged");
 
-    let from_derived: T = from_bytes(&derived).expect("serde decode of owned bytes");
+    let from_derived: T = match from_bytes(&derived) {
+        Ok(decoded) => decoded,
+        Err(error) => panic!("serde decode of owned bytes: {error}"),
+    };
     assert_eq!(&from_derived, value);
-    let from_adapter: T = decode_from_slice(&adapter).expect("owned decode of serde bytes");
+    let from_adapter: T = match decode_from_slice(&adapter) {
+        Ok(decoded) => decoded,
+        Err(error) => panic!("owned decode of serde bytes: {error}"),
+    };
     assert_eq!(&from_adapter, value);
 }
 
@@ -45,8 +64,7 @@ where
     T: WireEncode + for<'de> WireDecode<'de> + Serialize + DeserializeOwned + PartialEq + Debug,
 {
     assert_drivers_agree(value);
-    let derived = encode_to_vec(value).unwrap();
-    assert_eq!(derived, golden, "owned bytes drifted from the pinned encoding");
+    assert_eq!(owned_bytes(value), golden, "owned bytes drifted from the pinned encoding");
 }
 
 #[test]
@@ -149,9 +167,12 @@ fn schema_cell_static_and_owned_encode_identically() {
     static INNER: SchemaType = SchemaType::Bool;
     let static_cell = SchemaCell::Static(&INNER);
     let owned_cell = SchemaCell::owned(SchemaType::Bool);
-    assert_eq!(encode_to_vec(&static_cell).unwrap(), encode_to_vec(&owned_cell).unwrap());
+    assert_eq!(owned_bytes(&static_cell), owned_bytes(&owned_cell));
     assert_drivers_agree(&owned_cell);
-    let decoded: SchemaCell = decode_from_slice(&encode_to_vec(&static_cell).unwrap()).unwrap();
+    let decoded: SchemaCell = match decode_from_slice(&owned_bytes(&static_cell)) {
+        Ok(cell) => cell,
+        Err(error) => panic!("owned decode of static cell: {error}"),
+    };
     assert!(matches!(decoded, SchemaCell::Owned(_)));
 }
 
@@ -233,9 +254,12 @@ fn kind_labels_and_reply_contract_match_serde() {
 #[test]
 fn float_bits_are_faithful_across_drivers() {
     let nan = f64::from_bits(0x7ff8_0000_0000_0001);
-    let derived = encode_to_vec(&nan).unwrap();
-    let adapter = to_vec(&nan).unwrap();
+    let derived = owned_bytes(&nan);
+    let adapter = serde_bytes(&nan);
     assert_eq!(derived, adapter);
-    let back: f64 = decode_from_slice(&derived).unwrap();
+    let back: f64 = match decode_from_slice(&derived) {
+        Ok(value) => value,
+        Err(error) => panic!("owned decode of nan bits: {error}"),
+    };
     assert_eq!(back.to_bits(), nan.to_bits());
 }

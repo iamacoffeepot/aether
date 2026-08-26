@@ -582,7 +582,7 @@ fn expand_wire_codec(name: &syn::Ident, data: &Data) -> TokenStream2 {
     }
 }
 
-fn encode_ref_expr(ref_expr: TokenStream2, ty: &Type) -> TokenStream2 {
+fn encode_ref_expr(ref_expr: &TokenStream2, ty: &Type) -> TokenStream2 {
     if is_vec_u8(ty) {
         quote! { ::aether_data::__derive_runtime::encode_bytes(out, #ref_expr)?; }
     } else {
@@ -620,7 +620,7 @@ fn expand_wire_struct(name: &syn::Ident, fields: &Fields) -> TokenStream2 {
         Fields::Named(named) => {
             let encodes = named.named.iter().map(|field| {
                 let ident = field.ident.as_ref();
-                encode_ref_expr(quote!(&self.#ident), &field.ty)
+                encode_ref_expr(&quote!(&self.#ident), &field.ty)
             });
             let decodes = named.named.iter().map(|field| {
                 let ident = field.ident.as_ref();
@@ -649,7 +649,7 @@ fn expand_wire_struct(name: &syn::Ident, fields: &Fields) -> TokenStream2 {
         Fields::Unnamed(unnamed) => {
             let encodes = unnamed.unnamed.iter().enumerate().map(|(idx, field)| {
                 let index = syn::Index::from(idx);
-                encode_ref_expr(quote!(&self.#index), &field.ty)
+                encode_ref_expr(&quote!(&self.#index), &field.ty)
             });
             let decodes = unnamed.unnamed.iter().map(|field| decode_expr(&field.ty));
             quote! {
@@ -676,8 +676,7 @@ fn expand_wire_struct(name: &syn::Ident, fields: &Fields) -> TokenStream2 {
 
 fn expand_wire_enum(name: &syn::Ident, data: &DataEnum) -> TokenStream2 {
     let encode_arms = data.variants.iter().enumerate().map(|(idx, variant)| {
-        #[allow(clippy::cast_possible_truncation)]
-        let selector = idx as u32;
+        let selector = u32::try_from(idx).unwrap_or(u32::MAX);
         let ident = &variant.ident;
         match &variant.fields {
             Fields::Unit => quote! {
@@ -691,7 +690,7 @@ fn expand_wire_enum(name: &syn::Ident, data: &DataEnum) -> TokenStream2 {
                     .unnamed
                     .iter()
                     .zip(&bindings)
-                    .map(|(field, binding)| encode_ref_expr(quote!(#binding), &field.ty));
+                    .map(|(field, binding)| encode_ref_expr(&quote!(#binding), &field.ty));
                 quote! {
                     Self::#ident(#(#bindings),*) => {
                         ::aether_data::__derive_runtime::WireEncode::encode(&#selector, out)?;
@@ -702,7 +701,7 @@ fn expand_wire_enum(name: &syn::Ident, data: &DataEnum) -> TokenStream2 {
             Fields::Named(named) => {
                 let idents: Vec<_> = named.named.iter().map(|field| field.ident.as_ref()).collect();
                 let encodes =
-                    named.named.iter().zip(&idents).map(|(field, ident)| encode_ref_expr(quote!(#ident), &field.ty));
+                    named.named.iter().zip(&idents).map(|(field, ident)| encode_ref_expr(&quote!(#ident), &field.ty));
                 quote! {
                     Self::#ident { #(#idents),* } => {
                         ::aether_data::__derive_runtime::WireEncode::encode(&#selector, out)?;
@@ -713,8 +712,7 @@ fn expand_wire_enum(name: &syn::Ident, data: &DataEnum) -> TokenStream2 {
         }
     });
     let decode_arms = data.variants.iter().enumerate().map(|(idx, variant)| {
-        #[allow(clippy::cast_possible_truncation)]
-        let selector = idx as u32;
+        let selector = u32::try_from(idx).unwrap_or(u32::MAX);
         let ident = &variant.ident;
         match &variant.fields {
             Fields::Unit => quote! {
