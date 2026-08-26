@@ -6,14 +6,17 @@
 
 #![allow(clippy::unwrap_used)]
 
+use std::sync::Arc;
+
 use aether_bloomery::{
     BloomId, BloomStatus, BloomView, CommissionProjection, Digest, Evidence, EvidenceKind, LandingReceipt, MemberView,
     PendingDecisionView, ProjectedReceipt, ProjectionBackend, ResolutionClaim, StageId, ViewDocument, WithdrawnView,
     WorkpieceId,
 };
 use aether_bloomery_github::{
-    CommissionProjectionApi, GithubProjection, Marker, NewIssue, commission_floor_title, issue_title_is_valid,
-    landing_branch, marker::render_marker, testing::FakeGithub,
+    CommissionProjectionApi, GithubError, GithubProjection, HttpRequest, HttpResponse, HttpTransport, Marker, NewIssue,
+    ReqwestGithub, StaticTokenSource, commission_floor_title, issue_title_is_valid, landing_branch,
+    marker::render_marker, testing::FakeGithub,
 };
 
 /// The two issue numbers the view's members address — objects the repository
@@ -305,6 +308,42 @@ fn an_unaddressable_id_and_an_absent_object_are_skipped_without_error() {
     assert_eq!(projection.client().issue_count(), 1, "nothing is fabricated to give a projection a home");
     assert_eq!(projection.client().comment_count(), 1, "only the target the repository holds is written");
     assert_eq!(projection.client().comments_on(MEMBER_B).len(), 1, "a skipped target does not abort its siblings");
+}
+
+// Tripwire: a spent allowance used to arrive as 403, which `refuses_comment`
+// treats as a locked object, so `reconcile_view` returned Ok and the outbox
+// acked the document with nothing written. An allowance refusal is 429 and
+// re-drives.
+#[test]
+fn a_rate_limited_comment_re_drives_rather_than_acking() {
+    struct RateLimitedTransport;
+
+    impl HttpTransport for RateLimitedTransport {
+        fn execute(&self, _request: HttpRequest) -> Result<HttpResponse, GithubError> {
+            Ok(HttpResponse {
+                status: 403,
+                body: r#"{"message":"API rate limit exceeded"}"#.to_owned(),
+                headers: vec![
+                    ("x-ratelimit-remaining".to_owned(), "0".to_owned()),
+                    ("x-ratelimit-reset".to_owned(), u64::from(u32::MAX).to_string()),
+                ],
+            })
+        }
+    }
+
+    let projection = GithubProjection::new(ReqwestGithub::with_transport(
+        RateLimitedTransport,
+        Arc::new(StaticTokenSource::new("t0ken".to_owned())),
+        "https://api.github.com",
+        "octo/shadow",
+    ));
+    let document = one_bloom(BloomId(digest(1)), vec![member(MEMBER_A, 10)]);
+
+    let error = projection.reconcile_view(&document).expect_err("a spent allowance re-drives");
+    assert!(
+        matches!(error, GithubError::Status { status: 429, .. }),
+        "the allowance refusal is 429, not a skipped 403: {error}",
+    );
 }
 
 #[test]

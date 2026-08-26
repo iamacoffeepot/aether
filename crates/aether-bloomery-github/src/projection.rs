@@ -307,8 +307,11 @@ pub fn canonical_issue_number(id: &str) -> Option<u64> {
 }
 
 /// Whether `error` is the target refusing the write rather than a transport
-/// fault: absent (404, or 410 for a deleted object) or locked against comment
-/// (403). Permanent for that target, so it is recorded and skipped.
+/// fault: absent (404, or 410 for a deleted object) or locked / inaccessible
+/// against comment (403). Permanent for that target, so it is recorded and
+/// skipped. An allowance refusal is `429` by the time it reaches here — the
+/// client normalizes primary, secondary, and withheld windows to that status —
+/// and does not match, so the comment re-drives rather than acking as delivered.
 fn refuses_comment(error: &GithubError) -> bool {
     matches!(error, GithubError::Status { status: 403 | 404 | 410, .. })
 }
