@@ -28,10 +28,10 @@ fn a_panic_between_the_fork_and_the_teardown_reaps_the_coordinator() {
     // store, and a run under a coordinator's environment inherits one — the live
     // journal (#4714). Handshake is the boot gate so the panic below unwinds
     // past a *booted* coordinator — the shape that leaked, and the one that
-    // holds a lock. Port 0 lets the child bind atomically; the helper
-    // discovers that listen instead of racing a reserved port (#5116).
+    // holds a lock. Port 0 lets the child bind atomically; the helper dials the
+    // port the child announced instead of racing a reserved one (#5116).
     let (coordinator, _stream) = spawn_and_connect("reap-test", Duration::from_mins(1), || {
-        (0, Coordinator::spawn(0, &[("AETHER_STORE_PATH", ":memory:")]))
+        Coordinator::spawn(0, &[("AETHER_STORE_PATH", ":memory:")])
     });
     let pid = i32::try_from(coordinator.pid()).unwrap();
     assert!(is_pid_alive(pid), "the forked coordinator is live before the panic");

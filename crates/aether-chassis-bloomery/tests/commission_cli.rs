@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use aether_bloomery::{AuthorityDoor, Digest, KeyId, SignatureEnvelope, authorization_message};
 use aether_chassis_bloomery::commission;
-use common::Coordinator;
 use common::client::spawn_and_connect;
+use common::{Coordinator, Ingress};
 use ed25519_dalek::{Signer, SigningKey};
 use tempfile::TempDir;
 
@@ -63,26 +63,34 @@ fn cli(http_port: u16, rest: &[&str]) -> Result<String, anyhow::Error> {
 }
 
 /// Fork with OS-assigned RPC and HTTP, handshake the child we spawned, then
-/// wait until that child's HTTP answers `list`. A reserved `free_port` here
-/// burns the ready deadline against a closed socket once a sibling steals
-/// the bind — the full-suite flake at this panic.
+/// wait until that child's HTTP answers `list`. A reserved port here burns the
+/// ready deadline against a closed socket once a sibling steals the bind — the
+/// full-suite flake at this panic — so both ports are the child's own and it
+/// says which they are.
 fn spawn_ready(policy_path: &str) -> (u16, Coordinator) {
     let allowlist = owner_allowlist();
-    let (coordinator, stream) =
-        spawn_and_connect("commission-cli", Duration::from_mins(1), || (0, spawn(policy_path, &allowlist)));
-    let rpc_port = stream.peer_addr().unwrap_or_else(|error| panic!("rpc peer: {error}")).port();
-    (wait_http(&coordinator, rpc_port), coordinator)
+    let (coordinator, _stream) =
+        spawn_and_connect("commission-cli", Duration::from_mins(1), || spawn(policy_path, &allowlist));
+    (wait_http(&coordinator), coordinator)
 }
 
-fn wait_http(coordinator: &Coordinator, rpc_port: u16) -> u16 {
+/// The child's REST port, once it answers `list`.
+///
+/// Two gates, and both are needed: the child announces the port it bound, and
+/// the CLI's own `list` is what says the routes behind it have registered.
+fn wait_http(coordinator: &Coordinator) -> u16 {
     let deadline = Instant::now() + Duration::from_secs(30);
-    let mut last = String::from("HTTP never listened");
+    let port = coordinator
+        .await_port(Ingress::Http, deadline)
+        .unwrap_or_else(|why| panic!("the coordinator never bound its REST control API: {why}"));
+
+    // Assigned on every path that reaches the assert, so it always names the
+    // refusal the last attempt actually met.
+    let mut last;
     loop {
-        if let Some(port) = coordinator.listening_ports().into_iter().find(|port| *port != rpc_port) {
-            match cli(port, &["list"]) {
-                Ok(_) => return port,
-                Err(error) => last = error.to_string(),
-            }
+        match cli(port, &["list"]) {
+            Ok(_) => return port,
+            Err(error) => last = error.to_string(),
         }
         assert!(Instant::now() < deadline, "coordinator HTTP never became ready for commission list: {last}");
         thread::sleep(Duration::from_millis(50));

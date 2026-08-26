@@ -7,4 +7,4 @@ pub mod process;
 pub mod repo;
 pub mod wire;
 
-pub use process::{Coordinator, free_port};
+pub use process::{Coordinator, Ingress, free_port};

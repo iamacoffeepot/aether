@@ -7,9 +7,9 @@
 //! envelope of the expected kind, return it at `ReplyEnd`" shape is subtle
 //! enough that a copy which got it slightly wrong would fail intermittently and
 //! look like a coordinator bug. The spawn-and-handshake transaction lives here
-//! for the same reason: a bind-race retry that only one suite owns leaves every
-//! other caller burning the handshake deadline against a child that already
-//! lost the port.
+//! for the same reason: a fork retry that only one suite owns leaves every
+//! other caller burning the handshake deadline against a child that never came
+//! up.
 
 #![allow(dead_code, reason = "each test binary compiles the whole module and uses only the fixtures it needs")]
 #![allow(clippy::unwrap_used, reason = "a fixture that cannot reach its process reports it by panicking")]
@@ -23,12 +23,12 @@ use aether_data::{Kind, MailboxId};
 use aether_rpc::{Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, WIRE_VERSION, WireFrame};
 use serde::Serialize;
 
-use super::process::Coordinator;
+use super::process::{Coordinator, Ingress};
 
-/// How long one Hello probe may wait. A stranger that completes TCP (kernel
-/// listen backlog) but never speaks the wire used to hold this helper for the
-/// 20s call timeout, which is enough to burn the handshake deadline in one
-/// attempt (#5116).
+/// How long one Hello probe may wait. A coordinator that has bound its listener
+/// but not yet reached the mail loop completes TCP (kernel listen backlog) and
+/// then says nothing; at the 20s call timeout that is enough to burn the
+/// handshake deadline in one attempt (#5116).
 const HELLO_PROBE: Duration = Duration::from_secs(1);
 
 /// Timeout restored on a stream that has completed Hello, so later `Call`
@@ -71,18 +71,16 @@ fn connect_and_hello(port: u16, client_name: &str, timeout: Duration) -> Result<
 
 /// Connect and handshake as one retried unit against an already-chosen port.
 ///
-/// Retrying the pair rather than the connect alone is what makes this safe under
-/// a suite that forks many coordinators at once. A port is reserved by binding
-/// `:0` and releasing it, so between the release and the bin's own bind another
-/// process can take it — and the loser then *connects successfully* to a
-/// stranger and fails at the handshake, which a connect-only retry cannot
-/// recover from.
+/// Retrying the pair rather than the connect alone is what makes this safe
+/// against a peer that completes TCP before it can answer the wire: a
+/// connect-only retry hands back a socket whose Hello nobody has read.
 ///
 /// This helper cannot see the child. If the process that was supposed to bind
 /// `port` has already exited, the loop burns its deadline against a socket that
-/// will never accept — the full-suite flake at this panic. Callers that own the
-/// fork should use [`spawn_and_connect`] so a dead child is another attempt
-/// instead of a 30s hang.
+/// will never accept — the full-suite flake at this panic. It is for a peer the
+/// caller did not fork (an in-process chassis whose bound port it already
+/// holds); a caller that owns the fork uses [`spawn_and_connect`], which dials
+/// the port the child itself announced.
 ///
 /// # Panics
 /// No coordinator answered a handshake on `port` inside the deadline.
@@ -96,24 +94,27 @@ pub fn connect_and_handshake(port: u16, client_name: &str) -> TcpStream {
 }
 
 /// Run `spawn` and handshake as one transaction: a fresh child per attempt,
-/// handshake only against a listen that child owns, the whole fork retried
-/// after an early exit. Pass port `0` so the child binds atomically — no
-/// `free_port` reservation window — and this helper discovers the OS-assigned
-/// listen. Returns the live guard beside the stream so the caller cannot keep
-/// a connection to a stranger.
+/// against the port that child says it bound, the whole fork retried after an
+/// early exit. Returns the live guard beside the stream so the caller cannot
+/// keep a connection to a stranger.
+///
+/// `spawn` forks with RPC port `0`, so the child holds a port from the moment
+/// it binds — there is no reserve-then-release window for a sibling to take it,
+/// and the port this helper dials came from the child's own boot log rather
+/// than from a guess about who owns it.
 ///
 /// # Panics
 /// No child completed a handshake inside `budget`.
 pub fn spawn_and_connect(
     client_name: &str,
     budget: Duration,
-    mut spawn: impl FnMut() -> (u16, Coordinator),
+    mut spawn: impl FnMut() -> Coordinator,
 ) -> (Coordinator, TcpStream) {
     let deadline = Instant::now() + budget;
     let mut last = String::from("no attempt");
     while Instant::now() < deadline {
-        let (port, mut coordinator) = spawn();
-        match handshake_our_child(&mut coordinator, port, client_name, deadline) {
+        let mut coordinator = spawn();
+        match handshake_our_child(&mut coordinator, client_name, deadline) {
             Ok(stream) => return (coordinator, stream),
             Err(why) => last = why,
         }
@@ -121,49 +122,21 @@ pub fn spawn_and_connect(
     panic!("no coordinator answered a handshake: {last}");
 }
 
-/// Handshake only sockets this child owns. A reserved port another process
-/// claimed is never Hello'd — that connect succeeds against the thief's
-/// listen backlog and then burns the Hello timeout (#5116). `port == 0` is
-/// the OS-assigned bind: probe every listen the child holds until one
-/// answers Hello.
+/// Handshake the port this child announced, and only that one.
+///
+/// The child names its own RPC port as it binds, so there is no candidate set
+/// to probe and no way to reach a stranger: a port the coordinator never
+/// claimed is never dialled. A child that dies instead of announcing is
+/// abandoned at once, which is what lets the caller retry the whole fork
+/// instead of burning the handshake deadline (#5116).
 fn handshake_our_child(
     coordinator: &mut Coordinator,
-    port: u16,
     client_name: &str,
     deadline: Instant,
 ) -> Result<TcpStream, String> {
-    let mut last = String::from("child exited before a handshake attempt");
-    let mut refused = Vec::new();
-    while coordinator.is_alive() && Instant::now() < deadline {
-        let candidates = if port == 0 {
-            coordinator.listening_ports()
-        } else if coordinator.listens_on(port) {
-            vec![port]
-        } else {
-            Vec::new()
-        };
-        refused.retain(|seen| candidates.contains(seen));
-        for candidate in &candidates {
-            if refused.contains(candidate) {
-                continue;
-            }
-            match connect_and_hello(*candidate, client_name, HELLO_PROBE) {
-                Ok(stream) => return Ok(stream),
-                Err(why) => {
-                    last = why;
-                    if !last.starts_with("connecting:") {
-                        refused.push(*candidate);
-                    }
-                }
-            }
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    if coordinator.is_alive() {
-        Err(last)
-    } else {
-        Err(format!("child on port {port} exited: {last}"))
-    }
+    let port = coordinator.await_port(Ingress::Rpc, deadline)?;
+
+    handshake_while_alive(port, client_name, deadline, || coordinator.is_alive())
 }
 
 /// Poll the one-attempt handshake while `alive` stays true. An exited child

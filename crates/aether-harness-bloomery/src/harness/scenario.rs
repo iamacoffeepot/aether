@@ -44,10 +44,10 @@ use super::drive::{member, passed};
 use super::{BOOT_BUDGET, Backend, CoordinatorKind, HARNESS_STARTED, HarnessBuilder, Lane, POLL};
 use crate::oracle::{Oracle, is_answerable, liveness};
 use crate::scenario::{LaneScript, Scenario};
-use crate::support::client::connect_and_handshake;
+use crate::support::Coordinator;
+use crate::support::client::spawn_and_connect;
 use crate::support::repo::Repo;
 use crate::support::wire::{Wire, control_mailbox};
-use crate::support::{Coordinator, free_port};
 
 /// How long the world must hold still, with nothing in flight, before a settle
 /// loop calls it quiescent. Comfortably more than the poll cadence plus the gap
@@ -56,6 +56,12 @@ const QUIESCENCE: Duration = Duration::from_secs(12);
 
 /// Between polls of a forked coordinator's projection.
 const SETTLE_POLL: Duration = Duration::from_millis(250);
+
+/// How long a forked coordinator has to come up and answer a handshake, across
+/// however many forks that takes. Generous, because a loaded scenario suite
+/// boots many at once; a child that dies is retried immediately rather than
+/// waited out, so this is a ceiling and not a cost.
+const COORDINATOR_HANDSHAKE_BUDGET: Duration = Duration::from_mins(1);
 
 /// The signing seed the harness's operator answers a surface request with.
 ///
@@ -856,6 +862,12 @@ fn in_process_env(
     }
 }
 
+/// Fork the lane coordinator inside `repo` and handshake the child that stayed
+/// up, retrying the whole fork rather than the connect.
+///
+/// RPC port `0`: the child holds its port from the moment it binds and reports
+/// which one in its boot log, so a concurrently booting sibling has no window in
+/// which to take it.
 fn spawn_listening_coordinator(
     repo: &Repo,
     worktree_base: &str,
@@ -865,8 +877,7 @@ fn spawn_listening_coordinator(
 ) -> (Coordinator, TcpStream) {
     let heartbeat = heartbeat_silence_secs.map(|secs| secs.to_string());
     let lane_program = crate::mock_lane_program();
-    for _ in 0..8 {
-        let rpc_port = free_port();
+    spawn_and_connect("lane-boundary-harness", COORDINATOR_HANDSHAKE_BUDGET, || {
         let mut env = vec![
             ("AETHER_STORE_PATH", store_path),
             ("AETHER_ARTIFACTS_ROOT", artifacts_root),
@@ -882,16 +893,8 @@ fn spawn_listening_coordinator(
         if let Some(secs) = heartbeat.as_deref() {
             env.push(("AETHER_BLOOMERY_HEARTBEAT_SILENCE_SECS", secs));
         }
-        let mut coordinator = Coordinator::spawn_in(rpc_port, Some(&repo.work_dir()), &env);
-        if !coordinator.is_alive() {
-            continue;
-        }
-        let stream = connect_and_handshake(rpc_port, "lane-boundary-harness");
-        if coordinator.is_alive() {
-            return (coordinator, stream);
-        }
-    }
-    panic!("the lane coordinator would not stay up long enough to handshake");
+        Coordinator::spawn_in(0, Some(&repo.work_dir()), &env)
+    })
 }
 
 fn author_catalog(store_path: &str, wall_clock_secs: u64) -> ConfigRegistry {
