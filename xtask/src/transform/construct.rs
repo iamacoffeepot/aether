@@ -15,7 +15,7 @@ use crate::transform::{Measurements, TransformArgs, run_model_lane, write_eviden
 
 /// The typed id of the model-driven construct lane (#3511). Recognized here so
 /// an unknown id stays unmapped exactly as in the verify lane.
-pub(super) const CONSTRUCT_IMPLEMENT: &str = "construct.implement";
+pub(super) use aether_bloomery::CONSTRUCT_IMPLEMENT_COMMAND as CONSTRUCT_IMPLEMENT;
 
 /// The file the agent writes its commit message to, relative to the run
 /// worktree's root — the lane's one deliverable besides the candidate itself.

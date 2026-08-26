@@ -135,7 +135,7 @@ mod tests_support {
     use anyhow::{Result, anyhow};
 
     use super::Views;
-    use crate::bloom::dto::{BloomView, DigestHex, MemberView, ViewDocument};
+    use crate::bloom::dto::ViewDocument;
     use crate::bloom::upgrade::paths::Paths;
     use aether_bloomery::BloomStatus;
 
@@ -156,22 +156,15 @@ mod tests_support {
     }
 
     pub fn drained_view() -> ViewDocument {
-        ViewDocument {
-            mainline: DigestHex::from_bytes([1; 32]),
-            observed: DigestHex::from_bytes([2; 32]),
-            blooms: vec![BloomView {
-                id: DigestHex::from_bytes([3; 32]),
-                status: BloomStatus::Landed,
-                superseded_by: None,
-                members: vec![MemberView {
-                    workpiece: "issue-5014".to_owned(),
-                    scope_revision: DigestHex::from_bytes([7; 32]),
-                    awaiting_surface: None,
-                    withdrawn: None,
-                    cursor: None,
-                }],
-            }],
-        }
+        crate::bloom::dto::test_view(
+            aether_bloomery::Digest::from_bytes([1; 32]),
+            aether_bloomery::Digest::from_bytes([2; 32]),
+            vec![crate::bloom::dto::test_bloom(
+                aether_bloomery::Digest::from_bytes([3; 32]),
+                BloomStatus::Landed,
+                vec![crate::bloom::dto::test_member("issue-5014", aether_bloomery::Digest::from_bytes([7; 32]))],
+            )],
+        )
     }
 
     pub fn test_paths() -> Paths {
@@ -295,7 +288,6 @@ mod tests {
     use super::shell::fake::Fake;
     use super::tests_support::{Scripted, drained_view, seeded_args, test_args};
     use super::upgrade;
-    use crate::bloom::dto::DigestHex;
     use aether_bloomery::BloomStatus;
 
     fn present_candidate(mut args: super::UpgradeArgs) -> super::UpgradeArgs {
@@ -427,7 +419,7 @@ mod tests {
     #[test]
     fn a_live_observation_during_the_fold_test_is_the_deploy_baseline() {
         let mut later = drained_view();
-        later.observed = DigestHex::from_bytes([4; 32]);
+        later.observed = aether_bloomery::Digest::from_bytes([4; 32]);
         let expected = format!("observed={}", later.observed);
         let views = Scripted::new(Ok(later), Ok(drained_view()));
         let args = present_candidate(seeded_args(12, 12));

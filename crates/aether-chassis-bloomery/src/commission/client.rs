@@ -2,14 +2,13 @@
 //!
 //! Talks only over localhost HTTP. Never opens the journal database.
 
-use std::io::{Read as _, Write as _};
-use std::net::TcpStream;
-use std::str;
-use std::time::Duration;
-
+use aether_bloomery::{HTTP_READ_TIMEOUT, http_success};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::io::{Read as _, Write as _};
+use std::net::TcpStream;
+use std::str;
 
 /// One control-API session against a running coordinator.
 pub(super) struct ControlApi {
@@ -27,6 +26,19 @@ impl ControlApi {
         self.json("GET", path, None::<&()>)
     }
 
+    /// GET that treats HTTP 404 as `None` rather than an error string to parse.
+    pub(super) fn get_json_or_not_found<T: DeserializeOwned>(&self, path: &str) -> Result<Option<T>> {
+        let (status, response) = self.exchange("GET", path, None)?;
+        if status == 404 {
+            return Ok(None);
+        }
+        if !http_success(status) {
+            bail!("{}", refuse(status, &response));
+        }
+        serde_json::from_slice(&response)
+            .with_context(|| format!("decode GET {path} reply: {}", String::from_utf8_lossy(&response)))
+    }
+
     pub(super) fn send_json<T: DeserializeOwned>(&self, method: &str, path: &str, body: &impl Serialize) -> Result<T> {
         self.json(method, path, Some(body))
     }
@@ -37,7 +49,7 @@ impl ControlApi {
             None => None,
         };
         let (status, response) = self.exchange(method, path, encoded.as_deref())?;
-        if !(200..300).contains(&status) {
+        if !http_success(status) {
             bail!("{}", refuse(status, &response));
         }
         serde_json::from_slice(&response)
@@ -62,7 +74,7 @@ impl ControlApi {
 
         let mut stream = TcpStream::connect(("127.0.0.1", self.port))
             .with_context(|| format!("connect to control API on 127.0.0.1:{}", self.port))?;
-        stream.set_read_timeout(Some(Duration::from_secs(20))).context("set control API read timeout")?;
+        stream.set_read_timeout(Some(HTTP_READ_TIMEOUT)).context("set control API read timeout")?;
         stream.write_all(&request).context("write control API request")?;
         stream.flush().context("flush control API request")?;
         let mut response = Vec::new();

@@ -2791,8 +2791,8 @@ impl NativeActor for StoreCapability {
             Err(error) => return write_revision_error(CommissionError::from(error)),
         };
         let evidence = match RevisionEvidence::decode(&evidence) {
-            Ok(evidence) => evidence,
-            Err(error) => return write_revision_error(error),
+            Some(evidence) => evidence,
+            None => return write_revision_error(CommissionError::MalformedCanonical),
         };
         match state.backend.write_revision(&revision, &evidence) {
             Ok(digest) => WriteScopeRevisionResult::Ok { digest: digest.as_bytes().to_vec() },

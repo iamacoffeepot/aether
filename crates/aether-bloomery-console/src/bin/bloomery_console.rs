@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use aether_bloomery::DEFAULT_HTTP_PORT;
 use aether_bloomery_console::http::Endpoint;
 use aether_bloomery_console::keys::Outcome;
 use aether_bloomery_console::palette::{self, Depth};
@@ -18,9 +19,6 @@ use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_ra
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-/// Coordinator REST bind when `AETHER_HTTP_PORT` is unset — the same default
-/// `aether-chassis-bloomery` uses.
-const DEFAULT_HTTP_PORT: u16 = 8910;
 const DEFAULT_POLL_MILLIS: u64 = 1000;
 const INPUT_SLICE: Duration = Duration::from_millis(100);
 

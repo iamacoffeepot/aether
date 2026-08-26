@@ -20,12 +20,14 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use aether_bloomery::{
-    Digest, KeyId, Observation, OperatorKey, Provenance, ScopeRevision, SignatureEnvelope, Statement, digest_of,
-    signed_approval,
+    CancelCommissionRequest, CommissionApprovalView, CommissionCancelledView, CommissionCreatedView,
+    CommissionReopenedView, CommissionShowView, CommissionsView, CreateCommissionRequest, DEFAULT_HTTP_PORT, Digest,
+    KeyId, Observation, OperatorKey, Provenance, ReopenCommissionRequest, RevisionEvidence, ScopeRevision,
+    ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, SignatureEnvelope, Statement, ViewDocument,
+    WorkpieceId, WriteRevisionRequest, digest_of, signed_approval,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use serde::{Deserialize, Serialize};
 
 use client::ControlApi;
 use scope::load_revision;
@@ -33,10 +35,6 @@ use scope::load_revision;
 pub use scope::{parse_revision, task_text};
 
 use crate::bloomery::load_policy;
-
-/// Default REST port when `--http-port` is omitted — the same default the
-/// daemon binds when `AETHER_HTTP_PORT` is unset.
-const DEFAULT_HTTP_PORT: u16 = 8910;
 
 /// The `bloomery-commission` clap root.
 #[derive(Parser, Debug)]
@@ -221,84 +219,17 @@ fn dispatch(cli: CommissionCli) -> Result<String> {
     }
 }
 
-#[derive(Serialize)]
-struct CreateBody<'a> {
-    id: &'a str,
-    intent: &'a Statement,
-}
-
-#[derive(Serialize)]
-struct WriteRevisionBody<'a> {
-    revision: &'a ScopeRevision,
-}
-
-#[derive(Deserialize)]
-struct CreatedView {
-    id: String,
-    intent: String,
-}
-
-#[derive(Deserialize)]
-struct DigestView {
-    digest: String,
-}
-
-#[derive(Deserialize)]
-struct ShowView {
-    id: String,
-    intent: String,
-    status: String,
-    current_revision: Option<String>,
-    #[serde(default)]
-    current_unreadable: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ListView {
-    commissions: Vec<ShowView>,
-}
-
-#[derive(Deserialize)]
-struct CancelledView {
-    id: String,
-    status: String,
-}
-
-#[derive(Serialize)]
-struct ReopenBody {
-    statement: Statement,
-    reason: String,
-}
-
-#[derive(Deserialize)]
-struct ViewMainline {
-    mainline: String,
-}
-
-#[derive(Serialize)]
-struct ScopeRunBody {
-    base: Digest,
-}
-
-#[derive(Deserialize)]
-struct ScopeRunOpened {
-    id: String,
-    ordinal: u64,
-    sequence: u64,
-    subject: String,
-}
-
 fn open_scope_run(api: &ControlApi, id: &str) -> Result<String> {
-    let view: ViewMainline = api.get_json("/view")?;
-    let base = digest_from_hex(&view.mainline)?;
-    let opened: ScopeRunOpened =
-        api.send_json("POST", &format!("/commissions/{id}/scope-runs"), &ScopeRunBody { base })?;
+    let view: ViewDocument = api.get_json("/view")?;
+    let opened: ScopeRunOpenedView =
+        api.send_json("POST", &format!("/commissions/{id}/scope-runs"), &ScopeRunRequest { base: view.mainline })?;
     Ok(format!("{} ordinal {} sequence {} subject {}\n", opened.id, opened.ordinal, opened.sequence, opened.subject))
 }
 
 fn create(api: &ControlApi, id: &str, intent_file: &Path) -> Result<String> {
     let intent = load_intent(intent_file)?;
-    let created: CreatedView = api.send_json("POST", "/commissions", &CreateBody { id, intent: &intent })?;
+    let created: CommissionCreatedView =
+        api.send_json("POST", "/commissions", &CreateCommissionRequest { id: WorkpieceId(id.to_owned()), intent })?;
     Ok(format!("created {} intent {}\n", created.id, created.intent))
 }
 
@@ -323,21 +254,24 @@ fn write_scope(api: &ControlApi, id: &str, file: &Path, approval_policy: &Path) 
 fn write_verified_scope(api: &ControlApi, id: &str, file: &Path, approval_policy: &Path) -> Result<Digest> {
     let revision = prepared_revision(api, id, file, approval_policy)?;
     let expected = digest_of(&revision);
-    let written: DigestView =
-        api.send_json("POST", &format!("/commissions/{id}/revisions"), &WriteRevisionBody { revision: &revision })?;
-    refuse_unread_digest(&written.digest, expected)
+    let written = post_revision_value(api, id, revision)?;
+    refuse_unread_digest(written.digest, expected)
 }
 
-fn post_revision(api: &ControlApi, id: &str, file: &Path, approval_policy: &Path) -> Result<DigestView> {
-    let revision = prepared_revision(api, id, file, approval_policy)?;
-    api.send_json("POST", &format!("/commissions/{id}/revisions"), &WriteRevisionBody { revision: &revision })
+fn post_revision(api: &ControlApi, id: &str, file: &Path, approval_policy: &Path) -> Result<ScopeRevisionWrittenView> {
+    post_revision_value(api, id, prepared_revision(api, id, file, approval_policy)?)
+}
+
+fn post_revision_value(api: &ControlApi, id: &str, revision: ScopeRevision) -> Result<ScopeRevisionWrittenView> {
+    api.send_json(
+        "POST",
+        &format!("/commissions/{id}/revisions"),
+        &WriteRevisionRequest { revision, evidence: RevisionEvidence::default() },
+    )
 }
 
 fn prepared_revision(api: &ControlApi, id: &str, file: &Path, approval_policy: &Path) -> Result<ScopeRevision> {
-    let predecessor = match current_revision(api, id)? {
-        Some(hex) => Some(digest_from_hex(&hex)?),
-        None => None,
-    };
+    let predecessor = current_revision(api, id)?;
     let revision = load_revision(id, file, predecessor)?;
     lint_surface_granularity(&revision, approval_policy)?;
     Ok(revision)
@@ -345,10 +279,9 @@ fn prepared_revision(api: &ControlApi, id: &str, file: &Path, approval_policy: &
 
 /// Refuse a coordinator-stored digest that is not the address of the revision
 /// just written, so an approval is never signed over unread bytes.
-fn refuse_unread_digest(stored_hex: &str, expected: Digest) -> Result<Digest> {
-    let stored = digest_from_hex(stored_hex)?;
+fn refuse_unread_digest(stored: Digest, expected: Digest) -> Result<Digest> {
     if stored != expected {
-        bail!("the coordinator stored {stored_hex} for a revision addressed {}", expected.to_hex());
+        bail!("the coordinator stored {stored} for a revision addressed {expected}");
     }
     Ok(stored)
 }
@@ -400,13 +333,13 @@ fn approve(
 ) -> Result<String> {
     let digest = digest_from_hex(scope)?;
     let statement = approval_statement(digest, envelope, seed_file, signer)?;
-    let written: DigestView = api.send_json("POST", &format!("/commissions/{id}/approvals"), &statement)?;
+    let written: CommissionApprovalView = api.send_json("POST", &format!("/commissions/{id}/approvals"), &statement)?;
     Ok(format!("{}\n", written.digest))
 }
 
 fn approve_with_seed(api: &ControlApi, id: &str, digest: Digest, seed_file: &Path, signer: &str) -> Result<()> {
     let statement = approval_statement(digest, None, Some(seed_file), signer)?;
-    let _: DigestView = api.send_json("POST", &format!("/commissions/{id}/approvals"), &statement)?;
+    let _: CommissionApprovalView = api.send_json("POST", &format!("/commissions/{id}/approvals"), &statement)?;
     Ok(())
 }
 
@@ -445,8 +378,8 @@ fn show(api: &ControlApi, id: &str, json: bool) -> Result<String> {
         let body: serde_json::Value = api.get_json(&format!("/commissions/{id}"))?;
         Ok(format!("{}\n", serde_json::to_string_pretty(&body).context("pretty-print commission JSON")?))
     } else {
-        let view: ShowView = api.get_json(&format!("/commissions/{id}"))?;
-        let revision = view.current_revision.as_deref().unwrap_or("-");
+        let view: CommissionShowView = api.get_json(&format!("/commissions/{id}"))?;
+        let revision = view.current_revision.map_or_else(|| "-".to_owned(), |digest| digest.to_string());
         Ok(match view.current_unreadable {
             Some(reason) => {
                 format!("{} {} intent {} revision {revision} unreadable: {reason}\n", view.id, view.status, view.intent)
@@ -458,10 +391,10 @@ fn show(api: &ControlApi, id: &str, json: bool) -> Result<String> {
 
 fn list(api: &ControlApi, status: Option<&str>) -> Result<String> {
     let path = status.map_or_else(|| "/commissions".to_owned(), |status| format!("/commissions?status={status}"));
-    let view: ListView = api.get_json(&path)?;
+    let view: CommissionsView = api.get_json(&path)?;
     let mut out = String::new();
     for head in view.commissions {
-        out.push_str(&head.id);
+        out.push_str(&head.id.0);
         out.push(' ');
         out.push_str(&head.status);
         out.push('\n');
@@ -470,10 +403,13 @@ fn list(api: &ControlApi, status: Option<&str>) -> Result<String> {
 }
 
 fn cancel(api: &ControlApi, id: &str, reason: &str, envelope: &Path) -> Result<String> {
-    let view: ShowView = api.get_json(&format!("/commissions/{id}"))?;
-    let intent = digest_from_hex(&view.intent)?;
-    let statement = signed_statement(envelope, intent.as_bytes())?;
-    let cancelled: CancelledView = api.send_json("POST", &format!("/commissions/{id}/cancel"), &statement)?;
+    let view: CommissionShowView = api.get_json(&format!("/commissions/{id}"))?;
+    let statement = signed_statement(envelope, view.intent.as_bytes())?;
+    let cancelled: CommissionCancelledView = api.send_json(
+        "POST",
+        &format!("/commissions/{id}/cancel"),
+        &CancelCommissionRequest { statement, reason: reason.to_owned() },
+    )?;
     Ok(format!("{} {} ({reason})\n", cancelled.id, cancelled.status))
 }
 
@@ -484,21 +420,20 @@ fn cancel(api: &ControlApi, id: &str, reason: &str, envelope: &Path) -> Result<S
 /// they are looking at. The coordinator refuses a workpiece some bloom actually
 /// resolved, so a wrong id is answered rather than acted on.
 fn reopen(api: &ControlApi, id: &str, reason: &str, envelope: &Path) -> Result<String> {
-    let view: ShowView = api.get_json(&format!("/commissions/{id}"))?;
-    let intent = digest_from_hex(&view.intent)?;
-    let statement = signed_statement(envelope, intent.as_bytes())?;
-    let body = ReopenBody { statement, reason: reason.to_owned() };
-    let reopened: CancelledView = api.send_json("POST", &format!("/commissions/{id}/reopen"), &body)?;
+    let view: CommissionShowView = api.get_json(&format!("/commissions/{id}"))?;
+    let statement = signed_statement(envelope, view.intent.as_bytes())?;
+    let reopened: CommissionReopenedView = api.send_json(
+        "POST",
+        &format!("/commissions/{id}/reopen"),
+        &ReopenCommissionRequest { statement, reason: reason.to_owned() },
+    )?;
     Ok(format!("{} {} ({reason})\n", reopened.id, reopened.status))
 }
 
-fn current_revision(api: &ControlApi, id: &str) -> Result<Option<String>> {
-    match api.get_json::<ShowView>(&format!("/commissions/{id}")) {
-        Ok(view) => Ok(view.current_revision),
-        Err(error) if error.to_string().contains("404:") => {
-            bail!("no commission named {id}")
-        }
-        Err(error) => Err(error),
+fn current_revision(api: &ControlApi, id: &str) -> Result<Option<Digest>> {
+    match api.get_json_or_not_found::<CommissionShowView>(&format!("/commissions/{id}"))? {
+        Some(view) => Ok(view.current_revision),
+        None => bail!("no commission named {id}"),
     }
 }
 
@@ -675,12 +610,12 @@ mod tests {
     #[test]
     fn a_stored_digest_that_is_not_the_revision_is_refused() {
         let expected = Digest::from_bytes([1; 32]);
-        let stored = Digest::from_bytes([2; 32]).to_hex();
-        match refuse_unread_digest(&stored, expected) {
+        let stored = Digest::from_bytes([2; 32]);
+        match refuse_unread_digest(stored, expected) {
             Ok(_) => panic!("a mismatched stored digest must be refused"),
             Err(error) => {
                 let message = error.to_string();
-                assert!(message.contains(&stored), "refusal names the stored digest: {message}");
+                assert!(message.contains(&stored.to_hex()), "refusal names the stored digest: {message}");
                 assert!(message.contains(&expected.to_hex()), "refusal names the local address: {message}");
             }
         }

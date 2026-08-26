@@ -8,16 +8,17 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{env, process};
 
-use aether_bloomery::{ApprovalPolicy, ApprovalRule, BloomStatus, KeyId, Tier};
+use aether_bloomery::{
+    ApprovalPolicy, ApprovalRule, AwaitingSurfaceView, BloomStatus, Digest, KeyId, StageId, SurfacePathRequest, Tier,
+    WithdrawnView, WorkpieceId,
+};
 
 use super::revision::OperatorKey;
 use super::{TipStanding, request, sibling_is_sealable, siblings, surface, tip_standing};
-use crate::bloom::dto::{
-    AwaitingSurfaceView, BloomView, CommissionShowView, DigestHex, MemberView, SurfacePathRequest, WithdrawnView,
-};
+use crate::bloom::dto::{BloomView, CommissionShowView, MemberView, test_bloom, test_member};
 
-fn digest(seed: u8) -> DigestHex {
-    DigestHex::from_bytes([seed; 32])
+fn digest(seed: u8) -> Digest {
+    Digest::from_bytes([seed; 32])
 }
 
 fn scratch(tag: &str) -> PathBuf {
@@ -29,36 +30,32 @@ fn scratch(tag: &str) -> PathBuf {
 }
 
 fn member(awaiting: Option<AwaitingSurfaceView>) -> MemberView {
-    MemberView {
-        workpiece: "example-a".to_owned(),
-        scope_revision: digest(1),
-        awaiting_surface: awaiting,
-        withdrawn: None,
-        cursor: None,
-    }
+    let mut member = test_member("example-a", digest(1));
+    member.awaiting_surface = awaiting;
+    member
 }
 
 fn sibling(withdrawn: Option<WithdrawnView>) -> MemberView {
-    MemberView {
-        workpiece: "example-b".to_owned(),
-        scope_revision: digest(2),
-        awaiting_surface: None,
-        withdrawn,
-        cursor: None,
-    }
+    let mut member = test_member("example-b", digest(2));
+    member.withdrawn = withdrawn;
+    member
 }
 
 fn bloom(members: Vec<MemberView>) -> BloomView {
-    BloomView { id: digest(0), status: BloomStatus::Sealed, superseded_by: None, members }
+    test_bloom(digest(0), BloomStatus::Sealed, members)
 }
 
-fn commission(tip: DigestHex) -> CommissionShowView {
+fn commission(tip: Digest) -> CommissionShowView {
     CommissionShowView {
+        id: WorkpieceId("example-b".to_owned()),
         intent: digest(0),
-        status: "sealed".to_owned(),
         current_revision: Some(tip),
+        current_ordinal: None,
+        status: "sealed".to_owned(),
         current: None,
+        current_unreadable: None,
         approvals: Vec::new(),
+        scope_verify: None,
     }
 }
 
@@ -70,13 +67,16 @@ fn policy(named: &[&str]) -> ApprovalPolicy {
     }
 }
 
-fn awaiting(revision: DigestHex, paths: &[(&str, &str)]) -> AwaitingSurfaceView {
+fn awaiting(revision: Digest, paths: &[(&str, &str)]) -> AwaitingSurfaceView {
     AwaitingSurfaceView {
+        stage: StageId::Construct,
         scope_revision: revision,
+        evidence: digest(0xee),
         paths: paths
             .iter()
             .map(|(path, reason)| SurfacePathRequest { path: (*path).to_owned(), reason: (*reason).to_owned() })
             .collect(),
+        summary: String::new(),
         requests: 1,
     }
 }
@@ -129,7 +129,15 @@ fn the_lanes_paths_come_first_and_the_operators_union_in() {
 // withdrawn anything, over a scope the successor seal never reads.
 #[test]
 fn a_withdrawn_siblings_moved_commission_does_not_refuse_the_amendment() {
-    let left = bloom(vec![member(None), sibling(Some(WithdrawnView {}))]);
+    let left = bloom(vec![
+        member(None),
+        sibling(Some(WithdrawnView {
+            cause: "operator".to_owned(),
+            depends_on: None,
+            reason: "done".to_owned(),
+            operator: "eve".to_owned(),
+        })),
+    ]);
     assert!(siblings(&left, "example-a").next().is_none(), "a withdrawn member is no sibling to check");
 
     let standing = bloom(vec![member(None), sibling(None)]);
@@ -252,7 +260,7 @@ fn a_hex_seed_and_the_raw_bytes_it_spells_mint_the_same_approval() {
         }
     }
 
-    let scope = aether_bloomery::Digest::from_bytes([5; 32]);
+    let scope = Digest::from_bytes([5; 32]);
     let from_raw = OperatorKey::load(KeyId("operator".into()), &raw_path).expect("raw loads").approval_of(scope);
     let from_hex = OperatorKey::load(KeyId("operator".into()), &hex_path).expect("hex loads").approval_of(scope);
 

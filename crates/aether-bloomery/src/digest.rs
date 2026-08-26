@@ -22,6 +22,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt;
 
 use aether_data::wire::to_vec;
 use serde::{Deserialize, Serialize};
@@ -162,6 +163,12 @@ impl Digest {
         hasher.update(domain.as_bytes());
         hasher.update(bytes);
         Self(hasher.finalize().into())
+    }
+}
+
+impl fmt::Display for Digest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_hex())
     }
 }
 

@@ -132,25 +132,19 @@ mod tests {
     use aether_bloomery_git::DayCoverage;
 
     use super::{Day, RollArgs, roll, sync_from};
-    use crate::bloom::dto::{BloomView, DigestHex, MemberView, ViewDocument};
+    use crate::bloom::dto::{ViewDocument, test_bloom, test_member, test_view};
+    use aether_bloomery::Digest;
 
     fn drained_view() -> ViewDocument {
-        ViewDocument {
-            mainline: DigestHex::from_bytes([1; 32]),
-            observed: DigestHex::from_bytes([2; 32]),
-            blooms: vec![BloomView {
-                id: DigestHex::from_bytes([3; 32]),
-                status: BloomStatus::Landed,
-                superseded_by: None,
-                members: vec![MemberView {
-                    workpiece: "issue-4945".to_owned(),
-                    scope_revision: DigestHex::from_bytes([7; 32]),
-                    awaiting_surface: None,
-                    withdrawn: None,
-                    cursor: None,
-                }],
-            }],
-        }
+        test_view(
+            Digest::from_bytes([1; 32]),
+            Digest::from_bytes([2; 32]),
+            vec![test_bloom(
+                Digest::from_bytes([3; 32]),
+                BloomStatus::Landed,
+                vec![test_member("issue-4945", Digest::from_bytes([7; 32]))],
+            )],
+        )
     }
 
     fn args(from: &str) -> RollArgs {

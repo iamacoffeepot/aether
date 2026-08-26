@@ -12,7 +12,7 @@
 //! The whole module is runtime-gated (it pulls `aether-substrate` and the
 //! cap crates), so the marker/wasm consumer never links it.
 
-mod dto;
+pub(crate) mod dto;
 mod runtime;
 
 use aether_actor::actor;
