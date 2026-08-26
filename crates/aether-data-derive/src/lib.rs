@@ -5,10 +5,12 @@
 #![allow(clippy::option_if_let_else)]
 
 //! Proc-macro home for `aether-data`'s data-layer macros:
-//! `#[derive(Kind)]`, `#[derive(Schema)]`, and `#[transform]`.
+//! `#[derive(Kind)]`, `#[derive(Schema)]`, `#[derive(Storage)]`, and `#[transform]`.
 //!
-//! `Kind` and `Schema` are per ADR-0019 / ADR-0031 / ADR-0032. This
-//! crate is kept separate from `aether-data` because Rust requires
+//! `Kind` and `Schema` are per ADR-0019 / ADR-0031 / ADR-0032. `Storage`
+//! is the ADR-0059 TLV shape: a sibling derive that emits a nominal
+//! `Kind::ID` without a positional codec. This crate is kept separate
+//! from `aether-data` because Rust requires
 //! proc-macro crates to opt into `proc-macro = true` and forbids them
 //! from exporting non-macro items; pairing them in the same crate would
 //! force every consumer through the proc-macro toolchain even when they
@@ -88,6 +90,8 @@ use syn::{
     PathArguments, ReturnType, Token, Type, parse_macro_input, token,
 };
 
+mod storage;
+
 /// ADR-0048 §1 cap on input parameters.
 const MAX_TRANSFORM_INPUTS: usize = 8;
 
@@ -104,6 +108,15 @@ pub fn derive_kind(input: TokenStream) -> TokenStream {
 pub fn derive_schema(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match expand_schema(&input) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+#[proc_macro_derive(Storage, attributes(kind, storage))]
+pub fn derive_storage(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match storage::expand_storage(&input) {
         Ok(ts) => ts.into(),
         Err(e) => e.to_compile_error().into(),
     }
@@ -553,7 +566,7 @@ fn field_type_schema_expr(ty: &Type) -> TokenStream2 {
 /// segment is `u8`, e.g. `Vec<core::primitive::u8>`). The check is purely
 /// syntactic — a type alias (`type Blob = Vec<u8>`) is not resolved by the
 /// proc macro and falls through to the generic `Vec` schema.
-fn is_vec_u8(ty: &Type) -> bool {
+pub(crate) fn is_vec_u8(ty: &Type) -> bool {
     let Type::Path(tp) = ty else {
         return false;
     };
@@ -885,11 +898,11 @@ fn reject_hashmap(ty: &Type) -> syn::Result<()> {
     Ok(())
 }
 
-struct KindAttr {
-    name: String,
+pub(crate) struct KindAttr {
+    pub(crate) name: String,
 }
 
-fn parse_kind_attr(attrs: &[Attribute]) -> syn::Result<KindAttr> {
+pub(crate) fn parse_kind_attr(attrs: &[Attribute]) -> syn::Result<KindAttr> {
     for attr in attrs {
         if !attr.path().is_ident("kind") {
             continue;
@@ -919,7 +932,7 @@ fn parse_kind_attr(attrs: &[Attribute]) -> syn::Result<KindAttr> {
     ))
 }
 
-fn struct_has_repr_c(attrs: &[Attribute]) -> bool {
+pub(crate) fn struct_has_repr_c(attrs: &[Attribute]) -> bool {
     for attr in attrs {
         if !attr.path().is_ident("repr") {
             continue;
@@ -941,7 +954,7 @@ fn struct_has_repr_c(attrs: &[Attribute]) -> bool {
     false
 }
 
-fn struct_fields(input: &DeriveInput) -> syn::Result<Vec<FieldInfo>> {
+pub(crate) fn struct_fields(input: &DeriveInput) -> syn::Result<Vec<FieldInfo>> {
     let Data::Struct(DataStruct { fields, .. }) = &input.data else {
         return Err(syn::Error::new_spanned(&input.ident, "expected struct"));
     };
@@ -956,12 +969,12 @@ fn struct_fields(input: &DeriveInput) -> syn::Result<Vec<FieldInfo>> {
     })
 }
 
-struct FieldInfo {
-    ident: Option<syn::Ident>,
-    ty: Type,
+pub(crate) struct FieldInfo {
+    pub(crate) ident: Option<syn::Ident>,
+    pub(crate) ty: Type,
 }
 
-fn to_screaming_snake_case(s: &str) -> String {
+pub(crate) fn to_screaming_snake_case(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 4);
     for (i, ch) in s.chars().enumerate() {
         if ch.is_ascii_uppercase() && i > 0 {

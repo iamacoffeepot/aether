@@ -1,8 +1,8 @@
 # ADR-0059: Content-hashed field tags for upgradable storage
 
-- **Status:** Proposed
-- **Date:** 2026-04-27 · **Revised:** 2026-08-26 (out of draft; ready for implementation)
-- **Revision note:** the 2026-04 draft targeted the handle store and predates three decisions this revision resolves against: ADR-0118 (the structured wire body is `aether_data::wire`; postcard is gone), ADR-0187 (persisted rows record their writing schema), and ADR-0188 (the wire codec derives from `Schema`). The consumer that takes this ADR out of ADR-0113's parking is the coordinator's own persistence — the journal's views and projections. The draft's `Mail`-trait fork and `Envelope` rename are superseded by a lighter mapping onto today's `Kind`; renames gain a declared alias (`#[storage(was = "…")]`) instead of the draft's no-remap stance. The wire format itself — TLV records, content-hashed tags, flattening, the unknown bucket, the required/`Option` discipline — stands as resolved in 2026-04.
+- **Status:** Accepted
+- **Date:** 2026-04-27 · **Revised:** 2026-08-26 (accepted; storage TLV shipped)
+- **Revision note:** the 2026-04 draft targeted the handle store and predates three decisions this revision resolves against: ADR-0118 (the structured wire body is `aether_data::wire`; postcard is gone), ADR-0187 (persisted rows record their writing schema), and ADR-0188 (the wire codec derives from `Schema`). The consumer that takes this ADR out of ADR-0113's parking is the coordinator's own persistence — the journal's views and projections. The draft's `Mail`-trait fork and `Envelope` rename are superseded by a lighter mapping onto today's `Kind`; renames gain a declared alias (`#[storage(was = "…")]`) instead of the draft's no-remap stance. The wire format itself — TLV records, content-hashed tags, flattening, the unknown bucket, the required/`Option` discipline — stands as resolved in 2026-04. Implementation settled four points recorded in the Decision section: the field-hash preimage is a NUL-separated fold, the TLV length is a fixed 32-bit count, the decoded payload type is `StorageData` throughout, and anonymous record names are already provided by nameless canonical schema bytes.
 
 ## Context
 
@@ -59,10 +59,12 @@ The wire format described below applies to `Storage` kinds. Everything else uses
 A struct payload is a sequence of `[field_hash][length][bytes]` records, concatenated in field-hash sort order. Receivers walk the records, look each `field_hash` up in their local schema, dispatch the bytes against the matched field's type, skip unknown ids, and default missing ids.
 
 ```
-+----------------+------------+------------------------+
-| field_hash u64 | len varint | aether_data::wire body |
-+----------------+------------+------------------------+
++----------------+---------------+------------------------+
+| field_hash u64 | len u32 LE    | aether_data::wire body |
++----------------+---------------+------------------------+
 ```
+
+Length is a fixed 32-bit little-endian count, matching every other count in the ADR-0118 format. The 2026-04 draft drew a varint; ADR-0118 removed variable-length integers from the format, so the envelope follows the rest of the crate.
 
 Field bodies are encoded against the field's declared type by the same owned, `Schema`-derived codec ADR-0188 gives the positional wire — varint scalars, length-prefixed strings, the closed vocabulary `Schema` already enforces. The TLV layer adds only the `(field_hash, length)` envelope; primitive bytes inside don't carry their own type tags. Receivers that don't know a field id skip `length` bytes and continue. One codec family drives both wire shapes, so TLV bodies and positional bodies can never disagree about how a leaf value is spelled.
 
@@ -71,10 +73,10 @@ Field bodies are encoded against the field's declared type by the same owned, `S
 For each field, a stable 64-bit content hash:
 
 ```
-field_hash = fnv1a_64_prefixed(FIELD_DOMAIN, canonical(field_name, field_type))
+field_hash = fold(FIELD_DOMAIN ++ path_bytes ++ 0x00 ++ canonical_schema(field_type))
 ```
 
-`FIELD_DOMAIN` is a new prefix disjoint from `KIND_DOMAIN` and `MAILBOX_DOMAIN` so the id spaces don't overlap. The canonical bytes mirror today's `canonical_serialize_kind` but at the field granularity.
+`FIELD_DOMAIN` is a new prefix disjoint from `KIND_DOMAIN` and `MAILBOX_DOMAIN` so the id spaces don't overlap. The path is dotted (`addr.street`) but never materialized: each segment is folded onto an in-progress carry (`fold_path_segment`), then a NUL terminator, then the type's canonical schema bytes (the same encoding `canonical_serialize_schema` already produces). `canonical_serialize_kind` length-prefixes its name, which cannot be written before the whole path is known and would forbid the incremental fold; NUL is unambiguous because Rust identifiers and the dot join both exclude it.
 
 Renames shift the field hash (the name is in the canonical bytes). On the wire a rename is therefore remove-plus-add — and the author declares that the two are one field:
 
@@ -93,15 +95,7 @@ What `was` does not cover is a rename-plus-retype: the alias hash uses the *curr
 
 ### Anonymous record names
 
-Nested record types (e.g., a `Vec3`-shaped triple used inside a kind without a top-level kind name) get a **synthesized name** content-derived from their field blob:
-
-```
-synthesized_name = "__" + hex(short_hash(field_blob))
-```
-
-Two crates declaring the same anonymous shape get the same synthesized name → same field hash for any field of that type → **cross-crate structural identity for free**. Top-level kinds with explicit names (`#[kind(name = "...")]`) keep their nominal identity, so `Position { x, y, z }` and `Velocity { x, y, z }` stay distinct. The footgun (two genuinely different concepts both declared anonymously with identical shape) lives in a corner where you'd have to deliberately go nameless on both — convention says don't.
-
-The `__` prefix is reserved for system-synthesized identifiers (see rule 4 below), so user-supplied names can never collide with a synthesis output.
+Canonical schema bytes already omit field and variant names, so two crates declaring the same record shape already produce byte-identical canonical bytes — the cross-crate structural identity a synthesized `__<hash>` name was invented to buy is free, and no synthesized name is emitted. The `__` prefix still stands for `__variant` (and any future synthesis). The consequence is that discipline rule 1 holds only up to structural equality: retyping a field between two structurally identical records — a position and a velocity, both three floats — leaves the field hash unchanged, so old bytes decode silently into the new type.
 
 ### Nested struct and enum flattening
 
@@ -211,8 +205,10 @@ Kind::ID = fnv1a_64_prefixed(KIND_DOMAIN, name)
 
 On read, fields the receiver's schema doesn't bind are preserved verbatim in an unknown-fields bucket alongside the typed value. The bucket carries `(field_hash, raw_bytes)` per unknown field. On re-encode, unknowns merge back into field-hash sort order alongside known fields, so a payload round-trips exactly through a receiver that doesn't fully understand it — v1 reading v2's payload, then writing it back, doesn't lose v2's additions.
 
+The decoded payload type is `StorageData` throughout (the 2026-04 draft also called it `DecodedPayload`; that name is retired).
+
 ```rust
-struct DecodedPayload<T> {
+struct StorageData<T> {
     value: T,
     unknown_fields: Vec<UnknownField>,
 }
@@ -232,7 +228,7 @@ Memory cost is the bucket bytes per decoded payload. Typically zero (no version 
 A name-based accessor that hashes `(name, type)` and looks the field up across known fields and the unknown bucket in one call:
 
 ```rust
-impl<T> DecodedPayload<T> {
+impl<T> StorageData<T> {
     /// Fetch a field by name and decode it as `U`. The lookup hash
     /// is `field_hash(name, U::SCHEMA)`, so a name match with a
     /// type mismatch returns None — there is no way to misdecode
@@ -244,7 +240,7 @@ impl<T> DecodedPayload<T> {
 
     /// Loose lookup by name only — for tooling that knows the name
     /// but wants raw bytes against an out-of-band schema.
-    fn get_raw(&self, name: &str) -> Option<(u64, &[u8])>;
+    fn get_raw<U: Schema>(&self, name: &str) -> Option<(u64, &[u8])>;
 }
 ```
 

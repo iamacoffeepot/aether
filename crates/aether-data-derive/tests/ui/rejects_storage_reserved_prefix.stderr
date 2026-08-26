@@ -1,0 +1,5 @@
+error: the `__` prefix is reserved for system-synthesized storage identifiers; field name `__secret` is not allowed (ADR-0059 rule 4)
+ --> tests/ui/rejects_storage_reserved_prefix.rs:6:5
+  |
+6 |     __secret: u32,
+  |     ^^^^^^^^
