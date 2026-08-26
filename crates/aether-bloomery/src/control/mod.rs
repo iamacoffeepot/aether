@@ -65,6 +65,10 @@ pub struct OutboxPayload {
     /// The opaque payload bytes to republish.
     #[serde(with = "aether_data::bytes")]
     pub payload: Vec<u8>,
+    /// The writing-schema identity stamped beside the payload. `None` is the
+    /// pre-adoption positional identity; adopted topics write their current
+    /// identity in the same transaction as the bytes.
+    pub payload_schema: Option<String>,
 }
 
 impl OutboxPayload {
@@ -75,7 +79,13 @@ impl OutboxPayload {
     /// so a producer call site cannot spell an arbitrary topic string.
     #[must_use]
     pub fn new(topic: Topic, payload: Vec<u8>) -> Self {
-        Self { topic: topic.as_str().to_owned(), payload }
+        Self { topic: topic.as_str().to_owned(), payload, payload_schema: None }
+    }
+
+    /// Build an outbox entry whose payload was encoded under `payload_schema`.
+    #[must_use]
+    pub fn stamped(topic: Topic, payload: Vec<u8>, payload_schema: &'static str) -> Self {
+        Self { topic: topic.as_str().to_owned(), payload, payload_schema: Some(payload_schema.to_owned()) }
     }
 }
 

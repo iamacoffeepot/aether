@@ -257,7 +257,7 @@ fn enqueue_dispatch_with_configs(
     // this bloom already holds answers with a conflict outcome rather than an
     // error — the fixture stages several stages' orders for one member.
     store.claim_seal(bloom.0.as_bytes(), &[workpiece.to_owned()]).unwrap();
-    store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap()).unwrap()
+    store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap(), None).unwrap()
 }
 
 // Enqueue one bloom-level aggregate-review dispatch against an explicit sealed
@@ -278,7 +278,7 @@ fn enqueue_aggregate_review(store: &mut SqliteStore, bloom: BloomId, workpiece: 
         configs,
     };
     store.claim_seal(payload.bloom.as_bytes(), &[workpiece.to_owned()]).unwrap();
-    store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap()
+    store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap()
 }
 
 // ADR-0153 — the aggregate-review topic drains into a bloom-level order: the
@@ -310,7 +310,7 @@ fn drain_and_dispatch_aggregate_submits_a_bloom_level_review_order() {
     // A queued review belongs to a live bloom; the drain reads its membership to
     // tell a live plan from a retired one (#4640).
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
-    let sequence = store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
+    let sequence = store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap();
 
     let (handles, ack_through, _transient) = drain_and_dispatch_aggregate(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
     assert_eq!(handles.len(), 1);
@@ -362,7 +362,7 @@ fn the_second_aggregate_roll_frames_a_delta_confirm_against_the_frozen_findings(
         configs: ConfigRegistry::default(),
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
-    store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
+    store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap();
 
     let (handles, _ack, _transient) = drain_and_dispatch_aggregate(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
     assert_eq!(handles.len(), 1);
@@ -407,7 +407,7 @@ fn a_fresh_roll_one_aggregate_dispatch_clears_the_stale_frozen_row() {
         configs: ConfigRegistry::default(),
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
-    store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
+    store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap();
 
     drain_and_dispatch_aggregate(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
@@ -664,7 +664,7 @@ fn drain_dispatches_the_review_lane_under_its_own_calibrated_profile() {
         configs: ConfigRegistry::default(),
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
-    store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
+    store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap();
 
     drain_and_dispatch_aggregate(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
@@ -935,7 +935,7 @@ fn drain_stops_the_ack_prefix_at_a_missing_subject_entry() {
     // naming one that holds no membership before it ever inspects the
     // transformation — which would skip this entry rather than break on it.
     store.claim_seal(bloom.0.as_bytes(), &["wp-none".to_owned()]).unwrap();
-    store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap()).unwrap();
+    store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap(), None).unwrap();
     enqueue_construct_dispatch(&mut store, bloom, "wp-c", 7);
 
     let (handles, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
@@ -1256,7 +1256,7 @@ fn dispatch_aggregate_review(
         configs: ConfigRegistry::default(),
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
-    let sequence = store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
+    let sequence = store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap();
     let (handles, _ack, _transient) = drain_and_dispatch_aggregate(store, &shell, NOW_UNIX_MILLIS).unwrap();
     store.ack_topic(Topic::AggregateReview, sequence).unwrap();
     let nonce = handles[0].nonce.0.clone();
@@ -1799,7 +1799,7 @@ fn drain_stamps_the_record_axes_from_the_payload() {
         configs: ConfigRegistry::default(),
     };
     store.claim_seal(bloom.0.as_bytes(), &["wp-cand".to_owned()]).unwrap();
-    let sequence = store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap()).unwrap();
+    let sequence = store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap(), None).unwrap();
 
     drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
@@ -2537,7 +2537,7 @@ fn park_and_answer(
     // `Decision::RedispatchStage` once an author-signed answer adopts the hold.
     let payload =
         RedispatchPayload { bloom: bloom.0, question, answer: digest(0xA1), words: words.as_bytes().to_vec() };
-    store.enqueue_topic(Topic::Redispatch, &to_vec(&payload).unwrap()).unwrap()
+    store.enqueue_topic(Topic::Redispatch, &to_vec(&payload).unwrap(), None).unwrap()
 }
 
 // ADR-0151 / #3664 — the whole parked-question loop: a dispatched lane parks, the
@@ -2632,7 +2632,7 @@ fn a_redispatch_with_no_held_order_acks_past_instead_of_wedging_the_topic() {
 
     let payload =
         RedispatchPayload { bloom: bloom.0, question: digest(0x9A), answer: digest(0xA1), words: b"ship it".to_vec() };
-    let orphan = store.enqueue_topic(Topic::Redispatch, &to_vec(&payload).unwrap()).unwrap();
+    let orphan = store.enqueue_topic(Topic::Redispatch, &to_vec(&payload).unwrap(), None).unwrap();
     store.record_dispatch_description(bloom.0.as_bytes(), "wp-held", "build the widget").unwrap();
     let live = park_and_answer(&mut store, &shell, bloom, "wp-held", digest(0x9B), "ship it");
 

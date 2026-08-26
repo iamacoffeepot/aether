@@ -26,7 +26,8 @@ pub trait TopicOutbox {
     fn redeliver_topic(&mut self, topic: Topic, sequence: u64) -> rusqlite::Result<bool>;
     /// Enqueue `payload` under `topic`; returns its sequence. Test seeding —
     /// production enqueue rides the combined `Commit` via `OutboxPayload::new`.
-    fn enqueue_topic(&mut self, topic: Topic, payload: &[u8]) -> rusqlite::Result<u64>;
+    /// `payload_schema` is the writing-schema identity; `None` is positional.
+    fn enqueue_topic(&mut self, topic: Topic, payload: &[u8], payload_schema: Option<&str>) -> rusqlite::Result<u64>;
 }
 
 impl<S: StoreBackend + ?Sized> TopicOutbox for S {
@@ -46,7 +47,7 @@ impl<S: StoreBackend + ?Sized> TopicOutbox for S {
         self.redeliver_outbox(topic.as_str(), sequence)
     }
 
-    fn enqueue_topic(&mut self, topic: Topic, payload: &[u8]) -> rusqlite::Result<u64> {
-        self.enqueue_outbox(topic.as_str(), payload)
+    fn enqueue_topic(&mut self, topic: Topic, payload: &[u8], payload_schema: Option<&str>) -> rusqlite::Result<u64> {
+        self.enqueue_outbox(topic.as_str(), payload, payload_schema)
     }
 }

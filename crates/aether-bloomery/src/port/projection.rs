@@ -34,8 +34,14 @@ use crate::values::{
 /// idempotent and rebuildable after a deletion (ADR-0149 §The boundary). An
 /// adapter renders entirely from this value and never queries back into the
 /// store.
-#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+///
+/// Persisted outbox rows adopt the ADR-0059 storage shape: a future field is
+/// added as an optional (required-by-default). Trailing optionals at this root
+/// decode as absent for a reader that predates them. Fields reached through
+/// [`Self::blooms`] stay positional inside that container.
+#[derive(aether_data::Schema, aether_data::Storage, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[cfg_attr(any(test, feature = "testing"), derive(Default))]
+#[kind(name = "aether.bloomery.view_document")]
 pub struct ViewDocument {
     /// The current mainline head.
     pub mainline: Digest,
@@ -46,16 +52,12 @@ pub struct ViewDocument {
     ///
     /// `None` when the door is open. Carried on the document so `GET /view`
     /// and `GET /blooms` render the axis, spend, and ceiling without a
-    /// query-back into the journal. `#[serde(default)]` so a reader that
-    /// predates the field still decodes.
-    #[serde(default)]
+    /// query-back into the journal.
     pub spend_quiesce: Option<SpendQuiesce>,
     /// The blooms to mirror, each self-describing.
     pub blooms: Vec<BloomView>,
     /// A red whole-workspace base receipt, when one is holding the day
-    /// (ADR-0200). Trailing plus `serde(default)` so a reader that predates
-    /// the field still decodes.
-    #[serde(default)]
+    /// (ADR-0200).
     pub base_alert: Option<BaseAlertView>,
 }
 
@@ -123,26 +125,23 @@ pub struct BloomView {
     /// [`MemberView::pending_decision`] would change member semantics. The
     /// digest is always present so a live-query path that cannot resolve the
     /// question artifact still names what `adjudicate --finding` must quote.
-    /// `#[serde(default)]` so a reader that predates the field still decodes.
+    /// Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
     #[serde(default)]
     pub review_park: Option<ReviewParkView>,
     /// The composition workpiece's own line (ADR-0191): its cursor, a wedge in
     /// the same shape a member wedge renders, and the open findings whose
     /// `detail` digests `adjudicate --finding` must quote. `None` while the
     /// composition has never taken a cursor, wedged, or filed a finding — an
-    /// ordinary bloom stays unchanged. Trailing and `#[serde(default)]` so a
-    /// reader that predates the field still decodes.
+    /// ordinary bloom stays unchanged. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
     #[serde(default)]
     pub composition: Option<CompositionView>,
     /// The operator brake currently on this bloom (#4976); `None` while it
     /// dispatches normally. Without it a held bloom and an idle one render
-    /// identically. Trailing and `#[serde(default)]` so a reader that predates
-    /// the field still decodes.
+    /// identically. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
     #[serde(default)]
     pub operator_hold: Option<OperatorHold>,
     /// Why the bloom's fold refused, once it has (ADR-0206). `None` while the
-    /// fold has not refused — an ordinary bloom stays unchanged. Trailing and
-    /// `#[serde(default)]` so a reader that predates the field still decodes.
+    /// fold has not refused — an ordinary bloom stays unchanged. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
     #[serde(default)]
     pub blocker: Option<RecordedRefusal>,
     /// Every write lease this bloom's lanes hold (ADR-0204), in path order.
@@ -153,8 +152,7 @@ pub struct BloomView {
     /// map — which is how an invisible lease turns contention into an
     /// unexplained stall (ADR-0198). Empty while nothing has been observed
     /// writing, and empty again once the bloom finishes: no lease survives its
-    /// bloom. Trailing and `#[serde(default)]` so a reader that predates the
-    /// field still decodes.
+    /// bloom. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
     #[serde(default)]
     pub leases: Vec<LeaseView>,
     /// Every composition this bloom narrowed to a subset of its candidates
@@ -166,8 +164,7 @@ pub struct BloomView {
     /// of a composition is that it belongs to none of them. This is also the
     /// only place a derived bound is readable, so "what was that repair allowed
     /// to touch, and on whose approval" has an answer without opening the
-    /// journal. Trailing and `#[serde(default)]` so a reader that predates the
-    /// field still decodes.
+    /// journal. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
     #[serde(default)]
     pub narrowed_compositions: Vec<NarrowedCompositionView>,
 }
@@ -236,8 +233,7 @@ pub struct LeaseView {
 ///
 /// Every field serializes in declaration order even when it is `None` or
 /// empty: `aether_data::wire` encodes structs positionally, so omitting a
-/// slot shifts the next bloom's bytes into it. `#[serde(default)]` is only
-/// for a human-readable reader that predates a field.
+/// slot shifts the next bloom's bytes into it. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[cfg_attr(any(test, feature = "testing"), derive(Default))]
 pub struct CompositionView {
@@ -282,8 +278,7 @@ pub struct CompositionCursorView {
 ///
 /// Every field serializes in declaration order even when it is `None` or
 /// empty: `aether_data::wire` encodes structs positionally, so omitting a
-/// slot shifts the next bloom's bytes into it. `#[serde(default)]` is only
-/// for a human-readable reader that predates a field.
+/// slot shifts the next bloom's bytes into it. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[cfg_attr(any(test, feature = "testing"), derive(Default))]
 pub struct ReviewParkView {
@@ -363,47 +358,40 @@ pub struct MemberView {
     pub wedge: Option<Wedge>,
     /// The ancestor whose unresolved or wedged state is why this member has
     /// not entered the line (ADR-0196). `None` while the member is working,
-    /// already resolved, or a root that dispatched at seal. `#[serde(default)]`
-    /// so a reader that predates the field still decodes.
+    /// already resolved, or a root that dispatched at seal. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
     #[serde(default)]
     pub blocked_by: Option<WorkpieceId>,
     /// Why this member is sitting at Verify without a dispatched attempt
     /// (#5020): the host could not run the gates. `None` while the member is
     /// working, wedged, or resolved. The findings name the missing tools
-    /// verbatim. `#[serde(default)]` so a reader that predates the field
-    /// still decodes.
+    /// verbatim. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
     #[serde(default)]
     pub host_fault: Option<HostFaultView>,
     /// Machinery faults this member has taken on its current stage (ADR-0195).
-    /// `0` while none have been recorded. `#[serde(default)]` so a reader that
-    /// predates the field still decodes.
+    /// `0` while none have been recorded. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
     #[serde(default)]
     pub machinery_rolls: u32,
     /// The sealed retry budget the machinery series is bounded by — the bound
     /// stated rather than left for a reader to know. `0` when the member has
-    /// no cursor yet. `#[serde(default)]` so a reader that predates the field
-    /// still decodes.
+    /// no cursor yet. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
     #[serde(default)]
     pub machinery_budget: u32,
     /// Why the member stopped, once it has wedged (ADR-0195). `None` while it
     /// is still working. Distinguishes a sick host from rejected work at the
-    /// door an operator reads. `#[serde(default)]` so a reader that predates
-    /// the field still decodes.
+    /// door an operator reads. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
     #[serde(default)]
     pub wedge_cause: Option<WedgeCause>,
     /// The member's stage cursor, when it has dispatch history; `None` for a
     /// member that has never entered the line. Same [`CompositionCursorView`]
     /// shape the composition cursor already proves — stage, attempts, and the
-    /// candidate it is targeting. Trailing and `#[serde(default)]` so a reader
-    /// that predates the field still decodes.
+    /// candidate it is targeting. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
     #[serde(default)]
     pub cursor: Option<CompositionCursorView>,
     /// A construct that concluded without a candidate (#5292, #5332). `None`
     /// while the member is working, wedged, or resolved. Distinct from
     /// [`Self::pending_decision`]: a park is not an ADR-0151 question, and both
     /// liveness oracles read this field rather than reconstructing it from
-    /// snapshot state. Trailing and `#[serde(default)]` so a reader that
-    /// predates the field still decodes.
+    /// snapshot state. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
     #[serde(default)]
     pub park: Option<crate::MemberPark>,
     /// The surface amendment this member is waiting on (ADR-0207). `None`
@@ -411,23 +399,20 @@ pub struct MemberView {
     /// (the machinery could not push it through) and from
     /// [`Self::pending_decision`] (an ADR-0151 question an answer settles):
     /// this member is waiting on a person to widen a boundary, and more
-    /// attempts cannot help. Trailing and `#[serde(default)]` so a reader that
-    /// predates the field still decodes.
+    /// attempts cannot help. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
     #[serde(default)]
     pub awaiting_surface: Option<AwaitingSurfaceView>,
     /// Why the member left the line, when an operator withdrew it or its
     /// dependency was withdrawn (#5327). `None` for every member still in the
     /// line. Distinct from [`Self::wedge`], which a member earns by exhausting
     /// a budget and which a grant can undo: a withdrawal is a person's
-    /// decision and is one-way. Trailing and `#[serde(default)]` so a reader
-    /// that predates the field still decodes.
+    /// decision and is one-way. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
     #[serde(default)]
     pub withdrawn: Option<WithdrawnView>,
     /// The repository paths this member holds a write lease on (ADR-0204), in
     /// path order. Empty for a member whose lane has written nothing yet, and
     /// for every member of a bloom that has finished — no lease survives its
-    /// bloom. Trailing and `#[serde(default)]` so a reader that predates the
-    /// field still decodes.
+    /// bloom. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
     #[serde(default)]
     pub leases: Vec<String>,
     /// The earlier-canonical sibling that took a path this member held,
@@ -435,8 +420,7 @@ pub struct MemberView {
     /// a member that is working normally. Distinct from [`Self::blocked_by`],
     /// which names a *declared* dependency that has not resolved: this member
     /// declared nothing and would have run, and the file it collided on is the
-    /// only reason it is waiting. Trailing and `#[serde(default)]` so a reader
-    /// that predates the field still decodes.
+    /// only reason it is waiting. Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast.
     ///
     /// `None` on every bloom a current coordinator walks: #5401 retracted the
     /// eviction, so a shared file is merged at integration instead. The slot
@@ -501,8 +485,7 @@ pub struct MemberWhy {
     /// The `dispatch_member` guard that refused this member's entry into the
     /// line, when one is stored (ADR-0206).
     ///
-    /// Trailing and `#[serde(default)]`, so a reader of an older projection
-    /// still decodes. `None` is the ordinary case: a member that is working,
+    /// Positional inside its container under ADR-0059's flattening rule: adding a field after it is still a breaking shape change owing an upcast. `None` is the ordinary case: a member that is working,
     /// resolved, or held out by a rung the chain above already names has
     /// nothing to refuse.
     #[serde(default)]
@@ -621,7 +604,12 @@ pub struct PendingDecisionView {
 /// Wholly from the local commission and its journal view. A caller-supplied
 /// GitHub title or body is not an input — the adapter renders this document
 /// and never reads platform edits back.
-#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+///
+/// Persisted outbox rows adopt the ADR-0059 storage shape: a future field is
+/// added as an optional (required-by-default). Trailing optionals at this root
+/// decode as absent for a reader that predates them.
+#[derive(aether_data::Schema, aether_data::Storage, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[kind(name = "aether.bloomery.commission_projection")]
 pub struct CommissionProjection {
     /// The workpiece this commission is.
     pub workpiece: WorkpieceId,
@@ -639,16 +627,13 @@ pub struct CommissionProjection {
     /// Frozen at enqueue time — later creates persist into the store row, not
     /// this snapshot. The reactor overlays the store's recorded number before
     /// projecting; `find_issue` is advisory crash-recovery only.
-    #[serde(default)]
     pub recorded_issue: Option<u64>,
     /// The commission's own title — the first markdown heading of its intent —
     /// or empty when the intent carries no heading.
     ///
     /// Rendered into the replica's title so six freshly authored commissions
     /// are six distinguishable rows in an issue list rather than six copies of
-    /// one constant. Trailing and defaulted, so an outbox row enqueued before
-    /// this field existed still decodes and renders the untitled form.
-    #[serde(default)]
+    /// one constant.
     pub title: String,
 }
 
