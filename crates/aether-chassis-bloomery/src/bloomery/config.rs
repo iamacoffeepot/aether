@@ -261,6 +261,19 @@ pub struct CoordinatorConfig {
     /// knobs are: the disk a build cache may fill is a property of the machine.
     #[config(env = "AETHER_BLOOMERY_LANE_TARGET_BUDGET_BYTES", default = 68_719_476_736u64)]
     pub lane_target_budget_bytes: u64,
+    /// How often a slot target tree may be re-walked, in seconds. Distinct from
+    /// [`Self::poll_interval_secs`], which decides how often the janitor pass
+    /// runs at all: the size walk is tens of gigabytes and must not run on the
+    /// executor's dispatch cadence. A slot is re-walked when this interval
+    /// elapses or when the slot changes hands, whichever comes first. `0`
+    /// re-walks every pass.
+    ///
+    /// Named `AETHER_BLOOMERY_LANE_TARGET_MEASURE_INTERVAL_SECS` rather than
+    /// under this struct's `AETHER_GITHUB` prefix, for the reason the other
+    /// host-resource knobs are: how often a host measures its build cache is a
+    /// property of the machine.
+    #[config(env = "AETHER_BLOOMERY_LANE_TARGET_MEASURE_INTERVAL_SECS", default = 300)]
+    pub lane_target_measure_interval_secs: u64,
     /// How many days a consumed evidence directory of a terminal bloom is kept
     /// after that bloom lands or is superseded. Evidence feeds intake and then
     /// serves forensics and the calibration ledger (ADR-0184); this is the
@@ -457,6 +470,7 @@ impl Default for CoordinatorConfig {
             max_concurrent_lanes: 3,
             lane_target_base: String::new(),
             lane_target_budget_bytes: 68_719_476_736,
+            lane_target_measure_interval_secs: 300,
             evidence_retention_days: 7,
             lane_build_jobs: 8,
             stale_warn_after_secs: 1800,
