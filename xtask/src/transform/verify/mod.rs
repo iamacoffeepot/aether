@@ -22,7 +22,8 @@ use aether_bloomery::{VerifyFailure, VerifyFailureSet};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 
-use crate::cargo::{self, WASM_TARGET, run_captured, write_json_pretty};
+use crate::affected::graph::Workspace;
+use crate::cargo::{WASM_TARGET, run_captured, write_json_pretty};
 use crate::fixtures::annotate_findings;
 use crate::transform::peak_memory::{self, PeakMemory};
 use crate::transform::sccache::{self, CompilerCache, Counters};
@@ -1040,11 +1041,15 @@ struct SpawnRunner<'a> {
     ///
     /// One tree, not one per replay. Every base replay in a member run is at
     /// the same commit, and the tree carries a whole cold build with it: its
-    /// own `CARGO_TARGET_DIR` and its own component cross-build, neither of
-    /// which survived the `worktree remove` that used to follow each replay. A
-    /// member with four triaged failures paid for four from-scratch workspace
-    /// builds of the same base.
+    /// own `CARGO_TARGET_DIR` and, when the package under test needs it, its
+    /// own component cross-build, neither of which survived the `worktree
+    /// remove` that used to follow each replay. A member with four triaged
+    /// failures paid for four from-scratch workspace builds of the same base.
     base: Option<BaseCheckout>,
+    /// Workspace graph used to decide whether a replayed package's tests need
+    /// the component-wasm prepare. Loaded on first use so a candidate-only
+    /// replay does not pay for metadata.
+    workspace: Option<Workspace>,
 }
 
 impl MemberRunner for SpawnRunner<'_> {
@@ -1059,47 +1064,90 @@ impl MemberRunner for SpawnRunner<'_> {
 
     fn replay(&mut self, invocation: &VerifyInvocation, test: &str, at: Option<&str>) -> Result<Captured> {
         let Some(base) = at else {
-            return self.spawn_one(invocation, test, None);
+            return self.spawn_one(invocation, test, None, &replay_notices(test, None));
         };
-        let path = self.base_checkout(invocation, base)?.to_path_buf();
-        self.spawn_one(invocation, test, Some(&path))
+        let prepare = self.should_prepare(invocation, replay_package(test));
+        let path = self.base_checkout(invocation, base, prepare)?.to_path_buf();
+        self.spawn_one(invocation, test, Some(&path), &replay_notices(test, invocation.prepare.map(|_| prepare)))
     }
 }
 
 impl<'a> SpawnRunner<'a> {
     fn new(cache: Option<&'a CompilerCache>, peak: &'a PeakMemory) -> Self {
-        Self { cache, peak, base: None }
+        Self { cache, peak, base: None, workspace: None }
     }
 
-    /// The tree this member's base replays run in, opened and prepared on the
-    /// first replay that asks for it.
+    /// The tree this member's base replays run in, opened on the first replay
+    /// that asks for it and prepared only when the package under test needs the
+    /// component wasm.
     ///
     /// The base run needs a tree at the base commit, and it must not be this
     /// one: stashing would move the candidate out from under a lane that is
     /// mid-verification. A detached worktree is the cheap, side-effect-free
     /// form.
     ///
-    /// It is prepared here rather than per replay because the preparation
-    /// belongs to the tree: `verify.test` needs the component wasm the prepare
-    /// cross-builds, and without it `AETHER_REQUIRE_RUNTIME=1` turns every
-    /// scenario test red — which this triage would then read as "the base was
-    /// already broken" and use to excuse a real finding.
+    /// The prepare belongs to the tree, not to every replay: `verify.test`
+    /// scenario tests load component wasm that `cargo xtask dist` cross-builds,
+    /// and without it `AETHER_REQUIRE_RUNTIME=1` turns those tests red — which
+    /// this triage would then read as "the base was already broken" and use to
+    /// excuse a real finding. A crate whose tests do not touch that wasm must
+    /// not pay for the cross-build. The decision is per package, so a later
+    /// replay whose package does need wasm still runs the prepare on this
+    /// checkout.
     ///
     /// A replay naming a different base than the open one closes it and opens
     /// that: the tree is only ever the answer to a commit.
-    fn base_checkout(&mut self, invocation: &VerifyInvocation, base: &str) -> Result<&Path> {
+    fn base_checkout(&mut self, invocation: &VerifyInvocation, base: &str, prepare: bool) -> Result<&Path> {
         if self.base.as_ref().is_none_or(|open| open.base != base) {
             self.close_base();
-            let checkout = BaseCheckout::open(base)?;
-            if let Some(prepare) = invocation.prepare {
-                let at = checkout.path();
-                let mut step = cargo::command();
-                step.args(prepare.iter().copied()).current_dir(at).env("CARGO_TARGET_DIR", at.join("target"));
-                run_captured(step).with_context(|| format!("prepare the base checkout at {}", at.display()))?;
-            }
-            self.base = Some(checkout);
+            self.base = Some(BaseCheckout::open(base)?);
+        }
+        if prepare && self.base.as_ref().is_some_and(|checkout| !checkout.prepared) {
+            let at = self.base.as_ref().expect("the checkout was just opened").path.clone();
+            self.run_base_prepare(invocation, &at)?;
+            self.base.as_mut().expect("the checkout was just opened").prepared = true;
         }
         Ok(self.base.as_ref().expect("the checkout was just opened").path())
+    }
+
+    /// Cross-build the component wasm in the base checkout, through the same
+    /// cache and peak-memory wrapper the candidate prepare uses.
+    fn run_base_prepare(&self, invocation: &VerifyInvocation, at: &Path) -> Result<()> {
+        let Some(prepare) = invocation.prepare else {
+            return Ok(());
+        };
+        let mut step = self.peak.command("cargo");
+        step.args(prepare.iter().copied())
+            .current_dir(at)
+            .env("CARGO_TARGET_DIR", at.join("target"))
+            .envs(CI_BUILD_ENV.iter().copied());
+        sccache::export(self.cache, &mut step);
+        let output = run_captured(step).with_context(|| format!("prepare the base checkout at {}", at.display()))?;
+        let _ = self.peak.take_report(output.stderr);
+        Ok(())
+    }
+
+    /// Whether this replay should run `invocation.prepare` in the base checkout.
+    ///
+    /// An unresolvable binary id keeps the prepare: skipping it on a workspace
+    /// run would turn every scenario test red and read as an inherited failure.
+    /// A workspace graph that would not load does the same — the cost of a
+    /// wasm cross-build is the fail-safe, not the fail-toward-excusal.
+    fn should_prepare(&mut self, invocation: &VerifyInvocation, package: Option<&str>) -> bool {
+        if invocation.prepare.is_none() {
+            return false;
+        }
+        let Some(package) = package else {
+            return true;
+        };
+        self.workspace().is_none_or(|workspace| workspace.needs_dist_prepare(package))
+    }
+
+    fn workspace(&mut self) -> Option<&Workspace> {
+        if self.workspace.is_none() {
+            self.workspace = Workspace::load().ok();
+        }
+        self.workspace.as_ref()
     }
 
     /// Remove the base checkout this runner opened, if it opened one.
@@ -1123,11 +1171,33 @@ impl<'a> SpawnRunner<'a> {
     /// at one keeps the replay about the recorded input, which is the whole
     /// point of step 1 — a different dice roll is not evidence about this
     /// failure either way.
-    fn spawn_one(&self, invocation: &VerifyInvocation, test: &str, at: Option<&Path>) -> Result<Captured> {
+    fn spawn_one(
+        &self,
+        invocation: &VerifyInvocation,
+        test: &str,
+        at: Option<&Path>,
+        notices: &[String],
+    ) -> Result<Captured> {
+        for notice in notices {
+            eprintln!("{notice}");
+        }
+        let output =
+            run_captured(self.replay_command(invocation, test, at)).with_context(|| format!("replay {test}"))?;
+        let mut stderr = notices.join("\n").into_bytes();
+        if !stderr.is_empty() {
+            stderr.push(b'\n');
+        }
+        stderr.extend_from_slice(&self.peak.take_report(output.stderr));
+        Ok(Captured { stdout: output.stdout, stderr, code: output.status.code() })
+    }
+
+    /// The command a one-test replay actually dispatches: narrowed argv, the
+    /// same compiler cache the candidate run uses, and a fresh target directory
+    /// when it runs in a base checkout.
+    fn replay_command(&self, invocation: &VerifyInvocation, test: &str, at: Option<&Path>) -> Command {
         let mut command = self.peak.command(invocation.program);
         command
-            .args(invocation.args.iter().copied())
-            .args(["-E", &nextest_filter(test)])
+            .args(replay_args(invocation, test))
             .envs(invocation.env.iter().copied())
             .envs(CI_BUILD_ENV.iter().copied())
             .env("PROPTEST_CASES", "1");
@@ -1135,14 +1205,16 @@ impl<'a> SpawnRunner<'a> {
             // Its own target directory: cargo's incremental cache surfaces a
             // dependency last compiled from the other tree's source otherwise,
             // and a phantom error here would read as a base failure that
-            // excuses a real finding. It is the checkout's, so it lives as long
-            // as the checkout does and every replay after the first is warm.
+            // excuses a real finding. That is an argument against sharing
+            // cargo's fingerprints, not against the compiler cache — sccache
+            // keys each invocation by content, so the failure mode is a miss,
+            // never a wrong artifact, and this checkout is a new path with no
+            // fingerprints of its own. It is the checkout's, so it lives as
+            // long as the checkout does and every replay after the first is warm.
             command.current_dir(at).env("CARGO_TARGET_DIR", at.join("target"));
-        } else {
-            sccache::export(self.cache, &mut command);
         }
-        let output = run_captured(command).with_context(|| format!("replay {test}"))?;
-        Ok(Captured { stdout: output.stdout, stderr: self.peak.take_report(output.stderr), code: output.status.code() })
+        sccache::export(self.cache, &mut command);
+        command
     }
 }
 
@@ -1161,6 +1233,63 @@ fn nextest_filter(test: &str) -> String {
     }
 }
 
+/// The workspace package a nextest `binary-id test_name` pair names.
+///
+/// `None` when the key has no binary-id half: guessing a package from a bare
+/// test name would `-p` the wrong crate and the replay would come back
+/// [`ReplayVerdict::Unreached`].
+fn replay_package(test: &str) -> Option<&str> {
+    let mut halves = test.split_whitespace();
+    let (Some(binary), Some(_)) = (halves.next(), halves.next()) else {
+        return None;
+    };
+    binary.split("::").next().filter(|package| !package.is_empty())
+}
+
+/// The argv a one-test replay dispatches: the invocation's stated argv, narrowed
+/// to the failing test's own package when the binary-id names one, plus the
+/// nextest filter that selects that test.
+///
+/// Mirrors [`VerifyInvocation::args_under`]: `--workspace` is dropped rather
+/// than left beside `-p`, because cargo treats the pair as the whole workspace.
+/// An unresolvable binary id keeps the unnarrowed argv — building too much is
+/// slow, building the wrong crate is a [`ReplayVerdict::Unreached`].
+fn replay_args(invocation: &VerifyInvocation, test: &str) -> Vec<String> {
+    let mut args: Vec<String> = match replay_package(test) {
+        Some(package) => invocation
+            .args
+            .iter()
+            .filter(|arg| **arg != "--workspace")
+            .map(|arg| (*arg).to_owned())
+            .chain(["-p".to_owned(), package.to_owned()])
+            .collect(),
+        None => invocation.args.iter().map(|arg| (*arg).to_owned()).collect(),
+    };
+    args.extend(["-E".to_owned(), nextest_filter(test)]);
+    args
+}
+
+/// Notices a replay writes into its captured log so a skip or an unnarrowed
+/// fallback is diagnosable after the fact.
+fn replay_notices(test: &str, prepared: Option<bool>) -> Vec<String> {
+    let mut notices = Vec::new();
+    if replay_package(test).is_none() {
+        notices.push(format!("replay: could not resolve a package from `{test}`; keeping the unnarrowed argv"));
+    }
+    match prepared {
+        Some(true) => {
+            let package = replay_package(test).unwrap_or("the unnarrowed workspace");
+            notices.push(format!("replay: running the component-wasm prepare; {package} tests need it"));
+        }
+        Some(false) => {
+            let package = replay_package(test).unwrap_or("this package");
+            notices.push(format!("replay: skipped the component-wasm prepare; {package} tests do not need it"));
+        }
+        None => {}
+    }
+    notices
+}
+
 /// A detached git worktree at one commit, removed on [`close`](Self::close).
 ///
 /// Deliberately not `Drop`: removing a worktree can fail, and a destructor that
@@ -1171,6 +1300,10 @@ struct BaseCheckout {
     /// The commit it stands at, so a replay can tell whether the open checkout
     /// is the one it needs.
     base: String,
+    /// Whether `invocation.prepare` has already run in this tree. A later
+    /// replay whose package needs the wasm still has to be able to run it if
+    /// an earlier one skipped.
+    prepared: bool,
 }
 
 impl BaseCheckout {
@@ -1184,7 +1317,7 @@ impl BaseCheckout {
         if !added.status.success() {
             bail!("git worktree add at {base} failed: {}", String::from_utf8_lossy(&added.stderr));
         }
-        Ok(Self { path, base: base.to_owned() })
+        Ok(Self { path, base: base.to_owned(), prepared: false })
     }
 
     fn path(&self) -> &Path {
@@ -1568,8 +1701,7 @@ fn triage_shaped(
         return triage::triage(classified, diff_base, |test, at| {
             replays += 1;
             eprintln!("verify.triage: replay {replays} (of {} candidate failures): {test}", candidates.len());
-            let captured = runner.replay(invocation, test, at)?;
-            Ok(replay_verdict(id, invocation, test, at, &captured))
+            timed_replay(id, invocation, runner, test, at)
         });
     }
     eprintln!(
@@ -1598,16 +1730,32 @@ fn triage_shaped(
         triage::triage(&kept, diff_base, |test, at| {
             replays += 1;
             eprintln!("verify.triage: replay {replays} (of {} repeated tests): {test}", still_failing.len());
-            let captured = runner.replay(invocation, test, at)?;
-            Ok(replay_verdict(id, invocation, test, at, &captured))
+            timed_replay(id, invocation, runner, test, at)
         })?
     };
-    triaged.flakes.extend(
-        cleared
-            .into_iter()
-            .map(|test| Excused { test, replayed: "a whole-member re-run on the settled host".to_owned() }),
-    );
+    triaged.flakes.extend(cleared.into_iter().map(|test| Excused {
+        test,
+        replayed: "a whole-member re-run on the settled host".to_owned(),
+        duration_millis: None,
+    }));
     Ok(triaged)
+}
+
+/// Run one named test and return the verdict, the ledger label, and the spawn's
+/// wall-clock. The duration is the interval the gate receipt otherwise swallows
+/// inside its own timer — a base replay is a cold build, and without this it is
+/// one opaque share of `verify.test`.
+fn timed_replay(
+    id: &str,
+    invocation: &VerifyInvocation,
+    runner: &mut dyn MemberRunner,
+    test: &str,
+    at: Option<&str>,
+) -> Result<(ReplayVerdict, String, u64)> {
+    let started = Instant::now();
+    let captured = runner.replay(invocation, test, at)?;
+    let (verdict, replayed) = replay_verdict(id, invocation, test, at, &captured);
+    Ok((verdict, replayed, elapsed_millis(started)))
 }
 
 /// Read one replay's captured output as a verdict about the one test it was
@@ -2392,19 +2540,21 @@ fn check_pass(args: &TransformArgs, logs: &Path, full: bool) -> Result<CheckPass
 mod tests {
     use super::{
         BASE_SET_SUBJECT, Captured, EvidenceChannel, MAX_FINDING_LINES, MemberOutcome, MemberRun, MemberRunner,
-        SUPPRESS_MEMBER, Scope, VERIFY_BASE, VERIFY_CHECK, VerifyInvocation, builds_artifacts, clippy_verdict, closure,
-        distil_diagnostics, effective_exit_code, environment_observations, failed_verifiers, host_fault_in,
-        member_diff_base, member_outcome, member_scope_notice, operational_failure_notice, package_name,
-        preflight_tools, prepare_failure_log, render_diagnostics, required_targets, required_tools, run_member,
-        run_member_discriminated, run_timed_prepare, umbrella_status, unjudged_notice, verify_check_members,
-        verify_command, verify_findings, workflow,
+        SUPPRESS_MEMBER, Scope, SpawnRunner, VERIFY_BASE, VERIFY_CHECK, VerifyInvocation, builds_artifacts,
+        clippy_verdict, closure, distil_diagnostics, effective_exit_code, environment_observations, failed_verifiers,
+        host_fault_in, member_diff_base, member_outcome, member_scope_notice, operational_failure_notice, package_name,
+        preflight_tools, prepare_failure_log, render_diagnostics, replay_args, required_targets, required_tools,
+        run_member, run_member_discriminated, run_timed_prepare, umbrella_status, unjudged_notice,
+        verify_check_members, verify_command, verify_findings, workflow,
     };
     use std::iter;
+    use std::path::Path;
 
     use crate::cargo::WASM_TARGET;
     use crate::transform::construct::{CONSTRUCT_IMPLEMENT, CONSTRUCT_INSTRUCTIONS};
     use crate::transform::peak_memory;
     use crate::transform::review::REVIEW_CRITIC;
+    use crate::transform::sccache::CompilerCache;
     use aether_bloomery::{VerifyFailure, VerifyFailureSet};
 
     /// The full command line an invocation dispatches, program first, in the
@@ -2802,6 +2952,61 @@ mod tests {
         assert_eq!(
             test.args_under(&scope, None),
             [owned(test.args), owned(&["-p", "aether-chassis-bloomery", "-p", "aether-math"])].concat(),
+        );
+    }
+
+    #[test]
+    fn a_base_replay_narrows_to_the_failing_tests_package() {
+        // The base replay used to dispatch verify.test's workspace argv, so a
+        // one-crate failure compiled the whole tree into a fresh target
+        // directory. The package is the binary-id half, not the member's
+        // closure: the closure can be several crates, the test lives in one.
+        let invocation = verify_command("verify.test").expect("verify.test mapped");
+        let test = "aether-chassis-hub::fleetharness_binary_store fleetharness_uploads_lists_and_dedups_a_real_binary";
+        let args = replay_args(&invocation, test);
+
+        assert!(
+            !args.iter().any(|arg| arg == "--workspace"),
+            "a workspace flag would re-select everything the package flag just narrowed: {args:?}"
+        );
+        assert_eq!(
+            args.windows(2).find(|pair| pair[0] == "-p").map(|pair| pair[1].as_str()),
+            Some("aether-chassis-hub"),
+            "the replay builds the crate the binary id names: {args:?}"
+        );
+
+        // Tripwire: narrowing is a package selection and nothing else. The
+        // gate's own argv is what the CI-parity assertions pin; leaking `-p`
+        // onto it would leave those green while the landing suite ran one crate.
+        let flags: Vec<String> =
+            invocation.args.iter().map(|arg| (*arg).to_owned()).filter(|arg| arg != "--workspace").collect();
+        assert_eq!(args[..flags.len()], flags[..], "narrowing may drop the selection and no other flag");
+    }
+
+    #[test]
+    fn a_base_replay_exports_the_compiler_cache() {
+        // The base checkout is a new path with no cargo fingerprints. sccache
+        // keys by content, so it is the cache that can hit there — and it used
+        // to be exported only on the candidate branch.
+        let invocation = verify_command("verify.test").expect("verify.test mapped");
+        let peak = peak_memory::detect();
+        let cache = CompilerCache::unused();
+        let runner = SpawnRunner::new(Some(&cache), &peak);
+        let command = runner.replay_command(
+            &invocation,
+            "aether-chassis-hub::fleetharness_binary_store fleetharness_uploads_lists_and_dedups_a_real_binary",
+            Some(Path::new("/tmp/aether-verify-base")),
+        );
+
+        let wrapper = command
+            .get_envs()
+            .find(|(key, _)| key.to_str() == Some("RUSTC_WRAPPER"))
+            .and_then(|(_, value)| value.map(|value| value.to_string_lossy().into_owned()));
+        assert_eq!(wrapper.as_deref(), Some("sccache"), "the base branch must carry the compiler cache: {wrapper:?}");
+        assert_eq!(
+            command.get_current_dir(),
+            Some(Path::new("/tmp/aether-verify-base")),
+            "the fresh target directory stays; it protects cargo's incremental cache, which sccache does not share",
         );
     }
 
@@ -3698,6 +3903,14 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         assert!(run.findings().is_none(), "a failure the base already had is not this candidate's to fix");
         assert_eq!(run.inherited().len(), 1, "the excusal is recorded against the base it was red at");
         assert_eq!(run.inherited()[0].replayed, "deadbeef");
+        assert!(
+            run.inherited()[0].duration_millis.is_some(),
+            "the base replay states its own wall time beside the excusal"
+        );
+        assert!(
+            run.observation().expect("the inherited receipt is on the lane").contains("millis"),
+            "a slow triage reads the replay's wall-clock off the dispatch",
+        );
         assert!(run.flakes().is_empty(), "and it is an inherited failure, not a flake");
     }
 
