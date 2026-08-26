@@ -65,7 +65,7 @@ pub use executor::{
     CaptureIdentity, CapturedObjects, DEFAULT_LANE_PROGRAM, ExecutorPortError, ExecutorShell, LaneOccupancy,
     LaneProgram, LocalExecutor, LocalExecutorError, LocalLane, OrphanedRun, OutstandingDispatch,
     ProcessTransformRunner, ReconcileLanes, ReconcileReport, RoutingExecutor, RunLifecycle, RunProcess, RunSpec,
-    TransformRunner, UnconfiguredActionsBackend, mock_lane,
+    TransformRunner, UnconfiguredActionsBackend, admits_lane_key, mock_lane,
 };
 #[cfg(feature = "github")]
 pub use intake::{

@@ -26,7 +26,7 @@ use aether_bloomery::{BackendObjectId, is_model_lane};
 use aether_bloomery_git::command::{self, GitCommandError};
 
 use super::error::LocalExecutorError;
-use super::lane_env::{inherited_keys, scrub_coordinator_env};
+use super::lane_env::{construct_lane_env, inherited_env};
 use super::lane_program::LaneProgram;
 use super::runner::{CapturedObjects, RunLifecycle, RunProcess, RunSpec, TransformRunner};
 use super::task_argv;
@@ -214,12 +214,12 @@ impl TransformRunner for ProcessTransformRunner {
             exclude_slot_target(spec.worktree_dir)?;
         }
         // Spawn the same portable entrypoint the wrappers run, in the checked-out
-        // worktree, under the ambient local `claude` auth (ADR-0150) — and under
-        // the wrapper's environment rather than the coordinator's, which the
+        // worktree, under the ambient local `claude` auth (ADR-0150) — and on an
+        // environment this constructs rather than the coordinator's, which the
         // child would otherwise inherit wholesale and come up configured as a
         // second coordinator (#4714; see `lane_env`).
         let mut lane = self.lane_program.command();
-        scrub_coordinator_env(&mut lane, inherited_keys());
+        construct_lane_env(&mut lane, inherited_env());
         export_build_env(&mut lane, spec);
         lane.current_dir(spec.worktree_dir);
         // Command, `--out`, `--nonce`, and the optional `--diff-base` /
@@ -406,8 +406,8 @@ fn work_order_args(spec: &RunSpec<'_>, checkout: &str, diff_base: Option<&str>) 
 /// candidate has to build in the same directory the lane that produced it did, or
 /// the fingerprints it reuses are somebody else's.
 ///
-/// The two are also set **after** the coordinator's own configuration is scrubbed
-/// out ([`scrub_coordinator_env`]), so a coordinator that inherited a
+/// The two are also set **after** the child's environment is constructed
+/// ([`construct_lane_env`]), so a coordinator that inherited a
 /// `CARGO_TARGET_DIR` from its boot environment hands the lane the slot's rather
 /// than its own.
 ///

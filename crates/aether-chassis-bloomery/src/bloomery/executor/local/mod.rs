@@ -100,6 +100,7 @@ mod task_argv;
 
 pub use backend::LocalExecutor;
 pub use error::LocalExecutorError;
+pub use lane_env::admits_lane_key;
 pub use lane_program::{DEFAULT_LANE_PROGRAM, LaneProgram};
 pub use orphan::OrphanedRun;
 pub use process_runner::{CaptureIdentity, ProcessTransformRunner};
