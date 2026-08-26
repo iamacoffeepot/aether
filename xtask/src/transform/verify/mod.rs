@@ -3783,6 +3783,27 @@ error: test run failed
     }
 
     #[test]
+    fn a_schema_digest_failure_names_append_and_upcast_not_regen() {
+        let log = "\
+        FAIL [   0.008s] ( 156/3737) aether-bloomery::golden_decisions pinned_schema_digests_match_the_registry
+
+--- STDERR:              aether-bloomery::golden_decisions pinned_schema_digests_match_the_registry ---
+thread 'pinned_schema_digests_match_the_registry' panicked at crates/aether-bloomery/tests/golden_decisions/schema_digests.rs:20:5:
+kind `decisions` current digest drifted
+
+     Summary [  74.644s] 3737 tests run: 3736 passed, 1 failed, 20 skipped
+error: test run failed
+";
+
+        let findings = verify_findings(&[member("verify.test", MemberOutcome::Failed, log)])
+            .and_then(|channel| channel.text().map(str::to_owned))
+            .expect("findings");
+
+        assert!(findings.contains("append the new digest to `schema-digests.txt` and register an upcast"));
+        assert!(!findings.contains("fixtures regen"), "{findings}");
+    }
+
+    #[test]
     fn a_compile_error_in_a_test_target_still_surfaces_through_the_rustc_channel() {
         // Tripwire: a compile error inside a test target is a rustc diagnostic
         // and reaches findings today. Routing verify.test unconditionally to

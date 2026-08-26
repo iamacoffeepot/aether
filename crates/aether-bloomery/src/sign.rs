@@ -66,7 +66,7 @@ use crate::values::Tier;
 /// changes the message every past signature was minted over and invalidates all
 /// of them, with no compile error and no decode failure to announce it. Append
 /// new doors; never reorder.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum AuthorityDoor {
     /// Approving a member's scope revision at seal time, bound to that
     /// revision's digest.
@@ -132,7 +132,7 @@ pub fn authorization_message(door: AuthorityDoor, binding: Digest, words: &[u8])
 /// An author signature over exact bytes: the assertion "this signer asserted
 /// these bytes for this purpose". The only provenance that can become
 /// *instruction* (ADR-0149 §The value vocabulary).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct SignatureEnvelope {
     /// The asserting signer's key identity.
     pub signer: KeyId,

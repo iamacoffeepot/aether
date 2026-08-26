@@ -7,6 +7,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_data::Kind;
+use aether_data::Schema;
 use serde::de::DeserializeOwned;
 
 use super::attempt::{DispatchTargets, SealedLine, move_effects, stage_binding};
@@ -294,7 +295,7 @@ fn validate_line(spec: &BloomSpec, configs: &ResolvedConfigs) -> Result<StageCat
 /// configuration authored before a breaking change to its kind — would fall
 /// through to the compiled line and seal a bloom running a line its receipt does
 /// not name.
-fn sealed_config<K: ConfigKind + DeserializeOwned>(
+fn sealed_config<K: ConfigKind + DeserializeOwned + Schema>(
     scopes: ConfigScopes<'_>,
     configs: &ResolvedConfigs,
 ) -> Result<Option<K>, SealError> {
@@ -309,7 +310,7 @@ fn sealed_config<K: ConfigKind + DeserializeOwned>(
         reason: match error {
             ConfigResolveError::Missing { .. } => Unproducible::Absent,
             ConfigResolveError::KindMismatch { stored, .. } => Unproducible::MisfiledAs(stored),
-            ConfigResolveError::Decode { .. } => Unproducible::Undecodable,
+            ConfigResolveError::Decode { .. } | ConfigResolveError::NoUpcast { .. } => Unproducible::Undecodable,
         },
     })
 }
@@ -769,6 +770,7 @@ fn verify_reentry(
 
 #[cfg(test)]
 mod tests {
+    use crate::persisted::DECISIONS;
     use alloc::string::String;
 
     use aether_data::Kind;
@@ -779,8 +781,7 @@ mod tests {
     use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
     use crate::reduce::SealError;
     use crate::reduce::{
-        BloomStatus, DECISIONS_SCHEMA, Decision, Decisions, Event, Fact, Outcome, Snapshot, decode_recorded_decisions,
-        reduce,
+        BloomStatus, Decision, Decisions, Event, Fact, Outcome, Snapshot, decode_recorded_decisions, reduce,
     };
     use crate::values::{
         BaseReceipt, BaseVerdict, BloomDraft, BloomSpec, CandidateRef, ConfigKind, ConfigRegistry, Evidence,
@@ -811,7 +812,7 @@ mod tests {
         let mut registry = ConfigRegistry::default();
         registry.insert::<SpendCeiling>(ceiling.address());
         let mut configs = ResolvedConfigs::default();
-        configs.insert(ceiling.address(), SpendCeiling::NAME, to_vec(ceiling).expect("ceiling encodes"));
+        configs.insert(ceiling.address(), SpendCeiling::NAME, to_vec(ceiling).expect("ceiling encodes"), None);
         (registry, configs)
     }
 
@@ -982,7 +983,7 @@ mod tests {
         member.approval.subject = member.subject();
         let spec = BloomDraft { proposals: vec![member], base: digest(0), ..BloomDraft::default() }.seal();
         let mut configs = ResolvedConfigs::default();
-        configs.insert(ceiling.address(), SpendCeiling::NAME, to_vec(&ceiling).expect("ceiling encodes"));
+        configs.insert(ceiling.address(), SpendCeiling::NAME, to_vec(&ceiling).expect("ceiling encodes"), None);
 
         let decided = reduce_seal(
             &Snapshot::new(digest(0)).with_green_base(digest(0)),
@@ -1037,7 +1038,7 @@ mod tests {
         );
 
         let mut configs = ResolvedConfigs::default();
-        configs.insert(address, String::from("aether.bloomery.price_table"), vec![1, 2, 3]);
+        configs.insert(address, String::from("aether.bloomery.price_table"), vec![1, 2, 3], None);
         let decided = reduce_seal(
             &Snapshot::new(digest(0)).with_green_base(digest(0)),
             &spec,
@@ -1059,7 +1060,7 @@ mod tests {
         );
 
         configs = ResolvedConfigs::default();
-        configs.insert(address, SpendCeiling::NAME, vec![0xff, 0xff]);
+        configs.insert(address, SpendCeiling::NAME, vec![0xff, 0xff], None);
         let decided = reduce_seal(
             &Snapshot::new(digest(0)).with_green_base(digest(0)),
             &spec,
@@ -1175,9 +1176,11 @@ mod tests {
 
         let live = base.apply(&event, &decided, &ResolvedConfigs::default());
         let journaled: Event = from_bytes(&to_vec(&event).expect("event encodes")).expect("event decodes");
-        let recorded: Decisions =
-            decode_recorded_decisions(&to_vec(&decided).expect("decisions encode"), Some(DECISIONS_SCHEMA))
-                .expect("journaled decisions decode");
+        let recorded: Decisions = decode_recorded_decisions(
+            &to_vec(&decided).expect("decisions encode"),
+            Some(DECISIONS.current_digest().as_bytes()),
+        )
+        .expect("journaled decisions decode");
         let replayed = base.apply(&journaled, &recorded, &ResolvedConfigs::default());
 
         assert_eq!(
@@ -1549,26 +1552,38 @@ mod tests {
         let replayed = base
             .apply(
                 &from_bytes(&to_vec(&seal).expect("event encodes")).expect("event decodes"),
-                &decode_recorded_decisions(&to_vec(&sealed).expect("seal encodes"), Some(DECISIONS_SCHEMA))
-                    .expect("seal decodes"),
+                &decode_recorded_decisions(
+                    &to_vec(&sealed).expect("seal encodes"),
+                    Some(DECISIONS.current_digest().as_bytes()),
+                )
+                .expect("seal decodes"),
                 &ResolvedConfigs::default(),
             )
             .apply(
                 &from_bytes(&to_vec(&a_done).expect("event encodes")).expect("event decodes"),
-                &decode_recorded_decisions(&to_vec(&decided_a).expect("a encodes"), Some(DECISIONS_SCHEMA))
-                    .expect("a decodes"),
+                &decode_recorded_decisions(
+                    &to_vec(&decided_a).expect("a encodes"),
+                    Some(DECISIONS.current_digest().as_bytes()),
+                )
+                .expect("a decodes"),
                 &ResolvedConfigs::default(),
             )
             .apply(
                 &from_bytes(&to_vec(&c_done).expect("event encodes")).expect("event decodes"),
-                &decode_recorded_decisions(&to_vec(&decided_c).expect("c encodes"), Some(DECISIONS_SCHEMA))
-                    .expect("c decodes"),
+                &decode_recorded_decisions(
+                    &to_vec(&decided_c).expect("c encodes"),
+                    Some(DECISIONS.current_digest().as_bytes()),
+                )
+                .expect("c decodes"),
                 &ResolvedConfigs::default(),
             )
             .apply(
                 &from_bytes(&to_vec(&supersede).expect("event encodes")).expect("event decodes"),
-                &decode_recorded_decisions(&to_vec(&decided_sup).expect("sup encodes"), Some(DECISIONS_SCHEMA))
-                    .expect("sup decodes"),
+                &decode_recorded_decisions(
+                    &to_vec(&decided_sup).expect("sup encodes"),
+                    Some(DECISIONS.current_digest().as_bytes()),
+                )
+                .expect("sup decodes"),
                 &ResolvedConfigs::default(),
             );
 

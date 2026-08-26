@@ -116,7 +116,7 @@ use crate::ids::{StageId, WorkpieceId};
 /// The generic immutable node of the derivation DAG: opaque typed bytes plus
 /// the digests of the parents it derives from. Every durable value projects
 /// to an artifact; the artifact's identity is `digest_of(self)`.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Artifact {
     /// The typed tag naming what kind of bytes these are.
     pub media_type: String,
@@ -141,7 +141,7 @@ impl Artifact {
 /// The stable identity of one intended change plus its current scope
 /// revision. A GitHub issue is one projection of a workpiece; the workpiece
 /// is the native truth (ADR-0149 §The bloom).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Workpiece {
     /// The stable, projection-independent identity.
     pub id: WorkpieceId,
@@ -293,7 +293,7 @@ pub enum EvidenceKind {
 /// the wall.
 ///
 /// [`predicted_worker_secs`]: Self::predicted_worker_secs
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct Forecast {
     /// The predicted total token spend, summed over every attempt.
     pub predicted_tokens: u64,

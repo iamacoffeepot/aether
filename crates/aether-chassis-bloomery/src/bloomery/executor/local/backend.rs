@@ -1245,7 +1245,7 @@ impl LocalExecutor {
         let Some(address) = ConfigScopes::bloom_wide(&registry).address::<PriceTable>() else {
             return PriceTable::default();
         };
-        let Ok(Some((kind, bytes))) = store.lookup_config(address.as_bytes()) else {
+        let Ok(Some((kind, bytes, _))) = store.lookup_config(address.as_bytes()) else {
             return PriceTable::default();
         };
         if kind != PriceTable::NAME {

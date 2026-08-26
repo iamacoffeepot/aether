@@ -1505,7 +1505,7 @@ fn fold_unpriced_construct_seats() -> (Vec<MetricsSeat>, CapabilityLedger) {
     member.approval.subject = member.subject();
 
     let mut configs = ResolvedConfigs::default();
-    configs.insert(override_.address(), ModelOverride::NAME, to_vec(&override_).expect("override encodes"));
+    configs.insert(override_.address(), ModelOverride::NAME, to_vec(&override_).expect("override encodes"), None);
 
     let spec = BloomDraft { proposals: vec![member], base: digest(1), ..BloomDraft::default() }.seal();
     let bloom = spec.id();

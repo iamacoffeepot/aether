@@ -10,11 +10,10 @@ use std::time::{Duration, Instant};
 
 use aether_actor::runtime;
 use aether_bloomery::{
-    BackendObjectId, BloomId, BloomStatus, Digest, Event, Fact, ResolvedConfigs, SharedCorrespondence, Snapshot, Topic,
-    WorkpieceId, decode_recorded_decisions, is_active_unlanded,
+    BackendObjectId, BloomId, BloomStatus, Digest, Fact, ResolvedConfigs, SharedCorrespondence, Snapshot, Topic,
+    WorkpieceId, decode_recorded_decisions, decode_recorded_event, is_active_unlanded,
 };
 use aether_bloomery_github::GitObjectId;
-use aether_data::wire::from_bytes;
 use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -265,7 +264,7 @@ fn replay(store: &mut dyn StoreBackend) -> rusqlite::Result<Replay> {
         let Some(address) = Digest::from_slice(&record.digest) else {
             continue;
         };
-        configs.insert(address, record.kind, record.bytes);
+        configs.insert(address, record.kind, record.bytes, record.schema_digest);
     }
 
     let mut snapshot = Snapshot::default();
@@ -273,7 +272,7 @@ fn replay(store: &mut dyn StoreBackend) -> rusqlite::Result<Replay> {
     let mut land_sequences = Vec::new();
     let mut journaled_heads = Vec::new();
     for record in store.replay_journal()? {
-        let Ok(event) = from_bytes::<Event>(&record.event) else {
+        let Ok(event) = decode_recorded_event(&record.event, record.event_schema.as_deref()) else {
             tracing::warn!(
                 target: "aether_chassis_bloomery::doctor",
                 sequence = record.sequence,
@@ -281,7 +280,8 @@ fn replay(store: &mut dyn StoreBackend) -> rusqlite::Result<Replay> {
             );
             continue;
         };
-        let Ok(decisions) = decode_recorded_decisions(&record.decisions, record.decisions_schema.as_deref()) else {
+        let Ok(decisions) = decode_recorded_decisions(&record.decisions, record.decisions_schema_digest.as_deref())
+        else {
             tracing::warn!(
                 target: "aether_chassis_bloomery::doctor",
                 sequence = record.sequence,

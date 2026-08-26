@@ -322,7 +322,7 @@ fn resolve_price_table(
     let Some(address) = scopes.address::<PriceTable>() else {
         return Ok(SealedPriceTable::Current(PriceTable::default()));
     };
-    let Some((stored_kind, bytes)) = store.lookup_config(address.as_bytes())? else {
+    let Some((stored_kind, bytes, _)) = store.lookup_config(address.as_bytes())? else {
         return Err(ConfigResolveError::Missing { kind: PriceTable::NAME }.into());
     };
     if stored_kind != PriceTable::NAME {

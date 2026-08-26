@@ -177,7 +177,7 @@ pub(super) fn config_response(state: &mut ApiCapabilityState, result: RecordConf
                 return error_response(500, &format!("config write echoed a {}-byte address", digest.len()));
             };
 
-            state.configs.insert(address, kind.clone(), bytes);
+            state.configs.insert(address, kind.clone(), bytes, None);
             json(200, &ConfigView { digest: address, kind })
         }
         RecordConfigResult::Err { error } => error_response(500, &format!("config write failed: {error}")),
@@ -202,7 +202,7 @@ impl ApiCapabilityState {
             let Some(address) = Digest::from_slice(&record.digest) else {
                 ctx.fatal_abort(format!("stored configuration `{}` has a malformed address", record.kind));
             };
-            self.configs.insert(address, record.kind, record.bytes);
+            self.configs.insert(address, record.kind, record.bytes, record.schema_digest);
         }
         self.configs_ready = true;
     }

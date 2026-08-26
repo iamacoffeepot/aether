@@ -223,13 +223,13 @@ impl SessionSlug {
 /// A signer identity (ADR-0149 §The value vocabulary). The signature
 /// *mechanism* is stubbed against a fake key provider in v1; the id shape
 /// ships from the start so everything downstream binds to it.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct KeyId(pub String);
 
 /// An admitted fact's idempotency key (ADR-0149 §The control core). The
 /// reducer treats a replayed key as a no-op, so recovery is journal replay
 /// plus outbox republish without double-applying.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct IdempotencyKey(pub String);
 
 /// A work order's idempotency nonce (ADR-0149 §The boundary, the executor
@@ -238,7 +238,7 @@ pub struct IdempotencyKey(pub String);
 /// resolves nonce → run on demand. Distinct from [`IdempotencyKey`], which
 /// dedups admitted *facts* at the reducer; a nonce correlates a dispatched
 /// *worker* at the executor boundary.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct Nonce(pub String);
 
 /// Declares the closed [`StageId`] vocabulary and its complete, ordered

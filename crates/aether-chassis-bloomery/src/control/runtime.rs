@@ -51,8 +51,8 @@ use aether_bloomery::{
     BloomId, BloomStatus, CalibrationDocument, CalibrationLedger, ClaimRefKind, ClaimRefState, DAYS_CAP, Decision,
     Decisions, Digest, Event, EvidenceKind, Fact, IdempotencyKey, METRICS_DEFAULT_LIMIT, METRICS_MAX_LIMIT,
     MetricsLedger, OperatorRepairError, Outcome, Question, ResolvedConfigs, Snapshot, SpendWindow, StudyRecord,
-    Unproducible, ViewDocument, decode_recorded_decisions, grade, is_active_unlanded, measure, reduce, view_of, why_of,
-    window_label,
+    Unproducible, ViewDocument, decode_recorded_decisions, decode_recorded_event, grade, is_active_unlanded, measure,
+    reduce, view_of, why_of, window_label,
 };
 
 use super::{ControlCore, ControlSetup, ObserveTick, PRE_REPLAY_REFUSAL};
@@ -581,7 +581,7 @@ impl NativeActor for ControlCore {
             let Some(address) = Digest::from_slice(&record.digest) else {
                 ctx.fatal_abort(format!("stored configuration `{}` has a malformed address", record.kind));
             };
-            state.configs.insert(address, record.kind, record.bytes);
+            state.configs.insert(address, record.kind, record.bytes, record.schema_digest);
         }
 
         match held {
@@ -606,7 +606,7 @@ impl NativeActor for ControlCore {
             }
         };
         for record in records {
-            let event: Event = match from_bytes(&record.event) {
+            let event: Event = match decode_recorded_event(&record.event, record.event_schema.as_deref()) {
                 Ok(event) => event,
                 Err(error) => ctx.fatal_abort(format!(
                     "boot journal replay: record {} ({}) did not decode: {error}",
@@ -618,7 +618,7 @@ impl NativeActor for ControlCore {
             // them resurrects rejections a looser rule now admits and re-refuses
             // admissions a stricter rule no longer would (#4937).
             let decisions: Decisions =
-                match decode_recorded_decisions(&record.decisions, record.decisions_schema.as_deref()) {
+                match decode_recorded_decisions(&record.decisions, record.decisions_schema_digest.as_deref()) {
                     Ok(decisions) => decisions,
                     Err(error) => ctx.fatal_abort(format!(
                         "boot journal replay: record {} ({}) {error}",

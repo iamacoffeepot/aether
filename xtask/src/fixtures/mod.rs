@@ -6,9 +6,11 @@
 #[cfg(test)]
 mod tests;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use aether_bloomery::persisted::PERSISTED_KINDS;
 use aether_bloomery::testing::{
     containment_refused_event, representative, surface_overlap_decisions, surface_overlap_event,
 };
@@ -18,6 +20,9 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 const FIXTURES_DIR: &str = "crates/aether-bloomery/tests/golden_decisions/fixtures";
+const SCHEMA_DIGESTS_FILE: &str = "schema-digests.txt";
+const SCHEMA_DIGESTS_TEST: &str = "pinned_schema_digests_match_the_registry";
+const SCHEMA_DIGESTS_HINT: &str = "append the new digest to `schema-digests.txt` and register an upcast";
 
 /// `cargo xtask fixtures`.
 #[derive(Args, Debug)]
@@ -31,7 +36,8 @@ enum FixturesCommand {
     /// Rewrite pinned fixture files from their constructors.
     ///
     /// Names: `decisions`, `surface-overlap-decisions`, `surface-overlap-event`,
-    /// `containment-refused-event`. Omit the name to rewrite every file.
+    /// `containment-refused-event`, `schema-digests`. Omit the name to rewrite
+    /// every file. Byte-fixtures overwrite; `schema-digests` only appends.
     Regen {
         /// Fixture name. Omit to rewrite every fixture.
         name: Option<String>,
@@ -40,11 +46,21 @@ enum FixturesCommand {
     Check,
 }
 
+/// How regen writes this fixture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WriteMode {
+    /// Replace the file with the constructor's bytes.
+    Overwrite,
+    /// Append newly current schema digests; never drop a prior line.
+    Append,
+}
+
 struct Fixture {
     name: &'static str,
     file: &'static str,
     test: &'static str,
-    encode: fn() -> Result<Vec<u8>>,
+    mode: WriteMode,
+    encode: Option<fn() -> Result<Vec<u8>>>,
 }
 
 impl Fixture {
@@ -58,25 +74,36 @@ const FIXTURES: &[Fixture] = &[
         name: "decisions",
         file: "decisions.bin",
         test: "decisions_wire_bytes_match_pinned_golden",
-        encode: encode_decisions,
+        mode: WriteMode::Overwrite,
+        encode: Some(encode_decisions),
     },
     Fixture {
         name: "surface-overlap-decisions",
         file: "surface-overlap-decisions.bin",
         test: "surface_overlap_outcome_wire_bytes_match_pinned_golden",
-        encode: encode_surface_overlap_decisions,
+        mode: WriteMode::Overwrite,
+        encode: Some(encode_surface_overlap_decisions),
     },
     Fixture {
         name: "surface-overlap-event",
         file: "surface-overlap-event.bin",
         test: "surface_overlap_event_wire_bytes_match_pinned_golden",
-        encode: encode_surface_overlap_event,
+        mode: WriteMode::Overwrite,
+        encode: Some(encode_surface_overlap_event),
     },
     Fixture {
         name: "containment-refused-event",
         file: "containment-refused-event.bin",
         test: "containment_refused_event_wire_bytes_match_pinned_golden",
-        encode: encode_containment_refused_event,
+        mode: WriteMode::Overwrite,
+        encode: Some(encode_containment_refused_event),
+    },
+    Fixture {
+        name: "schema-digests",
+        file: SCHEMA_DIGESTS_FILE,
+        test: SCHEMA_DIGESTS_TEST,
+        mode: WriteMode::Append,
+        encode: None,
     },
 ];
 
@@ -131,7 +158,17 @@ pub fn regen_in(root: &Path, name: Option<&str>) -> Result<Vec<&'static str>> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
         }
-        fs::write(&path, (fixture.encode)()?).with_context(|| format!("write {}", path.display()))?;
+        match fixture.mode {
+            WriteMode::Overwrite => {
+                let encode = fixture.encode.context("overwrite fixtures encode")?;
+                fs::write(&path, encode()?).with_context(|| format!("write {}", path.display()))?;
+            }
+            WriteMode::Append => {
+                let existing = fs::read_to_string(&path).ok();
+                fs::write(&path, schema_digest_file(existing.as_deref()))
+                    .with_context(|| format!("write {}", path.display()))?;
+            }
+        }
         written.push(fixture.name);
     }
     Ok(written)
@@ -141,20 +178,36 @@ pub fn regen_in(root: &Path, name: Option<&str>) -> Result<Vec<&'static str>> {
 pub fn check_in(root: &Path) -> Result<Vec<&'static str>> {
     let mut stale = Vec::new();
     for fixture in FIXTURES {
-        let encoded = (fixture.encode)()?;
-        let on_disk = fs::read(fixture.path(root)).ok();
-        if on_disk.as_deref() != Some(encoded.as_slice()) {
-            stale.push(fixture.name);
+        match fixture.mode {
+            WriteMode::Overwrite => {
+                let Some(encode) = fixture.encode else {
+                    continue;
+                };
+                let encoded = encode()?;
+                let on_disk = fs::read(fixture.path(root)).ok();
+                if on_disk.as_deref() != Some(encoded.as_slice()) {
+                    stale.push(fixture.name);
+                }
+            }
+            WriteMode::Append => {
+                if schema_digests_are_stale(&fixture.path(root)) {
+                    stale.push(fixture.name);
+                }
+            }
         }
     }
     Ok(stale)
 }
 
-/// Append regen commands for any golden fixture tests named in `findings`.
+/// Append a regen command for a byte-fixture failure, or the append-and-upcast
+/// hint for the schema-digest gate. Never names a regen command for that gate.
 pub fn annotate_findings(findings: &str) -> String {
+    if findings.contains(SCHEMA_DIGESTS_TEST) {
+        return format!("{findings}\n{SCHEMA_DIGESTS_HINT}");
+    }
     let hints: Vec<String> = FIXTURES
         .iter()
-        .filter(|fixture| findings.contains(fixture.test))
+        .filter(|fixture| fixture.mode == WriteMode::Overwrite && findings.contains(fixture.test))
         .map(|fixture| {
             let name = fixture.name;
             format!("run `cargo xtask fixtures regen {name}`")
@@ -164,6 +217,53 @@ pub fn annotate_findings(findings: &str) -> String {
         findings.to_owned()
     } else {
         format!("{findings}\n{}", hints.join("\n"))
+    }
+}
+
+fn schema_digests_are_stale(path: &Path) -> bool {
+    let on_disk = fs::read_to_string(path).unwrap_or_default();
+    let last_by_kind = last_pinned_by_kind(&on_disk);
+    PERSISTED_KINDS.iter().any(|kind| last_by_kind.get(kind.name).copied() != Some(kind.current_digest()))
+}
+
+fn last_pinned_by_kind(text: &str) -> BTreeMap<&str, aether_bloomery::Digest> {
+    let mut last = BTreeMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let Some(kind) = parts.next() else {
+            continue;
+        };
+        let Some(hex) = parts.next() else {
+            continue;
+        };
+        if let Some(digest) = aether_bloomery::Digest::from_hex(hex) {
+            last.insert(kind, digest);
+        }
+    }
+    last
+}
+
+fn schema_digest_file(existing: Option<&str>) -> String {
+    let mut lines: Vec<String> =
+        existing.unwrap_or("").lines().map(str::trim).filter(|line| !line.is_empty()).map(str::to_owned).collect();
+    let last = last_pinned_by_kind(existing.unwrap_or(""));
+    for kind in PERSISTED_KINDS {
+        let current = kind.current_digest();
+        if last.get(kind.name).copied() == Some(current) {
+            continue;
+        }
+        lines.push(format!("{} {current}", kind.name));
+    }
+    if lines.is_empty() {
+        String::new()
+    } else {
+        let mut body = lines.join("\n");
+        body.push('\n');
+        body
     }
 }
 
