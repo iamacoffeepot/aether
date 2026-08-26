@@ -8,15 +8,13 @@
 //! it happens.
 
 use std::fmt;
-use std::fs;
 use std::path::Path;
-use std::str;
 
 use aether_bloomery::{
     Digest, KeyId, SCOPE_VERIFY_SCHEMA, ScopeRevision, ScopeVerifyInput, Statement, digest_of, signed_approval,
     signed_cancel, signed_reopen,
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 
 use crate::bloom::client::Client;
 use crate::bloom::dto::{CommissionShowView, DigestHex, RevisionEvidence};
@@ -47,11 +45,8 @@ impl OperatorKey {
     /// another account on the host is a key that is no longer the operator's,
     /// and a tool that shrugs at that teaches the habit.
     pub fn load(signer: KeyId, path: &Path) -> Result<Self> {
-        let bytes = fs::read(path).with_context(|| format!("read signing seed {}", path.display()))?;
-        refuse_loose_mode(path)?;
-        let seed = decode_seed(&bytes)
-            .with_context(|| format!("signing seed {} is neither 32 raw bytes nor 64 hex", path.display()))?;
-        Ok(Self { signer, seed })
+        let loaded = aether_bloomery::OperatorKey::load(signer, path)?;
+        Ok(Self { signer: loaded.signer.clone(), seed: *loaded.seed() })
     }
 
     /// The Approve-door statement over `scope`.
@@ -79,39 +74,6 @@ impl OperatorKey {
     pub fn reopen_of(&self, intent: Digest) -> Statement {
         signed_reopen(self.signer.clone(), &self.seed, intent)
     }
-}
-
-fn decode_seed(bytes: &[u8]) -> Result<[u8; 32]> {
-    if let Ok(raw) = <[u8; 32]>::try_from(bytes) {
-        return Ok(raw);
-    }
-    let text = str::from_utf8(bytes).context("seed is not raw bytes and not UTF-8 hex")?;
-    let text = text.trim();
-    if text.len() != 64 {
-        bail!("hex seed is {} characters, not 64", text.len());
-    }
-    let mut seed = [0_u8; 32];
-    for (index, slot) in seed.iter_mut().enumerate() {
-        *slot = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).context("seed is not hex")?;
-    }
-    Ok(seed)
-}
-
-#[cfg(unix)]
-fn refuse_loose_mode(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let metadata = fs::metadata(path).with_context(|| format!("stat signing seed {}", path.display()))?;
-    let mode = metadata.permissions().mode();
-    if mode & 0o077 != 0 {
-        bail!("signing seed {} is mode {:o}; make it 0600 before signing with it", path.display(), mode & 0o777);
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn refuse_loose_mode(_path: &Path) -> Result<()> {
-    Ok(())
 }
 
 /// Write `widened` as the commission's next revision, returning its address.
