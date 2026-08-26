@@ -21,25 +21,31 @@
 mod common;
 
 use std::net::TcpStream;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aether_chassis_bloomery::session::{Acquire, AcquireResult, Release, ReleaseResult, SessionKey, SessionManifest};
 use aether_data::{Kind, MailboxId, mailbox_id_from_path};
-use common::client::{call, connect_and_handshake};
-use common::{Coordinator, free_port};
+use common::Coordinator;
+use common::client::{call, spawn_and_connect};
 use serde::Serialize;
 
-/// Fork the `bloomery` bin on `port` with an in-memory pool and a zero lease TTL
-/// (immediate lazy-expiry reclaim, so re-acquire is deterministic), reaped when
-/// the returned guard drops.
+/// Fork the `bloomery` bin with an in-memory pool and a zero lease TTL
+/// (immediate lazy-expiry reclaim, so re-acquire is deterministic), and
+/// handshake the child that stayed up. Reaped when the returned guard drops.
+///
+/// RPC port `0`: the child holds its port from the moment it binds and reports
+/// which one, so a sibling fixture booting at the same time cannot take it —
+/// the collision this suite kept losing under a full-width run (#5000, #5193).
 ///
 /// `AETHER_STORE_PATH` is pinned rather than left to its `":memory:"` default:
 /// the default only holds when nothing in the ambient environment names a store,
 /// and a run under a coordinator's environment inherits one — which is the live
 /// journal, opened read-write by a test that assumes it owns an empty pool
 /// (#4714).
-fn spawn(port: u16) -> Coordinator {
-    Coordinator::spawn(port, &[("AETHER_STORE_PATH", ":memory:"), ("AETHER_SESSION_LEASE_TTL_MINS", "0")])
+fn spawn_ready(client_name: &str) -> (Coordinator, TcpStream) {
+    spawn_and_connect(client_name, Duration::from_mins(1), || {
+        Coordinator::spawn(0, &[("AETHER_STORE_PATH", ":memory:"), ("AETHER_SESSION_LEASE_TTL_MINS", "0")])
+    })
 }
 
 fn session_mailbox() -> MailboxId {
@@ -64,9 +70,7 @@ fn key() -> SessionKey {
 
 #[test]
 fn acquire_release_resume_over_rpc() {
-    let port = free_port();
-    let _coordinator = spawn(port);
-    let mut stream = connect_and_handshake(port, "session-pool-test");
+    let (_coordinator, mut stream) = spawn_ready("session-pool-test");
 
     let now = now_secs();
 
