@@ -324,7 +324,7 @@ fn actor_setups(
             worktree_base: coordinator.local_worktree_base.clone(),
             target_base: coordinator.lane_target_base.clone(),
             lane_target_budget_bytes: coordinator.lane_target_budget_bytes,
-            lane_target_measure_interval_secs: coordinator.lane_target_measure_interval_secs,
+            target_scan_interval_secs: coordinator.lane_target_scan_interval_secs,
             evidence_retention_days: coordinator.evidence_retention_days,
             poll_interval_secs: github_poll_interval_secs,
             repo: repo.display().to_string(),
