@@ -20,6 +20,7 @@ mod common;
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -1648,17 +1649,49 @@ fn write_owner_seed(path: &std::path::Path) {
     }
 }
 
+fn spawn_os_ports(policy_path: &str) -> Coordinator {
+    let allowlist = owner_allowlist();
+    Coordinator::spawn(
+        0,
+        &[
+            ("AETHER_STORE_PATH", ":memory:"),
+            ("AETHER_SIGNING_ALLOWLIST", &allowlist),
+            ("AETHER_APPROVAL_POLICY_FILE", policy_path),
+            ("AETHER_HTTP_CONTROL_TOKEN", CONTROL_TOKEN),
+        ],
+    )
+}
+
+fn spawn_author_ready(policy_path: &str) -> (u16, Coordinator) {
+    let (coordinator, stream) =
+        common::client::spawn_and_connect("rest-author", Duration::from_mins(1), || (0, spawn_os_ports(policy_path)));
+    let rpc_port = stream.peer_addr().unwrap().port();
+    (wait_author_http(&coordinator, rpc_port), coordinator)
+}
+
+fn wait_author_http(coordinator: &Coordinator, rpc_port: u16) -> u16 {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut last = String::from("HTTP never listened");
+    loop {
+        if let Some(port) = coordinator.listening_ports().into_iter().find(|port| *port != rpc_port) {
+            match try_http(port, "GET", "/drafts", None) {
+                Ok((200, _)) => return port,
+                Ok((status, _)) => last = format!("/drafts returned {status}"),
+                Err(error) => last = error.to_string(),
+            }
+        }
+        assert!(Instant::now() < deadline, "coordinator HTTP never became ready for author: {last}");
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// `bloomery-commission author` creates, scopes, and approves against a live
 /// coordinator: the printed digest is the local `digest_of` of the revision,
 /// the commission is open, and an approval is stored over that tip.
 #[test]
 fn author_opens_a_commission_with_an_approval_over_the_local_digest() {
-    let http_port = free_port();
-    let rpc_port = free_port();
     let (_policy_dir, policy_path) = test_policy();
-    let _coordinator = spawn(http_port, rpc_port, &policy_path);
-    wait_for_200(http_port, "/drafts");
-    wait_for_200(http_port, "/view");
+    let (http_port, _coordinator) = spawn_author_ready(&policy_path);
 
     let dir = tempfile::tempdir().unwrap();
     let intent = dir.path().join("intent.txt");
@@ -1720,11 +1753,11 @@ fn author_opens_a_commission_with_an_approval_over_the_local_digest() {
 fn author_refuses_when_the_stored_digest_differs() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let http_port = listener.local_addr().unwrap().port();
-    let approved = std::sync::Arc::new(AtomicBool::new(false));
-    let done = std::sync::Arc::new(AtomicBool::new(false));
-    let flag = approved.clone();
-    let stop = done.clone();
-    thread::spawn(move || serve_mismatched_revision(&listener, &flag, &stop));
+    let approved = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&approved);
+    let stop = Arc::clone(&done);
+    let server = thread::spawn(move || serve_mismatched_revision(&listener, &flag, &stop));
 
     let dir = tempfile::tempdir().unwrap();
     let intent = dir.path().join("intent.txt");
@@ -1763,6 +1796,7 @@ fn author_refuses_when_the_stored_digest_differs() {
         }
     }
     done.store(true, Ordering::SeqCst);
+    let _ = server.join();
     assert!(!approved.load(Ordering::SeqCst), "a mismatched digest must not be signed over");
 }
 
@@ -1774,7 +1808,10 @@ fn serve_mismatched_revision(listener: &TcpListener, approved: &AtomicBool, done
     while Instant::now() < deadline && !done.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => handle_stub_conn(stream, approved, &wrong, &intent),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::Interrupted =>
+            {
                 thread::sleep(Duration::from_millis(10));
             }
             Err(error) => panic!("stub accept: {error}"),
@@ -1783,21 +1820,9 @@ fn serve_mismatched_revision(listener: &TcpListener, approved: &AtomicBool, done
 }
 
 fn handle_stub_conn(mut stream: TcpStream, approved: &AtomicBool, wrong: &str, intent: &str) {
+    stream.set_nonblocking(false).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-    let mut request = Vec::new();
-    let mut buf = [0_u8; 4096];
-    loop {
-        match stream.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => request.extend_from_slice(&buf[..n]),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => break,
-            Err(error) => panic!("stub read: {error}"),
-        }
-        if request.windows(4).any(|window| window == b"\r\n\r\n") {
-            break;
-        }
-    }
+    let request = read_http_request(&mut stream);
     let head = std::str::from_utf8(&request).unwrap_or("");
     let line = head.lines().next().unwrap_or("");
     let (status, body) = if line.starts_with("POST /commissions/wp-mismatch/approvals") {
@@ -1817,4 +1842,38 @@ fn handle_stub_conn(mut stream: TcpStream, approved: &AtomicBool, wrong: &str, i
         body.len()
     );
     stream.write_all(response.as_bytes()).unwrap();
+}
+
+fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {
+    let mut request = Vec::new();
+    let mut buf = [0_u8; 4096];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => request.extend_from_slice(&buf[..n]),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut
+                    || error.kind() == std::io::ErrorKind::Interrupted =>
+            {
+                break;
+            }
+            Err(error) => panic!("stub read: {error}"),
+        }
+        let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            continue;
+        };
+        let head = std::str::from_utf8(&request[..header_end]).unwrap_or("");
+        let content_length = head.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length").then_some(())?;
+            value.trim().parse::<usize>().ok()
+        });
+        match content_length {
+            Some(length) if request.len() >= header_end + 4 + length => break,
+            None => break,
+            Some(_) => {}
+        }
+    }
+    request
 }
