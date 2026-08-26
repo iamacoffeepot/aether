@@ -61,6 +61,28 @@ impl Workspace {
         self.graph.workspace().iter().map(|package| package.name().to_string()).collect()
     }
 
+    /// Every workspace crate's root directory, each carrying its trailing
+    /// separator so a prefix match names a path *inside* that crate rather
+    /// than a sibling whose name merely starts the same way
+    /// (`crates/aether-math-derive/…` against the `crates/aether-math` root).
+    ///
+    /// The verify lane reads this to bound the one claim a selection of no
+    /// packages does not itself justify: the path rules deselect a handful of
+    /// files that live inside a crate (`README*`, `LICENSE*`, `.gitignore`),
+    /// and "no package was selected" reads the same for those as it does for a
+    /// diff that never entered a crate at all. A package at the workspace root
+    /// would have an empty path and is skipped — a root prefix of `/` would
+    /// claim every path in the tree.
+    pub fn crate_roots(&self) -> BTreeSet<String> {
+        self.graph
+            .workspace()
+            .iter()
+            .filter_map(|package| package.source().workspace_path().map(|root| root.as_str().to_owned()))
+            .filter(|root| !root.is_empty())
+            .map(|root| format!("{root}/"))
+            .collect()
+    }
+
     /// The crates whose sources compile to component or behavior wasm.
     ///
     /// The verify lane reads this to recognize the one coupling a linkage

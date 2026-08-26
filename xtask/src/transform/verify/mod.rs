@@ -1828,6 +1828,26 @@ fn member_scope_notice(invocation: &VerifyInvocation, scope: &Scope) -> Option<S
     (invocation.breadth == Breadth::Closure).then(|| scope.member_notice()).flatten()
 }
 
+/// The run a member records without dispatching, when this run's closure is
+/// empty — or `None` when it has work to do.
+///
+/// Keyed on [`Breadth`] rather than on the member id, because it is the same
+/// property the narrowing itself is keyed on: a member that answers for the
+/// crates the closure reaches answers for none of them when the closure is
+/// empty, while a member that reads the whole tree whatever the diff touched
+/// still has the tree to read. So `verify.fmt`, `verify.dup`, `verify.deps`,
+/// `verify.lock` and `verify.suppress` run over a docs-only candidate exactly
+/// as they did, and the three that compile stop re-proving the base.
+///
+/// A pass rather than a skip, and a log rather than silence: ADR-0178's
+/// `failed_verifiers` names what found a defect, and this member found none —
+/// but a member that produced no evidence at all would read as a gate quietly
+/// dropped. [`Scope::empty_closure_verdict`] is that evidence.
+fn empty_closure_run(id: &str, invocation: &VerifyInvocation, scope: &Scope) -> Option<MemberRun> {
+    let verdict = (invocation.breadth == Breadth::Closure).then(|| scope.empty_closure_verdict()).flatten()?;
+    Some(MemberRun::plain(id, MemberOutcome::Passed, verdict.into_bytes(), 0))
+}
+
 // A derived verdict (currently clippy's structured warning predicate) may fail
 // even when the child exited zero. The umbrella must still exit nonzero so its
 // evidence status and the Actions step outcome cannot disagree.
@@ -1938,47 +1958,27 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
     let cache = sccache::detect();
     let peak = peak_memory::detect();
     let started = Instant::now();
-    let output = run_captured(invocation.command(&scope, args.diff_base.as_deref(), cache.as_ref(), &peak))
-        .with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
-    let stderr = peak.take_report(output.stderr);
+    // The empty-closure verdict comes off the same seam for the same reason: a
+    // member dispatched alone against a diff that entered no crate has exactly
+    // as little to compile as it does inside the umbrella.
+    let mut run = match empty_closure_run(&args.command, &invocation, &scope) {
+        Some(run) => run,
+        None => dispatch_single(args, &invocation, &scope, cache.as_ref(), &peak)?,
+    };
     let duration_millis = elapsed_millis(started);
 
     fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let derived_pass = args.command != "verify.clippy" || clippy_verdict(&stdout, &scope);
-    let code = output.status.code();
-    let outcome = member_outcome(&invocation, derived_pass, code);
-
     let log_name = format!("{}.log", args.command);
     let log_path = args.out.join(&log_name);
-    let mut log_bytes = Vec::new();
-    if let Some(notice) = member_scope_notice(&invocation, &scope) {
-        log_bytes.extend_from_slice(notice.as_bytes());
-    }
-    if let Some(notice) = (args.command == "verify.clippy").then(|| unjudged_notice(&stdout, &scope)).flatten() {
-        log_bytes.extend_from_slice(notice.as_bytes());
-    }
-    if outcome == MemberOutcome::Operational {
-        log_bytes.extend_from_slice(operational_failure_notice(&args.command, &invocation, code).as_bytes());
-    }
-    log_bytes.extend_from_slice(&output.stdout);
-    log_bytes.extend_from_slice(&stderr);
-    fs::write(&log_path, &log_bytes).with_context(|| format!("write {}", log_path.display()))?;
+    fs::write(&log_path, &run.log).with_context(|| format!("write {}", log_path.display()))?;
 
-    let passed = outcome.passed();
-    let exit_code = effective_exit_code(passed, code);
-
-    // A failing single verify contributes its own diagnostics on the same
-    // channel the umbrella uses, so a lane run alone directs a Refine too — and
-    // a `verify.suppress` run alone states its requests on the same channel the
-    // umbrella states them on, so the two paths hand the reviewer one shape.
-    let mut run = MemberRun::plain(&args.command, outcome, log_bytes, exit_code);
     if let Some(flags) = symbol_flags(&args.command, args.diff_base.as_deref()) {
         run.set(flags);
     }
 
-    let failures = outcome.failure(&args.command).map(VerifyFailureSet::one);
+    let passed = run.outcome.passed();
+    let exit_code = run.exit_code;
+    let failures = run.outcome.failure(&args.command).map(VerifyFailureSet::one);
     let evidence = build_evidence(&args.command, args.nonce.clone(), passed, Some(exit_code), log_name, None, failures)
         .measured_by(cache.as_ref(), &peak)
         .timed(duration_millis)
@@ -1998,6 +1998,47 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
     } else {
         process::exit(exit_code);
     }
+}
+
+/// Spawn one member alone and reduce its captured output to the run
+/// [`run_single`] records — the scope and operational notices its log opens
+/// with, the derived verdict, and the exit code the umbrella's own members
+/// carry.
+///
+/// A failing single verify contributes its diagnostics on the same channel the
+/// umbrella uses, so a lane run alone directs a Refine too — and a
+/// `verify.suppress` run alone states its requests on the same channel the
+/// umbrella states them on, so the two paths hand the reviewer one shape.
+fn dispatch_single(
+    args: &TransformArgs,
+    invocation: &VerifyInvocation,
+    scope: &Scope,
+    cache: Option<&CompilerCache>,
+    peak: &PeakMemory,
+) -> Result<MemberRun> {
+    let output = run_captured(invocation.command(scope, args.diff_base.as_deref(), cache, peak))
+        .with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
+    let stderr = peak.take_report(output.stderr);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let derived_pass = args.command != "verify.clippy" || clippy_verdict(&stdout, scope);
+    let code = output.status.code();
+    let outcome = member_outcome(invocation, derived_pass, code);
+
+    let mut log = Vec::new();
+    if let Some(notice) = member_scope_notice(invocation, scope) {
+        log.extend_from_slice(notice.as_bytes());
+    }
+    if let Some(notice) = (args.command == "verify.clippy").then(|| unjudged_notice(&stdout, scope)).flatten() {
+        log.extend_from_slice(notice.as_bytes());
+    }
+    if outcome == MemberOutcome::Operational {
+        log.extend_from_slice(operational_failure_notice(&args.command, invocation, code).as_bytes());
+    }
+    log.extend_from_slice(&output.stdout);
+    log.extend_from_slice(&stderr);
+
+    Ok(MemberRun::plain(&args.command, outcome, log, effective_exit_code(outcome.passed(), code)))
 }
 
 /// The line prefixes that open a diagnostic in the verify lanes' output — rustc
@@ -2416,20 +2457,28 @@ fn run_gate(id: &'static str, pass: &GatePass<'_>) -> Result<(MemberRun, GateTim
     // candidate cannot repair any of those, and `run_prepare` charges them to
     // the host instead.
     let gate_started = Instant::now();
-    let (prepare_failure, prepare_millis) = run_timed_prepare(id, &invocation, cache, peak)?;
-    let mut runner = SpawnRunner::new(cache, peak);
-    let run = match prepare_failure {
-        Some((log, code, outcome)) => MemberRun::plain(id, outcome, log.into_bytes(), code),
-        None => run_member_discriminated(
-            id,
-            &invocation,
-            scope,
-            closure,
-            member_diff_base(id, args.diff_base.as_deref(), full),
-            &mut runner,
-        )?,
+    // Ahead of the prepare, not only of the run: `verify.test`'s prepare is the
+    // wasm cross-build, the largest single compile in the lane, and a member
+    // with an empty closure has nothing to load the wasm for.
+    let (run, prepare_millis) = if let Some(run) = empty_closure_run(id, &invocation, scope) {
+        (run, None)
+    } else {
+        let (prepare_failure, prepare_millis) = run_timed_prepare(id, &invocation, cache, peak)?;
+        let mut runner = SpawnRunner::new(cache, peak);
+        let run = match prepare_failure {
+            Some((log, code, outcome)) => MemberRun::plain(id, outcome, log.into_bytes(), code),
+            None => run_member_discriminated(
+                id,
+                &invocation,
+                scope,
+                closure,
+                member_diff_base(id, args.diff_base.as_deref(), full),
+                &mut runner,
+            )?,
+        };
+        runner.close_base();
+        (run, prepare_millis)
     };
-    runner.close_base();
     let duration_millis = elapsed_millis(gate_started);
 
     let log_path = logs.join(format!("{id}.log"));
@@ -2536,11 +2585,11 @@ mod tests {
     use super::{
         BASE_SET_SUBJECT, Captured, EvidenceChannel, MAX_FINDING_LINES, MemberOutcome, MemberRun, MemberRunner,
         SUPPRESS_MEMBER, Scope, SpawnRunner, VERIFY_BASE, VERIFY_CHECK, VerifyInvocation, builds_artifacts,
-        clippy_verdict, closure, distil_diagnostics, effective_exit_code, environment_observations, failed_verifiers,
-        host_fault_in, member_diff_base, member_outcome, member_scope_notice, operational_failure_notice, package_name,
-        preflight_tools, prepare_failure_log, render_diagnostics, replay_args, required_targets, required_tools,
-        run_member, run_member_discriminated, run_timed_prepare, umbrella_status, unjudged_notice,
-        verify_check_members, verify_command, verify_findings, workflow,
+        clippy_verdict, closure, distil_diagnostics, effective_exit_code, empty_closure_run, environment_observations,
+        failed_verifiers, host_fault_in, member_diff_base, member_outcome, member_scope_notice,
+        operational_failure_notice, package_name, preflight_tools, prepare_failure_log, render_diagnostics,
+        replay_args, required_targets, required_tools, run_member, run_member_discriminated, run_timed_prepare,
+        umbrella_status, unjudged_notice, verify_check_members, verify_command, verify_findings, workflow,
     };
     use std::iter;
     use std::path::Path;
@@ -3018,6 +3067,46 @@ mod tests {
             let invocation = verify_command(id).expect("member mapped");
             assert_eq!(invocation.args_under(&scope, None), owned(invocation.args), "{id} must not narrow");
             assert_eq!(member_scope_notice(&invocation, &scope), None, "{id} must not claim a closure it ignored");
+        }
+    }
+
+    #[test]
+    fn an_empty_closure_passes_the_compiling_members_and_leaves_the_rest_running() {
+        // Tripwire for the fail-open a docs-only member fell through: with no
+        // crate in the diff there is nothing for a compiling member to build,
+        // and running the workspace suite anyway re-proved the base for
+        // forty-odd minutes while lending the candidate every unrelated flake
+        // it met. Both halves are the invariant. A member that stops recording
+        // the pass re-opens the fail-open; a member that starts recording one
+        // it should not — a tree member, or any member under a scope that names
+        // real work — is a gate a candidate's code slipped past unrun.
+        let outside = Scope::outside_of(&["docs/adr/0200-verification-is-a-ledger-of-proof-facts.md"]);
+
+        for id in ["verify.clippy", "verify.docs", "verify.test"] {
+            let invocation = verify_command(id).expect("member mapped");
+            let run = empty_closure_run(id, &invocation, &outside).expect("a compiling member records the verdict");
+            let log = String::from_utf8_lossy(&run.log);
+
+            assert!(run.outcome.passed(), "{id} found no defect in a diff it could not have broken");
+            assert_eq!(run.exit_code, 0, "{id} passes rather than reporting a code");
+            assert!(log.contains("no workspace crate in the diff"), "{id} names why it did not run: {log}");
+            assert!(log.contains("docs/adr/0200"), "{id} names the diff its pass rests on: {log}");
+        }
+
+        for id in ["verify.fmt", "verify.dup", "verify.deps", "verify.lock", "verify.suppress"] {
+            let invocation = verify_command(id).expect("member mapped");
+            assert!(
+                empty_closure_run(id, &invocation, &outside).is_none(),
+                "{id} reads the tree whatever the diff touched and still has it to read",
+            );
+        }
+
+        let test = verify_command("verify.test").expect("verify.test mapped");
+        for scope in [closure_scope(&["aether-math"]), Scope::resolve(None)] {
+            assert!(
+                empty_closure_run("verify.test", &test, &scope).is_none(),
+                "a scope naming crates to compile must dispatch the suite: {scope:?}",
+            );
         }
     }
 
