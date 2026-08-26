@@ -236,7 +236,7 @@ mod tests {
     use serde_json::json;
 
     use super::from_slice;
-    use crate::api::runtime::hex::to_vec;
+    use crate::bloom::hex::to_vec;
 
     /// A member whose digest-typed fields — `scope_revision` and the approval's
     /// `subject` / `detail` — each carry a distinguishable value.

@@ -2,6 +2,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt;
 
 use serde::{Deserialize, Serialize};
 
@@ -116,6 +117,30 @@ impl WorkpieceId {
     }
 }
 
+impl fmt::Display for WorkpieceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl PartialEq<str> for WorkpieceId {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for WorkpieceId {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<String> for WorkpieceId {
+    fn eq(&self, other: &String) -> bool {
+        &self.0 == other
+    }
+}
+
 /// A sealed bloom's identity: the digest of its canonical [`BloomSpec`]
 /// bytes (ADR-0149 §The bloom). A bloom that differs in any sealed field is
 /// a different bloom.
@@ -123,6 +148,12 @@ impl WorkpieceId {
 /// [`BloomSpec`]: crate::values::BloomSpec
 #[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct BloomId(pub Digest);
+
+impl fmt::Display for BloomId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 /// One reusable harness conversation's identity, minted by the coordinator
 /// before that conversation exists (#5425).

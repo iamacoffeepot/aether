@@ -72,7 +72,7 @@ impl Default for RpcPortConfig {
 
 /// The default REST control-API port when `AETHER_HTTP_PORT` is unset —
 /// distinct from the RPC port so the two ingresses coexist on one host.
-pub const DEFAULT_HTTP_PORT: u16 = 8910;
+pub use aether_bloomery::DEFAULT_HTTP_PORT;
 
 /// The REST control-API ingress port knob, resolved argv > `AETHER_HTTP_PORT` >
 /// default. The `aether.http.server` cap binds this on localhost; the operator

@@ -6,7 +6,8 @@ use aether_bloomery::{
     DRAFT_ADMISSION_GATE, Digest, Evidence, EvidenceKind, Observation, Provenance, Read, Refusal, Statement, digest_of,
 };
 use aether_data::wire::to_vec;
-use serde::{Deserialize, Serialize};
+
+pub use aether_bloomery::{AdrTouch, Completeness};
 
 use super::policy::{ApprovalPolicy, Tier};
 
@@ -69,51 +70,6 @@ pub fn projection_digest(request: &AdmissionRequest) -> Digest {
     ))
     .expect("admission facts never exceed the ADR-0118 u32 wire-length ceiling");
     Digest::of_wire_bytes(&bytes)
-}
-
-/// The completeness facts a scope revision must satisfy before it is admissible.
-/// Every field is a fail-closed check: a `false` (or a wrong count) refuses the
-/// gate rather than forming an approval.
-// The many bools are the point: this is a checklist of independent completeness
-// signals the host projects, not a state machine — a two-variant enum per signal
-// would only rename `true`/`false` without adding meaning.
-#[allow(clippy::struct_excessive_bools)]
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-pub struct Completeness {
-    /// `## Problem statement` present and non-empty.
-    pub has_problem_statement: bool,
-    /// `## Design notes` present and non-empty.
-    pub has_design_notes: bool,
-    /// `## Implementation plan` present and non-empty.
-    pub has_implementation_plan: bool,
-    /// Every referenced ADR PR has merged.
-    pub referenced_adr_prs_merged: bool,
-    /// The number of model routings declared — admission requires exactly one.
-    pub model_routing_count: usize,
-    /// Whether the workpiece is blocked (a blocked one is inadmissible).
-    pub blocked: bool,
-    /// The declared surface is fresh against the current base.
-    pub declared_surface_fresh: bool,
-    /// Every `## Depends on` dependency is satisfied: a co-sealed member of this
-    /// seal, or a commission whose status is `Landed`.
-    pub dependencies_all_closed: bool,
-    /// Umbrella integrity holds (not a decomposition umbrella whose children fail
-    /// to back-reference).
-    pub umbrella_integrity: bool,
-}
-
-/// The maturity of the ADRs a change touches — the axis the unconditional hard
-/// gate routes on (a glob matches paths, not maturity, so this cannot live in the
-/// policy file).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum AdrTouch {
-    /// The change touches no ADR.
-    None,
-    /// The change writes a NEW ADR or edits an ESTABLISHED (non-`Proposed`) one —
-    /// routes to the owner unconditionally, waiving no override.
-    NewOrEstablished,
-    /// The change edits only still-`Proposed` ADRs — defers to the tier policy.
-    ProposedOnly,
 }
 
 /// A completeness check that failed closed, naming which one.

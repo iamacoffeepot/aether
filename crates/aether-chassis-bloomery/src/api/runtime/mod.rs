@@ -62,7 +62,7 @@ mod commissions;
 mod configs;
 mod drafts;
 mod evidence;
-mod hex;
+pub mod hex;
 mod metrics;
 mod reads;
 mod response;

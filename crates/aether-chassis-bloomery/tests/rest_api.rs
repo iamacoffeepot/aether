@@ -1833,7 +1833,10 @@ fn handle_stub_conn(mut stream: TcpStream, approved: &AtomicBool, wrong: &str, i
     } else if line.starts_with("POST /commissions") {
         (201, format!(r#"{{"id":"wp-mismatch","intent":"{intent}"}}"#))
     } else if line.starts_with("GET /commissions/wp-mismatch") {
-        (200, format!(r#"{{"id":"wp-mismatch","intent":"{intent}","status":"open"}}"#))
+        (
+            200,
+            format!(r#"{{"id":"wp-mismatch","intent":"{intent}","status":"open","approvals":[],"scope_verify":null}}"#),
+        )
     } else {
         (404, r#"{"error":"unexpected"}"#.to_owned())
     };

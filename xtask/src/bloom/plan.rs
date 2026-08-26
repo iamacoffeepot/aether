@@ -8,16 +8,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aether_bloomery::{ApprovalPolicy, BloomDraft, Digest, Evidence, EvidenceKind, Forecast, Membership, WorkpieceId};
+use aether_bloomery::{
+    ApprovalPolicy, BloomSpec, CandidateRef, ConfigRegistry, Digest, Forecast, MemberDependency, Membership,
+    SealRequest, SupersedeRequest, ViewDocument, WorkpieceId,
+};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use super::client::Client;
-use super::dto::{
-    Approval, BloomSpec, CandidateRefRequest, ConfigRegistry, DependencyEdge, DigestHex, DraftPatch, SealRequest,
-    SupersedeRequest, ViewDocument,
-};
-use super::dto::{ConfigRegistry as WireRegistry, Membership as WireMembership};
+use super::dto::{DigestHex, DraftPatch, placeholder_member};
 
 /// Where a draft's `base` comes from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,11 +82,11 @@ pub fn refuse_unnamed_file_entries(policy: &ApprovalPolicy, workpiece: &str, dec
     Ok(())
 }
 
-pub fn resolve_base(choice: &BaseChoice, view: &ViewDocument) -> DigestHex {
+pub fn resolve_base(choice: &BaseChoice, view: &ViewDocument) -> Digest {
     match choice {
         BaseChoice::Observed => view.observed,
         BaseChoice::Mainline => view.mainline,
-        BaseChoice::Hex(digest) => *digest,
+        BaseChoice::Hex(digest) => digest.digest(),
     }
 }
 
@@ -135,7 +134,7 @@ pub fn author_values(client: &Client<'_>, specs: &[(String, Value)]) -> Result<C
     let mut registry = ConfigRegistry::default();
     for (kind, value) in specs {
         let authored = client.author_config(kind, value)?;
-        registry.entries.insert(authored.kind, authored.digest);
+        registry.insert_named(&authored.kind, authored.digest);
     }
     Ok(registry)
 }
@@ -158,9 +157,9 @@ pub fn seal_workpieces(explicit: &[String], task_file: &Path) -> Result<Vec<Stri
 
 pub fn seal_patch(
     workpieces: &[String],
-    scope_revision: DigestHex,
-    revisions: &[(String, DigestHex)],
-    base: DigestHex,
+    scope_revision: Digest,
+    revisions: &[(String, Digest)],
+    base: Digest,
     configs: ConfigRegistry,
     forecast: Forecast,
 ) -> Result<DraftPatch> {
@@ -170,19 +169,19 @@ pub fn seal_patch(
     Ok(DraftPatch { proposals: Some(proposals), configs: Some(configs), base: Some(base), forecast: Some(forecast) })
 }
 
-pub fn successor_patch(spec: &BloomSpec, base: DigestHex, configs: ConfigRegistry) -> DraftPatch {
+pub fn successor_patch(spec: &BloomSpec, base: Digest, configs: ConfigRegistry) -> DraftPatch {
     DraftPatch {
-        proposals: Some(spec.members.clone()),
+        proposals: Some(spec.members().to_vec()),
         configs: Some(configs),
         base: Some(base),
-        forecast: Some(spec.forecast),
+        forecast: Some(spec.forecast()),
     }
 }
 
 /// Drop named predecessor members from the successor's proposals. Refuses an
 /// eject that names a workpiece the predecessor does not carry, or that would
 /// leave the successor with no members.
-pub fn eject_members(proposals: &mut Vec<WireMembership>, eject: &[String]) -> Result<()> {
+pub fn eject_members(proposals: &mut Vec<Membership>, eject: &[String]) -> Result<()> {
     for workpiece in eject {
         if proposals.iter().all(|member| member.workpiece != *workpiece) {
             bail!("--eject names {workpiece}, which is not a predecessor member");
@@ -191,7 +190,7 @@ pub fn eject_members(proposals: &mut Vec<WireMembership>, eject: &[String]) -> R
     if eject.is_empty() {
         return Ok(());
     }
-    proposals.retain(|member| !eject.contains(&member.workpiece));
+    proposals.retain(|member| !eject.iter().any(|named| member.workpiece == *named));
     if proposals.is_empty() {
         bail!("--eject would leave the successor with no members");
     }
@@ -203,14 +202,14 @@ pub fn eject_members(proposals: &mut Vec<WireMembership>, eject: &[String]) -> R
 /// workpiece that is not in `proposals` — a typo would otherwise seal the
 /// default digest and fail at the admission door with nothing pointing at
 /// the flag.
-pub fn pin_revisions(proposals: &mut [WireMembership], revisions: &[(String, DigestHex)]) -> Result<()> {
+pub fn pin_revisions(proposals: &mut [Membership], revisions: &[(String, Digest)]) -> Result<()> {
     for (workpiece, _) in revisions {
         if proposals.iter().all(|member| member.workpiece != *workpiece) {
             bail!("--revision names {workpiece}, which is not in the sealed membership");
         }
     }
     for member in proposals.iter_mut() {
-        if let Some((_, digest)) = revisions.iter().rfind(|(workpiece, _)| workpiece == &member.workpiece) {
+        if let Some((_, digest)) = revisions.iter().rfind(|(workpiece, _)| member.workpiece == *workpiece) {
             member.scope_revision = *digest;
             member.approval.subject = *digest;
         }
@@ -226,58 +225,20 @@ pub fn supersede_request(draft_id: &str, edges: &[(String, String)]) -> Supersed
     SupersedeRequest { successor_draft: draft_id.to_owned(), idempotency_key: None, edges: wire_edges(edges) }
 }
 
-fn wire_edges(edges: &[(String, String)]) -> Vec<DependencyEdge> {
+fn wire_edges(edges: &[(String, String)]) -> Vec<MemberDependency> {
     edges
         .iter()
-        .map(|(member, depends_on)| DependencyEdge { member: member.clone(), depends_on: depends_on.clone() })
+        .map(|(member, depends_on)| MemberDependency {
+            member: WorkpieceId(member.clone()),
+            depends_on: WorkpieceId(depends_on.clone()),
+        })
         .collect()
 }
 
 /// Reconstruct a sealed spec's identity so a journal row can be matched to a
-/// live bloom id. `BloomDraft::seal` canonicalizes member order the same way
-/// the original seal did, so the digest agrees.
+/// live bloom id.
 pub fn spec_id(spec: &BloomSpec) -> DigestHex {
-    let draft = BloomDraft {
-        proposals: spec.members.iter().map(native_member).collect(),
-        base: native_digest(spec.base),
-        configs: native_registry(&spec.configs),
-        forecast: spec.forecast,
-    };
-    DigestHex::from_bytes(*draft.seal().id().0.as_bytes())
-}
-
-fn placeholder_member(workpiece: &str, scope_revision: DigestHex) -> WireMembership {
-    WireMembership {
-        workpiece: workpiece.to_owned(),
-        scope_revision,
-        configs: ConfigRegistry::default(),
-        approval: Approval {
-            subject: scope_revision,
-            kind: EvidenceKind::Approval,
-            detail: DigestHex::from_bytes([0; 32]),
-        },
-    }
-}
-
-fn native_member(member: &WireMembership) -> Membership {
-    Membership {
-        workpiece: WorkpieceId(member.workpiece.clone()),
-        scope_revision: native_digest(member.scope_revision),
-        configs: native_registry(&member.configs),
-        approval: Evidence {
-            subject: native_digest(member.approval.subject),
-            kind: member.approval.kind,
-            detail: native_digest(member.approval.detail),
-        },
-    }
-}
-
-fn native_digest(digest: DigestHex) -> Digest {
-    Digest::from_bytes(*digest.as_bytes())
-}
-
-fn native_registry(registry: &WireRegistry) -> aether_bloomery::ConfigRegistry {
-    registry.entries.iter().map(|(kind, digest)| (kind.clone(), native_digest(*digest))).collect()
+    DigestHex::from(spec.id().0)
 }
 
 pub fn parse_config_flag(raw: &str) -> Result<(String, PathBuf), String> {
@@ -344,8 +305,8 @@ mod candidate_flag_tests {
         let checkout = DigestHex::from_bytes([0xcd; 32]);
         let parsed =
             super::parse_candidate_flag(&format!("{}:{}", tree.as_hex(), checkout.as_hex())).expect("well-formed pair");
-        assert_eq!(parsed.tree, tree);
-        assert_eq!(parsed.checkout, checkout);
+        assert_eq!(parsed.tree, tree.digest());
+        assert_eq!(parsed.checkout, checkout.digest());
 
         let unpaired = super::parse_candidate_flag(&tree.as_hex()).expect_err("one half is not a pair");
         assert!(unpaired.contains("tree:checkout"), "the error states the shape: {unpaired}");
@@ -383,14 +344,14 @@ pub fn parse_revision_flag(raw: &str) -> Result<(String, DigestHex), String> {
 /// Both halves are required and both are digests. A single flag rather than two
 /// because the pair is one value: a `--tree` accepted without its `--checkout`
 /// would journal a repair whose verifying lane has nothing to check out.
-pub fn parse_candidate_flag(raw: &str) -> Result<CandidateRefRequest, String> {
+pub fn parse_candidate_flag(raw: &str) -> Result<CandidateRef, String> {
     let Some((tree, checkout)) = raw.split_once(':') else {
         return Err(format!("expected tree:checkout, both 64-hex digests, got {raw}"));
     };
     let tree = super::hex::decode(tree).ok_or_else(|| format!("candidate tree {tree} is not a 32-byte hex digest"))?;
     let checkout = super::hex::decode(checkout)
         .ok_or_else(|| format!("candidate checkout {checkout} is not a 32-byte hex digest"))?;
-    Ok(CandidateRefRequest { tree: DigestHex::from_bytes(tree), checkout: DigestHex::from_bytes(checkout) })
+    Ok(CandidateRef { tree: Digest::from_bytes(tree), checkout: Digest::from_bytes(checkout) })
 }
 
 /// `--request <64-hex>` — one suppression request digest the reviewer is
@@ -420,24 +381,21 @@ mod tests {
         BaseChoice, eject_members, pin_revisions, refuse_unnamed_file_entries, resolve_base, seal_patch,
         successor_patch,
     };
-    use crate::bloom::dto::{Approval, BloomSpec, ConfigRegistry, DigestHex, Membership, ViewDocument};
-    use aether_bloomery::{ApprovalPolicy, ApprovalRule, EvidenceKind, Forecast, Tier};
+    use crate::bloom::dto::{DigestHex, placeholder_member, test_view};
+    use aether_bloomery::{
+        ApprovalPolicy, ApprovalRule, BloomDraft, ConfigRegistry, Digest, Forecast, Membership, Tier,
+    };
 
-    fn digest(byte: u8) -> DigestHex {
-        DigestHex::from_bytes([byte; 32])
+    fn digest(byte: u8) -> Digest {
+        Digest::from_bytes([byte; 32])
     }
 
-    fn view(mainline: u8, observed: u8) -> ViewDocument {
-        ViewDocument { mainline: digest(mainline), observed: digest(observed), blooms: Vec::new() }
+    fn view(mainline: u8, observed: u8) -> aether_bloomery::ViewDocument {
+        test_view(digest(mainline), digest(observed), Vec::new())
     }
 
     fn member(workpiece: &str, revision: u8) -> Membership {
-        Membership {
-            workpiece: workpiece.to_owned(),
-            scope_revision: digest(revision),
-            configs: ConfigRegistry::default(),
-            approval: Approval { subject: digest(revision), kind: EvidenceKind::Approval, detail: digest(9) },
-        }
+        placeholder_member(workpiece, digest(revision))
     }
 
     #[test]
@@ -445,7 +403,7 @@ mod tests {
         let view = view(1, 2);
         assert_eq!(resolve_base(&BaseChoice::Observed, &view), digest(2));
         assert_eq!(resolve_base(&BaseChoice::Mainline, &view), digest(1));
-        assert_eq!(resolve_base(&BaseChoice::Hex(digest(3)), &view), digest(3));
+        assert_eq!(resolve_base(&BaseChoice::Hex(DigestHex::from(digest(3))), &view), digest(3));
     }
 
     #[test]
@@ -481,13 +439,14 @@ mod tests {
         // silent change to either default would mint a successor that drops the
         // claim or the configuration the predecessor attested.
         let mut configs = ConfigRegistry::default();
-        configs.entries.insert("aether.bloomery.stage_catalog".to_owned(), digest(0xaa));
-        let spec = BloomSpec {
-            members: vec![member("wp-1", 7)],
+        configs.insert_named("aether.bloomery.stage_catalog", digest(0xaa));
+        let spec = BloomDraft {
+            proposals: vec![member("wp-1", 7)],
             base: digest(1),
             configs: configs.clone(),
             forecast: Forecast::default(),
-        };
+        }
+        .seal();
 
         let patch = successor_patch(&spec, digest(2), configs.clone());
 

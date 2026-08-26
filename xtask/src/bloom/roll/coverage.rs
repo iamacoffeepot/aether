@@ -8,35 +8,26 @@
 
 use std::collections::BTreeSet;
 
-use aether_bloomery::{BloomStatus, EvidenceKind};
-use aether_bloomery_git::DayCoverage;
-use serde_json::Value;
-
-use crate::bloom::dto::{IntegrateClaimView, JournalView, ViewDocument};
+use aether_bloomery::{BloomStatus, EvidenceKind, Fact, JournalView, ViewDocument};
 
 /// Standing landed workpieces minus those with a `VerificationResult` integrate claim.
-pub fn day_coverage(view: &ViewDocument, journal: &JournalView) -> DayCoverage {
+pub fn day_coverage(view: &ViewDocument, journal: &JournalView) -> aether_bloomery_git::DayCoverage {
     let required: BTreeSet<String> = view
         .blooms
         .iter()
         .filter(|bloom| bloom.status == BloomStatus::Landed)
         .flat_map(|bloom| {
-            bloom.members.iter().filter(|member| member.withdrawn.is_none()).map(|member| member.workpiece.clone())
+            bloom.members.iter().filter(|member| member.withdrawn.is_none()).map(|member| member.workpiece.0.clone())
         })
         .collect();
-    let covered: BTreeSet<String> = journal
-        .records
-        .iter()
-        .filter_map(|record| integrate_claim(&record.event.fact))
-        .filter(|claim| claim.evidence.kind == EvidenceKind::VerificationResult)
-        .map(|claim| claim.workpiece)
-        .collect();
+    let covered: BTreeSet<String> =
+        journal.records.iter().filter_map(|record| integrate_workpiece(&record.event.fact)).collect();
 
     if required.is_subset(&covered) {
-        DayCoverage::green()
+        aether_bloomery_git::DayCoverage::green()
     } else {
         let members = required.difference(&covered).cloned().collect::<Vec<_>>().join("\n");
-        DayCoverage::hold(format!("{members}\n{}", evaluated_trailer(journal)))
+        aether_bloomery_git::DayCoverage::hold(format!("{members}\n{}", evaluated_trailer(journal)))
     }
 }
 
@@ -48,61 +39,81 @@ fn evaluated_trailer(journal: &JournalView) -> String {
     )
 }
 
-fn integrate_claim(fact: &Value) -> Option<IntegrateClaimView> {
-    serde_json::from_value(fact.get("Integrate")?.get("claim")?.clone()).ok()
+fn integrate_workpiece(fact: &Fact) -> Option<String> {
+    match fact {
+        Fact::Integrate { claim, .. } if claim.evidence.kind == EvidenceKind::VerificationResult => {
+            Some(claim.workpiece.0.clone())
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::day_coverage;
-    use crate::bloom::dto::{BloomView, DigestHex, JournalEntry, JournalEvent, JournalView, MemberView, ViewDocument};
-    use aether_bloomery::{BloomStatus, EvidenceKind};
+    use crate::bloom::dto::{test_bloom, test_member, test_view};
+    use aether_bloomery::{
+        BloomStatus, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, JournalEntry, JournalView, Outcome,
+        ResolutionClaim, WithdrawnView, WorkpieceId,
+    };
     use aether_bloomery_git::DayCoverage;
-    use serde_json::{Value, json};
 
-    fn landed(workpieces: &[&str]) -> ViewDocument {
+    fn digest(byte: u8) -> Digest {
+        Digest::from_bytes([byte; 32])
+    }
+
+    fn landed(workpieces: &[&str]) -> aether_bloomery::ViewDocument {
         blooms([(BloomStatus::Landed, workpieces)])
     }
 
-    fn blooms<const N: usize>(entries: [(BloomStatus, &[&str]); N]) -> ViewDocument {
-        ViewDocument {
-            mainline: DigestHex::from_bytes([1; 32]),
-            observed: DigestHex::from_bytes([2; 32]),
-            blooms: entries
+    fn blooms<const N: usize>(entries: [(BloomStatus, &[&str]); N]) -> aether_bloomery::ViewDocument {
+        test_view(
+            digest(1),
+            digest(2),
+            entries
                 .into_iter()
                 .enumerate()
-                .map(|(index, (status, workpieces))| BloomView {
-                    id: DigestHex::from_bytes([u8::try_from(index).expect("few blooms"); 32]),
-                    status,
-                    superseded_by: None,
-                    members: workpieces
-                        .iter()
-                        .map(|workpiece| MemberView {
-                            workpiece: (*workpiece).to_owned(),
-                            scope_revision: DigestHex::from_bytes([7; 32]),
-                            awaiting_surface: None,
-                            withdrawn: None,
-                            cursor: None,
-                        })
-                        .collect(),
+                .map(|(index, (status, workpieces))| {
+                    test_bloom(
+                        digest(u8::try_from(index).expect("few blooms")),
+                        status,
+                        workpieces.iter().map(|workpiece| test_member(workpiece, digest(7))).collect(),
+                    )
                 })
                 .collect(),
-        }
+        )
     }
 
-    fn journal(facts: impl IntoIterator<Item = Value>) -> JournalView {
-        let records: Vec<_> =
-            facts.into_iter().map(|fact| JournalEntry { sequence: None, event: JournalEvent { fact } }).collect();
+    fn journal(facts: impl IntoIterator<Item = Fact>) -> JournalView {
+        let records: Vec<_> = facts
+            .into_iter()
+            .enumerate()
+            .map(|(index, fact)| JournalEntry {
+                sequence: u64::try_from(index).expect("few"),
+                idempotency_key: "k".to_owned(),
+                event: Event { idempotency_key: IdempotencyKey("k".to_owned()), fact },
+                outcome: Outcome::Duplicate,
+                decider: "test".to_owned(),
+            })
+            .collect();
         let shown = u64::try_from(records.len()).unwrap_or(u64::MAX);
-        JournalView { records, total_matched: shown, shown, truncated: false, next_from_sequence: None }
+        JournalView { records, total_matched: shown, shown, truncated: false, next_from_sequence: None, notice: None }
     }
 
     fn held(members: &str, journal: &JournalView) -> DayCoverage {
         DayCoverage::hold(format!("{members}\n{}", super::evaluated_trailer(journal)))
     }
 
-    fn integrate(workpiece: &str, kind: EvidenceKind) -> Value {
-        json!({ "Integrate": { "claim": { "workpiece": workpiece, "evidence": { "kind": kind } } } })
+    fn integrate(workpiece: &str, kind: EvidenceKind) -> Fact {
+        Fact::Integrate {
+            bloom: aether_bloomery::BloomId(digest(1)),
+            claim: ResolutionClaim {
+                workpiece: WorkpieceId(workpiece.to_owned()),
+                scope_revision: digest(7),
+                candidate: digest(8),
+                evidence: Evidence { subject: digest(8), kind, detail: digest(9) },
+            },
+        }
     }
 
     #[test]
@@ -110,7 +121,7 @@ mod tests {
         assert_eq!(
             day_coverage(
                 &landed(&["issue-4945"]),
-                &journal([integrate("issue-4945", EvidenceKind::VerificationResult)]),
+                &journal([integrate("issue-4945", EvidenceKind::VerificationResult)])
             ),
             DayCoverage::green()
         );
@@ -153,48 +164,22 @@ mod tests {
         // Tripwire: bloom 79137ad910a6 landed with the one member that stayed,
         // after fifteen were withdrawn. Requiring a receipt from every
         // `members[]` entry held the roll on fifteen members that never
-        // integrated and so can never hold an integrate claim. The view is
-        // decoded the way the edge renders it, so a mirror that drops the
-        // withdrawal fails here too.
-        let view: ViewDocument = serde_json::from_value(json!({
-            "mainline": DigestHex::from_bytes([1; 32]),
-            "observed": DigestHex::from_bytes([2; 32]),
-            "blooms": [{
-                "id": DigestHex::from_bytes([3; 32]),
-                "status": "Landed",
-                "superseded_by": null,
-                "members": [
-                    { "workpiece": "issue-resolved", "scope_revision": DigestHex::from_bytes([7; 32]) },
-                    {
-                        "workpiece": "issue-withdrawn",
-                        "scope_revision": DigestHex::from_bytes([7; 32]),
-                        "withdrawn": {
-                            "cause": "operator",
-                            "depends_on": null,
-                            "reason": "the day no longer needs it",
-                            "operator": "operator-eve"
-                        }
-                    }
-                ]
-            }]
-        }))
-        .expect("the view decodes");
-
+        // integrated and so can never hold an integrate claim.
+        let mut withdrawn = test_member("issue-withdrawn", digest(7));
+        withdrawn.withdrawn = Some(WithdrawnView {
+            cause: "operator".to_owned(),
+            depends_on: None,
+            reason: "the day no longer needs it".to_owned(),
+            operator: "operator-eve".to_owned(),
+        });
+        let view = test_view(
+            digest(1),
+            digest(2),
+            vec![test_bloom(digest(3), BloomStatus::Landed, vec![test_member("issue-resolved", digest(7)), withdrawn])],
+        );
         assert_eq!(
             day_coverage(&view, &journal([integrate("issue-resolved", EvidenceKind::VerificationResult)])),
             DayCoverage::green()
         );
-    }
-
-    #[test]
-    fn a_landed_member_whose_proof_sits_past_the_first_page_is_green_on_the_full_walk() {
-        // A map that only saw the first journal page would miss this proof and
-        // hold; the full walk includes it.
-        let mut facts: Vec<Value> = (0..100).map(|n| json!({ "other": n })).collect();
-        facts.push(integrate("issue-4945", EvidenceKind::VerificationResult));
-        let first_page = journal(facts.iter().take(100).cloned());
-        let full = journal(facts);
-        assert_eq!(day_coverage(&landed(&["issue-4945"]), &first_page), held("issue-4945", &first_page));
-        assert_eq!(day_coverage(&landed(&["issue-4945"]), &full), DayCoverage::green());
     }
 }

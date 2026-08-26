@@ -201,10 +201,10 @@ fn path_arg(path: &Path) -> Result<&str> {
 #[cfg(test)]
 mod tests {
     use super::{SIDECARS, prove, sidecar_path};
-    use crate::bloom::dto::DigestHex;
     use crate::bloom::upgrade::shell::Run;
     use crate::bloom::upgrade::shell::fake::Fake;
     use crate::bloom::upgrade::tests_support::{Scripted, drained_view, seeded_paths};
+    use aether_bloomery::Digest;
 
     fn matching() -> Scripted {
         Scripted::matching()
@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn a_diverged_fold_names_both_states() {
         let mut folded = drained_view();
-        folded.mainline = DigestHex::from_bytes([9; 32]);
+        folded.mainline = Digest::from_bytes([9; 32]);
         let views = Scripted::new(Ok(drained_view()), Ok(folded));
         let shell = Fake::new(folding());
         let mut log = String::new();
@@ -332,7 +332,7 @@ mod tests {
 
         assert!(refusal.contains("diverged"), "the refusal names the divergence: {refusal}");
         assert!(refusal.contains(&drained_view().mainline.to_string()), "live mainline is named: {refusal}");
-        assert!(refusal.contains(&DigestHex::from_bytes([9; 32]).to_string()), "folded mainline is named: {refusal}");
+        assert!(refusal.contains(&Digest::from_bytes([9; 32]).to_string()), "folded mainline is named: {refusal}");
         assert!(refusal.contains("blooms="), "both bloom counts are named: {refusal}");
     }
 
@@ -343,7 +343,7 @@ mod tests {
     #[test]
     fn a_fold_that_catches_up_after_replay_is_not_a_divergence() {
         let mut empty = drained_view();
-        empty.mainline = DigestHex::from_bytes([0; 32]);
+        empty.mainline = Digest::from_bytes([0; 32]);
         empty.blooms.clear();
         let views = Scripted::matching().first_folded(empty);
         let shell = Fake::new(folding());

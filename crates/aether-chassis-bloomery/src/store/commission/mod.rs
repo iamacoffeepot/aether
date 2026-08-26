@@ -11,11 +11,12 @@ use std::fmt;
 use aether_bloomery::{
     AuthorityDoor, BloomId, CommissionApprovalTier, CommissionProjection, CommissionStatementRole, CommissionStatus,
     CommissionValueError, Digest, KeyProvider, Observation, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision,
-    ScopeVerifyInput, ScopeVerifyReport, Statement, Topic, WorkpieceId, digest_of, intent_title, verify_scope,
+    ScopeVerifyReport, Statement, Topic, WorkpieceId, digest_of, intent_title, verify_scope,
 };
+
+pub use aether_bloomery::RevisionEvidence;
 use aether_data::wire::{from_bytes, to_vec};
 use rusqlite::{Connection, OptionalExtension, Transaction};
-use serde::{Deserialize, Serialize};
 
 use super::SqliteStore;
 use super::membership;
@@ -322,39 +323,6 @@ pub struct CommissionView {
     /// `None` when the tip is absent or readable. Trailing so an already-loaded
     /// view keeps its meaning: the head is still the commission.
     pub current_unreadable: Option<CommissionValueError>,
-}
-
-/// What is known about a revision without being part of it.
-///
-/// The revision's own bytes are the signed subject; nothing here is hashed
-/// into them. Today's only field is the freeze-check projection (ADR-0208);
-/// the next slice adds a field here rather than a parameter to the write.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RevisionEvidence {
-    /// The workpiece's field records projected for the freeze check.
-    /// `None` for a hand-authored revision, which writes no report.
-    #[serde(default)]
-    pub scope_verify: Option<ScopeVerifyInput>,
-}
-
-impl RevisionEvidence {
-    /// Canonical aether-wire bytes of this sidecar.
-    ///
-    /// # Panics
-    /// Panics if the value exceeds the ADR-0118 `u32` wire-length ceiling,
-    /// which no revision sidecar does.
-    #[must_use]
-    pub fn encode(&self) -> Vec<u8> {
-        to_vec(self).expect("revision evidence never exceeds the ADR-0118 u32 wire-length ceiling")
-    }
-
-    /// Decode sidecar bytes.
-    ///
-    /// # Errors
-    /// [`CommissionError::MalformedCanonical`] when the bytes are not this type.
-    pub fn decode(bytes: &[u8]) -> Result<Self, CommissionError> {
-        from_bytes(bytes).map_err(|_| CommissionError::MalformedCanonical)
-    }
 }
 
 /// Authoring and query transactions for signed commissions.

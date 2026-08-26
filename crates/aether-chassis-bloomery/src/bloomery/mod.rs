@@ -46,7 +46,7 @@ pub use approve::{
     StatementRejected, Tier, approval_from_statement, check_signer_tier, load_policy, parse_policy, precheck_statement,
     projection_digest, verified_statement_approval,
 };
-pub use chassis::{BloomeryChassis, BloomeryEnv, DEFAULT_RPC_PORT, RpcPortConfig};
+pub use chassis::{BloomeryChassis, BloomeryEnv, DEFAULT_HTTP_PORT, DEFAULT_RPC_PORT, RpcPortConfig};
 pub use cli::BloomeryCli;
 pub use config::{CoordinatorConfig, CoordinatorOverlay, MissingWriterMarker};
 #[cfg(feature = "github")]

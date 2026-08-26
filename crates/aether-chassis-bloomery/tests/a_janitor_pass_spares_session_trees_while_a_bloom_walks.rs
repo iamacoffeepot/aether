@@ -68,16 +68,27 @@ fn a_janitor_pass_spares_session_trees_while_a_bloom_walks() {
 
     for _ in 0..BUDGET {
         harness.tick();
-        let between = harness.bloom(bloom).status == BloomStatus::Landed && harness.outstanding().is_empty();
         harness.janitor_tick();
+        let between = harness.bloom(bloom).status == BloomStatus::Landed && harness.outstanding().is_empty();
+        if !tree.is_dir() {
+            assert!(
+                between,
+                "session tree {MISSED_SLUG} was reclaimed while the bloom was still walking: status {:?} outstanding {:?}",
+                harness.bloom(bloom).status,
+                harness.outstanding(),
+            );
+            return;
+        }
         if between {
+            // The view can land on the tick that the janitor sampled as still
+            // walking. One more pass is the between-blooms reclaim the gate is for.
+            harness.janitor_tick();
             assert!(
                 !tree.is_dir(),
                 "once the bloom is terminal and nothing is outstanding, the between-blooms pass reclaims the tree",
             );
             return;
         }
-        still_there(&tree, "a janitor pass while the bloom was still walking");
     }
 
     panic!(
