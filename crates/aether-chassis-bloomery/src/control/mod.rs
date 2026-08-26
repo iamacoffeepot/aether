@@ -40,6 +40,19 @@ use aether_bloomery::control::{
 pub mod kinds;
 pub use kinds::ObserveTick;
 
+/// What every read surface answers while the boot journal replay is still
+/// folding — the `Err` arm of `Query`, `MetricsQuery`, and `SpendQuery` until
+/// the snapshot is the one the journal describes.
+///
+/// A named constant rather than three literals because it is the only signal a
+/// client has that a read is refused for a reason that passes on its own: the
+/// refusal carries a string and nothing else, so a caller that waits for the
+/// replay has to recognize this exact text. Reworded prose in one of the three
+/// handlers would otherwise leave that caller waiting out its budget against a
+/// coordinator that was answering it all along.
+pub const PRE_REPLAY_REFUSAL: &str =
+    "the boot journal replay has not finished; the projection is not yet the one the journal describes";
+
 /// Addressing identity for the `aether.bloomery.control` capability (ADR-0122).
 #[actor(singleton, root)]
 pub struct ControlCore;
