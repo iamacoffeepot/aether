@@ -23,7 +23,10 @@ use aether_data::wire::{from_bytes, to_vec};
 use super::receipt::fixtures::seed_dispatch;
 use super::{RECONCILE_CLOSES_PER_PASS, drain_and_land, drain_and_land_emitting, reconcile_terminal_commissions};
 use crate::bloomery::outbox::TopicOutbox;
-use crate::store::{AppendOutcome, CommissionBackend, JournalWrite, SqliteStore, StoreBackend};
+use crate::store::{
+    AppendOutcome, CANDIDATE_HASH_OCCASION_LAND, CANDIDATE_HASH_OCCASION_SEAL, CommissionBackend, JournalWrite,
+    SqliteStore, StoreBackend,
+};
 
 // A fake-GitHub-backed source shell with the land gate set explicitly, so a
 // test drives the same shell the running reactor holds.
@@ -596,6 +599,52 @@ fn a_withdrawn_members_commission_stays_open_when_the_bloom_lands() {
         CommissionStatus::Open,
         "a withdrawn member's commission must stay open for the next wave"
     );
+}
+
+#[test]
+fn a_landed_bloom_journals_every_resolved_members_candidate_hash() {
+    // The land bookend closes the bloom's inventory. Matching on workpiece
+    // rather than bloom is what makes an inherited member come out right: the
+    // fold copies the predecessor's ref into this namespace and no push fires
+    // under the successor, so the workpiece's newest row is that commit either
+    // way. A member the record holds no hash for is written as an unpublished
+    // empty hex rather than dropped.
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    let source = shell(fake, true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+
+    let predecessor = [0xAA; 32];
+    let inherited_ref = "refs/heads/bloom/aa/candidate/wp-inherited";
+    let inherited_commit = "ab".repeat(20);
+    store
+        .record_candidate_hash(
+            &predecessor,
+            "wp-inherited",
+            inherited_ref,
+            &inherited_commit,
+            CANDIDATE_HASH_OCCASION_SEAL,
+            true,
+        )
+        .unwrap();
+
+    let bloom = journal_membership(&mut store, &["wp-inherited", "wp-hole"], &[]);
+    enqueue_land(&mut store, bloom, base, new_head);
+    drain_and_land(&mut store, &source).unwrap();
+
+    let rows = store.list_candidate_hashes(bloom.0.as_bytes()).unwrap();
+    assert_eq!(rows.len(), 2, "every resolved member has a land row; none is implied by absence");
+    let inherited = rows.iter().find(|row| row.workpiece == "wp-inherited").expect("the inherited member is named");
+    assert_eq!(inherited.commit_hex, inherited_commit, "the predecessor's sha is restamped onto this bloom");
+    assert_eq!(inherited.ref_name, inherited_ref);
+    assert_eq!(inherited.occasion, CANDIDATE_HASH_OCCASION_LAND);
+    assert!(inherited.published);
+    let hole = rows.iter().find(|row| row.workpiece == "wp-hole").expect("a missing hash is a stated hole");
+    assert!(hole.commit_hex.is_empty(), "a hole carries no invented sha");
+    assert!(hole.ref_name.is_empty());
+    assert!(!hole.published);
+    assert_eq!(hole.occasion, CANDIDATE_HASH_OCCASION_LAND);
 }
 
 fn seed_commission(store: &mut SqliteStore, workpiece: &str) {

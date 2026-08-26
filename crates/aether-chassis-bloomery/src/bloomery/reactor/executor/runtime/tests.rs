@@ -53,7 +53,9 @@ use crate::bloomery::{
     ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle, UnconfiguredActionsBackend,
 };
 use crate::session::SessionConfig;
-use crate::store::{CommissionBackend, JournalWrite, OutstandingOrder, SqliteStore, StoreBackend};
+use crate::store::{
+    CANDIDATE_HASH_OCCASION_SEAL, CommissionBackend, JournalWrite, OutstandingOrder, SqliteStore, StoreBackend,
+};
 use aether_bloomery_github::{LandingSource, candidate_ref_name, member_checkpoint_ref_name};
 
 // A capturing executor backend: it records every submitted `WorkOrder` so a test
@@ -1844,7 +1846,9 @@ fn admitted_passing_captures_push_to_the_bloom_candidate_ref() {
 
     let pusher = RecordingPush::default();
     let correspondence: SharedCorrespondence = Arc::new(store);
+    let mut hashes = SqliteStore::open(":memory:").unwrap();
     push_admitted_candidates(
+        &mut hashes,
         &[admission(true, Some(capture)), admission(false, Some(capture)), admission(true, None)],
         Some(&correspondence),
         &pusher,
@@ -1895,13 +1899,19 @@ fn a_failing_refine_capture_is_not_pushed_as_a_member_checkpoint() {
     let event = Event { idempotency_key: IdempotencyKey("k".to_owned()), fact };
     let pusher = RecordingPush::default();
     let correspondence: SharedCorrespondence = Arc::new(store);
+    let mut hashes = SqliteStore::open(":memory:").unwrap();
     push_admitted_candidates(
+        &mut hashes,
         &[Admission { admit: Admit { event: to_vec(&event).unwrap() }, event }],
         Some(&correspondence),
         &pusher,
     );
 
     assert!(pusher.pushed.lock().unwrap().is_empty(), "a refine failure is not a construct checkpoint");
+    assert!(
+        hashes.list_candidate_hashes(bloom.0.as_bytes()).unwrap().is_empty(),
+        "a refine failure journals no candidate hash",
+    );
 }
 
 // #5102 — a passing composition Refine capture is the head landing will create
@@ -1931,7 +1941,9 @@ fn a_passing_composition_refine_capture_pushes_to_the_candidate_ref() {
     let event = Event { idempotency_key: IdempotencyKey("k".to_owned()), fact };
     let pusher = RecordingPush::default();
     let correspondence: SharedCorrespondence = Arc::new(store);
+    let mut hashes = SqliteStore::open(":memory:").unwrap();
     push_admitted_candidates(
+        &mut hashes,
         &[Admission { admit: Admit { event: to_vec(&event).unwrap() }, event }],
         Some(&correspondence),
         &pusher,
@@ -1945,6 +1957,50 @@ fn a_passing_composition_refine_capture_pushes_to_the_candidate_ref() {
         candidate_ref_name(&bloom, WorkpieceId::COMPOSITION),
         "the target is the reserved composition workpiece's candidate ref",
     );
+}
+
+// ADR-0211 — a refusing pusher still leaves a row naming the attempted sha with
+// published false. That axis exists nowhere else: correspondence cannot say
+// whether the push succeeded, and a failed push never appears in a ref listing.
+#[test]
+fn a_refused_candidate_push_journals_the_unpublished_sha() {
+    use aether_bloomery::{CandidateRef, Event, IdempotencyKey};
+
+    let bloom = BloomId(digest(1));
+    let capture = CandidateRef { tree: digest(0xAB), checkout: digest(0xAC) };
+    let github = FakeGithub::new();
+    github.seed_git_object(&capture.checkout);
+    let commit_hex = to_hex(&capture.checkout);
+    let fact = Fact::AttemptCompleted {
+        bloom,
+        workpiece: WorkpieceId("wp/cand".to_owned()),
+        stage: StageId::Construct,
+        passed: true,
+        evidence: aether_bloomery::Evidence {
+            subject: digest(9),
+            kind: aether_bloomery::EvidenceKind::VerificationResult,
+            detail: digest(8),
+        },
+        candidate: Some(capture),
+    };
+    let event = Event { idempotency_key: IdempotencyKey("k".to_owned()), fact };
+    let correspondence: SharedCorrespondence = Arc::new(github);
+    let mut hashes = SqliteStore::open(":memory:").unwrap();
+    let pusher = default_candidate_push(true);
+    push_admitted_candidates(
+        &mut hashes,
+        &[Admission { admit: Admit { event: to_vec(&event).unwrap() }, event }],
+        Some(&correspondence),
+        pusher.as_ref(),
+    );
+
+    let rows = hashes.list_candidate_hashes(bloom.0.as_bytes()).unwrap();
+    assert_eq!(rows.len(), 1, "a refused push still leaves a row");
+    assert_eq!(rows[0].commit_hex, commit_hex, "the row names the attempted sha");
+    assert!(!rows[0].published, "a refused push is unpublished, not omitted");
+    assert_eq!(rows[0].occasion, CANDIDATE_HASH_OCCASION_SEAL);
+    assert_eq!(rows[0].ref_name, candidate_ref_name(&bloom, "wp/cand"));
+    assert_eq!(rows[0].workpiece, "wp/cand");
 }
 
 // Tripwire: `default_candidate_push`'s fixture arm declines every push rather
@@ -2422,7 +2478,7 @@ fn an_aggregate_verify_repair_candidate_reaches_landing_ref_creation() {
     github.seed_git_object(&captured.checkout);
     let pusher = RecordingPush::default();
     let correspondence: SharedCorrespondence = Arc::new(github.clone());
-    push_admitted_candidates(slice::from_ref(&*admission), Some(&correspondence), &pusher);
+    push_admitted_candidates(&mut store, slice::from_ref(&*admission), Some(&correspondence), &pusher);
 
     let issued = pusher.pushed.lock().unwrap().clone();
     assert_eq!(issued.len(), 1, "the accepted repair capture is published before landing");

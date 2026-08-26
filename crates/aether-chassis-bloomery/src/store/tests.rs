@@ -8,8 +8,8 @@
 #![allow(clippy::unwrap_used)]
 
 use super::runtime::{
-    AppendOutcome, CommitOutcome, JournalWrite, OutstandingOrder, ProofFactWrite, RecordOutcome, SealOutcome,
-    SqliteStore, StoreBackend,
+    AppendOutcome, CANDIDATE_HASH_OCCASION_SEAL, CommitOutcome, JournalWrite, OutstandingOrder, ProofFactWrite,
+    RecordOutcome, SealOutcome, SqliteStore, StoreBackend,
 };
 use aether_bloomery::{MembershipMutation, OutboxPayload, WorkpieceId};
 
@@ -822,6 +822,101 @@ fn a_members_candidate_commit_message_is_superseded_by_its_next_capture() {
     );
 }
 
+#[test]
+fn a_members_second_candidate_hash_is_appended_not_replaced() {
+    // The property that distinguishes this table from the commit-message row it
+    // sits beside. Last-writer-wins on (bloom, workpiece) is what an implementer
+    // is most likely to trade the autoincrement key for; a member's second
+    // recorded capture must add a row and leave the first listed, because the
+    // question the record answers is what this bloom's refs held across its life.
+    let mut store = memory();
+    let bloom = [0xB1; 32];
+    let first = "aa".repeat(20);
+    let second = "bb".repeat(20);
+    store
+        .record_candidate_hash(
+            &bloom,
+            "issue-11",
+            "refs/heads/bloom/b1/candidate/issue-11",
+            &first,
+            CANDIDATE_HASH_OCCASION_SEAL,
+            true,
+        )
+        .unwrap();
+    store
+        .record_candidate_hash(
+            &bloom,
+            "issue-11",
+            "refs/heads/bloom/b1/candidate/issue-11",
+            &second,
+            CANDIDATE_HASH_OCCASION_SEAL,
+            false,
+        )
+        .unwrap();
+
+    let rows = store.list_candidate_hashes(&bloom).unwrap();
+    assert_eq!(rows.len(), 2, "a second capture adds a row");
+    assert_eq!(rows[0].commit_hex, first, "the first capture is still listed");
+    assert!(rows[0].published);
+    assert_eq!(rows[1].commit_hex, second);
+    assert!(!rows[1].published, "the later row can disagree about publish");
+    assert_eq!(rows[0].workpiece, "issue-11");
+    assert_eq!(rows[1].workpiece, "issue-11");
+    assert!(store.list_candidate_hashes(&[0xB2; 32]).unwrap().is_empty(), "a sibling bloom is its own inventory");
+}
+
+#[test]
+fn the_newest_candidate_hash_is_keyed_by_workpiece_not_bloom() {
+    // The land bookend's correctness for an inherited member rests on this:
+    // matching on workpiece rather than bloom finds the commit a predecessor
+    // recorded, without walking supersession lineage.
+    let mut store = memory();
+    let predecessor = [0xAA; 32];
+    let successor = [0xBB; 32];
+    let inherited = "aa".repeat(20);
+    let sibling = "cc".repeat(20);
+    let restamped = "bb".repeat(20);
+    store
+        .record_candidate_hash(
+            &predecessor,
+            "issue-11",
+            "refs/heads/bloom/aa/candidate/issue-11",
+            &inherited,
+            CANDIDATE_HASH_OCCASION_SEAL,
+            true,
+        )
+        .unwrap();
+    store
+        .record_candidate_hash(
+            &successor,
+            "issue-12",
+            "refs/heads/bloom/bb/candidate/issue-12",
+            &sibling,
+            CANDIDATE_HASH_OCCASION_SEAL,
+            true,
+        )
+        .unwrap();
+
+    let latest = store.latest_candidate_hash("issue-11").unwrap().expect("the predecessor recorded a hash");
+    assert_eq!(latest.bloom, predecessor, "the lookup is not scoped to one bloom");
+    assert_eq!(latest.commit_hex, inherited);
+    assert_eq!(store.latest_candidate_hash("issue-13").unwrap(), None, "a member with no hash is a miss, not a hole");
+
+    store
+        .record_candidate_hash(
+            &successor,
+            "issue-11",
+            "refs/heads/bloom/bb/candidate/issue-11",
+            &restamped,
+            CANDIDATE_HASH_OCCASION_SEAL,
+            true,
+        )
+        .unwrap();
+    let newest = store.latest_candidate_hash("issue-11").unwrap().expect("the successor restamped it");
+    assert_eq!(newest.bloom, successor);
+    assert_eq!(newest.commit_hex, restamped, "the newest row for the workpiece wins across blooms");
+}
+
 // The sealed-configuration resolution path (ADR-0174). A test kind stands in
 // for a real configuration: the resolver is generic over `ConfigKind`, so what
 // it resolves is the contract and which kind is incidental.
@@ -1419,5 +1514,37 @@ fn a_v11_store_gains_an_empty_scope_verify_ledger() {
         .query_row("SELECT count(*) FROM scope_verify_reports", [], |row| row.get(0))
         .expect("the ledger exists after migration");
     assert_eq!(reports, 0, "migration invents no reports");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 15);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 16);
+}
+
+#[test]
+fn a_v15_store_gains_an_empty_candidate_hash_journal() {
+    // Version 16 is the candidate-hash journal (ADR-0211). Opening a schema-15
+    // file must create the table empty rather than skip it because user_version
+    // was already "current" at 15 — and must invent no hash for history that
+    // predates the record.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v15.db").to_str().unwrap().to_owned();
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE journal (
+                 sequence        INTEGER PRIMARY KEY AUTOINCREMENT,
+                 idempotency_key TEXT NOT NULL UNIQUE,
+                 event           BLOB NOT NULL,
+                 decisions       BLOB,
+                 decider         TEXT,
+                 decisions_schema TEXT
+             );
+             PRAGMA user_version = 15;",
+        )
+        .unwrap();
+
+    let store = SqliteStore::open(&path).expect("a v15 store migrates");
+    let hashes: i64 = store
+        .conn
+        .query_row("SELECT count(*) FROM candidate_hash", [], |row| row.get(0))
+        .expect("the journal exists after migration");
+    assert_eq!(hashes, 0, "migration invents no hashes");
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 16);
 }

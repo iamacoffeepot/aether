@@ -81,7 +81,9 @@ use crate::bloomery::study::{StudyAdmitDecision, UploadedStudyRecord, admit_stud
 use crate::bloomery::testing::{ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload};
 use crate::bloomery::{CoordinatorConfig, ExecutorReactorSetup};
 use crate::control::ControlCore;
-use crate::store::{OutstandingOrder, SqliteStore, StoreBackend, StoreConfigError, resolve_config};
+use crate::store::{
+    CANDIDATE_HASH_OCCASION_SEAL, OutstandingOrder, SqliteStore, StoreBackend, StoreConfigError, resolve_config,
+};
 
 mod scope;
 use scope::drain_and_dispatch_scope;
@@ -2252,12 +2254,13 @@ pub fn candidate_push_at(refuse: bool, repo: impl Into<PathBuf>, remote: impl In
 /// silently run the wrong tree. A failed checkpoint push costs a resume, never
 /// correctness.
 fn push_admitted_candidates(
+    store: &mut dyn StoreBackend,
     admissions: &[Admission],
     correspondence: Option<&SharedCorrespondence>,
     pusher: &dyn CandidatePush,
 ) {
     for admission in admissions {
-        let (workpiece, candidate, target_ref, kind) = match &admission.event.fact {
+        let (bloom, workpiece, candidate, target_ref, kind) = match &admission.event.fact {
             Fact::AttemptCompleted {
                 bloom,
                 workpiece,
@@ -2265,7 +2268,7 @@ fn push_admitted_candidates(
                 passed: true,
                 candidate: Some(candidate),
                 ..
-            } => (workpiece, candidate, candidate_ref_name(bloom, &workpiece.0), "candidate"),
+            } => (bloom, workpiece, candidate, candidate_ref_name(bloom, &workpiece.0), "candidate"),
             Fact::AttemptCompleted {
                 bloom,
                 workpiece,
@@ -2273,27 +2276,64 @@ fn push_admitted_candidates(
                 passed: false,
                 candidate: Some(candidate),
                 ..
-            } => (workpiece, candidate, member_checkpoint_ref_name(bloom, &workpiece.0), "member checkpoint"),
+            } => (bloom, workpiece, candidate, member_checkpoint_ref_name(bloom, &workpiece.0), "member checkpoint"),
             _ => continue,
         };
         let Some(commit) = resolve_capture_commit(correspondence, workpiece, candidate) else {
             continue;
         };
-        match pusher.push(&commit.to_hex(), &target_ref) {
-            Ok(()) => tracing::info!(
-                target: "aether_chassis_bloomery::executor",
-                workpiece = %workpiece.0,
-                target_ref = %target_ref,
-                "{kind} capture pushed",
-            ),
-            Err(error) => tracing::warn!(
-                target: "aether_chassis_bloomery::executor",
-                workpiece = %workpiece.0,
-                target_ref = %target_ref,
-                %error,
-                "{kind} push failed; capture stays local-only",
-            ),
+        let commit_hex = commit.to_hex();
+        match pusher.push(&commit_hex, &target_ref) {
+            Ok(()) => {
+                tracing::info!(
+                    target: "aether_chassis_bloomery::executor",
+                    workpiece = %workpiece.0,
+                    target_ref = %target_ref,
+                    "{kind} capture pushed",
+                );
+                journal_candidate_push(store, bloom, workpiece, &target_ref, &commit_hex, true);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::executor",
+                    workpiece = %workpiece.0,
+                    target_ref = %target_ref,
+                    %error,
+                    "{kind} push failed; capture stays local-only",
+                );
+                journal_candidate_push(store, bloom, workpiece, &target_ref, &commit_hex, false);
+            }
         }
+    }
+}
+
+/// Record the sha the push just named. Best-effort: a store fault here is
+/// warned and stepped over, never a reason to fail the admit — the push itself
+/// is best-effort, and its record must not be stricter than the thing it
+/// records.
+fn journal_candidate_push(
+    store: &mut dyn StoreBackend,
+    bloom: &BloomId,
+    workpiece: &WorkpieceId,
+    ref_name: &str,
+    commit_hex: &str,
+    published: bool,
+) {
+    if let Err(error) = store.record_candidate_hash(
+        bloom.0.as_bytes(),
+        &workpiece.0,
+        ref_name,
+        commit_hex,
+        CANDIDATE_HASH_OCCASION_SEAL,
+        published,
+    ) {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::executor",
+            workpiece = %workpiece.0,
+            target_ref = %ref_name,
+            %error,
+            "could not journal the candidate hash; the capture push itself stands",
+        );
     }
 }
 
@@ -2566,7 +2606,7 @@ fn pull_and_admit(
     // Make each admitted passing capture reachable on the hosted repo before the
     // fact reaches the reducer — the very next tick can dispatch the follow-on
     // stage to a zero-secret Actions runner that must fetch it (ADR-0152).
-    push_admitted_candidates(&sink.0, correspondence, pusher);
+    push_admitted_candidates(store, &sink.0, correspondence, pusher);
 
     sink.0.into_iter().map(|admission| admission.admit).chain(timed_out).chain(silenced).collect()
 }

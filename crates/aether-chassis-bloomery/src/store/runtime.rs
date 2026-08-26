@@ -245,6 +245,42 @@ pub struct ProofFactRow {
     pub producing_bloom: Vec<u8>,
 }
 
+/// The seal bookend of a [`CandidateHash`] row — written when the executor
+/// reactor pushes (or fails to push) an admitted capture.
+pub const CANDIDATE_HASH_OCCASION_SEAL: &str = "seal";
+/// The land bookend of a [`CandidateHash`] row — written when a landing is
+/// observed, one row per member the bloom resolved.
+pub const CANDIDATE_HASH_OCCASION_LAND: &str = "land";
+
+/// One append-only candidate-hash row (ADR-0211). The ref is working state;
+/// this row is the record of the sha it held, so pruning the ref cannot make
+/// the candidate unreconstructable. Column order is load-bearing from row one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateHash {
+    /// Monotonic append sequence. A second capture for the same member adds a
+    /// row; it does not replace the first.
+    pub sequence: u64,
+    /// The bloom whose ref this row is about (its `BloomId` digest bytes).
+    pub bloom: Vec<u8>,
+    /// The member workpiece the candidate belongs to.
+    pub workpiece: String,
+    /// The ref name that was written (or would have been). Distinguishes a
+    /// candidate ref from a member-checkpoint ref without a second column.
+    pub ref_name: String,
+    /// The commit hex the ref pointed at. Empty on a land-bookend hole — a
+    /// resolved member the record holds no hash for.
+    pub commit_hex: String,
+    /// Which bookend wrote the row: [`CANDIDATE_HASH_OCCASION_SEAL`] or
+    /// [`CANDIDATE_HASH_OCCASION_LAND`].
+    pub occasion: String,
+    /// Whether the named ref was actually published. A failed push records
+    /// the same sha with this false; a land hole is unpublished with an empty
+    /// hex.
+    pub published: bool,
+    /// Host-clock millisecond stamp at the write.
+    pub recorded_unix_millis: u64,
+}
+
 /// Columns of one proof-fact insert. Sequence is assigned by the table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProofFactWrite<'a> {
@@ -460,6 +496,28 @@ pub trait StoreBackend: Send {
     /// member's lane wrote none — the landing assembly falls back rather than
     /// blocking on the absence.
     fn lookup_candidate_commit_message(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<String>>;
+    /// Append one candidate-hash observation (ADR-0211). Insert-only: a later
+    /// capture for the same member adds a row and leaves the first listed. The
+    /// two bookends name themselves via `occasion` —
+    /// [`CANDIDATE_HASH_OCCASION_SEAL`] at the executor push,
+    /// [`CANDIDATE_HASH_OCCASION_LAND`] when a landing is observed.
+    fn record_candidate_hash(
+        &mut self,
+        bloom: &[u8],
+        workpiece: &str,
+        ref_name: &str,
+        commit_hex: &str,
+        occasion: &str,
+        published: bool,
+    ) -> rusqlite::Result<()>;
+    /// `bloom`'s candidate-hash rows in sequence order — the inventory a reader
+    /// lists. Empty when nothing has been observed for it.
+    fn list_candidate_hashes(&mut self, bloom: &[u8]) -> rusqlite::Result<Vec<CandidateHash>>;
+    /// The newest candidate-hash row for `workpiece` across blooms, or `None`
+    /// when the record holds no hash for it. Keyed by workpiece rather than by
+    /// bloom so the land bookend finds an inherited member's commit without
+    /// walking supersession lineage.
+    fn latest_candidate_hash(&mut self, workpiece: &str) -> rusqlite::Result<Option<CandidateHash>>;
     /// Record the construct lane's harness session id for (`bloom`, `workpiece`)
     /// (#5177) — what a same-member Refine dispatch resumes. Last-writer-wins
     /// on the key: a later construct capture supersedes the handle of the
@@ -830,7 +888,13 @@ impl SqliteStore {
 /// the thing it is about. No backfill — a pre-existing row names no
 /// checkout, so the member it belongs to mints a slug on its next dispatch
 /// and starts a session of its own.
-const SCHEMA_VERSION: i64 = 15;
+///
+/// `16` is the candidate-hash journal (ADR-0211): `candidate_hash`,
+/// append-only rows recorded at the executor push and at land. Empty on
+/// creation; a store written before this step holds no observed pushes to
+/// invent, and inventing a hash for history that predates the record would
+/// attest a publish no reactor observed.
+const SCHEMA_VERSION: i64 = 16;
 
 /// Bring a store opened at [`MIGRATIONS`] up to [`SCHEMA_VERSION`], or refuse it.
 ///
@@ -990,6 +1054,12 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
         migration.execute_batch("ALTER TABLE construct_session ADD COLUMN slug TEXT;")?;
     }
 
+    // Version 16 (ADR-0211): the candidate-hash journal. Empty on creation; a
+    // pre-existing store has no observed pushes to invent.
+    if !has_table(&migration, "candidate_hash")? {
+        migration.execute_batch(CANDIDATE_HASH_TABLE)?;
+    }
+
     migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     migration.commit()
 }
@@ -1138,6 +1208,17 @@ CREATE TABLE IF NOT EXISTS candidate_commit_message (
     message   TEXT NOT NULL,
     PRIMARY KEY (bloom, workpiece)
 );
+CREATE TABLE IF NOT EXISTS candidate_hash (
+    sequence             INTEGER PRIMARY KEY AUTOINCREMENT,
+    bloom                BLOB NOT NULL,
+    workpiece            TEXT NOT NULL,
+    ref_name             TEXT NOT NULL,
+    commit_hex           TEXT NOT NULL,
+    occasion             TEXT NOT NULL,
+    published            INTEGER NOT NULL,
+    recorded_unix_millis INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS candidate_hash_by_bloom ON candidate_hash (bloom);
 CREATE TABLE IF NOT EXISTS suppression_request (
     bloom     BLOB NOT NULL,
     workpiece TEXT NOT NULL,
@@ -1228,6 +1309,22 @@ CREATE TABLE IF NOT EXISTS proof_facts (
 );
 ";
 
+/// The ADR-0211 candidate-hash journal. Append-only; sequence is the primary
+/// key so a later capture cannot replace the one it superseded.
+const CANDIDATE_HASH_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS candidate_hash (
+    sequence             INTEGER PRIMARY KEY AUTOINCREMENT,
+    bloom                BLOB NOT NULL,
+    workpiece            TEXT NOT NULL,
+    ref_name             TEXT NOT NULL,
+    commit_hex           TEXT NOT NULL,
+    occasion             TEXT NOT NULL,
+    published            INTEGER NOT NULL,
+    recorded_unix_millis INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS candidate_hash_by_bloom ON candidate_hash (bloom);
+";
+
 /// The per-member construct session a same-member refine resumes (#5177).
 const CONSTRUCT_SESSION_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS construct_session (
@@ -1293,6 +1390,25 @@ fn is_constraint_violation(error: &rusqlite::Error) -> bool {
 /// one spelling, so they cannot drift apart column-wise.
 const ORDER_COLUMNS: &str = "nonce, bloom, workpiece, scope_revision, candidate, displayed_digest, stage, \
                              transformation, configs, profile, deadline_unix_millis";
+
+/// The [`CandidateHash`] columns, in the order [`candidate_hash_from_row`] reads
+/// them. List and latest share this spelling so they cannot drift.
+const CANDIDATE_HASH_COLUMNS: &str =
+    "sequence, bloom, workpiece, ref_name, commit_hex, occasion, published, recorded_unix_millis";
+
+/// Read a [`CandidateHash`] from a row selected with [`CANDIDATE_HASH_COLUMNS`].
+fn candidate_hash_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CandidateHash> {
+    Ok(CandidateHash {
+        sequence: row.get(0)?,
+        bloom: row.get(1)?,
+        workpiece: row.get(2)?,
+        ref_name: row.get(3)?,
+        commit_hex: row.get(4)?,
+        occasion: row.get(5)?,
+        published: row.get(6)?,
+        recorded_unix_millis: u64::try_from(row.get::<_, i64>(7)?).unwrap_or_default(),
+    })
+}
 
 /// Read an [`OutstandingOrder`] from a row selected with [`ORDER_COLUMNS`].
 fn order_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutstandingOrder> {
@@ -1655,6 +1771,48 @@ impl StoreBackend for SqliteStore {
             self.conn.prepare("SELECT message FROM candidate_commit_message WHERE bloom = ?1 AND workpiece = ?2")?;
         let mut rows = stmt.query_map(rusqlite::params![bloom, workpiece], |row| row.get::<_, String>(0))?;
         // The (bloom, workpiece) pair is the primary key, so at most one row.
+        rows.next().transpose()
+    }
+
+    fn record_candidate_hash(
+        &mut self,
+        bloom: &[u8],
+        workpiece: &str,
+        ref_name: &str,
+        commit_hex: &str,
+        occasion: &str,
+        published: bool,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO candidate_hash \
+             (bloom, workpiece, ref_name, commit_hex, occasion, published, recorded_unix_millis) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                bloom,
+                workpiece,
+                ref_name,
+                commit_hex,
+                occasion,
+                published,
+                recorded_column(now_unix_millis()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn list_candidate_hashes(&mut self, bloom: &[u8]) -> rusqlite::Result<Vec<CandidateHash>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CANDIDATE_HASH_COLUMNS} FROM candidate_hash WHERE bloom = ?1 ORDER BY sequence"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![bloom], candidate_hash_from_row)?;
+        rows.collect()
+    }
+
+    fn latest_candidate_hash(&mut self, workpiece: &str) -> rusqlite::Result<Option<CandidateHash>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CANDIDATE_HASH_COLUMNS} FROM candidate_hash WHERE workpiece = ?1 ORDER BY sequence DESC LIMIT 1"
+        ))?;
+        let mut rows = stmt.query_map(rusqlite::params![workpiece], candidate_hash_from_row)?;
         rows.next().transpose()
     }
 
