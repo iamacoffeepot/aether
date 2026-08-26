@@ -261,6 +261,10 @@ fn reported_status(response: &HttpResponse) -> u16 {
     }
 }
 
+fn status_error(response: HttpResponse) -> GithubError {
+    GithubError::Status { status: reported_status(&response), body: response.body }
+}
+
 /// The first backoff window for a refusal that named no reset instant.
 const BACKOFF_BASE: Duration = Duration::from_secs(30);
 
@@ -597,7 +601,7 @@ impl<T: HttpTransport> ReqwestGithub<T> {
         if (200..300).contains(&response.status) {
             Ok(response)
         } else {
-            Err(GithubError::Status { status: reported_status(&response), body: response.body })
+            Err(status_error(response))
         }
     }
 
@@ -610,7 +614,7 @@ impl<T: HttpTransport> ReqwestGithub<T> {
         } else if response.status == 404 {
             Ok(None)
         } else {
-            Err(GithubError::Status { status: reported_status(&response), body: response.body })
+            Err(status_error(response))
         }
     }
 
@@ -1175,7 +1179,7 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
         if (200..300).contains(&response.status) || response.status == 404 || response.status == 422 {
             Ok(())
         } else {
-            Err(git_data_error(GithubError::Status { status: response.status, body: response.body }))
+            Err(git_data_error(status_error(response)))
         }
     }
 
@@ -1255,7 +1259,7 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
             status if (200..300).contains(&status) => {
                 Ok(MergeResult::Merged(decode::<GhMergeCommit>(&response).map_err(git_data_error)?.into_git_commit()))
             }
-            status => Err(git_data_error(GithubError::Status { status, body: response.body })),
+            _ => Err(git_data_error(status_error(response))),
         }
     }
 
@@ -1333,7 +1337,7 @@ impl<T: HttpTransport> PullRequestApi for ReqwestGithub<T> {
                 Ok(PullMergeResult::Merged { merge_commit_sha: decode::<GhMerged>(&response)?.sha })
             }
             status @ (405 | 409) => Ok(PullMergeResult::Refused { status, detail: response.body }),
-            status => Err(GithubError::Status { status, body: response.body }),
+            _ => Err(status_error(response)),
         }
     }
 
@@ -2370,6 +2374,24 @@ mod tests {
             matches!(&second, GithubError::Status { status: 429, body } if body.contains("withholding")),
             "and the remembered one is the same status: {second}",
         );
+    }
+
+    // Tripwire: squash_merge dispatches rather than `request`s so 405/409 stay
+    // outcomes. A spent allowance on that path must still be 429, not a 403
+    // the caller would read as a permanent permission refusal.
+    #[test]
+    fn a_rate_limited_squash_merge_is_reported_as_429() {
+        let github = ReqwestGithub::with_transport(
+            CountingTransport::new(exhausted(u64::from(u32::MAX))),
+            Arc::new(StaticTokenSource::new("t0ken".to_owned())),
+            "https://api.github.com",
+            "octo/shadow",
+        );
+
+        match github.squash_merge_pull_request(7, "deadbeef") {
+            Err(GithubError::Status { status: 429, .. }) => {}
+            other => panic!("a spent allowance on the merge route is 429, got {other:?}"),
+        }
     }
 
     // Tripwire: the same `403` status, refused for a reason waiting cannot fix,
