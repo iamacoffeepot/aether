@@ -14,6 +14,8 @@ mod transcript;
 
 use crossterm::event::KeyEvent;
 use ratatui::Frame;
+#[cfg(test)]
+use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 
 use crate::dto::DigestHex;
@@ -339,7 +341,7 @@ impl Screen {
 }
 
 #[cfg(test)]
-fn row_caret(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>, needle: &str) -> String {
+fn row_caret(terminal: &ratatui::Terminal<TestBackend>, needle: &str) -> String {
     let buffer = terminal.backend().buffer();
     let area = buffer.area();
     for y in 0..area.height {
