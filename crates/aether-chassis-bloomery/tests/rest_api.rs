@@ -26,11 +26,11 @@ use std::time::{Duration, Instant};
 use aether_bloomery::testing::{digest, event};
 use aether_bloomery::{
     AgentProfile, ApprovalPolicy, ApprovalRule, AuthorityDoor, BloomDraft, BloomId, CapabilityLedger, ClaimRefKind,
-    ConfigKind, ConfigRegistry, Digest, DispatchPayload, Evidence, EvidenceKind, Harness, KeyId, Membership,
-    MetricsSeat, NamedPath, ORPHAN_CLAIM_RELEASE_WORDS, Observation, OrphanClaimRelease, PathOrigin, Provenance,
-    ReasoningEffort, SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA, ScopeRevision, ScopeRouting, ScopeVerifyInput,
-    SignatureEnvelope, StageCatalog, StageId, Statement, Tier, ToolPolicy, Topic, WorkpieceId, authorization_message,
-    verify_scope,
+    ConfigKind, ConfigRegistry, ContentAddressed, Digest, DispatchPayload, Evidence, EvidenceKind, Harness, KeyId,
+    Membership, MetricsSeat, NamedPath, ORPHAN_CLAIM_RELEASE_WORDS, Observation, OrphanClaimRelease, PathOrigin,
+    Provenance, ReasoningEffort, SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA, ScopeRevision, ScopeRouting,
+    ScopeVerifyInput, SignatureEnvelope, StageCatalog, StageId, Statement, Tier, ToolPolicy, Topic, WorkpieceId,
+    authorization_message, verify_scope,
 };
 use aether_chassis_bloomery::bloomery::TopicOutbox;
 use aether_chassis_bloomery::store::{CommissionBackend, SqliteStore, StoreBackend};
@@ -157,6 +157,12 @@ fn seed_commission_revision(
 fn send_auth(port: u16, method: &str, path: &str, body: &Value) -> (u16, Value) {
     let bytes = serde_json::to_vec(body).unwrap();
     let (status, response) = try_http_auth(port, method, path, Some(&bytes), Some(CONTROL_TOKEN)).unwrap();
+    (status, serde_json::from_slice(&response).unwrap_or(Value::Null))
+}
+
+/// Authenticated JSON GET used by the commission show route.
+fn get_auth(port: u16, path: &str) -> (u16, Value) {
+    let (status, response) = try_http_auth(port, "GET", path, None, Some(CONTROL_TOKEN)).unwrap();
     (status, serde_json::from_slice(&response).unwrap_or(Value::Null))
 }
 
@@ -1327,6 +1333,99 @@ fn posting_a_scope_run_enqueues_the_host_minted_topic() {
     let entries = store.drain_topic(Topic::ScopeDispatch).expect("drain");
     assert_eq!(entries.len(), 1, "one POST, one outbox row");
     assert_eq!(entries[0].sequence, opened["sequence"].as_u64().expect("sequence is a u64"));
+}
+
+#[test]
+fn a_commission_whose_tip_predates_a_field_append_can_be_shown_and_healed() {
+    // Before the fix, GET /commissions/{id} over a short version-1 row is the
+    // 500 an operator cannot act on. After it, show returns the tip digest and
+    // a successor that names that digest as predecessor brings the id back.
+    let http_port = free_port();
+    let rpc_port = free_port();
+    let (_policy_dir, policy_path) = test_policy();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store_path = store_dir.path().join("bloomery.db");
+    let store_path = store_path.to_str().unwrap();
+
+    let intent = Statement {
+        words: b"intent wp-old".to_vec(),
+        provenance: Provenance::ObservationAttestation(Observation { source: "rest-api".to_owned() }),
+        parents: Vec::new(),
+    };
+    let mut old_bytes = ScopeRevision {
+        schema: SCOPE_REVISION_SCHEMA,
+        workpiece: WorkpieceId("wp-old".to_owned()),
+        predecessor: None,
+        problem: "problem".to_owned(),
+        design: "design".to_owned(),
+        plan: "plan".to_owned(),
+        declared_surface: vec!["docs/guide/**".to_owned()],
+        dogfood_brief: "dogfood".to_owned(),
+        routing: ScopeRouting { size: "M".to_owned(), model: "construct: test".to_owned() },
+        dependencies: Vec::new(),
+        description: "task for wp-old".to_owned(),
+        implements: Vec::new(),
+        declared_crates: Vec::new(),
+        declared_reads: Vec::new(),
+    }
+    .to_canonical();
+    old_bytes.truncate(old_bytes.len() - 8);
+    let old_digest = Digest::of_domain_tagged(ScopeRevision::DOMAIN, &old_bytes);
+    {
+        let mut store = SqliteStore::open(store_path).unwrap();
+        store.create(&WorkpieceId("wp-old".to_owned()), &intent).expect("create commission");
+    }
+    {
+        let conn = rusqlite::Connection::open(store_path).unwrap();
+        conn.execute(
+            "INSERT INTO scope_revisions (digest, commission, predecessor, ordinal, canonical)
+             VALUES (?1, ?2, NULL, 1, ?3)",
+            rusqlite::params![old_digest.as_bytes().as_slice(), "wp-old", old_bytes],
+        )
+        .expect("plant a pre-append revision");
+        conn.execute(
+            "UPDATE commissions SET current_revision = ?1, current_ordinal = 1 WHERE id = ?2",
+            rusqlite::params![old_digest.as_bytes().as_slice(), "wp-old"],
+        )
+        .expect("point the tip at the planted row");
+    }
+
+    let _coordinator = spawn_with_store(http_port, rpc_port, &policy_path, store_path);
+    wait_for_200(http_port, "/view");
+
+    let (status, shown) = get_auth(http_port, "/commissions/wp-old");
+    assert_eq!(status, 200, "an older tip must not 500: {shown:?}");
+    assert_eq!(digest_at(&shown["current_revision"]), old_digest, "show names the tip an operator can chain from");
+    assert!(
+        shown["current_unreadable"].as_str().is_some_and(|reason| reason.contains("malformed")),
+        "the body is named unreadable, not silently absent: {shown:?}"
+    );
+
+    let successor = ScopeRevision {
+        schema: SCOPE_REVISION_SCHEMA,
+        workpiece: WorkpieceId("wp-old".to_owned()),
+        predecessor: Some(old_digest),
+        problem: "healed".to_owned(),
+        design: "design".to_owned(),
+        plan: "plan".to_owned(),
+        declared_surface: vec!["docs/guide/**".to_owned()],
+        dogfood_brief: "dogfood".to_owned(),
+        routing: ScopeRouting { size: "M".to_owned(), model: "construct: test".to_owned() },
+        dependencies: Vec::new(),
+        description: "task for wp-old".to_owned(),
+        implements: Vec::new(),
+        declared_crates: Vec::new(),
+        declared_reads: Vec::new(),
+    };
+    let (status, written) =
+        send_auth(http_port, "POST", "/commissions/wp-old/revisions", &serde_json::json!({ "revision": successor }));
+    assert_eq!(status, 201, "writing forward heals the id: {written:?}");
+    let next = digest_at(&written["digest"]);
+
+    let (status, shown) = get_auth(http_port, "/commissions/wp-old");
+    assert_eq!(status, 200, "{shown:?}");
+    assert_eq!(digest_at(&shown["current_revision"]), next);
+    assert_eq!(shown["current"]["problem"], "healed");
 }
 
 /// Endpoint laws the REST surface documents: a limit above the clamp is applied

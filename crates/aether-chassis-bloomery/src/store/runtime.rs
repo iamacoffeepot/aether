@@ -2838,6 +2838,7 @@ impl NativeActor for StoreCapability {
                     current: view.current.map(|revision| revision.to_canonical()),
                     approvals,
                     scope_verify: view.scope_verify.map(|report| report.to_canonical()),
+                    current_unreadable: view.current_unreadable.map(|error| error.to_string()),
                 }
             }
             Err(error) => LoadCommissionResult::Err { error: error.to_string() },

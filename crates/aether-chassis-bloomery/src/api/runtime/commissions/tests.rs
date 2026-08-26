@@ -118,6 +118,7 @@ fn every_route_result_has_a_success_status() {
             current: None,
             approvals: Vec::new(),
             scope_verify: None,
+            current_unreadable: None,
         })
         .status,
         200
@@ -128,6 +129,53 @@ fn every_route_result_has_a_success_status() {
     assert_eq!(scope_run_response(EnqueueScopeRunResult::Missing { id: "wp-1".to_owned() }).status, 404);
     assert_eq!(scope_run_response(EnqueueScopeRunResult::AlreadyInFlight { ordinal: 1 }).status, 409);
     assert_eq!(show_response(LoadCommissionResult::Missing { id: "wp-1".to_owned() }).status, 404);
+}
+
+#[test]
+fn an_unreadable_current_revision_is_shown_not_a_500() {
+    // A 500 on an intact older row is the operator-facing form of taking the
+    // whole commission down: show cannot print the tip, and scope cannot name
+    // it as predecessor. The body is unreadable; the head is not.
+    let digest = vec![7; 32];
+    let marked = show_response(LoadCommissionResult::Ok {
+        id: "wp-1".to_owned(),
+        intent: digest.clone(),
+        current_revision: Some(digest.clone()),
+        current_ordinal: Some(1),
+        status: "open".to_owned(),
+        current: None,
+        approvals: Vec::new(),
+        scope_verify: None,
+        current_unreadable: Some("canonical commission bytes are malformed".to_owned()),
+    });
+    let from_bytes = show_response(LoadCommissionResult::Ok {
+        id: "wp-1".to_owned(),
+        intent: digest.clone(),
+        current_revision: Some(digest),
+        current_ordinal: Some(1),
+        status: "open".to_owned(),
+        current: Some(vec![0xff, 0x00]),
+        approvals: Vec::new(),
+        scope_verify: None,
+        current_unreadable: None,
+    });
+    assert_eq!(marked.status, 200, "a store-marked unreadable tip is still a commission: {}", error_text(&marked));
+    assert_eq!(
+        from_bytes.status,
+        200,
+        "bytes this binary cannot decode are still a commission: {}",
+        error_text(&from_bytes)
+    );
+    assert!(
+        error_text(&marked).contains("canonical commission bytes are malformed"),
+        "the marker carries the reason: {}",
+        error_text(&marked)
+    );
+    assert!(
+        error_text(&from_bytes).contains("malformed"),
+        "the api-side decode names the same class of failure: {}",
+        error_text(&from_bytes)
+    );
 }
 
 #[test]
@@ -251,6 +299,7 @@ fn loaded_open(id: &str, revision: &ScopeRevision) -> LoadCommissionResult {
         current: Some(revision.to_canonical()),
         approvals: Vec::new(),
         scope_verify: None,
+        current_unreadable: None,
     }
 }
 
@@ -342,6 +391,7 @@ fn a_commission_with_nothing_to_approve_is_refused() {
         current,
         approvals: Vec::new(),
         scope_verify: None,
+        current_unreadable: None,
     };
     let unscoped = LoadCommissionResult::Ok {
         id: "wp-1".to_owned(),
@@ -352,6 +402,7 @@ fn a_commission_with_nothing_to_approve_is_refused() {
         current: None,
         approvals: Vec::new(),
         scope_verify: None,
+        current_unreadable: None,
     };
 
     assert_eq!(refused_auto(auto_approval_write(Some(&ladder()), &id, landed)).status, 422, "a closed commission");
