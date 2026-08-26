@@ -326,6 +326,7 @@ fn actor_setups(
             lane_target_budget_bytes: coordinator.lane_target_budget_bytes,
             target_scan_interval_secs: coordinator.lane_target_scan_interval_secs,
             evidence_retention_days: coordinator.evidence_retention_days,
+            archive_base: coordinator.archive_base.clone(),
             poll_interval_secs: github_poll_interval_secs,
             repo: repo.display().to_string(),
         },
@@ -659,6 +660,7 @@ impl BootableChassis for BloomeryChassis {
                 correspondence: Some(setups.correspondence),
                 pusher: Some(setups.pusher),
                 worktree_base,
+                archive_base: coordinator.archive_base.clone(),
                 artifacts_root,
                 control_token: coordinator.http_control_token,
                 doctor: Some(setups.doctor_board),
@@ -707,6 +709,7 @@ impl BootableChassis for BloomeryChassis {
             .with_actor::<BloomeryApiCapability>(ApiParams {
                 approval_policy_file,
                 worktree_base,
+                archive_base: coordinator.archive_base.clone(),
                 artifacts_root,
                 control_token: coordinator.http_control_token,
             }))

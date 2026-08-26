@@ -8,14 +8,15 @@
 //! `aether-bloomery` dependency.
 
 pub use aether_bloomery::{
-    AdjudicateRequest, BloomDispatchView, BloomDispatchesView, CancelCommissionRequest, ClaimRefView, ClaimsView,
-    CommissionApprovalView, CommissionCancelledView, CommissionCreatedView, CommissionHeadView, CommissionReopenedView,
-    CommissionShowView, CommissionsView, CoordinatorLogEntry, CoordinatorLogsView, CreateCommissionRequest,
-    DispatchEvidenceView, DispatchFilePage, DispatchProcessView, DraftPatch, DraftView, DraftsView, ErrorView,
-    GrantRequest, HoldRequest, JournalEntry, JournalView, MemberProjection, OutcomeView, ReleaseAcceptedView,
-    ReleaseRequest, ReopenCommissionRequest, RepairRequest, RetryRequest, ReverifyBaseRequest,
-    ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, SealRequest, SupersedeRequest,
-    SuppressionAnswerRequest, WithdrawRequest, WorkpiecesView, WriteRevisionRequest,
+    AdjudicateRequest, ArchiveFailureView, ArchiveListView, ArchivePassView, ArchiveRecordView, BloomDispatchView,
+    BloomDispatchesView, CancelCommissionRequest, ClaimRefView, ClaimsView, CommissionApprovalView,
+    CommissionCancelledView, CommissionCreatedView, CommissionHeadView, CommissionReopenedView, CommissionShowView,
+    CommissionsView, CoordinatorLogEntry, CoordinatorLogsView, CreateCommissionRequest, DispatchEvidenceView,
+    DispatchFilePage, DispatchProcessView, DraftPatch, DraftView, DraftsView, ErrorView, GrantRequest, HoldRequest,
+    JournalEntry, JournalView, MemberProjection, OutcomeView, ReleaseAcceptedView, ReleaseRequest,
+    ReopenCommissionRequest, RepairRequest, RetryRequest, ReverifyBaseRequest, ScopeRevisionWrittenView,
+    ScopeRunOpenedView, ScopeRunRequest, SealRequest, SupersedeRequest, SuppressionAnswerRequest, WithdrawRequest,
+    WorkpiecesView, WriteRevisionRequest,
 };
 
 use serde::{Deserialize, Serialize};

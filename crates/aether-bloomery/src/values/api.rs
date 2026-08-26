@@ -659,6 +659,52 @@ pub struct DispatchEvidenceView {
     pub process: Option<DispatchProcessView>,
     /// File names in the evidence directory, sorted, bounded.
     pub files: Vec<String>,
+    /// Filesystem path of the archived evidence directory when the record
+    /// lives on the archive tier. Absent when the directory is still under
+    /// the working root, or when it is gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<String>,
+}
+
+/// One archived record as `GET /archive` and `POST /archive` render it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchiveRecordView {
+    /// `evidence` or `session`.
+    pub class: String,
+    /// The name the record was addressed by.
+    pub name: String,
+    /// Path on the tier.
+    pub path: String,
+    /// Total file bytes under the tree.
+    pub bytes: u64,
+}
+
+/// Why one record in an otherwise successful archive pass did not move.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchiveFailureView {
+    /// `evidence` or `session`.
+    pub class: String,
+    /// The name the record was addressed by.
+    pub name: String,
+    /// Why the move did not complete.
+    pub error: String,
+}
+
+/// `POST /archive` — records the pass moved, plus per-record failures.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchivePassView {
+    /// Records that now live on the tier.
+    pub records: Vec<ArchiveRecordView>,
+    /// Records that could not move; each is still at its working path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<ArchiveFailureView>,
+}
+
+/// `GET /archive` — the records currently on the tier.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchiveListView {
+    /// Evidence then session trees, each class sorted by name.
+    pub records: Vec<ArchiveRecordView>,
 }
 
 /// The pid / pgid / starttime / boot id a lane recorded at spawn.

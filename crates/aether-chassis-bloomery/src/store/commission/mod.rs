@@ -1019,6 +1019,17 @@ fn load_approvals(conn: &Connection, scope: Digest) -> Result<Vec<Statement>, Co
     Ok(approvals)
 }
 
+/// Whether `workpiece`'s commission is landed or cancelled. A missing row
+/// reads as live, matching the janitor's "unknown is not eligible" posture.
+pub fn commission_is_resolved(conn: &Connection, workpiece: &str) -> rusqlite::Result<bool> {
+    let status: Option<String> =
+        conn.query_row("SELECT status FROM commissions WHERE id = ?1", [workpiece], |row| row.get(0)).optional()?;
+    Ok(matches!(
+        status.as_deref().and_then(CommissionStatus::parse),
+        Some(CommissionStatus::Landed | CommissionStatus::Cancelled)
+    ))
+}
+
 fn list_commissions(
     conn: &Connection,
     status: Option<CommissionStatus>,

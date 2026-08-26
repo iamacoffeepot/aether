@@ -125,6 +125,8 @@ pub struct ApiCapabilityState {
     pub(super) pusher: Option<Arc<dyn CandidatePush>>,
     /// Scratch-worktree base the evidence directories live under.
     pub(super) worktree_base: PathBuf,
+    /// Archive-tier root. Evidence that has left the working root is read here.
+    pub(super) archive_base: PathBuf,
     /// Optional artifacts handle for resolving study cost on the dispatch list.
     pub(super) artifacts: Option<ArtifactsCapabilityState>,
     /// Staged workpieces, keyed by their workpiece id.
@@ -401,6 +403,12 @@ pub(super) enum Routed {
         /// The workpiece the path named.
         id: WorkpieceId,
     },
+    /// Relay an archive pass to the janitor.
+    #[cfg(feature = "github")]
+    ArchiveRecords(crate::bloomery::ArchiveRecords),
+    /// Relay a tier listing to the janitor.
+    #[cfg(feature = "github")]
+    ListArchive(crate::bloomery::ListArchive),
     /// Relay a commission list to the store.
     ListCommissions(ListCommissions),
     /// Relay an open-commission list rendered as workpieces.
@@ -503,6 +511,10 @@ pub(super) fn finish(
         Routed::RecordConfig(request) => ctx.defer(&request).to::<StoreCapability>(),
         #[cfg(feature = "github")]
         Routed::EnumerateClaims(request) => ctx.defer(&request).to::<SourceCapability>(),
+        #[cfg(feature = "github")]
+        Routed::ArchiveRecords(request) => ctx.defer(&request).to::<crate::bloomery::JanitorReactorCapability>(),
+        #[cfg(feature = "github")]
+        Routed::ListArchive(request) => ctx.defer(&request).to::<crate::bloomery::JanitorReactorCapability>(),
         Routed::DeferredVerify { correlation, subject, event } => {
             state.verifying.insert(correlation, VerifyPending { inbound: ctx.take_inbound(), subject, event: *event });
             http::Outcome::Deferred

@@ -118,6 +118,18 @@ impl<'a> Client<'a> {
         self.get(&format!("/commissions/{id}"))
     }
 
+    /// Run the between-blooms archive pass. A `409` refusal exits as an error
+    /// so a scripted operator run does not read a between-blooms block as
+    /// success.
+    pub fn archive_pass(&self) -> Result<super::dto::ArchivePassView> {
+        http::json(self.endpoint, "POST", "/archive", None::<&()>)
+    }
+
+    /// List the records currently on the archive tier.
+    pub fn list_archive(&self) -> Result<super::dto::ArchiveListView> {
+        self.get("/archive")
+    }
+
     /// Write `revision` as the commission's next scope revision, with sidecar
     /// evidence about it. The revision's bytes stay the signed subject.
     ///

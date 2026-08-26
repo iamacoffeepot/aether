@@ -60,6 +60,8 @@ refused with `approval policy unavailable; seal fails closed`.
 | `GET /claims/releases/{digest}` | One authorized release's state — pending, or its terminal result. |
 | `GET /journal` | The whole journal, decoded, oldest first. |
 | `GET /artifacts/{digest}` | The content-addressed artifact bytes, or `404`. |
+| `POST /archive` | Move eligible evidence directories and resolved session trees onto the archive tier (ADR-0211). Refuses with `409` unless the coordinator is between blooms. Nothing is ever deleted. |
+| `GET /archive` | List the records currently on the archive tier. |
 
 Request and response bodies are JSON over the `aether-bloomery` value types
 (`Workpiece`, `BloomDraft`, `Membership`, `ViewDocument`, …) via serde. Three
@@ -358,6 +360,45 @@ curl -s -X POST localhost:8910/blooms/<bloom-hex>/supersede \
 Fetch the fault report itself the way you fetch any artifact —
 `curl -s localhost:8910/artifacts/<hex-of-evidence>` — to read what the lane
 said it could not do.
+
+## The archive tier
+
+ADR-0211 classifies every artefact the coordinator produces as a record, working
+state, or a cache. **No coordinator path deletes a record.** Evidence directories
+and session trees stay until an operator archives them; archival changes where
+a record lives, never whether it exists.
+
+The three classes, and where each goes:
+
+| Class | What | Where it lives | Who moves it |
+|---|---|---|---|
+| Record | Evidence directories, session trees, the journal, the artifact store | Working root, then the archive tier | `POST /archive` / `cargo xtask bloom archive` |
+| Working state | Nonce-keyed dispatch checkouts, terminal working refs | Reclaimed between blooms by the janitor tick | The tick, never the archive pass |
+| Cache | Per-slot cargo target directories | The configured `lane_target_base` | Disk-pressure eviction |
+
+The pass refuses unless the coordinator is between blooms: no bloom active and
+unlanded, and no order outstanding. A `409` names the walking bloom or the
+outstanding nonce. While work walks, a session tree renamed out from under a
+resumable conversation is the 2026-08-25 board-5435 failure; the operator stays
+the trigger for that reason.
+
+Layout under `AETHER_BLOOMERY_ARCHIVE_BASE` (empty resolves to
+`<local_worktree_base>/archive`):
+
+```
+<archive-base>/
+  evidence/<nonce>-evidence/
+  sessions/<slug>/
+```
+
+Each record keeps the name it was addressed by. `GET /archive` is a directory
+listing of that tree. An archived dispatch still reads through
+`GET /dispatches/{nonce}` and its transcript page: the header reports
+`retained: true`, names the tier path in `archived`, and carries no swept
+notice.
+
+`cargo xtask bloom archive` posts the pass; `--list` enumerates the tier.
+A refusal exits non-zero so a scripted run does not read a `409` as success.
 
 ## How it works
 
