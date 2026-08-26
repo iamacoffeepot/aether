@@ -1,11 +1,13 @@
 //! Typed verifier-failure identities and their canonical bounded set (ADR-0178).
 
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt;
 use core::iter::FromIterator;
 
 use aether_data::Schema;
 use aether_data::schema::{LabelCell, LabelNode, SchemaCell, SchemaType};
+use aether_data::wire::{Error as WireError, WireDecode, WireEncode};
 use serde::de::{Error as DeError, SeqAccess, Visitor};
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -133,6 +135,31 @@ impl Schema for VerifyFailureSet {
     const SCHEMA: SchemaType = SchemaType::Vec(SchemaCell::Static(&VerifyFailure::SCHEMA));
     const LABEL: Option<&'static str> = Some("aether.bloomery.verify_failure_set");
     const LABEL_NODE: LabelNode = LabelNode::Vec(LabelCell::Static(&VerifyFailure::LABEL_NODE));
+}
+
+impl WireEncode for VerifyFailure {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
+        self.as_str().encode(out)
+    }
+}
+
+impl<'de> WireDecode<'de> for VerifyFailure {
+    fn decode(cursor: &mut &'de [u8]) -> Result<Self, WireError> {
+        let name = String::decode(cursor)?;
+        Self::from_name(&name).ok_or(WireError::Message(name))
+    }
+}
+
+impl WireEncode for VerifyFailureSet {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
+        self.iter().collect::<Vec<_>>().encode(out)
+    }
+}
+
+impl<'de> WireDecode<'de> for VerifyFailureSet {
+    fn decode(cursor: &mut &'de [u8]) -> Result<Self, WireError> {
+        Ok(Vec::<VerifyFailure>::decode(cursor)?.into_iter().collect())
+    }
 }
 
 struct VerifyFailureVisitor;

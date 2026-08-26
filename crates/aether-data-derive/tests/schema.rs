@@ -8,6 +8,9 @@
 fn ui() {
     let t = trybuild::TestCases::new();
     t.pass("tests/ui/accepts_default_wire_field.rs");
+    t.pass("tests/ui/accepts_cast_and_nested_enum.rs");
     t.compile_fail("tests/ui/rejects_skipped_struct_field.rs");
     t.compile_fail("tests/ui/rejects_skipped_enum_field.rs");
+    t.compile_fail("tests/ui/rejects_out_of_vocabulary_rc.rs");
+    t.compile_fail("tests/ui/rejects_out_of_vocabulary_hashset.rs");
 }

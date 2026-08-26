@@ -366,6 +366,7 @@ name = "aether-codec"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-data",
+ "aether-test-fixtures-kinds",
  "bytemuck",
  "proptest",
  "serde",

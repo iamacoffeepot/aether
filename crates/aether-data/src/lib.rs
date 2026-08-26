@@ -12,8 +12,8 @@
 //!     `AnyBitPattern`. Encoded as their native byte layout; decoded
 //!     zero-copy to `&T` or `&[T]`. Used for vertex streams, fixed-
 //!     layout structs, anything where throughput or zero-copy matters.
-//!   - Structural: `serde::Serialize + DeserializeOwned` types. Encoded
-//!     with the structured wire format (Rust-native, varint-compact, no_std-friendly).
+//!   - Structural: types that implement `Schema` (and therefore the owned
+//!     wire codec). Encoded with the structured wire format (ADR-0118).
 //!     Used for small control messages with Option/Vec/enum shape.
 //!
 //! A type picks one tier — not both — as part of its contract.
@@ -477,11 +477,10 @@ pub mod __inventory {
 pub mod __derive_runtime {
     pub use crate::canonical;
     pub use crate::schema::{EnumVariant, KindLabels, LabelCell, LabelNode, NamedField, SchemaType, VariantLabel};
+    use crate::wire;
+    pub use crate::wire::{WireDecode, WireEncode, decode_bytes, encode_bytes};
     pub use alloc::borrow::Cow;
     pub use alloc::vec::Vec;
-    use serde::de::DeserializeOwned;
-
-    use crate::wire;
 
     /// Cast-shape decode helper. Routes through `bytemuck::pod_read_unaligned`
     /// after a length check so the Kind derive can emit a uniform call
@@ -512,14 +511,13 @@ pub mod __derive_runtime {
 
     /// Wire-shape decode helper. Sibling of `decode_cast` for
     /// schema-shaped kinds (anything carrying `Vec` / `String` /
-    /// `Option` / a tagged enum). `T` satisfies `DeserializeOwned`
-    /// via the user's `#[derive(Deserialize)]`; the bound lives on
-    /// this helper rather than on `Kind` so cast kinds stay
-    /// independent of `serde`. Reads the unversioned wire body
-    /// (ADR-0118) directly.
+    /// `Option` / a tagged enum). `T` satisfies [`WireDecode`] via
+    /// `#[derive(Schema)]`; the bound lives on this helper rather
+    /// than on `Kind` so cast kinds stay independent of the structured
+    /// codec. Reads the unversioned wire body (ADR-0118) directly.
     #[must_use]
-    pub fn decode_wire<T: DeserializeOwned>(bytes: &[u8]) -> Option<T> {
-        wire::from_bytes(bytes).ok()
+    pub fn decode_wire<T: for<'de> WireDecode<'de>>(bytes: &[u8]) -> Option<T> {
+        wire::decode_from_slice(bytes).ok()
     }
 
     /// Cast-shape encode helper. Mirror of `decode_cast`. Routes
@@ -532,11 +530,11 @@ pub mod __derive_runtime {
     }
 
     /// Wire-shape encode helper. Mirror of `decode_wire`. The
-    /// `Serialize` bound lives here, not on `Kind`, so cast kinds stay
-    /// independent of `serde`. Emits the unversioned wire body
-    /// (ADR-0118); encoding fails only past the `u32` length ceiling.
-    pub fn encode_wire<T: serde::Serialize>(value: &T) -> Vec<u8> {
-        wire::to_vec(value).expect("wire encode to Vec fails only past the u32 length ceiling")
+    /// [`WireEncode`] bound lives here, not on `Kind`, so cast kinds stay
+    /// independent of the structured codec. Emits the unversioned wire
+    /// body (ADR-0118); encoding fails only past the `u32` length ceiling.
+    pub fn encode_wire<T: WireEncode>(value: &T) -> Vec<u8> {
+        wire::encode_to_vec(value).expect("wire encode to Vec fails only past the u32 length ceiling")
     }
 }
 

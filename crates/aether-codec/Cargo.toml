@@ -38,6 +38,7 @@ tracing = { workspace = true }
 # kinds) or a `serde` deserialize. Production callers don't need any of
 # this — only pulled in for `cargo test`.
 aether-data = { path = "../aether-data", features = ["derive"] }
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
 bytemuck = { workspace = true, features = ["derive"] }
 # Issue 1561: the schema-driven round-trip property
 # (`decode_schema(encode_schema(v)) == v`) over a generated `SchemaType`

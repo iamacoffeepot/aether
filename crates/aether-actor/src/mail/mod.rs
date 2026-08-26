@@ -109,6 +109,18 @@ impl Schema for ReplyHandle {
     const LABEL_NODE: LabelNode = <u32 as Schema>::LABEL_NODE;
 }
 
+impl wire::WireEncode for ReplyHandle {
+    fn encode(&self, out: &mut alloc::vec::Vec<u8>) -> Result<(), wire::Error> {
+        wire::WireEncode::encode(&self.raw, out)
+    }
+}
+
+impl<'de> wire::WireDecode<'de> for ReplyHandle {
+    fn decode(cursor: &mut &'de [u8]) -> Result<Self, wire::Error> {
+        wire::WireDecode::decode(cursor).map(|raw| Self { raw })
+    }
+}
+
 /// Inbound mail, as received by the `#[actor]`-synthesized
 /// `__aether_dispatch` (driven by the guest's `receive` FFI export).
 /// Wraps the raw

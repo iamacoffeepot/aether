@@ -1,0 +1,52 @@
+error[E0277]: the trait bound `Rc<u32>: Schema` is not satisfied
+ --> tests/ui/rejects_out_of_vocabulary_rc.rs:9:14
+  |
+9 |     wrapped: Rc<u32>,
+  |              ^^^^^^^ the trait `Schema` is not implemented for `Rc<u32>`
+  |
+  = help: the following other types implement trait `Schema`:
+            ()
+            BTreeMap<K, V>
+            Counted
+            DagId
+            EngineId
+            KindId
+            MailId
+            MailboxId
+          and $N others
+
+error[E0277]: the trait bound `Rc<u32>: WireEncode` is not satisfied
+ --> tests/ui/rejects_out_of_vocabulary_rc.rs:7:10
+  |
+7 | #[derive(aether_data::Schema)]
+  |          ^^^^^^^^^^^^^^^^^^^ the trait `WireEncode` is not implemented for `Rc<u32>`
+  |
+  = help: the following other types implement trait `WireEncode`:
+            ()
+            ActorLineageRecord
+            BTreeMap<K, V>
+            Box<T>
+            Counted
+            Cow<'_, [T]>
+            Cow<'_, str>
+            DagId
+          and $N others
+  = note: this error originates in the derive macro `aether_data::Schema` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `Rc<u32>: WireDecode<'_>` is not satisfied
+ --> tests/ui/rejects_out_of_vocabulary_rc.rs:7:10
+  |
+7 | #[derive(aether_data::Schema)]
+  |          ^^^^^^^^^^^^^^^^^^^ the trait `WireDecode<'_>` is not implemented for `Rc<u32>`
+  |
+  = help: the following other types implement trait `WireDecode<'de>`:
+            ()
+            ActorLineageRecord
+            BTreeMap<K, V>
+            Box<T>
+            Counted
+            Cow<'static, [T]>
+            Cow<'static, str>
+            DagId
+          and $N others
+  = note: this error originates in the derive macro `aether_data::Schema` (in Nightly builds, run with -Z macro-backtrace for more info)

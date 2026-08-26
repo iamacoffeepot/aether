@@ -14,6 +14,12 @@
 //! slow. The deserialize side also accepts a seq of integers so
 //! self-describing formats that render bytes as an array (`serde_json`)
 //! keep decoding exactly as the plain `Vec<u8>` impl did.
+//!
+//! This attribute no longer affects the Kind wire path (ADR-0188):
+//! `#[derive(Schema)]` routes `Vec<u8>` fields through the memcpy arm by
+//! the same `is_vec_u8` match that emits `SchemaType::Bytes`. It still
+//! matters for serde JSON/TOML edges and for `to_vec` on types that have
+//! not yet dropped their serde derive.
 
 use alloc::vec::Vec;
 use core::fmt;
