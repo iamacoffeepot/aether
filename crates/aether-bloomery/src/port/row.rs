@@ -60,7 +60,7 @@ impl Error for RowSchemaError {}
 
 /// Encode `value` under the writing-schema identity `schema`.
 ///
-/// The current identity ([`Kind::NAME`]) writes the storage shape. Absent or
+/// The current identity ([`aether_data::Kind::NAME`]) writes the storage shape. Absent or
 /// [`POSITIONAL_ROW_SCHEMA`] writes the sealed positional shape. Anything else
 /// is [`RowSchemaError::NoUpcast`].
 ///
@@ -79,7 +79,7 @@ pub fn encode_row<T: Storage + Serialize + Clone>(value: &T, schema: Option<&str
 
 /// Decode persisted `bytes` under the writing-schema identity `schema`.
 ///
-/// The current identity ([`Kind::NAME`]) decodes the storage shape. Absent or
+/// The current identity ([`aether_data::Kind::NAME`]) decodes the storage shape. Absent or
 /// [`POSITIONAL_ROW_SCHEMA`] decodes the sealed positional shape. Anything else
 /// is [`RowSchemaError::NoUpcast`].
 ///

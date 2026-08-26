@@ -20,7 +20,7 @@ use super::{
 };
 use crate::bloomery::{ScopeRunRefusal, TopicOutbox, open_scope_run};
 use crate::store::runtime::{SqliteStore, StoreBackend, StoreCapabilityState};
-use crate::store::{JournalWrite, now_unix_millis};
+use crate::store::{JournalWrite, OutboxEntry, now_unix_millis};
 
 fn memory() -> SqliteStore {
     SqliteStore::open(":memory:").expect("in-memory store opens")
@@ -30,7 +30,7 @@ fn workpiece(id: &str) -> WorkpieceId {
     WorkpieceId(id.to_owned())
 }
 
-fn decode_projection(entry: &crate::store::OutboxEntry) -> CommissionProjection {
+fn decode_projection(entry: &OutboxEntry) -> CommissionProjection {
     decode_row(&entry.payload, entry.payload_schema.as_deref()).expect("payload")
 }
 
