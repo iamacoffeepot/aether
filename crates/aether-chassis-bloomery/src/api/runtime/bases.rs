@@ -20,9 +20,8 @@ impl ApiCapabilityState {
     /// `Fact::BaseReverify` and nothing else. The reducer overwrites the red as
     /// pending and queues the dispatch; the gates still judge.
     pub(super) fn reverify_base(base: &str, body: &[u8]) -> Routed {
-        let base = match digest_from_hex(base) {
-            Some(digest) => digest,
-            None => return Routed::Reply(error_response(400, "base is not a 32-byte hex digest")),
+        let Some(base) = digest_from_hex(base) else {
+            return Routed::Reply(error_response(400, "base is not a 32-byte hex digest"));
         };
         let request: ReverifyBaseRequest = match hex::from_slice(body) {
             Ok(request) => request,
