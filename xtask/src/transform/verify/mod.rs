@@ -1134,13 +1134,9 @@ impl<'a> SpawnRunner<'a> {
     /// A workspace graph that would not load does the same — the cost of a
     /// wasm cross-build is the fail-safe, not the fail-toward-excusal.
     fn should_prepare(&mut self, invocation: &VerifyInvocation, package: Option<&str>) -> bool {
-        if invocation.prepare.is_none() {
-            return false;
-        }
-        let Some(package) = package else {
-            return true;
-        };
-        self.workspace().is_none_or(|workspace| workspace.needs_dist_prepare(package))
+        invocation.prepare.is_some()
+            && package
+                .is_none_or(|package| self.workspace().is_none_or(|workspace| workspace.needs_dist_prepare(package)))
     }
 
     fn workspace(&mut self) -> Option<&Workspace> {
@@ -1178,9 +1174,6 @@ impl<'a> SpawnRunner<'a> {
         at: Option<&Path>,
         notices: &[String],
     ) -> Result<Captured> {
-        for notice in notices {
-            eprintln!("{notice}");
-        }
         let output =
             run_captured(self.replay_command(invocation, test, at)).with_context(|| format!("replay {test}"))?;
         let mut stderr = notices.join("\n").into_bytes();
@@ -1255,16 +1248,11 @@ fn replay_package(test: &str) -> Option<&str> {
 /// An unresolvable binary id keeps the unnarrowed argv — building too much is
 /// slow, building the wrong crate is a [`ReplayVerdict::Unreached`].
 fn replay_args(invocation: &VerifyInvocation, test: &str) -> Vec<String> {
-    let mut args: Vec<String> = match replay_package(test) {
-        Some(package) => invocation
-            .args
-            .iter()
-            .filter(|arg| **arg != "--workspace")
-            .map(|arg| (*arg).to_owned())
-            .chain(["-p".to_owned(), package.to_owned()])
-            .collect(),
-        None => invocation.args.iter().map(|arg| (*arg).to_owned()).collect(),
-    };
+    let stated = || invocation.args.iter().map(|arg| (*arg).to_owned());
+    let mut args: Vec<String> = replay_package(test).map_or_else(
+        || stated().collect(),
+        |package| stated().filter(|arg| arg != "--workspace").chain(["-p".to_owned(), package.to_owned()]).collect(),
+    );
     args.extend(["-E".to_owned(), nextest_filter(test)]);
     args
 }
@@ -1276,16 +1264,23 @@ fn replay_notices(test: &str, prepared: Option<bool>) -> Vec<String> {
     if replay_package(test).is_none() {
         notices.push(format!("replay: could not resolve a package from `{test}`; keeping the unnarrowed argv"));
     }
-    match prepared {
-        Some(true) => {
-            let package = replay_package(test).unwrap_or("the unnarrowed workspace");
-            notices.push(format!("replay: running the component-wasm prepare; {package} tests need it"));
-        }
-        Some(false) => {
-            let package = replay_package(test).unwrap_or("this package");
-            notices.push(format!("replay: skipped the component-wasm prepare; {package} tests do not need it"));
-        }
-        None => {}
+    if let Some(running) = prepared {
+        let package = replay_package(test).unwrap_or(if running {
+            "the unnarrowed workspace"
+        } else {
+            "this package"
+        });
+        let action = if running {
+            "running the component-wasm prepare"
+        } else {
+            "skipped the component-wasm prepare"
+        };
+        let reason = if running {
+            "need it"
+        } else {
+            "do not need it"
+        };
+        notices.push(format!("replay: {action}; {package} tests {reason}"));
     }
     notices
 }

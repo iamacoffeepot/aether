@@ -112,10 +112,10 @@ impl Excused {
     /// One ledger line: the test, what it was replayed against, and the replay's
     /// wall-clock when the spawn measured one.
     fn line(&self, relation: &str) -> String {
-        match self.duration_millis {
-            Some(millis) => format!("  {} ({relation} {}; {millis} millis)", self.test, self.replayed),
-            None => format!("  {} ({relation} {})", self.test, self.replayed),
-        }
+        self.duration_millis.map_or_else(
+            || format!("  {} ({relation} {})", self.test, self.replayed),
+            |millis| format!("  {} ({relation} {}; {millis} millis)", self.test, self.replayed),
+        )
     }
 }
 
