@@ -116,10 +116,8 @@ impl BootLog {
     pub fn draining(stderr: ChildStderr) -> Self {
         let announced = Arc::new((Mutex::new(Announced::default()), Condvar::new()));
         let reader = Arc::clone(&announced);
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "a test-harness thread outside any substrate: it owns a child's stderr pipe and ends at end-of-file"
-        )]
+        #[allow(clippy::disallowed_methods)]
+        // aether-suppression-request: a test-harness thread outside any substrate: it owns a child's stderr pipe and ends at end-of-file
         thread::spawn(move || drain(stderr, &reader));
 
         Self { announced }
