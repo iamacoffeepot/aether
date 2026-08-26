@@ -19,6 +19,15 @@ use crate::tagged_id::{Tag, with_tag};
 use crate::{Schema, fnv1a_64_prefixed};
 use alloc::borrow::Cow;
 
+static U64_SCHEMA: SchemaType = SchemaType::Scalar(Primitive::U64);
+static WIDE_SCHEMA: SchemaType = SchemaType::Struct {
+    fields: Cow::Borrowed(&[
+        NamedField { name: Cow::Borrowed("id"), ty: SchemaType::Scalar(Primitive::U64) },
+        NamedField { name: Cow::Borrowed("note"), ty: SchemaType::String },
+    ]),
+    repr_c: false,
+};
+
 #[derive(Debug)]
 struct Address {
     street: String,
@@ -232,16 +241,8 @@ fn storage_kind_id_ignores_schema() {
     let expected = KindId(with_tag(Tag::Kind, fnv1a_64_prefixed(KIND_DOMAIN, name.as_bytes())));
     assert_eq!(storage_kind_id_from_name(name), expected);
 
-    static U64: SchemaType = SchemaType::Scalar(Primitive::U64);
-    static WIDE: SchemaType = SchemaType::Struct {
-        fields: Cow::Borrowed(&[
-            NamedField { name: Cow::Borrowed("id"), ty: SchemaType::Scalar(Primitive::U64) },
-            NamedField { name: Cow::Borrowed("note"), ty: SchemaType::String },
-        ]),
-        repr_c: false,
-    };
-    let mail_narrow = kind_id_from_parts(name, &U64);
-    let mail_wide = kind_id_from_parts(name, &WIDE);
+    let mail_narrow = kind_id_from_parts(name, &U64_SCHEMA);
+    let mail_wide = kind_id_from_parts(name, &WIDE_SCHEMA);
     assert_ne!(mail_narrow, mail_wide);
     assert_ne!(storage_kind_id_from_name(name).0, mail_wide);
 }

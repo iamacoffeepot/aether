@@ -13,7 +13,7 @@ pub(super) fn emit(input: &DeriveInput, kind: &KindAttr, storage: &TypeStorageAt
     let strict = storage.strict;
     let leaves = match &input.data {
         Data::Struct(s) => emit_struct_leaves(name, &s.fields)?,
-        Data::Enum(e) => emit_enum_leaves(name, e)?,
+        Data::Enum(e) => emit_enum_leaves(name, e),
         Data::Union(_) => TokenStream2::new(),
     };
     let (alias_statics, alias_pairs) = alias_statics(name, input)?;
@@ -137,9 +137,9 @@ fn emit_struct_leaves(name: &syn::Ident, fields: &Fields) -> syn::Result<TokenSt
         });
     }
 
-    let contribute_fields = field_contributes(fields)?;
+    let contribute_fields = field_contributes(fields);
     let assemble_fields = field_assembles(fields)?;
-    let absent_fields = field_absents(fields)?;
+    let absent_fields = field_absents(fields);
     let ctor = match fields {
         Fields::Named(_) => quote! { Self { #(#assemble_fields),* } },
         Fields::Unnamed(_) => quote! { Self(#(#assemble_fields),*) },
@@ -176,7 +176,7 @@ fn emit_struct_leaves(name: &syn::Ident, fields: &Fields) -> syn::Result<TokenSt
     })
 }
 
-fn field_contributes(fields: &Fields) -> syn::Result<Vec<TokenStream2>> {
+fn field_contributes(fields: &Fields) -> Vec<TokenStream2> {
     let mut out = Vec::new();
     for (idx, field) in fields.iter().enumerate() {
         let fname = match &field.ident {
@@ -202,7 +202,7 @@ fn field_contributes(fields: &Fields) -> syn::Result<Vec<TokenStream2>> {
             });
         }
     }
-    Ok(out)
+    out
 }
 
 fn field_assembles(fields: &Fields) -> syn::Result<Vec<TokenStream2>> {
@@ -254,7 +254,7 @@ fn field_assembles(fields: &Fields) -> syn::Result<Vec<TokenStream2>> {
     Ok(out)
 }
 
-fn field_absents(fields: &Fields) -> syn::Result<Vec<TokenStream2>> {
+fn field_absents(fields: &Fields) -> Vec<TokenStream2> {
     let mut out = Vec::new();
     for (idx, field) in fields.iter().enumerate() {
         let fname = match &field.ident {
@@ -275,10 +275,10 @@ fn field_absents(fields: &Fields) -> syn::Result<Vec<TokenStream2>> {
             });
         }
     }
-    Ok(out)
+    out
 }
 
-fn emit_enum_leaves(name: &syn::Ident, data: &DataEnum) -> syn::Result<TokenStream2> {
+fn emit_enum_leaves(name: &syn::Ident, data: &DataEnum) -> TokenStream2 {
     let mut disc_consts = Vec::new();
     let mut contribute_arms = Vec::new();
     let mut assemble_arms = Vec::new();
@@ -290,10 +290,10 @@ fn emit_enum_leaves(name: &syn::Ident, data: &DataEnum) -> syn::Result<TokenStre
         disc_consts.push(quote! {
             const #disc_ident: u64 = ::aether_data::__derive_runtime::variant_hash(#vname, &#body_schema);
         });
-        contribute_arms.push(enum_contribute_arm(vident, &vname, &disc_ident, &variant.fields)?);
-        assemble_arms.push(enum_assemble_arm(vident, &vname, &disc_ident, &variant.fields)?);
+        contribute_arms.push(enum_contribute_arm(vident, &vname, &disc_ident, &variant.fields));
+        assemble_arms.push(enum_assemble_arm(vident, &vname, &disc_ident, &variant.fields));
     }
-    Ok(quote! {
+    quote! {
         impl ::aether_data::__derive_runtime::StorageLeaves for #name {
             fn contribute(
                 &self,
@@ -347,7 +347,7 @@ fn emit_enum_leaves(name: &syn::Ident, data: &DataEnum) -> syn::Result<TokenStre
                 <u64 as ::aether_data::__derive_runtime::StorageLeaves>::is_absent(__var_carry, depth + 1, source)
             }
         }
-    })
+    }
 }
 
 fn variant_body_schema(fields: &Fields) -> TokenStream2 {
@@ -384,12 +384,7 @@ fn struct_schema_from_fields<'a>(fields: impl Iterator<Item = (String, &'a Type)
     }
 }
 
-fn enum_contribute_arm(
-    vident: &syn::Ident,
-    vname: &str,
-    disc_ident: &syn::Ident,
-    fields: &Fields,
-) -> syn::Result<TokenStream2> {
+fn enum_contribute_arm(vident: &syn::Ident, vname: &str, disc_ident: &syn::Ident, fields: &Fields) -> TokenStream2 {
     let disc_emit = quote! {
         <u64 as ::aether_data::__derive_runtime::StorageLeaves>::contribute(
             &#disc_ident, __var_carry, depth + 1, sink
@@ -398,7 +393,7 @@ fn enum_contribute_arm(
     let body_carry = quote! {
         ::aether_data::__derive_runtime::fold_path_segment(carry, #vname.as_bytes(), depth)
     };
-    Ok(match fields {
+    match fields {
         Fields::Unit => quote! {
             Self::#vident => {
                 #disc_emit
@@ -484,19 +479,14 @@ fn enum_contribute_arm(
                 }
             }
         }
-    })
+    }
 }
 
-fn enum_assemble_arm(
-    vident: &syn::Ident,
-    vname: &str,
-    disc_ident: &syn::Ident,
-    fields: &Fields,
-) -> syn::Result<TokenStream2> {
+fn enum_assemble_arm(vident: &syn::Ident, vname: &str, disc_ident: &syn::Ident, fields: &Fields) -> TokenStream2 {
     let body_carry = quote! {
         ::aether_data::__derive_runtime::fold_path_segment(carry, #vname.as_bytes(), depth)
     };
-    Ok(match fields {
+    match fields {
         Fields::Unit => quote! {
             if __disc == #disc_ident {
                 return ::core::result::Result::Ok(Self::#vident);
@@ -571,5 +561,5 @@ fn enum_assemble_arm(
                 }
             }
         }
-    })
+    }
 }

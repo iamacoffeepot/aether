@@ -71,6 +71,12 @@ impl<T> StorageData<T> {
         Self { value, unknown_fields, records }
     }
 
+    /// Encode helper: a typed value with an empty unknown bucket.
+    #[must_use]
+    pub fn from_value(value: T) -> Self {
+        Self { value, unknown_fields: Vec::new(), records: BTreeMap::new() }
+    }
+
     /// Fetch a leaf by dotted path and decode it as `U`. The lookup
     /// hash is `field_hash(name, U::SCHEMA)`, so a name match with a
     /// type mismatch returns `None`.

@@ -52,7 +52,7 @@ pub enum StorageError {
 impl fmt::Display for StorageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingRequiredField { hash, name } if name.is_empty() => {
+            Self::MissingRequiredField { hash, name: "" } => {
                 write!(f, "storage: missing required field {hash:#018x}")
             }
             Self::MissingRequiredField { hash, name } => {

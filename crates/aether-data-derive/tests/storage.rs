@@ -67,8 +67,7 @@ fn older_reader_reencode_matches_newer_writer() {
         tags: vec![String::from("a")],
         addr: Address { street: String::from("oak"), city: String::from("bend") },
     };
-    let produced =
-        RecordV2::encode_storage(&aether_data::StorageData::from_parts(newer, Vec::new(), Default::default())).unwrap();
+    let produced = RecordV2::encode_storage(&aether_data::StorageData::from_value(newer)).unwrap();
     let older = RecordV1::decode_storage(&produced).unwrap();
     assert_eq!(older.value.id, 7);
     assert_eq!(older.value.note.as_deref(), Some("hi"));
@@ -80,8 +79,7 @@ fn older_reader_reencode_matches_newer_writer() {
 #[test]
 fn decode_from_bytes_is_a_strict_miss() {
     let value = RecordV1 { id: 1, note: None };
-    let bytes =
-        RecordV1::encode_storage(&aether_data::StorageData::from_parts(value, Vec::new(), Default::default())).unwrap();
+    let bytes = RecordV1::encode_storage(&aether_data::StorageData::from_value(value)).unwrap();
     assert!(RecordV1::decode_from_bytes(&bytes).is_none());
 }
 
@@ -95,8 +93,7 @@ fn encode_into_bytes_names_storage_cause() {
 #[test]
 fn read_alias_reads_old_name_and_writes_new() {
     let old = RecordV1 { id: 4, note: Some(String::from("keep")) };
-    let old_bytes =
-        RecordV1::encode_storage(&aether_data::StorageData::from_parts(old, Vec::new(), Default::default())).unwrap();
+    let old_bytes = RecordV1::encode_storage(&aether_data::StorageData::from_value(old)).unwrap();
     let renamed = RecordRenamed::decode_storage(&old_bytes).unwrap();
     assert_eq!(renamed.value.remark.as_deref(), Some("keep"));
     let new_bytes = RecordRenamed::encode_storage(&renamed).unwrap();
@@ -108,8 +105,7 @@ fn read_alias_reads_old_name_and_writes_new() {
 #[test]
 fn every_declared_leaf_is_emitted() {
     let value = RecordV1 { id: 1, note: None };
-    let bytes =
-        RecordV1::encode_storage(&aether_data::StorageData::from_parts(value, Vec::new(), Default::default())).unwrap();
+    let bytes = RecordV1::encode_storage(&aether_data::StorageData::from_value(value)).unwrap();
     let decoded = RecordV1::decode_storage(&bytes).unwrap();
     assert!(decoded.get::<u64>("id").is_some());
     assert!(decoded.get::<u64>("note.__variant").is_some());
@@ -124,8 +120,7 @@ fn nested_and_sequence_are_readable() {
         tags: vec![String::from("t")],
         addr: Address { street: String::from("main"), city: String::from("lake") },
     };
-    let bytes =
-        RecordV2::encode_storage(&aether_data::StorageData::from_parts(value, Vec::new(), Default::default())).unwrap();
+    let bytes = RecordV2::encode_storage(&aether_data::StorageData::from_value(value)).unwrap();
     let decoded = RecordV2::decode_storage(&bytes).unwrap();
     assert_eq!(decoded.get::<String>("addr.street").unwrap().unwrap(), "main");
     assert_eq!(decoded.value.tags, vec![String::from("t")]);
@@ -147,8 +142,7 @@ fn strict_failure_names_the_unknown_leaf() {
         tags: Vec::new(),
         addr: Address { street: String::from("a"), city: String::from("b") },
     };
-    let bytes =
-        RecordV2::encode_storage(&aether_data::StorageData::from_parts(newer, Vec::new(), Default::default())).unwrap();
+    let bytes = RecordV2::encode_storage(&aether_data::StorageData::from_value(newer)).unwrap();
     let err = StrictRecord::decode_storage(&bytes).unwrap_err();
     let rendered = err.to_string();
     assert!(rendered.contains("strict mode"), "{rendered}");

@@ -8,6 +8,12 @@
 //! identifiers and the dot join both exclude NUL, so the boundary is
 //! unambiguous and the fold stays incremental and const.
 
+// clippy's `ptr_arg` wants `&[T]` / `&str` over `&Cow<[T]>` / `&Cow<str>`.
+// Deref of `Cow` is not `const`, so these helpers match on the variant
+// to narrow `Cow::Borrowed` by hand — the same exemption
+// `canonical::primitives` documents.
+#![allow(clippy::ptr_arg)] // aether-suppression-request: Cow deref is not const; helpers match Borrowed by hand like canonical::primitives
+
 use alloc::borrow::Cow;
 
 use crate::hash::{FIELD_DOMAIN, VARIANT_DOMAIN, fnv1a_64_fold, fnv1a_64_prefixed};
@@ -70,6 +76,8 @@ pub const fn fold_index_segment(carry: u64, depth: u32, index: usize) -> u64 {
     fold_path_segment(carry, buf.split_at(start).1, depth)
 }
 
+const DIGITS: &[u8; 10] = b"0123456789";
+
 const fn write_decimal(buf: &mut [u8; 20], mut n: usize) -> usize {
     if n == 0 {
         buf[19] = b'0';
@@ -78,7 +86,7 @@ const fn write_decimal(buf: &mut [u8; 20], mut n: usize) -> usize {
     let mut i = 20;
     while n > 0 {
         i -= 1;
-        buf[i] = b'0' + (n % 10) as u8;
+        buf[i] = DIGITS[n % 10];
         n /= 10;
     }
     i
@@ -223,6 +231,7 @@ const fn fold_u64(hash: u64, val: u64) -> u64 {
     fnv1a_64_fold(hash, &val.to_le_bytes())
 }
 
+#[allow(clippy::cast_possible_truncation)] // aether-suppression-request: const count after assert that len fits u32; try_from is not const
 const fn count_u32(len: usize) -> u32 {
     assert!(len <= u32::MAX as usize, "storage hash: count exceeds u32::MAX");
     len as u32
@@ -274,6 +283,11 @@ const fn schema_types<'a>(fields: &'a Cow<'static, [SchemaType]>) -> &'a [Schema
 /// Walk `schema` under `carry` and return the number of TLV leaves the
 /// flattening rules emit, including every enum variant (collision
 /// check sees the full set, not the active arm).
+///
+/// # Panics
+/// Panics if `depth` exceeds [`MAX_STORAGE_DEPTH`], or if `schema`
+/// contains an `Owned` cell — only derive-emitted `Static` schemas are
+/// legal in const context.
 #[must_use]
 pub const fn count_leaves(schema: &SchemaType, carry: u64, depth: u32) -> usize {
     assert!(depth <= MAX_STORAGE_DEPTH, "storage hash: schema nesting exceeds MAX_STORAGE_DEPTH");
@@ -371,6 +385,10 @@ const fn cow_str_bytes<'a>(c: &'a Cow<'static, str>) -> &'a [u8] {
 /// Hash of the `index`th flattened leaf of `schema` under `carry`, in
 /// walk order. Used with [`count_leaves`] for the pairwise collision
 /// check the derive emits.
+///
+/// # Panics
+/// Panics if `index` is out of range, if `depth` exceeds
+/// [`MAX_STORAGE_DEPTH`], or if `schema` contains an `Owned` cell.
 #[must_use]
 pub const fn nth_leaf_hash(schema: &SchemaType, carry: u64, depth: u32, index: usize) -> u64 {
     match find_nth_leaf(schema, carry, depth, index) {
@@ -504,6 +522,11 @@ pub const UNIT_SCHEMA: SchemaType = SchemaType::Unit;
 ///
 /// `aliases` is `(old_field_name, current_field_schema)` pairs, each
 /// flattened as if the field still used the old name.
+///
+/// # Panics
+/// Panics on a within-kind leaf-hash collision or a read-alias
+/// collision (ADR-0059 rule 2), and on the same depth / `Owned`-cell
+/// faults [`count_leaves`] names.
 pub const fn assert_unique_storage_leaves(schema: &SchemaType, aliases: &[(&str, &SchemaType)]) {
     let live = count_leaves(schema, field_path_root(), 0);
     let mut extra = 0;
@@ -560,6 +583,7 @@ mod tests {
     use crate::canonical::{canonical_len_schema, canonical_serialize_schema};
     use crate::hash::{FIELD_DOMAIN, fnv1a_64_bytes, fnv1a_64_fold, fnv1a_64_prefixed};
     use crate::schema::Primitive;
+    use alloc::string::String;
     use alloc::vec::Vec;
 
     fn materialized(path: &str, schema: &SchemaType) -> u64 {
@@ -588,7 +612,7 @@ mod tests {
         let schema = &<u64 as Schema>::SCHEMA;
         assert_eq!(field_hash("id", schema), materialized("id", schema));
         assert_eq!(field_hash("addr.street", schema), materialized("addr.street", schema));
-        let string = &<alloc::string::String as Schema>::SCHEMA;
+        let string = &<String as Schema>::SCHEMA;
         assert_eq!(field_hash("addr.street", string), materialized("addr.street", string));
     }
 
