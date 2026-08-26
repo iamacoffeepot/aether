@@ -12,11 +12,10 @@
 //! The behaviour of a run is chosen by a [`script`] the harness writes beside the
 //! run directories, not by the nonce: the coordinator mints nonces, so a test
 //! cannot name one in advance, and the child's environment is constructed from
-//! an allow list ([`lane_env`]) that admits no coordinator knob a harness could
+//! an allow list (`lane_env`) that admits no coordinator knob a harness could
 //! plant one in. The script's location is derived from `--out`, which is the one
 //! channel that survives both.
 //!
-//! [`lane_env`]: super::lane_env
 //!
 //! [`LaneProgram`]: super::LaneProgram
 //! [`TransformRunner`]: super::TransformRunner

@@ -102,7 +102,7 @@ impl Wire {
     /// window unobservable for every read that follows on this wire.
     ///
     /// # Panics
-    /// The replay did not finish inside [`REPLAY_BUDGET`], or a read was
+    /// The replay did not finish inside `REPLAY_BUDGET`, or a read was
     /// refused for some other reason.
     pub fn await_replayed(&mut self) {
         let deadline = Instant::now() + REPLAY_BUDGET;

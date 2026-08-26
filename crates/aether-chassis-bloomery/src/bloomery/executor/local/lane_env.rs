@@ -139,12 +139,12 @@ const ALLOWLISTED_NAMES: &[&str] = &[
 /// `__GL_`, `__EGL_`, `DRI_`).
 ///
 /// No `AETHER_` prefix appears here, and none can: the one lane-contract
-/// `AETHER_*` name is spelled out in [`ALLOWLISTED_NAMES`], so a family match
+/// `AETHER_*` name is spelled out in `ALLOWLISTED_NAMES`, so a family match
 /// can never admit a coordinator knob by accident.
 const ALLOWLISTED_PREFIXES: &[&str] = &["LC_", "XDG_", "SCCACHE_", "VK_", "MESA_", "LIBGL_", "__GL_", "__EGL_", "DRI_"];
 
 /// Whether a lane child may inherit `key` from the coordinator — an exact match
-/// in [`ALLOWLISTED_NAMES`] or a member of an [`ALLOWLISTED_PREFIXES`] family.
+/// in `ALLOWLISTED_NAMES` or a member of an `ALLOWLISTED_PREFIXES` family.
 ///
 /// A non-UTF-8 name matches nothing (the allow list is all ASCII) and is
 /// therefore denied, which is the safe direction.
