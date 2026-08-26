@@ -57,7 +57,17 @@ fn a_local_authority_bloom_lands_after_a_restart_and_a_failing_mirror() {
 
     let mut harness =
         HarnessBuilder::local_authority(&authority).roots(&roots).cas_land(true).start("local-authority-2");
-    assert_eq!(harness.bloom(bloom).status, BloomStatus::Resolved, "the journal replayed the already-produced head");
+    // Boot awaits journal replay, so by the time `start` returns the CAS-on
+    // land reactor may already have landed the replayed resolution — a race
+    // this assert legitimately loses. Either state proves what the line asks:
+    // the journal preserved the already-produced resolution rather than
+    // regressing the bloom to an earlier stage. The CAS itself is proven by
+    // `land_until` and the receipt asserts below either way.
+    let replayed = harness.bloom(bloom).status;
+    assert!(
+        matches!(replayed, BloomStatus::Resolved | BloomStatus::Landed),
+        "the journal replayed the already-produced resolution, found {replayed:?}",
+    );
     harness.land_until(bloom, BloomStatus::Landed);
 
     assert_ne!(harness.view().mainline, sealed_on, "the receipt advanced coordinator mainline");
