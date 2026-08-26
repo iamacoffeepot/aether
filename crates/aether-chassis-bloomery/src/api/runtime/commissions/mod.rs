@@ -459,15 +459,22 @@ fn auto_approval_statement(scope: Digest) -> Statement {
 /// digest is what the minted approval binds.
 fn auto_approval_revision(id: &WorkpieceId, result: LoadCommissionResult) -> Result<ScopeRevision, HttpServerResponse> {
     match result {
-        LoadCommissionResult::Ok { status, current, .. } => {
+        LoadCommissionResult::Ok { status, current, current_unreadable, .. } => {
             if status != CommissionStatus::Open.as_str() {
                 return Err(error_response(422, &format!("commission {} is not open", id.0)));
+            }
+            if let Some(reason) = current_unreadable {
+                return Err(error_response(
+                    422,
+                    &format!("commission {} current revision is unreadable: {reason}", id.0),
+                ));
             }
             let Some(canonical) = current else {
                 return Err(error_response(422, &format!("commission {} has no scope revision to approve", id.0)));
             };
-            ScopeRevision::from_canonical(&canonical)
-                .map_err(|_| error_response(500, &format!("commission {} stored revision bytes are malformed", id.0)))
+            ScopeRevision::from_canonical(&canonical).map_err(|error| {
+                error_response(422, &format!("commission {} current revision is unreadable: {error}", id.0))
+            })
         }
         LoadCommissionResult::Missing { id } => Err(error_response(404, &format!("commission {id} not found"))),
         LoadCommissionResult::Err { error } => Err(error_response(500, &format!("commission load failed: {error}"))),
@@ -652,6 +659,21 @@ pub(super) fn approval_response(result: RecordCommissionApprovalResult) -> HttpS
     }
 }
 
+/// The decoded current revision, or the unreadable-body marker when those
+/// bytes are not this binary's shape. A missing tip stays missing.
+fn show_current(
+    current: Option<Vec<u8>>,
+    current_unreadable: Option<String>,
+) -> (Option<ScopeRevision>, Option<String>) {
+    match current {
+        Some(bytes) => match ScopeRevision::from_canonical(&bytes) {
+            Ok(revision) => (Some(revision), None),
+            Err(error) => (None, Some(current_unreadable.unwrap_or_else(|| error.to_string()))),
+        },
+        None => (None, current_unreadable),
+    }
+}
+
 /// Render [`LoadCommissionResult`].
 pub(super) fn show_response(result: LoadCommissionResult) -> HttpServerResponse {
     match result {
@@ -664,6 +686,7 @@ pub(super) fn show_response(result: LoadCommissionResult) -> HttpServerResponse 
             current,
             approvals,
             scope_verify,
+            current_unreadable,
         } => {
             let Ok(intent) = digest_of_bytes(&intent) else {
                 return error_response(500, "stored intent digest is not 32 bytes");
@@ -675,13 +698,7 @@ pub(super) fn show_response(result: LoadCommissionResult) -> HttpServerResponse 
                 },
                 None => None,
             };
-            let current = match current {
-                Some(bytes) => match ScopeRevision::from_canonical(&bytes) {
-                    Ok(revision) => Some(revision),
-                    Err(_) => return error_response(500, "stored current revision is malformed"),
-                },
-                None => None,
-            };
+            let (current, current_unreadable) = show_current(current, current_unreadable);
             let mut decoded = Vec::new();
             for bytes in approvals {
                 match from_bytes::<Statement>(&bytes) {
@@ -705,6 +722,7 @@ pub(super) fn show_response(result: LoadCommissionResult) -> HttpServerResponse 
                     current_ordinal,
                     status,
                     current,
+                    current_unreadable,
                     approvals: decoded,
                     scope_verify,
                 },

@@ -202,6 +202,8 @@ struct ShowView {
     intent: String,
     status: String,
     current_revision: Option<String>,
+    #[serde(default)]
+    current_unreadable: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -316,7 +318,12 @@ fn show(api: &ControlApi, id: &str, json: bool) -> Result<String> {
     } else {
         let view: ShowView = api.get_json(&format!("/commissions/{id}"))?;
         let revision = view.current_revision.as_deref().unwrap_or("-");
-        Ok(format!("{} {} intent {} revision {}\n", view.id, view.status, view.intent, revision))
+        Ok(match view.current_unreadable {
+            Some(reason) => {
+                format!("{} {} intent {} revision {revision} unreadable: {reason}\n", view.id, view.status, view.intent)
+            }
+            None => format!("{} {} intent {} revision {revision}\n", view.id, view.status, view.intent),
+        })
     }
 }
 

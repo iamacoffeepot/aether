@@ -179,6 +179,10 @@ pub enum LoadCommissionResult {
         /// here are content-addressed or signed, so nothing is pinned to the
         /// old layout.
         scope_verify: Option<Vec<u8>>,
+        /// Why the current revision body could not be decoded. `None` when the
+        /// tip is absent or readable. Trailing so an already-journaled `Ok`
+        /// keeps its meaning: the head is still the commission.
+        current_unreadable: Option<String>,
     },
     /// No commission exists under this workpiece id.
     Missing {
