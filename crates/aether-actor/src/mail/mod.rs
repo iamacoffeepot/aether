@@ -16,6 +16,7 @@
 //! the inherent methods on `aether_substrate::actor::native::binding::NativeBinding`
 //! (native).
 
+use alloc::vec::Vec;
 use core::slice;
 use serde::de::DeserializeOwned;
 pub mod mailbox;
@@ -110,7 +111,7 @@ impl Schema for ReplyHandle {
 }
 
 impl wire::WireEncode for ReplyHandle {
-    fn encode(&self, out: &mut alloc::vec::Vec<u8>) -> Result<(), wire::Error> {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), wire::Error> {
         wire::WireEncode::encode(&self.raw, out)
     }
 }

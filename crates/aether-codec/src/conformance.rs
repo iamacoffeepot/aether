@@ -23,6 +23,7 @@
 #![cfg(test)]
 
 use core::fmt::Debug;
+use std::collections::BTreeMap;
 
 use aether_data::wire::{self, WireDecode, WireEncode, decode_from_slice, encode_to_vec};
 use aether_data::{Primitive, SchemaCell, SchemaType};
@@ -213,7 +214,6 @@ fn enum_variants_conform() {
 
 #[test]
 fn map_keys_conform_in_encoded_byte_order() {
-    use std::collections::BTreeMap;
     // Keys 1 and 256 sort numerically as 1 < 256 but in little-endian
     // u32 bytes as 256 < 1 — the multi-byte key case the encoded-byte
     // map ordering must reproduce.
@@ -301,10 +301,10 @@ fn fixture_kinds_corpus_covers_every_schema_arm() {
     let nested = CorpusNested { items: vec![None, Some(CorpusSum::Pending), Some(CorpusSum::Ok(1))] };
     check(&nested, &CorpusNested::SCHEMA, &json!({ "items": [null, "Pending", { "Ok": 1u64 }] }));
 
-    let mut by_name = std::collections::BTreeMap::new();
+    let mut by_name = BTreeMap::new();
     by_name.insert("b".into(), 1u8);
     by_name.insert("aa".into(), 2u8);
-    let mut by_u32 = std::collections::BTreeMap::new();
+    let mut by_u32 = BTreeMap::new();
     by_u32.insert(1u32, "one".into());
     by_u32.insert(256u32, "two-fifty-six".into());
     check(
