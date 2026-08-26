@@ -618,21 +618,20 @@ pub enum MemberExecutorFaultError {
     },
 }
 
-/// Why an attribution of a failing fold to two parents was refused
-/// (ADR-0210).
+/// Why an attribution of a failing fold was refused (ADR-0210).
 ///
 /// Every arm leaves the verdict where the host found it. A mint over a
-/// membership that cannot support the attribution would hand a repair lane two
+/// membership that cannot support the attribution would hand a repair lane
 /// candidates the bloom does not hold, which is worse than no attribution at
 /// all.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum NarrowCompositionError {
     /// No active bloom with this id.
     UnknownOrInactiveBloom,
-    /// The attribution names some number of parents other than two. A
-    /// collision has exactly two sides; anything else is a guess wearing a
-    /// subject's clothes.
-    NotTwoParents(usize),
+    /// The attribution names no parents. A composition over an empty parent
+    /// set is not a repair of anyone's collision; the `usize` is the named
+    /// count, always zero at this arm.
+    EmptyParents(usize),
     /// A named parent is not a member of this bloom.
     NotAMember(WorkpieceId),
     /// A named parent was withdrawn, so its candidate is not in the fold and
