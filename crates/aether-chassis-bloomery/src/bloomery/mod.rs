@@ -90,7 +90,7 @@ pub use reactor::{
     IntegrateReactorCapability, IntegrateReactorSetup, IntegrateReactorState, IntegrateTick, JanitorPolicy,
     JanitorReactorCapability, JanitorReactorSetup, JanitorReactorState, JanitorTick, LandReactorCapability,
     LandReactorSetup, LandReactorState, LandTick, MirrorReactorCapability, MirrorReactorSetup, MirrorReactorState,
-    SweepReport, SweepRequest, WorkingRefPruner, sweep,
+    SweepReport, SweepRequest, TargetReadings, WorkingRefPruner, sweep,
 };
 #[cfg(feature = "github")]
 pub use repair::{CandidateSource, PrepareError, prepare_candidate};
