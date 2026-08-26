@@ -37,14 +37,6 @@ impl SourceReplicaShell {
     pub fn publish(&self) -> Result<(), ReplicaError> {
         self.backend.publish()
     }
-
-    /// The mainline head this replica has not published yet, or `None` when
-    /// nothing is owed (#5260) — the timer question that catches a ref advance
-    /// no coordinator event announced.
-    #[must_use]
-    pub fn unpublished_head(&self) -> Option<String> {
-        self.backend.unpublished_head()
-    }
 }
 
 /// The git remote URL a GitHub connection pushes source refs to.
