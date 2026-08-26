@@ -10,6 +10,8 @@ use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
 use std::str;
 
+use crate::api::hex;
+
 /// One control-API session against a running coordinator.
 pub(super) struct ControlApi {
     pub(super) port: u16,
@@ -35,7 +37,7 @@ impl ControlApi {
         if !http_success(status) {
             bail!("{}", refuse(status, &response));
         }
-        serde_json::from_slice(&response)
+        hex::from_slice(&response)
             .with_context(|| format!("decode GET {path} reply: {}", String::from_utf8_lossy(&response)))
     }
 
@@ -45,14 +47,14 @@ impl ControlApi {
 
     fn json<T: DeserializeOwned>(&self, method: &str, path: &str, body: Option<&impl Serialize>) -> Result<T> {
         let encoded = match body {
-            Some(value) => Some(serde_json::to_vec(value).context("encode request body")?),
+            Some(value) => Some(hex::to_vec(value).context("encode request body")?),
             None => None,
         };
         let (status, response) = self.exchange(method, path, encoded.as_deref())?;
         if !http_success(status) {
             bail!("{}", refuse(status, &response));
         }
-        serde_json::from_slice(&response)
+        hex::from_slice(&response)
             .with_context(|| format!("decode {method} {path} reply: {}", String::from_utf8_lossy(&response)))
     }
 

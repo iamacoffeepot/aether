@@ -21,7 +21,7 @@ use serde::ser::{
 use super::{DIGEST, hex_encode};
 
 /// Render `value` as JSON with every digest inside it spelled in hex.
-pub(in crate::api::runtime) fn to_vec(value: &impl Serialize) -> Result<Vec<u8>, serde_json::Error> {
+pub fn to_vec(value: &impl Serialize) -> Result<Vec<u8>, serde_json::Error> {
     serde_json::to_vec(&HexDigests(value))
 }
 

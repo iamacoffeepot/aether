@@ -15,6 +15,9 @@
 pub(crate) mod dto;
 mod runtime;
 
+// The commission CLI talks the same REST hex spelling the control API renders.
+pub(crate) use runtime::hex;
+
 use aether_actor::actor;
 
 // The handled-kind types the `#[actor(singleton)]` dispatch table references —
