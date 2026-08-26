@@ -1,16 +1,20 @@
 //! Auth, refusal mapping, and response-status tests for commission routes.
 
-use aether_bloomery::{Digest, KeyId, signed_cancel};
+use aether_bloomery::{
+    ApprovalPolicy, ApprovalRule, Digest, KeyId, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, Tier, WorkpieceId,
+    digest_of, signed_cancel,
+};
+use aether_data::wire::from_bytes;
 use aether_http::{HttpHeader, HttpServerRequest, HttpServerResponse};
 
 use super::{
-    approval_response, authorize, cancel_request, cancel_response, create_response, list_response, query_status,
-    reopen_request, reopen_response, revision_response, scope_run_response, show_response,
+    approval_response, authorize, auto_approval_write, cancel_request, cancel_response, create_response, list_response,
+    query_status, reopen_request, reopen_response, revision_response, scope_run_response, show_response,
 };
 use crate::api::dto::{CancelCommissionRequest, ReopenCommissionRequest};
 use crate::store::{
     CancelCommissionResult, CreateCommissionResult, EnqueueScopeRunResult, ListCommissionsResult, LoadCommissionResult,
-    RecordCommissionApprovalResult, ReopenCommissionResult, WriteScopeRevisionResult,
+    RecordCommissionApproval, RecordCommissionApprovalResult, ReopenCommissionResult, WriteScopeRevisionResult,
 };
 
 fn request(authorization: Option<&str>) -> HttpServerRequest {
@@ -114,6 +118,7 @@ fn every_route_result_has_a_success_status() {
             current: None,
             approvals: Vec::new(),
             scope_verify: None,
+            current_unreadable: None,
         })
         .status,
         200
@@ -124,6 +129,53 @@ fn every_route_result_has_a_success_status() {
     assert_eq!(scope_run_response(EnqueueScopeRunResult::Missing { id: "wp-1".to_owned() }).status, 404);
     assert_eq!(scope_run_response(EnqueueScopeRunResult::AlreadyInFlight { ordinal: 1 }).status, 409);
     assert_eq!(show_response(LoadCommissionResult::Missing { id: "wp-1".to_owned() }).status, 404);
+}
+
+#[test]
+fn an_unreadable_current_revision_is_shown_not_a_500() {
+    // A 500 on an intact older row is the operator-facing form of taking the
+    // whole commission down: show cannot print the tip, and scope cannot name
+    // it as predecessor. The body is unreadable; the head is not.
+    let digest = vec![7; 32];
+    let marked = show_response(LoadCommissionResult::Ok {
+        id: "wp-1".to_owned(),
+        intent: digest.clone(),
+        current_revision: Some(digest.clone()),
+        current_ordinal: Some(1),
+        status: "open".to_owned(),
+        current: None,
+        approvals: Vec::new(),
+        scope_verify: None,
+        current_unreadable: Some("canonical commission bytes are malformed".to_owned()),
+    });
+    let from_bytes = show_response(LoadCommissionResult::Ok {
+        id: "wp-1".to_owned(),
+        intent: digest.clone(),
+        current_revision: Some(digest),
+        current_ordinal: Some(1),
+        status: "open".to_owned(),
+        current: Some(vec![0xff, 0x00]),
+        approvals: Vec::new(),
+        scope_verify: None,
+        current_unreadable: None,
+    });
+    assert_eq!(marked.status, 200, "a store-marked unreadable tip is still a commission: {}", error_text(&marked));
+    assert_eq!(
+        from_bytes.status,
+        200,
+        "bytes this binary cannot decode are still a commission: {}",
+        error_text(&from_bytes)
+    );
+    assert!(
+        error_text(&marked).contains("canonical commission bytes are malformed"),
+        "the marker carries the reason: {}",
+        error_text(&marked)
+    );
+    assert!(
+        error_text(&from_bytes).contains("malformed"),
+        "the api-side decode names the same class of failure: {}",
+        error_text(&from_bytes)
+    );
 }
 
 #[test]
@@ -214,4 +266,155 @@ fn a_reopen_with_a_blank_reason_is_refused_before_the_signature_is_read() {
 
     assert_eq!(response.status, 400);
     assert!(error_text(&response).contains("reopen reason is required"), "{}", error_text(&response));
+}
+
+/// A stored revision for `id` declaring exactly `surface`.
+fn revision_declaring(id: &str, surface: &[&str]) -> ScopeRevision {
+    ScopeRevision {
+        schema: SCOPE_REVISION_SCHEMA,
+        workpiece: WorkpieceId(id.to_owned()),
+        predecessor: None,
+        problem: "problem".to_owned(),
+        design: "design".to_owned(),
+        plan: "plan".to_owned(),
+        declared_surface: surface.iter().map(|glob| (*glob).to_owned()).collect(),
+        dogfood_brief: String::new(),
+        routing: ScopeRouting { size: "S".to_owned(), model: "construct: test".to_owned() },
+        dependencies: Vec::new(),
+        description: "advisory".to_owned(),
+        implements: Vec::new(),
+        declared_crates: Vec::new(),
+        declared_reads: Vec::new(),
+    }
+}
+
+/// A store load carrying `revision` as the open commission's current tip.
+fn loaded_open(id: &str, revision: &ScopeRevision) -> LoadCommissionResult {
+    LoadCommissionResult::Ok {
+        id: id.to_owned(),
+        intent: vec![2; 32],
+        current_revision: Some(digest_of(revision).as_bytes().to_vec()),
+        current_ordinal: Some(1),
+        status: "open".to_owned(),
+        current: Some(revision.to_canonical()),
+        approvals: Vec::new(),
+        scope_verify: None,
+        current_unreadable: None,
+    }
+}
+
+/// `docs/guide/**` advances on its own; everything else stops at the owner.
+fn ladder() -> ApprovalPolicy {
+    ApprovalPolicy {
+        default: Tier::Human,
+        rules: vec![ApprovalRule { glob: "docs/guide/**".to_owned(), tier: Tier::Auto }],
+    }
+}
+
+fn refused_auto(result: Result<RecordCommissionApproval, HttpServerResponse>) -> HttpServerResponse {
+    match result {
+        Err(response) => response,
+        Ok(_) => panic!("expected a refused auto approval"),
+    }
+}
+
+#[test]
+fn an_auto_surface_mints_an_unsigned_approval_bound_to_the_stored_revision() {
+    // The producer #5325 says the store models but nothing writes. The bug this
+    // catches is a door that binds the wrong digest — the intent, or the load's
+    // index column rather than a recompute over the canonical bytes — which
+    // would file the approval against a revision it does not approve.
+    let revision = revision_declaring("wp-1", &["docs/guide/**"]);
+    let write = auto_approval_write(Some(&ladder()), &WorkpieceId("wp-1".to_owned()), loaded_open("wp-1", &revision))
+        .expect("an auto-tier surface mints its own approval");
+
+    let statement: aether_bloomery::Statement = from_bytes(&write.statement).expect("the minted statement decodes");
+
+    assert_eq!(write.id, "wp-1", "the write is addressed to the commission the path named");
+    assert_eq!(statement.words, digest_of(&revision).as_bytes(), "the approval binds the stored revision's digest");
+    assert!(
+        !statement.is_instruction_capable(),
+        "an auto approval is the gate's observation, never an author signature"
+    );
+}
+
+#[test]
+fn an_above_auto_surface_is_refused_naming_the_tier_it_resolved() {
+    // The line that keeps an unsigned producer from becoming a way to
+    // self-approve anything: the door reads the stored surface itself and
+    // refuses upward. A caller cannot claim the tier, because it never supplies
+    // one.
+    let revision = revision_declaring("wp-1", &["crates/aether-data/src/**"]);
+
+    let response = refused_auto(auto_approval_write(
+        Some(&ladder()),
+        &WorkpieceId("wp-1".to_owned()),
+        loaded_open("wp-1", &revision),
+    ));
+
+    assert_eq!(response.status, 422);
+    assert!(error_text(&response).contains("Human"), "the refusal names the tier it found: {}", error_text(&response));
+}
+
+#[test]
+fn an_unreadable_ladder_refuses_rather_than_defaulting_to_auto() {
+    // No policy is not "no restriction". A door that minted an approval because
+    // it could not read the ladder would grant exactly the tier it failed to
+    // check.
+    let revision = revision_declaring("wp-1", &["docs/guide/**"]);
+
+    let response =
+        refused_auto(auto_approval_write(None, &WorkpieceId("wp-1".to_owned()), loaded_open("wp-1", &revision)));
+
+    assert_eq!(response.status, 422, "an unloadable policy fails closed");
+}
+
+#[test]
+fn a_commission_with_nothing_to_approve_is_refused() {
+    // Each of these would otherwise mint an approval for something no operator
+    // could act on: a closed commission, or one whose scope has not been
+    // written yet.
+    let revision = revision_declaring("wp-1", &["docs/guide/**"]);
+    let id = WorkpieceId("wp-1".to_owned());
+
+    let LoadCommissionResult::Ok { intent, current_revision, current_ordinal, current, .. } =
+        loaded_open("wp-1", &revision)
+    else {
+        panic!("the helper builds an Ok load");
+    };
+    let landed = LoadCommissionResult::Ok {
+        id: "wp-1".to_owned(),
+        intent: intent.clone(),
+        current_revision,
+        current_ordinal,
+        status: "landed".to_owned(),
+        current,
+        approvals: Vec::new(),
+        scope_verify: None,
+        current_unreadable: None,
+    };
+    let unscoped = LoadCommissionResult::Ok {
+        id: "wp-1".to_owned(),
+        intent,
+        current_revision: None,
+        current_ordinal: None,
+        status: "open".to_owned(),
+        current: None,
+        approvals: Vec::new(),
+        scope_verify: None,
+        current_unreadable: None,
+    };
+
+    assert_eq!(refused_auto(auto_approval_write(Some(&ladder()), &id, landed)).status, 422, "a closed commission");
+    assert_eq!(refused_auto(auto_approval_write(Some(&ladder()), &id, unscoped)).status, 422, "an unscoped commission");
+    assert_eq!(
+        refused_auto(auto_approval_write(
+            Some(&ladder()),
+            &id,
+            LoadCommissionResult::Missing { id: "wp-1".to_owned() }
+        ))
+        .status,
+        404,
+        "an unknown commission"
+    );
 }

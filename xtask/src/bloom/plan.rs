@@ -2,22 +2,20 @@
 //!
 //! The successor base is the current observed head, the predecessor's sealed
 //! configs are reused by digest, and each member keeps the predecessor's
-//! scope revision so the workpiece claim transfers. Completeness defaults to
-//! the direct-drive projection the pre-seal gate accepts.
+//! scope revision so the workpiece claim transfers. Surface, completeness,
+//! description, and approval are the stored revision's, not the client's.
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use aether_bloomery::{ApprovalPolicy, BloomDraft, Digest, Evidence, EvidenceKind, Forecast, Membership, WorkpieceId};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
-use sha2::{Digest as _, Sha256};
 
 use super::client::Client;
 use super::dto::{
-    AdrTouch, Approval, BloomSpec, Completeness, ConfigRegistry, DependencyEdge, DigestHex, DraftPatch,
-    MemberProjection, SealRequest, SupersedeRequest, ViewDocument,
+    Approval, BloomSpec, CandidateRefRequest, ConfigRegistry, DependencyEdge, DigestHex, DraftPatch, SealRequest,
+    SupersedeRequest, ViewDocument,
 };
 use super::dto::{ConfigRegistry as WireRegistry, Membership as WireMembership};
 
@@ -41,48 +39,6 @@ impl BaseChoice {
     }
 }
 
-/// Completeness / surface flags both verbs share.
-#[derive(Clone, Debug)]
-pub struct ProjectionInput {
-    pub declared_surface: Vec<String>,
-    pub completeness: Completeness,
-    pub adr_touch: AdrTouch,
-    pub pre_approved: bool,
-    /// The approval policy the declared-surface granularity check reads, when
-    /// one could be loaded. `None` skips the check here; the seal door is the
-    /// authority and refuses the same shape with the same words.
-    pub policy: Option<ApprovalPolicy>,
-}
-
-impl ProjectionInput {
-    pub fn resolve(
-        declared_surface: Vec<String>,
-        completeness_file: Option<&Path>,
-        adr_touch: AdrTouch,
-        pre_approved: bool,
-        approval_policy: Option<&Path>,
-    ) -> Result<Self> {
-        let completeness = match completeness_file {
-            Some(path) => {
-                let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
-                serde_json::from_slice(&bytes).with_context(|| format!("parse completeness file {}", path.display()))?
-            }
-            None => Completeness::direct_drive(),
-        };
-        Ok(Self {
-            declared_surface: if declared_surface.is_empty() {
-                direct_drive_surface()
-            } else {
-                declared_surface
-            },
-            completeness,
-            adr_touch,
-            pre_approved,
-            policy: approval_policy.and_then(load_policy),
-        })
-    }
-}
-
 /// The approval policy at `path`, or `None` with a warning.
 ///
 /// A missing or malformed policy skips the client-side granularity check
@@ -90,7 +46,7 @@ impl ProjectionInput {
 /// and refuses the same shape there, so this front is a courtesy that must not
 /// become the thing that stops work. `rules_in_grammar` is the same
 /// fail-closed check the coordinator's loader applies.
-fn load_policy(path: &Path) -> Option<ApprovalPolicy> {
+pub fn load_policy(path: &Path) -> Option<ApprovalPolicy> {
     let warn = |reason: &str| {
         eprintln!(
             "warning: approval policy {} {reason}; skipping the declared-surface granularity check. \
@@ -115,9 +71,16 @@ fn load_policy(path: &Path) -> Option<ApprovalPolicy> {
     }
 }
 
-/// Surface the shipped fallback policy resolves `auto`.
-pub fn direct_drive_surface() -> Vec<String> {
-    vec!["docs/guide/**".to_owned()]
+/// The same refusal the seal door makes, in the same words, against the
+/// stored declared surface the door will actually load.
+pub fn refuse_unnamed_file_entries(policy: &ApprovalPolicy, workpiece: &str, declared: &[String]) -> Result<()> {
+    if let Some(glob) = policy.unnamed_file_entries(declared).first() {
+        bail!(
+            "member {workpiece} declared surface {glob:?} names one file and no approval-policy rule names that \
+             file; widen it to a crate glob such as crates/<crate>/src/**",
+        );
+    }
+    Ok(())
 }
 
 pub fn resolve_base(choice: &BaseChoice, view: &ViewDocument) -> DigestHex {
@@ -177,17 +140,8 @@ pub fn author_values(client: &Client<'_>, specs: &[(String, Value)]) -> Result<C
     Ok(registry)
 }
 
-pub fn descriptions(task: &str, workpieces: impl IntoIterator<Item = impl AsRef<str>>) -> BTreeMap<String, String> {
-    workpieces.into_iter().map(|workpiece| (workpiece.as_ref().to_owned(), task.to_owned())).collect()
-}
-
 pub fn read_task_file(path: &Path) -> Result<String> {
     fs::read_to_string(path).with_context(|| format!("read {}", path.display()))
-}
-
-pub fn file_digest(path: &Path) -> Result<DigestHex> {
-    let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    Ok(DigestHex::from_bytes(Sha256::digest(&bytes).into()))
 }
 
 pub fn seal_workpieces(explicit: &[String], task_file: &Path) -> Result<Vec<String>> {
@@ -264,85 +218,19 @@ pub fn pin_revisions(proposals: &mut [WireMembership], revisions: &[(String, Dig
     Ok(())
 }
 
-pub fn projections(
-    members: &[WireMembership],
-    input: &ProjectionInput,
-    surfaces: &[(String, String)],
-) -> Result<Vec<MemberProjection>> {
-    let mut grouped: BTreeMap<&str, Vec<String>> = BTreeMap::new();
-    for (member, glob) in surfaces {
-        if members.iter().all(|known| known.workpiece != *member) {
-            bail!("--surface names {member}, which is not in the sealed membership");
-        }
-        grouped.entry(member.as_str()).or_default().push(glob.clone());
-    }
+pub fn seal_request(edges: &[(String, String)]) -> SealRequest {
+    SealRequest { idempotency_key: None, edges: wire_edges(edges) }
+}
 
-    // The same refusal the seal door makes, in the same words, before the
-    // request is sent. Applied to the per-member overrides as well as the
-    // fallback, because `--surface` is the flag operators actually reach for.
-    if let Some(policy) = &input.policy {
-        for member in members {
-            let declared = grouped.get(member.workpiece.as_str()).unwrap_or(&input.declared_surface).clone();
-            if let Some(glob) = policy.unnamed_file_entries(&declared).first() {
-                bail!(
-                    "member {} declared surface {glob:?} names one file and no approval-policy rule names that \
-                     file; widen it to a crate glob such as crates/<crate>/src/**",
-                    member.workpiece,
-                );
-            }
-        }
-    }
+pub fn supersede_request(draft_id: &str, edges: &[(String, String)]) -> SupersedeRequest {
+    SupersedeRequest { successor_draft: draft_id.to_owned(), idempotency_key: None, edges: wire_edges(edges) }
+}
 
-    Ok(members
+fn wire_edges(edges: &[(String, String)]) -> Vec<DependencyEdge> {
+    edges
         .iter()
-        .map(|member| MemberProjection {
-            workpiece: member.workpiece.clone(),
-            scope_revision: member.scope_revision,
-            declared_surface: grouped
-                .get(member.workpiece.as_str())
-                .cloned()
-                .unwrap_or_else(|| input.declared_surface.clone()),
-            completeness: input.completeness,
-            adr_touch: input.adr_touch,
-            pre_approved: input.pre_approved,
-        })
-        .collect())
-}
-
-pub fn seal_request(
-    members: &[WireMembership],
-    task: &str,
-    input: &ProjectionInput,
-    edges: &[(String, String)],
-    surfaces: &[(String, String)],
-) -> Result<SealRequest> {
-    Ok(SealRequest {
-        projections: projections(members, input, surfaces)?,
-        descriptions: descriptions(task, members.iter().map(|member| member.workpiece.as_str())),
-        edges: edges
-            .iter()
-            .map(|(member, depends_on)| DependencyEdge { member: member.clone(), depends_on: depends_on.clone() })
-            .collect(),
-    })
-}
-
-pub fn supersede_request(
-    draft_id: &str,
-    members: &[WireMembership],
-    task: &str,
-    input: &ProjectionInput,
-    edges: &[(String, String)],
-    surfaces: &[(String, String)],
-) -> Result<SupersedeRequest> {
-    Ok(SupersedeRequest {
-        successor_draft: draft_id.to_owned(),
-        projections: projections(members, input, surfaces)?,
-        descriptions: descriptions(task, members.iter().map(|member| member.workpiece.as_str())),
-        edges: edges
-            .iter()
-            .map(|(member, depends_on)| DependencyEdge { member: member.clone(), depends_on: depends_on.clone() })
-            .collect(),
-    })
+        .map(|(member, depends_on)| DependencyEdge { member: member.clone(), depends_on: depends_on.clone() })
+        .collect()
 }
 
 /// Reconstruct a sealed spec's identity so a journal row can be matched to a
@@ -417,22 +305,6 @@ mod edge_flag_tests {
 }
 
 #[cfg(test)]
-mod surface_flag_tests {
-    #[test]
-    fn parse_surface_flag_reads_member_equals_glob() {
-        // `--surface issue-A=crates/foo/**` is that member's glob. Accepting a
-        // missing half would attach an empty workpiece or drop a surface.
-        assert_eq!(
-            super::parse_surface_flag("issue-A=crates/foo/**").expect("well-formed"),
-            ("issue-A".to_owned(), "crates/foo/**".to_owned()),
-        );
-        assert!(super::parse_surface_flag("issue-A").is_err());
-        assert!(super::parse_surface_flag("=crates/foo/**").is_err());
-        assert!(super::parse_surface_flag("issue-A=").is_err());
-    }
-}
-
-#[cfg(test)]
 mod revision_flag_tests {
     use crate::bloom::dto::DigestHex;
 
@@ -458,20 +330,40 @@ mod revision_flag_tests {
     }
 }
 
+#[cfg(test)]
+mod candidate_flag_tests {
+    use crate::bloom::dto::DigestHex;
+
+    #[test]
+    fn parse_candidate_flag_reads_tree_then_checkout() {
+        // `--candidate <tree>:<checkout>`, in that order. Swapping the sides
+        // journals a repair whose identity is the capture commit and whose
+        // checkout is a tree — the verifying lane then checks out something
+        // that is not a commit, having already spent the operator's override.
+        let tree = DigestHex::from_bytes([0xab; 32]);
+        let checkout = DigestHex::from_bytes([0xcd; 32]);
+        let parsed =
+            super::parse_candidate_flag(&format!("{}:{}", tree.as_hex(), checkout.as_hex())).expect("well-formed pair");
+        assert_eq!(parsed.tree, tree);
+        assert_eq!(parsed.checkout, checkout);
+
+        let unpaired = super::parse_candidate_flag(&tree.as_hex()).expect_err("one half is not a pair");
+        assert!(unpaired.contains("tree:checkout"), "the error states the shape: {unpaired}");
+        let bad_tree =
+            super::parse_candidate_flag(&format!("not-a-digest:{}", checkout.as_hex())).expect_err("malformed tree");
+        assert!(bad_tree.contains("not-a-digest"), "the error names the offending half: {bad_tree}");
+        let bad_checkout =
+            super::parse_candidate_flag(&format!("{}:not-a-digest", tree.as_hex())).expect_err("malformed checkout");
+        assert!(bad_checkout.contains("not-a-digest"), "the error names the offending half: {bad_checkout}");
+    }
+}
+
 pub fn parse_edge_flag(raw: &str) -> Result<(String, String), String> {
     let (member, depends_on) = raw.split_once('=').ok_or_else(|| "expected dependent=dependency".to_owned())?;
     if member.is_empty() || depends_on.is_empty() {
         return Err("expected dependent=dependency".to_owned());
     }
     Ok((member.to_owned(), depends_on.to_owned()))
-}
-
-pub fn parse_surface_flag(raw: &str) -> Result<(String, String), String> {
-    let (member, glob) = raw.split_once('=').ok_or_else(|| "expected member=glob".to_owned())?;
-    if member.is_empty() || glob.is_empty() {
-        return Err("expected member=glob".to_owned());
-    }
-    Ok((member.to_owned(), glob.to_owned()))
 }
 
 pub fn parse_revision_flag(raw: &str) -> Result<(String, DigestHex), String> {
@@ -483,6 +375,28 @@ pub fn parse_revision_flag(raw: &str) -> Result<(String, DigestHex), String> {
     }
     let bytes = super::hex::decode(hex).ok_or_else(|| format!("{hex} is not a 32-byte hex digest"))?;
     Ok((member.to_owned(), DigestHex::from_bytes(bytes)))
+}
+
+/// `--candidate <tree>:<checkout>` — the low-level candidate pair a repair
+/// names when the operator pushed the ref themselves.
+///
+/// Both halves are required and both are digests. A single flag rather than two
+/// because the pair is one value: a `--tree` accepted without its `--checkout`
+/// would journal a repair whose verifying lane has nothing to check out.
+pub fn parse_candidate_flag(raw: &str) -> Result<CandidateRefRequest, String> {
+    let Some((tree, checkout)) = raw.split_once(':') else {
+        return Err(format!("expected tree:checkout, both 64-hex digests, got {raw}"));
+    };
+    let tree = super::hex::decode(tree).ok_or_else(|| format!("candidate tree {tree} is not a 32-byte hex digest"))?;
+    let checkout = super::hex::decode(checkout)
+        .ok_or_else(|| format!("candidate checkout {checkout} is not a 32-byte hex digest"))?;
+    Ok(CandidateRefRequest { tree: DigestHex::from_bytes(tree), checkout: DigestHex::from_bytes(checkout) })
+}
+
+/// `--request <64-hex>` — one suppression request digest the reviewer is
+/// answering.
+pub fn parse_digest_flag(raw: &str) -> Result<DigestHex, String> {
+    super::hex::decode(raw).map(DigestHex::from_bytes).ok_or_else(|| format!("{raw} is not a 32-byte hex digest"))
 }
 
 pub fn parse_bloom_id(raw: &str) -> Result<String, String> {
@@ -503,12 +417,10 @@ pub fn require_task(text: &str, path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BaseChoice, ProjectionInput, direct_drive_surface, eject_members, pin_revisions, projections, resolve_base,
-        seal_patch, successor_patch,
+        BaseChoice, eject_members, pin_revisions, refuse_unnamed_file_entries, resolve_base, seal_patch,
+        successor_patch,
     };
-    use crate::bloom::dto::{
-        AdrTouch, Approval, BloomSpec, Completeness, ConfigRegistry, DigestHex, Membership, ViewDocument,
-    };
+    use crate::bloom::dto::{Approval, BloomSpec, ConfigRegistry, DigestHex, Membership, ViewDocument};
     use aether_bloomery::{ApprovalPolicy, ApprovalRule, EvidenceKind, Forecast, Tier};
 
     fn digest(byte: u8) -> DigestHex {
@@ -675,70 +587,24 @@ mod tests {
     }
 
     #[test]
-    fn projection_input_defaults_the_direct_drive_surface() {
-        let input = ProjectionInput::resolve(Vec::new(), None, AdrTouch::None, false, None)
-            .expect("defaults do not read a completeness file");
-        assert_eq!(input.declared_surface, ["docs/guide/**"]);
-        assert_eq!(input.completeness.model_routing_count, Completeness::direct_drive().model_routing_count);
-        assert!(!input.completeness.blocked);
-    }
-
-    #[test]
-    fn projections_group_repeated_globs_and_fall_back_per_member() {
-        // A specialized member must not inherit the bloom-wide fallback, and a
-        // member with no `--surface` entries must keep it. Mixing those up
-        // would either invent a derived overlap edge or drop a declared surface.
-        let input = ProjectionInput::resolve(vec!["docs/guide/**".to_owned()], None, AdrTouch::None, false, None)
-            .expect("fallback surface does not read a completeness file");
-        let members = [member("issue-A", 1), member("issue-B", 2)];
-        let surfaces =
-            [("issue-A".to_owned(), "crates/foo/**".to_owned()), ("issue-A".to_owned(), "crates/bar/**".to_owned())];
-
-        let projections = projections(&members, &input, &surfaces).expect("known members");
-
-        assert_eq!(projections[0].workpiece, "issue-A");
-        assert_eq!(projections[0].declared_surface, ["crates/foo/**", "crates/bar/**"]);
-        assert_eq!(projections[1].workpiece, "issue-B");
-        assert_eq!(projections[1].declared_surface, ["docs/guide/**"]);
-    }
-
-    #[test]
-    fn projections_refuse_a_surface_for_an_unknown_member() {
-        // Silently dropping `--surface issue-Z=…` would let the operator think
-        // they specialized a workpiece the seal never admitted.
-        let input = ProjectionInput::resolve(Vec::new(), None, AdrTouch::None, false, None)
-            .expect("defaults do not read a completeness file");
-        let err = projections(&[member("issue-A", 1)], &input, &[("issue-Z".to_owned(), "crates/**".to_owned())])
-            .expect_err("unknown member");
-        assert!(err.to_string().contains("issue-Z"), "error names the absent workpiece: {err}");
-    }
-
-    #[test]
-    fn projections_refuse_a_file_granular_surface_the_policy_does_not_name() {
-        // The lint applied to the `ProjectionInput` default only would miss
-        // every per-member `--surface` override — which is the flag operators
-        // actually reach for, and the one this refusal exists to catch.
+    fn refuse_unnamed_file_entries_reads_the_stored_surface() {
+        // The lint used to run against a client-supplied `--surface` the door
+        // never sees. Pointed at the stored declared surface, it still names
+        // the member and the entry, and still admits a crate glob or a file
+        // the policy names.
         let policy = ApprovalPolicy {
             default: Tier::Judge,
             rules: vec![ApprovalRule { glob: "/Cargo.toml".to_owned(), tier: Tier::Human }],
         };
-        let input = ProjectionInput {
-            declared_surface: direct_drive_surface(),
-            completeness: Completeness::direct_drive(),
-            adr_touch: AdrTouch::None,
-            pre_approved: false,
-            policy: Some(policy),
-        };
-        let members = [member("issue-A", 1)];
 
-        let error = projections(&members, &input, &[("issue-A".to_owned(), "crates/foo/src/lib.rs".to_owned())])
+        let error = refuse_unnamed_file_entries(&policy, "issue-A", &["crates/foo/src/lib.rs".to_owned()])
             .expect_err("a file the policy does not name is refused");
         assert!(error.to_string().contains("issue-A"), "the refusal names the member: {error}");
         assert!(error.to_string().contains("crates/foo/src/lib.rs"), "and the entry: {error}");
 
-        projections(&members, &input, &[("issue-A".to_owned(), "crates/foo/src/**".to_owned())])
+        refuse_unnamed_file_entries(&policy, "issue-A", &["crates/foo/src/**".to_owned()])
             .expect("a crate glob is admitted");
-        projections(&members, &input, &[("issue-A".to_owned(), "Cargo.toml".to_owned())])
+        refuse_unnamed_file_entries(&policy, "issue-A", &["Cargo.toml".to_owned()])
             .expect("a file the policy names is admitted");
     }
 }

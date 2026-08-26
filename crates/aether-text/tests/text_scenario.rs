@@ -54,7 +54,10 @@ const FONT_PATH: &str = "fonts/RobotoMono.ttf";
 /// dir (which holds `fonts/RobotoMono.ttf` — rehomed from the chassis
 /// bundle at the by-chassis split, #3814).
 fn font_assets_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("assets")
+    match env::current_dir().map(|current| current.join("assets")) {
+        Ok(dir) if dir.is_dir() => dir,
+        _ => Path::new(env!("CARGO_MANIFEST_DIR")).join("assets"),
+    }
 }
 
 /// `NamespaceRoots` for these scenarios: `assets` points at the in-repo

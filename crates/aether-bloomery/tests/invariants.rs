@@ -4935,6 +4935,86 @@ fn a_proof_from_another_gate_set_refuses_the_memo_and_re_proves() {
     assert!(after.blooms.get(&bloom).unwrap().verify_reuses.is_empty());
 }
 
+/// Drive a single-member bloom from a green base all the way to Resolved, ready
+/// for the land that follows. Returns the snapshot and the bloom's id; the fold
+/// is tree `digest(100)` on head `digest(101)`.
+fn resolved_on_green_base() -> (Snapshot, BloomId) {
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&Snapshot::new(digest(1)).with_green_base(digest(1)), &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) =
+        step(&snapshot, &event("integrate", Fact::Integrate { bloom, claim: verified_claim("wp", 10, 100, 60) }));
+    let (snapshot, _) = step(
+        &snapshot,
+        &event("resolve", Fact::Resolve { bloom, tree: digest(100), head: digest(101), lineage: vec![] }),
+    );
+    let (snapshot, _) = step(
+        &snapshot,
+        &event(
+            "review",
+            Fact::AggregateReviewCompleted {
+                bloom,
+                passed: true,
+                evidence: Evidence { subject: digest(100), kind: EvidenceKind::ReviewFinding, detail: digest(70) },
+                implicated: vec![],
+            },
+        ),
+    );
+
+    (snapshot, bloom)
+}
+
+// The land-time base receipt: the head a landing produces is a tree the line
+// already answered for, so the next bloom to seal on it stands on that answer
+// instead of re-dispatching a whole-workspace `verify.base`.
+//
+// Tripwire: the two halves must be asserted together. A receipt filed under the
+// wrong key — the landed head as its own tree, or the lane gate set instead of
+// the base one — still puts a row in the ledger and still looks green to a
+// reader, while `enqueue_base_verify_if_needed` misses it and every daily cut
+// silently keeps paying the full base run this exists to avoid.
+#[test]
+fn a_landed_head_carries_the_base_receipt_the_next_seal_stands_on() {
+    let (snapshot, bloom) = resolved_on_green_base();
+
+    let (landed, decisions) = step(&snapshot, &event("land", Fact::Land { bloom, new_head: digest(101) }));
+
+    assert!(matches!(decisions.outcome, Outcome::Landed(_)), "the bloom lands");
+    let receipt = landed.base_receipt_for(digest(101)).expect("the landed head carries a whole-workspace receipt");
+    assert!(receipt.is_green(), "the chain that produced it was whole, so the verdict is green");
+    assert_eq!(receipt.tree, digest(100), "keyed by the tree the fold produced, not by the head commit");
+
+    // The half that is the whole point: a bloom sealing on the landed head asks
+    // the base question and finds it already answered.
+    let next = draft(101, vec![membership("wp-next", 11)]).seal();
+    let (_, sealed) = step(&landed, &event("seal-next", Fact::Seal(next)));
+
+    assert!(
+        !sealed.effects.iter().any(|effect| matches!(effect, Decision::DispatchBaseVerify { .. })),
+        "a seal on a head the coordinator itself landed re-asks nothing",
+    );
+}
+
+// The negative that keeps the receipt honest: the answer comes from the landing,
+// never from the head digest. A mainline hand-moved onto the very same commit —
+// no bloom, no fold, no gates — carries no receipt, so the seal pays the full
+// whole-workspace run.
+//
+// Tripwire: without it, a receipt keyed loosely enough to match any head would
+// pass the positive case above and silently skip base verify on operator-moved
+// mainlines, which is exactly the tree nobody has verified.
+#[test]
+fn a_hand_moved_head_still_pays_its_base_verify() {
+    let spec = draft(101, vec![membership("wp-next", 11)]).seal();
+
+    let (_, sealed) = step(&Snapshot::new(digest(101)), &event("seal", Fact::Seal(spec)));
+
+    assert!(
+        sealed.effects.iter().any(|effect| matches!(effect, Decision::DispatchBaseVerify { .. })),
+        "nothing proved this tree, so the gates run",
+    );
+}
+
 // #4891 — the memo is keyed by content, not by position, so it answers any
 // verify aimed at a proven tree. The live case: an aggregate review sends a
 // member back into Refine, the repair lap changes nothing the tree records (an

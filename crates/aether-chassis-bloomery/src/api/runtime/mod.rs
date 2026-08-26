@@ -325,6 +325,19 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, routed)
     }
 
+    /// `POST /commissions/{id}/approvals/auto` — record the unsigned auto-tier
+    /// approval, refusing upward when the surface resolves above `auto`.
+    #[http::route(Post, "/commissions/{id}/approvals/auto")]
+    fn on_post_commission_auto_approval(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = state.auto_approve_commission(ctx.request(), &id);
+        finish(state, ctx, routed)
+    }
+
     /// `POST /commissions/{id}/cancel` — verify a cancel envelope and close.
     #[http::route(Post, "/commissions/{id}/cancel")]
     fn on_post_commission_cancel(
@@ -1074,10 +1087,27 @@ impl NativeActor for BloomeryApiCapability {
             state.resolve_seal_commission_load(ctx, mail);
             return;
         }
-        if let Some(CommissionHttp { inbound, render: CommissionHttpRender::Show }) =
-            state.commission_http.remove(&correlation)
-        {
-            inbound.reply(&commissions::show_response(mail));
+        let Some(CommissionHttp { inbound, render }) = state.commission_http.remove(&correlation) else {
+            return;
+        };
+        match render {
+            CommissionHttpRender::Show => {
+                inbound.reply(&commissions::show_response(mail));
+            }
+            // The load is a hop, not the answer: on an auto-tier surface the
+            // door mints the approval and holds the obligation across the store
+            // write, which `on_record_commission_approval_result` answers.
+            CommissionHttpRender::AutoApproval { id } => match state.resolve_auto_approval(ctx, &id, mail) {
+                Ok(correlation) => {
+                    state.commission_writing.insert(correlation, inbound);
+                }
+                Err(response) => {
+                    inbound.reply(&response);
+                }
+            },
+            CommissionHttpRender::List | CommissionHttpRender::Workpieces => {
+                inbound.reply(&error_response(500, "a commission load answered a list read"));
+            }
         }
     }
 
@@ -1098,8 +1128,8 @@ impl NativeActor for BloomeryApiCapability {
             CommissionHttpRender::Workpieces => {
                 inbound.reply(&workpieces::list_response(mail));
             }
-            CommissionHttpRender::Show => {
-                inbound.reply(&error_response(500, "commission list answered a show read"));
+            CommissionHttpRender::Show | CommissionHttpRender::AutoApproval { .. } => {
+                inbound.reply(&error_response(500, "commission list answered a single-commission read"));
             }
         }
     }

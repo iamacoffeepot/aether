@@ -69,6 +69,11 @@ impl Journal {
         LIST_HINTS
     }
 
+    #[must_use]
+    pub fn enter_pushes(&self) -> bool {
+        self.cursor.selected().is_some()
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, store: &Store) -> Outcome {
         if self.editing {
             return self.handle_filter(key);
@@ -127,7 +132,10 @@ impl Journal {
         if items.is_empty() {
             items.push(ListItem::new("journal  (empty)"));
         }
-        let list = List::new(items).style(palette::body()).highlight_style(palette::cursor()).highlight_symbol("> ");
+        let list = List::new(items)
+            .style(palette::body())
+            .highlight_style(palette::cursor())
+            .highlight_symbol(super::caret(self.enter_pushes()));
         let selected = self
             .cursor
             .selected_index(&rows, |row| row.sequence)

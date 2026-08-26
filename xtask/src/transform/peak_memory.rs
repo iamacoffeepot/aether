@@ -19,8 +19,8 @@
 //! would read as a run that used no memory, and never a failed lane, which would
 //! trade a measurement for the work it was measuring.
 
-use std::cell::Cell;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The wrapper, at its absolute path rather than through `PATH`: `time` is a
 /// shell builtin in most shells, and the builtin takes no `-v`.
@@ -41,6 +41,9 @@ const MAXIMUM_RESIDENT: &str = "Maximum resident set size";
 /// The key lane evidence carries the reading under.
 const EVIDENCE_KEY: &str = "peak_resident_bytes";
 
+/// The reading a wrapper that has reported nothing yet holds.
+const UNMEASURED: u64 = 0;
+
 /// The host's peak-memory wrapper, held across one lane run.
 pub(super) struct PeakMemory {
     /// Whether this host's `/usr/bin/time` produced a report the reader
@@ -50,7 +53,12 @@ pub(super) struct PeakMemory {
     /// several commands (eight verify members, each possibly preceded by a
     /// pre-build), and what the concurrency model needs is the high-water mark
     /// one lane reached, not the last member to finish.
-    observed: Cell<Option<u64>>,
+    ///
+    /// Atomic because the gates that report into it no longer all run on one
+    /// thread: the members that take no cargo build lock run alongside the ones
+    /// that do. `UNMEASURED` stands for "nothing reported yet" — a real
+    /// `ru_maxrss` is never zero, since the process that reported it ran.
+    observed: AtomicU64,
 }
 
 /// The host's wrapper, or an unavailable one when it has none.
@@ -68,7 +76,7 @@ pub(super) fn detect() -> PeakMemory {
         .ok()
         .filter(|probed| probed.status.success())
         .is_some_and(|probed| split_report(&probed.stderr).1.is_some());
-    PeakMemory { available: probed, observed: Cell::new(None) }
+    PeakMemory { available: probed, observed: AtomicU64::new(UNMEASURED) }
 }
 
 impl PeakMemory {
@@ -110,13 +118,13 @@ impl PeakMemory {
     /// The largest reading this run's commands reported, in bytes, or `None` on a
     /// host that could not measure one.
     pub(super) fn peak_resident_bytes(&self) -> Option<u64> {
-        self.observed.get()
+        Some(self.observed.load(Ordering::Relaxed)).filter(|observed| *observed != UNMEASURED)
     }
 
     /// Keep `peak` when it is the largest seen so far.
     fn record(&self, peak: Option<u64>) {
         if let Some(peak) = peak {
-            self.observed.set(Some(self.observed.get().map_or(peak, |seen| seen.max(peak))));
+            self.observed.fetch_max(peak, Ordering::Relaxed);
         }
     }
 }
@@ -172,15 +180,15 @@ fn parse_maximum_resident_bytes(report: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::sync::atomic::AtomicU64;
 
-    use super::{PeakMemory, split_report, stamp};
+    use super::{PeakMemory, UNMEASURED, split_report, stamp};
 
     /// A wrapper in the stated availability state, without probing the host — the
     /// tests state both hosts, and a real probe would make which one they get
     /// depend on which machine is running them.
     fn wrapper(available: bool) -> PeakMemory {
-        PeakMemory { available, observed: Cell::new(None) }
+        PeakMemory { available, observed: AtomicU64::new(UNMEASURED) }
     }
 
     /// The verbose report GNU time appends to a wrapped command's stderr,

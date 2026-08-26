@@ -318,6 +318,10 @@ pub struct CommissionView {
     /// pre-migration revisions are honestly the same thing, and none of them is
     /// a clean report.
     pub scope_verify: Option<ScopeVerifyReport>,
+    /// Why [`Self::current`] is absent even though the head names a tip.
+    /// `None` when the tip is absent or readable. Trailing so an already-loaded
+    /// view keeps its meaning: the head is still the commission.
+    pub current_unreadable: Option<CommissionValueError>,
 }
 
 /// What is known about a revision without being part of it.
@@ -405,6 +409,11 @@ pub trait CommissionBackend {
 
     /// Load a commission and recompute its current revision from canonical
     /// bytes, or `None` when the id is unknown.
+    ///
+    /// An undecodable current revision is not a failure of the commission: the
+    /// head is returned and [`CommissionView::current_unreadable`] names why
+    /// the body could not be read. Approval, dependency, and seal paths keep
+    /// using [`Self::load_revision`], which stays strict.
     fn load(&mut self, id: &WorkpieceId) -> Result<Option<CommissionView>, CommissionError>;
 
     /// Decode one revision from its stored bytes, recomputing the digest.
@@ -950,15 +959,23 @@ fn load_commission(conn: &mut Connection, id: &WorkpieceId) -> Result<Option<Com
     let Some(head) = load_head(conn, &id.0)? else {
         return Ok(None);
     };
-    let current = match head.current_revision {
-        Some(digest) => Some(load_revision(conn, digest)?.ok_or(CommissionError::MalformedCanonical)?),
-        None => None,
+    let (current, current_unreadable) = match head.current_revision {
+        Some(digest) => match load_revision(conn, digest) {
+            Ok(Some(revision)) => (Some(revision), None),
+            Ok(None) => return Err(CommissionError::MalformedCanonical),
+            Err(CommissionError::MalformedCanonical) => (None, Some(CommissionValueError::Malformed)),
+            Err(CommissionError::UnsupportedSchema(schema)) => {
+                (None, Some(CommissionValueError::UnsupportedSchema(schema)))
+            }
+            Err(error) => return Err(error),
+        },
+        None => (None, None),
     };
     let scope_verify = match head.current_revision {
         Some(digest) => load_scope_verify_report(conn, digest)?,
         None => None,
     };
-    Ok(Some(CommissionView { head, current, scope_verify }))
+    Ok(Some(CommissionView { head, current, scope_verify, current_unreadable }))
 }
 
 fn load_revision(conn: &Connection, digest: Digest) -> Result<Option<ScopeRevision>, CommissionError> {

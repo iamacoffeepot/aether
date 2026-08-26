@@ -33,7 +33,7 @@ use super::state::{
 };
 use crate::api::dto::{MemberProjection, SealRequest};
 use crate::bloomery::{
-    AdmissionRequest, Decision, Gate, precheck_statement, projection_digest, verified_statement_approval,
+    AdmissionRequest, Decision, Gate, Tier, precheck_statement, projection_digest, verified_statement_approval,
 };
 use crate::control::ControlCore;
 use crate::signing::{SigningCapability, Verify, VerifyResult, authority_bytes};
@@ -352,15 +352,15 @@ impl ApiCapabilityState {
         // Pre-encoding lets an encode failure bail with the 500 while the
         // dispatch state is still empty.
         let mut encoded = Vec::with_capacity(pending_verifications.len());
-        for (member_index, scope_revision, statement) in pending_verifications {
+        for (member_index, scope_revision, statement, tier) in pending_verifications {
             let statement_bytes = match to_vec(&statement) {
                 Ok(bytes) => bytes,
                 Err(error) => return Routed::Reply(error_response(500, &format!("statement encode failed: {error}"))),
             };
-            encoded.push((member_index, scope_revision, statement, statement_bytes));
+            encoded.push((member_index, scope_revision, statement, statement_bytes, tier));
         }
         let mut verifications = Vec::with_capacity(encoded.len());
-        for (member_index, scope_revision, statement, statement_bytes) in encoded {
+        for (member_index, scope_revision, statement, statement_bytes, tier) in encoded {
             // Bound to the member's own scope revision, which this path already
             // holds and derives from the gated draft rather than from the
             // envelope — so a statement signed for another revision has no
@@ -370,6 +370,10 @@ impl ApiCapabilityState {
                 &Verify {
                     statement: statement_bytes,
                     authority: authority_bytes(AuthorityDoor::Approve, scope_revision),
+                    // The tier this member's own declared surface resolved at,
+                    // so the signing cap refuses a signer authorized lower
+                    // however good the signature is (#5324).
+                    required_tier: Some(tier),
                 },
             );
             verifications.push(PendingVerify { correlation, member_index, statement });
@@ -539,6 +543,16 @@ impl ApiCapabilityState {
             VerifyResult::Ok { verified: false } => {
                 self.fail_seal(seal, 422, "an above-auto member's signed statement did not verify; seal fails closed");
             }
+            VerifyResult::BelowTier { required, ceiling } => {
+                self.fail_seal(
+                    seal,
+                    422,
+                    &format!(
+                        "an above-auto member's declared surface resolves {required:?} tier, and its statement is \
+                         signed by a key the signing allowlist authorizes only to {ceiling:?}; seal fails closed"
+                    ),
+                );
+            }
             VerifyResult::Err { error } => {
                 self.fail_seal(
                     seal,
@@ -563,8 +577,15 @@ impl ApiCapabilityState {
 }
 
 /// One above-auto member queued for the deferred signature verify: its proposal
-/// index, scope-revision digest, and signed statement — Pass 1's carry into Pass 2.
-type PendingVerification = (usize, Digest, Statement);
+/// index, scope-revision digest, signed statement, and the tier its declared
+/// surface resolved at — Pass 1's carry into Pass 2.
+///
+/// The tier rides along because Pass 1 is the only place that resolves it and
+/// Pass 2 is the only place that can enforce it: the api cap holds no key
+/// material, so "may this signer approve this high" is a question only
+/// `aether.signing` can answer, and it can only answer the question it is
+/// handed (#5324).
+type PendingVerification = (usize, Digest, Statement, Tier);
 
 /// Build the gate request from a stored membership and its projection, then
 /// bind `projection_digest` over the fields the gate will evaluate.
@@ -652,7 +673,7 @@ fn resolve_seal_memberships(
             Decision::Incomplete { reason, refusal } => {
                 return Err(error_response(422, &format!("member {member} is incomplete: {reason:?} ({refusal})")));
             }
-            Decision::RequiresStatement(_tier) => {
+            Decision::RequiresStatement(tier) => {
                 // Above-auto: consume the member projection's signed statement, run
                 // the two synchronous pre-checks (subject + author signature), and
                 // queue it for the async signature verify. A missing or
@@ -676,7 +697,7 @@ fn resolve_seal_memberships(
                     ));
                 }
                 sealed_proposals.push(proposal.clone());
-                pending_verifications.push((index, proposal.scope_revision, statement.clone()));
+                pending_verifications.push((index, proposal.scope_revision, statement.clone(), tier));
             }
         }
     }

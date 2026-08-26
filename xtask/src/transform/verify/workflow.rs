@@ -55,6 +55,29 @@ pub(super) fn gate_step(job: &str, command: &[&str]) -> Step {
     })
 }
 
+/// Every step of `job` whose `run:` holds `tokens` as a contiguous run of
+/// whitespace-separated words, in file order.
+///
+/// The selector for a gate spelled as a shell script rather than as one
+/// command. A `run: |` body opens with `set -uo pipefail` and an `out=`
+/// binding, so the invocation under assertion is never at the front of the
+/// token list [`gate_step`]'s prefix match reads — and now that every
+/// mechanical gate opens the same way, a prefix cannot tell one from another
+/// at all. Content is what discriminates them.
+///
+/// Returned as a list rather than a sole match because the count is itself the
+/// assertion: a gate that invokes its arm twice, or not at all, is the drift
+/// worth naming.
+pub(super) fn steps_running(job: &str, tokens: &[&str]) -> Vec<Step> {
+    assert!(!tokens.is_empty(), "a run-content selector must name at least one token");
+    steps(job)
+        .into_iter()
+        .filter(|step| {
+            step.run.windows(tokens.len()).any(|window| window.iter().map(String::as_str).eq(tokens.iter().copied()))
+        })
+        .collect()
+}
+
 /// The one step of `job` carrying `name`.
 ///
 /// The selector for a job running the same tool more than once under different

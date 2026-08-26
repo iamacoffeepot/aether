@@ -293,9 +293,15 @@ pub use reduce::view_of;
 pub use reduce::why_of;
 pub use sign::AuthorityDoor;
 #[cfg(not(target_arch = "wasm32"))]
+pub use sign::AuthorizedSigner;
+#[cfg(not(target_arch = "wasm32"))]
 pub use sign::Ed25519KeyProvider;
 pub use sign::FakeKeyProvider;
 pub use sign::KeyProvider;
+#[cfg(not(target_arch = "wasm32"))]
+pub use sign::OperatorKey;
+#[cfg(not(target_arch = "wasm32"))]
+pub use sign::OperatorKeyError;
 pub use sign::SignatureEnvelope;
 pub use sign::authorization_message;
 #[cfg(not(target_arch = "wasm32"))]

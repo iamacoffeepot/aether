@@ -9,10 +9,24 @@ on:
     branches-ignore:
       - 'bloomery/daily/**'
   push:
-    branches: [ main ]
-  # The full-suite lane runs only on a push to `main`, so without a
-  # manual trigger there is no way to exercise a change to it before
-  # merging it. A dispatch takes the same non-pull-request path: the
+    # `bloomery/daily/**` is ADR-0186's preferred backstop posture
+    # (iamacoffeepot/aether#4946). A bloom lands on the day's ref without a
+    # pull request, so until sync-back nothing exercised the repository-wide
+    # suite over it: an affected-set or scoping miss stayed green inside its
+    # wave and accumulated for the rest of the day. Running the full suite at
+    # each landing caps that at about one bloom.
+    #
+    # It is a backstop, not a gate. Nothing here is a required check, no
+    # branch protection changes, and a red run is read by an operator — the
+    # quarantine and repair-bloom reaction stays deliberately outside this
+    # workflow, because workflow credentials must not become an unreviewed
+    # coordinator-control channel.
+    branches:
+      - main
+      - 'bloomery/daily/**'
+  # The full-suite lane runs only on a push to `main` or a daily ref, so
+  # without a manual trigger there is no way to exercise a change to it
+  # before merging it. A dispatch takes the same non-pull-request path: the
   # GitHub-hosted runner, the sharded full suite, and no affected-package
   # narrowing.
   workflow_dispatch:
@@ -23,15 +37,20 @@ permissions:
 
 # A push to a branch supersedes that branch's in-flight run: cancel it
 # instead of letting it hold 8-vCPU runners to completion (the account
-# spot quota is the scarce resource). Main is exempt — every main push
-# is a distinct merge whose full run carries the cache-save and scan
-# signal — and each main push gets its own group (keyed by sha):
-# GitHub allows only one running + one queued run per group, so a
-# shared main group would serialize back-to-back merges and silently
-# cancel the intermediate runs.
+# spot quota is the scarce resource).
+#
+# Integration pushes — `main` and the day's bloomery ref — are exempt, and
+# each gets its own group keyed by sha. Every one of them is a distinct
+# landing whose full run carries the cache-save and scan signal, and GitHub
+# allows only one running + one queued run per group, so a shared group
+# would serialize back-to-back landings and silently cancel the intermediate
+# runs. On the daily ref that cancellation is the whole failure mode the
+# backstop exists to prevent: a branch-ref group would let bloom N+1 cancel
+# bloom N's run and erase the first red landing, which is exactly the commit
+# an operator needs named.
 concurrency:
-  group: ci-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ci-${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/bloomery/daily/')) && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/bloomery/daily/') }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -44,12 +63,18 @@ jobs:
       # A manual dispatch is an explicit request to run the suite, and it
       # carries no diff base for the filter to reason from, so it bypasses
       # the filter rather than being classified by it.
-      code: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.code == 'true' }}
+      #
+      # A daily landing bypasses it too, and for the opposite reason: the
+      # backstop exists specifically to catch a wave whose affected set was
+      # wrong (iamacoffeepot/aether#4946), so classifying it by the same kind
+      # of path selection would let the miss it is hunting decide whether it
+      # runs at all.
+      code: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/heads/bloomery/daily/') || steps.filter.outputs.code == 'true' }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
         id: filter
-        if: github.event_name != 'workflow_dispatch'
+        if: github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/heads/bloomery/daily/')
         with:
           filters: |
             code:
@@ -64,10 +89,9 @@ jobs:
               # ci.yml only, not workflows/**: the other workflows
               # (nightlies, docs, release, ...) cannot change a Rust
               # build's outcome, so their edits skip the Rust suite.
-              # ci.yml defines these jobs, so it stays.
-              # ci.yml also carries the dup-check gate's own arguments —
-              # format, threshold, min-tokens — so an edit to them re-runs
-              # the job they configure.
+              # ci.yml defines these jobs, so it stays. Every gate's own
+              # calibration now lives in `xtask/**`, which the rule above
+              # already covers.
               - '.github/workflows/ci.yml'
 
   # A suppression makes the tool it targets green by construction, so this
@@ -119,6 +143,24 @@ jobs:
           --pull-request "${{ github.event.pull_request.number }}"
           --repository "${{ github.repository }}"
 
+  # Every mechanical gate below invokes `cargo xtask transform verify.<id>`
+  # (iamacoffeepot/aether#4883). `xtask/src/transform/verify` owns each gate's
+  # program, argv, environment, exit-code interpretation and verdict; the
+  # Bloomery verify lane runs the same arm, so a calibration edit — the jscpd
+  # threshold, the machete flags, a rustdoc lint — is one Rust change that moves
+  # the gate and the lane's prediction of it together. Stating the invocation
+  # here as well is exactly the two-site duplication this repository has already
+  # been burned by twice (#4856, #4863).
+  #
+  # Scheduling stays in YAML: job names, `needs`, conditions, runners, caches,
+  # tool installation, the affected-package computation, matrix cardinality and
+  # artifact uploads are the executor's business, not the gate's.
+  #
+  # Each arm captures the tool's stdout+stderr into `<out>/verify.<id>.log`
+  # instead of streaming it, and writes throwaway evidence beside it under
+  # `${RUNNER_TEMP}`. The step therefore prints that log and re-raises the arm's
+  # own exit code — `|| status=$?` suppresses `bash -e` for the one command
+  # without laundering its status.
   fmt:
     name: Format
     runs-on: ubuntu-latest
@@ -132,7 +174,17 @@ jobs:
       # with no argument reads the file, including its `components` and
       # `targets`, so each job's needs are declared once, in the repo.
       - run: rustup toolchain install
-      - run: cargo fmt --all -- --check
+      # The gate is now an xtask build, so the job caches like the other Rust
+      # jobs rather than paying a cold compile of the executor every run.
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Format gate
+        run: |
+          set -uo pipefail
+          out="${RUNNER_TEMP}/verify-fmt"
+          status=0
+          cargo xtask transform verify.fmt --out "$out" || status=$?
+          cat "$out/verify.fmt.log" 2>/dev/null || true
+          exit "$status"
 
   clippy:
     name: Clippy
@@ -153,11 +205,27 @@ jobs:
       - name: Install ALSA dev headers (cpal Linux backend)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      # --keep-going so one run reports every crate's diagnostics rather than
-      # stopping at the first failing one — the push-early loop pays a full
-      # round trip per hidden error, and the verify lane pays a repair roll
-      # (#4690). It must stay in step with xtask's `verify_command` argv.
-      - run: cargo clippy --workspace --all-targets --keep-going -- -D warnings
+      # The arm runs clippy non-denying under `--message-format=json` and
+      # applies the same fail-on-any-warning predicate `-D warnings` encodes
+      # over the complete diagnostic list (#4706): denying makes a lint a
+      # compile error, so a lib that trips one is never built and everything
+      # depending on it is never linted at all. The verdict is identical and the
+      # coverage is strictly wider.
+      #
+      # The captured log is that JSON stream, so the step renders `.message
+      # .rendered` back to the text a reader expects. That rendering carries no
+      # calibration — the verdict is the arm's exit code and nothing here can
+      # change it — so it is display, not a second copy of the gate.
+      - name: Clippy gate
+        run: |
+          set -uo pipefail
+          out="${RUNNER_TEMP}/verify-clippy"
+          status=0
+          cargo xtask transform verify.clippy --out "$out" || status=$?
+          log="$out/verify.clippy.log"
+          grep -v '^{' "$log" || true
+          jq -Rr 'fromjson? | select(.reason == "compiler-message") | .message.rendered // empty' "$log" || true
+          exit "$status"
 
   # Not the guide: docs.yml builds the mdBook. This job denies the
   # tracked rustdoc lints over the API docs.
@@ -191,13 +259,18 @@ jobs:
       # `#[cfg(test)]` modules sit outside either selection: rustdoc
       # does not document them at all, so a doc link inside one stays
       # unchecked under any feature set.
-      - name: cargo doc with tracked rustdoc lints denied
-        env:
-          RUSTDOCFLAGS: >-
-            -D rustdoc::redundant_explicit_links
-            -D rustdoc::broken_intra_doc_links
-            -D rustdoc::private_intra_doc_links
-        run: cargo doc --workspace --no-deps --document-private-items --all-features --keep-going
+      #
+      # RUSTDOCFLAGS is the arm's own environment, not the job's: escalating a
+      # tracked lint on one side and not the other is exactly the gate a lane
+      # cannot predict.
+      - name: Rustdoc gate
+        run: |
+          set -uo pipefail
+          out="${RUNNER_TEMP}/verify-docs"
+          status=0
+          cargo xtask transform verify.docs --out "$out" || status=$?
+          cat "$out/verify.docs.log" 2>/dev/null || true
+          exit "$status"
 
   # Workspace-wide tests run on linux only. Non-chassis crates
   # (aether-kinds, aether-data, aether-actor, aether-actor-derive,
@@ -419,6 +492,16 @@ jobs:
       #
       # `strategy.job-total` is 1 on the pull-request lane, and
       # `slice:1/1` selects every test, so the flag is inert there.
+      #
+      # The one gate still spelled here rather than as `verify.test`
+      # (iamacoffeepot/aether#4883). The arm runs the suite whole: it takes no
+      # partition, no package selection, and it re-runs `cargo xtask dist` as
+      # its own prepare, so routing this job through it would discard the
+      # affected subset, run the full suite three times over, and pay the wasm
+      # cross-build twice per shard. Aligning it needs the arm to accept those
+      # three scheduling inputs — an explicit package set, the nextest
+      # partition, and an attestation that the conditional pre-build step above
+      # already ran — which is a change to `xtask/src/transform/verify`.
       - name: Run tests (workspace, parallel)
         if: github.event_name != 'pull_request' || steps.affected.outputs.run_all == 'true'
         run: cargo nextest run --all-features --profile ci --partition slice:${{ matrix.shard }}/${{ strategy.job-total }}
@@ -468,11 +551,22 @@ jobs:
         run: sccache --show-stats
 
   # Token-based duplicate-code detection (jscpd). The gate — min-tokens and
-  # the duplicated-line percentage threshold — is the argv below; jscpd exits
-  # non-zero when the tree exceeds it. Whole-tree scan of crates/ (not a
+  # the duplicated-line percentage threshold — is `verify.dup`'s argv; jscpd
+  # exits non-zero when the tree exceeds it. Whole-tree scan of crates/ (not a
   # diff-scoped run): jscpd only finds clones among the files it scans, so
   # scanning just the PR's changed files would miss a changed file
-  # duplicating an unchanged one. node-only, so it needs no Rust toolchain.
+  # duplicating an unchanged one.
+  #
+  # Settings ride that argv rather than a `.jscpd.json`, and the repository has
+  # no such file (#4856): jscpd answers a malformed config with one stderr
+  # warning and a silent fall back to built-in defaults — threshold included —
+  # so the gate went green at the moment its configuration broke. A bad flag it
+  # rejects outright (exit 2). No ignore flag is needed: jscpd honours
+  # .gitignore, which already covers target/.
+  #
+  # The scan itself is node-only; the executor that states its calibration is
+  # not, which is why this job now installs a toolchain and caches like the
+  # Rust jobs. That build is the price of the calibration living in one place.
   dup-check:
     name: Duplicate code
     needs: changes
@@ -483,14 +577,16 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-      # Settings here rather than in a `.jscpd.json`, and the repository has
-      # no such file (#4856): jscpd answers a malformed config with one stderr
-      # warning and a silent fall back to built-in defaults — threshold
-      # included — so the gate went green at the moment its configuration
-      # broke. A bad flag it rejects outright (exit 2). No ignore flag is
-      # needed: jscpd honours .gitignore, which already covers target/.
-      # Mirror any change into `verify.dup` so the lane predicts the gate.
-      - run: npx --yes jscpd@5.0.12 -f rust -k 150 -t 0.5 -r consoleFull crates
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Duplicate-code gate
+        run: |
+          set -uo pipefail
+          out="${RUNNER_TEMP}/verify-dup"
+          status=0
+          cargo xtask transform verify.dup --out "$out" || status=$?
+          cat "$out/verify.dup.log" 2>/dev/null || true
+          exit "$status"
 
   # Unused-dependency detection (cargo-machete). Scoped to crates/ to
   # match dup-check. False positives (a dep used only through a
@@ -507,12 +603,24 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo install cargo-machete --locked
-      # --no-ignore because cargo-machete skips gitignored files by default,
-      # so a .gitignore pattern that happens to match a crate path retires it
-      # from this gate silently — exit 0, "Good job!", never scanned (#4863).
-      # --skip-target-dir then re-excludes target/, which is the only thing
-      # .gitignore was doing for this scan.
-      - run: cargo machete --no-ignore --skip-target-dir crates
+      # `verify.deps` carries `--no-ignore` because cargo-machete skips
+      # gitignored files by default, so a .gitignore pattern that happens to
+      # match a crate path retires it from this gate silently — exit 0, "Good
+      # job!", never scanned (#4863). `--skip-target-dir` then re-excludes
+      # target/, which is the only thing .gitignore was doing for this scan.
+      #
+      # The arm invokes the `cargo-machete` binary directly rather than through
+      # `cargo machete`, which hands the subcommand its own name as argv[1] and
+      # walks a nonexistent `machete/` alongside `crates/` (#4706). Same scan,
+      # same paths.
+      - name: Unused-dependency gate
+        run: |
+          set -uo pipefail
+          out="${RUNNER_TEMP}/verify-deps"
+          status=0
+          cargo xtask transform verify.deps --out "$out" || status=$?
+          cat "$out/verify.deps.log" 2>/dev/null || true
+          exit "$status"
 
   # Cargo.lock records every workspace package's dependency list, so a
   # manifest edit that lands without the matching lock update leaves the
@@ -528,12 +636,26 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - run: rustup toolchain install
-      - name: Resolve the dependency graph against the committed lock
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # The resolved graph goes to the arm's captured log rather than to this
+      # job's, which is what the previous `> /dev/null` was for: the exit code
+      # is the verdict and the JSON body is never read.
+      #
+      # Spelled out rather than through the `cargo xtask` alias so the
+      # executor's own build carries `--locked`. Without it, building the
+      # executor is the first thing in this job to resolve the graph, and cargo
+      # would silently regenerate the very lock the arm is about to judge — the
+      # gate would then pass over a lockfile it had just repaired in place.
+      - name: Cargo lock freshness gate
         run: |
-          if ! cargo metadata --format-version 1 --locked > /dev/null; then
+          set -uo pipefail
+          out="${RUNNER_TEMP}/verify-lock"
+          status=0
+          cargo run --locked --quiet --package xtask -- transform verify.lock --out "$out" || status=$?
+          if [ "$status" -ne 0 ]; then
             echo "::error::Cargo.lock is stale. Run 'cargo metadata --format-version 1 --offline > /dev/null' and commit the regenerated Cargo.lock."
-            exit 1
           fi
+          exit "$status"
 
   # The one required check. Every job above must resolve to `success`
   # here, or to `skipped` where the path filter is allowed to skip it —

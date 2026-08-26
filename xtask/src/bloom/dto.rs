@@ -359,76 +359,6 @@ pub struct ConfigView {
     pub kind: String,
 }
 
-/// The nine completeness facts the pre-seal gate fails closed on.
-///
-/// Flattened groups keep the wire object one level (the gate's field names)
-/// without packing eight independent bools onto a single Rust struct.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct Completeness {
-    #[serde(flatten)]
-    statements: CompletenessStatements,
-    pub referenced_adr_prs_merged: bool,
-    pub model_routing_count: usize,
-    pub blocked: bool,
-    #[serde(flatten)]
-    freshness: CompletenessFreshness,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-struct CompletenessStatements {
-    has_problem_statement: bool,
-    has_design_notes: bool,
-    has_implementation_plan: bool,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-struct CompletenessFreshness {
-    declared_surface_fresh: bool,
-    dependencies_all_closed: bool,
-    umbrella_integrity: bool,
-}
-
-impl Completeness {
-    /// The checklist a first-class direct-drive seal satisfies.
-    pub fn direct_drive() -> Self {
-        Self {
-            statements: CompletenessStatements {
-                has_problem_statement: true,
-                has_design_notes: true,
-                has_implementation_plan: true,
-            },
-            referenced_adr_prs_merged: true,
-            model_routing_count: 1,
-            blocked: false,
-            freshness: CompletenessFreshness {
-                declared_surface_fresh: true,
-                dependencies_all_closed: true,
-                umbrella_integrity: true,
-            },
-        }
-    }
-}
-
-/// ADR-maturity the hard gate routes on.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
-pub enum AdrTouch {
-    #[default]
-    None,
-    NewOrEstablished,
-    ProposedOnly,
-}
-
-/// One member's seal-time projection.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemberProjection {
-    pub workpiece: String,
-    pub scope_revision: DigestHex,
-    pub declared_surface: Vec<String>,
-    pub completeness: Completeness,
-    pub adr_touch: AdrTouch,
-    pub pre_approved: bool,
-}
-
 /// One declared member-dependency edge (`member` depends on `depends_on`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DependencyEdge {
@@ -437,11 +367,15 @@ pub struct DependencyEdge {
 }
 
 /// `POST /drafts/{id}/seal` body.
+///
+/// Scope, approval, description, and completeness are not fields here: the
+/// door loads them from the commission store. A body that still carried
+/// `projections` or `descriptions` would be accepted and ignored.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SealRequest {
-    pub projections: Vec<MemberProjection>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub descriptions: BTreeMap<String, String>,
+    /// Override the admit idempotency key; defaults to the sealed bloom id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub edges: Vec<DependencyEdge>,
 }
@@ -450,9 +384,9 @@ pub struct SealRequest {
 #[derive(Debug, Clone, Serialize)]
 pub struct SupersedeRequest {
     pub successor_draft: String,
-    pub projections: Vec<MemberProjection>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub descriptions: BTreeMap<String, String>,
+    /// Override the admit idempotency key; defaults to the successor bloom id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub edges: Vec<DependencyEdge>,
 }
@@ -472,6 +406,55 @@ pub struct WithdrawRequest {
     pub reason: String,
     pub operator: String,
     pub cascade: bool,
+}
+
+/// `POST /blooms/{id}/members/{workpiece}/repair` body (#4957, #5032).
+///
+/// Exactly one source is set. The `skip_serializing_if` keeps the other two
+/// slots off the wire entirely rather than sending them as `null`: the route
+/// counts the sources it was given, and a `null` that decodes to `None` is the
+/// same as absent only for as long as nobody adds a third spelling.
+#[derive(Debug, Serialize)]
+pub struct RepairRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<CandidateRefRequest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_worktree: Option<String>,
+    pub reason: String,
+    pub operator: String,
+}
+
+/// The `(tree, checkout)` pair a repair names when the operator has already
+/// pushed the candidate ref themselves (ADR-0152).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct CandidateRefRequest {
+    pub tree: DigestHex,
+    pub checkout: DigestHex,
+}
+
+/// `POST /blooms/{id}/members/{workpiece}/suppression` body (ADR-0193 §5).
+#[derive(Debug, Serialize)]
+pub struct SuppressionAnswerRequest {
+    pub requests: Vec<DigestHex>,
+    pub verdict: SuppressionVerdict,
+    pub reason: String,
+    pub operator: String,
+}
+
+/// A reviewer's answer to the suppression requests a candidate is carrying.
+///
+/// Spelled here rather than reused from `aether_bloomery` so the CLI can derive
+/// `clap::ValueEnum` on it; the variant names are the wire's, so the serialized
+/// value is the one the route decodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, clap::ValueEnum)]
+pub enum SuppressionVerdict {
+    /// The suppressions may stand; the candidate keeps them and continues.
+    Granted,
+    /// They may not. The member re-opens at `Refine` carrying the denial's
+    /// reason, at its own repair budget's expense.
+    Denied,
 }
 
 /// `GET /journal`.

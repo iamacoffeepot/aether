@@ -214,10 +214,25 @@ impl<'policy> Gate<'policy> {
     /// that depends on them — so most of its globs say nothing about what the
     /// work means to change, and only its protected files do.
     fn tier_of(&self, request: &AdmissionRequest) -> Tier {
-        if request.declared_crates.is_empty() {
-            self.policy.resolve_surface(&request.declared_surface)
+        self.tier_of_declaration(&request.declared_surface, &request.declared_crates)
+    }
+
+    /// The policy tier of a declared surface, read the way that surface was
+    /// declared — the rule `tier_of` applies, reachable without an
+    /// [`AdmissionRequest`] to wrap it in.
+    ///
+    /// The seal gate holds a full admission projection; the commission
+    /// auto-approval door (#5325) holds a stored revision and nothing else.
+    /// Both have to read the ladder identically, because a surface the seal
+    /// would call `human` must not be one a commission door calls `auto` — so
+    /// there is one implementation and the request-shaped caller is the one
+    /// that adapts.
+    #[must_use]
+    pub fn tier_of_declaration(&self, declared_surface: &[String], declared_crates: &[String]) -> Tier {
+        if declared_crates.is_empty() {
+            self.policy.resolve_surface(declared_surface)
         } else {
-            self.policy.resolve_protected(&request.declared_surface)
+            self.policy.resolve_protected(declared_surface)
         }
     }
 }

@@ -2,7 +2,7 @@
 //! signed [`Statement`] must pass, and the evidence-formation that populates a
 //! membership `approval` from a verified statement.
 
-use aether_bloomery::{AuthorityDoor, Digest, Evidence, EvidenceKind, KeyProvider, Statement, digest_of};
+use aether_bloomery::{AuthorityDoor, Digest, Evidence, EvidenceKind, KeyProvider, Statement, Tier, digest_of};
 
 /// Why an above-auto approval's signed statement was rejected.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -15,6 +15,52 @@ pub enum StatementRejected {
     NotAnAuthorSignature,
     /// The author signature did not verify against the host key policy (#3560).
     Unverified,
+    /// The signature verified, but the signer is not authorized that high: the
+    /// declared surface resolved a tier above the signer's key-policy ceiling
+    /// (#5324). A genuine signature by an allowlisted key, refused on authority
+    /// rather than on cryptography.
+    BelowTier {
+        /// The tier the member's declared surface resolved at.
+        required: Tier,
+        /// The highest tier this signer's allowlist entry authorizes.
+        ceiling: Tier,
+    },
+}
+
+/// Whether the signer of an already-verified `statement` may approve at
+/// `required`, per the key policy's per-signer tier ceiling (#5324).
+///
+/// The **second** key-policy question, and the one a signature check cannot
+/// answer. `verify_authority` establishes that these words were asserted by an
+/// allowlisted key at this door for this binding; it says nothing about whether
+/// that key stands in for the reader the tier policy asked for. Without this
+/// check one allowlist entry authorizes every tier, so an operator key signs a
+/// `human`-tier surface and the gate admits it exactly as it would an `auto`
+/// one — human tier enforced by the human declining to sign rather than by the
+/// machine.
+///
+/// Runs **after** verification, never before: a ceiling lookup on a merely
+/// *claimed* signer would answer for a key the caller has not proven it holds,
+/// which turns the refusal message into an oracle over the allowlist.
+///
+/// # Errors
+/// [`StatementRejected::BelowTier`] naming both tiers when the signer's ceiling
+/// is below `required`, and [`StatementRejected::Unverified`] when the
+/// statement carries no author signature or its signer has no ceiling at all —
+/// both unreachable behind a successful verification, and both fail closed
+/// rather than assuming an authority the policy did not state.
+pub fn check_signer_tier(
+    statement: &Statement,
+    keys: &dyn KeyProvider,
+    required: Tier,
+) -> Result<(), StatementRejected> {
+    let Some(ceiling) = statement.author_signer().and_then(|signer| keys.tier_ceiling(signer)) else {
+        return Err(StatementRejected::Unverified);
+    };
+    if ceiling < required {
+        return Err(StatementRejected::BelowTier { required, ceiling });
+    }
+    Ok(())
 }
 
 /// The two **synchronous** pre-checks an above-auto signed [`Statement`] must
@@ -61,16 +107,21 @@ pub fn verified_statement_approval(subject: Digest, statement: &Statement) -> Ev
 
 /// Populate an above-auto membership `approval` from an owner-authorized signed
 /// [`Statement`] (ADR-0151, #3560). The statement must sign exactly the
-/// `scope_revision` bytes it approves, be an author signature, and verify against
-/// the host's [`KeyProvider`] (the `aether.signing` capability's allowlist) —
-/// every other case is a fail-closed rejection. On success the formed `approval`
+/// `scope_revision` bytes it approves, be an author signature, verify against
+/// the host's [`KeyProvider`] (the `aether.signing` capability's allowlist), and
+/// come from a signer that key policy authorizes at `required` or above
+/// (#5324) — every other case is a fail-closed rejection. On success the formed `approval`
 /// [`Evidence`] binds the `scope_revision` and details the signed statement, so
 /// the seal-time `validate_member_admission` accepts it exactly as it does an
 /// auto approval.
 ///
 /// This is a **distinct** reader from the tier policy: tier policy decides *what*
 /// tier a surface earns; this key-policy verification decides *who* may sign in
-/// the owner's stead. The two are never folded (ADR-0151 owner rider 1).
+/// the owner's stead, and how high (#5324). The two are never folded (ADR-0151
+/// owner rider 1) — the gate holds both answers and compares them, which is a
+/// different thing from one reader computing the other. `required` is the tier
+/// policy's answer, arriving here as a parameter precisely so this function
+/// cannot resolve it itself.
 ///
 /// The synchronous composition of [`precheck_statement`] → authority verification
 /// → [`verified_statement_approval`]; the deferred-verify seal path splits the
@@ -85,16 +136,18 @@ pub fn verified_statement_approval(subject: Digest, statement: &Statement) -> Ev
 /// though its words are a digest either could name.
 ///
 /// # Errors
-/// [`StatementRejected`] if the statement's subject, provenance, or signature
-/// does not hold.
+/// [`StatementRejected`] if the statement's subject, provenance, signature, or
+/// signer authority does not hold.
 pub fn approval_from_statement(
     scope_revision: Digest,
     statement: &Statement,
     keys: &dyn KeyProvider,
+    required: Tier,
 ) -> Result<Evidence, StatementRejected> {
     precheck_statement(scope_revision, statement)?;
     if !statement.verify_authority(keys, AuthorityDoor::Approve, scope_revision) {
         return Err(StatementRejected::Unverified);
     }
+    check_signer_tier(statement, keys, required)?;
     Ok(verified_statement_approval(scope_revision, statement))
 }

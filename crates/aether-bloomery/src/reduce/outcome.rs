@@ -796,15 +796,15 @@ pub enum Outcome {
         /// The verifier identities that failed together.
         failed: VerifyFailureSet,
     },
-    /// A failing fold was attributed to two candidates and the synthetic
-    /// subject that repairs their coexistence was minted (ADR-0210). Appended
-    /// so every prior outcome keeps its wire discriminant.
+    /// A failing fold was attributed to the candidates that account for it and
+    /// the synthetic subject that repairs their coexistence was minted
+    /// (ADR-0210). Appended so every prior outcome keeps its wire discriminant.
     CompositionNarrowed {
         /// The bloom whose fold refused.
         bloom: BloomId,
         /// The minted subject.
         workpiece: WorkpieceId,
-        /// Its two parents, in canonical id order.
+        /// Its parents, in canonical id order. The arity is this list's length.
         parents: Vec<WorkpieceId>,
         /// The union of the parents' declared surfaces — what its repair may
         /// edit, recorded here because it is derived rather than sealed and so

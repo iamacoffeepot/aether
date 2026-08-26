@@ -56,11 +56,10 @@ fn narrowed_line(record: &BloomRecord) -> SealedLine<'_> {
 /// Reduce a host attribution of a failing fold (ADR-0210).
 ///
 /// The refusal ladder, in order: an unknown or non-`Sealed` bloom; an
-/// attribution that does not name exactly two parents; a parent that is not a
-/// member of this bloom or has been withdrawn; and the verified member turning
-/// up as its own parent. Each of those is a reason to leave the verdict where
-/// the host found it rather than mint a subject over a membership that cannot
-/// support it.
+/// attribution that names no parents; a parent that is not a member of this
+/// bloom or has been withdrawn; and the verified member turning up as its own
+/// parent. Each of those is a reason to leave the verdict where the host found
+/// it rather than mint a subject over a membership that cannot support it.
 ///
 /// Past the ladder the effects are: the verdict on the journal, then either the
 /// narrowed composition's cursor move plus its dispatch, or — when its budget is
@@ -83,7 +82,7 @@ pub(super) fn reduce_composition_narrowed(
         return Decisions::rejected(Outcome::NarrowCompositionRejected(NarrowCompositionError::UnknownOrInactiveBloom));
     }
     let Some(workpiece) = attribution.workpiece() else {
-        return Decisions::rejected(Outcome::NarrowCompositionRejected(NarrowCompositionError::NotTwoParents(
+        return Decisions::rejected(Outcome::NarrowCompositionRejected(NarrowCompositionError::EmptyParents(
             attribution.parents.len(),
         )));
     };
@@ -255,6 +254,54 @@ mod tests {
     }
 
     #[test]
+    fn a_one_parent_attribution_dispatches_the_composition_and_moves_no_member() {
+        // Tripwire: the arity this finding is about. Before it, a sole owner
+        // was `NotTwoParents(1)` and the verified member kept the finding.
+        let (snapshot, bloom) = sealed();
+        let verified = WorkpieceId(VERIFIED.to_string());
+
+        let decisions = reduce_composition_narrowed(
+            &snapshot,
+            &bloom,
+            &verified,
+            digest(0xF0),
+            digest(0xF1),
+            &verdict(),
+            &attribution(&[FIRST]),
+        );
+
+        let Outcome::CompositionNarrowed { workpiece, parents, bound, attempt, .. } = &decisions.outcome else {
+            panic!("a one-parent narrowing mints a composition: {:?}", decisions.outcome);
+        };
+        assert!(workpiece.is_composition(), "a narrowed composition is still a composition: {workpiece:?}");
+        assert_eq!(
+            workpiece.composition_parents().expect("a narrowed composition names its parents in its id"),
+            *parents,
+            "the id carries the same parent set the outcome reports",
+        );
+        assert_eq!(parents.len(), 1);
+        assert_eq!(parents[0], WorkpieceId(FIRST.to_string()));
+        assert_eq!(bound, &strings(&["crates/example/**", "xtask/**"]));
+        assert_eq!(*attempt, 1);
+
+        let moved: Vec<&WorkpieceId> = decisions
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Decision::AdvanceStage { workpiece, .. } | Decision::DispatchAttempt { workpiece, .. } => {
+                    Some(workpiece)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(!moved.is_empty(), "the minted subject dispatches: {:?}", decisions.effects);
+        assert!(
+            moved.iter().all(|target| target.is_composition()),
+            "no member's cursor moves for a collision it did not cause: {moved:?}",
+        );
+    }
+
+    #[test]
     fn the_repair_enters_at_the_same_stage_the_whole_bloom_repair_does() {
         // The subject is the fold that refused, not either parent's candidate:
         // the objective is that both intents coexist *on that tree*, so a lap
@@ -354,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn a_parent_set_naming_a_stranger_or_the_wrong_count_is_refused() {
+    fn a_parent_set_naming_a_stranger_or_no_parents_is_refused() {
         let (snapshot, bloom) = sealed();
         let verified = WorkpieceId(VERIFIED.to_string());
 
@@ -382,10 +429,10 @@ mod tests {
                 digest(0xF0),
                 digest(0xF1),
                 &verdict(),
-                &attribution(&[FIRST]),
+                &attribution(&[]),
             )
             .outcome,
-            Outcome::NarrowCompositionRejected(NarrowCompositionError::NotTwoParents(1)),
+            Outcome::NarrowCompositionRejected(NarrowCompositionError::EmptyParents(0)),
         );
     }
 }

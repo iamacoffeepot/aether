@@ -116,7 +116,7 @@ fn spawn_shard(exe: &Path, spec: &str) -> Child {
         .arg("--shard")
         .arg(spec)
         .env("CARGO_TARGET_DIR", &target)
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .current_dir(crate_root())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -149,11 +149,27 @@ fn relay_failure(spec: &str, output: &Output) -> String {
 }
 
 fn discover() -> Vec<Fixture> {
-    let ui_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/ui");
+    let ui_dir = fixture_dir();
     let stems = rs_stems_in(&ui_dir);
     let harvest = harvest_named_by_actor_args(&ui_dir, &stems);
 
     stems.into_iter().filter(|stem| !harvest.contains(stem)).map(|stem| fixture_in(&ui_dir, stem)).collect()
+}
+
+/// This crate's root as the running process sees it — the current directory
+/// when it holds `tests/ui` (cargo and nextest run the test there), else the
+/// compile-time path for a caller running from elsewhere. Runtime-first
+/// because a lane-cached test binary can outlive the checkout it was
+/// compiled in (dispatch-3177): its baked path then names a pruned tree.
+fn crate_root() -> PathBuf {
+    match env::current_dir() {
+        Ok(dir) if dir.join("tests/ui").is_dir() => dir,
+        _ => PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+    }
+}
+
+fn fixture_dir() -> PathBuf {
+    crate_root().join("tests/ui")
 }
 
 fn rs_stems_in(ui_dir: &Path) -> BTreeSet<String> {

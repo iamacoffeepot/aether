@@ -73,38 +73,50 @@ fn a_bloom_whose_lanes_all_pass_resolves_its_member() {
 }
 
 #[test]
-fn every_launch_of_one_session_stands_in_that_sessions_tree() {
-    // Acceptance for #5425, below the spawn seam: construct and the verify that
-    // judges what it built run in one tree, and that tree belongs to the session
-    // the construct opened rather than to whichever lane slot each launch was
-    // handed.
+fn a_conversation_keeps_its_session_tree_and_a_mechanical_lane_builds_in_its_slot() {
+    // Acceptance for #5425 as amended by the slot-pairing fix, below the spawn
+    // seam. Two halves, one rule per lane class:
     //
-    // Pre-fix every lane built in `<scratch>/slot-<index>`. A harness binds a
-    // conversation permanently to the directory it was born in — grok stores
-    // sessions under a percent-encoded working directory and ignores `--cwd` on
-    // a resume — so a member whose launches landed in different slots had its
-    // resumed lap edit whatever was in the old slot while its own checkout
-    // stayed clean, which reads downstream as a lane that produced nothing
-    // (dispatch-2374, dispatch-2379).
+    // A *conversation* lane stands in the tree its session opened, every lap. A
+    // harness binds a conversation permanently to the directory it was born in —
+    // grok stores sessions under a percent-encoded working directory and ignores
+    // `--cwd` on a resume — so a member whose launches landed in different slots
+    // had its resumed lap edit whatever was in the old slot while its own
+    // checkout stayed clean, which reads downstream as a lane that produced
+    // nothing (dispatch-2374, dispatch-2379).
+    //
+    // A *mechanical* lane carries no conversation, and a per-session tree is a
+    // path no earlier lane ever built at — cargo keys freshness on mtimes a
+    // fresh worktree restamps and sccache keys on the path itself — so the
+    // verify that judges the candidate builds in its slot's own checkout, where
+    // the paths are the ones that slot has always built at.
     let mut harness = LaneHarness::start_with(&LaneScript::all_passing(), "wp-own-tree");
     harness
         .settle("the member resolves", |bloom| bloom.members.first().is_some_and(|member| member.resolution.is_some()));
 
     let sessions = harness.runs_dir().join("sessions");
-    let member_lanes: Vec<(String, String)> = harness
-        .ledger()
-        .into_iter()
-        .filter_map(|run| run.worktree.map(|worktree| (run.command, worktree)))
-        .filter(|(_, worktree)| worktree.contains("/sessions/"))
-        .collect();
+    let placed: Vec<(String, String)> =
+        harness.ledger().into_iter().filter_map(|run| run.worktree.map(|worktree| (run.command, worktree))).collect();
 
-    let commands: BTreeSet<&str> = member_lanes.iter().map(|(command, _)| command.as_str()).collect();
-    assert!(commands.len() > 1, "more than one of the member's stages ran: {member_lanes:?}");
-    let trees: BTreeSet<&str> = member_lanes.iter().map(|(_, worktree)| worktree.as_str()).collect();
-    assert_eq!(trees.len(), 1, "every one of them stood in one tree: {member_lanes:?}");
+    let session_lanes: Vec<&(String, String)> =
+        placed.iter().filter(|(_, worktree)| worktree.contains("/sessions/")).collect();
+    let commands: BTreeSet<&str> = session_lanes.iter().map(|(command, _)| command.as_str()).collect();
+    assert!(commands.contains(CONSTRUCT_IMPLEMENT_COMMAND), "the conversation lane ran in a session tree: {placed:?}");
+    let trees: BTreeSet<&str> = session_lanes.iter().map(|(_, worktree)| worktree.as_str()).collect();
+    assert_eq!(trees.len(), 1, "every conversation launch stood in one tree: {session_lanes:?}");
     let tree = Path::new(trees.iter().next().unwrap());
     assert_eq!(tree.file_name().and_then(|name| name.to_str()), Some("tree"));
     assert_eq!(tree.parent().and_then(Path::parent), Some(sessions.as_path()), "and it is a session's: {tree:?}");
+
+    let verify_trees: Vec<&(String, String)> =
+        placed.iter().filter(|(command, _)| command == VERIFY_CHECK_COMMAND).collect();
+    assert!(!verify_trees.is_empty(), "the mechanical verify ran with a placed tree: {placed:?}");
+    for (_, worktree) in &verify_trees {
+        assert!(
+            !worktree.contains("/sessions/") && worktree.contains("slot-"),
+            "a mechanical lane builds in its slot, not a session tree: {verify_trees:?}",
+        );
+    }
 
     let session_dirs: Vec<String> = fs::read_dir(&sessions)
         .expect("the session root exists")

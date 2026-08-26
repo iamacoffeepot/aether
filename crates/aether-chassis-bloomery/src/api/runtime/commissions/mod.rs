@@ -7,7 +7,10 @@
 //! store write.
 
 use aether_actor::Manual;
-use aether_bloomery::{AuthorityDoor, Digest, Provenance, ScopeRevision, ScopeVerifyReport, Statement, WorkpieceId};
+use aether_bloomery::{
+    AuthorityDoor, CommissionStatus, Digest, Observation, Provenance, ScopeRevision, ScopeVerifyReport, Statement,
+    WorkpieceId, digest_of,
+};
 use aether_data::wire::{from_bytes, to_vec};
 use aether_http::{HttpHeader, HttpServerRequest, HttpServerResponse};
 use aether_substrate::actor::native::NativeCtx;
@@ -20,7 +23,7 @@ use crate::api::dto::{
     CommissionHeadView, CommissionReopenedView, CommissionShowView, CommissionsView, CreateCommissionRequest,
     ReopenCommissionRequest, ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, WriteRevisionRequest,
 };
-use crate::bloomery::{StatementRejected, precheck_statement, verified_statement_approval};
+use crate::bloomery::{ApprovalPolicy, Gate, StatementRejected, Tier, precheck_statement, verified_statement_approval};
 use crate::signing::{SigningCapability, Verify, VerifyResult, authority_bytes};
 use crate::store::{
     CancelCommission, CancelCommissionResult, CreateCommission, CreateCommissionResult, EnqueueScopeRun,
@@ -177,12 +180,70 @@ impl ApiCapabilityState {
         };
         let correlation = self.send_tracked(
             ctx.actor::<SigningCapability>(),
-            &Verify { statement: encoded, authority: authority_bytes(AuthorityDoor::Approve, scope) },
+            // No tier requirement: this door records an approval row, and it
+            // holds no declared surface to resolve a tier from. The tier→signer
+            // binding is applied where the tier exists — the seal gate, which
+            // resolves each member's surface and refuses a row signed below it
+            // (#5324) — so a row stored here still faces that check before it
+            // ever admits a member.
+            &Verify {
+                statement: encoded,
+                authority: authority_bytes(AuthorityDoor::Approve, scope),
+                required_tier: None,
+            },
         );
         Routed::DeferredCommissionVerify {
             correlation,
             write: CommissionWrite::Approval { id: WorkpieceId(id.to_owned()), statement },
         }
+    }
+
+    /// `POST /commissions/{id}/approvals/auto` — record the unsigned `auto`
+    /// approval the store already models but nothing produced (#5325).
+    ///
+    /// The store has always accepted an `ObservationAttestation` approval row
+    /// as tier `Auto` — the seal gate forms exactly such a row for itself — but
+    /// [`submit_commission_approval`](Self::submit_commission_approval) refuses
+    /// any statement that is not an author signature, so the row had no
+    /// producer over the control API and even an `auto`-tier commission had to
+    /// reach for the operator's signing key.
+    ///
+    /// This door mints the row instead of accepting one. The caller supplies no
+    /// statement and no signature, because there is nothing here for a caller
+    /// to assert: the words are the current revision's own digest and the
+    /// provenance is this gate's observation that the tier policy resolved
+    /// `auto`. What the caller *cannot* do is claim the tier — the door reads
+    /// the stored revision's declared surface and resolves it against the
+    /// policy itself, and refuses upward with the tier it found. That refusal
+    /// is what keeps this from becoming a way to self-approve anything: an
+    /// unsigned approval is only ever available where a signature was never
+    /// what the ladder asked for.
+    ///
+    /// Deferred behind a [`LoadCommission`], because the surface lives in the
+    /// store and a door that trusted the caller's account of it would be
+    /// deciding the tier from the request it is gating.
+    pub(super) fn auto_approve_commission(&self, request: &HttpServerRequest, id: &str) -> Routed {
+        if let Err(response) = authorize(request, &self.control_token) {
+            return Routed::Reply(response);
+        }
+        Routed::AutoApproveCommission { request: LoadCommission { id: id.to_owned() }, id: WorkpieceId(id.to_owned()) }
+    }
+
+    /// Resolve a held auto-approval door from the store's commission load:
+    /// decide it against [`auto_approval_write`], then dispatch the minted
+    /// unsigned approval (#5325).
+    ///
+    /// Returns the write correlation to hold the obligation against, or the
+    /// response that answers it now.
+    pub(super) fn resolve_auto_approval(
+        &self,
+        ctx: &NativeCtx<'_, Manual>,
+        id: &WorkpieceId,
+        result: LoadCommissionResult,
+    ) -> Result<u64, HttpServerResponse> {
+        let write = auto_approval_write(self.file_policy.as_ref(), id, result)?;
+
+        Ok(self.send_tracked(ctx.actor::<StoreCapability>(), &write))
     }
 
     /// `GET /commissions/{id}` — show one commission.
@@ -222,7 +283,11 @@ impl ApiCapabilityState {
         };
         let correlation = self.send_tracked(
             ctx.actor::<SigningCapability>(),
-            &Verify { statement: encoded, authority: authority_bytes(AuthorityDoor::Cancel, intent) },
+            &Verify {
+                statement: encoded,
+                authority: authority_bytes(AuthorityDoor::Cancel, intent),
+                required_tier: None,
+            },
         );
         Routed::DeferredCommissionVerify {
             correlation,
@@ -254,7 +319,11 @@ impl ApiCapabilityState {
         };
         let correlation = self.send_tracked(
             ctx.actor::<SigningCapability>(),
-            &Verify { statement: encoded, authority: authority_bytes(AuthorityDoor::Reopen, intent) },
+            &Verify {
+                statement: encoded,
+                authority: authority_bytes(AuthorityDoor::Reopen, intent),
+                required_tier: None,
+            },
         );
         Routed::DeferredCommissionVerify {
             correlation,
@@ -284,6 +353,16 @@ impl ApiCapabilityState {
             VerifyResult::Err { error } => {
                 inbound.reply(&error_response(400, &format!("signed statement did not verify: {error}")));
             }
+            // Unreachable: none of these doors names a `required_tier`, so the
+            // signing cap has no ladder to refuse against. Answered rather than
+            // ignored, so a door that later starts naming one cannot lose its
+            // refusal to a silent fall-through.
+            VerifyResult::BelowTier { required, ceiling } => {
+                inbound.reply(&error_response(
+                    400,
+                    &format!("signer is authorized to {ceiling:?} tier, below the {required:?} tier required"),
+                ));
+            }
         }
     }
 
@@ -292,6 +371,113 @@ impl ApiCapabilityState {
         if let Some(inbound) = self.commission_writing.remove(&ctx.reply_target().correlation_id) {
             inbound.reply(response);
         }
+    }
+}
+
+/// The store write an auto-approval door produces, or the refusal that answers
+/// it instead (#5325).
+///
+/// The whole decision, kept pure so the tier gate is testable without a live
+/// capability: the only thing [`resolve_auto_approval`] adds is the dispatch.
+///
+/// `policy` is the host's file-loaded ladder. A lone commission seals no
+/// bloom-wide configuration, so there is no attested policy to prefer over it —
+/// and `None` is a refusal rather than a default, because a door that guessed
+/// `auto` because it could not read the ladder is the one thing this route must
+/// never do.
+///
+/// # Errors
+/// The commission has nothing to approve, no policy was loaded, or its declared
+/// surface resolves above `auto` — in which case the refusal names the tier it
+/// found, since "not auto" alone does not tell an operator whose signature to
+/// go and get.
+///
+/// [`resolve_auto_approval`]: ApiCapabilityState::resolve_auto_approval
+fn auto_approval_write(
+    policy: Option<&ApprovalPolicy>,
+    id: &WorkpieceId,
+    result: LoadCommissionResult,
+) -> Result<RecordCommissionApproval, HttpServerResponse> {
+    let revision = auto_approval_revision(id, result)?;
+
+    let Some(policy) = policy else {
+        return Err(error_response(422, "approval policy unavailable; auto approval fails closed"));
+    };
+    let tier = Gate::new(policy).tier_of_declaration(&revision.declared_surface, &revision.declared_crates);
+    if tier != Tier::Auto {
+        return Err(error_response(
+            422,
+            &format!(
+                "commission {} declares a surface that resolves {tier:?} tier; an unsigned auto approval is \
+                 available only at auto tier, so this one needs a signed statement",
+                id.0
+            ),
+        ));
+    }
+
+    // The digest is recomputed from the canonical bytes rather than read off
+    // the load's index column, so the approval binds the revision the store
+    // actually holds.
+    let statement = to_vec(&auto_approval_statement(digest_of(&revision)))
+        .map_err(|error| error_response(500, &format!("auto approval encode failed: {error}")))?;
+
+    Ok(RecordCommissionApproval { id: id.0.clone(), statement })
+}
+
+/// The source label an auto-tier commission approval's observation carries.
+///
+/// Distinct from the seal gate's own `approve_gate:auto-tier` label: both
+/// record that a policy resolved `auto`, and a reader of a stored row should be
+/// able to tell which door decided it.
+const AUTO_APPROVAL_SOURCE: &str = "aether.bloomery.commission_approve:auto-tier";
+
+/// The unsigned `auto` approval for `scope` (#5325).
+///
+/// An observation attestation, never an author signature: nobody asserted
+/// anything here, the gate observed that the tier policy resolved `auto`. That
+/// is precisely the provenance `classify_approval` files as tier `Auto`, so the
+/// store needs no new shape to accept it.
+///
+/// Deterministic from `scope` alone, so a re-POST re-mints a byte-identical
+/// statement and the store's duplicate check makes the second attempt a no-op
+/// rather than a second row.
+fn auto_approval_statement(scope: Digest) -> Statement {
+    Statement {
+        words: scope.as_bytes().to_vec(),
+        provenance: Provenance::ObservationAttestation(Observation { source: AUTO_APPROVAL_SOURCE.to_owned() }),
+        parents: vec![scope],
+    }
+}
+
+/// The current revision an auto approval would bind, or the refusal that
+/// answers the door instead.
+///
+/// Every branch here is a commission that has nothing for this door to approve
+/// — no such commission, no revision written yet, bytes that do not decode, or
+/// a lifecycle that has already closed. The digest is recomputed from the
+/// canonical bytes rather than taken from the row's index column, because that
+/// digest is what the minted approval binds.
+fn auto_approval_revision(id: &WorkpieceId, result: LoadCommissionResult) -> Result<ScopeRevision, HttpServerResponse> {
+    match result {
+        LoadCommissionResult::Ok { status, current, current_unreadable, .. } => {
+            if status != CommissionStatus::Open.as_str() {
+                return Err(error_response(422, &format!("commission {} is not open", id.0)));
+            }
+            if let Some(reason) = current_unreadable {
+                return Err(error_response(
+                    422,
+                    &format!("commission {} current revision is unreadable: {reason}", id.0),
+                ));
+            }
+            let Some(canonical) = current else {
+                return Err(error_response(422, &format!("commission {} has no scope revision to approve", id.0)));
+            };
+            ScopeRevision::from_canonical(&canonical).map_err(|error| {
+                error_response(422, &format!("commission {} current revision is unreadable: {error}", id.0))
+            })
+        }
+        LoadCommissionResult::Missing { id } => Err(error_response(404, &format!("commission {id} not found"))),
+        LoadCommissionResult::Err { error } => Err(error_response(500, &format!("commission load failed: {error}"))),
     }
 }
 
@@ -346,6 +532,10 @@ fn approval_rejected(rejected: StatementRejected) -> HttpServerResponse {
         StatementRejected::WrongSubject => error_response(400, "approval words are not the scope digest"),
         StatementRejected::NotAnAuthorSignature => error_response(400, "approval is not an author signature"),
         StatementRejected::Unverified => error_response(400, "approval signature did not verify"),
+        StatementRejected::BelowTier { required, ceiling } => error_response(
+            403,
+            &format!("approval signer is authorized to {ceiling:?} tier, below the {required:?} tier required"),
+        ),
     }
 }
 
@@ -469,6 +659,21 @@ pub(super) fn approval_response(result: RecordCommissionApprovalResult) -> HttpS
     }
 }
 
+/// The decoded current revision, or the unreadable-body marker when those
+/// bytes are not this binary's shape. A missing tip stays missing.
+fn show_current(
+    current: Option<Vec<u8>>,
+    current_unreadable: Option<String>,
+) -> (Option<ScopeRevision>, Option<String>) {
+    match current {
+        Some(bytes) => match ScopeRevision::from_canonical(&bytes) {
+            Ok(revision) => (Some(revision), None),
+            Err(error) => (None, Some(current_unreadable.unwrap_or_else(|| error.to_string()))),
+        },
+        None => (None, current_unreadable),
+    }
+}
+
 /// Render [`LoadCommissionResult`].
 pub(super) fn show_response(result: LoadCommissionResult) -> HttpServerResponse {
     match result {
@@ -481,6 +686,7 @@ pub(super) fn show_response(result: LoadCommissionResult) -> HttpServerResponse 
             current,
             approvals,
             scope_verify,
+            current_unreadable,
         } => {
             let Ok(intent) = digest_of_bytes(&intent) else {
                 return error_response(500, "stored intent digest is not 32 bytes");
@@ -492,13 +698,7 @@ pub(super) fn show_response(result: LoadCommissionResult) -> HttpServerResponse 
                 },
                 None => None,
             };
-            let current = match current {
-                Some(bytes) => match ScopeRevision::from_canonical(&bytes) {
-                    Ok(revision) => Some(revision),
-                    Err(_) => return error_response(500, "stored current revision is malformed"),
-                },
-                None => None,
-            };
+            let (current, current_unreadable) = show_current(current, current_unreadable);
             let mut decoded = Vec::new();
             for bytes in approvals {
                 match from_bytes::<Statement>(&bytes) {
@@ -522,6 +722,7 @@ pub(super) fn show_response(result: LoadCommissionResult) -> HttpServerResponse 
                     current_ordinal,
                     status,
                     current,
+                    current_unreadable,
                     approvals: decoded,
                     scope_verify,
                 },

@@ -677,6 +677,10 @@ pub struct CommissionShowView {
     /// The current revision decoded from its canonical bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current: Option<ScopeRevision>,
+    /// Why [`Self::current`] is absent even though [`Self::current_revision`]
+    /// names a tip. Omitted when the tip is absent or readable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_unreadable: Option<String>,
     /// Approval statements stored for the current revision, in insert order.
     pub approvals: Vec<Statement>,
     /// The scope-verify report journaled for the current revision (ADR-0208).

@@ -12,8 +12,9 @@ use std::collections::{HashMap, HashSet};
 use std::collections::BTreeMap;
 
 use aether_bloomery::{
-    AuthorityDoor, ClosureViolation, Digest, Ed25519KeyProvider, KeyProvider, MANIFEST_CLOSURE_BUDGET, Provenance,
-    ProvenanceIndex, SignatureEnvelope, Slot, SlotRole, Statement, assemble_manifest, authorization_message,
+    AuthorityDoor, AuthorizedSigner, ClosureViolation, Digest, Ed25519KeyProvider, KeyProvider,
+    MANIFEST_CLOSURE_BUDGET, Provenance, ProvenanceIndex, SignatureEnvelope, Slot, SlotRole, Statement, Tier,
+    assemble_manifest, authorization_message,
 };
 use aether_bloomery::{KeyId, Observation};
 use ed25519_dalek::{Signer, SigningKey};
@@ -83,6 +84,10 @@ impl KeyProvider for RejectingKeyProvider {
     fn verify(&self, _envelope: &SignatureEnvelope, _message: &[u8]) -> bool {
         false
     }
+
+    fn tier_ceiling(&self, _signer: &KeyId) -> Option<Tier> {
+        None
+    }
 }
 
 /// The deterministic authorized signer (fixed seed, no rng) — its public half
@@ -96,7 +101,10 @@ fn owner_key() -> SigningKey {
 /// custody shape the host `aether.signing` capability constructs, so the
 /// closure gate's tests run against the real verifier, not the fake stub.
 fn real_provider() -> Ed25519KeyProvider {
-    Ed25519KeyProvider::new(BTreeMap::from([(KeyId("owner".into()), owner_key().verifying_key())]))
+    Ed25519KeyProvider::new(BTreeMap::from([(
+        KeyId("owner".into()),
+        AuthorizedSigner { key: owner_key().verifying_key(), ceiling: Tier::Human },
+    )]))
 }
 
 /// A statement genuinely signed as authority to ground the artifact stored at

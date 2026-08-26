@@ -585,7 +585,7 @@ fn verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Ev
             }
         } else if let Some(narrowing) = upload.observation.narrowing.clone() {
             // The verdict is real and the member is not who owes it: the failing
-            // diagnostic is accounted for by two other candidates in the same fold
+            // diagnostic is accounted for by other candidates in the same fold
             // (ADR-0210). Routing it to `VerifyFailed` here is what charged an
             // innocent member a repair lap it would decline, so the fold's own
             // narrowing takes precedence over both arms below.

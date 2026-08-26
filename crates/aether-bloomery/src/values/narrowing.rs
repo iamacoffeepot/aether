@@ -58,10 +58,11 @@ pub struct FoldContribution {
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct CompositionParents {
     /// The parents, in canonical id order — the composition's arity is this
-    /// list's length. Exactly two by construction here: [`narrow_composition`]
-    /// refuses every other count rather than naming a parent set that is a
-    /// guess, and the whole-bloom instance reads its parents off the bloom
-    /// rather than through this value.
+    /// list's length. [`narrow_composition`] names one parent when a single
+    /// candidate covers the paths, two when a pair does, and refuses every
+    /// other count rather than naming a parent set that is a guess. The
+    /// whole-bloom instance reads its parents off the bloom rather than through
+    /// this value.
     pub parents: Vec<WorkpieceId>,
     /// The diagnostic paths the collision was read off, sorted and deduplicated.
     pub paths: Vec<String>,
@@ -72,35 +73,38 @@ pub struct CompositionParents {
 
 impl CompositionParents {
     /// The composition this parent set names.
+    ///
+    /// [`None`] only for an empty list: [`WorkpieceId::composition_of`] already
+    /// spells an id at any non-empty arity, and an empty parent set is not a
+    /// collision to repair.
     #[must_use]
     pub fn workpiece(&self) -> Option<WorkpieceId> {
-        match self.parents.as_slice() {
-            [first, second] => Some(WorkpieceId::composition_of(&[first.clone(), second.clone()])),
-            _ => None,
+        if self.parents.is_empty() {
+            None
+        } else {
+            Some(WorkpieceId::composition_of(&self.parents))
         }
     }
 }
 
-/// Why a failing fold does not narrow to a two-candidate composition.
+/// Why a failing fold does not narrow to a composition.
 ///
 /// Every arm is a reason to leave the failure where it already was rather than
 /// narrow: a parent set that guesses is worse than none, because the composition
-/// it names would be handed two candidates with nothing to do with the defect
-/// and told to make them coexist.
+/// it names would be handed candidates with nothing to do with the defect and
+/// told to make them coexist.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum NarrowingRefusal {
     /// The verdict named no paths, so there is nothing to attribute.
     NoDiagnosticPaths,
-    /// One member's candidate accounts for every named path. That is an
-    /// ordinary finding against that member, not a collision between two.
-    SingleOwner(WorkpieceId),
     /// The member under verification is itself one of the writers. Its own
     /// Verify is the right place for that, and re-routing it to a composition
     /// would hide a defect the member owns.
     VerifiedMemberWrote(WorkpieceId),
     /// No pair of candidates accounts for the named paths — a path nobody in
     /// this bloom wrote, or a collision wider than two. Find the real owner
-    /// before inventing one.
+    /// before inventing one. A single candidate that covers the paths is not
+    /// this: that names a one-parent composition.
     NoCoveringPair,
     /// A named path sits outside the union of the parents' surfaces, so the
     /// composition could not legally edit the file the diagnostic points at. A
@@ -108,26 +112,29 @@ pub enum NarrowingRefusal {
     OutsideTheUnion(Vec<String>),
 }
 
-/// Narrow a failing fold to the pair of candidates that collide on it, or
-/// refuse to narrow it (ADR-0210).
+/// Narrow a failing fold to the candidates that collide on it, or refuse to
+/// narrow it (ADR-0210).
 ///
 /// `verified` is the member whose Verify produced the verdict — the one this
 /// exists to leave untouched. `paths` are the repository-relative paths the
 /// diagnostic named. `contributions` is every member of the bloom whose
 /// candidate is in the tree under test.
 ///
-/// The pair is found by exhaustive search over pairs rather than by a general
-/// minimum-set-cover: only a cover of size two narrows anything, so checking every
-/// pair is both exact and cheap. That is `O(m² · p)` membership tests over a
-/// membership the seal door caps and a diagnostic path list a verdict bounds —
-/// tens of members against tens of paths, evaluated once per failing fold, not
-/// per file. A single member covering the paths is reported as such rather than
-/// being padded out to a pair, and ties among covering pairs resolve to the
-/// canonically first, so the same failing fold attributes the same way however
-/// the membership was ordered.
+/// A single candidate that covers every named path names a one-parent
+/// composition over that candidate, under that candidate's own surface, rather
+/// than being padded out to a pair. The pair is found by exhaustive search over
+/// pairs rather than by a general minimum-set-cover: only a cover of size one
+/// or two narrows anything, so checking every pair is both exact and cheap.
+/// That is `O(m² · p)` membership tests over a membership the seal door caps
+/// and a diagnostic path list a verdict bounds — tens of members against tens
+/// of paths, evaluated once per failing fold, not per file. Ties among covering
+/// pairs resolve to the canonically first, so the same failing fold attributes
+/// the same way however the membership was ordered. Three-or-more stays
+/// [`NarrowingRefusal::NoCoveringPair`]: generalizing to arbitrary subsets is a
+/// cover problem whose answer is not unique.
 ///
 /// # Errors
-/// A [`NarrowingRefusal`] naming why this fold does not narrow to two parents.
+/// A [`NarrowingRefusal`] naming why this fold does not narrow to a parent set.
 pub fn narrow_composition(
     verified: &WorkpieceId,
     paths: &[String],
@@ -144,7 +151,13 @@ pub fn narrow_composition(
         return Err(NarrowingRefusal::VerifiedMemberWrote(writer.workpiece.clone()));
     }
     if let Some(sole) = contributions.iter().find(|entry| covers(entry, &paths)) {
-        return Err(NarrowingRefusal::SingleOwner(sole.workpiece.clone()));
+        let bound = surface_union(&[sole.surface.as_slice()]);
+        let outside: Vec<String> =
+            paths.iter().filter(|path| !path_in_surface(&bound, path)).map(String::clone).collect();
+        if !outside.is_empty() {
+            return Err(NarrowingRefusal::OutsideTheUnion(outside));
+        }
+        return Ok(CompositionParents { parents: alloc::vec![sole.workpiece.clone()], paths, bound });
     }
 
     let mut ordered: Vec<&FoldContribution> =
@@ -291,17 +304,30 @@ mod tests {
     }
 
     #[test]
-    fn a_path_one_member_owns_alone_stays_that_members_finding() {
-        // A defect inside one candidate is not a collision, and minting a
-        // synthetic for it would hand a repair lane one parent and nothing to
-        // reconcile it against.
+    fn a_path_one_other_member_owns_narrows_to_the_composition_over_that_member() {
+        // Tripwire: the arity this finding is about. The diagnostic names a
+        // path one sibling wrote and the member under verification did not.
+        // Charging the verified member parks it awaiting a surface it was
+        // never approved for; charging the owner reopens reviewed work. The
+        // composition over that one candidate is the subject that exists to
+        // make a candidate coexist with the tree it landed in.
+        let attribution = narrow_composition(
+            &workpiece("issue-5417"),
+            &strings(&["crates/aether-bloomery/src/values/proof.rs"]),
+            &the_night(),
+        )
+        .expect("one other candidate accounts for every named path");
+
+        assert_eq!(attribution.parents, vec![workpiece("issue-5346")]);
+        assert_eq!(attribution.bound, strings(&["crates/aether-bloomery/**", "xtask/**"]));
         assert_eq!(
-            narrow_composition(
-                &workpiece("issue-5417"),
-                &strings(&["crates/aether-bloomery/src/values/proof.rs"]),
-                &the_night()
-            ),
-            Err(NarrowingRefusal::SingleOwner(workpiece("issue-5346"))),
+            attribution.workpiece(),
+            Some(WorkpieceId::composition_of(&[workpiece("issue-5346")])),
+            "a one-parent attribution still mints a composition, not the owner",
+        );
+        assert!(
+            !attribution.parents.contains(&workpiece("issue-5417")),
+            "the member that happened to verify the fold is not a parent",
         );
     }
 
@@ -341,7 +367,7 @@ mod tests {
 
         assert_eq!(
             narrow_composition(&workpiece("issue-c"), &strings(&["Cargo.lock"]), &contributions),
-            Err(NarrowingRefusal::SingleOwner(workpiece("issue-a"))),
+            Err(NarrowingRefusal::OutsideTheUnion(strings(&["Cargo.lock"]))),
         );
         assert_eq!(
             narrow_composition(

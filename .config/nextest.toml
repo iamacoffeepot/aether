@@ -6,6 +6,20 @@ final-status-level = "slow"
 fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 1 }
 
+# The fork-class integration binaries — every suite that forks a real debug
+# `aether-headless` or a real coordinator and waits for it to bind — flake
+# under full-width suite runs (32 test threads on the fleet host), and each
+# flake replays alone through the per-test triage at ~45s apiece, serially
+# (iamacoffeepot/aether#5475: a measured 2m48s full gate became a 15-25 minute
+# run three times in one night). One retry absorbs the saturation flake inline
+# in seconds while a deterministic failure still fails — twice, visibly, with
+# the retry noted in the report. Scoped to the fork-class packages' integration
+# binaries rather than profile-wide: a unit test that fails twice in a row is
+# not contention, and a profile-wide retry would quietly soften every gate.
+[[profile.ci.overrides]]
+filter = "(package(=aether-component) | package(=aether-fleet) | package(=aether-rpc) | package(=aether-actor) | package(=aether-tcp) | package(=aether-substrate) | package(=aether-chassis-headless) | package(=aether-chassis-hub) | package(=aether-chassis-bloomery) | package(=aether-harness-bloomery) | package(=aether-http) | package(=aether-render) | package(=aether-text)) & kind(test)"
+retries = 1
+
 # `terrain_workbench_scenario` (aether-kit-workbench) is a heavy integration
 # binary — four cold wasm component loads (mark/world/terra/workbench) plus a
 # font load and six GPU captures in one test, versus siblings that load one or

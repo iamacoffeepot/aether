@@ -18,7 +18,7 @@ use ed25519_dalek::{Signer, SigningKey};
 
 use super::{
     AdmissionRequest, AdrTouch, ApprovalPolicy, Completeness, Decision, Gate, Incompleteness, StatementRejected, Tier,
-    approval_from_statement, load_policy, precheck_statement, verified_statement_approval,
+    approval_from_statement, check_signer_tier, load_policy, precheck_statement, verified_statement_approval,
 };
 
 /// The test tier policy the gate cases decide over: `docs/guide/**` advances on
@@ -264,9 +264,19 @@ fn signing_key(seed: u8) -> SigningKey {
     SigningKey::from_bytes(&[seed; 32])
 }
 
-/// A provider trusting exactly `signer` at `key`'s public half.
+/// A provider trusting exactly `signer` at `key`'s public half, authorized to
+/// the top of the tier ladder.
 fn provider(signer: &str, key: &SigningKey) -> Ed25519KeyProvider {
-    Ed25519KeyProvider::new(BTreeMap::from([(KeyId(signer.to_owned()), key.verifying_key())]))
+    provider_at(signer, key, Tier::Human)
+}
+
+/// A provider trusting exactly `signer` at `key`'s public half, authorized no
+/// higher than `ceiling`.
+fn provider_at(signer: &str, key: &SigningKey, ceiling: Tier) -> Ed25519KeyProvider {
+    Ed25519KeyProvider::new(BTreeMap::from([(
+        KeyId(signer.to_owned()),
+        aether_bloomery::AuthorizedSigner { key: key.verifying_key(), ceiling },
+    )]))
 }
 
 /// An author-signed statement over `words` by `signer` using `key`, signed as
@@ -289,7 +299,8 @@ fn an_authorized_signed_statement_over_the_revision_forms_the_approval() {
     let key = signing_key(7);
     let keys = provider("owner", &key);
     let statement = signed_statement("owner", &key, revision().as_bytes(), revision());
-    let evidence = approval_from_statement(revision(), &statement, &keys).expect("verified statement forms approval");
+    let evidence =
+        approval_from_statement(revision(), &statement, &keys, Tier::Human).expect("verified statement forms approval");
     assert_eq!(evidence.kind, EvidenceKind::Approval);
     assert!(evidence.validates(&revision()));
     assert_eq!(evidence.detail, digest_of(&statement), "the detail names the signed statement");
@@ -303,7 +314,10 @@ fn a_statement_over_another_revision_is_rejected() {
     // this one (old evidence never validates a replacement).
     let other = Digest::from_bytes([1; 32]);
     let statement = signed_statement("owner", &key, other.as_bytes(), other);
-    assert_eq!(approval_from_statement(revision(), &statement, &keys), Err(StatementRejected::WrongSubject));
+    assert_eq!(
+        approval_from_statement(revision(), &statement, &keys, Tier::Human),
+        Err(StatementRejected::WrongSubject)
+    );
 }
 
 #[test]
@@ -315,7 +329,10 @@ fn a_non_author_statement_is_rejected() {
         provenance: Provenance::ObservationAttestation(aether_bloomery::Observation { source: "adapter".to_owned() }),
         parents: vec![],
     };
-    assert_eq!(approval_from_statement(revision(), &statement, &keys), Err(StatementRejected::NotAnAuthorSignature));
+    assert_eq!(
+        approval_from_statement(revision(), &statement, &keys, Tier::Human),
+        Err(StatementRejected::NotAnAuthorSignature)
+    );
 }
 
 #[test]
@@ -325,7 +342,7 @@ fn a_signature_outside_the_key_policy_is_rejected() {
     // allowlist — fail-closed, distinct from the tier policy (who may sign).
     let keys = provider("owner", &key);
     let statement = signed_statement("intruder", &key, revision().as_bytes(), revision());
-    assert_eq!(approval_from_statement(revision(), &statement, &keys), Err(StatementRejected::Unverified));
+    assert_eq!(approval_from_statement(revision(), &statement, &keys, Tier::Human), Err(StatementRejected::Unverified));
 }
 
 #[test]
@@ -342,7 +359,7 @@ fn a_signature_bound_to_another_revision_is_rejected_even_with_the_right_words()
     let statement = signed_statement("owner", &key, revision().as_bytes(), other);
 
     assert_eq!(precheck_statement(revision(), &statement), Ok(()), "the words bind this revision, so precheck passes");
-    assert_eq!(approval_from_statement(revision(), &statement, &keys), Err(StatementRejected::Unverified));
+    assert_eq!(approval_from_statement(revision(), &statement, &keys, Tier::Human), Err(StatementRejected::Unverified));
 }
 
 #[test]
@@ -379,5 +396,58 @@ fn verified_statement_approval_binds_the_revision_and_details_the_statement() {
     // The split helper forms the exact evidence the composed reader returns on a
     // verified statement — the deferred-verify seal path reuses this format.
     let keys = provider("owner", &key);
-    assert_eq!(approval_from_statement(revision(), &statement, &keys), Ok(evidence));
+    assert_eq!(approval_from_statement(revision(), &statement, &keys, Tier::Human), Ok(evidence));
+}
+
+#[test]
+fn a_signer_below_the_resolved_tier_does_not_approve() {
+    // The #5324 hole, at the synchronous door: an operator key the allowlist
+    // authorizes only to `judge`, signing a genuine, correctly-bound statement
+    // over a surface the tier policy resolved `human`. Before the binding
+    // existed this formed an approval indistinguishable from an owner's — human
+    // tier was enforced by the human declining to sign, not by the machine.
+    let key = signing_key(7);
+    let keys = provider_at("operator", &key, Tier::Judge);
+    let statement = signed_statement("operator", &key, revision().as_bytes(), revision());
+
+    assert_eq!(
+        approval_from_statement(revision(), &statement, &keys, Tier::Human),
+        Err(StatementRejected::BelowTier { required: Tier::Human, ceiling: Tier::Judge }),
+        "a judge-ceiling signer must not approve a human-tier surface"
+    );
+}
+
+#[test]
+fn a_signer_at_the_resolved_tier_approves() {
+    // The same signer, the same statement, at the tier its key policy actually
+    // authorizes — so the binding refuses too little rather than everything.
+    let key = signing_key(7);
+    let keys = provider_at("operator", &key, Tier::Judge);
+    let statement = signed_statement("operator", &key, revision().as_bytes(), revision());
+
+    assert_eq!(
+        approval_from_statement(revision(), &statement, &keys, Tier::Judge)
+            .expect("a judge-ceiling signer approves a judge-tier surface"),
+        verified_statement_approval(revision(), &statement),
+        "an in-authority signature forms the same approval it always did"
+    );
+}
+
+#[test]
+fn the_tier_check_refuses_a_statement_carrying_no_author_signature() {
+    // Fail closed on the shape the ceiling lookup cannot answer for. Nothing
+    // reaches this through `approval_from_statement` (the precheck refuses a
+    // non-author statement first), so this pins the helper's own behaviour for
+    // the deferred path, which composes the same three steps by hand.
+    let statement = Statement {
+        words: revision().as_bytes().to_vec(),
+        provenance: Provenance::ObservationAttestation(aether_bloomery::Observation { source: "adapter".to_owned() }),
+        parents: vec![],
+    };
+
+    assert_eq!(
+        check_signer_tier(&statement, &FakeKeyProvider, Tier::Auto),
+        Err(StatementRejected::Unverified),
+        "a statement with no signer has no ceiling, so it authorizes nothing"
+    );
 }

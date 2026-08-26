@@ -16,6 +16,8 @@
 //! dispatch. It reaches the lane — and through it every verify gate the lane
 //! spawns — as `CARGO_TARGET_DIR`; see [`export_build_env`].
 
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::{fs, io};
@@ -123,6 +125,9 @@ pub struct ProcessTransformRunner {
     /// Empty means the GitHub `origin` remote; a local authority stores the
     /// absolute repository path (no `file://` prefix).
     fetch_remote: String,
+    /// Tests inject a `HEAD` so the mismatch arm can fail the start without
+    /// a corrupted checkout. Production is always `None`.
+    head_override: Option<String>,
 }
 
 impl ProcessTransformRunner {
@@ -132,7 +137,7 @@ impl ProcessTransformRunner {
     pub fn new(identity: CaptureIdentity, lane_program: LaneProgram, repo: impl Into<PathBuf>) -> Self {
         let repo = repo.into();
         let repo = repo.canonicalize().unwrap_or(repo);
-        Self { identity, lane_program, repo, fetch_remote: String::new() }
+        Self { identity, lane_program, repo, fetch_remote: String::new(), head_override: None }
     }
 
     /// Fetch missing order identities from `remote` instead of `origin`.
@@ -145,12 +150,27 @@ impl ProcessTransformRunner {
         self
     }
 
+    /// Pretend the worktree's `HEAD` is `head`. Tests drive the mismatch arm
+    /// this way; production never sets it.
+    #[cfg(test)]
+    #[must_use]
+    fn with_head_override(mut self, head: impl Into<String>) -> Self {
+        self.head_override = Some(head.into());
+        self
+    }
+
     fn fetch_remote(&self) -> &str {
         if self.fetch_remote.is_empty() {
             "origin"
         } else {
             &self.fetch_remote
         }
+    }
+
+    /// The `HEAD` compared against the sealed subject: git, unless a test
+    /// overrode it so the mismatch arm can fail without a corrupted tree.
+    fn observed_head(&self, worktree_dir: &Path) -> Result<String, LocalExecutorError> {
+        self.head_override.clone().map_or_else(|| worktree_head(worktree_dir), Ok)
     }
 }
 
@@ -170,8 +190,11 @@ impl TransformRunner for ProcessTransformRunner {
         let checkout = commitish_for(&self.repo, spec.checkout_hex)?;
         let diff_base = spec.diff_base_hex.map(|hex| commitish_for(&self.repo, hex)).transpose()?;
         // Bring the slot's checkout to the sealed subject — reset in place when the
-        // slot already holds one, created when it does not.
+        // slot already holds one, created when it does not — then read HEAD back
+        // so a miss cannot launch the lane on a tree nobody can explain.
         materialize_checkout(&self.repo, spec.worktree_dir, &checkout)?;
+        let observed = self.observed_head(spec.worktree_dir)?;
+        confirm_checkout_head(spec.worktree_dir, &checkout, &observed)?;
         // The scratch worktree is a full checkout carrying the repo's interactive
         // `.claude/settings.json` hooks, and the construct lane spawns headless
         // `claude` in it — so the SessionStart worktree-rebind hook would fire and
@@ -181,6 +204,15 @@ impl TransformRunner for ProcessTransformRunner {
         // mark the file skip-worktree so the edit neither shows as a candidate nor
         // can be committed.
         neutralize_hooks(spec.worktree_dir)?;
+        // The reset above scrubbed untracked state, the symlink included; put
+        // the slot's target pairing back before anything in the lane builds,
+        // and keep it out of the subject's git view so a candidate capture
+        // never reads the pairing as work.
+        #[cfg(unix)]
+        {
+            link_slot_target(spec.worktree_dir, spec.target_dir)?;
+            exclude_slot_target(spec.worktree_dir)?;
+        }
         // Spawn the same portable entrypoint the wrappers run, in the checked-out
         // worktree, under the ambient local `claude` auth (ADR-0150) — and under
         // the wrapper's environment rather than the coordinator's, which the
@@ -204,6 +236,7 @@ impl TransformRunner for ProcessTransformRunner {
         // child's own pid as pgid; no new dependency.
         let child = spawn_isolated(&mut lane).map_err(LocalExecutorError::Spawn)?;
         super::identity::record_spawned(spec.evidence_dir, child.id());
+        super::identity::record_checkout_head(spec.evidence_dir, &observed);
         Ok(Box::new(ChildProcess { child }))
     }
 
@@ -381,10 +414,87 @@ fn work_order_args(spec: &RunSpec<'_>, checkout: &str, diff_base: Option<&str>) 
 /// A `build_jobs` of zero states no cap, leaving cargo's default of one job per
 /// core — an explicit `CARGO_BUILD_JOBS=0` is a cargo error, not "unlimited".
 fn export_build_env(lane: &mut Command, spec: &RunSpec<'_>) {
+    // Unix lanes reach the slot's target through the checkout's `target`
+    // symlink ([`link_slot_target`]) instead of this export: the absolute
+    // out-of-workspace spelling is exactly what the trybuild fixtures cannot
+    // normalize, so exporting it as well would hand every nested cargo the
+    // broken view right back (#5478). Non-unix hosts keep the export — they
+    // run the harnesses, not the fleet's lanes, and the env is the portable
+    // spelling of the same pairing.
+    #[cfg(not(unix))]
     lane.env("CARGO_TARGET_DIR", spec.target_dir);
     if spec.build_jobs > 0 {
         lane.env("CARGO_BUILD_JOBS", spec.build_jobs.to_string());
     }
+}
+
+/// Materialize `<checkout>/target` as a symlink to the slot's cache target.
+///
+/// The lane exported `CARGO_TARGET_DIR` instead until #5478: trybuild
+/// materializes its compile-fail fixture projects under the target dir, and
+/// from an out-of-workspace target the path dependencies back to the
+/// workspace cannot be relative — the compiler prints workspace sources
+/// absolute, the blessed `$WORKSPACE`-relative stderr mismatches, and every
+/// fixture in the workspace fails, but only inside lanes. A `target` symlink
+/// inside the checkout keeps cargo's view workspace-shaped while the
+/// artifacts stay on the slot's cache volume, so the warmth pairing the slot
+/// exists for survives.
+///
+/// Recreated on every start because the reset scrubs untracked state. A
+/// non-symlink `target` occupying the path is foreign state — refused loudly
+/// rather than silently replaced, because the one way it appears is a build
+/// that ran in the checkout without the pairing, and its artifacts are
+/// exactly what the slot's fingerprints must never mix with.
+#[cfg(unix)]
+fn link_slot_target(worktree_dir: &Path, target_dir: &Path) -> Result<(), LocalExecutorError> {
+    let link = worktree_dir.join("target");
+    match fs::symlink_metadata(&link) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            if fs::read_link(&link).map_err(LocalExecutorError::Io)? == target_dir {
+                return Ok(());
+            }
+            fs::remove_file(&link).map_err(LocalExecutorError::Io)?;
+        }
+        Ok(_) => {
+            return Err(LocalExecutorError::Worktree(format!(
+                "the slot checkout holds a real `target` at {}; refusing to replace it with the slot link",
+                link.display()
+            )));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(LocalExecutorError::Io(error)),
+    }
+    fs::create_dir_all(target_dir).map_err(LocalExecutorError::Io)?;
+    symlink(target_dir, &link).map_err(LocalExecutorError::Io)
+}
+
+/// Hide the slot's `target` link from the checkout's git view.
+///
+/// The aether workspace ignores `/target` itself, but the pairing must not
+/// lean on the subject's own `.gitignore`: a subject without the entry would
+/// surface the link as an untracked file in every candidate capture, and a
+/// construct that wrote nothing would read as one that wrote something (the
+/// lane-boundary scenario that caught exactly that). The worktree's private
+/// `info/exclude` is the subject-independent spelling — per-checkout git
+/// state, never part of the tree.
+#[cfg(unix)]
+fn exclude_slot_target(worktree_dir: &Path) -> Result<(), LocalExecutorError> {
+    let printed = git_in(worktree_dir, &["rev-parse", "--git-path", "info/exclude"])?;
+    let path = worktree_dir.join(printed.trim());
+    if let Ok(existing) = fs::read_to_string(&path)
+        && existing.lines().any(|line| line.trim() == "/target")
+    {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(LocalExecutorError::Io)?;
+    }
+    let mut existing = fs::read_to_string(&path).unwrap_or_default();
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        existing.push('\n');
+    }
+    existing.push_str("/target\n");
+    fs::write(&path, existing).map_err(LocalExecutorError::Io)
 }
 
 /// Decode the hex object id `git rev-parse` printed into the opaque bytes the
@@ -504,6 +614,11 @@ fn resolved_git_common_dir(repo: &Path) -> Option<PathBuf> {
 /// dependency claim that resolved without a capture commit (ADR-0196) — so
 /// [`commitish_for`] resolves it first; both the reset and the re-create
 /// paths then stand on a subject git accepts.
+///
+/// The caller verifies the result. [`ProcessTransformRunner::start`] reads
+/// `HEAD` back immediately after this returns and fails the start when it is
+/// not the commitish the checkout was made from: a silent miss would launch
+/// a lane on a tree nobody can explain.
 fn materialize_checkout(repo_dir: &Path, worktree_dir: &Path, checkout_hex: &str) -> Result<(), LocalExecutorError> {
     let commitish = commitish_for(repo_dir, checkout_hex)?;
     if worktree_dir.exists() && slot_belongs_to_repo(worktree_dir, repo_dir) {
@@ -519,6 +634,27 @@ fn materialize_checkout(repo_dir: &Path, worktree_dir: &Path, checkout_hex: &str
     }
     reclaim_worktree_path(worktree_dir)?;
     add_worktree(repo_dir, worktree_dir, &commitish)
+}
+
+/// The worktree's current `HEAD`, as `git rev-parse` printed it.
+fn worktree_head(worktree_dir: &Path) -> Result<String, LocalExecutorError> {
+    git_in(worktree_dir, &["rev-parse", "HEAD"])
+}
+
+/// Fail the start when the worktree's `HEAD` is not the commitish
+/// [`materialize_checkout`] was asked to stand on.
+///
+/// A mismatch here is a host fault: materialize has already returned, so the
+/// tree should be at `expected`. Launching the lane anyway would spend a lap
+/// on a subject nobody can explain.
+fn confirm_checkout_head(worktree_dir: &Path, expected: &str, observed: &str) -> Result<(), LocalExecutorError> {
+    if observed == expected {
+        return Ok(());
+    }
+    Err(LocalExecutorError::Worktree(format!(
+        "worktree at {} is at `{observed}`, expected `{expected}`",
+        worktree_dir.display(),
+    )))
 }
 
 /// Whether the slot at `worktree_dir` is a worktree of `repo_dir`.
@@ -777,9 +913,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     use super::super::runner::RunProcess;
     use super::super::runner::{RunLifecycle, RunSpec};
+    #[cfg(unix)]
+    use super::link_slot_target;
     use super::{
-        CaptureIdentity, FALLBACK_CAPTURE_SUBJECT, FALLBACK_IDENTITY, ProcessTransformRunner, SETTINGS_PATH,
-        TransformRunner, capture_subject, commitish_for, decode_object_hex, fetch_order_identities,
+        CaptureIdentity, FALLBACK_CAPTURE_SUBJECT, FALLBACK_IDENTITY, LocalExecutorError, ProcessTransformRunner,
+        SETTINGS_PATH, TransformRunner, capture_subject, commitish_for, decode_object_hex, fetch_order_identities,
         fetch_subject_if_absent, git_in, materialize_checkout, neutralize_hooks, reclaim_worktree_path, reset_checkout,
         resolved_git_common_dir, strip_hooks, work_order_args,
     };
@@ -1184,6 +1322,72 @@ mod tests {
             git_in(&slot, &["status", "--porcelain"]).unwrap().trim(),
             "",
             "a reused slot presents exactly as a freshly created checkout, which is what the lane assumes",
+        );
+    }
+
+    #[test]
+    fn a_slot_left_at_another_subject_is_brought_to_this_one_and_the_head_is_recorded() {
+        // The plausible bug: a reused slot is reset to this dispatch's subject
+        // but nothing records the HEAD the lane actually started on, so a later
+        // observer reconstructs occupancy from timestamps. The record is what
+        // makes "did this lane run on its own subject" one field.
+        let (repo, scratch, first, second) = repo_with_two_commits();
+        let slot = scratch.path().join("slot-0");
+        let evidence = scratch.path().join("n-1-evidence");
+        let target = scratch.path().join("slot-0-target");
+        materialize_checkout(repo.path(), &slot, &first).unwrap();
+        assert_eq!(git_in(&slot, &["rev-parse", "HEAD"]).unwrap().trim(), first);
+
+        let runner = ProcessTransformRunner::new(CaptureIdentity::default(), LaneProgram::parse("true"), repo.path());
+        let _child = runner
+            .start(&spec("construct.implement", &second, None, None, &evidence, &slot, &target))
+            .expect("start on the second subject");
+
+        assert_eq!(git_in(&slot, &["rev-parse", "HEAD"]).unwrap().trim(), second, "the slot holds this dispatch's sha");
+        let recorded =
+            super::super::identity::CheckoutHead::read(&evidence).expect("the dispatch records the HEAD it started on");
+        assert_eq!(recorded.head, second, "the recorded head is this dispatch's subject, not the slot's previous one");
+    }
+
+    #[test]
+    fn a_checkout_head_mismatch_fails_the_start_before_spawn() {
+        // A tree the host already knows is wrong must not spend a lap. The
+        // check sits before spawn, so a stubbed HEAD that does not match the
+        // materialized subject fails the start rather than launching the lane.
+        let (repo, scratch, first, _second) = repo_with_two_commits();
+        let slot = scratch.path().join("slot-0");
+        let evidence = scratch.path().join("n-1-evidence");
+        let target = scratch.path().join("slot-0-target");
+        let runner = ProcessTransformRunner::new(
+            CaptureIdentity::default(),
+            LaneProgram::parse("/this/lane/must/not/spawn"),
+            repo.path(),
+        )
+        .with_head_override("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+
+        let error = runner
+            .start(&spec("construct.implement", &first, None, None, &evidence, &slot, &target))
+            .err()
+            .expect("a mismatched HEAD must fail the start");
+
+        let detail = format!("{error:?}");
+        assert!(
+            matches!(error, LocalExecutorError::Worktree(_)),
+            "the start fails as a worktree fault, not a spawn: {detail}"
+        );
+        assert!(
+            detail.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            "the failure names the observed HEAD: {detail}"
+        );
+        assert!(detail.contains(&first), "the failure names the expected subject: {detail}");
+        assert!(detail.contains(&slot.display().to_string()), "the failure names the worktree path: {detail}");
+        assert!(
+            super::super::identity::ProcessIdentity::read(&evidence).is_none(),
+            "a failed start must not have spawned a child to record"
+        );
+        assert!(
+            super::super::identity::CheckoutHead::read(&evidence).is_none(),
+            "a failed start records no HEAD: the lane never stood in the tree"
         );
     }
 
@@ -1593,5 +1797,34 @@ mod tests {
         let detail = format!("{error:?}");
         assert!(detail.contains(&missing), "the failure names the subject: {detail}");
         assert!(!detail.contains("origin"), "a local authority must not name the GitHub remote: {detail}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_slot_target_link_is_created_recreated_and_refuses_a_real_directory() {
+        // The pairing the lane builds through (#5478): `<checkout>/target` is a
+        // symlink to the slot's cache target, recreated after every reset, and
+        // a real directory at that path is foreign artifacts to refuse — the
+        // silent replacement would mix another build's fingerprints into the
+        // slot the pairing exists to keep coherent.
+        let checkout = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let target = cache.path().join("slot-0-target");
+        let link = checkout.path().join("target");
+
+        link_slot_target(checkout.path(), &target).expect("first link");
+        assert_eq!(fs::read_link(&link).unwrap(), target, "the link names the slot's cache target");
+        assert!(target.is_dir(), "the cache target is created for a fresh slot");
+
+        link_slot_target(checkout.path(), &target).expect("an identical link is idempotent");
+
+        let elsewhere = cache.path().join("slot-1-target");
+        link_slot_target(checkout.path(), &elsewhere).expect("a repointed slot replaces its own stale link");
+        assert_eq!(fs::read_link(&link).unwrap(), elsewhere, "the stale link was replaced, not kept");
+
+        fs::remove_file(&link).unwrap();
+        fs::create_dir(&link).unwrap();
+        let refused = link_slot_target(checkout.path(), &target).expect_err("a real directory is refused");
+        assert!(format!("{refused:?}").contains("refusing"), "the refusal says why: {refused:?}");
     }
 }

@@ -8,7 +8,7 @@
 //!    itself, so a slow endpoint cannot hold the dispatcher through a store
 //!    read as well.
 //! 2. **Answer.** [`QueryResult::Document`] decodes back into a
-//!    [`ViewDocument`], [`loud_events`] turns it into a keyed set, and
+//!    [`ViewDocument`], [`notify_events`] turns it into a keyed set, and
 //!    [`deliver`] differences that against the `notification_sent` ledger.
 //!    An empty ledger is a first mount: every current key plus a reserved
 //!    seed marker is recorded without posting, so the standing set is adopted
@@ -37,7 +37,7 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
 use serde::{Deserialize, Serialize};
 
-use super::taxonomy::loud_events;
+use super::taxonomy::{Volume, notify_events};
 use super::{NotifyReactorCapability, NotifyReactorSetup};
 
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
@@ -56,6 +56,7 @@ pub struct NotifyTick {}
 pub struct NotifyReactorState {
     sink: Option<Arc<dyn WebhookSink>>,
     store: Option<SqliteStore>,
+    milestones: bool,
     control_mailbox: MailboxId,
     mailer: Arc<Mailer>,
     self_mailbox: MailboxId,
@@ -73,12 +74,14 @@ impl NotifyReactorState {
     pub fn with_parts(
         sink: Option<Arc<dyn WebhookSink>>,
         store: Option<SqliteStore>,
+        milestones: bool,
         mailer: Arc<Mailer>,
         self_mailbox: MailboxId,
     ) -> Self {
         Self {
             sink,
             store,
+            milestones,
             control_mailbox: <ControlCore as Addressable>::resolve(0, ()),
             mailer,
             self_mailbox,
@@ -96,19 +99,30 @@ pub struct Delivered {
     pub forgotten: u32,
     /// Keys recorded without posting because this was the first mount.
     pub seeded: u32,
+    /// Milestone keys recorded without posting because this coordinator has
+    /// not been asked for milestones. Recorded rather than skipped, so
+    /// enabling the knob starts the stream forward instead of replaying every
+    /// standing milestone at once.
+    pub suppressed: u32,
     /// Whether the pass stopped early on a failing endpoint. The unposted keys
     /// stay unrecorded, so the next tick re-derives and retries them.
     pub stalled: bool,
 }
 
 /// Reserved ledger key that names no condition. Its dotted spelling cannot be
-/// produced by any [`loud_events`] format (`<word>:<parts>`), and its presence
+/// produced by any [`notify_events`] format (`<word>:<parts>`), and its presence
 /// is what distinguishes a never-mounted ledger from one whose conditions have
 /// all cleared.
 pub const SEED_MARKER_KEY: &str = "aether.bloomery.notify.seeded";
 
-/// Post every loud condition in `view` the ledger has not already reported,
-/// and forget every recorded key whose condition has cleared.
+/// Post every condition in `view` the ledger has not already reported, and
+/// forget every recorded key whose condition has cleared.
+///
+/// `milestones` selects the volume: `false` posts [`Volume::Loud`] events only,
+/// `true` posts those plus the quiet milestones. It gates the *POST*, never
+/// the ledger — a suppressed milestone is still recorded, so the knob changes
+/// what the channel says from now on and never replays what it stayed quiet
+/// about.
 ///
 /// Stops at the first failing POST rather than running the whole set: a
 /// refusing or rate-limited endpoint refuses the next message too, and the
@@ -118,11 +132,11 @@ pub const SEED_MARKER_KEY: &str = "aether.bloomery.notify.seeded";
 ///
 /// An empty ledger is a first mount, not a quiet day: every current event key
 /// is recorded without posting, plus a reserved seed marker whose dotted
-/// spelling no [`loud_events`] format produces. The marker is what keeps the
+/// spelling no [`notify_events`] format produces. The marker is what keeps the
 /// ledger non-empty after every condition has cleared, so a later genuinely
 /// new wedge is a transition rather than a second seed. The forget sweep
 /// skips the marker; the post loop never sees it, because it is not a
-/// [`loud_events`] key.
+/// [`notify_events`] key.
 ///
 /// The factored-out network side, unit-testable against a `SqliteStore` and a
 /// recording sink without the mail harness.
@@ -130,9 +144,10 @@ pub fn deliver(
     store: &mut dyn StoreBackend,
     sink: &dyn WebhookSink,
     view: &ViewDocument,
+    milestones: bool,
     now_unix_millis: u64,
 ) -> rusqlite::Result<Delivered> {
-    let events = loud_events(view);
+    let events = notify_events(view);
     let recorded = store.list_notifications()?;
     if recorded.is_empty() {
         for event in &events {
@@ -150,6 +165,11 @@ pub fn deliver(
     }
 
     for event in events.iter().filter(|event| !recorded.iter().any(|key| key == &event.key)) {
+        if event.volume == Volume::Milestone && !milestones {
+            store.record_notification(&event.key, now_unix_millis)?;
+            report.suppressed += 1;
+            continue;
+        }
         if let Err(error) = sink.post(&event.message) {
             // The error carries a status or a transport class and never the
             // endpoint URL — see `aether_bloomery_github::WebhookError`.
@@ -199,6 +219,7 @@ impl NativeActor for NotifyReactorCapability {
             return Ok(NotifyReactorState {
                 sink: None,
                 store: None,
+                milestones: config.milestones,
                 control_mailbox,
                 mailer,
                 self_mailbox,
@@ -219,11 +240,13 @@ impl NativeActor for NotifyReactorCapability {
         tracing::info!(
             target: "aether_chassis_bloomery::notify",
             poll_interval_secs = config.poll_interval_secs,
-            "notification reactor mounted; posting loud transitions to the configured webhook",
+            milestones = config.milestones,
+            "notification reactor mounted; posting transitions to the configured webhook",
         );
         Ok(NotifyReactorState {
             sink: Some(sink),
             store: Some(store),
+            milestones: config.milestones,
             control_mailbox,
             mailer,
             self_mailbox,
@@ -261,6 +284,7 @@ impl NativeActor for NotifyReactorCapability {
         let Some(sink) = state.sink.clone() else {
             return;
         };
+        let milestones = state.milestones;
         let Some(store) = state.store.as_mut() else {
             return;
         };
@@ -288,15 +312,18 @@ impl NativeActor for NotifyReactorCapability {
             return;
         };
 
-        match deliver(store, sink.as_ref(), &view, now_unix_millis()) {
-            Ok(report) if report.posted > 0 || report.forgotten > 0 || report.seeded > 0 => tracing::info!(
-                target: "aether_chassis_bloomery::notify",
-                posted = report.posted,
-                forgotten = report.forgotten,
-                seeded = report.seeded,
-                stalled = report.stalled,
-                "notification pass complete",
-            ),
+        match deliver(store, sink.as_ref(), &view, milestones, now_unix_millis()) {
+            Ok(report) if report.posted > 0 || report.forgotten > 0 || report.seeded > 0 || report.suppressed > 0 => {
+                tracing::info!(
+                    target: "aether_chassis_bloomery::notify",
+                    posted = report.posted,
+                    forgotten = report.forgotten,
+                    seeded = report.seeded,
+                    suppressed = report.suppressed,
+                    stalled = report.stalled,
+                    "notification pass complete",
+                );
+            }
             Ok(_) => {}
             Err(error) => tracing::warn!(
                 target: "aether_chassis_bloomery::notify",

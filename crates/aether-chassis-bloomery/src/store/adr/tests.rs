@@ -33,7 +33,10 @@ fn signing_key(seed: u8) -> SigningKey {
 }
 
 fn provider(signer: &str, key: &SigningKey) -> Ed25519KeyProvider {
-    Ed25519KeyProvider::new(BTreeMap::from([(KeyId(signer.to_owned()), key.verifying_key())]))
+    Ed25519KeyProvider::new(BTreeMap::from([(
+        KeyId(signer.to_owned()),
+        aether_bloomery::AuthorizedSigner { key: key.verifying_key(), ceiling: aether_bloomery::Tier::Human },
+    )]))
 }
 
 fn signed_accept(signer: &str, key: &SigningKey, adr: Digest) -> Statement {

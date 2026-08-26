@@ -3,13 +3,11 @@
 //! against a `SqliteStore` and a stub [`TransformRunner`] without the mail
 //! harness.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-#[cfg(test)]
-use std::time::Duration;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use aether_bloomery::{BloomId, BloomStatus, Digest, Snapshot, is_active_unlanded};
 use aether_bloomery_github::SourceError;
@@ -49,8 +47,67 @@ const SECS_PER_DAY: u64 = 86_400;
 pub struct JanitorPolicy {
     /// Combined size ceiling across every `slot-*-target` directory.
     pub lane_target_budget_bytes: u64,
+    /// How often a slot target tree may be re-walked. Distinct from the poll
+    /// interval that decides how often the pass runs at all.
+    pub lane_target_measure_interval_secs: u64,
     /// Days to keep consumed evidence of a terminal bloom.
     pub evidence_retention_days: u64,
+}
+
+/// Last size and recency reading per slot target directory, held across passes
+/// so an over-budget tick that cannot evict does not pay the walk again.
+#[derive(Clone, Debug, Default)]
+pub struct TargetReadings {
+    slots: HashMap<usize, SlotReading>,
+    /// Fingerprint of the last over-budget summary this process emitted, so a
+    /// tick that only re-confirmed a cached answer stays silent.
+    last_over_budget: Option<OverBudgetVerdict>,
+    /// How many slot target trees have been walked since this cache was
+    /// created. Tests pin that a busy over-budget pass does not re-walk.
+    #[cfg(test)]
+    walks: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SlotReading {
+    bytes: u64,
+    used: SystemTime,
+    taken_at: SystemTime,
+    occupied: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OverBudgetVerdict {
+    total_bytes: u64,
+    occupied: BTreeSet<usize>,
+    unattributed: bool,
+}
+
+impl TargetReadings {
+    fn total_bytes(&self) -> u64 {
+        self.slots.values().map(|reading| reading.bytes).sum()
+    }
+
+    fn confirm(&mut self, now: SystemTime) {
+        for reading in self.slots.values_mut() {
+            reading.taken_at = now;
+        }
+    }
+
+    fn clear_over_budget(&mut self) {
+        self.last_over_budget = None;
+    }
+
+    #[cfg(test)]
+    pub(super) fn walks(&self) -> usize {
+        self.walks
+    }
+}
+
+impl SlotReading {
+    fn is_stale(&self, now: SystemTime, interval: Duration) -> bool {
+        now.duration_since(self.taken_at).ok().is_none_or(|elapsed| elapsed >= interval)
+    }
 }
 
 /// What one sweep pass reclaimed, for the log line and for tests.
@@ -105,17 +162,20 @@ pub struct SweepRequest<'a> {
     ///
     /// A sampled `bool` is what let the 2026-08-14 incident through. A pass
     /// replays the whole journal, prunes a terminal bloom's refs over the
-    /// network, and walks every target tree for its size before it reaches the
+    /// network, and may walk target trees for size before it reaches the
     /// eviction — seconds at least, and the reading it acted on came from
     /// before all of that. A slot frees and is claimed again inside that
     /// window, so what the sweep believed was an idle host was one with a
     /// compiler running in the directory it deleted.
     pub lanes: &'a dyn Fn() -> LaneOccupancy,
+    /// Last size and recency reading per slot target directory. Reused across
+    /// passes until the measurement interval elapses or the slot changes hands.
+    pub target_readings: &'a mut TargetReadings,
     /// Retention and budget.
     pub policy: &'a JanitorPolicy,
-    /// The clock retention is measured against. Production passes
-    /// [`SystemTime::now`]; tests pin it so a suite is not a function of when
-    /// it ran.
+    /// The clock retention and target-tree measurement freshness are measured
+    /// against. Production passes [`SystemTime::now`]; tests pin it so a suite
+    /// is not a function of when it ran.
     pub now: SystemTime,
     /// Blooms this process has already pruned working refs for. A successful
     /// prune is recorded so a later tick does not pay for it again; a fault is
@@ -155,7 +215,7 @@ pub fn sweep(request: &mut SweepRequest<'_>) -> rusqlite::Result<SweepReport> {
         + reclaim_session_trees(request.runner, request.worktree_base, request.store, &snapshot, &outstanding)?;
     let evidence_dirs = reclaim_evidence(request, &live, &owners, &snapshot);
     let refs = request.source.map_or(0, |source| prune_terminal_refs(source, &snapshot, request.pruned));
-    let target_dirs = sweep_targets(request.target_base, request.policy.lane_target_budget_bytes, request.lanes);
+    let target_dirs = sweep_targets(request);
     Ok(SweepReport { worktrees, evidence_dirs, refs, target_dirs })
 }
 
@@ -535,35 +595,99 @@ struct SlotTarget {
 /// the working set makes it fire forever: the host can never get under, so
 /// every tick wants to sweep and races every lane start. Evicting to the line
 /// keeps the warm caches that are still inside it.
-fn sweep_targets(target_base: &Path, budget_bytes: u64, lanes: &dyn Fn() -> LaneOccupancy) -> usize {
-    let mut removed = reclaim_evicting_leftovers(target_base);
-    let mut targets = slot_targets(target_base);
-    let total: u64 = targets.iter().map(|target| target.bytes).sum();
-    if total <= budget_bytes {
+///
+/// Size is the expensive part of the pass, so readings live on
+/// [`SweepRequest::target_readings`] and a slot is re-walked only when its
+/// reading is older than the measurement interval or the slot has changed
+/// hands since it was taken. An over-budget tick that evicts nothing marks
+/// those readings current so the next poll does not re-derive them.
+fn sweep_targets(request: &mut SweepRequest<'_>) -> usize {
+    let mut removed = reclaim_evicting_leftovers(request.target_base);
+    // Cheap decision: occupancy at the start of the size work. The destructive
+    // path re-reads live per candidate below; this sample only decides what to
+    // walk and whether an unidentified child means we should not walk at all.
+    let occupancy = (request.lanes)();
+    if occupancy.unattributed {
+        note_unattributed(request, &occupancy);
         return removed;
     }
 
-    let occupancy = lanes();
-    tracing::info!(
-        target: "aether_chassis_bloomery::janitor",
-        total_bytes = total,
-        budget_bytes,
-        lanes_running = occupancy.any_running(),
-        occupied_slots = occupancy.slots.len(),
-        "janitor: lane target dirs over budget; evicting least recently used back to the line",
-    );
+    let (mut targets, refreshed) = collect_slot_targets(request, &occupancy);
+    let total: u64 = targets.iter().map(|target| target.bytes).sum();
+    let budget_bytes = request.policy.lane_target_budget_bytes;
+    if total <= budget_bytes {
+        request.target_readings.clear_over_budget();
+        return removed;
+    }
 
+    let evicted = evict_coldest(&mut targets, request, total, budget_bytes);
+    removed += evicted;
+    if evicted == 0 {
+        request.target_readings.confirm(request.now);
+    }
+    emit_over_budget(request, total, budget_bytes, &occupancy, evicted, refreshed);
+    removed
+}
+
+/// Reuse a cached reading when it is inside the interval and the slot has not
+/// changed hands; walk only otherwise.
+fn collect_slot_targets(request: &mut SweepRequest<'_>, occupancy: &LaneOccupancy) -> (Vec<SlotTarget>, bool) {
+    let Ok(entries) = fs::read_dir(request.target_base) else {
+        request.target_readings.slots.clear();
+        return (Vec::new(), false);
+    };
+    let interval = Duration::from_secs(request.policy.lane_target_measure_interval_secs);
+    let now = request.now;
+    let mut targets = Vec::new();
+    let mut seen = HashSet::new();
+    let mut refreshed = false;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(slot) = path.file_name().and_then(|name| name.to_str()).and_then(slot_target_index) else {
+            continue;
+        };
+        if !path.is_dir() {
+            continue;
+        }
+        seen.insert(slot);
+        let occupied = occupancy.slots.contains(&slot);
+        if let Some(cached) = request.target_readings.slots.get(&slot)
+            && cached.occupied == occupied
+            && !cached.is_stale(now, interval)
+        {
+            targets.push(SlotTarget { slot, path, bytes: cached.bytes, used: cached.used });
+            continue;
+        }
+
+        let usage = dir_usage(&path);
+        #[cfg(test)]
+        {
+            request.target_readings.walks += 1;
+        }
+        request
+            .target_readings
+            .slots
+            .insert(slot, SlotReading { bytes: usage.bytes, used: usage.newest, taken_at: now, occupied });
+        refreshed = true;
+        targets.push(SlotTarget { slot, path, bytes: usage.bytes, used: usage.newest });
+    }
+    request.target_readings.slots.retain(|slot, _| seen.contains(slot));
+    (targets, refreshed)
+}
+
+fn evict_coldest(targets: &mut [SlotTarget], request: &mut SweepRequest<'_>, total: u64, budget_bytes: u64) -> usize {
     // Coldest first: the slot nobody has built in for longest is the one whose
     // loss costs the least rebuild time.
     targets.sort_by_key(|target| target.used);
     let mut held = total;
-    for target in targets {
+    let mut evicted = 0;
+    for target in targets.iter() {
         if held <= budget_bytes {
             break;
         }
         // Live, per directory. Everything above this point — the size walk
         // especially — takes long enough for the answer to have changed.
-        let occupancy = lanes();
+        let occupancy = (request.lanes)();
         if occupancy.unattributed {
             tracing::warn!(
                 target: "aether_chassis_bloomery::janitor",
@@ -572,37 +696,71 @@ fn sweep_targets(target_base: &Path, budget_bytes: u64, lanes: &dyn Fn() -> Lane
             break;
         }
         if occupancy.slots.contains(&target.slot) {
-            tracing::info!(
-                target: "aether_chassis_bloomery::janitor",
-                slot = target.slot,
-                "janitor: slot is occupied; its target dir stays even though the host is over budget",
-            );
             continue;
         }
         if evict_target_dir(&target.path) {
+            request.target_readings.slots.remove(&target.slot);
             held = held.saturating_sub(target.bytes);
-            removed += 1;
+            evicted += 1;
         }
     }
-    removed
+    evicted
 }
 
-fn slot_targets(target_base: &Path) -> Vec<SlotTarget> {
-    let Ok(entries) = fs::read_dir(target_base) else {
-        return Vec::new();
+fn note_unattributed(request: &mut SweepRequest<'_>, occupancy: &LaneOccupancy) {
+    let total = request.target_readings.total_bytes();
+    if total <= request.policy.lane_target_budget_bytes {
+        return;
+    }
+    request.target_readings.confirm(request.now);
+    let verdict = OverBudgetVerdict { total_bytes: total, occupied: occupancy.slots.clone(), unattributed: true };
+    if request.target_readings.last_over_budget.as_ref() == Some(&verdict) {
+        return;
+    }
+    tracing::warn!(
+        target: "aether_chassis_bloomery::janitor",
+        "janitor: a lane child is running in an unidentified slot; leaving every target dir in place",
+    );
+    request.target_readings.last_over_budget = Some(verdict);
+}
+
+fn emit_over_budget(
+    request: &mut SweepRequest<'_>,
+    total: u64,
+    budget_bytes: u64,
+    occupancy: &LaneOccupancy,
+    evicted: usize,
+    refreshed: bool,
+) {
+    let verdict = OverBudgetVerdict {
+        total_bytes: total,
+        occupied: occupancy.slots.clone(),
+        unattributed: occupancy.unattributed,
     };
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            let slot = slot_target_index(path.file_name()?.to_str()?)?;
-            if !path.is_dir() {
-                return None;
-            }
-            let usage = dir_usage(&path);
-            Some(SlotTarget { slot, path, bytes: usage.bytes, used: usage.newest })
-        })
-        .collect()
+    if !refreshed && request.target_readings.last_over_budget.as_ref() == Some(&verdict) {
+        return;
+    }
+    if evicted == 0 {
+        tracing::info!(
+            target: "aether_chassis_bloomery::janitor",
+            total_bytes = total,
+            budget_bytes,
+            lanes_running = occupancy.any_running(),
+            occupied_slots = occupancy.slots.len(),
+            "janitor: lane target dirs over budget with no evictable slot; leaving occupied target dirs in place",
+        );
+    } else {
+        tracing::info!(
+            target: "aether_chassis_bloomery::janitor",
+            total_bytes = total,
+            budget_bytes,
+            evicted,
+            lanes_running = occupancy.any_running(),
+            occupied_slots = occupancy.slots.len(),
+            "janitor: lane target dirs over budget; evicted least recently used back toward the line",
+        );
+    }
+    request.target_readings.last_over_budget = Some(verdict);
 }
 
 fn slot_target_index(name: &str) -> Option<usize> {

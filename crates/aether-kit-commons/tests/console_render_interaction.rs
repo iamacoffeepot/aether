@@ -15,6 +15,7 @@
 #![allow(clippy::print_stderr)]
 
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -43,8 +44,16 @@ fn console_address() -> String {
     format!("aether.component/{}:console", aether_component::WasmTrampoline::NAMESPACE)
 }
 
+/// The crate's `assets/` under the directory the test runs in — cargo and
+/// nextest set that to this crate's root — falling back to the compile-time
+/// path for a caller running from elsewhere. Runtime-first because a
+/// lane-cached test binary can outlive the checkout it was compiled in
+/// (dispatch-3177): its baked path then names a pruned tree.
 fn assets_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("assets")
+    match env::current_dir().map(|current| current.join("assets")) {
+        Ok(dir) if dir.is_dir() => dir,
+        _ => Path::new(env!("CARGO_MANIFEST_DIR")).join("assets"),
+    }
 }
 
 fn build_bench() -> SubstrateHarness {

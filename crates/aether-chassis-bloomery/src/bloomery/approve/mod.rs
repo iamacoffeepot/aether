@@ -40,7 +40,11 @@
 //! ([`Gate::evaluate`] → [`Decision::AutoApproved`]). Anything above `auto`
 //! requires an owner-authorized signed [`Statement`] (ADR-0151, #3560) to
 //! populate the approval ([`approval_from_statement`]) — the tier policy (*what*
-//! tier) and the signing key policy (*who* may sign) stay distinct readers.
+//! tier) and the signing key policy (*who* may sign, and *how high*) stay
+//! distinct readers, and the gate compares their two answers
+//! ([`check_signer_tier`], #5324). A signature by an allowlisted key that the
+//! key policy authorizes no higher than `judge` never approves a `human`-tier
+//! surface, however good the signature is.
 //!
 //! [`Evidence`]: aether_bloomery::Evidence
 //! [`EvidenceKind::Approval`]: aether_bloomery::EvidenceKind::Approval
@@ -53,7 +57,9 @@ mod statement;
 
 pub use gate::{AdmissionRequest, AdrTouch, Completeness, Decision, Gate, Incompleteness, projection_digest};
 pub use policy::{ApprovalPolicy, PolicyError, Tier, load_policy, parse_policy};
-pub use statement::{StatementRejected, approval_from_statement, precheck_statement, verified_statement_approval};
+pub use statement::{
+    StatementRejected, approval_from_statement, check_signer_tier, precheck_statement, verified_statement_approval,
+};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]

@@ -16,7 +16,7 @@ use aether_actor::actor;
 use crate::bloomery::{ExecutorShell, SourceShell};
 
 pub use runtime::{JanitorReactorState, JanitorTick};
-pub use sweep::{JanitorPolicy, SweepReport, SweepRequest, WorkingRefPruner, sweep};
+pub use sweep::{JanitorPolicy, SweepReport, SweepRequest, TargetReadings, WorkingRefPruner, sweep};
 
 /// Composer-supplied parts for the janitor reactor.
 pub struct JanitorReactorSetup {
@@ -34,6 +34,9 @@ pub struct JanitorReactorSetup {
     pub target_base: String,
     /// Combined size ceiling across every slot target directory.
     pub lane_target_budget_bytes: u64,
+    /// How often a slot target tree may be re-walked, in seconds. Distinct from
+    /// [`Self::poll_interval_secs`], which decides how often the pass runs at all.
+    pub lane_target_measure_interval_secs: u64,
     /// Days to keep consumed evidence of a terminal bloom.
     pub evidence_retention_days: u64,
     /// How often to wake and sweep.

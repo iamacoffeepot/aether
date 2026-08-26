@@ -97,6 +97,11 @@ impl Workpiece {
         self.selected_line().filter(|line| line.openable).and_then(|line| line.digest)
     }
 
+    #[must_use]
+    pub fn enter_pushes(&self) -> bool {
+        self.selected_line().and_then(|line| line.enter.as_ref()).is_some()
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, _store: &Store) -> Outcome {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
@@ -131,7 +136,10 @@ impl Workpiece {
             );
         }
         let items: Vec<ListItem> = self.lines.iter().map(|line| ListItem::new(line.text.clone())).collect();
-        let list = List::new(items).style(palette::body()).highlight_style(palette::cursor()).highlight_symbol("> ");
+        let list = List::new(items)
+            .style(palette::body())
+            .highlight_style(palette::cursor())
+            .highlight_symbol(super::super::caret(self.enter_pushes()));
         let mut state = ListState::default()
             .with_selected(self.cursor.selected_index(&self.lines, |line| line.key.clone()))
             .with_offset(self.scroll);

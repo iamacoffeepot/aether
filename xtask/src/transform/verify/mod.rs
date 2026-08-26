@@ -7,17 +7,19 @@ mod triage;
 #[cfg(test)]
 mod workflow;
 
-use std::collections::BTreeMap;
+use std::any::Any;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::slice::from_ref;
+use std::thread;
 use std::time::Instant;
 
 use aether_bloomery::{VerifyFailure, VerifyFailureSet};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 
 use crate::cargo::{self, WASM_TARGET, run_captured, write_json_pretty};
@@ -461,6 +463,12 @@ fn tree_member(id: &str) -> Option<VerifyInvocation> {
 /// languages with nothing tying them together, and a drift here reads a
 /// requested scan as an operational fault — a `VerifyFailure::Preflight` on a
 /// candidate that did exactly what it was asked to do.
+/// Past this many candidate failures in one member, the failure shape itself
+/// is the diagnosis — host contention, not a candidate that broke this many
+/// suites at once — and the triage answers with one whole-member re-run
+/// instead of a serial replay per casualty (#5479).
+const STORM_TRIAGE_THRESHOLD: usize = 8;
+
 const SUPPRESSION_REQUESTED_EXIT: i32 = 4;
 
 /// The member the symbol pass rides (#5185). jscpd's own member, because the
@@ -719,6 +727,28 @@ fn verify_check_members() -> &'static [&'static str] {
         "verify.deps",
         "verify.lock",
     ]
+}
+
+/// The members that build into the lane's `CARGO_TARGET_DIR`, and so cannot run
+/// beside each other.
+///
+/// Cargo takes an exclusive lock on the artifact directory for the whole of a
+/// build — a second invocation against the same one prints "Blocking waiting for
+/// file lock on artifact directory" and waits — so running these three at once
+/// buys nothing and costs the log noise. Giving each its own directory would
+/// undo far more than it bought: clippy, rustdoc and the test build share one
+/// compiled dependency tree, and splitting them makes every one of them rebuild
+/// it. `verify.test`'s prepare builds into the same directory, so it belongs to
+/// the same lane.
+///
+/// Everything else — the formatter, the clone detector, the dependency scan,
+/// the suppression scan, the lockfile freshness check — reads the tree and
+/// never writes an artifact, so it runs alongside the compiles.
+const BUILD_LANE_MEMBERS: [&str; 3] = ["verify.clippy", "verify.docs", "verify.test"];
+
+/// Whether this member holds the cargo artifact lock — see [`BUILD_LANE_MEMBERS`].
+fn builds_artifacts(id: &str) -> bool {
+    BUILD_LANE_MEMBERS.contains(&id)
 }
 
 /// The status the umbrella stamps, from what its members said (ADR-0176's
@@ -1005,6 +1035,16 @@ trait MemberRunner {
 struct SpawnRunner<'a> {
     cache: Option<&'a CompilerCache>,
     peak: &'a PeakMemory,
+    /// The base checkout this member's replays share, opened by the first one
+    /// that needs it and kept until the member is done.
+    ///
+    /// One tree, not one per replay. Every base replay in a member run is at
+    /// the same commit, and the tree carries a whole cold build with it: its
+    /// own `CARGO_TARGET_DIR` and its own component cross-build, neither of
+    /// which survived the `worktree remove` that used to follow each replay. A
+    /// member with four triaged failures paid for four from-scratch workspace
+    /// builds of the same base.
+    base: Option<BaseCheckout>,
 }
 
 impl MemberRunner for SpawnRunner<'_> {
@@ -1021,18 +1061,59 @@ impl MemberRunner for SpawnRunner<'_> {
         let Some(base) = at else {
             return self.spawn_one(invocation, test, None);
         };
-        // The base run needs a tree at the base commit, and it must not be this
-        // one: stashing would move the candidate out from under a lane that is
-        // mid-verification. A detached worktree is the cheap, side-effect-free
-        // form, removed whichever way the run went.
-        let checkout = BaseCheckout::open(base)?;
-        let captured = self.spawn_one(invocation, test, Some(checkout.path()));
-        checkout.close();
-        captured
+        let path = self.base_checkout(invocation, base)?.to_path_buf();
+        self.spawn_one(invocation, test, Some(&path))
     }
 }
 
-impl SpawnRunner<'_> {
+impl<'a> SpawnRunner<'a> {
+    fn new(cache: Option<&'a CompilerCache>, peak: &'a PeakMemory) -> Self {
+        Self { cache, peak, base: None }
+    }
+
+    /// The tree this member's base replays run in, opened and prepared on the
+    /// first replay that asks for it.
+    ///
+    /// The base run needs a tree at the base commit, and it must not be this
+    /// one: stashing would move the candidate out from under a lane that is
+    /// mid-verification. A detached worktree is the cheap, side-effect-free
+    /// form.
+    ///
+    /// It is prepared here rather than per replay because the preparation
+    /// belongs to the tree: `verify.test` needs the component wasm the prepare
+    /// cross-builds, and without it `AETHER_REQUIRE_RUNTIME=1` turns every
+    /// scenario test red — which this triage would then read as "the base was
+    /// already broken" and use to excuse a real finding.
+    ///
+    /// A replay naming a different base than the open one closes it and opens
+    /// that: the tree is only ever the answer to a commit.
+    fn base_checkout(&mut self, invocation: &VerifyInvocation, base: &str) -> Result<&Path> {
+        if self.base.as_ref().is_none_or(|open| open.base != base) {
+            self.close_base();
+            let checkout = BaseCheckout::open(base)?;
+            if let Some(prepare) = invocation.prepare {
+                let at = checkout.path();
+                let mut step = cargo::command();
+                step.args(prepare.iter().copied()).current_dir(at).env("CARGO_TARGET_DIR", at.join("target"));
+                run_captured(step).with_context(|| format!("prepare the base checkout at {}", at.display()))?;
+            }
+            self.base = Some(checkout);
+        }
+        Ok(self.base.as_ref().expect("the checkout was just opened").path())
+    }
+
+    /// Remove the base checkout this runner opened, if it opened one.
+    ///
+    /// Explicit rather than a destructor for the reason [`BaseCheckout`] itself
+    /// is: removing a worktree can fail, and swallowing that leaves a stale
+    /// entry in `.git/worktrees` that the next `worktree add` at the same path
+    /// refuses.
+    fn close_base(&mut self) {
+        if let Some(checkout) = self.base.take() {
+            checkout.close();
+        }
+    }
+
     /// Spawn `invocation` narrowed to the one `test`, optionally in `at`.
     ///
     /// `PROPTEST_CASES=1` is what replays a property test's *own* counterexample
@@ -1054,17 +1135,9 @@ impl SpawnRunner<'_> {
             // Its own target directory: cargo's incremental cache surfaces a
             // dependency last compiled from the other tree's source otherwise,
             // and a phantom error here would read as a base failure that
-            // excuses a real finding.
+            // excuses a real finding. It is the checkout's, so it lives as long
+            // as the checkout does and every replay after the first is warm.
             command.current_dir(at).env("CARGO_TARGET_DIR", at.join("target"));
-            // And its own prepare. `verify.test` needs the component wasm this
-            // step cross-builds, and without it `AETHER_REQUIRE_RUNTIME=1` turns
-            // every scenario test red — which this triage would then read as
-            // "the base was already broken" and use to excuse a real finding.
-            if let Some(prepare) = invocation.prepare {
-                let mut step = cargo::command();
-                step.args(prepare.iter().copied()).current_dir(at).env("CARGO_TARGET_DIR", at.join("target"));
-                run_captured(step).with_context(|| format!("prepare the base checkout at {}", at.display()))?;
-            }
         } else {
             sccache::export(self.cache, &mut command);
         }
@@ -1095,6 +1168,9 @@ fn nextest_filter(test: &str) -> String {
 /// `git worktree add` at the same path refuses.
 struct BaseCheckout {
     path: PathBuf,
+    /// The commit it stands at, so a replay can tell whether the open checkout
+    /// is the one it needs.
+    base: String,
 }
 
 impl BaseCheckout {
@@ -1108,7 +1184,7 @@ impl BaseCheckout {
         if !added.status.success() {
             bail!("git worktree add at {base} failed: {}", String::from_utf8_lossy(&added.stderr));
         }
-        Ok(Self { path })
+        Ok(Self { path, base: base.to_owned() })
     }
 
     fn path(&self) -> &Path {
@@ -1276,6 +1352,28 @@ fn classify_failures(
         .flatten()
 }
 
+/// The receipt a per-test triage leaves at the end of the member's own log.
+///
+/// The log a triaged member keeps is the failing run and nothing else, and the
+/// replays that follow it are separate spawns whose output goes to the triage's
+/// own verdicts. So the artifact ends at a summary line and is not written
+/// again until every replay has finished — a base replay compiles the whole
+/// workspace at the base commit, which is minutes. A reader comparing the last
+/// line to the member's reported wall-clock has no way to tell that work from a
+/// gate that stopped, and this is what tells them.
+fn triage_notice(id: &str, tests: usize, base: Option<&str>) -> String {
+    let replays = base.map_or_else(
+        || String::from("replayed against the same input"),
+        |base| format!("replayed against the same input, then run at the work order's base {base}"),
+    );
+    format!(
+        "\n\n{id}: {tests} failing {} triaged after the run above — each {replays}. Those replays are \
+         separate builds whose output is not captured here, so this member's reported wall-clock runs well \
+         past the last line above.\n",
+        nextest::tests_word(tests),
+    )
+}
+
 /// The line separating a member's first run from its out-of-closure repeat
 /// inside the one log the evidence keeps.
 ///
@@ -1358,10 +1456,10 @@ fn run_member_discriminated(
         // Every failing test the candidate is charged with is triaged on its
         // own (FIX-4b): replayed against the same input, then run at the work
         // order's base. Only a test red *only* on the candidate is a finding.
-        let triaged = triage::triage(&classified, diff_base, |test, at| {
-            let captured = runner.replay(invocation, test, at)?;
-            Ok(replay_verdict(id, invocation, test, at, &captured))
-        })?;
+        let triaged_tests = classified.candidate_tests().len();
+        // A storm-shaped run takes a member-scope shortcut first — see
+        // [`triage_shaped`] for the diagnosis and both of its verdicts.
+        let triaged = triage_shaped(id, invocation, scope, closure, diff_base, runner, &classified)?;
 
         let kept = classified.retaining(&triaged.findings);
         let outcome = if kept.has_candidate_failures() {
@@ -1376,7 +1474,7 @@ fn run_member_discriminated(
         return Ok(MemberRun {
             id: id.to_owned(),
             outcome,
-            log,
+            log: [log, triage_notice(id, triaged_tests, diff_base).into_bytes()].concat(),
             exit_code: if outcome.passed() {
                 0
             } else {
@@ -1431,6 +1529,85 @@ fn run_member_discriminated(
                 .chain(rerun_observation(outcome, classified.observation()).map(EvidenceChannel::environment)),
         ),
     })
+}
+
+/// Triage `classified`'s candidate failures by their shape.
+///
+/// A storm-shaped set — more than [`STORM_TRIAGE_THRESHOLD`] failures in one
+/// member — is its own diagnosis: that count comes from host-level contention,
+/// not from a candidate that broke that many suites at once, and replaying
+/// every casualty serially prices the answer at one cargo invocation per test
+/// (#5479: forty-five serial minutes on the fleet host). One whole-member
+/// re-run on the settled host answers all of them at once; only the tests
+/// that fail *again* earn the per-test replay, which then also asks the base
+/// as usual.
+///
+/// A set still storm-shaped on the re-run gets no per-test replays at all.
+/// Two member-scope failures of the same set are the member's verdict — one
+/// systemic cause, not that many independent flakes — so the repeated set is
+/// charged as findings directly. The serial path priced that answer at hours
+/// on the fleet host, long enough for the executor to read the run as stale,
+/// and a per-test replay under a fresher build can clear a test whose
+/// member-scope runs fail deterministically — excusing a systemic breakage
+/// as a pile of flakes and handing the gate a false green.
+///
+/// Below the threshold, every failure takes the per-test path directly.
+/// Replays print a numbered heartbeat either way, so a tail is never silent.
+fn triage_shaped(
+    id: &str,
+    invocation: &VerifyInvocation,
+    scope: &Scope,
+    closure: Option<&Closure>,
+    diff_base: Option<&str>,
+    runner: &mut dyn MemberRunner,
+    classified: &nextest::ClassifiedRun,
+) -> Result<triage::Triage> {
+    let candidates = classified.candidate_tests();
+    if candidates.len() <= STORM_TRIAGE_THRESHOLD {
+        let mut replays = 0usize;
+        return triage::triage(classified, diff_base, |test, at| {
+            replays += 1;
+            eprintln!("verify.triage: replay {replays} (of {} candidate failures): {test}", candidates.len());
+            let captured = runner.replay(invocation, test, at)?;
+            Ok(replay_verdict(id, invocation, test, at, &captured))
+        });
+    }
+    eprintln!(
+        "verify.triage: {} candidate failures is storm-shaped; one whole-member re-run replaces {} serial replays",
+        candidates.len(),
+        candidates.len(),
+    );
+    let (rerun_outcome, rerun_log, _) = run_member(id, invocation, scope, diff_base, runner)?;
+    let repeated: BTreeSet<String> = classify_failures(id, rerun_outcome, &rerun_log, closure)
+        .map(|second| second.candidate_tests().into_iter().collect())
+        .unwrap_or_default();
+    let (still_failing, cleared): (Vec<String>, Vec<String>) =
+        candidates.into_iter().partition(|test| repeated.contains(test));
+    let mut triaged = if still_failing.len() > STORM_TRIAGE_THRESHOLD {
+        eprintln!(
+            "verify.triage: {} of the failures repeated on the whole-member re-run — still storm-shaped, so the \
+             set is charged as findings without per-test replays: two member-scope failures are one systemic \
+             cause, not {} independent flakes",
+            still_failing.len(),
+            still_failing.len(),
+        );
+        triage::Triage { findings: still_failing.into_iter().collect(), ..triage::Triage::default() }
+    } else {
+        let kept = classified.retaining(&repeated);
+        let mut replays = 0usize;
+        triage::triage(&kept, diff_base, |test, at| {
+            replays += 1;
+            eprintln!("verify.triage: replay {replays} (of {} repeated tests): {test}", still_failing.len());
+            let captured = runner.replay(invocation, test, at)?;
+            Ok(replay_verdict(id, invocation, test, at, &captured))
+        })?
+    };
+    triaged.flakes.extend(
+        cleared
+            .into_iter()
+            .map(|test| Excused { test, replayed: "a whole-member re-run on the settled host".to_owned() }),
+    );
+    Ok(triaged)
 }
 
 /// Read one replay's captured output as a verdict about the one test it was
@@ -2057,6 +2234,76 @@ struct CheckPass {
     peak_resident_bytes: Option<u64>,
 }
 
+/// What every gate of one pass shares: the resolved scope and closure it
+/// narrows to, the host tooling it reports through, and where its log goes.
+#[derive(Clone, Copy)]
+struct GatePass<'a> {
+    args: &'a TransformArgs,
+    full: bool,
+    logs: &'a Path,
+    scope: &'a Scope,
+    closure: Option<&'a Closure>,
+    cache: Option<&'a CompilerCache>,
+    peak: &'a PeakMemory,
+}
+
+/// Run one umbrella member and write its log, returning what it said and what
+/// it cost.
+///
+/// The whole of a gate — its prepare, its run, its triage, its log — so the two
+/// lanes in [`check_pass`] are the same function over different member lists,
+/// and a gate's receipt covers exactly the work done under its identity however
+/// many gates are in flight.
+fn run_gate(id: &'static str, pass: &GatePass<'_>) -> Result<(MemberRun, GateTiming)> {
+    let GatePass { args, full, logs, scope, closure, cache, peak } = *pass;
+    let invocation = verify_command(id).expect("verify_check_members ids all resolve via verify_command");
+    // The member's own prerequisite, run immediately before it rather than once
+    // up front: it belongs to this member, and a member that is one day removed
+    // should take its prepare step with it. A failed prepare fails the member
+    // without running it — see `prepare_failure_log`.
+    //
+    // It is the member's own failure, not an operational one, even though the
+    // member never ran: ADR-0178 rules that "a failed member preparation step
+    // belongs to that member's identity". The host half of it is already
+    // covered — the preflight checks the cross-target the pre-build needs — so
+    // what is left is the candidate breaking its own build.
+    //
+    // Unless the pre-build did not fail so much as die (#5422): a linker killed
+    // by a signal, a `rustc` killed for memory, a write out of disk. The
+    // candidate cannot repair any of those, and `run_prepare` charges them to
+    // the host instead.
+    let gate_started = Instant::now();
+    let (prepare_failure, prepare_millis) = run_timed_prepare(id, &invocation, cache, peak)?;
+    let mut runner = SpawnRunner::new(cache, peak);
+    let run = match prepare_failure {
+        Some((log, code, outcome)) => MemberRun::plain(id, outcome, log.into_bytes(), code),
+        None => run_member_discriminated(
+            id,
+            &invocation,
+            scope,
+            closure,
+            member_diff_base(id, args.diff_base.as_deref(), full),
+            &mut runner,
+        )?,
+    };
+    runner.close_base();
+    let duration_millis = elapsed_millis(gate_started);
+
+    let log_path = logs.join(format!("{id}.log"));
+    fs::write(&log_path, &run.log).with_context(|| format!("write {}", log_path.display()))?;
+
+    Ok((run, GateTiming { command: id.to_owned(), duration_millis, prepare_millis }))
+}
+
+/// What a lane thread carried out of a panic, as a line a caller can report.
+fn panic_message(panicked: &Box<dyn Any + Send>) -> String {
+    panicked
+        .downcast_ref::<&str>()
+        .map(|message| (*message).to_owned())
+        .or_else(|| panicked.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| String::from("a verify lane thread panicked"))
+}
+
 /// Run every member in [`verify_check_members`] over the current tree, in
 /// CI-parity order and without short-circuiting on the first failure.
 ///
@@ -2076,8 +2323,6 @@ fn check_pass(args: &TransformArgs, logs: &Path, full: bool) -> Result<CheckPass
     } else {
         closure::resolve(args.diff_base.as_deref())
     };
-    let mut runner = SpawnRunner { cache: cache.as_ref(), peak: &peak };
-
     // Resolved once, before any member runs, and written out as its own log:
     // the compiling members are only comparable across a run if they all
     // narrowed to the same closure, and a receipt no one can read is not a
@@ -2092,53 +2337,45 @@ fn check_pass(args: &TransformArgs, logs: &Path, full: bool) -> Result<CheckPass
     fs::write(&scope_path, scope.receipt()).with_context(|| format!("write {}", scope_path.display()))?;
     let mut log_names = vec![String::from(SCOPE_LOG)];
 
-    let mut runs = Vec::with_capacity(verify_check_members().len());
-    let mut gates = Vec::with_capacity(verify_check_members().len());
+    // Two lanes, run at once: the members that compile take the cargo artifact
+    // lock and so go one at a time, and everything else runs beside them for
+    // free (see `BUILD_LANE_MEMBERS`). Both keep their own order, so a lane that
+    // dies mid-pass has still run its members in the order the receipts name.
+    let pass =
+        GatePass { args, full, logs, scope: &scope, closure: closure.as_ref(), cache: cache.as_ref(), peak: &peak };
+    let lane = |members: Vec<&'static str>| -> Result<Vec<(MemberRun, GateTiming)>> {
+        members.into_iter().map(|id| run_gate(id, &pass)).collect()
+    };
+    let (compiled, read_only): (Vec<&str>, Vec<&str>) =
+        verify_check_members().iter().partition(|id| builds_artifacts(id));
+    let mut completed = thread::scope(|threads| -> Result<Vec<(MemberRun, GateTiming)>> {
+        let reading = threads.spawn(|| lane(read_only));
+        let compiling = lane(compiled);
+        let read = reading.join().map_err(|panicked| anyhow!(panic_message(&panicked)))?;
+        let mut completed = compiling?;
+        completed.extend(read?);
+        Ok(completed)
+    })?;
+
+    // Reassembled in CI-parity order rather than completion order: the umbrella's
+    // exit code is the *first* failing member's, the evidence `log` field lists
+    // the member logs in that same order, and both would otherwise depend on
+    // which lane happened to finish first.
+    let mut runs = Vec::with_capacity(completed.len());
+    let mut gates = Vec::with_capacity(completed.len());
     let mut first_failure_code: Option<i32> = None;
-
     for &id in verify_check_members() {
-        let invocation = verify_command(id).expect("verify_check_members ids all resolve via verify_command");
-        // The member's own prerequisite, run immediately before it rather than
-        // once up front: it belongs to this member, and a member that is one day
-        // removed should take its prepare step with it. A failed prepare fails
-        // the member without running it — see `prepare_failure_log`.
-        //
-        // It is the member's own failure, not an operational one, even though
-        // the member never ran: ADR-0178 rules that "a failed member
-        // preparation step belongs to that member's identity". The host half of
-        // it is already covered — the preflight checks the cross-target the
-        // pre-build needs — so what is left is the candidate breaking its own
-        // build.
-        //
-        // Unless the pre-build did not fail so much as die (#5422): a linker
-        // killed by a signal, a `rustc` killed for memory, a write out of disk.
-        // The candidate cannot repair any of those, and `run_prepare` charges
-        // them to the host instead.
-        let gate_started = Instant::now();
-        let (prepare_failure, prepare_millis) = run_timed_prepare(id, &invocation, cache.as_ref(), &peak)?;
-        let run = match prepare_failure {
-            Some((log, code, outcome)) => MemberRun::plain(id, outcome, log.into_bytes(), code),
-            None => run_member_discriminated(
-                id,
-                &invocation,
-                &scope,
-                closure.as_ref(),
-                member_diff_base(id, args.diff_base.as_deref(), full),
-                &mut runner,
-            )?,
-        };
-        let duration_millis = elapsed_millis(gate_started);
-
-        let log_name = format!("{id}.log");
-        let log_path = logs.join(&log_name);
-        fs::write(&log_path, &run.log).with_context(|| format!("write {}", log_path.display()))?;
-        log_names.push(log_name);
-
+        let position = completed
+            .iter()
+            .position(|(run, _)| run.id == id)
+            .expect("every member of the umbrella ran in one of the two lanes");
+        let (run, gate) = completed.swap_remove(position);
+        log_names.push(format!("{id}.log"));
         if !run.outcome.passed() && first_failure_code.is_none() {
             first_failure_code = Some(run.exit_code);
         }
         runs.push(run);
-        gates.push(GateTiming { command: id.to_owned(), duration_millis, prepare_millis });
+        gates.push(gate);
     }
 
     Ok(CheckPass {
@@ -2155,7 +2392,7 @@ fn check_pass(args: &TransformArgs, logs: &Path, full: bool) -> Result<CheckPass
 mod tests {
     use super::{
         BASE_SET_SUBJECT, Captured, EvidenceChannel, MAX_FINDING_LINES, MemberOutcome, MemberRun, MemberRunner,
-        SUPPRESS_MEMBER, Scope, VERIFY_BASE, VERIFY_CHECK, VerifyInvocation, clippy_verdict, closure,
+        SUPPRESS_MEMBER, Scope, VERIFY_BASE, VERIFY_CHECK, VerifyInvocation, builds_artifacts, clippy_verdict, closure,
         distil_diagnostics, effective_exit_code, environment_observations, failed_verifiers, host_fault_in,
         member_diff_base, member_outcome, member_scope_notice, operational_failure_notice, package_name,
         preflight_tools, prepare_failure_log, render_diagnostics, required_targets, required_tools, run_member,
@@ -2178,6 +2415,10 @@ mod tests {
 
     fn owned(tokens: &[&str]) -> Vec<String> {
         tokens.iter().map(|token| (*token).to_owned()).collect()
+    }
+
+    fn borrowed(tokens: &[String]) -> Vec<&str> {
+        tokens.iter().map(String::as_str).collect()
     }
 
     fn owned_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -2328,62 +2569,94 @@ mod tests {
         assert_eq!(host_fault_in(&failing_run(&["aether-render::a_test"])), None, "and so is a failing test");
     }
 
+    /// The six mechanical gates, each with the job that runs it and the exact
+    /// words that job spells to reach the arm.
+    ///
+    /// Five go through the `cargo xtask` alias. `lock-freshness` spells the
+    /// executor's own build out with `--locked`, because building it is the
+    /// first thing in that job to resolve the dependency graph and an unlocked
+    /// build would regenerate the very lockfile the arm is about to judge — the
+    /// gate would then pass over a lock it had just repaired in place.
+    ///
+    /// `test` is deliberately absent. Its job keeps the native nextest spelling
+    /// so it can carry the affected-package selection and the shard partition,
+    /// neither of which the arm accepts; it is asserted on its own below.
+    const XTASK_GATES: &[(&str, &str, &[&str])] = &[
+        ("fmt", "verify.fmt", &["cargo", "xtask", "transform", "verify.fmt"]),
+        ("clippy", "verify.clippy", &["cargo", "xtask", "transform", "verify.clippy"]),
+        ("docs", "verify.docs", &["cargo", "xtask", "transform", "verify.docs"]),
+        ("dup-check", "verify.dup", &["cargo", "xtask", "transform", "verify.dup"]),
+        ("unused-deps", "verify.deps", &["cargo", "xtask", "transform", "verify.deps"]),
+        (
+            "lock-freshness",
+            "verify.lock",
+            &["cargo", "run", "--locked", "--quiet", "--package", "xtask", "--", "transform", "verify.lock"],
+        ),
+    ];
+
     #[test]
-    fn ci_parity_argv_matches_the_command_the_workflow_runs() {
-        // Tripwire: every argv here is a second spelling of a command Actions
-        // runs, and only `.github/workflows/ci.yml` is the copy the gate
-        // executes. Comparing the two Rust literals proved nothing about that
-        // — the workflow could be trimmed back to default features, or lose a
-        // flag, with the whole suite still green (#4843). Each assertion below
-        // reads the workflow, so drift on either side fails here.
-        let fmt = verify_command("verify.fmt").expect("verify.fmt mapped");
-        assert_eq!(argv(&fmt), workflow::gate_step("fmt", &["cargo", "fmt"]).run);
+    fn every_mechanical_gate_invokes_its_own_verify_arm() {
+        // Tripwire: the calibration each of these gates applies — the jscpd
+        // threshold, the machete flags, the rustdoc lints, clippy's feature
+        // set — now lives in exactly one place, the arm. The drift worth
+        // catching is no longer two argv spellings disagreeing but a gate
+        // quietly leaving the executor: a job that stopped invoking its arm, or
+        // invoked a different one, would run a check the lane cannot predict
+        // while the whole suite stayed green (#4843, #4856, #4863).
+        for (job, id, invoker) in XTASK_GATES {
+            assert!(verify_command(id).is_some(), "`{id}` must be a mapped arm for `jobs.{job}` to invoke");
 
-        // The duplicate-code gate states its whole calibration on the argv
-        // (#4856), so the argv is the gate: a lane running a different format,
-        // threshold, or min-tokens predicts a different check than CI applies.
-        // Selected on `npx` alone, since every token that carries calibration
-        // has to stay on the asserted side rather than the selecting side.
-        let dup = verify_command("verify.dup").expect("verify.dup mapped");
-        assert_eq!(argv(&dup), workflow::gate_step("dup-check", &["npx"]).run);
+            let spelled = workflow::steps_running(job, invoker);
+            assert_eq!(
+                spelled.len(),
+                1,
+                "`jobs.{job}` must reach its arm exactly once as `{}`, found {} such steps",
+                invoker.join(" "),
+                spelled.len(),
+            );
 
-        // The lane asks cargo for JSON diagnostics and deliberately does not
-        // deny (#4706); `clippy_verdict` applies the same fail-on-any-warning
-        // predicate over the complete list a non-denying run produces. That
-        // trailing `-- -D warnings` is the whole permitted divergence —
-        // everything before it is the shared invocation.
-        let clippy = verify_command("verify.clippy").expect("verify.clippy mapped");
-        let ci_clippy = workflow::gate_step("clippy", &["cargo", "clippy"]).run;
-        let (shared, deny) = ci_clippy.split_at(ci_clippy.len() - 3);
-        assert_eq!(
-            deny,
-            owned(&["--", "-D", "warnings"]),
-            "CI's clippy gate denies through a trailing `-- -D warnings`"
-        );
-        assert_eq!(argv(&clippy), [shared.to_vec(), owned(&["--message-format=json"])].concat());
+            // And by no other spelling. The count above is about the words this
+            // gate is required to use; this one is about the arm being run once
+            // whatever words reach it, so a second invocation appended beside
+            // the first cannot hide behind a different prefix.
+            let arms = workflow::steps_running(job, &["transform", id]);
+            assert_eq!(arms.len(), 1, "`jobs.{job}` must run `{id}` exactly once, found {}", arms.len());
+        }
+    }
 
-        // Docs is a straight mirror, env included: RUSTDOCFLAGS is what
-        // escalates the tracked lints to failures, so a lint denied on one
-        // side and not the other is a gate the lane cannot predict.
-        let docs = verify_command("verify.docs").expect("verify.docs mapped");
-        let ci_docs = workflow::gate_step("docs", &["cargo", "doc"]);
-        assert_eq!(argv(&docs), ci_docs.run);
-        assert_eq!(owned_pairs(docs.env), ci_docs.env);
+    #[test]
+    fn no_mechanical_gate_still_spells_its_own_calibrated_command() {
+        // Tripwire: the other half of the move. An arm invocation added beside
+        // a raw `cargo clippy … -D warnings` or a raw `npx jscpd -t 0.5` would
+        // satisfy every assertion above while restoring the two-site edit the
+        // executor exists to end — and the second copy is the one Actions would
+        // judge by. The arm's own argv is what must not reappear in the job
+        // that invokes it.
+        for (job, id, _) in XTASK_GATES {
+            let invocation = verify_command(id).unwrap_or_else(|| panic!("{id} mapped"));
+            let calibrated = argv(&invocation);
+            let restated = workflow::steps_running(job, &borrowed(&calibrated));
+            assert!(
+                restated.is_empty(),
+                "`jobs.{job}` spells `{}` itself; that calibration belongs to `{id}` alone",
+                calibrated.join(" "),
+            );
+        }
+    }
 
-        // cargo-machete is invoked as the binary rather than through `cargo
-        // machete`, which hands the subcommand its own name as argv[1] and
-        // walks a nonexistent `machete/` alongside `crates/` (#4706). The
-        // directories it scans are still CI's, and they are not optional.
-        let deps = verify_command("verify.deps").expect("verify.deps mapped");
-        let ci_deps = workflow::gate_step("unused-deps", &["cargo", "machete"]).run;
-        assert_eq!(deps.program, "cargo-machete", "going through `cargo machete` re-adds the bogus path");
-        assert_eq!(owned(deps.args), ci_deps[2..].to_vec());
-
-        // The test member drops CI's shard partition — the lane runs the suite
-        // whole — and keeps every flag before it, `--all-features` above all: a
-        // lane running fewer tests than the gate it predicts is a false green
-        // that surfaces at the landing pull request. The wasm pre-build its
-        // scenario tests load is CI's own step, in the same job.
+    #[test]
+    fn the_test_gate_keeps_the_native_spelling_its_scheduling_needs() {
+        // Tripwire: `test` is the one mechanical gate still spelled in YAML,
+        // and the reason is its scheduling — an affected-package selection on
+        // pull requests and a three-way shard partition on everything else,
+        // neither of which the arm accepts. So the two argv stay two, and the
+        // parity between them is asserted the old way.
+        //
+        // The member drops CI's partition — the lane runs the suite whole — and
+        // keeps every flag before it, `--all-features` above all: a lane
+        // running fewer tests than the gate it predicts is a false green that
+        // surfaces at the landing pull request. The wasm pre-build its scenario
+        // tests load is CI's own step, in the same job.
         let test = verify_command("verify.test").expect("verify.test mapped");
         let ci_test = workflow::named_step("test", "Run tests (workspace, parallel)");
         let partition = ci_test.run.iter().position(|token| token == "--partition").expect("CI shards the full suite");
@@ -2395,6 +2668,50 @@ mod tests {
         for pair in &ci_test.env {
             assert!(owned_pairs(test.env).contains(pair), "CI sets {pair:?} for the gate, so the lane must too");
         }
+
+        // The affected selection is the second half of that scheduling, and it
+        // is why the job cannot simply become an arm invocation.
+        assert_eq!(
+            workflow::named_step("test", "Compute affected packages (PR only)").run,
+            owned(&["cargo", "xtask", "affected", "--base", "HEAD^1", "--github-output"]),
+        );
+        assert!(
+            workflow::steps_running("test", &["transform", "verify.test"]).is_empty(),
+            "routing the shards through the arm would discard the affected subset and cross-build the wasm per shard",
+        );
+    }
+
+    #[test]
+    fn the_suppression_gate_runs_the_base_branchs_scanner_not_the_candidates() {
+        // Tripwire: this is the one gate that must not become an arm. The arm
+        // runs `python3 scripts/check-suppressions.py` out of the tree it is
+        // checking, which on Actions is the tree under review — a candidate
+        // could then ship a scanner that approves its own suppressions. CI
+        // materializes the scanner from the event base instead and runs that
+        // blob, and the lane's arm is the local-only spelling of the same scan.
+        let suppress = verify_command("verify.suppress").expect("verify.suppress mapped");
+        assert_eq!(suppress.program, "python3");
+        assert_eq!(owned(suppress.args), owned(&["scripts/check-suppressions.py"]));
+
+        assert_eq!(
+            workflow::steps_running("suppressions", &["git", "show", "\"${BASE_SHA}:scripts/check-suppressions.py\""])
+                .len(),
+            1,
+            "the scanner CI executes has to come out of the event base",
+        );
+        assert_eq!(
+            workflow::steps_running("suppressions", &["python3", "\"${SCANNER_PATH}\""]).len(),
+            1,
+            "and the run has to be of that materialized blob",
+        );
+        assert!(
+            workflow::steps_running("suppressions", &borrowed(&argv(&suppress))).is_empty(),
+            "running the tree's own scanner would let a candidate judge itself",
+        );
+        assert!(
+            workflow::steps_running("suppressions", &["transform", "verify.suppress"]).is_empty(),
+            "and so would the arm, which reads the same tree",
+        );
     }
 
     #[test]
@@ -2470,15 +2787,14 @@ mod tests {
         );
 
         // Tripwire: narrowing is a package selection and nothing else. The
-        // scoped argv is what a member actually dispatches, and the CI-parity
-        // assertions above pin only the unscoped one — so a flag dropped on
-        // this path would leave the member predicting a gate CI does not run
-        // while every parity test stayed green (#5411). Read from the workflow
-        // rather than from a literal, so drift on either side fails here.
-        let ci_clippy = workflow::gate_step("clippy", &["cargo", "clippy"]).run;
-        let flags: Vec<String> =
-            ci_clippy[2..ci_clippy.len() - 3].iter().filter(|flag| *flag != "--workspace").cloned().collect();
-        assert_eq!(args[1..=flags.len()], flags[..], "the member must carry every CI flag but the selection");
+        // scoped argv is what a member actually dispatches, and the parity
+        // assertions above pin only which arm each gate invokes — so a flag
+        // dropped on this path would leave the member predicting a gate CI does
+        // not run while every parity test stayed green (#5411). Read off the
+        // unscoped invocation rather than restated, so the two move together.
+        let unscoped: Vec<String> = owned(clippy.args);
+        let flags: Vec<String> = unscoped.iter().filter(|flag| *flag != "--workspace").cloned().collect();
+        assert_eq!(args[..flags.len()], flags[..], "narrowing may drop the selection and no other flag");
 
         // nextest states no `--workspace` at all — the workspace is its own
         // default — so there the package flags are the entire narrowing.
@@ -2868,19 +3184,25 @@ mod tests {
     }
 
     #[test]
-    fn the_lock_member_runs_the_lock_freshness_gate_command() {
-        // Parity with the gate, which wraps the command in an `if !` so its
-        // stdout can be discarded — the argv is a contiguous run inside that
-        // script rather than its first words.
-        let lock = verify_command("verify.lock").expect("verify.lock mapped");
-        let argv = argv(&lock);
-        let step =
-            workflow::named_step("lock-freshness", "Resolve the dependency graph against the committed lock").run;
+    fn the_lock_gate_builds_its_executor_against_the_lock_it_judges() {
+        // Tripwire: this is the one gate whose invocation spelling is itself
+        // load-bearing. `cargo xtask` is an alias, and the build behind it is
+        // the first thing in the job to resolve the dependency graph — an
+        // unlocked one would regenerate the very lockfile the arm then judges,
+        // so the gate would pass over a lock it had just repaired in place.
+        // `--locked` on the executor's own build is what stops that.
+        let step = workflow::named_step("lock-freshness", "Cargo lock freshness gate").run;
+        let build = step
+            .iter()
+            .position(|token| token == "transform")
+            .expect("the lock-freshness step must reach an arm through `transform`");
 
-        assert!(
-            step.windows(argv.len()).any(|window| window == argv.as_slice()),
-            "the lock-freshness step must run {argv:?}, found {step:?}",
+        assert_eq!(
+            step[build - 7..build],
+            owned(&["cargo", "run", "--locked", "--quiet", "--package", "xtask", "--"])[..],
+            "the executor's own build has to carry --locked: {step:?}",
         );
+        assert_eq!(step[build + 1], "verify.lock", "and the arm it reaches is the lock member's");
     }
 
     #[test]
@@ -3106,6 +3428,31 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         // by `the_umbrella_covers_every_required_ci_job`.
         for &id in verify_check_members() {
             assert!(verify_command(id).is_some(), "{id} must resolve via verify_command");
+        }
+    }
+
+    #[test]
+    fn every_member_that_compiles_runs_in_the_lane_that_holds_the_build_lock() {
+        // Tripwire: the umbrella runs the read-only members beside the compiling
+        // ones, and cargo locks its artifact directory for the whole of a build.
+        // A member that compiles and is not named in BUILD_LANE_MEMBERS would be
+        // started against a directory another gate holds — it would block on the
+        // lock rather than run, and the receipt would charge it that wait. The
+        // subcommand is the axis: `fmt` and `metadata` read, everything else
+        // here writes artifacts. A prepare step compiles too, whatever the
+        // member's own argv does.
+        const READS_ONLY: [&str; 2] = ["fmt", "metadata"];
+
+        for &id in verify_check_members() {
+            let invocation = verify_command(id).expect("every member resolves");
+            let compiles = invocation.prepare.is_some()
+                || (invocation.program == "cargo" && !READS_ONLY.contains(&invocation.args[0]));
+            assert_eq!(
+                compiles,
+                builds_artifacts(id),
+                "{id} builds artifacts: {compiles}, but the build lane says {}",
+                builds_artifacts(id),
+            );
         }
     }
 
@@ -3381,6 +3728,33 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
     }
 
     #[test]
+    fn a_triaged_member_says_in_its_own_log_that_replays_followed_the_run() {
+        // Tripwire: a triaged member's log is the failing run and nothing else,
+        // and every replay after it is a separate build — a base replay
+        // compiles the whole workspace at the base commit. Drop this line and
+        // the artifact's last content sits minutes behind the wall-clock the
+        // member reports, which reads as a gate that stopped rather than one
+        // still working.
+        let invocation = verify_command("verify.test").expect("verify.test mapped");
+        let failing = failing_run(&["aether-component::fleetharness_asset_window"]);
+        let mut runner = ScriptedRunner::with_replays(&[(&failing, 100)], &[(&failing, 100), (&passing_run(), 0)]);
+
+        let run = run_member_discriminated(
+            "verify.test",
+            &invocation,
+            &Scope::resolve(None),
+            None,
+            Some("deadbeef"),
+            &mut runner,
+        )
+        .expect("the policy runs");
+
+        let log = String::from_utf8(run.log).expect("a verify log is utf-8");
+        assert!(log.contains("1 failing test triaged after the run above"), "how much was triaged: {log}");
+        assert!(log.contains("the work order's base deadbeef"), "and what the replays ran against: {log}");
+    }
+
+    #[test]
     fn a_base_run_that_would_not_build_does_not_excuse_the_candidate() {
         // Tripwire (FIX-4b): a base checkout that fails to compile exits 101 and
         // names no failing test. Reading "the base run was red" as "the failure
@@ -3431,6 +3805,82 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         assert!(!findings.contains("client_scenario"), "the one that cleared does not");
         assert_eq!(run.flakes().len(), 1, "and the cleared one is on the flake ledger");
         assert_eq!(run.flakes()[0].test, "aether-kit-sim::client_scenario");
+    }
+
+    /// Ten failing tests — past [`STORM_TRIAGE_THRESHOLD`], so the triage
+    /// re-runs the member once instead of opening with ten serial replays.
+    fn storm() -> Vec<String> {
+        (0..10).map(|index| format!("aether-kit-commons::scenario_{index}")).collect()
+    }
+
+    #[test]
+    fn a_storm_that_repeats_at_member_scope_is_charged_without_per_test_replays() {
+        // Acceptance for the repeated-storm verdict. On the fleet host a
+        // member-wide breakage (dispatch-3177: 84 scenario tests red on a
+        // stale-baked dist path) repeated wholesale on the re-run, and the
+        // triage then replayed every casualty serially — pricing the verdict
+        // at hours, past the executor's staleness threshold, with each
+        // replay free to clear and excuse the systemic breakage as flakes.
+        // Two member-scope failures of the same set are the verdict.
+        let invocation = verify_command("verify.test").expect("verify.test mapped");
+        let names = storm();
+        let failing = failing_run(&names.iter().map(String::as_str).collect::<Vec<_>>());
+        let mut runner = ScriptedRunner::new(&[(&failing, 100), (&failing, 100)]);
+
+        let run = run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, None, &mut runner)
+            .expect("the policy runs");
+
+        assert_eq!(runner.runs, 2, "the storm earns exactly one whole-member re-run");
+        assert!(runner.replayed.is_empty(), "and a set still storm-shaped after it earns no per-test replays");
+        assert_eq!(run.outcome, MemberOutcome::Failed);
+        let findings = run.findings().expect("a repeated storm is repair work, not a pile of excusals");
+        assert!(findings.contains("scenario_0"), "the repeated tests are named in the findings");
+        assert!(run.flakes().is_empty(), "nothing that failed twice is on the flake ledger");
+        assert!(run.inherited().is_empty(), "and nothing was asked at a base the aggregate does not have");
+    }
+
+    #[test]
+    fn a_storm_that_clears_on_the_member_re_run_is_excused_wholesale() {
+        // The settling-host direction of the same diagnosis: the count came
+        // from contention, the re-run on the settled host comes back green,
+        // and every casualty is excused by that one run — no serial replays.
+        let invocation = verify_command("verify.test").expect("verify.test mapped");
+        let names = storm();
+        let failing = failing_run(&names.iter().map(String::as_str).collect::<Vec<_>>());
+        let mut runner = ScriptedRunner::new(&[(&failing, 100), (&passing_run(), 0)]);
+
+        let run = run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, None, &mut runner)
+            .expect("the policy runs");
+
+        assert_eq!(runner.runs, 2, "one whole-member re-run answers for the whole set");
+        assert!(runner.replayed.is_empty(), "with no replay per casualty");
+        assert_eq!(run.outcome, MemberOutcome::Passed);
+        assert!(run.findings().is_none(), "a storm that settled is not repair work");
+        assert_eq!(run.flakes().len(), names.len(), "every casualty is on the flake ledger");
+    }
+
+    #[test]
+    fn a_storm_survivor_set_below_the_threshold_takes_the_per_test_path() {
+        // The hand-off between the two shapes: the re-run clears most of the
+        // storm, and the few that repeat are no longer storm-shaped — each is
+        // triaged on its own, exactly as a small failure set would have been.
+        let invocation = verify_command("verify.test").expect("verify.test mapped");
+        let names = storm();
+        let failing = failing_run(&names.iter().map(String::as_str).collect::<Vec<_>>());
+        let survivors = failing_run(&[&names[0], &names[1]]);
+        let mut runner = ScriptedRunner::new(&[(&failing, 100), (&survivors, 100)]);
+
+        let run = run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, None, &mut runner)
+            .expect("the policy runs");
+
+        assert_eq!(runner.runs, 2);
+        let replayed: Vec<&str> = runner.replayed.iter().map(|(test, _)| test.as_str()).collect();
+        assert_eq!(replayed.len(), 2, "only the survivors are replayed per test");
+        assert!(replayed.contains(&names[0].as_str()) && replayed.contains(&names[1].as_str()));
+        assert_eq!(run.outcome, MemberOutcome::Failed);
+        let findings = run.findings().expect("survivors that repeat on replay are repair work");
+        assert!(findings.contains(&names[0]) && findings.contains(&names[1]));
+        assert_eq!(run.flakes().len(), names.len() - 2, "the cleared casualties are on the flake ledger");
     }
 
     #[test]

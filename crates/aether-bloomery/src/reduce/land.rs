@@ -13,7 +13,7 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, WorkpieceId};
 use crate::port::ProjectedReceipt;
 use crate::reads;
-use crate::values::LandingReceipt;
+use crate::values::{BaseReceipt, BaseVerdict, LandingReceipt, VerifyGateSet};
 
 /// The `land` boundary (ADR-0206): mainline advances onto a resolved bloom's
 /// head, or the record says which guard stopped it.
@@ -71,6 +71,9 @@ fn landing(
         .map(|member| Decision::ReleaseMembership { workpiece: member.workpiece.clone(), bloom })
         .collect();
     effects.push(Decision::AdvanceMainline { from: snapshot.mainline, to: new_head });
+    // The head this land produces is a tree the line has already answered for,
+    // so the next bloom to seal on it should not re-ask (#4891 follow-on).
+    effects.extend(landed_base_receipt(snapshot, record, base, new_head));
 
     // The receipt travels with the membership it was minted from: the value
     // itself names no members, and the outward projection has no other route to
@@ -80,6 +83,56 @@ fn landing(
     effects.push(Decision::EmitReceipt(ProjectedReceipt { receipt: receipt.clone(), members }));
 
     Decisions { outcome: Outcome::Landed(receipt), effects }
+}
+
+/// The green whole-workspace receipt a land files for the head it produced, or
+/// `None` when this bloom's chain does not reach that far.
+///
+/// The rule, exactly: a receipt is filed only when all three links hold — the
+/// head being landed is the one the bloom resolved onto
+/// ([`BloomRecord::resolved_head`](super::BloomRecord::resolved_head) is
+/// `new_head`), the tree that head carries wears this bloom's own green lane
+/// [`VerifyProof`](crate::VerifyProof), and the bloom's sealed base already held
+/// a green whole-workspace receipt. Together they say the landed content was
+/// reached from a tree the whole-workspace question was answered for, by a fold
+/// whose mechanical gates passed over exactly the tree being landed. Break any
+/// link — a head nobody resolved onto, a tree whose gates never judged it, a
+/// base that was never proven — and nothing is filed: the next seal dispatches a
+/// real `verify.base` and pays the honest price.
+///
+/// This is deliberately *not* the memo's key-equality reuse, which
+/// [`VerifyGateSet::base`] keeps separate on purpose — a closure-narrowed member
+/// proof must never answer the whole-workspace question by itself, and no lookup
+/// here reads a receipt out from under the lane gate set. The receipt is minted
+/// under the base gate set on the strength of the chain above. What it inherits
+/// is the narrowing's own standing assumption: the lane's closure covers
+/// everything the members' diff can reach, so what the base proved at the
+/// previous head still holds everywhere the fold did not touch. A land whose
+/// base receipt was itself filed here extends the chain by induction, one link
+/// per landing, on that same assumption.
+fn landed_base_receipt(
+    snapshot: &Snapshot,
+    record: &super::BloomRecord,
+    base: Digest,
+    new_head: Digest,
+) -> Option<Decision> {
+    let tree = record.resolved_tree.filter(|_| record.resolved_head == Some(new_head))?;
+    let proof = record.verify_proof_for(tree)?;
+    if !snapshot.base_receipt_for(base).is_some_and(BaseReceipt::is_green) {
+        return None;
+    }
+
+    // Keyed by the landed tree under the base gate set, so the next seal's
+    // `base_receipt_for(new_head)` resolves commit → tree → this verdict. The
+    // evidence is the lane proof's own, which already binds the tree it judged.
+    Some(Decision::RecordBaseReceipt {
+        receipt: BaseReceipt {
+            base: new_head,
+            tree,
+            gate_set: VerifyGateSet::base().digest(),
+            verdict: BaseVerdict::Green { evidence: proof.evidence.clone() },
+        },
+    })
 }
 
 #[cfg(test)]

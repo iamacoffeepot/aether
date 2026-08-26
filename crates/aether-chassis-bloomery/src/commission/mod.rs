@@ -4,8 +4,10 @@
 //! talk to the coordinator's authenticated control API and never open
 //! `SQLite`. `import` is the offline exception: it writes an explicit
 //! snapshot into a journal file while commission creation and sealing are
-//! quiesced. `approve` and `cancel` submit an already-produced
-//! [`SignatureEnvelope`]; this crate does not hold private keys.
+//! quiesced. The coordinator holds no private keys; this CLI signs on the
+//! operator's host with the operator's seed, the same way `xtask bloom
+//! cancel` / `reopen` / `amend` do. `approve` still accepts an already-produced
+//! [`SignatureEnvelope`] when the operator minted one elsewhere.
 
 mod client;
 mod crates;
@@ -14,9 +16,13 @@ pub(crate) mod scope;
 
 use std::ffi::OsString;
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use aether_bloomery::{Digest, Observation, Provenance, ScopeRevision, SignatureEnvelope, Statement};
+use aether_bloomery::{
+    Digest, KeyId, Observation, OperatorKey, Provenance, ScopeRevision, SignatureEnvelope, Statement, digest_of,
+    signed_approval,
+};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -24,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use client::ControlApi;
 use scope::load_revision;
 
-pub use scope::task_text;
+pub use scope::{parse_revision, task_text};
 
 use crate::bloomery::load_policy;
 
@@ -80,7 +86,8 @@ enum Command {
         #[arg(long = "approval-policy", default_value = "approval-policy.toml")]
         approval_policy: PathBuf,
     },
-    /// Submit a pre-signed approval envelope for a scope digest.
+    /// Submit an approval for a scope digest: either a pre-signed envelope or a
+    /// seed-file signature minted through [`signed_approval`].
     Approve {
         /// Workpiece id whose commission is approved.
         id: String,
@@ -89,7 +96,37 @@ enum Command {
         scope: String,
         /// Already-produced ADR-0179 signature envelope.
         #[arg(long)]
-        envelope: PathBuf,
+        envelope: Option<PathBuf>,
+        /// Operator signing seed: 32 raw bytes or 64 hex characters, mode 0600.
+        #[arg(long)]
+        seed_file: Option<PathBuf>,
+        /// The `KeyId` the coordinator's allowlist names for that seed.
+        #[arg(long, default_value = "operator")]
+        signer: String,
+    },
+    /// Create-or-rescope, write a scope revision, and approve it in one step.
+    Author {
+        /// Workpiece id the commission is.
+        #[arg(long)]
+        id: String,
+        /// File whose bytes become the intent statement.
+        #[arg(long = "intent-file")]
+        intent_file: PathBuf,
+        /// Managed-heading markdown for the scope revision.
+        #[arg(long = "scope-file")]
+        scope_file: PathBuf,
+        /// Operator signing seed: 32 raw bytes or 64 hex characters, mode 0600.
+        #[arg(long)]
+        seed_file: Option<PathBuf>,
+        /// The `KeyId` the coordinator's allowlist names for that seed.
+        #[arg(long, default_value = "operator")]
+        signer: String,
+        /// Append `id=digest` to this file after a successful write.
+        #[arg(long)]
+        ledger: Option<PathBuf>,
+        /// Approval policy the declared-surface granularity lint reads.
+        #[arg(long = "approval-policy", default_value = "approval-policy.toml")]
+        approval_policy: PathBuf,
     },
     /// Show one commission.
     Show {
@@ -163,7 +200,17 @@ fn dispatch(cli: CommissionCli) -> Result<String> {
         Command::Create { id, intent_file } => create(&api, &id, &intent_file),
         Command::ScopeRun { id } => open_scope_run(&api, &id),
         Command::Scope { id, file, approval_policy } => write_scope(&api, &id, &file, &approval_policy),
-        Command::Approve { id, scope, envelope } => approve(&api, &id, &scope, &envelope),
+        Command::Approve { id, scope, envelope, seed_file, signer } => {
+            approve(&api, &id, &scope, envelope.as_deref(), seed_file.as_deref(), &signer)
+        }
+        Command::Author { id, intent_file, scope_file, seed_file, signer, ledger, approval_policy } => {
+            create_or_rescope(&api, &id, &intent_file)?;
+            let digest = write_verified_scope(&api, &id, &scope_file, &approval_policy)?;
+            if let Some(seed_file) = seed_file.as_deref() {
+                approve_with_seed(&api, &id, digest, seed_file, &signer)?;
+            }
+            record_authored(&id, digest, ledger.as_deref())
+        }
         Command::Show { id, json } => show(&api, &id, json),
         Command::List { status } => list(&api, status.as_deref()),
         Command::Cancel { id, reason, envelope } => cancel(&api, &id, &reason, &envelope),
@@ -202,6 +249,8 @@ struct ShowView {
     intent: String,
     status: String,
     current_revision: Option<String>,
+    #[serde(default)]
+    current_unreadable: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -253,16 +302,55 @@ fn create(api: &ControlApi, id: &str, intent_file: &Path) -> Result<String> {
     Ok(format!("created {} intent {}\n", created.id, created.intent))
 }
 
+fn create_or_rescope(api: &ControlApi, id: &str, intent_file: &Path) -> Result<()> {
+    match create(api, id, intent_file) {
+        Ok(_) => Ok(()),
+        Err(error) if is_duplicate_commission(&error) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn is_duplicate_commission(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    message.contains("409:") && message.contains("already exists")
+}
+
 fn write_scope(api: &ControlApi, id: &str, file: &Path, approval_policy: &Path) -> Result<String> {
+    let written = post_revision(api, id, file, approval_policy)?;
+    Ok(format!("{}\n", written.digest))
+}
+
+fn write_verified_scope(api: &ControlApi, id: &str, file: &Path, approval_policy: &Path) -> Result<Digest> {
+    let revision = prepared_revision(api, id, file, approval_policy)?;
+    let expected = digest_of(&revision);
+    let written: DigestView =
+        api.send_json("POST", &format!("/commissions/{id}/revisions"), &WriteRevisionBody { revision: &revision })?;
+    refuse_unread_digest(&written.digest, expected)
+}
+
+fn post_revision(api: &ControlApi, id: &str, file: &Path, approval_policy: &Path) -> Result<DigestView> {
+    let revision = prepared_revision(api, id, file, approval_policy)?;
+    api.send_json("POST", &format!("/commissions/{id}/revisions"), &WriteRevisionBody { revision: &revision })
+}
+
+fn prepared_revision(api: &ControlApi, id: &str, file: &Path, approval_policy: &Path) -> Result<ScopeRevision> {
     let predecessor = match current_revision(api, id)? {
         Some(hex) => Some(digest_from_hex(&hex)?),
         None => None,
     };
     let revision = load_revision(id, file, predecessor)?;
     lint_surface_granularity(&revision, approval_policy)?;
-    let written: DigestView =
-        api.send_json("POST", &format!("/commissions/{id}/revisions"), &WriteRevisionBody { revision: &revision })?;
-    Ok(format!("{}\n", written.digest))
+    Ok(revision)
+}
+
+/// Refuse a coordinator-stored digest that is not the address of the revision
+/// just written, so an approval is never signed over unread bytes.
+fn refuse_unread_digest(stored_hex: &str, expected: Digest) -> Result<Digest> {
+    let stored = digest_from_hex(stored_hex)?;
+    if stored != expected {
+        bail!("the coordinator stored {stored_hex} for a revision addressed {}", expected.to_hex());
+    }
+    Ok(stored)
 }
 
 /// Refuse a declared surface that names a file the approval policy does not.
@@ -302,11 +390,54 @@ fn lint_surface_granularity(revision: &ScopeRevision, approval_policy: &Path) ->
     Ok(())
 }
 
-fn approve(api: &ControlApi, id: &str, scope: &str, envelope: &Path) -> Result<String> {
+fn approve(
+    api: &ControlApi,
+    id: &str,
+    scope: &str,
+    envelope: Option<&Path>,
+    seed_file: Option<&Path>,
+    signer: &str,
+) -> Result<String> {
     let digest = digest_from_hex(scope)?;
-    let statement = signed_statement(envelope, digest.as_bytes())?;
+    let statement = approval_statement(digest, envelope, seed_file, signer)?;
     let written: DigestView = api.send_json("POST", &format!("/commissions/{id}/approvals"), &statement)?;
     Ok(format!("{}\n", written.digest))
+}
+
+fn approve_with_seed(api: &ControlApi, id: &str, digest: Digest, seed_file: &Path, signer: &str) -> Result<()> {
+    let statement = approval_statement(digest, None, Some(seed_file), signer)?;
+    let _: DigestView = api.send_json("POST", &format!("/commissions/{id}/approvals"), &statement)?;
+    Ok(())
+}
+
+fn approval_statement(
+    digest: Digest,
+    envelope: Option<&Path>,
+    seed_file: Option<&Path>,
+    signer: &str,
+) -> Result<Statement> {
+    match (envelope, seed_file) {
+        (Some(_), Some(_)) => bail!("approve takes --envelope or --seed-file, not both"),
+        (None, None) => bail!("approve requires --envelope or --seed-file"),
+        (Some(path), None) => signed_statement(path, digest.as_bytes()),
+        (None, Some(path)) => {
+            let key = OperatorKey::load(KeyId(signer.to_owned()), path)?;
+            Ok(signed_approval(key.signer.clone(), key.seed(), digest))
+        }
+    }
+}
+
+fn record_authored(id: &str, digest: Digest, ledger: Option<&Path>) -> Result<String> {
+    let line = format!("{id}={}", digest.to_hex());
+    if let Some(path) = ledger {
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .and_then(|mut file| writeln!(file, "{line}"))
+            .with_context(|| format!("append ledger {}", path.display()))?;
+    }
+    Ok(format!("{line}\n"))
 }
 
 fn show(api: &ControlApi, id: &str, json: bool) -> Result<String> {
@@ -316,7 +447,12 @@ fn show(api: &ControlApi, id: &str, json: bool) -> Result<String> {
     } else {
         let view: ShowView = api.get_json(&format!("/commissions/{id}"))?;
         let revision = view.current_revision.as_deref().unwrap_or("-");
-        Ok(format!("{} {} intent {} revision {}\n", view.id, view.status, view.intent, revision))
+        Ok(match view.current_unreadable {
+            Some(reason) => {
+                format!("{} {} intent {} revision {revision} unreadable: {reason}\n", view.id, view.status, view.intent)
+            }
+            None => format!("{} {} intent {} revision {revision}\n", view.id, view.status, view.intent),
+        })
     }
 }
 
@@ -393,7 +529,8 @@ fn digest_from_hex(hex: &str) -> Result<Digest> {
 mod tests {
     use std::fs;
 
-    use super::{Command, CommissionCli, load_intent, signed_statement};
+    use super::{Command, CommissionCli, load_intent, refuse_unread_digest, signed_statement};
+    use aether_bloomery::Digest;
     use clap::Parser;
 
     #[test]
@@ -474,5 +611,78 @@ mod tests {
         fs::write(&path, "ship the CLI").unwrap_or_else(|error| panic!("write intent fixture: {error}"));
         let statement = load_intent(&path).unwrap_or_else(|error| panic!("text intent must load: {error}"));
         assert_eq!(statement.words, b"ship the CLI");
+    }
+
+    #[test]
+    fn author_is_a_verb_on_the_sibling_binary() {
+        let cli = CommissionCli::try_parse_from([
+            "bloomery-commission",
+            "author",
+            "--id",
+            "issue-1",
+            "--intent-file",
+            "intent.txt",
+            "--scope-file",
+            "scope.md",
+            "--seed-file",
+            "seed",
+        ])
+        .unwrap_or_else(|error| panic!("author must parse: {error}"));
+        match cli.command {
+            Command::Author { id, signer, .. } => {
+                assert_eq!(id, "issue-1");
+                assert_eq!(signer, "operator");
+            }
+            other => panic!("expected author, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn approve_refuses_when_neither_envelope_nor_seed_is_given() {
+        match super::run(["bloomery-commission", "approve", "issue-1", "--scope", &"aa".repeat(32)]) {
+            Ok(output) => panic!("neither source must be refused, got {output}"),
+            Err(error) => {
+                let message = error.to_string();
+                assert!(
+                    message.contains("--envelope") && message.contains("--seed-file"),
+                    "refusal names both sources, got {message}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn approve_refuses_when_both_envelope_and_seed_are_given() {
+        match super::run([
+            "bloomery-commission",
+            "approve",
+            "issue-1",
+            "--scope",
+            &"aa".repeat(32),
+            "--envelope",
+            "envelope.json",
+            "--seed-file",
+            "seed",
+        ]) {
+            Ok(output) => panic!("both sources must be refused, got {output}"),
+            Err(error) => {
+                let message = error.to_string();
+                assert!(message.contains("not both"), "refusal names the conflict, got {message}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_stored_digest_that_is_not_the_revision_is_refused() {
+        let expected = Digest::from_bytes([1; 32]);
+        let stored = Digest::from_bytes([2; 32]).to_hex();
+        match refuse_unread_digest(&stored, expected) {
+            Ok(_) => panic!("a mismatched stored digest must be refused"),
+            Err(error) => {
+                let message = error.to_string();
+                assert!(message.contains(&stored), "refusal names the stored digest: {message}");
+                assert!(message.contains(&expected.to_hex()), "refusal names the local address: {message}");
+            }
+        }
     }
 }

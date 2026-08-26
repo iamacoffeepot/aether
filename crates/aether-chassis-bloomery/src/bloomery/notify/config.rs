@@ -1,4 +1,4 @@
-//! The notification reactor's ADR-0090 derive-`Config` member (#5166).
+//! The notification reactor's ADR-0090 derive-`Config` member (#5166, #5457).
 
 /// Where the operator webhook URL is read from.
 ///
@@ -20,4 +20,19 @@ pub struct NotifyConfig {
     /// reactor mounts disabled.
     #[config(env = "AETHER_BLOOMERY_NOTIFY_WEBHOOK_FILE")]
     pub webhook_file: Option<String>,
+    /// Whether the channel also carries quiet milestones — a bloom entering
+    /// the line, a member integrating — beside the loud conditions it always
+    /// carries (#5457).
+    ///
+    /// Off by default, because the loud set is what an alert channel is for
+    /// and every existing endpoint was configured against that volume. On, a
+    /// night where nothing goes wrong still produces a readable line of
+    /// progress, which is the only way to tell a healthy coordinator from a
+    /// dead one without opening the console.
+    ///
+    /// Flipping it is forward-only: the ledger records milestone keys whether
+    /// or not they were posted, so enabling the knob starts the stream from
+    /// the next transition rather than replaying the day.
+    #[config(default = false)]
+    pub milestones: bool,
 }

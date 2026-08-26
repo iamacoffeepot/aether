@@ -2,9 +2,20 @@
 //!
 //! Post-cutover the operator's ambient verification surface is gone: the
 //! console covers attended watching, and nothing covers unattended. This
-//! capability is the unattended half — one plain-text message per loud
-//! transition, posted to a configured Discord-compatible webhook, best-effort
-//! and never on the line's critical path.
+//! capability is the unattended half — one plain-text message per transition,
+//! posted to a configured Discord-compatible webhook, best-effort and never on
+//! the line's critical path.
+//!
+//! # Two volumes
+//!
+//! Loud conditions — wedges, host faults, parks, held decisions, refused
+//! landings, a bloom's lifecycle — always post. Quiet milestones — a bloom
+//! entering the line, a member integrating — post only when
+//! [`NotifyConfig::milestones`] is on (#5457). The difference matters because
+//! a bloom that walks cleanly raises no loud condition at all, so an operator
+//! watching only the loud channel cannot tell a healthy night from a dead
+//! coordinator. The knob gates the POST and not the ledger, so turning it on
+//! starts the milestone stream forward rather than replaying the day.
 //!
 //! # It drains no topic
 //!
@@ -60,7 +71,7 @@ mod config;
 pub use config::{NotifyConfig, NotifyOverlay};
 
 mod taxonomy;
-pub use taxonomy::{LoudEvent, loud_events};
+pub use taxonomy::{NotifyEvent, Volume, notify_events};
 
 mod runtime;
 pub use runtime::{Delivered, NotifyReactorState, NotifyTick, deliver};
@@ -121,6 +132,9 @@ pub struct NotifyReactorSetup {
     pub sink: Option<Arc<dyn WebhookSink>>,
     /// The store the dedupe ledger lives in.
     pub store_path: String,
+    /// Whether the channel also carries quiet milestones (#5457) — the
+    /// resolved [`NotifyConfig::milestones`].
+    pub milestones: bool,
     /// How often to wake, read the document, and post what is new.
     pub poll_interval_secs: u64,
 }

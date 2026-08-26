@@ -56,6 +56,12 @@ impl Timeline {
         HINTS
     }
 
+    /// The lane timeline has no Enter; the caret follows that.
+    #[must_use]
+    pub fn enter_pushes() -> bool {
+        false
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, store: &Store) -> Outcome {
         let rows = self.rows(store);
         match key.code {
@@ -118,7 +124,7 @@ impl Timeline {
         .style(palette::body())
         .header(header)
         .row_highlight_style(palette::cursor())
-        .highlight_symbol("> ");
+        .highlight_symbol(super::super::caret(Self::enter_pushes()));
         let mut state = TableState::default()
             .with_selected(self.cursor.selected_index(&rows, |row| row.workpiece.clone()))
             .with_offset(self.scroll);
@@ -246,11 +252,15 @@ fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{Timeline, lane_title};
-    use crate::dto::DigestHex;
+    use crate::dto::{DigestHex, MetricsTimeline, StageId, TimelineSpan};
     use crate::keys::{Outcome, assert_footer_honest};
     use crate::nav::Nav;
     use crate::shell::Shell;
+    use crate::store::Store;
     use crossterm::event::KeyEvent;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use std::time::Duration;
 
     #[test]
     fn timeline_footer_keys_are_handled() {
@@ -270,5 +280,30 @@ mod tests {
         assert!(reconstructed.contains("axis: reconstructed"), "{reconstructed}");
         assert!(!live.contains("axis: reconstructed"), "{live}");
         assert_ne!(live, reconstructed);
+    }
+
+    #[test]
+    fn a_screen_with_no_enter_paints_no_caret() {
+        // The plausible bug: highlight_symbol tracks TableState, so every
+        // lane row paints `>` even though Enter cannot push a frame.
+        let bloom = DigestHex::from_bytes([1; 32]);
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_timeline(
+            bloom,
+            Ok(MetricsTimeline {
+                bloom,
+                spans: vec![TimelineSpan {
+                    workpiece: "wp-a".to_owned(),
+                    stage: StageId::Construct,
+                    started_unix_millis: Some(1_000),
+                    ..TimelineSpan::default()
+                }],
+                ..MetricsTimeline::default()
+            }),
+        );
+        let mut timeline = Timeline::new(bloom);
+        let mut terminal = Terminal::new(TestBackend::new(80, 8)).expect("test backend");
+        terminal.draw(|frame| timeline.render(frame, frame.area(), &store)).expect("draw");
+        assert_eq!(super::super::super::row_caret(&terminal, "wp-a"), "  ");
     }
 }

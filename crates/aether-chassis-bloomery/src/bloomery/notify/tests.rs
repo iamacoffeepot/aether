@@ -1,22 +1,23 @@
-//! Store-backed tests for the notification ledger (#5166).
+//! Store-backed tests for the notification ledger (#5166, #5457).
 //!
 //! Everything here drives [`deliver`] against a real `:memory:` store and a
 //! recording sink, because the logic under test *is* the difference between a
-//! document's loud set and the ledger — a fake store would be testing the
+//! document's event set and the ledger — a fake store would be testing the
 //! fake.
 
 use std::sync::{Mutex, PoisonError};
 
 use aether_bloomery::testing::digest;
 use aether_bloomery::{
-    AwaitingSurfaceView, BloomId, BloomStatus, BloomView, CompositionFinding, CompositionView, ExecutorFaultView,
-    HostFaultView, LandingBlock, MemberPark, MemberView, OperatorHold, PendingDecisionView, ReviewParkView,
-    SpendQuiesce, StageId, SurfacePathRequest, VerifyFailureSet, ViewDocument, Wedge, WorkpieceId,
+    AwaitingSurfaceView, BloomId, BloomStatus, BloomView, CompositionCursorView, CompositionFinding, CompositionView,
+    Evidence, EvidenceKind, ExecutorFaultView, HostFaultView, LandingBlock, MemberPark, MemberView, OperatorHold,
+    PendingDecisionView, ResolutionClaim, ReviewParkView, SpendQuiesce, StageId, SurfacePathRequest, VerifyFailureSet,
+    ViewDocument, Wedge, WithdrawnView, WorkpieceId,
 };
 use aether_bloomery_github::{WebhookError, WebhookSink};
 
 use super::runtime::SEED_MARKER_KEY;
-use super::{deliver, loud_events};
+use super::{Volume, deliver, notify_events};
 use crate::store::{SqliteStore, StoreBackend};
 
 /// A sink that records what it was asked to post and can be told to refuse.
@@ -56,6 +57,24 @@ fn wedged_member(workpiece: &str) -> MemberView {
     MemberView { workpiece: WorkpieceId(workpiece.to_owned()), wedge: Some(wedge), ..MemberView::default() }
 }
 
+/// A member that has dispatched and integrated — the shape a bloom walking
+/// cleanly is made of, and the one the loud taxonomy has nothing to say about.
+fn resolved_member(workpiece: &str) -> MemberView {
+    let claim = ResolutionClaim {
+        workpiece: WorkpieceId(workpiece.to_owned()),
+        scope_revision: digest(1),
+        candidate: digest(2),
+        evidence: Evidence { subject: digest(2), kind: EvidenceKind::ResolutionClaim, detail: digest(3) },
+    };
+
+    MemberView {
+        workpiece: WorkpieceId(workpiece.to_owned()),
+        resolution: Some(claim),
+        cursor: Some(CompositionCursorView { stage: StageId::Verify, attempts: 1, candidate: None }),
+        ..MemberView::default()
+    }
+}
+
 fn bloom(status: BloomStatus, members: Vec<MemberView>) -> ViewDocument {
     ViewDocument {
         blooms: vec![BloomView { id: BloomId(digest(0xab)), status, members, ..BloomView::default() }],
@@ -91,21 +110,21 @@ fn one_message_per_transition_and_never_a_second() {
     // alert channel into noise nobody reads within a day.
     let mut store = store();
     let sink = RecordingSink::default();
-    deliver(&mut store, &sink, &ViewDocument::default(), 0).expect("the first mount seeds");
+    deliver(&mut store, &sink, &ViewDocument::default(), false, 0).expect("the first mount seeds");
 
     let sealed = bloom(
         BloomStatus::Sealed,
         vec![MemberView { workpiece: WorkpieceId("issue-1".to_owned()), ..MemberView::default() }],
     );
-    deliver(&mut store, &sink, &sealed, 1).expect("the ledger writes");
-    deliver(&mut store, &sink, &sealed, 2).expect("the ledger writes");
+    deliver(&mut store, &sink, &sealed, false, 1).expect("the ledger writes");
+    deliver(&mut store, &sink, &sealed, false, 2).expect("the ledger writes");
 
     let wedged = bloom(BloomStatus::Sealed, vec![wedged_member("issue-1")]);
-    deliver(&mut store, &sink, &wedged, 3).expect("the ledger writes");
-    deliver(&mut store, &sink, &wedged, 4).expect("the ledger writes");
+    deliver(&mut store, &sink, &wedged, false, 3).expect("the ledger writes");
+    deliver(&mut store, &sink, &wedged, false, 4).expect("the ledger writes");
 
     let landed = bloom(BloomStatus::Landed, vec![wedged_member("issue-1")]);
-    deliver(&mut store, &sink, &landed, 5).expect("the ledger writes");
+    deliver(&mut store, &sink, &landed, false, 5).expect("the ledger writes");
 
     let posted = sink.posted();
     assert_eq!(posted.len(), 3, "one message per transition, not one per poll: {posted:?}");
@@ -121,11 +140,11 @@ fn a_failing_endpoint_leaves_the_message_owed() {
     // successful, the ledger says "reported", and the operator is never told.
     let mut store = store();
     let sink = RecordingSink::default();
-    deliver(&mut store, &sink, &ViewDocument::default(), 0).expect("the first mount seeds");
+    deliver(&mut store, &sink, &ViewDocument::default(), false, 0).expect("the first mount seeds");
     let view = bloom(BloomStatus::Sealed, vec![wedged_member("issue-1")]);
 
     sink.refuse(true);
-    let refused = deliver(&mut store, &sink, &view, 1).expect("a refused POST is not a store failure");
+    let refused = deliver(&mut store, &sink, &view, false, 1).expect("a refused POST is not a store failure");
     assert_eq!(refused.posted, 0);
     assert!(refused.stalled, "the pass reports that it stopped short");
     assert!(sink.posted().is_empty());
@@ -136,7 +155,7 @@ fn a_failing_endpoint_leaves_the_message_owed() {
     );
 
     sink.refuse(false);
-    let retried = deliver(&mut store, &sink, &view, 2).expect("the ledger writes");
+    let retried = deliver(&mut store, &sink, &view, false, 2).expect("the ledger writes");
     assert_eq!(retried.posted, 2, "both the seal and the wedge are still owed");
     assert_eq!(sink.posted().len(), 2);
 }
@@ -148,21 +167,21 @@ fn a_cleared_condition_is_forgotten_and_notifies_again_if_it_returns() {
     // second stop is silent, which is the one an operator most needs.
     let mut store = store();
     let sink = RecordingSink::default();
-    deliver(&mut store, &sink, &ViewDocument::default(), 0).expect("the first mount seeds");
+    deliver(&mut store, &sink, &ViewDocument::default(), false, 0).expect("the first mount seeds");
 
     let wedged = bloom(BloomStatus::Sealed, vec![wedged_member("issue-1")]);
-    deliver(&mut store, &sink, &wedged, 1).expect("the ledger writes");
+    deliver(&mut store, &sink, &wedged, false, 1).expect("the ledger writes");
     assert_eq!(sink.posted().len(), 2, "the seal and the wedge");
 
     let cleared = bloom(
         BloomStatus::Sealed,
         vec![MemberView { workpiece: WorkpieceId("issue-1".to_owned()), ..MemberView::default() }],
     );
-    let quiet = deliver(&mut store, &sink, &cleared, 2).expect("the ledger writes");
+    let quiet = deliver(&mut store, &sink, &cleared, false, 2).expect("the ledger writes");
     assert_eq!(quiet.forgotten, 1, "the wedge key is dropped once its condition clears");
     assert_eq!(sink.posted().len(), 2, "clearing a condition posts nothing");
 
-    deliver(&mut store, &sink, &wedged, 3).expect("the ledger writes");
+    deliver(&mut store, &sink, &wedged, false, 3).expect("the ledger writes");
     assert_eq!(sink.posted().len(), 3, "the returning wedge is a new transition");
 }
 
@@ -176,9 +195,9 @@ fn a_first_mount_adopts_the_standing_loud_set_without_posting() {
     let mut store = store();
     let sink = RecordingSink::default();
     let standing = standing_loud_set();
-    let events = loud_events(&standing);
+    let events = notify_events(&standing);
 
-    let report = deliver(&mut store, &sink, &standing, 1).expect("the ledger writes");
+    let report = deliver(&mut store, &sink, &standing, false, 1).expect("the ledger writes");
     assert_eq!(report.posted, 0);
     assert_eq!(report.seeded, u32::try_from(events.len()).expect("the standing set is tiny"));
     assert!(sink.posted().is_empty());
@@ -196,7 +215,7 @@ fn a_transition_after_the_seed_still_posts_exactly_once() {
     let mut store = store();
     let sink = RecordingSink::default();
     let standing = standing_loud_set();
-    deliver(&mut store, &sink, &standing, 1).expect("the first mount seeds");
+    deliver(&mut store, &sink, &standing, false, 1).expect("the first mount seeds");
     assert!(sink.posted().is_empty());
 
     let mut blooms = standing.blooms.clone();
@@ -207,11 +226,11 @@ fn a_transition_after_the_seed_still_posts_exactly_once() {
         ..BloomView::default()
     });
     let with_new = ViewDocument { blooms, ..ViewDocument::default() };
-    let first = deliver(&mut store, &sink, &with_new, 2).expect("the ledger writes");
+    let first = deliver(&mut store, &sink, &with_new, false, 2).expect("the ledger writes");
     assert_eq!(first.posted, 1);
     assert_eq!(sink.posted().len(), 1);
 
-    let second = deliver(&mut store, &sink, &with_new, 3).expect("the ledger writes");
+    let second = deliver(&mut store, &sink, &with_new, false, 3).expect("the ledger writes");
     assert_eq!(second.posted, 0);
     assert_eq!(sink.posted().len(), 1);
 }
@@ -223,9 +242,9 @@ fn an_emptied_ledger_is_not_re_seeded() {
     // inverted.
     let mut store = store();
     let sink = RecordingSink::default();
-    deliver(&mut store, &sink, &standing_loud_set(), 1).expect("the first mount seeds");
+    deliver(&mut store, &sink, &standing_loud_set(), false, 1).expect("the first mount seeds");
 
-    let quiet = deliver(&mut store, &sink, &ViewDocument::default(), 2).expect("the ledger writes");
+    let quiet = deliver(&mut store, &sink, &ViewDocument::default(), false, 2).expect("the ledger writes");
     assert_eq!(store.list_notifications().expect("the ledger reads"), [SEED_MARKER_KEY]);
     assert_eq!(quiet.seeded, 0, "an emptied ledger must not re-arm the seed");
     assert!(sink.posted().is_empty());
@@ -234,7 +253,7 @@ fn an_emptied_ledger_is_not_re_seeded() {
         BloomStatus::Sealed,
         vec![MemberView { workpiece: WorkpieceId("issue-1".to_owned()), ..MemberView::default() }],
     );
-    let report = deliver(&mut store, &sink, &sealed, 3).expect("the ledger writes");
+    let report = deliver(&mut store, &sink, &sealed, false, 3).expect("the ledger writes");
     assert_eq!(report.posted, 1);
     assert_eq!(sink.posted().len(), 1);
 }
@@ -244,10 +263,10 @@ fn the_seed_marker_is_never_posted_and_never_forgotten() {
     let mut store = store();
     let sink = RecordingSink::default();
 
-    deliver(&mut store, &sink, &standing_loud_set(), 1).expect("the first mount seeds");
-    deliver(&mut store, &sink, &ViewDocument::default(), 2).expect("the ledger writes");
-    deliver(&mut store, &sink, &bloom(BloomStatus::Sealed, vec![]), 3).expect("the ledger writes");
-    deliver(&mut store, &sink, &bloom(BloomStatus::Landed, vec![wedged_member("issue-1")]), 4)
+    deliver(&mut store, &sink, &standing_loud_set(), false, 1).expect("the first mount seeds");
+    deliver(&mut store, &sink, &ViewDocument::default(), false, 2).expect("the ledger writes");
+    deliver(&mut store, &sink, &bloom(BloomStatus::Sealed, vec![]), false, 3).expect("the ledger writes");
+    deliver(&mut store, &sink, &bloom(BloomStatus::Landed, vec![wedged_member("issue-1")]), false, 4)
         .expect("the ledger writes");
 
     let posted = sink.posted();
@@ -341,8 +360,8 @@ fn every_loud_branch_keys() -> Vec<String> {
         ..ViewDocument::default()
     };
 
-    let mut keys: Vec<_> = loud_events(&kitchen).into_iter().map(|event| event.key).collect();
-    keys.extend(loud_events(&bloom_quiesce).into_iter().map(|event| event.key));
+    let mut keys: Vec<_> = notify_events(&kitchen).into_iter().map(|event| event.key).collect();
+    keys.extend(notify_events(&bloom_quiesce).into_iter().map(|event| event.key));
     keys
 }
 
@@ -379,4 +398,95 @@ fn no_loud_event_key_collides_with_the_seed_marker() {
         assert_ne!(key.as_str(), SEED_MARKER_KEY);
         assert!(!key.starts_with(SEED_MARKER_KEY), "taxonomy key {key} collides with the seed marker");
     }
+}
+
+#[test]
+fn a_cleanly_walking_bloom_produces_milestones_and_no_loud_stop() {
+    // The observed silence (#5457): a sealed bloom whose members dispatched and
+    // integrated with nothing wrong. The plausible bug is a taxonomy with no
+    // milestone branch at all — hours of real progress render as one lifecycle
+    // line, which reads exactly like a dead coordinator. The withdrawn member
+    // is here for the denominator: it left the line and can never resolve, so
+    // counting it would strand the progress line one short of its own total.
+    let view = bloom(
+        BloomStatus::Sealed,
+        vec![
+            resolved_member("issue-1"),
+            resolved_member("issue-2"),
+            MemberView {
+                cursor: Some(CompositionCursorView { stage: StageId::Construct, attempts: 1, candidate: None }),
+                ..MemberView { workpiece: WorkpieceId("issue-3".to_owned()), ..MemberView::default() }
+            },
+            MemberView {
+                withdrawn: Some(WithdrawnView {
+                    cause: "operator".to_owned(),
+                    depends_on: None,
+                    reason: "not tonight".to_owned(),
+                    operator: "owner".to_owned(),
+                }),
+                ..MemberView { workpiece: WorkpieceId("issue-4".to_owned()), ..MemberView::default() }
+            },
+        ],
+    );
+
+    let events = notify_events(&view);
+    let milestones: Vec<_> =
+        events.iter().filter(|event| event.volume == Volume::Milestone).map(|event| event.key.as_str()).collect();
+    assert_eq!(milestones, ["dispatch:abababababab", "resolved:abababababab:issue-1", "resolved:abababababab:issue-2"]);
+
+    let loud: Vec<_> =
+        events.iter().filter(|event| event.volume == Volume::Loud).map(|event| event.key.as_str()).collect();
+    assert_eq!(loud, ["status:abababababab:Sealed"], "nothing here is a stop");
+
+    let progress = &events.iter().find(|event| event.key.ends_with(":issue-2")).expect("issue-2 resolved").message;
+    assert!(progress.contains("(2 of 3 member(s) resolved)"), "the withdrawn member is out of both counts: {progress}");
+}
+
+#[test]
+fn a_suppressed_milestone_is_recorded_so_enabling_the_knob_starts_forward() {
+    // The plausible bug: filtering milestones out of the *walk* rather than out
+    // of the POST. The ledger then holds no milestone keys, so the moment an
+    // operator turns the knob on the channel replays every standing milestone
+    // at once — the flood that gets the knob turned straight back off.
+    let mut store = store();
+    let sink = RecordingSink::default();
+    deliver(&mut store, &sink, &ViewDocument::default(), false, 0).expect("the first mount seeds");
+
+    let walking = bloom(BloomStatus::Sealed, vec![resolved_member("issue-1")]);
+    let quiet = deliver(&mut store, &sink, &walking, false, 1).expect("the ledger writes");
+    assert_eq!(quiet.posted, 1, "the seal is loud and still posts");
+    assert_eq!(quiet.suppressed, 2, "the dispatch and the resolution are recorded, not posted");
+    assert_eq!(sink.posted().len(), 1);
+
+    let enabled = deliver(&mut store, &sink, &walking, true, 2).expect("the ledger writes");
+    assert_eq!(enabled.posted, 0, "enabling the knob replays nothing");
+    assert_eq!(sink.posted().len(), 1);
+
+    let more = bloom(BloomStatus::Sealed, vec![resolved_member("issue-1"), resolved_member("issue-2")]);
+    let forward = deliver(&mut store, &sink, &more, true, 3).expect("the ledger writes");
+    assert_eq!(forward.posted, 1, "only the milestone that is new since the knob went on");
+    assert!(sink.posted()[1].starts_with("resolved  issue-2 in bloom abababababab"), "{:?}", sink.posted());
+}
+
+#[test]
+fn milestones_post_beside_the_loud_set_when_the_knob_is_on() {
+    // The other half of the same knob: an operator who asked for milestones
+    // gets the whole taxonomy in document order, not a channel that quietly
+    // still filters them.
+    let mut store = store();
+    let sink = RecordingSink::default();
+    deliver(&mut store, &sink, &ViewDocument::default(), true, 0).expect("the first mount seeds");
+
+    let walking = bloom(BloomStatus::Sealed, vec![resolved_member("issue-1"), wedged_member("issue-2")]);
+    let report = deliver(&mut store, &sink, &walking, true, 1).expect("the ledger writes");
+
+    assert_eq!(report.suppressed, 0);
+    assert_eq!(
+        sink.posted()
+            .iter()
+            .map(|message| message.split("  ").next().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>(),
+        ["sealed", "dispatch", "resolved", "wedge"],
+        "document order: the bloom, then its dispatch, then its members",
+    );
 }

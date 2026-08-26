@@ -32,6 +32,18 @@
 #[cfg(not(target_arch = "wasm32"))]
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+#[cfg(not(target_arch = "wasm32"))]
+use std::error::Error;
+#[cfg(not(target_arch = "wasm32"))]
+use std::fmt;
+#[cfg(not(target_arch = "wasm32"))]
+use std::fs;
+#[cfg(not(target_arch = "wasm32"))]
+use std::io;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
+use std::str;
 
 #[cfg(not(target_arch = "wasm32"))]
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
@@ -39,6 +51,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::KeyId;
+use crate::values::Tier;
 
 /// Which door an author signature authorizes (ADR-0182).
 ///
@@ -136,6 +149,22 @@ pub trait KeyProvider {
     /// Does `envelope` verify as a signature by its named signer over
     /// `message`?
     fn verify(&self, envelope: &SignatureEnvelope, message: &[u8]) -> bool;
+
+    /// The highest [`Tier`] `signer` is authorized to approve at, or `None`
+    /// when the signer is not in the key policy at all.
+    ///
+    /// The second half of the key policy, and the one [`Self::verify`] cannot
+    /// answer (#5324). A signature check proves *who* asserted the words; it
+    /// says nothing about whether that signer may stand in for the reader the
+    /// tier policy asked for. Without this, one allowlist entry authorizes
+    /// every tier, so an operator key signs a `human`-tier surface and the gate
+    /// admits it exactly as it would an `auto` one — human tier enforced by the
+    /// human declining to sign rather than by the machine.
+    ///
+    /// Required rather than defaulted: a provider that cannot state a ceiling
+    /// has no business answering the approve gate, and a default would let a
+    /// new provider inherit "authorized at every tier" by writing nothing.
+    fn tier_ceiling(&self, signer: &KeyId) -> Option<Tier>;
 }
 
 /// The v1 stub: every well-formed envelope verifies. With one operator there
@@ -148,6 +177,14 @@ pub struct FakeKeyProvider;
 impl KeyProvider for FakeKeyProvider {
     fn verify(&self, _envelope: &SignatureEnvelope, _message: &[u8]) -> bool {
         true
+    }
+
+    /// Every signer is authorized to the top of the ladder, matching the stub's
+    /// "every well-formed envelope verifies" contract. A stub that admitted the
+    /// signature and then refused the tier would fail every above-auto path in
+    /// the no-key configuration this exists to serve.
+    fn tier_ceiling(&self, _signer: &KeyId) -> Option<Tier> {
+        Some(Tier::Human)
     }
 }
 
@@ -167,16 +204,36 @@ impl KeyProvider for FakeKeyProvider {
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug)]
 pub struct Ed25519KeyProvider {
-    allowlist: BTreeMap<KeyId, VerifyingKey>,
+    allowlist: BTreeMap<KeyId, AuthorizedSigner>,
+}
+
+/// One allowlist entry: the public key a signer signs with, and the highest
+/// [`Tier`] that signer may approve at (#5324).
+///
+/// The two travel together because verifying a signature and admitting an
+/// approval are the same decision seen from two sides — a key with no stated
+/// ceiling is a key whose authority nobody wrote down, and the gate that reads
+/// one without the other admits every tier to every allowlisted signer.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug)]
+pub struct AuthorizedSigner {
+    /// The 32-byte ed25519 verifying key this signer signs with.
+    pub key: VerifyingKey,
+    /// The highest tier this signer may approve at. A statement over a surface
+    /// that resolves above this is refused with both tiers named, however good
+    /// the signature is.
+    pub ceiling: Tier,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Ed25519KeyProvider {
-    /// Build a provider over the `KeyId → verifying-key` allowlist — the set of
-    /// signers authorized to sign in a person's stead (ADR-0151 key policy). An
-    /// empty allowlist verifies nothing.
+    /// Build a provider over the allowlist mapping each [`KeyId`] to its
+    /// [`AuthorizedSigner`] — the
+    /// set of signers authorized to sign in a person's stead, each with the tier
+    /// it may sign up to (ADR-0151 key policy, #5324). An empty allowlist
+    /// verifies nothing and authorizes no tier.
     #[must_use]
-    pub fn new(allowlist: BTreeMap<KeyId, VerifyingKey>) -> Self {
+    pub fn new(allowlist: BTreeMap<KeyId, AuthorizedSigner>) -> Self {
         Self { allowlist }
     }
 }
@@ -184,13 +241,17 @@ impl Ed25519KeyProvider {
 #[cfg(not(target_arch = "wasm32"))]
 impl KeyProvider for Ed25519KeyProvider {
     fn verify(&self, envelope: &SignatureEnvelope, message: &[u8]) -> bool {
-        let Some(key) = self.allowlist.get(&envelope.signer) else {
+        let Some(signer) = self.allowlist.get(&envelope.signer) else {
             return false;
         };
         let Ok(bytes) = <[u8; 64]>::try_from(envelope.signature.as_slice()) else {
             return false;
         };
-        key.verify_strict(message, &Signature::from_bytes(&bytes)).is_ok()
+        signer.key.verify_strict(message, &Signature::from_bytes(&bytes)).is_ok()
+    }
+
+    fn tier_ceiling(&self, signer: &KeyId) -> Option<Tier> {
+        self.allowlist.get(signer).map(|signer| signer.ceiling)
     }
 }
 
@@ -224,17 +285,162 @@ pub fn sign_authorization(
     SignatureEnvelope { signer, signature }
 }
 
+/// The operator's signing seed, loaded from a file on the operator's host.
+///
+/// The coordinator holds no private keys, so every approval at every tier
+/// needs a signature minted here. Custody is the operator's, and the file mode
+/// check is the one thing this can do about it.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct OperatorKey {
+    /// The allowlist identity this seed signs as.
+    pub signer: KeyId,
+    seed: [u8; 32],
+}
+
+/// Hand-written rather than derived: the seed is a private signing key, and a
+/// derived `Debug` would put it in every panic message and test failure that
+/// prints one.
+#[cfg(not(target_arch = "wasm32"))]
+impl fmt::Debug for OperatorKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OperatorKey").field("signer", &self.signer).field("seed", &"<redacted>").finish()
+    }
+}
+
+/// Why [`OperatorKey::load`] refused a seed file.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub enum OperatorKeyError {
+    /// The seed file could not be read.
+    Read {
+        /// Path that failed to read.
+        path: PathBuf,
+        /// The underlying IO error.
+        source: io::Error,
+    },
+    /// The seed file could not be stat'd for its mode.
+    Stat {
+        /// Path that failed to stat.
+        path: PathBuf,
+        /// The underlying IO error.
+        source: io::Error,
+    },
+    /// Group or other can read the seed file.
+    LooseMode {
+        /// Path whose mode was too open.
+        path: PathBuf,
+        /// `mode & 0o777` as reported by the filesystem.
+        mode: u32,
+    },
+    /// The file was neither 32 raw bytes nor 64 hex characters.
+    InvalidSeed {
+        /// Path whose contents were not a seed.
+        path: PathBuf,
+    },
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl fmt::Display for OperatorKeyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Read { path, .. } => write!(f, "read signing seed {}", path.display()),
+            Self::Stat { path, .. } => write!(f, "stat signing seed {}", path.display()),
+            Self::LooseMode { path, mode } => {
+                write!(f, "signing seed {} is mode {:o}; make it 0600 before signing with it", path.display(), mode)
+            }
+            Self::InvalidSeed { path } => {
+                write!(f, "signing seed {} is neither 32 raw bytes nor 64 hex", path.display())
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Error for OperatorKeyError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Read { source, .. } | Self::Stat { source, .. } => Some(source),
+            Self::LooseMode { .. } | Self::InvalidSeed { .. } => None,
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl OperatorKey {
+    /// Load a 32-raw-byte or 64-hex seed from `path`.
+    ///
+    /// Refuses a file any group or other can read: a signing seed readable by
+    /// another account on the host is a key that is no longer the operator's,
+    /// and a tool that shrugs at that teaches the habit.
+    ///
+    /// # Errors
+    ///
+    /// [`OperatorKeyError`] when the file cannot be read, is group- or
+    /// other-readable, or is neither 32 raw bytes nor 64 hex characters.
+    pub fn load(signer: KeyId, path: &Path) -> Result<Self, OperatorKeyError> {
+        let bytes = fs::read(path).map_err(|source| OperatorKeyError::Read { path: path.to_owned(), source })?;
+        refuse_loose_mode(path)?;
+        let seed = decode_seed(&bytes).ok_or_else(|| OperatorKeyError::InvalidSeed { path: path.to_owned() })?;
+        Ok(Self { signer, seed })
+    }
+
+    /// The 32-byte ed25519 seed this key signs with.
+    #[must_use]
+    pub const fn seed(&self) -> &[u8; 32] {
+        &self.seed
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn decode_seed(bytes: &[u8]) -> Option<[u8; 32]> {
+    if let Ok(raw) = <[u8; 32]>::try_from(bytes) {
+        return Some(raw);
+    }
+    let text = str::from_utf8(bytes).ok()?.trim();
+    if text.len() != 64 {
+        return None;
+    }
+    let mut seed = [0_u8; 32];
+    for (index, slot) in seed.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(seed)
+}
+
+#[cfg(all(not(target_arch = "wasm32"), unix))]
+fn refuse_loose_mode(path: &Path) -> Result<(), OperatorKeyError> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let metadata = fs::metadata(path).map_err(|source| OperatorKeyError::Stat { path: path.to_owned(), source })?;
+    let mode = metadata.permissions().mode();
+    if mode & 0o077 != 0 {
+        return Err(OperatorKeyError::LooseMode { path: path.to_owned(), mode: mode & 0o777 });
+    }
+    Ok(())
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(unix)))]
+fn refuse_loose_mode(_path: &Path) -> Result<(), OperatorKeyError> {
+    Ok(())
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use alloc::collections::BTreeMap;
+    use std::env;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process;
 
     use ed25519_dalek::{Signer, SigningKey};
 
     use super::{
-        AuthorityDoor, Ed25519KeyProvider, KeyProvider, SignatureEnvelope, authorization_message, sign_authorization,
+        AuthorityDoor, AuthorizedSigner, Ed25519KeyProvider, KeyProvider, OperatorKey, SignatureEnvelope,
+        authorization_message, sign_authorization,
     };
     use crate::digest::Digest;
     use crate::ids::KeyId;
+    use crate::values::Tier;
 
     /// A distinct binding digest per seed — two requests to sign for.
     fn binding(seed: u8) -> Digest {
@@ -247,9 +453,19 @@ mod tests {
         SigningKey::from_bytes(&[seed; 32])
     }
 
-    /// A provider trusting exactly `signer` at `key`'s public half.
+    /// A provider trusting exactly `signer` at `key`'s public half, authorized
+    /// to the top of the tier ladder.
     fn provider(signer: &str, key: &SigningKey) -> Ed25519KeyProvider {
-        Ed25519KeyProvider::new(BTreeMap::from([(KeyId(signer.into()), key.verifying_key())]))
+        provider_at(signer, key, Tier::Human)
+    }
+
+    /// A provider trusting exactly `signer` at `key`'s public half, authorized
+    /// no higher than `ceiling`.
+    fn provider_at(signer: &str, key: &SigningKey, ceiling: Tier) -> Ed25519KeyProvider {
+        Ed25519KeyProvider::new(BTreeMap::from([(
+            KeyId(signer.into()),
+            AuthorizedSigner { key: key.verifying_key(), ceiling },
+        )]))
     }
 
     /// An author-signature envelope over `message` by `signer` using `key`.
@@ -351,7 +567,7 @@ mod tests {
         let words = b"the scope revision";
         let envelope = sign_authorization(KeyId("operator".into()), &seed, AuthorityDoor::Approve, binding(1), words);
 
-        let keys = Ed25519KeyProvider::new(BTreeMap::from([(KeyId("operator".into()), key.verifying_key())]));
+        let keys = provider("operator", &key);
         assert!(keys.verify(&envelope, authorization_message(AuthorityDoor::Approve, binding(1), words).as_bytes()));
         assert!(
             !keys.verify(&envelope, authorization_message(AuthorityDoor::Answer, binding(1), words).as_bytes()),
@@ -371,5 +587,58 @@ mod tests {
         let seed = [9_u8; 32];
         let mint = || sign_authorization(KeyId("operator".into()), &seed, AuthorityDoor::Approve, binding(3), b"w");
         assert_eq!(mint(), mint());
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!("aether-sign-{tag}-{}", process::id()));
+        fs::create_dir_all(&dir).unwrap_or_else(|error| panic!("create scratch dir: {error}"));
+        dir
+    }
+
+    // Tripwire: a signing seed another account on the host can read is a key that
+    // is no longer the operator's. A tool that signs with it anyway teaches the
+    // habit, and the habit is the whole exposure.
+    #[cfg(unix)]
+    #[test]
+    fn a_group_or_world_readable_seed_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = scratch("loose-seed");
+        let path = dir.join("seed");
+        fs::write(&path, [3_u8; 32]).unwrap_or_else(|error| panic!("write seed: {error}"));
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
+            .unwrap_or_else(|error| panic!("set mode: {error}"));
+
+        let error = OperatorKey::load(KeyId("operator".into()), &path).expect_err("a loose seed is refused");
+        assert!(error.to_string().contains("0600"), "the refusal names the fix: {error}");
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .unwrap_or_else(|error| panic!("set mode: {error}"));
+        OperatorKey::load(KeyId("operator".into()), &path).expect("a 0600 seed loads");
+    }
+
+    // Tripwire: the two seed spellings have to reach the same key, or an operator
+    // who stored theirs as hex signs with 32 bytes of ASCII and every approval
+    // they mint is refused by a verifier that cannot say why.
+    #[test]
+    fn a_hex_seed_and_the_raw_bytes_it_spells_decode_to_the_same_key() {
+        let dir = scratch("seed-forms");
+        let raw_path = dir.join("raw");
+        let hex_path = dir.join("hex");
+        let raw = [0xAB_u8; 32];
+        fs::write(&raw_path, raw).unwrap_or_else(|error| panic!("write raw seed: {error}"));
+        fs::write(&hex_path, "ab".repeat(32)).unwrap_or_else(|error| panic!("write hex seed: {error}"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            for path in [&raw_path, &hex_path] {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                    .unwrap_or_else(|error| panic!("set mode: {error}"));
+            }
+        }
+
+        let from_raw = OperatorKey::load(KeyId("operator".into()), &raw_path).expect("raw loads");
+        let from_hex = OperatorKey::load(KeyId("operator".into()), &hex_path).expect("hex loads");
+        assert_eq!(from_raw.seed(), from_hex.seed());
     }
 }

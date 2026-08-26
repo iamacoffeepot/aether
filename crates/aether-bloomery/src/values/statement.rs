@@ -40,6 +40,22 @@ impl Statement {
         matches!(self.provenance, Provenance::AuthorSignature(_))
     }
 
+    /// The key identity that asserted these words, when the provenance is an
+    /// author signature.
+    ///
+    /// The claimed signer, not a verified one: reading it proves nothing on its
+    /// own. It is what a caller needs *after*
+    /// [`verify_authority`](Self::verify_authority) has held, to ask the key
+    /// policy a second question the signature cannot answer — how high this
+    /// signer may approve ([`KeyProvider::tier_ceiling`], #5324).
+    #[must_use]
+    pub const fn author_signer(&self) -> Option<&KeyId> {
+        match &self.provenance {
+            Provenance::AuthorSignature(envelope) => Some(&envelope.signer),
+            Provenance::ObservationAttestation(_) | Provenance::StageReceipt(_) => None,
+        }
+    }
+
     /// Verify the statement's provenance as authority for one exact request.
     ///
     /// An author signature verifies its envelope over
@@ -202,14 +218,18 @@ mod tests {
     use super::{signed_cancel, signed_reopen};
     use crate::digest::Digest;
     use crate::ids::KeyId;
-    use crate::sign::{AuthorityDoor, Ed25519KeyProvider};
+    use crate::sign::{AuthorityDoor, AuthorizedSigner, Ed25519KeyProvider};
+    use crate::values::Tier;
 
     #[test]
     fn a_signed_cancel_verifies_only_at_the_cancel_door_for_its_own_intent() {
         let seed = [7_u8; 32];
         let key = SigningKey::from_bytes(&seed);
         let signer = KeyId(String::from("operator"));
-        let keys = Ed25519KeyProvider::new(BTreeMap::from([(signer.clone(), key.verifying_key())]));
+        let keys = Ed25519KeyProvider::new(BTreeMap::from([(
+            signer.clone(),
+            AuthorizedSigner { key: key.verifying_key(), ceiling: Tier::Human },
+        )]));
         let intent = Digest::from_bytes([3; 32]);
         let other = Digest::from_bytes([4; 32]);
         let statement = signed_cancel(signer, &seed, intent);
@@ -236,7 +256,10 @@ mod tests {
         let seed = [7_u8; 32];
         let key = SigningKey::from_bytes(&seed);
         let signer = KeyId(String::from("operator"));
-        let keys = Ed25519KeyProvider::new(BTreeMap::from([(signer.clone(), key.verifying_key())]));
+        let keys = Ed25519KeyProvider::new(BTreeMap::from([(
+            signer.clone(),
+            AuthorizedSigner { key: key.verifying_key(), ceiling: Tier::Human },
+        )]));
         let intent = Digest::from_bytes([3; 32]);
 
         let reopen = signed_reopen(signer.clone(), &seed, intent);

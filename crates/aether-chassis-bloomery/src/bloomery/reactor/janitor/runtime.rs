@@ -15,7 +15,7 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
 use serde::{Deserialize, Serialize};
 
-use super::sweep::{JanitorPolicy, SweepRequest, WorkingRefPruner, sweep};
+use super::sweep::{JanitorPolicy, SweepRequest, TargetReadings, WorkingRefPruner, sweep};
 use super::{JanitorReactorCapability, JanitorReactorSetup};
 
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
@@ -39,6 +39,9 @@ pub struct JanitorReactorState {
     worktree_base: PathBuf,
     target_base: PathBuf,
     policy: JanitorPolicy,
+    /// Last size and recency reading per slot target directory. Reused across
+    /// ticks until the measurement interval elapses or the slot changes hands.
+    target_readings: TargetReadings,
     /// Blooms whose working refs this process has already pruned successfully.
     /// Process-local: a restart walks the terminal set again, one bloom per
     /// tick, and a prune that errors is left out so the next tick retries.
@@ -83,6 +86,7 @@ impl NativeActor for JanitorReactorCapability {
             target: "aether_chassis_bloomery::janitor",
             poll_interval_secs = config.poll_interval_secs,
             lane_target_budget_bytes = config.lane_target_budget_bytes,
+            lane_target_measure_interval_secs = config.lane_target_measure_interval_secs,
             evidence_retention_days = config.evidence_retention_days,
             "janitor reactor mounted; sweeping terminal blooms on the coordinator cadence",
         );
@@ -99,8 +103,10 @@ impl NativeActor for JanitorReactorCapability {
             target_base,
             policy: JanitorPolicy {
                 lane_target_budget_bytes: config.lane_target_budget_bytes,
+                lane_target_measure_interval_secs: config.lane_target_measure_interval_secs,
                 evidence_retention_days: config.evidence_retention_days,
             },
+            target_readings: TargetReadings::default(),
             pruned: HashSet::new(),
             mailer,
             self_mailbox,
@@ -138,6 +144,7 @@ impl NativeActor for JanitorReactorCapability {
             worktree_base: &state.worktree_base,
             target_base: &state.target_base,
             lanes: &lanes,
+            target_readings: &mut state.target_readings,
             policy: &state.policy,
             now: SystemTime::now(),
             pruned: &mut state.pruned,

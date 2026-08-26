@@ -93,6 +93,11 @@ impl Backlog {
         self.intents.get(index).copied().filter(|digest| *digest != DigestHex::default())
     }
 
+    #[must_use]
+    pub fn enter_pushes(&self, store: &Store) -> bool {
+        store.commission_capability() != Some(CommissionCapability::Absent) && self.cursor.selected().is_some()
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, store: &Store) -> Outcome {
         if store.commission_capability() == Some(CommissionCapability::Absent) {
             return match key.code {
@@ -169,7 +174,7 @@ impl Backlog {
             .style(palette::body())
             .header(Row::new(["WORKPIECE", "STATE", "INTENT"]).style(palette::body().add_modifier(Modifier::BOLD)))
             .row_highlight_style(palette::cursor())
-            .highlight_symbol("> ");
+            .highlight_symbol(super::caret(self.enter_pushes(store)));
         let mut state = TableState::default()
             .with_selected(self.cursor.selected_index(&rows, |row| row.id.clone()))
             .with_offset(self.scroll);

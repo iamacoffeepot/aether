@@ -43,8 +43,8 @@ mod verify;
 
 pub use approve::{
     AdmissionRequest, AdrTouch, ApprovalPolicy, Completeness, Decision, Gate, Incompleteness, PolicyError,
-    StatementRejected, Tier, approval_from_statement, load_policy, parse_policy, precheck_statement, projection_digest,
-    verified_statement_approval,
+    StatementRejected, Tier, approval_from_statement, check_signer_tier, load_policy, parse_policy, precheck_statement,
+    projection_digest, verified_statement_approval,
 };
 pub use chassis::{BloomeryChassis, BloomeryEnv, DEFAULT_RPC_PORT, RpcPortConfig};
 pub use cli::BloomeryCli;
@@ -77,8 +77,8 @@ pub use intake::{
 pub use mirror::ProjectionShell;
 #[cfg(feature = "github")]
 pub use notify::{
-    Delivered, LoudEvent, NotifyConfig, NotifyOverlay, NotifyReactorCapability, NotifyReactorSetup, NotifyReactorState,
-    NotifyTick, deliver, loud_events, webhook_sink,
+    Delivered, NotifyConfig, NotifyEvent, NotifyOverlay, NotifyReactorCapability, NotifyReactorSetup,
+    NotifyReactorState, NotifyTick, Volume, deliver, notify_events, webhook_sink,
 };
 pub use outbox::TopicOutbox;
 #[cfg(feature = "github")]
@@ -90,7 +90,7 @@ pub use reactor::{
     IntegrateReactorCapability, IntegrateReactorSetup, IntegrateReactorState, IntegrateTick, JanitorPolicy,
     JanitorReactorCapability, JanitorReactorSetup, JanitorReactorState, JanitorTick, LandReactorCapability,
     LandReactorSetup, LandReactorState, LandTick, MirrorReactorCapability, MirrorReactorSetup, MirrorReactorState,
-    SweepReport, SweepRequest, WorkingRefPruner, sweep,
+    SweepReport, SweepRequest, TargetReadings, WorkingRefPruner, sweep,
 };
 #[cfg(feature = "github")]
 pub use repair::{CandidateSource, PrepareError, prepare_candidate};

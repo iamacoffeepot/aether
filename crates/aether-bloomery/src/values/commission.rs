@@ -13,8 +13,9 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt;
 
-use aether_data::wire::{from_bytes, to_vec};
+use aether_data::wire::{from_bytes, take_from_bytes, to_vec};
 use serde::{Deserialize, Serialize};
 
 use crate::digest::{ContentAddressed, Digest, digest_of};
@@ -28,8 +29,19 @@ pub const SCOPE_REVISION_SCHEMA: u32 = 1;
 pub enum CommissionValueError {
     /// The bytes are not a well-formed aether-wire encoding of this type.
     Malformed,
-    /// The bytes decoded, but the schema field is not one this binary writes.
+    /// The leading schema field is not one this binary writes.
     UnsupportedSchema(u32),
+}
+
+impl fmt::Display for CommissionValueError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Malformed => f.write_str("canonical commission bytes are malformed"),
+            Self::UnsupportedSchema(schema) => {
+                write!(f, "scope revision schema {schema} is not {SCOPE_REVISION_SCHEMA}")
+            }
+        }
+    }
 }
 
 /// Size and model-routing lines sealed into a scope revision.
@@ -77,8 +89,11 @@ pub struct ScopeRevision {
     /// bytes an approval covers.
     pub description: String,
     /// ADR digests this revision implements. Empty when the commission does
-    /// not bind itself to a stored decision. Trailing so the version-1 layout
-    /// can name ADRs without a schema bump (#5124).
+    /// not bind itself to a stored decision.
+    ///
+    /// Appending a field is a schema bump. aether-wire is positional and
+    /// untagged, so a shorter stored row is `UnexpectedEof`, not a compatible
+    /// tail (#5124, #5418).
     pub implements: Vec<Digest>,
     /// The workspace crates the scope declared, in declaration order — the
     /// `## Declared crates` block. Empty when the scope declared its surface as
@@ -97,7 +112,7 @@ pub struct ScopeRevision {
     /// non-empty list is the fact the tier resolver needs: a crate-derived
     /// surface takes its tier from the protected files it names, never from the
     /// crate globs, so the resolver has to be able to tell one kind of surface
-    /// from the other. Trailing for the reason
+    /// from the other. Appending a field is a schema bump for the reason
     /// [`implements`](Self::implements) is.
     pub declared_crates: Vec<String>,
     /// The workspace crates this scope load-bearingly *reads*, in declaration
@@ -116,23 +131,28 @@ pub struct ScopeRevision {
     /// [`declared_crates`](Self::declared_crates) is: nobody can name the files
     /// a lane will touch before the work is done, so a file-granular read list
     /// is a forecast, and a forecast that misses reads as an assurance nobody
-    /// gave. Trailing for the reason [`implements`](Self::implements) is.
+    /// gave. Appending a field is a schema bump for the reason
+    /// [`implements`](Self::implements) is.
     pub declared_reads: Vec<String>,
 }
 
 impl ScopeRevision {
     /// Decode canonical bytes as a version-1 revision.
     ///
+    /// The leading `schema` field is read first so a version this binary does
+    /// not write is [`CommissionValueError::UnsupportedSchema`] even when the
+    /// rest of the bytes are not this type's shape.
+    ///
     /// # Errors
     /// [`CommissionValueError::Malformed`] when the bytes are not this type;
-    /// [`CommissionValueError::UnsupportedSchema`] when they decode as a
-    /// later (or zero) schema this encoder does not write.
+    /// [`CommissionValueError::UnsupportedSchema`] when the leading schema
+    /// field is a later (or zero) schema this encoder does not write.
     pub fn from_canonical(bytes: &[u8]) -> Result<Self, CommissionValueError> {
-        let value: Self = from_bytes(bytes).map_err(|_| CommissionValueError::Malformed)?;
-        if value.schema != SCOPE_REVISION_SCHEMA {
-            return Err(CommissionValueError::UnsupportedSchema(value.schema));
+        let (schema, _) = take_from_bytes::<u32>(bytes).map_err(|_| CommissionValueError::Malformed)?;
+        if schema != SCOPE_REVISION_SCHEMA {
+            return Err(CommissionValueError::UnsupportedSchema(schema));
         }
-        Ok(value)
+        from_bytes(bytes).map_err(|_| CommissionValueError::Malformed)
     }
 
     /// Canonical aether-wire bytes of this revision.
@@ -290,7 +310,8 @@ mod tests {
     use super::{SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting};
     use crate::digest::digest_of;
     use crate::ids::{KeyId, WorkpieceId};
-    use crate::sign::{AuthorityDoor, Ed25519KeyProvider, SignatureEnvelope, authorization_message};
+    use crate::sign::{AuthorityDoor, AuthorizedSigner, Ed25519KeyProvider, SignatureEnvelope, authorization_message};
+    use crate::values::Tier;
     use crate::values::{Provenance, Statement};
 
     /// The fixture a signature may one day cover. Field values are short and
@@ -315,12 +336,9 @@ mod tests {
         }
     }
 
-    // Tripwire: version-1 wire bytes. A signature covers these exact bytes; the
-    // encoder may be superseded, never silently changed. Recompute-and-repin
-    // only when introducing a new schema, or when the revision grows a trailing
-    // field — `declared_crates` and `declared_reads` append eight bytes of empty
-    // list here, and every constant below is over those bytes, so a signature
-    // made before them covers a different subject.
+    // Tripwire: the version-1 layout is frozen; a field append is a schema bump.
+    // A signature covers these exact bytes; the encoder may be superseded, never
+    // silently changed. Recompute-and-repin only when introducing a new schema.
     const GOLDEN_SCOPE_REVISION_V1: &[u8] = &[
         1, 0, 0, 0, 10, 0, 0, 0, 105, 115, 115, 117, 101, 45, 53, 48, 52, 53, 0, 1, 0, 0, 0, 112, 1, 0, 0, 0, 100, 1,
         0, 0, 0, 110, 1, 0, 0, 0, 25, 0, 0, 0, 99, 114, 97, 116, 101, 115, 47, 97, 101, 116, 104, 101, 114, 45, 98,
@@ -400,7 +418,10 @@ mod tests {
             "Approve signature drifted; signature={signature:?}"
         );
 
-        let keys = Ed25519KeyProvider::new(BTreeMap::from([(KeyId(String::from("owner")), key.verifying_key())]));
+        let keys = Ed25519KeyProvider::new(BTreeMap::from([(
+            KeyId(String::from("owner")),
+            AuthorizedSigner { key: key.verifying_key(), ceiling: Tier::Human },
+        )]));
         let statement = Statement {
             words: digest.as_bytes().to_vec(),
             provenance: Provenance::AuthorSignature(SignatureEnvelope {
@@ -423,6 +444,29 @@ mod tests {
             ScopeRevision::from_canonical(&bytes),
             Err(super::CommissionValueError::UnsupportedSchema(2)),
             "a later schema must not be silently read as version 1"
+        );
+    }
+
+    #[test]
+    fn a_later_schema_is_named_before_the_shape_is_decoded() {
+        // The version guard exists so a future bump is `UnsupportedSchema`
+        // even when the rest of the bytes cannot be read as this type. Reading
+        // the whole value first would report those rows as malformed.
+        assert_eq!(
+            ScopeRevision::from_canonical(&[2, 0, 0, 0]),
+            Err(super::CommissionValueError::UnsupportedSchema(2)),
+            "a schema this binary does not write must be named before the body is decoded"
+        );
+    }
+
+    #[test]
+    fn a_version_one_row_short_by_trailing_fields_is_malformed_not_unsupported() {
+        let mut bytes = fixture().to_canonical();
+        bytes.truncate(bytes.len() - 8);
+        assert_eq!(
+            ScopeRevision::from_canonical(&bytes),
+            Err(super::CommissionValueError::Malformed),
+            "an honest schema-1 row that predates a field append is short, not a later schema"
         );
     }
 

@@ -19,20 +19,23 @@
 mod common;
 
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_bloomery::testing::{digest, event};
 use aether_bloomery::{
     AgentProfile, ApprovalPolicy, ApprovalRule, AuthorityDoor, BloomDraft, BloomId, CapabilityLedger, ClaimRefKind,
-    ConfigKind, ConfigRegistry, Digest, DispatchPayload, Evidence, EvidenceKind, Harness, KeyId, Membership,
-    MetricsSeat, NamedPath, ORPHAN_CLAIM_RELEASE_WORDS, Observation, OrphanClaimRelease, PathOrigin, Provenance,
-    ReasoningEffort, SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA, ScopeRevision, ScopeRouting, ScopeVerifyInput,
-    SignatureEnvelope, StageCatalog, StageId, Statement, Tier, ToolPolicy, Topic, WorkpieceId, authorization_message,
-    verify_scope,
+    ConfigKind, ConfigRegistry, ContentAddressed, Digest, DispatchPayload, Evidence, EvidenceKind, Harness, KeyId,
+    Membership, MetricsSeat, NamedPath, ORPHAN_CLAIM_RELEASE_WORDS, Observation, OrphanClaimRelease, PathOrigin,
+    Provenance, ReasoningEffort, SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA, ScopeRevision, ScopeRouting,
+    ScopeVerifyInput, SignatureEnvelope, StageCatalog, StageId, Statement, Tier, ToolPolicy, Topic, WorkpieceId,
+    authorization_message, digest_of, verify_scope,
 };
 use aether_chassis_bloomery::bloomery::TopicOutbox;
+use aether_chassis_bloomery::commission;
 use aether_chassis_bloomery::store::{CommissionBackend, SqliteStore, StoreBackend};
 use aether_data::wire::from_bytes;
 use common::{Coordinator, free_port};
@@ -160,6 +163,12 @@ fn send_auth(port: u16, method: &str, path: &str, body: &Value) -> (u16, Value) 
     (status, serde_json::from_slice(&response).unwrap_or(Value::Null))
 }
 
+/// Authenticated JSON GET used by the commission show route.
+fn get_auth(port: u16, path: &str) -> (u16, Value) {
+    let (status, response) = try_http_auth(port, "GET", path, None, Some(CONTROL_TOKEN)).unwrap();
+    (status, serde_json::from_slice(&response).unwrap_or(Value::Null))
+}
+
 /// Write a self-contained tier policy to a temp dir and return it plus the
 /// policy path. `docs/guide/**` resolves `auto`; `crates/aether-data/**` resolves
 /// `human` (above-auto); the default is `judge`. Kept independent of the evolving
@@ -184,9 +193,10 @@ fn owner_signing_key() -> SigningKey {
 }
 
 /// The `AETHER_SIGNING_ALLOWLIST` value trusting `owner` at [`owner_signing_key`]'s
-/// public half (`key-id:hex-public-key`).
+/// public half, at the `human` ceiling — this key stands in for the owner, so
+/// it signs at every tier (`key-id:hex-public-key:tier`, #5324).
 fn owner_allowlist() -> String {
-    format!("owner:{}", aether_bloomery::encode_hex(&owner_signing_key().verifying_key().to_bytes()))
+    format!("owner:{}:human", aether_bloomery::encode_hex(&owner_signing_key().verifying_key().to_bytes()))
 }
 
 /// Fork the `bloomery` bin with the HTTP ingress and control core autoloaded,
@@ -1328,6 +1338,99 @@ fn posting_a_scope_run_enqueues_the_host_minted_topic() {
     assert_eq!(entries[0].sequence, opened["sequence"].as_u64().expect("sequence is a u64"));
 }
 
+#[test]
+fn a_commission_whose_tip_predates_a_field_append_can_be_shown_and_healed() {
+    // Before the fix, GET /commissions/{id} over a short version-1 row is the
+    // 500 an operator cannot act on. After it, show returns the tip digest and
+    // a successor that names that digest as predecessor brings the id back.
+    let http_port = free_port();
+    let rpc_port = free_port();
+    let (_policy_dir, policy_path) = test_policy();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store_path = store_dir.path().join("bloomery.db");
+    let store_path = store_path.to_str().unwrap();
+
+    let intent = Statement {
+        words: b"intent wp-old".to_vec(),
+        provenance: Provenance::ObservationAttestation(Observation { source: "rest-api".to_owned() }),
+        parents: Vec::new(),
+    };
+    let mut old_bytes = ScopeRevision {
+        schema: SCOPE_REVISION_SCHEMA,
+        workpiece: WorkpieceId("wp-old".to_owned()),
+        predecessor: None,
+        problem: "problem".to_owned(),
+        design: "design".to_owned(),
+        plan: "plan".to_owned(),
+        declared_surface: vec!["docs/guide/**".to_owned()],
+        dogfood_brief: "dogfood".to_owned(),
+        routing: ScopeRouting { size: "M".to_owned(), model: "construct: test".to_owned() },
+        dependencies: Vec::new(),
+        description: "task for wp-old".to_owned(),
+        implements: Vec::new(),
+        declared_crates: Vec::new(),
+        declared_reads: Vec::new(),
+    }
+    .to_canonical();
+    old_bytes.truncate(old_bytes.len() - 8);
+    let old_digest = Digest::of_domain_tagged(ScopeRevision::DOMAIN, &old_bytes);
+    {
+        let mut store = SqliteStore::open(store_path).unwrap();
+        store.create(&WorkpieceId("wp-old".to_owned()), &intent).expect("create commission");
+    }
+    {
+        let conn = rusqlite::Connection::open(store_path).unwrap();
+        conn.execute(
+            "INSERT INTO scope_revisions (digest, commission, predecessor, ordinal, canonical)
+             VALUES (?1, ?2, NULL, 1, ?3)",
+            rusqlite::params![old_digest.as_bytes().as_slice(), "wp-old", old_bytes],
+        )
+        .expect("plant a pre-append revision");
+        conn.execute(
+            "UPDATE commissions SET current_revision = ?1, current_ordinal = 1 WHERE id = ?2",
+            rusqlite::params![old_digest.as_bytes().as_slice(), "wp-old"],
+        )
+        .expect("point the tip at the planted row");
+    }
+
+    let _coordinator = spawn_with_store(http_port, rpc_port, &policy_path, store_path);
+    wait_for_200(http_port, "/view");
+
+    let (status, shown) = get_auth(http_port, "/commissions/wp-old");
+    assert_eq!(status, 200, "an older tip must not 500: {shown:?}");
+    assert_eq!(digest_at(&shown["current_revision"]), old_digest, "show names the tip an operator can chain from");
+    assert!(
+        shown["current_unreadable"].as_str().is_some_and(|reason| reason.contains("malformed")),
+        "the body is named unreadable, not silently absent: {shown:?}"
+    );
+
+    let successor = ScopeRevision {
+        schema: SCOPE_REVISION_SCHEMA,
+        workpiece: WorkpieceId("wp-old".to_owned()),
+        predecessor: Some(old_digest),
+        problem: "healed".to_owned(),
+        design: "design".to_owned(),
+        plan: "plan".to_owned(),
+        declared_surface: vec!["docs/guide/**".to_owned()],
+        dogfood_brief: "dogfood".to_owned(),
+        routing: ScopeRouting { size: "M".to_owned(), model: "construct: test".to_owned() },
+        dependencies: Vec::new(),
+        description: "task for wp-old".to_owned(),
+        implements: Vec::new(),
+        declared_crates: Vec::new(),
+        declared_reads: Vec::new(),
+    };
+    let (status, written) =
+        send_auth(http_port, "POST", "/commissions/wp-old/revisions", &serde_json::json!({ "revision": successor }));
+    assert_eq!(status, 201, "writing forward heals the id: {written:?}");
+    let next = digest_at(&written["digest"]);
+
+    let (status, shown) = get_auth(http_port, "/commissions/wp-old");
+    assert_eq!(status, 200, "{shown:?}");
+    assert_eq!(digest_at(&shown["current_revision"]), next);
+    assert_eq!(shown["current"]["problem"], "healed");
+}
+
 /// Endpoint laws the REST surface documents: a limit above the clamp is applied
 /// and named, percent-decoding is over the whole byte string, and a grant
 /// carries audit fields whose reducer refusal is `422`.
@@ -1493,4 +1596,284 @@ fn get_json_and_notice(port: u16, path: &str) -> (u16, Value, Option<String>) {
     let (status, headers, body) = request(port, "GET", path, None, None).unwrap();
     let notice = headers.iter().find(|(name, _)| name == "x-aether-notice").map(|(_, value)| value.clone());
     (status, serde_json::from_slice(&body).unwrap_or(Value::Null), notice)
+}
+
+fn commission_cli(http_port: u16, rest: &[&str]) -> Result<String, anyhow::Error> {
+    let port = http_port.to_string();
+    let mut invocation = vec![
+        "bloomery-commission".to_owned(),
+        "--http-port".to_owned(),
+        port,
+        "--token".to_owned(),
+        CONTROL_TOKEN.to_owned(),
+    ];
+    invocation.extend(rest.iter().map(|word| (*word).to_owned()));
+    commission::run(invocation)
+}
+
+fn author_scope_markdown() -> &'static str {
+    "\
+## Problem statement\n\
+\n\
+Need a one-command author path.\n\
+\n\
+## Design notes\n\
+\n\
+Compose create, scope, and approve.\n\
+\n\
+## Implementation plan\n\
+\n\
+Ship bloomery-commission author.\n\
+\n\
+**Size:** m\n\
+**Implementation model:** grok-4.6\n\
+**Routing reason:** focused CLI\n\
+\n\
+## Declared surface\n\
+\n\
+```text\n\
+crates/aether-chassis-bloomery/**\n\
+```\n\
+\n\
+## Dogfood brief\n\
+\n\
+Author then show.\n"
+}
+
+fn write_owner_seed(path: &std::path::Path) {
+    std::fs::write(path, [42u8; 32]).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+fn spawn_os_ports(policy_path: &str) -> Coordinator {
+    let allowlist = owner_allowlist();
+    Coordinator::spawn(
+        0,
+        &[
+            ("AETHER_STORE_PATH", ":memory:"),
+            ("AETHER_SIGNING_ALLOWLIST", &allowlist),
+            ("AETHER_APPROVAL_POLICY_FILE", policy_path),
+            ("AETHER_HTTP_CONTROL_TOKEN", CONTROL_TOKEN),
+        ],
+    )
+}
+
+fn spawn_author_ready(policy_path: &str) -> (u16, Coordinator) {
+    let (coordinator, stream) =
+        common::client::spawn_and_connect("rest-author", Duration::from_mins(1), || (0, spawn_os_ports(policy_path)));
+    let rpc_port = stream.peer_addr().unwrap().port();
+    (wait_author_http(&coordinator, rpc_port), coordinator)
+}
+
+fn wait_author_http(coordinator: &Coordinator, rpc_port: u16) -> u16 {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut last = String::from("HTTP never listened");
+    loop {
+        if let Some(port) = coordinator.listening_ports().into_iter().find(|port| *port != rpc_port) {
+            match try_http(port, "GET", "/drafts", None) {
+                Ok((200, _)) => return port,
+                Ok((status, _)) => last = format!("/drafts returned {status}"),
+                Err(error) => last = error.to_string(),
+            }
+        }
+        assert!(Instant::now() < deadline, "coordinator HTTP never became ready for author: {last}");
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// `bloomery-commission author` creates, scopes, and approves against a live
+/// coordinator: the printed digest is the local `digest_of` of the revision,
+/// the commission is open, and an approval is stored over that tip.
+#[test]
+fn author_opens_a_commission_with_an_approval_over_the_local_digest() {
+    let (_policy_dir, policy_path) = test_policy();
+    let (http_port, _coordinator) = spawn_author_ready(&policy_path);
+
+    let dir = tempfile::tempdir().unwrap();
+    let intent = dir.path().join("intent.txt");
+    let scope = dir.path().join("scope.md");
+    let seed = dir.path().join("seed");
+    let ledger = dir.path().join("ledger");
+    std::fs::write(&intent, b"ship the author verb").unwrap();
+    std::fs::write(&scope, author_scope_markdown()).unwrap();
+    write_owner_seed(&seed);
+
+    let output = commission_cli(
+        http_port,
+        &[
+            "author",
+            "--id",
+            "wp-author",
+            "--intent-file",
+            intent.to_str().unwrap(),
+            "--scope-file",
+            scope.to_str().unwrap(),
+            "--seed-file",
+            seed.to_str().unwrap(),
+            "--signer",
+            "owner",
+            "--ledger",
+            ledger.to_str().unwrap(),
+            "--approval-policy",
+            &policy_path,
+        ],
+    )
+    .unwrap_or_else(|error| panic!("author: {error}"));
+
+    let markdown = std::fs::read_to_string(&scope).unwrap();
+    let expected = digest_of(&commission::parse_revision("wp-author", &markdown, None).unwrap());
+    let line = format!("wp-author={}", expected.to_hex());
+    assert_eq!(output, format!("{line}\n"), "author prints id=digest of the local revision");
+    assert_eq!(std::fs::read_to_string(&ledger).unwrap(), format!("{line}\n"), "ledger records the same line");
+
+    let (status, body) = try_http_auth(http_port, "GET", "/commissions/wp-author", None, Some(CONTROL_TOKEN)).unwrap();
+    assert_eq!(status, 200, "show the authored commission: {body:?}");
+    let shown: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(shown["status"], "open", "authored commission is open: {shown:?}");
+    assert_eq!(
+        shown["current_revision"].as_str().unwrap(),
+        expected.to_hex(),
+        "tip is the locally computed digest: {shown:?}"
+    );
+    let approvals = shown["approvals"].as_array().expect("approvals list");
+    assert_eq!(approvals.len(), 1, "one approval over the tip: {shown:?}");
+    let words = approvals[0]["words"].as_array().expect("approval words");
+    let expected_words: Vec<Value> = expected.as_bytes().iter().copied().map(Value::from).collect();
+    assert_eq!(words, &expected_words, "approval is stored over the tip digest");
+}
+
+/// `author` must refuse when the coordinator stores a different address than
+/// `digest_of` of the revision just written — otherwise it would sign an
+/// approval over unread bytes.
+#[test]
+fn author_refuses_when_the_stored_digest_differs() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let http_port = listener.local_addr().unwrap().port();
+    let approved = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&approved);
+    let stop = Arc::clone(&done);
+    let server = thread::spawn(move || serve_mismatched_revision(&listener, &flag, &stop));
+
+    let dir = tempfile::tempdir().unwrap();
+    let intent = dir.path().join("intent.txt");
+    let scope = dir.path().join("scope.md");
+    let seed = dir.path().join("seed");
+    let policy = dir.path().join("approval-policy.toml");
+    std::fs::write(&intent, b"ship the author verb").unwrap();
+    std::fs::write(&scope, author_scope_markdown()).unwrap();
+    std::fs::write(&policy, b"default = \"judge\"\n").unwrap();
+    write_owner_seed(&seed);
+
+    let wrong = Digest::from_bytes([0x11; 32]).to_hex();
+    match commission_cli(
+        http_port,
+        &[
+            "author",
+            "--id",
+            "wp-mismatch",
+            "--intent-file",
+            intent.to_str().unwrap(),
+            "--scope-file",
+            scope.to_str().unwrap(),
+            "--seed-file",
+            seed.to_str().unwrap(),
+            "--signer",
+            "owner",
+            "--approval-policy",
+            policy.to_str().unwrap(),
+        ],
+    ) {
+        Ok(output) => panic!("a mismatched stored digest must be refused, got {output}"),
+        Err(error) => {
+            let message = error.to_string();
+            assert!(message.contains(&wrong), "refusal names the stored digest: {message}");
+            assert!(message.contains("addressed"), "refusal names the local address: {message}");
+        }
+    }
+    done.store(true, Ordering::SeqCst);
+    let _ = server.join();
+    assert!(!approved.load(Ordering::SeqCst), "a mismatched digest must not be signed over");
+}
+
+fn serve_mismatched_revision(listener: &TcpListener, approved: &AtomicBool, done: &AtomicBool) {
+    let wrong = Digest::from_bytes([0x11; 32]).to_hex();
+    let intent = Digest::from_bytes([0x22; 32]).to_hex();
+    listener.set_nonblocking(true).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline && !done.load(Ordering::SeqCst) {
+        match listener.accept() {
+            Ok((stream, _)) => handle_stub_conn(stream, approved, &wrong, &intent),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::Interrupted =>
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("stub accept: {error}"),
+        }
+    }
+}
+
+fn handle_stub_conn(mut stream: TcpStream, approved: &AtomicBool, wrong: &str, intent: &str) {
+    stream.set_nonblocking(false).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let request = read_http_request(&mut stream);
+    let head = std::str::from_utf8(&request).unwrap_or("");
+    let line = head.lines().next().unwrap_or("");
+    let (status, body) = if line.starts_with("POST /commissions/wp-mismatch/approvals") {
+        approved.store(true, Ordering::SeqCst);
+        (201, format!(r#"{{"digest":"{wrong}"}}"#))
+    } else if line.starts_with("POST /commissions/wp-mismatch/revisions") {
+        (201, format!(r#"{{"digest":"{wrong}"}}"#))
+    } else if line.starts_with("POST /commissions") {
+        (201, format!(r#"{{"id":"wp-mismatch","intent":"{intent}"}}"#))
+    } else if line.starts_with("GET /commissions/wp-mismatch") {
+        (200, format!(r#"{{"id":"wp-mismatch","intent":"{intent}","status":"open"}}"#))
+    } else {
+        (404, r#"{"error":"unexpected"}"#.to_owned())
+    };
+    let response = format!(
+        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(response.as_bytes()).unwrap();
+}
+
+fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {
+    let mut request = Vec::new();
+    let mut buf = [0_u8; 4096];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => request.extend_from_slice(&buf[..n]),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut
+                    || error.kind() == std::io::ErrorKind::Interrupted =>
+            {
+                break;
+            }
+            Err(error) => panic!("stub read: {error}"),
+        }
+        let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            continue;
+        };
+        let head = std::str::from_utf8(&request[..header_end]).unwrap_or("");
+        let content_length = head.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length").then_some(())?;
+            value.trim().parse::<usize>().ok()
+        });
+        match content_length {
+            Some(length) if request.len() >= header_end + 4 + length => break,
+            None => break,
+            Some(_) => {}
+        }
+    }
+    request
 }

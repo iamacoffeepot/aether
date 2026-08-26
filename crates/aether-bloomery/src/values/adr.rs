@@ -257,7 +257,8 @@ mod tests {
     use super::{ADR_SCHEMA, Adr, AdrStatus, AdrTransition, AdrValueError};
     use crate::digest::digest_of;
     use crate::ids::KeyId;
-    use crate::sign::{AuthorityDoor, Ed25519KeyProvider, SignatureEnvelope, authorization_message};
+    use crate::sign::{AuthorityDoor, AuthorizedSigner, Ed25519KeyProvider, SignatureEnvelope, authorization_message};
+    use crate::values::Tier;
     use crate::values::{Provenance, Statement};
 
     fn fixture() -> Adr {
@@ -371,7 +372,10 @@ a
         let signature = key.sign(message.as_bytes()).to_bytes();
         assert_eq!(signature.as_slice(), GOLDEN_ACCEPT_SIGNATURE, "Accept signature drifted; signature={signature:?}");
 
-        let keys = Ed25519KeyProvider::new(BTreeMap::from([(KeyId(String::from("owner")), key.verifying_key())]));
+        let keys = Ed25519KeyProvider::new(BTreeMap::from([(
+            KeyId(String::from("owner")),
+            AuthorizedSigner { key: key.verifying_key(), ceiling: Tier::Human },
+        )]));
         let statement = Statement {
             words: digest.as_bytes().to_vec(),
             provenance: Provenance::AuthorSignature(SignatureEnvelope {

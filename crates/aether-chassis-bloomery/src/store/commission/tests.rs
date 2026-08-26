@@ -5,10 +5,10 @@ use std::collections::BTreeMap;
 use aether_bloomery::control::ScopeDispatchPayload;
 use aether_bloomery::testing::{claim, draft, event as decided_event, membership as member_of};
 use aether_bloomery::{
-    AuthorityDoor, BloomId, CommissionProjection, CommissionStatus, Decision, Decisions, Digest, Ed25519KeyProvider,
-    Fact, FakeKeyProvider, KeyId, NamedPath, Observation, Outcome, PathOrigin, Provenance, SCOPE_FILL_COMMAND,
-    SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA, ScopeRevision, ScopeRouting, ScopeVerifyInput, SignatureEnvelope,
-    StageId, Statement, Topic, WorkpieceId, authorization_message, digest_of,
+    AuthorityDoor, BloomId, CommissionProjection, CommissionStatus, CommissionValueError, ContentAddressed, Decision,
+    Decisions, Digest, Ed25519KeyProvider, Fact, FakeKeyProvider, KeyId, NamedPath, Observation, Outcome, PathOrigin,
+    Provenance, SCOPE_FILL_COMMAND, SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA, ScopeRevision, ScopeRouting,
+    ScopeVerifyInput, SignatureEnvelope, StageId, Statement, Topic, WorkpieceId, authorization_message, digest_of,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use ed25519_dalek::{Signer, SigningKey};
@@ -60,7 +60,10 @@ fn signing_key(seed: u8) -> SigningKey {
 }
 
 fn provider(signer: &str, key: &SigningKey) -> Ed25519KeyProvider {
-    Ed25519KeyProvider::new(BTreeMap::from([(KeyId(signer.to_owned()), key.verifying_key())]))
+    Ed25519KeyProvider::new(BTreeMap::from([(
+        KeyId(signer.to_owned()),
+        aether_bloomery::AuthorizedSigner { key: key.verifying_key(), ceiling: aether_bloomery::Tier::Human },
+    )]))
 }
 
 fn signed_approval(signer: &str, key: &SigningKey, scope: Digest) -> Statement {
@@ -147,6 +150,37 @@ fn seed(store: &mut SqliteStore, id: &str) -> Digest {
 
 fn write(store: &mut SqliteStore, id: &str, predecessor: Option<Digest>) -> Digest {
     store.write_revision(&revision(id, predecessor), &RevisionEvidence::default()).expect("write revision")
+}
+
+/// Canonical bytes of a version-1 revision from before `declared_crates` and
+/// `declared_reads` were appended. Those rows still write schema 1.
+fn pre_append_canonical(revision: &ScopeRevision) -> Vec<u8> {
+    assert!(revision.declared_crates.is_empty() && revision.declared_reads.is_empty());
+    let mut bytes = revision.to_canonical();
+    bytes.truncate(bytes.len() - 8);
+    bytes
+}
+
+fn plant_pre_append_tip(store: &mut SqliteStore, id: &str) -> Digest {
+    seed(store, id);
+    let canonical = pre_append_canonical(&revision(id, None));
+    let digest = Digest::of_domain_tagged(ScopeRevision::DOMAIN, &canonical);
+    store
+        .conn
+        .execute(
+            "INSERT INTO scope_revisions (digest, commission, predecessor, ordinal, canonical)
+             VALUES (?1, ?2, NULL, 1, ?3)",
+            rusqlite::params![digest.as_bytes().as_slice(), id, canonical],
+        )
+        .expect("plant a pre-append revision");
+    store
+        .conn
+        .execute(
+            "UPDATE commissions SET current_revision = ?1, current_ordinal = 1 WHERE id = ?2",
+            rusqlite::params![digest.as_bytes().as_slice(), id],
+        )
+        .expect("point the tip at the planted row");
+    digest
 }
 
 fn evidence(input: ScopeVerifyInput) -> RevisionEvidence {
@@ -353,6 +387,35 @@ fn malformed_canonical_bytes_are_refused_on_read() {
         store.load_revision(planted),
         Err(CommissionError::MalformedCanonical),
         "garbage canonical bytes must not decode as a revision"
+    );
+}
+
+#[test]
+fn a_commission_whose_tip_predates_a_field_append_still_loads() {
+    // An intact older row is not a corrupt commission. The head and tip digest
+    // must come back so an operator can write the next revision forward.
+    let mut store = memory();
+    let digest = plant_pre_append_tip(&mut store, "wp-1");
+    let view = store.load(&workpiece("wp-1")).expect("load").expect("created");
+    assert_eq!(view.head.current_revision, Some(digest), "the tip digest is what a successor names as predecessor");
+    assert!(view.current.is_none(), "the body is not this binary's shape");
+    assert_eq!(
+        view.current_unreadable,
+        Some(CommissionValueError::Malformed),
+        "an honest schema-1 row that predates a field append is short, not a later schema"
+    );
+}
+
+#[test]
+fn an_approval_over_an_unreadable_revision_is_still_refused() {
+    // The read degrades; the gate does not. Approving bytes this binary cannot
+    // understand would attest a surface nobody could seal.
+    let mut store = memory();
+    let digest = plant_pre_append_tip(&mut store, "wp-1");
+    assert_eq!(
+        store.insert_approval(&auto_approval(digest), &FakeKeyProvider),
+        Err(CommissionError::MalformedCanonical),
+        "an unreadable tip must not take an approval"
     );
 }
 

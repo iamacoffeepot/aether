@@ -493,7 +493,7 @@ impl ApiCapabilityState {
         let event = Event { idempotency_key: IdempotencyKey(key), fact: Fact::AdoptAnswer { bloom, answer } };
         let correlation = self.send_tracked(
             ctx.actor::<SigningCapability>(),
-            &Verify { statement, authority: authority_bytes(AuthorityDoor::Answer, question) },
+            &Verify { statement, authority: authority_bytes(AuthorityDoor::Answer, question), required_tier: None },
         );
         Routed::DeferredVerify { correlation, subject: "answer statement", event: Box::new(event) }
     }
@@ -526,6 +526,18 @@ impl ApiCapabilityState {
             }
             VerifyResult::Err { error } => {
                 inbound.reply(&error_response(400, &format!("{subject} did not verify: {error}")));
+            }
+            // Unreachable: neither door this serves names a `required_tier`, so
+            // the signing cap has no ladder to refuse against. Answered rather
+            // than ignored, so a door that later starts naming one cannot lose
+            // its refusal to a silent fall-through.
+            VerifyResult::BelowTier { required, ceiling } => {
+                inbound.reply(&error_response(
+                    400,
+                    &format!(
+                        "{subject} signer is authorized to {ceiling:?} tier, below the {required:?} tier required"
+                    ),
+                ));
             }
         }
     }

@@ -5,10 +5,12 @@
 //! `target/` tree is still populated identically, so in-process scenario
 //! tests (which read `target/…`) are untouched.
 
+mod freshness;
 mod manifest;
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use cargo_metadata::MetadataCommand;
@@ -54,30 +56,65 @@ pub fn run(args: &DistArgs) -> Result<()> {
     let wasm_profile_dir = target_dir.join(WASM_TARGET).join(args.profile.as_str());
     let dist = workspace_root.join("dist");
 
-    // Build host-carrying variants FIRST (issue 2688): the feature build
-    // clobbers `<stem>.wasm`, so we copy it to `<stem>_behavior.wasm` and then
-    // let the stock component loop below rebuild `<stem>.wasm` lean. Only the
-    // behavior-host scenario loads the `_behavior` stem; every other kit
-    // consumer keeps the small stock wasm.
-    for variant in discover_behavior_variants(&metadata) {
-        let plan = BuildPlan { package: variant.package.clone(), examples: false, features: variant.features.clone() };
-        build_component(&plan, args.profile)?;
-        let built = wasm_profile_dir.join(format!("{}.wasm", variant.stem));
-        let variant_stem = wasm_profile_dir.join(format!("{}_behavior.wasm", variant.stem));
-        fs::copy(&built, &variant_stem)
-            .with_context(|| format!("copy {} -> {}", built.display(), variant_stem.display()))?;
-    }
+    let variants = discover_behavior_variants(&metadata);
+    let host_profile_dir = target_dir.join(args.profile.as_str());
+    let built_artifacts: Vec<PathBuf> = components
+        .iter()
+        .map(|component| wasm_artifact_path(&wasm_profile_dir, component))
+        .chain(variants.iter().map(|variant| wasm_profile_dir.join(format!("{}_behavior.wasm", variant.stem))))
+        .chain(
+            behaviors.iter().map(|behavior| wasm_profile_dir.join("examples").join(format!("{}.wasm", behavior.stem))),
+        )
+        .chain(
+            (!args.no_bins)
+                .then(|| CHASSIS_BINS.iter().map(|(_, bin)| host_profile_dir.join(host_binary_filename(bin))))
+                .into_iter()
+                .flatten(),
+        )
+        .collect();
 
-    // Build each component package in its own cargo invocation — never
-    // batch multiple `-p`. See `inventory::build_plans`.
-    for plan in build_plans(&components) {
-        build_component(&plan, args.profile)?;
-    }
-    for plan in behavior_build_plans(&behaviors) {
-        build_component(&plan, args.profile)?;
-    }
-    if !args.no_bins {
-        build_chassis(args.profile)?;
+    // The whole build, keyed on what it reads (see `freshness`): a lane that
+    // changed nothing a component crate compiles from pays cargo's per-package
+    // resolve twenty times over to be told so. The key is stamped only after
+    // every build below succeeds, and it is cleared before the first one runs,
+    // so an interrupted build leaves no stamp to be trusted.
+    let key = freshness::key(&metadata, args.profile, args.no_bins);
+    let fresh = key.as_ref().is_some_and(|key| freshness::is_current(key, &wasm_profile_dir, &built_artifacts));
+    if fresh {
+        println!("dist: sources unchanged since the last build; assembling dist/ from the artifacts on disk");
+    } else {
+        freshness::invalidate(&wasm_profile_dir);
+
+        // Build host-carrying variants FIRST (issue 2688): the feature build
+        // clobbers `<stem>.wasm`, so we copy it to `<stem>_behavior.wasm` and then
+        // let the stock component loop below rebuild `<stem>.wasm` lean. Only the
+        // behavior-host scenario loads the `_behavior` stem; every other kit
+        // consumer keeps the small stock wasm.
+        for variant in &variants {
+            let plan =
+                BuildPlan { package: variant.package.clone(), examples: false, features: variant.features.clone() };
+            build_component(&plan, args.profile)?;
+            let built = wasm_profile_dir.join(format!("{}.wasm", variant.stem));
+            let variant_stem = wasm_profile_dir.join(format!("{}_behavior.wasm", variant.stem));
+            fs::copy(&built, &variant_stem)
+                .with_context(|| format!("copy {} -> {}", built.display(), variant_stem.display()))?;
+        }
+
+        // Build each component package in its own cargo invocation — never
+        // batch multiple `-p`. See `inventory::build_plans`.
+        for plan in build_plans(&components) {
+            build_component(&plan, args.profile)?;
+        }
+        for plan in behavior_build_plans(&behaviors) {
+            build_component(&plan, args.profile)?;
+        }
+        if !args.no_bins {
+            build_chassis(args.profile)?;
+        }
+
+        if let Some(key) = key.as_ref() {
+            freshness::record(key, &wasm_profile_dir);
+        }
     }
 
     // Regenerate dist/ from scratch so the manifest is authoritative
@@ -98,7 +135,6 @@ pub fn run(args: &DistArgs) -> Result<()> {
     let mut chassis_paths = BTreeMap::new();
     if !args.no_bins {
         fs::create_dir_all(dist.join("bin")).context("create dist/bin")?;
-        let host_profile_dir = target_dir.join(args.profile.as_str());
         for (_, bin) in CHASSIS_BINS {
             // The manifest key stays the bare bin name — that is the logical
             // name every consumer looks a chassis up by — while the path it

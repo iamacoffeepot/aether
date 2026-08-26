@@ -51,6 +51,12 @@ impl Breakdown {
         HINTS
     }
 
+    /// The cost breakdown has no Enter; the caret follows that.
+    #[must_use]
+    pub fn enter_pushes() -> bool {
+        false
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, store: &Store) -> Outcome {
         let rows = self.groups(store);
         match key.code {
@@ -118,7 +124,7 @@ impl Breakdown {
         .style(palette::body())
         .header(header)
         .row_highlight_style(palette::cursor())
-        .highlight_symbol("> ");
+        .highlight_symbol(super::super::caret(Self::enter_pushes()));
         let mut state = TableState::default()
             .with_selected(self.cursor.selected_index(&rows, |row| row.label.clone()))
             .with_offset(self.scroll);
@@ -141,15 +147,38 @@ impl Breakdown {
 #[cfg(test)]
 mod tests {
     use super::Breakdown;
+    use crate::dto::{MetricsSeat, SeatAgent, StageId};
     use crate::keys::{Outcome, assert_footer_honest};
     use crate::nav::Nav;
     use crate::shell::Shell;
+    use crate::store::Store;
     use crossterm::event::KeyEvent;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use std::time::Duration;
 
     #[test]
     fn breakdown_footer_keys_are_handled() {
         assert_footer_honest(Breakdown::key_hints(), |code| {
             Shell::probe(Nav::cost()).handle_key(KeyEvent::from(code)) != Outcome::Ignored
         });
+    }
+
+    #[test]
+    fn a_screen_with_no_enter_paints_no_caret() {
+        // The plausible bug: highlight_symbol tracks TableState, so every
+        // cost row paints `>` even though Enter cannot push a frame.
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_seats(Ok(vec![MetricsSeat {
+            agent: SeatAgent { harness: "claude".to_owned(), model: "opus".to_owned(), effort: "high".to_owned() },
+            stage: StageId::Construct,
+            cost_micro_usd: 1_000_000,
+            priced_samples: 1,
+            ..MetricsSeat::default()
+        }]));
+        let mut breakdown = Breakdown::new();
+        let mut terminal = Terminal::new(TestBackend::new(80, 8)).expect("test backend");
+        terminal.draw(|frame| breakdown.render(frame, frame.area(), &store)).expect("draw");
+        assert_eq!(super::super::super::row_caret(&terminal, "opus"), "  ");
     }
 }

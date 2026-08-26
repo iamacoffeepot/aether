@@ -93,7 +93,11 @@ impl ApiCapabilityState {
         // the one release it was minted for.
         let correlation = self.send_tracked(
             ctx.actor::<SigningCapability>(),
-            &Verify { statement, authority: authority_bytes(AuthorityDoor::OrphanClaimRelease, binding) },
+            &Verify {
+                statement,
+                authority: authority_bytes(AuthorityDoor::OrphanClaimRelease, binding),
+                required_tier: None,
+            },
         );
         Routed::DeferredVerify { correlation, subject: "release authorization", event: Box::new(event) }
     }

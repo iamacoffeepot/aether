@@ -41,7 +41,7 @@ use clap::{Args, ValueEnum};
 
 use super::client::{Client, bloom_in};
 use super::dto::{BloomSpec, BloomView, CommissionShowView, DigestHex, MemberView, ScopeRevisionView};
-use super::{ProjectionArgs, plan, render_outcome};
+use super::{plan, render_outcome};
 
 use request::Requested;
 use tier::PolicySource;
@@ -104,9 +104,6 @@ pub struct AmendArgs {
     /// Print the plan and the tier verdict; mutate nothing.
     #[arg(long)]
     dry_run: bool,
-
-    #[command(flatten)]
-    projection: ProjectionArgs,
 }
 
 /// Everything the preflight proved, so the mutating half never re-decides.
@@ -183,7 +180,7 @@ pub fn run(client: &Client<'_>, args: &AmendArgs, policy_file: &Path) -> Result<
         out.push_str("approved   already stored\n");
     }
 
-    out.push_str(&supersede(client, args, &plan, scope, policy_file)?);
+    out.push_str(&supersede(client, args, &plan, scope)?);
     Ok(out)
 }
 
@@ -376,13 +373,7 @@ fn overlaps(
 }
 
 /// X: seal the successor with the amended member pinned at its new revision.
-fn supersede(
-    client: &Client<'_>,
-    args: &AmendArgs,
-    plan: &AmendPlan,
-    scope: DigestHex,
-    policy_file: &Path,
-) -> Result<String> {
+fn supersede(client: &Client<'_>, args: &AmendArgs, plan: &AmendPlan, scope: DigestHex) -> Result<String> {
     let task = plan::read_task_file(&args.task_file)?;
     plan::require_task(&task, &args.task_file)?;
     let view = client.view()?;
@@ -395,22 +386,9 @@ fn supersede(
 
     let draft = client.open_draft()?;
     client.patch_draft(&draft.draft_id, &patch)?;
-    let members = patch.proposals.clone().unwrap_or_default();
-    // The amended member's projection carries the widened surface so the
-    // successor's declared surface matches the revision it seals against.
-    let surfaces: Vec<(String, String)> =
-        plan.widened.iter().map(|glob| (plan.workpiece.clone(), glob.clone())).collect();
-    let outcome = client.supersede(
-        &args.bloom_id,
-        &plan::supersede_request(
-            &draft.draft_id,
-            &members,
-            &task,
-            &args.projection.input(policy_file)?,
-            &[],
-            &surfaces,
-        )?,
-    )?;
+    // The door loads the widened surface from the stored revision this command
+    // just wrote; the successor body names only the draft and any extra edges.
+    let outcome = client.supersede(&args.bloom_id, &plan::supersede_request(&draft.draft_id, &[]))?;
     Ok(render_outcome(&outcome.outcome))
 }
 

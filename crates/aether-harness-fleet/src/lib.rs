@@ -1036,11 +1036,44 @@ fn single_reply(replies: &[MailEnvelope], label: &str) -> Vec<u8> {
     }
 }
 
-/// Workspace `dist/` directory: `CARGO_MANIFEST_DIR`
-/// (`crates/aether-harness-fleet`) up two levels to the workspace
-/// root, then `dist/`.
+/// Env override for the dist-tree resolution: an explicit path to the `dist/` tree
+/// `cargo xtask dist` packages, for pointing the harness at a dist built
+/// somewhere other than the running tree's workspace root.
+pub const DIST_DIR_ENV: &str = "AETHER_DIST_DIR";
+
+/// Workspace `dist/` directory, resolved at run time: the [`DIST_DIR_ENV`]
+/// override when set, else `dist/` under the nearest ancestor of the current
+/// directory that is a checkout root (holds a `Cargo.lock`).
+///
+/// Run time rather than `env!("CARGO_MANIFEST_DIR")`: the lane hosts share
+/// one build directory across many checkouts, so a compiled test binary can
+/// outlive the tree it was compiled in — and a compile-time path then names
+/// a checkout whose `dist/` no longer exists, failing every scenario in the
+/// member at once while a per-test replay of the same scenario passes. The
+/// tree the test *runs in* is the one whose dist it must read, and cargo and
+/// nextest run every test with the current directory inside its own package,
+/// so the walk up from there lands on the right checkout root. The
+/// compile-time path remains only as the last resort for a caller whose
+/// current directory is outside any checkout.
 fn dist_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dist")
+    if let Some(dir) = env::var_os(DIST_DIR_ENV) {
+        return PathBuf::from(dir);
+    }
+    env::current_dir()
+        .ok()
+        .and_then(|current| runtime_dist_dir(&current))
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dist"))
+}
+
+/// `dist/` under the nearest ancestor of `current` that is a checkout root
+/// (holds a `Cargo.lock`), or `None` when no ancestor is one.
+///
+/// Nearest root, not nearest `dist/`: a checkout without a dist must resolve
+/// to where its dist *would* be, so the missing-manifest panic names the
+/// `cargo xtask dist` the caller actually needs to run — never a leftover
+/// dist somewhere above the checkout.
+fn runtime_dist_dir(current: &Path) -> Option<PathBuf> {
+    current.ancestors().find(|dir| dir.join("Cargo.lock").is_file()).map(|root| root.join("dist"))
 }
 
 /// The chassis bin `FleetHarness` forks — the `dist/manifest.json` chassis
@@ -1281,12 +1314,13 @@ mod tests {
     use std::io::{Error as IoError, ErrorKind};
     use std::path::Path;
     use std::time::Duration;
+    use std::{env, fs, process};
 
     use aether_codec::frame::FrameError;
 
     use crate::{
         DistComponentGuardOutcome, DistManifestClassification, HEADLESS_BIN, cap_from_secs, classify_dist_chassis,
-        classify_dist_manifest, dist_component_guard_outcome, is_rearm_timeout,
+        classify_dist_manifest, dist_component_guard_outcome, is_rearm_timeout, runtime_dist_dir,
     };
 
     #[test]
@@ -1383,5 +1417,25 @@ mod tests {
         assert!(skip_message.contains("/tmp/dist/manifest.json"));
         assert!(skip_message.contains("cargo xtask dist"));
         assert!(skip_message.contains("remove generated `dist/`"));
+    }
+
+    #[test]
+    fn dist_resolves_under_the_checkout_the_caller_runs_in() {
+        // The lane hosts share one build directory across many checkouts, so
+        // a test binary can run in a tree it was not compiled in — dispatch
+        // 3177 failed 84 scenarios at once on a compile-time dist path into a
+        // checkout whose dist was gone. Resolution walks up from the caller's
+        // directory instead: the nearest checkout root wins, and a directory
+        // outside any checkout resolves to nothing rather than to a guess.
+        let scratch = env::temp_dir().join(format!("aether-dist-resolve-{}", process::id()));
+        let checkout = scratch.join("outer").join("checkout");
+        let nested = checkout.join("crates").join("some-crate");
+        fs::create_dir_all(&nested).expect("scratch tree");
+        fs::write(checkout.join("Cargo.lock"), "").expect("checkout marker");
+
+        assert_eq!(runtime_dist_dir(&nested), Some(checkout.join("dist")));
+        assert_eq!(runtime_dist_dir(&scratch), None, "no ancestor checkout, no resolution");
+
+        fs::remove_dir_all(&scratch).expect("scratch removed");
     }
 }

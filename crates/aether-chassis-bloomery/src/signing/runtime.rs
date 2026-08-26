@@ -18,7 +18,9 @@
 use std::collections::BTreeMap;
 
 use aether_actor::runtime;
-use aether_bloomery::{AuthorityDoor, Digest, Ed25519KeyProvider, KeyId, Statement};
+use aether_bloomery::{
+    AuthorityDoor, AuthorizedSigner, Digest, Ed25519KeyProvider, KeyId, KeyProvider, Statement, Tier,
+};
 use aether_data::wire::from_bytes;
 use ed25519_dalek::VerifyingKey;
 
@@ -55,8 +57,17 @@ impl SigningCapabilityState {
     /// presented under a door or binding it was not signed for) is
     /// `Ok { verified: false }` — the fail-closed answer the gate turns into a
     /// `400`.
+    ///
+    /// A `required_tier` asks the allowlist's *second* question once the
+    /// signature has held: is this signer authorized this high (#5324). A
+    /// ceiling below it answers [`VerifyResult::BelowTier`] naming both tiers,
+    /// never `Ok { verified: true }` — this is the only place the two halves of
+    /// the key policy meet, because it is the only place that holds the keys. A
+    /// verified signature whose signer has no ceiling at all cannot happen
+    /// through this provider (verification reads the same allowlist row), and
+    /// is refused as unverified rather than assumed authorized.
     #[must_use]
-    pub fn verify(&self, statement: &[u8], authority: &[u8]) -> VerifyResult {
+    pub fn verify(&self, statement: &[u8], authority: &[u8], required_tier: Option<Tier>) -> VerifyResult {
         let statement: Statement = match from_bytes(statement) {
             Ok(statement) => statement,
             Err(error) => return VerifyResult::Err { error: error.to_string() },
@@ -65,22 +76,47 @@ impl SigningCapabilityState {
             Ok(authority) => authority,
             Err(error) => return VerifyResult::Err { error: error.to_string() },
         };
-        VerifyResult::Ok { verified: statement.verify_authority(&self.provider, door, binding) }
+        if !statement.verify_authority(&self.provider, door, binding) {
+            return VerifyResult::Ok { verified: false };
+        }
+        let Some(required) = required_tier else {
+            return VerifyResult::Ok { verified: true };
+        };
+        let Some(ceiling) = statement.author_signer().and_then(|signer| self.provider.tier_ceiling(signer)) else {
+            return VerifyResult::Ok { verified: false };
+        };
+        if ceiling < required {
+            return VerifyResult::BelowTier { required, ceiling };
+        }
+        VerifyResult::Ok { verified: true }
     }
 }
 
-/// Parse the `key-id:hex-public-key` allowlist config into the provider's
+/// The tier an allowlist entry that states none is authorized at (#5324).
+///
+/// The bottom of the ladder, because an entry that states no authority is not
+/// an entry that states unlimited authority. A key at this ceiling signs
+/// nothing the gate needs a signature for — an `auto` surface forms its own
+/// approval — so the old two-field form keeps parsing while authorizing
+/// exactly what it wrote down, which is nothing.
+const UNSTATED_CEILING: Tier = Tier::Auto;
+
+/// Parse the `key-id:hex-public-key:tier` allowlist config into the provider's
 /// allowlist. Each comma-separated entry pairs a [`KeyId`] with a 32-byte
-/// ed25519 verifying key (64 hex chars); whitespace around entries is trimmed
-/// and empty entries are skipped, so a trailing comma is tolerated. A malformed
-/// entry (missing separator, bad hex, wrong length, non-canonical key point) or
-/// a duplicate key-id is an error — the caller fails the boot rather than
-/// trusting a smaller set or silently resolving a duplicate to one key.
+/// ed25519 verifying key (64 hex chars) and the highest [`Tier`] that signer may
+/// approve at; whitespace around entries is trimmed and empty entries are
+/// skipped, so a trailing comma is tolerated. The two-field
+/// `key-id:hex-public-key` form still parses and resolves to
+/// [`UNSTATED_CEILING`], with a warning per entry. A malformed entry (missing
+/// separator, bad hex, wrong length, non-canonical key point, unknown tier
+/// spelling) or a duplicate key-id is an error — the caller fails the boot
+/// rather than trusting a smaller set, silently resolving a duplicate to one
+/// key, or guessing what an unreadable tier meant.
 ///
 /// # Errors
 ///
 /// Returns a human-readable reason naming the offending entry.
-pub fn parse_allowlist(allowlist: Option<&str>) -> Result<BTreeMap<KeyId, VerifyingKey>, String> {
+pub fn parse_allowlist(allowlist: Option<&str>) -> Result<BTreeMap<KeyId, AuthorizedSigner>, String> {
     let mut parsed = BTreeMap::new();
     let Some(allowlist) = allowlist else {
         return Ok(parsed);
@@ -90,8 +126,24 @@ pub fn parse_allowlist(allowlist: Option<&str>) -> Result<BTreeMap<KeyId, Verify
         if entry.is_empty() {
             continue;
         }
-        let (id, hex) =
-            entry.split_once(':').ok_or_else(|| format!("allowlist entry `{entry}` is not `key-id:hex-public-key`"))?;
+        let (id, rest) = entry
+            .split_once(':')
+            .ok_or_else(|| format!("allowlist entry `{entry}` is not `key-id:hex-public-key:tier`"))?;
+        let id = id.trim();
+
+        // The key is fixed-width hex with no separator of its own, so the last
+        // colon — when there is a second one — is the tier's.
+        let (hex, ceiling) = if let Some((hex, tier)) = rest.rsplit_once(':') {
+            (hex, parse_tier(tier.trim()).ok_or_else(|| unknown_tier(id, tier.trim()))?)
+        } else {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::signing",
+                signer = %id,
+                ceiling = ?UNSTATED_CEILING,
+                "allowlist entry states no tier; authorizing it at the bottom of the ladder"
+            );
+            (rest, UNSTATED_CEILING)
+        };
         let bytes = aether_bloomery::decode_hex(hex.trim())
             .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
             .ok_or_else(|| format!("allowlist entry `{id}` has a malformed hex key"))?;
@@ -100,11 +152,30 @@ pub fn parse_allowlist(allowlist: Option<&str>) -> Result<BTreeMap<KeyId, Verify
         // A duplicate key-id is ambiguous — silently keeping the last would let a
         // later entry override an earlier signer's key without notice, a silent
         // trust change. Fail the boot instead.
-        if parsed.insert(KeyId(id.trim().to_owned()), key).is_some() {
-            return Err(format!("allowlist entry `{}` duplicates an earlier key-id", id.trim()));
+        if parsed.insert(KeyId(id.to_owned()), AuthorizedSigner { key, ceiling }).is_some() {
+            return Err(format!("allowlist entry `{id}` duplicates an earlier key-id"));
         }
     }
     Ok(parsed)
+}
+
+/// The policy-text spelling of a tier ceiling, or `None` outside the ladder.
+///
+/// Spelled out here rather than deserialized through serde's aliases so the
+/// accepted set is one readable list at the boundary that reads it, and so an
+/// unknown spelling is a boot error naming what the operator wrote rather than
+/// a deserializer's message about a type they never mentioned.
+fn parse_tier(tier: &str) -> Option<Tier> {
+    match tier {
+        "auto" => Some(Tier::Auto),
+        "judge" => Some(Tier::Judge),
+        "human" => Some(Tier::Human),
+        _ => None,
+    }
+}
+
+fn unknown_tier(id: &str, tier: &str) -> String {
+    format!("allowlist entry `{id}` names tier `{tier}`; expected one of auto, judge, human")
 }
 
 #[runtime]
@@ -130,6 +201,6 @@ impl NativeActor for SigningCapability {
     #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_verify(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Verify) -> VerifyResult {
-        state.verify(&mail.statement, &mail.authority)
+        state.verify(&mail.statement, &mail.authority, mail.required_tier)
     }
 }
