@@ -892,7 +892,7 @@ fn a_scope_run_writes_its_ledger_row_and_its_outbox_row_together() {
     let commission = workpiece("wp-scope");
     let intent_digest = seed(&mut store, "wp-scope");
 
-    let opened = open_scope_run(&mut store, &commission, intent_digest, base())
+    let opened = open_scope_run(&mut store, &commission, intent_digest, base(), "scope sketch")
         .expect("a fresh commission opens its first scoping run");
     let sequence = opened.sequence;
 
@@ -924,9 +924,9 @@ fn a_run_in_flight_refuses_a_second_lane_on_the_same_commission() {
     let commission = workpiece("wp-twice");
     let intent_digest = seed(&mut store, "wp-twice");
 
-    open_scope_run(&mut store, &commission, intent_digest, base()).expect("the first run opens");
+    open_scope_run(&mut store, &commission, intent_digest, base(), "scope sketch").expect("the first run opens");
     assert_eq!(
-        open_scope_run(&mut store, &commission, intent_digest, base()),
+        open_scope_run(&mut store, &commission, intent_digest, base(), "scope sketch"),
         Err(ScopeRunRefusal::AlreadyInFlight { ordinal: 1 }),
     );
 
@@ -936,7 +936,7 @@ fn a_run_in_flight_refuses_a_second_lane_on_the_same_commission() {
     store.record_scope_verdict(&commission.0, 1, "VerificationFailed", why.as_bytes().as_slice()).expect("verdict");
 
     assert!(
-        open_scope_run(&mut store, &commission, intent_digest, base()).is_ok(),
+        open_scope_run(&mut store, &commission, intent_digest, base(), "scope sketch").is_ok(),
         "an answered run inside the budget does not block the retry",
     );
     assert_eq!(
@@ -954,7 +954,7 @@ fn a_dispatched_run_is_reachable_from_its_nonce() {
     let mut store = memory();
     let commission = workpiece("wp-nonce");
     let intent_digest = seed(&mut store, "wp-nonce");
-    open_scope_run(&mut store, &commission, intent_digest, base()).expect("open");
+    open_scope_run(&mut store, &commission, intent_digest, base(), "scope sketch").expect("open");
 
     store.record_scope_dispatch(&commission.0, 1, "dispatch-7").expect("record dispatch");
 
@@ -985,7 +985,7 @@ fn enqueuing_a_scope_run_is_one_transaction() {
         .expect("install abort trigger");
 
     let mut store = SqliteStore::open(path).expect("reopen");
-    let opened = open_scope_run(&mut store, &commission, intent_digest, base());
+    let opened = open_scope_run(&mut store, &commission, intent_digest, base(), "scope sketch");
     assert!(opened.is_err(), "the aborted outbox insert must refuse the open: {opened:?}");
     assert!(
         store.list_scope_runs(&commission.0).expect("list").is_empty(),
