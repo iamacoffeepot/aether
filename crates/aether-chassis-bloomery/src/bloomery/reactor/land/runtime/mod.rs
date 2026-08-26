@@ -176,7 +176,7 @@ fn journal_holds_land(store: &mut dyn StoreBackend, bloom: &Digest) -> rusqlite:
 /// `false` leaves the land entry unacked so a encode/store fault redrives.
 fn enqueue_source_replica(store: &mut dyn StoreBackend, new_head: &Digest) -> bool {
     match to_vec(&SourceReplicaPayload { new_head: *new_head }) {
-        Ok(bytes) => match store.enqueue_outbox(Topic::SourceReplica.as_str(), &bytes) {
+        Ok(bytes) => match store.enqueue_outbox(Topic::SourceReplica.as_str(), &bytes, None) {
             Ok(_) => true,
             Err(error) => {
                 tracing::warn!(

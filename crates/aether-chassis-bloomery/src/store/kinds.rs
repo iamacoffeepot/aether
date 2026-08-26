@@ -211,6 +211,9 @@ pub struct OutboxEntry {
     /// The opaque payload bytes.
     #[serde(with = "aether_data::bytes")]
     pub payload: Vec<u8>,
+    /// The writing-schema identity stamped beside the payload. `None` is the
+    /// pre-adoption positional identity.
+    pub payload_schema: Option<String>,
 }
 
 /// Reply to [`DrainOutbox`].

@@ -12,7 +12,7 @@ use aether_bloomery::testing::{claim, digest, draft, event as decided_event, mem
 use aether_bloomery::{
     Adjudication, Admit, BloomId, Correspondence, Decision, Decisions, Digest, Disposition, Event, Fact,
     IdempotencyKey, LandPayload, Observation, Outcome, Provenance, SourceReplicaPayload, StageId, Statement, Topic,
-    Withdrawal, WithdrawalCause, WorkpieceId,
+    Withdrawal, WithdrawalCause, WorkpieceId, decode_row,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -47,7 +47,7 @@ fn seeded() -> (FakeGithub, Digest) {
 // `DispatchLand` projection would enqueue), returning its outbox sequence.
 fn enqueue_land(store: &mut SqliteStore, bloom: BloomId, expected_base: Digest, new_head: Digest) -> u64 {
     let payload = LandPayload { bloom: bloom.0, expected_base, new_head };
-    store.enqueue_topic(Topic::Land, &to_vec(&payload).unwrap()).unwrap()
+    store.enqueue_topic(Topic::Land, &to_vec(&payload).unwrap(), None).unwrap()
 }
 
 #[test]
@@ -563,8 +563,9 @@ fn landing_marks_member_commissions_landed_before_any_replica_close() {
     assert_eq!(view.head.status, CommissionStatus::Landed, "land stamps the local commission first");
     let queued = store.drain_topic(Topic::Commission).unwrap();
     assert!(queued.len() >= 2, "create and land each enqueue a replica projection");
+    let last_row = queued.last().unwrap();
     let last: aether_bloomery::CommissionProjection =
-        from_bytes(&queued.last().unwrap().payload).expect("landed projection");
+        decode_row(&last_row.payload, last_row.payload_schema.as_deref()).expect("landed projection");
     assert_eq!(last.status, "landed");
 }
 

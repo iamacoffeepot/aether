@@ -26,6 +26,7 @@
 
 mod executor;
 mod projection;
+mod row;
 mod source;
 
 pub use executor::{
@@ -38,6 +39,7 @@ pub use projection::{
     MemberWhy, NarrowedCompositionView, PendingDecisionView, ProjectedReceipt, ProjectionBackend, ReviewParkView,
     TransitionWhy, ViewDocument, WedgeCause, WhyDocument, WhyState, WithdrawnView, intent_title,
 };
+pub use row::{POSITIONAL_ROW_SCHEMA, RowSchemaError, decode_row, encode_row};
 pub use source::{
     Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome, IntegrateOutcome,
     IntegrationPosition, LandOutcome, SourceBackend, SourceSnapshot,

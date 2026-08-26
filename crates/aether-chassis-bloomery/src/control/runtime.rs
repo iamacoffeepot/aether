@@ -51,8 +51,8 @@ use aether_bloomery::{
     BloomId, BloomStatus, CalibrationDocument, CalibrationLedger, ClaimRefKind, ClaimRefState, DAYS_CAP, Decision,
     Decisions, Digest, Event, EvidenceKind, Fact, IdempotencyKey, METRICS_DEFAULT_LIMIT, METRICS_MAX_LIMIT,
     MetricsLedger, OperatorRepairError, Outcome, Question, ResolvedConfigs, Snapshot, SpendWindow, StudyRecord,
-    Unproducible, ViewDocument, decode_recorded_decisions, decode_recorded_event, grade, is_active_unlanded, measure,
-    reduce, view_of, why_of, window_label,
+    Unproducible, ViewDocument, decode_recorded_decisions, decode_recorded_event, encode_row, grade,
+    is_active_unlanded, measure, reduce, view_of, why_of, window_label,
 };
 
 use super::{ControlCore, ControlSetup, ObserveTick, PRE_REPLAY_REFUSAL};
@@ -1589,12 +1589,13 @@ fn view_document_outbox(
     let preview = snapshot.apply(event, decisions, configs);
     let holds = resolve_holds(&preview, artifacts);
     let document = projected_view(&preview, &touched_blooms(event, decisions), |digest| holds.get(digest).cloned());
-    let bytes = to_vec(&document)?;
+    let bytes =
+        encode_row(&document, Some(ViewDocument::NAME)).map_err(|error| WireError::Message(error.to_string()))?;
     let digest = Digest::of_wire_bytes(&bytes);
     if last_view_digest == Some(digest) {
         Ok(None)
     } else {
-        Ok(Some((OutboxPayload::new(Topic::ViewDocument, bytes), digest)))
+        Ok(Some((OutboxPayload::stamped(Topic::ViewDocument, bytes, ViewDocument::NAME), digest)))
     }
 }
 
@@ -2033,9 +2034,9 @@ mod tests {
         BloomDraft, BloomId, BloomRecord, BloomStatus, CandidateRef, ConfigRegistry, Decisions, Digest, Event,
         Evidence, EvidenceKind, Fact, HostFaultHold, IdempotencyKey, Membership, OperatorRepair, OperatorRepairError,
         OutboxPayload, Outcome, QueryResult, ResolvedConfigs, Snapshot, SpendWindow, StudyCost, StudyRecord, Topic,
-        ViewDocument, WorkpieceId, reduce,
+        ViewDocument, WorkpieceId, decode_row, reduce,
     };
-    use aether_data::wire::{from_bytes, to_vec};
+    use aether_data::wire::to_vec;
 
     use std::collections::BTreeMap;
 
@@ -2334,7 +2335,8 @@ mod tests {
         view_document_outbox(snapshot, &configs, event, &decisions, None, last).expect("a view document encodes").map(
             |(payload, digest)| {
                 assert_eq!(payload.topic, Topic::ViewDocument.as_str(), "the producer mints the view topic");
-                let document = from_bytes(&payload.payload).expect("the view payload decodes");
+                let document =
+                    decode_row(&payload.payload, payload.payload_schema.as_deref()).expect("the view payload decodes");
                 (document, digest, payload)
             },
         )

@@ -11,8 +11,9 @@ use std::fmt;
 use aether_bloomery::{
     AuthorityDoor, BloomId, CommissionApprovalTier, CommissionProjection, CommissionStatementRole, CommissionStatus,
     CommissionValueError, Digest, KeyProvider, Observation, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision,
-    ScopeVerifyReport, Statement, Topic, WorkpieceId, digest_of, intent_title, verify_scope,
+    ScopeVerifyReport, Statement, Topic, WorkpieceId, decode_row, digest_of, encode_row, intent_title, verify_scope,
 };
+use aether_data::Kind;
 
 pub use aether_bloomery::RevisionEvidence;
 use aether_data::wire::{from_bytes, to_vec};
@@ -846,8 +847,8 @@ fn load_projection(conn: &Connection, id: &WorkpieceId) -> Result<Option<u64>, C
 fn enqueue_projection(txn: &Transaction<'_>, id: &str) -> Result<(), CommissionError> {
     let payload = snapshot_projection(txn, id)?;
     txn.execute(
-        "INSERT INTO outbox (topic, payload) VALUES (?1, ?2)",
-        rusqlite::params![Topic::Commission.as_str(), payload],
+        "INSERT INTO outbox (topic, payload, payload_schema) VALUES (?1, ?2, ?3)",
+        rusqlite::params![Topic::Commission.as_str(), payload, CommissionProjection::NAME],
     )?;
     Ok(())
 }
@@ -865,16 +866,19 @@ fn snapshot_projection(conn: &Connection, id: &str) -> Result<Vec<u8>, Commissio
     // the head is an index, and a title recomputed from the bytes cannot drift
     // from the intent the commission was created with.
     let title = load_statement(conn, head.intent)?.and_then(|intent| intent_title(&intent.words)).unwrap_or_default();
-    to_vec(&CommissionProjection {
-        workpiece: head.id,
-        intent: head.intent,
-        scope_revision: head.current_revision,
-        approval_signer,
-        approval_digest,
-        status: head.status.as_str().to_owned(),
-        recorded_issue,
-        title,
-    })
+    encode_row(
+        &CommissionProjection {
+            workpiece: head.id,
+            intent: head.intent,
+            scope_revision: head.current_revision,
+            approval_signer,
+            approval_digest,
+            status: head.status.as_str().to_owned(),
+            recorded_issue,
+            title,
+        },
+        Some(CommissionProjection::NAME),
+    )
     .map_err(|error| CommissionError::Store(error.to_string()))
 }
 
@@ -916,8 +920,8 @@ fn load_recorded_issue(conn: &Connection, id: &str) -> Result<Option<u64>, Commi
 /// Overlay the store's recorded replica-issue number onto a drained
 /// commission payload. The outbox row is a frozen snapshot; this table is
 /// the create-vs-update authority for a later entry of the same commission.
-pub fn overlay_recorded_projection(conn: &Connection, payload: &mut Vec<u8>) {
-    let Ok(mut document) = from_bytes::<CommissionProjection>(payload) else {
+pub fn overlay_recorded_projection(conn: &Connection, payload: &mut Vec<u8>, schema: Option<&str>) {
+    let Ok(mut document) = decode_row::<CommissionProjection>(payload, schema) else {
         return;
     };
     let Ok(Some(number)) = load_recorded_issue(conn, &document.workpiece.0) else {
@@ -927,7 +931,7 @@ pub fn overlay_recorded_projection(conn: &Connection, payload: &mut Vec<u8>) {
         return;
     }
     document.recorded_issue = Some(number);
-    if let Ok(bytes) = to_vec(&document) {
+    if let Ok(bytes) = encode_row(&document, schema) {
         *payload = bytes;
     }
 }

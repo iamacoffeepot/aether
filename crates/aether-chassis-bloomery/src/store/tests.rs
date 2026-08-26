@@ -12,7 +12,8 @@ use super::runtime::{
     RecordOutcome, SealOutcome, SqliteStore, StoreBackend,
 };
 use aether_bloomery::persisted::DECISIONS;
-use aether_bloomery::{MembershipMutation, OutboxPayload, WorkpieceId};
+use aether_bloomery::{MembershipMutation, OutboxPayload, Topic, ViewDocument, WorkpieceId, decode_row, encode_row};
+use aether_data::Kind;
 
 fn memory() -> SqliteStore {
     SqliteStore::open(":memory:").unwrap()
@@ -45,7 +46,11 @@ fn commit_journals_claims_and_outbox_in_one_transaction() {
             &write("seal-1", b"sealed-bloom-event", b"decided"),
             &[],
             &[claim("wp-1", b"bloom-a"), claim("wp-2", b"bloom-a")],
-            &[OutboxPayload { topic: "landing_receipt".to_owned(), payload: b"receipt".to_vec() }],
+            &[OutboxPayload {
+                topic: "landing_receipt".to_owned(),
+                payload: b"receipt".to_vec(),
+                payload_schema: None,
+            }],
         )
         .unwrap();
     assert_eq!(outcome, CommitOutcome::Applied(1));
@@ -103,7 +108,7 @@ fn commit_membership_conflict_rolls_back_journal_and_releases() {
                 &write("conflicted", b"event-bytes", b"decided"),
                 &[claim("w-held", b"pred")],
                 &[claim("free", b"succ"), claim("taken", b"succ")],
-                &[OutboxPayload { topic: "t".to_owned(), payload: b"p".to_vec() }],
+                &[OutboxPayload { topic: "t".to_owned(), payload: b"p".to_vec(), payload_schema: None }],
             )
             .unwrap(),
         CommitOutcome::Conflict("taken".to_owned()),
@@ -341,8 +346,8 @@ fn supersession_conflicting_with_a_third_bloom_rolls_back() {
 #[test]
 fn outbox_enqueue_drain_ack_cycle() {
     let mut store = memory();
-    assert_eq!(store.enqueue_outbox("receipt", b"r1").unwrap(), 1);
-    assert_eq!(store.enqueue_outbox("receipt", b"r2").unwrap(), 2);
+    assert_eq!(store.enqueue_outbox("receipt", b"r1", None).unwrap(), 1);
+    assert_eq!(store.enqueue_outbox("receipt", b"r2", None).unwrap(), 2);
 
     let drained = store.drain_outbox(None).unwrap();
     assert_eq!(drained.len(), 2);
@@ -363,9 +368,9 @@ fn outbox_topic_scoped_drain_and_ack_are_independent() {
     // consumption): draining and acking one topic must never touch the other's
     // rows, so disjoint reactors never race on the shared `delivered` flag.
     let mut store = memory();
-    assert_eq!(store.enqueue_outbox("view_document", b"v1").unwrap(), 1);
-    assert_eq!(store.enqueue_outbox("landing_receipt", b"r1").unwrap(), 2);
-    assert_eq!(store.enqueue_outbox("view_document", b"v2").unwrap(), 3);
+    assert_eq!(store.enqueue_outbox("view_document", b"v1", None).unwrap(), 1);
+    assert_eq!(store.enqueue_outbox("landing_receipt", b"r1", None).unwrap(), 2);
+    assert_eq!(store.enqueue_outbox("view_document", b"v2", None).unwrap(), 3);
 
     // A topic-scoped drain sees only its own topic's entries, in sequence order.
     let views = store.drain_outbox(Some("view_document")).unwrap();
@@ -394,7 +399,7 @@ fn reopen_converges_via_journal_replay_and_outbox_republish() {
         let mut store = SqliteStore::open(path).unwrap();
         store.append_event(&write("seal-1", b"sealed-bloom-event", b"decided")).unwrap();
         store.claim_seal(b"bloom-1", &members(&["wp"])).unwrap();
-        store.enqueue_outbox("landing_receipt", b"receipt-bytes").unwrap();
+        store.enqueue_outbox("landing_receipt", b"receipt-bytes", None).unwrap();
         // Drop without any explicit close — a committed WAL transaction is durable.
     }
 
@@ -728,7 +733,7 @@ fn crash_between_enqueue_and_ack_preserves_the_entry_for_republish() {
     // Crash after enqueue, before ack.
     {
         let mut store = SqliteStore::open(&path).unwrap();
-        store.enqueue_outbox("receipt", b"r1").unwrap();
+        store.enqueue_outbox("receipt", b"r1", None).unwrap();
     }
     let mut store = SqliteStore::open(&path).unwrap();
     let drained = store.drain_outbox(None).unwrap();
@@ -1518,7 +1523,7 @@ fn a_v11_store_gains_an_empty_scope_verify_ledger() {
         .query_row("SELECT count(*) FROM scope_verify_reports", [], |row| row.get(0))
         .expect("the ledger exists after migration");
     assert_eq!(reports, 0, "migration invents no reports");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 17);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 18);
 }
 
 #[test]
@@ -1550,7 +1555,7 @@ fn a_v15_store_gains_an_empty_candidate_hash_journal() {
         .query_row("SELECT count(*) FROM candidate_hash", [], |row| row.get(0))
         .expect("the journal exists after migration");
     assert_eq!(hashes, 0, "migration invents no hashes");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 17);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 18);
 }
 
 mod schema_digest_migration {
@@ -1617,7 +1622,7 @@ mod schema_digest_migration {
         drop(conn);
 
         let mut store = SqliteStore::open(&path).expect("a v16 store migrates");
-        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 17);
+        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 18);
         let journal = store.replay_journal().unwrap();
         assert_eq!(journal.len(), 2);
         let v2 = journal.iter().find(|row| row.idempotency_key == "v2").unwrap();
@@ -1697,4 +1702,62 @@ mod schema_digest_migration {
         assert!(text.contains("for kind `aether.bloomery.spend_ceiling`"), "{text}");
         assert!(matches!(error, StoreConfigError::Content(ConfigResolveError::NoUpcast { .. })), "{error:?}");
     }
+}
+
+#[test]
+fn a_null_stamped_outbox_row_still_decodes_positionally_after_migration() {
+    // Version 18 adds payload_schema without backfill. A pre-adoption row
+    // reads back null and is the positional identity.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v17-outbox.db").to_str().unwrap().to_owned();
+    let document = ViewDocument::default();
+    let bytes = encode_row(&document, None).unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE journal (
+             sequence        INTEGER PRIMARY KEY AUTOINCREMENT,
+             idempotency_key TEXT NOT NULL UNIQUE,
+             event           BLOB NOT NULL,
+             decisions       BLOB,
+             decider         TEXT,
+             decisions_schema TEXT
+         );
+         CREATE TABLE outbox (
+             sequence  INTEGER PRIMARY KEY AUTOINCREMENT,
+             topic     TEXT NOT NULL,
+             payload   BLOB NOT NULL,
+             delivered INTEGER NOT NULL DEFAULT 0
+         );",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO outbox (topic, payload) VALUES (?1, ?2)",
+        rusqlite::params![Topic::ViewDocument.as_str(), bytes],
+    )
+    .unwrap();
+    conn.execute_batch("PRAGMA user_version = 17;").unwrap();
+    drop(conn);
+
+    let mut store = SqliteStore::open(&path).expect("a v17 store migrates");
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 18);
+    let entries = store.drain_outbox(Some(Topic::ViewDocument.as_str())).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].payload_schema, None, "migration invents no stamp");
+    let decoded = decode_row::<ViewDocument>(&entries[0].payload, entries[0].payload_schema.as_deref()).unwrap();
+    assert_eq!(decoded, document);
+}
+
+#[test]
+fn an_unknown_outbox_schema_refuses_by_name() {
+    // ADR-0187: a row stamped with a writing schema this binary has no path
+    // for must refuse by name carrying both identities — never decode as
+    // current.
+    let mut store = memory();
+    store.enqueue_outbox(Topic::ViewDocument.as_str(), b"x", Some("aether.bloomery.no-such-shape")).unwrap();
+    let entries = store.drain_outbox(Some(Topic::ViewDocument.as_str())).unwrap();
+    let error =
+        decode_row::<ViewDocument>(&entries[0].payload, entries[0].payload_schema.as_deref()).unwrap_err().to_string();
+    assert!(error.contains("no migration from schema `aether.bloomery.no-such-shape`"), "{error}");
+    assert!(error.contains(&format!("to current `{}`", ViewDocument::NAME)), "{error}");
+    assert!(error.contains(&format!("for kind `{}`", ViewDocument::NAME)), "{error}");
 }

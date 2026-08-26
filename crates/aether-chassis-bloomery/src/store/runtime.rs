@@ -641,8 +641,10 @@ pub trait StoreBackend: Send {
     fn supersede(&mut self, predecessor: &[u8], successor: &[u8], members: &[String]) -> rusqlite::Result<SealOutcome>;
     /// Release every active membership `bloom` holds; returns how many.
     fn release_membership(&mut self, bloom: &[u8]) -> rusqlite::Result<u32>;
-    /// Enqueue an outbox entry; returns its sequence.
-    fn enqueue_outbox(&mut self, topic: &str, payload: &[u8]) -> rusqlite::Result<u64>;
+    /// Enqueue an outbox entry; returns its sequence. `payload_schema` is the
+    /// writing-schema identity stamped beside the bytes; `None` is the
+    /// pre-adoption positional identity.
+    fn enqueue_outbox(&mut self, topic: &str, payload: &[u8], payload_schema: Option<&str>) -> rusqlite::Result<u64>;
     /// Read undelivered outbox entries, in sequence order — scoped to `topic`
     /// when `Some`, across every topic when `None`.
     fn drain_outbox(&mut self, topic: Option<&str>) -> rusqlite::Result<Vec<OutboxEntry>>;
@@ -911,7 +913,12 @@ impl SqliteStore {
 /// identity current at migration — for decisions, a v2 TEXT stamp maps to
 /// the v2 digest and an unstamped decided row maps to v1, preserving the
 /// unstamped-is-v1 read.
-const SCHEMA_VERSION: i64 = 17;
+///
+/// `18` is the outbox writing-schema stamp (`payload_schema`). Added nullable
+/// with no backfill — an undrained pre-adoption row reads back `NULL` and is
+/// the positional identity. Adopted topics write their current identity in
+/// the same transaction as the bytes.
+const SCHEMA_VERSION: i64 = 18;
 
 /// Historical TEXT stamp written beside v2 decisions rows before the digest
 /// column existed. Kept only so migration 17 can map it onto the v2 digest.
@@ -1089,6 +1096,13 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
 
     migrate_schema_digests(&migration)?;
 
+    // Version 18: the outbox writing-schema stamp. Added nullable with no
+    // backfill — an undrained pre-adoption row reads back NULL and is the
+    // positional identity.
+    if !has_column(&migration, "outbox", "payload_schema")? {
+        migration.execute_batch("ALTER TABLE outbox ADD COLUMN payload_schema TEXT;")?;
+    }
+
     migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     migration.commit()
 }
@@ -1246,7 +1260,8 @@ CREATE TABLE IF NOT EXISTS outbox (
     sequence  INTEGER PRIMARY KEY AUTOINCREMENT,
     topic     TEXT NOT NULL,
     payload   BLOB NOT NULL,
-    delivered INTEGER NOT NULL DEFAULT 0
+    delivered INTEGER NOT NULL DEFAULT 0,
+    payload_schema TEXT
 );
 CREATE TABLE IF NOT EXISTS outstanding_orders (
     nonce                TEXT PRIMARY KEY,
@@ -2161,8 +2176,8 @@ impl StoreBackend for SqliteStore {
         }
         for entry in outbox {
             tx.execute(
-                "INSERT INTO outbox (topic, payload) VALUES (?1, ?2)",
-                rusqlite::params![entry.topic, entry.payload],
+                "INSERT INTO outbox (topic, payload, payload_schema) VALUES (?1, ?2, ?3)",
+                rusqlite::params![entry.topic, entry.payload, entry.payload_schema],
             )?;
         }
         tx.commit()?;
@@ -2250,8 +2265,11 @@ impl StoreBackend for SqliteStore {
         Ok(u32::try_from(released).unwrap_or(u32::MAX))
     }
 
-    fn enqueue_outbox(&mut self, topic: &str, payload: &[u8]) -> rusqlite::Result<u64> {
-        self.conn.execute("INSERT INTO outbox (topic, payload) VALUES (?1, ?2)", rusqlite::params![topic, payload])?;
+    fn enqueue_outbox(&mut self, topic: &str, payload: &[u8], payload_schema: Option<&str>) -> rusqlite::Result<u64> {
+        self.conn.execute(
+            "INSERT INTO outbox (topic, payload, payload_schema) VALUES (?1, ?2, ?3)",
+            rusqlite::params![topic, payload, payload_schema],
+        )?;
         Ok(u64::try_from(self.conn.last_insert_rowid()).unwrap_or_default())
     }
 
@@ -2260,15 +2278,16 @@ impl StoreBackend for SqliteStore {
         // whole-outbox drain the recovery drill uses.
         let sql = match topic {
             Some(_) => {
-                "SELECT sequence, topic, payload FROM outbox WHERE delivered = 0 AND topic = ?1 ORDER BY sequence"
+                "SELECT sequence, topic, payload, payload_schema FROM outbox WHERE delivered = 0 AND topic = ?1 ORDER BY sequence"
             }
-            None => "SELECT sequence, topic, payload FROM outbox WHERE delivered = 0 ORDER BY sequence",
+            None => "SELECT sequence, topic, payload, payload_schema FROM outbox WHERE delivered = 0 ORDER BY sequence",
         };
         let map_row = |row: &rusqlite::Row<'_>| {
             Ok(OutboxEntry {
                 sequence: u64::try_from(row.get::<_, i64>(0)?).unwrap_or_default(),
                 topic: row.get(1)?,
                 payload: row.get(2)?,
+                payload_schema: row.get(3)?,
             })
         };
         let mut entries: Vec<OutboxEntry> = {
@@ -2280,7 +2299,11 @@ impl StoreBackend for SqliteStore {
         };
         for entry in &mut entries {
             if entry.topic == Topic::Commission.as_str() {
-                super::commission::overlay_recorded_projection(&self.conn, &mut entry.payload);
+                super::commission::overlay_recorded_projection(
+                    &self.conn,
+                    &mut entry.payload,
+                    entry.payload_schema.as_deref(),
+                );
             }
         }
         Ok(entries)
@@ -2303,13 +2326,14 @@ impl StoreBackend for SqliteStore {
 
     fn delivered_outbox(&mut self, topic: &str) -> rusqlite::Result<Vec<OutboxEntry>> {
         let mut stmt = self.conn.prepare(
-            "SELECT sequence, topic, payload FROM outbox WHERE delivered = 1 AND topic = ?1 ORDER BY sequence",
+            "SELECT sequence, topic, payload, payload_schema FROM outbox WHERE delivered = 1 AND topic = ?1 ORDER BY sequence",
         )?;
         stmt.query_map(rusqlite::params![topic], |row| {
             Ok(OutboxEntry {
                 sequence: u64::try_from(row.get::<_, i64>(0)?).unwrap_or_default(),
                 topic: row.get(1)?,
                 payload: row.get(2)?,
+                payload_schema: row.get(3)?,
             })
         })?
         .collect()
@@ -2956,7 +2980,7 @@ impl NativeActor for StoreCapability {
         mail: EnqueueOutbox,
     ) -> EnqueueOutboxResult {
         let EnqueueOutbox { topic, payload } = mail;
-        match state.backend.enqueue_outbox(&topic, &payload) {
+        match state.backend.enqueue_outbox(&topic, &payload, None) {
             Ok(sequence) => EnqueueOutboxResult::Ok { sequence },
             Err(error) => EnqueueOutboxResult::Err { error: error.to_string() },
         }
