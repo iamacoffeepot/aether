@@ -25,6 +25,7 @@ mod fixers;
 mod grok;
 #[cfg(test)]
 mod harness_stub;
+mod heartbeat;
 mod lane;
 mod messages;
 mod muse;

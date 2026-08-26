@@ -6,7 +6,7 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aether_actor::Addressable;
 use aether_bloomery::{
@@ -583,6 +583,21 @@ impl ScenarioHarness {
             .expect("the transcript opens")
             .write_all(line.as_bytes())
             .expect("the transcript writes");
+    }
+
+    /// Truncate-write the named run's lane heartbeat file.
+    ///
+    /// The coordinator reads this file's modification time as liveness once the
+    /// streamed transcript has gone quiet. Truncating is the signal: the body
+    /// is not read.
+    ///
+    /// # Panics
+    /// The evidence directory could not be created or the file written.
+    pub fn touch_heartbeat(&self, nonce: &str) {
+        let dir = Path::new(&self.worktree_base).join(format!("{nonce}-evidence"));
+        fs::create_dir_all(&dir).expect("the evidence directory creates");
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).expect("now is after the epoch").as_millis();
+        fs::write(dir.join("heartbeat"), stamp.to_string()).expect("the heartbeat writes");
     }
 
     /// Every evidence directory under the run root whose name ends in `-evidence`.
