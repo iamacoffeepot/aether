@@ -13,7 +13,7 @@ use core::fmt::Debug;
 
 use aether_codec::encode_schema;
 use aether_data::Schema;
-use aether_data::wire::{encode_to_vec, to_vec};
+use aether_data::wire::{WireEncode, encode_to_vec, to_vec};
 use serde::Serialize;
 
 use super::{ConfigKind, config_address};
@@ -30,7 +30,7 @@ use crate::values::{
 // for one value and fail nothing else.
 fn assert_encoders_agree<K>(value: &K)
 where
-    K: ConfigKind + Schema + Serialize + aether_data::wire::WireEncode + Debug,
+    K: ConfigKind + Schema + Serialize + WireEncode + Debug,
 {
     let typed = to_vec(value).expect("a fixture config wire-encodes");
     let derived = encode_to_vec(value).expect("a fixture config owned-encodes");
