@@ -7,11 +7,11 @@
 
 What problem are we solving? What constraints, prior decisions, or forces are at play? Enough background that a future reader can judge whether this decision still applies.
 
+When this decision leans on a mechanism another ADR describes, name the symbol it leans on — the function, type, variant, or route — beside the citation. A later change that removes the mechanism is then greppable from here, so this ADR cannot go on describing a route that no longer exists.
+
 ## Decision
 
 What we decided, stated plainly.
-
-When this decision leans on a mechanism another ADR describes, name the symbol it leans on — the function, type, variant, or route — beside the citation. A later change that removes the mechanism is then greppable from here, so this ADR cannot go on describing a route that no longer exists.
 
 ## Consequences
 

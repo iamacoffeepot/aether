@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-08-14
+- **Amended:** 2026-08-26 — §5's mechanism sentence was corrected to the post-ADR-0191 route (`reduce_suppression_disposition`); the decision is unchanged.
 
 ## Context
 
