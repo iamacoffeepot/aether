@@ -31,7 +31,9 @@ impl Beat {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let out_dir = out_dir.to_path_buf();
-        Self { stop, worker: Some(thread::spawn(move || beat_until_stopped(&out_dir, &worker_stop))) }
+        #[allow(clippy::disallowed_methods)] // aether-suppression-request: infra heartbeat timer below the mail layer
+        let worker = thread::spawn(move || beat_until_stopped(&out_dir, &worker_stop));
+        Self { stop, worker: Some(worker) }
     }
 }
 
