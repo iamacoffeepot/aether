@@ -56,7 +56,7 @@ pub const fn http_success(status: u16) -> bool {
 // The many bools are the point: this is a checklist of independent completeness
 // signals the host projects, not a state machine — a two-variant enum per signal
 // would only rename `true`/`false` without adding meaning.
-#[allow(clippy::struct_excessive_bools)]
+#[allow(clippy::struct_excessive_bools)] // aether-suppression-request: nine independent fail-closed completeness facts, not a state machine
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Completeness {
     /// `## Problem statement` present and non-empty.

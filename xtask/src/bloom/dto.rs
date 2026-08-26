@@ -6,6 +6,8 @@
 
 use std::fmt;
 
+#[cfg(test)]
+use aether_bloomery::{BloomId, BloomStatus};
 use aether_bloomery::{Digest, Evidence, EvidenceKind, Membership, WorkpieceId};
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -155,7 +157,7 @@ pub fn test_member(workpiece: &str, revision: impl Into<Digest>) -> MemberView {
 #[cfg(test)]
 pub fn test_bloom(id: impl Into<Digest>, status: BloomStatus, members: Vec<MemberView>) -> BloomView {
     BloomView {
-        id: aether_bloomery::BloomId(id.into()),
+        id: BloomId(id.into()),
         status,
         superseded_by: None,
         members,

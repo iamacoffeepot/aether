@@ -14,6 +14,7 @@ use super::dto::{
     SealRequest, SupersedeRequest, SuppressionAnswerRequest, WithdrawRequest, WriteRevisionRequest,
 };
 use super::http;
+use super::plan::spec_id;
 
 /// Thin client over one coordinator.
 pub struct Client<'a> {
@@ -158,7 +159,7 @@ impl<'a> Client<'a> {
         let journal = self.journal()?;
         for record in journal.records.into_iter().rev() {
             if let Some(spec) = spec_in_fact(&record.event.fact)
-                && crate::bloom::plan::spec_id(&spec).as_hex() == bloom_id
+                && spec_id(&spec).as_hex() == bloom_id
             {
                 return Ok(spec);
             }

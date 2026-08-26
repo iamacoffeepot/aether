@@ -21,7 +21,7 @@ mod upgrade;
 use std::env;
 use std::path::{Path, PathBuf};
 
-use aether_bloomery::{DEFAULT_HTTP_PORT, Digest, KeyId};
+use aether_bloomery::{DEFAULT_HTTP_PORT, Digest, KeyId, Outcome};
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 
@@ -651,7 +651,7 @@ fn run_supersede(client: &Client<'_>, args: &SupersedeArgs) -> Result<String> {
     Ok(render_outcome(&outcome.outcome))
 }
 
-pub fn render_outcome(outcome: &aether_bloomery::Outcome) -> String {
+pub fn render_outcome(outcome: &Outcome) -> String {
     format!("{}\n", serde_json::to_string_pretty(outcome).unwrap_or_else(|_| format!("{outcome:?}")))
 }
 
