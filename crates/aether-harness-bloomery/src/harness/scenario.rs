@@ -101,28 +101,7 @@ impl ScenarioHarness {
             );
         }
 
-        let owned_state;
-        let owned_runs;
-        let store_path;
-        let artifacts_root;
-        let worktree_base;
-        if let (Some(store), Some(artifacts), Some(worktree)) =
-            (&builder.shared_store, &builder.shared_artifacts, &builder.shared_worktree)
-        {
-            owned_state = None;
-            owned_runs = None;
-            store_path = store.clone();
-            artifacts_root = artifacts.clone();
-            worktree_base = worktree.clone();
-        } else {
-            let state = tempfile::tempdir().expect("a temporary root for the journal and the artifacts store");
-            store_path = state.path().join("bloomery.db").to_string_lossy().into_owned();
-            artifacts_root = state.path().join("artifacts").to_string_lossy().into_owned();
-            let runs = tempfile::tempdir().expect("lane worktree base");
-            worktree_base = runs.path().to_string_lossy().into_owned();
-            owned_state = Some(state);
-            owned_runs = Some(runs);
-        }
+        let BootRoots { owned_state, owned_runs, store_path, artifacts_root, worktree_base } = boot_roots(&builder);
 
         if let Some(script) = &builder.script {
             script.write_to(Path::new(&worktree_base)).expect("the mock-lane script writes");
@@ -191,12 +170,19 @@ impl ScenarioHarness {
             step_budget: builder.step_budget,
         };
 
+        // The control core refuses every read until its boot journal replay has
+        // folded, so a scenario step that lands in that window reads a refusal
+        // where it expected a projection. Awaited once, here, rather than
+        // retried at each call site: the flag never goes back, so the window
+        // this closes is the only one a scenario can meet.
+        harness.wire.await_replayed();
+
         match builder.backend {
             Backend::Fixture => harness.base = harness.sealable_fixture_base(),
             Backend::LocalRepo if builder.coordinator == CoordinatorKind::InProcess => {
-                // Correspondence only. A view() here waits long enough for the
-                // land reactor's boot tick to consume a replayed land decision,
-                // so a restart scenario would observe Landed before it can
+                // Correspondence only, and no further wait: the land reactor's
+                // boot tick consumes a replayed land decision, so a restart
+                // scenario that idles here would observe Landed before it can
                 // assert the journal still reads Resolved.
                 harness.wait_for_genesis_correspondence();
             }
@@ -777,6 +763,47 @@ impl ScenarioHarness {
 
     pub(super) fn fake(&self) -> &FakeGithub {
         self.fake.as_ref().expect("this method is a fixture-cell method")
+    }
+}
+
+/// Where one booting harness keeps its journal, artifacts, and lane worktrees,
+/// and which of those directories it owns.
+struct BootRoots {
+    /// The journal / artifacts tempdir, when this harness minted it. `None` on
+    /// shared roots, whose lifetime belongs to the [`HarnessRoots`] a restart
+    /// scenario holds across both coordinators.
+    ///
+    /// [`HarnessRoots`]: super::HarnessRoots
+    owned_state: Option<TempDir>,
+    /// The lane-worktree tempdir, on the same terms.
+    owned_runs: Option<TempDir>,
+    store_path: String,
+    artifacts_root: String,
+    worktree_base: String,
+}
+
+/// Fresh temporary roots, or the shared ones a restart scenario passed in.
+fn boot_roots(builder: &HarnessBuilder) -> BootRoots {
+    if let (Some(store), Some(artifacts), Some(worktree)) =
+        (&builder.shared_store, &builder.shared_artifacts, &builder.shared_worktree)
+    {
+        return BootRoots {
+            owned_state: None,
+            owned_runs: None,
+            store_path: store.clone(),
+            artifacts_root: artifacts.clone(),
+            worktree_base: worktree.clone(),
+        };
+    }
+
+    let state = tempfile::tempdir().expect("a temporary root for the journal and the artifacts store");
+    let runs = tempfile::tempdir().expect("lane worktree base");
+    BootRoots {
+        store_path: state.path().join("bloomery.db").to_string_lossy().into_owned(),
+        artifacts_root: state.path().join("artifacts").to_string_lossy().into_owned(),
+        worktree_base: runs.path().to_string_lossy().into_owned(),
+        owned_state: Some(state),
+        owned_runs: Some(runs),
     }
 }
 

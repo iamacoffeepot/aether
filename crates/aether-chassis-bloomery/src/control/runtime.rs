@@ -55,7 +55,7 @@ use aether_bloomery::{
     window_label,
 };
 
-use super::{ControlCore, ControlSetup, ObserveTick};
+use super::{ControlCore, ControlSetup, ObserveTick, PRE_REPLAY_REFUSAL};
 use crate::artifacts::{ArtifactsCapabilityState, GetResult, resolve_root};
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 #[cfg(feature = "github")]
@@ -866,11 +866,7 @@ impl NativeActor for ControlCore {
     fn on_query(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, mail: Query) {
         let inbound = ctx.take_inbound();
         if !state.replayed {
-            inbound.reply(&QueryResult::Err {
-                error: "the boot journal replay has not finished; the projection is not yet the one the journal \
-                        describes"
-                    .to_owned(),
-            });
+            inbound.reply(&QueryResult::Err { error: PRE_REPLAY_REFUSAL.to_owned() });
             return;
         }
         let result = match mail.selector {
@@ -893,11 +889,7 @@ impl NativeActor for ControlCore {
     fn on_metrics_query(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, mail: MetricsQuery) {
         let inbound = ctx.take_inbound();
         if !state.replayed {
-            inbound.reply(&MetricsQueryResult::Err {
-                error: "the boot journal replay has not finished; the projection is not yet the one the journal \
-                        describes"
-                    .to_owned(),
-            });
+            inbound.reply(&MetricsQueryResult::Err { error: PRE_REPLAY_REFUSAL.to_owned() });
             return;
         }
         inbound.reply(&metrics_response(state, mail));
@@ -911,11 +903,7 @@ impl NativeActor for ControlCore {
     fn on_spend_query(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, _mail: SpendQuery) {
         let inbound = ctx.take_inbound();
         if !state.replayed {
-            inbound.reply(&SpendQueryResult::Err {
-                error: "the boot journal replay has not finished; the projection is not yet the one the journal \
-                        describes"
-                    .to_owned(),
-            });
+            inbound.reply(&SpendQueryResult::Err { error: PRE_REPLAY_REFUSAL.to_owned() });
             return;
         }
         inbound.reply(&spend_response(&state.spend));
