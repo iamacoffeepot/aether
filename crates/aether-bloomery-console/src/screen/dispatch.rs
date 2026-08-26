@@ -72,6 +72,15 @@ impl DispatchList {
         self.cursor.selected()
     }
 
+    #[must_use]
+    pub fn enter_pushes(&self, store: &Store) -> bool {
+        let rows = self.rows(store);
+        self.cursor
+            .selected()
+            .filter(|nonce| !nonce.is_empty())
+            .is_some_and(|nonce| rows.iter().find(|row| &row.nonce == nonce).is_none_or(|row| row.evidence_retained))
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, store: &Store) -> Outcome {
         let rows = self.rows(store);
         match key.code {
@@ -153,7 +162,7 @@ impl DispatchList {
         .style(palette::body())
         .header(header)
         .row_highlight_style(palette::cursor())
-        .highlight_symbol("> ");
+        .highlight_symbol(super::caret(self.enter_pushes(store)));
         let mut state = TableState::default()
             .with_selected(self.cursor.selected_index(&rows, |row| row.nonce.clone()))
             .with_offset(self.scroll);
@@ -310,5 +319,18 @@ mod tests {
             list.handle_key(KeyEvent::from(KeyCode::Enter), &store),
             Outcome::Push(Nav::transcript("dispatch-1"))
         );
+    }
+
+    #[test]
+    fn a_row_enter_refuses_paints_no_caret() {
+        // The plausible bug: a swept row advertises `>` while Enter has
+        // already decided it cannot open a transcript.
+        let bloom = digest(1);
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_bloom_dispatches(bloom, Ok(page()));
+        let mut list = DispatchList::new(bloom, "wp-b");
+        let mut terminal = Terminal::new(TestBackend::new(100, 8)).expect("test backend");
+        terminal.draw(|frame| list.render(frame, frame.area(), &store)).expect("draw");
+        assert_eq!(super::super::row_caret(&terminal, "dispatch-other"), "  ");
     }
 }
