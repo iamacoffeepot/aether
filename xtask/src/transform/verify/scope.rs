@@ -22,6 +22,24 @@
 //! config, cargo/nextest config, this tool's own crate), a path matching no
 //! package and no rule, a component crate anywhere in the closure, and any
 //! error at all reaching for git or the package graph.
+//!
+//! The one direction that does not widen is a diff that entered no crate at
+//! all — [`Scope::Outside`]. There the whole tree is not the safe answer but
+//! the expensive one: nothing a workspace run compiles differs from the base,
+//! so it re-proves the base at the candidate's expense and lends it every
+//! unrelated flake it meets. That scope is claimed only when every path in the
+//! diff lies outside every workspace crate root, and the members that narrow to
+//! a closure record an explicit empty-closure pass instead of running.
+//!
+//! The closure decides one thing besides the argv: whether `verify.test`'s
+//! `cargo xtask dist` pre-build runs at all. That step cross-builds
+//! every component package in its own cargo invocation, plus the behaviour
+//! variants and the chassis binaries, and it is the single largest compile in
+//! the lane — but what it produces is read only by tests that resolve a dist
+//! artifact through the filesystem. Whether any crate in the closure does that
+//! is the same question `cargo xtask affected` answers as
+//! [`Selection::wasm_needed`](crate::affected::select::Selection::wasm_needed),
+//! so the scope carries that answer through rather than deriving a second one.
 
 use std::collections::BTreeSet;
 use std::process::Command;
@@ -42,6 +60,11 @@ use crate::affected::rules::global_screen;
 /// as the subset that happens to matter under the current member breakdown.
 const VERIFY_RUN_ALL_EXACT: &[&str] = &["rustfmt.toml"];
 
+/// How many of the diff's paths an [`Scope::Outside`] receipt names before it
+/// says how many more there are. The reader needs to recognize the diff, not to
+/// enumerate a docs sweep that moved two hundred files.
+const MAX_NAMED_PATHS: usize = 12;
+
 /// The crate set a member of the umbrella compiles over.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Scope {
@@ -59,6 +82,18 @@ pub(super) enum Scope {
         /// that makes a wrong closure legible: a crate that should have been
         /// reached appears here by name instead of vanishing.
         skipped: Vec<String>,
+        /// Whether any crate in the closure resolves a `cargo xtask dist`
+        /// artifact by filesystem path at test time — the selection's own
+        /// `wasm_needed`, carried rather than recomputed so the lane and the
+        /// gate it predicts cannot answer it two ways.
+        wasm_needed: bool,
+    },
+    /// The candidate diff entered no workspace crate at all, so the compiling
+    /// members have an empty closure and nothing of the candidate's to build.
+    Outside {
+        /// The diff's own paths, so the verdict is checkable rather than
+        /// trusted: a reader confirms that none of them is a crate path.
+        paths: Vec<String>,
     },
 }
 
@@ -106,13 +141,8 @@ impl Scope {
         if let Some(reason) = selection.run_all {
             return Ok(Self::workspace(reason));
         }
-        // A closure of nothing is a diff the path rules resolved to no crate
-        // at all — prose, agent state, a non-`ci.yml` workflow. Narrowing to
-        // an empty package list would ask cargo to compile nothing and report
-        // that as a verdict, so the empty case takes the whole tree like every
-        // other case the closure cannot speak for.
         if selection.packages.is_empty() {
-            return Ok(Self::workspace("the diff resolved to no workspace crate"));
+            return Ok(Self::outside(changed, &workspace.crate_roots()));
         }
         if let Some(source) = wasm_source_in(&selection.packages, workspace.wasm_sources()) {
             return Ok(Self::workspace(format!(
@@ -122,15 +152,83 @@ impl Scope {
 
         let members = workspace.members();
         let skipped = members.difference(&selection.packages).cloned().collect();
-        Ok(Self::Closure { packages: selection.packages.into_iter().collect(), skipped })
+        Ok(Self::Closure {
+            packages: selection.packages.into_iter().collect(),
+            skipped,
+            wasm_needed: selection.wasm_needed,
+        })
+    }
+
+    /// The scope a diff the path rules resolved to no package computes.
+    ///
+    /// A closure of nothing is a diff that reached no crate — prose, agent
+    /// state, a non-`ci.yml` workflow. Compiling the whole tree for it is a
+    /// fail-open in the expensive direction and only that: the crates a
+    /// workspace run would build are byte-for-byte the base's, so the suite
+    /// re-proves the base at the candidate's expense and lends the candidate
+    /// every unrelated flake it meets on the way. The gate this lane predicts
+    /// already declines that work — CI's pull-request lane skips its test steps
+    /// outright on an empty affected set — so the empty case states an empty
+    /// closure rather than the widest possible one.
+    ///
+    /// What the empty selection does *not* prove on its own is that the diff
+    /// stayed outside the crates. The path rules also deselect a few files that
+    /// live inside one (`README*`, `LICENSE*`, `.gitignore`), and such a file
+    /// can be `include_str!`d into a crate that compiles it. So a path under any
+    /// crate root takes the whole tree with its reason stated, and the empty
+    /// closure is claimed only for a diff every path of which is outside every
+    /// crate root.
+    fn outside(changed: &[String], crate_roots: &BTreeSet<String>) -> Self {
+        changed.iter().find(|path| crate_roots.iter().any(|root| path.starts_with(root))).map_or_else(
+            || Self::Outside { paths: changed.to_vec() },
+            |inside| {
+                Self::workspace(format!(
+                    "{inside} sits inside a crate root and the path rules resolved it to no package, so what it \
+                     can reach is unstated"
+                ))
+            },
+        )
     }
 
     /// The crates a scoped member narrows to, or `None` when this run compiles
     /// the whole workspace.
+    ///
+    /// [`Self::Outside`] answers `None` with the rest: it names no crates to
+    /// compile, and a member that reached a command under it anyway must run
+    /// the stated workspace argv rather than one with `--workspace` traded for
+    /// no `-p` at all, which cargo reads as the whole workspace regardless.
     pub(super) fn packages(&self) -> Option<&[String]> {
         match self {
-            Self::Workspace { .. } => None,
+            Self::Workspace { .. } | Self::Outside { .. } => None,
             Self::Closure { packages, .. } => Some(packages),
+        }
+    }
+
+    /// Whether the tests this run selects read a `cargo xtask dist` artifact,
+    /// and so whether `verify.test`'s pre-build has anything to produce for
+    /// them.
+    ///
+    /// A workspace run says yes for the same reason it compiles everything: it
+    /// selects the suites that load component wasm and fork the dist-resolved
+    /// chassis binaries, so the pre-build is theirs. A closure says what its
+    /// selection said — a crate resolving a dist artifact by path is a
+    /// structural property of its dependency list, recomputed from the
+    /// workspace sources on every push by the `affected::invariants` module's
+    /// `dist_consumers` scan rather than trusted to a list here.
+    ///
+    /// Declining the pre-build is the narrow direction, so it is worth naming
+    /// what happens when this is wrong. `verify.test` runs under
+    /// `AETHER_REQUIRE_RUNTIME=1`, which turns a missing artifact into a failed
+    /// test rather than a silent skip — a misclassification is loud on the next
+    /// run, never a candidate integrating on a suite that quietly did not
+    /// execute.
+    pub(super) fn wasm_needed(&self) -> bool {
+        match self {
+            Self::Workspace { .. } => true,
+            Self::Closure { wasm_needed, .. } => *wasm_needed,
+            // A diff that entered no crate compiles nothing; the compiling
+            // members record the empty-closure pass before any prepare runs.
+            Self::Outside { .. } => false,
         }
     }
 
@@ -154,7 +252,7 @@ impl Scope {
     /// minutes earlier, which is the failure this predicate exists to stop.
     pub(super) fn judges(&self, package: &str) -> bool {
         match self {
-            Self::Workspace { .. } => true,
+            Self::Workspace { .. } | Self::Outside { .. } => true,
             Self::Closure { packages, .. } => packages.iter().any(|name| name == package),
         }
     }
@@ -168,22 +266,37 @@ impl Scope {
     pub(super) fn receipt(&self) -> String {
         match self {
             Self::Workspace { reason } => format!("verify scope: every workspace crate — {reason}\n"),
-            Self::Closure { packages, skipped } => format!(
+            Self::Closure { packages, skipped, wasm_needed } => format!(
                 "verify scope: the candidate diff's reverse-dependency closure.\n\
-                 crates in ({}): {}\ncrates skipped ({}): {}\n",
+                 crates in ({}): {}\ncrates skipped ({}): {}\ndist pre-build: {}\n",
                 packages.len(),
                 packages.join(" "),
                 skipped.len(),
                 skipped.join(" "),
+                if *wasm_needed {
+                    "needed — a crate in the closure resolves a dist artifact by path"
+                } else {
+                    "not needed — no crate in the closure resolves a dist artifact by path"
+                },
+            ),
+            Self::Outside { paths } => format!(
+                "verify scope: no workspace crate — every one of the candidate diff's {} path(s) lies outside \
+                 every crate root, so the closure is empty and the compiling members record a pass without \
+                 running.\npaths ({}): {}\n",
+                paths.len(),
+                paths.len(),
+                named(paths),
             ),
         }
     }
 
     /// The line a scoped member's own log opens with, so a reader who opens
     /// `verify.clippy.log` learns what it looked at without correlating files.
-    /// `None` for a workspace run, whose log needs no qualification.
+    /// `None` for a workspace run, whose log needs no qualification, and for an
+    /// empty closure, whose members write [`Self::empty_closure_verdict`]
+    /// instead of a log to qualify.
     pub(super) fn member_notice(&self) -> Option<String> {
-        let Self::Closure { packages, skipped } = self else {
+        let Self::Closure { packages, skipped, .. } = self else {
             return None;
         };
         Some(format!(
@@ -193,6 +306,52 @@ impl Scope {
             packages.len() + skipped.len(),
         ))
     }
+
+    /// The whole log a compiling member writes when this run's closure is
+    /// empty, or `None` when there is work for it to do.
+    ///
+    /// Stated at length because it is the only thing standing where a member's
+    /// output would be, and a pass nobody can account for is worse than the
+    /// full-suite run it replaces. It names the verdict, why the member did not
+    /// run, and what the pass rests on: the crates it would have compiled are
+    /// the base's own, unchanged by a diff that never entered one.
+    pub(super) fn empty_closure_verdict(&self) -> Option<String> {
+        let Self::Outside { paths } = self else {
+            return None;
+        };
+        Some(format!(
+            "pass: not run — no workspace crate in the diff; the closure this member compiles is empty.\n\
+             Every one of the candidate's {} changed path(s) lies outside every workspace crate root, so the \
+             crates this member would build are byte-for-byte the base's and this run would re-prove the base \
+             rather than judge the candidate. Nothing was compiled and no test was executed (see \
+             verify.scope.log).\npaths ({}): {}\n",
+            paths.len(),
+            paths.len(),
+            named(paths),
+        ))
+    }
+}
+
+#[cfg(test)]
+impl Scope {
+    /// The scope of a diff that entered no crate, for exercising the members'
+    /// empty-closure verdict without a git repository or a package graph.
+    pub(super) fn outside_of(paths: &[&str]) -> Self {
+        Self::Outside { paths: paths.iter().map(|path| (*path).to_owned()).collect() }
+    }
+}
+
+/// A bounded rendering of a diff's paths: the first [`MAX_NAMED_PATHS`], then a
+/// count of what was left out. A silently truncated list would make a diff that
+/// touched something look like one that did not.
+fn named(paths: &[String]) -> String {
+    let listed: Vec<&str> = paths.iter().take(MAX_NAMED_PATHS).map(String::as_str).collect();
+    let omitted = paths.len() - listed.len();
+    let list = listed.join(" ");
+    if omitted == 0 {
+        return list;
+    }
+    format!("{list}, and {omitted} more")
 }
 
 /// The paths `base..HEAD` changed — the member candidate's own diff, which is
@@ -323,6 +482,57 @@ mod tests {
         );
     }
 
+    /// A crate that resolves a `cargo xtask dist` artifact by filesystem path,
+    /// and whose own reverse-dependency closure reaches no component crate — so
+    /// the scope narrows instead of failing open and the pre-build question is
+    /// actually asked. Derived rather than assumed: the test below refuses to
+    /// pass on a narrowing that never happened.
+    const DIST_CONSUMING_LEAF: &str = "aether-chassis-desktop";
+
+    /// A crate whose closure reads nothing the pre-build produces — the shape
+    /// every member of a coordinator-side wave has.
+    const DIST_FREE_LEAF: &str = "aether-chassis-bloomery";
+
+    #[test]
+    fn the_dist_prebuild_follows_the_closure_rather_than_the_whole_tree() {
+        // Tripwire. `cargo xtask dist` cross-builds thirteen
+        // component packages in thirteen cargo invocations plus the chassis
+        // binaries, and `verify.test` ran it before every member however narrow
+        // — for a coordinator-side candidate, minutes of cross-build producing
+        // wasm that no test in the closure opens. Both directions are the
+        // invariant. A closure that stops declining the pre-build puts the cost
+        // back; a closure that starts declining one it needs leaves a
+        // dist-resolving test with no artifact, and `AETHER_REQUIRE_RUNTIME=1`
+        // turns that into a red member on a candidate that did nothing wrong.
+        let free = Scope::over_changed(&strings(&[&format!("crates/{DIST_FREE_LEAF}/src/lib.rs")]))
+            .expect("compute the closure over a coordinator-side change");
+        let consuming = Scope::over_changed(&strings(&[&format!("crates/{DIST_CONSUMING_LEAF}/src/lib.rs")]))
+            .expect("compute the closure over a dist-resolving change");
+
+        assert!(free.packages().is_some(), "{DIST_FREE_LEAF} must narrow, or the question is never asked");
+        assert!(consuming.packages().is_some(), "{DIST_CONSUMING_LEAF} must narrow, or the question is never asked");
+        assert!(
+            !free.wasm_needed(),
+            "no crate in {DIST_FREE_LEAF}'s closure opens a dist artifact: {}",
+            free.receipt()
+        );
+        assert!(
+            consuming.wasm_needed(),
+            "{DIST_CONSUMING_LEAF} resolves a dist artifact by path and its closure must say so: {}",
+            consuming.receipt(),
+        );
+
+        // The whole tree keeps the pre-build for the same reason it keeps the
+        // whole argv: it selects the suites that load component wasm and fork
+        // the dist-resolved chassis binaries.
+        assert!(Scope::resolve(None).wasm_needed(), "a workspace run must pre-build");
+
+        // Both halves stated where the reader is, so a run that skipped the
+        // cross-build is read rather than inferred from a missing log.
+        assert!(free.receipt().contains("dist pre-build: not needed"), "{}", free.receipt());
+        assert!(consuming.receipt().contains("dist pre-build: needed"), "{}", consuming.receipt());
+    }
+
     #[test]
     fn a_workspace_level_input_runs_the_whole_workspace() {
         // Tripwire for acceptance 2. Each of these reshapes the build graph,
@@ -376,6 +586,61 @@ mod tests {
 
         assert_eq!(scope.packages(), None);
         assert!(scope.receipt().contains("could not be computed"), "{}", scope.receipt());
+    }
+
+    #[test]
+    fn a_diff_that_entered_no_crate_resolves_an_empty_closure() {
+        // Tripwire for the fail-open this arm closed: a docs-only member and a
+        // non-`ci.yml` workflow member each resolved to no package and were
+        // handed the whole workspace, which compiled ninety-six crates and ran
+        // the entire suite over a diff that could not move any of it. The
+        // expensive direction is not the safe one here — it re-proves the base
+        // at the candidate's expense and lends the candidate every unrelated
+        // flake the suite meets on the way.
+        let scope = Scope::over_changed(&strings(&["docs/adr/0200-verification-is-a-ledger-of-proof-facts.md"]))
+            .expect("resolve a docs-only diff");
+
+        assert!(
+            matches!(scope, Scope::Outside { .. }),
+            "a docs-only diff must not take the whole workspace: {scope:?}"
+        );
+        assert_eq!(scope.packages(), None, "an empty closure names no crate to compile");
+        assert!(scope.empty_closure_verdict().is_some(), "the compiling members record a verdict rather than run");
+        assert!(scope.receipt().contains("no workspace crate"), "{}", scope.receipt());
+        assert!(
+            scope.receipt().contains("docs/adr/0200"),
+            "the receipt names the diff it rests on: {}",
+            scope.receipt()
+        );
+
+        let workflow = Scope::over_changed(&strings(&[".github/workflows/perf-compare.yml"]))
+            .expect("resolve a non-ci.yml workflow diff");
+        assert!(matches!(workflow, Scope::Outside { .. }), "a workflow that is not ci.yml reaches no crate");
+    }
+
+    #[test]
+    fn only_a_diff_outside_every_crate_root_may_skip_the_compiling_members() {
+        // Tripwire for the direction that would let a code change dodge its
+        // tests. The empty-closure pass rests on the compiled content being
+        // byte-for-byte the base's, which holds only for a diff that never
+        // entered a crate — so a path *inside* a crate root that the path rules
+        // happened to deselect (`README*`, `LICENSE*`, `.gitignore`, any rule
+        // added later) must widen the run instead of emptying it. Such a file
+        // can be `include_str!`d into the crate that ships it.
+        let inside = Scope::over_changed(&strings(&["crates/aether-math/README.md"]))
+            .expect("resolve a diff inside a crate root");
+
+        assert!(inside.empty_closure_verdict().is_none(), "a path inside a crate root must not empty the closure");
+        assert!(inside.receipt().contains("every workspace crate"), "{}", inside.receipt());
+        assert!(inside.receipt().contains("crates/aether-math/README.md"), "{}", inside.receipt());
+
+        // The two scopes that do name work keep it: a narrowed run compiles its
+        // closure and a workspace run compiles the tree, and neither may answer
+        // with a verdict nothing ran for.
+        let closure = Scope::over_changed(&strings(&["crates/aether-chassis-bloomery/src/lib.rs"]))
+            .expect("compute the closure over a near-leaf change");
+        assert!(closure.empty_closure_verdict().is_none(), "a crate source change must still be compiled and tested");
+        assert!(Scope::resolve(None).empty_closure_verdict().is_none(), "a workspace run must still run");
     }
 
     #[test]

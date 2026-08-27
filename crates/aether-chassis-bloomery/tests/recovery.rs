@@ -33,14 +33,22 @@ use aether_chassis_bloomery::store::{
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, mailbox_id_from_path};
-use common::client::{call, connect_and_handshake};
-use common::{Coordinator, free_port};
+use common::Coordinator;
+use common::client::{call, spawn_and_connect};
 use serde::Serialize;
 
-/// Fork the `bloomery` bin against `db` on `port`, reaped when the returned
-/// guard drops.
-fn spawn(port: u16, db: &str) -> Coordinator {
-    Coordinator::spawn(port, &[("AETHER_STORE_PATH", db)])
+/// How long a fork has to come up and answer a handshake, across however many
+/// forks that takes.
+const HANDSHAKE_BUDGET: Duration = Duration::from_mins(1);
+
+/// Fork the `bloomery` bin against `db` and handshake the child that stayed up,
+/// reaped when the returned guard drops.
+///
+/// RPC port `0`: the child holds its port from the moment it binds and reports
+/// which one, so neither a sibling fixture nor this suite's own restart can be
+/// handed a port someone else already took (#5000, #5116).
+fn spawn_ready(db: &str) -> (Coordinator, TcpStream) {
+    spawn_and_connect("recovery-test", HANDSHAKE_BUDGET, || Coordinator::spawn(0, &[("AETHER_STORE_PATH", db)]))
 }
 
 fn store_call<Req, Reply>(stream: &mut TcpStream, cid: u64, request: &Req) -> Reply
@@ -58,9 +66,7 @@ fn kill_and_restart_converges_over_rpc() {
     let db = db.to_str().unwrap();
 
     // First boot: seal a synthetic single-workpiece bloom through typed mail.
-    let port = free_port();
-    let coordinator = spawn(port, db);
-    let mut stream = connect_and_handshake(port, "recovery-test");
+    let (coordinator, mut stream) = spawn_ready(db);
 
     // A real, wire-encoded bloom-protocol event — the shape the host journals.
     // The control core replays this journal at boot and decodes each record as an
@@ -104,9 +110,7 @@ fn kill_and_restart_converges_over_rpc() {
     coordinator.kill9();
 
     // Restart against the same database file.
-    let port = free_port();
-    let _coordinator = spawn(port, db);
-    let mut stream = connect_and_handshake(port, "recovery-test");
+    let (_coordinator, mut stream) = spawn_ready(db);
 
     // Journal replay: the sealed event survived the crash.
     let replay: ReplayJournalResult = store_call(&mut stream, 1, &ReplayJournal);
@@ -213,7 +217,7 @@ fn wait_for_attempt(stream: &mut TcpStream, cid_base: u64) -> (Event, Decisions)
             ReplayJournalResult::Err { error } => panic!("journal replay failed: {error}"),
         };
         for record in &records {
-            let decisions = decode_recorded_decisions(&record.decisions, record.decisions_schema.as_deref())
+            let decisions = decode_recorded_decisions(&record.decisions, record.decisions_schema_digest.as_deref())
                 .unwrap_or_else(|error| panic!("record {} did not decode: {error}", record.idempotency_key));
             assert!(
                 !matches!(
@@ -269,16 +273,16 @@ fn a_completed_order_is_admitted_after_replay_not_as_unknown_bloom() {
     // The restart: same store, same scratch root the previous process left.
     // A long poll keeps the boot tick as the only drain so a retry the
     // admission may enqueue does not spawn a live lane while we inspect.
-    let port = free_port();
-    let _coordinator = Coordinator::spawn(
-        port,
-        &[
-            ("AETHER_STORE_PATH", db),
-            ("AETHER_GITHUB_LOCAL_WORKTREE_BASE", worktrees_path),
-            ("AETHER_GITHUB_POLL_INTERVAL_SECS", "3600"),
-        ],
-    );
-    let mut stream = connect_and_handshake(port, "recovery-test");
+    let (_coordinator, mut stream) = spawn_and_connect("recovery-test", HANDSHAKE_BUDGET, || {
+        Coordinator::spawn(
+            0,
+            &[
+                ("AETHER_STORE_PATH", db),
+                ("AETHER_GITHUB_LOCAL_WORKTREE_BASE", worktrees_path),
+                ("AETHER_GITHUB_POLL_INTERVAL_SECS", "3600"),
+            ],
+        )
+    });
 
     let (admitted, decided) = wait_for_attempt(&mut stream, 1);
     match admitted.fact {

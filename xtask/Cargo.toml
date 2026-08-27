@@ -46,5 +46,17 @@ sha2 = { workspace = true, features = ["std"] }
 syn = { workspace = true, features = ["full"] }
 tokio = { version = "1", features = ["rt-multi-thread", "signal", "sync", "time"] }
 
+# Landlock LSM helpers for the model-lane child confinement (ADR-0194). Linux
+# only — the crate talks to the kernel ABI, so mac builds of xtask stay
+# unchanged. Unused until issue 4875's confinement slice consumes it.
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
+
+# The Unused dependencies gate otherwise fails on a dependency this slice
+# deliberately does not reference; the consuming confinement slice is issue
+# 4875's next step.
+[package.metadata.cargo-machete]
+ignored = ["landlock"] # aether-suppression-request: unused until issue 4875's confinement slice consumes it
+
 [lints]
 workspace = true

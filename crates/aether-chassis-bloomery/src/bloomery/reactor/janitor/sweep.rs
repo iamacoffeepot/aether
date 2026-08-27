@@ -1,7 +1,12 @@
-//! The journal-driven sweep: rebuild the snapshot, then reclaim whatever the
-//! journal says is terminal. Factored out of the reactor so tests drive it
+//! The journal-driven sweep of **working state** (ADR-0211): nonce-keyed
+//! dispatch checkouts, terminal-bloom working refs, and the moved-aside
+//! leavings of past evictions. Factored out of the reactor so tests drive it
 //! against a `SqliteStore` and a stub [`TransformRunner`] without the mail
 //! harness.
+//!
+//! Records — evidence directories and resolved session trees — belong to the
+//! archive pass, not this tick. Caches — cargo target directories — are the
+//! only disk-pressure kill, and still run every tick.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -18,18 +23,10 @@ use crate::bloomery::TransformRunner;
 use crate::bloomery::config::JANITOR_REF_PRUNES_PER_TICK;
 use crate::store::{StoreBackend, membership};
 
-/// The suffix a dispatch's evidence directory carries under the scratch root —
-/// the same spelling [`LocalExecutor`](crate::bloomery::LocalExecutor) uses.
-const EVIDENCE_SUFFIX: &str = "-evidence";
+use super::records::{between_blooms, bloom_is_live, child_name_of, dispatch_owners};
 
 /// The prefix a lane slot's fallback checkout or target directory carries.
 const SLOT_PREFIX: &str = "slot-";
-
-/// The directory under the scratch root holding one checkout per reusable
-/// harness session, and the working tree inside each — the same spelling
-/// [`LocalExecutor`](crate::bloomery::LocalExecutor) lays them out under.
-const SESSIONS_DIR: &str = "sessions";
-const SESSION_TREE_DIR: &str = "tree";
 
 /// The suffix a lane slot's cargo target directory carries.
 const TARGET_SUFFIX: &str = "-target";
@@ -38,87 +35,61 @@ const TARGET_SUFFIX: &str = "-target";
 /// it out of the build path and the removal that frees its bytes.
 const EVICTING_SUFFIX: &str = ".evicting-";
 
-/// Seconds in a day — the unit [`JanitorPolicy::evidence_retention_days`] is
-/// stated in.
-const SECS_PER_DAY: u64 = 86_400;
-
 /// Configured retention and budget the sweep applies.
 #[derive(Clone, Copy, Debug)]
 pub struct JanitorPolicy {
     /// Combined size ceiling across every `slot-*-target` directory.
     pub lane_target_budget_bytes: u64,
-    /// How often a slot target tree may be re-walked. Distinct from the poll
-    /// interval that decides how often the pass runs at all.
-    pub lane_target_measure_interval_secs: u64,
-    /// Days to keep consumed evidence of a terminal bloom.
+    /// Floor between size walks, in seconds. Stated apart from the executor's
+    /// poll interval because the two answer different questions: the poll is
+    /// how often the pass runs at all, this is how often a pass that *could*
+    /// evict is allowed to pay for `dir_usage`. `0` measures on every tick
+    /// that has a free slot.
+    pub target_scan_interval_secs: u64,
+    /// Days a consumed evidence directory of a terminal bloom must age before
+    /// an archive pass will move it. The tick no longer deletes evidence; the
+    /// field stays on the policy so the pass and the sweep share one struct.
     pub evidence_retention_days: u64,
 }
 
-/// Last size and recency reading per slot target directory, held across passes
-/// so an over-budget tick that cannot evict does not pay the walk again.
+/// What one pass leaves the next: the free-slot set the last measurement was
+/// taken against, and when.
+///
+/// The memo is neither a seam nor per-pass — it is process-local state the
+/// reactor holds so an over-budget tick that cannot evict does not re-walk
+/// the trees. Rebuilt empty on restart, which costs exactly one measurement.
 #[derive(Clone, Debug, Default)]
-pub struct TargetReadings {
-    slots: HashMap<usize, SlotReading>,
-    /// Fingerprint of the last over-budget summary this process emitted, so a
-    /// tick that only re-confirmed a cached answer stays silent.
-    last_over_budget: Option<OverBudgetVerdict>,
-    /// How many slot target trees have been walked since this cache was
-    /// created. Tests pin that a busy over-budget pass does not re-walk.
-    #[cfg(test)]
-    walks: usize,
+pub struct TargetScan {
+    measured_at: Option<SystemTime>,
+    free_slots: BTreeSet<usize>,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct SlotReading {
-    bytes: u64,
-    used: SystemTime,
-    taken_at: SystemTime,
-    occupied: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct OverBudgetVerdict {
-    total_bytes: u64,
-    occupied: BTreeSet<usize>,
-    unattributed: bool,
-}
-
-impl TargetReadings {
-    fn total_bytes(&self) -> u64 {
-        self.slots.values().map(|reading| reading.bytes).sum()
-    }
-
-    fn confirm(&mut self, now: SystemTime) {
-        for reading in self.slots.values_mut() {
-            reading.taken_at = now;
+impl TargetScan {
+    /// True when `free` differs from the memo's set, when nothing has been
+    /// measured yet, or when the interval has elapsed.
+    fn should_measure(&self, free: &BTreeSet<usize>, interval: Duration, now: SystemTime) -> bool {
+        let Some(measured_at) = self.measured_at else {
+            return true;
+        };
+        if *free != self.free_slots {
+            return true;
         }
+        now.duration_since(measured_at).ok().is_none_or(|elapsed| elapsed >= interval)
     }
 
-    fn clear_over_budget(&mut self) {
-        self.last_over_budget = None;
-    }
-
-    #[cfg(test)]
-    pub(super) fn walks(&self) -> usize {
-        self.walks
-    }
-}
-
-impl SlotReading {
-    fn is_stale(&self, now: SystemTime, interval: Duration) -> bool {
-        now.duration_since(self.taken_at).ok().is_none_or(|elapsed| elapsed >= interval)
+    fn record(&mut self, free: BTreeSet<usize>, now: SystemTime) {
+        self.free_slots = free;
+        self.measured_at = Some(now);
     }
 }
 
 /// What one sweep pass reclaimed, for the log line and for tests.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SweepReport {
-    /// Checkouts released because the work they belong to is terminal: a
-    /// nonce-keyed one whose owning run is over, and a session tree no live
-    /// member's conversation is bound to any more.
+    /// Nonce-keyed checkouts released because the work they belong to is
+    /// terminal — an owning run that is over. Session trees are records and
+    /// are not counted here.
     pub worktrees: usize,
-    /// Consumed evidence directories past the retention window.
-    pub evidence_dirs: usize,
     /// Candidate / integration / checkpoint refs deleted for terminal blooms.
     pub refs: usize,
     /// Slot target directories whose bytes this pass actually returned to the
@@ -126,6 +97,11 @@ pub struct SweepReport {
     /// left behind. Removals, never attempts: a directory the sweep tried and
     /// failed to remove is not one of these.
     pub target_dirs: usize,
+    /// Slot target trees this pass walked for size. Separate from
+    /// [`Self::target_dirs`]: a pass that measured nothing and a pass that
+    /// measured everything both remove zero directories when the host is over
+    /// budget with no free slot.
+    pub targets_measured: usize,
 }
 
 /// The prune seam one janitor tick talks to. [`SourceShell`] is the production
@@ -168,9 +144,6 @@ pub struct SweepRequest<'a> {
     /// window, so what the sweep believed was an idle host was one with a
     /// compiler running in the directory it deleted.
     pub lanes: &'a dyn Fn() -> LaneOccupancy,
-    /// Last size and recency reading per slot target directory. Reused across
-    /// passes until the measurement interval elapses or the slot changes hands.
-    pub target_readings: &'a mut TargetReadings,
     /// Retention and budget.
     pub policy: &'a JanitorPolicy,
     /// The clock retention and target-tree measurement freshness are measured
@@ -184,11 +157,11 @@ pub struct SweepRequest<'a> {
     pub pruned: &'a mut HashSet<BloomId>,
 }
 
-/// Rebuild the snapshot from the journal, then reclaim terminal worktrees,
-/// retained-past-window evidence, terminal-bloom working refs, and enough
-/// over-budget target dirs to get back under the budget. Best-effort
-/// throughout: a dir git refuses or a ref the source cannot delete is logged
-/// and stepped over, never a reason to skip the rest of the pass.
+/// Rebuild the snapshot from the journal, then reclaim terminal nonce-keyed
+/// worktrees, terminal-bloom working refs, and enough over-budget target dirs
+/// to get back under the budget. Best-effort throughout: a dir git refuses or
+/// a ref the source cannot delete is logged and stepped over, never a reason
+/// to skip the rest of the pass.
 ///
 /// The snapshot comes from the shared replay that folds each row's *recorded*
 /// decisions (ADR-0190), not from re-deciding the journal with this binary's
@@ -198,49 +171,41 @@ pub struct SweepRequest<'a> {
 /// replay off the real history, and because the seal door admits one active
 /// bloom per mainline, a landing lost that way refuses every seal after it.
 /// The live bloom then does not exist as far as the sweep can see, and the
-/// checkouts, evidence, and refs its members are still standing in read as
-/// nobody's.
+/// checkouts and refs its members are still standing in read as nobody's.
+///
+/// Nonce-keyed checkout reclaim runs only between blooms: no bloom in that
+/// replayed snapshot is active-and-unlanded, and no order is outstanding.
+/// Computed in this pass from those two sets, never sampled elsewhere or
+/// cached across ticks. While anything walks, that sweep skips quietly.
+/// Evidence directories and session trees are records (ADR-0211) and are not
+/// deleted here — the operator archive pass moves them. Disk pressure is the
+/// slot-target budget eviction, which still runs every tick and evicts only
+/// those directories — regenerable build state, never source trees or text.
+/// The target sweep measures on its own cadence: a size walk runs only when a
+/// slot is free to evict and either occupancy has changed or the scan
+/// interval has elapsed.
 ///
 /// # Errors
 /// The store could not be read. A journal row that does not decode is logged
 /// and left out rather than failed — a torn record must not take the
 /// coordinator's janitor down.
-pub fn sweep(request: &mut SweepRequest<'_>) -> rusqlite::Result<SweepReport> {
+pub fn sweep(request: &mut SweepRequest<'_>, scan: &mut TargetScan) -> rusqlite::Result<SweepReport> {
     let snapshot = membership::replay_snapshot(request.store)?;
     let outstanding = request.store.list_outstanding_nonces()?;
     let live: HashSet<&str> = outstanding.iter().map(String::as_str).collect();
     let owners = dispatch_owners(request.store, &outstanding)?;
+    let between_blooms = between_blooms(&snapshot, &outstanding);
 
-    let worktrees = reclaim_worktrees(request.runner, request.worktree_base, &live, &owners, &snapshot)
-        + reclaim_session_trees(request.runner, request.worktree_base, request.store, &snapshot, &outstanding)?;
-    let evidence_dirs = reclaim_evidence(request, &live, &owners, &snapshot);
+    let worktrees = if between_blooms {
+        reclaim_worktrees(request.runner, request.worktree_base, &live, &owners, &snapshot)
+    } else {
+        0
+    };
     let refs = request.source.map_or(0, |source| prune_terminal_refs(source, &snapshot, request.pruned));
-    let target_dirs = sweep_targets(request);
-    Ok(SweepReport { worktrees, evidence_dirs, refs, target_dirs })
-}
-
-/// Nonce → owning bloom, from outstanding rows and the durable owner table.
-fn dispatch_owners(store: &mut dyn StoreBackend, outstanding: &[String]) -> rusqlite::Result<HashMap<String, BloomId>> {
-    let mut owners = HashMap::new();
-    for nonce in outstanding {
-        if let Some(order) = store.lookup_order(nonce)?
-            && let Some(bloom) = Digest::from_slice(&order.bloom).map(BloomId)
-        {
-            owners.insert(nonce.clone(), bloom);
-        }
-    }
-    Ok(owners)
-}
-
-fn bloom_of(store: &mut dyn StoreBackend, nonce: &str, owners: &HashMap<String, BloomId>) -> Option<BloomId> {
-    if let Some(bloom) = owners.get(nonce) {
-        return Some(*bloom);
-    }
-    store.lookup_dispatch_owner(nonce).ok().flatten().and_then(|bytes| Digest::from_slice(&bytes).map(BloomId))
-}
-
-fn bloom_is_live(snapshot: &Snapshot, bloom: &BloomId) -> bool {
-    snapshot.blooms.get(bloom).is_some_and(|record| is_active_unlanded(record.status))
+    let interval = Duration::from_secs(request.policy.target_scan_interval_secs);
+    let now = request.now;
+    let (target_dirs, targets_measured) = sweep_targets(request, scan, interval, now);
+    Ok(SweepReport { worktrees, refs, target_dirs, targets_measured })
 }
 
 fn reclaim_worktrees(
@@ -287,190 +252,6 @@ fn reclaim_worktrees(
         }
     }
     reclaimed
-}
-
-/// Release the checkout of every harness session no live member is bound to
-/// any more (#5425).
-///
-/// A session's tree is created when the session is minted and reused by every
-/// launch of that conversation — a member's own retry laps, and a declared-edge
-/// dependent that inherits it — so nothing inside the session's life may remove
-/// it. What ends it is the work ending: no order under this slug is outstanding
-/// any more, and every member whose row names it landed with its bloom, was
-/// withdrawn from it, or left with it when the bloom was superseded or
-/// cancelled. Everything the live set does not name is reclaimable, which also
-/// clears the trees of a bloom this process never saw walk.
-///
-/// The candidates are the repository's *registered* worktrees, filtered to the
-/// `sessions/<slug>/tree` shape, for the reason [`reclaim_worktrees`] filters to
-/// children of the base: the scratch root is a configured path, and a
-/// registration is the only positive proof a directory under it is one of ours.
-///
-/// The session's compiled artifacts inside each slot target are deliberately
-/// not chased. Cargo names its fingerprint and incremental directories by a
-/// metadata hash this process cannot derive from a source path, and a
-/// hand-removal of part of a target directory is not an operation cargo
-/// supports — a half-removed fingerprint set fails the next build in ways that
-/// read as a regression in the candidate. What bounds that growth is the budget
-/// eviction below, which takes a whole target out atomically.
-///
-/// # Errors
-/// The store could not be read for the live members' slugs.
-fn reclaim_session_trees(
-    runner: &dyn TransformRunner,
-    worktree_base: &Path,
-    store: &mut dyn StoreBackend,
-    snapshot: &Snapshot,
-    outstanding: &[String],
-) -> rusqlite::Result<usize> {
-    let Ok(base) = fs::canonicalize(worktree_base.join(SESSIONS_DIR)) else {
-        return Ok(0);
-    };
-    let registered = match runner.registered_worktrees() {
-        Ok(registered) => registered,
-        Err(error) => {
-            tracing::warn!(
-                target: "aether_chassis_bloomery::janitor",
-                %error,
-                "janitor: worktree registrations unreadable; terminal session trees not reclaimed",
-            );
-            return Ok(0);
-        }
-    };
-    let live = live_session_slugs(store, snapshot, outstanding)?;
-
-    let mut reclaimed = 0;
-    for worktree in registered {
-        let Some(slug) = session_slug_of(&base, &worktree) else {
-            continue;
-        };
-        if live.contains(slug.as_str()) {
-            continue;
-        }
-        tracing::info!(
-            target: "aether_chassis_bloomery::janitor",
-            %slug,
-            worktree = %worktree.display(),
-            "janitor: reclaiming the checkout of a session no live member is bound to",
-        );
-        if reclaim_checkout(runner, &worktree) {
-            reclaimed += 1;
-        }
-    }
-    Ok(reclaimed)
-}
-
-/// The slug a registered worktree belongs to, when it is one of ours: exactly
-/// `<base>/<slug>/tree`, both sides canonicalized.
-fn session_slug_of(base: &Path, worktree: &Path) -> Option<String> {
-    if worktree.file_name()?.to_str()? != SESSION_TREE_DIR {
-        return None;
-    }
-    child_name_of(base, worktree.parent()?)
-}
-
-/// Every session slug still entitled to its tree: one named by a member of a
-/// bloom that is active and unlanded and not itself withdrawn from it, and one
-/// named by an order that is still outstanding.
-///
-/// The second half is not a belt on the first. The journal is keyed by bloom
-/// and only blooms are in it, so a dispatch whose order names no sealed bloom
-/// is invisible to the membership walk however live it is — the pre-bloom
-/// scoping run (ADR-0208) is exactly that shape: a real lane, working in a real
-/// session tree, under a reserved digest nothing ever seals. Reading the
-/// outstanding orders as well is what makes "no live work is bound to this
-/// tree" a statement about the work rather than about the journal's coverage of
-/// it, and an outstanding order is the narrowest durable evidence that a lane
-/// may still be standing in the directory.
-fn live_session_slugs(
-    store: &mut dyn StoreBackend,
-    snapshot: &Snapshot,
-    outstanding: &[String],
-) -> rusqlite::Result<HashSet<String>> {
-    let mut live = HashSet::new();
-    for record in snapshot.blooms.values().filter(|record| is_active_unlanded(record.status)) {
-        let bloom = record.spec.id();
-        for member in record.spec.members() {
-            if record.withdrawn.contains_key(&member.workpiece) {
-                continue;
-            }
-            if let Some(slug) = store.lookup_session_slug(bloom.0.as_bytes(), &member.workpiece.0)? {
-                live.insert(slug);
-            }
-        }
-    }
-
-    for nonce in outstanding {
-        let Some(order) = store.lookup_order(nonce)? else {
-            continue;
-        };
-        if let Some(slug) = store.lookup_session_slug(&order.bloom, &order.workpiece)? {
-            live.insert(slug);
-        }
-    }
-    Ok(live)
-}
-
-fn reclaim_evidence(
-    request: &mut SweepRequest<'_>,
-    live: &HashSet<&str>,
-    owners: &HashMap<String, BloomId>,
-    snapshot: &Snapshot,
-) -> usize {
-    let entries = match fs::read_dir(request.worktree_base) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return 0,
-        Err(error) => {
-            tracing::warn!(
-                target: "aether_chassis_bloomery::janitor",
-                %error,
-                "janitor: evidence root unreadable",
-            );
-            return 0;
-        }
-    };
-
-    let mut reclaimed = 0;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(nonce) = evidence_nonce_of(&path) else {
-            continue;
-        };
-        let owner = bloom_of(request.store, &nonce, owners);
-        if evidence_is_protected(live, snapshot, &nonce, owner.as_ref()) {
-            continue;
-        }
-        if age_days(&path, request.now).is_none_or(|age| age < request.policy.evidence_retention_days) {
-            continue;
-        }
-        tracing::info!(
-            target: "aether_chassis_bloomery::janitor",
-            %nonce,
-            evidence = %path.display(),
-            "janitor: reclaiming a consumed evidence directory past the retention window",
-        );
-        if remove_abandoned(&path) {
-            reclaimed += 1;
-        }
-    }
-    reclaimed
-}
-
-fn evidence_is_protected(live: &HashSet<&str>, snapshot: &Snapshot, nonce: &str, owner: Option<&BloomId>) -> bool {
-    // An outstanding order is the narrowest durable evidence that a lane may
-    // still be standing in this directory. The journal cannot speak for a
-    // dispatch whose owner is not a sealed bloom — the pre-bloom scoping run
-    // (ADR-0208) is exactly that shape — and whether that order is abandoned is
-    // not this sweep's question: the executor reconciles the outstanding set
-    // against its own runs at boot, re-adopting the ones it recognizes and
-    // reclaiming the rest, and faults an order whose lane is gone. The
-    // directory becomes eligible when the order stops being outstanding.
-    if live.contains(nonce) {
-        return true;
-    }
-    // Consumed, but the bloom is still working — keep for forensics and
-    // the calibration window until that bloom itself is terminal.
-    owner.is_some_and(|bloom| bloom_is_live(snapshot, bloom))
 }
 
 fn prune_terminal_refs(source: &dyn WorkingRefPruner, snapshot: &Snapshot, already: &mut HashSet<BloomId>) -> usize {
@@ -590,57 +371,83 @@ struct SlotTarget {
 /// Bring the slot target directories back under budget, evicting the coldest
 /// first and only as far as the budget requires.
 ///
+/// This is the only disk-pressure lever, and it runs on every tick — tree and
+/// text reclaim wait until the coordinator is between blooms; target
+/// directories are regenerable build state and are what pressure actually
+/// evicts. Occupancy is still re-read live immediately before each eviction,
+/// and unattributed occupancy still refuses the pass; those guards stay
+/// exactly as they are.
+///
 /// Reclaiming *everything* on an overage — what this did until the 2026-08-14
 /// incident — makes each firing maximally destructive, and a budget set below
 /// the working set makes it fire forever: the host can never get under, so
 /// every tick wants to sweep and races every lane start. Evicting to the line
 /// keeps the warm caches that are still inside it.
 ///
-/// Size is the expensive part of the pass, so readings live on
-/// [`SweepRequest::target_readings`] and a slot is re-walked only when its
-/// reading is older than the measurement interval or the slot has changed
-/// hands since it was taken. An over-budget tick that evicts nothing marks
-/// those readings current so the next poll does not re-derive them.
-fn sweep_targets(request: &mut SweepRequest<'_>) -> usize {
-    let mut removed = reclaim_evicting_leftovers(request.target_base);
+/// Size is the expensive part of the pass. The cheap questions — which slot
+/// directories exist, which of them are free — decide whether a walk can
+/// change anything; [`TargetScan`] remembers the free set the last walk was
+/// taken against so an unchanged occupancy inside the scan interval does not
+/// pay again.
+fn sweep_targets(
+    request: &SweepRequest<'_>,
+    scan: &mut TargetScan,
+    interval: Duration,
+    now: SystemTime,
+) -> (usize, usize) {
+    let removed = reclaim_evicting_leftovers(request.target_base);
+    let paths = slot_target_paths(request.target_base);
     // Cheap decision: occupancy at the start of the size work. The destructive
-    // path re-reads live per candidate below; this sample only decides what to
-    // walk and whether an unidentified child means we should not walk at all.
+    // path re-reads live per candidate below; this sample only decides whether
+    // anything is free to evict, and an unidentified child forbids every slot.
     let occupancy = (request.lanes)();
-    if occupancy.unattributed {
-        note_unattributed(request, &occupancy);
-        return removed;
+    let free = free_slots(&paths, &occupancy);
+    if free.is_empty() || !scan.should_measure(&free, interval, now) {
+        tracing::debug!(
+            target: "aether_chassis_bloomery::janitor",
+            free_slots = free.len(),
+            "janitor: skipping target-dir measurement; nothing evictable or scan interval has not elapsed",
+        );
+        return (removed, 0);
     }
 
-    let (mut targets, refreshed) = collect_slot_targets(request, &occupancy);
+    let mut targets = measure(&paths);
+    let measured = targets.len();
+    scan.record(free.clone(), now);
+
     let total: u64 = targets.iter().map(|target| target.bytes).sum();
     let budget_bytes = request.policy.lane_target_budget_bytes;
     if total <= budget_bytes {
-        request.target_readings.clear_over_budget();
-        return removed;
+        return (removed, measured);
     }
 
+    tracing::info!(
+        target: "aether_chassis_bloomery::janitor",
+        total_bytes = total,
+        budget_bytes,
+        free_slots = free.len(),
+        "janitor: lane target dirs over budget",
+    );
+    let occupied_held: Vec<usize> =
+        occupancy.slots.iter().copied().filter(|slot| targets.iter().any(|target| target.slot == *slot)).collect();
     let evicted = evict_coldest(&mut targets, request, total, budget_bytes);
-    removed += evicted;
-    if evicted == 0 {
-        request.target_readings.confirm(request.now);
+    if !occupied_held.is_empty() {
+        tracing::info!(
+            target: "aether_chassis_bloomery::janitor",
+            occupied_slots = ?occupied_held,
+            "janitor: occupied slots held their target dirs",
+        );
     }
-    emit_over_budget(request, total, budget_bytes, &occupancy, evicted, refreshed);
-    removed
+    (removed + evicted, measured)
 }
 
-/// Reuse a cached reading when it is inside the interval and the slot has not
-/// changed hands; walk only otherwise.
-fn collect_slot_targets(request: &mut SweepRequest<'_>, occupancy: &LaneOccupancy) -> (Vec<SlotTarget>, bool) {
-    let Ok(entries) = fs::read_dir(request.target_base) else {
-        request.target_readings.slots.clear();
-        return (Vec::new(), false);
+/// Slot index and path of each `slot-<index>-target` directory under `base`.
+/// A `read_dir` and a name parse — no recursive walk.
+fn slot_target_paths(target_base: &Path) -> Vec<(usize, PathBuf)> {
+    let Ok(entries) = fs::read_dir(target_base) else {
+        return Vec::new();
     };
-    let interval = Duration::from_secs(request.policy.lane_target_measure_interval_secs);
-    let now = request.now;
-    let mut targets = Vec::new();
-    let mut seen = HashSet::new();
-    let mut refreshed = false;
+    let mut paths = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         let Some(slot) = path.file_name().and_then(|name| name.to_str()).and_then(slot_target_index) else {
@@ -649,33 +456,30 @@ fn collect_slot_targets(request: &mut SweepRequest<'_>, occupancy: &LaneOccupanc
         if !path.is_dir() {
             continue;
         }
-        seen.insert(slot);
-        let occupied = occupancy.slots.contains(&slot);
-        if let Some(cached) = request.target_readings.slots.get(&slot)
-            && cached.occupied == occupied
-            && !cached.is_stale(now, interval)
-        {
-            targets.push(SlotTarget { slot, path, bytes: cached.bytes, used: cached.used });
-            continue;
-        }
-
-        let usage = dir_usage(&path);
-        #[cfg(test)]
-        {
-            request.target_readings.walks += 1;
-        }
-        request
-            .target_readings
-            .slots
-            .insert(slot, SlotReading { bytes: usage.bytes, used: usage.newest, taken_at: now, occupied });
-        refreshed = true;
-        targets.push(SlotTarget { slot, path, bytes: usage.bytes, used: usage.newest });
+        paths.push((slot, path));
     }
-    request.target_readings.slots.retain(|slot, _| seen.contains(slot));
-    (targets, refreshed)
+    paths
 }
 
-fn evict_coldest(targets: &mut [SlotTarget], request: &mut SweepRequest<'_>, total: u64, budget_bytes: u64) -> usize {
+/// Walk each listed slot directory for size and recency.
+fn measure(paths: &[(usize, PathBuf)]) -> Vec<SlotTarget> {
+    paths
+        .iter()
+        .map(|(slot, path)| {
+            let usage = dir_usage(path);
+            SlotTarget { slot: *slot, path: path.clone(), bytes: usage.bytes, used: usage.newest }
+        })
+        .collect()
+}
+
+fn free_slots(paths: &[(usize, PathBuf)], occupancy: &LaneOccupancy) -> BTreeSet<usize> {
+    if occupancy.unattributed {
+        return BTreeSet::new();
+    }
+    paths.iter().map(|(slot, _)| *slot).filter(|slot| !occupancy.slots.contains(slot)).collect()
+}
+
+fn evict_coldest(targets: &mut [SlotTarget], request: &SweepRequest<'_>, total: u64, budget_bytes: u64) -> usize {
     // Coldest first: the slot nobody has built in for longest is the one whose
     // loss costs the least rebuild time.
     targets.sort_by_key(|target| target.used);
@@ -699,68 +503,11 @@ fn evict_coldest(targets: &mut [SlotTarget], request: &mut SweepRequest<'_>, tot
             continue;
         }
         if evict_target_dir(&target.path) {
-            request.target_readings.slots.remove(&target.slot);
             held = held.saturating_sub(target.bytes);
             evicted += 1;
         }
     }
     evicted
-}
-
-fn note_unattributed(request: &mut SweepRequest<'_>, occupancy: &LaneOccupancy) {
-    let total = request.target_readings.total_bytes();
-    if total <= request.policy.lane_target_budget_bytes {
-        return;
-    }
-    request.target_readings.confirm(request.now);
-    let verdict = OverBudgetVerdict { total_bytes: total, occupied: occupancy.slots.clone(), unattributed: true };
-    if request.target_readings.last_over_budget.as_ref() == Some(&verdict) {
-        return;
-    }
-    tracing::warn!(
-        target: "aether_chassis_bloomery::janitor",
-        "janitor: a lane child is running in an unidentified slot; leaving every target dir in place",
-    );
-    request.target_readings.last_over_budget = Some(verdict);
-}
-
-fn emit_over_budget(
-    request: &mut SweepRequest<'_>,
-    total: u64,
-    budget_bytes: u64,
-    occupancy: &LaneOccupancy,
-    evicted: usize,
-    refreshed: bool,
-) {
-    let verdict = OverBudgetVerdict {
-        total_bytes: total,
-        occupied: occupancy.slots.clone(),
-        unattributed: occupancy.unattributed,
-    };
-    if !refreshed && request.target_readings.last_over_budget.as_ref() == Some(&verdict) {
-        return;
-    }
-    if evicted == 0 {
-        tracing::info!(
-            target: "aether_chassis_bloomery::janitor",
-            total_bytes = total,
-            budget_bytes,
-            lanes_running = occupancy.any_running(),
-            occupied_slots = occupancy.slots.len(),
-            "janitor: lane target dirs over budget with no evictable slot; leaving occupied target dirs in place",
-        );
-    } else {
-        tracing::info!(
-            target: "aether_chassis_bloomery::janitor",
-            total_bytes = total,
-            budget_bytes,
-            evicted,
-            lanes_running = occupancy.any_running(),
-            occupied_slots = occupancy.slots.len(),
-            "janitor: lane target dirs over budget; evicted least recently used back toward the line",
-        );
-    }
-    request.target_readings.last_over_budget = Some(verdict);
 }
 
 fn slot_target_index(name: &str) -> Option<usize> {
@@ -778,28 +525,6 @@ fn is_slot_directory(name: &str) -> bool {
 
 fn scratch_nonce_of(base: &Path, worktree: &Path) -> Option<String> {
     child_name_of(base, worktree)
-}
-
-/// The file name of `path` when its parent is exactly `base`, canonicalized on
-/// both sides — the discriminator both checkout sweeps read their key with.
-fn child_name_of(base: &Path, path: &Path) -> Option<String> {
-    let parent = fs::canonicalize(path.parent()?).ok()?;
-    if parent != *base {
-        return None;
-    }
-    Some(path.file_name()?.to_str()?.to_owned())
-}
-
-fn evidence_nonce_of(path: &Path) -> Option<String> {
-    if !path.is_dir() {
-        return None;
-    }
-    path.file_name()?.to_str()?.strip_suffix(EVIDENCE_SUFFIX).filter(|nonce| !nonce.is_empty()).map(str::to_owned)
-}
-
-fn age_days(path: &Path, now: SystemTime) -> Option<u64> {
-    let modified = fs::metadata(path).ok()?.modified().ok()?;
-    now.duration_since(modified).ok().map(|elapsed| elapsed.as_secs() / SECS_PER_DAY)
 }
 
 /// What one directory tree costs and when it was last written.
@@ -967,6 +692,4 @@ fn hex_of(digest: &Digest) -> String {
 
 /// Retention window as a [`Duration`], for tests that age a directory.
 #[cfg(test)]
-pub(super) fn retention_duration(days: u64) -> Duration {
-    Duration::from_secs(days.saturating_mul(SECS_PER_DAY))
-}
+pub(super) use super::records::retention_duration;

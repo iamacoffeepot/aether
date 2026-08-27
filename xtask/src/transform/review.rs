@@ -21,7 +21,7 @@ use crate::transform::{Measurements, TransformArgs, resolve_harness, run_model_l
 /// critic (`Transformation::for_member_stage` dispatches it for the Review
 /// stage). Recognized here so an unknown id stays unmapped exactly as in the
 /// other lanes.
-pub(super) const REVIEW_CRITIC: &str = "review.critic";
+pub(super) use aether_bloomery::REVIEW_CRITIC_COMMAND as REVIEW_CRITIC;
 
 /// The review lane's in-repo instruction source, embedded like the construct
 /// lane's: the critic prompt is assembled from this text plus the subject and

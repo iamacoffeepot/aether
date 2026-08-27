@@ -97,6 +97,13 @@ impl CompilerCache {
     pub(super) fn served(&self) -> Option<Counters> {
         read_counters().map(|closing| closing.since(self.opening))
     }
+
+    /// A handle tests can export without talking to a server. `export` only
+    /// looks at whether the option is `Some`, so the counters here are unused.
+    #[cfg(test)]
+    pub(super) fn unused() -> Self {
+        Self { opening: Counters { hits: 0, misses: 0 } }
+    }
 }
 
 /// The host's sccache, or `None` when it has none.

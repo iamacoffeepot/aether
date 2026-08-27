@@ -40,7 +40,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use aether_actor::{MailSender, runtime};
-use aether_bloomery::{CommissionProjection, ProjectedReceipt, Topic, ViewDocument};
+use aether_bloomery::{CommissionProjection, ProjectedReceipt, Topic, ViewDocument, decode_row};
 use aether_bloomery_github::ReplicaError;
 use aether_data::wire::from_bytes;
 use aether_data::{Kind, MailboxId};
@@ -153,7 +153,8 @@ impl MirrorReactorState {
 /// that topic's ack prefix; the entry re-delivers on the next drain.
 fn deliver(projection: &ProjectionShell, entry: &OutboxEntry) -> Result<(), String> {
     if entry.topic == Topic::ViewDocument {
-        let view: ViewDocument = from_bytes(&entry.payload).map_err(|e| e.to_string())?;
+        let view: ViewDocument =
+            decode_row(&entry.payload, entry.payload_schema.as_deref()).map_err(|error| error.to_string())?;
         projection.reconcile_view(&view).map_err(|e| e.to_string())
     } else if entry.topic == Topic::LandingReceipt {
         let receipt: ProjectedReceipt = from_bytes(&entry.payload).map_err(|e| e.to_string())?;
@@ -244,7 +245,8 @@ fn deliver_commission(
     entry: &OutboxEntry,
     recorded: &BTreeMap<String, u64>,
 ) -> Result<Option<RecordCommissionProjection>, String> {
-    let mut document: CommissionProjection = from_bytes(&entry.payload).map_err(|error| error.to_string())?;
+    let mut document: CommissionProjection =
+        decode_row(&entry.payload, entry.payload_schema.as_deref()).map_err(|error| error.to_string())?;
     if let Some(&number) = recorded.get(&document.workpiece.0) {
         document.recorded_issue = Some(number);
     }
@@ -255,29 +257,6 @@ fn deliver_commission(
         return Ok(None);
     }
     Ok(Some(RecordCommissionProjection { id: document.workpiece.0, issue_number: number }))
-}
-
-/// Push the refs a timer check found unpublished (#5260).
-///
-/// No ack: nothing decided this and no outbox row is spent, so a failure needs
-/// no row left undelivered — the next check finds the same ref still ahead and
-/// tries again. That is the redrive, and it stays bounded because the backend's
-/// own transient counter escalates an identical repeated failure to a
-/// deterministic one rather than looping at warn forever.
-fn publish_reconciled_head(replica: &SourceReplicaShell, head: &str) {
-    match replica.publish() {
-        Ok(()) => tracing::info!(
-            target: "aether_chassis_bloomery::mirror",
-            %head,
-            "source replica reconciled a mainline advance no coordinator event announced",
-        ),
-        Err(error) => tracing::warn!(
-            target: "aether_chassis_bloomery::mirror",
-            %head,
-            %error,
-            "source replica reconcile push failed; the next drain tick re-checks the ref",
-        ),
-    }
 }
 
 /// Coalesce superseded replica requests to the latest sequence and push once.
@@ -413,30 +392,6 @@ impl NativeActor for MirrorReactorCapability {
         // remote, which converges only when the writes are serial: two workers
         // racing over one entry both read "absent" and both create.
         if state.cycle_in_flight() {
-            return;
-        }
-        // A mainline ref that advanced without a coordinator event — an
-        // operator's direct push — emits no replica topic, so nothing would
-        // ever drain it and the mirror lags for as long as the board stays
-        // quiet (#5260). Ask the ref itself instead of waiting to be told.
-        //
-        // Exclusive with the drain: claiming a worker slot makes the next
-        // tick's `cycle_in_flight` true, so the reconcile push and a topic
-        // push are never in flight together — two concurrent pushes of the
-        // same refs is exactly the race the serial cycle exists to prevent.
-        // The drains run on the following tick, which costs the poll interval
-        // and only on a tick that found work to reconcile.
-        //
-        // The question is a local `git rev-parse`, so it is answered inline;
-        // only the push it may lead to goes to a worker.
-        if let Some(replica) = state.replica.clone()
-            && let Some(head) = replica.unpublished_head()
-        {
-            let slot = WorkerSlot::claim(&state.outstanding);
-            ctx.spawn_detached::<MirrorReactorCapability, _>(move |_root| {
-                let _slot = slot;
-                publish_reconciled_head(&replica, &head);
-            });
             return;
         }
         let mut drains = Vec::new();
@@ -648,7 +603,7 @@ mod tests {
         // project it, and ack the delivered prefix.
         {
             let mut store = SqliteStore::open(db).unwrap();
-            store.enqueue_topic(Topic::ViewDocument, &encoded_view()).unwrap();
+            store.enqueue_topic(Topic::ViewDocument, &encoded_view(), None).unwrap();
 
             let entries = store.drain_topic(Topic::ViewDocument).unwrap();
             assert_eq!(entries.len(), 1, "the enqueued view is drainable on its topic");
@@ -675,7 +630,7 @@ mod tests {
         // idempotent, so the re-projection converges to the same carbon copy.
         {
             let mut store = SqliteStore::open(db).unwrap();
-            store.enqueue_topic(Topic::ViewDocument, &encoded_view()).unwrap();
+            store.enqueue_topic(Topic::ViewDocument, &encoded_view(), None).unwrap();
             drop(store);
 
             // Simulated restart: reopen the same database file.
@@ -713,7 +668,7 @@ mod tests {
             receipt: LandingReceipt { bloom, previous_base: digest(10), new_head: digest(20) },
             members: vec![WorkpieceId(format!("issue-{MEMBER_ISSUE}"))],
         };
-        store.enqueue_topic(Topic::LandingReceipt, &to_vec(&projected).unwrap()).unwrap();
+        store.enqueue_topic(Topic::LandingReceipt, &to_vec(&projected).unwrap(), None).unwrap();
 
         let entries = store.drain_topic(Topic::LandingReceipt).unwrap();
         assert_eq!(entries.len(), 1, "the enqueued receipt is drainable on the receipt topic");
@@ -770,8 +725,12 @@ mod tests {
         // on_drain_result projects the entry and — on success — the detached
         // worker acks the delivered prefix. The ack landing on egress proves the
         // worker ran (it sends the ack only after the reconcile returns Ok).
-        let entry =
-            OutboxEntry { sequence: 7, topic: Topic::ViewDocument.as_str().to_owned(), payload: encoded_view() };
+        let entry = OutboxEntry {
+            sequence: 7,
+            topic: Topic::ViewDocument.as_str().to_owned(),
+            payload: encoded_view(),
+            payload_schema: None,
+        };
         {
             let mut ctx = NativeCtx::new_dispatching(&binding, Source::NONE, MailId::NONE, MailId::NONE);
             MirrorReactorCapability::on_drain_result(
@@ -938,6 +897,7 @@ mod tests {
             sequence,
             topic: Topic::SourceReplica.as_str().to_owned(),
             payload: to_vec(&SourceReplicaPayload { new_head: digest(20) }).unwrap(),
+            payload_schema: None,
         }
     }
 
@@ -949,7 +909,7 @@ mod tests {
         let fake = FakeReplica::failing();
         let shell = SourceReplicaShell::new(fake.clone());
         let mut store = SqliteStore::open(":memory:").unwrap();
-        store.enqueue_topic(Topic::SourceReplica, &replica_entry(1).payload).unwrap();
+        store.enqueue_topic(Topic::SourceReplica, &replica_entry(1).payload, None).unwrap();
 
         let entries = store.drain_topic(Topic::SourceReplica).unwrap();
         let acks = publish_replica_batch(&shell, &entries);
@@ -1011,6 +971,7 @@ mod tests {
             sequence: 1,
             topic: Topic::ViewDocument.as_str().to_owned(),
             payload: b"not-a-view".to_vec(),
+            payload_schema: None,
         };
         let view_acks = project_batch(&projection, &[bad_view]);
         assert!(view_acks.is_empty(), "an undecodable view stalls its own topic");
@@ -1024,7 +985,12 @@ mod tests {
         let replica_acks = publish_replica_batch(&replica_shell, &[replica_entry(4)]);
         assert!(replica_acks.is_empty(), "a replica fault stalls only the replica topic");
 
-        let view = OutboxEntry { sequence: 5, topic: Topic::ViewDocument.as_str().to_owned(), payload: encoded_view() };
+        let view = OutboxEntry {
+            sequence: 5,
+            topic: Topic::ViewDocument.as_str().to_owned(),
+            payload: encoded_view(),
+            payload_schema: None,
+        };
         let view_acks = project_batch(&projection, &[view]);
         assert_eq!(view_acks.len(), 1, "the view topic still delivers beside a stalled replica");
         assert_eq!(fake.comments_on(MEMBER_ISSUE).len(), 1);
@@ -1045,6 +1011,7 @@ mod tests {
                 title: String::new(),
             })
             .unwrap(),
+            payload_schema: None,
         }
     }
 
@@ -1099,6 +1066,7 @@ mod tests {
             sequence: 1,
             topic: Topic::Commission.as_str().to_owned(),
             payload: b"not-a-commission".to_vec(),
+            payload_schema: None,
         };
         let (commission_acks, persists) = project_commission_batch(&projection, &[bad_commission]);
         assert!(commission_acks.is_empty(), "an undecodable commission stalls its own topic");
@@ -1112,11 +1080,17 @@ mod tests {
                 members: vec![WorkpieceId(format!("issue-{MEMBER_ISSUE}"))],
             })
             .unwrap(),
+            payload_schema: None,
         };
         let receipt_acks = project_batch(&projection, &[receipt]);
         assert_eq!(receipt_acks.len(), 1, "the receipt topic still delivers");
 
-        let view = OutboxEntry { sequence: 3, topic: Topic::ViewDocument.as_str().to_owned(), payload: encoded_view() };
+        let view = OutboxEntry {
+            sequence: 3,
+            topic: Topic::ViewDocument.as_str().to_owned(),
+            payload: encoded_view(),
+            payload_schema: None,
+        };
         let view_acks = project_batch(&projection, &[view]);
         assert_eq!(view_acks.len(), 1, "the view topic still delivers beside a stalled commission");
         assert_eq!(

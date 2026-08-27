@@ -79,7 +79,7 @@ pub(super) struct CommissionVerify {
 ///
 /// An empty configured token refuses every request: the surface that can
 /// approve work is fail-closed when nothing has been configured to authenticate.
-pub(super) fn authorize(request: &HttpServerRequest, token: &str) -> Result<(), HttpServerResponse> {
+pub(in crate::api::runtime) fn authorize(request: &HttpServerRequest, token: &str) -> Result<(), HttpServerResponse> {
     if token.is_empty() {
         return Err(error_response(401, "unauthenticated"));
     }

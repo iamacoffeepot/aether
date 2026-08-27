@@ -22,7 +22,8 @@ use aether_bloomery::{VerifyFailure, VerifyFailureSet};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 
-use crate::cargo::{self, WASM_TARGET, run_captured, write_json_pretty};
+use crate::affected::graph::Workspace;
+use crate::cargo::{WASM_TARGET, run_captured, write_json_pretty};
 use crate::fixtures::annotate_findings;
 use crate::transform::peak_memory::{self, PeakMemory};
 use crate::transform::sccache::{self, CompilerCache, Counters};
@@ -207,6 +208,30 @@ impl VerifyInvocation {
             args.push(base.to_owned());
         }
         args
+    }
+
+    /// The prepare step this invocation runs under `scope`, or `None` when it
+    /// has none — or when the scope it narrowed to has nothing to prepare for
+    ///.
+    ///
+    /// The one prepare in the lane is `verify.test`'s `cargo xtask dist`, which
+    /// cross-builds every component package in its own cargo invocation and
+    /// then the chassis binaries. What it produces is read only by tests that
+    /// resolve one of those artifacts through the filesystem, so a closure
+    /// containing no such crate is a run with nothing for the cross-build to
+    /// hand it — minutes of the lane's largest compile producing wasm the
+    /// selected tests never open.
+    ///
+    /// Keyed on [`Breadth`] first, like the argv narrowing and for the same
+    /// reason: a member that answers for the whole tree whatever the diff
+    /// touched must keep its stated behaviour whatever the scope says.
+    ///
+    /// This is the call the gate already makes. CI's pull-request lane runs
+    /// `cargo xtask dist` only when the affected selection sets `run_all` or
+    /// `wasm_needed`, so declining it here on the same predicate moves the lane
+    /// towards the job it predicts rather than past it.
+    fn prepare_under(&self, scope: &Scope) -> Option<&'static [&'static str]> {
+        self.prepare.filter(|_| self.breadth != Breadth::Closure || scope.wasm_needed())
     }
 }
 
@@ -1040,11 +1065,15 @@ struct SpawnRunner<'a> {
     ///
     /// One tree, not one per replay. Every base replay in a member run is at
     /// the same commit, and the tree carries a whole cold build with it: its
-    /// own `CARGO_TARGET_DIR` and its own component cross-build, neither of
-    /// which survived the `worktree remove` that used to follow each replay. A
-    /// member with four triaged failures paid for four from-scratch workspace
-    /// builds of the same base.
+    /// own `CARGO_TARGET_DIR` and, when the package under test needs it, its
+    /// own component cross-build, neither of which survived the `worktree
+    /// remove` that used to follow each replay. A member with four triaged
+    /// failures paid for four from-scratch workspace builds of the same base.
     base: Option<BaseCheckout>,
+    /// Workspace graph used to decide whether a replayed package's tests need
+    /// the component-wasm prepare. Loaded on first use so a candidate-only
+    /// replay does not pay for metadata.
+    workspace: Option<Workspace>,
 }
 
 impl MemberRunner for SpawnRunner<'_> {
@@ -1059,47 +1088,93 @@ impl MemberRunner for SpawnRunner<'_> {
 
     fn replay(&mut self, invocation: &VerifyInvocation, test: &str, at: Option<&str>) -> Result<Captured> {
         let Some(base) = at else {
-            return self.spawn_one(invocation, test, None);
+            return self.spawn_one(invocation, test, None, &replay_notices(test, None));
         };
-        let path = self.base_checkout(invocation, base)?.to_path_buf();
-        self.spawn_one(invocation, test, Some(&path))
+        let prepare = self.should_prepare(invocation, replay_package(test));
+        let path = self.base_checkout(invocation, base, prepare)?.to_path_buf();
+        self.spawn_one(invocation, test, Some(&path), &replay_notices(test, invocation.prepare.map(|_| prepare)))
     }
 }
 
 impl<'a> SpawnRunner<'a> {
     fn new(cache: Option<&'a CompilerCache>, peak: &'a PeakMemory) -> Self {
-        Self { cache, peak, base: None }
+        Self { cache, peak, base: None, workspace: None }
     }
 
-    /// The tree this member's base replays run in, opened and prepared on the
-    /// first replay that asks for it.
+    /// The tree this member's base replays run in, opened on the first replay
+    /// that asks for it and prepared only when the package under test needs the
+    /// component wasm.
     ///
     /// The base run needs a tree at the base commit, and it must not be this
     /// one: stashing would move the candidate out from under a lane that is
     /// mid-verification. A detached worktree is the cheap, side-effect-free
     /// form.
     ///
-    /// It is prepared here rather than per replay because the preparation
-    /// belongs to the tree: `verify.test` needs the component wasm the prepare
-    /// cross-builds, and without it `AETHER_REQUIRE_RUNTIME=1` turns every
-    /// scenario test red — which this triage would then read as "the base was
-    /// already broken" and use to excuse a real finding.
+    /// The prepare belongs to the tree, not to every replay: `verify.test`
+    /// scenario tests load component wasm that `cargo xtask dist` cross-builds,
+    /// and without it `AETHER_REQUIRE_RUNTIME=1` turns those tests red — which
+    /// this triage would then read as "the base was already broken" and use to
+    /// excuse a real finding. A crate whose tests do not touch that wasm must
+    /// not pay for the cross-build. The decision is per package, so a later
+    /// replay whose package does need wasm still runs the prepare on this
+    /// checkout.
+    ///
+    /// The stated prepare, not [`VerifyInvocation::prepare_under`]: a base
+    /// replay runs the member's unnarrowed argv against a tree that is not the
+    /// candidate's, so the candidate's closure says nothing about what this one
+    /// loads. Narrowing the tree's preparation by the other tree's scope is the
+    /// direction that excuses a finding, and this path only runs at all once a
+    /// member has already failed.
     ///
     /// A replay naming a different base than the open one closes it and opens
     /// that: the tree is only ever the answer to a commit.
-    fn base_checkout(&mut self, invocation: &VerifyInvocation, base: &str) -> Result<&Path> {
+    fn base_checkout(&mut self, invocation: &VerifyInvocation, base: &str, prepare: bool) -> Result<&Path> {
         if self.base.as_ref().is_none_or(|open| open.base != base) {
             self.close_base();
-            let checkout = BaseCheckout::open(base)?;
-            if let Some(prepare) = invocation.prepare {
-                let at = checkout.path();
-                let mut step = cargo::command();
-                step.args(prepare.iter().copied()).current_dir(at).env("CARGO_TARGET_DIR", at.join("target"));
-                run_captured(step).with_context(|| format!("prepare the base checkout at {}", at.display()))?;
-            }
-            self.base = Some(checkout);
+            self.base = Some(BaseCheckout::open(base)?);
+        }
+        if prepare && self.base.as_ref().is_some_and(|checkout| !checkout.prepared) {
+            let at = self.base.as_ref().expect("the checkout was just opened").path.clone();
+            self.run_base_prepare(invocation, &at)?;
+            self.base.as_mut().expect("the checkout was just opened").prepared = true;
         }
         Ok(self.base.as_ref().expect("the checkout was just opened").path())
+    }
+
+    /// Cross-build the component wasm in the base checkout, through the same
+    /// cache and peak-memory wrapper the candidate prepare uses.
+    fn run_base_prepare(&self, invocation: &VerifyInvocation, at: &Path) -> Result<()> {
+        let Some(prepare) = invocation.prepare else {
+            return Ok(());
+        };
+        let mut step = self.peak.command("cargo");
+        step.args(prepare.iter().copied())
+            .current_dir(at)
+            .env("CARGO_TARGET_DIR", at.join("target"))
+            .envs(CI_BUILD_ENV.iter().copied());
+        sccache::export(self.cache, &mut step);
+        let output = run_captured(step).with_context(|| format!("prepare the base checkout at {}", at.display()))?;
+        let _ = self.peak.take_report(output.stderr);
+        Ok(())
+    }
+
+    /// Whether this replay should run `invocation.prepare` in the base checkout.
+    ///
+    /// An unresolvable binary id keeps the prepare: skipping it on a workspace
+    /// run would turn every scenario test red and read as an inherited failure.
+    /// A workspace graph that would not load does the same — the cost of a
+    /// wasm cross-build is the fail-safe, not the fail-toward-excusal.
+    fn should_prepare(&mut self, invocation: &VerifyInvocation, package: Option<&str>) -> bool {
+        invocation.prepare.is_some()
+            && package
+                .is_none_or(|package| self.workspace().is_none_or(|workspace| workspace.needs_dist_prepare(package)))
+    }
+
+    fn workspace(&mut self) -> Option<&Workspace> {
+        if self.workspace.is_none() {
+            self.workspace = Workspace::load().ok();
+        }
+        self.workspace.as_ref()
     }
 
     /// Remove the base checkout this runner opened, if it opened one.
@@ -1123,11 +1198,30 @@ impl<'a> SpawnRunner<'a> {
     /// at one keeps the replay about the recorded input, which is the whole
     /// point of step 1 — a different dice roll is not evidence about this
     /// failure either way.
-    fn spawn_one(&self, invocation: &VerifyInvocation, test: &str, at: Option<&Path>) -> Result<Captured> {
+    fn spawn_one(
+        &self,
+        invocation: &VerifyInvocation,
+        test: &str,
+        at: Option<&Path>,
+        notices: &[String],
+    ) -> Result<Captured> {
+        let output =
+            run_captured(self.replay_command(invocation, test, at)).with_context(|| format!("replay {test}"))?;
+        let mut stderr = notices.join("\n").into_bytes();
+        if !stderr.is_empty() {
+            stderr.push(b'\n');
+        }
+        stderr.extend_from_slice(&self.peak.take_report(output.stderr));
+        Ok(Captured { stdout: output.stdout, stderr, code: output.status.code() })
+    }
+
+    /// The command a one-test replay actually dispatches: narrowed argv, the
+    /// same compiler cache the candidate run uses, and a fresh target directory
+    /// when it runs in a base checkout.
+    fn replay_command(&self, invocation: &VerifyInvocation, test: &str, at: Option<&Path>) -> Command {
         let mut command = self.peak.command(invocation.program);
         command
-            .args(invocation.args.iter().copied())
-            .args(["-E", &nextest_filter(test)])
+            .args(replay_args(invocation, test))
             .envs(invocation.env.iter().copied())
             .envs(CI_BUILD_ENV.iter().copied())
             .env("PROPTEST_CASES", "1");
@@ -1135,14 +1229,16 @@ impl<'a> SpawnRunner<'a> {
             // Its own target directory: cargo's incremental cache surfaces a
             // dependency last compiled from the other tree's source otherwise,
             // and a phantom error here would read as a base failure that
-            // excuses a real finding. It is the checkout's, so it lives as long
-            // as the checkout does and every replay after the first is warm.
+            // excuses a real finding. That is an argument against sharing
+            // cargo's fingerprints, not against the compiler cache — sccache
+            // keys each invocation by content, so the failure mode is a miss,
+            // never a wrong artifact, and this checkout is a new path with no
+            // fingerprints of its own. It is the checkout's, so it lives as
+            // long as the checkout does and every replay after the first is warm.
             command.current_dir(at).env("CARGO_TARGET_DIR", at.join("target"));
-        } else {
-            sccache::export(self.cache, &mut command);
         }
-        let output = run_captured(command).with_context(|| format!("replay {test}"))?;
-        Ok(Captured { stdout: output.stdout, stderr: self.peak.take_report(output.stderr), code: output.status.code() })
+        sccache::export(self.cache, &mut command);
+        command
     }
 }
 
@@ -1161,6 +1257,65 @@ fn nextest_filter(test: &str) -> String {
     }
 }
 
+/// The workspace package a nextest `binary-id test_name` pair names.
+///
+/// `None` when the key has no binary-id half: guessing a package from a bare
+/// test name would `-p` the wrong crate and the replay would come back
+/// [`ReplayVerdict::Unreached`].
+fn replay_package(test: &str) -> Option<&str> {
+    let mut halves = test.split_whitespace();
+    let (Some(binary), Some(_)) = (halves.next(), halves.next()) else {
+        return None;
+    };
+    binary.split("::").next().filter(|package| !package.is_empty())
+}
+
+/// The argv a one-test replay dispatches: the invocation's stated argv, narrowed
+/// to the failing test's own package when the binary-id names one, plus the
+/// nextest filter that selects that test.
+///
+/// Mirrors [`VerifyInvocation::args_under`]: `--workspace` is dropped rather
+/// than left beside `-p`, because cargo treats the pair as the whole workspace.
+/// An unresolvable binary id keeps the unnarrowed argv — building too much is
+/// slow, building the wrong crate is a [`ReplayVerdict::Unreached`].
+fn replay_args(invocation: &VerifyInvocation, test: &str) -> Vec<String> {
+    let stated = || invocation.args.iter().map(|arg| (*arg).to_owned());
+    let mut args: Vec<String> = replay_package(test).map_or_else(
+        || stated().collect(),
+        |package| stated().filter(|arg| arg != "--workspace").chain(["-p".to_owned(), package.to_owned()]).collect(),
+    );
+    args.extend(["-E".to_owned(), nextest_filter(test)]);
+    args
+}
+
+/// Notices a replay writes into its captured log so a skip or an unnarrowed
+/// fallback is diagnosable after the fact.
+fn replay_notices(test: &str, prepared: Option<bool>) -> Vec<String> {
+    let mut notices = Vec::new();
+    if replay_package(test).is_none() {
+        notices.push(format!("replay: could not resolve a package from `{test}`; keeping the unnarrowed argv"));
+    }
+    if let Some(running) = prepared {
+        let package = replay_package(test).unwrap_or(if running {
+            "the unnarrowed workspace"
+        } else {
+            "this package"
+        });
+        let action = if running {
+            "running the component-wasm prepare"
+        } else {
+            "skipped the component-wasm prepare"
+        };
+        let reason = if running {
+            "need it"
+        } else {
+            "do not need it"
+        };
+        notices.push(format!("replay: {action}; {package} tests {reason}"));
+    }
+    notices
+}
+
 /// A detached git worktree at one commit, removed on [`close`](Self::close).
 ///
 /// Deliberately not `Drop`: removing a worktree can fail, and a destructor that
@@ -1171,6 +1326,10 @@ struct BaseCheckout {
     /// The commit it stands at, so a replay can tell whether the open checkout
     /// is the one it needs.
     base: String,
+    /// Whether `invocation.prepare` has already run in this tree. A later
+    /// replay whose package needs the wasm still has to be able to run it if
+    /// an earlier one skipped.
+    prepared: bool,
 }
 
 impl BaseCheckout {
@@ -1184,7 +1343,7 @@ impl BaseCheckout {
         if !added.status.success() {
             bail!("git worktree add at {base} failed: {}", String::from_utf8_lossy(&added.stderr));
         }
-        Ok(Self { path, base: base.to_owned() })
+        Ok(Self { path, base: base.to_owned(), prepared: false })
     }
 
     fn path(&self) -> &Path {
@@ -1568,8 +1727,7 @@ fn triage_shaped(
         return triage::triage(classified, diff_base, |test, at| {
             replays += 1;
             eprintln!("verify.triage: replay {replays} (of {} candidate failures): {test}", candidates.len());
-            let captured = runner.replay(invocation, test, at)?;
-            Ok(replay_verdict(id, invocation, test, at, &captured))
+            timed_replay(id, invocation, runner, test, at)
         });
     }
     eprintln!(
@@ -1598,16 +1756,32 @@ fn triage_shaped(
         triage::triage(&kept, diff_base, |test, at| {
             replays += 1;
             eprintln!("verify.triage: replay {replays} (of {} repeated tests): {test}", still_failing.len());
-            let captured = runner.replay(invocation, test, at)?;
-            Ok(replay_verdict(id, invocation, test, at, &captured))
+            timed_replay(id, invocation, runner, test, at)
         })?
     };
-    triaged.flakes.extend(
-        cleared
-            .into_iter()
-            .map(|test| Excused { test, replayed: "a whole-member re-run on the settled host".to_owned() }),
-    );
+    triaged.flakes.extend(cleared.into_iter().map(|test| Excused {
+        test,
+        replayed: "a whole-member re-run on the settled host".to_owned(),
+        duration_millis: None,
+    }));
     Ok(triaged)
+}
+
+/// Run one named test and return the verdict, the ledger label, and the spawn's
+/// wall-clock. The duration is the interval the gate receipt otherwise swallows
+/// inside its own timer — a base replay is a cold build, and without this it is
+/// one opaque share of `verify.test`.
+fn timed_replay(
+    id: &str,
+    invocation: &VerifyInvocation,
+    runner: &mut dyn MemberRunner,
+    test: &str,
+    at: Option<&str>,
+) -> Result<(ReplayVerdict, String, u64)> {
+    let started = Instant::now();
+    let captured = runner.replay(invocation, test, at)?;
+    let (verdict, replayed) = replay_verdict(id, invocation, test, at, &captured);
+    Ok((verdict, replayed, elapsed_millis(started)))
 }
 
 /// Read one replay's captured output as a verdict about the one test it was
@@ -1677,12 +1851,55 @@ fn names_a_minimal_failing_input(log: &str) -> bool {
     log.contains("minimal failing input:")
 }
 
-/// The scope line this member's log opens with, when the member is one the run
-/// narrowed. A workspace-wide member under a narrowed run gets none — claiming
-/// a closure it did not honor would misdirect the reader of a `verify.dup`
-/// failure to crates that were never the reason.
+/// The scope lines this member's log opens with, when the member is one the run
+/// narrowed: what it compiled over, and — for the one member that has a prepare
+/// — whether that prepare ran. A workspace-wide member under a narrowed run
+/// gets none — claiming a closure it did not honor would misdirect the reader of
+/// a `verify.dup` failure to crates that were never the reason.
 fn member_scope_notice(invocation: &VerifyInvocation, scope: &Scope) -> Option<String> {
-    (invocation.breadth == Breadth::Closure).then(|| scope.member_notice()).flatten()
+    if invocation.breadth != Breadth::Closure {
+        return None;
+    }
+
+    let notice: String =
+        [scope.member_notice(), declined_prepare_notice(invocation, scope)].into_iter().flatten().collect();
+    (!notice.is_empty()).then_some(notice)
+}
+
+/// The line a member writes when its scope declined its prepare step — or
+/// `None` when the prepare ran, or when the member has none.
+///
+/// A skipped build is exactly the kind of work that has to state itself: a log
+/// with no cross-build in it and no line saying why reads as a lane that
+/// silently stopped doing something, and a reader chasing a missing artifact
+/// has nowhere to start.
+fn declined_prepare_notice(invocation: &VerifyInvocation, scope: &Scope) -> Option<String> {
+    let prepare = invocation.prepare.filter(|_| invocation.prepare_under(scope).is_none())?;
+    Some(format!(
+        "note: `cargo {}` did not run — no crate in this run's closure resolves a dist artifact by path, so the \
+         cross-build has nothing the selected tests read (see {SCOPE_LOG})\n",
+        prepare.join(" "),
+    ))
+}
+
+/// The run a member records without dispatching, when this run's closure is
+/// empty — or `None` when it has work to do.
+///
+/// Keyed on [`Breadth`] rather than on the member id, because it is the same
+/// property the narrowing itself is keyed on: a member that answers for the
+/// crates the closure reaches answers for none of them when the closure is
+/// empty, while a member that reads the whole tree whatever the diff touched
+/// still has the tree to read. So `verify.fmt`, `verify.dup`, `verify.deps`,
+/// `verify.lock` and `verify.suppress` run over a docs-only candidate exactly
+/// as they did, and the three that compile stop re-proving the base.
+///
+/// A pass rather than a skip, and a log rather than silence: ADR-0178's
+/// `failed_verifiers` names what found a defect, and this member found none —
+/// but a member that produced no evidence at all would read as a gate quietly
+/// dropped. [`Scope::empty_closure_verdict`] is that evidence.
+fn empty_closure_run(id: &str, invocation: &VerifyInvocation, scope: &Scope) -> Option<MemberRun> {
+    let verdict = (invocation.breadth == Breadth::Closure).then(|| scope.empty_closure_verdict()).flatten()?;
+    Some(MemberRun::plain(id, MemberOutcome::Passed, verdict.into_bytes(), 0))
 }
 
 // A derived verdict (currently clippy's structured warning predicate) may fail
@@ -1703,10 +1920,11 @@ fn effective_exit_code(passed: bool, exit_code: Option<i32>) -> i32 {
 fn run_prepare(
     id: &str,
     invocation: &VerifyInvocation,
+    scope: &Scope,
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
 ) -> Result<PrepareFailure> {
-    let Some(prepare) = invocation.prepare else {
+    let Some(prepare) = invocation.prepare_under(scope) else {
         return Ok(None);
     };
 
@@ -1755,26 +1973,28 @@ type PrepareFailure = Option<(String, i32, MemberOutcome)>;
 
 /// Prepare-step result plus its own wall-clock share.
 ///
-/// `(None, None)` is a member with no prepare. `(Some(log), Some(millis))` is
-/// a prepare that failed. `(None, Some(millis))` is a prepare that ran and
-/// left the member clear to run.
+/// `(None, None)` is a member with no prepare to run — either it declares none,
+/// or its scope declined the one it declares. `(Some(log), Some(millis))` is a
+/// prepare that failed. `(None, Some(millis))` is a prepare that ran and left
+/// the member clear to run.
 type TimedPrepare = (PrepareFailure, Option<u64>);
 
-/// Run `invocation`'s prepare step when it has one, and return that step's
-/// own wall-clock share so the gate receipt can split the wasm cross-build
-/// out of the member it precedes.
+/// Run `invocation`'s prepare step when its scope calls for one, and return that
+/// step's own wall-clock share so the gate receipt can split the wasm
+/// cross-build out of the member it precedes.
 fn run_timed_prepare(
     id: &str,
     invocation: &VerifyInvocation,
+    scope: &Scope,
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
 ) -> Result<TimedPrepare> {
-    if invocation.prepare.is_none() {
+    if invocation.prepare_under(scope).is_none() {
         return Ok((None, None));
     }
 
     let started = Instant::now();
-    let failure = run_prepare(id, invocation, cache, peak)?;
+    let failure = run_prepare(id, invocation, scope, cache, peak)?;
     Ok((failure, Some(elapsed_millis(started))))
 }
 
@@ -1795,47 +2015,27 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
     let cache = sccache::detect();
     let peak = peak_memory::detect();
     let started = Instant::now();
-    let output = run_captured(invocation.command(&scope, args.diff_base.as_deref(), cache.as_ref(), &peak))
-        .with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
-    let stderr = peak.take_report(output.stderr);
+    // The empty-closure verdict comes off the same seam for the same reason: a
+    // member dispatched alone against a diff that entered no crate has exactly
+    // as little to compile as it does inside the umbrella.
+    let mut run = match empty_closure_run(&args.command, &invocation, &scope) {
+        Some(run) => run,
+        None => dispatch_single(args, &invocation, &scope, cache.as_ref(), &peak)?,
+    };
     let duration_millis = elapsed_millis(started);
 
     fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let derived_pass = args.command != "verify.clippy" || clippy_verdict(&stdout, &scope);
-    let code = output.status.code();
-    let outcome = member_outcome(&invocation, derived_pass, code);
-
     let log_name = format!("{}.log", args.command);
     let log_path = args.out.join(&log_name);
-    let mut log_bytes = Vec::new();
-    if let Some(notice) = member_scope_notice(&invocation, &scope) {
-        log_bytes.extend_from_slice(notice.as_bytes());
-    }
-    if let Some(notice) = (args.command == "verify.clippy").then(|| unjudged_notice(&stdout, &scope)).flatten() {
-        log_bytes.extend_from_slice(notice.as_bytes());
-    }
-    if outcome == MemberOutcome::Operational {
-        log_bytes.extend_from_slice(operational_failure_notice(&args.command, &invocation, code).as_bytes());
-    }
-    log_bytes.extend_from_slice(&output.stdout);
-    log_bytes.extend_from_slice(&stderr);
-    fs::write(&log_path, &log_bytes).with_context(|| format!("write {}", log_path.display()))?;
+    fs::write(&log_path, &run.log).with_context(|| format!("write {}", log_path.display()))?;
 
-    let passed = outcome.passed();
-    let exit_code = effective_exit_code(passed, code);
-
-    // A failing single verify contributes its own diagnostics on the same
-    // channel the umbrella uses, so a lane run alone directs a Refine too — and
-    // a `verify.suppress` run alone states its requests on the same channel the
-    // umbrella states them on, so the two paths hand the reviewer one shape.
-    let mut run = MemberRun::plain(&args.command, outcome, log_bytes, exit_code);
     if let Some(flags) = symbol_flags(&args.command, args.diff_base.as_deref()) {
         run.set(flags);
     }
 
-    let failures = outcome.failure(&args.command).map(VerifyFailureSet::one);
+    let passed = run.outcome.passed();
+    let exit_code = run.exit_code;
+    let failures = run.outcome.failure(&args.command).map(VerifyFailureSet::one);
     let evidence = build_evidence(&args.command, args.nonce.clone(), passed, Some(exit_code), log_name, None, failures)
         .measured_by(cache.as_ref(), &peak)
         .timed(duration_millis)
@@ -1855,6 +2055,47 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
     } else {
         process::exit(exit_code);
     }
+}
+
+/// Spawn one member alone and reduce its captured output to the run
+/// [`run_single`] records — the scope and operational notices its log opens
+/// with, the derived verdict, and the exit code the umbrella's own members
+/// carry.
+///
+/// A failing single verify contributes its diagnostics on the same channel the
+/// umbrella uses, so a lane run alone directs a Refine too — and a
+/// `verify.suppress` run alone states its requests on the same channel the
+/// umbrella states them on, so the two paths hand the reviewer one shape.
+fn dispatch_single(
+    args: &TransformArgs,
+    invocation: &VerifyInvocation,
+    scope: &Scope,
+    cache: Option<&CompilerCache>,
+    peak: &PeakMemory,
+) -> Result<MemberRun> {
+    let output = run_captured(invocation.command(scope, args.diff_base.as_deref(), cache, peak))
+        .with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
+    let stderr = peak.take_report(output.stderr);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let derived_pass = args.command != "verify.clippy" || clippy_verdict(&stdout, scope);
+    let code = output.status.code();
+    let outcome = member_outcome(invocation, derived_pass, code);
+
+    let mut log = Vec::new();
+    if let Some(notice) = member_scope_notice(invocation, scope) {
+        log.extend_from_slice(notice.as_bytes());
+    }
+    if let Some(notice) = (args.command == "verify.clippy").then(|| unjudged_notice(&stdout, scope)).flatten() {
+        log.extend_from_slice(notice.as_bytes());
+    }
+    if outcome == MemberOutcome::Operational {
+        log.extend_from_slice(operational_failure_notice(&args.command, invocation, code).as_bytes());
+    }
+    log.extend_from_slice(&output.stdout);
+    log.extend_from_slice(&stderr);
+
+    Ok(MemberRun::plain(&args.command, outcome, log, effective_exit_code(outcome.passed(), code)))
 }
 
 /// The line prefixes that open a diagnostic in the verify lanes' output — rustc
@@ -2273,20 +2514,28 @@ fn run_gate(id: &'static str, pass: &GatePass<'_>) -> Result<(MemberRun, GateTim
     // candidate cannot repair any of those, and `run_prepare` charges them to
     // the host instead.
     let gate_started = Instant::now();
-    let (prepare_failure, prepare_millis) = run_timed_prepare(id, &invocation, cache, peak)?;
-    let mut runner = SpawnRunner::new(cache, peak);
-    let run = match prepare_failure {
-        Some((log, code, outcome)) => MemberRun::plain(id, outcome, log.into_bytes(), code),
-        None => run_member_discriminated(
-            id,
-            &invocation,
-            scope,
-            closure,
-            member_diff_base(id, args.diff_base.as_deref(), full),
-            &mut runner,
-        )?,
+    // Ahead of the prepare, not only of the run: `verify.test`'s prepare is the
+    // wasm cross-build, the largest single compile in the lane, and a member
+    // with an empty closure has nothing to load the wasm for.
+    let (run, prepare_millis) = if let Some(run) = empty_closure_run(id, &invocation, scope) {
+        (run, None)
+    } else {
+        let (prepare_failure, prepare_millis) = run_timed_prepare(id, &invocation, scope, cache, peak)?;
+        let mut runner = SpawnRunner::new(cache, peak);
+        let run = match prepare_failure {
+            Some((log, code, outcome)) => MemberRun::plain(id, outcome, log.into_bytes(), code),
+            None => run_member_discriminated(
+                id,
+                &invocation,
+                scope,
+                closure,
+                member_diff_base(id, args.diff_base.as_deref(), full),
+                &mut runner,
+            )?,
+        };
+        runner.close_base();
+        (run, prepare_millis)
     };
-    runner.close_base();
     let duration_millis = elapsed_millis(gate_started);
 
     let log_path = logs.join(format!("{id}.log"));
@@ -2392,19 +2641,21 @@ fn check_pass(args: &TransformArgs, logs: &Path, full: bool) -> Result<CheckPass
 mod tests {
     use super::{
         BASE_SET_SUBJECT, Captured, EvidenceChannel, MAX_FINDING_LINES, MemberOutcome, MemberRun, MemberRunner,
-        SUPPRESS_MEMBER, Scope, VERIFY_BASE, VERIFY_CHECK, VerifyInvocation, builds_artifacts, clippy_verdict, closure,
-        distil_diagnostics, effective_exit_code, environment_observations, failed_verifiers, host_fault_in,
-        member_diff_base, member_outcome, member_scope_notice, operational_failure_notice, package_name,
-        preflight_tools, prepare_failure_log, render_diagnostics, required_targets, required_tools, run_member,
-        run_member_discriminated, run_timed_prepare, umbrella_status, unjudged_notice, verify_check_members,
-        verify_command, verify_findings, workflow,
+        SUPPRESS_MEMBER, Scope, SpawnRunner, VERIFY_BASE, VERIFY_CHECK, VerifyInvocation, builds_artifacts,
+        clippy_verdict, closure, distil_diagnostics, effective_exit_code, empty_closure_run, environment_observations,
+        failed_verifiers, host_fault_in, member_diff_base, member_outcome, member_scope_notice,
+        operational_failure_notice, package_name, preflight_tools, prepare_failure_log, render_diagnostics,
+        replay_args, required_targets, required_tools, run_member, run_member_discriminated, run_timed_prepare,
+        umbrella_status, unjudged_notice, verify_check_members, verify_command, verify_findings, workflow,
     };
     use std::iter;
+    use std::path::Path;
 
     use crate::cargo::WASM_TARGET;
     use crate::transform::construct::{CONSTRUCT_IMPLEMENT, CONSTRUCT_INSTRUCTIONS};
     use crate::transform::peak_memory;
     use crate::transform::review::REVIEW_CRITIC;
+    use crate::transform::sccache::CompilerCache;
     use aether_bloomery::{VerifyFailure, VerifyFailureSet};
 
     /// The full command line an invocation dispatches, program first, in the
@@ -2749,11 +3000,24 @@ mod tests {
         }
     }
 
-    /// A computed closure over two crates, for the argv assertions.
+    /// A computed closure over two crates, for the argv assertions. Nothing in
+    /// it resolves a dist artifact by path, which is the ordinary shape;
+    /// [`dist_consuming_closure_scope`] is the other one.
     fn closure_scope(packages: &[&str]) -> Scope {
+        scope_of(packages, false)
+    }
+
+    /// The same closure, over crates whose tests read what `cargo xtask dist`
+    /// builds.
+    fn dist_consuming_closure_scope(packages: &[&str]) -> Scope {
+        scope_of(packages, true)
+    }
+
+    fn scope_of(packages: &[&str], wasm_needed: bool) -> Scope {
         Scope::Closure {
             packages: packages.iter().map(|name| (*name).to_owned()).collect(),
             skipped: vec![String::from("aether-render")],
+            wasm_needed,
         }
     }
 
@@ -2806,6 +3070,61 @@ mod tests {
     }
 
     #[test]
+    fn a_base_replay_narrows_to_the_failing_tests_package() {
+        // The base replay used to dispatch verify.test's workspace argv, so a
+        // one-crate failure compiled the whole tree into a fresh target
+        // directory. The package is the binary-id half, not the member's
+        // closure: the closure can be several crates, the test lives in one.
+        let invocation = verify_command("verify.test").expect("verify.test mapped");
+        let test = "aether-chassis-hub::fleetharness_binary_store fleetharness_uploads_lists_and_dedups_a_real_binary";
+        let args = replay_args(&invocation, test);
+
+        assert!(
+            !args.iter().any(|arg| arg == "--workspace"),
+            "a workspace flag would re-select everything the package flag just narrowed: {args:?}"
+        );
+        assert_eq!(
+            args.windows(2).find(|pair| pair[0] == "-p").map(|pair| pair[1].as_str()),
+            Some("aether-chassis-hub"),
+            "the replay builds the crate the binary id names: {args:?}"
+        );
+
+        // Tripwire: narrowing is a package selection and nothing else. The
+        // gate's own argv is what the CI-parity assertions pin; leaking `-p`
+        // onto it would leave those green while the landing suite ran one crate.
+        let flags: Vec<String> =
+            invocation.args.iter().map(|arg| (*arg).to_owned()).filter(|arg| arg != "--workspace").collect();
+        assert_eq!(args[..flags.len()], flags[..], "narrowing may drop the selection and no other flag");
+    }
+
+    #[test]
+    fn a_base_replay_exports_the_compiler_cache() {
+        // The base checkout is a new path with no cargo fingerprints. sccache
+        // keys by content, so it is the cache that can hit there — and it used
+        // to be exported only on the candidate branch.
+        let invocation = verify_command("verify.test").expect("verify.test mapped");
+        let peak = peak_memory::detect();
+        let cache = CompilerCache::unused();
+        let runner = SpawnRunner::new(Some(&cache), &peak);
+        let command = runner.replay_command(
+            &invocation,
+            "aether-chassis-hub::fleetharness_binary_store fleetharness_uploads_lists_and_dedups_a_real_binary",
+            Some(Path::new("/tmp/aether-verify-base")),
+        );
+
+        let wrapper = command
+            .get_envs()
+            .find(|(key, _)| key.to_str() == Some("RUSTC_WRAPPER"))
+            .and_then(|(_, value)| value.map(|value| value.to_string_lossy().into_owned()));
+        assert_eq!(wrapper.as_deref(), Some("sccache"), "the base branch must carry the compiler cache: {wrapper:?}");
+        assert_eq!(
+            command.get_current_dir(),
+            Some(Path::new("/tmp/aether-verify-base")),
+            "the fresh target directory stays; it protects cargo's incremental cache, which sccache does not share",
+        );
+    }
+
+    #[test]
     fn a_workspace_breadth_member_runs_the_whole_tree_under_a_closure() {
         // Tripwire: the members that stay wide are wide *because* their work
         // is cross-crate. jscpd compares every crate against every other, so a
@@ -2818,6 +3137,96 @@ mod tests {
             let invocation = verify_command(id).expect("member mapped");
             assert_eq!(invocation.args_under(&scope, None), owned(invocation.args), "{id} must not narrow");
             assert_eq!(member_scope_notice(&invocation, &scope), None, "{id} must not claim a closure it ignored");
+        }
+    }
+
+    #[test]
+    fn an_empty_closure_passes_the_compiling_members_and_leaves_the_rest_running() {
+        // Tripwire for the fail-open a docs-only member fell through: with no
+        // crate in the diff there is nothing for a compiling member to build,
+        // and running the workspace suite anyway re-proved the base for
+        // forty-odd minutes while lending the candidate every unrelated flake
+        // it met. Both halves are the invariant. A member that stops recording
+        // the pass re-opens the fail-open; a member that starts recording one
+        // it should not — a tree member, or any member under a scope that names
+        // real work — is a gate a candidate's code slipped past unrun.
+        let outside = Scope::outside_of(&["docs/adr/0200-verification-is-a-ledger-of-proof-facts.md"]);
+
+        for id in ["verify.clippy", "verify.docs", "verify.test"] {
+            let invocation = verify_command(id).expect("member mapped");
+            let run = empty_closure_run(id, &invocation, &outside).expect("a compiling member records the verdict");
+            let log = String::from_utf8_lossy(&run.log);
+
+            assert!(run.outcome.passed(), "{id} found no defect in a diff it could not have broken");
+            assert_eq!(run.exit_code, 0, "{id} passes rather than reporting a code");
+            assert!(log.contains("no workspace crate in the diff"), "{id} names why it did not run: {log}");
+            assert!(log.contains("docs/adr/0200"), "{id} names the diff its pass rests on: {log}");
+        }
+
+        for id in ["verify.fmt", "verify.dup", "verify.deps", "verify.lock", "verify.suppress"] {
+            let invocation = verify_command(id).expect("member mapped");
+            assert!(
+                empty_closure_run(id, &invocation, &outside).is_none(),
+                "{id} reads the tree whatever the diff touched and still has it to read",
+            );
+        }
+
+        let test = verify_command("verify.test").expect("verify.test mapped");
+        for scope in [closure_scope(&["aether-math"]), Scope::resolve(None)] {
+            assert!(
+                empty_closure_run("verify.test", &test, &scope).is_none(),
+                "a scope naming crates to compile must dispatch the suite: {scope:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_scoped_member_runs_its_prepare_only_when_the_closure_reads_what_it_builds() {
+        // Tripwire. `verify.test`'s prepare is the lane's largest
+        // single compile — every component package in its own cargo
+        // invocation, then the chassis binaries — and it ran ahead of every
+        // member however narrow the closure. All three arms are the invariant.
+        // A narrow closure that starts running it again puts back minutes of
+        // cross-build whose output no selected test opens; a closure that reads
+        // a dist artifact and stops running it leaves that test with nothing to
+        // load; and a workspace run that stops running it is the whole suite
+        // without its wasm.
+        let test = verify_command("verify.test").expect("verify.test mapped");
+
+        assert_eq!(
+            test.prepare_under(&closure_scope(&["aether-chassis-bloomery"])),
+            None,
+            "a closure that opens no dist artifact must not pay for the cross-build",
+        );
+        assert_eq!(
+            test.prepare_under(&dist_consuming_closure_scope(&["aether-chassis-desktop"])),
+            test.prepare,
+            "a closure that resolves a dist artifact by path keeps its stated prepare",
+        );
+        assert_eq!(
+            test.prepare_under(&Scope::resolve(None)),
+            test.prepare,
+            "a workspace run selects the suites the pre-build exists for",
+        );
+
+        // A declined build states itself where the reader is. Without the line,
+        // a log with no cross-build in it is indistinguishable from a lane that
+        // quietly stopped preparing.
+        let notice = member_scope_notice(&test, &closure_scope(&["aether-chassis-bloomery"]))
+            .expect("a scoped member qualifies its own log");
+        assert!(notice.contains("cargo xtask dist` did not run"), "{notice}");
+        assert!(
+            !member_scope_notice(&test, &dist_consuming_closure_scope(&["aether-chassis-desktop"]))
+                .expect("a scoped member qualifies its own log")
+                .contains("did not run"),
+            "a prepare that ran must not be reported as declined",
+        );
+
+        // Nothing else in the lane declares a prepare, and the narrowing must
+        // not invent one for them.
+        for &id in verify_check_members().iter().filter(|id| **id != "verify.test") {
+            let invocation = verify_command(id).expect("member mapped");
+            assert_eq!(invocation.prepare_under(&closure_scope(&["aether-math"])), None, "{id} declares no prepare");
         }
     }
 
@@ -3106,8 +3515,9 @@ mod tests {
         // prepare_millis: 0 on every gate that never prepared, which reads as
         // a free wasm cross-build rather than as "this gate has no prepare".
         let invocation = verify_command("verify.fmt").expect("verify.fmt mapped");
-        let (failure, prepare_millis) = run_timed_prepare("verify.fmt", &invocation, None, &peak_memory::detect())
-            .expect("a member with no prepare is a no-op");
+        let (failure, prepare_millis) =
+            run_timed_prepare("verify.fmt", &invocation, &Scope::resolve(None), None, &peak_memory::detect())
+                .expect("a member with no prepare is a no-op");
         assert!(failure.is_none());
         assert!(prepare_millis.is_none(), "a gate that never prepared must not stamp a prepare share");
     }
@@ -3370,6 +3780,27 @@ error: test run failed
             .expect("findings");
 
         assert!(findings.contains("run `cargo xtask fixtures regen decisions`"));
+    }
+
+    #[test]
+    fn a_schema_digest_failure_names_append_and_upcast_not_regen() {
+        let log = "\
+        FAIL [   0.008s] ( 156/3737) aether-bloomery::golden_decisions pinned_schema_digests_match_the_registry
+
+--- STDERR:              aether-bloomery::golden_decisions pinned_schema_digests_match_the_registry ---
+thread 'pinned_schema_digests_match_the_registry' panicked at crates/aether-bloomery/tests/golden_decisions/schema_digests.rs:20:5:
+kind `decisions` current digest drifted
+
+     Summary [  74.644s] 3737 tests run: 3736 passed, 1 failed, 20 skipped
+error: test run failed
+";
+
+        let findings = verify_findings(&[member("verify.test", MemberOutcome::Failed, log)])
+            .and_then(|channel| channel.text().map(str::to_owned))
+            .expect("findings");
+
+        assert!(findings.contains("append the new digest to `schema-digests.txt` and register an upcast"));
+        assert!(!findings.contains("fixtures regen"), "{findings}");
     }
 
     #[test]
@@ -3698,6 +4129,14 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         assert!(run.findings().is_none(), "a failure the base already had is not this candidate's to fix");
         assert_eq!(run.inherited().len(), 1, "the excusal is recorded against the base it was red at");
         assert_eq!(run.inherited()[0].replayed, "deadbeef");
+        assert!(
+            run.inherited()[0].duration_millis.is_some(),
+            "the base replay states its own wall time beside the excusal"
+        );
+        assert!(
+            run.observation().expect("the inherited receipt is on the lane").contains("millis"),
+            "a slow triage reads the replay's wall-clock off the dispatch",
+        );
         assert!(run.flakes().is_empty(), "and it is an inherited failure, not a flake");
     }
 

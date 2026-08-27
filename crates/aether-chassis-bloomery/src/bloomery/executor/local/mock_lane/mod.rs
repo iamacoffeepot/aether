@@ -11,9 +11,11 @@
 //!
 //! The behaviour of a run is chosen by a [`script`] the harness writes beside the
 //! run directories, not by the nonce: the coordinator mints nonces, so a test
-//! cannot name one in advance, and the lane environment scrub deliberately
-//! strips every `AETHER_*` variable before the child starts. The script's
-//! location is derived from `--out`, which is the one channel that survives both.
+//! cannot name one in advance, and the child's environment is constructed from
+//! an allow list (`lane_env`) that admits no coordinator knob a harness could
+//! plant one in. The script's location is derived from `--out`, which is the one
+//! channel that survives both.
+//!
 //!
 //! [`LaneProgram`]: super::LaneProgram
 //! [`TransformRunner`]: super::TransformRunner
@@ -107,6 +109,7 @@ pub fn run<I: IntoIterator<Item = String>>(args: I, worktree: &Path) -> Result<i
             diff_base: args.diff_base.clone(),
             task: args.task.clone(),
             worktree: Some(worktree.display().to_string()),
+            env: inherited_env_names(),
         },
     )?;
 
@@ -122,6 +125,19 @@ pub fn run<I: IntoIterator<Item = String>>(args: I, worktree: &Path) -> Result<i
     }
 
     Ok(outcome.exit_code)
+}
+
+/// The names of the environment variables this run came up holding, sorted and
+/// deduplicated — the lane boundary as the child actually sees it.
+///
+/// Enumerating the environment is not a configuration read: nothing here is
+/// resolved *as* a knob, and the names are collected only so a scenario can
+/// judge which of them crossed.
+fn inherited_env_names() -> Vec<String> {
+    let mut names: Vec<String> = env::vars_os().map(|(key, _)| key.to_string_lossy().into_owned()).collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// [`run`] over the real process's arguments and working directory — the
@@ -222,7 +238,7 @@ mod tests {
     #[test]
     fn the_script_is_found_beside_the_run_directories() {
         // Tripwire: the derivation is the only channel that survives both the
-        // coordinator-minted nonce and the `AETHER_*` environment scrub. If it
+        // coordinator-minted nonce and the constructed lane environment. If it
         // drifted from the backend's `<base>/<nonce>-evidence` layout, every
         // scenario would silently run the default mode and the scripts would
         // become decoration.

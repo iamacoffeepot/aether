@@ -98,6 +98,14 @@ tier = "human"
 glob = "crates/*/Cargo.toml"
 tier = "human"
 
+# The lockfile is the mechanical artifact of the manifest conversation above:
+# every dependency change rewrites it, and without a rule naming it here the
+# file-granularity check refuses any scope that declares it — making
+# dependency work impossible to scope at all (found by execution, issue-4875).
+[[rules]]
+glob = "/Cargo.lock"
+tier = "human"
+
 # ADRs. The routing decision lives in the ADR hard gate ABOVE this file
 # (maturity-aware): a new or established ADR is already routed to the owner by
 # the gate before this lookup runs, so this entry is only ever consulted on the

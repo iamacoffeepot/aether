@@ -7,6 +7,7 @@
 //! GitHub types — and are content-addressed the same way (`digest_of`).
 
 mod adr;
+mod api;
 mod approval;
 mod base_verify;
 mod bloom;
@@ -38,11 +39,22 @@ mod verify;
 mod workpiece_builder;
 
 pub use adr::{ADR_SCHEMA, ADR_TRANSITION_SCHEMA, Adr, AdrStatus, AdrTransition, AdrValueError};
+pub use api::{
+    AdjudicateRequest, AdrTouch, ArchiveFailureView, ArchiveListView, ArchivePassView, ArchiveRecordView,
+    BloomDispatchView, BloomDispatchesView, CancelCommissionRequest, ClaimRefView, ClaimsView, CommissionApprovalView,
+    CommissionCancelledView, CommissionCreatedView, CommissionHeadView, CommissionReopenedView, CommissionShowView,
+    CommissionsView, Completeness, CoordinatorLogEntry, CoordinatorLogsView, CreateCommissionRequest,
+    DEFAULT_HTTP_PORT, DispatchEvidenceView, DispatchFilePage, DispatchProcessView, DraftPatch, DraftView, DraftsView,
+    ErrorView, GrantRequest, HTTP_READ_TIMEOUT, HoldRequest, JournalEntry, JournalView, MemberProjection, OutcomeView,
+    ReleaseAcceptedView, ReleaseRequest, ReopenCommissionRequest, RepairRequest, RetryRequest, ReverifyBaseRequest,
+    RevisionEvidence, ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, SealRequest, SupersedeRequest,
+    SuppressionAnswerRequest, WithdrawRequest, WorkpiecesView, WriteRevisionRequest, http_success,
+};
 pub use approval::{
     ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, TierVerdict, gate_widening, path_in_surface, surface_additions,
     surface_intersection, surface_union, tier_verdict,
 };
-pub use base_verify::{BaseReceipt, BaseVerdict};
+pub use base_verify::{BaseReceipt, BaseReverify, BaseVerdict};
 pub use bloom::{
     BloomDraft, BloomSpec, DependencyError, LandingReceipt, MemberCandidate, MemberDependency, MemberSubject,
     Membership, ResolutionClaim, ResolvedBloom, ResolvedDependencies, resolve_member_dependencies,
@@ -104,7 +116,7 @@ use crate::ids::{StageId, WorkpieceId};
 /// The generic immutable node of the derivation DAG: opaque typed bytes plus
 /// the digests of the parents it derives from. Every durable value projects
 /// to an artifact; the artifact's identity is `digest_of(self)`.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Artifact {
     /// The typed tag naming what kind of bytes these are.
     pub media_type: String,
@@ -129,7 +141,7 @@ impl Artifact {
 /// The stable identity of one intended change plus its current scope
 /// revision. A GitHub issue is one projection of a workpiece; the workpiece
 /// is the native truth (ADR-0149 §The bloom).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Workpiece {
     /// The stable, projection-independent identity.
     pub id: WorkpieceId,
@@ -281,7 +293,7 @@ pub enum EvidenceKind {
 /// the wall.
 ///
 /// [`predicted_worker_secs`]: Self::predicted_worker_secs
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct Forecast {
     /// The predicted total token spend, summed over every attempt.
     pub predicted_tokens: u64,

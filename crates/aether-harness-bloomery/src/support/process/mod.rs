@@ -5,14 +5,24 @@
 //! or a timeout unwinds straight past it and leaves a fully booted coordinator
 //! running (#4724). Killing and reaping in `Drop` instead runs on both paths.
 
-use std::collections::HashSet;
-use std::fs;
+mod boot_log;
+
 use std::net::TcpListener;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::time::Instant;
 
-/// Reserve a free localhost port by binding `:0`, then release it for the bin to
-/// claim. A small race window, tolerated by the callers' connect retry loops.
+use boot_log::BootLog;
+pub use boot_log::Ingress;
+
+/// A localhost port nothing is listening on: bind `:0`, read what the OS
+/// assigned, and release it.
+///
+/// This is a port for a fixture that wants a *refusal* — a closed socket to
+/// prove a helper abandons rather than waits. It is not how a child is given a
+/// port to bind: the window between this release and that bind is the race
+/// every fork-class flake in this suite came from, so a child binds `0` and
+/// [announces](Coordinator::await_port) what it got instead.
 ///
 /// # Panics
 /// Binding `:0` or reading the bound address failed.
@@ -34,14 +44,21 @@ pub struct Coordinator {
     /// Captured at the fork so it stays readable once the child is reaped and
     /// the handle is gone.
     pid: u32,
+    /// The child's own account of which ports it bound.
+    boot: BootLog,
 }
 
 impl Coordinator {
     /// Fork the `bloomery` bin serving RPC on `rpc_port`, with `env` layered
-    /// over the two defaults every scenario wants: a free REST control-API port
-    /// (#3498 gave the bin a fixed default, which collides across the suite's
-    /// concurrently spawned bins) and closed standard streams. An entry in `env`
-    /// overrides a default of the same name.
+    /// over the two defaults every scenario wants: an OS-assigned REST
+    /// control-API port (#3498 gave the bin a fixed default, which collides
+    /// across the suite's concurrently spawned bins) and a closed stdin. An
+    /// entry in `env` overrides a default of the same name.
+    ///
+    /// Pass `0` for `rpc_port` — the child then binds a port no sibling can
+    /// steal from it and announces which one, which
+    /// [`await_port`](Self::await_port) reads back. A non-zero port is for a
+    /// fixture that needs to name the port itself.
     ///
     /// # Panics
     /// The coordinator binary could not be forked.
@@ -67,20 +84,23 @@ impl Coordinator {
         let mut command = Command::new(crate::bloomery_bin());
         command
             .env("AETHER_RPC_PORT", rpc_port.to_string())
-            // OS-assigned: a reserved-then-released HTTP port is the same
-            // bind race as RPC, and a collision here kills the child before
-            // the RPC ingress exists.
+            // OS-assigned: a reserved-then-released HTTP port is the same bind
+            // race as RPC, and a collision here kills the child before the RPC
+            // ingress exists.
             .env("AETHER_HTTP_PORT", "0")
             .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            // Piped rather than closed: the boot log is where the child says
+            // which ports it bound, and what went wrong when it binds none.
+            .stderr(Stdio::piped());
         if let Some(cwd) = cwd {
             command.current_dir(cwd);
         }
-        let child = command.spawn().expect("the bloomery coordinator forks");
+        let mut child = command.spawn().expect("the bloomery coordinator forks");
+        let stderr = child.stderr.take().expect("a piped child has a stderr handle");
 
-        Self { pid: child.id(), child: Some(child) }
+        Self { pid: child.id(), child: Some(child), boot: BootLog::draining(stderr) }
     }
 
     /// The forked process id.
@@ -90,46 +110,18 @@ impl Coordinator {
     }
 
     /// Whether the child is still running.
-    ///
-    /// `free_port` binds `:0` and releases, so a sibling can claim the port
-    /// before this bin binds. The loser exits; a deadline handshake then
-    /// attaches to the thief or burns 30s against a closed port. A caller
-    /// that requires this to stay true after the handshake is talking to the
-    /// process it spawned, not a stranger — [`super::client::spawn_and_connect`]
-    /// retries the whole fork when this goes false.
     pub fn is_alive(&mut self) -> bool {
         self.child.as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(None)))
     }
 
-    /// Local ports this process currently has in `LISTEN`, from `/proc`.
+    /// The port this child bound for `ingress`, as the child itself reported
+    /// it, waiting for the announcement until `deadline`.
     ///
-    /// Used by the handshake helper so a connect only targets a socket the
-    /// child we forked actually owns — a reserved port another suite process
-    /// claimed in the `free_port` window is skipped rather than Hello'd.
-    #[must_use]
-    pub fn listening_ports_for(pid: u32) -> Vec<u16> {
-        let ours = socket_inodes(pid);
-        if ours.is_empty() {
-            return Vec::new();
-        }
-        let mut ports = Vec::new();
-        collect_our_listen_ports("/proc/net/tcp", &ours, &mut ports);
-        collect_our_listen_ports("/proc/net/tcp6", &ours, &mut ports);
-        ports.sort_unstable();
-        ports.dedup();
-        ports
-    }
-
-    /// [`listening_ports_for`](Self::listening_ports_for) for this child.
-    #[must_use]
-    pub fn listening_ports(&self) -> Vec<u16> {
-        Self::listening_ports_for(self.pid)
-    }
-
-    /// Whether this child owns a `LISTEN` socket on `port`.
-    #[must_use]
-    pub fn listens_on(&self, port: u16) -> bool {
-        self.listening_ports().contains(&port)
+    /// # Errors
+    /// The child exited before announcing (the refusal carries what it last
+    /// logged), or it stayed silent past the deadline.
+    pub fn await_port(&self, ingress: Ingress, deadline: Instant) -> Result<u16, String> {
+        self.boot.await_port(ingress, deadline)
     }
 
     /// SIGKILL the coordinator now and reap it (`Child::kill` is SIGKILL on
@@ -156,40 +148,4 @@ impl Drop for Coordinator {
     fn drop(&mut self) {
         self.reap();
     }
-}
-
-fn socket_inodes(pid: u32) -> HashSet<u64> {
-    let Ok(entries) = fs::read_dir(format!("/proc/{pid}/fd")) else {
-        return HashSet::new();
-    };
-    entries.flatten().filter_map(|entry| parse_socket_inode(&fs::read_link(entry.path()).ok()?)).collect()
-}
-
-fn parse_socket_inode(target: &Path) -> Option<u64> {
-    target.to_str()?.strip_prefix("socket:[")?.strip_suffix(']')?.parse().ok()
-}
-
-fn collect_our_listen_ports(table: &str, ours: &HashSet<u64>, ports: &mut Vec<u16>) {
-    let Ok(text) = fs::read_to_string(table) else {
-        return;
-    };
-    for line in text.lines().skip(1) {
-        let columns: Vec<&str> = line.split_whitespace().collect();
-        // sl local rem st tx:rx tr:when retr uid timeout inode
-        if columns.len() < 10 || columns[3] != "0A" {
-            continue;
-        }
-        let Ok(inode) = columns[9].parse() else {
-            continue;
-        };
-        if ours.contains(&inode)
-            && let Some(port) = parse_hex_port(columns[1])
-        {
-            ports.push(port);
-        }
-    }
-}
-
-fn parse_hex_port(local_address: &str) -> Option<u16> {
-    u16::from_str_radix(local_address.rsplit_once(':')?.1, 16).ok()
 }

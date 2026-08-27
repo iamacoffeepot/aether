@@ -7,16 +7,19 @@
 //! future schema-described data consumer (the prompt-system save
 //! format being the next).
 //!
-//! Two payload tiers (ADR-0005):
+//! Three payload tiers (ADR-0005, ADR-0059):
 //!   - POD: `#[repr(C)]` types implementing `bytemuck::NoUninit` /
 //!     `AnyBitPattern`. Encoded as their native byte layout; decoded
 //!     zero-copy to `&T` or `&[T]`. Used for vertex streams, fixed-
 //!     layout structs, anything where throughput or zero-copy matters.
-//!   - Structural: `serde::Serialize + DeserializeOwned` types. Encoded
-//!     with the structured wire format (Rust-native, varint-compact, no_std-friendly).
+//!   - Structural: types that implement `Schema` (and therefore the owned
+//!     wire codec). Encoded with the structured wire format (ADR-0118).
 //!     Used for small control messages with Option/Vec/enum shape.
+//!   - Storage: TLV records with content-hashed field tags (ADR-0059).
+//!     Used wherever bytes outlive the binary that wrote them.
 //!
-//! A type picks one tier — not both — as part of its contract.
+//! A type picks one tier — not both mail shapes, and never mail plus
+//! storage — as part of its contract.
 //!
 //! ## What lives here
 //!
@@ -49,15 +52,17 @@ pub mod mail;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod name_inventory;
 pub mod schema;
+pub mod storage;
 pub mod tag_bits;
 pub mod tagged_id;
 pub mod transform;
 pub mod wire;
 pub mod wire_id;
 pub use hash::{
-    KIND_DOMAIN, MAILBOX_DOMAIN, MAX_SCOPE_PATH_BYTES, MAX_SCOPE_PATH_DEPTH, ScopePathError, THREAD_DOMAIN,
-    TRANSFORM_DOMAIN, TYPE_DOMAIN, fnv1a_64_bytes, fnv1a_64_prefixed, fold_lineage, mailbox_id_from_name,
-    mailbox_id_from_name_pair, mailbox_id_from_path, thread_id_from_name, validate_scope_path,
+    FIELD_DOMAIN, KIND_DOMAIN, MAILBOX_DOMAIN, MAX_SCOPE_PATH_BYTES, MAX_SCOPE_PATH_DEPTH, ScopePathError,
+    THREAD_DOMAIN, TRANSFORM_DOMAIN, TYPE_DOMAIN, VARIANT_DOMAIN, fnv1a_64_bytes, fnv1a_64_fold, fnv1a_64_prefixed,
+    fold_lineage, mailbox_id_from_name, mailbox_id_from_name_pair, mailbox_id_from_path, storage_kind_id_from_name,
+    thread_id_from_name, validate_scope_path,
 };
 pub use ids::{
     ActorId, DagId, KindId, MailboxId, RequestId, ThreadId, TransformId, tag_for_type_id, type_name_for_type_id,
@@ -69,6 +74,7 @@ pub use name_inventory::{
     id_for_name, name_entries, root_entries, template_entries,
 };
 pub use schema::*;
+pub use storage::{Storage, StorageData, StorageError, StorageLeaves, UnknownField};
 pub use tagged_id::{Tag, with_tag};
 pub use transform::{InvokeFn, TransformError};
 #[cfg(not(target_arch = "wasm32"))]
@@ -78,11 +84,11 @@ pub use wire_id::{EngineId, SessionToken, Uuid};
 /// Re-exported derive macros from `aether-data-derive`. Behind the
 /// `derive` feature so `cargo build` on a guest that hand-writes
 /// `impl Kind` doesn't pay the proc-macro compile cost. Only the
-/// data-layer derives (`Kind`, `Schema`) are re-exported here; the
+/// data-layer derives (`Kind`, `Schema`, `Storage`) are re-exported here; the
 /// actor-SDK attribute macros (`actor`, `capability`, `fallback`,
 /// `handler`, `local`) are exported from `aether-actor` directly.
 #[cfg(feature = "derive")]
-pub use aether_data_derive::{Kind, Schema};
+pub use aether_data_derive::{Kind, Schema, Storage};
 
 /// Re-exported `#[transform]` attribute macro from `aether-data-derive`
 /// (ADR-0048 §1). A transform is a pure `Kind -> Kind` data-layer
@@ -186,7 +192,7 @@ macro_rules! pod_kind_codec {
 /// the `Kind` derive, which this hand-rolled impl bypasses).
 impl Kind for () {
     const NAME: &'static str = "aether.unit";
-    const ID: KindId = KindId(with_tag(Tag::Kind, fnv1a_64_prefixed(KIND_DOMAIN, Self::NAME.as_bytes())));
+    const ID: KindId = storage_kind_id_from_name(Self::NAME);
 
     fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.is_empty() {
@@ -467,21 +473,27 @@ pub mod __inventory {
     inventory::collect!(DescriptorEntry);
 }
 
-/// Internal re-exports the `#[derive(Schema)]` and `#[derive(Kind)]`
-/// macros point at so their output compiles in no_std + alloc
-/// consumer crates without those consumers needing `extern crate
-/// alloc;` or a direct `aether-data` dep at the site.
+/// Internal re-exports the `#[derive(Schema)]`, `#[derive(Kind)]`, and
+/// `#[derive(Storage)]` macros point at so their output compiles in
+/// no_std + alloc consumer crates without those consumers needing
+/// `extern crate alloc;` or a direct `aether-data` dep at the site.
 /// Not part of the public API; the macros are the only intended
 /// callers.
 #[doc(hidden)]
 pub mod __derive_runtime {
     pub use crate::canonical;
+    pub use crate::hash::{fnv1a_64_fold, storage_kind_id_from_name};
     pub use crate::schema::{EnumVariant, KindLabels, LabelCell, LabelNode, NamedField, SchemaType, VariantLabel};
+    pub use crate::storage::{
+        BYTES_SCHEMA, RecordReader, RecordWriter, Storage, StorageData, StorageError, StorageLeaves, U64_SCHEMA,
+        UNIT_SCHEMA, UnknownField, VARIANT_LEAF, assemble_bytes, assemble_bytes_with_aliases, assemble_with_aliases,
+        assert_unique_storage_leaves, bytes_absent, contribute_bytes, decode_derived, encode_derived, field_path_root,
+        fold_index_segment, fold_path_segment, terminate_field_hash, variant_hash,
+    };
+    use crate::wire;
+    pub use crate::wire::{WireDecode, WireEncode, decode_bytes, encode_bytes};
     pub use alloc::borrow::Cow;
     pub use alloc::vec::Vec;
-    use serde::de::DeserializeOwned;
-
-    use crate::wire;
 
     /// Cast-shape decode helper. Routes through `bytemuck::pod_read_unaligned`
     /// after a length check so the Kind derive can emit a uniform call
@@ -512,14 +524,13 @@ pub mod __derive_runtime {
 
     /// Wire-shape decode helper. Sibling of `decode_cast` for
     /// schema-shaped kinds (anything carrying `Vec` / `String` /
-    /// `Option` / a tagged enum). `T` satisfies `DeserializeOwned`
-    /// via the user's `#[derive(Deserialize)]`; the bound lives on
-    /// this helper rather than on `Kind` so cast kinds stay
-    /// independent of `serde`. Reads the unversioned wire body
-    /// (ADR-0118) directly.
+    /// `Option` / a tagged enum). `T` satisfies [`WireDecode`] via
+    /// `#[derive(Schema)]`; the bound lives on this helper rather
+    /// than on `Kind` so cast kinds stay independent of the structured
+    /// codec. Reads the unversioned wire body (ADR-0118) directly.
     #[must_use]
-    pub fn decode_wire<T: DeserializeOwned>(bytes: &[u8]) -> Option<T> {
-        wire::from_bytes(bytes).ok()
+    pub fn decode_wire<T: for<'de> WireDecode<'de>>(bytes: &[u8]) -> Option<T> {
+        wire::decode_from_slice(bytes).ok()
     }
 
     /// Cast-shape encode helper. Mirror of `decode_cast`. Routes
@@ -532,11 +543,11 @@ pub mod __derive_runtime {
     }
 
     /// Wire-shape encode helper. Mirror of `decode_wire`. The
-    /// `Serialize` bound lives here, not on `Kind`, so cast kinds stay
-    /// independent of `serde`. Emits the unversioned wire body
-    /// (ADR-0118); encoding fails only past the `u32` length ceiling.
-    pub fn encode_wire<T: serde::Serialize>(value: &T) -> Vec<u8> {
-        wire::to_vec(value).expect("wire encode to Vec fails only past the u32 length ceiling")
+    /// [`WireEncode`] bound lives here, not on `Kind`, so cast kinds stay
+    /// independent of the structured codec. Emits the unversioned wire
+    /// body (ADR-0118); encoding fails only past the `u32` length ceiling.
+    pub fn encode_wire<T: WireEncode>(value: &T) -> Vec<u8> {
+        wire::encode_to_vec(value).expect("wire encode to Vec fails only past the u32 length ceiling")
     }
 }
 

@@ -23,7 +23,7 @@ use std::vec::IntoIter as ArrayItems;
 use super::{DIGEST, digest_from_hex};
 
 /// Decode a request body, accepting either digest form.
-pub(in crate::api::runtime) fn from_slice<T: DeserializeOwned>(body: &[u8]) -> Result<T, serde_json::Error> {
+pub fn from_slice<T: DeserializeOwned>(body: &[u8]) -> Result<T, serde_json::Error> {
     T::deserialize(HexDigests(serde_json::from_slice(body)?))
 }
 

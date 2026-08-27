@@ -32,8 +32,8 @@ pub const SURFACE_PARK_AGE_BOUND: Duration = Duration::from_mins(5);
 /// replica topic before a deterministic retry is reported as a violation.
 pub const DETERMINISTIC_RETRY_BOUND: u32 = 20;
 
-/// How long a daily sha may lack correspondence before the three head
-/// checks treat it as a divergence rather than a restart racing the mirror.
+/// How long a daily sha may lack correspondence before the head checks
+/// treat it as a divergence rather than a restart racing the mirror.
 ///
 /// The boot pass runs before the mirror has reconciled, so an unresolved
 /// sha looks like a missing correspondence, an observed-head mismatch, and
@@ -41,10 +41,12 @@ pub const DETERMINISTIC_RETRY_BOUND: u32 = 20;
 /// two readings: the mirror is a poller on the same cadence, and a sha that
 /// has not resolved past this window is a real fault — the coordinator
 /// cannot say what its own mainline is. [`Invariant::ViewMainlineCorresponds`],
-/// [`Invariant::ObservedHeadEqualsDailyHead`], and
-/// [`Invariant::LandedResolutionIsAncestor`] share this bound; they report
-/// nothing for the unresolved-head case while the sighting is inside it, and
-/// report as they do today past it.
+/// [`Invariant::ObservedHeadEqualsDailyHead`],
+/// [`Invariant::LandedResolutionIsAncestor`], and
+/// [`Invariant::DailyHeadIsCoordinatorLastLand`] share this bound; they report
+/// nothing for the unresolved-head case while the sighting is inside it.
+/// The first three report as they do today past it; the land-grounded row
+/// stays silent, because an unresolved head is not a descendant of a land.
 pub const UNRESOLVED_HEAD_AGE_BOUND: Duration = Duration::from_secs(30);
 
 /// One named state property the doctor evaluates.
@@ -62,6 +64,8 @@ pub enum Invariant {
     LandedResolutionIsAncestor,
     /// The observed head equals the actual daily ref head.
     ObservedHeadEqualsDailyHead,
+    /// The live daily head is the head the coordinator last landed.
+    DailyHeadIsCoordinatorLastLand,
     /// The correspondence table is a bijection.
     CorrespondenceIsBijection,
     /// Every digest the journal references resolves through correspondence.
@@ -87,6 +91,7 @@ impl Invariant {
         Self::ViewMainlineCorresponds,
         Self::LandedResolutionIsAncestor,
         Self::ObservedHeadEqualsDailyHead,
+        Self::DailyHeadIsCoordinatorLastLand,
         Self::CorrespondenceIsBijection,
         Self::JournalDigestsResolve,
         Self::ReplicaTopicAge,
@@ -106,6 +111,7 @@ impl Invariant {
             Self::ViewMainlineCorresponds => "view_mainline_corresponds",
             Self::LandedResolutionIsAncestor => "landed_resolution_is_ancestor",
             Self::ObservedHeadEqualsDailyHead => "observed_head_equals_daily_head",
+            Self::DailyHeadIsCoordinatorLastLand => "daily_head_is_the_coordinator_last_land",
             Self::CorrespondenceIsBijection => "correspondence_is_bijection",
             Self::JournalDigestsResolve => "journal_digests_resolve",
             Self::ReplicaTopicAge => "replica_topic_age",
@@ -132,6 +138,7 @@ impl Invariant {
                 "a bloom landed on the current daily ref has a resolution tree that is an ancestor of the current daily head"
             }
             Self::ObservedHeadEqualsDailyHead => "the observed head equals the actual daily ref head",
+            Self::DailyHeadIsCoordinatorLastLand => "the live daily head is the head the coordinator last landed",
             Self::CorrespondenceIsBijection => "the correspondence table is a bijection",
             Self::JournalDigestsResolve => "every digest the journal references resolves through correspondence",
             Self::ReplicaTopicAge => "no undelivered replica topic is older than a bounded age",
@@ -158,6 +165,7 @@ impl Invariant {
             Self::ViewMainlineCorresponds => view_mainline_corresponds(live),
             Self::LandedResolutionIsAncestor => landed_resolution_is_ancestor(live),
             Self::ObservedHeadEqualsDailyHead => observed_head_equals_daily_head(live),
+            Self::DailyHeadIsCoordinatorLastLand => daily_head_is_the_coordinator_last_land(live),
             Self::CorrespondenceIsBijection => correspondence_is_bijection(live),
             Self::JournalDigestsResolve => journal_digests_resolve(live),
             Self::ReplicaTopicAge => replica_topic_age(live),
@@ -524,11 +532,63 @@ fn observed_head_equals_daily_head(live: &LiveState<'_>) -> Vec<String> {
     }
 }
 
+fn daily_head_is_the_coordinator_last_land(live: &LiveState<'_>) -> Vec<String> {
+    if unresolved_head_within_grace(live) {
+        return Vec::new();
+    }
+    let Some(daily) = live.actual_head else {
+        return Vec::new();
+    };
+    let Some(ancestry) = live.ancestry else {
+        return Vec::new();
+    };
+    let Some((bloom, landed)) = coordinator_last_land(live, daily, ancestry) else {
+        return Vec::new();
+    };
+    if daily == *landed {
+        return Vec::new();
+    }
+    match ancestry(landed, &daily) {
+        Some(true) => vec![format!(
+            "daily head {}{} is a descendant of bloom {}'s last land {}; the coordinator did not write this head",
+            hex_of(&daily),
+            live.actual_head_sha.map(|sha| format!(" (sha {sha})")).unwrap_or_default(),
+            hex_of(&bloom.0),
+            hex_of(landed),
+        )],
+        _ => Vec::new(),
+    }
+}
+
+/// The coordinator's newest write to the day: the `landed_heads` entry whose
+/// `land_sequences` sequence is greatest among those the current-era anchor
+/// does not exclude.
+///
+/// A Land that precedes the newest anchored journaled head is usually a
+/// previous day's write. Keep it when the live head still carries it: that is
+/// the second-writer shape after the observer has absorbed the extra commit,
+/// which is the drift this row exists to name.
+fn coordinator_last_land<'a>(
+    live: &LiveState<'a>,
+    daily: Digest,
+    ancestry: &Ancestry<'_>,
+) -> Option<(&'a BloomId, &'a Digest)> {
+    let anchor = newest_anchored_sequence(live, daily, ancestry);
+    live.landed_heads
+        .iter()
+        .filter(|(bloom, head)| !land_precedes_anchor(live, bloom, anchor) || ancestry(head, &daily) == Some(true))
+        .filter_map(|(bloom, head)| {
+            live.land_sequences.iter().find(|(id, _)| id == bloom).map(|(_, sequence)| (*sequence, bloom, head))
+        })
+        .max_by_key(|(sequence, _, _)| *sequence)
+        .map(|(_, bloom, head)| (bloom, head))
+}
+
 /// Whether the unresolved-head case is still inside [`UNRESOLVED_HEAD_AGE_BOUND`].
 ///
 /// A daily sha with no correspondence is not-yet-checkable until it has
-/// stayed that way long enough to be a fault. The three head checks share
-/// this reading so a restart that races the mirror is one policy, not three.
+/// stayed that way long enough to be a fault. The head checks share this
+/// reading so a restart that races the mirror is one policy, not four.
 fn unresolved_head_within_grace(live: &LiveState<'_>) -> bool {
     live.actual_head.is_none()
         && live.actual_head_sha.is_some()
@@ -806,6 +866,134 @@ mod tests {
         let named = check.divergences.join(" ");
         assert!(named.contains(&hex_of(&digest(1))), "the observed digest is named: {named}");
         assert!(named.contains(&hex_of(&actual)), "the actual daily head is named: {named}");
+    }
+
+    #[test]
+    fn a_fast_forward_past_the_newest_land_is_named() {
+        // Tripwire: a person commits on top of the last land and pushes
+        // fast-forward. Observation absorbs the new head, ancestry stays
+        // clean, and nothing named the second writer.
+        let spec = draft(9, vec![membership("issue-landed", 1)]).seal();
+        let mut snapshot = Snapshot::default();
+        splice_bloom(&mut snapshot, &spec, BloomStatus::Landed);
+        let landed = [(spec.id(), digest(9))];
+        let land_sequences = [(spec.id(), 5)];
+        let sha = "cafef00d";
+        let ancestry = current_era_chain();
+        let mut state = live(&snapshot, &[]);
+        state.actual_head = Some(digest(10));
+        state.actual_head_sha = Some(sha);
+        state.landed_heads = &landed;
+        state.land_sequences = &land_sequences;
+        state.ancestry = Some(&ancestry);
+
+        let report = evaluate(&state);
+        let check = report
+            .named(Invariant::DailyHeadIsCoordinatorLastLand.name())
+            .expect("the seed list includes the coordinator's last land");
+        assert!(!check.passed, "a descendant of the last land is a violation: {check:?}");
+        let named = check.divergences.join(" ");
+        assert!(named.contains(&hex_of(&digest(9))), "the last land's digest is named: {named}");
+        assert!(named.contains(&hex_of(&digest(10))), "the live head's digest is named: {named}");
+        assert!(named.contains(&hex_of(&spec.id().0)), "the authoring bloom is named: {named}");
+        assert!(named.contains(sha), "the live sha is named: {named}");
+        for forbidden in ["push", "reset", "reconcile"] {
+            assert!(!named.contains(forbidden), "the row must not instruct a repair ({forbidden}): {named}");
+        }
+    }
+
+    #[test]
+    fn a_head_equal_to_the_newest_land_is_not_a_divergence() {
+        // A clean landed day is the last land. Naming it would redden every
+        // ordinary day and, through the harness oracle, every harness scenario.
+        let spec = draft(9, vec![membership("issue-landed", 1)]).seal();
+        let mut snapshot = Snapshot::default();
+        splice_bloom(&mut snapshot, &spec, BloomStatus::Landed);
+        let landed = [(spec.id(), digest(10))];
+        let land_sequences = [(spec.id(), 5)];
+        let ancestry = current_era_chain();
+        let mut state = live(&snapshot, &[]);
+        state.actual_head = Some(digest(10));
+        state.landed_heads = &landed;
+        state.land_sequences = &land_sequences;
+        state.ancestry = Some(&ancestry);
+
+        let report = evaluate(&state);
+        let check = report
+            .named(Invariant::DailyHeadIsCoordinatorLastLand.name())
+            .expect("the seed list includes the coordinator's last land");
+        assert!(check.passed, "a head equal to the newest land is a clean day: {check:?}");
+    }
+
+    #[test]
+    fn a_non_descendant_head_is_not_this_row() {
+        // A roll or rewrite leaves a head that is not a descendant of the last
+        // land. landed_resolution_is_ancestor already names that shape; this
+        // row must stay silent so one fault is not two rows.
+        let spec = draft(9, vec![membership("issue-landed", 1)]).seal();
+        let mut snapshot = Snapshot::default();
+        splice_bloom(&mut snapshot, &spec, BloomStatus::Landed);
+        let landed = [(spec.id(), digest(3))];
+        let land_sequences = [(spec.id(), 5)];
+        let ancestry = current_era_chain();
+        let mut state = live(&snapshot, &[]);
+        state.actual_head = Some(digest(10));
+        state.landed_heads = &landed;
+        state.land_sequences = &land_sequences;
+        state.ancestry = Some(&ancestry);
+
+        let report = evaluate(&state);
+        let check = report
+            .named(Invariant::DailyHeadIsCoordinatorLastLand.name())
+            .expect("the seed list includes the coordinator's last land");
+        assert!(check.passed, "a non-descendant head is not this row: {check:?}");
+    }
+
+    #[test]
+    fn a_pre_roll_land_is_not_measured_against_the_new_day() {
+        // After a roll every land is before the new day's anchor. Measuring
+        // those heads against the new daily would report forever.
+        let pre = draft(1, vec![membership("issue-yesterday", 1)]).seal();
+        let mut snapshot = Snapshot::default();
+        splice_bloom(&mut snapshot, &pre, BloomStatus::Landed);
+        let landed = [(pre.id(), digest(2))];
+        let land_sequences = [(pre.id(), 20)];
+        let journaled_heads = [(digest(1), 5), (digest(2), 20), (digest(9), 60)];
+        let ancestry = rolled_day_chain();
+        let mut state = live(&snapshot, &[]);
+        state.actual_head = Some(digest(10));
+        state.landed_heads = &landed;
+        state.land_sequences = &land_sequences;
+        state.journaled_heads = &journaled_heads;
+        state.ancestry = Some(&ancestry);
+
+        let report = evaluate(&state);
+        let check = report
+            .named(Invariant::DailyHeadIsCoordinatorLastLand.name())
+            .expect("the seed list includes the coordinator's last land");
+        assert!(check.passed, "a previous day's land is out of jurisdiction: {check:?}");
+    }
+
+    #[test]
+    fn an_unresolved_head_is_not_this_row_inside_the_grace_window() {
+        // A boot that races the mirror has a daily sha and no correspondence.
+        // Treating that as a descendant of the last land would alert on restart.
+        let spec = draft(9, vec![membership("issue-landed", 1)]).seal();
+        let mut snapshot = Snapshot::default();
+        splice_bloom(&mut snapshot, &spec, BloomStatus::Landed);
+        let landed = [(spec.id(), digest(9))];
+        let land_sequences = [(spec.id(), 5)];
+        let mut state = live(&snapshot, &[]);
+        state.actual_head_sha = Some("0123abcd");
+        state.landed_heads = &landed;
+        state.land_sequences = &land_sequences;
+        state.unresolved_head_age = Some(Duration::from_secs(1));
+
+        let report = evaluate(&state);
+        let check = report
+            .named(Invariant::DailyHeadIsCoordinatorLastLand.name())
+            .expect("the seed list includes the coordinator's last land");
+        assert!(check.passed, "an unresolved head inside the grace window is not this row: {check:?}");
     }
 
     #[test]

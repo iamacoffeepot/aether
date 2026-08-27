@@ -48,7 +48,8 @@ mod routing;
 
 pub use local::{
     CaptureIdentity, CapturedObjects, DEFAULT_LANE_PROGRAM, LaneProgram, LocalExecutor, LocalExecutorError,
-    OrphanedRun, ProcessTransformRunner, RunLifecycle, RunProcess, RunSpec, TransformRunner, mock_lane,
+    OrphanedRun, ProcessTransformRunner, RunLifecycle, RunProcess, RunSpec, TransformRunner, admits_lane_key,
+    mock_lane,
 };
 pub use reconcile::{LaneOccupancy, LocalLane, OutstandingDispatch, ReconcileLanes, ReconcileReport};
 pub use routing::RoutingExecutor;

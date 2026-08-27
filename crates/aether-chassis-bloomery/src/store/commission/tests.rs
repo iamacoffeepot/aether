@@ -8,8 +8,10 @@ use aether_bloomery::{
     AuthorityDoor, BloomId, CommissionProjection, CommissionStatus, CommissionValueError, ContentAddressed, Decision,
     Decisions, Digest, Ed25519KeyProvider, Fact, FakeKeyProvider, KeyId, NamedPath, Observation, Outcome, PathOrigin,
     Provenance, SCOPE_FILL_COMMAND, SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA, ScopeRevision, ScopeRouting,
-    ScopeVerifyInput, SignatureEnvelope, StageId, Statement, Topic, WorkpieceId, authorization_message, digest_of,
+    ScopeVerifyInput, SignatureEnvelope, StageId, Statement, Topic, WorkpieceId, authorization_message, decode_row,
+    digest_of, encode_row,
 };
+use aether_data::Kind;
 use aether_data::wire::{from_bytes, to_vec};
 use ed25519_dalek::{Signer, SigningKey};
 
@@ -18,7 +20,7 @@ use super::{
 };
 use crate::bloomery::{ScopeRunRefusal, TopicOutbox, open_scope_run};
 use crate::store::runtime::{SqliteStore, StoreBackend, StoreCapabilityState};
-use crate::store::{JournalWrite, now_unix_millis};
+use crate::store::{JournalWrite, OutboxEntry, now_unix_millis};
 
 fn memory() -> SqliteStore {
     SqliteStore::open(":memory:").expect("in-memory store opens")
@@ -26,6 +28,10 @@ fn memory() -> SqliteStore {
 
 fn workpiece(id: &str) -> WorkpieceId {
     WorkpieceId(id.to_owned())
+}
+
+fn decode_projection(entry: &OutboxEntry) -> CommissionProjection {
+    decode_row(&entry.payload, entry.payload_schema.as_deref()).expect("payload")
 }
 
 fn intent() -> Statement {
@@ -213,7 +219,7 @@ fn a_v6_store_gains_empty_commission_tables() {
     let mut store = SqliteStore::open(path).expect("a v6 store migrates");
     assert!(store.list(None).expect("list").is_empty(), "migration invents no commissions");
     let flags: i64 = store.conn.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("user_version");
-    assert_eq!(flags, 15, "the open stamps the current schema");
+    assert_eq!(flags, 18, "the open stamps the current schema");
     assert!(
         store.load_projection(&workpiece("wp-1")).expect("load").is_none(),
         "migration invents no replica-issue numbers"
@@ -606,7 +612,7 @@ fn create_enqueues_a_commission_projection_and_record_round_trips() {
     seed(&mut store, "wp-1");
     let entries = store.drain_topic(Topic::Commission).expect("drain");
     assert_eq!(entries.len(), 1, "create enqueues one replica projection");
-    let payload: CommissionProjection = from_bytes(&entries[0].payload).expect("payload");
+    let payload = decode_projection(&entries[0]);
     assert_eq!(payload.workpiece.0, "wp-1");
     assert_eq!(payload.status, "open");
     assert!(payload.recorded_issue.is_none(), "nothing has been created on GitHub yet");
@@ -615,7 +621,7 @@ fn create_enqueues_a_commission_projection_and_record_round_trips() {
     assert_eq!(store.load_projection(&workpiece("wp-1")).expect("load"), Some(9));
     write(&mut store, "wp-1", None);
     let after = store.drain_topic(Topic::Commission).expect("drain after scope");
-    let latest: CommissionProjection = from_bytes(&after.last().expect("row").payload).expect("decode");
+    let latest = decode_projection(after.last().expect("row"));
     assert_eq!(latest.recorded_issue, Some(9), "later writes snapshot the recorded number");
 }
 
@@ -632,7 +638,7 @@ fn drain_overlays_the_recorded_number_onto_a_frozen_payload() {
     let entries = store.drain_topic(Topic::Commission).expect("drain");
     assert_eq!(entries.len(), 2, "create and scope each enqueued one row");
     for entry in &entries {
-        let payload: CommissionProjection = from_bytes(&entry.payload).expect("payload");
+        let payload = decode_projection(entry);
         assert_eq!(payload.recorded_issue, Some(9), "drain overlays the store row onto a frozen snapshot");
     }
 }
@@ -865,7 +871,7 @@ fn the_projection_snapshot_carries_the_intents_own_heading() {
     store.create(&workpiece("issue-9001"), &titled).expect("create commission");
 
     let entries = store.drain_topic(Topic::Commission).expect("drain");
-    let payload: CommissionProjection = from_bytes(&entries[0].payload).expect("payload");
+    let payload = decode_projection(&entries[0]);
     assert_eq!(payload.title, "Refuse a contradictory workpiece");
 
     seed(&mut store, "wp-untitled");
@@ -874,7 +880,7 @@ fn the_projection_snapshot_carries_the_intents_own_heading() {
     let entries = store.drain_topic(Topic::Commission).expect("drain");
     let untitled = entries
         .iter()
-        .filter_map(|entry| from_bytes::<CommissionProjection>(&entry.payload).ok())
+        .filter_map(|entry| decode_row::<CommissionProjection>(&entry.payload, entry.payload_schema.as_deref()).ok())
         .find(|payload| payload.workpiece == workpiece("wp-untitled"))
         .expect("the seeded commission projects");
     assert_eq!(untitled.title, "", "an intent with no heading carries no title");
@@ -892,7 +898,7 @@ fn a_scope_run_writes_its_ledger_row_and_its_outbox_row_together() {
     let commission = workpiece("wp-scope");
     let intent_digest = seed(&mut store, "wp-scope");
 
-    let opened = open_scope_run(&mut store, &commission, intent_digest, base())
+    let opened = open_scope_run(&mut store, &commission, intent_digest, base(), "scope sketch")
         .expect("a fresh commission opens its first scoping run");
     let sequence = opened.sequence;
 
@@ -924,9 +930,9 @@ fn a_run_in_flight_refuses_a_second_lane_on_the_same_commission() {
     let commission = workpiece("wp-twice");
     let intent_digest = seed(&mut store, "wp-twice");
 
-    open_scope_run(&mut store, &commission, intent_digest, base()).expect("the first run opens");
+    open_scope_run(&mut store, &commission, intent_digest, base(), "scope sketch").expect("the first run opens");
     assert_eq!(
-        open_scope_run(&mut store, &commission, intent_digest, base()),
+        open_scope_run(&mut store, &commission, intent_digest, base(), "scope sketch"),
         Err(ScopeRunRefusal::AlreadyInFlight { ordinal: 1 }),
     );
 
@@ -936,7 +942,7 @@ fn a_run_in_flight_refuses_a_second_lane_on_the_same_commission() {
     store.record_scope_verdict(&commission.0, 1, "VerificationFailed", why.as_bytes().as_slice()).expect("verdict");
 
     assert!(
-        open_scope_run(&mut store, &commission, intent_digest, base()).is_ok(),
+        open_scope_run(&mut store, &commission, intent_digest, base(), "scope sketch").is_ok(),
         "an answered run inside the budget does not block the retry",
     );
     assert_eq!(
@@ -954,7 +960,7 @@ fn a_dispatched_run_is_reachable_from_its_nonce() {
     let mut store = memory();
     let commission = workpiece("wp-nonce");
     let intent_digest = seed(&mut store, "wp-nonce");
-    open_scope_run(&mut store, &commission, intent_digest, base()).expect("open");
+    open_scope_run(&mut store, &commission, intent_digest, base(), "scope sketch").expect("open");
 
     store.record_scope_dispatch(&commission.0, 1, "dispatch-7").expect("record dispatch");
 
@@ -985,7 +991,7 @@ fn enqueuing_a_scope_run_is_one_transaction() {
         .expect("install abort trigger");
 
     let mut store = SqliteStore::open(path).expect("reopen");
-    let opened = open_scope_run(&mut store, &commission, intent_digest, base());
+    let opened = open_scope_run(&mut store, &commission, intent_digest, base(), "scope sketch");
     assert!(opened.is_err(), "the aborted outbox insert must refuse the open: {opened:?}");
     assert!(
         store.list_scope_runs(&commission.0).expect("list").is_empty(),
@@ -1014,8 +1020,7 @@ fn a_landed_commission_no_bloom_resolved_reopens_and_projects_the_restored_statu
     let view = store.load(&workpiece("wp-1")).expect("load").expect("the commission remains");
     assert_eq!(view.head.status, CommissionStatus::Open, "the workpiece is back in the line");
     let queued = store.drain_topic(Topic::Commission).expect("drain");
-    let projected: CommissionProjection =
-        from_bytes(&queued.last().expect("the reopen enqueues a projection").payload).expect("projection decodes");
+    let projected = decode_projection(queued.last().expect("the reopen enqueues a projection"));
     assert_eq!(projected.status, "open", "the replica is told the commission is open again");
 }
 
@@ -1064,4 +1069,46 @@ fn a_reopen_bound_to_another_commissions_intent_is_refused() {
     }
     let view = store.load(&workpiece("wp-1")).expect("load").expect("the commission remains");
     assert_eq!(view.head.status, CommissionStatus::Landed, "a refused reopen writes nothing");
+}
+
+fn frozen_projection(intent: Digest) -> CommissionProjection {
+    CommissionProjection {
+        workpiece: workpiece("wp-1"),
+        intent,
+        scope_revision: None,
+        approval_signer: None,
+        approval_digest: None,
+        status: "open".to_owned(),
+        recorded_issue: None,
+        title: String::new(),
+    }
+}
+
+#[test]
+fn overlay_over_a_null_stamped_row_stays_positional() {
+    // Tripwire: overlaying a replica-issue number onto a pre-adoption row must
+    // re-encode under the positional identity that row claims, never silently
+    // reshape it into storage bytes.
+    let mut store = memory();
+    let intent = seed(&mut store, "wp-1");
+    store.record_projection(&workpiece("wp-1"), 9).expect("persist");
+    let mut bytes = encode_row(&frozen_projection(intent), None).expect("positional encode");
+    super::overlay_recorded_projection(&store.conn, &mut bytes, None);
+    let decoded = decode_row::<CommissionProjection>(&bytes, None).expect("positional decode");
+    assert_eq!(decoded.recorded_issue, Some(9));
+    from_bytes::<CommissionProjection>(&bytes).expect("overlay left positional bytes");
+}
+
+#[test]
+fn overlay_over_a_stamped_row_stays_storage_shaped() {
+    // Tripwire: overlaying a stamped row must hand the reactor storage bytes
+    // in the shape that row claims.
+    let mut store = memory();
+    let intent = seed(&mut store, "wp-1");
+    store.record_projection(&workpiece("wp-1"), 9).expect("persist");
+    let mut bytes = encode_row(&frozen_projection(intent), Some(CommissionProjection::NAME)).expect("storage encode");
+    super::overlay_recorded_projection(&store.conn, &mut bytes, Some(CommissionProjection::NAME));
+    let decoded = decode_row::<CommissionProjection>(&bytes, Some(CommissionProjection::NAME)).expect("storage decode");
+    assert_eq!(decoded.recorded_issue, Some(9));
+    from_bytes::<CommissionProjection>(&bytes).expect_err("overlay left storage bytes, not positional");
 }

@@ -1,7 +1,23 @@
 //! 32-byte digest spelling the REST edge already speaks: 64 hex characters.
+//!
+//! Encode/decode helpers plus the JSON body adapters that render a [`Digest`]
+//! as hex and accept either hex or the canonical byte array. The adapters are
+//! the REST edge's hex wrapper: shared envelope types carry [`Digest`], and
+//! these codecs are how this client speaks the operator-facing spelling.
 
 use aether_bloomery::Digest;
 use anyhow::{Result, bail};
+
+mod deserialize;
+mod serialize;
+
+pub use deserialize::from_slice;
+pub use serialize::to_vec;
+
+/// The name [`Digest`] reports for itself as a `serde` newtype struct — the
+/// hook both body codecs key on to recognize a digest by type rather than by
+/// the shape of its rendered JSON.
+const DIGEST: &str = "Digest";
 
 /// Lowercase-hex-encode bytes.
 pub fn encode(bytes: &[u8]) -> String {
@@ -32,6 +48,14 @@ pub fn from_json(value: &serde_json::Value, what: &str) -> Result<[u8; 32]> {
         }
         _ => bail!("{what} is not a 32-byte hex digest"),
     }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    encode(bytes)
+}
+
+fn digest_from_hex(hex: &str) -> Option<Digest> {
+    Digest::from_hex(hex)
 }
 
 #[cfg(test)]

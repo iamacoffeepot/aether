@@ -16,7 +16,7 @@ use crate::ids::{KeyId, StageId};
 use crate::sign::{AuthorityDoor, KeyProvider, SignatureEnvelope, authorization_message, sign_authorization};
 
 /// An artifact carrying words plus exactly one provenance claim.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Statement {
     /// The asserted bytes — the exact bytes the provenance claim is over.
     pub words: Vec<u8>,
@@ -100,7 +100,7 @@ impl ContentAddressed for Statement {
 }
 
 /// One of the three provenance claims a [`Statement`] can carry.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Provenance {
     /// A person asserted these exact bytes for this purpose — the only claim
     /// that can become instruction.
@@ -181,7 +181,7 @@ pub fn signed_reopen(signer: KeyId, seed: &[u8; 32], intent: Digest) -> Statemen
 /// Where an adapter saw the observed bytes. An observation carries no
 /// authority — it becomes intent only when a person adopts its exact digest
 /// in a native signed statement (ADR-0149 §The boundary, second amendment).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Observation {
     /// A stable, human-readable source label (e.g. the adapter and the
     /// external object it mirrored).
@@ -190,7 +190,7 @@ pub struct Observation {
 
 /// A record that one stage binding ran: the profile, the exact inputs it
 /// consumed, and the exact outputs it produced (ADR-0149 §The line).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct StageReceipt {
     /// The stage that ran.
     pub stage: StageId,

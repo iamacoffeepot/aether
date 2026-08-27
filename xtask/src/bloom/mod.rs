@@ -8,6 +8,7 @@
 //! workpiece claim transfers.
 
 mod amend;
+mod archive;
 mod client;
 mod dto;
 mod hex;
@@ -21,7 +22,7 @@ mod upgrade;
 use std::env;
 use std::path::{Path, PathBuf};
 
-use aether_bloomery::{Digest, KeyId};
+use aether_bloomery::{DEFAULT_HTTP_PORT, Digest, KeyId, Outcome};
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 
@@ -30,10 +31,6 @@ use crate::bloom::client::{Client, bloom_in};
 use crate::bloom::plan::BaseChoice;
 use crate::bloom::roll::RollArgs;
 use crate::bloom::upgrade::UpgradeArgs;
-
-/// Coordinator REST bind when `AETHER_HTTP_PORT` is unset — the same default
-/// `aether-chassis-bloomery` uses (`DEFAULT_HTTP_PORT`).
-const DEFAULT_HTTP_PORT: u16 = 8910;
 
 /// The repository's approval policy — the fallback the coordinator itself
 /// loads when a bloom seals none of its own.
@@ -114,10 +111,17 @@ enum BloomCommand {
     /// Answer a parked member's surface request: widen its scope revision,
     /// approve the widening, and seal the successor (ADR-0207).
     Amend(AmendArgs),
+    /// Move aged evidence directories and resolved session trees onto the
+    /// archive tier. Refuses unless the coordinator is between blooms.
+    /// Nothing is ever deleted.
+    Archive(archive::ArchiveArgs),
     /// Take one member out of a walking bloom without superseding it (#5327).
     Withdraw(WithdrawArgs),
     /// Run one member's current stage again on the candidate it already holds.
     Retry(RetryArgs),
+    /// Run `verify.base` again on a red receipt whose failure does not describe
+    /// the tree.
+    Reverify(ReverifyBaseArgs),
     /// Hand a wedged member a candidate you produced yourself and let the
     /// ordinary gates judge it (#4957).
     Repair(RepairArgs),
@@ -178,6 +182,25 @@ struct RetryArgs {
 }
 
 #[derive(Args, Debug)]
+struct ReverifyBaseArgs {
+    /// The base commit to re-verify (64 hex characters). Defaults to the red
+    /// alert's own commit; naming a different one is refused rather than
+    /// applied, so a re-verify aimed from a stale board does not spend a
+    /// whole-workspace build on the wrong tree.
+    #[arg(long, value_parser = plan::parse_digest_flag)]
+    base: Option<dto::DigestHex>,
+
+    /// Why this red does not describe the tree, in your own words. Required;
+    /// a blank one is refused at the door.
+    #[arg(long)]
+    reason: String,
+
+    /// Who is deciding. Recorded as the decider.
+    #[arg(long, default_value = "operator")]
+    operator: String,
+}
+
+#[derive(Args, Debug)]
 struct RepairArgs {
     /// The bloom the member belongs to (64 hex characters).
     #[arg(value_parser = plan::parse_bloom_id)]
@@ -191,7 +214,7 @@ struct RepairArgs {
     /// digests. Name exactly one of this, `--from-commit`, or
     /// `--from-worktree`.
     #[arg(long, value_parser = plan::parse_candidate_flag)]
-    candidate: Option<dto::CandidateRefRequest>,
+    candidate: Option<dto::CandidateRef>,
 
     /// A commit the coordinator's repository can already reach. It derives the
     /// candidate, pushes the ref, and records correspondence for you.
@@ -232,7 +255,7 @@ struct SuppressionArgs {
     /// The answer. `granted` lets the candidate keep its suppressions; `denied`
     /// bounces the member to a repair lap at its own budget's expense.
     #[arg(long, value_enum)]
-    verdict: dto::SuppressionVerdict,
+    verdict: dto::SuppressionVerdictArg,
 
     /// Why. Required; for a denial it is what the repair lap is told, and for a
     /// grant it is the record of the judgment.
@@ -382,8 +405,10 @@ fn run_on_with_policy(endpoint: &Endpoint, command: &BloomCommand, approval_poli
         BloomCommand::Roll(args) => roll::run(&client, args),
         BloomCommand::Upgrade(args) => upgrade::run(&client, args),
         BloomCommand::Amend(args) => amend::run(&client, args, approval_policy),
+        BloomCommand::Archive(args) => archive::run(&client, args),
         BloomCommand::Withdraw(args) => run_withdraw(&client, args),
         BloomCommand::Retry(args) => run_retry(&client, args),
+        BloomCommand::Reverify(args) => run_reverify_base(&client, args),
         BloomCommand::Repair(args) => run_repair(&client, args),
         BloomCommand::Suppression(args) => run_suppression(&client, args),
         BloomCommand::Cancel(args) => run_cancel(&client, args),
@@ -408,8 +433,12 @@ fn require_member(client: &Client<'_>, bloom_id: &str, workpiece: &str) -> Resul
 fn run_withdraw(client: &Client<'_>, args: &WithdrawArgs) -> Result<String> {
     require_member(client, &args.bloom_id, &args.workpiece)?;
 
-    let request =
-        dto::WithdrawRequest { reason: args.reason.clone(), operator: args.operator.clone(), cascade: args.cascade };
+    let request = dto::WithdrawRequest {
+        reason: args.reason.clone(),
+        operator: args.operator.clone(),
+        cascade: args.cascade,
+        idempotency_key: None,
+    };
     Ok(render_outcome(&client.withdraw(&args.bloom_id, &args.workpiece, &request)?.outcome))
 }
 
@@ -436,9 +465,9 @@ fn run_retry(client: &Client<'_>, args: &RetryArgs) -> Result<String> {
         .as_ref()
         .with_context(|| format!("{} has never entered the line, so it has no stage to run again", args.workpiece))?;
     if let Some(named) = &args.stage
-        && !named.eq_ignore_ascii_case(&cursor.stage)
+        && !named.eq_ignore_ascii_case(&format!("{:?}", cursor.stage))
     {
-        bail!("{} is at {}, not {named}", args.workpiece, cursor.stage);
+        bail!("{} is at {:?}, not {named}", args.workpiece, cursor.stage);
     }
     if args.reason.trim().is_empty() {
         bail!("retry reason is required");
@@ -448,12 +477,38 @@ fn run_retry(client: &Client<'_>, args: &RetryArgs) -> Result<String> {
     // the scope revision it was admitted at when it is carrying none.
     let subject = cursor.candidate.as_ref().map_or(member.scope_revision, |candidate| candidate.tree);
     let request = dto::RetryRequest {
-        stage: cursor.stage.clone(),
+        stage: cursor.stage,
         subject,
         reason: args.reason.clone(),
         operator: args.operator.clone(),
+        idempotency_key: None,
     };
     Ok(render_outcome(&client.retry(&args.bloom_id, &args.workpiece, &request)?.outcome))
+}
+
+/// Re-run `verify.base` on a red receipt — the read-first shape `run_retry`
+/// uses, defaulting the target to the alert the board is already showing.
+fn run_reverify_base(client: &Client<'_>, args: &ReverifyBaseArgs) -> Result<String> {
+    let view = client.view()?;
+    let Some(alert) = &view.base_alert else {
+        bail!("there is no red base alert to re-verify");
+    };
+    if let Some(named) = args.base
+        && named.digest() != alert.base
+    {
+        bail!("the board's red base is {}, not {named} (failed: {})", alert.base, alert.failed.join(", "));
+    }
+    if args.reason.trim().is_empty() {
+        bail!("reverify reason is required");
+    }
+
+    let base = args.base.map_or(alert.base, dto::DigestHex::digest);
+    let request = dto::ReverifyBaseRequest {
+        reason: args.reason.clone(),
+        operator: args.operator.clone(),
+        idempotency_key: None,
+    };
+    Ok(render_outcome(&client.reverify_base(&base.to_hex(), &request)?.outcome))
 }
 
 /// Hand a wedged member the candidate the operator produced and let the
@@ -488,6 +543,7 @@ fn repair_body(args: &RepairArgs) -> Result<dto::RepairRequest> {
         from_worktree: args.from_worktree.clone(),
         reason: args.reason.clone(),
         operator: args.operator.clone(),
+        idempotency_key: None,
     })
 }
 
@@ -509,10 +565,11 @@ fn run_suppression(client: &Client<'_>, args: &SuppressionArgs) -> Result<String
     }
 
     let request = dto::SuppressionAnswerRequest {
-        requests: args.requests.clone(),
-        verdict: args.verdict,
+        requests: args.requests.iter().map(|digest| digest.digest()).collect(),
+        verdict: args.verdict.into(),
         reason: args.reason.clone(),
         operator: args.operator.clone(),
+        idempotency_key: None,
     };
     Ok(render_outcome(&client.suppression(&args.bloom_id, &args.workpiece, &request)?.outcome))
 }
@@ -535,10 +592,7 @@ fn run_cancel(client: &Client<'_>, args: &CancelArgs) -> Result<String> {
     )?;
     let stored = client.cancel(
         &args.workpiece,
-        &dto::CancelCommissionRequest {
-            statement: key.cancel_of(Digest::from_bytes(*shown.intent.as_bytes())),
-            reason: args.reason.clone(),
-        },
+        &dto::CancelCommissionRequest { statement: key.cancel_of(shown.intent), reason: args.reason.clone() },
     )?;
     Ok(format!("cancelled {} {} ({})\n", args.workpiece, stored.digest, stored.status))
 }
@@ -565,10 +619,7 @@ fn run_reopen(client: &Client<'_>, args: &ReopenArgs) -> Result<String> {
     )?;
     let restored = client.reopen(
         &args.workpiece,
-        &dto::ReopenCommissionRequest {
-            statement: key.reopen_of(Digest::from_bytes(*shown.intent.as_bytes())),
-            reason: args.reason.clone(),
-        },
+        &dto::ReopenCommissionRequest { statement: key.reopen_of(shown.intent), reason: args.reason.clone() },
     )?;
     Ok(format!("reopened {} {} ({})\n", args.workpiece, restored.digest, restored.status))
 }
@@ -590,7 +641,7 @@ fn run_seal(client: &Client<'_>, args: &SealArgs, approval_policy: &Path) -> Res
         }
     }
     let default_revision = pins.first().map(|(_, digest)| *digest).context("seal names no members")?;
-    pins.extend(args.revisions.iter().cloned());
+    pins.extend(args.revisions.iter().map(|(workpiece, digest)| (workpiece.clone(), digest.digest())));
 
     let view = client.view()?;
     let base = plan::resolve_base(&args.base, &view);
@@ -614,7 +665,7 @@ fn run_seal(client: &Client<'_>, args: &SealArgs, approval_policy: &Path) -> Res
 /// The store already holds the revision and its approval; guessing a digest
 /// from the task file can never match. Missing, not-open, and unapproved are
 /// the same facts the door would 422, named here so the draft is never opened.
-fn require_sealable_commission(client: &Client<'_>, workpiece: &str) -> Result<(dto::DigestHex, Vec<String>)> {
+fn require_sealable_commission(client: &Client<'_>, workpiece: &str) -> Result<(Digest, Vec<String>)> {
     let shown = client.commission(workpiece).with_context(|| format!("no commission named {workpiece}"))?;
     if shown.status != "open" {
         bail!("commission {workpiece} is {}, not open", shown.status);
@@ -637,7 +688,7 @@ fn run_supersede(client: &Client<'_>, args: &SupersedeArgs) -> Result<String> {
     bloom_in(&view, &args.bloom_id)?;
     let spec = client.spec_for(&args.bloom_id)?;
     let authored = plan::author_profile_and_flags(client, args.profile.as_deref(), &args.configs)?;
-    let mut configs = spec.configs.clone();
+    let mut configs = spec.configs().clone();
     configs.overlay(authored.configs);
     let base = plan::resolve_base(&args.base, &view);
     let mut patch = plan::successor_patch(&spec, base, configs);
@@ -646,15 +697,16 @@ fn run_supersede(client: &Client<'_>, args: &SupersedeArgs) -> Result<String> {
     }
     let proposals = patch.proposals.get_or_insert_with(Vec::new);
     plan::eject_members(proposals, &args.eject)?;
-    plan::pin_revisions(proposals, &args.revisions)?;
+    let pins: Vec<_> = args.revisions.iter().map(|(workpiece, digest)| (workpiece.clone(), digest.digest())).collect();
+    plan::pin_revisions(proposals, &pins)?;
     let draft = client.open_draft()?;
     client.patch_draft(&draft.draft_id, &patch)?;
     let outcome = client.supersede(&args.bloom_id, &plan::supersede_request(&draft.draft_id, &args.edges))?;
     Ok(render_outcome(&outcome.outcome))
 }
 
-pub fn render_outcome(outcome: &serde_json::Value) -> String {
-    format!("{}\n", serde_json::to_string_pretty(outcome).unwrap_or_else(|_| outcome.to_string()))
+pub fn render_outcome(outcome: &Outcome) -> String {
+    format!("{}\n", serde_json::to_string_pretty(outcome).unwrap_or_else(|_| format!("{outcome:?}")))
 }
 
 #[cfg(test)]
@@ -700,42 +752,11 @@ mod tests {
         hex::encode(digest.as_bytes())
     }
 
-    fn hexify(value: Value) -> Value {
-        match value {
-            Value::Array(items)
-                if items.len() == 32 && items.iter().all(|item| item.as_u64().is_some_and(|n| n <= 255)) =>
-            {
-                let bytes: Vec<u8> = items
-                    .iter()
-                    .map(|item| u8::try_from(item.as_u64().expect("bounded above")).expect("n <= 255"))
-                    .collect();
-                Value::String(hex::encode(&bytes))
-            }
-            Value::Array(items) => Value::Array(items.into_iter().map(hexify).collect()),
-            Value::Object(map) => Value::Object(map.into_iter().map(|(key, value)| (key, hexify(value))).collect()),
-            other => other,
-        }
+    fn predecessor_spec() -> (String, aether_bloomery::BloomSpec) {
+        predecessor_spec_of(&[("wp-1", 7)])
     }
 
-    fn predecessor_spec() -> (String, Value) {
-        let mut configs = ConfigRegistry::default();
-        configs.insert_named("aether.bloomery.stage_catalog", digest(0xaa));
-        let spec = BloomDraft {
-            proposals: vec![Membership {
-                workpiece: WorkpieceId("wp-1".to_owned()),
-                scope_revision: digest(7),
-                configs: ConfigRegistry::default(),
-                approval: Evidence { subject: digest(8), kind: EvidenceKind::Approval, detail: digest(9) },
-            }],
-            base: digest(1),
-            configs,
-            forecast: Forecast::default(),
-        }
-        .seal();
-        (hex_of(spec.id().0), hexify(serde_json::to_value(&spec).expect("spec encodes")))
-    }
-
-    fn predecessor_spec_of(members: &[(&str, u8)]) -> (String, Value) {
+    fn predecessor_spec_of(members: &[(&str, u8)]) -> (String, aether_bloomery::BloomSpec) {
         let mut configs = ConfigRegistry::default();
         configs.insert_named("aether.bloomery.stage_catalog", digest(0xaa));
         let spec = BloomDraft {
@@ -753,7 +774,7 @@ mod tests {
             forecast: Forecast::default(),
         }
         .seal();
-        (hex_of(spec.id().0), hexify(serde_json::to_value(&spec).expect("spec encodes")))
+        (hex_of(spec.id().0), spec)
     }
 
     fn supersede_args(
@@ -869,20 +890,37 @@ mod tests {
     }
 
     fn open_approved(workpiece: &str, revision: Digest) -> Value {
-        json!({
-            "intent": hex_of(digest(1)),
-            "status": "open",
-            "current_revision": hex_of(revision),
-            "current": {
-                "schema": 1,
-                "workpiece": workpiece,
-                "problem": "p",
-                "design": "d",
-                "plan": "p",
-                "declared_surface": ["docs/guide/**"],
-                "routing": { "size": "small", "model": "grok-4.6" }
-            },
-            "approvals": [{ "words": revision.as_bytes().as_slice() }],
+        as_json(&aether_bloomery::CommissionShowView {
+            id: WorkpieceId(workpiece.to_owned()),
+            intent: digest(1),
+            current_revision: Some(revision),
+            current_ordinal: None,
+            status: "open".to_owned(),
+            current: Some(aether_bloomery::ScopeRevision {
+                schema: 1,
+                workpiece: WorkpieceId(workpiece.to_owned()),
+                predecessor: None,
+                problem: "p".into(),
+                design: "d".into(),
+                plan: "p".into(),
+                declared_surface: vec!["docs/guide/**".into()],
+                dogfood_brief: String::new(),
+                routing: aether_bloomery::ScopeRouting { size: "small".into(), model: "grok-4.6".into() },
+                dependencies: Vec::new(),
+                description: String::new(),
+                implements: Vec::new(),
+                declared_crates: Vec::new(),
+                declared_reads: Vec::new(),
+            }),
+            current_unreadable: None,
+            approvals: vec![aether_bloomery::Statement {
+                words: revision.as_bytes().to_vec(),
+                provenance: aether_bloomery::Provenance::ObservationAttestation(aether_bloomery::Observation {
+                    source: "test".into(),
+                }),
+                parents: Vec::new(),
+            }],
+            scope_verify: None,
         })
     }
 
@@ -905,30 +943,19 @@ mod tests {
         let revision = hex_of(digest(7));
         let bloom_id_for_view = bloom_id.clone();
         let spec_for_journal = spec_wire;
-        let revision_for_view = revision.clone();
+        let _revision_for_view = revision.clone();
 
         let task = temp_task("supersede", "recover the wedged member");
         let (output, log) = with_fake(
             move |request| match (request.method.as_str(), request.path.as_str()) {
-                ("GET", "/view") => (
-                    200,
-                    json!({
-                        "mainline": hex_of(digest(1)),
-                        "observed": hex_of(digest(2)),
-                        "blooms": [{
-                            "id": bloom_id_for_view.clone(),
-                            "status": "Sealed",
-                            "superseded_by": null,
-                            "members": [{ "workpiece": "wp-1", "scope_revision": revision_for_view }]
-                        }]
-                    }),
-                ),
-                (method, path) if method == "GET" && path.starts_with("/journal") => (
-                    200,
-                    json!({ "records": [{ "sequence": 1, "idempotency_key": "k", "event": { "idempotency_key": "k", "fact": { "Seal": spec_for_journal } } }] }),
-                ),
-                ("POST", "/drafts") => (201, json!({ "draft_id": "1", "draft": {} })),
-                ("PATCH", "/drafts/1") => (200, json!({ "draft_id": "1", "draft": {} })),
+                ("GET", "/view") => {
+                    (200, live_view(Digest::from_hex(&bloom_id_for_view).expect("id"), "wp-1", digest(7)))
+                }
+                (method, path) if method == "GET" && path.starts_with("/journal") => {
+                    (200, journal_seal(&spec_for_journal))
+                }
+                ("POST", "/drafts") => (201, draft_reply("1")),
+                ("PATCH", "/drafts/1") => (200, draft_reply("1")),
                 (method, path) if method == "POST" && path.ends_with("/supersede") => (
                     200,
                     json!({ "outcome": { "Superseded": { "predecessor": bloom_id_for_view.clone(), "successor": hex_of(digest(3)) } } }),
@@ -984,26 +1011,16 @@ mod tests {
             move |request| match (request.method.as_str(), request.path.as_str()) {
                 ("GET", "/view") => (
                     200,
-                    json!({
-                        "mainline": hex_of(digest(1)),
-                        "observed": hex_of(digest(2)),
-                        "blooms": [{
-                            "id": bloom_id_for_view.clone(),
-                            "status": "Sealed",
-                            "superseded_by": null,
-                            "members": [
-                                { "workpiece": "issue-A", "scope_revision": hex_of(digest(1)) },
-                                { "workpiece": "issue-B", "scope_revision": hex_of(digest(2)) }
-                            ]
-                        }]
-                    }),
+                    live_bloom(
+                        Digest::from_hex(&bloom_id_for_view).expect("id"),
+                        &[("issue-A", digest(1)), ("issue-B", digest(2))],
+                    ),
                 ),
-                (method, path) if method == "GET" && path.starts_with("/journal") => (
-                    200,
-                    json!({ "records": [{ "sequence": 1, "idempotency_key": "k", "event": { "idempotency_key": "k", "fact": { "Seal": spec_for_journal } } }] }),
-                ),
-                ("POST", "/drafts") => (201, json!({ "draft_id": "1", "draft": {} })),
-                ("PATCH", "/drafts/1") => (200, json!({ "draft_id": "1", "draft": {} })),
+                (method, path) if method == "GET" && path.starts_with("/journal") => {
+                    (200, journal_seal(&spec_for_journal))
+                }
+                ("POST", "/drafts") => (201, draft_reply("1")),
+                ("PATCH", "/drafts/1") => (200, draft_reply("1")),
                 (method, path) if method == "POST" && path.ends_with("/supersede") => (
                     200,
                     json!({ "outcome": { "Superseded": { "predecessor": bloom_id_for_view.clone(), "successor": hex_of(digest(3)) } } }),
@@ -1044,26 +1061,16 @@ mod tests {
             move |request| match (request.method.as_str(), request.path.as_str()) {
                 ("GET", "/view") => (
                     200,
-                    json!({
-                        "mainline": hex_of(digest(1)),
-                        "observed": hex_of(digest(2)),
-                        "blooms": [{
-                            "id": bloom_id_for_view.clone(),
-                            "status": "Sealed",
-                            "superseded_by": null,
-                            "members": [
-                                { "workpiece": "wp-1", "scope_revision": hex_of(digest(7)) },
-                                { "workpiece": "wp-2", "scope_revision": hex_of(digest(8)) }
-                            ]
-                        }]
-                    }),
+                    live_bloom(
+                        Digest::from_hex(&bloom_id_for_view).expect("id"),
+                        &[("wp-1", digest(7)), ("wp-2", digest(8))],
+                    ),
                 ),
-                (method, path) if method == "GET" && path.starts_with("/journal") => (
-                    200,
-                    json!({ "records": [{ "sequence": 1, "idempotency_key": "k", "event": { "idempotency_key": "k", "fact": { "Seal": spec_for_journal } } }] }),
-                ),
-                ("POST", "/drafts") => (201, json!({ "draft_id": "1", "draft": {} })),
-                ("PATCH", "/drafts/1") => (200, json!({ "draft_id": "1", "draft": {} })),
+                (method, path) if method == "GET" && path.starts_with("/journal") => {
+                    (200, journal_seal(&spec_for_journal))
+                }
+                ("POST", "/drafts") => (201, draft_reply("1")),
+                ("PATCH", "/drafts/1") => (200, draft_reply("1")),
                 (method, path) if method == "POST" && path.ends_with("/supersede") => (
                     200,
                     json!({ "outcome": { "Superseded": { "predecessor": bloom_id_for_view.clone(), "successor": hex_of(digest(3)) } } }),
@@ -1100,23 +1107,12 @@ mod tests {
         let task = temp_task("supersede-eject-refuse", "should not dispatch");
         let ((unknown, emptying), _) = with_fake(
             move |request| match (request.method.as_str(), request.path.as_str()) {
-                ("GET", "/view") => (
-                    200,
-                    json!({
-                        "mainline": hex_of(digest(1)),
-                        "observed": hex_of(digest(2)),
-                        "blooms": [{
-                            "id": bloom_id_for_view.clone(),
-                            "status": "Sealed",
-                            "superseded_by": null,
-                            "members": [{ "workpiece": "wp-1", "scope_revision": hex_of(digest(7)) }]
-                        }]
-                    }),
-                ),
-                (method, path) if method == "GET" && path.starts_with("/journal") => (
-                    200,
-                    json!({ "records": [{ "sequence": 1, "idempotency_key": "k", "event": { "idempotency_key": "k", "fact": { "Seal": spec_for_journal } } }] }),
-                ),
+                ("GET", "/view") => {
+                    (200, live_view(Digest::from_hex(&bloom_id_for_view).expect("id"), "wp-1", digest(7)))
+                }
+                (method, path) if method == "GET" && path.starts_with("/journal") => {
+                    (200, journal_seal(&spec_for_journal))
+                }
                 _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
             },
             |port| {
@@ -1154,26 +1150,16 @@ mod tests {
             move |request| match (request.method.as_str(), request.path.as_str()) {
                 ("GET", "/view") => (
                     200,
-                    json!({
-                        "mainline": hex_of(digest(1)),
-                        "observed": hex_of(digest(2)),
-                        "blooms": [{
-                            "id": bloom_id_for_view.clone(),
-                            "status": "Sealed",
-                            "superseded_by": null,
-                            "members": [
-                                { "workpiece": "wp-1", "scope_revision": hex_of(digest(7)) },
-                                { "workpiece": "wp-2", "scope_revision": hex_of(digest(8)) }
-                            ]
-                        }]
-                    }),
+                    live_bloom(
+                        Digest::from_hex(&bloom_id_for_view).expect("id"),
+                        &[("wp-1", digest(7)), ("wp-2", digest(8))],
+                    ),
                 ),
-                (method, path) if method == "GET" && path.starts_with("/journal") => (
-                    200,
-                    json!({ "records": [{ "sequence": 1, "idempotency_key": "k", "event": { "idempotency_key": "k", "fact": { "Seal": spec_for_journal } } }] }),
-                ),
-                ("POST", "/drafts") => (201, json!({ "draft_id": "1", "draft": {} })),
-                ("PATCH", "/drafts/1") => (200, json!({ "draft_id": "1", "draft": {} })),
+                (method, path) if method == "GET" && path.starts_with("/journal") => {
+                    (200, journal_seal(&spec_for_journal))
+                }
+                ("POST", "/drafts") => (201, draft_reply("1")),
+                ("PATCH", "/drafts/1") => (200, draft_reply("1")),
                 (method, path) if method == "POST" && path.ends_with("/supersede") => (
                     200,
                     json!({ "outcome": { "Superseded": { "predecessor": bloom_id_for_view.clone(), "successor": hex_of(digest(3)) } } }),
@@ -1211,31 +1197,29 @@ mod tests {
 
     #[test]
     fn status_renders_the_live_list() {
-        let predecessor = hex_of(digest(0x11));
-        let successor = hex_of(digest(0x22));
+        let predecessor = digest(0x11);
+        let successor = digest(0x22);
+        let mut pred = dto::test_bloom(
+            predecessor,
+            aether_bloomery::BloomStatus::Superseded,
+            vec![dto::test_member("wp-1", digest(7))],
+        );
+        pred.superseded_by = Some(aether_bloomery::BloomId(successor));
+        let view = dto::test_view(
+            digest(1),
+            digest(2),
+            vec![
+                pred,
+                dto::test_bloom(
+                    successor,
+                    aether_bloomery::BloomStatus::Sealed,
+                    vec![dto::test_member("wp-1", digest(7))],
+                ),
+            ],
+        );
         let (text, _) = with_fake(
             move |request| match (request.method.as_str(), request.path.as_str()) {
-                ("GET", "/view") => (
-                    200,
-                    json!({
-                        "mainline": hex_of(digest(1)),
-                        "observed": hex_of(digest(2)),
-                        "blooms": [
-                            {
-                                "id": predecessor,
-                                "status": "Superseded",
-                                "superseded_by": successor.clone(),
-                                "members": [{ "workpiece": "wp-1", "scope_revision": hex_of(digest(7)) }]
-                            },
-                            {
-                                "id": successor,
-                                "status": "Sealed",
-                                "superseded_by": null,
-                                "members": [{ "workpiece": "wp-1", "scope_revision": hex_of(digest(7)) }]
-                            }
-                        ]
-                    }),
-                ),
+                ("GET", "/view") => (200, as_json(&view)),
                 _ => (404, json!({ "error": "unexpected" })),
             },
             |port| {
@@ -1248,8 +1232,52 @@ mod tests {
         assert!(text.contains("wp-1"), "members are listed: {text}");
     }
 
+    fn as_json(value: &impl serde::Serialize) -> Value {
+        serde_json::from_slice(&hex::to_vec(value).expect("fixture encodes")).expect("fixture json")
+    }
+
     fn empty_view() -> Value {
-        json!({ "mainline": hex_of(digest(1)), "observed": hex_of(digest(2)), "blooms": [] })
+        as_json(&dto::test_view(digest(1), digest(2), Vec::new()))
+    }
+
+    fn live_view(bloom_id: Digest, workpiece: &str, revision: Digest) -> Value {
+        live_bloom(bloom_id, &[(workpiece, revision)])
+    }
+
+    fn live_bloom(bloom_id: Digest, members: &[(&str, Digest)]) -> Value {
+        as_json(&dto::test_view(
+            digest(1),
+            digest(2),
+            vec![dto::test_bloom(
+                bloom_id,
+                aether_bloomery::BloomStatus::Sealed,
+                members.iter().map(|(workpiece, revision)| dto::test_member(workpiece, *revision)).collect(),
+            )],
+        ))
+    }
+
+    fn journal_seal(spec: &aether_bloomery::BloomSpec) -> Value {
+        as_json(&aether_bloomery::JournalView {
+            records: vec![aether_bloomery::JournalEntry {
+                sequence: 1,
+                idempotency_key: "k".to_owned(),
+                event: aether_bloomery::Event {
+                    idempotency_key: aether_bloomery::IdempotencyKey("k".to_owned()),
+                    fact: aether_bloomery::Fact::Seal(spec.clone()),
+                },
+                outcome: aether_bloomery::Outcome::Duplicate,
+                decider: "test".to_owned(),
+            }],
+            total_matched: 1,
+            shown: 1,
+            truncated: false,
+            next_from_sequence: None,
+            notice: None,
+        })
+    }
+
+    fn draft_reply(id: &str) -> Value {
+        as_json(&aether_bloomery::DraftView { draft_id: id.to_owned(), draft: BloomDraft::default() })
     }
 
     fn commission_route(path: &str) -> Option<&str> {
@@ -1273,8 +1301,8 @@ mod tests {
                     assert!(body["value"].is_object(), "config value is the file JSON, not a hand-rolled envelope");
                     (200, json!({ "digest": catalog_for_reply, "kind": "aether.bloomery.stage_catalog" }))
                 }
-                ("POST", "/drafts") => (201, json!({ "draft_id": "3", "draft": {} })),
-                ("PATCH", "/drafts/3") => (200, json!({ "draft_id": "3", "draft": {} })),
+                ("POST", "/drafts") => (201, draft_reply("3")),
+                ("PATCH", "/drafts/3") => (200, draft_reply("3")),
                 ("POST", "/drafts/3/seal") => (200, json!({ "outcome": { "Sealed": hex_of(digest(4)) } })),
                 _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
             },
@@ -1314,8 +1342,8 @@ mod tests {
             move |request| match (request.method.as_str(), request.path.as_str()) {
                 ("GET", path) if let Some(id) = commission_route(path) => (200, open_approved(id, digest(0xaa))),
                 ("GET", "/view") => (200, empty_view()),
-                ("POST", "/drafts") => (201, json!({ "draft_id": "5", "draft": {} })),
-                ("PATCH", "/drafts/5") => (200, json!({ "draft_id": "5", "draft": {} })),
+                ("POST", "/drafts") => (201, draft_reply("5")),
+                ("PATCH", "/drafts/5") => (200, draft_reply("5")),
                 ("POST", "/drafts/5/seal") => (200, json!({ "outcome": { "Sealed": hex_of(digest(4)) } })),
                 _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
             },
@@ -1337,6 +1365,30 @@ mod tests {
     }
 
     #[test]
+    fn a_seal_issued_twice_with_the_same_idempotency_key_sends_the_key_both_times() {
+        // Tripwire: before the shared SealRequest the CLI had no field for the
+        // key, so a resend could not be a duplicate. Both POSTs must carry it.
+        let request = dto::SealRequest { idempotency_key: Some("once".to_owned()), edges: Vec::new() };
+        let ((), log) = with_fake(
+            |recorded| match (recorded.method.as_str(), recorded.path.as_str()) {
+                ("POST", "/drafts/1/seal") => (200, json!({ "outcome": "Duplicate" })),
+                _ => (404, json!({ "error": format!("unexpected {} {}", recorded.method, recorded.path) })),
+            },
+            |port| {
+                let endpoint = Endpoint { host: "127.0.0.1".to_owned(), port, token: None };
+                let client = crate::bloom::client::Client::new(&endpoint);
+                client.seal("1", &request).expect("first seal");
+                client.seal("1", &request).expect("second seal");
+            },
+        );
+        let keys: Vec<_> = log
+            .iter()
+            .filter_map(|entry| entry.body.as_ref().and_then(|body| body.get("idempotency_key")).cloned())
+            .collect();
+        assert_eq!(keys, vec![json!("once"), json!("once")], "both POSTs carry the same key: {log:?}");
+    }
+
+    #[test]
     fn a_seal_takes_each_members_revision_from_the_store() {
         // Before this change, a member without `--revision` received a bare
         // sha256 of the task file, which no store row can match. The store's
@@ -1349,8 +1401,8 @@ mod tests {
                 ("GET", "/commissions/issue-A") => (200, open_approved("issue-A", digest(0x11))),
                 ("GET", "/commissions/issue-B") => (200, open_approved("issue-B", digest(0x22))),
                 ("GET", "/view") => (200, empty_view()),
-                ("POST", "/drafts") => (201, json!({ "draft_id": "6", "draft": {} })),
-                ("PATCH", "/drafts/6") => (200, json!({ "draft_id": "6", "draft": {} })),
+                ("POST", "/drafts") => (201, draft_reply("6")),
+                ("PATCH", "/drafts/6") => (200, draft_reply("6")),
                 ("POST", "/drafts/6/seal") => (200, json!({ "outcome": { "Sealed": hex_of(digest(4)) } })),
                 _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
             },
@@ -1423,8 +1475,8 @@ mod tests {
                 ("GET", "/commissions/issue-B") => (200, open_approved("issue-B", digest(0x32))),
                 ("GET", "/commissions/issue-C") => (200, open_approved("issue-C", digest(0x33))),
                 ("GET", "/view") => (200, empty_view()),
-                ("POST", "/drafts") => (201, json!({ "draft_id": "8", "draft": {} })),
-                ("PATCH", "/drafts/8") => (200, json!({ "draft_id": "8", "draft": {} })),
+                ("POST", "/drafts") => (201, draft_reply("8")),
+                ("PATCH", "/drafts/8") => (200, draft_reply("8")),
                 ("POST", "/drafts/8/seal") => (200, json!({ "outcome": { "Sealed": hex_of(digest(4)) } })),
                 _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
             },
@@ -1484,8 +1536,8 @@ mod tests {
                         other => (400, json!({ "error": format!("unexpected kind {other}") })),
                     }
                 }
-                ("POST", "/drafts") => (201, json!({ "draft_id": "9", "draft": {} })),
-                ("PATCH", "/drafts/9") => (200, json!({ "draft_id": "9", "draft": {} })),
+                ("POST", "/drafts") => (201, draft_reply("9")),
+                ("PATCH", "/drafts/9") => (200, draft_reply("9")),
                 ("POST", "/drafts/9/seal") => (200, json!({ "outcome": { "Sealed": hex_of(digest(4)) } })),
                 _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
             },
@@ -1754,16 +1806,7 @@ mod tests {
     }
 
     fn view_with_member(bloom_id: &str, workpiece: &str) -> Value {
-        json!({
-            "mainline": hex_of(digest(1)),
-            "observed": hex_of(digest(2)),
-            "blooms": [{
-                "id": bloom_id,
-                "status": "Sealed",
-                "superseded_by": null,
-                "members": [{ "workpiece": workpiece, "scope_revision": hex_of(digest(7)) }]
-            }]
-        })
+        live_view(Digest::from_hex(bloom_id).expect("id"), workpiece, digest(7))
     }
 
     fn repair_args(bloom_id: &str, workpiece: &str) -> RepairArgs {
@@ -1815,9 +1858,7 @@ mod tests {
         let (output, log) = with_fake(
             move |request| match (request.method.as_str(), request.path.as_str()) {
                 ("GET", "/view") => (200, view_with_member(&bloom_for_view, "wp-1")),
-                ("POST", path) if path.ends_with("/members/wp-1/repair") => {
-                    (200, json!({ "outcome": { "Admitted": { "sequence": 12 } } }))
-                }
+                ("POST", path) if path.ends_with("/members/wp-1/repair") => (200, json!({ "outcome": "Duplicate" })),
                 _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
             },
             |port| {
@@ -1837,7 +1878,7 @@ mod tests {
         assert!(body.get("candidate").is_none(), "an unnamed source is absent, not null: {body}");
         assert!(body.get("from_commit").is_none(), "an unnamed source is absent, not null: {body}");
         assert_eq!(body["operator"], "operator");
-        assert!(output.contains("Admitted"), "the outcome is printed: {output}");
+        assert!(output.contains("Duplicate"), "the outcome is printed: {output}");
     }
 
     #[test]
@@ -1878,7 +1919,7 @@ mod tests {
             move |request| match (request.method.as_str(), request.path.as_str()) {
                 ("GET", "/view") => (200, view_with_member(&bloom_for_view, "wp-1")),
                 ("POST", path) if path.ends_with("/members/wp-1/suppression") => {
-                    (200, json!({ "outcome": { "Admitted": { "sequence": 13 } } }))
+                    (200, json!({ "outcome": "Duplicate" }))
                 }
                 _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
             },
@@ -1889,7 +1930,7 @@ mod tests {
                         bloom_id: bloom_id.clone(),
                         workpiece: "wp-1".to_owned(),
                         requests: vec![first, second],
-                        verdict: dto::SuppressionVerdict::Denied,
+                        verdict: dto::SuppressionVerdictArg::Denied,
                         reason: "the allow hides the bug the gate caught".to_owned(),
                         operator: "reviewer".to_owned(),
                     }),
@@ -1902,7 +1943,7 @@ mod tests {
         assert_eq!(body["requests"], json!([first.as_hex(), second.as_hex()]));
         assert_eq!(body["verdict"], "Denied", "the verdict is the wire spelling the route decodes");
         assert_eq!(body["operator"], "reviewer");
-        assert!(output.contains("Admitted"), "the outcome is printed: {output}");
+        assert!(output.contains("Duplicate"), "the outcome is printed: {output}");
     }
 
     #[test]
@@ -1924,7 +1965,7 @@ mod tests {
                         bloom_id: bloom_id.clone(),
                         workpiece: "wp-1".to_owned(),
                         requests: Vec::new(),
-                        verdict: dto::SuppressionVerdict::Granted,
+                        verdict: dto::SuppressionVerdictArg::Granted,
                         reason: "looks fine".to_owned(),
                         operator: "reviewer".to_owned(),
                     }),

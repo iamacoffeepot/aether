@@ -44,6 +44,11 @@ pub struct Excused {
     /// property test, the identical invocation for a plain one, or the base
     /// commit for an inherited failure.
     pub replayed: String,
+    /// Wall-clock of the replay that produced this excusal, when that replay
+    /// was a one-test spawn. Absent for a wholesale member re-run that never
+    /// opened a per-test replay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_millis: Option<u64>,
 }
 
 /// What a per-test triage concluded about one failing run.
@@ -83,9 +88,7 @@ impl Triage {
                     "flakes"
                 },
             ));
-            lines.extend(
-                self.flakes.iter().map(|excused| format!("  {} (replayed {})", excused.test, excused.replayed)),
-            );
+            lines.extend(self.flakes.iter().map(|excused| excused.line("replayed")));
         }
         if !self.inherited.is_empty() {
             lines.push(format!(
@@ -99,11 +102,20 @@ impl Triage {
                     "they were"
                 },
             ));
-            lines.extend(
-                self.inherited.iter().map(|excused| format!("  {} (red at {})", excused.test, excused.replayed)),
-            );
+            lines.extend(self.inherited.iter().map(|excused| excused.line("red at")));
         }
         Some(lines.join("\n"))
+    }
+}
+
+impl Excused {
+    /// One ledger line: the test, what it was replayed against, and the replay's
+    /// wall-clock when the spawn measured one.
+    fn line(&self, relation: &str) -> String {
+        self.duration_millis.map_or_else(
+            || format!("  {} ({relation} {})", self.test, self.replayed),
+            |millis| format!("  {} ({relation} {}; {millis} millis)", self.test, self.replayed),
+        )
     }
 }
 
@@ -137,7 +149,7 @@ pub(super) enum ReplayVerdict {
 pub(super) fn triage(
     classified: &ClassifiedRun,
     base: Option<&str>,
-    mut replay: impl FnMut(&str, Option<&str>) -> Result<(ReplayVerdict, String)>,
+    mut replay: impl FnMut(&str, Option<&str>) -> Result<(ReplayVerdict, String, u64)>,
 ) -> Result<Triage> {
     let mut triage = Triage::default();
     for test in classified.candidate_tests() {
@@ -145,9 +157,9 @@ pub(super) fn triage(
         // replay that could not compute a verdict at all proves nothing, and
         // reading it as a pass would excuse a defect on the strength of a build
         // that never happened.
-        let (verdict, replayed) = replay(&test, None)?;
+        let (verdict, replayed, duration_millis) = replay(&test, None)?;
         if matches!(verdict, ReplayVerdict::Cleared) {
-            triage.flakes.push(Excused { test, replayed });
+            triage.flakes.push(Excused { test, replayed, duration_millis: Some(duration_millis) });
             continue;
         }
         // Step 2, when there is a base to ask. Only a base run that named this
@@ -157,9 +169,9 @@ pub(super) fn triage(
             triage.findings.insert(test);
             continue;
         };
-        let (base_verdict, at) = replay(&test, Some(base))?;
+        let (base_verdict, at, duration_millis) = replay(&test, Some(base))?;
         if matches!(base_verdict, ReplayVerdict::Repeated) {
-            triage.inherited.push(Excused { test, replayed: at });
+            triage.inherited.push(Excused { test, replayed: at, duration_millis: Some(duration_millis) });
         } else {
             triage.findings.insert(test);
         }

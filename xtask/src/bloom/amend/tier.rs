@@ -47,14 +47,14 @@ impl PolicySource {
 /// and a tier verdict against the wrong policy is worse than no verdict at all
 /// — it reads as authoritative.
 pub fn resolve_policy(client: &Client<'_>, spec: &BloomSpec, file: &Path) -> Result<(ApprovalPolicy, PolicySource)> {
-    let Some(address) = spec.configs.entries.get(APPROVAL_POLICY_KIND) else {
+    let Some(address) = spec.configs().address_of(APPROVAL_POLICY_KIND) else {
         let text = fs::read_to_string(file).with_context(|| format!("read approval policy {}", file.display()))?;
         let policy: ApprovalPolicy =
             toml::from_str(&text).with_context(|| format!("parse approval policy {}", file.display()))?;
         return Ok((policy, PolicySource::File(file.to_owned())));
     };
 
-    let hex = address.as_hex();
+    let hex = address.to_hex();
     let stored = client
         .config(&hex)
         .with_context(|| format!("read the bloom's sealed approval policy {hex}; the amendment cannot be judged"))?;
@@ -63,7 +63,7 @@ pub fn resolve_policy(client: &Client<'_>, spec: &BloomSpec, file: &Path) -> Res
     }
     let policy: ApprovalPolicy = serde_json::from_value(stored.value)
         .with_context(|| format!("the bloom's sealed approval policy {hex} does not decode"))?;
-    Ok((policy, PolicySource::Sealed(*address)))
+    Ok((policy, PolicySource::Sealed(DigestHex::from(address))))
 }
 
 /// The verdict table `--dry-run` prints, and the same table a refusal carries.

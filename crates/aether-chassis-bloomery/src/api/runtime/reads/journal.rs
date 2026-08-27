@@ -2,8 +2,7 @@
 //! forward) scan; a filter whose bloom has no recent activity may walk the
 //! whole journal to fill one page or to learn the match set is empty.
 
-use aether_bloomery::{BloomId, Digest, Event, Fact, JournalRecord, decode_recorded_decisions};
-use aether_data::wire::from_bytes;
+use aether_bloomery::{BloomId, Digest, Fact, JournalRecord, decode_recorded_decisions, decode_recorded_event};
 
 use super::query::JournalQuery;
 use crate::api::dto::{JournalEntry, JournalView};
@@ -78,9 +77,9 @@ fn past_cursor(sequence: u64, query: &JournalQuery) -> bool {
 }
 
 fn decode_entry(record: &JournalRecord) -> Result<JournalEntry, JournalPageError> {
-    let event = from_bytes::<Event>(&record.event)
+    let event = decode_recorded_event(&record.event, record.event_schema.as_deref())
         .map_err(|error| JournalPageError::Event { sequence: record.sequence, error: error.to_string() })?;
-    let decisions = decode_recorded_decisions(&record.decisions, record.decisions_schema.as_deref())
+    let decisions = decode_recorded_decisions(&record.decisions, record.decisions_schema_digest.as_deref())
         .map_err(|error| JournalPageError::Decisions { sequence: record.sequence, error: error.to_string() })?;
     Ok(JournalEntry {
         sequence: record.sequence,
@@ -136,6 +135,7 @@ fn fact_blooms(fact: &Fact) -> Vec<BloomId> {
         | Fact::SurfaceOverlap { .. }
         | Fact::RequestOrphanClaimRelease { .. }
         | Fact::CompleteOrphanClaimRelease { .. }
-        | Fact::BaseVerifyCompleted { .. } => Vec::new(),
+        | Fact::BaseVerifyCompleted { .. }
+        | Fact::BaseReverify(_) => Vec::new(),
     }
 }

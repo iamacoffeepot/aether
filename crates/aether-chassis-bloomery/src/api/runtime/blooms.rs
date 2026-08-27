@@ -671,7 +671,7 @@ fn derive_repair_candidate(
 /// because an override's whole product is its audit trail: a waiver with a
 /// default reason and no named operator records that something was waived and
 /// nothing about who or why.
-fn unstated(reason: &str, operator: &str) -> Option<HttpServerResponse> {
+pub(super) fn unstated(reason: &str, operator: &str) -> Option<HttpServerResponse> {
     if reason.trim().is_empty() {
         return Some(error_response(422, "an override must state a reason; a blank one is refused, never defaulted"));
     }

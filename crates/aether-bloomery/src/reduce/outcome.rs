@@ -1,19 +1,14 @@
 //! The reducer's result vocabulary: what one event resolved to, paired with
 //! the ordered effects it decided.
 
-use alloc::string::String;
 use alloc::vec::Vec;
 
-use core::fmt;
-
-use aether_data::wire::{Error as WireError, from_bytes};
 use serde::{Deserialize, Serialize};
 
-use super::decisions_v1::DecisionsV1;
 use super::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,
-    AggregateVerifyError, AttemptCompletedError, Decision, FoldConflictError, GrantAttemptsError, HostFaultError,
-    IntegrateError, LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError,
+    AggregateVerifyError, AttemptCompletedError, BaseReverifyError, Decision, FoldConflictError, GrantAttemptsError,
+    HostFaultError, IntegrateError, LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError,
     NarrowCompositionError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ResolveError, SealError,
     SpliceError, SupersedeError, SuppressionDispositionError, SurfaceRequestedError, VerifyFailedError, WithdrawError,
 };
@@ -25,7 +20,7 @@ use crate::values::{
 
 /// The result of reducing one event: an outcome plus the ordered effects that
 /// enter the transactional outbox.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Decisions {
     /// What the event resolved to.
     pub outcome: Outcome,
@@ -46,62 +41,8 @@ impl Decisions {
     }
 }
 
-/// The writing-schema identity this binary stamps beside every journaled
-/// [`Decisions`] blob (ADR-0187). A row whose stamp is not this value and not
-/// a known prior identity is refused by name.
-pub const DECISIONS_SCHEMA: &str = "aether.bloomery.decisions.v2";
-
-/// The writing-schema identity of rows encoded before #5330 appended
-/// `reconcile_assembles_base` to [`StageProgress`](super::StageProgress). An
-/// unstamped row is this identity too — it predates the column.
-pub const DECISIONS_SCHEMA_V1: &str = "aether.bloomery.decisions.v1";
-
-/// Why recorded decisions could not be folded (ADR-0187).
-#[derive(Debug)]
-pub enum DecisionsSchemaError {
-    /// The bytes did not decode as the current [`Decisions`] shape.
-    Decode(WireError),
-    /// The row names a writing schema this binary has no upcast for.
-    Unknown {
-        /// The identity stamped beside the bytes.
-        found: String,
-        /// The identity this binary writes and can decode.
-        current: &'static str,
-    },
-}
-
-impl fmt::Display for DecisionsSchemaError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Decode(error) => write!(f, "decision did not decode: {error}"),
-            Self::Unknown { found, current } => {
-                write!(f, "no migration from schema `{found}` to current `{current}` for kind decisions")
-            }
-        }
-    }
-}
-
-/// Decode journaled [`Decisions`] under the writing-schema identity stamped
-/// beside them (ADR-0187).
-///
-/// The current identity decodes as today. A missing stamp is the implicit v1
-/// identity — rows written before the column existed, named here rather than
-/// treated as a zero-effect table or a fatal abort of an otherwise healthy
-/// shape. v1 (stamped or unstamped) upcasts by filling
-/// `StageProgress::reconcile_assembles_base` as `false`. Any other identity
-/// is a named refusal: this binary has no upcast for it.
-pub fn decode_recorded_decisions(bytes: &[u8], schema: Option<&str>) -> Result<Decisions, DecisionsSchemaError> {
-    match schema {
-        None | Some(DECISIONS_SCHEMA_V1) => {
-            from_bytes::<DecisionsV1>(bytes).map(Decisions::from).map_err(DecisionsSchemaError::Decode)
-        }
-        Some(DECISIONS_SCHEMA) => from_bytes(bytes).map_err(DecisionsSchemaError::Decode),
-        Some(found) => Err(DecisionsSchemaError::Unknown { found: String::from(found), current: DECISIONS_SCHEMA }),
-    }
-}
-
 /// The closed set of event outcomes.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Outcome {
     /// The idempotency key was already applied — no-op.
     Duplicate,
@@ -836,7 +777,7 @@ pub enum Outcome {
     /// **Retired**, and kept for the same reason
     /// [`Fact::SurfaceGranted`](super::Fact::SurfaceGranted) is: journaled
     /// [`Decisions`] blobs already carry it, so removing it stops those rows
-    /// decoding. Last but one in declaration order, so every prior outcome
+    /// decoding. Kept in this declaration position so every prior outcome
     /// keeps its wire discriminant.
     ///
     /// A member's surface request was granted by the machinery and the member
@@ -856,6 +797,9 @@ pub enum Outcome {
     /// [`Fact::SurfaceGranted`](super::Fact::SurfaceGranted) that reaches it:
     /// [`SurfaceRequestedError::GrantRetired`], with no effects.
     SurfaceGrantRejected(SurfaceRequestedError),
+    /// A base re-verify was refused. Appended last so every prior outcome keeps
+    /// its wire discriminant.
+    BaseReverifyRejected(BaseReverifyError),
 }
 
 impl Outcome {
@@ -877,6 +821,7 @@ impl Outcome {
                 | Self::OperatorHoldRejected(_)
                 | Self::WithdrawRejected(_)
                 | Self::SuppressionRejected(_)
+                | Self::BaseReverifyRejected(_)
         )
     }
 }
@@ -886,11 +831,12 @@ mod tests {
     use super::*;
     use crate::digest::Digest;
     use crate::ids::{BloomId, StageId, WorkpieceId};
+    use crate::persisted::{DECISIONS, PersistedSchemaError, decode_recorded_decisions};
     use crate::values::{
         AgentProfile, ConfigRegistry, ExecutionLimits, Harness, NetworkProfile, ReasoningEffort, ToolPolicy,
         Transformation, VerifyFailureSet,
     };
-    use aether_data::wire::{from_bytes, to_vec};
+    use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 
     // Tripwire: wire bytes of a DecisionsV1 whose effects are DispatchAttempt,
     // AdvanceStage with StageProgressV1, then RecordObservation — so the bool
@@ -960,7 +906,9 @@ mod tests {
 
     #[test]
     fn a_v1_row_carrying_a_dispatch_decodes_and_upcasts() {
-        let stamped = decode_recorded_decisions(V1_ROW, Some(DECISIONS_SCHEMA_V1)).expect("stamped v1 decodes");
+        let stamped =
+            decode_recorded_decisions(V1_ROW, Some(DECISIONS.upcast_digest(&DECISIONS.upcasts[0]).as_bytes()))
+                .expect("stamped v1 decodes");
         let unstamped = decode_recorded_decisions(V1_ROW, None).expect("unstamped row is v1");
         assert_eq!(stamped, unstamped);
 
@@ -1006,7 +954,8 @@ mod tests {
             ],
         };
         let bytes = to_vec(&recorded).expect("v2 encodes");
-        let decoded = decode_recorded_decisions(&bytes, Some(DECISIONS_SCHEMA)).expect("current identity decodes");
+        let decoded = decode_recorded_decisions(&bytes, Some(DECISIONS.current_digest().as_bytes()))
+            .expect("current identity decodes");
         assert_eq!(decoded, recorded);
     }
 
@@ -1058,7 +1007,8 @@ mod tests {
         // discriminant and the boot replay misreads the journal, which is the
         // #5338 abort class.
         let expected = minted_v2_row();
-        let stamped = decode_recorded_decisions(V2_ROW, Some(DECISIONS_SCHEMA)).expect("checked-in v2 decodes");
+        let stamped = decode_recorded_decisions(V2_ROW, Some(DECISIONS.current_digest().as_bytes()))
+            .expect("checked-in v2 decodes");
         assert_eq!(stamped, expected);
     }
 
@@ -1066,18 +1016,20 @@ mod tests {
     fn an_unknown_stamp_is_refused_by_name() {
         // A reshape without an upcast must refuse replay by the identities
         // involved, never silently invent a value.
-        let error = decode_recorded_decisions(b"x", Some("aether.bloomery.decisions.v3"))
-            .expect_err("an unknown identity must refuse");
+        let found = Digest::from_bytes([0xcd; 32]);
+        let error =
+            decode_recorded_decisions(b"x", Some(found.as_bytes())).expect_err("an unknown identity must refuse");
         let text = format!("{error}");
-        assert!(text.contains("no migration from schema `aether.bloomery.decisions.v3`"), "{text}");
-        assert!(text.contains(DECISIONS_SCHEMA), "{text}");
-        assert!(text.contains("kind decisions"), "{text}");
+        assert!(text.contains(&format!("no migration from schema `{}`", found.to_hex())), "{text}");
+        assert!(text.contains(&DECISIONS.current_digest().to_hex()), "{text}");
+        assert!(text.contains("for kind `decisions`"), "{text}");
         match error {
-            DecisionsSchemaError::Unknown { found, current } => {
-                assert_eq!(found, "aether.bloomery.decisions.v3");
-                assert_eq!(current, DECISIONS_SCHEMA);
+            PersistedSchemaError::NoUpcast { kind, found: named, current } => {
+                assert_eq!(kind, "decisions");
+                assert_eq!(named, found.to_hex());
+                assert_eq!(current, DECISIONS.current_digest());
             }
-            other @ DecisionsSchemaError::Decode(_) => panic!("expected Unknown, got {other:?}"),
+            other @ PersistedSchemaError::Decode(_) => panic!("expected NoUpcast, got {other:?}"),
         }
     }
 }

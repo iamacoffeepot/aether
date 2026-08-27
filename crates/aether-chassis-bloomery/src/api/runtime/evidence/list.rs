@@ -7,7 +7,7 @@ use std::path::Path;
 use aether_bloomery::{MetricDispatch, StageId, StudyRecord};
 use aether_data::wire::from_bytes;
 
-use super::{evidence_dir, evidence_retained, is_host_nonce};
+use super::{evidence_retained, is_host_nonce, resolve_evidence_dir};
 use crate::api::dto::{BloomDispatchView, BloomDispatchesView};
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::store::{BloomDispatchLive, BloomDispatchRollup};
@@ -15,6 +15,7 @@ use crate::store::{BloomDispatchLive, BloomDispatchRollup};
 /// Assemble the HTTP list from store rows plus filesystem and artifacts.
 pub fn assemble(
     worktree_base: &Path,
+    archive_base: &Path,
     mut artifacts: Option<&mut ArtifactsCapabilityState>,
     rollup: &[BloomDispatchRollup],
     outstanding: &[BloomDispatchLive],
@@ -34,8 +35,8 @@ pub fn assemble(
             (Some(digest), Some(store)) => resolve_cost(store, digest.as_bytes()),
             _ => None,
         };
-        let verdict = retained_verdict(worktree_base, &nonce);
-        let retained = evidence_retained(worktree_base, &nonce);
+        let verdict = retained_verdict(worktree_base, archive_base, &nonce);
+        let retained = evidence_retained(worktree_base, archive_base, &nonce);
         rows.push(BloomDispatchView {
             nonce,
             workpiece: payload.workpiece,
@@ -59,9 +60,9 @@ pub fn assemble(
             workpiece: live.workpiece.clone(),
             stage,
             attempt: 0,
-            verdict: retained_verdict(worktree_base, &live.nonce),
+            verdict: retained_verdict(worktree_base, archive_base, &live.nonce),
             cost: None,
-            evidence_retained: evidence_retained(worktree_base, &live.nonce),
+            evidence_retained: evidence_retained(worktree_base, archive_base, &live.nonce),
         });
     }
 
@@ -99,11 +100,9 @@ fn assign_attempts(rows: &mut [BloomDispatchView]) {
     }
 }
 
-fn retained_verdict(worktree_base: &Path, nonce: &str) -> Option<String> {
-    if !evidence_retained(worktree_base, nonce) {
-        return None;
-    }
-    let bytes = fs::read(evidence_dir(worktree_base, nonce).join("evidence.json")).ok()?;
+fn retained_verdict(worktree_base: &Path, archive_base: &Path, nonce: &str) -> Option<String> {
+    let dir = resolve_evidence_dir(worktree_base, archive_base, nonce)?;
+    let bytes = fs::read(dir.join("evidence.json")).ok()?;
     let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     match value.get("status").and_then(serde_json::Value::as_str)? {
         "pass" | "fail" | "environment" => Some(value["status"].as_str()?.to_owned()),

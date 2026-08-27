@@ -25,7 +25,7 @@
 //! outbox row.
 
 use aether_bloomery::control::ScopeDispatchPayload;
-use aether_bloomery::{Digest, StageCatalog, StageId, Transformation, WorkpieceId};
+use aether_bloomery::{Digest, StageCatalog, StageId, Transformation, WorkpieceId, pin_workpiece_description};
 use aether_data::wire::to_vec;
 
 use crate::store::{ScopeRunOpen, ScopeRunRow, StoreBackend};
@@ -64,15 +64,28 @@ pub fn scope_run_subject(commission: &WorkpieceId, intent: Digest, base: Digest)
 /// binding and the seat come from the compiled line: pre-bloom means there is
 /// no sealed catalog, so the compiled line is the authority, exactly as
 /// `stage_binding` already falls back for a bloom that sealed none.
+///
+/// `sketch` is the commission's intent text, threaded onto the
+/// transformation's advisory description so the lane's `## Task` section
+/// carries the problem it is scoping. The member stages leave the description
+/// for the drain to thread from durable state, because their producer is the
+/// reducer and the reducer holds only digests — but this producer is host code
+/// inside the commission store's own transaction, already holding the intent
+/// statement, and the outbox row is a frozen snapshot by design. A payload
+/// enqueued without the sketch dispatches a lane whose only honest move is to
+/// refuse (it has no claim to ground), so the text is not optional here.
 #[must_use]
 pub fn scope_dispatch_payload(
     commission: WorkpieceId,
     ordinal: u64,
     intent: Digest,
     base: Digest,
+    sketch: &str,
 ) -> ScopeDispatchPayload {
     let binding = StageCatalog::binding_of(StageId::Scope);
     let subject = scope_run_subject(&commission, intent, base);
+    let mut transformation = Transformation::for_scoping_run(&binding, subject, base);
+    transformation.description = Some(pin_workpiece_description(&commission.0, sketch));
     ScopeDispatchPayload {
         commission,
         ordinal,
@@ -80,7 +93,7 @@ pub fn scope_dispatch_payload(
         intent,
         base,
         stage: StageId::Scope,
-        transformation: Transformation::for_scoping_run(&binding, subject, base),
+        transformation,
         // Carried unread: whatever the compiled line calibrates is what
         // dispatches. No `ModelOverride` is resolved against it — that type is
         // sealed into a *bloom's* registry, and there is no bloom here.
@@ -201,6 +214,7 @@ pub fn open_scope_run(
     commission: &WorkpieceId,
     intent: Digest,
     base: Digest,
+    sketch: &str,
 ) -> Result<OpenedScopeRun, ScopeRunRefusal> {
     let rows = store.list_scope_runs(&commission.0).map_err(|error| ScopeRunRefusal::Store(error.to_string()))?;
     match scope_run_state(&rows) {
@@ -212,7 +226,7 @@ pub fn open_scope_run(
 
     let ordinal =
         store.next_scope_run_ordinal(&commission.0).map_err(|error| ScopeRunRefusal::Store(error.to_string()))?;
-    let payload = scope_dispatch_payload(commission.clone(), ordinal, intent, base);
+    let payload = scope_dispatch_payload(commission.clone(), ordinal, intent, base, sketch);
     let encoded = to_vec(&payload).map_err(|error| ScopeRunRefusal::Encode(error.to_string()))?;
 
     let sequence = store

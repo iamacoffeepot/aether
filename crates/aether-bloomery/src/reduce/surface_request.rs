@@ -95,6 +95,7 @@ pub(super) fn reduce_surface_requested(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use crate::persisted::DECISIONS;
     use alloc::string::ToString as _;
     use alloc::vec;
     use alloc::vec::Vec;
@@ -104,9 +105,7 @@ mod tests {
     use super::reduce_surface_requested;
     use crate::digest::{Digest, decode_hex};
     use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
-    use crate::reduce::{
-        DECISIONS_SCHEMA, Event, Fact, Outcome, Snapshot, SurfaceRequestedError, decode_recorded_decisions, reduce,
-    };
+    use crate::reduce::{Event, Fact, Outcome, Snapshot, SurfaceRequestedError, decode_recorded_decisions, reduce};
     use crate::testing::{draft, membership};
     use crate::values::{Evidence, EvidenceKind, ResolvedConfigs, SpendWindow, SurfaceRequest};
 
@@ -280,7 +279,7 @@ mod tests {
         "8820849806fe22984bfaa333e53c154d5df469bac7330e1666234e9c24",
     );
 
-    /// The `decisions` blob of the same record, stamped [`DECISIONS_SCHEMA`] —
+    /// The `decisions` blob of the same record, stamped as the current writing schema —
     /// a retired [`Outcome::SurfaceGranted`] at wire discriminant 88, carrying
     /// the three effects that grant decided.
     const RETIRED_GRANT_DECISIONS: &str = concat!(
@@ -321,8 +320,9 @@ mod tests {
         assert_eq!(*stage, StageId::Construct);
         assert_eq!(added, &["scripts/**".to_string()]);
 
-        let decisions = decode_recorded_decisions(&wire(RETIRED_GRANT_DECISIONS), Some(DECISIONS_SCHEMA))
-            .expect("its recorded decisions decode under the schema they were stamped with");
+        let decisions =
+            decode_recorded_decisions(&wire(RETIRED_GRANT_DECISIONS), Some(DECISIONS.current_digest().as_bytes()))
+                .expect("its recorded decisions decode under the schema they were stamped with");
         assert!(
             matches!(decisions.outcome, Outcome::SurfaceGranted { .. }),
             "the recorded outcome is the retired one: {:?}",

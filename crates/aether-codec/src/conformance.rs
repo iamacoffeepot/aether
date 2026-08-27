@@ -23,8 +23,9 @@
 #![cfg(test)]
 
 use core::fmt::Debug;
+use std::collections::BTreeMap;
 
-use aether_data::wire;
+use aether_data::wire::{self, WireDecode, WireEncode, decode_from_slice, encode_to_vec};
 use aether_data::{Primitive, SchemaCell, SchemaType};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -34,24 +35,29 @@ use crate::test_fixtures::{named, scalar, structured_struct};
 use crate::{decode_schema, encode_schema};
 
 /// The conformance law for one `(value, schema, json)` fixture: the
-/// serde adapter and the schema walker emit identical versioned bytes,
-/// and each side decodes the other's bytes back to the canonical form.
+/// owned codec, the serde adapter, and the schema walker emit identical
+/// bytes, and each decoder accepts the others' output.
 fn check<T>(value: &T, schema: &SchemaType, json: &Value)
 where
-    T: Serialize + DeserializeOwned + PartialEq + Debug,
+    T: Serialize + DeserializeOwned + WireEncode + for<'de> WireDecode<'de> + PartialEq + Debug,
 {
     let adapter = wire::to_vec(value).expect("wire adapter encode");
+    let derived = encode_to_vec(value).expect("owned encode");
     let walker = encode_schema(json, schema).expect("schema walker encode");
     assert_eq!(adapter, walker, "adapter vs walker encode bytes diverge for {json}");
+    assert_eq!(derived, adapter, "owned codec vs serde adapter encode bytes diverge for {json}");
 
     let decoded_json = decode_schema(&adapter, schema).expect("walker decode of adapter bytes");
     assert_eq!(&decoded_json, json, "walker decode of adapter bytes diverges for {json}");
 
     let decoded_value: T = wire::from_bytes(&walker).expect("adapter decode of walker bytes");
     assert_eq!(&decoded_value, value, "adapter decode of walker bytes diverges");
+
+    let from_derived: T = decode_from_slice(&walker).expect("owned decode of walker bytes");
+    assert_eq!(&from_derived, value, "owned decode of walker bytes diverges");
 }
 
-#[derive(Serialize, serde::Deserialize, PartialEq, Debug)]
+#[derive(Serialize, serde::Deserialize, aether_data::Schema, PartialEq, Debug)]
 struct Scalars {
     a: u8,
     b: u16,
@@ -117,12 +123,12 @@ fn scalars_conform() {
     check(&value, &scalars_schema(), &json);
 }
 
-#[derive(Serialize, serde::Deserialize, PartialEq, Debug)]
+#[derive(Serialize, serde::Deserialize, aether_data::Schema, PartialEq, Debug)]
 struct Inner {
     seq: u32,
 }
 
-#[derive(Serialize, serde::Deserialize, PartialEq, Debug)]
+#[derive(Serialize, serde::Deserialize, aether_data::Schema, PartialEq, Debug)]
 struct Collections {
     tags: Vec<String>,
     maybe_some: Option<u64>,
@@ -165,7 +171,7 @@ fn collections_conform() {
     check(&value, &collections_schema(), &json);
 }
 
-#[derive(Serialize, serde::Deserialize, PartialEq, Debug)]
+#[derive(Serialize, serde::Deserialize, aether_data::Schema, PartialEq, Debug)]
 enum Sum {
     Pending,
     Ok(u64),
@@ -208,7 +214,6 @@ fn enum_variants_conform() {
 
 #[test]
 fn map_keys_conform_in_encoded_byte_order() {
-    use std::collections::BTreeMap;
     // Keys 1 and 256 sort numerically as 1 < 256 but in little-endian
     // u32 bytes as 256 < 1 — the multi-byte key case the encoded-byte
     // map ordering must reproduce.
@@ -221,4 +226,95 @@ fn map_keys_conform_in_encoded_byte_order() {
     };
     let json = json!({ "1": "one", "256": "two-fifty-six" });
     check(&value, &schema, &json);
+}
+
+#[test]
+fn fixture_kinds_corpus_covers_every_schema_arm() {
+    use aether_data::Schema;
+    use aether_test_fixtures_kinds::wire_corpus::{
+        CorpusCast, CorpusCollections, CorpusMaps, CorpusNested, CorpusScalars, CorpusSum, CorpusUnit,
+    };
+
+    check(&CorpusUnit, &CorpusUnit::SCHEMA, &json!(null));
+
+    let scalars = CorpusScalars {
+        u8_field: 1,
+        u16_field: 0x0102,
+        u32_field: 0x0102_0304,
+        u64_field: 0x0102_0304_0506_0708,
+        i8_field: -1,
+        i16_field: -300,
+        i32_field: -70_000,
+        i64_field: -5_000_000_000,
+        f32_field: 1.5,
+        f64_field: -2.25,
+        flag: true,
+        label: "héllo".into(),
+    };
+    check(
+        &scalars,
+        &CorpusScalars::SCHEMA,
+        &json!({
+            "u8_field": 1u8,
+            "u16_field": 0x0102u16,
+            "u32_field": 0x0102_0304u32,
+            "u64_field": 0x0102_0304_0506_0708u64,
+            "i8_field": -1i8,
+            "i16_field": -300i16,
+            "i32_field": -70_000i32,
+            "i64_field": -5_000_000_000i64,
+            "f32_field": 1.5,
+            "f64_field": -2.25,
+            "flag": true,
+            "label": "héllo",
+        }),
+    );
+
+    let collections = CorpusCollections {
+        tags: vec!["alpha".into(), "beta".into()],
+        maybe_some: Some(9),
+        maybe_none: None,
+        triple: [1, 2, 3],
+        blob: vec![0, 1, 255],
+        empty_vec: vec![],
+        empty_string: String::new(),
+    };
+    check(
+        &collections,
+        &CorpusCollections::SCHEMA,
+        &json!({
+            "tags": ["alpha", "beta"],
+            "maybe_some": 9u64,
+            "maybe_none": null,
+            "triple": [1u32, 2u32, 3u32],
+            "blob": [0, 1, 255],
+            "empty_vec": [],
+            "empty_string": "",
+        }),
+    );
+
+    check(&CorpusSum::Pending, &CorpusSum::SCHEMA, &json!("Pending"));
+    check(&CorpusSum::Ok(7), &CorpusSum::SCHEMA, &json!({ "Ok": 7u64 }));
+    check(&CorpusSum::Pair(1, -2), &CorpusSum::SCHEMA, &json!({ "Pair": [1u32, -2i16] }));
+    check(&CorpusSum::Err { reason: "nope".into() }, &CorpusSum::SCHEMA, &json!({ "Err": { "reason": "nope" } }));
+
+    let nested = CorpusNested { items: vec![None, Some(CorpusSum::Pending), Some(CorpusSum::Ok(1))] };
+    check(&nested, &CorpusNested::SCHEMA, &json!({ "items": [null, "Pending", { "Ok": 1u64 }] }));
+
+    let mut by_name = BTreeMap::new();
+    by_name.insert("b".into(), 1u8);
+    by_name.insert("aa".into(), 2u8);
+    let mut by_u32 = BTreeMap::new();
+    by_u32.insert(1u32, "one".into());
+    by_u32.insert(256u32, "two-fifty-six".into());
+    check(
+        &CorpusMaps { by_name, by_u32 },
+        &CorpusMaps::SCHEMA,
+        &json!({
+            "by_name": { "aa": 2, "b": 1 },
+            "by_u32": { "1": "one", "256": "two-fifty-six" },
+        }),
+    );
+
+    check(&CorpusCast { x: 1.5, y: -2.25 }, &CorpusCast::SCHEMA, &json!({ "x": 1.5, "y": -2.25 }));
 }

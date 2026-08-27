@@ -72,7 +72,7 @@ pub fn draft_with_catalog(base: u8, members: Vec<Membership>, catalog: &StageCat
     configs.insert::<StageCatalog>(catalog.address());
 
     let mut resolved = ResolvedConfigs::default();
-    resolved.insert(catalog.address(), StageCatalog::NAME, to_vec(catalog).expect("catalog encodes"));
+    resolved.insert(catalog.address(), StageCatalog::NAME, to_vec(catalog).expect("catalog encodes"), None);
 
     (BloomDraft { proposals: members, base: digest(base), configs, ..BloomDraft::default() }, resolved)
 }
@@ -95,7 +95,7 @@ pub fn draft_with_member_override(
     let member = approved(member);
 
     let mut resolved = ResolvedConfigs::default();
-    resolved.insert(override_.address(), ModelOverride::NAME, to_vec(override_).expect("override encodes"));
+    resolved.insert(override_.address(), ModelOverride::NAME, to_vec(override_).expect("override encodes"), None);
 
     (BloomDraft { proposals: vec![member], base: digest(base), ..BloomDraft::default() }, resolved)
 }

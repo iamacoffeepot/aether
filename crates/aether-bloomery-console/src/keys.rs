@@ -218,6 +218,17 @@ mod tests {
     }
 
     #[test]
+    fn footer_keys_never_drops_the_overlay_key() {
+        // The plausible bug: a budget too small for the screen list walks
+        // off the unelidable tail, so `?` vanishes and the overlay has no door.
+        let tail = footer_line(INLINE_HINTS);
+        for budget in [0, 1, tail.chars().count(), 40] {
+            let rendered = footer_keys(&BOARD_HINTS, INLINE_HINTS, budget);
+            assert!(rendered.contains("? keys"), "budget {budget}: {rendered}");
+        }
+    }
+
+    #[test]
     fn footer_keys_paints_quit_once() {
         // Tripwire: the tail and the screen lists overlap by construction, so
         // the dedupe is the only thing keeping a duplicated key out of the row.

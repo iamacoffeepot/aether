@@ -1,8 +1,9 @@
 //! Shell: endpoint, store, fetch lanes, a three-pane workspace, and pushed frames.
 //!
 //! Screens receive the store read-only and cannot fetch or mutate it.
-//! The header, breadcrumb, rules, and one-line footer are shell chrome. Only
-//! the middle band swaps between the workspace and the top pushed frame.
+//! The header, rules, and one-line footer are shell chrome; the trail sits in
+//! the footer's left slot. Only the middle band swaps between the workspace
+//! and the top pushed frame.
 
 pub mod chrome;
 mod workspace;
@@ -126,7 +127,6 @@ impl Shell {
             .constraints([
                 Constraint::Length(1),
                 Constraint::Length(1),
-                Constraint::Length(1),
                 Constraint::Min(3),
                 Constraint::Length(1),
                 Constraint::Length(1),
@@ -143,12 +143,11 @@ impl Shell {
             ),
             chunks[0],
         );
-        frame.render_widget(chrome::breadcrumb(&self.breadcrumb_trail()), chunks[1]);
-        frame.render_widget(chrome::rule(frame.area().width), chunks[2]);
+        frame.render_widget(chrome::rule(frame.area().width), chunks[1]);
         if self.stack.is_empty() {
-            self.workspace.render(frame, chunks[3], &self.store);
+            self.workspace.render(frame, chunks[2], &self.store);
         } else if let Some(screen) = self.stack.last_mut() {
-            let body = chunks[3];
+            let body = chunks[2];
             if let Some(title) = screen.reading_title() {
                 let block = chrome::pane_block(title, true);
                 let inner = block.inner(body);
@@ -160,12 +159,12 @@ impl Shell {
         }
         let hints = self.footer_hints();
         if self.keys_overlay {
-            let (area, overlay) = chrome::keys_overlay(&hints, chunks[3]);
+            let (area, overlay) = chrome::keys_overlay(&hints, chunks[2]);
             frame.render_widget(Clear, area);
             frame.render_widget(overlay, area);
         }
-        frame.render_widget(chrome::rule(frame.area().width), chunks[4]);
-        frame.render_widget(chrome::footer(&hints, chunks[5].width), chunks[5]);
+        frame.render_widget(chrome::rule(frame.area().width), chunks[3]);
+        frame.render_widget(chrome::footer(&self.breadcrumb_trail(), &hints, chunks[4].width), chunks[4]);
     }
 
     fn drain_replies(&mut self) {
@@ -363,7 +362,7 @@ impl Shell {
         }
     }
 
-    /// Path from the workspace through each pushed frame, painted on the breadcrumb row.
+    /// Path from the workspace through each pushed frame, painted in the footer.
     fn breadcrumb_trail(&self) -> String {
         once("board".to_owned()).chain(self.stack.iter().map(Screen::label)).collect::<Vec<_>>().join(" › ")
     }
@@ -461,7 +460,7 @@ mod tests {
     };
     use crate::fetch::{FetchReply, ResourceBody};
     use crate::http::Endpoint;
-    use crate::keys::{Outcome, assert_footer_honest, footer_line};
+    use crate::keys::{INLINE_HINTS, Outcome, assert_footer_honest, footer_keys, footer_line, footer_row};
     use crate::nav::Nav;
     use crate::palette::{Role, depth};
     use crate::screen::{Dashboard, RowId};
@@ -686,6 +685,10 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 16)).expect("test backend");
         terminal.draw(|frame| shell.render(frame)).expect("draw");
         buffer_text(&terminal)
+    }
+
+    fn composed_footer(shell: &Shell, width: usize) -> String {
+        footer_row(&shell.breadcrumb_trail(), &footer_keys(&shell.footer_hints(), INLINE_HINTS, width), width)
     }
 
     fn assert_interrupt_jumps(view: &ViewDocument, action: &str, focus: &Focus) {
@@ -990,12 +993,18 @@ mod tests {
             },
         );
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
-        let text = draw(&mut shell);
-        let crumb = text.lines().nth(1).unwrap_or("").to_owned();
-        let last = text.lines().last().unwrap_or("").to_owned();
-        assert!(crumb.contains("board › bloom "), "{crumb}");
-        assert!(crumb.contains("› member issue-1"), "{crumb}");
-        assert!(crumb.contains("› transcript"), "{crumb}");
+        let trail = shell.breadcrumb_trail();
+        assert!(trail.contains("board › bloom "), "{trail}");
+        assert!(trail.contains("› member issue-1"), "{trail}");
+        assert!(trail.contains("› transcript"), "{trail}");
+        let mut terminal = Terminal::new(TestBackend::new(240, 16)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let last = buffer_text(&terminal).lines().last().unwrap_or("").to_owned();
+        assert_eq!(last, composed_footer(&shell, 240), "{last}");
+        assert!(last.contains("board › bloom "), "{last}");
+        assert!(last.contains("› member issue-1"), "{last}");
+        assert!(last.contains("› transcript"), "{last}");
+        assert!(last.contains("? keys"), "{last}");
         assert!(last.trim_end().ends_with("q quit"), "{last}");
     }
 
@@ -1004,15 +1013,37 @@ mod tests {
         // Names the bug: a path that is blank at the root, which is the wish's
         // first half.
         let mut root = Shell::showing(&ViewDocument::default(), None);
+        assert_eq!(root.breadcrumb_trail(), "board");
         let mut terminal = Terminal::new(TestBackend::new(100, 16)).expect("test backend");
         terminal.draw(|frame| root.render(frame)).expect("draw");
-        let row1 = buffer_text(&terminal).lines().nth(1).unwrap_or("").to_owned();
-        assert!(row1.starts_with("board"), "{row1}");
+        let last = buffer_text(&terminal).lines().last().unwrap_or("").to_owned();
+        assert_eq!(last, composed_footer(&root, 100), "{last}");
 
         let mut days = Shell::probe(Nav::days());
+        assert_eq!(days.breadcrumb_trail(), "board › days");
         terminal.draw(|frame| days.render(frame)).expect("draw");
-        let row1 = buffer_text(&terminal).lines().nth(1).unwrap_or("").to_owned();
-        assert_eq!(row1.trim(), "board › days", "{row1}");
+        let last = buffer_text(&terminal).lines().last().unwrap_or("").to_owned();
+        assert_eq!(last, composed_footer(&days, 100), "{last}");
+        assert!(last.starts_with("board › days"), "{last}");
+        assert!(last.contains("? keys"), "{last}");
+    }
+
+    #[test]
+    fn a_pushed_screen_paints_the_trail_in_the_footer_not_the_top_chrome() {
+        // The plausible bug: chunks[1] still carries the trail, so a titled
+        // pane names the screen twice and the footer's left slot stays empty.
+        let mut shell = Shell::probe(Nav::days());
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let text = buffer_text(&terminal);
+        let lines: Vec<&str> = text.lines().collect();
+        let rule = "─".repeat(100);
+        assert_eq!(lines.get(1).copied().unwrap_or(""), rule, "row under the header is not the rule:\n{text}");
+        let last = lines.last().copied().unwrap_or("");
+        assert_eq!(last, composed_footer(&shell, 100), "{last}");
+        assert!(last.starts_with("board › days"), "{last}");
+        assert!(last.contains("? keys"), "{last}");
+        assert!(last.trim_end().ends_with("q quit"), "{last}");
     }
 
     #[test]
@@ -1026,20 +1057,21 @@ mod tests {
         let text = buffer_text(&terminal);
         let lines: Vec<&str> = text.lines().collect();
         let rule = "─".repeat(100);
-        assert_eq!(lines.get(2).copied().unwrap_or(""), rule, "top rule:\n{text}");
+        assert_eq!(lines.get(1).copied().unwrap_or(""), rule, "top rule:\n{text}");
         assert_eq!(lines.iter().rev().nth(1).copied().unwrap_or(""), rule, "bottom rule:\n{text}");
         assert!(lines.last().is_some_and(|last| last.contains("? keys")), "footer:\n{text}");
-        let body = lines.get(3).copied().unwrap_or("");
+        let body = lines.get(2).copied().unwrap_or("");
         assert_ne!(body, rule, "first body row is a rule:\n{text}");
         assert!(body.contains('┏') || body.contains('┌'), "first body row:\n{body}");
     }
 
     #[test]
-    fn at_rest_the_footer_carries_the_keys_alone() {
-        // Tripwire: the trail has its own row; a crumb on the footer is
-        // noise on every frame.
+    fn at_rest_the_footer_carries_the_trail_and_the_keys() {
+        // The plausible bug: moving the trail into the footer drops the keys,
+        // or the left slot stays empty so the root still has no name.
         let mut shell = Shell::showing(&ViewDocument::default(), None);
         let last = draw(&mut shell).lines().last().unwrap_or("").to_owned();
+        assert_eq!(last, composed_footer(&shell, 100), "{last}");
         assert!(!last.contains('›'), "{last}");
         assert!(last.contains("? keys"), "{last}");
         assert!(last.trim_end().ends_with("q quit"), "{last}");
@@ -1048,19 +1080,21 @@ mod tests {
     #[test]
     fn a_deep_trail_is_elided_from_the_left_and_keeps_the_keys() {
         // The plausible bug: a long trail still shares the footer, so q quit
-        // is the token that goes.
+        // is the token that goes — or width truncation walks off `?` instead
+        // of the root crumbs.
         let mut shell = Shell::showing(&ViewDocument::default(), None);
         for _ in 0..12 {
             shell.push_nav(Nav::days());
         }
-        shell.push_nav(Nav::transcript("deep-crumb"));
         let mut terminal = Terminal::new(TestBackend::new(60, 24)).expect("test backend");
         terminal.draw(|frame| shell.render(frame)).expect("draw");
         let last = buffer_text(&terminal).lines().last().unwrap_or("").to_owned();
-        assert!(!last.starts_with('…'), "{last}");
+        assert_eq!(last, composed_footer(&shell, 60), "{last}");
+        assert!(last.starts_with('…'), "{last}");
+        assert!(!last.contains("board ›"), "root was dropped: {last}");
         assert!(last.chars().count() <= 60, "{last}");
-        assert!(last.trim_end().ends_with("q quit"), "{last}");
         assert!(last.contains("? keys"), "{last}");
+        assert!(last.trim_end().ends_with("q quit"), "{last}");
     }
 
     #[test]
@@ -1430,9 +1464,8 @@ mod tests {
         assert_eq!(title_border_symbol(buffer, "needs you"), "┏");
     }
 
-    /// The body rect's first row: the header, the breadcrumb and the rule each
-    /// take one row above it.
-    const BODY_TOP: u16 = 3;
+    /// The body rect's first row: the header and the rule each take one row above it.
+    const BODY_TOP: u16 = 2;
 
     #[test]
     fn a_pushed_artifact_reads_inside_a_titled_pane() {

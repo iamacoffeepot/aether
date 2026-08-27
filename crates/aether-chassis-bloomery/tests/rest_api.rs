@@ -38,12 +38,17 @@ use aether_chassis_bloomery::bloomery::TopicOutbox;
 use aether_chassis_bloomery::commission;
 use aether_chassis_bloomery::store::{CommissionBackend, SqliteStore, StoreBackend};
 use aether_data::wire::from_bytes;
-use common::{Coordinator, free_port};
+use common::{Coordinator, Ingress};
 use ed25519_dalek::{Signer, SigningKey};
 use serde_json::Value;
 
 /// Bearer the commission authoring routes require in this process.
 const CONTROL_TOKEN: &str = "test-control-token";
+
+/// How long a forked coordinator has to bind an ingress and say so. A child
+/// that dies instead reports at once, so this is the silent-child ceiling
+/// rather than a cost any passing run pays.
+const BIND_BUDGET: Duration = Duration::from_mins(1);
 
 /// An empty seal / supersede body. Projections and descriptions are store-backed.
 fn seal_body() -> Value {
@@ -202,17 +207,22 @@ fn owner_allowlist() -> String {
 /// Fork the `bloomery` bin with the HTTP ingress and control core autoloaded,
 /// pointing the pre-seal approve gate at `policy_path` (#3583). Reaped when the
 /// returned guard drops.
-fn spawn(http_port: u16, rpc_port: u16, policy_path: &str) -> Coordinator {
-    spawn_with_store(http_port, rpc_port, policy_path, ":memory:")
+///
+/// Both ingresses bind `0`, so the child holds each port from the moment it
+/// binds and no concurrently booting sibling can take one. A REST port reserved
+/// and released here used to be stolen exactly that way, and the loser died on
+/// the HTTP bind before the RPC ingress existed — leaving the fixture to burn
+/// its readiness deadline against a socket nobody owned (#5000, #5475).
+fn spawn(policy_path: &str) -> Coordinator {
+    spawn_with_store(policy_path, ":memory:")
 }
 
 /// [`spawn`], with a caller-provided durable store for a test that reads the
 /// dispatch outbox through a second store connection.
-fn spawn_with_store(http_port: u16, rpc_port: u16, policy_path: &str, store_path: &str) -> Coordinator {
+fn spawn_with_store(policy_path: &str, store_path: &str) -> Coordinator {
     Coordinator::spawn(
-        rpc_port,
+        0,
         &[
-            ("AETHER_HTTP_PORT", &http_port.to_string()),
             ("AETHER_STORE_PATH", store_path),
             ("AETHER_SIGNING_ALLOWLIST", &owner_allowlist()),
             ("AETHER_APPROVAL_POLICY_FILE", policy_path),
@@ -221,8 +231,22 @@ fn spawn_with_store(http_port: u16, rpc_port: u16, policy_path: &str, store_path
     )
 }
 
+/// The port `coordinator` announced for `ingress` as it bound.
+///
+/// # Panics
+/// The child died before it bound that ingress, or stayed silent past the
+/// budget — either way the refusal carries what it last logged.
+fn announced_port(coordinator: &Coordinator, ingress: Ingress) -> u16 {
+    coordinator
+        .await_port(ingress, Instant::now() + BIND_BUDGET)
+        .unwrap_or_else(|why| panic!("the coordinator never announced a bound ingress: {why}"))
+}
+
 /// Record a green whole-workspace receipt for `base` so a following HTTP seal
 /// dispatches Construct rather than waiting on `verify.base`.
+///
+/// `rpc_port` is the one the child announced, so the handshake here reaches the
+/// coordinator this test forked and no other.
 fn prove_green_base(rpc_port: u16, base: Digest) {
     use aether_bloomery::{
         Admit, AdmitResult, CONTROL_CORE_NAMESPACE, Event, Fact, IdempotencyKey, Outcome, VerifyFailureSet,
@@ -438,11 +462,10 @@ fn assert_store_door_fails_closed(http_port: u16) {
 
 #[test]
 fn rest_api_drives_a_bloom_end_to_end() {
-    let http_port = free_port();
-    let rpc_port = free_port();
     // The gate loads this policy at init; kept alive for the coordinator's lifetime.
     let (_policy_dir, policy_path) = test_policy();
-    let _coordinator = spawn(http_port, rpc_port, &policy_path);
+    let coordinator = spawn(&policy_path);
+    let http_port = announced_port(&coordinator, Ingress::Http);
 
     // Routes register asynchronously; `/drafts` (an in-memory route) is the
     // http-readiness signal.
@@ -521,13 +544,12 @@ fn a_seal_reads_commission_task_text_without_a_github_issue() {
     // Acceptance: the door seals a commission that never had a GitHub home,
     // and construct's task is the signed work order — not a gh issue view,
     // and not an empty advisory field.
-    let http_port = free_port();
-    let rpc_port = free_port();
     let (_policy_dir, policy_path) = test_policy();
     let store_dir = tempfile::tempdir().unwrap();
     let store_path = store_dir.path().join("bloomery.db");
     let store_path = store_path.to_str().unwrap();
-    let _coordinator = spawn_with_store(http_port, rpc_port, &policy_path, store_path);
+    let coordinator = spawn_with_store(&policy_path, store_path);
+    let http_port = announced_port(&coordinator, Ingress::Http);
 
     wait_for_200(http_port, "/drafts");
     wait_for_200(http_port, "/view");
@@ -600,13 +622,12 @@ fn an_open_non_member_dependency_is_refused_as_open_dependency() {
 /// refused it as an unknown workpiece; the gate must admit it.
 #[test]
 fn a_member_depending_on_a_landed_commission_seals() {
-    let http_port = free_port();
-    let rpc_port = free_port();
     let (_policy_dir, policy_path) = test_policy();
     let store_dir = tempfile::tempdir().unwrap();
     let store_path = store_dir.path().join("bloomery.db");
     let store_path = store_path.to_str().unwrap();
-    let _coordinator = spawn_with_store(http_port, rpc_port, &policy_path, store_path);
+    let coordinator = spawn_with_store(&policy_path, store_path);
+    let http_port = announced_port(&coordinator, Ingress::Http);
 
     wait_for_200(http_port, "/drafts");
     wait_for_200(http_port, "/view");
@@ -680,10 +701,9 @@ fn mixed_auto_and_above_auto_seal_admits_when_verified() {
 /// HTTP router, `/view` for the live control core), then run `body` against its
 /// HTTP port. The coordinator is reaped when this returns, panic or not.
 fn run_with_bloomery(_label: &str, body: impl FnOnce(u16)) {
-    let http_port = free_port();
-    let rpc_port = free_port();
     let (_policy_dir, policy_path) = test_policy();
-    let _coordinator = spawn(http_port, rpc_port, &policy_path);
+    let coordinator = spawn(&policy_path);
+    let http_port = announced_port(&coordinator, Ingress::Http);
 
     wait_for_200(http_port, "/drafts");
     wait_for_200(http_port, "/view");
@@ -753,10 +773,9 @@ fn assert_mixed_above_auto_seal(http_port: u16) {
 // resolution, encoding through that schema, addressing, and the deferral.
 #[test]
 fn authoring_a_config_stores_it_under_a_stable_content_address() {
-    let http_port = free_port();
-    let rpc_port = free_port();
     let (_policy_dir, policy_path) = test_policy();
-    let _coordinator = spawn(http_port, rpc_port, &policy_path);
+    let coordinator = spawn(&policy_path);
+    let http_port = announced_port(&coordinator, Ingress::Http);
 
     wait_for_200(http_port, "/drafts");
 
@@ -814,10 +833,9 @@ fn authoring_a_config_stores_it_under_a_stable_content_address() {
 // receipt contradicts.
 #[test]
 fn a_sealed_approval_policy_decides_the_tier_the_file_policy_would_refuse() {
-    let http_port = free_port();
-    let rpc_port = free_port();
     let (_policy_dir, policy_path) = test_policy();
-    let _coordinator = spawn(http_port, rpc_port, &policy_path);
+    let coordinator = spawn(&policy_path);
+    let http_port = announced_port(&coordinator, Ingress::Http);
 
     wait_for_200(http_port, "/drafts");
     wait_for_200(http_port, "/view");
@@ -919,13 +937,12 @@ fn patch_draft(http_port: u16, patch: &Value) -> String {
 // authored construct binding from the compiled fallback.
 #[test]
 fn authored_stage_catalog_reaches_the_dispatch_profile() {
-    let http_port = free_port();
-    let rpc_port = free_port();
     let (_policy_dir, policy_path) = test_policy();
     let store_dir = tempfile::tempdir().unwrap();
     let store_path = store_dir.path().join("bloomery.db");
     let store_path = store_path.to_str().unwrap();
-    let _coordinator = spawn_with_store(http_port, rpc_port, &policy_path, store_path);
+    let coordinator = spawn_with_store(&policy_path, store_path);
+    let http_port = announced_port(&coordinator, Ingress::Http);
 
     wait_for_200(http_port, "/drafts");
 
@@ -972,7 +989,7 @@ fn authored_stage_catalog_reaches_the_dispatch_profile() {
     assert_eq!(fetched["draft"]["configs"], rendered_registry);
 
     wait_for_200(http_port, "/view");
-    prove_green_base(rpc_port, Digest::from_bytes([1; 32]));
+    prove_green_base(announced_port(&coordinator, Ingress::Rpc), Digest::from_bytes([1; 32]));
     let (status, sealed) = send_json(http_port, "POST", &format!("/drafts/{draft_id}/seal"), &seal_body());
     assert_eq!(status, 200, "seal the draft carrying the authored catalog: {sealed:?}");
 
@@ -1234,13 +1251,12 @@ fn grant_route_carries_the_selected_count_and_refuses_concurrent_work() {
 fn an_amend_shaped_revision_files_a_scope_verify_report() {
     // An operator freeze that files no report reads exactly like a hand-authored
     // one. The xtask client path now carries the sidecar so the report lands.
-    let http_port = free_port();
-    let rpc_port = free_port();
     let (_policy_dir, policy_path) = test_policy();
     let store_dir = tempfile::tempdir().unwrap();
     let store_path = store_dir.path().join("bloomery.db");
     let store_path = store_path.to_str().unwrap();
-    let _coordinator = spawn_with_store(http_port, rpc_port, &policy_path, store_path);
+    let coordinator = spawn_with_store(&policy_path, store_path);
+    let http_port = announced_port(&coordinator, Ingress::Http);
 
     wait_for_200(http_port, "/view");
 
@@ -1301,13 +1317,12 @@ fn posting_a_scope_run_enqueues_the_host_minted_topic() {
     // The trigger: POST /commissions/{id}/scope-runs writes the enqueued row
     // and the Topic::ScopeDispatch outbox row in one transaction, so the
     // executor can drain a pre-bloom run with no bloom in the store.
-    let http_port = free_port();
-    let rpc_port = free_port();
     let (_policy_dir, policy_path) = test_policy();
     let store_dir = tempfile::tempdir().unwrap();
     let store_path = store_dir.path().join("bloomery.db");
     let store_path = store_path.to_str().unwrap();
-    let _coordinator = spawn_with_store(http_port, rpc_port, &policy_path, store_path);
+    let coordinator = spawn_with_store(&policy_path, store_path);
+    let http_port = announced_port(&coordinator, Ingress::Http);
 
     wait_for_200(http_port, "/view");
 
@@ -1343,8 +1358,6 @@ fn a_commission_whose_tip_predates_a_field_append_can_be_shown_and_healed() {
     // Before the fix, GET /commissions/{id} over a short version-1 row is the
     // 500 an operator cannot act on. After it, show returns the tip digest and
     // a successor that names that digest as predecessor brings the id back.
-    let http_port = free_port();
-    let rpc_port = free_port();
     let (_policy_dir, policy_path) = test_policy();
     let store_dir = tempfile::tempdir().unwrap();
     let store_path = store_dir.path().join("bloomery.db");
@@ -1393,7 +1406,8 @@ fn a_commission_whose_tip_predates_a_field_append_can_be_shown_and_healed() {
         .expect("point the tip at the planted row");
     }
 
-    let _coordinator = spawn_with_store(http_port, rpc_port, &policy_path, store_path);
+    let coordinator = spawn_with_store(&policy_path, store_path);
+    let http_port = announced_port(&coordinator, Ingress::Http);
     wait_for_200(http_port, "/view");
 
     let (status, shown) = get_auth(http_port, "/commissions/wp-old");
@@ -1491,7 +1505,7 @@ fn fold_unpriced_construct_seats() -> (Vec<MetricsSeat>, CapabilityLedger) {
     member.approval.subject = member.subject();
 
     let mut configs = ResolvedConfigs::default();
-    configs.insert(override_.address(), ModelOverride::NAME, to_vec(&override_).expect("override encodes"));
+    configs.insert(override_.address(), ModelOverride::NAME, to_vec(&override_).expect("override encodes"), None);
 
     let spec = BloomDraft { proposals: vec![member], base: digest(1), ..BloomDraft::default() }.seal();
     let bloom = spec.id();
@@ -1663,22 +1677,26 @@ fn spawn_os_ports(policy_path: &str) -> Coordinator {
 }
 
 fn spawn_author_ready(policy_path: &str) -> (u16, Coordinator) {
-    let (coordinator, stream) =
-        common::client::spawn_and_connect("rest-author", Duration::from_mins(1), || (0, spawn_os_ports(policy_path)));
-    let rpc_port = stream.peer_addr().unwrap().port();
-    (wait_author_http(&coordinator, rpc_port), coordinator)
+    let (coordinator, _stream) =
+        common::client::spawn_and_connect("rest-author", Duration::from_mins(1), || spawn_os_ports(policy_path));
+    (wait_author_http(&coordinator), coordinator)
 }
 
-fn wait_author_http(coordinator: &Coordinator, rpc_port: u16) -> u16 {
+/// The child's REST port, once `/drafts` answers on it.
+///
+/// Two gates, and both are needed: the child announces the port it bound, and
+/// the first `200` is what says the routes behind it have registered.
+fn wait_author_http(coordinator: &Coordinator) -> u16 {
     let deadline = Instant::now() + Duration::from_secs(30);
-    let mut last = String::from("HTTP never listened");
+    let port = announced_port(coordinator, Ingress::Http);
+    // Assigned on every path that reaches the assert, so it always names the
+    // refusal the last attempt actually met.
+    let mut last;
     loop {
-        if let Some(port) = coordinator.listening_ports().into_iter().find(|port| *port != rpc_port) {
-            match try_http(port, "GET", "/drafts", None) {
-                Ok((200, _)) => return port,
-                Ok((status, _)) => last = format!("/drafts returned {status}"),
-                Err(error) => last = error.to_string(),
-            }
+        match try_http(port, "GET", "/drafts", None) {
+            Ok((200, _)) => return port,
+            Ok((status, _)) => last = format!("/drafts returned {status}"),
+            Err(error) => last = error.to_string(),
         }
         assert!(Instant::now() < deadline, "coordinator HTTP never became ready for author: {last}");
         thread::sleep(Duration::from_millis(50));
@@ -1833,7 +1851,10 @@ fn handle_stub_conn(mut stream: TcpStream, approved: &AtomicBool, wrong: &str, i
     } else if line.starts_with("POST /commissions") {
         (201, format!(r#"{{"id":"wp-mismatch","intent":"{intent}"}}"#))
     } else if line.starts_with("GET /commissions/wp-mismatch") {
-        (200, format!(r#"{{"id":"wp-mismatch","intent":"{intent}","status":"open"}}"#))
+        (
+            200,
+            format!(r#"{{"id":"wp-mismatch","intent":"{intent}","status":"open","approvals":[],"scope_verify":null}}"#),
+        )
     } else {
         (404, r#"{"error":"unexpected"}"#.to_owned())
     };

@@ -142,10 +142,10 @@ mod tests {
     use std::path::PathBuf;
 
     use super::apply;
-    use crate::bloom::dto::DigestHex;
     use crate::bloom::upgrade::shell::Run;
     use crate::bloom::upgrade::shell::fake::Fake;
     use crate::bloom::upgrade::tests_support::{Scripted, drained_view, test_paths};
+    use aether_bloomery::Digest;
 
     fn live_views() -> Scripted {
         Scripted::matching()
@@ -340,7 +340,7 @@ mod tests {
     #[test]
     fn a_stale_observed_digest_is_not_yet() {
         let mut empty = drained_view();
-        empty.observed = DigestHex::from_bytes([0; 32]);
+        empty.observed = Digest::from_bytes([0; 32]);
         let views = Scripted::new(Ok(empty), Ok(drained_view()));
         let mut log = String::new();
 
@@ -358,7 +358,7 @@ mod tests {
     #[test]
     fn observation_waits_for_the_pre_restart_digest() {
         let mut empty = drained_view();
-        empty.observed = DigestHex::from_bytes([0; 32]);
+        empty.observed = Digest::from_bytes([0; 32]);
         let views = Scripted::matching().first_live(empty);
         let mut paths = test_paths();
         paths.observe_timeout_millis = 5_000;

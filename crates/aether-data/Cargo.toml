@@ -5,9 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-# Re-export `#[derive(Kind)]`, `#[derive(Schema)]`, and `#[transform]`
-# from `aether-data-derive`. Off by default so guests that hand-write
-# `impl Kind for ...` don't pay the proc-macro compile cost.
+# Re-export `#[derive(Kind)]`, `#[derive(Schema)]`, `#[derive(Storage)]`,
+# and `#[transform]` from `aether-data-derive`. Off by default so guests
+# that hand-write `impl Kind for ...` don't pay the proc-macro compile cost.
 derive = ["dep:aether-data-derive"]
 
 [dependencies]

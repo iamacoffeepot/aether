@@ -21,12 +21,14 @@ use alloc::vec::Vec;
 use core::error::Error;
 use core::fmt;
 
+use aether_data::Schema;
 use aether_data::wire::from_bytes;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use super::{ConfigKind, ConfigRegistry, ConfigScopes};
-use crate::digest::Digest;
+use crate::digest::{Digest, encode_hex, schema_digest};
+use crate::persisted::{PersistedSchemaError, decode_persisted, kind_named};
 
 /// Why a sealed configuration could not be produced.
 ///
@@ -58,6 +60,16 @@ pub enum ConfigResolveError {
         /// The kind the registry key named.
         kind: &'static str,
     },
+    /// The stored schema digest does not match this binary's current shape and
+    /// no upcast is registered (ADR-0187).
+    NoUpcast {
+        /// The kind the registry key named.
+        kind: &'static str,
+        /// The identity stamped beside the bytes.
+        found: String,
+        /// The identity this binary writes.
+        current: Digest,
+    },
 }
 
 impl fmt::Display for ConfigResolveError {
@@ -66,6 +78,9 @@ impl fmt::Display for ConfigResolveError {
             Self::Missing { kind } => write!(f, "sealed config `{kind}` has no available content"),
             Self::KindMismatch { expected, stored } => write!(f, "sealed config `{expected}` is stored as `{stored}`"),
             Self::Decode { kind } => write!(f, "sealed config `{kind}` does not decode as its kind"),
+            Self::NoUpcast { kind, found, current } => {
+                write!(f, "no migration from schema `{found}` to current `{current}` for kind `{kind}`")
+            }
         }
     }
 }
@@ -82,16 +97,41 @@ impl Error for ConfigResolveError {}
 ///
 /// # Errors
 ///
-/// [`ConfigResolveError::KindMismatch`] when `stored_kind` is not `K::NAME`, and
-/// [`ConfigResolveError::Decode`] when the bytes do not decode as `K`.
-pub fn decode_config<K: ConfigKind + DeserializeOwned>(
+/// [`ConfigResolveError::KindMismatch`] when `stored_kind` is not `K::NAME`,
+/// [`ConfigResolveError::Decode`] when the bytes do not decode as `K`, and
+/// [`ConfigResolveError::NoUpcast`] when the recorded digest names a shape this
+/// binary has no upcast for.
+pub fn decode_config<K: ConfigKind + DeserializeOwned + Schema>(
     stored_kind: &str,
     bytes: &[u8],
+    recorded_schema: Option<&[u8]>,
 ) -> Result<K, ConfigResolveError> {
     if stored_kind != K::NAME {
         return Err(ConfigResolveError::KindMismatch { expected: K::NAME, stored: String::from(stored_kind) });
     }
-    from_bytes::<K>(bytes).map_err(|_| ConfigResolveError::Decode { kind: K::NAME })
+    let decoded = kind_named(K::NAME).map_or_else(
+        || decode_unnamed_config::<K>(recorded_schema, bytes),
+        |kind| decode_persisted(kind, recorded_schema, bytes, &[]),
+    );
+    decoded.map_err(|error| match error {
+        PersistedSchemaError::Decode(_) => ConfigResolveError::Decode { kind: K::NAME },
+        PersistedSchemaError::NoUpcast { kind, found, current } => {
+            ConfigResolveError::NoUpcast { kind, found, current }
+        }
+    })
+}
+
+fn decode_unnamed_config<K: ConfigKind + DeserializeOwned + Schema>(
+    recorded_schema: Option<&[u8]>,
+    bytes: &[u8],
+) -> Result<K, PersistedSchemaError> {
+    let current =
+        schema_digest(K::NAME, &K::SCHEMA).expect("compiled config kinds never exceed the schema-rendering budget");
+    match recorded_schema {
+        None => from_bytes(bytes).map_err(PersistedSchemaError::Decode),
+        Some(found) if found == current.as_bytes() => from_bytes(bytes).map_err(PersistedSchemaError::Decode),
+        Some(found) => Err(PersistedSchemaError::NoUpcast { kind: K::NAME, found: encode_hex(found), current }),
+    }
 }
 
 /// Configuration content, by the address it seals under.
@@ -111,6 +151,7 @@ pub struct ResolvedConfigs {
 struct StoredConfig {
     kind: String,
     bytes: Vec<u8>,
+    schema_digest: Option<Vec<u8>>,
 }
 
 /// Why a sealed registry entry's content cannot be produced from a
@@ -119,7 +160,7 @@ struct StoredConfig {
 /// The distinction is whether fetching would help. Absent content is a caller
 /// that has not looked yet; the other two are already wrong at rest and will be
 /// just as wrong after another fetch.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Unproducible {
     /// No content is available at that address.
     Absent,
@@ -140,8 +181,14 @@ impl ResolvedConfigs {
     /// An address is a hash of the kind name and the bytes, so re-inserting one
     /// writes content equal to what was there — the return value reports a
     /// redundant fetch, never a conflict.
-    pub fn insert(&mut self, address: Digest, kind: impl Into<String>, bytes: Vec<u8>) -> bool {
-        self.entries.insert(address, StoredConfig { kind: kind.into(), bytes }).is_some()
+    pub fn insert(
+        &mut self,
+        address: Digest,
+        kind: impl Into<String>,
+        bytes: Vec<u8>,
+        schema_digest: Option<Vec<u8>>,
+    ) -> bool {
+        self.entries.insert(address, StoredConfig { kind: kind.into(), bytes, schema_digest }).is_some()
     }
 
     /// Whether `address`'s content is available.
@@ -177,7 +224,7 @@ impl ResolvedConfigs {
     /// be produced — unavailable here, filed under another kind, or bytes that do
     /// not decode. Each is a refusal rather than a fall-through to the caller's
     /// default.
-    pub fn resolve<K: ConfigKind + DeserializeOwned>(
+    pub fn resolve<K: ConfigKind + DeserializeOwned + Schema>(
         &self,
         scopes: ConfigScopes<'_>,
     ) -> Result<Option<K>, ConfigResolveError> {
@@ -187,7 +234,7 @@ impl ResolvedConfigs {
         let Some(stored) = self.entries.get(&address) else {
             return Err(ConfigResolveError::Missing { kind: K::NAME });
         };
-        decode_config::<K>(&stored.kind, &stored.bytes).map(Some)
+        decode_config::<K>(&stored.kind, &stored.bytes, stored.schema_digest.as_deref()).map(Some)
     }
 
     /// The kind and raw bytes stored at `address`, when this set holds them.
@@ -238,7 +285,7 @@ mod tests {
     /// A `ResolvedConfigs` holding `value` at its own address, filed correctly.
     fn available<K: ConfigKind>(value: &K) -> ResolvedConfigs {
         let mut configs = ResolvedConfigs::default();
-        configs.insert(value.address(), K::NAME, to_vec(value).expect("test value encodes"));
+        configs.insert(value.address(), K::NAME, to_vec(value).expect("test value encodes"), None);
         configs
     }
 
@@ -290,7 +337,7 @@ mod tests {
     fn content_filed_under_another_kind_is_refused() {
         let alpha = Alpha { setting: 7 };
         let mut configs = ResolvedConfigs::default();
-        configs.insert(alpha.address(), Beta::NAME, to_vec(&alpha).expect("test value encodes"));
+        configs.insert(alpha.address(), Beta::NAME, to_vec(&alpha).expect("test value encodes"), None);
 
         assert_eq!(
             configs.resolve::<Alpha>(ConfigScopes::bloom_wide(&sealing(&alpha))),
@@ -306,7 +353,7 @@ mod tests {
     fn content_that_does_not_decode_is_refused() {
         let alpha = Alpha { setting: 7 };
         let mut configs = ResolvedConfigs::default();
-        configs.insert(alpha.address(), Alpha::NAME, alloc::vec![0xff]);
+        configs.insert(alpha.address(), Alpha::NAME, alloc::vec![0xff], None);
 
         assert_eq!(
             configs.resolve::<Alpha>(ConfigScopes::bloom_wide(&sealing(&alpha))),
@@ -340,7 +387,7 @@ mod tests {
     fn misfiled_content_is_distinguished_from_absent() {
         let alpha = Alpha { setting: 7 };
         let mut configs = ResolvedConfigs::default();
-        configs.insert(alpha.address(), Beta::NAME, to_vec(&alpha).expect("test value encodes"));
+        configs.insert(alpha.address(), Beta::NAME, to_vec(&alpha).expect("test value encodes"), None);
 
         assert_eq!(
             configs.unproducible_in(&sealing(&alpha)).collect::<Vec<_>>(),
@@ -357,7 +404,7 @@ mod tests {
         let (bloom, member) = (sealing(&outer), sealing(&inner));
 
         let mut configs = available(&outer);
-        configs.insert(inner.address(), Alpha::NAME, to_vec(&inner).expect("test value encodes"));
+        configs.insert(inner.address(), Alpha::NAME, to_vec(&inner).expect("test value encodes"), None);
 
         assert_eq!(configs.resolve::<Alpha>(ConfigScopes::member_of(&member, &bloom)), Ok(Some(inner)));
         assert_eq!(configs.resolve::<Alpha>(ConfigScopes::bloom_wide(&bloom)), Ok(Some(outer)));

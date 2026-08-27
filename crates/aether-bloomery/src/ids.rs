@@ -2,6 +2,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt;
 
 use serde::{Deserialize, Serialize};
 
@@ -116,6 +117,30 @@ impl WorkpieceId {
     }
 }
 
+impl fmt::Display for WorkpieceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl PartialEq<str> for WorkpieceId {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for WorkpieceId {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<String> for WorkpieceId {
+    fn eq(&self, other: &String) -> bool {
+        &self.0 == other
+    }
+}
+
 /// A sealed bloom's identity: the digest of its canonical [`BloomSpec`]
 /// bytes (ADR-0149 §The bloom). A bloom that differs in any sealed field is
 /// a different bloom.
@@ -123,6 +148,12 @@ impl WorkpieceId {
 /// [`BloomSpec`]: crate::values::BloomSpec
 #[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct BloomId(pub Digest);
+
+impl fmt::Display for BloomId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 /// One reusable harness conversation's identity, minted by the coordinator
 /// before that conversation exists (#5425).
@@ -192,13 +223,13 @@ impl SessionSlug {
 /// A signer identity (ADR-0149 §The value vocabulary). The signature
 /// *mechanism* is stubbed against a fake key provider in v1; the id shape
 /// ships from the start so everything downstream binds to it.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct KeyId(pub String);
 
 /// An admitted fact's idempotency key (ADR-0149 §The control core). The
 /// reducer treats a replayed key as a no-op, so recovery is journal replay
 /// plus outbox republish without double-applying.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct IdempotencyKey(pub String);
 
 /// A work order's idempotency nonce (ADR-0149 §The boundary, the executor
@@ -207,7 +238,7 @@ pub struct IdempotencyKey(pub String);
 /// resolves nonce → run on demand. Distinct from [`IdempotencyKey`], which
 /// dedups admitted *facts* at the reducer; a nonce correlates a dispatched
 /// *worker* at the executor boundary.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct Nonce(pub String);
 
 /// Declares the closed [`StageId`] vocabulary and its complete, ordered

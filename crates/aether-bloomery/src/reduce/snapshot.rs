@@ -332,7 +332,7 @@ impl Snapshot {
 /// Keyed to the stage rather than to the bloom: leaving the stage begins a
 /// fresh series, so a member that advanced after an outage is not carrying
 /// the previous stage's spent retries.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct MemberMachineryFault {
     /// The stage the faults are against.
     pub stage: StageId,
@@ -689,7 +689,7 @@ pub struct MemberPark {
 /// and whose every literal would break, and distinguishable from it on the
 /// served view: a decline *with* a request lights this, a decline without one
 /// stays a plain park.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct AwaitingSurface {
     /// The stage that declined.
     pub stage: StageId,
@@ -709,7 +709,7 @@ pub struct AwaitingSurface {
 /// own: once the repair exists, that member has to be put back on the line
 /// against the repaired tree rather than left holding a refusal about work that
 /// has been redone.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct NarrowedComposition {
     /// The parents, the diagnostic paths, and the derived bound.
     pub parents: CompositionParents,
@@ -724,7 +724,7 @@ pub struct NarrowedComposition {
 /// [`Fact::LaneWritesObserved`]. Held from the first observed write until the
 /// member integrates or is retired, and never past the bloom — every lease is
 /// scoped to the bloom whose lanes contend for the file.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct FileLease {
     /// The member holding the path.
     pub holder: WorkpieceId,
@@ -747,7 +747,7 @@ pub struct FileLease {
 /// The type stays because a journal an older binary wrote records evictions,
 /// and replay folds recorded decisions — the member it stopped still has to
 /// be redeemed when the member that took its path integrates.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct LeaseEviction {
     /// The earlier-canonical member that took the path.
     pub by: WorkpieceId,
@@ -763,7 +763,7 @@ pub struct LeaseEviction {
 /// [`Decision::RecordHostFault`]. The evidence digest keys the cadence
 /// resume so two ticks against the same hold collapse, and a later miss
 /// (a new evidence artifact) is a new key.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct HostFaultHold {
     /// The preflight findings — the missing tools, listed verbatim.
     pub findings: String,
@@ -867,7 +867,7 @@ impl Excuse {
 /// Keyed to the subject rather than to the bloom: a different fold is a
 /// different subject and begins its own series, so a bloom that re-integrated
 /// after an outage is not carrying the previous fold's spent retries.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct AggregateReviewFault {
     /// The fold tree the faults are against — the held integration's tree.
     pub subject: Digest,

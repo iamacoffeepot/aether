@@ -20,6 +20,7 @@ use aether_bloomery::{
     ModelOverride, Nonce, Observation, Provenance, ReasoningEffort, RedispatchPayload, ReviewPass,
     SharedCorrespondence, StageCatalog, StageId, StageOverride, Statement, TimeoutRecord, Topic, Transformation,
     VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, pin_workpiece_description,
+    split_lane_identity,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -52,7 +53,9 @@ use crate::bloomery::{
     ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle, UnconfiguredActionsBackend,
 };
 use crate::session::SessionConfig;
-use crate::store::{CommissionBackend, JournalWrite, OutstandingOrder, SqliteStore, StoreBackend};
+use crate::store::{
+    CANDIDATE_HASH_OCCASION_SEAL, CommissionBackend, JournalWrite, OutstandingOrder, SqliteStore, StoreBackend,
+};
 use aether_bloomery_github::{LandingSource, candidate_ref_name, member_checkpoint_ref_name};
 
 // A capturing executor backend: it records every submitted `WorkOrder` so a test
@@ -254,7 +257,7 @@ fn enqueue_dispatch_with_configs(
     // this bloom already holds answers with a conflict outcome rather than an
     // error — the fixture stages several stages' orders for one member.
     store.claim_seal(bloom.0.as_bytes(), &[workpiece.to_owned()]).unwrap();
-    store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap()).unwrap()
+    store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap(), None).unwrap()
 }
 
 // Enqueue one bloom-level aggregate-review dispatch against an explicit sealed
@@ -275,7 +278,7 @@ fn enqueue_aggregate_review(store: &mut SqliteStore, bloom: BloomId, workpiece: 
         configs,
     };
     store.claim_seal(payload.bloom.as_bytes(), &[workpiece.to_owned()]).unwrap();
-    store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap()
+    store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap()
 }
 
 // ADR-0153 — the aggregate-review topic drains into a bloom-level order: the
@@ -307,7 +310,7 @@ fn drain_and_dispatch_aggregate_submits_a_bloom_level_review_order() {
     // A queued review belongs to a live bloom; the drain reads its membership to
     // tell a live plan from a retired one (#4640).
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
-    let sequence = store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
+    let sequence = store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap();
 
     let (handles, ack_through, _transient) = drain_and_dispatch_aggregate(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
     assert_eq!(handles.len(), 1);
@@ -359,7 +362,7 @@ fn the_second_aggregate_roll_frames_a_delta_confirm_against_the_frozen_findings(
         configs: ConfigRegistry::default(),
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
-    store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
+    store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap();
 
     let (handles, _ack, _transient) = drain_and_dispatch_aggregate(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
     assert_eq!(handles.len(), 1);
@@ -404,7 +407,7 @@ fn a_fresh_roll_one_aggregate_dispatch_clears_the_stale_frozen_row() {
         configs: ConfigRegistry::default(),
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
-    store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
+    store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap();
 
     drain_and_dispatch_aggregate(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
@@ -523,7 +526,7 @@ fn a_scope_run_drains_with_no_bloom_in_the_store() {
     let backend = Arc::new(CapturingBackend::default());
     let shell = ExecutorShell::new(Arc::clone(&backend));
     let (commission, intent) = seed_commission(&mut store, "wp-scope-drain");
-    let opened = open_scope_run(&mut store, &commission, intent, digest(2)).expect("open");
+    let opened = open_scope_run(&mut store, &commission, intent, digest(2), "scope sketch").expect("open");
 
     let (handles, ack_through, transient) = drain_and_dispatch_scope(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
@@ -542,6 +545,29 @@ fn a_scope_run_drains_with_no_bloom_in_the_store() {
 }
 
 #[test]
+fn the_dispatched_scope_order_carries_the_pinned_sketch() {
+    // The bug that shipped: `Transformation::for_scoping_run` builds with
+    // `description: None` and no producer threaded the intent text on, so
+    // every scope lane came up with no `## Task` and refused — the order's
+    // description is the one channel the lane's sketch rides (#3595).
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let (commission, intent) = seed_commission(&mut store, "wp-scope-sketch");
+    open_scope_run(&mut store, &commission, intent, digest(2), "the sketch body").expect("open");
+
+    drain_and_dispatch_scope(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+
+    let orders = backend.orders();
+    let description = orders[0].transformation.description.as_deref().expect("the order carries the sketch");
+    assert_eq!(
+        split_lane_identity(description),
+        ("the sketch body", Some("Workpiece: wp-scope-sketch")),
+        "the sketch is pinned with the commission id so the lane's ## Lane and ## Task both resolve",
+    );
+}
+
+#[test]
 fn the_member_topic_is_undisturbed() {
     // Tripwire: the shared-topic shortcut is the one a later change takes
     // under time pressure, and the fail-stop decode at drain_and_dispatch
@@ -551,7 +577,7 @@ fn the_member_topic_is_undisturbed() {
     let backend = Arc::new(CapturingBackend::default());
     let shell = ExecutorShell::new(Arc::clone(&backend));
     let (commission, intent) = seed_commission(&mut store, "wp-scope-peer");
-    let opened = open_scope_run(&mut store, &commission, intent, digest(2)).expect("open");
+    let opened = open_scope_run(&mut store, &commission, intent, digest(2), "scope sketch").expect("open");
     let bloom = BloomId(digest(1));
     let (member_sequence, _subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-line", 5);
 
@@ -638,7 +664,7 @@ fn drain_dispatches_the_review_lane_under_its_own_calibrated_profile() {
         configs: ConfigRegistry::default(),
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
-    store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
+    store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap();
 
     drain_and_dispatch_aggregate(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
@@ -909,7 +935,7 @@ fn drain_stops_the_ack_prefix_at_a_missing_subject_entry() {
     // naming one that holds no membership before it ever inspects the
     // transformation — which would skip this entry rather than break on it.
     store.claim_seal(bloom.0.as_bytes(), &["wp-none".to_owned()]).unwrap();
-    store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap()).unwrap();
+    store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap(), None).unwrap();
     enqueue_construct_dispatch(&mut store, bloom, "wp-c", 7);
 
     let (handles, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
@@ -1035,7 +1061,7 @@ fn an_overdue_scope_order_terminates_once() {
     let backend = Arc::new(CapturingBackend::default());
     let shell = ExecutorShell::new(Arc::clone(&backend));
     let (commission, intent) = seed_commission(&mut store, "wp-scope-overdue");
-    let opened = open_scope_run(&mut store, &commission, intent, digest(2)).expect("open");
+    let opened = open_scope_run(&mut store, &commission, intent, digest(2), "scope sketch").expect("open");
     let (handles, ack_through, _transient) = drain_and_dispatch_scope(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
     store.ack_topic(Topic::ScopeDispatch, ack_through.unwrap()).unwrap();
     let mut tracked = track(handles);
@@ -1230,7 +1256,7 @@ fn dispatch_aggregate_review(
         configs: ConfigRegistry::default(),
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
-    let sequence = store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
+    let sequence = store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap();
     let (handles, _ack, _transient) = drain_and_dispatch_aggregate(store, &shell, NOW_UNIX_MILLIS).unwrap();
     store.ack_topic(Topic::AggregateReview, sequence).unwrap();
     let nonce = handles[0].nonce.0.clone();
@@ -1773,7 +1799,7 @@ fn drain_stamps_the_record_axes_from_the_payload() {
         configs: ConfigRegistry::default(),
     };
     store.claim_seal(bloom.0.as_bytes(), &["wp-cand".to_owned()]).unwrap();
-    let sequence = store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap()).unwrap();
+    let sequence = store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap(), None).unwrap();
 
     drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
@@ -1820,7 +1846,9 @@ fn admitted_passing_captures_push_to_the_bloom_candidate_ref() {
 
     let pusher = RecordingPush::default();
     let correspondence: SharedCorrespondence = Arc::new(store);
+    let mut hashes = SqliteStore::open(":memory:").unwrap();
     push_admitted_candidates(
+        &mut hashes,
         &[admission(true, Some(capture)), admission(false, Some(capture)), admission(true, None)],
         Some(&correspondence),
         &pusher,
@@ -1871,13 +1899,19 @@ fn a_failing_refine_capture_is_not_pushed_as_a_member_checkpoint() {
     let event = Event { idempotency_key: IdempotencyKey("k".to_owned()), fact };
     let pusher = RecordingPush::default();
     let correspondence: SharedCorrespondence = Arc::new(store);
+    let mut hashes = SqliteStore::open(":memory:").unwrap();
     push_admitted_candidates(
+        &mut hashes,
         &[Admission { admit: Admit { event: to_vec(&event).unwrap() }, event }],
         Some(&correspondence),
         &pusher,
     );
 
     assert!(pusher.pushed.lock().unwrap().is_empty(), "a refine failure is not a construct checkpoint");
+    assert!(
+        hashes.list_candidate_hashes(bloom.0.as_bytes()).unwrap().is_empty(),
+        "a refine failure journals no candidate hash",
+    );
 }
 
 // #5102 — a passing composition Refine capture is the head landing will create
@@ -1907,7 +1941,9 @@ fn a_passing_composition_refine_capture_pushes_to_the_candidate_ref() {
     let event = Event { idempotency_key: IdempotencyKey("k".to_owned()), fact };
     let pusher = RecordingPush::default();
     let correspondence: SharedCorrespondence = Arc::new(store);
+    let mut hashes = SqliteStore::open(":memory:").unwrap();
     push_admitted_candidates(
+        &mut hashes,
         &[Admission { admit: Admit { event: to_vec(&event).unwrap() }, event }],
         Some(&correspondence),
         &pusher,
@@ -1921,6 +1957,50 @@ fn a_passing_composition_refine_capture_pushes_to_the_candidate_ref() {
         candidate_ref_name(&bloom, WorkpieceId::COMPOSITION),
         "the target is the reserved composition workpiece's candidate ref",
     );
+}
+
+// ADR-0211 — a refusing pusher still leaves a row naming the attempted sha with
+// published false. That axis exists nowhere else: correspondence cannot say
+// whether the push succeeded, and a failed push never appears in a ref listing.
+#[test]
+fn a_refused_candidate_push_journals_the_unpublished_sha() {
+    use aether_bloomery::{CandidateRef, Event, IdempotencyKey};
+
+    let bloom = BloomId(digest(1));
+    let capture = CandidateRef { tree: digest(0xAB), checkout: digest(0xAC) };
+    let github = FakeGithub::new();
+    github.seed_git_object(&capture.checkout);
+    let commit_hex = to_hex(&capture.checkout);
+    let fact = Fact::AttemptCompleted {
+        bloom,
+        workpiece: WorkpieceId("wp/cand".to_owned()),
+        stage: StageId::Construct,
+        passed: true,
+        evidence: aether_bloomery::Evidence {
+            subject: digest(9),
+            kind: aether_bloomery::EvidenceKind::VerificationResult,
+            detail: digest(8),
+        },
+        candidate: Some(capture),
+    };
+    let event = Event { idempotency_key: IdempotencyKey("k".to_owned()), fact };
+    let correspondence: SharedCorrespondence = Arc::new(github);
+    let mut hashes = SqliteStore::open(":memory:").unwrap();
+    let pusher = default_candidate_push(true);
+    push_admitted_candidates(
+        &mut hashes,
+        &[Admission { admit: Admit { event: to_vec(&event).unwrap() }, event }],
+        Some(&correspondence),
+        pusher.as_ref(),
+    );
+
+    let rows = hashes.list_candidate_hashes(bloom.0.as_bytes()).unwrap();
+    assert_eq!(rows.len(), 1, "a refused push still leaves a row");
+    assert_eq!(rows[0].commit_hex, commit_hex, "the row names the attempted sha");
+    assert!(!rows[0].published, "a refused push is unpublished, not omitted");
+    assert_eq!(rows[0].occasion, CANDIDATE_HASH_OCCASION_SEAL);
+    assert_eq!(rows[0].ref_name, candidate_ref_name(&bloom, "wp/cand"));
+    assert_eq!(rows[0].workpiece, "wp/cand");
 }
 
 // Tripwire: `default_candidate_push`'s fixture arm declines every push rather
@@ -2398,7 +2478,7 @@ fn an_aggregate_verify_repair_candidate_reaches_landing_ref_creation() {
     github.seed_git_object(&captured.checkout);
     let pusher = RecordingPush::default();
     let correspondence: SharedCorrespondence = Arc::new(github.clone());
-    push_admitted_candidates(slice::from_ref(&*admission), Some(&correspondence), &pusher);
+    push_admitted_candidates(&mut store, slice::from_ref(&*admission), Some(&correspondence), &pusher);
 
     let issued = pusher.pushed.lock().unwrap().clone();
     assert_eq!(issued.len(), 1, "the accepted repair capture is published before landing");
@@ -2457,7 +2537,7 @@ fn park_and_answer(
     // `Decision::RedispatchStage` once an author-signed answer adopts the hold.
     let payload =
         RedispatchPayload { bloom: bloom.0, question, answer: digest(0xA1), words: words.as_bytes().to_vec() };
-    store.enqueue_topic(Topic::Redispatch, &to_vec(&payload).unwrap()).unwrap()
+    store.enqueue_topic(Topic::Redispatch, &to_vec(&payload).unwrap(), None).unwrap()
 }
 
 // ADR-0151 / #3664 — the whole parked-question loop: a dispatched lane parks, the
@@ -2552,7 +2632,7 @@ fn a_redispatch_with_no_held_order_acks_past_instead_of_wedging_the_topic() {
 
     let payload =
         RedispatchPayload { bloom: bloom.0, question: digest(0x9A), answer: digest(0xA1), words: b"ship it".to_vec() };
-    let orphan = store.enqueue_topic(Topic::Redispatch, &to_vec(&payload).unwrap()).unwrap();
+    let orphan = store.enqueue_topic(Topic::Redispatch, &to_vec(&payload).unwrap(), None).unwrap();
     store.record_dispatch_description(bloom.0.as_bytes(), "wp-held", "build the widget").unwrap();
     let live = park_and_answer(&mut store, &shell, bloom, "wp-held", digest(0x9B), "ship it");
 

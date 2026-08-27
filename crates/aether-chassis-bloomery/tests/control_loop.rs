@@ -27,9 +27,9 @@
 
 mod common;
 
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::Path;
-use std::process::{self, Command};
+use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -48,7 +48,7 @@ use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId, mailbox_id_from_path};
 use aether_rpc::WireFrame;
 use common::client::{call, call_frame, handshake_while_alive, spawn_and_connect};
-use common::{Coordinator, free_port};
+use common::{Coordinator, Ingress, free_port};
 use serde::Serialize;
 
 /// Not the production `cargo xtask transform` line. That boots a 15-tool
@@ -65,11 +65,11 @@ fn spawn(port: u16, db: &str) -> Coordinator {
 /// Fork the coordinator against `db` and handshake only with the child that
 /// stayed alive. Same bind-race retry as [`spawn_with_artifacts`].
 ///
-/// RPC port 0 lets the child bind atomically — no `free_port` reservation
-/// window for a sibling to steal — and the handshake helper discovers the
-/// listen the child actually owns.
+/// RPC port 0 lets the child bind atomically — no reservation window for a
+/// sibling to steal — and the handshake helper dials the port the child
+/// announced in its boot log.
 fn spawn_with_store(db: &str, client_name: &str) -> (Coordinator, TcpStream) {
-    spawn_and_connect(client_name, Duration::from_mins(1), || (0, spawn(0, db)))
+    spawn_and_connect(client_name, Duration::from_mins(1), || spawn(0, db))
 }
 
 /// Pipeline two typed `Call`s to `mailbox` — write **both** frames before reading
@@ -815,22 +815,19 @@ fn the_capability_ledger_is_measured_live_and_rebuilt_on_replay() {
 /// with the child that stayed alive.
 ///
 /// Port 0 is the bind: the OS assigns the RPC port to the child, so there
-/// is no `free_port` reservation window for a sibling to steal. The
-/// handshake helper discovers that listen. A child that still exits (HTTP
+/// is no reservation window for a sibling to steal, and the handshake helper
+/// dials the port the child announced. A child that still exits (HTTP
 /// collision used to, boot error still can) is another attempt, not a
 /// 30s wait on a closed port.
 fn spawn_with_artifacts(db: &str, artifacts: &str, client_name: &str) -> (Coordinator, TcpStream) {
     spawn_and_connect(client_name, Duration::from_mins(1), || {
-        (
+        Coordinator::spawn(
             0,
-            Coordinator::spawn(
-                0,
-                &[
-                    ("AETHER_STORE_PATH", db),
-                    ("AETHER_ARTIFACTS_ROOT", artifacts),
-                    ("AETHER_BLOOMERY_LANE_PROGRAM", CONTROL_LOOP_LANE),
-                ],
-            ),
+            &[
+                ("AETHER_STORE_PATH", db),
+                ("AETHER_ARTIFACTS_ROOT", artifacts),
+                ("AETHER_BLOOMERY_LANE_PROGRAM", CONTROL_LOOP_LANE),
+            ],
         )
     })
 }
@@ -977,15 +974,26 @@ fn handshake_while_alive_abandons_a_dead_child_without_the_deadline() {
     );
 }
 
-// The plausible bug: `/proc/net/tcp` column math is off by one, so an
-// OS-assigned listen is invisible and spawn_and_connect polls an empty
-// candidate list until the deadline (#5116).
+// The plausible bug: the boot-log reader latches the first `port=` line it
+// sees, so the two ingresses collapse onto one number and every REST fixture
+// drives `curl` at the RPC socket (or the other way round) until its deadline.
+// Only a live child catches a reword of either announcement.
 #[test]
-fn listening_ports_reports_a_listener_this_process_owns() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let ports = Coordinator::listening_ports_for(process::id());
-    assert!(ports.contains(&port), "procfs listen scan missed {port}: {ports:?}");
+fn a_child_announces_its_two_ingresses_apart() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("bloomery.db");
+    let db = db.to_str().unwrap();
+
+    let coordinator = spawn(0, db);
+    let deadline = Instant::now() + Duration::from_mins(1);
+    let rpc = coordinator.await_port(Ingress::Rpc, deadline).unwrap_or_else(|why| panic!("rpc port: {why}"));
+    let http = coordinator.await_port(Ingress::Http, deadline).unwrap_or_else(|why| panic!("http port: {why}"));
+
+    assert_ne!(rpc, http, "the RPC and REST ingresses bind different ports");
+    TcpStream::connect(("127.0.0.1", rpc))
+        .unwrap_or_else(|error| panic!("the announced RPC port {rpc} accepts: {error}"));
+    TcpStream::connect(("127.0.0.1", http))
+        .unwrap_or_else(|error| panic!("the announced HTTP port {http} accepts: {error}"));
 }
 
 // The plausible bug: AETHER_RPC_PORT=0 binds a real ingress but the helper
@@ -998,7 +1006,7 @@ fn spawn_and_connect_handshakes_an_os_assigned_port() {
     let db = db.to_str().unwrap();
 
     let start = Instant::now();
-    let (mut coordinator, _stream) = spawn_and_connect("port-zero", Duration::from_mins(1), || (0, spawn(0, db)));
+    let (mut coordinator, _stream) = spawn_and_connect("port-zero", Duration::from_mins(1), || spawn(0, db));
     assert!(coordinator.is_alive(), "the child that bound :0 stayed up through handshake");
     assert!(
         start.elapsed() < Duration::from_secs(30),
@@ -1024,9 +1032,8 @@ fn an_early_dead_study_artifact_coordinator_is_retried_without_the_handshake_dea
     let (mut coordinator, _stream) = spawn_and_connect("calibration-retry", Duration::from_secs(30), || {
         attempts += 1;
         if attempts == 1 {
-            let port = free_port();
             let mut coordinator =
-                Coordinator::spawn(port, &[("AETHER_STORE_PATH", db), ("AETHER_ARTIFACTS_ROOT", artifacts)]);
+                Coordinator::spawn(0, &[("AETHER_STORE_PATH", db), ("AETHER_ARTIFACTS_ROOT", artifacts)]);
             let _ = Command::new("kill").args(["-9", &coordinator.pid().to_string()]).status().unwrap();
             let give_up = Instant::now() + Duration::from_secs(2);
             while coordinator.is_alive() && Instant::now() < give_up {
@@ -1034,21 +1041,18 @@ fn an_early_dead_study_artifact_coordinator_is_retried_without_the_handshake_dea
             }
             assert!(!coordinator.is_alive(), "the scripted first child must already be dead");
             first_returned_at = Some(Instant::now());
-            (port, coordinator)
+            coordinator
         } else {
             if second_started_at.is_none() {
                 second_started_at = Some(Instant::now());
             }
-            (
+            Coordinator::spawn(
                 0,
-                Coordinator::spawn(
-                    0,
-                    &[
-                        ("AETHER_STORE_PATH", db),
-                        ("AETHER_ARTIFACTS_ROOT", artifacts),
-                        ("AETHER_BLOOMERY_LANE_PROGRAM", CONTROL_LOOP_LANE),
-                    ],
-                ),
+                &[
+                    ("AETHER_STORE_PATH", db),
+                    ("AETHER_ARTIFACTS_ROOT", artifacts),
+                    ("AETHER_BLOOMERY_LANE_PROGRAM", CONTROL_LOOP_LANE),
+                ],
             )
         }
     });
@@ -1213,7 +1217,7 @@ fn integration_dispatch_count(db: &str) -> usize {
         .unwrap()
         .iter()
         .map(|record| {
-            decode_recorded_decisions(&record.decisions, record.decisions_schema.as_deref())
+            decode_recorded_decisions(&record.decisions, record.decisions_schema_digest.as_deref())
                 .expect("journaled decisions decode")
         })
         .map(|decisions| {

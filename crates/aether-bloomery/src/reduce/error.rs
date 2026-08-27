@@ -11,7 +11,7 @@ use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{CatalogError, OverrideError, Unproducible};
 
 /// Why an aggregate-review completion was refused (ADR-0153).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum AggregateReviewError {
     /// No active bloom with this id.
     UnknownOrInactiveBloom,
@@ -31,7 +31,7 @@ pub enum AggregateReviewError {
 }
 
 /// Why a landing rejection was refused (#4689).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum LandingRejectedError {
     /// The bloom exists but is not awaiting a landing — a rejection against a
     /// bloom that already landed, was superseded, or is still working.
@@ -59,7 +59,7 @@ pub enum LandingRejectedError {
 /// minus an implication check: a compile failure over the fold is a property of
 /// the combination, not attributable to one member, so a failing verify carries
 /// no implication to validate and re-opens every member.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum AggregateVerifyError {
     /// No active bloom with this id.
     UnknownOrInactiveBloom,
@@ -77,7 +77,7 @@ pub enum AggregateVerifyError {
 }
 /// One member already claimed by a foreign active bloom — the conflict that
 /// aborts an all-or-nothing seal or supersession.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct SealConflict {
     /// The workpiece already claimed.
     pub workpiece: WorkpieceId,
@@ -86,7 +86,7 @@ pub struct SealConflict {
 }
 
 /// Why a seal was refused (ADR-0149 §The bloom admission rules).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum SealError {
     /// A member is already claimed by a foreign active bloom.
     MembershipConflict(SealConflict),
@@ -181,7 +181,7 @@ pub enum SealError {
 }
 
 /// Why a supersession was refused.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum SupersedeError {
     /// The predecessor is not a known bloom, or is no longer supersedable —
     /// only `Sealed` and `Resolved` blooms supersede.
@@ -216,7 +216,7 @@ pub enum SupersedeError {
 }
 
 /// Why an integration was refused.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum IntegrateError {
     /// The bloom is not known or not active.
     UnknownOrInactiveBloom,
@@ -228,7 +228,7 @@ pub enum IntegrateError {
 }
 
 /// Why an evidence admission was refused (ADR-0151).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum AdmitEvidenceError {
     /// The bloom is not known or not active (only a `Sealed` bloom admits
     /// evidence — a resolved, landed, or superseded bloom is past recording).
@@ -239,7 +239,7 @@ pub enum AdmitEvidenceError {
 }
 
 /// Why a resolve was refused.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ResolveError {
     /// The bloom is not known or not active.
     UnknownOrInactiveBloom,
@@ -265,7 +265,7 @@ pub enum ResolveError {
 }
 
 /// Why an answer adoption was refused (ADR-0151).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum AdoptAnswerError {
     /// The bloom is not known or not active (only a `Sealed` bloom holds a
     /// pending decision — a resolved, landed, or superseded bloom is past it).
@@ -281,7 +281,7 @@ pub enum AdoptAnswerError {
 }
 
 /// Why an attempt completion was refused (ADR-0149 §The line).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum AttemptCompletedError {
     /// The bloom is not known or not active (only a `Sealed` bloom runs a line —
     /// a resolved, landed, or superseded bloom is past dispatch).
@@ -313,7 +313,7 @@ pub enum AttemptCompletedError {
 }
 
 /// Why a typed terminal-Verify failure was refused (ADR-0178).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum VerifyFailedError {
     /// No active bloom with this id.
     UnknownOrInactiveBloom,
@@ -347,7 +347,7 @@ pub enum VerifyFailedError {
 /// here rather than predicted client-side. The granted axis and resume stage
 /// ride the admitted [`Outcome::AttemptsGranted`](crate::Outcome::AttemptsGranted),
 /// not a second error vocabulary.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum GrantAttemptsError {
     /// The bloom is not known or not active — only a `Sealed` bloom runs a line,
     /// so only one can hold a member to resume.
@@ -389,7 +389,7 @@ pub enum GrantAttemptsError {
 /// Every variant is a synchronous refusal that attempts no mutation: the request
 /// fact is never admitted, so no outbox effect is emitted and the source is never
 /// dialled.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum OrphanClaimReleaseError {
     /// The authorization is not an author signature — only that provenance
     /// becomes instruction (ADR-0149 §The value vocabulary).
@@ -420,7 +420,7 @@ pub enum OrphanClaimReleaseError {
 /// waiver nobody signed rather than a waiver with a default attached. The rest
 /// are about the request reaching past what an override may decide: findings the
 /// bloom never raised, and a membership that is not fully approved.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum AdjudicationError {
     /// No bloom with this id, or one past adjudicating — a landed or superseded
     /// bloom has no findings left to close.
@@ -451,7 +451,7 @@ pub enum AdjudicationError {
 }
 
 /// Why an operator-supplied repair was refused (#4957).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum OperatorRepairError {
     /// The bloom is not known or not active — only a `Sealed` bloom runs a
     /// line, so only one has a position a repair could re-enter.
@@ -493,7 +493,7 @@ pub enum OperatorRepairError {
 /// mirror. Splitting them would be two near-identical enums whose only real
 /// difference is which of [`AlreadyHeld`](Self::AlreadyHeld) /
 /// [`NotHeld`](Self::NotHeld) is reachable.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum OperatorHoldError {
     /// No bloom with this id, or one past holding — a landed or superseded
     /// bloom dispatches nothing there is anything left to freeze.
@@ -517,7 +517,7 @@ pub enum OperatorHoldError {
 }
 
 /// Why a host splice-assembly admission was refused (ADR-0196 G2).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum SpliceError {
     /// No active bloom with this id.
     UnknownOrInactiveBloom,
@@ -529,7 +529,7 @@ pub enum SpliceError {
 }
 
 /// A land refused because mainline had moved off the bloom's sealed base.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct BaseMismatch {
     /// The bloom's sealed base — the only head it may land on.
     pub expected: Digest,
@@ -538,7 +538,7 @@ pub struct BaseMismatch {
 }
 
 /// Why a fold-conflict admission was refused (ADR-0189).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum FoldConflictError {
     /// No active bloom with this id.
     UnknownOrInactiveBloom,
@@ -557,7 +557,7 @@ pub enum FoldConflictError {
 }
 
 /// Why a land was refused (ADR-0149 §The bloom).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum LandError {
     /// No bloom with this id is known.
     UnknownBloom(BloomId),
@@ -568,7 +568,7 @@ pub enum LandError {
 }
 
 /// Why a host-fault hold or cadence resume was refused (#5020).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum HostFaultError {
     /// No active bloom with this id.
     UnknownOrInactiveBloom,
@@ -593,7 +593,7 @@ pub enum HostFaultError {
 }
 
 /// Why a member machinery-fault admission was refused (ADR-0195).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum MemberExecutorFaultError {
     /// No active bloom with this id.
     UnknownOrInactiveBloom,
@@ -624,14 +624,14 @@ pub enum MemberExecutorFaultError {
 /// membership that cannot support the attribution would hand a repair lane
 /// candidates the bloom does not hold, which is worse than no attribution at
 /// all.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum NarrowCompositionError {
     /// No active bloom with this id.
     UnknownOrInactiveBloom,
     /// The attribution names no parents. A composition over an empty parent
-    /// set is not a repair of anyone's collision; the `usize` is the named
-    /// count, always zero at this arm.
-    EmptyParents(usize),
+    /// set is not a repair of anyone's collision; the count is always zero
+    /// at this arm.
+    EmptyParents(u64),
     /// A named parent is not a member of this bloom.
     NotAMember(WorkpieceId),
     /// A named parent was withdrawn, so its candidate is not in the fold and
@@ -644,7 +644,7 @@ pub enum NarrowCompositionError {
 }
 
 /// Why a surface-request admission was refused (ADR-0207).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum SurfaceRequestedError {
     /// No active bloom with this id.
     UnknownOrInactiveBloom,
@@ -687,7 +687,7 @@ pub enum SurfaceRequestedError {
 ///
 /// The ladder is checked in declaration order, so the first thing wrong with a
 /// request is the thing the operator is told about.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum WithdrawError {
     /// No bloom with this id, or one past withdrawing. Only a `Sealed` bloom
     /// is still running a line a member can leave: a resolved bloom's members
@@ -729,7 +729,7 @@ pub enum WithdrawError {
 /// the observation itself was malformed, which
 /// [`normalize_write_paths`](crate::normalize_write_paths) already dropped at
 /// the host.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum LeaseObservationError {
     /// No active bloom with this id.
     UnknownOrInactiveBloom,
@@ -765,7 +765,7 @@ pub enum LeaseObservationError {
 /// reducer cannot act on — never that the requests it closes were themselves
 /// malformed, which [`SuppressionRequest::normalize`](crate::SuppressionRequest::normalize)
 /// already dropped at the host.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum SuppressionDispositionError {
     /// No active bloom with this id.
     UnknownOrInactiveBloom,
@@ -789,4 +789,30 @@ pub enum SuppressionDispositionError {
     /// checks out the tree carrying the refused suppression; with no such tree
     /// the dispatch would bill a fresh construct as a repair.
     NoCandidate(WorkpieceId),
+}
+
+/// Why a base re-verify was refused.
+///
+/// The ladder is checked in declaration order, so the first thing wrong with
+/// a request is the thing the operator is told about.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum BaseReverifyError {
+    /// The request states no reason. Refused rather than defaulted: a re-verify
+    /// is an act no verdict produced, so a record of it that says nothing is
+    /// the whole failure.
+    BlankReason,
+    /// The request names no operator, so the record would not say who asked.
+    BlankOperator,
+    /// Nothing has ever judged this base, so there is no red to clear and the
+    /// seal door would have dispatched a run itself. Refused rather than
+    /// absorbed: admitting one would invent a pending receipt for a tree the
+    /// machine has not been asked about.
+    NoReceipt,
+    /// The receipt is not red. A green has nothing to clear and re-running it
+    /// re-spends a whole-workspace build on a settled question; a pending
+    /// already has a dispatch outstanding, which the deadline sweep resolves
+    /// the way it resolves every other overtaken order. Refused rather than
+    /// absorbed so the journal never carries a fact that queued a second run
+    /// beside one already in flight, or spent a build to re-answer a green.
+    NotRed,
 }

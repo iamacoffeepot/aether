@@ -69,10 +69,17 @@ pub fn set(field: &str, run: &Path, value_file: &Path) -> Result<()> {
 }
 
 fn read_value(path: &Path) -> Result<String> {
-    if path.as_os_str() == "-" {
+    let raw = if path.as_os_str() == "-" {
         let mut buf = String::new();
         io::stdin().read_to_string(&mut buf).context("read field value from stdin")?;
-        return Ok(buf);
-    }
-    fs::read_to_string(path).with_context(|| format!("read {}", path.display()))
+        buf
+    } else {
+        fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?
+    };
+    // Interior newlines are content ("a value with newlines survives"), but the
+    // trailing newline is the file format's, not the field's: left in place it
+    // rides into every entry, and a single-path declared-surface value then
+    // fails the surface grammar's character check on a glob that is otherwise
+    // exactly right.
+    Ok(raw.trim_end().to_owned())
 }

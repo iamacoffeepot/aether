@@ -25,7 +25,7 @@ A **kind** is a named, sendable mail payload — a Rust type carrying a name, a
 stable id, and a wire encoding. You declare one with two derives and a name:
 
 ```rust
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize)]
+#[derive(aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.audio.note_on")]
 struct NoteOn { pitch: u8, velocity: u8, instrument_id: u8 }
 ```
@@ -33,11 +33,12 @@ struct NoteOn { pitch: u8, velocity: u8, instrument_id: u8 }
 **Two derives, because they describe two different things.**
 
 - **`Schema`** gives `const SCHEMA: SchemaType` — a description of the type's
-  byte *layout* ([ADR-0031](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0031-const-constructible-schema-representation.md)). It's compositional: every type that can sit inside a
+  byte *layout* ([ADR-0031](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0031-const-constructible-schema-representation.md)) — and the owned wire codec that walks the same
+  field list ([ADR-0188](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0188-the-wire-codec-derives-from-schema.md)). It's compositional: every type that can sit inside a
   payload implements it — the primitives, `String`, `Vec<T>`, `Option<T>`,
   arrays, and your own structs — so a struct's schema is assembled from its
   fields'. A type that only ever appears as a *field* of a kind derives `Schema`
-  alone.
+  alone. Serde derives are not required to put a type on the wire.
 - **`Kind`** marks the type as a top-level, addressable payload: `const NAME`
   (the declared name), `const ID: KindId`, and the encode/decode bodies. `Kind`
   is *layered on* `Schema` — the id is `hash(name + canonical(SCHEMA))`, so the

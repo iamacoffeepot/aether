@@ -10,13 +10,13 @@ use super::gate::RecordedRefusal;
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
-    Adjudication, BloomSpec, CandidateRef, CompositionParents, ConfigRegistry, Evidence, MemberDependency,
-    OperatorHold, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim, Statement,
-    SuppressionDisposition, SurfaceRequest, VerifyFailureSet, Withdrawal,
+    Adjudication, BaseReverify, BloomSpec, CandidateRef, CompositionParents, ConfigRegistry, Evidence,
+    MemberDependency, OperatorHold, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim,
+    Statement, SuppressionDisposition, SurfaceRequest, VerifyFailureSet, Withdrawal,
 };
 
 /// An admitted fact plus its idempotency key (ADR-0149 §The control core).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Event {
     /// The idempotency key — a replayed key reduces to [`Outcome::Duplicate`](crate::Outcome::Duplicate).
     pub idempotency_key: IdempotencyKey,
@@ -26,7 +26,7 @@ pub struct Event {
 
 /// The closed set of admitted facts (ADR-0149 §The line: a closed enum, not a
 /// workflow language).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Fact {
     /// Seal a draft into an active bloom.
     Seal(BloomSpec),
@@ -787,8 +787,8 @@ pub enum Fact {
     ///
     /// It keeps its place because the journal already holds records written
     /// under it, and ADR-0187 never rewrites sealed history: those bytes have
-    /// to go on decoding under the shape that wrote them. Last in declaration
-    /// order, so every prior fact keeps its wire discriminant.
+    /// to go on decoding under the shape that wrote them. Kept in this
+    /// declaration position so every prior fact keeps its wire discriminant.
     ///
     /// Boot replay folds each record's *recorded* decisions rather than
     /// re-deciding it (ADR-0190), so a historical grant still folds exactly as
@@ -811,6 +811,13 @@ pub enum Fact {
         /// The declining evidence the grant answered.
         evidence: Evidence,
     },
+    /// An operator decided this base's red verdict does not describe the tree
+    /// and asked for the gates to run again.
+    ///
+    /// It stamps nothing green and authorizes nothing — the gates still judge.
+    /// Admitted only by the operator door. Last in declaration order, so every
+    /// prior fact keeps its wire discriminant.
+    BaseReverify(BaseReverify),
 }
 
 impl Fact {

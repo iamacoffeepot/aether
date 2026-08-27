@@ -1,0 +1,5 @@
+error: a set has no `Schema` impl and is not allowed in derived kind schemas — model it as a sorted `Vec<T>`, which encodes deterministically. See https://github.com/iamacoffeepot/aether/issues/232
+ --> tests/ui/rejects_out_of_vocabulary_hashset.rs:8:13
+  |
+8 |     values: HashSet<u32>,
+  |             ^^^^^^^^^^^^

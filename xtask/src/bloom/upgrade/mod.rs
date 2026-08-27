@@ -135,9 +135,9 @@ mod tests_support {
     use anyhow::{Result, anyhow};
 
     use super::Views;
-    use crate::bloom::dto::{BloomView, DigestHex, MemberView, ViewDocument};
+    use crate::bloom::dto::{ViewDocument, test_bloom, test_member, test_view};
     use crate::bloom::upgrade::paths::Paths;
-    use aether_bloomery::BloomStatus;
+    use aether_bloomery::{BloomStatus, Digest};
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -156,22 +156,15 @@ mod tests_support {
     }
 
     pub fn drained_view() -> ViewDocument {
-        ViewDocument {
-            mainline: DigestHex::from_bytes([1; 32]),
-            observed: DigestHex::from_bytes([2; 32]),
-            blooms: vec![BloomView {
-                id: DigestHex::from_bytes([3; 32]),
-                status: BloomStatus::Landed,
-                superseded_by: None,
-                members: vec![MemberView {
-                    workpiece: "issue-5014".to_owned(),
-                    scope_revision: DigestHex::from_bytes([7; 32]),
-                    awaiting_surface: None,
-                    withdrawn: None,
-                    cursor: None,
-                }],
-            }],
-        }
+        test_view(
+            Digest::from_bytes([1; 32]),
+            Digest::from_bytes([2; 32]),
+            vec![test_bloom(
+                Digest::from_bytes([3; 32]),
+                BloomStatus::Landed,
+                vec![test_member("issue-5014", Digest::from_bytes([7; 32]))],
+            )],
+        )
     }
 
     pub fn test_paths() -> Paths {
@@ -295,8 +288,7 @@ mod tests {
     use super::shell::fake::Fake;
     use super::tests_support::{Scripted, drained_view, seeded_args, test_args};
     use super::upgrade;
-    use crate::bloom::dto::DigestHex;
-    use aether_bloomery::BloomStatus;
+    use aether_bloomery::{BloomStatus, Digest};
 
     fn present_candidate(mut args: super::UpgradeArgs) -> super::UpgradeArgs {
         let path = super::tests_support::unique_temp("aether-xtask-upgrade-candidate");
@@ -427,7 +419,7 @@ mod tests {
     #[test]
     fn a_live_observation_during_the_fold_test_is_the_deploy_baseline() {
         let mut later = drained_view();
-        later.observed = DigestHex::from_bytes([4; 32]);
+        later.observed = Digest::from_bytes([4; 32]);
         let expected = format!("observed={}", later.observed);
         let views = Scripted::new(Ok(later), Ok(drained_view()));
         let args = present_candidate(seeded_args(12, 12));

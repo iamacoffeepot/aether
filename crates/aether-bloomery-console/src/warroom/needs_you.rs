@@ -87,7 +87,7 @@ fn action_clause(kind: InterruptKind) -> &'static str {
         InterruptKind::Wedge => "widen the surface or eject",
         InterruptKind::Quiesce => "raise the ceiling or stand down",
         InterruptKind::Hold => "release",
-        InterruptKind::BaseRed => "repair the base",
+        InterruptKind::BaseRed => "re-verify or repair the base",
     }
 }
 
@@ -196,7 +196,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].focus, Focus::Seal);
         assert!(rows[0].happened.contains(InterruptKind::BaseRed.label()));
-        assert_eq!(rows[0].action, "repair the base");
+        assert_eq!(rows[0].action, "re-verify or repair the base");
         assert_eq!(rows[0].severity, Severity::Loud);
     }
 

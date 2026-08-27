@@ -1,7 +1,8 @@
 # ADR-0188: The wire codec derives from Schema
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-13
+- **Amended:** 2026-08-26
 
 ## Context
 
@@ -26,6 +27,14 @@ The `Schema` derive emits the wire codec, and serde leaves the data plane.
 - Costs, accepted: owned derive machinery to maintain in `aether-data-derive`; a workspace-wide, mechanical derive-list migration; the loss of serde's representation conveniences (enum tagging knobs, field defaults) in the data plane — which the closed vocabulary defines for itself, and which is the point.
 - Sequencing: after #4922's fixtures are in the base (they gate the swap) and after ADR-0187's schema stamping lands (drift during the migration is then detectable by mechanism, not forensics). Implementation is #4928.
 - Non-goals: JSON and TOML edges keep serde; nothing changes for the tool envelope or host config parsing.
+
+### Settled in implementation (#4928)
+
+- **Kind encode/decode is derived.** `__derive_runtime::encode_wire` / `decode_wire` bind `WireEncode` / `WireDecode`. A type that derives `Kind` and `Schema` — with no serde derive — is on the mail path. Types that already had a hand-written `Schema` (the metaschema vocabulary, `MailId` / `Source` / `EngineId`, `VerifyFailure`, `WindowId`, `ReplyHandle`) got matching owned impls beside those `Schema` impls.
+- **The workspace-wide derive-list migration named in Decision §3 is deferred** to its own workpiece. Serde stays linked-but-inert on data-plane kinds: once the Kind path is derived-driven, nothing routes addressed kind bytes through serde. What the follow-on removes is a linked-but-unused impl, not a second encoder of kind payloads. The sweep is: strip `Serialize, Deserialize` from the 835 data-plane derive lines across roughly forty crates.
+- **Borrowed decode is a lifetime only.** `WireDecode<'de>` carries the lifetime so Decision §4 stays reachable. Every derived impl, and every leaf, decodes owned — the serde `borrow` attribute has no user under `crates/`.
+- **`to_vec` / `from_bytes` stay serde-bound** for a third category the original Decision did not enumerate: protocol frames that travel ADR-0118 bytes but are not `Schema` types (`WireFrame` and its nested vocabulary, `PlayerFrame`) plus the fuzz corpus (`WireValue` and its tuples). Rebinding those three public entry points in the same change would require owned impls in `aether-rpc`, `aether-game`, and `fuzz/`, which is a follow-on beside the derive-list strip. Kind addressed bytes do not go through that bound: they go through `encode_wire` / `decode_wire`.
+- **ADR-0187 is still Proposed**, with no schema-stamping implementation in the tree. This workpiece proceeded without it: 0187's contribution is drift *detection* during migration, and the contract here is that there is no drift to detect — byte identity is proven over the corpus (every `SchemaType` arm, the little-endian map-key inversion, sealed configuration kinds) before the Kind-path oracle is removed.
 
 ## Alternatives considered
 

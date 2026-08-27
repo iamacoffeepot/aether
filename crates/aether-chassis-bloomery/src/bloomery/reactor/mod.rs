@@ -54,8 +54,10 @@ pub use executor::{
 };
 pub use integrate::{IntegrateReactorCapability, IntegrateReactorSetup, IntegrateReactorState, IntegrateTick};
 pub use janitor::{
-    JanitorPolicy, JanitorReactorCapability, JanitorReactorSetup, JanitorReactorState, JanitorTick, SweepReport,
-    SweepRequest, TargetReadings, WorkingRefPruner, sweep,
+    ArchiveFailure, ArchiveFailureView, ArchiveOutcome, ArchiveRecords, ArchiveRecordsResult, ArchiveRequest,
+    ArchiveTier, ArchivedRecord, ArchivedRecordView, JanitorPolicy, JanitorReactorCapability, JanitorReactorSetup,
+    JanitorReactorState, JanitorTick, ListArchive, ListArchiveResult, SweepReport, SweepRequest, TargetScan,
+    WorkingRefPruner, archive_pass, sweep,
 };
 pub use land::{LandReactorCapability, LandReactorSetup, LandReactorState, LandTick};
 pub use mirror::{DrainTick, MirrorReactorCapability, MirrorReactorSetup, MirrorReactorState};

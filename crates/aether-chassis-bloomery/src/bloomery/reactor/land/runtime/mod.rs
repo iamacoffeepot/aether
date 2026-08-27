@@ -91,7 +91,7 @@ use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::control::ControlCore;
 use crate::store::membership;
-use crate::store::{CommissionBackend, SqliteStore, StoreBackend};
+use crate::store::{CANDIDATE_HASH_OCCASION_LAND, CommissionBackend, SqliteStore, StoreBackend};
 
 use aether_bloomery::Topic;
 
@@ -176,7 +176,7 @@ fn journal_holds_land(store: &mut dyn StoreBackend, bloom: &Digest) -> rusqlite:
 /// `false` leaves the land entry unacked so a encode/store fault redrives.
 fn enqueue_source_replica(store: &mut dyn StoreBackend, new_head: &Digest) -> bool {
     match to_vec(&SourceReplicaPayload { new_head: *new_head }) {
-        Ok(bytes) => match store.enqueue_outbox(Topic::SourceReplica.as_str(), &bytes) {
+        Ok(bytes) => match store.enqueue_outbox(Topic::SourceReplica.as_str(), &bytes, None) {
             Ok(_) => true,
             Err(error) => {
                 tracing::warn!(
@@ -426,6 +426,7 @@ fn drain_and_land_emitting(
                 match watch_proposal(source, &bloom, &payload, number) {
                     Ok(Watched::Landed { admit, new_head }) => {
                         mark_member_commissions_landed(store, &bloom);
+                        record_landed_candidate_hashes(store, &bloom);
                         close_member_source_issues(store, source, &bloom, &payload.expected_base, &new_head);
                         // External merge is observed; the receipt is not durable
                         // until the journal holds `land_key`. Hold the prefix and
@@ -696,6 +697,60 @@ fn mark_member_commissions_landed(store: &mut SqliteStore, bloom: &BloomId) {
                 workpiece = workpiece.0.as_str(),
                 %error,
                 "failed to mark the member commission landed; the landing itself stands",
+            );
+        }
+    }
+}
+
+/// Close the bloom's candidate-hash inventory at land (ADR-0211). One row per
+/// resolved member restamps the newest recorded hash for that workpiece against
+/// the landed bloom — matching on workpiece rather than bloom so an inherited
+/// member, whose ref reached this namespace through fold adoption and never
+/// pushed here, still names its commit. A member the record holds no hash for
+/// is written as an unpublished empty hex rather than dropped. Best-effort: a
+/// store fault is warned and never holds the land.
+fn record_landed_candidate_hashes(store: &mut SqliteStore, bloom: &BloomId) {
+    let resolved = match membership::resolved_members(store, bloom) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::land",
+                %error,
+                "could not read which members resolved; leaving the candidate-hash inventory unclosed, the landing itself stands",
+            );
+            return;
+        }
+    };
+    for workpiece in resolved {
+        let latest = match store.latest_candidate_hash(&workpiece.0) {
+            Ok(latest) => latest,
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::land",
+                    workpiece = workpiece.0.as_str(),
+                    %error,
+                    "could not look up the member's candidate hash; the landing itself stands",
+                );
+                continue;
+            }
+        };
+        let (ref_name, commit_hex, published) = match latest {
+            Some(row) => (row.ref_name, row.commit_hex, row.published),
+            None => (String::new(), String::new(), false),
+        };
+        if let Err(error) = store.record_candidate_hash(
+            bloom.0.as_bytes(),
+            &workpiece.0,
+            &ref_name,
+            &commit_hex,
+            CANDIDATE_HASH_OCCASION_LAND,
+            published,
+        ) {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::land",
+                workpiece = workpiece.0.as_str(),
+                %error,
+                "could not journal the landed candidate hash; the landing itself stands",
             );
         }
     }

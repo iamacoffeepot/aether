@@ -44,7 +44,7 @@ fn undrained(view: &ViewDocument) -> Option<String> {
         .blooms
         .iter()
         .filter(|bloom| matches!(bloom.status, BloomStatus::Sealed | BloomStatus::Resolved))
-        .map(|bloom| bloom.id.as_hex())
+        .map(|bloom| bloom.id.to_string())
         .collect();
     (!in_flight.is_empty()).then(|| format!("{} bloom(s) undrained: {}", in_flight.len(), in_flight.join(" ")))
 }
@@ -117,37 +117,33 @@ mod tests {
     use std::fs;
 
     use super::screen;
-    use crate::bloom::dto::{BloomView, DigestHex, MemberView, ViewDocument};
+    use crate::bloom::dto::{ViewDocument, test_bloom, test_member, test_view};
     use crate::bloom::upgrade::paths::Paths;
     use crate::bloom::upgrade::shell::Run;
     use crate::bloom::upgrade::shell::fake::Fake;
     use crate::bloom::upgrade::tests_support::{drained_view, install_service_environ, test_paths, unique_temp};
+    use aether_bloomery::Digest;
 
     const SERVICE_PATH: &str = "/service/bin";
     const SERVICE_PID: &str = "4321";
     const DOCTOR_MISSING: &str = "jscpd            MISSING  npm install -g jscpd";
 
     fn view(statuses: &[BloomStatus]) -> ViewDocument {
-        ViewDocument {
-            mainline: DigestHex::from_bytes([1; 32]),
-            observed: DigestHex::from_bytes([2; 32]),
-            blooms: statuses
+        test_view(
+            Digest::from_bytes([1; 32]),
+            Digest::from_bytes([2; 32]),
+            statuses
                 .iter()
                 .enumerate()
-                .map(|(index, status)| BloomView {
-                    id: DigestHex::from_bytes([u8::try_from(index).expect("few blooms"); 32]),
-                    status: *status,
-                    superseded_by: None,
-                    members: vec![MemberView {
-                        workpiece: format!("wp-{index}"),
-                        scope_revision: DigestHex::from_bytes([7; 32]),
-                        awaiting_surface: None,
-                        withdrawn: None,
-                        cursor: None,
-                    }],
+                .map(|(index, status)| {
+                    test_bloom(
+                        Digest::from_bytes([u8::try_from(index).expect("few blooms"); 32]),
+                        *status,
+                        vec![test_member(&format!("wp-{index}"), Digest::from_bytes([7; 32]))],
+                    )
                 })
                 .collect(),
-        }
+        )
     }
 
     fn reachable() -> Fake<'static> {

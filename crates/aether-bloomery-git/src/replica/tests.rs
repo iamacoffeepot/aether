@@ -118,44 +118,6 @@ fn a_real_push_copies_mainline_and_tags_and_leaves_coordination_refs_behind() {
 }
 
 #[test]
-fn an_operator_ref_advance_is_owed_a_push_until_one_lands() {
-    // The 2026-08-19 observation: a commit pushed straight to the daily ref in
-    // the fleet repository emits no coordinator event, so no replica topic is
-    // enqueued and the mirror sits a commit behind for as long as the board
-    // stays quiet. Nothing reports it, because nothing is looking. The ref is.
-    let (_root, authority, replica) = paired_repos();
-    let replica_url = replica.to_str().expect("utf-8").to_owned();
-    let source = GitSourceReplica::new(&authority, replica_url, MainlineRef::default(), "");
-
-    assert!(source.unpublished_head().is_some(), "a fresh process has published nothing and owes the boot push");
-    source.publish().expect("boot push succeeds");
-    assert_eq!(source.unpublished_head(), None, "an up-to-date replica owes nothing");
-
-    advance_mainline(&authority);
-    let advanced = git_stdout(&authority, &["rev-parse", "refs/heads/main"]);
-
-    assert_eq!(source.unpublished_head().as_deref(), Some(advanced.as_str()), "the advanced ref is owed a push");
-    source.publish().expect("reconcile push succeeds");
-    assert_eq!(source.unpublished_head(), None, "publishing it settles the debt");
-    assert_eq!(git_stdout(&replica, &["rev-parse", "refs/heads/main"]), advanced);
-}
-
-#[test]
-fn a_failed_push_leaves_the_head_still_owed() {
-    // Tripwire: recording the head before checking the push result would mark
-    // a ref published that never left the host, and the reconcile would go
-    // quiet on exactly the failure it exists to surface.
-    let (_root, authority, replica) = paired_repos();
-    advance_mainline(&authority);
-    install_rejecting_hook(&replica);
-    let source = GitSourceReplica::new(&authority, replica.to_str().expect("utf-8"), MainlineRef::default(), "");
-
-    source.publish().expect_err("the hook rejects the force-push");
-
-    assert!(source.unpublished_head().is_some(), "a rejected push still owes the head");
-}
-
-#[test]
 fn a_protected_mainline_force_is_classified_as_rejected() {
     let (_root, authority, replica) = paired_repos();
     advance_mainline(&authority);

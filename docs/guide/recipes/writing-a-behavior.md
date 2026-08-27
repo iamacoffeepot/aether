@@ -55,11 +55,9 @@ matching name decodes the real traffic byte-for-byte. Copy the field shape exact
 a compile error.
 
 ```rust
-use serde::{Deserialize, Serialize};
-
 // Twin of aether-kit-widget's slider event — same wire name, so it decodes the
 // real SliderChanged flowing past the host.
-#[derive(Serialize, Deserialize, aether_data::Kind, aether_data::Schema, Clone)]
+#[derive(aether_data::Kind, aether_data::Schema, Clone)]
 #[kind(name = "aether.kit.widget.slider.changed")]
 struct SliderChanged {
     value: f32,

@@ -29,15 +29,13 @@ The clipboard contract is a compact current exemplar:
 ## 2. Declare request and reply
 
 ```rust
-use serde::{Deserialize, Serialize};
-
 /// Request the current UTF-8 clipboard text.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[derive(aether_data::Kind, aether_data::Schema, Debug, Clone)]
 #[kind(name = "aether.clipboard.get_text")]
 pub struct GetClipboardText;
 
 /// Reply to `GetClipboardText`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[derive(aether_data::Kind, aether_data::Schema, Debug, Clone)]
 #[kind(name = "aether.clipboard.get_text_result")]
 pub enum GetClipboardTextResult {
     Ok { text: String },
@@ -46,9 +44,9 @@ pub enum GetClipboardTextResult {
 ```
 
 The canonical name is the operator-facing `kind_name`. Follow the owner's
-family. Derive `Kind` and `Schema`; serde derives provide the structured wire
-shape. Write docs for a caller, including reply, units, limits, and error
-meaning.
+family. Derive `Kind` and `Schema` — `Schema` emits the structured wire codec
+(ADR-0188); a serde derive is not required to put the type on the mail path.
+Write docs for a caller, including reply, units, limits, and error meaning.
 
 Reply is a handler contract, not a `Kind` associated type. Name/result shapes
 should make the pairing clear, but live handler inventory is what declares the

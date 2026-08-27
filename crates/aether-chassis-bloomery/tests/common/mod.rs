@@ -9,10 +9,11 @@
 #![allow(clippy::unwrap_used, reason = "a fixture that cannot set up its process reports it by panicking")]
 
 pub use aether_harness_bloomery::client;
-pub use aether_harness_bloomery::{Coordinator, free_port};
+pub use aether_harness_bloomery::{Coordinator, Ingress, free_port};
 
 fn _every_binary_names_the_fixtures() {
     let _: fn() -> u16 = free_port;
     let _: fn(u16, &[(&str, &str)]) -> Coordinator = Coordinator::spawn;
+    let _ = Ingress::Rpc;
     let _ = client::connect_and_handshake;
 }

@@ -53,6 +53,8 @@
 //! one resource each; [`response`] and [`hex`] hold the shared response
 //! constructors and the bloom-id URL codec.
 
+mod archive;
+mod bases;
 mod blooms;
 mod calibration;
 #[cfg(feature = "github")]
@@ -62,7 +64,7 @@ mod commissions;
 mod configs;
 mod drafts;
 mod evidence;
-mod hex;
+pub mod hex;
 mod metrics;
 mod reads;
 mod response;
@@ -104,7 +106,7 @@ use super::BloomeryApiCapability;
 use crate::artifacts::{ArtifactsCapabilityState, GetRange, GetRangeResult, resolve_root};
 use crate::bloomery::load_policy;
 #[cfg(feature = "github")]
-use crate::bloomery::{CandidatePush, DoctorBoard};
+use crate::bloomery::{ArchiveRecordsResult, CandidatePush, DoctorBoard, ListArchiveResult};
 use crate::signing::VerifyResult;
 use crate::store::{
     CancelCommissionResult, CreateCommissionResult, EnqueueScopeRunResult, ListCommissionsResult, LoadCommissionResult,
@@ -187,6 +189,8 @@ pub struct ApiParams {
     pub pusher: Option<Arc<dyn CandidatePush>>,
     /// Scratch-worktree base: `{nonce}-evidence` directories live here.
     pub worktree_base: String,
+    /// Archive-tier root. Empty resolves to `<worktree_base>/archive`.
+    pub archive_base: String,
     /// Artifacts root used to resolve study cost on the dispatch list. `None`
     /// leaves every cost `null`.
     pub artifacts_root: Option<String>,
@@ -242,7 +246,12 @@ impl NativeActor for BloomeryApiCapability {
             correspondence: params.correspondence,
             #[cfg(feature = "github")]
             pusher: params.pusher,
-            worktree_base: PathBuf::from(params.worktree_base),
+            worktree_base: PathBuf::from(&params.worktree_base),
+            archive_base: if params.archive_base.is_empty() {
+                PathBuf::from(&params.worktree_base).join("archive")
+            } else {
+                PathBuf::from(params.archive_base)
+            },
             artifacts: open_api_artifacts(params.artifacts_root.as_deref()),
             staged: BTreeMap::new(),
             drafts: BTreeMap::new(),
@@ -371,6 +380,20 @@ impl NativeActor for BloomeryApiCapability {
     ) -> http::Outcome {
         let id = id.0;
         let routed = state.enqueue_scope_run(ctx.request(), &id);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /archive` — move eligible records onto the archive tier.
+    #[http::route(Post, "/archive")]
+    fn on_post_archive(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+        let routed = archive::post(state, ctx.request());
+        finish(state, ctx, routed)
+    }
+
+    /// `GET /archive` — list the archive tier.
+    #[http::route(Get, "/archive")]
+    fn on_get_archive(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+        let routed = archive::list(state, ctx.request());
         finish(state, ctx, routed)
     }
 
@@ -638,6 +661,20 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, routed)
     }
 
+    /// `POST /bases/{base}/reverify` — run `verify.base` again on a red
+    /// receipt whose failure the operator has judged does not describe the
+    /// tree.
+    #[http::route(Post, "/bases/{base}/reverify")]
+    fn on_reverify_base(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        base: http::Path<String>,
+    ) -> http::Outcome {
+        let base = base.0;
+        let routed = ApiCapabilityState::reverify_base(&base, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
     /// `POST /blooms/{id}/answer/{question}` — adopt a signed answer to the
     /// parked question `{question}` names. The question is a path segment
     /// because the signature is bound to it (ADR-0182).
@@ -795,7 +832,13 @@ impl NativeActor for BloomeryApiCapability {
         nonce: http::Path<String>,
     ) -> http::Outcome {
         let nonce = nonce.0;
-        let response = evidence::file_page(&state.worktree_base, &nonce, "transcript.jsonl", &ctx.request().query);
+        let response = evidence::file_page(
+            &state.worktree_base,
+            &state.archive_base,
+            &nonce,
+            "transcript.jsonl",
+            &ctx.request().query,
+        );
         finish(state, ctx, Routed::Reply(response))
     }
 
@@ -807,7 +850,8 @@ impl NativeActor for BloomeryApiCapability {
         nonce: http::Path<String>,
     ) -> http::Outcome {
         let nonce = nonce.0;
-        let response = evidence::file_page(&state.worktree_base, &nonce, "prompt.md", &ctx.request().query);
+        let response =
+            evidence::file_page(&state.worktree_base, &state.archive_base, &nonce, "prompt.md", &ctx.request().query);
         finish(state, ctx, Routed::Reply(response))
     }
 
@@ -964,7 +1008,7 @@ impl NativeActor for BloomeryApiCapability {
         _ctx: &mut NativeCtx<'_, Manual>,
         mail: ListBloomDispatchesResult,
     ) -> HttpServerResponse {
-        evidence::list_response(&state.worktree_base, state.artifacts.as_mut(), mail)
+        evidence::list_response(&state.worktree_base, &state.archive_base, state.artifacts.as_mut(), mail)
     }
 
     #[http::reply]
@@ -973,7 +1017,27 @@ impl NativeActor for BloomeryApiCapability {
         _ctx: &mut NativeCtx<'_, Manual>,
         mail: LookupDispatchResult,
     ) -> HttpServerResponse {
-        evidence::header_response(&state.worktree_base, mail)
+        evidence::header_response(&state.worktree_base, &state.archive_base, mail)
+    }
+
+    #[cfg(feature = "github")]
+    #[http::reply]
+    fn on_archive_records_result(
+        _state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: ArchiveRecordsResult,
+    ) -> HttpServerResponse {
+        archive::pass_response(mail)
+    }
+
+    #[cfg(feature = "github")]
+    #[http::reply]
+    fn on_list_archive_result(
+        _state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: ListArchiveResult,
+    ) -> HttpServerResponse {
+        archive::list_response(mail)
     }
 
     /// The source cap's reply to a claim enumeration (ADR-0179).

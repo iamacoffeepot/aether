@@ -10,10 +10,12 @@
 //! so existing call sites compile unchanged.
 
 use alloc::borrow::Cow;
+use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
 use crate::schema::{EnumVariant, LabelNode, NamedField, Primitive, SchemaType};
+use crate::wire::{Error as WireError, WireDecode, WireEncode};
 use crate::{EngineId, MailboxId, Schema, SessionToken};
 
 /// ADR-0080 §1: the unique identity of a mail. A 128-bit composite of
@@ -53,6 +55,19 @@ impl Schema for MailId {
     };
     const LABEL: Option<&'static str> = Some("aether.mail_id");
     const LABEL_NODE: LabelNode = LabelNode::Anonymous;
+}
+
+impl WireEncode for MailId {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
+        self.sender.encode(out)?;
+        self.correlation_id.encode(out)
+    }
+}
+
+impl<'de> WireDecode<'de> for MailId {
+    fn decode(cursor: &mut &'de [u8]) -> Result<Self, WireError> {
+        Ok(Self { sender: MailboxId::decode(cursor)?, correlation_id: u64::decode(cursor)? })
+    }
 }
 
 impl MailId {
@@ -125,6 +140,41 @@ impl Schema for SourceAddr {
     const LABEL_NODE: LabelNode = LabelNode::Anonymous;
 }
 
+impl WireEncode for SourceAddr {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
+        match self {
+            Self::None => 0u32.encode(out),
+            Self::Session(token) => {
+                1u32.encode(out)?;
+                token.encode(out)
+            }
+            Self::EngineMailbox { engine_id, mailbox_id } => {
+                2u32.encode(out)?;
+                engine_id.encode(out)?;
+                mailbox_id.encode(out)
+            }
+            Self::Component(mailbox) => {
+                3u32.encode(out)?;
+                mailbox.encode(out)
+            }
+        }
+    }
+}
+
+impl<'de> WireDecode<'de> for SourceAddr {
+    fn decode(cursor: &mut &'de [u8]) -> Result<Self, WireError> {
+        match u32::decode(cursor)? {
+            0 => Ok(Self::None),
+            1 => Ok(Self::Session(SessionToken::decode(cursor)?)),
+            2 => {
+                Ok(Self::EngineMailbox { engine_id: EngineId::decode(cursor)?, mailbox_id: MailboxId::decode(cursor)? })
+            }
+            3 => Ok(Self::Component(MailboxId::decode(cursor)?)),
+            other => Err(WireError::InvalidEnum(other)),
+        }
+    }
+}
+
 /// The immediate sender of a substrate-side `Mail` — the addressing
 /// layer's "who sent this" (ADR-0083). `addr` is the sender's
 /// addressable mailbox (where a reply goes); `correlation_id` is an
@@ -158,6 +208,19 @@ impl Schema for Source {
     };
     const LABEL: Option<&'static str> = Some("aether.source");
     const LABEL_NODE: LabelNode = LabelNode::Anonymous;
+}
+
+impl WireEncode for Source {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
+        self.addr.encode(out)?;
+        self.correlation_id.encode(out)
+    }
+}
+
+impl<'de> WireDecode<'de> for Source {
+    fn decode(cursor: &mut &'de [u8]) -> Result<Self, WireError> {
+        Ok(Self { addr: SourceAddr::decode(cursor)?, correlation_id: u64::decode(cursor)? })
+    }
 }
 
 impl Source {

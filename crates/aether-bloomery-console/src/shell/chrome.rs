@@ -1,7 +1,8 @@
 //! Application chrome: header, breadcrumb, rules, status, needs-you band, footer, pane frames.
 //!
-//! The header, breadcrumb, rules, and footer are shell chrome. Needs-you paints
-//! the merged queue; quiet paints the status, today, and rest-count lines.
+//! The header, rules, and footer are shell chrome; the trail sits in the
+//! footer's left slot. Needs-you paints the merged queue; quiet paints the
+//! status, today, and rest-count lines.
 
 use std::time::Duration;
 
@@ -276,13 +277,14 @@ pub fn keys_overlay(hints: &[KeyHint], area: Rect) -> (Rect, Paragraph<'static>)
     (rect, Paragraph::new(lines.join("\n")).block(block).style(palette::body()))
 }
 
-/// One footer row: the current screen's keys, flush right across the full
-/// width. The unelidable tail is applied here; callers pass the screen's set,
-/// not the inline pair.
+/// One footer row: the trail on the left, the current screen's keys flush
+/// right. The unelidable tail is applied here; callers pass the screen's set,
+/// not the inline pair. A trail that cannot share the row with the keys is
+/// elided from the left so the leaf stays.
 #[must_use]
-pub fn footer(hints: &[KeyHint], width: u16) -> Paragraph<'static> {
+pub fn footer(trail: &str, hints: &[KeyHint], width: u16) -> Paragraph<'static> {
     let keys = footer_keys(hints, INLINE_HINTS, width as usize);
-    Paragraph::new(footer_row("", &keys, width as usize)).style(palette::body())
+    Paragraph::new(footer_row(trail, &keys, width as usize)).style(palette::body())
 }
 
 #[cfg(test)]

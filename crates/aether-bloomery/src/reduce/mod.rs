@@ -25,7 +25,7 @@ mod base_verify;
 mod boundary;
 mod composition;
 mod decision;
-mod decisions_v1;
+pub(crate) mod decisions_v1;
 mod error;
 mod event;
 mod evidence;
@@ -56,22 +56,22 @@ mod view;
 mod why;
 mod withdraw;
 
+pub use crate::persisted::decode_recorded_decisions;
 pub use decision::Decision;
 pub use error::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError,
-    AttemptCompletedError, BaseMismatch, FoldConflictError, GrantAttemptsError, HostFaultError, IntegrateError,
-    LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError, NarrowCompositionError,
-    OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ResolveError, SealConflict, SealError,
-    SpliceError, SupersedeError, SuppressionDispositionError, SurfaceRequestedError, VerifyFailedError, WithdrawError,
+    AttemptCompletedError, BaseMismatch, BaseReverifyError, FoldConflictError, GrantAttemptsError, HostFaultError,
+    IntegrateError, LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError,
+    NarrowCompositionError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ResolveError,
+    SealConflict, SealError, SpliceError, SupersedeError, SuppressionDispositionError, SurfaceRequestedError,
+    VerifyFailedError, WithdrawError,
 };
 pub use event::{Event, Fact};
 pub use gate::{
     AGGREGATE_REVIEW_GATE, AGGREGATE_VERIFY_GATE, DISPATCH_MEMBER_GATE, DRAFT_ADMISSION_GATE, FOLD_GATE, Gate,
     LAND_GATE, Read, RecordedRead, RecordedRefusal, Refusal,
 };
-pub use outcome::{
-    DECISIONS_SCHEMA, DECISIONS_SCHEMA_V1, Decisions, DecisionsSchemaError, Outcome, decode_recorded_decisions,
-};
+pub use outcome::{Decisions, Outcome};
 pub use seal::is_active_unlanded;
 pub use snapshot::{
     AggregateReviewFault, AwaitingSurface, BloomRecord, BloomStatus, Excuse, FileLease, FoldedIntegration,
@@ -84,7 +84,7 @@ use crate::values::{ResolvedConfigs, SpendWindow};
 
 use aggregate_verify::reduce_aggregate_verify_completed;
 use attempt::{reduce_attempt_completed, reduce_member_executor_fault};
-use base_verify::reduce_base_verify_completed;
+use base_verify::{reduce_base_reverify, reduce_base_verify_completed};
 use evidence::{reduce_admit_evidence, reduce_adopt_answer};
 use fold_conflict::reduce_fold_conflict;
 use fold_refusal::reduce_fold_refused;
@@ -207,6 +207,7 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         Fact::BaseVerifyCompleted { base, tree, passed, evidence, failed } => {
             reduce_base_verify_completed(snapshot, *base, *tree, *passed, evidence, *failed)
         }
+        Fact::BaseReverify(reverify) => reduce_base_reverify(snapshot, reverify),
         Fact::CompositionNarrowed { bloom, verified, tree, head, evidence, attribution } => {
             reduce_composition_narrowed(snapshot, bloom, verified, *tree, *head, evidence, attribution)
         }

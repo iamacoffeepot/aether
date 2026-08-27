@@ -28,6 +28,7 @@
 //! is `cargo xtask fixtures regen <name>`.
 
 mod completeness;
+mod schema_digests;
 
 use aether_bloomery::testing::{
     containment_refused_event, representative, surface_overlap_decisions, surface_overlap_event,

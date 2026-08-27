@@ -72,7 +72,7 @@ impl Default for RpcPortConfig {
 
 /// The default REST control-API port when `AETHER_HTTP_PORT` is unset —
 /// distinct from the RPC port so the two ingresses coexist on one host.
-pub const DEFAULT_HTTP_PORT: u16 = 8910;
+pub use aether_bloomery::DEFAULT_HTTP_PORT;
 
 /// The REST control-API ingress port knob, resolved argv > `AETHER_HTTP_PORT` >
 /// default. The `aether.http.server` cap binds this on localhost; the operator
@@ -324,8 +324,9 @@ fn actor_setups(
             worktree_base: coordinator.local_worktree_base.clone(),
             target_base: coordinator.lane_target_base.clone(),
             lane_target_budget_bytes: coordinator.lane_target_budget_bytes,
-            lane_target_measure_interval_secs: coordinator.lane_target_measure_interval_secs,
+            target_scan_interval_secs: coordinator.lane_target_scan_interval_secs,
             evidence_retention_days: coordinator.evidence_retention_days,
+            archive_base: coordinator.archive_base.clone(),
             poll_interval_secs: github_poll_interval_secs,
             repo: repo.display().to_string(),
         },
@@ -659,6 +660,7 @@ impl BootableChassis for BloomeryChassis {
                 correspondence: Some(setups.correspondence),
                 pusher: Some(setups.pusher),
                 worktree_base,
+                archive_base: coordinator.archive_base.clone(),
                 artifacts_root,
                 control_token: coordinator.http_control_token,
                 doctor: Some(setups.doctor_board),
@@ -707,6 +709,7 @@ impl BootableChassis for BloomeryChassis {
             .with_actor::<BloomeryApiCapability>(ApiParams {
                 approval_policy_file,
                 worktree_base,
+                archive_base: coordinator.archive_base.clone(),
                 artifacts_root,
                 control_token: coordinator.http_control_token,
             }))

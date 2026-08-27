@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use super::{SWEPT_NOTICE, evidence_dir, evidence_retained, nonce_spellings};
+use super::{SWEPT_NOTICE, archived_location, evidence_retained, nonce_spellings, resolve_evidence_dir};
 use crate::api::dto::{DispatchEvidenceView, DispatchProcessView};
 
 /// Independent cap on `assistant_text` in the header.
@@ -17,12 +17,12 @@ const IDENTITY_FILE: &str = "identity";
 const EVIDENCE_JSON: &str = "evidence.json";
 
 /// Read the header for a nonce the journal already named.
-pub fn read(worktree_base: &Path, nonce: &str) -> DispatchEvidenceView {
+pub fn read(worktree_base: &Path, archive_base: &Path, nonce: &str) -> DispatchEvidenceView {
     let spelling = nonce_spellings(nonce)
         .into_iter()
-        .find(|candidate| evidence_retained(worktree_base, candidate))
+        .find(|candidate| evidence_retained(worktree_base, archive_base, candidate))
         .unwrap_or_else(|| nonce.to_owned());
-    if !evidence_retained(worktree_base, &spelling) {
+    let Some(dir) = resolve_evidence_dir(worktree_base, archive_base, &spelling) else {
         return DispatchEvidenceView {
             nonce: spelling,
             retained: false,
@@ -33,14 +33,15 @@ pub fn read(worktree_base: &Path, nonce: &str) -> DispatchEvidenceView {
             commit_message_truncated: false,
             process: None,
             files: Vec::new(),
+            archived: None,
         };
-    }
+    };
 
-    let dir = evidence_dir(worktree_base, &spelling);
     let files = list_files(&dir);
     let process = read_process(&dir.join(IDENTITY_FILE));
     let (assistant_text, assistant_text_truncated, commit_message, commit_message_truncated) =
         read_prose(&dir.join(EVIDENCE_JSON));
+    let archived = archived_location(worktree_base, archive_base, &spelling).map(|path| path.display().to_string());
     DispatchEvidenceView {
         nonce: spelling,
         retained: true,
@@ -51,6 +52,7 @@ pub fn read(worktree_base: &Path, nonce: &str) -> DispatchEvidenceView {
         commit_message_truncated,
         process,
         files,
+        archived,
     }
 }
 

@@ -1245,7 +1245,7 @@ impl LocalExecutor {
         let Some(address) = ConfigScopes::bloom_wide(&registry).address::<PriceTable>() else {
             return PriceTable::default();
         };
-        let Ok(Some((kind, bytes))) = store.lookup_config(address.as_bytes()) else {
+        let Ok(Some((kind, bytes, _))) = store.lookup_config(address.as_bytes()) else {
             return PriceTable::default();
         };
         if kind != PriceTable::NAME {
@@ -2705,17 +2705,11 @@ fn recorded_lane(evidence_dir: &Path) -> (Option<usize>, Option<SessionSlug>) {
 /// the streamed transcript and the lane's own heartbeat — or `None` when
 /// neither is present, readable, and stamped in the past.
 ///
-/// Both, because the transcript alone does not cover the lane. It goes quiet
-/// the moment the model ends its turn, and the mechanical fixers that follow
-/// can compile for minutes; a construct lane cancelled as a dead child in that
-/// window loses a finished candidate (#5383). The lane stamps `heartbeat` while
-/// it does that work, and the newer of the two is what this lane last did.
-///
-/// Future metadata is refused rather than reported: a clock-skewed mtime would
-/// otherwise look like progress that has not happened yet and extend the
-/// silence window past the sealed deadline. Metadata is read only — opening
-/// either file for write here would make coordinator polling itself the
-/// heartbeat.
+/// The later of the two, because a dispatch sealed before the lane learned to
+/// beat writes no heartbeat file: its transcript stamp is still the answer.
+/// An absent heartbeat is `None` rather than a silence since epoch — treating
+/// a missing file as time zero would make every verify lane, which never
+/// writes one, instantly silent.
 fn lane_progress_unix_millis(evidence_dir: &Path) -> Option<u64> {
     [TRANSCRIPT_FILE, HEARTBEAT_FILE]
         .into_iter()
@@ -2725,6 +2719,11 @@ fn lane_progress_unix_millis(evidence_dir: &Path) -> Option<u64> {
 
 /// One file's modification time in Unix milliseconds, or `None` when it is
 /// absent, unreadable, or stamped in the future.
+///
+/// Future metadata is refused rather than reported: a clock-skewed mtime would
+/// otherwise look like progress that has not happened yet and extend the
+/// silence window past the sealed deadline. Metadata is read only — opening
+/// the file for write here would make coordinator polling itself the heartbeat.
 fn file_progress_unix_millis(path: &Path) -> Option<u64> {
     let modified = fs::metadata(path).ok()?.modified().ok()?;
     let millis = modified.duration_since(UNIX_EPOCH).ok().and_then(|since| u64::try_from(since.as_millis()).ok())?;

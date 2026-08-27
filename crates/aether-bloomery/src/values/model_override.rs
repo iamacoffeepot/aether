@@ -93,7 +93,7 @@ pub struct StageOverride {
 }
 
 /// Why a caller-authored [`ModelOverride`] cannot be sealed.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum OverrideError {
     /// A [`StageOverride`] is keyed to a stage the sealed catalog binds to no
     /// model lane, so nothing would ever resolve it.

@@ -8,7 +8,8 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use aether_actor::Addressable;
 use aether_bloomery::{
@@ -17,6 +18,7 @@ use aether_bloomery::{
 };
 use aether_chassis_bloomery::ControlCore;
 use aether_chassis_bloomery::bloomery::DoctorReport;
+use aether_chassis_bloomery::control::PRE_REPLAY_REFUSAL;
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId};
@@ -24,6 +26,15 @@ use aether_rpc::WireFrame;
 use serde::Serialize;
 
 use super::client::{call, call_frame, connect_and_handshake};
+
+/// How long [`Wire::await_replayed`] gives the coordinator's boot journal
+/// replay. Generous against a journal a restart scenario has already filled,
+/// and far short of a hang: an exhausted budget is a panic naming the read the
+/// coordinator is still refusing.
+const REPLAY_BUDGET: Duration = Duration::from_secs(30);
+
+/// Between re-probes of the projection while the replay is still folding.
+const REPLAY_POLL: Duration = Duration::from_millis(20);
 
 /// A live RPC session: handshake already done, cids allocated in order.
 pub struct Wire {
@@ -79,14 +90,67 @@ impl Wire {
         call(&mut self.stream, self.cid, mailbox, request)
     }
 
+    /// Wait for the coordinator's boot journal replay to fold, so every later
+    /// read on this wire is served rather than refused.
+    ///
+    /// The control core refuses every read until its snapshot is the one the
+    /// journal describes — deliberately, because an empty projection served
+    /// during that window is indistinguishable from a genuinely quiet fleet.
+    /// The refusal is therefore not a fault to assert into but a state to await,
+    /// the way a substrate scenario polls for an effect no causal chain of its
+    /// own can settle: the flag never goes back, so one await is what makes the
+    /// window unobservable for every read that follows on this wire.
+    ///
+    /// # Panics
+    /// The replay did not finish inside `REPLAY_BUDGET`, or a read was
+    /// refused for some other reason.
+    pub fn await_replayed(&mut self) {
+        let deadline = Instant::now() + REPLAY_BUDGET;
+        loop {
+            match self.read_document() {
+                Ok(_) => return,
+                Err(refusal) => assert!(
+                    refusal.contains(PRE_REPLAY_REFUSAL),
+                    "the projection read was refused for a reason that is not the boot replay: {refusal}"
+                ),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the coordinator's boot journal replay did not finish inside {REPLAY_BUDGET:?}; \
+                 every read stays refused until the projection is the one the journal describes"
+            );
+            thread::sleep(REPLAY_POLL);
+        }
+    }
+
     /// The whole projection, right now.
+    ///
+    /// Strict about a refusal, including the boot-replay one: the harness awaits
+    /// the replay once at boot, so a scenario step that meets that window is
+    /// reading over a wire nobody waited on rather than watching a coordinator
+    /// misbehave, and the panic says so.
     ///
     /// # Panics
     /// The query was refused or its reply did not decode.
     pub fn view(&mut self) -> ViewDocument {
+        match self.read_document() {
+            Ok(document) => document,
+            Err(refusal) if refusal.contains(PRE_REPLAY_REFUSAL) => {
+                panic!("this wire read the projection without awaiting the boot journal replay: {refusal}")
+            }
+            Err(refusal) => panic!("the projection read was refused: {refusal}"),
+        }
+    }
+
+    /// One document read: the decoded projection, or the control core's refusal.
+    ///
+    /// # Panics
+    /// The reply was neither a document nor a refusal, or it did not decode.
+    fn read_document(&mut self) -> Result<ViewDocument, String> {
         let query = Query { selector: QuerySelector::Document };
         match self.call::<_, QueryResult>(control_mailbox(), &query) {
-            QueryResult::Document { document } => from_bytes(&document).expect("the projection decodes"),
+            QueryResult::Document { document } => Ok(from_bytes(&document).expect("the projection decodes")),
+            QueryResult::Err { error } => Err(error),
             other => panic!("expected a document reply, got {other:?}"),
         }
     }

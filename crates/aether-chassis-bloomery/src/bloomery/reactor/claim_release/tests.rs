@@ -39,7 +39,7 @@ fn shell() -> SourceShell {
 fn enqueue_release(store: &mut SqliteStore, target: &OrphanClaimRelease) -> u64 {
     let payload = OrphanClaimReleasePayload { request: target.request(), target: target.clone() };
     store
-        .enqueue_topic(Topic::OrphanClaimRelease, &to_vec(&payload).expect("the payload encodes"))
+        .enqueue_topic(Topic::OrphanClaimRelease, &to_vec(&payload).expect("the payload encodes"), None)
         .expect("the enqueue lands")
 }
 

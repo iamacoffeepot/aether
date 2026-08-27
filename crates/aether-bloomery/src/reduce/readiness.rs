@@ -473,14 +473,15 @@ fn member_index(record: &BloomRecord, workpiece: &WorkpieceId) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use crate::persisted::DECISIONS;
     use aether_data::wire::{from_bytes, to_vec};
 
     use super::{blocking_ancestor, newly_ready_entries};
     use crate::digest::Digest;
     use crate::ids::{IdempotencyKey, StageId, WorkpieceId};
     use crate::reduce::{
-        BloomRecord, DECISIONS_SCHEMA, Decision, Decisions, Event, Fact, Outcome, Snapshot, StageProgress,
-        decode_recorded_decisions, reduce,
+        BloomRecord, Decision, Decisions, Event, Fact, Outcome, Snapshot, StageProgress, decode_recorded_decisions,
+        reduce,
     };
     use crate::values::{
         BloomDraft, BloomSpec, ConfigRegistry, Evidence, EvidenceKind, MemberDependency, Membership, ResolutionClaim,
@@ -734,12 +735,16 @@ mod tests {
         let integrated = reduce(&after_seal, &integrate, &ResolvedConfigs::default(), &SpendWindow::default());
         let live = after_seal.apply(&integrate, &integrated, &ResolvedConfigs::default());
 
-        let replayed_seal: Decisions =
-            decode_recorded_decisions(&to_vec(&sealed).expect("seal encodes"), Some(DECISIONS_SCHEMA))
-                .expect("seal decodes");
-        let replayed_integrate: Decisions =
-            decode_recorded_decisions(&to_vec(&integrated).expect("integrate encodes"), Some(DECISIONS_SCHEMA))
-                .expect("integrate decodes");
+        let replayed_seal: Decisions = decode_recorded_decisions(
+            &to_vec(&sealed).expect("seal encodes"),
+            Some(DECISIONS.current_digest().as_bytes()),
+        )
+        .expect("seal decodes");
+        let replayed_integrate: Decisions = decode_recorded_decisions(
+            &to_vec(&integrated).expect("integrate encodes"),
+            Some(DECISIONS.current_digest().as_bytes()),
+        )
+        .expect("integrate decodes");
         let replayed = base
             .apply(
                 &from_bytes(&to_vec(&seal).expect("event encodes")).expect("event decodes"),

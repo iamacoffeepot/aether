@@ -142,6 +142,11 @@ impl ConfigRegistry {
         effective
     }
 
+    /// Merge `other`'s entries into this registry, `other` winning per kind.
+    pub fn overlay(&mut self, other: Self) {
+        self.entries.extend(other.entries);
+    }
+
     /// Whether anything is sealed here.
     #[must_use]
     pub fn is_empty(&self) -> bool {

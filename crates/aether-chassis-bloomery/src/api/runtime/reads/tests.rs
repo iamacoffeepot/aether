@@ -1,8 +1,7 @@
 //! Paging, ranging, and kind-resolution tests for the REST read surface.
 
 use aether_bloomery::{
-    BloomId, DECISIONS_SCHEMA, Decisions, Digest, Event, Fact, IdempotencyKey, JournalRecord, Outcome, StudyCost,
-    StudyRecord,
+    BloomId, Decisions, Digest, Event, Fact, IdempotencyKey, JournalRecord, Outcome, StudyCost, StudyRecord,
 };
 use aether_data::wire::to_vec;
 
@@ -40,8 +39,10 @@ fn record(sequence: u64, event: &Event) -> JournalRecord {
         event: to_vec(event).expect("event encodes"),
         decisions: to_vec(&decisions).expect("decisions encode"),
         decider: "test".to_owned(),
-        decisions_schema: Some(DECISIONS_SCHEMA.to_owned()),
+        decisions_schema: None,
         recorded_unix_millis: None,
+        event_schema: None,
+        decisions_schema_digest: None,
     }
 }
 

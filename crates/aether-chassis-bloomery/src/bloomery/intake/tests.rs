@@ -1583,7 +1583,7 @@ fn a_scope_result_is_admitted_and_readable_off_its_ordinal() {
     };
     let intent_digest = store.create(&commission, &intent).expect("create commission");
     let base = Digest::from_bytes([2; 32]);
-    let opened = open_scope_run(&mut store, &commission, intent_digest, base).expect("open");
+    let opened = open_scope_run(&mut store, &commission, intent_digest, base, "scope sketch").expect("open");
     let nonce = dispatch_nonce(opened.sequence);
     let mut record =
         dispatch_record(&nonce.0, BloomId(Digest::from_bytes([1; 32])), &commission, opened.subject, opened.subject);

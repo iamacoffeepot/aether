@@ -51,11 +51,11 @@ use aether_bloomery::{
     BloomId, BloomStatus, CalibrationDocument, CalibrationLedger, ClaimRefKind, ClaimRefState, DAYS_CAP, Decision,
     Decisions, Digest, Event, EvidenceKind, Fact, IdempotencyKey, METRICS_DEFAULT_LIMIT, METRICS_MAX_LIMIT,
     MetricsLedger, OperatorRepairError, Outcome, Question, ResolvedConfigs, Snapshot, SpendWindow, StudyRecord,
-    Unproducible, ViewDocument, decode_recorded_decisions, grade, is_active_unlanded, measure, reduce, view_of, why_of,
-    window_label,
+    Unproducible, ViewDocument, decode_recorded_decisions, decode_recorded_event, encode_row, grade,
+    is_active_unlanded, measure, reduce, view_of, why_of, window_label,
 };
 
-use super::{ControlCore, ControlSetup, ObserveTick};
+use super::{ControlCore, ControlSetup, ObserveTick, PRE_REPLAY_REFUSAL};
 use crate::artifacts::{ArtifactsCapabilityState, GetResult, resolve_root};
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 #[cfg(feature = "github")]
@@ -581,7 +581,7 @@ impl NativeActor for ControlCore {
             let Some(address) = Digest::from_slice(&record.digest) else {
                 ctx.fatal_abort(format!("stored configuration `{}` has a malformed address", record.kind));
             };
-            state.configs.insert(address, record.kind, record.bytes);
+            state.configs.insert(address, record.kind, record.bytes, record.schema_digest);
         }
 
         match held {
@@ -606,7 +606,7 @@ impl NativeActor for ControlCore {
             }
         };
         for record in records {
-            let event: Event = match from_bytes(&record.event) {
+            let event: Event = match decode_recorded_event(&record.event, record.event_schema.as_deref()) {
                 Ok(event) => event,
                 Err(error) => ctx.fatal_abort(format!(
                     "boot journal replay: record {} ({}) did not decode: {error}",
@@ -618,7 +618,7 @@ impl NativeActor for ControlCore {
             // them resurrects rejections a looser rule now admits and re-refuses
             // admissions a stricter rule no longer would (#4937).
             let decisions: Decisions =
-                match decode_recorded_decisions(&record.decisions, record.decisions_schema.as_deref()) {
+                match decode_recorded_decisions(&record.decisions, record.decisions_schema_digest.as_deref()) {
                     Ok(decisions) => decisions,
                     Err(error) => ctx.fatal_abort(format!(
                         "boot journal replay: record {} ({}) {error}",
@@ -866,11 +866,7 @@ impl NativeActor for ControlCore {
     fn on_query(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, mail: Query) {
         let inbound = ctx.take_inbound();
         if !state.replayed {
-            inbound.reply(&QueryResult::Err {
-                error: "the boot journal replay has not finished; the projection is not yet the one the journal \
-                        describes"
-                    .to_owned(),
-            });
+            inbound.reply(&QueryResult::Err { error: PRE_REPLAY_REFUSAL.to_owned() });
             return;
         }
         let result = match mail.selector {
@@ -893,11 +889,7 @@ impl NativeActor for ControlCore {
     fn on_metrics_query(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, mail: MetricsQuery) {
         let inbound = ctx.take_inbound();
         if !state.replayed {
-            inbound.reply(&MetricsQueryResult::Err {
-                error: "the boot journal replay has not finished; the projection is not yet the one the journal \
-                        describes"
-                    .to_owned(),
-            });
+            inbound.reply(&MetricsQueryResult::Err { error: PRE_REPLAY_REFUSAL.to_owned() });
             return;
         }
         inbound.reply(&metrics_response(state, mail));
@@ -911,11 +903,7 @@ impl NativeActor for ControlCore {
     fn on_spend_query(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, _mail: SpendQuery) {
         let inbound = ctx.take_inbound();
         if !state.replayed {
-            inbound.reply(&SpendQueryResult::Err {
-                error: "the boot journal replay has not finished; the projection is not yet the one the journal \
-                        describes"
-                    .to_owned(),
-            });
+            inbound.reply(&SpendQueryResult::Err { error: PRE_REPLAY_REFUSAL.to_owned() });
             return;
         }
         inbound.reply(&spend_response(&state.spend));
@@ -1442,7 +1430,8 @@ fn event_bloom(event: &Event) -> Option<BloomId> {
         | Fact::RequestOrphanClaimRelease { .. }
         | Fact::CompleteOrphanClaimRelease { .. }
         | Fact::SurfaceOverlap { .. }
-        | Fact::BaseVerifyCompleted { .. } => None,
+        | Fact::BaseVerifyCompleted { .. }
+        | Fact::BaseReverify(_) => None,
     }
 }
 
@@ -1600,12 +1589,13 @@ fn view_document_outbox(
     let preview = snapshot.apply(event, decisions, configs);
     let holds = resolve_holds(&preview, artifacts);
     let document = projected_view(&preview, &touched_blooms(event, decisions), |digest| holds.get(digest).cloned());
-    let bytes = to_vec(&document)?;
+    let bytes =
+        encode_row(&document, Some(ViewDocument::NAME)).map_err(|error| WireError::Message(error.to_string()))?;
     let digest = Digest::of_wire_bytes(&bytes);
     if last_view_digest == Some(digest) {
         Ok(None)
     } else {
-        Ok(Some((OutboxPayload::new(Topic::ViewDocument, bytes), digest)))
+        Ok(Some((OutboxPayload::stamped(Topic::ViewDocument, bytes, ViewDocument::NAME), digest)))
     }
 }
 
@@ -2044,9 +2034,9 @@ mod tests {
         BloomDraft, BloomId, BloomRecord, BloomStatus, CandidateRef, ConfigRegistry, Decisions, Digest, Event,
         Evidence, EvidenceKind, Fact, HostFaultHold, IdempotencyKey, Membership, OperatorRepair, OperatorRepairError,
         OutboxPayload, Outcome, QueryResult, ResolvedConfigs, Snapshot, SpendWindow, StudyCost, StudyRecord, Topic,
-        ViewDocument, WorkpieceId, reduce,
+        ViewDocument, WorkpieceId, decode_row, reduce,
     };
-    use aether_data::wire::{from_bytes, to_vec};
+    use aether_data::wire::to_vec;
 
     use std::collections::BTreeMap;
 
@@ -2345,7 +2335,8 @@ mod tests {
         view_document_outbox(snapshot, &configs, event, &decisions, None, last).expect("a view document encodes").map(
             |(payload, digest)| {
                 assert_eq!(payload.topic, Topic::ViewDocument.as_str(), "the producer mints the view topic");
-                let document = from_bytes(&payload.payload).expect("the view payload decodes");
+                let document =
+                    decode_row(&payload.payload, payload.payload_schema.as_deref()).expect("the view payload decodes");
                 (document, digest, payload)
             },
         )

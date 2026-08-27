@@ -55,7 +55,7 @@ fn enqueue_integration_adopting(
         .map(|(index, candidate)| MemberCandidate { workpiece: WorkpieceId(format!("wp-{index}")), candidate })
         .collect();
     let payload = IntegratePayload { bloom: bloom.0, base, members, adopt_from };
-    store.enqueue_topic(Topic::Integrate, &to_vec(&payload).unwrap()).unwrap()
+    store.enqueue_topic(Topic::Integrate, &to_vec(&payload).unwrap(), None).unwrap()
 }
 
 fn decoded_resolve(admit: &aether_bloomery::Admit) -> (BloomId, Digest, Digest, Vec<Digest>) {
@@ -159,7 +159,7 @@ fn a_multi_tip_join_admits_splice_assembled_not_resolve() {
         ],
         adopt_from: None,
     };
-    let sequence = store.enqueue_topic(Topic::Splice, &to_vec(&payload).unwrap()).unwrap();
+    let sequence = store.enqueue_topic(Topic::Splice, &to_vec(&payload).unwrap(), None).unwrap();
 
     let (admits, ack_through) = drain_and_splice(&mut store, &source, None).unwrap();
 

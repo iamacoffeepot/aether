@@ -14,6 +14,8 @@
 
 extern crate alloc;
 
+pub mod wire_corpus;
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use bytemuck::{Pod, Zeroable};

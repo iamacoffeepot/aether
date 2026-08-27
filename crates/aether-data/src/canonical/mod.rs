@@ -64,9 +64,9 @@ mod tests {
     //!
     //! The `*_const_matches_wire_runtime` tests are the load-bearing
     //! silent-corruption guard ADR-0118 §Consequences calls out: the
-    //! const-fn writers must emit the exact bytes the serde-driven
-    //! `wire::to_vec` runtime produces for the same value, or a
-    //! mis-hashed `KindId` would mis-route mail.
+    //! const-fn writers must emit the exact bytes the runtime encoder
+    //! (`wire::to_vec`) produces for the same value, or a mis-hashed
+    //! `KindId` would mis-route mail.
     //!
     //! Each test constructs a schema via `static` so `SchemaCell::Static`
     //! is reachable in const context, runs both passes, and compares

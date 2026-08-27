@@ -46,7 +46,7 @@ pub use approve::{
     StatementRejected, Tier, approval_from_statement, check_signer_tier, load_policy, parse_policy, precheck_statement,
     projection_digest, verified_statement_approval,
 };
-pub use chassis::{BloomeryChassis, BloomeryEnv, DEFAULT_RPC_PORT, RpcPortConfig};
+pub use chassis::{BloomeryChassis, BloomeryEnv, DEFAULT_HTTP_PORT, DEFAULT_RPC_PORT, RpcPortConfig};
 pub use cli::BloomeryCli;
 pub use config::{CoordinatorConfig, CoordinatorOverlay, MissingWriterMarker};
 #[cfg(feature = "github")]
@@ -65,7 +65,7 @@ pub use executor::{
     CaptureIdentity, CapturedObjects, DEFAULT_LANE_PROGRAM, ExecutorPortError, ExecutorShell, LaneOccupancy,
     LaneProgram, LocalExecutor, LocalExecutorError, LocalLane, OrphanedRun, OutstandingDispatch,
     ProcessTransformRunner, ReconcileLanes, ReconcileReport, RoutingExecutor, RunLifecycle, RunProcess, RunSpec,
-    TransformRunner, UnconfiguredActionsBackend, mock_lane,
+    TransformRunner, UnconfiguredActionsBackend, admits_lane_key, mock_lane,
 };
 #[cfg(feature = "github")]
 pub use intake::{
@@ -85,12 +85,14 @@ pub use outbox::TopicOutbox;
 pub(crate) use reactor::candidate_push_at;
 #[cfg(feature = "github")]
 pub use reactor::{
-    CandidatePush, ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, ClaimReleaseReactorState, ClaimReleaseTick,
-    DispatchTick, DrainTick, ExecutorReactorCapability, ExecutorReactorSetup, ExecutorReactorState,
-    IntegrateReactorCapability, IntegrateReactorSetup, IntegrateReactorState, IntegrateTick, JanitorPolicy,
-    JanitorReactorCapability, JanitorReactorSetup, JanitorReactorState, JanitorTick, LandReactorCapability,
-    LandReactorSetup, LandReactorState, LandTick, MirrorReactorCapability, MirrorReactorSetup, MirrorReactorState,
-    SweepReport, SweepRequest, TargetReadings, WorkingRefPruner, sweep,
+    ArchiveFailure, ArchiveFailureView, ArchiveOutcome, ArchiveRecords, ArchiveRecordsResult, ArchiveRequest,
+    ArchiveTier, ArchivedRecord, ArchivedRecordView, CandidatePush, ClaimReleaseReactorCapability,
+    ClaimReleaseReactorSetup, ClaimReleaseReactorState, ClaimReleaseTick, DispatchTick, DrainTick,
+    ExecutorReactorCapability, ExecutorReactorSetup, ExecutorReactorState, IntegrateReactorCapability,
+    IntegrateReactorSetup, IntegrateReactorState, IntegrateTick, JanitorPolicy, JanitorReactorCapability,
+    JanitorReactorSetup, JanitorReactorState, JanitorTick, LandReactorCapability, LandReactorSetup, LandReactorState,
+    LandTick, ListArchive, ListArchiveResult, MirrorReactorCapability, MirrorReactorSetup, MirrorReactorState,
+    SweepReport, SweepRequest, TargetScan, WorkingRefPruner, archive_pass, sweep,
 };
 #[cfg(feature = "github")]
 pub use repair::{CandidateSource, PrepareError, prepare_candidate};

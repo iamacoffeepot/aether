@@ -261,31 +261,44 @@ pub struct CoordinatorConfig {
     /// knobs are: the disk a build cache may fill is a property of the machine.
     #[config(env = "AETHER_BLOOMERY_LANE_TARGET_BUDGET_BYTES", default = 68_719_476_736u64)]
     pub lane_target_budget_bytes: u64,
-    /// How often a slot target tree may be re-walked, in seconds. Distinct from
-    /// [`Self::poll_interval_secs`], which decides how often the janitor pass
-    /// runs at all: the size walk is tens of gigabytes and must not run on the
-    /// executor's dispatch cadence. A slot is re-walked when this interval
-    /// elapses or when the slot changes hands, whichever comes first. `0`
-    /// re-walks every pass.
+    /// Floor between janitor size walks of slot target trees, in seconds.
+    /// Distinct from [`Self::poll_interval_secs`], which decides how often the
+    /// janitor pass runs at all: the size walk is tens of gigabytes and must
+    /// not run on the executor's dispatch cadence. A walk runs when a slot is
+    /// free to evict and either occupancy has changed or this interval has
+    /// elapsed. `0` measures on every tick that could evict.
     ///
-    /// Named `AETHER_BLOOMERY_LANE_TARGET_MEASURE_INTERVAL_SECS` rather than
+    /// Named `AETHER_BLOOMERY_LANE_TARGET_SCAN_INTERVAL_SECS` rather than
     /// under this struct's `AETHER_GITHUB` prefix, for the reason the other
     /// host-resource knobs are: how often a host measures its build cache is a
     /// property of the machine.
-    #[config(env = "AETHER_BLOOMERY_LANE_TARGET_MEASURE_INTERVAL_SECS", default = 300)]
-    pub lane_target_measure_interval_secs: u64,
-    /// How many days a consumed evidence directory of a terminal bloom is kept
-    /// after that bloom lands or is superseded. Evidence feeds intake and then
-    /// serves forensics and the calibration ledger (ADR-0184); this is the
-    /// stated retention window, not a silent default-delete. `0` reclaims as
-    /// soon as the owning bloom is terminal and the evidence is no longer
-    /// outstanding. Live blooms' evidence is never deleted.
+    #[config(env = "AETHER_BLOOMERY_LANE_TARGET_SCAN_INTERVAL_SECS", default = 300)]
+    pub lane_target_scan_interval_secs: u64,
+    /// How many days a consumed evidence directory of a terminal bloom must age
+    /// before an archive pass will move it onto the archive tier (ADR-0211).
+    /// Evidence feeds intake and then serves forensics and the calibration
+    /// ledger (ADR-0184); this is the archive-after window, never a delete-after
+    /// one. `0` means eligible as soon as the owning bloom is terminal and the
+    /// evidence is no longer outstanding. Nothing deletes the directory at any
+    /// age. Live blooms' evidence is never archived.
     ///
     /// Named `AETHER_BLOOMERY_EVIDENCE_RETENTION_DAYS` rather than under this
     /// struct's `AETHER_GITHUB` prefix: retention is a coordinator policy, not
     /// a GitHub-connection property.
     #[config(env = "AETHER_BLOOMERY_EVIDENCE_RETENTION_DAYS", default = 7)]
     pub evidence_retention_days: u64,
+    /// Root of the archive tier (ADR-0211): one subdirectory per record class,
+    /// `evidence/<nonce>-evidence` and `sessions/<slug>`. Empty (the default)
+    /// resolves to `<local_worktree_base>/archive`, the way an empty
+    /// [`lane_target_base`](Self::lane_target_base) resolves to the worktree
+    /// base. An explicit path points the tier at another volume.
+    ///
+    /// Named `AETHER_BLOOMERY_ARCHIVE_BASE` rather than under this struct's
+    /// `AETHER_GITHUB` prefix, for the reason [`lane_target_base`](Self::lane_target_base)
+    /// gives: which volume records rest on is a property of the machine, not of
+    /// the GitHub connection.
+    #[config(env = "AETHER_BLOOMERY_ARCHIVE_BASE", default = "")]
+    pub archive_base: String,
     /// How many build jobs one lane's cargo invocations may run at once — the
     /// `CARGO_BUILD_JOBS` every dispatch and the verify gates inside it run under
     /// (#4912).
@@ -470,8 +483,9 @@ impl Default for CoordinatorConfig {
             max_concurrent_lanes: 3,
             lane_target_base: String::new(),
             lane_target_budget_bytes: 68_719_476_736,
-            lane_target_measure_interval_secs: 300,
+            lane_target_scan_interval_secs: 300,
             evidence_retention_days: 7,
+            archive_base: String::new(),
             lane_build_jobs: 8,
             stale_warn_after_secs: 1800,
             heartbeat_silence_secs: 600,
@@ -914,6 +928,7 @@ xAtw6HCuoUIzjbWZe1H+wS8KmJmYkTvf8f70x0/jMYRUyvMQy3beUUQ=
         assert_eq!(connection.executor_workflow_file, "transform.yml");
         assert_eq!(connection.executor_model_workflow_file, "transform-model.yml");
         assert_eq!(coordinator.poll_interval_secs, 5);
+        assert_eq!(coordinator.lane_target_scan_interval_secs, 300);
         assert_eq!(coordinator.local_lane_prefixes(), ["construct.", "review.", "scope."]);
         assert_eq!(coordinator.store_path, ":memory:");
         assert_eq!(coordinator.heartbeat_silence_secs, 600);

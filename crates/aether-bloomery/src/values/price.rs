@@ -569,7 +569,7 @@ mod tests {
             SealedPriceTable::PreMigration,
         );
 
-        configs.insert(address, "aether.bloomery.stage_catalog", Vec::new());
+        configs.insert(address, "aether.bloomery.stage_catalog", Vec::new(), None);
         assert_eq!(
             PriceTable::sealed_in(ConfigScopes::bloom_wide(&registry), &configs),
             SealedPriceTable::Unresolvable,

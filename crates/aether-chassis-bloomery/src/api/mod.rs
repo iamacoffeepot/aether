@@ -12,8 +12,11 @@
 //! The whole module is runtime-gated (it pulls `aether-substrate` and the
 //! cap crates), so the marker/wasm consumer never links it.
 
-mod dto;
+pub(crate) mod dto;
 mod runtime;
+
+// The commission CLI talks the same REST hex spelling the control API renders.
+pub(crate) use runtime::hex;
 
 use aether_actor::actor;
 

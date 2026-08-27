@@ -636,6 +636,78 @@ fn a_lane_working_past_its_transcript_reports_its_own_heartbeat() {
     );
 }
 
+// Tripwire: a fold that took the heartbeat unconditionally would let a stale
+// beat mask a live stream.
+#[test]
+fn the_newer_of_the_two_files_is_the_progress_stamp() {
+    let base = TempDir::new().unwrap();
+    let exec = executor(&base, "{}", RunLifecycle::Running);
+    let handle = exec.submit(&construct_order(digest(5), "n-newer")).unwrap();
+    let dir = evidence_dir(&base, "n-newer");
+
+    let heartbeat = dir.join("heartbeat");
+    fs::write(&heartbeat, b"1").unwrap();
+    let file = fs::File::open(&heartbeat).unwrap();
+    file.set_modified(SystemTime::now() - Duration::from_mins(15)).unwrap();
+    drop(file);
+
+    let transcript = dir.join("transcript.jsonl");
+    fs::write(&transcript, b"{}\n").unwrap();
+    let stamped = unix_millis(fs::metadata(&transcript).unwrap().modified().unwrap());
+    let stale = unix_millis(fs::metadata(&heartbeat).unwrap().modified().unwrap());
+    assert!(stamped > stale, "the stamp under test has to be the newer of the two");
+
+    assert_eq!(
+        exec.inspect(&handle).unwrap(),
+        ExecutionStatus::Running { last_progress_unix_millis: Some(stamped) },
+        "a live transcript is progress even when a heartbeat file is older",
+    );
+}
+
+#[test]
+fn an_absent_heartbeat_is_not_progress() {
+    let base = TempDir::new().unwrap();
+    let exec = executor(&base, "{}", RunLifecycle::Running);
+    let with_transcript = exec.submit(&construct_order(digest(5), "n-hb-absent")).unwrap();
+    let neither = exec.submit(&construct_order(digest(6), "n-hb-none")).unwrap();
+
+    let transcript = evidence_dir(&base, "n-hb-absent").join("transcript.jsonl");
+    fs::write(&transcript, b"{}\n").unwrap();
+    let stamped = unix_millis(fs::metadata(&transcript).unwrap().modified().unwrap());
+
+    assert_eq!(
+        exec.inspect(&with_transcript).unwrap(),
+        ExecutionStatus::Running { last_progress_unix_millis: Some(stamped) },
+        "a missing heartbeat is not silence-since-epoch over a live transcript",
+    );
+    assert_eq!(
+        exec.inspect(&neither).unwrap(),
+        ExecutionStatus::Running { last_progress_unix_millis: None },
+        "reading a missing heartbeat as time zero would make every verify lane instantly silent",
+    );
+}
+
+// Tripwire: opening the heartbeat for write on a poll would make coordinator
+// polling itself the liveness signal.
+#[test]
+fn inspect_does_not_advance_the_heartbeat_it_reads() {
+    let base = TempDir::new().unwrap();
+    let exec = executor(&base, "{}", RunLifecycle::Running);
+    let handle = exec.submit(&construct_order(digest(5), "n-hb-ro")).unwrap();
+    let heartbeat = evidence_dir(&base, "n-hb-ro").join("heartbeat");
+    fs::write(&heartbeat, b"1").unwrap();
+    let stamped = unix_millis(fs::metadata(&heartbeat).unwrap().modified().unwrap());
+
+    let first = exec.inspect(&handle).unwrap();
+    assert_eq!(first, ExecutionStatus::Running { last_progress_unix_millis: Some(stamped) });
+    assert_eq!(
+        unix_millis(fs::metadata(&heartbeat).unwrap().modified().unwrap()),
+        stamped,
+        "inspect must not touch the heartbeat it is reading",
+    );
+    assert_eq!(exec.inspect(&handle).unwrap(), first, "a second poll reports the same stamp, not a later one");
+}
+
 #[test]
 fn stream_evidence_evicts_the_consumed_run() {
     // Once the evidence is read, the run is consumed: the registry drops it so a

@@ -1,6 +1,6 @@
 //! Coordinator REST verbs. Every request body is a typed serde value.
 
-use aether_bloomery::{ScopeRevision, Statement};
+use aether_bloomery::{BloomSpec, Fact, ScopeRevision, Statement, ViewDocument};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -8,10 +8,11 @@ use serde_json::Value;
 
 use super::Endpoint;
 use super::dto::{
-    ApprovalStoredView, BloomSpec, BloomView, CancelCommissionRequest, CommissionCancelledView, CommissionReopenedView,
+    ApprovalStoredView, BloomView, CancelCommissionRequest, CommissionCancelledView, CommissionReopenedView,
     CommissionShowView, ConfigRequest, ConfigValueView, ConfigView, DraftPatch, DraftView, JournalEntry, JournalView,
-    OutcomeView, ReopenCommissionRequest, RepairRequest, RetryRequest, RevisionEvidence, ScopeRevisionWrittenView,
-    SealRequest, SupersedeRequest, SuppressionAnswerRequest, ViewDocument, WithdrawRequest, WriteRevisionRequest,
+    OutcomeView, ReopenCommissionRequest, RepairRequest, RetryRequest, ReverifyBaseRequest, RevisionEvidence,
+    ScopeRevisionWrittenView, SealRequest, SupersedeRequest, SuppressionAnswerRequest, WithdrawRequest,
+    WriteRevisionRequest,
 };
 use super::http;
 use super::plan::spec_id;
@@ -57,7 +58,7 @@ impl<'a> Client<'a> {
         }
 
         let shown = u64::try_from(records.len()).unwrap_or(u64::MAX);
-        Ok(JournalView { records, total_matched, shown, truncated: false, next_from_sequence: None })
+        Ok(JournalView { records, total_matched, shown, truncated: false, next_from_sequence: None, notice: None })
     }
 
     pub fn open_draft(&self) -> Result<DraftView> {
@@ -90,6 +91,11 @@ impl<'a> Client<'a> {
         self.send("POST", &format!("/blooms/{bloom_id}/members/{workpiece}/retry"), request)
     }
 
+    /// Run `verify.base` again on a red receipt.
+    pub fn reverify_base(&self, base: &str, request: &ReverifyBaseRequest) -> Result<OutcomeView> {
+        self.send("POST", &format!("/bases/{base}/reverify"), request)
+    }
+
     /// Hand a wedged member the candidate the operator supplied and let the
     /// ordinary gates judge it (#4957).
     pub fn repair(&self, bloom_id: &str, workpiece: &str, request: &RepairRequest) -> Result<OutcomeView> {
@@ -112,6 +118,18 @@ impl<'a> Client<'a> {
         self.get(&format!("/commissions/{id}"))
     }
 
+    /// Run the between-blooms archive pass. A `409` refusal exits as an error
+    /// so a scripted operator run does not read a between-blooms block as
+    /// success.
+    pub fn archive_pass(&self) -> Result<super::dto::ArchivePassView> {
+        http::json(self.endpoint, "POST", "/archive", None::<&()>)
+    }
+
+    /// List the records currently on the archive tier.
+    pub fn list_archive(&self) -> Result<super::dto::ArchiveListView> {
+        self.get("/archive")
+    }
+
     /// Write `revision` as the commission's next scope revision, with sidecar
     /// evidence about it. The revision's bytes stay the signed subject.
     ///
@@ -124,7 +142,11 @@ impl<'a> Client<'a> {
         revision: &ScopeRevision,
         evidence: &RevisionEvidence,
     ) -> Result<ScopeRevisionWrittenView> {
-        self.send("POST", &format!("/commissions/{id}/revisions"), &WriteRevisionRequest { revision, evidence })
+        self.send(
+            "POST",
+            &format!("/commissions/{id}/revisions"),
+            &WriteRevisionRequest { revision: revision.clone(), evidence: evidence.clone() },
+        )
     }
 
     /// Submit `statement` as an approval of the commission's current revision.
@@ -173,25 +195,25 @@ impl<'a> Client<'a> {
 }
 
 fn walk_stopped(records: &[JournalEntry], path: &str) -> String {
-    records.last().and_then(|entry| entry.sequence).map_or_else(
+    records.last().map_or_else(
         || format!("journal walk stopped at {path}"),
-        |sequence| format!("journal walk stopped at sequence {sequence}"),
+        |entry| format!("journal walk stopped at sequence {}", entry.sequence),
     )
 }
 
-fn spec_in_fact(fact: &Value) -> Option<BloomSpec> {
-    let spec = fact
-        .get("Seal")
-        .or_else(|| fact.get("Supersede").and_then(|body| body.get("successor")))
-        .or_else(|| fact.get("GraphSeal").and_then(|body| body.get("spec")))?;
-    serde_json::from_value(spec.clone()).ok()
+fn spec_in_fact(fact: &Fact) -> Option<BloomSpec> {
+    match fact {
+        Fact::Seal(spec) | Fact::GraphSeal { spec, .. } => Some(spec.clone()),
+        Fact::Supersede { successor, .. } => Some(successor.clone()),
+        _ => None,
+    }
 }
 
 /// The bloom in `view` whose id is `bloom_id`.
 pub fn bloom_in<'a>(view: &'a ViewDocument, bloom_id: &str) -> Result<&'a BloomView> {
     view.blooms
         .iter()
-        .find(|bloom| bloom.id.as_hex() == bloom_id)
+        .find(|bloom| bloom.id.to_string() == bloom_id)
         .with_context(|| format!("no bloom {bloom_id} in the live view"))
 }
 
@@ -215,9 +237,20 @@ mod tests {
         path: String,
     }
 
-    fn page(sequence: u64, fact: &Value, truncated: bool, next: Option<u64>) -> Value {
+    fn page(sequence: u64, truncated: bool, next: Option<u64>) -> Value {
+        let bloom = "0".repeat(64);
+        let head = bloom.clone();
         json!({
-            "records": [{ "sequence": sequence, "event": { "fact": fact } }],
+            "records": [{
+                "sequence": sequence,
+                "idempotency_key": "k",
+                "event": {
+                    "idempotency_key": "k",
+                    "fact": { "Land": { "bloom": bloom, "new_head": head } }
+                },
+                "outcome": "Duplicate",
+                "decider": "test"
+            }],
             "total_matched": 3,
             "shown": 1,
             "truncated": truncated,
@@ -238,9 +271,9 @@ mod tests {
         // A client that stops after the first page would return only n=3.
         let (journal, log) = with_fake(
             |request| match (request.method.as_str(), from_sequence(&request.path)) {
-                ("GET", None) => (200, page(3, &json!({ "n": 3 }), true, Some(3))),
-                ("GET", Some(3)) => (200, page(2, &json!({ "n": 2 }), true, Some(2))),
-                ("GET", Some(2)) => (200, page(1, &json!({ "n": 1 }), false, None)),
+                ("GET", None) => (200, page(3, true, Some(3))),
+                ("GET", Some(3)) => (200, page(2, true, Some(2))),
+                ("GET", Some(2)) => (200, page(1, false, None)),
                 _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
             },
             |port| {
@@ -248,8 +281,8 @@ mod tests {
             },
         );
 
-        let facts: Vec<_> = journal.records.iter().map(|record| record.event.fact.clone()).collect();
-        assert_eq!(facts, vec![json!({ "n": 3 }), json!({ "n": 2 }), json!({ "n": 1 })]);
+        let sequences: Vec<_> = journal.records.iter().map(|record| record.sequence).collect();
+        assert_eq!(sequences, vec![3, 2, 1]);
         assert!(!journal.truncated);
         assert_eq!(journal.shown, 3);
         assert_eq!(journal.total_matched, 3);
@@ -265,7 +298,7 @@ mod tests {
         // Returning the one page would silently drop the rest of the journal.
         let error = with_fake(
             |request| match request.method.as_str() {
-                "GET" => (200, page(3, &json!({ "n": 3 }), true, None)),
+                "GET" => (200, page(3, true, None)),
                 _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
             },
             |port| {

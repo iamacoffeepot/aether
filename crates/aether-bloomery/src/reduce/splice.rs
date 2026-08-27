@@ -201,14 +201,14 @@ fn member_index(members: &[WorkpieceId], id: &WorkpieceId) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use crate::persisted::DECISIONS;
     use aether_data::wire::{from_bytes, to_vec};
 
     use super::{SplicedBase, checkout_from, member_construct_base, splice_lineage, spliced_base};
     use crate::digest::Digest;
     use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
     use crate::reduce::{
-        BloomRecord, DECISIONS_SCHEMA, Decision, Decisions, Event, Fact, Outcome, Snapshot, decode_recorded_decisions,
-        reduce,
+        BloomRecord, Decision, Decisions, Event, Fact, Outcome, Snapshot, decode_recorded_decisions, reduce,
     };
     use crate::values::{
         BloomDraft, BloomSpec, CandidateRef, ConfigRegistry, Evidence, EvidenceKind, Forecast, MemberDependency,
@@ -384,20 +384,29 @@ mod tests {
         let replayed = base
             .apply(
                 &from_bytes(&to_vec(&seal).expect("event encodes")).expect("event decodes"),
-                &decode_recorded_decisions(&to_vec(&sealed).expect("seal encodes"), Some(DECISIONS_SCHEMA))
-                    .expect("seal decodes"),
+                &decode_recorded_decisions(
+                    &to_vec(&sealed).expect("seal encodes"),
+                    Some(DECISIONS.current_digest().as_bytes()),
+                )
+                .expect("seal decodes"),
                 &ResolvedConfigs::default(),
             )
             .apply(
                 &from_bytes(&to_vec(&a_done).expect("event encodes")).expect("event decodes"),
-                &decode_recorded_decisions(&to_vec(&decided_a).expect("integrate a encodes"), Some(DECISIONS_SCHEMA))
-                    .expect("integrate a decodes"),
+                &decode_recorded_decisions(
+                    &to_vec(&decided_a).expect("integrate a encodes"),
+                    Some(DECISIONS.current_digest().as_bytes()),
+                )
+                .expect("integrate a decodes"),
                 &ResolvedConfigs::default(),
             )
             .apply(
                 &from_bytes(&to_vec(&b_done).expect("event encodes")).expect("event decodes"),
-                &decode_recorded_decisions(&to_vec(&decided_b).expect("integrate b encodes"), Some(DECISIONS_SCHEMA))
-                    .expect("integrate b decodes"),
+                &decode_recorded_decisions(
+                    &to_vec(&decided_b).expect("integrate b encodes"),
+                    Some(DECISIONS.current_digest().as_bytes()),
+                )
+                .expect("integrate b decodes"),
                 &ResolvedConfigs::default(),
             );
 
@@ -722,8 +731,11 @@ mod tests {
     fn replay_row(snapshot: &Snapshot, event: &Event, decided: &Decisions) -> Snapshot {
         snapshot.apply(
             &from_bytes(&to_vec(event).expect("event encodes")).expect("event decodes"),
-            &decode_recorded_decisions(&to_vec(decided).expect("decisions encode"), Some(DECISIONS_SCHEMA))
-                .expect("decisions decode"),
+            &decode_recorded_decisions(
+                &to_vec(decided).expect("decisions encode"),
+                Some(DECISIONS.current_digest().as_bytes()),
+            )
+            .expect("decisions decode"),
             &ResolvedConfigs::default(),
         )
     }

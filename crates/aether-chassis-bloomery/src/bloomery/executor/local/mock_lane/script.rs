@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 
 /// The file name the harness writes its script under, and the mock reads it
 /// from — resolved against the run's `--out` parent so no environment variable
-/// has to survive the lane environment scrub (#4714).
+/// has to survive the constructed lane environment (#4714).
 pub const SCRIPT_FILE: &str = "mock-lane-script.json";
 
 /// The file name each run appends its record to, beside the script.
@@ -214,6 +214,19 @@ pub struct LaneRun {
     /// still reads.
     #[serde(default)]
     pub worktree: Option<String>,
+    /// The names of the environment variables this run came up holding, sorted.
+    ///
+    /// Names only, never values: a lane legitimately carries the harness
+    /// credential, and a fixture ledger on disk is no place for one. Names are
+    /// all the lane-boundary assertion needs, since what it judges is *which*
+    /// variables crossed.
+    ///
+    /// Recorded here for the same reason [`Self::worktree`] is — a child
+    /// process's environment is not observable from the scenario any other way,
+    /// and it is the one thing a test double mounted above the spawn cannot
+    /// have.
+    #[serde(default)]
+    pub env: Vec<String>,
 }
 
 /// Append `run` to the ledger in `dir`.
@@ -302,6 +315,7 @@ mod tests {
             diff_base: None,
             task: None,
             worktree: None,
+            env: Vec::new(),
         };
 
         append_run(dir.path(), &run("verify.check", "n-1")).unwrap();

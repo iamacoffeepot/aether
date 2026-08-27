@@ -22,12 +22,21 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt;
 
+use aether_data::schema::SchemaType;
 use aether_data::wire::to_vec;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+use crate::persisted::RenderError;
+use crate::persisted::render_schema;
+
 const HEX_DIGIT: &[u8; 16] = b"0123456789abcdef";
+
+/// Domain tag hashed ahead of a canonical schema rendering so a schema digest
+/// can never collide with a value digest over the same bytes (ADR-0187).
+pub const SCHEMA_DIGEST_DOMAIN: &str = "aether.bloomery.schema";
 
 /// Encode `bytes` as lowercase hex.
 ///
@@ -165,6 +174,28 @@ impl Digest {
     }
 }
 
+/// Digest of a kind's schema: sha256 over a bloomery-owned canonical rendering
+/// of the shape, domain-tagged so it cannot collide with a value digest over
+/// the same bytes (ADR-0187).
+///
+/// The rendering is a function of the *shape* alone. A change to
+/// [`SchemaType`] itself in the data crate therefore moves no existing
+/// pinned digest.
+///
+/// # Errors
+///
+/// [`RenderError`] when the schema tree exceeds the walker's node or depth
+/// budget. Compiled-in kinds are well under both.
+pub fn schema_digest(kind: &str, schema: &SchemaType) -> Result<Digest, RenderError> {
+    Ok(Digest::of_domain_tagged(SCHEMA_DIGEST_DOMAIN, &render_schema(kind, schema)?))
+}
+
+impl fmt::Display for Digest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_hex())
+    }
+}
+
 /// A value that is content-addressed by digest.
 ///
 /// The `const DOMAIN` is a stable per-type domain-separation tag [`digest_of`]
@@ -212,7 +243,11 @@ pub fn digest_of<T: ContentAddressed + ?Sized>(value: &T) -> Digest {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContentAddressed, Digest, decode_hex, digest_of, encode_hex};
+    use aether_data::schema::SchemaType;
+
+    use crate::persisted::render_schema;
+
+    use super::{ContentAddressed, Digest, SCHEMA_DIGEST_DOMAIN, decode_hex, digest_of, encode_hex, schema_digest};
 
     // Two ContentAddressed impls sharing one byte payload but differing in
     // DOMAIN, so the domain tag is the only thing that can distinguish them.
@@ -247,6 +282,19 @@ mod tests {
     #[test]
     fn same_value_yields_stable_digest() {
         assert_eq!(digest_of(&Alpha(7)), digest_of(&Alpha(7)));
+    }
+
+    #[test]
+    fn schema_digest_is_domain_separated_from_a_value_hash_of_the_same_bytes() {
+        // A schema digest and a value digest over identical bytes must not
+        // collide, or a stored schema identity could be mistaken for a value
+        // address.
+        let rendered = render_schema("k", &SchemaType::Unit).expect("a unit schema renders");
+        assert_ne!(
+            schema_digest("k", &SchemaType::Unit).expect("unit schema digests"),
+            Digest::of_wire_bytes(&rendered)
+        );
+        assert_ne!(Digest::of_domain_tagged(SCHEMA_DIGEST_DOMAIN, &rendered), Digest::of_domain_tagged("k", &rendered));
     }
 
     #[test]

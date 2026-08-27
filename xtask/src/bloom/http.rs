@@ -7,15 +7,15 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::str;
-use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use super::Endpoint;
+use aether_bloomery::{HTTP_READ_TIMEOUT, http_success};
 
-const READ_TIMEOUT: Duration = Duration::from_secs(30);
+use super::Endpoint;
+use super::hex;
 
 /// One JSON request. `body` is `None` for no-body methods (GET, empty POST).
 pub fn json<T: DeserializeOwned>(
@@ -24,15 +24,15 @@ pub fn json<T: DeserializeOwned>(
     path: &str,
     body: Option<&impl Serialize>,
 ) -> Result<T> {
-    let encoded = body.map(serde_json::to_vec).transpose().context("encode request body")?;
+    let encoded = body.map(hex::to_vec).transpose().context("encode request body")?;
     let (status, bytes) = exchange(endpoint, method, path, encoded.as_deref())?;
-    if status >= 400 {
+    if !http_success(status) {
         let detail = serde_json::from_slice::<ErrorBody>(&bytes)
             .ok()
             .map_or_else(|| String::from_utf8_lossy(&bytes).into_owned(), |body| body.error);
         bail!("{method} {path} failed ({status}): {detail}");
     }
-    serde_json::from_slice(&bytes)
+    hex::from_slice(&bytes)
         .with_context(|| format!("{method} {path} returned {status} but the body is not the expected JSON shape"))
 }
 
@@ -64,7 +64,7 @@ fn exchange(endpoint: &Endpoint, method: &str, path: &str, body: Option<&[u8]>) 
 
     let mut stream = TcpStream::connect((endpoint.host.as_str(), endpoint.port))
         .with_context(|| format!("connect to coordinator at {}:{}", endpoint.host, endpoint.port))?;
-    stream.set_read_timeout(Some(READ_TIMEOUT)).context("set read timeout")?;
+    stream.set_read_timeout(Some(HTTP_READ_TIMEOUT)).context("set read timeout")?;
     stream.write_all(&request).context("write request")?;
     stream.flush().context("flush request")?;
 

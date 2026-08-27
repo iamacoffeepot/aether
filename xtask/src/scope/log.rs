@@ -266,6 +266,24 @@ mod tests {
     }
 
     #[test]
+    fn a_value_files_trailing_newline_never_reaches_the_entry() {
+        // Tripwire: every editor- or echo-produced value file ends with a
+        // newline, and an entry that keeps it fails the surface grammar's
+        // character check on a glob that is otherwise exactly right — nine
+        // scoping runs died on this in one afternoon. Interior newlines are
+        // content and must survive; only the file format's tail is stripped.
+        let run = scratch("trailing-newline");
+        set("declared-surface", &run, &write_value(&run, "surface.txt", "xtask/**\n")).unwrap();
+        set("problem", &run, &write_value(&run, "problem.txt", "para one\n\npara two\n")).unwrap();
+        set("plan-step", &run, &write_value(&run, "step.txt", "the step\n")).unwrap();
+
+        let calls = load(&run).unwrap();
+        assert_eq!(winning_texts(&calls, FieldKind::DeclaredSurface), ["xtask/**"]);
+        assert_eq!(winning_texts(&calls, FieldKind::Problem), ["para one\n\npara two"]);
+        replay(workpiece(), &calls).finish(None, routing()).expect("the trimmed surface passes the grammar");
+    }
+
+    #[test]
     fn consecutive_plan_steps_replay_as_one_generation() {
         let run = scratch("list");
         append(&run, FieldKind::PlanStep, String::from("first")).unwrap();

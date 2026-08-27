@@ -18,8 +18,8 @@
 mod deserialize;
 mod serialize;
 
-pub(super) use deserialize::from_slice;
-pub(super) use serialize::to_vec;
+pub use deserialize::from_slice;
+pub use serialize::to_vec;
 
 use aether_bloomery::Digest;
 

@@ -6,7 +6,7 @@
 //! `MailboxId`-into-`KindId` slot (or vice versa) hashes to a
 //! different value rather than colliding silently.
 
-use crate::ids::{ActorId, MailboxId, ThreadId};
+use crate::ids::{ActorId, KindId, MailboxId, ThreadId};
 use crate::tagged_id::{Tag, with_tag};
 
 /// Domain tag prefixed to every mailbox-name hash so the `MailboxId`
@@ -49,6 +49,19 @@ pub const THREAD_DOMAIN: &[u8] = b"thread:";
 /// name bytes.
 pub const TRANSFORM_DOMAIN: [u8; 16] = *b"aether/xform/v1\0";
 
+/// ADR-0059: domain prefix for storage-field hashes. Hashed input is
+/// the NUL-terminated dotted leaf path followed by the field type's
+/// canonical schema bytes. Disjoint from the mailbox / kind / type /
+/// thread / variant domains so a field hash cannot alias those spaces
+/// if a misrouted id lands in a field-hash slot.
+pub const FIELD_DOMAIN: &[u8] = b"field:";
+
+/// ADR-0059: domain prefix for storage-enum variant hashes. Hashed
+/// input is the variant name, a NUL terminator, and the variant body's
+/// canonical schema bytes. Disjoint from `FIELD_DOMAIN` so a variant
+/// discriminant cannot be mistaken for a field tag on the TLV wire.
+pub const VARIANT_DOMAIN: &[u8] = b"variant:";
+
 /// FNV-1a 64 over a byte slice. Retained for the few call sites that
 /// hash neither a mailbox name nor a kind schema. New callers should
 /// prefer `fnv1a_64_prefixed` with an explicit domain so the output
@@ -61,9 +74,11 @@ pub const fn fnv1a_64_bytes(bytes: &[u8]) -> u64 {
 /// Fold `bytes` into an in-progress FNV-1a 64 hash. `const`-safe so the
 /// id helpers compose several byte runs (a domain prefix, scope
 /// segments, the separators between them) into one hash without
-/// allocating a joined buffer.
+/// allocating a joined buffer. Public so the storage leaf walk can
+/// thread a path carry the same way [`mailbox_id_from_name_pair`] and
+/// [`fold_lineage`] already do.
 #[must_use]
-const fn fnv1a_64_fold(mut hash: u64, bytes: &[u8]) -> u64 {
+pub const fn fnv1a_64_fold(mut hash: u64, bytes: &[u8]) -> u64 {
     let mut i = 0;
     while i < bytes.len() {
         hash ^= bytes[i] as u64;
@@ -276,6 +291,16 @@ pub const fn thread_id_from_name(name: &str) -> ThreadId {
     ThreadId(with_tag(Tag::Thread, fnv1a_64_prefixed(THREAD_DOMAIN, name.as_bytes())))
 }
 
+/// ADR-0059 §Kind ID: the nominal `Kind::ID` of a storage kind. Hashes
+/// `KIND_DOMAIN ++ name` and stamps `Tag::Kind` — the schema is not in
+/// the preimage, so adding, removing, or reordering fields leaves the
+/// id stable. Mail kinds keep hashing canonical schema bytes; this
+/// helper is the storage path only.
+#[must_use]
+pub const fn storage_kind_id_from_name(name: &str) -> KindId {
+    KindId(with_tag(Tag::Kind, fnv1a_64_prefixed(KIND_DOMAIN, name.as_bytes())))
+}
+
 #[cfg(test)]
 mod tests {
     // The id/hash primitive's own unit tests call `mailbox_id_from_name` /
@@ -439,5 +464,31 @@ mod tests {
     fn scope_path_too_long_is_rejected() {
         let big: String = "x".repeat(MAX_SCOPE_PATH_BYTES + 1);
         assert_eq!(validate_scope_path(&[big.as_str()]), Err(ScopePathError::TooLong { limit: MAX_SCOPE_PATH_BYTES }),);
+    }
+
+    #[test]
+    fn storage_kind_id_is_nominal() {
+        // Tripwire: a storage kind id hashes KIND_DOMAIN + name with
+        // Tag::Kind, matching `impl Kind for ()`. The schema is not in
+        // the preimage — if this starts hashing canonical bytes, every
+        // persisted row re-keys on a field edit.
+        let expected = KindId(with_tag(Tag::Kind, fnv1a_64_prefixed(KIND_DOMAIN, b"aether.unit")));
+        assert_eq!(storage_kind_id_from_name("aether.unit"), expected);
+        assert_eq!(storage_kind_id_from_name("aether.unit"), storage_kind_id_from_name("aether.unit"));
+        assert_ne!(storage_kind_id_from_name("aether.unit"), storage_kind_id_from_name("aether.other"));
+    }
+
+    #[test]
+    fn field_and_variant_domains_are_disjoint_from_kind() {
+        // Tripwire: the same payload under FIELD_DOMAIN / VARIANT_DOMAIN
+        // / KIND_DOMAIN must not collide. The prefixes exist so a
+        // misrouted id cannot silently match another space.
+        let payload = b"shared";
+        let kind = fnv1a_64_prefixed(KIND_DOMAIN, payload);
+        let field = fnv1a_64_prefixed(FIELD_DOMAIN, payload);
+        let variant = fnv1a_64_prefixed(VARIANT_DOMAIN, payload);
+        assert_ne!(kind, field);
+        assert_ne!(kind, variant);
+        assert_ne!(field, variant);
     }
 }

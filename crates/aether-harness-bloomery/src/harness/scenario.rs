@@ -6,7 +6,7 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aether_actor::Addressable;
 use aether_bloomery::{
@@ -22,7 +22,8 @@ use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneRun, LaneScript
 use aether_chassis_bloomery::bloomery::{
     BloomeryChassis, BloomeryEnv, Chassis, CoordinatorConfig, DispatchTick, DoctorReactorCapability, DoctorReport,
     DoctorTick, ExecutorReactorCapability, GithubConnectionConfig, IntegrateReactorCapability, IntegrateTick,
-    LandReactorCapability, LandTick, NotifyConfig, ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload,
+    JanitorReactorCapability, JanitorTick, LandReactorCapability, LandTick, NotifyConfig, ScriptedEvidence,
+    ScriptedEvidenceResult, ScriptedUpload,
 };
 use aether_chassis_bloomery::commission::task_text;
 use aether_chassis_bloomery::control::ObserveTick;
@@ -43,10 +44,10 @@ use super::drive::{member, passed};
 use super::{BOOT_BUDGET, Backend, CoordinatorKind, HARNESS_STARTED, HarnessBuilder, Lane, POLL};
 use crate::oracle::{Oracle, is_answerable, liveness};
 use crate::scenario::{LaneScript, Scenario};
-use crate::support::client::connect_and_handshake;
+use crate::support::Coordinator;
+use crate::support::client::spawn_and_connect;
 use crate::support::repo::Repo;
 use crate::support::wire::{Wire, control_mailbox};
-use crate::support::{Coordinator, free_port};
 
 /// How long the world must hold still, with nothing in flight, before a settle
 /// loop calls it quiescent. Comfortably more than the poll cadence plus the gap
@@ -55,6 +56,12 @@ const QUIESCENCE: Duration = Duration::from_secs(12);
 
 /// Between polls of a forked coordinator's projection.
 const SETTLE_POLL: Duration = Duration::from_millis(250);
+
+/// How long a forked coordinator has to come up and answer a handshake, across
+/// however many forks that takes. Generous, because a loaded scenario suite
+/// boots many at once; a child that dies is retried immediately rather than
+/// waited out, so this is a ceiling and not a cost.
+const COORDINATOR_HANDSHAKE_BUDGET: Duration = Duration::from_mins(1);
 
 /// The signing seed the harness's operator answers a surface request with.
 ///
@@ -100,28 +107,7 @@ impl ScenarioHarness {
             );
         }
 
-        let owned_state;
-        let owned_runs;
-        let store_path;
-        let artifacts_root;
-        let worktree_base;
-        if let (Some(store), Some(artifacts), Some(worktree)) =
-            (&builder.shared_store, &builder.shared_artifacts, &builder.shared_worktree)
-        {
-            owned_state = None;
-            owned_runs = None;
-            store_path = store.clone();
-            artifacts_root = artifacts.clone();
-            worktree_base = worktree.clone();
-        } else {
-            let state = tempfile::tempdir().expect("a temporary root for the journal and the artifacts store");
-            store_path = state.path().join("bloomery.db").to_string_lossy().into_owned();
-            artifacts_root = state.path().join("artifacts").to_string_lossy().into_owned();
-            let runs = tempfile::tempdir().expect("lane worktree base");
-            worktree_base = runs.path().to_string_lossy().into_owned();
-            owned_state = Some(state);
-            owned_runs = Some(runs);
-        }
+        let BootRoots { owned_state, owned_runs, store_path, artifacts_root, worktree_base } = boot_roots(&builder);
 
         if let Some(script) = &builder.script {
             script.write_to(Path::new(&worktree_base)).expect("the mock-lane script writes");
@@ -190,12 +176,19 @@ impl ScenarioHarness {
             step_budget: builder.step_budget,
         };
 
+        // The control core refuses every read until its boot journal replay has
+        // folded, so a scenario step that lands in that window reads a refusal
+        // where it expected a projection. Awaited once, here, rather than
+        // retried at each call site: the flag never goes back, so the window
+        // this closes is the only one a scenario can meet.
+        harness.wire.await_replayed();
+
         match builder.backend {
             Backend::Fixture => harness.base = harness.sealable_fixture_base(),
             Backend::LocalRepo if builder.coordinator == CoordinatorKind::InProcess => {
-                // Correspondence only. A view() here waits long enough for the
-                // land reactor's boot tick to consume a replayed land decision,
-                // so a restart scenario would observe Landed before it can
+                // Correspondence only, and no further wait: the land reactor's
+                // boot tick consumes a replayed land decision, so a restart
+                // scenario that idles here would observe Landed before it can
                 // assert the journal still reads Resolved.
                 harness.wait_for_genesis_correspondence();
             }
@@ -584,6 +577,21 @@ impl ScenarioHarness {
             .expect("the transcript writes");
     }
 
+    /// Truncate-write the named run's lane heartbeat file.
+    ///
+    /// The coordinator reads this file's modification time as liveness once the
+    /// streamed transcript has gone quiet. Truncating is the signal: the body
+    /// is not read.
+    ///
+    /// # Panics
+    /// The evidence directory could not be created or the file written.
+    pub fn touch_heartbeat(&self, nonce: &str) {
+        let dir = Path::new(&self.worktree_base).join(format!("{nonce}-evidence"));
+        fs::create_dir_all(&dir).expect("the evidence directory creates");
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).expect("now is after the epoch").as_millis();
+        fs::write(dir.join("heartbeat"), stamp.to_string()).expect("the heartbeat writes");
+    }
+
     /// Every evidence directory under the run root whose name ends in `-evidence`.
     ///
     /// # Panics
@@ -779,6 +787,47 @@ impl ScenarioHarness {
     }
 }
 
+/// Where one booting harness keeps its journal, artifacts, and lane worktrees,
+/// and which of those directories it owns.
+struct BootRoots {
+    /// The journal / artifacts tempdir, when this harness minted it. `None` on
+    /// shared roots, whose lifetime belongs to the [`HarnessRoots`] a restart
+    /// scenario holds across both coordinators.
+    ///
+    /// [`HarnessRoots`]: super::HarnessRoots
+    owned_state: Option<TempDir>,
+    /// The lane-worktree tempdir, on the same terms.
+    owned_runs: Option<TempDir>,
+    store_path: String,
+    artifacts_root: String,
+    worktree_base: String,
+}
+
+/// Fresh temporary roots, or the shared ones a restart scenario passed in.
+fn boot_roots(builder: &HarnessBuilder) -> BootRoots {
+    if let (Some(store), Some(artifacts), Some(worktree)) =
+        (&builder.shared_store, &builder.shared_artifacts, &builder.shared_worktree)
+    {
+        return BootRoots {
+            owned_state: None,
+            owned_runs: None,
+            store_path: store.clone(),
+            artifacts_root: artifacts.clone(),
+            worktree_base: worktree.clone(),
+        };
+    }
+
+    let state = tempfile::tempdir().expect("a temporary root for the journal and the artifacts store");
+    let runs = tempfile::tempdir().expect("lane worktree base");
+    BootRoots {
+        store_path: state.path().join("bloomery.db").to_string_lossy().into_owned(),
+        artifacts_root: state.path().join("artifacts").to_string_lossy().into_owned(),
+        worktree_base: runs.path().to_string_lossy().into_owned(),
+        owned_state: Some(state),
+        owned_runs: Some(runs),
+    }
+}
+
 fn in_process_env(
     builder: &HarnessBuilder,
     store_path: &str,
@@ -855,6 +904,12 @@ fn in_process_env(
     }
 }
 
+/// Fork the lane coordinator inside `repo` and handshake the child that stayed
+/// up, retrying the whole fork rather than the connect.
+///
+/// RPC port `0`: the child holds its port from the moment it binds and reports
+/// which one in its boot log, so a concurrently booting sibling has no window in
+/// which to take it.
 fn spawn_listening_coordinator(
     repo: &Repo,
     worktree_base: &str,
@@ -864,8 +919,7 @@ fn spawn_listening_coordinator(
 ) -> (Coordinator, TcpStream) {
     let heartbeat = heartbeat_silence_secs.map(|secs| secs.to_string());
     let lane_program = crate::mock_lane_program();
-    for _ in 0..8 {
-        let rpc_port = free_port();
+    spawn_and_connect("lane-boundary-harness", COORDINATOR_HANDSHAKE_BUDGET, || {
         let mut env = vec![
             ("AETHER_STORE_PATH", store_path),
             ("AETHER_ARTIFACTS_ROOT", artifacts_root),
@@ -881,16 +935,8 @@ fn spawn_listening_coordinator(
         if let Some(secs) = heartbeat.as_deref() {
             env.push(("AETHER_BLOOMERY_HEARTBEAT_SILENCE_SECS", secs));
         }
-        let mut coordinator = Coordinator::spawn_in(rpc_port, Some(&repo.work_dir()), &env);
-        if !coordinator.is_alive() {
-            continue;
-        }
-        let stream = connect_and_handshake(rpc_port, "lane-boundary-harness");
-        if coordinator.is_alive() {
-            return (coordinator, stream);
-        }
-    }
-    panic!("the lane coordinator would not stay up long enough to handshake");
+        Coordinator::spawn_in(0, Some(&repo.work_dir()), &env)
+    })
 }
 
 fn author_catalog(store_path: &str, wall_clock_secs: u64) -> ConfigRegistry {
@@ -1062,6 +1108,16 @@ impl ScenarioHarness {
     /// Wake the doctor reactor once so `/view` overlays a fresh report.
     pub fn doctor_tick(&mut self) {
         self.wire.tick(<DoctorReactorCapability as Addressable>::resolve(0, ()), &DoctorTick::default());
+    }
+
+    /// Wake the janitor reactor once so a scenario can observe a reclaim pass
+    /// without waiting on its poll timer.
+    ///
+    /// Kept off [`Self::tick`]: a scenario that is not about retention must
+    /// not start reclaiming session trees mid-walk just because it advanced
+    /// the other reactors.
+    pub fn janitor_tick(&mut self) {
+        self.wire.tick(<JanitorReactorCapability as Addressable>::resolve(0, ()), &JanitorTick::default());
     }
 
     /// One round of executor / integrate / land / observe / doctor.

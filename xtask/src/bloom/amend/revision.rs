@@ -93,10 +93,10 @@ pub fn write_widened(client: &Client<'_>, workpiece: &str, widened: &ScopeRevisi
     let expected = DigestHex::from_bytes(*digest_of(widened).as_bytes());
     match client.write_revision(workpiece, widened, &evidence) {
         Ok(written) => {
-            if written.digest != expected {
+            if written.digest != expected.digest() {
                 bail!("the coordinator stored {} for a revision addressed {expected}", written.digest);
             }
-            Ok(written.digest)
+            Ok(written.digest.into())
         }
         Err(error) if error.to_string().contains("already stored") => Ok(expected),
         Err(error) => Err(error),

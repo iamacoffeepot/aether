@@ -136,7 +136,7 @@ fn is_known_process(process: &str) -> bool {
 }
 
 /// Why a caller-authored [`StageCatalog`] cannot be sealed.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum CatalogError {
     /// A stage of the closed vocabulary has no binding.
     UnboundStage(StageId),
@@ -446,7 +446,14 @@ impl StageCatalog {
             // (`wall_clock_secs` is `3_600` across the line) against a sketch
             // that is probably the actual problem — wedging puts it in front
             // of an operator, where an unscopeable sketch belongs.
-            StageId::Scope => (&["bloom.sketch"], &["bloom.scope"], SCOPE_FILL_COMMAND, "scope-filled", 2, 3_600),
+            // Budget 4, not 2: the run ledger is append-only and exhaustion is
+            // derived from it, so a systemic lane-infrastructure failure (a
+            // sketchless dispatch, a polluted setter value) burns attempts the
+            // authored work never had a chance in — two of those in a row
+            // permanently exhausted seven commissions on 2026-08-26. Four
+            // leaves the same tight leash on genuinely failing scopes while
+            // absorbing one infrastructure incident without stranding the line.
+            StageId::Scope => (&["bloom.sketch"], &["bloom.scope"], SCOPE_FILL_COMMAND, "scope-filled", 4, 3_600),
             // Approve is a pre-seal host-side admission gate (ADR-0149 §The
             // line, ADR-0151): the coordinator's own host resolves the
             // workpiece's declared surface to an approval tier and forms the
@@ -631,7 +638,7 @@ impl StageCatalog {
 /// workpiece then stage and precede every `Bloom` entry. Nothing reads that
 /// order for meaning — the grade sums the whole map — but it makes a rendered
 /// ledger stable across replays.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum DispatchKey {
     /// One workpiece's slot at one stage: `Construct`, `Verify`, the
     /// repair-only `Refine` re-entry, or the fold-conflict `Reconcile`
@@ -660,7 +667,7 @@ pub enum DispatchKey {
 /// One execution of one binding against one subject (ADR-0149 §The line).
 /// Agents return proposed artifacts and evidence only — the reducer alone
 /// advances state.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Attempt {
     /// The binding this attempt executed.
     pub binding: StageId,
@@ -1226,9 +1233,14 @@ mod tests {
     // Repinned again because the line gained the base-verify position: a
     // fourteenth binding, dispatched by a seal that found no base receipt
     // rather than by member-line progression.
+    // Repinned again for the Scope retry budget 2 → 4: the append-only run
+    // ledger derives exhaustion from this number, and two lane-infrastructure
+    // failures in a row (a sketchless dispatch, a polluted setter value)
+    // permanently exhausted seven commissions the authored work never failed
+    // in. An intended catalog edit.
     const GOLDEN_LINE_DIGEST: [u8; 32] = [
-        0xe0, 0x12, 0xe9, 0x20, 0xc4, 0xce, 0x31, 0xa7, 0xe7, 0x31, 0x7c, 0x8d, 0xf1, 0x11, 0x01, 0xef, 0x75, 0x99,
-        0xda, 0x00, 0x14, 0xfd, 0xcf, 0x4e, 0x56, 0xa6, 0x18, 0x4b, 0xa3, 0xd9, 0xf3, 0xcf,
+        0x7d, 0xbd, 0xcb, 0x5c, 0xe4, 0xce, 0x3e, 0x39, 0x92, 0xd7, 0xbb, 0x2b, 0xcc, 0x4c, 0x6e, 0x8a, 0x9b, 0x2c,
+        0xd4, 0x30, 0x64, 0x95, 0x2b, 0xec, 0x5d, 0x37, 0x87, 0x92, 0xe0, 0xd9, 0x9c, 0xe7,
     ];
 
     // Tripwire: the compiled line passes the same validation an authored catalog

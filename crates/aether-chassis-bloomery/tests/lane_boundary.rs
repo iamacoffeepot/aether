@@ -16,15 +16,16 @@
 #![allow(clippy::unwrap_used, reason = "a scenario that cannot set up its coordinator reports it by panicking")]
 
 use std::collections::BTreeSet;
-use std::fs;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{env, fs, thread};
 
 use aether_bloomery::{
     BloomStatus, BloomView, CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND, VERIFY_CHECK_COMMAND, VerifyFailure,
     VerifyFailureSet,
 };
+use aether_chassis_bloomery::bloomery::admits_lane_key;
 use aether_chassis_bloomery::bloomery::mock_lane::{FOREIGN_SESSION_ID, LaneMode, LaneScript};
 use aether_chassis_bloomery::store::{SqliteStore, StoreBackend};
 use aether_harness_bloomery::{HarnessBuilder, HarnessRoots, LaneHarness, while_pumping};
@@ -124,6 +125,82 @@ fn a_conversation_keeps_its_session_tree_and_a_mechanical_lane_builds_in_its_slo
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect();
     assert_eq!(session_dirs.len(), 1, "one member's line opened one session: {session_dirs:?}");
+}
+
+/// The coordinator knobs the lane harness forks its coordinator under — the
+/// journal, the artifact store, the repository binding, the poll cadence, and
+/// above all the two live control ports (`support::process` sets `AETHER_RPC_PORT`
+/// and `AETHER_HTTP_PORT` itself). Every one is a knob a chassis forked *under* a
+/// lane would resolve as its own.
+const COORDINATOR_KNOBS: [&str; 6] = [
+    "AETHER_RPC_PORT",
+    "AETHER_HTTP_PORT",
+    "AETHER_STORE_PATH",
+    "AETHER_ARTIFACTS_ROOT",
+    "AETHER_GITHUB_BACKEND",
+    "AETHER_GITHUB_POLL_INTERVAL_SECS",
+];
+
+/// Names a process's own runtime stamps into its environment whatever its parent
+/// handed it: macOS's `CoreFoundation` writes `__CF_USER_TEXT_ENCODING` into every
+/// process it initializes in. Their presence in a child says nothing about what
+/// crossed the boundary, so the containment check steps over them rather than
+/// reading a platform's own bookkeeping as a leak.
+const SELF_STAMPED: [&str; 1] = ["__CF_USER_TEXT_ENCODING"];
+
+#[test]
+fn a_lane_child_comes_up_on_a_constructed_environment_not_the_coordinators() {
+    // The incident this prevents: on 2026-08-25 a base verify recorded forty
+    // full-suite failures whose in-lane solo replays failed too, while the
+    // identical nextest invocation passed instantly from a clean shell. The lane
+    // child had inherited the coordinator's whole process environment — twenty-two
+    // AETHER_* runtime variables on the production host, the live control and RPC
+    // ports among them — so every test under it that forks a chassis (the fleet
+    // harness suites, the hub binary-store proofs, the http serving tests)
+    // resolved the coordinator's ports as the ones to bind, and either failed to
+    // bind or dialled the live coordinator. It read for months as "fleetharness
+    // flakes under saturation" (#5475), because a deterministic poisoning that
+    // only fires when a coordinator is up looks exactly like a flake.
+    //
+    // Nothing about this scenario is simulated: the coordinator is a forked
+    // `bloomery` process holding real knobs, the lane is a real child of it, and
+    // what the child came up holding is what it recorded. Only the program at the
+    // end of the argv is a stand-in.
+    let mut harness = LaneHarness::start(&LaneScript::all_passing());
+    harness
+        .settle("the member resolves", |bloom| bloom.members.first().is_some_and(|member| member.resolution.is_some()));
+
+    let runs = harness.ledger();
+    assert!(!runs.is_empty(), "the scenario has to have dispatched a real lane to have an environment to judge");
+    for run in &runs {
+        let child: BTreeSet<&str> = run.env.iter().map(String::as_str).collect();
+        assert!(
+            child.contains("PATH"),
+            "{}: a lane whose PATH did not cross could not resolve cargo, git, or its harness — the over-scrub that \
+             would be a louder bug than the leak: {child:?}",
+            run.command,
+        );
+        for knob in COORDINATOR_KNOBS {
+            assert!(!child.contains(knob), "{}: the coordinator's {knob} reached its lane child", run.command);
+        }
+        let leaked: Vec<&&str> =
+            child.iter().filter(|key| !admits_lane_key(OsStr::new(key)) && !SELF_STAMPED.contains(key)).collect();
+        assert!(
+            leaked.is_empty(),
+            "{}: the child's environment is constructed from the allow list, so nothing outside it can appear: \
+             {leaked:?}",
+            run.command,
+        );
+    }
+
+    // And the denial was load-bearing rather than vacuous: this process is the
+    // forked coordinator's own parent, so what it carries is what the coordinator
+    // carried and the lane would have inherited wholesale.
+    assert!(
+        env::vars_os()
+            .any(|(key, _)| !admits_lane_key(&key) && !SELF_STAMPED.contains(&key.to_string_lossy().as_ref())),
+        "the ancestry carried nothing to deny, so the scenario proved nothing",
+    );
 }
 
 #[test]
@@ -493,14 +570,66 @@ fn a_lane_that_goes_silent_is_cancelled_before_its_wall_clock() {
         LaneHarness::start_with_heartbeat(&LaneScript::all_passing().with_default(LaneMode::NeverExits), 60, 2);
 
     harness.wait_for_runs(1);
-    for nonce in harness.evidence_nonces() {
-        harness.write_transcript(&nonce, "{}\n");
+    let nonces = harness.evidence_nonces();
+    for nonce in &nonces {
+        harness.write_transcript(nonce, "{}\n");
     }
-    thread::sleep(Duration::from_secs(5));
+    // Wait until the original nonce leaves outstanding: a cancelled run is
+    // admitted as a host fault and redispatched under a new nonce. The
+    // executor tick is the GitHub poll floor, longer than the 2 s allowance.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let outstanding = harness.outstanding();
+        if nonces.iter().all(|nonce| !outstanding.contains(nonce)) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "a silent lane's nonce leaves outstanding rather than occupying the slot; outstanding={outstanding:?} original={nonces:?}"
+        );
+        thread::sleep(Duration::from_millis(200));
+    }
 
     let bloom = harness.view();
     assert!(bloom.blooms[0].members[0].resolution.is_none(), "a silent lane resolves nothing");
     assert_scratch_checkouts_are_named_for_work(&harness, "a silenced run leaves no checkout of its own behind");
+}
+
+#[test]
+fn a_lane_beating_only_its_heartbeat_is_not_silence() {
+    // The transcript falls silent the moment the model ends its turn, and the
+    // lane then stamps `heartbeat` while it compiles. Pre-fix this cancelled
+    // the run ~2s after the single transcript write (#5383).
+    let mut harness =
+        LaneHarness::start_with_heartbeat(&LaneScript::all_passing().with_default(LaneMode::NeverExits), 60, 2);
+
+    harness.wait_for_runs(1);
+    let nonces = harness.evidence_nonces();
+    for nonce in &nonces {
+        harness.write_transcript(nonce, "{}\n");
+        harness.touch_heartbeat(nonce);
+    }
+    let runs = harness.runs_dir();
+    let pumped = nonces.clone();
+    while_pumping(
+        || {
+            for nonce in &pumped {
+                let dir = runs.join(format!("{nonce}-evidence"));
+                let _ = fs::create_dir_all(&dir);
+                let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis());
+                let _ = fs::write(dir.join("heartbeat"), stamp.to_string());
+            }
+        },
+        || thread::sleep(Duration::from_secs(12)),
+    );
+
+    let outstanding = harness.outstanding();
+    for nonce in &nonces {
+        assert!(
+            outstanding.contains(nonce),
+            "a lane beating its heartbeat must keep its original nonce, not be cancelled and redispatched; outstanding={outstanding:?} original={nonces:?}"
+        );
+    }
 }
 
 #[test]

@@ -1,50 +1,36 @@
-# ADR-0059: Content-hashed field tags for upgradable component storage
+# ADR-0059: Content-hashed field tags for upgradable storage
 
-- **Status:** Proposed (Draft — brainstorm capture; revisit before implementation)
-- **Amended (ADR-0118):** mentions of `postcard` below describe the superseded body format. The structured wire body is now `aether_data::wire`; postcard is no longer a dependency of any crate in the workspace. The decision this ADR records otherwise stands.
-- **Date:** 2026-04-27
+- **Status:** Accepted
+- **Date:** 2026-04-27 · **Revised:** 2026-08-26 (accepted; storage TLV shipped)
+- **Revision note:** the 2026-04 draft targeted the handle store and predates three decisions this revision resolves against: ADR-0118 (the structured wire body is `aether_data::wire`; postcard is gone), ADR-0187 (persisted rows record their writing schema), and ADR-0188 (the wire codec derives from `Schema`). The consumer that takes this ADR out of ADR-0113's parking is the coordinator's own persistence — the journal's views and projections. The draft's `Mail`-trait fork and `Envelope` rename are superseded by a lighter mapping onto today's `Kind`; renames gain a declared alias (`#[storage(was = "…")]`) instead of the draft's no-remap stance. The wire format itself — TLV records, content-hashed tags, flattening, the unknown bucket, the required/`Option` discipline — stands as resolved in 2026-04. Implementation settled four points recorded in the Decision section: the field-hash preimage is a NUL-separated fold, the TLV length is a fixed 32-bit count, the decoded payload type is `StorageData` throughout, and anonymous record names are already provided by nameless canonical schema bytes.
 
 ## Context
 
 Today every kind payload travels in one of two wire shapes:
 
 - **Cast** (`Struct { repr_c: true }`) — raw `#[repr(C)]` bytes, decoded by `bytemuck::cast`. Field layout is positional in the language itself. Hot-path kinds (`DrawTriangle`, `Vertex`, `Tick`).
-- **Postcard** (everything else) — postcard 1.x wire, fields concatenated in declaration order, no per-field tag or length. Control-plane kinds, mail with `Vec`/`Option`/`Enum`/`Map` shape.
+- **Structured** (everything else) — `aether_data::wire` (ADR-0118), fields concatenated in declaration order, no per-field tag or length. Control-plane kinds, mail with `Vec`/`Option`/`Enum`/`Map` shape.
 
 Both are positional. Adding, removing, or reordering a field in source produces a different `Kind::ID` (the hash includes the canonical schema bytes — ADR-0030, ADR-0032) *and* a wire-incompatible payload. Sender and receiver have to be exact-id matches; any drift is an undeliverable.
 
-That's fine for live mail, where sender and receiver are in lockstep within a session. It is **not fine for the persistent handle store** (ADR-0049): payloads written against component v1 still need to be readable after the component upgrades to v2. Today an upgrade invalidates every stored payload at the kind layer, even if the schema change was a benign field addition.
+That's fine for live mail, where sender and receiver are in lockstep within a session. It fails wherever bytes outlive the binary that wrote them, and the coordinator is now the proof: `MemberView` carries eight trailing `#[serde(default)]` appends and `CommissionProjection` several more, all riding the positional wire where the annotation is inert — the rows decode only because one binary writes and reads them. The decisions vocabulary already paid the price in production: journal replay aborted on rows written by an earlier schema until a hand-written `decisions.v2` upcast landed (#5338). ADR-0187 makes that failure honest — persisted rows become `(kind, schema_digest, bytes)` and a missing upcast is a named refusal — but under a positional wire *every* schema change owes an upcast, additive ones included. The handle store (ADR-0049) and kind-typed actor state across hot reload (ADR-0113, which parked this ADR "awaiting a consumer") remain future consumers with the same shape of problem.
 
-A version graph layered on top of the current hashes (sketched in chat 2026-04-27) was one direction. The cleaner direction is **a wire format that is itself version-tolerant** — fields self-identify, receivers tolerate unknown ids, missing ids fall back to defaults. Most of the version-graph problem then dissolves; the residual cases (type changes, semantic renames) shrink to a handful.
+The cleaner direction is **a wire format that is itself version-tolerant** — fields self-identify, receivers tolerate unknown ids, missing ids fall back to defaults. Under it, ADR-0187's upcast obligation shrinks to the genuinely breaking changes (type changes, undeclared renames); adds, removes, and reorders decode transparently.
 
-This ADR captures the brainstorm of that wire format. It's deliberately under-specified — there's enough open shape that committing now would be premature.
+## Decision
 
-## Decision (sketch)
+Add a third wire shape, **TLV with content-hashed field tags**, alongside cast and positional-structured, behind a `Storage` trait. First consumer: the coordinator's persisted rows (journal views and projections). Future consumers: the handle store (ADR-0049), kind-typed actor state across `replace_component` (ADR-0113), save files via ADR-0041's `save` namespace.
 
-Add a third wire shape, **TLV with content-hashed field tags**, alongside cast and positional-postcard. The trait surface forks: `Mail` for kinds that ride the wire (cast or postcard, current behavior); `Storage` for kinds that live in durable backing stores via TLV. Both extend a bare `Kind` trait that carries only metadata (`NAME`, `ID`), so neither subtrait can decode the other's bytes — the type system enforces wire-shape correctness rather than relying on runtime checks. Scope: storage payloads written to the handle store (ADR-0049); possibly later, save files via ADR-0041's `save://` namespace.
+### Trait surface
 
-### Trait hierarchy
-
-Three traits, with `Kind` as the bare metadata supertrait:
+`Kind` today carries metadata (`NAME`, `ID: KindId`) plus the positional codec (`decode_from_bytes` / `encode_into_bytes`), where `decode_from_bytes` has a default body returning `None` — the strict-receiver miss (`DISPATCH_UNKNOWN_KIND`). This revision keeps that trait untouched and adds one sibling:
 
 ```rust
-pub trait Kind {
-    const NAME: &'static str;
-    const ID: u64;
-    const IS_INPUT: bool = false;
-    // No decode/encode methods on the bare trait — pure metadata.
-}
-
-pub trait Mail: Kind {
-    fn decode_from_bytes(bytes: &[u8]) -> Option<Self> where Self: Sized;
-    fn encode_into_bytes(&self) -> Vec<u8>;
-}
-
 pub trait Storage: Kind {
     /// Reject unknown fields rather than bucketing them. Default
     /// `false` (forgiving for storage forward-compat); `true` for
-    /// capability-style payloads where preserving an unknown field
-    /// is a security concern. Set via `#[storage(strict)]`.
+    /// payloads where silently carrying an unknown field is a
+    /// security concern. Set via `#[storage(strict)]`.
     const STRICT: bool = false;
 
     fn decode_storage(bytes: &[u8]) -> Option<StorageData<Self>> where Self: Sized;
@@ -58,64 +44,58 @@ pub struct StorageData<T> {
 
 pub struct UnknownField {
     pub hash: u64,
-    pub bytes: Vec<u8>,
+    pub bytes: Vec<u8>,    // verbatim TLV body, ready to re-emit
 }
 ```
 
-A type implements either `Mail` or `Storage`, never both. Disjoint trait membership prevents wire-shape mistakes at the type level: trying to decode a `Storage` kind's TLV bytes as if they were postcard would require calling `decode_from_bytes`, which doesn't exist on `Storage` — the type system blocks the misuse.
+`#[derive(Storage)]` emits the `Kind` metadata impl **without** a positional codec — `decode_from_bytes` keeps its `None` default and there is no `encode_into_bytes` body to call — plus the `Storage` TLV codec. Disjointness therefore falls out of what already exists: handing a `Storage` kind's bytes to the mail dispatcher fails closed as an ordinary strict-receiver miss, and nothing can positionally encode a `Storage` value because the derive never emits that path. The 2026-04 draft reached the same guarantee by forking a `Mail` subtrait out of `Kind` and renaming the runtime `Mail<'a>` type to `Envelope<'a>`; with the fail-closed default already in the trait, that churn buys nothing and is dropped.
 
-User-facing derive macros:
-
-- `#[derive(Mail)]` produces `impl Kind + impl Mail` — cast or postcard wire (autodetected from `#[repr(C)]`).
-- `#[derive(Storage)]` produces `impl Kind + impl Storage` — TLV wire.
-
-The existing `#[derive(Kind)]` becomes an alias for `#[derive(Mail)]` during migration; the substantive split is between `Mail` and `Storage`. Existing call sites that constrain `K: Kind` for decode/encode work migrate to `K: Mail`.
-
-**Runtime type rename.** The current `Mail<'a>` runtime type — passed to `#[fallback]` handlers — renames to `Envelope<'a>` to free up `Mail` as the trait name. The semantics are unchanged; the new name reflects the role (it's the carrier you open to find the typed value, not the content). Pre-1.0 so the rename is mechanical: `#[fallback]` signatures and `Mail::decode_kind::<K>()` calls update in lockstep.
-
-**Wire reachability.** Storage kinds cannot ride mail directly. Mail reaches them only through `Ref<S>` (handle indirection per ADR-0045): mail carries a handle id; the substrate's handle store holds the TLV bytes; the receiver resolves the handle and decodes via `Storage::decode_storage`. The bytes-format never crosses the trait boundary, so the wire-shape disjointness stays clean and there's no "wrap a Storage value as Bytes-on-mail" path needed for v1.
+**Wire reachability.** Storage kinds do not ride mail. They live in rows — the store writes `(kind, schema_digest, bytes)` per ADR-0187 and reads back through `Storage::decode_storage`. When the handle store becomes a consumer, mail reaches a storage value only through handle indirection (ADR-0045): mail carries the handle id, the store holds the TLV bytes.
 
 ### Wire format
 
-The wire format described below applies to `Storage` kinds. `Mail` kinds use the existing cast or positional-postcard shape unchanged.
-
-
+The wire format described below applies to `Storage` kinds. Everything else uses the existing cast or positional-structured shape unchanged.
 
 A struct payload is a sequence of `[field_hash][length][bytes]` records, concatenated in field-hash sort order. Receivers walk the records, look each `field_hash` up in their local schema, dispatch the bytes against the matched field's type, skip unknown ids, and default missing ids.
 
 ```
-+----------------+----------+----------------+
-| field_hash u64 | len varint | postcard body |
-+----------------+----------+----------------+
++----------------+---------------+------------------------+
+| field_hash u64 | len u32 LE    | aether_data::wire body |
++----------------+---------------+------------------------+
 ```
 
-Field bodies are encoded against the field's declared type using existing postcard rules (varint scalars, length-prefixed strings, etc.). The body is self-describing only at the `(field_hash, length)` envelope; primitive bytes inside don't carry their own type tags. Receivers that don't know a field id skip `length` bytes and continue.
+Length is a fixed 32-bit little-endian count, matching every other count in the ADR-0118 format. The 2026-04 draft drew a varint; ADR-0118 removed variable-length integers from the format, so the envelope follows the rest of the crate.
+
+Field bodies are encoded against the field's declared type by the same owned, `Schema`-derived codec ADR-0188 gives the positional wire — varint scalars, length-prefixed strings, the closed vocabulary `Schema` already enforces. The TLV layer adds only the `(field_hash, length)` envelope; primitive bytes inside don't carry their own type tags. Receivers that don't know a field id skip `length` bytes and continue. One codec family drives both wire shapes, so TLV bodies and positional bodies can never disagree about how a leaf value is spelled.
 
 ### Field hash
 
 For each field, a stable 64-bit content hash:
 
 ```
-field_hash = fnv1a_64_prefixed(FIELD_DOMAIN, canonical(field_name, field_type))
+field_hash = fold(FIELD_DOMAIN ++ path_bytes ++ 0x00 ++ canonical_schema(field_type))
 ```
 
-`FIELD_DOMAIN` is a new prefix disjoint from `KIND_DOMAIN` and `MAILBOX_DOMAIN` so the id spaces don't overlap. The canonical bytes mirror today's `canonical_serialize_kind` but at the field granularity.
+`FIELD_DOMAIN` is a new prefix disjoint from `KIND_DOMAIN` and `MAILBOX_DOMAIN` so the id spaces don't overlap. The path is dotted (`addr.street`) but never materialized: each segment is folded onto an in-progress carry (`fold_path_segment`), then a NUL terminator, then the type's canonical schema bytes (the same encoding `canonical_serialize_schema` already produces). `canonical_serialize_kind` length-prefixes its name, which cannot be written before the whole path is known and would forbid the incremental fold; NUL is unambiguous because Rust identifiers and the dot join both exclude it.
 
-Renames shift the field hash (the name is in the canonical bytes). The format treats them as **breaking schema changes**, the same as type changes — no remap mechanism. Old wire data is preserved verbatim in the unknown-fields bucket; the new schema doesn't see the value via typed access until the author runs an explicit migration tool (read old payloads, decode the bucket entry into the new field, re-encode under the new schema). Keeping the wire format free of remap machinery is intentional: maintaining a remap dict per-kind for renames is a long-tail authoring tax that only solves the typed-access case (the data itself is already preserved by bucketing). v1 trades that ergonomic for simplicity.
+Renames shift the field hash (the name is in the canonical bytes). On the wire a rename is therefore remove-plus-add — and the author declares that the two are one field:
+
+```rust
+struct Record {
+    #[storage(was = "note")]
+    remark: Option<String>,
+}
+```
+
+`#[storage(was = "old_name")]` adds a **read alias**: the derive computes the alias hash from `(old_name, current_type)` and binds it into the reader's lookup set beside the current hash. A record tagged with either hash decodes into the field; writers emit only the current hash, so aliases never appear in new bytes and the wire format carries no remap table — the declaration lives in source, costs one attribute, and compiles into the same lookup the reader already does. The attribute repeats for a chain of renames (`was = "a"`, `was = "b"`), and alias hashes join the within-kind collision check like any other.
+
+What `was` does not cover is a rename-plus-retype: the alias hash uses the *current* type, so bytes written under `(old_name, old_type)` still miss and bucket — a type change is a breaking schema change with or without a rename riding on it, and the migration story below applies. An **undeclared** rename is simply what the wire sees: the old value defaults away (or errors, for a required field) and the new field reads as absent. That silent loss is exactly what the ADR-0187 fixture corpus exists to catch — a schema-digest change whose fixture row shows a defaulted-away value fails the build until the author either declares the alias or writes the upcast.
 
 **Hash width: 64-bit.** All id spaces (`Kind::ID`, `MailboxId`, field hashes, variant hashes) use 64-bit FNV-1a. Per-kind collision probability stays below 10⁻¹⁰ at realistic ecosystem scope; the derive-time within-kind collision check (rule 2) catches the rare birthday strike as a compile error. 128-bit was considered and rejected on FFI grounds — wasm32 has no native 128-bit type, so every host fn carrying ids would split into pairs of i64. Issue [#320](https://github.com/iamacoffeepot/aether/issues/320) tracks the trigger conditions for revisiting if ecosystem growth or threat-model shifts (third-party kinds from untrusted sources, real observed collisions) ever justify the upgrade.
 
 ### Anonymous record names
 
-Nested record types (e.g., a `Vec3`-shaped triple used inside a kind without a top-level kind name) get a **synthesized name** content-derived from their field blob:
-
-```
-synthesized_name = "__" + hex(short_hash(field_blob))
-```
-
-Two crates declaring the same anonymous shape get the same synthesized name → same field hash for any field of that type → **cross-crate structural identity for free**. Top-level kinds with explicit names (`#[kind(name = "...")]`) keep their nominal identity, so `Position { x, y, z }` and `Velocity { x, y, z }` stay distinct. The footgun (two genuinely different concepts both declared anonymously with identical shape) lives in a corner where you'd have to deliberately go nameless on both — convention says don't.
-
-The `__` prefix is reserved for system-synthesized identifiers (see rule 4 below), so user-supplied names can never collide with a synthesis output.
+Canonical schema bytes already omit field and variant names, so two crates declaring the same record shape already produce byte-identical canonical bytes — the cross-crate structural identity a synthesized `__<hash>` name was invented to buy is free, and no synthesized name is emitted. The `__` prefix still stands for `__variant` (and any future synthesis). The consequence is that discipline rule 1 holds only up to structural equality: retyping a field between two structurally identical records — a position and a velocity, both three floats — leaves the field hash unchanged, so old bytes decode silently into the new type.
 
 ### Nested struct and enum flattening
 
@@ -129,7 +109,7 @@ Plain nested structs and enums flatten into the top-level field set so recursive
 | Enum (incl. `Option<T>`) | yes | `__variant` discriminant leaf + variant-prefixed leaves (only the active variant emits) |
 | `Vec<T>`, `Map<K, V>`, fixed `Array` | no | dynamic cardinality; flattening to `path[i].*` would leak runtime counts into the field-hash space |
 
-Containers stay as a single TLV record with postcard-encoded body. To get version-tolerance for a container's element type, lift the element to its own TLV kind and reference via `Ref<K>` (handle indirection per ADR-0045).
+Containers stay as a single TLV record whose body is the field's ordinary `aether_data::wire` encoding. To get version-tolerance for a container's element type, lift the element to its own TLV kind and reference via `Ref<K>` (handle indirection per ADR-0045).
 
 **Path delimiter.** `.` joins parent path to nested field name (`addr.street`, `result.Ok.profile.bio`). User-supplied identifiers cannot contain `.` — Rust idents already exclude it, so the reservation is free.
 
@@ -177,7 +157,7 @@ field.Attack.damage: u32
 variant_hash = fnv1a_64_prefixed(VARIANT_DOMAIN, canonical(variant_name, variant_fields))
 ```
 
-`VARIANT_DOMAIN` is disjoint from `FIELD_DOMAIN`, `KIND_DOMAIN`, and `MAILBOX_DOMAIN`. Variant renames or field-set changes inside a variant produce a new variant hash. Like field renames, variant renames are breaking schema changes — old wire data preserves in the unknown-fields bucket; typed access requires migration. No remap mechanism.
+`VARIANT_DOMAIN` is disjoint from `FIELD_DOMAIN`, `KIND_DOMAIN`, and `MAILBOX_DOMAIN`. Variant renames or field-set changes inside a variant produce a new variant hash and remain **breaking schema changes** in v1 — old wire data preserves in the unknown-fields bucket; typed access requires migration. The `#[storage(was = "…")]` alias covers *fields* only; extending it to variants is a follow-up if a real rename shows up there, not a v1 surface.
 
 **Tuple-variant rules:**
 
@@ -206,7 +186,7 @@ Version-skew of an `Option<T>`-typed field — receiver's schema has the field b
 
 - *Field hash*: leaf paths feed `fnv(FIELD_DOMAIN, canonical(path, type))` directly. The path string changes from `bio` to `addr.bio` to `result.Ok.profile.bio` as flattening descends; the hash function is unchanged.
 - *Anonymous record names*: an anonymously-named nested struct still gets its `__<hash>` synthesized name for *type identity* (when used as a field type elsewhere), but the flattening path uses the *field's* name from the parent, not the type name. `Outer { addr: __abcd { x, y } }` → leaves `addr.x`, `addr.y`.
-- *Kind ID*: now hashes the leaf-set, not the source-level field-set. Reorder-free at every nesting level, not just at the top.
+- *Kind ID*: nominal for storage kinds (see below) — flattening changes never touch it; shape identity rides the ADR-0187 `schema_digest`.
 - *Unknown bucket*: a leaf path the receiver doesn't recognize gets bucketed verbatim. v1 reading v2's `addr.apartment` leaf → bucket → round-trips on re-emit.
 - *Typed field access*: `.get::<T>("addr.street")` — full path is the lookup key. Optional v2 ergonomic: `.get_at::<Address>("addr")` walks all `addr.*` leaves and assembles a sub-struct.
 - *`SchemaType` vocabulary*: unchanged. The existing `Option`/`Vec`/`Struct`/`Enum`/`Map`/`Ref` arms drive flattening logic at the derive and codec layer; no new schema variants.
@@ -216,17 +196,19 @@ Version-skew of an `Option<T>`-typed field — receiver's schema has the field b
 For TLV-shape kinds:
 
 ```
-Kind::ID = fnv1a_64_prefixed(KIND_DOMAIN, name ++ sorted_field_hash_blob)
+Kind::ID = fnv1a_64_prefixed(KIND_DOMAIN, name)
 ```
 
-Where `sorted_field_hash_blob` is the canonical bytes of `field_hashes.sort().concat()`. Reorder-free at the source layer — moving a field's source position doesn't shift the kind id. Renames shift the kind id (since the field hash changes); they're breaking schema changes that require migration to translate old payloads into the new id space.
+**Nominal, not structural** — a deliberate departure from the 2026-04 draft, which hashed the sorted leaf set into the id. A storage kind's id is the discriminator rows are keyed by, and rows outlive schemas: an id that moves whenever the leaf set moves re-keys the store on every schema change, orphaning exactly the rows this wire format exists to keep readable. Shape identity has its own carrier — the ADR-0187 `schema_digest` recorded beside every row — so baking shape into the id was redundant for storage kinds and actively harmful. Mail kinds keep their existing schema-inclusive hash: there, skew *should* be an undeliverable, and the id is the enforcement. Version tolerance for storage lives entirely in the TLV field records and the digest column, never in the kind id.
 
 ### Unknown fields
 
 On read, fields the receiver's schema doesn't bind are preserved verbatim in an unknown-fields bucket alongside the typed value. The bucket carries `(field_hash, raw_bytes)` per unknown field. On re-encode, unknowns merge back into field-hash sort order alongside known fields, so a payload round-trips exactly through a receiver that doesn't fully understand it — v1 reading v2's payload, then writing it back, doesn't lose v2's additions.
 
+The decoded payload type is `StorageData` throughout (the 2026-04 draft also called it `DecodedPayload`; that name is retired).
+
 ```rust
-struct DecodedPayload<T> {
+struct StorageData<T> {
     value: T,
     unknown_fields: Vec<UnknownField>,
 }
@@ -246,7 +228,7 @@ Memory cost is the bucket bytes per decoded payload. Typically zero (no version 
 A name-based accessor that hashes `(name, type)` and looks the field up across known fields and the unknown bucket in one call:
 
 ```rust
-impl<T> DecodedPayload<T> {
+impl<T> StorageData<T> {
     /// Fetch a field by name and decode it as `U`. The lookup hash
     /// is `field_hash(name, U::SCHEMA)`, so a name match with a
     /// type mismatch returns None — there is no way to misdecode
@@ -258,7 +240,7 @@ impl<T> DecodedPayload<T> {
 
     /// Loose lookup by name only — for tooling that knows the name
     /// but wants raw bytes against an out-of-band schema.
-    fn get_raw(&self, name: &str) -> Option<(u64, &[u8])>;
+    fn get_raw<U: Schema>(&self, name: &str) -> Option<(u64, &[u8])>;
 }
 ```
 
@@ -268,7 +250,7 @@ The `T: Schema + Decode` bound is satisfied by primitives, `String`, `bool`, `Ve
 
 ### Required fields and `Option<T>`
 
-Every field declared on a TLV kind is **required by default** — its absence on the wire is a decode error, not a silent fallback. Optionality is expressed in the type system: `Option<T>` fields tolerate version-skew absence and decode missing as `None`. Wire shape per type follows the flattening rule above (primitive/String → single leaf; nested struct → multiple leaves under a dotted path; enum including `Option<T>` → `__variant` + variant-prefixed leaves; container → single leaf with opaque postcard body).
+Every field declared on a TLV kind is **required by default** — its absence on the wire is a decode error, not a silent fallback. Optionality is expressed in the type system: `Option<T>` fields tolerate version-skew absence and decode missing as `None`. Wire shape per type follows the flattening rule above (primitive/String → single leaf; nested struct → multiple leaves under a dotted path; enum including `Option<T>` → `__variant` + variant-prefixed leaves; container → single leaf with an opaque `aether_data::wire` body).
 
 ```rust
 struct Record {
@@ -296,7 +278,8 @@ Receiver-side semantics across the wire/schema product:
 | `Option<T>` field, sender wrote `None` | `__variant`=None-hash, no Some leaves | `None` |
 | `Option<T>` field | all leaves absent *(version skew)* | `None` |
 | unknown leaf | leaf present | bucketed verbatim |
-| renamed-from (old hash, schema mismatch) | leaf present | bucketed verbatim — typed access requires migration |
+| leaf under a declared `was` alias hash | leaf present | decodes into the renamed field |
+| renamed-from, alias undeclared | leaf present | bucketed verbatim — the ADR-0187 fixture gate fails the build until the alias or an upcast exists |
 
 The Option-None and Option-version-skew cases both decode to `None` at the API — sender intent between "explicit None" and "schema didn't have the field" isn't observable. If an author needs that distinction, `Option<Option<T>>` works: `None` for skew, `Some(None)` for explicit None, `Some(Some(T))` for value.
 
@@ -304,7 +287,7 @@ The Option-None and Option-version-skew cases both decode to `None` at the API �
 
 ### Discipline (the strict rules)
 
-1. Once shipped, a field's content hash is determined by its `(name, type)` pair. Changing either produces a new hash; the format treats this as a breaking schema change for that field (old wire data preserves in the unknown bucket; new schema requires migration to surface it via typed access).
+1. Once shipped, a field's content hash is determined by its `(name, type)` pair. Changing the type produces a new hash and is a breaking schema change (old wire data preserves in the unknown bucket; typed access requires migration). Changing the name alone is a breaking change *unless declared* — `#[storage(was = "old_name")]` binds the old hash as a read alias and keeps typed access continuous.
 2. Within a single kind, no two field hashes may collide. The derive cross-checks all current fields' hashes pairwise at compile time; the rare birthday strike between distinct `(name, type)` pairs in one schema fails to compile rather than producing two fields with the same wire id. Author nudges one name to disambiguate.
 3. Reordering source code is free (sort order is canonical).
 4. The `__` prefix is reserved for system-synthesized identifiers — anonymous record names, the `__variant` discriminant leaf, and any future synthesis patterns. User-supplied names — kind names, field names, variant names, explicit anonymous-record overrides — must not begin with `__`. The derive rejects offending names at compile time, so a future synthesis pattern can't silently collide with a user identifier already in the wild.
@@ -312,31 +295,31 @@ The Option-None and Option-version-skew cases both decode to `None` at the API �
 
 ## Consequences
 
-- **Component upgrades survive add/remove/reorder when the changing fields are `Option<T>`.** Reorder is unconditional. Adds and removes require the field to be optional at the type level; required fields are wire-immutable across compat boundaries by design. The compiler catches the discipline lapse: you can't add a required field and have v1 readers silently default it. Pays off ADR-0049 with author-intent visibility instead of silent type-default fallbacks.
-- **Cross-crate shared anonymous types.** Two components declaring the same `Vec3`-shaped record without coordination get the same identity. Useful as the component ecosystem grows.
-- **Third wire shape to maintain.** Encoder, decoder, kind-manifest reader, handle-store walker all gain a TLV path alongside cast and positional. Bounded and parallel to the existing two paths, but real engineering surface.
-- **Hash semantics shift for TLV kinds.** Reorder no longer changes `Kind::ID`. Renames and type changes still do, and the format treats those as breaking schema changes (typed access lost; data preserved verbatim in the bucket; migrate if you care). Today's positional hash stays for cast and positional-postcard kinds.
-- **Storage compat across upgrades is split cleanly.** Add/remove/reorder are wire-tolerated transparently. Renames and type changes are breaking schema changes — old wire data preserves in the unknown bucket, but typed access requires running an explicit migration tool. The wire format ships no remap mechanism; "what's a migration vs what's transparent" is a property of the change kind, knowable from the source diff.
-- **Trait hierarchy fork.** `Kind` becomes bare metadata (`NAME`, `ID`); existing `decode_from_bytes` / `encode_into_bytes` migrate to a new `Mail` subtrait. Existing call sites that constrain `K: Kind` for encode/decode work need to upgrade to `K: Mail`. The runtime `Mail<'a>` type renames to `Envelope<'a>`. Mechanical refactor across `aether-component`, `aether-mail`, `aether-mail-derive`, and the `#[fallback]` signatures; pre-1.0 so the rename is allowed.
+- **Additive schema evolution stops owing upcasts.** Under ADR-0187 alone, every digest change owes an upcast; under this ADR, adds, removes, and reorders of `Option<T>` fields decode transparently, and the upcast obligation narrows to type changes, undeclared renames, and variant-set changes — a property knowable from the source diff. The `MemberView`/`CommissionProjection` append pattern becomes real instead of inert, and the `decisions.v2` class of replay abort (#5338) cannot recur for additive drift.
+- **Declared renames are one attribute.** `#[storage(was = "…")]` keeps typed access across a rename with no wire-side remap table; the ADR-0187 fixture corpus turns an undeclared rename into a failing build instead of silent data loss.
+- **Sealed history is never rewritten.** Adoption applies to newly written rows. Bytes already sealed — signed subjects especially, whose digests are load-bearing — keep their recorded schema digest and decode by the path that digest names. A storage kind's TLV adoption is a new schema digest for new rows, not a migration of old ones.
+- **Cross-crate shared anonymous types.** Two crates declaring the same `Vec3`-shaped record without coordination get the same identity. Useful as the component ecosystem grows.
+- **Third wire shape to maintain.** Encoder, decoder, and every store walker gain a TLV path alongside cast and positional — in `aether-data` / `aether-data-derive`, sharing the ADR-0188 leaf codec so the body spelling has one origin. Bounded and parallel to the existing two paths, but real engineering surface.
+- **Minimal trait churn.** `Kind` is untouched; `Storage` is additive; no call-site migration and no runtime-type rename. The one behavioral edge is deliberate: a `Storage` kind reaching the mail dispatcher fails closed as a strict-receiver miss.
 
 ## Resolved in chat (2026-04-27)
 
 These were Open Questions in earlier drafts; resolutions are folded into the Decision section above. Listed here so the journey is recoverable.
 
-- **Postcard integration** → TLV envelope is hand-written; body reuses existing postcard rules per the field's declared type. No coupling to postcard's experimental schema features; no serializer swap.
+- **Body-format integration** → TLV envelope is hand-written; the body reuses the workspace's own structured encoding per the field's declared type. *Revised 2026-08-26:* originally resolved against postcard; ADR-0118 replaced the body format with `aether_data::wire` and ADR-0188 makes the leaf codec derive-owned — the resolution's shape (envelope hand-written, body borrowed from the ordinary wire) is unchanged.
 - **Removal vs deprecation** → Hard removal allowed. Old payloads with the removed field's hash bucket on new readers; new senders don't emit. The "what if a future field hash-collides with a removed one" footgun is either (a) not a footgun (re-add of identical `(name, type)` is semantically the same field), (b) astronomically improbable (accidental 64-bit collision between distinct `(name, type)` pairs), or (c) author-level "don't reuse names for different concepts" discipline that no wire format can enforce. Deprecation period stays a CI-rule concern if anyone wants it; not a wire-format requirement.
-- **Which kinds use TLV** → Opt-in per kind via `#[derive(Storage)]` (vs `#[derive(Mail)]` for the live wire). The trait split (`Storage: Kind`, `Mail: Kind`) makes the choice a type-system property and prevents cross-decoding.
+- **Which kinds use TLV** → Opt-in per kind via `#[derive(Storage)]` (vs the ordinary `#[derive(Kind)]` for the live wire). *Revised 2026-08-26:* the draft's `Mail` subtrait fork is gone; disjointness now rests on the `Storage` derive emitting no positional codec, so cross-decoding fails closed at dispatch.
 - **Cast + TLV interaction** → `Storage` is TLV-only; `#[repr(C)]` on a `Storage` type is a derive-time error. The trait fork makes the question moot at the type level.
 - **Field-hash collision policy** → Stay at 64-bit FNV-1a across all id spaces (`Kind::ID`, `MailboxId`, field hashes, variant hashes). Derive-time within-kind collision check on the current field set surfaces the rare birthday strike as a compile error. At realistic ecosystem scope (10⁴–10⁵ cumulative ids), P(collision) stays below ~3 × 10⁻¹⁰; the 128-bit defense was rejected because the FFI cost (every wasm host fn carrying ids splits into pairs of i64; every wire structure widens) outweighs insurance against an event that effectively never happens. Issue [#320](https://github.com/iamacoffeepot/aether/issues/320) tracks the trigger conditions and migration shape if the ecosystem ever grows past ~10⁷ ids and a switch becomes warranted.
-- **Composition with the version-graph idea** → Dropped. TLV envelopes + flattening cover add/remove/reorder transparently at the wire layer; no cross-kind migration edges or graph traversal at decode. The residual cases (renames, type changes) are breaking schema changes — old wire data preserves in the unknown-fields bucket; authors who need typed access to that data run an explicit migration tool (read old storage, decode the bucket entry into the new field, re-encode under the new schema). Migration is outside the wire format's responsibility.
+- **Composition with the version-graph idea** → Dropped. TLV envelopes + flattening cover add/remove/reorder transparently at the wire layer; no cross-kind migration edges or graph traversal at decode. The residual cases (type changes, undeclared renames, variant-set changes) are breaking schema changes — old wire data preserves in the unknown-fields bucket; authors who need typed access to that data run an explicit migration tool (read old storage, decode the bucket entry into the new field, re-encode under the new schema). Migration is outside the wire format's responsibility.
 - **Manifest format** → No new section. Field/variant hashes are derived at load time by walking the labeled schema in `aether.kinds` + `aether.kinds.labels`; reserved-hash sets and remap dictionaries were dropped (renames are breaking; reserved-hash tracking solves a non-problem). Strict mode rides on the trait as `Storage::STRICT: bool`, set by `#[storage(strict)]` — no wire-side surface for it.
-- **Variant rename mechanics** → Dropped along with field renames. Variant renames are breaking schema changes; old wire data buckets; typed access requires migration. No remap, no per-leaf synthesis question.
-- **Migration of existing stored payloads** → N/A. The handle store (ADR-0049) is itself unshipped — there are no existing stored payloads to migrate. TLV is the wire format storage starts with. If a future durable backend (save files via ADR-0041, etc.) gets retrofitted onto pre-existing data, that backend's adoption gets its own one-time migration story at that time.
+- **Variant rename mechanics** → Variant renames stay breaking schema changes; old wire data buckets; typed access requires migration. *Revised 2026-08-26:* field renames left this bucket — `#[storage(was = "…")]` declares them — but the alias does not extend to variants in v1.
+- **Migration of existing stored payloads** → *Revised 2026-08-26:* the first consumer's rows already exist (the coordinator's journal views and projections, positional today). They are not migrated: sealed bytes keep their recorded schema digest (ADR-0187) and their positional decode path; TLV is the shape of newly written rows. A future durable backend retrofitted onto pre-existing data gets its own one-time migration story at adoption time.
 - **Adding an enum variant** → Strict for v1. Unknown `__variant` hash on the wire is a decode error; adding a variant is a breaking schema change, same migration story as field/variant renames and type changes. Tolerant mode (bucket the whole enum field as raw bytes) was rejected because Rust enums lack a sentinel arm — the typed API would have to surface "this enum had an unknown variant" through every consumer, a significant ergonomic cost for a forward-compat property that's rarely needed in single-org schema evolution. Revisit if a forcing function appears (third-party kinds with independent variant evolution, ecosystem-wide enum-evolution coordination pain).
 
 ## Open questions
 
-None remaining as of 2026-04-27. All initial brainstorm questions are folded into the Decision section above with their resolutions captured in *Resolved in chat*. Subsequent questions raised during implementation accumulate here.
+None remaining as of the 2026-08-26 revision. The 2026-04 brainstorm questions are folded into the Decision section with their resolutions captured in *Resolved in chat*; the revision resolved the remaining drift against ADR-0118/0187/0188 and the coordinator-persistence consumer. Questions raised during implementation accumulate here.
 
 ## Alternatives considered
 

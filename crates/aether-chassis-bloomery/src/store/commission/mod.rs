@@ -11,11 +11,13 @@ use std::fmt;
 use aether_bloomery::{
     AuthorityDoor, BloomId, CommissionApprovalTier, CommissionProjection, CommissionStatementRole, CommissionStatus,
     CommissionValueError, Digest, KeyProvider, Observation, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision,
-    ScopeVerifyInput, ScopeVerifyReport, Statement, Topic, WorkpieceId, digest_of, intent_title, verify_scope,
+    ScopeVerifyReport, Statement, Topic, WorkpieceId, decode_row, digest_of, encode_row, intent_title, verify_scope,
 };
+use aether_data::Kind;
+
+pub use aether_bloomery::RevisionEvidence;
 use aether_data::wire::{from_bytes, to_vec};
 use rusqlite::{Connection, OptionalExtension, Transaction};
-use serde::{Deserialize, Serialize};
 
 use super::SqliteStore;
 use super::membership;
@@ -324,39 +326,6 @@ pub struct CommissionView {
     pub current_unreadable: Option<CommissionValueError>,
 }
 
-/// What is known about a revision without being part of it.
-///
-/// The revision's own bytes are the signed subject; nothing here is hashed
-/// into them. Today's only field is the freeze-check projection (ADR-0208);
-/// the next slice adds a field here rather than a parameter to the write.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RevisionEvidence {
-    /// The workpiece's field records projected for the freeze check.
-    /// `None` for a hand-authored revision, which writes no report.
-    #[serde(default)]
-    pub scope_verify: Option<ScopeVerifyInput>,
-}
-
-impl RevisionEvidence {
-    /// Canonical aether-wire bytes of this sidecar.
-    ///
-    /// # Panics
-    /// Panics if the value exceeds the ADR-0118 `u32` wire-length ceiling,
-    /// which no revision sidecar does.
-    #[must_use]
-    pub fn encode(&self) -> Vec<u8> {
-        to_vec(self).expect("revision evidence never exceeds the ADR-0118 u32 wire-length ceiling")
-    }
-
-    /// Decode sidecar bytes.
-    ///
-    /// # Errors
-    /// [`CommissionError::MalformedCanonical`] when the bytes are not this type.
-    pub fn decode(bytes: &[u8]) -> Result<Self, CommissionError> {
-        from_bytes(bytes).map_err(|_| CommissionError::MalformedCanonical)
-    }
-}
-
 /// Authoring and query transactions for signed commissions.
 ///
 /// Separate from the journal [`StoreBackend`](super::StoreBackend) so that
@@ -558,6 +527,15 @@ impl SqliteStore {
     /// The report journaled for `revision`, or `None` when none was written.
     pub fn load_scope_verify_report(&self, revision: Digest) -> Result<Option<ScopeVerifyReport>, CommissionError> {
         load_scope_verify_report(&self.conn, revision)
+    }
+
+    /// The words of the stored statement at `digest`, decoded from the exact
+    /// bytes written — for the intent statement, the commission's sketch text.
+    ///
+    /// # Errors
+    /// A store fault, or canonical bytes that no longer decode as a statement.
+    pub fn load_statement_words(&self, digest: Digest) -> Result<Option<Vec<u8>>, CommissionError> {
+        Ok(load_statement(&self.conn, digest)?.map(|statement| statement.words))
     }
 }
 
@@ -869,8 +847,8 @@ fn load_projection(conn: &Connection, id: &WorkpieceId) -> Result<Option<u64>, C
 fn enqueue_projection(txn: &Transaction<'_>, id: &str) -> Result<(), CommissionError> {
     let payload = snapshot_projection(txn, id)?;
     txn.execute(
-        "INSERT INTO outbox (topic, payload) VALUES (?1, ?2)",
-        rusqlite::params![Topic::Commission.as_str(), payload],
+        "INSERT INTO outbox (topic, payload, payload_schema) VALUES (?1, ?2, ?3)",
+        rusqlite::params![Topic::Commission.as_str(), payload, CommissionProjection::NAME],
     )?;
     Ok(())
 }
@@ -888,16 +866,19 @@ fn snapshot_projection(conn: &Connection, id: &str) -> Result<Vec<u8>, Commissio
     // the head is an index, and a title recomputed from the bytes cannot drift
     // from the intent the commission was created with.
     let title = load_statement(conn, head.intent)?.and_then(|intent| intent_title(&intent.words)).unwrap_or_default();
-    to_vec(&CommissionProjection {
-        workpiece: head.id,
-        intent: head.intent,
-        scope_revision: head.current_revision,
-        approval_signer,
-        approval_digest,
-        status: head.status.as_str().to_owned(),
-        recorded_issue,
-        title,
-    })
+    encode_row(
+        &CommissionProjection {
+            workpiece: head.id,
+            intent: head.intent,
+            scope_revision: head.current_revision,
+            approval_signer,
+            approval_digest,
+            status: head.status.as_str().to_owned(),
+            recorded_issue,
+            title,
+        },
+        Some(CommissionProjection::NAME),
+    )
     .map_err(|error| CommissionError::Store(error.to_string()))
 }
 
@@ -939,8 +920,8 @@ fn load_recorded_issue(conn: &Connection, id: &str) -> Result<Option<u64>, Commi
 /// Overlay the store's recorded replica-issue number onto a drained
 /// commission payload. The outbox row is a frozen snapshot; this table is
 /// the create-vs-update authority for a later entry of the same commission.
-pub fn overlay_recorded_projection(conn: &Connection, payload: &mut Vec<u8>) {
-    let Ok(mut document) = from_bytes::<CommissionProjection>(payload) else {
+pub fn overlay_recorded_projection(conn: &Connection, payload: &mut Vec<u8>, schema: Option<&str>) {
+    let Ok(mut document) = decode_row::<CommissionProjection>(payload, schema) else {
         return;
     };
     let Ok(Some(number)) = load_recorded_issue(conn, &document.workpiece.0) else {
@@ -950,7 +931,7 @@ pub fn overlay_recorded_projection(conn: &Connection, payload: &mut Vec<u8>) {
         return;
     }
     document.recorded_issue = Some(number);
-    if let Ok(bytes) = to_vec(&document) {
+    if let Ok(bytes) = encode_row(&document, schema) {
         *payload = bytes;
     }
 }
@@ -1040,6 +1021,17 @@ fn load_approvals(conn: &Connection, scope: Digest) -> Result<Vec<Statement>, Co
         approvals.push(statement);
     }
     Ok(approvals)
+}
+
+/// Whether `workpiece`'s commission is landed or cancelled. A missing row
+/// reads as live, matching the janitor's "unknown is not eligible" posture.
+pub fn commission_is_resolved(conn: &Connection, workpiece: &str) -> rusqlite::Result<bool> {
+    let status: Option<String> =
+        conn.query_row("SELECT status FROM commissions WHERE id = ?1", [workpiece], |row| row.get(0)).optional()?;
+    Ok(matches!(
+        status.as_deref().and_then(CommissionStatus::parse),
+        Some(CommissionStatus::Landed | CommissionStatus::Cancelled)
+    ))
 }
 
 fn list_commissions(

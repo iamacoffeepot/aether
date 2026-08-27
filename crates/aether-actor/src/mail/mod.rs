@@ -16,6 +16,7 @@
 //! the inherent methods on `aether_substrate::actor::native::binding::NativeBinding`
 //! (native).
 
+use alloc::vec::Vec;
 use core::slice;
 use serde::de::DeserializeOwned;
 pub mod mailbox;
@@ -107,6 +108,18 @@ impl Schema for ReplyHandle {
     const SCHEMA: SchemaType = <u32 as Schema>::SCHEMA;
     const LABEL: Option<&'static str> = <u32 as Schema>::LABEL;
     const LABEL_NODE: LabelNode = <u32 as Schema>::LABEL_NODE;
+}
+
+impl wire::WireEncode for ReplyHandle {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), wire::Error> {
+        wire::WireEncode::encode(&self.raw, out)
+    }
+}
+
+impl<'de> wire::WireDecode<'de> for ReplyHandle {
+    fn decode(cursor: &mut &'de [u8]) -> Result<Self, wire::Error> {
+        wire::WireDecode::decode(cursor).map(|raw| Self { raw })
+    }
 }
 
 /// Inbound mail, as received by the `#[actor]`-synthesized

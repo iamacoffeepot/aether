@@ -37,7 +37,7 @@ pub use oracle::{Oracle, Violation, is_answerable};
 pub use scenario::{LaneScript, MemberSpec, OperatorMove, Scenario, Supersede};
 pub use support::client;
 pub use support::correspondence::MapCorrespondence;
-pub use support::process::{Coordinator, free_port};
+pub use support::process::{Coordinator, Ingress, free_port};
 pub use support::repo::Repo;
 pub use support::wire::{Wire, control_mailbox};
 

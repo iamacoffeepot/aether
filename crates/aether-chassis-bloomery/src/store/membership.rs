@@ -15,8 +15,7 @@
 
 use std::collections::BTreeSet;
 
-use aether_bloomery::{BloomId, Event, Snapshot, WorkpieceId, decode_recorded_decisions};
-use aether_data::wire::from_bytes;
+use aether_bloomery::{BloomId, Snapshot, WorkpieceId, decode_recorded_decisions, decode_recorded_event};
 
 use super::runtime::{StoreBackend, resolved_configs};
 
@@ -35,7 +34,7 @@ pub fn replay_snapshot(store: &mut dyn StoreBackend) -> rusqlite::Result<Snapsho
     let configs = resolved_configs(store)?;
     let mut snapshot = Snapshot::default();
     for record in store.replay_journal()? {
-        let Ok(event) = from_bytes::<Event>(&record.event) else {
+        let Ok(event) = decode_recorded_event(&record.event, record.event_schema.as_deref()) else {
             tracing::warn!(
                 target: "aether_chassis_bloomery::store",
                 sequence = record.sequence,
@@ -43,7 +42,8 @@ pub fn replay_snapshot(store: &mut dyn StoreBackend) -> rusqlite::Result<Snapsho
             );
             continue;
         };
-        let Ok(decisions) = decode_recorded_decisions(&record.decisions, record.decisions_schema.as_deref()) else {
+        let Ok(decisions) = decode_recorded_decisions(&record.decisions, record.decisions_schema_digest.as_deref())
+        else {
             tracing::warn!(
                 target: "aether_chassis_bloomery::store",
                 sequence = record.sequence,

@@ -40,7 +40,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 
 use super::client::{Client, bloom_in};
-use super::dto::{BloomSpec, BloomView, CommissionShowView, DigestHex, MemberView, ScopeRevisionView};
+use super::dto::{BloomSpec, BloomView, CommissionShowView, DigestHex, MemberView};
 use super::{plan, render_outcome};
 
 use request::Requested;
@@ -117,7 +117,7 @@ struct AmendPlan {
     /// The commission tip, which the successor seals against when the widened
     /// surface turns out to be what the tip already declares.
     tip: DigestHex,
-    current: ScopeRevisionView,
+    current: ScopeRevision,
     commission: CommissionShowView,
     requested: Requested,
     /// Requested paths the policy does not name, and the glob each is admitted
@@ -143,7 +143,7 @@ impl AmendPlan {
     /// carries has to drop the file-granular spelling — appending the covering
     /// glob beside it would leave the entry the seal door refuses on.
     fn widened_revision(&self) -> ScopeRevision {
-        let current = self.current.to_revision();
+        let current = self.current.clone();
         ScopeRevision { predecessor: Some(digest_of(&current)), declared_surface: self.widened.clone(), ..current }
     }
 }
@@ -244,7 +244,7 @@ fn preflight(client: &Client<'_>, args: &AmendArgs, policy_file: &Path) -> Resul
         workpiece: args.workpiece.clone(),
         spec,
         withdrawn: withdrawn(bloom),
-        tip,
+        tip: tip.into(),
         current,
         commission,
         requested,
@@ -277,7 +277,7 @@ fn granularity_holds(policy: &ApprovalPolicy, workpiece: &str, surface: &[String
 
 /// The predecessor members the day withdrew.
 fn withdrawn(bloom: &BloomView) -> Vec<String> {
-    bloom.members.iter().filter(|member| member.withdrawn.is_some()).map(|member| member.workpiece.clone()).collect()
+    bloom.members.iter().filter(|member| member.withdrawn.is_some()).map(|member| member.workpiece.0.clone()).collect()
 }
 
 /// P4: every sibling must be at its own commission tip and carry an approval.
@@ -287,7 +287,7 @@ fn withdrawn(bloom: &BloomView) -> Vec<String> {
 /// operator's key has already signed and the commission tip has already moved.
 fn siblings_are_sealable(client: &Client<'_>, bloom: &BloomView, amended: &str) -> Result<()> {
     for member in siblings(bloom, amended) {
-        sibling_is_sealable(member, &client.commission(&member.workpiece)?)?;
+        sibling_is_sealable(member, &client.commission(&member.workpiece.0)?)?;
     }
     Ok(())
 }
@@ -342,7 +342,12 @@ enum TipStanding {
 /// surface — a tip declaring exactly what this amendment would write is this
 /// command's own half-finished work, and anything else is a scope somebody
 /// moved for a reason this command cannot see.
-fn tip_standing(tip: DigestHex, sealed: DigestHex, tip_surface: &[String], widened: &[String]) -> TipStanding {
+fn tip_standing(
+    tip: aether_bloomery::Digest,
+    sealed: aether_bloomery::Digest,
+    tip_surface: &[String],
+    widened: &[String],
+) -> TipStanding {
     if tip == sealed {
         TipStanding::Sealed
     } else if tip_surface == widened {
@@ -361,12 +366,12 @@ fn overlaps(
 ) -> Result<Vec<(String, Vec<String>)>> {
     let mut found = Vec::new();
     for member in siblings(bloom, amended) {
-        let Some(sibling) = client.commission(&member.workpiece)?.current else {
+        let Some(sibling) = client.commission(&member.workpiece.0)?.current else {
             continue;
         };
         let shared = surface_intersection(widened, &sibling.declared_surface);
         if !shared.is_empty() {
-            found.push((member.workpiece.clone(), shared));
+            found.push((member.workpiece.0.clone(), shared));
         }
     }
     Ok(found)
@@ -379,10 +384,10 @@ fn supersede(client: &Client<'_>, args: &AmendArgs, plan: &AmendPlan, scope: Dig
     let view = client.view()?;
     let base = plan::resolve_base(&args.base, &view);
 
-    let mut patch = plan::successor_patch(&plan.spec, base, plan.spec.configs.clone());
+    let mut patch = plan::successor_patch(&plan.spec, base, plan.spec.configs().clone());
     let proposals = patch.proposals.get_or_insert_with(Vec::new);
-    proposals.retain(|member| !plan.withdrawn.contains(&member.workpiece));
-    plan::pin_revisions(proposals, &[(plan.workpiece.clone(), scope)])?;
+    proposals.retain(|member| !plan.withdrawn.iter().any(|named| member.workpiece == *named));
+    plan::pin_revisions(proposals, &[(plan.workpiece.clone(), scope.digest())])?;
 
     let draft = client.open_draft()?;
     client.patch_draft(&draft.draft_id, &patch)?;

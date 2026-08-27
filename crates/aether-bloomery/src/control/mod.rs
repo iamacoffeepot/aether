@@ -65,6 +65,10 @@ pub struct OutboxPayload {
     /// The opaque payload bytes to republish.
     #[serde(with = "aether_data::bytes")]
     pub payload: Vec<u8>,
+    /// The writing-schema identity stamped beside the payload. `None` is the
+    /// pre-adoption positional identity; adopted topics write their current
+    /// identity in the same transaction as the bytes.
+    pub payload_schema: Option<String>,
 }
 
 impl OutboxPayload {
@@ -75,7 +79,13 @@ impl OutboxPayload {
     /// so a producer call site cannot spell an arbitrary topic string.
     #[must_use]
     pub fn new(topic: Topic, payload: Vec<u8>) -> Self {
-        Self { topic: topic.as_str().to_owned(), payload }
+        Self { topic: topic.as_str().to_owned(), payload, payload_schema: None }
+    }
+
+    /// Build an outbox entry whose payload was encoded under `payload_schema`.
+    #[must_use]
+    pub fn stamped(topic: Topic, payload: Vec<u8>, payload_schema: &'static str) -> Self {
+        Self { topic: topic.as_str().to_owned(), payload, payload_schema: Some(payload_schema.to_owned()) }
     }
 }
 
@@ -867,6 +877,14 @@ pub struct JournalRecord {
     /// optional so prior replay replies still decode.
     #[serde(default)]
     pub recorded_unix_millis: Option<u64>,
+    /// Digest of the schema that wrote [`event`](Self::event) (ADR-0187).
+    /// `None` is a pre-column row: implicit current-at-migration.
+    #[serde(default)]
+    pub event_schema: Option<Vec<u8>>,
+    /// Digest of the schema that wrote [`decisions`](Self::decisions)
+    /// (ADR-0187). `None` is a pre-column row: implicit v1.
+    #[serde(default)]
+    pub decisions_schema_digest: Option<Vec<u8>>,
 }
 
 /// Reply to [`ReplayJournal`].
@@ -910,6 +928,10 @@ pub struct ConfigRecord {
     /// The configuration's canonical `aether_data::wire` bytes.
     #[serde(with = "aether_data::bytes")]
     pub bytes: Vec<u8>,
+    /// Digest of the schema that wrote [`bytes`](Self::bytes) (ADR-0187).
+    /// `None` is a pre-column row: implicit current-at-migration.
+    #[serde(default)]
+    pub schema_digest: Option<Vec<u8>>,
 }
 
 /// Reply to [`LoadConfigs`].
