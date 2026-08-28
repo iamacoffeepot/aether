@@ -5,23 +5,25 @@
 //! state, ctx types, artifact/fleet helpers, and result kinds through the
 //! single `use runtime::*` glob in the parent.
 
+use super::config::RestartPolicy;
+use super::restart::schedule_restart;
 use super::{FleetConfig, FleetServer};
 use crate::child_env::isolate_child_environment;
 pub use crate::kinds::ForwardEnvelope;
-use crate::kinds::{EngineAlive, EngineDied};
+use crate::kinds::{EngineAlive, EngineDied, EngineRestartDue};
 pub use crate::proxy::{FleetProxy, FleetProxyConfig, HeartbeatParams, is_reforkable_spawn_failure};
 pub use crate::store::{ArtifactStore, LAYOUT_VERSION_DIR};
-pub use aether_actor::Manual;
 use aether_actor::runtime;
+pub use aether_actor::{Manual, Single};
 pub use aether_data::{EngineId, Kind, MailboxId, Uuid};
+use aether_kinds::{
+    BinarySelector, ListComponentBinaries, ListEngineBinaries, ListEngines, ResolveComponent, SpawnEngine,
+    TerminateEngine, UploadBinary, UploadComponent,
+};
 pub use aether_kinds::{
     DeadEngineDescriptor, DeathReason, EngineDescriptor, ListComponentBinariesResult, ListEngineBinariesResult,
     ListEnginesResult, ResolveComponentResult, SpawnEngineResult, TerminateEngineResult, UploadBinaryResult,
     UploadComponentResult,
-};
-use aether_kinds::{
-    ListComponentBinaries, ListEngineBinaries, ListEngines, ResolveComponent, SpawnEngine, TerminateEngine,
-    UploadBinary, UploadComponent,
 };
 use aether_rpc::RouteEnvelope;
 pub use aether_substrate::Mail;
@@ -34,8 +36,8 @@ pub use aether_substrate::mail::SourceAddr;
 pub use aether_substrate::mail::mailer::Mailer;
 pub use std::collections::HashMap;
 pub use std::collections::VecDeque;
-pub use std::path::PathBuf;
-pub use std::process::{Command, Stdio};
+pub use std::path::{Path, PathBuf};
+pub use std::process::{Child, Command, Stdio};
 pub use std::sync::Arc;
 pub use std::time::{Duration, Instant};
 
@@ -65,6 +67,139 @@ pub struct DeadRecord {
     pub died_at: Instant,
 }
 
+/// Everything needed to fork one substrate again exactly as it was
+/// forked the first time.
+///
+/// Retained on a supervised engine so an automatic restart re-runs the
+/// original recipe rather than a reconstruction of it. The selector is
+/// kept **resolved**, as the content hash `resolve_selector` returned —
+/// not the caller's `BinarySelector`. A bare name or attribute query
+/// resolves against whatever the store holds *now*, so replaying it could
+/// silently restart a crashed engine onto a different binary than the one
+/// that crashed; the hash cannot. The hash is still re-resolved at
+/// restart time, because the store's LRU may have evicted it since.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpawnRecipe {
+    /// Content hash of the binary this engine was forked from.
+    pub hash: String,
+    /// The caller's per-spawn argv, forwarded verbatim ahead of the
+    /// hub's own injections.
+    pub args: Vec<String>,
+    /// Boot-manifest path, when the spawn carried a component list.
+    pub boot_manifest: Option<String>,
+}
+
+/// Restart bookkeeping for one engine *lineage* — the chain of engine
+/// ids a repeatedly-restarted engine passes through.
+///
+/// A restarted engine gets a fresh id (identity continuity across a
+/// restart is deliberately out of scope), so a burst budget keyed on
+/// engine id would reset on every restart and never bind. Carrying the
+/// ledger forward through the successor's spawn context is what makes
+/// the limit hold across the whole lineage.
+#[derive(Clone, Debug)]
+pub struct Supervision {
+    /// How to fork this engine again.
+    pub recipe: SpawnRecipe,
+    /// When each automatic restart of this lineage was admitted,
+    /// oldest first. Entries are pruned as they age out of the policy
+    /// window, so the length is the budget spent right now.
+    pub restarts: VecDeque<Instant>,
+}
+
+impl Supervision {
+    /// Open a ledger for an engine spawned by request. A spawn the
+    /// operator asked for is not a restart, so the budget starts full.
+    pub fn new(recipe: SpawnRecipe) -> Self {
+        Self { recipe, restarts: VecDeque::new() }
+    }
+
+    /// Admit one restart against the burst budget, reporting whether it
+    /// may proceed. Ages spent restarts out of the window first, so a
+    /// lineage that crashes rarely is always recovered while one
+    /// crash-looping exhausts its budget and stays dead.
+    ///
+    /// Charges the budget only when it admits: a refusal must not push
+    /// the window forward, or a caller that kept asking would hold the
+    /// engine down indefinitely past the point the window had cleared.
+    pub fn admit_restart(&mut self, policy: RestartPolicy, now: Instant) -> bool {
+        while self.restarts.front().is_some_and(|at| now.duration_since(*at) >= policy.burst_window) {
+            self.restarts.pop_front();
+        }
+
+        let admitted = self.restarts.len() < policy.burst_limit as usize;
+        if admitted {
+            self.restarts.push_back(now);
+        }
+        admitted
+    }
+}
+
+/// Whether a [`DeathReason`] is one automatic restart supervision acts
+/// on.
+///
+/// `Terminated` never is: the operator asked for that engine to be gone,
+/// and an engines cap that forked it straight back would make
+/// `terminate_substrate` unable to do the one thing it exists for.
+/// `SpawnFailed` never is either — it names a spawn that failed, so
+/// there is no supervised engine to recover and `on_spawn`'s own bounded
+/// re-fork already owns that retry.
+pub fn restart_applies_to(reason: &DeathReason) -> bool {
+    matches!(reason, DeathReason::Crashed { .. } | DeathReason::Evicted { .. })
+}
+
+/// The complete argv tail a substrate is forked with, for one recipe on
+/// one port.
+///
+/// argv is the machine channel (ADR-0162: config is addressed via argv,
+/// never ambient env). The caller's per-spawn `args` go first, then the
+/// hub's own injections as the child's derive-emitted overlay flags
+/// (ADR-0156): `--rpc-port` assigns the substrate's RPC bind port, and a
+/// spawn carrying a component list rides `--boot-manifest` so the chassis
+/// reads the listed wasm itself (issue 1776). A binary lacking these
+/// flags fails at spawn.
+///
+/// Built here rather than inline at the fork so the requested-spawn and
+/// restart paths provably construct the same command line — the drift
+/// this exists to prevent is a restart that quietly loses the caller's
+/// args or its boot manifest.
+pub fn spawn_args(recipe: &SpawnRecipe, rpc_port: u16) -> Vec<String> {
+    let mut args = recipe.args.clone();
+    args.push("--rpc-port".to_owned());
+    args.push(rpc_port.to_string());
+    if let Some(boot_manifest) = &recipe.boot_manifest {
+        args.push("--boot-manifest".to_owned());
+        args.push(boot_manifest.clone());
+    }
+    args
+}
+
+/// The exact-hash selector a restart re-resolves its recipe through.
+/// `resolve_selector` tries `Selector::Hash` before any name or attribute
+/// interpretation, so a content hash can only ever resolve to the content
+/// it names.
+fn hash_selector(hash: &str) -> BinarySelector {
+    BinarySelector { query: Some(hash.to_owned()), chassis: None, caps: Vec::new(), target: None }
+}
+
+/// Fork the substrate into its own process group, so the proxy that owns
+/// it can signal the whole group at teardown.
+///
+/// Without this the substrate shares the hub's group, and anything the
+/// substrate forks is reachable only through the substrate's own
+/// shutdown — a wedged or killed substrate would orphan its children onto
+/// init. On non-unix there are no process groups to leave and the bare
+/// kill is already the whole subtree.
+fn set_own_process_group(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(not(unix))]
+    let _ = command;
+}
+
 /// One supervised engine in [`FleetServerState`]'s table.
 pub struct EngineEntry {
     /// Mailbox of the `aether.fleet.proxy:<id>` actor — the
@@ -77,6 +212,13 @@ pub struct EngineEntry {
     /// `EngineAlive` the proxy reports from a confirmed `Pong`.
     /// `on_list` reports `now - last_alive` as the heartbeat age.
     pub last_alive: Instant,
+    /// The recipe to re-fork this engine from, plus the restart budget
+    /// its lineage has already spent. Retained whether or not restart
+    /// supervision is armed — the cost is one small struct per engine,
+    /// and carrying it unconditionally keeps the spawn path free of a
+    /// policy branch that would otherwise decide, at fork time, whether
+    /// a later recovery is even possible.
+    pub supervision: Supervision,
 }
 
 /// Actor-local bookkeeping for a proxy whose initialized state has been
@@ -100,6 +242,52 @@ pub struct PendingEngine {
 pub struct FleetSpawnContext {
     pub engine_id: EngineId,
     pub rpc_port: u16,
+    /// The recipe + restart ledger to install on the engine this birth
+    /// commits. For a restart this is the dead engine's ledger carried
+    /// forward, which is what makes the burst limit bind across a
+    /// lineage whose engine id changes on every restart.
+    pub supervision: Supervision,
+    /// Who ordered this birth. Decides only what its completion owes:
+    /// a requested spawn owes the caller a `SpawnEngineResult`, a
+    /// restart owes nobody and must discharge without replying.
+    pub origin: SpawnOrigin,
+}
+
+/// What ordered a proxy birth.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SpawnOrigin {
+    /// A `SpawnEngine` from a caller who is waiting on the reply.
+    Requested,
+    /// Automatic restart supervision re-forking a dead engine. There is
+    /// no deferred reply behind it, so its completion releases the
+    /// settlement hold without sending one.
+    Restarted,
+}
+
+/// One prepared-but-not-yet-supervised substrate: the port reserved, the
+/// id minted, the binary realized, and the process forked. Both the
+/// requested-spawn and the restart path build this the same way through
+/// [`FleetServerState::prepare_fork`], so neither can drift from the
+/// other on argv, environment, or process-group construction.
+pub struct PreparedFork {
+    pub engine_id: EngineId,
+    pub rpc_port: u16,
+    pub rpc_addr: String,
+    pub child: Child,
+}
+
+/// Why a [`FleetServerState::prepare_fork`] did not produce a child.
+///
+/// The split is about what the caller owes, not about severity: a
+/// failure before an engine id was minted has nothing to correlate or
+/// reap, while one after leaves an id that must reach the caller and the
+/// recently-died ring (issue 2423).
+pub enum PrepareFailure {
+    /// Failed before minting an engine id — nothing to record.
+    PreAllocation(String),
+    /// Failed after minting `engine_id`, so the caller records a
+    /// `SpawnFailed` death against it and hands the id back.
+    PostAllocation { engine_id: EngineId, rpc_port: u16, error: String },
 }
 
 pub enum ProxySpawnOutcome {
@@ -110,7 +298,11 @@ pub enum ProxySpawnOutcome {
 pub enum EngineDeathDisposition {
     PendingLatched,
     PendingDuplicate,
-    LiveRemoved,
+    /// The engine was supervised and has been evicted and recorded. Its
+    /// retained [`Supervision`] rides out so the caller can decide
+    /// whether to restart the lineage — the entry itself is gone, so
+    /// this is the only remaining copy of the recipe.
+    LiveRemoved(Box<Supervision>),
     Unknown,
 }
 
@@ -174,6 +366,20 @@ pub struct FleetServerState {
     /// hub child); the spawn cutover (#1954) reads it back through the
     /// store's `get` seam.
     pub store: ArtifactStore,
+    /// This cap's own mailbox, retained so a restart-backoff timer has
+    /// somewhere to fire its [`EngineRestartDue`] wake.
+    pub self_mailbox: MailboxId,
+    /// The automatic-restart policy, or `None` when a dead engine stays
+    /// dead. Resolved once from `FleetConfig` at init.
+    pub restart_policy: Option<RestartPolicy>,
+    /// Restarts whose backoff is still running, keyed by the token their
+    /// timer will fire back. Holding the recipe here rather than on the
+    /// timer keeps [`EngineRestartDue`] a bare alarm — see
+    /// [`super::restart`].
+    pub pending_restarts: HashMap<u64, Supervision>,
+    /// Monotonic source of restart tokens. Process-local and never
+    /// externally addressable, so a plain counter is enough.
+    pub next_restart_token: u64,
 }
 
 impl FleetServerState {
@@ -196,6 +402,197 @@ impl FleetServerState {
         SpawnEngineResult::Err { engine_id: Some(engine_id.0.to_string()), error }
     }
 
+    /// Decide whether a just-evicted engine should be restarted, and if
+    /// so file its recipe and start the backoff timer.
+    ///
+    /// The death is already recorded by the time this runs, so every exit
+    /// here is a complete, honest outcome — a refusal leaves exactly the
+    /// state the cap had before restart supervision existed.
+    ///
+    /// Returns whether a restart was scheduled, so a caller (and a test)
+    /// can distinguish "declined" from "under way" without inspecting the
+    /// timer.
+    pub fn consider_restart(&mut self, engine_id: &str, reason: &DeathReason, mut supervision: Supervision) -> bool {
+        let Some(policy) = self.restart_policy else {
+            return false;
+        };
+        if !restart_applies_to(reason) {
+            return false;
+        }
+
+        if !supervision.admit_restart(policy, Instant::now()) {
+            // Loud, not quiet: an engine the cap has given up on is an
+            // operator-visible event, and the burst numbers are what
+            // explain why recovery stopped.
+            tracing::error!(
+                target: "aether_substrate::fleet_server",
+                engine_id = %engine_id,
+                reason = ?reason,
+                burst_limit = policy.burst_limit,
+                burst_window_secs = policy.burst_window.as_secs(),
+                "engine restart: burst limit exhausted; giving up on this engine",
+            );
+            return false;
+        }
+
+        let token = self.next_restart_token;
+        self.next_restart_token += 1;
+        self.pending_restarts.insert(token, supervision);
+        tracing::warn!(
+            target: "aether_substrate::fleet_server",
+            engine_id = %engine_id,
+            reason = ?reason,
+            backoff_millis = u64::try_from(policy.backoff.as_millis()).unwrap_or(u64::MAX),
+            "engine restart: scheduling a re-fork after the backoff",
+        );
+        schedule_restart(&self.mailer, self.self_mailbox, token, policy.backoff);
+        true
+    }
+
+    /// Reserve a port, mint an engine id, realize the binary, and fork it
+    /// — everything a substrate needs before a proxy can be pointed at
+    /// it, and nothing about who is waiting for the result.
+    ///
+    /// The one fork site. `on_spawn` and the restart path differ only in
+    /// what they owe their caller and how they stage the proxy; routing
+    /// both through here is what keeps a restarted engine's argv,
+    /// environment, and process group identical to the spawn it is
+    /// recovering rather than a second implementation that drifts.
+    fn prepare_fork(&mut self, exec_source: &Path, recipe: &SpawnRecipe) -> Result<PreparedFork, PrepareFailure> {
+        let rpc_port = free_local_port()
+            .map_err(|e| PrepareFailure::PreAllocation(format!("could not allocate an RPC port: {e}")))?;
+
+        let engine_id = EngineId(Uuid::from_u128(self.next_engine_seq));
+        self.next_engine_seq += 1;
+        let post = |error| PrepareFailure::PostAllocation { engine_id, rpc_port, error };
+
+        // Stored bytes are content-addressed and not directly
+        // fork-exec'able, so materialize the resolved entry to an
+        // executable temp file under this engine's own scratch dir and
+        // fork that (ADR-0115 §Execution); the caller never sees the path.
+        let exec_path = self.fleet_store_root.join(engine_id.0.simple().to_string()).join("substrate");
+        realize_executable(exec_source, &exec_path)
+            .map_err(|e| post(format!("materializing binary {} to {}: {e}", recipe.hash, exec_path.display())))?;
+
+        let mut command = Command::new(&exec_path);
+        command.stdin(Stdio::null());
+        // ADR-0162: a spawned engine's environment is constructed, never
+        // inherited. Clear it and copy only the platform/third-party
+        // allowlist (locale, proxy, driver vars, `PATH` / `HOME`, …); no
+        // `AETHER_*` key survives, so aether config can't ride the ambient
+        // channel. The child's addressed config rides argv below, and
+        // argv does not inherit — so a substrate that forks its own
+        // subprocess isolates by construction a generation down.
+        isolate_child_environment(&mut command);
+        command.args(spawn_args(recipe, rpc_port));
+        set_own_process_group(&mut command);
+
+        let child = command.spawn().map_err(|e| post(format!("failed to spawn {}: {e}", exec_path.display())))?;
+
+        Ok(PreparedFork { engine_id, rpc_port, rpc_addr: format!("127.0.0.1:{rpc_port}"), child })
+    }
+
+    /// Re-fork a dead engine from the recipe it was spawned with, and
+    /// stage a fresh proxy over it.
+    ///
+    /// The successor gets a **new** engine id: identity continuity across
+    /// a restart is deliberately out of scope here, and a caller holding
+    /// the old id learns the engine is gone from the recently-died ring
+    /// the way it always has. What *is* continuous is `supervision` — the
+    /// recipe and the spent restart budget ride across, so the burst
+    /// limit binds over the lineage rather than resetting on every new id.
+    fn restart_engine(&mut self, ctx: &mut NativeCtx<'_, Single, FleetServer>, supervision: Supervision) {
+        let hash = supervision.recipe.hash.clone();
+
+        // Re-resolve rather than trusting a path captured at spawn time:
+        // the store's LRU may have evicted this content since, in which
+        // case the recipe is no longer runnable and the engine simply
+        // stays dead. Its death is already recorded — there is no engine
+        // id for this attempt, so there is nothing honest to key a second
+        // record on.
+        let Some(artifact) = resolve_selector(&mut self.store, &hash_selector(&hash)) else {
+            tracing::error!(
+                target: "aether_substrate::fleet_server",
+                hash = %hash,
+                "engine restart: the recipe's binary is no longer in the store; the engine stays dead",
+            );
+            return;
+        };
+
+        let prepared = match self.prepare_fork(&artifact.path, &supervision.recipe) {
+            Ok(prepared) => prepared,
+            Err(failure) => {
+                let (engine_id, rpc_port, error) = match failure {
+                    PrepareFailure::PreAllocation(error) => {
+                        tracing::error!(
+                            target: "aether_substrate::fleet_server",
+                            hash = %hash,
+                            error = %error,
+                            "engine restart: could not prepare the re-fork; the engine stays dead",
+                        );
+                        return;
+                    }
+                    PrepareFailure::PostAllocation { engine_id, rpc_port, error } => (engine_id, rpc_port, error),
+                };
+                // An id was minted, so the failed recovery is
+                // correlatable: record it the way a failed spawn is
+                // (issue 2423) rather than only logging.
+                tracing::error!(
+                    target: "aether_substrate::fleet_server",
+                    engine_id = %engine_id.0,
+                    error = %error,
+                    "engine restart: the re-fork failed; the engine stays dead",
+                );
+                self.record_death(engine_id.0.to_string(), rpc_port, DeathReason::SpawnFailed { detail: error });
+                return;
+            }
+        };
+
+        let PreparedFork { engine_id, rpc_port, rpc_addr, child } = prepared;
+        let subname = engine_id.0.simple().to_string();
+        let staged = ctx
+            .spawn_child::<FleetProxy>(
+                Subname::Named(&subname),
+                FleetProxyConfig {
+                    engine_id,
+                    rpc_addr,
+                    spawned: Some(child),
+                    heartbeat: self.heartbeat,
+                    connect_budget: self.connect_budget,
+                },
+                (),
+            )
+            .stage_with(FleetSpawnContext { engine_id, rpc_port, supervision, origin: SpawnOrigin::Restarted });
+
+        match staged {
+            Ok(_) => {
+                let replaced = self.pending_engines.insert(engine_id, PendingEngine { rpc_port, early_death: None });
+                debug_assert!(replaced.is_none(), "fresh engine ids cannot replace a pending spawn");
+                tracing::warn!(
+                    target: "aether_substrate::fleet_server",
+                    engine_id = %engine_id.0,
+                    rpc_port,
+                    "engine restart: re-forked a dead engine under a fresh id",
+                );
+            }
+            Err(e) => {
+                // The staging itself was rejected, so no completion is
+                // coming and `FleetProxyState` never took ownership of
+                // the child — except on the init-failure path, which
+                // already terminated its group. Record the failed
+                // recovery against the id it burned.
+                let error = format!("proxy failed to connect to the restarted substrate: {e:?}");
+                tracing::error!(
+                    target: "aether_substrate::fleet_server",
+                    engine_id = %engine_id.0,
+                    error = %error,
+                    "engine restart: the replacement proxy did not come up; the engine stays dead",
+                );
+                self.record_death(engine_id.0.to_string(), rpc_port, DeathReason::SpawnFailed { detail: error });
+            }
+        }
+    }
+
     /// Apply the actor-local half of a staged proxy settlement. Returning
     /// `None` suppresses a stale completion; the binding-owned task ledger
     /// still gets discharged by the caller without emitting a second reply.
@@ -204,7 +601,7 @@ impl FleetServerState {
         spawn: FleetSpawnContext,
         outcome: ProxySpawnOutcome,
     ) -> Option<SpawnEngineResult> {
-        let FleetSpawnContext { engine_id, rpc_port } = spawn;
+        let FleetSpawnContext { engine_id, rpc_port, supervision, .. } = spawn;
         let pending = self.pending_engines.remove(&engine_id)?;
         debug_assert_eq!(pending.rpc_port, rpc_port, "spawn completion must match its pending engine");
 
@@ -224,6 +621,7 @@ impl FleetServerState {
                             // Authoritative activation + no early death =
                             // alive at the supervision commit boundary.
                             last_alive: Instant::now(),
+                            supervision,
                         },
                     );
                     SpawnEngineResult::Ok { engine_id: engine_id.0.to_string(), rpc_port }
@@ -246,7 +644,7 @@ impl FleetServerState {
         }
         if let Some(entry) = self.engines.remove(&engine_id) {
             self.record_death(engine_id.0.to_string(), entry.rpc_port, reason);
-            return EngineDeathDisposition::LiveRemoved;
+            return EngineDeathDisposition::LiveRemoved(Box::new(entry.supervision));
         }
         EngineDeathDisposition::Unknown
     }
@@ -288,6 +686,10 @@ impl NativeActor for FleetServer {
             fleet_store_root: resolve_fleet_store_root(config.fleet_store_root.as_deref()),
             recently_died: VecDeque::new(),
             store,
+            self_mailbox: ctx.self_id(),
+            restart_policy: config.restart_policy(),
+            pending_restarts: HashMap::new(),
+            next_restart_token: 1,
         })
     }
 
@@ -381,85 +783,38 @@ impl NativeActor for FleetServer {
         // caller can correlate and reap; a transient re-forked attempt is
         // recovered, not a real death, so it records nothing.
         let attempts = state.spawn_attempts;
+        let recipe = SpawnRecipe {
+            hash: artifact.hash.clone(),
+            args: mail.args.clone(),
+            boot_manifest: mail.boot_manifest.clone(),
+        };
         let mut last_error = String::new();
+
         for attempt in 0..attempts {
-            let rpc_port = match free_local_port() {
-                Ok(port) => port,
-                Err(e) => {
-                    // Still pre-allocation — no engine id minted this
-                    // attempt, so no death record and `engine_id` is `None`.
-                    owed.reply(
-                        ctx,
-                        &SpawnEngineResult::Err {
-                            engine_id: None,
-                            error: format!("could not allocate an RPC port: {e}"),
-                        },
-                    );
+            let prepared = match state.prepare_fork(&artifact.path, &recipe) {
+                Ok(prepared) => prepared,
+                // No engine id was minted, so there is nothing to
+                // correlate or reap and no death to record.
+                Err(PrepareFailure::PreAllocation(error)) => {
+                    owed.reply(ctx, &SpawnEngineResult::Err { engine_id: None, error });
                     return;
                 }
-            };
-
-            // Allocate a unique scratch subdirectory per attempt to
-            // hold its materialized executable.
-            let engine_id = EngineId(Uuid::from_u128(state.next_engine_seq));
-            state.next_engine_seq += 1;
-            let engine_store_dir = state.fleet_store_root.join(engine_id.0.simple().to_string());
-
-            // Stored bytes are content-addressed and not directly
-            // fork-exec'able, so materialize the resolved entry to an
-            // executable temp file under this engine's scratch dir and
-            // fork that (ADR-0115 §Execution); the caller never sees the
-            // path.
-            let exec_path = engine_store_dir.join("substrate");
-            if let Err(e) = realize_executable(&artifact.path, &exec_path) {
-                // Post-allocation failure: an id is minted but no engine
-                // was ever registered, so record a `SpawnFailed` death and
-                // carry the id back so a caller can correlate and reap.
-                let error = format!("materializing binary {} to {}: {e}", artifact.hash, exec_path.display());
-                owed.reply(ctx, &state.fail_spawn(engine_id, rpc_port, error));
-                return;
-            }
-
-            let mut command = Command::new(&exec_path);
-            command.stdin(Stdio::null());
-            // ADR-0162: a spawned engine's environment is constructed, never
-            // inherited. Clear it and copy only the platform/third-party
-            // allowlist (locale, proxy, driver vars, `PATH` / `HOME`, …); no
-            // `AETHER_*` key survives, so aether config can't ride the ambient
-            // channel. The child's addressed config rides argv below, and
-            // argv does not inherit — so a substrate that forks its own
-            // subprocess isolates by construction a generation down.
-            isolate_child_environment(&mut command);
-            // argv is the machine channel: the caller's per-spawn `args`
-            // first, then the hub's injections as the child's own
-            // derive-emitted overlay flags (ADR-0156). `--rpc-port`
-            // assigns the substrate's RPC bind port; a boot-manifest path
-            // (a spawn carrying a component list, issue 1776) rides
-            // `--boot-manifest` so the chassis reads the listed wasm
-            // itself. A binary lacking these flags fails at spawn, and the
-            // failure carries the engine id through the `spawn_failed`
-            // path below.
-            command.args(&mail.args);
-            command.arg("--rpc-port").arg(rpc_port.to_string());
-            if let Some(boot_manifest) = &mail.boot_manifest {
-                command.arg("--boot-manifest").arg(boot_manifest);
-            }
-            let child = match command.spawn() {
-                Ok(child) => child,
-                Err(e) => {
-                    let error = format!("failed to spawn {}: {e}", exec_path.display());
+                // An id is minted but no engine was ever registered, so
+                // record a `SpawnFailed` death and carry the id back so a
+                // caller can correlate and reap.
+                Err(PrepareFailure::PostAllocation { engine_id, rpc_port, error }) => {
                     owed.reply(ctx, &state.fail_spawn(engine_id, rpc_port, error));
                     return;
                 }
             };
 
+            let PreparedFork { engine_id, rpc_port, rpc_addr, child } = prepared;
             let subname = engine_id.0.simple().to_string();
-            let rpc_addr = format!("127.0.0.1:{rpc_port}");
 
             // `continue_from` still runs `FleetProxy::init` on this thread:
             // it dials the substrate (retrying while it comes up) and, on
-            // failure, kills the child it was handed. A successful init
-            // transfers the original caller obligation into the staged
+            // failure, terminates the child it was handed. A successful
+            // init transfers the original caller obligation into the staged
             // birth; only its later task completion may commit the engine.
             let result = ctx
                 .spawn_child::<FleetProxy>(
@@ -473,7 +828,15 @@ impl NativeActor for FleetServer {
                     },
                     (),
                 )
-                .continue_from(owed, FleetSpawnContext { engine_id, rpc_port });
+                .continue_from(
+                    owed,
+                    FleetSpawnContext {
+                        engine_id,
+                        rpc_port,
+                        supervision: Supervision::new(recipe.clone()),
+                        origin: SpawnOrigin::Requested,
+                    },
+                );
 
             match result {
                 Ok(_) => {
@@ -524,6 +887,7 @@ impl NativeActor for FleetServer {
     ) {
         let spawn = done.context().clone();
         let engine_id = spawn.engine_id;
+        let origin = spawn.origin;
         let outcome = match &done.output().result {
             Ok(()) => ProxySpawnOutcome::Applied(done.output().mailbox_id),
             Err(error) => ProxySpawnOutcome::Rejected(format!("proxy activation failed: {error:?}")),
@@ -537,7 +901,31 @@ impl NativeActor for FleetServer {
             done.release_no_reply();
             return;
         };
-        done.resolve_value(ctx, &reply);
+
+        match origin {
+            SpawnOrigin::Requested => done.resolve_value(ctx, &reply),
+            // A restart has no caller waiting on a `SpawnEngineResult`,
+            // so the settlement hold is released without one. The
+            // settle above still ran, so the recovered engine is
+            // supervised (or its failure recorded) either way; all that
+            // is skipped is the reply nobody asked for.
+            SpawnOrigin::Restarted => {
+                match &reply {
+                    SpawnEngineResult::Ok { .. } => tracing::info!(
+                        target: "aether_substrate::fleet_server",
+                        engine_id = %engine_id.0,
+                        "engine restart: the replacement engine is supervised",
+                    ),
+                    SpawnEngineResult::Err { error, .. } => tracing::error!(
+                        target: "aether_substrate::fleet_server",
+                        engine_id = %engine_id.0,
+                        error = %error,
+                        "engine restart: the replacement engine did not commit; the engine stays dead",
+                    ),
+                }
+                done.release_no_reply();
+            }
+        }
     }
 
     /// Terminate a supervised engine.
@@ -545,8 +933,8 @@ impl NativeActor for FleetServer {
     /// # Agent
     /// Send `TerminateEngine { engine_id }` (the string from a
     /// prior `SpawnEngineResult` / `ListEnginesResult`). The cap
-    /// forwards the kind to the engine's proxy — which SIGKILLs
-    /// its substrate and self-shuts-down — and drops its table
+    /// forwards the kind to the engine's proxy — which terminates
+    /// its substrate's process group and self-shuts-down — and drops its table
     /// entry. Reply: `TerminateEngineResult::Ok`, or `Err { error }`
     /// for an `engine_id` that doesn't parse or names no
     /// supervised engine.
@@ -573,7 +961,7 @@ impl NativeActor for FleetServer {
         let proxy_mailbox = entry.proxy_mailbox;
         state.record_death(mail.engine_id.clone(), entry.rpc_port, DeathReason::Terminated);
 
-        // Forward to the proxy: it SIGKILLs its substrate and
+        // Forward to the proxy: it terminates its substrate's group and
         // self-shuts-down. Fire-and-forget — the proxy doesn't
         // reply, and the table entry is already gone, so the
         // returned MailId has nothing to subscribe against.
@@ -669,15 +1057,30 @@ impl NativeActor for FleetServer {
                     "engine death latched while proxy activation is pending",
                 );
             }
-            EngineDeathDisposition::LiveRemoved => {
+            EngineDeathDisposition::LiveRemoved(supervision) => {
                 tracing::info!(
                     target: "aether_substrate::fleet_server",
                     engine_id = %mail.engine_id,
                     reason = ?mail.reason,
                     "engine evicted: proxy reported death",
                 );
+                state.consider_restart(&mail.engine_id, &mail.reason, *supervision);
             }
             EngineDeathDisposition::PendingDuplicate | EngineDeathDisposition::Unknown => {}
+        }
+    }
+
+    /// Re-fork an engine whose restart backoff has elapsed.
+    ///
+    /// # Agent
+    /// Not a user-facing tool — the cap's own restart-backoff timer
+    /// fires this at itself after `restart_backoff_millis`. The handler
+    /// looks the token up and re-forks the filed recipe under a fresh
+    /// engine id. A token with no pending entry is a silent no-op.
+    #[handler::single]
+    fn on_restart_due(state: &mut Self::State, ctx: &mut NativeCtx<'_, Single, Self>, mail: EngineRestartDue) {
+        if let Some(supervision) = state.pending_restarts.remove(&mail.token) {
+            state.restart_engine(ctx, supervision);
         }
     }
 

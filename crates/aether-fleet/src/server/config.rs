@@ -21,6 +21,38 @@ use std::time::Duration;
 /// tripping its backstop. `0` is the wait-forever sentinel.
 const DEFAULT_PROXY_CONNECT_BUDGET_SECS: u64 = 30;
 
+/// Default settle time between observing an engine death and re-forking
+/// it. Long enough that a crash-on-boot substrate cannot spin the cap,
+/// short enough that a real recovery is not noticeably delayed.
+const DEFAULT_RESTART_BACKOFF_MILLIS: u64 = 500;
+
+/// Default restart budget per engine, and the window it is counted over:
+/// five starts in five minutes, the start-limit shape this repository's
+/// own systemd unit uses for the same crash-loop question.
+const DEFAULT_RESTART_BURST_LIMIT: u32 = 5;
+const DEFAULT_RESTART_BURST_WINDOW_SECS: u64 = 300;
+
+/// Resolved automatic-restart supervision policy, or `None` when the cap
+/// is not supervising restarts at all.
+///
+/// Assembled once at init from [`FleetConfig::restart_policy`]. The cap
+/// holds the `Option` rather than the raw flags, so every restart site
+/// reads one value and a disabled policy has no reachable restart code
+/// beneath it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RestartPolicy {
+    /// Settle time between observing a death and re-forking, so a
+    /// substrate that dies immediately on boot cannot spin the cap.
+    pub backoff: Duration,
+    /// Most automatic restarts one engine lineage may spend inside
+    /// [`Self::burst_window`] before the cap gives up on it.
+    pub burst_limit: u32,
+    /// Rolling window the burst limit is counted over. Restarts older
+    /// than this stop counting, so an engine that crashes once a day
+    /// is restarted every time while one crash-looping is not.
+    pub burst_window: Duration,
+}
+
 /// Resolved engines-cap configuration (ADR-0090, issue 1339): the
 /// liveness-heartbeat tuning plus the hub binary store's layout dir,
 /// disk budget, and bootstrap list (ADR-0115, #1954 — these last three
@@ -79,6 +111,40 @@ pub struct FleetConfig {
     /// single-attempt behavior (no re-fork).
     #[config(default = 3)]
     pub proxy_spawn_attempts: u32,
+    /// Whether a crashed or evicted engine is automatically re-spawned.
+    ///
+    /// Off by default: the cap's historical contract is that a death is
+    /// terminal and the caller re-spawns, and every existing harness and
+    /// test reads it that way. Turning it on makes the cap re-fork a
+    /// `Crashed` or `Evicted` engine from the recipe it was spawned with.
+    /// A deliberate `TerminateEngine` is never restarted whatever this
+    /// says — the operator asked for the engine to be gone.
+    #[config(default = false)]
+    pub restart_on_crash: bool,
+    /// Milliseconds to wait after a death before re-forking the engine.
+    ///
+    /// A settle window, not a retry schedule: a substrate that dies on
+    /// boot would otherwise be re-forked as fast as the cap can observe
+    /// it. The burst limit, not this, is what stops a persistent crash
+    /// loop. Ignored when `restart_on_crash` is off.
+    #[config(default = 500)]
+    pub restart_backoff_millis: u64,
+    /// Most automatic restarts of one engine within the burst window.
+    ///
+    /// Past this the cap stops restarting that engine, logs loudly, and
+    /// records the death normally. `5` in `restart_burst_window_secs`
+    /// mirrors the start-limit shape the repository's own systemd unit
+    /// uses. `0` disables restarts as surely as `restart_on_crash =
+    /// false`.
+    #[config(default = 5)]
+    pub restart_burst_limit: u32,
+    /// Rolling window, in seconds, the restart burst limit is counted over.
+    ///
+    /// Restarts older than this stop counting toward the limit, so an
+    /// engine that crashes rarely is always recovered while one
+    /// crash-looping exhausts its budget and stays dead.
+    #[config(default = 300)]
+    pub restart_burst_window_secs: u64,
     /// Directory for the hub's content-addressed binary store; unset uses the platform data dir.
     ///
     /// The ops escape hatch and the fleet tests' per-process isolation
@@ -139,6 +205,14 @@ impl Default for FleetConfig {
             // a contention mitigation, and tests fork real substrates
             // serially, so one attempt keeps the path deterministic.
             proxy_spawn_attempts: 1,
+            // Restart supervision stays off in the test constructor for
+            // the same reason it is off in production by default: every
+            // existing harness reads a death as terminal, and a cap that
+            // silently re-forked would change what those tests observe.
+            restart_on_crash: false,
+            restart_backoff_millis: DEFAULT_RESTART_BACKOFF_MILLIS,
+            restart_burst_limit: DEFAULT_RESTART_BURST_LIMIT,
+            restart_burst_window_secs: DEFAULT_RESTART_BURST_WINDOW_SECS,
             binary_store_dir: None,
             fleet_store_root: None,
             binary_disk_budget_bytes: DEFAULT_DISK_BUDGET_BYTES,
@@ -172,6 +246,23 @@ impl FleetConfig {
     pub fn spawn_attempts(&self) -> u32 {
         self.proxy_spawn_attempts.max(1)
     }
+
+    /// The automatic-restart policy to supervise deaths under, or `None`
+    /// when the cap should leave a dead engine dead.
+    ///
+    /// Both the opt-in flag and a non-zero burst limit are required: a
+    /// limit of `0` admits no restart at all, so resolving it to a live
+    /// policy would arm the machinery around a budget that can never be
+    /// spent. Collapsing both to `None` keeps one disabled state instead
+    /// of two that behave alike but read differently.
+    #[must_use]
+    pub fn restart_policy(&self) -> Option<RestartPolicy> {
+        (self.restart_on_crash && self.restart_burst_limit != 0).then(|| RestartPolicy {
+            backoff: Duration::from_millis(self.restart_backoff_millis),
+            burst_limit: self.restart_burst_limit,
+            burst_window: Duration::from_secs(self.restart_burst_window_secs),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -192,6 +283,39 @@ mod config_tests {
     /// wait-forever sentinel — so a debug cold start under fork
     /// contention isn't called dead prematurely, while a genuinely
     /// dead substrate still fails the spawn rather than hanging.
+    /// Restart supervision is opt-in, and stays off through *either*
+    /// disabling route. The default config must not arm it — the whole
+    /// crate's existing contract is that a death is terminal — and a
+    /// `restart_on_crash` turned on beside a zero burst limit must
+    /// resolve to the same `None` rather than arming machinery around a
+    /// budget that admits nothing.
+    #[test]
+    fn restart_policy_is_off_by_default_and_off_at_a_zero_burst_limit() {
+        assert_eq!(FleetConfig::default().restart_policy(), None, "restart supervision must be opt-in");
+
+        let zero_budget = FleetConfig { restart_on_crash: true, restart_burst_limit: 0, ..FleetConfig::default() };
+        assert_eq!(zero_budget.restart_policy(), None, "a zero burst limit disables restarts as surely as the flag");
+    }
+
+    /// An enabled policy carries the configured milliseconds and seconds
+    /// through to the `Duration`s the cap actually waits and measures on.
+    /// Catches a unit slip at the one place the raw numbers become time.
+    #[test]
+    fn an_enabled_restart_policy_carries_its_configured_durations() {
+        let config = FleetConfig {
+            restart_on_crash: true,
+            restart_backoff_millis: 750,
+            restart_burst_limit: 3,
+            restart_burst_window_secs: 60,
+            ..FleetConfig::default()
+        };
+        let policy = config.restart_policy().expect("an enabled flag with a non-zero budget yields a policy");
+
+        assert_eq!(policy.backoff, Duration::from_millis(750), "backoff is milliseconds");
+        assert_eq!(policy.burst_limit, 3);
+        assert_eq!(policy.burst_window, Duration::from_mins(1), "the burst window is seconds");
+    }
+
     #[test]
     fn default_connect_budget_is_generous_and_finite() {
         let budget = FleetConfig::default().connect_budget().expect("default budget is finite, not wait-forever");

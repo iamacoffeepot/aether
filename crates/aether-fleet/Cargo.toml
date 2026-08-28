@@ -49,6 +49,13 @@ tracing = { workspace = true, features = ["std", "attributes"] }
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 inventory = { workspace = true }
 
+# The proxy forks its substrate into its own process group and tears that
+# group down with a SIGTERM → grace → SIGKILL escalation (`proxy::reap`), so a
+# subprocess the substrate itself forked cannot outlive the engine. `killpg` is
+# the only reason this is here; the fork side uses std's `process_group`.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # The proxy round-trip suite forwards onto the RPC `Call` path through a booted
 # `RpcServerCapability`, so it needs the transport crate's echo fixture.
