@@ -28,6 +28,7 @@ mod grok;
 mod harness_stub;
 mod heartbeat;
 mod lane;
+mod lint_check;
 mod messages;
 mod muse;
 mod peak_memory;
@@ -49,6 +50,7 @@ use serde::ser::{SerializeStruct, Serializer};
 
 use crate::cargo::write_json_pretty;
 use crate::transform::construct::CONSTRUCT_IMPLEMENT;
+use crate::transform::lane::Resumed;
 use crate::transform::peak_memory::PeakMemory;
 use crate::transform::review::REVIEW_CRITIC;
 use crate::transform::review_reports::REVIEW_REPORT;
@@ -585,16 +587,21 @@ pub fn resolve_harness(harness: Option<&str>) -> Result<Harness> {
 /// builds where an earlier one did draws on what that one compiled instead of
 /// re-paying for it, and the host's [`PeakMemory`] wrapper is resolved with them
 /// so the child's own peak is measured rather than modelled.
-fn run_model_lane(prompt: &str, args: &TransformArgs) -> Result<LaneRun> {
+/// `resumed` states what a resumed conversation is wrong about — the fact the
+/// arms correct in the prompt they pipe. A dispatch-level retry lap resumes
+/// [`Resumed::AfterReset`]; the construct lane's own post-fixer lint repair
+/// resumes [`Resumed::SameTree`], because it continues inside the dispatch that
+/// wrote the tree it is being asked to fix.
+fn run_model_lane(prompt: &str, args: &TransformArgs, resumed: Resumed) -> Result<LaneRun> {
     let harness = resolve_harness(args.harness.as_deref())?;
     let scratch = Scratch::prepare(&args.out, args.nonce.as_deref())?;
     let cache = sccache::detect();
     let peak = peak_memory::detect();
 
     let record = match harness {
-        Harness::Claude => claude::run_headless_claude(prompt, args, &scratch, cache.as_ref(), &peak)?,
-        Harness::Muse => muse::run(prompt, args, &scratch, cache.as_ref(), &peak)?,
-        Harness::Grok => grok::run(prompt, args, &scratch, cache.as_ref(), &peak)?,
+        Harness::Claude => claude::run_headless_claude(prompt, args, resumed, &scratch, cache.as_ref(), &peak)?,
+        Harness::Muse => muse::run(prompt, args, resumed, &scratch, cache.as_ref(), &peak)?,
+        Harness::Grok => grok::run(prompt, args, resumed, &scratch, cache.as_ref(), &peak)?,
         Harness::Codex => bail!("codex harness support has been removed"),
     };
 
