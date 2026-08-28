@@ -65,9 +65,9 @@ enum Commands {
     /// Rewrite or check pinned golden fixture files.
     Fixtures(FixturesArgs),
     /// Emit the shippable depot layout (ADR-0163 §1): the chassis binary,
-    /// a persisted `pack/manifest`, and content-addressed component
-    /// objects under `pack/objects/<sha256>`. The Steam depot is this
-    /// directory uploaded verbatim.
+    /// the workspace license files, a persisted `pack/manifest`, and
+    /// content-addressed component objects under `pack/objects/<sha256>`.
+    /// The Steam depot is this directory uploaded verbatim.
     Package(PackageArgs),
     /// ADR-0149 §Execution's portable execution unit: run one typed
     /// mechanical-verify command (`verify.fmt`, `verify.clippy`,

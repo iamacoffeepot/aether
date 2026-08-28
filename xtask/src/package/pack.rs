@@ -18,13 +18,20 @@ pub(super) struct PackComponent {
     pub(super) replicas: Option<u32>,
 }
 
+/// The workspace license files every depot carries, copied verbatim from the
+/// repository root into the depot root beside the chassis binary.
+const DEPOT_LICENSE_FILES: [&str; 2] = ["LICENSE-MIT", "LICENSE-APACHE"];
+
 /// Write the depot tree at `out`: copy the chassis binary to
 /// `<out>/<chassis_file>` (the host-platform filename, `.exe` on Windows),
-/// then write the `pack/` tree (content-addressed objects + `pack/manifest`)
-/// via [`write_pack`]. Regenerates `out` from scratch so a stale prior run
-/// can't leave orphaned objects. Returns the manifest it wrote.
+/// copy the workspace license files from `workspace_root` via
+/// [`copy_licenses`], then write the `pack/` tree of content-addressed
+/// objects and `pack/manifest` via [`write_pack`]. Regenerates `out` from
+/// scratch so a stale prior run can't leave orphaned objects. Returns the
+/// manifest it wrote.
 pub(super) fn emit_depot(
     out: &Path,
+    workspace_root: &Path,
     chassis_src: &Path,
     chassis_file: &str,
     components: &[PackComponent],
@@ -35,7 +42,24 @@ pub(super) fn emit_depot(
     }
     fs::create_dir_all(out).with_context(|| format!("create {}", out.display()))?;
     copy_artifact(chassis_src, &out.join(chassis_file))?;
+    copy_licenses(out, workspace_root)?;
     write_pack(out, components, settings)
+}
+
+/// Copy each of [`DEPOT_LICENSE_FILES`] from `workspace_root` into the depot
+/// root. The shipped chassis binary statically links dependencies whose
+/// licenses require the notice to travel with the distributed artifact, so a
+/// depot without these files is not redistributable. Same copy mechanics as
+/// the chassis binary — a missing source file fails the emit rather than
+/// silently shipping an incomplete depot. They are attribution files sitting
+/// beside the binary, not content-addressed payload, so they are deliberately
+/// not `pack/objects` entries and the manifest (which lists components) does
+/// not reference them.
+fn copy_licenses(out: &Path, workspace_root: &Path) -> Result<()> {
+    for file in DEPOT_LICENSE_FILES {
+        copy_artifact(&workspace_root.join(file), &out.join(file))?;
+    }
+    Ok(())
 }
 
 /// Write the `pack/` tree under `<root>/pack`: hash each component's wasm (and
@@ -99,10 +123,23 @@ mod tests {
     use aether_chassis::package::{Sha256, decode_manifest};
     use sha2::{Digest, Sha256 as Sha256Hasher};
 
-    use super::{PackComponent, emit_depot, write_pack};
+    use super::{DEPOT_LICENSE_FILES, PackComponent, emit_depot, write_pack};
     use crate::cargo::Profile;
     use crate::package::build::build_planned_components;
     use crate::package::plan::{PackageChassis, resolve_package_plan};
+
+    /// Write a stand-in workspace root carrying both license files, so an emit
+    /// under test reads the same sources `copy_licenses` reads from the real
+    /// repository root. Returns nothing — callers pass `dir` as the
+    /// `workspace_root` argument.
+    fn write_license_root(dir: &Path) {
+        use std::fs;
+
+        fs::create_dir_all(dir).expect("create license root");
+        for file in DEPOT_LICENSE_FILES {
+            fs::write(dir.join(file), format!("{file} body")).expect("write license");
+        }
+    }
 
     #[test]
     fn emitted_depot_round_trips_through_decoder() {
@@ -127,6 +164,9 @@ mod tests {
         let chassis_src = env::temp_dir().join(format!("aether-xtask-chassis-{}-{seq}", process::id()));
         fs::write(&chassis_src, b"chassis-binary-bytes").expect("write fake chassis binary");
 
+        let license_root = env::temp_dir().join(format!("aether-xtask-licenses-{}-{seq}", process::id()));
+        write_license_root(&license_root);
+
         // Two distinct components plus a third sharing bytes with the first —
         // the shared-bytes case exercises content-address dedup (one object
         // file, two entries pointing at it).
@@ -143,7 +183,8 @@ mod tests {
             named("alpha_twin", vec![0x00, 0x61, 0x73, 0x6d, 1, 2, 3]),
         ];
         let manifest =
-            emit_depot(&out, &chassis_src, "aether-desktop", &components, ChassisSettings::default()).expect("emit");
+            emit_depot(&out, &license_root, &chassis_src, "aether-desktop", &components, ChassisSettings::default())
+                .expect("emit");
 
         assert!(out.join("aether-desktop").exists(), "chassis binary copied into the depot root");
 
@@ -168,6 +209,7 @@ mod tests {
 
         fs::remove_dir_all(&out).ok();
         fs::remove_file(&chassis_src).ok();
+        fs::remove_dir_all(&license_root).ok();
     }
 
     #[test]
@@ -285,10 +327,11 @@ mod tests {
 
         let chassis_src = dir.join("fake-chassis");
         fs::write(&chassis_src, b"headless-binary-bytes").expect("write fake chassis");
+        write_license_root(&dir);
         let out = dir.join("depot");
         let settings =
             ChassisSettings { title: plan.title.clone(), window_mode: plan.window_mode.clone(), tick_hz: plan.tick_hz };
-        let manifest = emit_depot(&out, &chassis_src, chassis_bin, &components, settings).expect("emit depot");
+        let manifest = emit_depot(&out, &dir, &chassis_src, chassis_bin, &components, settings).expect("emit depot");
 
         let manifest_bytes = fs::read(out.join("pack").join("manifest")).expect("read manifest");
         let decoded = decode_manifest(&manifest_bytes).expect("chassis decoder reads the emitted manifest");
@@ -303,6 +346,40 @@ mod tests {
         assert_eq!(decoded.entries[1].config, None, "the config-less entry has no config object");
 
         assert!(out.join("aether-headless").exists(), "the headless chassis bin is shipped into the depot");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn emitted_depot_ships_the_workspace_license_files() {
+        // A depot is redistributed as-is and its chassis binary statically
+        // links attribution-bearing dependencies, so both workspace license
+        // files must land in the depot root with their bytes intact. The bug
+        // it catches: an emit that ships the binary and the `pack/` tree but
+        // drops the notices, leaving the depot non-redistributable — the emit
+        // stays green because nothing else reads them.
+        use std::env;
+        use std::fs;
+        use std::process;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = env::temp_dir().join(format!("aether-xtask-license-{}-{seq}", process::id()));
+        fs::create_dir_all(&dir).expect("create test dir");
+        write_license_root(&dir);
+
+        let chassis_src = dir.join("fake-chassis");
+        fs::write(&chassis_src, b"chassis-binary-bytes").expect("write fake chassis binary");
+
+        let out = dir.join("depot");
+        emit_depot(&out, &dir, &chassis_src, "aether-desktop", &[], ChassisSettings::default()).expect("emit depot");
+
+        for file in DEPOT_LICENSE_FILES {
+            let shipped = fs::read(out.join(file)).unwrap_or_else(|_| panic!("{file} shipped into the depot root"));
+            let source = fs::read(dir.join(file)).expect("read the source license");
+            assert_eq!(shipped, source, "{file} is copied verbatim");
+        }
 
         fs::remove_dir_all(&dir).ok();
     }

@@ -1,7 +1,8 @@
 //! `cargo xtask package` — emit the shippable depot layout (ADR-0163 §1):
-//! the chassis binary, a persisted `pack/manifest`, and content-addressed
-//! component objects under `pack/objects/<sha256>`. The Steam depot is this
-//! directory uploaded verbatim.
+//! the chassis binary, the workspace license files, a persisted
+//! `pack/manifest`, and content-addressed component objects under
+//! `pack/objects/<sha256>`. The Steam depot is this directory uploaded
+//! verbatim.
 
 mod build;
 mod pack;
@@ -72,12 +73,15 @@ pub struct PackageArgs {
     spec: Option<PathBuf>,
 }
 
-/// Emit the shippable depot layout (ADR-0163 §1): the chassis binary, a
-/// persisted `pack/manifest`, and content-addressed component objects.
+/// Emit the shippable depot layout (ADR-0163 §1): the chassis binary, the
+/// workspace license files, a persisted `pack/manifest`, and content-addressed
+/// component objects.
 ///
 /// ```text
 /// <out>/
 ///   aether-substrate            # chassis binary (desktop or headless; .exe on Windows)
+///   LICENSE-MIT                 # workspace licenses, shipped with the statically linked binary
+///   LICENSE-APACHE
 ///   pack/manifest               # `encode_manifest` output
 ///   pack/objects/<sha256>       # component wasm (+ config), content-addressed
 /// ```
@@ -130,7 +134,8 @@ pub fn run(args: &PackageArgs) -> Result<()> {
     // that filename verbatim so the shipped binary is runnable as-is.
     let chassis_file = host_binary_filename(chassis_bin);
     let chassis_src = target_dir.join(args.profile.as_str()).join(&chassis_file);
-    let manifest = emit_depot(&out, &chassis_src, &chassis_file, &components, settings)?;
+    let manifest =
+        emit_depot(&out, metadata.workspace_root.as_std_path(), &chassis_src, &chassis_file, &components, settings)?;
 
     println!(
         "package: {} component object(s) + {} chassis bin -> {}",
