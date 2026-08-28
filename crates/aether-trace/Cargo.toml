@@ -3,6 +3,7 @@ name = "aether-trace"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # `aether.trace` capability, extracted by the arc that dissolved the
 # capabilities monolith (iamacoffeepot/aether#3719) as a per-cap crate. Owns the thin `aether.trace` dispatch cap

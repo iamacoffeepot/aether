@@ -3,6 +3,7 @@ name = "aether-substrate"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # ADR-0035 Phase 1: runtime (wasmtime host, mail scheduler, kind
 # manifest, registry, control-plane dispatch, hub client) for the

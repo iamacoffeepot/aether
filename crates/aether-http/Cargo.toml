@@ -3,6 +3,7 @@ name = "aether-http"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # The two HTTP capabilities — the `aether.http` egress client and the
 # `aether.http.server` inbound server (ADR-0108, ADR-0129, ADR-0130,

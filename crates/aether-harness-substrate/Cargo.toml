@@ -3,6 +3,7 @@ name = "aether-harness-substrate"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # `SubstrateHarness` — the in-process harness harness (ADR-0067, issue #3765).
 # Boots a substrate-harness chassis (basics only: trace dispatch, the harness

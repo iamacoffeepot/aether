@@ -3,6 +3,7 @@ name = "aether-test-fixtures-stateful-reshaped"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # ADR-0113 decode-miss companion / replace TARGET: same
 # `NAMESPACE = "test.stateful.typed"` and `CounterState` kind name as the typed

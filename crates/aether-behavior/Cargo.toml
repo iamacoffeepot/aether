@@ -3,6 +3,7 @@ name = "aether-behavior"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # Script-side SDK for behavior scripts (ADR-0137). One crate with two
 # faces: the always-compiled trunk holds the host<->script envelope, the

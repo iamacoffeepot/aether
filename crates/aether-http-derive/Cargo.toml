@@ -3,6 +3,7 @@ name = "aether-http-derive"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # ADR-0131: the `#[http::router]` / `#[http::route]` proc macros for the
 # typed route-authoring surface over the `aether.http.server` cap. A leaf

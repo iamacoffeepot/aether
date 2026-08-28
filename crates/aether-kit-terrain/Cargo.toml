@@ -3,6 +3,7 @@ name = "aether-kit-terrain"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # The terrain stack extracted from `aether-kit` (iamacoffeepot/aether#3951):
 # the mark / world / terra / mover actors and their shared position

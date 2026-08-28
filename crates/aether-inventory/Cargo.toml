@@ -3,6 +3,7 @@ name = "aether-inventory"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # `aether.inventory` reverse-lookup / live-registry cap (ADR-0088 §6,
 # widened by ADR-0091 §5, ADR-0109 §5), extracted by the arc that dissolved the

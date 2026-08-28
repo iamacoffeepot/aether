@@ -3,6 +3,7 @@ name = "aether-test-fixtures-stateful-typed"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # ADR-0113 declarative-state replace SOURCE: a single-actor `Counter`
 # (`NAMESPACE = "test.stateful.typed"`) that declares `type State = CounterState`

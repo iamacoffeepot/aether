@@ -3,6 +3,7 @@ name = "aether-test-fixtures-defaultless"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # ADR-0138 fixture: a DEFAULTLESS multi-actor module. Two `WasmActor`
 # types (`Alpha`, `Beta`) exported via a bare `export!(Alpha, Beta)` (no
