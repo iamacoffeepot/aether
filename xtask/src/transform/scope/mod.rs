@@ -22,6 +22,7 @@ use self::anchors::Definition;
 use crate::scope::{load, replay, winning_texts};
 use crate::symbols::references::{self, ReferenceSearch, Role};
 use crate::transform::claude::assemble_construct_prompt;
+use crate::transform::lane::Resumed;
 use crate::transform::{LaneRun, Measurements, TransformArgs, run_model_lane, write_evidence_json};
 
 /// The lane-owned in-repo instruction source. Embedded at build time so the
@@ -122,7 +123,7 @@ fn run_directory(out: &Path) -> PathBuf {
 pub(super) fn run_scope(args: &TransformArgs) -> Result<()> {
     let run_dir = run_directory(&args.out);
     let prompt = assemble_scope_prompt(args.subject.as_deref(), args.task.as_deref(), &run_dir, &setter_binary());
-    let run = run_model_lane(&prompt, args)?;
+    let run = run_model_lane(&prompt, args, Resumed::AfterReset)?;
     write_evidence_json(&args.out, &finalize(args, &run_dir, run))
 }
 

@@ -11,7 +11,7 @@ use anyhow::Result;
 use sha2::{Digest, Sha256};
 
 use crate::transform::TransformArgs;
-use crate::transform::lane::{Terminal, capture, record, resumed_prompt, write_prompt};
+use crate::transform::lane::{Resumed, Terminal, capture, record, resumed_prompt, write_prompt};
 use crate::transform::peak_memory::PeakMemory;
 use crate::transform::sccache::{self, CompilerCache};
 use crate::transform::scratch::Scratch;
@@ -152,11 +152,12 @@ pub(super) fn derive_terminal(transcript: &str) -> Option<Terminal> {
 pub(super) fn run(
     prompt: &str,
     args: &TransformArgs,
+    resumed: Resumed,
     scratch: &Scratch,
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
 ) -> Result<serde_json::Value> {
-    run_at(MUSE, prompt, args, scratch, cache, peak)
+    run_at(MUSE, prompt, args, resumed, scratch, cache, peak)
 }
 
 /// [`run`] against an explicit `program` — production passes [`MUSE`]; tests
@@ -165,12 +166,13 @@ fn run_at(
     program: &str,
     prompt: &str,
     args: &TransformArgs,
+    resumed: Resumed,
     scratch: &Scratch,
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
 ) -> Result<serde_json::Value> {
     let session = args.resume.clone().unwrap_or_else(|| mint_session_id(args.nonce.as_deref()));
-    let prompt_file = write_prompt(&args.out, &resumed_prompt(prompt, args.resume.as_deref()))?;
+    let prompt_file = write_prompt(&args.out, &resumed_prompt(prompt, args.resume.as_deref(), resumed))?;
     let mut command = peak.command(program);
     command
         .args(muse_argv(&prompt_file.to_string_lossy(), args.model.as_deref(), args.effort.as_deref(), &session))
@@ -197,6 +199,7 @@ mod tests {
     use crate::transform::TransformArgs;
     use crate::transform::construct::CONSTRUCT_IMPLEMENT;
     use crate::transform::harness_stub::{self, Stub};
+    use crate::transform::lane::Resumed;
     use crate::transform::peak_memory;
     use crate::transform::scratch::Scratch;
 
@@ -294,7 +297,7 @@ mod tests {
 
     fn drive(stub: &Stub, args: &TransformArgs, prompt: &str) -> anyhow::Result<serde_json::Value> {
         let scratch = Scratch::prepare(&args.out, args.nonce.as_deref()).expect("scratch");
-        run_at(stub.program(), prompt, args, &scratch, None, &peak_memory::detect())
+        run_at(stub.program(), prompt, args, Resumed::AfterReset, &scratch, None, &peak_memory::detect())
     }
 
     // Tripwire: Muse names a new session and a continued one with the same

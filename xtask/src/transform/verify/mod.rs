@@ -651,8 +651,38 @@ fn parse_suppression_requests(log: &str) -> Vec<SuppressionRequest> {
 /// Reads cargo's JSON diagnostic stream rather than scanning rendered text, so
 /// the verdict turns on a structured `level` rather than on the word "warning"
 /// appearing in someone's identifier or doc comment.
-fn clippy_verdict(stdout: &str, scope: &Scope) -> bool {
-    !diagnostics(stdout).any(|diagnostic| diagnostic.is_finding() && diagnostic.judged_under(scope))
+pub(in crate::transform) fn clippy_verdict(stdout: &str, judge: &impl Judge) -> bool {
+    judged_findings(stdout, judge) == 0
+}
+
+/// How many diagnostics `judge` is answerable for in a `--message-format=json`
+/// stream — the count [`clippy_verdict`] reduces to a boolean.
+///
+/// The construct lane's post-fixer check reports the count rather than the
+/// verdict: "two findings before the repair turn, zero after" is a reading of
+/// whether that turn worked, and `false` → `true` is not.
+pub(in crate::transform) fn judged_findings(stdout: &str, judge: &impl Judge) -> usize {
+    diagnostics(stdout).filter(|diagnostic| diagnostic.is_finding() && diagnostic.judged_under(judge)).count()
+}
+
+/// Which packages a clippy verdict is answerable for.
+///
+/// The umbrella answers with the [`Scope`] it resolved from the candidate's
+/// diff; the construct lane's post-fixer check answers with the owning
+/// packages of the files the run dirtied. One predicate over one JSON reader,
+/// so the two lanes cannot reach different verdicts on the same stream — the
+/// harness-side check would otherwise drift into a second, looser definition
+/// of what `-D warnings` means.
+pub(in crate::transform) trait Judge {
+    /// Whether a diagnostic cargo attributed to `package` is this judge's to
+    /// answer for.
+    fn judges(&self, package: &str) -> bool;
+}
+
+impl Judge for Scope {
+    fn judges(&self, package: &str) -> bool {
+        Self::judges(self, package)
+    }
 }
 
 /// One compiler message cargo reported, reduced to what the verdict reads.
@@ -683,8 +713,8 @@ impl Diagnostic {
     /// the candidate, and a diagnostic whose owner cargo did not name is one
     /// this run cannot rule out; silently dropping it is the false-green
     /// direction.
-    fn judged_under(&self, scope: &Scope) -> bool {
-        self.package.as_deref().is_none_or(|package| scope.judges(package))
+    fn judged_under(&self, judge: &impl Judge) -> bool {
+        self.package.as_deref().is_none_or(|package| judge.judges(package))
     }
 }
 
@@ -735,9 +765,9 @@ fn package_name(package_id: &str) -> String {
 /// at the crates it is accountable for rather than at a warning in a dependency
 /// it cannot edit inside its surface. What was left out is stated by
 /// [`unjudged_notice`] rather than dropped in silence.
-fn render_diagnostics(stdout: &str, scope: &Scope) -> String {
+pub(in crate::transform) fn render_diagnostics(stdout: &str, judge: &impl Judge) -> String {
     diagnostics(stdout)
-        .filter(|diagnostic| diagnostic.judged_under(scope))
+        .filter(|diagnostic| diagnostic.judged_under(judge))
         .filter_map(|diagnostic| diagnostic.rendered)
         .collect::<Vec<String>>()
         .join("\n")
@@ -2264,7 +2294,7 @@ const MAX_FINDING_LINES: usize = 40;
 /// the `help:` line, the source snippet, the `note:` — and fall back to the tail
 /// when nothing matches. An unrecognized failure shape still says more than
 /// silence.
-fn distil_diagnostics(log: &str) -> Option<String> {
+pub(in crate::transform) fn distil_diagnostics(log: &str) -> Option<String> {
     let blocks = diagnostic_blocks(log);
     let selected = if blocks.is_empty() {
         let tail = tail_lines(log);
