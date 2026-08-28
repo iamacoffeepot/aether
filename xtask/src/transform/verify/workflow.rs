@@ -1,13 +1,13 @@
 //! The `.github/workflows/ci.yml` reader behind the CI-parity tripwire, and
 //! the `.github/workflows/transform.yml` reader behind the verifier-bit one.
 //!
-//! [`super::verify_command`]'s argv exists to reproduce, off Actions, the
-//! command each gate runs. Asserting it against a second Rust literal proves
-//! only that xtask agrees with itself: the workflow is the sole copy Actions
-//! executes, so it could be trimmed — back to default features, or without a
-//! flag — while every assertion in this crate stayed green (#4843). Reading
-//! the workflow makes the gate the source and the argv the assertion. The
-//! transform workflow's jq ladder is the same move for a second file:
+//! [`super::verify_command`] owns each gate's program, argv, environment and
+//! verdict. CI invokes the typed `verify.*` command; asserting a second copy
+//! of that argv against the workflow would prove only that the two copies
+//! still agree (#4843, #4883). The tripwire therefore checks the structure:
+//! each mechanical job reaches its arm exactly once, no raw calibrated
+//! command remains, and the test job still threads its scheduling inputs.
+//! The transform workflow's jq ladder is the same move for a second file:
 //! [`aether_bloomery::VerifyFailure::ALL`] is the source, and a transcribed
 //! table is what drifted when containment was appended.
 //!
