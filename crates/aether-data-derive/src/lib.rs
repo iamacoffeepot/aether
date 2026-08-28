@@ -320,6 +320,16 @@ fn cast_eligible_expr_for_struct(has_repr_c: bool, fields: &[FieldInfo]) -> Toke
 }
 
 fn expand_schema(input: &DeriveInput) -> syn::Result<TokenStream2> {
+    let core = expand_schema_core(input)?;
+    let element = expand_positional_element(&input.ident);
+    Ok(quote! { #core #element })
+}
+
+/// Schema impl, cast eligibility, and the positional wire codec —
+/// everything the `Schema` derive emits except the container-element
+/// impl, so the `Storage` derive can emit the same core beside its
+/// tagged element without colliding (#5496).
+pub(crate) fn expand_schema_core(input: &DeriveInput) -> syn::Result<TokenStream2> {
     reject_skipped_wire_fields(&input.data)?;
     let name = &input.ident;
     let name_str = name.to_string();
@@ -362,6 +372,34 @@ fn expand_schema(input: &DeriveInput) -> syn::Result<TokenStream2> {
 /// `Vec<u8>` field specialization: the schema side reports `Bytes`,
 /// the labels side reports `Anonymous` (no nominal info for a raw
 /// byte buffer).
+/// `#[derive(Schema)]` selects the positional container-element form:
+/// the element body is the type's ordinary wire bytes, byte-identical
+/// to the retired opaque container encoding, with no tolerance promise
+/// (#5496). `#[derive(Storage)]` emits the tagged form instead;
+/// deriving both is a duplicate-impl compile error by design.
+pub(crate) fn expand_positional_element(name: &syn::Ident) -> TokenStream2 {
+    quote! {
+        impl ::aether_data::__derive_runtime::StorageElement for #name {
+            const TAGGED: bool = false;
+
+            fn contribute_element(
+                &self,
+                _depth: u32,
+                out: &mut ::aether_data::__derive_runtime::Vec<u8>,
+            ) -> ::core::result::Result<(), ::aether_data::__derive_runtime::StorageError> {
+                ::aether_data::__derive_runtime::contribute_positional_element(self, out)
+            }
+
+            fn assemble_element(
+                _depth: u32,
+                cursor: &mut &[u8],
+            ) -> ::core::result::Result<Self, ::aether_data::__derive_runtime::StorageError> {
+                ::aether_data::__derive_runtime::assemble_positional_element(cursor)
+            }
+        }
+    }
+}
+
 fn expand_label_node_struct(type_ident: &str, fields: &[FieldInfo]) -> TokenStream2 {
     let field_names = fields.iter().enumerate().map(|(idx, f)| match &f.ident {
         Some(id) => id.to_string(),

@@ -13,5 +13,8 @@ pub fn expand_storage(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let kind = parse_kind_attr(&input.attrs)?;
     guard::check(input, &kind)?;
     let storage = attr::parse_type_storage(&input.attrs)?;
-    emit::emit(input, &kind, &storage)
+    let schema_core = crate::expand_schema_core(input)?;
+    let element = emit::emit_tagged_element(&input.ident);
+    let storage_impls = emit::emit(input, &kind, &storage)?;
+    Ok(quote::quote! { #schema_core #element #storage_impls })
 }

@@ -21,7 +21,7 @@ use serde::de::DeserializeOwned;
 
 use crate::ids::WorkpieceId;
 use crate::values::SpendQuiesce;
-use crate::{BaseAlertView, BloomView, Digest};
+use crate::{BaseAlertView, Digest};
 
 /// Pre-adoption positional identity. An absent stamp is this identity.
 pub const POSITIONAL_ROW_SCHEMA: &str = "positional";
@@ -174,20 +174,6 @@ fn opaque_absent<T: Schema>(carry: u64, source: &RecordReader) -> bool {
     !source.contains(terminate_field_hash(carry, &T::SCHEMA))
 }
 
-impl StorageLeaves for BloomView {
-    fn contribute(&self, carry: u64, depth: u32, sink: &mut RecordWriter) -> Result<(), StorageError> {
-        contribute_opaque(self, carry, depth, sink)
-    }
-
-    fn assemble(carry: u64, depth: u32, source: &mut RecordReader) -> Result<Self, StorageError> {
-        assemble_opaque(carry, depth, source)
-    }
-
-    fn is_absent(carry: u64, _depth: u32, source: &RecordReader) -> bool {
-        opaque_absent::<Self>(carry, source)
-    }
-}
-
 impl StorageLeaves for SpendQuiesce {
     fn contribute(&self, carry: u64, depth: u32, sink: &mut RecordWriter) -> Result<(), StorageError> {
         contribute_opaque(self, carry, depth, sink)
@@ -236,7 +222,7 @@ mod tests {
     use aether_data::Kind;
     use serde::{Deserialize, Serialize};
 
-    #[derive(Clone, PartialEq, Eq, Debug, aether_data::Schema, aether_data::Storage, Serialize, Deserialize)]
+    #[derive(Clone, PartialEq, Eq, Debug, aether_data::Storage, Serialize, Deserialize)]
     #[kind(name = "aether.bloomery.view_document")]
     struct ViewDocumentShadow {
         mainline: Digest,

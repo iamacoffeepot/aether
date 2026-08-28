@@ -39,7 +39,7 @@ use crate::values::{
 /// added as an optional (required-by-default). Trailing optionals at this root
 /// decode as absent for a reader that predates them. Fields reached through
 /// [`Self::blooms`] stay positional inside that container.
-#[derive(aether_data::Schema, aether_data::Storage, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Storage, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[cfg_attr(any(test, feature = "testing"), derive(Default))]
 #[kind(name = "aether.bloomery.view_document")]
 pub struct ViewDocument {
@@ -608,7 +608,7 @@ pub struct PendingDecisionView {
 /// Persisted outbox rows adopt the ADR-0059 storage shape: a future field is
 /// added as an optional (required-by-default). Trailing optionals at this root
 /// decode as absent for a reader that predates them.
-#[derive(aether_data::Schema, aether_data::Storage, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Storage, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[kind(name = "aether.bloomery.commission_projection")]
 pub struct CommissionProjection {
     /// The workpiece this commission is.

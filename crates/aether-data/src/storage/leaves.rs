@@ -2,15 +2,17 @@
 //! TLV leaves (ADR-0059).
 //!
 //! Blanket impls cover the closed vocabulary: scalars, `bool`, owned
-//! strings, `Bytes`, the typed-id newtypes, and the opaque containers
-//! `Vec`, `Map`, and `Array`. User structs and enums get a
-//! derive-emitted impl. `Option<T>` is the two-variant enum, not a
-//! special case.
+//! strings, `Bytes`, and the typed-id newtypes. The containers `Vec`,
+//! `Map`, and `Array` are one record each whose body encoding the
+//! element type selects through [`StorageElement`]. User structs and
+//! enums get a derive-emitted impl. `Option<T>` is the two-variant
+//! enum, not a special case.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use super::element::{StorageElement, container_hash};
 use super::hash::{
     BYTES_SCHEMA, MAX_STORAGE_DEPTH, U64_SCHEMA, UNIT_SCHEMA, VARIANT_LEAF, fold_path_segment, terminate_field_hash,
     variant_hash,
@@ -114,47 +116,89 @@ opaque_leaf!(
     ThreadId,
 );
 
-impl<T: StorageLeaves + LeafBody + Schema + 'static> StorageLeaves for Vec<T> {
-    fn contribute(&self, carry: u64, depth: u32, sink: &mut RecordWriter) -> Result<(), StorageError> {
-        contribute_opaque(self, carry, depth, sink)
-    }
-
-    fn assemble(carry: u64, depth: u32, source: &mut RecordReader) -> Result<Self, StorageError> {
-        assemble_opaque(carry, depth, source)
-    }
-
-    fn is_absent(carry: u64, _depth: u32, source: &RecordReader) -> bool {
-        opaque_absent::<Self>(carry, source)
-    }
-}
-
-impl<T: StorageLeaves + LeafBody + Schema + 'static, const N: usize> StorageLeaves for [T; N] {
-    fn contribute(&self, carry: u64, depth: u32, sink: &mut RecordWriter) -> Result<(), StorageError> {
-        contribute_opaque(self, carry, depth, sink)
-    }
-
-    fn assemble(carry: u64, depth: u32, source: &mut RecordReader) -> Result<Self, StorageError> {
-        assemble_opaque(carry, depth, source)
-    }
-
-    fn is_absent(carry: u64, _depth: u32, source: &RecordReader) -> bool {
-        opaque_absent::<Self>(carry, source)
-    }
-}
-
-impl<K: StorageLeaves + LeafBody + Schema + Ord + 'static, V: StorageLeaves + LeafBody + Schema + 'static> StorageLeaves
-    for BTreeMap<K, V>
+impl<T: StorageElement + Schema + 'static> StorageLeaves for Vec<T>
+where
+    Self: StorageElement + Schema,
 {
     fn contribute(&self, carry: u64, depth: u32, sink: &mut RecordWriter) -> Result<(), StorageError> {
-        contribute_opaque(self, carry, depth, sink)
+        contribute_container(self, carry, depth, sink)
     }
 
     fn assemble(carry: u64, depth: u32, source: &mut RecordReader) -> Result<Self, StorageError> {
-        assemble_opaque(carry, depth, source)
+        assemble_container(carry, depth, source)
     }
 
-    fn is_absent(carry: u64, _depth: u32, source: &RecordReader) -> bool {
-        opaque_absent::<Self>(carry, source)
+    fn is_absent(carry: u64, depth: u32, source: &RecordReader) -> bool {
+        !source.contains(container_hash::<Self>(carry, depth))
+    }
+}
+
+impl<T: StorageElement + Schema + 'static, const N: usize> StorageLeaves for [T; N]
+where
+    Self: StorageElement + Schema,
+{
+    fn contribute(&self, carry: u64, depth: u32, sink: &mut RecordWriter) -> Result<(), StorageError> {
+        contribute_container(self, carry, depth, sink)
+    }
+
+    fn assemble(carry: u64, depth: u32, source: &mut RecordReader) -> Result<Self, StorageError> {
+        assemble_container(carry, depth, source)
+    }
+
+    fn is_absent(carry: u64, depth: u32, source: &RecordReader) -> bool {
+        !source.contains(container_hash::<Self>(carry, depth))
+    }
+}
+
+impl<K: StorageElement + Schema + Ord + 'static, V: StorageElement + Schema + 'static> StorageLeaves for BTreeMap<K, V>
+where
+    Self: StorageElement + Schema,
+{
+    fn contribute(&self, carry: u64, depth: u32, sink: &mut RecordWriter) -> Result<(), StorageError> {
+        contribute_container(self, carry, depth, sink)
+    }
+
+    fn assemble(carry: u64, depth: u32, source: &mut RecordReader) -> Result<Self, StorageError> {
+        assemble_container(carry, depth, source)
+    }
+
+    fn is_absent(carry: u64, depth: u32, source: &RecordReader) -> bool {
+        !source.contains(container_hash::<Self>(carry, depth))
+    }
+}
+
+/// One container field as one record: the tag from [`container_hash`],
+/// the body from the container's own element encoding. Positional
+/// content reproduces the retired opaque form byte for byte; tagged
+/// content gets the schema-independent tag and framed element bodies.
+fn contribute_container<C: StorageElement + Schema>(
+    value: &C,
+    carry: u64,
+    depth: u32,
+    sink: &mut RecordWriter,
+) -> Result<(), StorageError> {
+    check_depth(depth)?;
+    let mut body = Vec::new();
+    value.contribute_element(depth, &mut body)?;
+    sink.emit(container_hash::<C>(carry, depth), body)
+}
+
+/// Inverse of [`contribute_container`], requiring the record body fully
+/// consumed.
+fn assemble_container<C: StorageElement + Schema>(
+    carry: u64,
+    depth: u32,
+    source: &mut RecordReader,
+) -> Result<C, StorageError> {
+    check_depth(depth)?;
+    let hash = container_hash::<C>(carry, depth);
+    let bytes = source.take(hash).ok_or(StorageError::MissingRequiredField { hash, name: "" })?;
+    let mut cursor = bytes.as_slice();
+    let value = C::assemble_element(depth, &mut cursor)?;
+    if cursor.is_empty() {
+        Ok(value)
+    } else {
+        Err(StorageError::TrailingBytes)
     }
 }
 
