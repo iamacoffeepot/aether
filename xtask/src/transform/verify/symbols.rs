@@ -262,12 +262,12 @@ fn classify(introduced: &[Symbol], index: &BTreeMap<String, Vec<&Symbol>>) -> (V
 }
 
 /// How close an existing symbol sits to an introduced one. Smaller is nearer:
-/// name gap first, then signature shape, then module proximity.
+/// name first, then signature shape, then module proximity.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct NeighbourRank {
-    name_gap: usize,
-    signature_gap: u8,
-    module_gap: u8,
+    name: usize,
+    signature: u8,
+    module: u8,
 }
 
 /// The existing symbols nearest `symbol` by name similarity, then signature
@@ -302,16 +302,16 @@ fn rank(symbol: &Symbol, existing: &Symbol, key: &str, candidate: &str) -> Neigh
     } else {
         (candidate, key)
     };
-    let signature_gap = u8::from(symbol.signature.arity != existing.signature.arity)
+    let signature = u8::from(symbol.signature.arity != existing.signature.arity)
         + u8::from(symbol.signature.output != existing.signature.output);
-    let module_gap = if symbol.module == existing.module {
+    let module = if symbol.module == existing.module {
         0
     } else if symbol.crate_name == existing.crate_name {
         1
     } else {
         2
     };
-    NeighbourRank { name_gap: long.len() - short.len(), signature_gap, module_gap }
+    NeighbourRank { name: long.len() - short.len(), signature, module }
 }
 
 /// Whether two normalized names are close enough to offer one as the other's
