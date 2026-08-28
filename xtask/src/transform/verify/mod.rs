@@ -167,9 +167,12 @@ impl VerifyInvocation {
         diff_base: Option<&str>,
         cache: Option<&CompilerCache>,
         peak: &PeakMemory,
+        schedule: TestSchedule<'_>,
     ) -> Command {
         let mut cmd = peak.command(self.program);
-        cmd.args(self.args_under(scope, diff_base)).envs(self.env.iter().copied()).envs(CI_BUILD_ENV.iter().copied());
+        cmd.args(self.scheduled_args(scope, diff_base, schedule))
+            .envs(self.env.iter().copied())
+            .envs(CI_BUILD_ENV.iter().copied());
         sccache::export(cache, &mut cmd);
         cmd
     }
@@ -192,7 +195,25 @@ impl VerifyInvocation {
     /// than guessing `origin/main` (#5033). Absent, the stated argv is left
     /// alone: the aggregate verify and a hand-run name no base.
     fn args_under(&self, scope: &Scope, diff_base: Option<&str>) -> Vec<String> {
-        let mut args: Vec<String> = scope.packages().filter(|_| self.breadth == Breadth::Closure).map_or_else(
+        self.scheduled_args(scope, diff_base, TestSchedule::default())
+    }
+
+    /// [`Self::args_under`] plus the CI scheduling inputs only `verify.test`
+    /// accepts: an explicit package set and a nextest partition (#4883).
+    ///
+    /// Explicit packages win over a closure's, because they *are* the
+    /// selection — CI's affected step already computed the reverse-dependency
+    /// set. A partition appends; it does not replace. The stated argv stays
+    /// the prefix either way, so `--all-features` cannot drop off a shard.
+    fn scheduled_args(&self, scope: &Scope, diff_base: Option<&str>, schedule: TestSchedule<'_>) -> Vec<String> {
+        let packages = if self.breadth != Breadth::Closure {
+            None
+        } else if schedule.packages.is_empty() {
+            scope.packages()
+        } else {
+            Some(schedule.packages)
+        };
+        let mut args: Vec<String> = packages.map_or_else(
             || self.args.iter().map(|arg| (*arg).to_owned()).collect(),
             |packages| {
                 self.args
@@ -206,6 +227,10 @@ impl VerifyInvocation {
         if let (Some(flag), Some(base)) = (self.diff_base_flag, diff_base) {
             args.push(flag.to_owned());
             args.push(base.to_owned());
+        }
+        if let Some(partition) = schedule.partition {
+            args.push("--partition".to_owned());
+            args.push(partition.to_owned());
         }
         args
     }
@@ -233,6 +258,42 @@ impl VerifyInvocation {
     fn prepare_under(&self, scope: &Scope) -> Option<&'static [&'static str]> {
         self.prepare.filter(|_| self.breadth != Breadth::Closure || scope.wasm_needed())
     }
+
+    /// [`Self::prepare_under`], or `None` when the caller attests it already
+    /// ran the component-wasm pre-build (#4883).
+    ///
+    /// CI's test job runs `cargo xtask dist` as its own conditional step, then
+    /// passes `--prepared` so this arm does not pay for it again per shard.
+    /// A closure that would have declined the prepare still declines it:
+    /// attestation skips a prepare that would have run, it does not resurrect
+    /// one the scope said not to.
+    fn should_prepare(&self, scope: &Scope, prepared: bool) -> Option<&'static [&'static str]> {
+        if prepared {
+            None
+        } else {
+            self.prepare_under(scope)
+        }
+    }
+}
+
+/// CI scheduling inputs that only `verify.test` accepts (#4883).
+///
+/// Package selection, the nextest partition, and an attestation that the
+/// caller already ran the component-wasm prepare. Empty on every other path:
+/// the umbrella, a laptop run, a Bloomery member. Presence on any other
+/// command is refused at [`super::run`], so a scheduling flag cannot silently
+/// narrow `verify.clippy` or skip a prepare that never ran.
+#[derive(Clone, Copy, Default)]
+struct TestSchedule<'a> {
+    packages: &'a [String],
+    partition: Option<&'a str>,
+    prepared: bool,
+}
+
+impl<'a> TestSchedule<'a> {
+    fn from_args(args: &'a TransformArgs) -> Self {
+        Self { packages: &args.package, partition: args.partition.as_deref(), prepared: args.prepared }
+    }
 }
 
 /// Maps a typed `verify.*` command id to the invocation that answers it, in
@@ -259,11 +320,10 @@ impl VerifyInvocation {
 /// dispatches, which is what lets a repair round recompile nine crates instead
 /// of ninety-six.
 ///
-/// Tripwire: these argv + env pins are CI-parity invariants — a drift here
-/// means this entrypoint no longer proves the laptop/Actions invocation
-/// symmetry ADR-0149 §Execution requires. The `workflow` module reads
-/// `.github/workflows/ci.yml` so the comparison is against the command the
-/// gate runs rather than against a second literal in this file (#4843).
+/// Tripwire: these argv + env pins are the gate (#4883). CI invokes this
+/// entrypoint; a drift here is a drift in what Actions runs. The `workflow`
+/// module reads `.github/workflows/ci.yml` so each job is asserted to call
+/// its typed command rather than restating this argv.
 fn verify_command(id: &str) -> Option<VerifyInvocation> {
     compiled_member(id).or_else(|| tree_member(id))
 }
@@ -1162,7 +1222,7 @@ struct SpawnRunner<'a> {
 
 impl MemberRunner for SpawnRunner<'_> {
     fn run(&mut self, invocation: &VerifyInvocation, scope: &Scope, diff_base: Option<&str>) -> Result<Captured> {
-        let output = run_captured(invocation.command(scope, diff_base, self.cache, self.peak))
+        let output = run_captured(invocation.command(scope, diff_base, self.cache, self.peak, TestSchedule::default()))
             .with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
         // The wrapper's report is taken off the stderr the member's log keeps:
         // the reading belongs in the evidence record, and the log belongs to
@@ -2007,8 +2067,9 @@ fn run_prepare(
     scope: &Scope,
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
+    prepared: bool,
 ) -> Result<PrepareFailure> {
-    let Some(prepare) = invocation.prepare_under(scope) else {
+    let Some(prepare) = invocation.should_prepare(scope, prepared) else {
         return Ok(None);
     };
 
@@ -2072,13 +2133,14 @@ fn run_timed_prepare(
     scope: &Scope,
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
+    prepared: bool,
 ) -> Result<TimedPrepare> {
-    if invocation.prepare_under(scope).is_none() {
+    if invocation.should_prepare(scope, prepared).is_none() {
         return Ok((None, None));
     }
 
     let started = Instant::now();
-    let failure = run_prepare(id, invocation, scope, cache, peak)?;
+    let failure = run_prepare(id, invocation, scope, cache, peak, prepared)?;
     Ok((failure, Some(elapsed_millis(started))))
 }
 
@@ -2157,7 +2219,12 @@ fn dispatch_single(
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
 ) -> Result<MemberRun> {
-    let output = run_captured(invocation.command(scope, args.diff_base.as_deref(), cache, peak))
+    let schedule = TestSchedule::from_args(args);
+    if let Some((log, code, outcome)) = run_prepare(&args.command, invocation, scope, cache, peak, schedule.prepared)? {
+        return Ok(MemberRun::plain(&args.command, outcome, log.into_bytes(), code));
+    }
+
+    let output = run_captured(invocation.command(scope, args.diff_base.as_deref(), cache, peak, schedule))
         .with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
     let stderr = peak.take_report(output.stderr);
 
@@ -2599,7 +2666,7 @@ fn run_gate(id: &'static str, pass: &GatePass<'_>) -> Result<(MemberRun, GateTim
     let (run, prepare_millis) = if let Some(run) = empty_closure_run(id, &invocation, scope) {
         (run, None)
     } else {
-        let (prepare_failure, prepare_millis) = run_timed_prepare(id, &invocation, scope, cache, peak)?;
+        let (prepare_failure, prepare_millis) = run_timed_prepare(id, &invocation, scope, cache, peak, false)?;
         let mut runner = SpawnRunner::new(cache, peak);
         let run = match prepare_failure {
             Some((log, code, outcome)) => MemberRun::plain(id, outcome, log.into_bytes(), code),
@@ -2721,13 +2788,13 @@ fn check_pass(args: &TransformArgs, logs: &Path, position: Position) -> Result<C
 mod tests {
     use super::{
         BASE_SET_SUBJECT, Captured, DOCS_MEMBER, EvidenceChannel, MAX_FINDING_LINES, MemberOutcome, MemberRun,
-        MemberRunner, Position, SUPPRESS_MEMBER, Scope, SpawnRunner, VERIFY_BASE, VERIFY_CHECK, VERIFY_MEMBER,
-        VerifyInvocation, builds_artifacts, clippy_verdict, closure, distil_diagnostics, effective_exit_code,
-        empty_closure_run, environment_observations, failed_verifiers, host_fault_in, member_diff_base, member_outcome,
-        member_scope_notice, operational_failure_notice, package_name, preflight_tools, prepare_failure_log,
-        render_diagnostics, replay_args, required_targets, required_tools, run_member, run_member_discriminated,
-        run_timed_prepare, umbrella_status, unjudged_notice, verify_check_members, verify_command, verify_findings,
-        workflow,
+        MemberRunner, Position, SUPPRESS_MEMBER, Scope, SpawnRunner, TestSchedule, VERIFY_BASE, VERIFY_CHECK,
+        VERIFY_MEMBER, VerifyInvocation, builds_artifacts, clippy_verdict, closure, distil_diagnostics,
+        effective_exit_code, empty_closure_run, environment_observations, failed_verifiers, host_fault_in,
+        member_diff_base, member_outcome, member_scope_notice, operational_failure_notice, package_name,
+        preflight_tools, prepare_failure_log, render_diagnostics, replay_args, required_targets, required_tools,
+        run_member, run_member_discriminated, run_timed_prepare, umbrella_status, unjudged_notice,
+        verify_check_members, verify_command, verify_findings, workflow,
     };
     use std::iter;
     use std::path::Path;
@@ -2751,10 +2818,6 @@ mod tests {
 
     fn borrowed(tokens: &[String]) -> Vec<&str> {
         tokens.iter().map(String::as_str).collect()
-    }
-
-    fn owned_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-        pairs.iter().map(|(key, value)| ((*key).to_owned(), (*value).to_owned())).collect()
     }
 
     /// One member's run as the umbrella records it, from a canned log.
@@ -2901,22 +2964,19 @@ mod tests {
         assert_eq!(host_fault_in(&failing_run(&["aether-render::a_test"])), None, "and so is a failing test");
     }
 
-    /// The six mechanical gates, each with the job that runs it and the exact
+    /// The mechanical gates, each with the job that runs it and the exact
     /// words that job spells to reach the arm.
     ///
-    /// Five go through the `cargo xtask` alias. `lock-freshness` spells the
+    /// Six go through the `cargo xtask` alias. `lock-freshness` spells the
     /// executor's own build out with `--locked`, because building it is the
     /// first thing in that job to resolve the dependency graph and an unlocked
     /// build would regenerate the very lockfile the arm is about to judge — the
     /// gate would then pass over a lock it had just repaired in place.
-    ///
-    /// `test` is deliberately absent. Its job keeps the native nextest spelling
-    /// so it can carry the affected-package selection and the shard partition,
-    /// neither of which the arm accepts; it is asserted on its own below.
     const XTASK_GATES: &[(&str, &str, &[&str])] = &[
         ("fmt", "verify.fmt", &["cargo", "xtask", "transform", "verify.fmt"]),
         ("clippy", "verify.clippy", &["cargo", "xtask", "transform", "verify.clippy"]),
         ("docs", "verify.docs", &["cargo", "xtask", "transform", "verify.docs"]),
+        ("test", "verify.test", &["cargo", "xtask", "transform", "verify.test"]),
         ("dup-check", "verify.dup", &["cargo", "xtask", "transform", "verify.dup"]),
         ("unused-deps", "verify.deps", &["cargo", "xtask", "transform", "verify.deps"]),
         (
@@ -2945,6 +3005,11 @@ mod tests {
                 "`jobs.{job}` must reach its arm exactly once as `{}`, found {} such steps",
                 invoker.join(" "),
                 spelled.len(),
+            );
+            assert!(
+                spelled[0].env.is_empty(),
+                "`jobs.{job}` must not restate `{id}`'s environment: {:?}",
+                spelled[0].env,
             );
 
             // And by no other spelling. The count above is about the words this
@@ -2977,39 +3042,40 @@ mod tests {
     }
 
     #[test]
-    fn the_test_gate_keeps_the_native_spelling_its_scheduling_needs() {
-        // Tripwire: `test` is the one mechanical gate still spelled in YAML,
-        // and the reason is its scheduling — an affected-package selection on
-        // pull requests and a three-way shard partition on everything else,
-        // neither of which the arm accepts. So the two argv stay two, and the
-        // parity between them is asserted the old way.
-        //
-        // The member drops CI's partition — the lane runs the suite whole — and
-        // keeps every flag before it, `--all-features` above all: a lane
-        // running fewer tests than the gate it predicts is a false green that
-        // surfaces at the landing pull request. The wasm pre-build its scenario
-        // tests load is CI's own step, in the same job.
-        let test = verify_command("verify.test").expect("verify.test mapped");
-        let ci_test = workflow::named_step("test", "Run tests (workspace, parallel)");
-        let partition = ci_test.run.iter().position(|token| token == "--partition").expect("CI shards the full suite");
-        assert_eq!(argv(&test), [ci_test.run[..partition].to_vec(), owned(&["--no-fail-fast"])].concat());
-        assert_eq!(
-            owned(test.prepare.expect("scenario tests need the component wasm built")),
-            workflow::gate_step("test", &["cargo", "xtask", "dist"]).run[1..].to_vec(),
+    fn the_test_gate_passes_its_scheduling_inputs_into_verify_test() {
+        // Tripwire: the arm now accepts the three scheduling inputs this job
+        // needs, so the gate is an arm invocation like the others. The drift
+        // worth catching is the job going back to a raw nextest argv (which
+        // would restore the two-site calibration) or dropping a scheduling
+        // input — without `--partition` each full-suite shard runs the whole
+        // suite; without `package_args` the affected subset is discarded;
+        // without `--prepared` the arm cross-builds the wasm the pre-build
+        // step already produced.
+        let steps = workflow::steps_running("test", &["cargo", "xtask", "transform", "verify.test"]);
+        assert_eq!(steps.len(), 1, "`jobs.test` must reach verify.test exactly once, found {}", steps.len());
+        let run = &steps[0].run;
+        assert!(
+            run.windows(2).any(|pair| pair[0] == "--partition" && pair[1].contains("slice:")),
+            "the test job must pass the nextest partition through: {run:?}",
         );
-        for pair in &ci_test.env {
-            assert!(owned_pairs(test.env).contains(pair), "CI sets {pair:?} for the gate, so the lane must too");
-        }
+        assert!(
+            run.iter().any(|token| token.contains("package_args")),
+            "the test job must pass the affected package set through: {run:?}",
+        );
+        assert!(
+            run.iter().any(|token| token == "--prepared"),
+            "the test job must attest the wasm pre-build already ran: {run:?}",
+        );
 
-        // The affected selection is the second half of that scheduling, and it
-        // is why the job cannot simply become an arm invocation.
         assert_eq!(
             workflow::named_step("test", "Compute affected packages (PR only)").run,
             owned(&["cargo", "xtask", "affected", "--base", "HEAD^1", "--github-output"]),
         );
-        assert!(
-            workflow::steps_running("test", &["transform", "verify.test"]).is_empty(),
-            "routing the shards through the arm would discard the affected subset and cross-build the wasm per shard",
+        assert_eq!(
+            owned(
+                verify_command("verify.test").expect("verify.test mapped").prepare.expect("scenario tests need wasm")
+            ),
+            workflow::gate_step("test", &["cargo", "xtask", "dist"]).run[1..].to_vec(),
         );
     }
 
@@ -3289,6 +3355,21 @@ mod tests {
             test.prepare,
             "a workspace run selects the suites the pre-build exists for",
         );
+        assert_eq!(
+            test.should_prepare(&Scope::resolve(None), true),
+            None,
+            "CI already ran the dist step, so the arm must not pay for it again",
+        );
+        assert_eq!(
+            test.should_prepare(&dist_consuming_closure_scope(&["aether-chassis-desktop"]), true),
+            None,
+            "attestation skips a prepare that would have run",
+        );
+        assert_eq!(
+            test.should_prepare(&closure_scope(&["aether-chassis-bloomery"]), true),
+            None,
+            "attestation must not resurrect a prepare the closure declined",
+        );
 
         // A declined build states itself where the reader is. Without the line,
         // a log with no cross-build in it is indistinguishable from a lane that
@@ -3309,6 +3390,49 @@ mod tests {
             let invocation = verify_command(id).expect("member mapped");
             assert_eq!(invocation.prepare_under(&closure_scope(&["aether-math"])), None, "{id} declares no prepare");
         }
+    }
+
+    #[test]
+    fn verify_test_composes_ci_scheduling_onto_the_canonical_invocation() {
+        // Tripwire for #4883. The arm owns the nextest argv; CI scheduling
+        // composes onto it. A shard that dropped `--partition` would run the
+        // whole suite three times over. An affected run that restated the
+        // nextest flags instead of composing `-p` would be a second copy of
+        // the calibration. `--prepared` is the dist skip, tested with
+        // should_prepare alongside the closure cases above.
+        let test = verify_command("verify.test").expect("verify.test mapped");
+        let workspace = Scope::resolve(None);
+        let canonical = owned(test.args);
+
+        assert_eq!(
+            test.scheduled_args(&workspace, None, TestSchedule::default()),
+            canonical,
+            "a laptop run with no scheduling inputs dispatches the stated argv",
+        );
+
+        let packages = owned(&["aether-math", "xtask"]);
+        let affected = TestSchedule { packages: &packages, ..TestSchedule::default() };
+        assert_eq!(
+            test.scheduled_args(&workspace, None, affected),
+            [canonical.clone(), owned(&["-p", "aether-math", "-p", "xtask"])].concat(),
+            "affected selection is -p flags composed onto the canonical argv",
+        );
+
+        let partitioned = TestSchedule { partition: Some("slice:2/3"), ..TestSchedule::default() };
+        let sharded = test.scheduled_args(&workspace, None, partitioned);
+        assert_eq!(
+            sharded,
+            [canonical.clone(), owned(&["--partition", "slice:2/3"])].concat(),
+            "the partition appends; dropping it would run the whole suite on every shard",
+        );
+        assert_ne!(sharded, canonical, "each CI shard must not re-run the unpartitioned suite");
+
+        let both = TestSchedule { packages: &packages, partition: Some("slice:1/1"), prepared: true };
+        assert_eq!(
+            test.scheduled_args(&workspace, None, both),
+            [canonical, owned(&["-p", "aether-math", "-p", "xtask", "--partition", "slice:1/1"])].concat(),
+        );
+        assert_eq!(test.should_prepare(&workspace, both.prepared), None);
     }
 
     #[test]
@@ -3604,7 +3728,7 @@ mod tests {
         // a free wasm cross-build rather than as "this gate has no prepare".
         let invocation = verify_command("verify.fmt").expect("verify.fmt mapped");
         let (failure, prepare_millis) =
-            run_timed_prepare("verify.fmt", &invocation, &Scope::resolve(None), None, &peak_memory::detect())
+            run_timed_prepare("verify.fmt", &invocation, &Scope::resolve(None), None, &peak_memory::detect(), false)
                 .expect("a member with no prepare is a no-op");
         assert!(failure.is_none());
         assert!(prepare_millis.is_none(), "a gate that never prepared must not stamp a prepare share");

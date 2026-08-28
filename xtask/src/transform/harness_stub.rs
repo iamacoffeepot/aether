@@ -134,6 +134,9 @@ pub fn args(command: impl Into<String>, out: PathBuf) -> TransformArgs {
         task: None,
         resume: None,
         seeded: None,
+        package: Vec::new(),
+        partition: None,
+        prepared: false,
     }
 }
 
