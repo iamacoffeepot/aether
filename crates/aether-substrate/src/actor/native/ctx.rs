@@ -813,6 +813,20 @@ impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
         }
     }
 
+    /// Kind of the context stored for the request this inbound reply answers,
+    /// leaving it stored. Returns `None` for ordinary mail and unmatched
+    /// replies.
+    ///
+    /// A handler that serves several context kinds from one reply kind probes
+    /// with this and only then commits to the matching
+    /// [`Self::take_context`]; a wrong guess would otherwise consume another
+    /// subsystem's context. Actor dispatch is serialized, so no other handler
+    /// can consume the entry between the probe and the take.
+    #[must_use]
+    pub fn in_reply_context_kind(&self) -> Option<KindId> {
+        self.binding.request_context_kind(self.in_reply_to()?)
+    }
+
     /// Recover and remove the typed context for the request this inbound reply
     /// answers. Returns `None` for ordinary mail, unmatched replies, wrong
     /// context kind, or decode failure.
@@ -1748,6 +1762,30 @@ mod tests {
 
         assert_eq!(ctx.take_context::<NativeRequestContext>(), Some(NativeRequestContext { value: 9 }));
         assert_eq!(ctx.take_context::<NativeRequestContext>(), None);
+    }
+
+    /// The ctx probe keys off the inbound reply's correlation id and leaves the
+    /// context stored, so a handler can route on the kind and still take it.
+    /// Ordinary mail carries no answered request, so it probes to `None`.
+    #[test]
+    fn native_ctx_in_reply_context_kind_probes_without_consuming() {
+        use crate::testing::bare_substrate;
+
+        let (_registry, mailer) = bare_substrate();
+        let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x00BE_EF12)));
+        binding.store_request_context(RequestId(77), &NativeRequestContext { value: 9 });
+
+        let reply_source = Source::with_correlation(SourceAddr::None, 77);
+        let ctx = NativeCtx::new(&binding, reply_source, MailId::NONE, MailId::NONE);
+        assert_eq!(ctx.in_reply_context_kind(), Some(NativeRequestContext::ID));
+        assert_eq!(ctx.in_reply_context_kind(), Some(NativeRequestContext::ID), "the probe does not consume");
+
+        let mut ctx = NativeCtx::new(&binding, reply_source, MailId::NONE, MailId::NONE);
+        assert_eq!(ctx.take_context::<NativeRequestContext>(), Some(NativeRequestContext { value: 9 }));
+
+        let caller_source = Source::with_correlation(SourceAddr::Component(MailboxId(0xC0)), 77);
+        let ordinary = NativeCtx::new(&binding, caller_source, MailId::NONE, MailId::NONE);
+        assert_eq!(ordinary.in_reply_context_kind(), None, "ordinary mail answers no request");
     }
 
     #[test]

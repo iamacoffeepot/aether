@@ -13,6 +13,12 @@
 //!   2. Structured (everything else): the `aether_data::wire` format,
 //!      written and read directly to match the format byte-for-byte.
 //!
+//!   [`decode_schema_strict`] is the same walk under a narrower policy,
+//!   for a caller forwarding decoded bytes across a protocol boundary:
+//!   non-finite floats and repeated map keys become errors instead of
+//!   `null` and last-writer-wins, and the caller names the ceiling on
+//!   projected values.
+//!
 //! - **Stream framing** ([`frame`]): length-prefixed frames for
 //!   serde-derived enum types. The hub channel (`aether_hub::wire`)
 //!   is the first consumer; ADR-0072 placed framing here because the
@@ -33,5 +39,5 @@ mod proptest_roundtrip;
 #[cfg(test)]
 mod test_fixtures;
 
-pub use decode::{DecodeError, decode_schema};
+pub use decode::{DecodeError, decode_schema, decode_schema_strict};
 pub use encode::{EncodeError, encode_schema};

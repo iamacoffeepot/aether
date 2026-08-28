@@ -17,13 +17,26 @@
 
 mod chassis;
 pub mod cli;
+pub mod mcp;
 
 pub use aether_substrate::Chassis;
-pub use chassis::{HubChassis, HubServerDriverCapability, HubServerDriverRunning};
+pub use chassis::{HubChassis, HubServerDriverCapability, HubServerDriverRunning, McpEndpointConfig};
 pub use cli::HubCli;
+pub use mcp::HubToolProvider;
 
 /// Default port the hub binds its `aether.rpc.server` on (issue 763).
 /// The hub boots its RPC server unconditionally — it's the target the
 /// out-of-process `aether-mcp` coordinator dials (matching that
 /// crate's `DEFAULT_HUB_RPC_ADDR`). `AETHER_RPC_PORT` overrides.
 pub const DEFAULT_RPC_PORT: u16 = 8901;
+
+/// Default port the hub binds its Model Context Protocol endpoint on.
+///
+/// The design's target topology puts the hub's `HttpServerCapability` here
+/// and eventually points the tunnel's `/mcp` proxy at it. Until that cutover
+/// the port is also the outgoing out-of-process `aether-mcp` child's, so a
+/// shadow endpoint enabled while that child is running will fail to bind —
+/// loudly, which is the intended way to discover the overlap. The endpoint
+/// is off unless `AETHER_MCP_ENABLED` says otherwise, so an ordinary hub
+/// never reaches that contention.
+pub const DEFAULT_MCP_HTTP_PORT: u16 = 8891;
