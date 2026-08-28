@@ -40,6 +40,7 @@ use aether_data::wire::to_vec;
 // written to a file and runs everywhere. Gating the import with them made this
 // crate's whole test target refuse to compile off Linux, so no test in it could
 // be run on a developer's machine at all.
+use super::backend::OrderIdentity;
 use super::identity::ProcessIdentity;
 use super::orphan::OrphanedRun;
 use super::quarantine;
@@ -3440,5 +3441,51 @@ fn containment_reads_the_finishing_lanes_own_tree() {
         refs[0].observation.violating_paths,
         [OUT_OF_SURFACE_PATH],
         "containment must name the finishing lane's out-of-surface path, not the sibling's reset tree",
+    );
+}
+
+/// Build the order context the candidate binding reads, for `stage` and the
+/// two digests whose disagreement is the whole discriminator.
+fn identity(stage: StageId, workpiece: &str, candidate: Digest, scope_revision: Digest) -> OrderIdentity {
+    OrderIdentity {
+        bloom: vec![1; 32],
+        workpiece: workpiece.to_owned(),
+        stage,
+        candidate: Some(candidate),
+        scope_revision: Some(scope_revision),
+    }
+}
+
+#[test]
+fn only_a_member_verify_over_a_captured_candidate_pins_its_checkout_to_a_tree() {
+    // Both ways of getting this wrong are silent. Too narrow and the binding
+    // never runs, which is the state the stale checkout got through. Too wide
+    // and every dispatch whose checkout is legitimately not the candidate —
+    // a Construct standing on the checkpoint it is about to change, a member
+    // that reached Verify with no capture and binds its scope revision, an
+    // aggregate lane with no member candidate at all — refuses before it
+    // spawns, which stops the whole line.
+    let candidate = digest(0xC1);
+    let scope = digest(0x51);
+
+    assert_eq!(
+        identity(StageId::Verify, "wp", candidate, scope).judged_candidate(),
+        Some(candidate),
+        "a member Verify over a captured candidate is the one lane whose checkout carries the judged tree",
+    );
+    assert_eq!(
+        identity(StageId::Construct, "wp", candidate, scope).judged_candidate(),
+        None,
+        "a Construct stands on a tree it is about to change",
+    );
+    assert_eq!(
+        identity(StageId::Verify, "wp", scope, scope).judged_candidate(),
+        None,
+        "a member that reached Verify with no capture binds its scope revision, which addresses no tree",
+    );
+    assert_eq!(
+        identity(StageId::Verify, "", candidate, scope).judged_candidate(),
+        None,
+        "a bloom-level lane has no member candidate to be pinned to",
     );
 }

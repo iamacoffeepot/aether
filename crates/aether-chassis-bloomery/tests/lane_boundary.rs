@@ -22,7 +22,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{env, fs, thread};
 
 use aether_bloomery::{
-    BloomStatus, BloomView, CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND, VERIFY_CHECK_COMMAND, VerifyFailure,
+    BloomStatus, BloomView, CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND, VERIFY_MEMBER_COMMAND, VerifyFailure,
     VerifyFailureSet,
 };
 use aether_chassis_bloomery::bloomery::admits_lane_key;
@@ -70,7 +70,7 @@ fn a_bloom_whose_lanes_all_pass_resolves_its_member() {
         commands.contains(&CONSTRUCT_IMPLEMENT_COMMAND.to_owned()),
         "the construct lane ran as a real subprocess: {commands:?}",
     );
-    assert!(commands.contains(&VERIFY_CHECK_COMMAND.to_owned()), "the verify lane ran too: {commands:?}");
+    assert!(commands.contains(&VERIFY_MEMBER_COMMAND.to_owned()), "the verify lane ran too: {commands:?}");
 }
 
 #[test]
@@ -110,7 +110,7 @@ fn a_conversation_keeps_its_session_tree_and_a_mechanical_lane_builds_in_its_slo
     assert_eq!(tree.parent().and_then(Path::parent), Some(sessions.as_path()), "and it is a session's: {tree:?}");
 
     let verify_trees: Vec<&(String, String)> =
-        placed.iter().filter(|(command, _)| command == VERIFY_CHECK_COMMAND).collect();
+        placed.iter().filter(|(command, _)| command == VERIFY_MEMBER_COMMAND).collect();
     assert!(!verify_trees.is_empty(), "the mechanical verify ran with a placed tree: {placed:?}");
     for (_, worktree) in &verify_trees {
         assert!(
@@ -210,8 +210,8 @@ fn a_bloom_that_fails_verification_twice_still_resolves() {
     // is a fresh process that must read the *next* step, not the first.
     let mut harness = LaneHarness::start(
         &LaneScript::all_passing()
-            .then(VERIFY_CHECK_COMMAND, LaneMode::Fail)
-            .then(VERIFY_CHECK_COMMAND, LaneMode::Fail),
+            .then(VERIFY_MEMBER_COMMAND, LaneMode::Fail)
+            .then(VERIFY_MEMBER_COMMAND, LaneMode::Fail),
     );
 
     let bloom = harness.settle("the member resolves after two failed verifications", |bloom| {
@@ -219,7 +219,7 @@ fn a_bloom_that_fails_verification_twice_still_resolves() {
     });
 
     assert!(bloom.members[0].wedge.is_none(), "two failures inside the budget wedge nothing");
-    let verifies = harness.ledger().into_iter().filter(|run| run.command == VERIFY_CHECK_COMMAND).count();
+    let verifies = harness.ledger().into_iter().filter(|run| run.command == VERIFY_MEMBER_COMMAND).count();
     assert!(verifies >= 3, "the failing verifications re-drove rather than being retried in place: {verifies} runs");
 }
 
@@ -230,7 +230,7 @@ fn a_candidate_that_does_not_build_steers_its_repair_lap_with_the_diagnostics() 
     // through the coordinator's persistence, into the next child's `--task` —
     // a path that exists entirely below the spawn seam, so nothing above it can
     // observe whether it is connected.
-    let mut harness = LaneHarness::start(&LaneScript::all_passing().then(VERIFY_CHECK_COMMAND, LaneMode::Fail));
+    let mut harness = LaneHarness::start(&LaneScript::all_passing().then(VERIFY_MEMBER_COMMAND, LaneMode::Fail));
 
     harness.settle("the member resolves after its repair lap", |bloom| {
         bloom.members.first().is_some_and(|member| member.resolution.is_some())
@@ -257,10 +257,10 @@ fn a_member_whose_verification_never_passes_wedges_with_recorded_evidence() {
     // Refine run passing so this wedges at Verify, not at the repair stage.
     let mut harness = LaneHarness::start(
         &LaneScript::all_passing()
-            .then(VERIFY_CHECK_COMMAND, LaneMode::Fail)
-            .then(VERIFY_CHECK_COMMAND, LaneMode::Fail)
-            .then(VERIFY_CHECK_COMMAND, LaneMode::Fail)
-            .then(VERIFY_CHECK_COMMAND, LaneMode::Fail),
+            .then(VERIFY_MEMBER_COMMAND, LaneMode::Fail)
+            .then(VERIFY_MEMBER_COMMAND, LaneMode::Fail)
+            .then(VERIFY_MEMBER_COMMAND, LaneMode::Fail)
+            .then(VERIFY_MEMBER_COMMAND, LaneMode::Fail),
     );
 
     let bloom =
@@ -467,14 +467,14 @@ fn a_failing_aggregate_review_drives_a_repair_lap_that_resolves() {
 #[test]
 fn a_preflight_failure_holds_on_the_host_and_resumes_without_refine() {
     // #5020: a missing gate tool is a host fault. The mock's Environment
-    // mode on verify.check stamps the production preflight shape; the
+    // mode on verify.member stamps the production preflight shape; the
     // coordinator must hold at Verify, spend no member budget, and — once
     // the next scripted run can pass — resume on its own cadence without
     // an operator grant or a Refine lap.
     let mut harness = LaneHarness::start(
         &LaneScript::all_passing()
-            .then(VERIFY_CHECK_COMMAND, LaneMode::Environment)
-            .then(VERIFY_CHECK_COMMAND, LaneMode::Pass),
+            .then(VERIFY_MEMBER_COMMAND, LaneMode::Environment)
+            .then(VERIFY_MEMBER_COMMAND, LaneMode::Pass),
     );
 
     let bloom = harness.settle("the member resolves after the host is probed again", |bloom| {
@@ -485,7 +485,7 @@ fn a_preflight_failure_holds_on_the_host_and_resumes_without_refine() {
     assert!(bloom.members[0].host_fault.is_none(), "a resolved member is no longer held");
 
     let ledger = harness.ledger();
-    let verifies = ledger.iter().filter(|run| run.command == VERIFY_CHECK_COMMAND).count();
+    let verifies = ledger.iter().filter(|run| run.command == VERIFY_MEMBER_COMMAND).count();
     let constructs = ledger.iter().filter(|run| run.command == CONSTRUCT_IMPLEMENT_COMMAND).count();
     assert!(verifies >= 2, "the cadence re-probed Verify after the preflight miss: {ledger:?}");
     assert_eq!(constructs, 1, "no Refine lap for a candidate the gates never judged: {ledger:?}");

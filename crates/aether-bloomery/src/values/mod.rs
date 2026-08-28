@@ -93,7 +93,7 @@ pub use spend::{SpendCeiling, SpendQuiesce, SpendWindow};
 pub use stage::{
     Attempt, CONSTRUCT_IMPLEMENT_COMMAND, CandidateRef, CatalogError, DispatchKey, ExecutionLimits, NetworkProfile,
     REVIEW_CRITIC_COMMAND, SCOPE_FILL_COMMAND, StageBinding, StageCatalog, Transformation, VERIFY_BASE_COMMAND,
-    VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK, is_model_lane,
+    VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK, VERIFY_MEMBER_COMMAND, is_model_lane,
 };
 pub use statement::{Observation, Provenance, StageReceipt, Statement};
 #[cfg(not(target_arch = "wasm32"))]

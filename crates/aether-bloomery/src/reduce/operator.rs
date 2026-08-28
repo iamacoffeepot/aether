@@ -239,12 +239,16 @@ fn proceed_to_landing(record: &BloomRecord, bloom: &BloomId, effects: &mut Vec<D
     true
 }
 
-/// Whether `tree` has a green mechanical proof on this bloom — the memo every
-/// other verify position consults (#4891). A missing proof is the failed-or-pending
-/// case: either the gates have not returned or they returned red, and neither is
-/// a head landing may propose.
+/// Whether `tree` has a green mechanical proof from the fold's own gates on this
+/// bloom — the memo every other verify position consults (#4891). A missing
+/// proof is the failed-or-pending case: either the gates have not returned or
+/// they returned red, and neither is a head landing may propose.
+///
+/// The fold's gates and not a member's: a weave is a whole tree, and the member
+/// position answers for neither documentation nor the interaction between two
+/// members' candidates.
 fn weave_is_proven(record: &BloomRecord, tree: Digest) -> bool {
-    record.verify_proof_for(tree).is_some()
+    record.verify_proof_for(StageId::AggregateVerify, tree).is_some()
 }
 
 /// Whether a `Resolved` bloom's landing head is a weave this bloom has already

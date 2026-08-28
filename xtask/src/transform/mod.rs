@@ -6,7 +6,8 @@
 //! - The **mechanical verify lane** (`verify.fmt`, `verify.clippy`,
 //!   `verify.docs`, `verify.test`, `verify.dup`, `verify.deps`, and
 //!   `verify.suppress`, #3501) — zero-secret invocations byte-for-byte with CI.
-//!   The `verify.check` umbrella runs all eight without short-circuiting.
+//!   The `verify.check` umbrella runs all eight without short-circuiting, and
+//!   `verify.member` runs the seven a per-member position answers for.
 //! - The **model-driven construct lane** (`construct.implement`, #3511) —
 //!   runs headless Claude at the resolved model + reasoning effort against the
 //!   checked-out **subject** tree, and writes the nonce-tagged **result record**
@@ -53,7 +54,7 @@ use crate::transform::review::REVIEW_CRITIC;
 use crate::transform::review_reports::REVIEW_REPORT;
 use crate::transform::sccache::{CompilerCache, Counters};
 use crate::transform::scratch::Scratch;
-use crate::transform::verify::{Excused, SuppressionRequest, VERIFY_BASE, VERIFY_CHECK};
+use crate::transform::verify::{Excused, Position, SuppressionRequest, VERIFY_BASE, VERIFY_CHECK, VERIFY_MEMBER};
 
 #[derive(Args, Clone)]
 pub struct TransformArgs {
@@ -484,11 +485,14 @@ pub fn run(args: &TransformArgs) -> Result<()> {
     if args.command == REVIEW_REPORT {
         return review_mcp::serve(&args.out);
     }
+    if args.command == VERIFY_MEMBER {
+        return verify::run_verify_check(args, Position::Member);
+    }
     if args.command == VERIFY_CHECK {
-        return verify::run_verify_check(args, false);
+        return verify::run_verify_check(args, Position::Fold);
     }
     if args.command == VERIFY_BASE {
-        return verify::run_verify_check(args, true);
+        return verify::run_verify_check(args, Position::Base);
     }
     verify::run_single(args)
 }

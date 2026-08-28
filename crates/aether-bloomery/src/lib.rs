@@ -490,6 +490,7 @@ pub use values::VERIFY_BASE_COMMAND;
 pub use values::VERIFY_CHECK_COMMAND;
 pub use values::VERIFY_LANE_IMAGE;
 pub use values::VERIFY_LANE_NETWORK;
+pub use values::VERIFY_MEMBER_COMMAND;
 pub use values::VerifiedTree;
 pub use values::VerifyFailure;
 pub use values::VerifyFailureSet;

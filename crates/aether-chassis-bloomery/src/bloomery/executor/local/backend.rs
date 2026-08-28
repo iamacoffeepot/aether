@@ -193,14 +193,60 @@ struct Run {
     diff_base_hex: Option<String>,
 }
 
-/// What a failed queued start has to keep in order to be recorded as a host
-/// fault: everything the tracked [`Run`] it becomes needs, taken before the
+/// What a failed start has to keep in order to be recorded as a host fault:
+/// everything the tracked [`Run`] it becomes needs, taken before the
 /// [`PendingRun`] is moved into the start that consumed it.
 struct FailedStart {
     nonce: String,
     evidence_dir: PathBuf,
     subject: Digest,
     gates: LaneGates,
+}
+
+impl FailedStart {
+    /// What to keep from `pending` before the start consumes it.
+    fn of(pending: &PendingRun) -> Self {
+        Self {
+            nonce: pending.nonce.clone(),
+            evidence_dir: pending.evidence_dir.clone(),
+            subject: pending.subject,
+            gates: pending.gates,
+        }
+    }
+}
+
+/// The reducer context one dispatch's outstanding-order row carries, resolved
+/// once per dispatch (see `LocalExecutor::prepare`).
+///
+/// The two digests are read back through [`Digest::from_slice`], so a row whose
+/// bytes are not a digest reads as absent rather than aborting the dispatch —
+/// the same posture the rest of this backend takes toward store contents.
+pub(super) struct OrderIdentity {
+    pub(super) bloom: Vec<u8>,
+    pub(super) workpiece: String,
+    pub(super) stage: StageId,
+    /// The digest the order's returned evidence must bind — the member's
+    /// candidate tree once it has one, else its frozen scope revision.
+    pub(super) candidate: Option<Digest>,
+    /// That frozen scope revision, which is what tells the two apart.
+    pub(super) scope_revision: Option<Digest>,
+}
+
+impl OrderIdentity {
+    /// The candidate tree this order's checkout is pinned to, when it is pinned
+    /// to one at all.
+    ///
+    /// A member `Verify` and nothing else: the mechanical gate judges the tree
+    /// it stands in, so its checkout and its evidence subject name the same
+    /// content. A displayed digest equal to the scope revision is a member with
+    /// no capture of its own, and a bloom-level lane (empty workpiece) has no
+    /// member candidate to be pinned to.
+    pub(super) fn judged_candidate(&self) -> Option<Digest> {
+        if self.stage != StageId::Verify || self.workpiece.is_empty() {
+            return None;
+        }
+        self.candidate.filter(|candidate| Some(*candidate) != self.scope_revision)
+    }
 }
 
 /// The stand-in process of a dispatch that never launched: terminal from the
@@ -267,6 +313,9 @@ struct PendingRun {
     checkout_hex: String,
     diff_base_hex: Option<String>,
     seeded_hex: Option<String>,
+    // The tree the checkout must carry, when the order pins one — see
+    // `RunSpec::judged_tree_hex`.
+    judged_tree_hex: Option<String>,
     evidence_dir: PathBuf,
     profile: Option<ResolvedModel>,
     task: Option<String>,
@@ -302,6 +351,7 @@ impl PendingRun {
             checkout_hex: &self.checkout_hex,
             diff_base_hex: self.diff_base_hex.as_deref(),
             seeded: self.seeded_hex.as_deref(),
+            judged_tree_hex: self.judged_tree_hex.as_deref(),
             worktree_dir,
             target_dir,
             build_jobs,
@@ -817,7 +867,11 @@ impl LocalExecutor {
         // runs, and reading it under the registry lock would put a database query
         // inside the decision every freed slot makes.
         let identity = self.order_identity(&nonce);
-        let priority = priority_of(identity.as_ref().map(|(_, _, stage)| *stage));
+        let priority = priority_of(identity.as_ref().map(|order| order.stage));
+        // Resolved here with the checkout, for the reason everything fallible is
+        // resolved here: a dispatch that reaches the spawn has already had every
+        // digest it names turned into a git object.
+        let judged_tree_hex = self.judged_tree_hex(identity.as_ref())?;
         // Only a lane that carries a conversation resolves a session, because
         // the session is what a conversation's directory is for (#5425) and a
         // mechanical lane has none. A verify lane materializes its tree from the
@@ -834,11 +888,11 @@ impl LocalExecutor {
             .then(|| {
                 identity
                     .as_ref()
-                    .filter(|(_, workpiece, _)| !workpiece.is_empty())
-                    .and_then(|(bloom, workpiece, _)| self.session_slug(&nonce, bloom, workpiece))
+                    .filter(|order| !order.workpiece.is_empty())
+                    .and_then(|order| self.session_slug(&nonce, &order.bloom, &order.workpiece))
             })
             .flatten();
-        let workpiece = identity.map(|(_, workpiece, _)| workpiece).filter(|workpiece| !workpiece.is_empty());
+        let workpiece = identity.map(|order| order.workpiece).filter(|workpiece| !workpiece.is_empty());
         let preferred = workpiece.as_deref().and_then(|workpiece| self.preferred_slot_of(workpiece));
         // The stage's resolved agent profile, overlaid onto the order by the
         // dispatching host (ADR-0149 §The line) — never a backend-local config
@@ -853,6 +907,7 @@ impl LocalExecutor {
             checkout_hex,
             diff_base_hex,
             seeded_hex,
+            judged_tree_hex,
             evidence_dir,
             profile: profile.cloned(),
             // The work-order description rides the order's transformation (#3595),
@@ -1035,7 +1090,7 @@ impl LocalExecutor {
     /// key is the findings overlay, which is a colder start than the construct
     /// session it would replace.
     fn journaled_refine_plan(&self, pending: &PendingRun, worktree_dir: &Path) -> Option<super::ReusePlan> {
-        let Some((bloom, workpiece, stage)) = self.order_identity(&pending.nonce) else {
+        let Some(OrderIdentity { bloom, workpiece, stage, .. }) = self.order_identity(&pending.nonce) else {
             // The registry row is written before the submit that starts this
             // lane, so a nonce that does not resolve here means the dispatch
             // never recorded one — every journaled resume is dead until it does.
@@ -1082,7 +1137,7 @@ impl LocalExecutor {
     /// Missing graph or an already-journaled own session fall through to the
     /// pool; a considered predecessor that fails a gate launches fresh.
     fn journaled_predecessor_plan(&self, pending: &PendingRun, worktree_dir: &Path) -> Option<super::ReusePlan> {
-        let (bloom, workpiece, stage) = self.order_identity(&pending.nonce)?;
+        let OrderIdentity { bloom, workpiece, stage, .. } = self.order_identity(&pending.nonce)?;
         if stage != StageId::Construct {
             return None;
         }
@@ -1149,13 +1204,49 @@ impl LocalExecutor {
         Some(candidates)
     }
 
-    fn order_identity(&self, nonce: &str) -> Option<(Vec<u8>, String, StageId)> {
+    fn order_identity(&self, nonce: &str) -> Option<OrderIdentity> {
         let messages = self.messages.as_ref()?;
         let mut store = messages.lock().unwrap_or_else(PoisonError::into_inner);
         let order = store.lookup_order(nonce).ok().flatten()?;
         drop(store);
         let stage = from_bytes::<StageId>(&order.stage).ok()?;
-        Some((order.bloom, order.workpiece, stage))
+        Some(OrderIdentity {
+            bloom: order.bloom,
+            workpiece: order.workpiece,
+            stage,
+            candidate: Digest::from_slice(&order.candidate),
+            scope_revision: Digest::from_slice(&order.scope_revision),
+        })
+    }
+
+    // The git tree a member `Verify` must materialize: the order's candidate,
+    // resolved to its backend object through the correspondence store (ADR-0150)
+    // exactly as the checkout is.
+    //
+    // `None` on every lane whose checkout is not pinned to a candidate — see
+    // `RunSpec::judged_tree_hex`. The discriminator is the order row's own two
+    // digests rather than a git probe: a member that reached Verify without a
+    // capture displays its scope revision, and the row is the only place the two
+    // are recorded side by side.
+    fn judged_tree_hex(&self, identity: Option<&OrderIdentity>) -> Result<Option<String>, LocalExecutorError> {
+        let Some(candidate) = identity.and_then(OrderIdentity::judged_candidate) else {
+            return Ok(None);
+        };
+        let resolved = self.correspondence.resolve_backend_object(&candidate)?;
+        if resolved.is_none() {
+            // Not a refusal: a backend running without a seeded correspondence
+            // would otherwise refuse every member Verify it ever takes. Logged
+            // because on a host that does capture its own candidates this is a
+            // hole in the binding, and a silent skip is how the stale checkout
+            // stayed invisible in the first place.
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                candidate = %candidate.to_hex(),
+                "local executor backend: the order's candidate resolves no git object; \
+                 this Verify's checkout is unbound",
+            );
+        }
+        Ok(resolved.as_ref().map(render_object_hex))
     }
 
     fn lookup_construct_session(&self, bloom: &[u8], workpiece: &str) -> Option<(String, u64)> {
@@ -1361,12 +1452,7 @@ impl LocalExecutor {
     // the loop moves on to the next waiting dispatch.
     fn pump(&self) {
         while let Some((pending, slot, reason)) = self.take_waiting() {
-            let failed = FailedStart {
-                nonce: pending.nonce.clone(),
-                evidence_dir: pending.evidence_dir.clone(),
-                subject: pending.subject,
-                gates: pending.gates,
-            };
+            let failed = FailedStart::of(&pending);
             if let Err(error) = self.start_reserved(pending, slot, reason) {
                 self.record_failed_start(failed, &error);
             }
@@ -1387,7 +1473,7 @@ impl LocalExecutor {
         tracing::error!(
             nonce = %failed.nonce,
             %error,
-            "local executor backend: a queued dispatch failed to start; recording a host fault so its member re-dispatches",
+            "local executor backend: a dispatch failed to start; recording a host fault so its member re-dispatches",
         );
         let FailedStart { nonce, evidence_dir, subject, gates } = failed;
         self.lock().runs.insert(
@@ -1840,7 +1926,7 @@ impl LocalExecutor {
         if self.order_stage(nonce) != Some(StageId::Verify) {
             return None;
         }
-        let (bloom, verified, _) = self.order_identity(nonce)?;
+        let OrderIdentity { bloom, workpiece: verified, .. } = self.order_identity(nonce)?;
         let bloom = BloomId(Digest::from_slice(&bloom)?);
 
         let named = named_surface(&parse_findings(bytes)?).paths;
@@ -2408,7 +2494,21 @@ impl ExecutorBackend for LocalExecutor {
         // as submitted either way, so the reducer's view of it never depends on how
         // busy this host happened to be.
         if let Some((slot, reason)) = self.reserve_slot(pending.priority, pending.preferred) {
-            self.start_reserved(pending, slot, reason)?;
+            let failed = FailedStart::of(&pending);
+            if let Err(error) = self.start_reserved(pending, slot, reason) {
+                // A checkout that does not carry the order's candidate is the
+                // one start fault the caller must not be handed back. The drain
+                // reads a returned error as transient and re-drives the entry,
+                // and the identical order materializes the identical stale tree
+                // every time — so the caller's re-drive is an unbounded loop
+                // rather than a recovery. Recorded as the host fault it is, on
+                // the queued start's own path: the member takes a machinery roll
+                // (ADR-0195) and re-dispatches against its current candidate.
+                if !matches!(error, LocalExecutorError::StaleCandidateCheckout { .. }) {
+                    return Err(error);
+                }
+                self.record_failed_start(failed, &error);
+            }
         } else {
             self.enqueue(pending);
         }

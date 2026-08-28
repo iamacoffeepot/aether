@@ -537,7 +537,7 @@ fn advance_after_pass(
     // carrying the same verdict, and the mechanical lane never runs.
     if let Some((current, proof)) = candidate
         .filter(|_| next == StageId::Verify)
-        .and_then(|current| record.verify_proof_for(current.tree).map(|proof| (current, proof)))
+        .and_then(|current| record.verify_proof_for(StageId::Verify, current.tree).map(|proof| (current, proof)))
     {
         let claim = ResolutionClaim {
             workpiece: workpiece.clone(),

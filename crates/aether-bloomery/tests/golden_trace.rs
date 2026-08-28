@@ -301,13 +301,19 @@ fn scripted_bloom_reaches_landed_and_advances_mainline() {
 // so the scripted land carries one more effect. The drift is that single added
 // row in the land step; every prior step is unchanged. An intended, coordinated
 // break, recomputed.
-// Repinned for the Scope retry budget 2 → 4: the budget rides the sealed
-// catalog's bytes, so the decision stream's catalog attestation moves with it.
-// No decision row changes shape; only the attested catalog does. An intended,
-// coordinated break, recomputed.
+// Repinned at the 2026-08-27 land merge, which carries two intended,
+// coordinated breaks recomputed together: the Scope retry budget 2 -> 4 (the
+// budget rides the sealed catalog's bytes, so the decision stream's catalog
+// attestation moves with it), and the documentation demotion (the member
+// `Verify` position dispatches `verify.member` rather than `verify.check` and
+// files its proof under a gate set that does not name `verify.docs`, so every
+// member verify work order carries the new command and every recorded proof a
+// new gate-set digest; the scripted fold runs its own gates over a
+// single-member weave instead of passing on the member's proof, which is the
+// one added `DispatchAggregateVerify`).
 const GOLDEN_DECISION_DIGEST: [u8; 32] = [
-    0x46, 0x80, 0xf4, 0x97, 0xaf, 0x6a, 0x60, 0x6e, 0x7b, 0x5c, 0xae, 0x77, 0x9b, 0x9e, 0x55, 0x0b, 0xd1, 0xc1, 0x06,
-    0x9d, 0x7d, 0x30, 0xcc, 0x5b, 0xf6, 0xbc, 0x2c, 0x62, 0x68, 0xfc, 0x68, 0x27,
+    0x22, 0x9f, 0x5f, 0x29, 0xba, 0x6f, 0x20, 0xdd, 0xab, 0x21, 0x25, 0xf9, 0xd2, 0x07, 0x84, 0xec, 0xa5, 0x7d, 0xbf,
+    0x34, 0x0a, 0xb6, 0x31, 0x70, 0x3c, 0x33, 0x7c, 0xb1, 0x4d, 0x54, 0x68, 0x3c,
 ];
 
 #[test]

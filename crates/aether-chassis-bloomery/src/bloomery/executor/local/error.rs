@@ -48,6 +48,29 @@ pub enum LocalExecutorError {
     /// mismatched identity, or a process group that stayed up after the
     /// signal.
     Unterminated(String),
+    /// The tree the dispatch's checkout materialized is not the candidate tree
+    /// the order binds its returned evidence to (ADR-0152).
+    ///
+    /// A machinery fault, never a verdict: the lane would have judged whatever
+    /// the checkout happened to carry — a splice built from an earlier lap, a
+    /// re-pointed correspondence row — and the gate's answer would have been
+    /// filed against a candidate no gate ever saw. On 2026-08-26 that filed a
+    /// repair lap's fix as unjudged, failed the same two verifiers a second
+    /// time over the identical content, and wedged the member on the
+    /// repeated-verifiers ceiling as if the model had produced the failure.
+    ///
+    /// Refused before the child is spawned, so no lap is paid for; the backend
+    /// records it as a host fault (ADR-0195) rather than returning it to the
+    /// drain, because the identical order would materialize the identical
+    /// stale tree on every re-drive.
+    StaleCandidateCheckout {
+        /// The dispatch's idempotency nonce.
+        nonce: String,
+        /// The git tree object the order's candidate digest resolves to.
+        expected: String,
+        /// The tree the materialized checkout actually carries.
+        observed: String,
+    },
     /// The lane-host tool kit is incomplete, so this dispatch was refused
     /// before a child was spawned (#5035). Transient: installing the missing
     /// tools clears the next re-drain, and the member stays queued rather
@@ -81,6 +104,11 @@ impl fmt::Display for LocalExecutorError {
                     nonce.0
                 )
             }
+            Self::StaleCandidateCheckout { nonce, expected, observed } => write!(
+                f,
+                "local executor backend: the checkout for nonce `{nonce}` carries tree `{observed}`, \
+                 not the candidate tree `{expected}` the order binds its evidence to",
+            ),
             Self::Correspondence(error) => write!(f, "local executor backend: {error}"),
             Self::Unterminated(detail) => {
                 write!(f, "local executor backend: could not terminate the lane child: {detail}")
@@ -100,6 +128,7 @@ impl Error for LocalExecutorError {
             | Self::NoRunForNonce(_)
             | Self::UnresolvedCheckout(_)
             | Self::UnresolvedDiffBase(_)
+            | Self::StaleCandidateCheckout { .. }
             | Self::Unterminated(_)
             | Self::MissingKit(_) => None,
         }

@@ -33,6 +33,21 @@ pub struct RunSpec<'a> {
     /// Construct start and on every non-Construct lane. Independent of
     /// [`resume`](Self::resume): session reuse and tree seeding are separate.
     pub seeded: Option<&'a str>,
+    /// The git tree object the checkout must actually materialize — the
+    /// candidate this dispatch's returned evidence binds (ADR-0152), rendered
+    /// to hex.
+    ///
+    /// `Some` only on a member `Verify` whose member holds a candidate of its
+    /// own, which is the one lane where the two digests are pinned to each
+    /// other: the gate judges the tree it stands in, and the verdict is filed
+    /// against the order's first [`Transformation::inputs`] digest. Every other lane names `None` —
+    /// a `Construct` stands on a checkpoint it is about to change, a
+    /// `Reconcile` on the folded head, and a member that reached `Verify`
+    /// without a capture binds its scope revision, which addresses no git tree
+    /// at all.
+    ///
+    /// [`Transformation::inputs`]: aether_bloomery::Transformation::inputs
+    pub judged_tree_hex: Option<&'a str>,
     /// Absolute path of the lane slot's canonical checkout — where this dispatch
     /// builds, and where every later dispatch in the same slot builds too.
     pub worktree_dir: &'a Path,

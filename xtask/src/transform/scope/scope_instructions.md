@@ -59,16 +59,17 @@ Authored kinds. Call the setter with the kebab-case name.
 - **rejected-option** — an option considered and why it loses. Repeated.
 - **plan-step** — one implementation step. Name the behavior, the
   repository-relative paths it edits, and the stable symbol anchors a later
-  inverse search will resolve. Repeated. Two disciplines the freeze check
-  enforces, so a step that ignores them is refused after all your work is
-  done: every path a step names must be admitted by your declared surface —
-  mention a file only if you would edit it, and keep background context out
-  of the step text — and every backticked symbol is resolved by inverse
-  search across the whole tree, so a generic name (a common method like
-  `truncate` or a widely-implemented trait item) lands coverage demands on
-  crates you never meant to touch. Backtick only identifiers whose
-  definitions live inside your surface; refer to everything else without
-  backticks.
+  inverse search will resolve. Repeated. One discipline the freeze check
+  enforces, so a step that ignores it is refused after all your work is done:
+  every path a step names must be admitted by your declared surface — mention
+  a file only if you would edit it, and keep background context out of the
+  step text. Backticked symbols are resolved by inverse search across the
+  whole tree, and only an anchor your surface already defines carries a
+  coverage demand: a name defined nowhere inside your surface is read as a
+  word the step mentions rather than code it claims, and is reported without
+  refusing. So backtick the identifiers you are working on — their other
+  definitions are exactly what the search exists to make you declare — and
+  refer to background code without backticks.
 - **acceptance** — one acceptance criterion. Repeated.
 - **declared-surface** — one glob the freeze will contain the work to.
   Repeated.

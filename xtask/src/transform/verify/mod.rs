@@ -721,9 +721,19 @@ fn unjudged_notice(stdout: &str, scope: &Scope) -> Option<String> {
 }
 
 /// The typed id of the verify umbrella (#3626) the reducer dispatches for the
-/// Verify stage (`Transformation::for_member_stage`) — distinct from the
-/// concrete `verify.*` ids `verify_command` maps individually.
+/// `AggregateVerify` stage (`Transformation::for_aggregate_verify`) — distinct
+/// from the concrete `verify.*` ids `verify_command` maps individually.
 pub(super) const VERIFY_CHECK: &str = "verify.check";
+
+/// The typed id of the per-member verify the reducer dispatches for the Verify
+/// stage (`Transformation::for_member_stage`).
+///
+/// [`VERIFY_CHECK`]'s fan-out less [`DOCS_MEMBER`] — see [`Position::runs`] for
+/// why documentation sits at the whole-tree positions. Its own id because the
+/// gate set it runs is its own identity: the proof a member files must name the
+/// gates that ran over it, and `aether-bloomery`'s `VerifyGateSet::member`
+/// spells this id for exactly that reason.
+pub(super) const VERIFY_MEMBER: &str = "verify.member";
 
 /// The typed id of the whole-workspace base verify. Same
 /// [`verify_check_members`] fan-out as [`VERIFY_CHECK`], but closure resolution
@@ -732,12 +742,78 @@ pub(super) const VERIFY_CHECK: &str = "verify.check";
 /// reporting green over nothing.
 pub(super) const VERIFY_BASE: &str = "verify.base";
 
+/// The documentation member — named once, because two things read it: the
+/// position that declines to run it, and the test that pins which position
+/// that is.
+const DOCS_MEMBER: &str = "verify.docs";
+
+/// Which verify position an umbrella run answers for.
+///
+/// The three positions of the line, and the two axes that separate them: how
+/// much of the workspace a run reads, and which members it fans out to. Stated
+/// as one closed vocabulary rather than as two booleans threaded through the
+/// pass, because every combination a pair of booleans admits is not a position —
+/// there is no docs-less base and no closure-narrowed vocabulary the base runs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Position {
+    /// One member's candidate, narrowed to its diff's closure.
+    Member,
+    /// The bloom's fold, narrowed to the union of its members' diffs.
+    Fold,
+    /// A sealed base, over the whole workspace.
+    Base,
+}
+
+impl Position {
+    /// The typed command id this position's evidence reports itself under — the
+    /// same spelling its dispatch names.
+    fn command(self) -> &'static str {
+        match self {
+            Self::Member => VERIFY_MEMBER,
+            Self::Fold => VERIFY_CHECK,
+            Self::Base => VERIFY_BASE,
+        }
+    }
+
+    /// Whether this position reads the whole workspace whatever the diff
+    /// touched, rather than narrowing to the candidate's closure.
+    fn whole_workspace(self) -> bool {
+        self == Self::Base
+    }
+
+    /// Whether this position runs `id`.
+    ///
+    /// One member differs, and only at one position: the member `Verify` does
+    /// not run [`DOCS_MEMBER`]. Documentation correctness is a whole-workspace
+    /// property — an intra-doc link resolves across crates, so the crates a
+    /// member's closure reaches can neither break it alone nor prove it alone —
+    /// while `cargo doc` over that closure is the most expensive single gate the
+    /// position runs. Over the 2026-08-26 wave it cost five to nine minutes in
+    /// each of eighteen member runs and found nothing in any of them; every real
+    /// finding that wave was `verify.test`'s. So the gate runs where its
+    /// question can be answered: the fold, and the base.
+    ///
+    /// The member position is the *only* one that skips it. A fold whose
+    /// documentation went unbuilt would carry that silence into the base receipt
+    /// a landing mints from its verdict.
+    fn runs(self, id: &str) -> bool {
+        self != Self::Member || id != DOCS_MEMBER
+    }
+
+    /// The members this position fans out to, in CI-parity order.
+    fn members(self) -> Vec<&'static str> {
+        verify_check_members().iter().copied().filter(|id| self.runs(id)).collect()
+    }
+}
+
 /// The log the umbrella writes its computed scope to, alongside its members'
 /// own logs — the receipt that makes a wrong closure visible in the envelope
 /// rather than silent (#4890).
 const SCOPE_LOG: &str = "verify.scope.log";
 
-/// The ordered member ids `verify.check` fans out to, in CI-parity order.
+/// The complete ordered member vocabulary, in CI-parity order — what
+/// `verify.check` and `verify.base` fan out to, and what
+/// [`Position::members`] filters for the member position.
 /// Pure so the umbrella membership is testable without spawning cargo; growing
 /// this list (e.g. a future `verify.test`) needs no change to the reducer's
 /// dispatched stage command.
@@ -883,12 +959,19 @@ fn failed_verifiers<'a>(members: impl IntoIterator<Item = (&'a str, MemberOutcom
     members.into_iter().filter_map(|(id, outcome)| outcome.failure(id)).collect()
 }
 
-/// Every program the umbrella's members need — the roots
+/// Every program the members `position` fans out to need — the roots
 /// [`tools::preflight`] resolves through the dependency graph.
-fn required_tools() -> Vec<&'static str> {
-    verify_check_members()
-        .iter()
-        .filter_map(|id| verify_command(id))
+///
+/// Keyed on the position rather than on the whole vocabulary, so the check is
+/// over what this run will actually dispatch: a host missing a tool only the
+/// fold's `verify.docs` needs has nothing to say about a member run that never
+/// reaches it, and refusing there would report a host fault for work nobody
+/// asked to do.
+fn required_tools(position: Position) -> Vec<&'static str> {
+    position
+        .members()
+        .into_iter()
+        .filter_map(verify_command)
         .flat_map(|invocation| invocation.requires.iter().copied())
         .collect()
 }
@@ -901,8 +984,8 @@ const STANDALONE_TOOLS: [(&str, &str); 2] =
 
 /// Resolve the dependency graph and the suppression scanner's standalone host
 /// roots into one fail-closed preflight result.
-fn preflight_tools() -> Vec<tools::Missing> {
-    let required = required_tools();
+fn preflight_tools(position: Position) -> Vec<tools::Missing> {
+    let required = required_tools(position);
     let mut missing = tools::preflight(&required);
     missing.extend(
         STANDALONE_TOOLS
@@ -916,14 +999,15 @@ fn preflight_tools() -> Vec<tools::Missing> {
     missing
 }
 
-/// Every toolchain target the umbrella's members cross-build for, checked
-/// alongside the programs. Pure so the union is testable without probing a
-/// host: a target declared on a member but never gathered here is a
+/// Every toolchain target the members `position` fans out to cross-build for,
+/// checked alongside the programs. Pure so the union is testable without probing
+/// a host: a target declared on a member but never gathered here is a
 /// prerequisite nothing verifies.
-fn required_targets() -> Vec<&'static str> {
-    verify_check_members()
-        .iter()
-        .filter_map(|id| verify_command(id))
+fn required_targets(position: Position) -> Vec<&'static str> {
+    position
+        .members()
+        .into_iter()
+        .filter_map(verify_command)
         .flat_map(|invocation| invocation.requires_targets.iter().copied())
         .collect()
 }
@@ -2375,18 +2459,23 @@ fn environment_observations(members: &[MemberRun]) -> Option<EvidenceChannel> {
 /// The candidate's reverse-dependency closure is resolved once, before any
 /// member runs, and every member is discriminated against that one answer
 /// (#4895) — recomputing it per member would let a mid-run repository change
-/// give two members two different candidates. `full` skips that resolution so
-/// each member keeps its stated `--workspace` argv: an empty candidate range
-/// would otherwise false-green a workspace-wide question.
-pub(super) fn run_verify_check(args: &TransformArgs, full: bool) -> Result<()> {
+/// give two members two different candidates. A whole-workspace `position`
+/// skips that resolution so each member keeps its stated `--workspace` argv: an
+/// empty candidate range would otherwise false-green a workspace-wide question.
+///
+/// `position` also chooses the fan-out — the member position does not run
+/// `verify.docs` (see [`Position::runs`]) — and names the command the evidence
+/// reports itself under, which is half the gate-set identity a bloom files the
+/// resulting proof against.
+pub(super) fn run_verify_check(args: &TransformArgs, position: Position) -> Result<()> {
     let umbrella_started = Instant::now();
     fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
 
     // Preflight before anything runs. A host missing a tool cannot compute what
     // the member would have said, and reporting that as a pass would let a
     // candidate integrate on the strength of a check that never happened.
-    let mut missing = preflight_tools();
-    missing.extend(tools::preflight_targets(&required_targets()));
+    let mut missing = preflight_tools(position);
+    missing.extend(tools::preflight_targets(&required_targets(position)));
     if !missing.is_empty() {
         let evidence = Evidence {
             failed_verifiers: Some(VerifyFailureSet::one(VerifyFailure::Preflight)),
@@ -2398,12 +2487,7 @@ pub(super) fn run_verify_check(args: &TransformArgs, full: bool) -> Result<()> {
             peak_resident_bytes: None,
             duration_millis: None,
             gates: None,
-            command: if full {
-                VERIFY_BASE
-            } else {
-                VERIFY_CHECK
-            }
-            .to_owned(),
+            command: position.command().to_owned(),
             nonce: args.nonce.clone(),
             status: "fail",
             exit_code: Some(1),
@@ -2415,7 +2499,7 @@ pub(super) fn run_verify_check(args: &TransformArgs, full: bool) -> Result<()> {
     }
 
     let CheckPass { runs, gates, log_names, first_failure_code, sccache_served, peak_resident_bytes } =
-        check_pass(args, &args.out, full)?;
+        check_pass(args, &args.out, position)?;
 
     let status = umbrella_status(&runs.iter().map(|run| run.outcome).collect::<Vec<MemberOutcome>>());
     let failures = failed_verifiers(runs.iter().map(|run| (run.id.as_str(), run.outcome)));
@@ -2425,12 +2509,7 @@ pub(super) fn run_verify_check(args: &TransformArgs, full: bool) -> Result<()> {
         peak_resident_bytes,
         duration_millis: None,
         gates: None,
-        command: if full {
-            VERIFY_BASE
-        } else {
-            VERIFY_CHECK
-        }
-        .to_owned(),
+        command: position.command().to_owned(),
         nonce: args.nonce.clone(),
         status,
         exit_code: Some(first_failure_code.unwrap_or(0)),
@@ -2553,12 +2632,13 @@ fn panic_message(panicked: &Box<dyn Any + Send>) -> String {
         .unwrap_or_else(|| String::from("a verify lane thread panicked"))
 }
 
-/// Run every member in [`verify_check_members`] over the current tree, in
-/// CI-parity order and without short-circuiting on the first failure.
+/// Run every member `position` fans out to over the current tree, in CI-parity
+/// order and without short-circuiting on the first failure.
 ///
 /// `logs` is the evidence directory each member's log and the scope receipt are
 /// written into, under the names the envelope's `log` field then lists.
-fn check_pass(args: &TransformArgs, logs: &Path, full: bool) -> Result<CheckPass> {
+fn check_pass(args: &TransformArgs, logs: &Path, position: Position) -> Result<CheckPass> {
+    let full = position.whole_workspace();
     // Resolved once for the whole pass, so the counters the evidence carries
     // cover every member's build rather than one member's slice of it, and the
     // peak it reports is the high-water mark of the whole lane.
@@ -2595,8 +2675,8 @@ fn check_pass(args: &TransformArgs, logs: &Path, full: bool) -> Result<CheckPass
     let lane = |members: Vec<&'static str>| -> Result<Vec<(MemberRun, GateTiming)>> {
         members.into_iter().map(|id| run_gate(id, &pass)).collect()
     };
-    let (compiled, read_only): (Vec<&str>, Vec<&str>) =
-        verify_check_members().iter().partition(|id| builds_artifacts(id));
+    let members = position.members();
+    let (compiled, read_only): (Vec<&str>, Vec<&str>) = members.iter().copied().partition(|id| builds_artifacts(id));
     let mut completed = thread::scope(|threads| -> Result<Vec<(MemberRun, GateTiming)>> {
         let reading = threads.spawn(|| lane(read_only));
         let compiling = lane(compiled);
@@ -2613,12 +2693,12 @@ fn check_pass(args: &TransformArgs, logs: &Path, full: bool) -> Result<CheckPass
     let mut runs = Vec::with_capacity(completed.len());
     let mut gates = Vec::with_capacity(completed.len());
     let mut first_failure_code: Option<i32> = None;
-    for &id in verify_check_members() {
-        let position = completed
+    for &id in &members {
+        let ran = completed
             .iter()
             .position(|(run, _)| run.id == id)
             .expect("every member of the umbrella ran in one of the two lanes");
-        let (run, gate) = completed.swap_remove(position);
+        let (run, gate) = completed.swap_remove(ran);
         log_names.push(format!("{id}.log"));
         if !run.outcome.passed() && first_failure_code.is_none() {
             first_failure_code = Some(run.exit_code);
@@ -2640,13 +2720,14 @@ fn check_pass(args: &TransformArgs, logs: &Path, full: bool) -> Result<CheckPass
 #[cfg(test)]
 mod tests {
     use super::{
-        BASE_SET_SUBJECT, Captured, EvidenceChannel, MAX_FINDING_LINES, MemberOutcome, MemberRun, MemberRunner,
-        SUPPRESS_MEMBER, Scope, SpawnRunner, VERIFY_BASE, VERIFY_CHECK, VerifyInvocation, builds_artifacts,
-        clippy_verdict, closure, distil_diagnostics, effective_exit_code, empty_closure_run, environment_observations,
-        failed_verifiers, host_fault_in, member_diff_base, member_outcome, member_scope_notice,
-        operational_failure_notice, package_name, preflight_tools, prepare_failure_log, render_diagnostics,
-        replay_args, required_targets, required_tools, run_member, run_member_discriminated, run_timed_prepare,
-        umbrella_status, unjudged_notice, verify_check_members, verify_command, verify_findings, workflow,
+        BASE_SET_SUBJECT, Captured, DOCS_MEMBER, EvidenceChannel, MAX_FINDING_LINES, MemberOutcome, MemberRun,
+        MemberRunner, Position, SUPPRESS_MEMBER, Scope, SpawnRunner, VERIFY_BASE, VERIFY_CHECK, VERIFY_MEMBER,
+        VerifyInvocation, builds_artifacts, clippy_verdict, closure, distil_diagnostics, effective_exit_code,
+        empty_closure_run, environment_observations, failed_verifiers, host_fault_in, member_diff_base, member_outcome,
+        member_scope_notice, operational_failure_notice, package_name, preflight_tools, prepare_failure_log,
+        render_diagnostics, replay_args, required_targets, required_tools, run_member, run_member_discriminated,
+        run_timed_prepare, umbrella_status, unjudged_notice, verify_check_members, verify_command, verify_findings,
+        workflow,
     };
     use std::iter;
     use std::path::Path;
@@ -3288,11 +3369,13 @@ mod tests {
             "no work-order base leaves the stated argv, so the script keeps its own default",
         );
         assert_eq!(suppress.requires, &["git", "python3"]);
-        let tools = required_tools();
+        let tools = required_tools(Position::Member);
         assert!(tools.contains(&"git"));
         assert!(tools.contains(&"python3"));
         assert!(
-            preflight_tools().iter().all(|missing| missing.requirement != "git" && missing.requirement != "python3"),
+            preflight_tools(Position::Member)
+                .iter()
+                .all(|missing| missing.requirement != "git" && missing.requirement != "python3"),
             "the host running the verifier tests must satisfy the scanner roots",
         );
     }
@@ -3489,7 +3572,12 @@ mod tests {
         // fine (#4717).
         let test = verify_command("verify.test").expect("verify.test mapped");
         assert_eq!(test.requires_targets, &[WASM_TARGET], "the dist pre-build cross-builds for this target");
-        assert!(required_targets().contains(&WASM_TARGET), "a declared target the preflight never checks is inert");
+        for position in [Position::Member, Position::Fold, Position::Base] {
+            assert!(
+                required_targets(position).contains(&WASM_TARGET),
+                "a declared target the {position:?} preflight never checks is inert",
+            );
+        }
     }
 
     #[test]
@@ -3571,6 +3659,13 @@ mod tests {
         // Read out of `ci-pass`'s own `needs:` rather than restated, so a gate
         // added to the required list without a member fails here instead of
         // passing unnoticed the way `lock-freshness` did.
+        //
+        // Asked of the two whole-tree positions, which are the ones that stand
+        // between a candidate and the landing CI. The member position runs a
+        // subset by design (see `Position::runs`), and
+        // `the_member_position_runs_every_gate_but_documentation` pins exactly
+        // which one it drops — a subset stated in one place rather than a hole
+        // this test would have to tolerate.
         for job in workflow::required_jobs() {
             if NOT_A_GATE.contains(&job.as_str()) {
                 continue;
@@ -3578,8 +3673,37 @@ mod tests {
             let (_, member) = GATE_MEMBERS.iter().find(|(gate, _)| *gate == job).unwrap_or_else(|| {
                 panic!("required CI job `{job}` has no umbrella member and is not declared a non-gate")
             });
-            assert!(verify_check_members().contains(member), "{member} is a required CI job the lane must run");
+            for position in [Position::Fold, Position::Base] {
+                assert!(
+                    position.members().contains(member),
+                    "{member} is a required CI job the {position:?} position must run",
+                );
+            }
         }
+    }
+
+    #[test]
+    fn the_member_position_runs_every_gate_but_documentation() {
+        // Tripwire: this is the demotion itself, stated as a set difference in
+        // the one place the fan-out is decided. Both directions matter. A member
+        // position that regains `verify.docs` is eighteen five-to-nine-minute
+        // rustdoc builds a wave, over closures that cannot answer the question;
+        // a member position that drops anything *else* is a gate a candidate
+        // walks past unrun until the fold — or CI — catches it, which is the
+        // expensive direction the umbrella exists to avoid.
+        //
+        // And the two whole-tree positions must keep the gate: the fold's
+        // verdict is what a landing mints its whole-workspace base receipt from.
+        let member = Position::Member.members();
+        let dropped: Vec<&str> = verify_check_members().iter().copied().filter(|id| !member.contains(id)).collect();
+
+        assert_eq!(dropped, vec![DOCS_MEMBER], "the member position drops documentation and nothing else");
+        assert_eq!(Position::Fold.members(), verify_check_members(), "the fold runs the whole vocabulary");
+        assert_eq!(Position::Base.members(), verify_check_members(), "and so does the base");
+        assert!(
+            member.iter().eq(verify_check_members().iter().filter(|id| **id != DOCS_MEMBER)),
+            "the subset keeps CI-parity order, so a failing member's exit code is still the first one CI would hit",
+        );
     }
 
     #[test]
@@ -4509,10 +4633,15 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         // does not (and must not) recognize the umbrella id, else an unrouted
         // verify.check would silently run as a single (wrong) cargo invocation
         // instead of falling to the unrecognized-id bail!.
-        assert!(verify_command(VERIFY_CHECK).is_none());
-        assert!(verify_command(VERIFY_BASE).is_none());
-        assert_ne!(VERIFY_CHECK, CONSTRUCT_IMPLEMENT);
-        assert_ne!(VERIFY_BASE, VERIFY_CHECK);
+        for umbrella in [VERIFY_MEMBER, VERIFY_CHECK, VERIFY_BASE] {
+            assert!(verify_command(umbrella).is_none(), "{umbrella} is an umbrella, not a member invocation");
+            assert_ne!(umbrella, CONSTRUCT_IMPLEMENT);
+        }
+        assert_eq!(
+            [Position::Member, Position::Fold, Position::Base].map(Position::command),
+            [VERIFY_MEMBER, VERIFY_CHECK, VERIFY_BASE],
+            "each position reports itself under its own id, or two positions' evidence is indistinguishable",
+        );
     }
 
     #[test]

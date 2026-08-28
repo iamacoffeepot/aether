@@ -22,6 +22,14 @@
 //! it, and when the work ends the tree is archived as a record rather than
 //! deleted.
 //!
+//! Tree and text reclaim wait until the coordinator is between blooms — no
+//! active-and-unlanded bloom in the replayed snapshot, and no outstanding
+//! order. Disk pressure evicts slot target directories on every tick; those
+//! are regenerable build state, never source trees or text. The 2026-08-25
+//! live-set miss (board-5435; dispatches 3301/3318) reclaimed a walking
+//! member's session tree mid-walk; session resumption is protected, so a
+//! session checkout lives at least as long as any work that could resume it.
+//!
 //! It drains no outbox topic — there is no reducer decision to carry out. The
 //! identity/runtime split follows ADR-0122.
 

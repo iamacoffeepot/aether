@@ -11,7 +11,9 @@
 //! runs one typed `verify.*` command — the same invocation CI runs —
 //! identically on a laptop and under the thin `transform.yml` wrapper
 //! workflow. `verify.check` aggregates formatting, clippy, docs, tests,
-//! duplicate code, unused dependencies, and added suppressions.
+//! duplicate code, unused dependencies, and added suppressions;
+//! `verify.member` is the same set less docs, which a single member's
+//! closure can neither break nor prove on its own.
 
 // xtask is a developer-facing build tool: emitting build progress + a
 // summary to the terminal is its purpose. The workspace
@@ -71,7 +73,9 @@ enum Commands {
     /// mechanical-verify command (`verify.fmt`, `verify.clippy`,
     /// `verify.docs`, `verify.test`, `verify.dup`, `verify.deps`, or
     /// `verify.suppress`) — the same invocation CI runs — and write
-    /// nonce-tagged evidence bytes. `verify.check` runs the full set.
+    /// nonce-tagged evidence bytes. `verify.check` runs the full set;
+    /// `verify.member` runs it less `verify.docs`, which the member
+    /// position leaves to the two whole-tree positions.
     Transform(TransformArgs),
     /// Compute the affected package set for PR CI test selection
     /// (issue #3611): changed paths against a base ref, mapped through

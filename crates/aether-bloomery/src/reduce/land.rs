@@ -10,7 +10,7 @@ use super::boundary::EventBoundary;
 use super::gate::LAND_GATE;
 use super::{BaseMismatch, BloomStatus, Decision, Decisions, LandError, Outcome, Snapshot};
 use crate::digest::Digest;
-use crate::ids::{BloomId, WorkpieceId};
+use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::port::ProjectedReceipt;
 use crate::reads;
 use crate::values::{BaseReceipt, BaseVerdict, LandingReceipt, VerifyGateSet};
@@ -91,7 +91,7 @@ fn landing(
 /// The rule, exactly: a receipt is filed only when all three links hold — the
 /// head being landed is the one the bloom resolved onto
 /// ([`BloomRecord::resolved_head`](super::BloomRecord::resolved_head) is
-/// `new_head`), the tree that head carries wears this bloom's own green lane
+/// `new_head`), the tree that head carries wears this bloom's own green *fold*
 /// [`VerifyProof`](crate::VerifyProof), and the bloom's sealed base already held
 /// a green whole-workspace receipt. Together they say the landed content was
 /// reached from a tree the whole-workspace question was answered for, by a fold
@@ -100,10 +100,16 @@ fn landing(
 /// base that was never proven — and nothing is filed: the next seal dispatches a
 /// real `verify.base` and pays the honest price.
 ///
+/// The proof asked for is the fold's, and only the fold's. It is the one
+/// position that runs the whole verifier vocabulary over the exact tree being
+/// landed — the member position does not run `verify.docs` at all — so a receipt
+/// minted from a member's proof would state a whole-workspace pass over gates
+/// that never ran.
+///
 /// This is deliberately *not* the memo's key-equality reuse, which
-/// [`VerifyGateSet::base`] keeps separate on purpose — a closure-narrowed member
+/// [`VerifyGateSet::base`] keeps separate on purpose — a closure-narrowed
 /// proof must never answer the whole-workspace question by itself, and no lookup
-/// here reads a receipt out from under the lane gate set. The receipt is minted
+/// here reads a receipt out from under the fold gate set. The receipt is minted
 /// under the base gate set on the strength of the chain above. What it inherits
 /// is the narrowing's own standing assumption: the lane's closure covers
 /// everything the members' diff can reach, so what the base proved at the
@@ -117,7 +123,7 @@ fn landed_base_receipt(
     new_head: Digest,
 ) -> Option<Decision> {
     let tree = record.resolved_tree.filter(|_| record.resolved_head == Some(new_head))?;
-    let proof = record.verify_proof_for(tree)?;
+    let proof = record.verify_proof_for(StageId::AggregateVerify, tree)?;
     if !snapshot.base_receipt_for(base).is_some_and(BaseReceipt::is_green) {
         return None;
     }

@@ -23,6 +23,23 @@ const DOGFOOD: &str = "Dogfood brief";
 const MANAGED: &[&str] =
     &[PROBLEM, DESIGN, PLAN, "Sub-issues", DEPENDS, SURFACE, CRATES, PROTECTED, READS, DOGFOOD, "Side findings"];
 
+/// The three labels that close `## Implementation plan`, shared by the parser
+/// that requires them and the renderer that writes them.
+///
+/// Stated once because they are the one place the two sides must agree
+/// character for character: a renderer that stopped one label short of what the
+/// parser demands wrote every revision a description its own parser refused.
+const SIZE_LABEL: &str = "**Size:**";
+const MODEL_LABEL: &str = "**Implementation model:**";
+const REASON_LABEL: &str = "**Routing reason:**";
+
+/// What the renderer writes on the reason line.
+///
+/// [`ScopeRouting`] stores size and model and discards the reason the parser
+/// validated, so a re-render has no authored reason to restate and says so
+/// rather than inventing one.
+const RERENDERED_REASON: &str = "re-rendered from the stored revision, which carries no authored reason";
+
 /// Render `markdown` as the next scope revision for `workpiece`.
 ///
 /// The surface arrives one of two ways. `## Declared crates` names the crates
@@ -169,10 +186,18 @@ fn render_work_order(revision: &ScopeRevision) -> String {
     out.push_str(PLAN);
     out.push_str("\n\n");
     out.push_str(revision.plan.trim());
-    out.push_str("\n\n**Size:** ");
+    out.push_str("\n\n");
+    out.push_str(SIZE_LABEL);
+    out.push(' ');
     out.push_str(&revision.routing.size);
-    out.push_str("\n**Implementation model:** ");
+    out.push('\n');
+    out.push_str(MODEL_LABEL);
+    out.push(' ');
     out.push_str(&revision.routing.model);
+    out.push('\n');
+    out.push_str(REASON_LABEL);
+    out.push(' ');
+    out.push_str(RERENDERED_REASON);
     out.push('\n');
     if !revision.dependencies.is_empty() {
         out.push_str("\n## ");
@@ -331,11 +356,11 @@ fn plan_and_routing(span: &str) -> Result<(String, ScopeRouting)> {
     let (Some(size_line), Some(model_line), Some(reason_line)) = (size_line, model_line, reason) else {
         bail!("implementation plan must end with Size, Implementation model, and Routing reason lines");
     };
-    if !reason_line.starts_with("**Routing reason:**") {
+    if !reason_line.starts_with(REASON_LABEL) {
         bail!("routing lines must be the final three non-empty Implementation plan lines");
     }
-    let size = labeled(size_line, "**Size:**")?;
-    let model = labeled(model_line, "**Implementation model:**")?;
+    let size = labeled(size_line, SIZE_LABEL)?;
+    let model = labeled(model_line, MODEL_LABEL)?;
     if size.is_empty() || model.is_empty() {
         bail!("Size and Implementation model routing lines must be non-empty");
     }
@@ -439,7 +464,7 @@ fn parse_workpieces(span: &str) -> Vec<WorkpieceId> {
 mod tests {
     use aether_bloomery::WorkpieceId;
 
-    use super::{parse_revision, parse_workpieces, task_text};
+    use super::{parse_revision, parse_workpieces, render_work_order, task_text};
 
     fn fixture() -> &'static str {
         "\
@@ -495,6 +520,32 @@ Create then show.\n"
         assert!(task.contains("## Design notes") && task.contains("Separate binary."), "{task}");
         assert!(task.contains("**Size:** m") && task.contains("**Implementation model:** sonnet"), "{task}");
         assert!(task.contains("crates/aether-chassis-bloomery/src/commission/**"), "{task}");
+    }
+
+    #[test]
+    fn a_rendered_work_order_parses_back_into_the_revision_it_came_from() {
+        // Tripwire: `parse_revision` stores its own `render_work_order` output
+        // as the revision's description, and that text is what the next scope
+        // of this commission starts from. The two sides are computed from each
+        // other, so the equality drifts the moment one grows a managed block or
+        // a required line the other does not write — which is how every
+        // revision written for a while stored a description its own parser
+        // refused.
+        let full = crate_declared()
+            .replace("## Declared crates", "## Depends on\n\n- issue-5286\n\n## Declared crates")
+            .replace("## Protected files", "## Reads\n\n- aether-data\n\n## Protected files");
+
+        for (label, markdown) in
+            [("surface-declared", fixture().to_owned()), ("crate-declared", crate_declared()), ("every-block", full)]
+        {
+            let revision = parse_revision("issue-5047", &markdown, None)
+                .unwrap_or_else(|error| panic!("{label}: the fixture parses: {error}"));
+
+            let reparsed = parse_revision("issue-5047", &render_work_order(&revision), None).unwrap_or_else(|error| {
+                panic!("{label}: the rendered work order must parse: {error}\n{}", render_work_order(&revision))
+            });
+            assert_eq!(reparsed, revision, "{label}: the rendered work order must reproduce the revision it came from");
+        }
     }
 
     #[test]

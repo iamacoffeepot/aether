@@ -57,7 +57,7 @@ pub(super) fn reduce_verify_failed(
             got: evidence.subject,
         }));
     }
-    let mut effects = alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }];
+    let effects = alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }];
 
     // Binding first, emptiness second: an unjudged verdict still re-dispatches
     // work, so it has to name the subject it was dispatched against before it is
@@ -84,6 +84,50 @@ pub(super) fn reduce_verify_failed(
         return host_fault_hold(*bloom, workpiece, evidence, String::new(), effects);
     }
 
+    let line =
+        VerifyLine { record, bloom: *bloom, member, cursor: &cursor, targets: DispatchTargets { subject, checkout } };
+
+    // A repeat over an unchanged tree is evidence about the machinery, not the
+    // model: nothing new was judged between the two verdicts, so `R = F ∩ S`
+    // is measuring the same work twice. Keyed here rather than folded into the
+    // intersection because the two mean different things — the seen set records
+    // which identities this member has ever failed, and the series records
+    // which *generation* of its work the roll count is about.
+    if snapshot.member_verify_series(bloom, workpiece) == Some(subject) {
+        return repeated_over_one_tree(snapshot, &line, evidence, effects);
+    }
+    counted_verdict(&line, failed_verifiers, evidence, effects)
+}
+
+/// The member-line context every arm of [`reduce_verify_failed`] decides
+/// against: the sealed bloom, which member, where its cursor stands, and the
+/// two digests its next dispatch aims at.
+///
+/// Grouped because the arms take all five or none — and because a
+/// [`DispatchTargets`] re-derived per arm is a transposed pair waiting to
+/// happen (ADR-0152).
+struct VerifyLine<'a> {
+    record: &'a BloomRecord,
+    bloom: BloomId,
+    member: &'a Membership,
+    cursor: &'a StageProgress,
+    targets: DispatchTargets,
+}
+
+/// Reduce a failing Verify over a generation the member really produced: the
+/// ADR-0178 accounting, and the wedge at its ceiling.
+///
+/// For current failures `F` and the member's seen set `S`, `R = F ∩ S` decides
+/// whether this verdict spends one repair roll, while `S ∪ F` becomes the
+/// durable cursor history.
+fn counted_verdict(
+    line: &VerifyLine<'_>,
+    failed_verifiers: VerifyFailureSet,
+    evidence: &Evidence,
+    mut effects: Vec<Decision>,
+) -> Decisions {
+    let VerifyLine { record, bloom, member, cursor, targets } = *line;
+    let workpiece = &member.workpiece;
     let repeated_verifiers = failed_verifiers.intersection(cursor.seen_verify_failures);
     let seen_verify_failures = cursor.seen_verify_failures.union(failed_verifiers);
     let rolls = cursor.repair_rolls + u32::from(!repeated_verifiers.is_empty());
@@ -105,15 +149,15 @@ pub(super) fn reduce_verify_failed(
         // Persist the union even on the terminal verdict. This cursor write is
         // intentionally not paired with a dispatch; the following RecordWedge
         // restores the terminal marker after AdvanceStage clears any stale one.
-        effects.push(Decision::AdvanceStage { bloom: *bloom, workpiece: workpiece.clone(), progress });
+        effects.push(Decision::AdvanceStage { bloom, workpiece: workpiece.clone(), progress });
         effects.push(Decision::RecordWedge {
-            bloom: *bloom,
+            bloom,
             workpiece: workpiece.clone(),
             wedge: Wedge { stage: StageId::Verify, evidence: evidence.detail, repeated_verifiers },
         });
         return Decisions {
             outcome: Outcome::AttemptWedged {
-                bloom: *bloom,
+                bloom,
                 workpiece: workpiece.clone(),
                 stage: StageId::Verify,
                 repeated_verifiers,
@@ -135,14 +179,117 @@ pub(super) fn reduce_verify_failed(
         reconcile_assembles_base: false,
     };
     effects.extend(move_effects(
-        *bloom,
+        bloom,
         workpiece,
         member.scope_revision,
         progress,
-        DispatchTargets { subject, checkout },
+        targets,
         SealedLine::of(record, member),
     ));
-    Decisions { outcome: Outcome::RefineReentered { bloom: *bloom, workpiece: workpiece.clone(), rolls }, effects }
+    Decisions { outcome: Outcome::RefineReentered { bloom, workpiece: workpiece.clone(), rolls }, effects }
+}
+
+/// Reduce a failing Verify whose judged tree is the one the member's series is
+/// already counting — the same effective content failing twice.
+///
+/// The repeated-verifiers ceiling exists to say "the model keeps producing work
+/// that fails the same way". Between two verdicts over one tree the model
+/// produced nothing at all, so the second says nothing about the model and buys
+/// no repair roll and no verifier identity. What it does say is that the
+/// machinery served the same candidate to the gate twice, which is the
+/// ADR-0195 series' subject, so the anomaly is recorded there — and at that
+/// series' ceiling the member wedges naming machinery rather than Work, so a
+/// coordinator stuck re-serving one tree stops without ever being read as a
+/// member that could not do its job.
+///
+/// The member still re-enters `Refine`. The verdict is a real one about a real
+/// tree; re-running the gate over that tree would only reproduce it, while a
+/// repair lap is the move that can change the tree the next verdict judges.
+///
+/// On 2026-08-26 this was the second half of the wedge that stopped
+/// `retention-archive-tier`: a stale checkout meant the gate judged one tree
+/// twice, and the identical failure pair tripped the ceiling with `wedge_cause`
+/// Work though no new model work had been judged since the first. The sibling
+/// checkout binding makes that particular route unreachable; this is the
+/// defence behind it.
+fn repeated_over_one_tree(
+    snapshot: &Snapshot,
+    line: &VerifyLine<'_>,
+    evidence: &Evidence,
+    mut effects: Vec<Decision>,
+) -> Decisions {
+    let VerifyLine { record, bloom, member, cursor, targets } = *line;
+    let workpiece = &member.workpiece;
+    let rolls = match snapshot.member_machinery(&bloom, workpiece) {
+        Some(fault) if fault.stage == StageId::Verify => fault.rolls.saturating_add(1),
+        _ => 1,
+    };
+    let budget = record.stage_catalog.retry_budget_of(StageId::Verify).unwrap_or(1);
+    let recorded = Decision::RecordMemberMachinery {
+        bloom,
+        workpiece: workpiece.clone(),
+        stage: StageId::Verify,
+        rolls,
+        evidence: evidence.detail,
+    };
+
+    if rolls >= budget {
+        effects.push(recorded);
+        effects.push(Decision::RecordWedge {
+            bloom,
+            workpiece: workpiece.clone(),
+            wedge: Wedge {
+                stage: StageId::Verify,
+                evidence: evidence.detail,
+                repeated_verifiers: VerifyFailureSet::EMPTY,
+            },
+        });
+        return Decisions {
+            outcome: Outcome::MachineryWedged {
+                bloom,
+                workpiece: workpiece.clone(),
+                stage: StageId::Verify,
+                rolls,
+                budget,
+            },
+            effects,
+        };
+    }
+
+    // Every ADR-0178 counter passes through untouched — the roll ledger and the
+    // seen set both describe judged generations, and this verdict judged none.
+    let progress = StageProgress {
+        stage: StageId::Refine,
+        attempts: 1,
+        candidate: cursor.candidate,
+        repair_rolls: cursor.repair_rolls,
+        seen_verify_failures: cursor.seen_verify_failures,
+        fold_checkpoint: cursor.fold_checkpoint,
+        fold_conflict_evidence: None,
+        reconcile_assembles_base: false,
+    };
+    effects.extend(move_effects(
+        bloom,
+        workpiece,
+        member.scope_revision,
+        progress,
+        targets,
+        SealedLine::of(record, member),
+    ));
+    // Ordered after the move, and it has to be: a cursor leaving the stage its
+    // machinery series is against retires that series (ADR-0195), and this
+    // cursor is leaving `Verify` for the repair lap. Recorded behind the
+    // advance, the anomaly survives the excursion and the next repeat counts
+    // from it — the same ordering the terminal repeat wedge above relies on to
+    // restore its marker. A lap that produces a genuinely new tree takes the
+    // ordinary path, whose advance retires the series and starts the member
+    // over with a clean one.
+    effects.push(recorded);
+
+    Decisions {
+        outcome: Outcome::RefineReentered { bloom, workpiece: workpiece.clone(), rolls: cursor.repair_rolls },
+        effects,
+    }
 }
 
 /// Re-run the gate over a candidate no gate ever judged, or wedge once the

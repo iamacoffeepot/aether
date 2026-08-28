@@ -38,16 +38,15 @@ fn a_committed_land_decision_nudges_the_reactor() {
     // reactor is owed is the one the committed decision must send.
     harness.integrate_tick();
 
-    let order = harness.await_order();
-    assert!(order.workpiece.is_empty(), "a bloom-level order carries no member axis");
-    let mut key = harness.upload_admitted(&passed(&order));
-
-    let mechanical_ran = key.starts_with("aether.bloomery.aggregate_verify:");
-    if mechanical_ran {
-        let aggregate_review = harness.await_order();
-        key = harness.upload_admitted(&passed(&aggregate_review));
+    let orders = harness.await_orders(2);
+    let mut keys = Vec::new();
+    for order in &orders {
+        assert!(order.workpiece.is_empty(), "a bloom-level order carries no member axis");
+        keys.push(harness.upload_admitted(&passed(order)));
     }
-    assert!(key.starts_with("aether.bloomery.aggregate_review:"), "the critic's gate: {key}");
+    for gate in ["aether.bloomery.aggregate_review:", "aether.bloomery.aggregate_verify:"] {
+        assert!(keys.iter().any(|key| key.starts_with(gate)), "the {gate} gate ran: {keys:?}");
+    }
 
     let proposal = await_landing_proposal(&mut harness, bloom);
     assert!(proposal > 0, "the land reactor opened a numbered proposal");

@@ -30,7 +30,7 @@ fn a_resolved_bloom_lands_on_the_coordinators_own_merge() {
     let verify = harness.await_order();
     harness.upload_admitted(&passed(&verify));
 
-    let (_, proposal) = harness.resolve_and_propose(bloom);
+    let proposal = harness.resolve_and_propose(bloom);
     assert!(harness.landing_merged(proposal), "the coordinator merged on the structural gates");
 
     // Nothing below merges anything — the ticks `await_landing` drives are

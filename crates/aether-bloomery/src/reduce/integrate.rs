@@ -282,14 +282,18 @@ fn folded(
     let integration = FoldedIntegration { tree, head, lineage: lineage.to_vec() };
     let hold = Decision::RecordIntegration { bloom, integration: Some(integration) };
 
-    // The fold may be a tree this bloom has already proven (#4891): a
-    // single-member fold is byte-identical to the candidate its member verified,
-    // so the mechanical gate would re-run for a verdict the journal holds. Pass
-    // by identity — the mechanical half of the join is recorded straight away,
-    // exactly as a returning green verdict would record it — and dispatch only
-    // the critic. A multi-member fold is a tree that never existed before this
-    // moment, so it misses and both gates run.
-    if let Some(proof) = record.verify_proof_for(tree) {
+    // The fold may be a tree this bloom's fold gates have already proven
+    // (#4891) — a re-weave that reproduces a tree an earlier round already put
+    // through them. Pass by identity: the mechanical half of the join is
+    // recorded straight away, exactly as a returning green verdict would record
+    // it, and only the critic is dispatched.
+    //
+    // A member's own proof is not an answer here, however byte-identical the
+    // fold is to that member's candidate. The member position does not run
+    // `verify.docs`, so its green says nothing about the gate that most needs a
+    // whole tree — and a fold that passed on it would carry that silence into
+    // the base receipt a landing mints.
+    if let Some(proof) = record.verify_proof_for(StageId::AggregateVerify, tree) {
         return Decisions {
             outcome: Outcome::AggregateVerifyReused { bloom, rolls: roll, proof: proof.evidence.detail },
             effects: reused_fold_effects(record, bloom, tree, head, hold, proof, roll),

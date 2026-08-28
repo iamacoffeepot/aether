@@ -3333,9 +3333,12 @@ fn a_grant_on_a_verify_wedge_resumes_at_refine_with_its_candidate() {
     };
 
     // Construct passes with a capture. The first clippy failure is forgiven;
-    // three repeats spend the whole repair ceiling and wedge holding that
-    // candidate and seen-history.
-    let captured = CandidateRef { tree: digest(21), checkout: digest(22) };
+    // three repeats spend the whole repair ceiling and wedge holding the newest
+    // candidate and the seen-history. Each repair lap captures a *different*
+    // tree, because the repeat rule counts distinct candidate generations
+    // (ADR-0178): four failures over one unchanged tree are a machinery
+    // anomaly, not four judged laps, and would never reach this wedge.
+    let mut captured = CandidateRef { tree: digest(21), checkout: digest(22) };
     let (mut snapshot, _) = step(&snapshot, &completion("c-pass", StageId::Construct, Some(captured)));
     for index in 0..3 {
         snapshot = step(
@@ -3350,7 +3353,8 @@ fn a_grant_on_a_verify_wedge_resumes_at_refine_with_its_candidate() {
             ),
         )
         .0;
-        snapshot = step(&snapshot, &completion(&format!("refine-pass-{index}"), StageId::Refine, None)).0;
+        captured = CandidateRef { tree: digest(31 + index), checkout: digest(41 + index) };
+        snapshot = step(&snapshot, &completion(&format!("refine-pass-{index}"), StageId::Refine, Some(captured))).0;
     }
     let (wedged, d) = step(
         &snapshot,
@@ -3384,14 +3388,15 @@ fn a_grant_on_a_verify_wedge_resumes_at_refine_with_its_candidate() {
     let progress = granted.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).unwrap();
     assert_eq!(progress.stage, StageId::Refine);
     assert!(progress.seen_verify_failures.contains(VerifyFailure::Clippy), "the grant preserves seen history");
-    let (snapshot, _) = step(&granted, &completion("refine-pass-granted", StageId::Refine, None));
+    let repaired = CandidateRef { tree: digest(51), checkout: digest(52) };
+    let (snapshot, _) = step(&granted, &completion("refine-pass-granted", StageId::Refine, Some(repaired)));
     let (_, d) = step(
         &snapshot,
         &verify_failed(
             "v-fail-after-grant",
             bloom,
             "wp",
-            captured.tree,
+            repaired.tree,
             90,
             VerifyFailureSet::one(VerifyFailure::Clippy),
         ),
@@ -4824,16 +4829,20 @@ fn verified_claim(name: &str, revision: u8, candidate: u8, verdict: u8) -> Resol
     }
 }
 
-// #4891 — a single-member fold is byte-identical to the candidate its member
-// already verified, so the aggregate verify passes on the recorded verdict
-// instead of dispatching a full mechanical run to re-derive it. The fold still
-// reaches the critic, held and unchanged.
+// The memo's key is the tree *and* the gates, and the member position no longer
+// runs the same gates as the fold: it does not run `verify.docs`, because an
+// intra-doc link resolves across crates and a member's closure can neither break
+// nor prove one alone. So a single-member fold — byte-identical to the candidate
+// its member verified — is still a tree the documentation gate has never seen,
+// and the fold dispatches its own run.
 //
-// Tripwire on the receipt above all: a pass that dispatched nothing and recorded
-// nothing would be indistinguishable from a gate quietly skipped, which is the
-// one way this optimization could become a lie.
+// Tripwire: this is the shape that reads as a free win, and taking it is how the
+// whole ledger goes quietly wrong. The fold's verdict is what a landing mints
+// its whole-workspace base receipt from, so a fold that passed on a member's
+// docs-less proof would file a green receipt for a tree nothing ever built the
+// documentation of, and the next seal would stand on it.
 #[test]
-fn a_fold_on_an_already_verified_tree_passes_the_aggregate_verify_by_identity() {
+fn a_fold_does_not_pass_on_a_member_proof_that_never_ran_the_documentation_gate() {
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&Snapshot::new(digest(1)).with_green_base(digest(1)), &event("seal", Fact::Seal(spec)));
@@ -4845,26 +4854,23 @@ fn a_fold_on_an_already_verified_tree_passes_the_aggregate_verify_by_identity() 
         &event("resolve", Fact::Resolve { bloom, tree: digest(100), head: digest(101), lineage: vec![] }),
     );
 
-    assert_eq!(resolved.outcome, Outcome::AggregateVerifyReused { bloom, rolls: 1, proof: digest(60) });
+    assert_eq!(resolved.outcome, Outcome::AggregateVerifyDispatched { bloom, roll: 1 });
     assert!(
-        !resolved.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateVerify { .. })),
-        "the gates do not run again over a tree this bloom already proved",
+        resolved.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateVerify { .. })),
+        "the fold's own gates run over the fold",
     );
-    match resolved.effects.iter().find(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })) {
-        Some(Decision::DispatchAggregateReview { transformation, .. }) => {
-            assert_eq!(transformation.inputs[0], digest(100), "the critic judges the fold the memo passed");
-            assert_eq!(transformation.checkout, digest(101));
-        }
-        other => panic!("expected the critic to be dispatched, got {other:?}"),
-    }
 
     let record = after.blooms.get(&bloom).unwrap();
-    let reuse = record.verify_reuses.first().expect("a memo hit leaves a receipt naming what it reused");
-    assert_eq!(reuse.stage, StageId::AggregateVerify);
-    assert_eq!(reuse.proof.stage, StageId::Verify, "the reused verdict is the member's own");
-    assert_eq!(reuse.proof.evidence.detail, digest(60));
-    assert_eq!(record.aggregate_verify_rolls, 1, "a pass by identity consumes its verdict like a dispatched one");
-    assert_eq!(record.integration.as_ref().unwrap().tree, digest(100), "the fold stays held for the critic");
+    assert!(record.verify_reuses.is_empty(), "nothing passed by identity, so no receipt claims one did");
+    assert!(
+        record.verify_proof_for(StageId::Verify, digest(100)).is_some(),
+        "the member's proof is filed under the position that collected it",
+    );
+    assert!(
+        record.verify_proof_for(StageId::AggregateVerify, digest(100)).is_none(),
+        "and no lookup can read it as the fold's",
+    );
+    assert_eq!(record.integration.as_ref().unwrap().tree, digest(100), "the fold stays held for both gates");
 }
 
 // #4891 — the memo fires on tree *identity* and nothing else. A multi-member
@@ -4948,6 +4954,10 @@ fn resolved_on_green_base() -> (Snapshot, BloomId) {
         &snapshot,
         &event("resolve", Fact::Resolve { bloom, tree: digest(100), head: digest(101), lineage: vec![] }),
     );
+    // The fold's own mechanical gates, dispatched over the fold and returning
+    // green: the member's proof does not answer here, because the member
+    // position does not run `verify.docs`.
+    let (snapshot, _) = step(&snapshot, &verify_passed(bloom, "aggregate-verify", 100));
     let (snapshot, _) = step(
         &snapshot,
         &event(
@@ -5508,7 +5518,10 @@ fn an_adjudication_does_not_land_a_head_whose_aggregate_verify_is_red() {
     let (pending, bloom) = newer_weave_awaiting_aggregate_verify();
     let before = pending.blooms.get(&bloom).unwrap();
     assert_eq!(before.integration.as_ref().unwrap().head, digest(45), "the refine lap already replaced the fold");
-    assert!(before.verify_proof_for(digest(44)).is_none(), "the newer weave has no green proof yet");
+    assert!(
+        before.verify_proof_for(StageId::AggregateVerify, digest(44)).is_none(),
+        "the newer weave has no green proof yet"
+    );
     assert!(
         before.open_composition_findings().any(|open| open.detail == digest(70)),
         "the first refusal is still open"
@@ -6608,4 +6621,56 @@ fn a_held_aggregate_and_its_release_replay_from_the_recorded_decisions_alone() {
     }
 
     assert_eq!(replayed, live, "replay over the recorded decisions rebuilds the held-and-released fold exactly");
+}
+
+// ADR-0178 / ADR-0195 — Tripwire: the anomaly a same-tree repeat records has to
+// survive the repair lap it dispatches. A cursor leaving the stage its
+// machinery series is against retires that series, and this cursor leaves
+// `Verify` for `Refine`, so the record is emitted *behind* the advance. Emitted
+// in front of it, every repeat would retire the count it had just written: the
+// series would stay at zero forever, the wedge would never read as machinery,
+// and a coordinator re-serving one tree would buy repair laps without bound.
+#[test]
+fn a_repeat_over_one_tree_records_an_anomaly_that_survives_its_repair_lap() {
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+
+    let captured = CandidateRef { tree: digest(21), checkout: digest(22) };
+    let pass = |key: &str, stage: StageId| {
+        event(
+            key,
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage,
+                passed: true,
+                evidence: attempt_evidence(),
+                candidate: Some(captured),
+            },
+        )
+    };
+    let clippy = VerifyFailureSet::one(VerifyFailure::Clippy);
+
+    // Two failures over one tree: the first is a novel identity that costs
+    // nothing, the second repeats it over content no repair touched.
+    let (snapshot, _) = step(&snapshot, &pass("construct", StageId::Construct));
+    let (snapshot, first) = step(&snapshot, &verify_failed("v-1", bloom, "wp", captured.tree, 81, clippy));
+    assert!(matches!(first.outcome, Outcome::RefineReentered { rolls: 0, .. }));
+    let (snapshot, _) = step(&snapshot, &pass("refine", StageId::Refine));
+    let (repeated, decided) = step(&snapshot, &verify_failed("v-2", bloom, "wp", captured.tree, 82, clippy));
+
+    assert!(
+        matches!(decided.outcome, Outcome::RefineReentered { rolls: 0, .. }),
+        "a repeat over one tree spends no repair roll, got {:?}",
+        decided.outcome,
+    );
+    let progress = repeated.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).unwrap();
+    assert_eq!(progress.repair_rolls, 0, "and leaves the roll ledger where it was");
+    assert_eq!(
+        repeated.member_machinery(&bloom, &workpiece("wp")).map(|fault| (fault.stage, fault.rolls)),
+        Some((StageId::Verify, 1)),
+        "the anomaly is recorded against Verify and outlives the Refine the same verdict dispatched",
+    );
 }

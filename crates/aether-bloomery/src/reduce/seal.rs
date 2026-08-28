@@ -649,7 +649,7 @@ fn adoption_of(
     claim: &ResolutionClaim,
     member: &Membership,
 ) -> Adoption {
-    let Some(proof) = predecessor.verify_proof_for(claim.candidate) else {
+    let Some(proof) = predecessor.verify_proof_for(StageId::Verify, claim.candidate) else {
         return Adoption::ClaimOnly;
     };
     let pred_base = member_construct_base(predecessor, &member.workpiece);
@@ -1347,8 +1347,8 @@ mod tests {
         assert!(pred.claims.contains_key(&wp("wp-a")));
         assert!(pred.claims.contains_key(&wp("wp-c")));
         assert!(pred.wedged.contains_key(&wp("wp-b")));
-        assert!(pred.verify_proof_for(digest(10)).is_some());
-        assert!(pred.verify_proof_for(digest(30)).is_some());
+        assert!(pred.verify_proof_for(StageId::Verify, digest(10)).is_some());
+        assert!(pred.verify_proof_for(StageId::Verify, digest(30)).is_some());
 
         let successor_spec = spec_at(&[("wp-a", 1), ("wp-b", 2), ("wp-c", 3)], 1);
         let (after, decided) = step(
@@ -1376,8 +1376,14 @@ mod tests {
         );
 
         let successor = after.blooms.get(&successor_spec.id()).expect("successor");
-        assert!(successor.verify_proof_for(digest(10)).is_some(), "A's proof is on the successor memo");
-        assert!(successor.verify_proof_for(digest(30)).is_some(), "C's proof is on the successor memo");
+        assert!(
+            successor.verify_proof_for(StageId::Verify, digest(10)).is_some(),
+            "A's proof is on the successor memo"
+        );
+        assert!(
+            successor.verify_proof_for(StageId::Verify, digest(30)).is_some(),
+            "C's proof is on the successor memo"
+        );
         assert!(successor.claims.contains_key(&wp("wp-a")));
         assert!(successor.claims.contains_key(&wp("wp-c")));
         assert!(!successor.claims.contains_key(&wp("wp-b")));
@@ -1421,8 +1427,8 @@ mod tests {
         assert!(pred.claims.contains_key(&wp("wp-a")));
         assert!(pred.claims.contains_key(&wp("wp-c")));
         assert!(pred.wedged.contains_key(&wp("wp-b")));
-        assert!(pred.verify_proof_for(digest(10)).is_some());
-        assert!(pred.verify_proof_for(digest(30)).is_some());
+        assert!(pred.verify_proof_for(StageId::Verify, digest(10)).is_some());
+        assert!(pred.verify_proof_for(StageId::Verify, digest(30)).is_some());
 
         let successor_spec = spec_at(&[("wp-a", 1), ("wp-b", 2), ("wp-c", 3)], 1);
         let (after, decided) = step(
@@ -1446,8 +1452,8 @@ mod tests {
         assert!(verify_dispatches(&decided).is_empty(), "a matching splice must not re-verify: {:?}", decided.effects);
 
         let successor = after.blooms.get(&successor_spec.id()).expect("successor");
-        assert!(successor.verify_proof_for(digest(10)).is_some());
-        assert!(successor.verify_proof_for(digest(30)).is_some());
+        assert!(successor.verify_proof_for(StageId::Verify, digest(10)).is_some());
+        assert!(successor.verify_proof_for(StageId::Verify, digest(30)).is_some());
         assert!(successor.claims.contains_key(&wp("wp-a")));
         assert!(successor.claims.contains_key(&wp("wp-c")));
         assert!(!successor.claims.contains_key(&wp("wp-b")));
@@ -1514,7 +1520,7 @@ mod tests {
         );
         let successor = after.blooms.get(&successor_spec.id()).expect("successor");
         assert!(
-            successor.verify_proof_for(digest(20)).is_none(),
+            successor.verify_proof_for(StageId::Verify, digest(20)).is_none(),
             "the refused proof is absent from the successor memo",
         );
         assert!(!successor.claims.contains_key(&wp("wp-b")), "B is not resolved until the re-verify integrates");
@@ -1589,8 +1595,8 @@ mod tests {
 
         assert_eq!(live, replayed, "apply-only replay of the journaled rows rebuilds the live snapshot");
         let successor = replayed.blooms.get(&successor_spec.id()).expect("replayed successor");
-        assert!(successor.verify_proof_for(digest(10)).is_some());
-        assert!(successor.verify_proof_for(digest(30)).is_some());
+        assert!(successor.verify_proof_for(StageId::Verify, digest(10)).is_some());
+        assert!(successor.verify_proof_for(StageId::Verify, digest(30)).is_some());
         assert!(successor.claims.contains_key(&wp("wp-a")));
         assert!(successor.claims.contains_key(&wp("wp-c")));
         assert_eq!(

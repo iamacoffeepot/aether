@@ -96,6 +96,24 @@ pub struct Snapshot {
     /// JSON-reader rescue.
     #[serde(default)]
     pub member_machinery: BTreeMap<BloomId, BTreeMap<WorkpieceId, MemberMachineryFault>>,
+    /// The candidate tree each member's repeated-verifiers series is counting
+    /// over (ADR-0178), keyed by bloom then workpiece.
+    ///
+    /// The ADR-0178 repeat rule is a statement about the *model*: the member
+    /// keeps producing work that fails the same way. A second verdict over an
+    /// unchanged tree says nothing of the kind — no new work was judged — so
+    /// the series is keyed by the tree the verdict judged, and only a failure
+    /// over a different one spends a repair roll.
+    ///
+    /// Folded from [`Fact::VerifyFailed`] the way a construct checkpoint is
+    /// folded from a failing attempt: the fact names the member and its
+    /// evidence binds the judged tree, so no new [`Decision`] enters the
+    /// journal's wire-frozen decisions graph. Snapshot-level rather than a
+    /// [`BloomRecord`] field so every existing `BloomRecord { … }` literal
+    /// stays compiling, the `member_checkpoints` precedent. `#[serde(default)]`
+    /// is the same JSON-reader rescue.
+    #[serde(default)]
+    pub member_verify_series: BTreeMap<BloomId, BTreeMap<WorkpieceId, Digest>>,
     /// Why a sealed bloom's fold refused (ADR-0206), keyed by bloom.
     ///
     /// Folded from [`Fact::FoldRefused`] the way construct checkpoints are
@@ -228,6 +246,13 @@ impl Snapshot {
     #[must_use]
     pub fn member_machinery(&self, bloom: &BloomId, workpiece: &WorkpieceId) -> Option<MemberMachineryFault> {
         self.member_machinery.get(bloom)?.get(workpiece).copied()
+    }
+
+    /// The candidate tree `workpiece`'s repeated-verifiers series is counting
+    /// over in `bloom`, once a judged failing Verify has named one (ADR-0178).
+    #[must_use]
+    pub fn member_verify_series(&self, bloom: &BloomId, workpiece: &WorkpieceId) -> Option<Digest> {
+        self.member_verify_series.get(bloom)?.get(workpiece).copied()
     }
 
     /// The recorded base-verify receipt for `base`, or `None` when this
@@ -1026,6 +1051,7 @@ impl Snapshot {
             next.apply_effect(effect);
         }
         next.record_construct_checkpoint(event, decisions);
+        next.record_verify_series(event, decisions);
         next.record_construct_park(event, decisions);
         next.record_fold_refusal(event, decisions);
         next.record_refusals(decisions);
@@ -1079,6 +1105,50 @@ impl Snapshot {
     /// that fact; a fact it rejected changes nothing. Leaving one standing
     /// would leave the member excused forever, waiting on a resume that cannot
     /// come.
+    /// Record the candidate tree a judged failing Verify was rendered over, so
+    /// the next one can tell a new generation from a repeat of this one
+    /// (ADR-0178).
+    ///
+    /// Gated on the outcomes that mean the verdict was *judged*: the Refine
+    /// re-entry, the repeat wedge, and the machinery arm a same-tree repeat
+    /// takes. A refused admission, a preflight-only host fault, and the
+    /// unjudged branch (a lane that died before the umbrella answered) all name
+    /// no verifier and are deliberately left out — none of them is a statement
+    /// about a tree, and recording one would let the next honest failure read
+    /// as a repeat.
+    ///
+    /// Gated, too, on the subject being the member's own captured candidate. A
+    /// member that reached Verify without one binds its *scope revision*, which
+    /// is an identity of the plan rather than of the work and is the same
+    /// digest on every lap — keying a generation off it would read every
+    /// repair the member ever makes as a repeat of the last.
+    fn record_verify_series(&mut self, event: &Event, decisions: &Decisions) {
+        let Fact::VerifyFailed { bloom, workpiece, evidence, failed_verifiers } = &event.fact else {
+            return;
+        };
+        if failed_verifiers.is_empty() {
+            return;
+        }
+        if !matches!(
+            decisions.outcome,
+            Outcome::RefineReentered { .. }
+                | Outcome::AttemptWedged { stage: StageId::Verify, .. }
+                | Outcome::MachineryWedged { stage: StageId::Verify, .. }
+        ) {
+            return;
+        }
+        let judged_candidate = self
+            .blooms
+            .get(bloom)
+            .and_then(|record| record.progress.get(workpiece))
+            .and_then(|cursor| cursor.candidate)
+            .is_some_and(|candidate| candidate.tree == evidence.subject);
+        if !judged_candidate {
+            return;
+        }
+        self.member_verify_series.entry(*bloom).or_default().insert(workpiece.clone(), evidence.subject);
+    }
+
     fn record_construct_park(&mut self, event: &Event, decisions: &Decisions) {
         match &event.fact {
             Fact::AttemptCompleted { passed: false, evidence, .. } => {
@@ -2023,17 +2093,25 @@ impl BloomRecord {
         })
     }
 
-    /// The recorded green verdict for `tree` under the gate set the compiled
-    /// verify lane runs, or `None` when this bloom holds none (#4891).
+    /// The recorded green verdict for `tree` under the gate set `position` runs,
+    /// or `None` when this bloom holds none (#4891).
     ///
     /// The one place a memo hit is decided, so every verify position asks the
     /// question the same way and none of them can reach past the gate-set half
     /// of the key. The current gate set is recomputed rather than remembered:
     /// that is what makes a proof journaled under a different verify vocabulary
     /// or lane miss instead of answering for gates that no longer exist.
+    ///
+    /// The asking position is named rather than assumed, because the positions
+    /// run different vocabularies: the member `Verify` does not run
+    /// `verify.docs` and the fold does, so a member's proof answers a member's
+    /// question and nothing else. A caller that named the wrong position would
+    /// be reading a narrower proof out from under a wider question — which is
+    /// the whole failure the gate-set half of the key exists to stop.
     #[must_use]
-    pub fn verify_proof_for(&self, tree: Digest) -> Option<&VerifyProof> {
-        self.verify_proofs.get(&VerifiedTree { tree, gate_set: VerifyGateSet::lane().digest() })
+    pub fn verify_proof_for(&self, position: StageId, tree: Digest) -> Option<&VerifyProof> {
+        let gate_set = VerifyGateSet::for_stage(position)?.digest();
+        self.verify_proofs.get(&VerifiedTree { tree, gate_set })
     }
 
     /// Fold one admitted evidence artifact into the record: the log entry, plus

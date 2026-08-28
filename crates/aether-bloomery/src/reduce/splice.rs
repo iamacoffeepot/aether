@@ -419,11 +419,14 @@ mod tests {
         assert_eq!(construct_checkout(&decided_b, "wp-c"), Some(digest(20)));
     }
 
-    // The plausible bug: a weave whose fold is byte-identical to the last
-    // dependent's already-proven candidate still dispatches AggregateVerify,
-    // re-paying a mechanical run the identity memo already holds (#4891).
+    // Tripwire: the fold runs `verify.docs` and the member position does not, so
+    // a weave byte-identical to the last dependent's proven candidate is still a
+    // tree the documentation gate has never seen. The plausible bug is the
+    // tempting one — reading the member's proof here because the trees match —
+    // which would carry that silence all the way into the base receipt a landing
+    // mints from the fold's verdict.
     #[test]
-    fn a_weave_equal_to_a_proven_dependent_passes_by_identity() {
+    fn a_weave_equal_to_a_proven_dependent_is_still_verified_as_a_fold() {
         let spec = spec(&[("wp-a", 1), ("wp-b", 2)]);
         let seal =
             event("seal", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges: vec![edge("wp-b", "wp-a")] });
@@ -444,17 +447,23 @@ mod tests {
 
         assert_eq!(
             resolved.outcome,
-            Outcome::AggregateVerifyReused { bloom: spec.id(), rolls: 1, proof: digest(61) },
-            "the fold is B's tree, which B already proved",
+            Outcome::AggregateVerifyDispatched { bloom: spec.id(), roll: 1 },
+            "B's member proof answers B's question, not the fold's",
         );
         assert!(
-            !resolved.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateVerify { .. })),
-            "a proven spliced tree is not re-verified",
+            resolved.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateVerify { .. })),
+            "the fold's own gates run over the spliced tree",
         );
-        let reuse =
-            after.blooms.get(&spec.id()).expect("sealed bloom").verify_reuses.first().expect("identity receipt");
-        assert_eq!(reuse.stage, StageId::AggregateVerify);
-        assert_eq!(reuse.proof.evidence.detail, digest(61));
+        let folded = after.blooms.get(&spec.id()).expect("sealed bloom");
+        assert!(folded.verify_reuses.is_empty(), "nothing passed by identity");
+        assert!(
+            folded.verify_proof_for(StageId::Verify, digest(20)).is_some(),
+            "B's own proof is still filed under the position that collected it",
+        );
+        assert!(
+            folded.verify_proof_for(StageId::AggregateVerify, digest(20)).is_none(),
+            "and it is not readable as the fold's",
+        );
     }
 
     // The plausible bug: two independent parents are silently ordered by

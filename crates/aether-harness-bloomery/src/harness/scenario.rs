@@ -1163,46 +1163,36 @@ impl ScenarioHarness {
 
     /// Carry a bloom whose claim set is complete through the fold, its
     /// aggregate gates, and the landing.
-    pub fn land_the_fold(&mut self, bloom: BloomId) -> bool {
-        let (mechanical_ran, _proposal) = self.resolve_and_propose(bloom);
+    pub fn land_the_fold(&mut self, bloom: BloomId) {
+        self.resolve_and_propose(bloom);
         self.await_landing(bloom, BloomStatus::Landed);
-        mechanical_ran
     }
 
-    /// The same tail up to the landing proposal being open.
+    /// The same tail up to the landing proposal being open, returning the
+    /// landing proposal's number.
     ///
     /// # Panics
-    /// The dispatched order was not bloom-level, the critic's gate did not run, or no landing was proposed.
-    pub fn resolve_and_propose(&mut self, bloom: BloomId) -> (bool, u64) {
+    /// The dispatched order was not bloom-level, either aggregate gate did not run, or no landing was proposed.
+    pub fn resolve_and_propose(&mut self, bloom: BloomId) -> u64 {
         self.integrate_tick();
 
         // Both composite gates go out over the same fold and neither reads the
         // other's verdict, so both orders stand outstanding at once and either
-        // can arrive first. The exception is a fold of one live member: that
-        // tree is byte-identical to the candidate the member already verified,
-        // so the mechanical gate passes by identity (#4891) and only the critic
-        // is dispatched.
-        let live = self.bloom(bloom).members.iter().filter(|member| member.withdrawn.is_none()).count();
-        let mechanical_ran = live > 1;
-        let orders = self.await_orders(usize::from(mechanical_ran) + 1);
+        // can arrive first. Both run over every fold, a fold of one live member
+        // included: the member position does not run `verify.docs`, so its proof
+        // answers a narrower question than the fold's and the memo does not hit.
+        let orders = self.await_orders(2);
         let mut keys = Vec::new();
         for order in &orders {
             assert!(order.workpiece.is_empty(), "a bloom-level order carries no member axis");
             keys.push(self.upload_admitted(&passed(order)));
         }
-        assert!(
-            keys.iter().any(|key| key.starts_with("aether.bloomery.aggregate_review:")),
-            "the critic's gate ran: {keys:?}",
-        );
-        assert_eq!(
-            keys.iter().any(|key| key.starts_with("aether.bloomery.aggregate_verify:")),
-            mechanical_ran,
-            "the mechanical gate runs exactly when the fold is not one already-verified candidate: {keys:?}",
-        );
+        for gate in ["aether.bloomery.aggregate_review:", "aether.bloomery.aggregate_verify:"] {
+            assert!(keys.iter().any(|key| key.starts_with(gate)), "the {gate} gate ran: {keys:?}");
+        }
 
         self.land_tick();
-        let proposal = self.landing_proposal(bloom).expect("a resolved bloom proposes a landing");
-        (mechanical_ran, proposal)
+        self.landing_proposal(bloom).expect("a resolved bloom proposes a landing")
     }
 
     /// Whether landing proposal `number` has merged.
@@ -1310,7 +1300,8 @@ fn nonces(orders: &[OutstandingOrder]) -> Vec<&str> {
 
 fn stage_command(stage: StageId) -> &'static str {
     match stage {
-        StageId::Verify | StageId::AggregateVerify => aether_bloomery::VERIFY_CHECK_COMMAND,
+        StageId::Verify => aether_bloomery::VERIFY_MEMBER_COMMAND,
+        StageId::AggregateVerify => aether_bloomery::VERIFY_CHECK_COMMAND,
         StageId::BaseVerify => aether_bloomery::VERIFY_BASE_COMMAND,
         StageId::AggregateReview => aether_bloomery::REVIEW_CRITIC_COMMAND,
         _ => aether_bloomery::CONSTRUCT_IMPLEMENT_COMMAND,

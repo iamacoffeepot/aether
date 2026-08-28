@@ -128,6 +128,10 @@ pub struct ProcessTransformRunner {
     /// Tests inject a `HEAD` so the mismatch arm can fail the start without
     /// a corrupted checkout. Production is always `None`.
     head_override: Option<String>,
+    /// Tests inject the checked-out tree the same way, so the stale-candidate
+    /// arm can fail the start without a mis-pointed correspondence row.
+    /// Production is always `None`.
+    tree_override: Option<String>,
 }
 
 impl ProcessTransformRunner {
@@ -137,7 +141,7 @@ impl ProcessTransformRunner {
     pub fn new(identity: CaptureIdentity, lane_program: LaneProgram, repo: impl Into<PathBuf>) -> Self {
         let repo = repo.into();
         let repo = repo.canonicalize().unwrap_or(repo);
-        Self { identity, lane_program, repo, fetch_remote: String::new(), head_override: None }
+        Self { identity, lane_program, repo, fetch_remote: String::new(), head_override: None, tree_override: None }
     }
 
     /// Fetch missing order identities from `remote` instead of `origin`.
@@ -167,10 +171,25 @@ impl ProcessTransformRunner {
         }
     }
 
+    /// Pretend the worktree's tree is `tree`. Tests drive the stale-candidate
+    /// arm this way; production never sets it.
+    #[cfg(test)]
+    #[must_use]
+    fn with_tree_override(mut self, tree: impl Into<String>) -> Self {
+        self.tree_override = Some(tree.into());
+        self
+    }
+
     /// The `HEAD` compared against the sealed subject: git, unless a test
     /// overrode it so the mismatch arm can fail without a corrupted tree.
     fn observed_head(&self, worktree_dir: &Path) -> Result<String, LocalExecutorError> {
         self.head_override.clone().map_or_else(|| worktree_head(worktree_dir), Ok)
+    }
+
+    /// The tree compared against the order's candidate, on the same terms as
+    /// [`Self::observed_head`].
+    fn observed_tree(&self, worktree_dir: &Path) -> Result<String, LocalExecutorError> {
+        self.tree_override.clone().map_or_else(|| worktree_tree(worktree_dir), Ok)
     }
 }
 
@@ -195,6 +214,14 @@ impl TransformRunner for ProcessTransformRunner {
         materialize_checkout(&self.repo, spec.worktree_dir, &checkout)?;
         let observed = self.observed_head(spec.worktree_dir)?;
         confirm_checkout_head(spec.worktree_dir, &checkout, &observed)?;
+        // And that the tree it stands on is the candidate the verdict will be
+        // filed against (ADR-0152). `HEAD` agreeing with the order's checkout
+        // digest only says the host materialized what the order named; it says
+        // nothing about whether what the order named still carries the member's
+        // current work.
+        if let Some(expected) = spec.judged_tree_hex {
+            confirm_judged_tree(spec.nonce, expected, &self.observed_tree(spec.worktree_dir)?)?;
+        }
         // The scratch worktree is a full checkout carrying the repo's interactive
         // `.claude/settings.json` hooks, and the construct lane spawns headless
         // `claude` in it — so the SessionStart worktree-rebind hook would fire and
@@ -297,7 +324,7 @@ impl TransformRunner for ProcessTransformRunner {
         commit.push(capture_subject(message).to_owned());
         git_in(worktree_dir, &commit.iter().map(String::as_str).collect::<Vec<_>>())?;
         let commit_hex = git_in(worktree_dir, &["rev-parse", "HEAD"])?;
-        #[allow(clippy::literal_string_with_formatting_args, reason = "git revision syntax, not a format string")]
+        #[allow(clippy::literal_string_with_formatting_args)] // aether-suppression-request: git revspec, not a format
         let tree_hex = git_in(worktree_dir, &["rev-parse", "HEAD^{tree}"])?;
         let commit = decode_object_hex(commit_hex.trim()).ok_or_else(|| {
             LocalExecutorError::Worktree(format!("malformed capture commit sha `{}`", commit_hex.trim()))
@@ -639,6 +666,37 @@ fn materialize_checkout(repo_dir: &Path, worktree_dir: &Path, checkout_hex: &str
 /// The worktree's current `HEAD`, as `git rev-parse` printed it.
 fn worktree_head(worktree_dir: &Path) -> Result<String, LocalExecutorError> {
     git_in(worktree_dir, &["rev-parse", "HEAD"])
+}
+
+/// The tree object the worktree's `HEAD` carries, as `git rev-parse` printed it.
+#[allow(clippy::literal_string_with_formatting_args)] // aether-suppression-request: git revspec, not a format
+fn worktree_tree(worktree_dir: &Path) -> Result<String, LocalExecutorError> {
+    git_in(worktree_dir, &["rev-parse", "HEAD^{tree}"])
+}
+
+/// Fail the start when the materialized checkout does not carry the candidate
+/// tree the order binds its returned evidence to (ADR-0152).
+///
+/// The two digests a dispatch aims at are independent axes: `checkout` names a
+/// git commit and the evidence subject names the candidate tree. Nothing
+/// downstream re-joins them — the reducer admits a verdict that binds the
+/// subject the order displayed, whatever tree the lane actually stood in — so a
+/// checkout that drifted off the candidate produces a verdict about content no
+/// one asked to be judged, filed as if it were about the member's newest work.
+///
+/// That is a fault of the machinery, not of the work, so it is refused here,
+/// before a lane is paid for: the backend records it as a host fault and the
+/// member re-dispatches, rather than spending a repair roll or a
+/// repeated-verifiers count on a tree it never produced.
+fn confirm_judged_tree(nonce: &str, expected: &str, observed: &str) -> Result<(), LocalExecutorError> {
+    if observed == expected {
+        return Ok(());
+    }
+    Err(LocalExecutorError::StaleCandidateCheckout {
+        nonce: nonce.to_owned(),
+        expected: expected.to_owned(),
+        observed: observed.to_owned(),
+    })
 }
 
 /// Fail the start when the worktree's `HEAD` is not the commitish
@@ -1001,6 +1059,7 @@ mod tests {
             checkout_hex,
             diff_base_hex,
             seeded,
+            judged_tree_hex: None,
             worktree_dir,
             target_dir,
             build_jobs: 1,
@@ -1388,6 +1447,44 @@ mod tests {
         assert!(
             super::super::identity::CheckoutHead::read(&evidence).is_none(),
             "a failed start records no HEAD: the lane never stood in the tree"
+        );
+    }
+
+    #[test]
+    fn a_checkout_that_lost_the_orders_candidate_fails_the_start_before_spawn() {
+        // The plausible bug: a `Verify` whose checkout materializes a tree that
+        // is not the candidate the order binds. `HEAD` agrees with the order's
+        // checkout digest — the host materialized exactly what it was told — so
+        // the head check passes and the lane spends a lap judging content no one
+        // asked about, and the verdict is filed against the candidate anyway.
+        // On 2026-08-26 that lost a repair lap's fix and wedged the member.
+        let (repo, scratch, first, _second) = repo_with_two_commits();
+        let slot = scratch.path().join("slot-0");
+        let evidence = scratch.path().join("n-1-evidence");
+        let target = scratch.path().join("slot-0-target");
+        let stale = "b".repeat(40);
+        let candidate = "c".repeat(40);
+        let runner = ProcessTransformRunner::new(
+            CaptureIdentity::default(),
+            LaneProgram::parse("/this/lane/must/not/spawn"),
+            repo.path(),
+        )
+        .with_tree_override(stale.clone());
+
+        let mut order = spec("verify.check", &first, None, None, &evidence, &slot, &target);
+        order.judged_tree_hex = Some(&candidate);
+        let error = runner.start(&order).err().expect("a checkout off the candidate must fail the start");
+
+        let detail = format!("{error:?}");
+        assert!(
+            matches!(error, LocalExecutorError::StaleCandidateCheckout { .. }),
+            "the start fails as a stale candidate, not as a plain worktree fault: {detail}"
+        );
+        assert!(detail.contains(&stale), "the failure names the tree the checkout carries: {detail}");
+        assert!(detail.contains(&candidate), "the failure names the candidate it should have carried: {detail}");
+        assert!(
+            super::super::identity::ProcessIdentity::read(&evidence).is_none(),
+            "a refused dispatch must not have spawned a child to record"
         );
     }
 

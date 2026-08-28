@@ -119,13 +119,11 @@ fn a_bloom_with_all_scripted_verdicts_lands() {
     //
     // A single member's fold is a *stating* one — it replaces the branch tree
     // with that member's candidate — so what comes out is the exact tree the
-    // Verify above proved. The mechanical gate has nothing left to learn from
-    // it and passes by identity (#4891), which is what this assertion pins: the
-    // real fold, through the real source port, still lands on the memo.
-    assert!(
-        !harness.land_the_fold(bloom),
-        "the fold reproduced the verified candidate, so the mechanical gate must not run a second time",
-    );
+    // Verify above proved. The mechanical gate still runs over it: the member
+    // position does not run `verify.docs` (its closure cannot answer a
+    // whole-workspace question), so the proof it filed is not the one the fold
+    // asks for, and `resolve_and_propose` asserts both bloom-level gates ran.
+    harness.land_the_fold(bloom);
 
     assert_ne!(harness.view().mainline, sealed_on, "mainline advanced off the base the bloom sealed on");
     assert_eq!(harness.bloom(bloom).status, BloomStatus::Landed);

@@ -40,23 +40,36 @@ pub const REVIEW_CRITIC_COMMAND: &str = "review.critic";
 /// a lane no executor recognizes.
 pub const SCOPE_FILL_COMMAND: &str = "scope.fill";
 
-/// The mechanical verify lane's typed command — the fan-out that runs fmt,
-/// clippy and docs in CI-parity order. Named once because two stages dispatch
-/// it: the member `Verify` over one candidate, and `AggregateVerify` over the
-/// fold (ADR-0149 §The line).
+/// The fold's mechanical verify lane — the whole fan-out, in CI-parity order,
+/// dispatched by `AggregateVerify` over the woven tree (ADR-0149 §The line).
+///
+/// The complete verifier vocabulary runs here: the fold is the first tree that
+/// carries every member at once, so it is the first place a whole-workspace
+/// property like documentation can honestly be judged.
 pub const VERIFY_CHECK_COMMAND: &str = "verify.check";
+
+/// The member's mechanical verify lane — [`VERIFY_CHECK_COMMAND`]'s fan-out
+/// less `verify.docs`, dispatched by the per-member `Verify` over one
+/// candidate.
+///
+/// Its own spelling because it is its own gate set: the fan-out the worker runs
+/// differs, and the identity a member's proof is filed under has to differ with
+/// it, or a member's green would answer the fold's question about a gate it
+/// never ran. See [`VerifyGateSet::member`](crate::VerifyGateSet::member) for
+/// why documentation sits at the two whole-tree positions instead.
+pub const VERIFY_MEMBER_COMMAND: &str = "verify.member";
 
 /// The whole-workspace base-verify command — the same eight-member fan-out as
 /// [`VERIFY_CHECK_COMMAND`], dispatched against a sealed base rather than a
 /// member candidate. Named once because the gate-set identity includes this
-/// spelling: a closure-narrowed member proof must not satisfy the base's
+/// spelling: a closure-narrowed proof must not satisfy the base's
 /// whole-workspace question.
 pub const VERIFY_BASE_COMMAND: &str = "verify.base";
 
 /// The execution image the mechanical verify lane runs in — named beside its
-/// command because the same two stages dispatch it, and because
-/// [`VerifyGateSet::lane`](crate::VerifyGateSet::lane) derives the gate-set
-/// identity from these words (#4891). A second spelling would let the two verify
+/// commands because all three verify stages dispatch it, and because
+/// [`VerifyGateSet::fold`](crate::VerifyGateSet::fold) derives the gate-set
+/// identity from these words (#4891). A second spelling would let two verify
 /// positions run different images while a memo treated their verdicts as
 /// interchangeable.
 pub const VERIFY_LANE_IMAGE: &str = "iama/verify:1";
@@ -102,7 +115,8 @@ pub(super) fn dispatched_command(stage: StageId) -> Option<&'static str> {
     match stage {
         StageId::Construct | StageId::Refine | StageId::Reconcile => Some(CONSTRUCT_IMPLEMENT_COMMAND),
         StageId::Review | StageId::AggregateReview => Some(REVIEW_CRITIC_COMMAND),
-        StageId::Verify | StageId::AggregateVerify => Some(VERIFY_CHECK_COMMAND),
+        StageId::Verify => Some(VERIFY_MEMBER_COMMAND),
+        StageId::AggregateVerify => Some(VERIFY_CHECK_COMMAND),
         StageId::BaseVerify => Some(VERIFY_BASE_COMMAND),
         StageId::Sketch | StageId::Scope | StageId::Approve | StageId::Integrate | StageId::Land | StageId::Study => {
             None
@@ -798,7 +812,7 @@ impl Transformation {
             // (Construct / Refine, and the non-member stages that fall through to
             // the construct lane here) reaches the model API under restricted
             // egress. Review is its own model lane.
-            StageId::Verify => (VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK),
+            StageId::Verify => (VERIFY_MEMBER_COMMAND, VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK),
             StageId::Review => (REVIEW_CRITIC_COMMAND, "iama/review-claude:1", NetworkProfile::Restricted),
             StageId::Scope => unreachable!(
                 "Scope is a pre-seal dispatched lane built by Transformation::for_scoping_run, never a member-stage transformation"
@@ -849,9 +863,9 @@ impl Transformation {
         }
     }
 
-    /// The whole-bloom aggregate-verify transformation: the same mechanical
-    /// `verify.check` fan-out the member `Verify` runs, dispatched once per
-    /// bloom against the folded head.
+    /// The whole-bloom aggregate-verify transformation: the complete mechanical
+    /// `verify.check` fan-out, dispatched once per bloom against the folded
+    /// head.
     ///
     /// A member's verdict only ever judged its own candidate in isolation; the
     /// fold is the first tree that carries every member at once, so it is the
@@ -860,6 +874,10 @@ impl Transformation {
     /// CI, downstream of the point where the bloom can still route it back to
     /// an owner. Zero-egress like the member lane — it runs a compiler and
     /// nothing else.
+    ///
+    /// It is also the first position that can answer a whole-workspace question
+    /// at all, which is why `verify.docs` runs here and not at the member
+    /// (`VERIFY_MEMBER_COMMAND`).
     ///
     /// `base` is the bloom's sealed base the fold was built onto. The woven
     /// tree against that base is the union of the members' diffs, so naming

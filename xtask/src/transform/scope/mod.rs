@@ -4,6 +4,8 @@
 //! workpiece against its own declared surface, and stamp a review-shaped
 //! evidence envelope.
 
+mod anchors;
+
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf, absolute};
@@ -16,6 +18,7 @@ use aether_bloomery::{
 use anyhow::Result;
 use serde_json::{Value, json};
 
+use self::anchors::Definition;
 use crate::scope::{load, replay, winning_texts};
 use crate::symbols::references::{self, ReferenceSearch, Role};
 use crate::transform::claude::assemble_construct_prompt;
@@ -145,8 +148,8 @@ fn finalize(args: &TransformArgs, run_dir: &Path, run: LaneRun) -> Value {
     let steps = owned(winning_texts(&calls, FieldKind::PlanStep));
 
     let rev = args.subject.as_deref().unwrap_or("HEAD");
-    let verify_input = match project_verify_input(&steps, &surface, rev) {
-        Ok(input) => input,
+    let projection = match project_verify_input(&steps, &surface, rev) {
+        Ok(projection) => projection,
         Err(error) => {
             return stamp_scope_evidence(
                 args.nonce.as_deref(),
@@ -157,14 +160,14 @@ fn finalize(args: &TransformArgs, run_dir: &Path, run: LaneRun) -> Value {
             );
         }
     };
-    let report = verify_scope(&verify_input);
+    let report = verify_scope(&projection.input);
 
     match builder.finish(None, ScopeRouting { size: String::new(), model: String::new() }) {
         Err(refusal) => stamp_scope_evidence(
             args.nonce.as_deref(),
             ScopeStatus::Fail,
             Some(unfillable_findings(&refusal)),
-            &bind_result(record, None, Some(&verify_input)),
+            &bind_result(record, None, Some(&projection)),
             measured,
         ),
         Ok(revision) => {
@@ -173,20 +176,28 @@ fn finalize(args: &TransformArgs, run_dir: &Path, run: LaneRun) -> Value {
                 args.nonce.as_deref(),
                 status,
                 findings_from_report(&report),
-                &bind_result(record, Some(&revision.to_canonical()), Some(&verify_input)),
+                &bind_result(record, Some(&revision.to_canonical()), Some(&projection)),
                 measured,
             )
         }
     }
 }
 
-fn bind_result(mut record: Value, revision: Option<&[u8]>, verify_input: Option<&ScopeVerifyInput>) -> Value {
+/// Bind the frozen revision and the projection the freeze was verified over
+/// onto the lane's result record.
+///
+/// A discounted anchor is stated here rather than dropped: the demand it would
+/// have made is gone, and the reader is told which name lost it and why.
+fn bind_result(mut record: Value, revision: Option<&[u8]>, projection: Option<&Projection>) -> Value {
     if let Some(object) = record.as_object_mut() {
         if let Some(revision) = revision {
             object.insert("revision".to_owned(), json!(encode_hex(revision)));
         }
-        if let Some(input) = verify_input {
-            object.insert("verify_input".to_owned(), json!(encode_hex(&input.to_canonical())));
+        if let Some(projection) = projection {
+            object.insert("verify_input".to_owned(), json!(encode_hex(&projection.input.to_canonical())));
+            if !projection.discounted.is_empty() {
+                object.insert("discounted_anchors".to_owned(), json!(projection.discounted));
+            }
         }
     }
     record
@@ -221,30 +232,64 @@ fn unfillable_findings(refusal: &WorkpieceRefusal) -> String {
     }
 }
 
-fn project_verify_input(steps: &[String], surface: &[String], rev: &str) -> Result<ScopeVerifyInput> {
+/// The freeze projection, with what the anchor calibration dropped from the
+/// refusing population stated beside it.
+struct Projection {
+    /// What the verifier is run over.
+    input: ScopeVerifyInput,
+    /// One note per discounted anchor, in plan order. Never a refusal: the
+    /// anchor is still reported, it just carries no coverage demand.
+    discounted: Vec<String>,
+}
+
+/// Project the authored plan steps and declared surface into what the freeze
+/// verifies.
+///
+/// Every path a plan step names enters the refusing population unconditionally.
+/// A backticked anchor's defining paths enter it only when
+/// [`anchors::calibrate`] reads the anchor as a claim about this work: a common
+/// word resolves definitions in crates the workpiece never touches, and
+/// demanding coverage of those refuses a run for naming a word.
+fn project_verify_input(steps: &[String], surface: &[String], rev: &str) -> Result<Projection> {
     let mut named_paths = named_paths_from_plan(steps);
     let mut named_symbols = Vec::new();
+    let mut discounted = Vec::new();
+
     for symbol in symbols_from_plan(steps) {
         match references::search(&symbol, rev, surface)? {
             ReferenceSearch::Unresolvable { symbol, .. } => {
                 named_symbols.push(NamedSymbol { symbol, definitions: Vec::new() });
             }
             ReferenceSearch::Resolved(resolved) => {
-                let mut definitions = Vec::new();
-                for path in resolved.paths {
-                    if path.role == Role::Defining {
-                        named_paths.push(NamedPath {
-                            path: path.path.clone(),
-                            origin: PathOrigin::InverseSearch { symbol: symbol.clone() },
-                        });
-                        definitions.push(path.path);
-                    }
+                let definitions: Vec<Definition> = resolved
+                    .paths
+                    .into_iter()
+                    .filter(|classified| classified.role == Role::Defining)
+                    .map(|classified| Definition { path: classified.path, covered: classified.covered })
+                    .collect();
+
+                let anchor = anchors::calibrate(&definitions);
+                if anchor.demands_coverage() {
+                    named_paths.extend(definitions.iter().map(|definition| NamedPath {
+                        path: definition.path.clone(),
+                        origin: PathOrigin::InverseSearch { symbol: symbol.clone() },
+                    }));
                 }
+                discounted.extend(anchor.note(&symbol));
+
+                let definitions = definitions.into_iter().map(|definition| definition.path).collect();
                 named_symbols.push(NamedSymbol { symbol, definitions });
             }
         }
     }
-    Ok(ScopeVerifyInput { schema: SCOPE_VERIFY_SCHEMA, named_paths, named_symbols, declared_surface: surface.to_vec() })
+
+    let input = ScopeVerifyInput {
+        schema: SCOPE_VERIFY_SCHEMA,
+        named_paths,
+        named_symbols,
+        declared_surface: surface.to_vec(),
+    };
+    Ok(Projection { input, discounted })
 }
 
 fn named_paths_from_plan(steps: &[String]) -> Vec<NamedPath> {
@@ -334,11 +379,13 @@ fn owned(texts: Vec<&str>) -> Vec<String> {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::{assemble_scope_prompt, findings_from_report, stamp_scope_evidence, status_from_report};
+    use super::{
+        assemble_scope_prompt, findings_from_report, project_verify_input, stamp_scope_evidence, status_from_report,
+    };
     use crate::transform::Measurements;
     use crate::transform::claude::assemble_construct_prompt;
     use crate::transform::construct::CONSTRUCT_INSTRUCTIONS;
-    use aether_bloomery::{NamedPath, NamedSymbol, PathOrigin, SCOPE_VERIFY_SCHEMA, ScopeVerifyReport};
+    use aether_bloomery::{NamedPath, NamedSymbol, PathOrigin, SCOPE_VERIFY_SCHEMA, ScopeVerifyReport, verify_scope};
     use serde_json::json;
     use std::path::Path;
 
@@ -370,6 +417,50 @@ mod tests {
             "a run-varying path inside the cached bulk forfeits the cache on every dispatch",
         );
         assert!(scope.contains("cargo xtask scope set"), "the emission section names the setter invocation");
+    }
+
+    #[test]
+    fn a_common_word_in_a_plan_step_costs_the_run_nothing() {
+        // Reconstructs the measured class (2026-08-26): seventeen scoping-lane
+        // attempts were refused at the freeze door, and a plan that backticked
+        // one common word was most of them. `truncate` defines itself in three
+        // crates a bloomery-notify workpiece never touches, so lifting its
+        // definitions into the refusing population refuses the run for naming
+        // a word. Prose discipline cannot carry this; the calibration does.
+        let steps = vec![String::from(
+            "Cut the digest the notifier sends in \
+             `crates/aether-chassis-bloomery/src/bloomery/notify/mod.rs`, where an over-long summary is cut with \
+             `truncate`.",
+        )];
+        let surface = vec![String::from("crates/aether-chassis-bloomery/src/bloomery/notify/**")];
+        let Ok(projection) = project_verify_input(&steps, &surface, "HEAD") else {
+            // No git, or a shallow checkout without HEAD: a host condition,
+            // not a defect in the calibration.
+            return;
+        };
+
+        let anchor = projection
+            .input
+            .named_symbols
+            .iter()
+            .find(|named| named.symbol == "truncate")
+            .expect("the anchor is reported, not deleted");
+        assert!(anchor.definitions.len() > 1, "the fixture word still resolves across crates: {anchor:?}");
+        assert!(
+            !projection
+                .input
+                .named_paths
+                .iter()
+                .any(|named| named.origin == PathOrigin::InverseSearch { symbol: String::from("truncate") }),
+            "a discounted anchor puts no path in the refusing population: {:?}",
+            projection.input.named_paths,
+        );
+        assert!(!verify_scope(&projection.input).refused(), "and the freeze is not refused for naming it");
+        assert!(
+            projection.discounted.iter().any(|note| note.contains("`truncate`")),
+            "the dropped demand is stated: {:?}",
+            projection.discounted,
+        );
     }
 
     #[test]

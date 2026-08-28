@@ -242,6 +242,19 @@ impl VerifyFailureSet {
         Self(self.0 & other.0)
     }
 
+    /// The set-theoretic difference: every identity in `self` that `other` does
+    /// not name.
+    ///
+    /// What one gate set states by *subtraction* from another — the member
+    /// verify position's vocabulary is the fold's less the one gate it does not
+    /// run ([`VerifyGateSet::member`](crate::VerifyGateSet::member)) — so the two
+    /// stay one hand-written list and one stated difference rather than two
+    /// lists free to drift.
+    #[must_use]
+    pub const fn difference(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
+
     /// Iterate in the canonical identity order.
     pub fn iter(self) -> impl Iterator<Item = VerifyFailure> {
         VerifyFailure::ALL.into_iter().filter(move |failure| self.contains(*failure))

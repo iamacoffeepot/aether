@@ -14,27 +14,40 @@
 //! `Verify` reaches it through the passing verdict's
 //! [`Fact::Integrate`](crate::Fact::Integrate) and through the dispatch its
 //! cursor move would have made; `AggregateVerify` reaches it through the fold's
-//! resolve and its own completion. A fold of one member is byte-identical to
-//! that member's candidate, and a repair lap that only amended a commit message
-//! leaves the tree it started from — both are hits, and both would otherwise
-//! re-pay a full mechanical run for a verdict the journal already holds.
+//! resolve and its own completion. A repair lap that only amended a commit
+//! message leaves the tree it started from, and re-running the fan-out over it
+//! buys nothing the journal does not already hold.
+//!
+//! Each position keys on its own gate set, so a hit is always within a
+//! position. A member's proof no longer answers the fold's question even when
+//! the fold is byte-identical to that one member's candidate: the member
+//! position does not run `verify.docs`, so it has said nothing about the one
+//! gate the fold most needs a whole tree to ask.
 
 use super::Decision;
 use crate::ids::{BloomId, StageId};
 use crate::values::{Evidence, EvidenceKind, VerifyGateSet, VerifyProof, VerifyReuse};
 
 /// File `evidence` as `stage`'s green proof of the tree it names, or `None` when
-/// it is not a verification verdict at all.
+/// it is not a verification verdict at all — or when `stage` is not a verify
+/// position, and so has no gate set to file one under.
 ///
 /// The kind check is what keeps the memo honest at its source: only a
 /// verification result attests that the gates ran and passed. A claim carrying
 /// any other evidence — an inherited one, a hand-built fixture — records
 /// nothing, and the tree it names stays unproven rather than acquiring a proof
 /// from a verdict that never judged it.
+///
+/// The gate set is read from the position rather than fixed, because the
+/// positions no longer run the same gates: a member `Verify` files under
+/// [`VerifyGateSet::member`] and `AggregateVerify` under
+/// [`VerifyGateSet::fold`], so a proof states the vocabulary that actually ran
+/// over the tree.
 pub(super) fn proof_of(bloom: BloomId, stage: StageId, evidence: &Evidence) -> Option<Decision> {
+    let gates = VerifyGateSet::for_stage(stage)?;
     (evidence.kind == EvidenceKind::VerificationResult).then(|| Decision::RecordVerifyProof {
         bloom,
-        proof: VerifyProof { gate_set: VerifyGateSet::lane().digest(), stage, evidence: evidence.clone() },
+        proof: VerifyProof { gate_set: gates.digest(), stage, evidence: evidence.clone() },
     })
 }
 
