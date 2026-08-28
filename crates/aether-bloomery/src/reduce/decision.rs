@@ -861,7 +861,7 @@ pub enum Decision {
     /// [`crate::Snapshot::queued_proposals`].
     ///
     /// Appended so every stored row stays decodable under the current shape:
-    /// new discriminants keep [`crate::reduce::decisions_v1`] frozen.
+    /// new discriminants keep the v1 decisions wire frozen.
     QueueProposal {
         /// The signed candidate waiting for a clear board.
         proposal: OperatorProposal,

@@ -829,7 +829,7 @@ pub enum Fact {
         /// The author-signed approval of this proposal's digest. The
         /// cryptographic verification is the host route's, upstream of
         /// admission (the reducer holds no key material); the reducer
-        /// re-checks that this evidence is an [`EvidenceKind::Approval`]
+        /// re-checks that this evidence is an [`crate::EvidenceKind::Approval`]
         /// bound to the proposal's own digest.
         authorization: Evidence,
     },
