@@ -65,10 +65,24 @@ pub enum DecodeError {
     /// iteration without consuming input — the pre-allocation clamp
     /// alone can't bound it. Same altitude as `frame.rs`'s
     /// `MAX_FRAME_SIZE`: a length prefix must not drive a reader into an
-    /// unbounded allocation.
+    /// unbounded allocation. [`decode_schema_strict`] reuses this for
+    /// its caller-named ceiling, so `budget` is whichever of the two
+    /// this decode ran under.
     ValueBudgetExceeded {
         path: String,
         budget: usize,
+    },
+    /// A `F32` / `F64` whose bytes are NaN or an infinity, under the
+    /// strict policy only ([`decode_schema_strict`]). The compatibility
+    /// policy projects the same bytes as `null`.
+    NonFiniteFloat {
+        path: String,
+    },
+    /// A decoded `Map` rendered the same JSON key twice, under the
+    /// strict policy only ([`decode_schema_strict`]). The compatibility
+    /// policy lets the later entry overwrite the earlier one.
+    DuplicateMapKey {
+        path: String,
     },
     /// Schema arm the hub decoder can't handle in this position. Mirror
     /// of the encoder's same variant — fires for non-cast leaf types
@@ -90,8 +104,10 @@ impl fmt::Display for DecodeError {
             }
             Self::InvalidUtf8 { path } => write!(f, "invalid utf-8 in string at {path}"),
             Self::ValueBudgetExceeded { path, budget } => {
-                write!(f, "decode value budget exceeded at {path}: more than {budget} values for the input length")
+                write!(f, "decode value budget exceeded at {path}: more than {budget} values")
             }
+            Self::NonFiniteFloat { path } => write!(f, "non-finite float at {path}: JSON has no NaN or infinity"),
+            Self::DuplicateMapKey { path } => write!(f, "duplicate map key at {path}"),
             Self::UnknownEnumDiscriminant { path, discriminant } => {
                 write!(f, "enum at {path} has no variant for discriminant {discriminant}")
             }
@@ -127,6 +143,24 @@ impl error::Error for DecodeError {}
 const VALUE_BUDGET_BASE: usize = 4096;
 const VALUES_PER_INPUT_BYTE: usize = 4;
 
+/// Which of the two decode policies a `Cursor` carries. Both walk the
+/// identical wire format; they differ only in what they do with the
+/// values that format admits but a boundary shouldn't forward.
+///
+/// The codec's compatibility domain is deliberately wider than any one
+/// caller's: `decode_schema` answers "what did the encoder write", so a
+/// non-finite float becomes `null`, a repeated map key resolves
+/// last-writer-wins, and the value budget only has to be
+/// bomb-proof — it is derived from the input length rather than named
+/// by the caller. A protocol boundary answers "may this leave the
+/// process", which is narrower on all three counts, so
+/// `decode_schema_strict` names them as errors instead of choices.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Policy {
+    Compatibility,
+    Strict,
+}
+
 /// ADR-0020 / ADR-0118: decode `bytes` against a `SchemaType`
 /// descriptor into a JSON value symmetric to what `encode_schema`
 /// would accept. Dispatches on the schema's wire shape (same split as
@@ -143,7 +177,36 @@ const VALUES_PER_INPUT_BYTE: usize = 4;
 /// number of bytes; extras mean schema/payload drift the agent should
 /// see).
 pub fn decode_schema(bytes: &[u8], schema: &SchemaType) -> Result<Value, DecodeError> {
-    let mut cur = Cursor::new(bytes);
+    decode_root(Cursor::new(bytes), schema)
+}
+
+/// [`decode_schema`] under the strict policy: the same wire-format walk
+/// and the same two shapes, with the three checks a protocol boundary
+/// needs before it forwards provider bytes to a client.
+///
+/// - A non-finite `F32` / `F64` is [`DecodeError::NonFiniteFloat`]
+///   rather than `null`. The check happens during the decode because it
+///   can't happen after one: an `Option::Some(NaN)` projects to exactly
+///   the `null` that `None` projects to, so nothing downstream of the
+///   walk can still tell them apart.
+/// - `maximum_values` replaces the input-proportional budget as the
+///   ceiling on projected `Value` nodes, and covers the nodes the
+///   compatibility budget never charges — cast-shaped nodes, and the
+///   one integer per byte a `Bytes` leaf projects. Collection
+///   pre-allocation is clamped to what is left of it, so a crafted
+///   length can't reserve past the ceiling before the charge rejects
+///   it.
+/// - A `Map` whose rendered keys repeat is
+///   [`DecodeError::DuplicateMapKey`] rather than a JSON object with
+///   one of the two values silently dropped.
+///
+/// [`decode_schema`] keeps its behavior exactly; a caller that wants
+/// the codec's wider compatibility domain still has it.
+pub fn decode_schema_strict(bytes: &[u8], schema: &SchemaType, maximum_values: usize) -> Result<Value, DecodeError> {
+    decode_root(Cursor::strict(bytes, maximum_values), schema)
+}
+
+fn decode_root(mut cur: Cursor<'_>, schema: &SchemaType) -> Result<Value, DecodeError> {
     let value = decode_value(&mut cur, schema, "$")?;
     if cur.remaining() != 0 {
         return Err(DecodeError::TrailingBytes { path: "$".into(), remaining: cur.remaining() });
@@ -155,6 +218,10 @@ fn decode_value(cur: &mut Cursor<'_>, schema: &SchemaType, path: &str) -> Result
     match schema {
         SchemaType::Unit => Ok(Value::Null),
         SchemaType::Struct { fields, repr_c: true } => {
+            // The root object of a cast-shaped tree. Every node below it
+            // charges from `decode_cast_field`; the wire path charges
+            // from `decode_wire_value` instead.
+            cur.charge_projected(1, path)?;
             let obj = decode_cast_struct(cur, fields, path)?;
             let max_align = struct_alignment(fields)?;
             cur.skip_pad_to(max_align);
@@ -186,6 +253,10 @@ fn decode_cast_field(cur: &mut Cursor<'_>, ty: &SchemaType, path: &str) -> Resul
     if let Some(msg) = non_cast_variant_error(ty) {
         return Err(DecodeError::UnsupportedSchema(msg));
     }
+    // Exactly one `Value` leaves this call, so one charge covers the
+    // whole cast-shaped tree: an array node and each of its elements
+    // arrive here in their own call.
+    cur.charge_projected(1, path)?;
     match ty {
         SchemaType::Scalar(p) => {
             let a = align_of_primitive(*p);
@@ -195,7 +266,7 @@ fn decode_cast_field(cur: &mut Cursor<'_>, ty: &SchemaType, path: &str) -> Resul
         SchemaType::Array { element, len } => {
             let elem_align = alignment_of_schema(element)?;
             cur.skip_pad_to(elem_align);
-            let mut arr = Vec::with_capacity(*len as usize);
+            let mut arr = Vec::with_capacity(cur.clamp_prealloc(*len as usize));
             for i in 0..*len {
                 let elem_path = format!("{path}[{i}]");
                 arr.push(decode_cast_field(cur, element, &elem_path)?);
@@ -244,6 +315,7 @@ fn render_type_id_value(id: u64, type_id: u64, _path: &str) -> Result<Value, Dec
 /// repr-C cast path and the wire path (the inverse of
 /// `encode::write_scalar_wire`). No varints, no zigzag.
 fn read_primitive_le(cur: &mut Cursor<'_>, p: Primitive, path: &str) -> Result<Value, DecodeError> {
+    let policy = cur.policy;
     match p {
         Primitive::U8 => Ok(Value::from(u8::from_le_bytes(cur.take::<1>(path)?))),
         Primitive::U16 => Ok(Value::from(u16::from_le_bytes(cur.take::<2>(path)?))),
@@ -253,8 +325,8 @@ fn read_primitive_le(cur: &mut Cursor<'_>, p: Primitive, path: &str) -> Result<V
         Primitive::I16 => Ok(Value::from(i16::from_le_bytes(cur.take::<2>(path)?))),
         Primitive::I32 => Ok(Value::from(i32::from_le_bytes(cur.take::<4>(path)?))),
         Primitive::I64 => Ok(Value::from(i64::from_le_bytes(cur.take::<8>(path)?))),
-        Primitive::F32 => Ok(json_f64(f64::from(f32::from_le_bytes(cur.take::<4>(path)?)))),
-        Primitive::F64 => Ok(json_f64(f64::from_le_bytes(cur.take::<8>(path)?))),
+        Primitive::F32 => project_float(f64::from(f32::from_le_bytes(cur.take::<4>(path)?)), policy, path),
+        Primitive::F64 => project_float(f64::from_le_bytes(cur.take::<8>(path)?), policy, path),
     }
 }
 
@@ -309,6 +381,10 @@ fn decode_wire_value(cur: &mut Cursor<'_>, schema: &SchemaType, path: &str) -> R
         SchemaType::Bytes => {
             let len = cur.read_count(path)? as usize;
             let bytes = cur.take_slice(len, path)?;
+            // One `Value` per byte, so the leaf is the densest node in
+            // the format — charged before the collect, since a ceiling
+            // below `len` must reject rather than allocate.
+            cur.charge_projected(len, path)?;
             // Mirror encoder input shape: array of byte values.
             let arr = bytes.iter().map(|b| Value::from(*b)).collect();
             Ok(Value::Array(arr))
@@ -328,7 +404,7 @@ fn decode_wire_value(cur: &mut Cursor<'_>, schema: &SchemaType, path: &str) -> R
             // `remaining` can't be valid non-degenerate input. Zero-byte
             // elements start small and grow by push; the decode-wide
             // budget bounds that loop.
-            let mut arr = Vec::with_capacity(len.min(cur.remaining()));
+            let mut arr = Vec::with_capacity(cur.clamp_prealloc(len.min(cur.remaining())));
             for i in 0..len {
                 let elem_path = format!("{path}[{i}]");
                 arr.push(decode_wire_value(cur, inner, &elem_path)?);
@@ -336,7 +412,7 @@ fn decode_wire_value(cur: &mut Cursor<'_>, schema: &SchemaType, path: &str) -> R
             Ok(Value::Array(arr))
         }
         SchemaType::Array { element, len } => {
-            let mut arr = Vec::with_capacity(*len as usize);
+            let mut arr = Vec::with_capacity(cur.clamp_prealloc(*len as usize));
             for i in 0..*len {
                 let elem_path = format!("{path}[{i}]");
                 arr.push(decode_wire_value(cur, element, &elem_path)?);
@@ -372,12 +448,19 @@ fn decode_wire_value(cur: &mut Cursor<'_>, schema: &SchemaType, path: &str) -> R
             let len = cur.read_count(path)? as usize;
             // Same clamp as the `Vec` arm: a `(k, v)` pair occupies ≥ 1
             // byte, so cap the pre-allocation at the bytes remaining.
-            let mut obj = Map::with_capacity(len.min(cur.remaining()));
+            let mut obj = Map::with_capacity(cur.clamp_prealloc(len.min(cur.remaining())));
             for i in 0..len {
                 let entry_path = format!("{path}[{i}]");
                 let key_value = decode_wire_value(cur, key_schema, &entry_path)?;
                 let val_value = decode_wire_value(cur, value_schema, &entry_path)?;
                 let key_string = render_map_key(&key_value, key_schema, &entry_path)?;
+                // Distinct encoded keys can still render to one JSON
+                // key, and the insert would drop a value either way. The
+                // compatibility policy keeps the later one; the strict
+                // policy won't forward a map the caller can't read back.
+                if cur.policy == Policy::Strict && obj.contains_key(&key_string) {
+                    return Err(DecodeError::DuplicateMapKey { path: entry_path });
+                }
                 obj.insert(key_string, val_value);
             }
             Ok(Value::Object(obj))
@@ -469,16 +552,26 @@ fn render_map_key(key_value: &Value, key_schema: &SchemaType, path: &str) -> Res
 }
 
 /// JSON numbers can't represent NaN/infinity. The encoder accepts
-/// arbitrary `f64`s; on decode we coerce non-finite to `null` so the
-/// JSON value remains valid. Round-trip semantics: finite floats round
-/// trip exactly; NaN/inf bytes decode to null (loud, not silent).
-fn json_f64(n: f64) -> Value {
-    serde_json::Number::from_f64(n).map_or(Value::Null, Value::Number)
+/// arbitrary `f64`s, so the decode has to decide what a non-finite one
+/// projects to, and the two policies decide differently: the
+/// compatibility policy coerces to `null` so the JSON value remains
+/// valid (finite floats round trip exactly; NaN/inf bytes decode to
+/// null — loud, not silent), while the strict policy refuses to hand a
+/// boundary a value that its advertised schema says is a number.
+fn project_float(n: f64, policy: Policy, path: &str) -> Result<Value, DecodeError> {
+    match (serde_json::Number::from_f64(n), policy) {
+        (Some(number), _) => Ok(Value::Number(number)),
+        (None, Policy::Compatibility) => Ok(Value::Null),
+        (None, Policy::Strict) => Err(DecodeError::NonFiniteFloat { path: path.into() }),
+    }
 }
 
 struct Cursor<'a> {
     bytes: &'a [u8],
     pos: usize,
+    policy: Policy,
+    /// The budget this decode started with, kept for the error message.
+    budget: usize,
     /// Remaining value budget for this decode (see `VALUE_BUDGET_BASE`).
     /// Each wire node decrements it via `charge_value`.
     values_left: usize,
@@ -488,8 +581,12 @@ impl<'a> Cursor<'a> {
     fn new(bytes: &'a [u8]) -> Self {
         // Saturating: a `bytes.len()` near `usize::MAX` is not reachable
         // (it's a real slice), but the arithmetic stays defined.
-        let values_left = VALUE_BUDGET_BASE.saturating_add(bytes.len().saturating_mul(VALUES_PER_INPUT_BYTE));
-        Self { bytes, pos: 0, values_left }
+        let budget = VALUE_BUDGET_BASE.saturating_add(bytes.len().saturating_mul(VALUES_PER_INPUT_BYTE));
+        Self { bytes, pos: 0, policy: Policy::Compatibility, budget, values_left: budget }
+    }
+
+    fn strict(bytes: &'a [u8], maximum_values: usize) -> Self {
+        Self { bytes, pos: 0, policy: Policy::Strict, budget: maximum_values, values_left: maximum_values }
     }
 
     fn remaining(&self) -> usize {
@@ -501,15 +598,40 @@ impl<'a> Cursor<'a> {
     /// can't expand into more `Value` nodes than the input length
     /// justifies — the bound for zero-wire-byte-element collections.
     fn charge_value(&mut self, path: &str) -> Result<(), DecodeError> {
-        match self.values_left.checked_sub(1) {
+        self.charge(1, path)
+    }
+
+    /// Charge `count` values that only the strict policy counts: the
+    /// cast-shaped nodes and the per-byte `Bytes` values that sit
+    /// outside `charge_value`'s per-wire-node accounting. A no-op under
+    /// the compatibility policy, whose budget is derived from the input
+    /// length and whose behavior must not move.
+    fn charge_projected(&mut self, count: usize, path: &str) -> Result<(), DecodeError> {
+        match self.policy {
+            Policy::Compatibility => Ok(()),
+            Policy::Strict => self.charge(count, path),
+        }
+    }
+
+    fn charge(&mut self, count: usize, path: &str) -> Result<(), DecodeError> {
+        match self.values_left.checked_sub(count) {
             Some(remaining) => {
                 self.values_left = remaining;
                 Ok(())
             }
-            None => Err(DecodeError::ValueBudgetExceeded {
-                path: path.into(),
-                budget: VALUE_BUDGET_BASE.saturating_add(self.bytes.len().saturating_mul(VALUES_PER_INPUT_BYTE)),
-            }),
+            None => Err(DecodeError::ValueBudgetExceeded { path: path.into(), budget: self.budget }),
+        }
+    }
+
+    /// Clamp a collection's pre-allocation to what is left of an
+    /// explicit ceiling. The compatibility path keeps its own clamps
+    /// (`len.min(remaining)` where a length is wire-read) untouched;
+    /// under the strict policy a caller who named a small ceiling must
+    /// not see a large reservation before the charge that rejects it.
+    fn clamp_prealloc(&self, len: usize) -> usize {
+        match self.policy {
+            Policy::Compatibility => len,
+            Policy::Strict => len.min(self.values_left),
         }
     }
 
@@ -554,7 +676,7 @@ impl<'a> Cursor<'a> {
 mod tests {
     use super::*;
     use crate::encode_schema;
-    use crate::test_fixtures::{cast_struct, pending_ok_err_variants, scalar, structured_struct};
+    use crate::test_fixtures::{cast_struct, named, pending_ok_err_variants, scalar, structured_struct};
     use aether_data::SchemaCell;
     use aether_data::tagged_id;
     use serde_json::json;
@@ -968,5 +1090,117 @@ mod tests {
     fn vec_of_hundred_units_roundtrips_inside_base_budget() {
         let schema = SchemaType::Vec(SchemaCell::owned(SchemaType::Unit));
         roundtrip(Value::Array(vec![Value::Null; 100]), &schema);
+    }
+
+    // `decode_schema_strict` — the boundary policy. The two entry points
+    // share one walk, so each test below pins both halves of a policy
+    // split: what strict now rejects, and what the compatibility entry
+    // point still does with the same bytes.
+
+    #[test]
+    fn strict_projects_finite_floats_like_the_compatibility_entry() {
+        // Sharing the decoder is what makes the strict entry point cheap
+        // and what makes a leak into valid projection possible: an
+        // over-eager charge or a mis-ordered finite check would land
+        // here, on both wire shapes at once.
+        let value = json!({"x": 1.5, "y": -2.25});
+        for schema in [
+            pc_struct(vec![scalar("x", Primitive::F32), scalar("y", Primitive::F64)]),
+            cast_struct(vec![scalar("x", Primitive::F32), scalar("y", Primitive::F64)]),
+        ] {
+            let bytes = encode_schema(&value, &schema).expect("test setup: encode finite floats");
+
+            assert_eq!(decode_schema(&bytes, &schema).expect("compatibility decode of finite floats"), value);
+            assert_eq!(decode_schema_strict(&bytes, &schema, 64).expect("strict decode of finite floats"), value);
+        }
+    }
+
+    #[test]
+    fn strict_rejects_the_non_finite_floats_the_compatibility_entry_nulls() {
+        let root = SchemaType::Scalar(Primitive::F64);
+        let err = decode_schema_strict(&f64::NAN.to_le_bytes(), &root, 64)
+            .expect_err("a non-finite root f64 must not reach the boundary");
+        assert!(matches!(err, DecodeError::NonFiniteFloat { ref path } if path == "$"), "{err}");
+
+        // `Some(inf)` is the case a validation pass over the decoded
+        // value cannot catch: it projects to exactly the `null` that
+        // `None` projects to, so the check has to be inside the walk.
+        let optional = SchemaType::Option(SchemaCell::owned(SchemaType::Scalar(Primitive::F32)));
+        let mut some_infinity = vec![1u8];
+        some_infinity.extend_from_slice(&f32::INFINITY.to_le_bytes());
+
+        assert_eq!(decode_schema(&some_infinity, &optional).expect("compatibility decode of Some(inf)"), Value::Null);
+        let err = decode_schema_strict(&some_infinity, &optional, 64)
+            .expect_err("a non-finite Some must not reach the boundary");
+        assert!(matches!(err, DecodeError::NonFiniteFloat { .. }), "{err}");
+    }
+
+    #[test]
+    fn strict_value_ceiling_binds_where_the_input_proportional_budget_does_not() {
+        // Low enough that every shape below crosses it, while the
+        // compatibility budget (4096 + 4/byte) stays far above them —
+        // so only a genuinely threaded ceiling can reject these.
+        const CEILING: usize = 8;
+
+        // Structured: 64 zero-wire-byte elements plus appended bytes.
+        // The compatibility decode walks all 64 and only complains about
+        // the tail, which is what the ceiling has to beat.
+        let mut unit_vec_bytes = 64u32.to_le_bytes().to_vec();
+        unit_vec_bytes.extend_from_slice(&[0u8; 32]);
+        let unit_vec = SchemaType::Vec(SchemaCell::owned(SchemaType::Unit));
+
+        let err = decode_schema(&unit_vec_bytes, &unit_vec).expect_err("appended bytes are trailing bytes");
+        assert!(matches!(err, DecodeError::TrailingBytes { .. }), "{err}");
+        let err = decode_schema_strict(&unit_vec_bytes, &unit_vec, CEILING)
+            .expect_err("64 unit values must cross a ceiling of 8");
+        assert!(matches!(err, DecodeError::ValueBudgetExceeded { budget: CEILING, .. }), "{err}");
+
+        // Cast-shaped: the compatibility path charges no cast node at
+        // all, so these 32 elements are only ever counted by the strict
+        // policy.
+        let cast_array = cast_struct(vec![named(
+            "xs",
+            SchemaType::Array { element: SchemaCell::owned(SchemaType::Scalar(Primitive::U8)), len: 32 },
+        )]);
+        let array_bytes = [7u8; 32];
+
+        assert_eq!(
+            decode_schema(&array_bytes, &cast_array).expect("compatibility decode of a cast array"),
+            json!({"xs": vec![7u8; 32]})
+        );
+        let err = decode_schema_strict(&array_bytes, &cast_array, CEILING)
+            .expect_err("32 cast array elements must cross a ceiling of 8");
+        assert!(matches!(err, DecodeError::ValueBudgetExceeded { .. }), "{err}");
+
+        // `Bytes`: one integer per byte, the densest node in the format.
+        let bytes_schema = pc_struct(vec![named("blob", SchemaType::Bytes)]);
+        let mut blob_bytes = 32u32.to_le_bytes().to_vec();
+        blob_bytes.extend_from_slice(&[1u8; 32]);
+
+        decode_schema(&blob_bytes, &bytes_schema).expect("compatibility decode of a 32-byte blob");
+        let err = decode_schema_strict(&blob_bytes, &bytes_schema, CEILING)
+            .expect_err("32 byte values must cross a ceiling of 8");
+        assert!(matches!(err, DecodeError::ValueBudgetExceeded { .. }), "{err}");
+    }
+
+    #[test]
+    fn strict_rejects_the_repeated_map_key_the_compatibility_entry_overwrites() {
+        // Hand-authored: the encoder can't produce this, because a JSON
+        // object can't carry the key twice in the first place. A
+        // provider writing wire bytes directly can.
+        let schema = map_schema(SchemaType::String, SchemaType::Scalar(Primitive::U32));
+        let mut bytes = 2u32.to_le_bytes().to_vec();
+        for entry in [1u32, 2u32] {
+            bytes.extend_from_slice(&1u32.to_le_bytes());
+            bytes.push(b'k');
+            bytes.extend_from_slice(&entry.to_le_bytes());
+        }
+
+        // Compatibility: last writer wins and the first value is gone.
+        assert_eq!(decode_schema(&bytes, &schema).expect("compatibility decode of a repeated key"), json!({"k": 2u32}));
+
+        let err =
+            decode_schema_strict(&bytes, &schema, 64).expect_err("a repeated rendered key must not reach the boundary");
+        assert!(matches!(err, DecodeError::DuplicateMapKey { .. }), "{err}");
     }
 }
