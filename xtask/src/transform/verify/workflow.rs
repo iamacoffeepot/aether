@@ -473,16 +473,11 @@ mod tests {
             "affected-package selection is pull_request only",
         );
         assert_eq!(
-            named_step("test", "Run tests (workspace, parallel)").if_condition.as_deref(),
-            Some("github.event_name != 'pull_request' || steps.affected.outputs.run_all == 'true'"),
-            "a daily push is not a pull_request, so it must take the full-suite step",
-        );
-        let affected = named_step("test", "Run tests (affected packages)")
-            .if_condition
-            .expect("the affected step is pull_request only");
-        assert!(
-            affected.contains("github.event_name == 'pull_request'"),
-            "the affected-package test step must not run on a daily push: {affected}"
+            named_step("test", "Test gate").if_condition.as_deref(),
+            Some(
+                "github.event_name != 'pull_request' || steps.affected.outputs.run_all == 'true' || steps.affected.outputs.package_args != ''"
+            ),
+            "a daily push is not a pull_request, so it must take the test gate",
         );
     }
 

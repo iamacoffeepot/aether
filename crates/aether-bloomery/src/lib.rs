@@ -528,6 +528,12 @@ pub use values::resolve_member_dependencies;
 pub use values::rewrites;
 #[cfg(not(target_arch = "wasm32"))]
 pub use values::signed_approval;
+#[cfg(not(target_arch = "wasm32"))]
+pub use values::signed_cancel;
+#[cfg(not(target_arch = "wasm32"))]
+pub use values::signed_proposal;
+#[cfg(not(target_arch = "wasm32"))]
+pub use values::signed_reopen;
 pub use values::split_lane_identity;
 pub use values::surface_additions;
 pub use values::surface_intersection;
@@ -535,5 +541,3 @@ pub use values::surface_union;
 pub use values::tier_verdict;
 pub use values::verify_scope;
 pub use values::widen;
-#[cfg(not(target_arch = "wasm32"))]
-pub use values::{signed_cancel, signed_proposal, signed_reopen};
