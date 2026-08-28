@@ -1,13 +1,13 @@
 //! Flattened leaf hashes are checked pairwise; an alias that matches a
 //! nested live leaf is a collision.
 
-#[derive(aether_data::Schema, aether_data::Storage)]
+#[derive(aether_data::Storage)]
 #[kind(name = "test.inner")]
 struct Inner {
     x: u32,
 }
 
-#[derive(aether_data::Schema, aether_data::Storage)]
+#[derive(aether_data::Storage)]
 #[kind(name = "test.leaf_collision")]
 struct Record {
     inner: Inner,

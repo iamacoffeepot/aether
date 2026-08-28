@@ -4,17 +4,22 @@
 //! Mail kinds keep the positional cast / structured codecs. A type
 //! derives [`Storage`] *instead of* [`crate::Kind`], never alongside it.
 
+mod element;
 mod hash;
 mod leaf;
 mod leaves;
 mod record;
 
+pub use element::{
+    ELEMENTS_LEAF, StorageElement, assemble_positional_element, assemble_tagged_element, container_hash,
+    contribute_positional_element, contribute_tagged_element,
+};
 pub use hash::{
     BYTES_SCHEMA, MAX_STORAGE_DEPTH, U64_SCHEMA, UNIT_SCHEMA, VARIANT_LEAF, assert_unique_storage_leaves, count_leaves,
     field_hash, field_path_root, fold_dotted_path, fold_index_segment, fold_path_segment, nth_leaf_hash,
     terminate_field_hash, variant_hash,
 };
-pub use leaf::LeafBody;
+pub use leaf::{LeafBody, decode_stream_leaf};
 pub use leaves::{
     StorageLeaves, assemble_bytes, assemble_bytes_with_aliases, assemble_with_aliases, bytes_absent, contribute_bytes,
 };

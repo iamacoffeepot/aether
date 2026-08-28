@@ -28,3 +28,11 @@ pub fn encode_leaf<T: LeafBody>(value: &T, out: &mut Vec<u8>) -> Result<(), Stor
 pub fn decode_leaf<T: LeafBody>(bytes: &[u8]) -> Result<T, StorageError> {
     decode_from_slice(bytes).map_err(StorageError::from)
 }
+
+/// Decode one value from the front of `cursor`, leaving the rest for
+/// the caller. Element bodies inside a container record concatenate,
+/// so consumption is partial by design; the container impl owns the
+/// trailing-bytes check.
+pub fn decode_stream_leaf<T: LeafBody>(cursor: &mut &[u8]) -> Result<T, StorageError> {
+    T::decode(cursor).map_err(StorageError::from)
+}
