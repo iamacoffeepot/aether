@@ -2,8 +2,8 @@
 //! minimal OBJ import/export, and renderer-neutral eye-facing stroke ribbons.
 //!
 //! Library-only (per ADR-0053): produces triangles, doesn't render. The
-//! `aether-mesh-viewer` runtime consumes this crate to mesh DSL text
-//! loaded from disk; the `dsl_to_obj` example converts a `.dsl` file to
+//! `aether-kit-commons`'s `aether.kit.mesh` export consumes this crate to
+//! mesh DSL text loaded from disk; the `dsl_to_obj` example converts a `.dsl` file to
 //! Wavefront OBJ for inspection in any external viewer. The indexed OBJ
 //! importer is also shared by the engine's triangle consumers.
 //!

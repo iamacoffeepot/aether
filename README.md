@@ -164,8 +164,9 @@ See [Writing a component](docs/guide/recipes/writing-a-component.md) and
 | Runtime | `aether-substrate` | registry, mail, scheduler, native/wasm hosts, settlement |
 | Native services | `aether-render`, `aether-audio`, `aether-fs` and the rest of `aether-<cap>` | one crate per capability mailbox: render, text, audio, FS, HTTP, TCP, lifecycle, fleet, providers |
 | Chassis and harnesses | `aether-chassis` + `aether-chassis-*` | per-chassis crates over a shared composition layer; harnesses in `aether-harness-*` |
-| Product actors | `aether-kit-*`, `aether-mesh` | camera, widgets, workbench, terrain/world, simulation, geometry DSL |
+| Product actors | `aether-kit-*`, `aether-mesh`, `aether-puppet` | camera, widgets, workbench, terrain/world, simulation, geometry DSL, pen-plotter line-art mascot |
 | Operator bridge | `aether-mcp` | MCP tools, live schemas, RPC and bounded evidence projection |
+| Bloomery control plane | `aether-bloomery` + `aether-bloomery-*`, `aether-chassis-bloomery`, `aether-harness-bloomery` | pure work-order reducer and value vocabulary, git and GitHub adapters, coordinator chassis, operator board, scenario harness |
 | Tooling | `xtask`, fixture crates, excluded `fuzz/` | dist/bundle discovery, compatibility artifacts, nightly fuzz targets |
 
 Capability request/reply kinds normally live with their capability, in that
