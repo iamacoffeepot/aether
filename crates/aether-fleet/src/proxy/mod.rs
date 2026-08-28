@@ -61,6 +61,8 @@ mod config;
 mod connect;
 #[cfg(not(target_family = "wasm"))]
 mod heartbeat;
+#[cfg(not(target_family = "wasm"))]
+mod reap;
 #[cfg(test)]
 mod sinks;
 

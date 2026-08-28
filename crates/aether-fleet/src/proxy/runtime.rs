@@ -6,9 +6,9 @@
 //! `use runtime::*` glob in the parent.
 //!
 //! Native-only: the state owns a `TcpStream` (via [`RpcConnection`]) and an OS
-//! thread (the heartbeat sidecar). `Drop` SIGKILLs the forked child and joins
-//! the heartbeat thread, so the RAII teardown follows the fields onto the
-//! state.
+//! thread (the heartbeat sidecar). `Drop` terminates the forked child's process
+//! group and joins the heartbeat thread, so the RAII teardown follows the
+//! fields onto the state.
 
 use super::{FleetProxy, FleetProxyConfig};
 pub use crate::kinds::{EngineAlive, EngineDied};
@@ -30,6 +30,7 @@ pub use std::process::Child;
 pub use std::sync::Arc;
 
 use super::heartbeat::HeartbeatHandle;
+use super::reap::terminate_child_group;
 use crate::FleetServer;
 
 // The init-only bring-up helpers live in the native-only `connect` /
@@ -78,8 +79,9 @@ pub struct FleetProxyState {
     /// `ReplyEnd` clears the entry.
     pub in_flight: HashMap<u64, Source>,
     /// The forked child substrate, when the engines cap spawned it
-    /// (see [`FleetProxyConfig::spawned`]). `Drop` SIGKILLs +
-    /// reaps it; `None` once taken or for an adopted substrate.
+    /// (see [`FleetProxyConfig::spawned`]). `Drop` terminates its
+    /// process group + reaps it; `None` once taken or for an adopted
+    /// substrate.
     pub spawned: Option<Child>,
     /// Consecutive heartbeat pings sent without a `Pong` reply
     /// (issue 1339). Incremented each `on_heartbeat_tick`, reset to
@@ -101,15 +103,16 @@ pub struct FleetProxyState {
 }
 
 impl Drop for FleetProxyState {
-    /// SIGKILL + reap the child substrate this proxy forked, so a
+    /// Terminate + reap the child substrate this proxy forked, so a
     /// terminated proxy (or a chassis teardown) never orphans a
-    /// substrate process. A no-op for an adopted substrate
-    /// (`spawned` is `None`). Graceful SIGTERM is a follow-up;
-    /// v1 is forceful.
+    /// substrate process — nor anything the substrate forked, which a
+    /// bare kill of the recorded pid would leave behind. The escalation
+    /// itself (SIGTERM the group, grace, SIGKILL) is
+    /// [`terminate_child_group`]. A no-op for an adopted substrate
+    /// (`spawned` is `None`).
     fn drop(&mut self) {
         if let Some(mut child) = self.spawned.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_child_group(&mut child);
         }
     }
 }
@@ -231,10 +234,11 @@ impl NativeActor for FleetProxy {
             Ok(conn) => conn,
             Err(e) => {
                 // The proxy owns the child it was handed — a
-                // failed boot must not orphan the substrate.
+                // failed boot must not orphan the substrate, and the
+                // same group escalation `Drop` runs is what makes that
+                // true for whatever the substrate itself forked.
                 if let Some(mut child) = config.spawned.take() {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    terminate_child_group(&mut child);
                 }
                 return Err(BootError::Other(Box::new(e)));
             }
@@ -379,8 +383,9 @@ impl NativeActor for FleetProxy {
     ///
     /// # Agent
     /// Sent by the engines cap (`aether.fleet`) on a terminate
-    /// request. The proxy self-shuts-down; its `Drop` SIGKILLs and
-    /// reaps the child substrate it forked (if any), and the
+    /// request. The proxy self-shuts-down; its `Drop` terminates and
+    /// reaps the process group of the child substrate it forked (if
+    /// any), and the
     /// outbound RPC connection closes as the actor drops. The
     /// `engine_id` field is ignored — a proxy only ever terminates
     /// its own engine.
@@ -408,8 +413,8 @@ impl NativeActor for FleetProxy {
     /// (a `Pong` since the last tick would have cleared the
     /// counter), and once `miss_limit` consecutive ticks go
     /// unanswered it declares the engine dead: reports `EngineDied`
-    /// to the engines cap and self-shuts-down (its `Drop` SIGKILLs
-    /// the wedged child). Otherwise it sends a fresh `Ping`.
+    /// to the engines cap and self-shuts-down (its `Drop` terminates
+    /// the wedged child's group). Otherwise it sends a fresh `Ping`.
     #[handler::single]
     fn on_heartbeat_tick(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: EngineHeartbeatTick) {
         state.heartbeat_seq += 1;

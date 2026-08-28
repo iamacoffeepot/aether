@@ -17,7 +17,7 @@ use std::time::Duration;
 /// fork+exec'd the substrate and handed its child handle here —
 /// the proxy then owns that process: it retries the startup dial
 /// (the substrate may not have bound its port yet), kills it on a
-/// failed boot, and SIGKILLs + reaps it on `Drop`. `None` for an
+/// failed boot, and terminates + reaps its process group on `Drop`. `None` for an
 /// adopted / externally-running substrate, whose lifetime the
 /// proxy doesn't manage.
 ///

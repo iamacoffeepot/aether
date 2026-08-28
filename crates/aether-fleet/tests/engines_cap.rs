@@ -508,3 +508,337 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 }
+
+/// Live restart-supervision coverage (the `restart_on_crash` path).
+///
+/// These two are the only tests that drive a *committed* engine through a
+/// real crash and out the other side, so they are what fails if
+/// `consider_restart` never fires, if the re-fork loses the recipe, or if
+/// the burst limit does not actually end a crash loop. The reducer tests
+/// in `server/mod.rs` cover the decision in isolation; nothing there forks
+/// a process, so nothing there can catch a restart that decides correctly
+/// and then re-forks wrong.
+#[cfg(unix)]
+mod restart_supervision {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// How long a crashing generation stays up before it kills its real
+    /// substrate. It has to outlast the spawn-commit boundary — a death
+    /// observed while the birth is still pending latches as a failed
+    /// spawn and is deliberately *not* restarted — so this is sized for
+    /// a debug fork under parallel build load rather than for speed.
+    const FIXTURE_ALIVE_SECS: u64 = 3;
+
+    /// Settle time the cap waits before re-forking. Short, because the
+    /// test's patience lives in the deadlines below, not here.
+    const RESTART_BACKOFF_MILLIS: u64 = 250;
+
+    /// How long to wait for a successor engine to appear. Generous by
+    /// construction: a restart costs a crash window, a backoff, a fork,
+    /// and a fresh chassis boot, and every one of those stretches under a
+    /// loaded machine. A tight budget here would fail the test for being
+    /// slow rather than for being wrong (issue 5498).
+    const SUCCESSOR_DEADLINE_SECS: u64 = 90;
+
+    /// The same patience, extended across a whole crash loop — several
+    /// generations, each paying the full cost above.
+    const CRASH_LOOP_DEADLINE_SECS: u64 = 150;
+
+    /// After the burst limit is reached, how long to keep watching for a
+    /// restart that must never come. Comfortably longer than one full
+    /// generation, so a cap that kept restarting would be caught rather
+    /// than merely be slow enough to look stopped.
+    const LOOP_SETTLE_SECS: u64 = 20;
+
+    /// Poll cadence for the list-driven waits.
+    const POLL_MILLIS: u64 = 250;
+
+    /// How long the first generation gets to fork, boot a real chassis,
+    /// and reply. Sized like the neighbouring real-fork suites' spawn
+    /// waits rather than trimmed, for the same load reason.
+    const FIRST_SPAWN_DEADLINE_SECS: u64 = 60;
+
+    /// A stand-in chassis binary that comes up for real and then crashes.
+    ///
+    /// It has to be a real substrate to be restarted at all: the engine
+    /// must connect, commit, and be supervised before its death counts as
+    /// a `Crashed` eviction rather than a failed spawn. So the script
+    /// delegates the work to the genuine headless binary and adds only
+    /// two things a real chassis cannot do — it records the argv the hub
+    /// handed it, and it kills its own substrate on a timer.
+    ///
+    /// `--describe` is delegated verbatim so the store ingests a genuine
+    /// conforming manifest and a `default` selector resolves to it.
+    ///
+    /// Only `--rpc-port` is forwarded to the real binary. The other flags
+    /// exist to be *observed* in the argv log — they are recipe-fidelity
+    /// markers, and feeding a real chassis flags it does not define would
+    /// test clap rather than the cap. Extracting the port by scanning for
+    /// its flag is also what makes the log meaningful: the script never
+    /// assumes a position the cap might have changed.
+    ///
+    /// When `once_marker` is set, only the first generation crashes and
+    /// every later one runs straight through — one restart, then a stable
+    /// successor. Without it every generation crashes, which is the crash
+    /// loop the burst limit has to stop.
+    fn write_crashing_stand_in(path: &Path, real: &str, argv_log: &Path, once_marker: Option<&Path>) {
+        let crash_guard = once_marker.map_or_else(String::new, |marker| {
+            format!(
+                "if [ -f '{}' ]; then exec \"$REAL\" --rpc-port \"$port\"; fi\n: > '{}'\n",
+                marker.display(),
+                marker.display()
+            )
+        });
+        let script = format!(
+            "#!/bin/sh\n\
+             REAL='{real}'\n\
+             if [ \"$1\" = \"--describe\" ]; then exec \"$REAL\" --describe; fi\n\
+             echo \"$*\" >> '{argv_log}'\n\
+             port=''\n\
+             prev=''\n\
+             for a in \"$@\"; do\n\
+             \x20 if [ \"$prev\" = \"--rpc-port\" ]; then port=\"$a\"; fi\n\
+             \x20 prev=\"$a\"\n\
+             done\n\
+             {crash_guard}\
+             \"$REAL\" --rpc-port \"$port\" &\n\
+             child=$!\n\
+             sleep {FIXTURE_ALIVE_SECS}\n\
+             kill -9 \"$child\" 2>/dev/null\n\
+             exit 1\n",
+            argv_log = argv_log.display(),
+        );
+        fs::write(path, script).expect("test setup: write crashing stand-in");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("test setup: chmod crashing stand-in");
+    }
+
+    /// The engines-cap config for a restart test: the isolated store and
+    /// spawn-dir parent the other suites use, plus an armed restart policy.
+    fn restart_config(store_dir: &Path, engine_root: &Path, stand_in: &Path, burst_limit: u32) -> FleetConfig {
+        FleetConfig {
+            binary_store_dir: Some(store_dir.to_string_lossy().into_owned()),
+            fleet_store_root: Some(engine_root.to_string_lossy().into_owned()),
+            binary_bootstrap: HashSet::from([stand_in.to_string_lossy().into_owned()]),
+            restart_on_crash: true,
+            restart_backoff_millis: RESTART_BACKOFF_MILLIS,
+            restart_burst_limit: burst_limit,
+            ..FleetConfig::default()
+        }
+    }
+
+    /// Re-drive `ListEngines` until `probe` accepts a snapshot, or the
+    /// deadline passes. The restart path produces no reply of its own —
+    /// it owes nobody one — so the cap's public list is how a test
+    /// observes it at all.
+    fn poll_list<T>(
+        mailer: &Arc<Mailer>,
+        cells: &ReplyCells,
+        deadline: Duration,
+        probe: impl Fn(&ListEnginesResult) -> Option<T>,
+    ) -> Option<T> {
+        let until = Instant::now() + deadline;
+        loop {
+            let list = drive(mailer, &ListEngines {}, Duration::from_secs(15), || {
+                cells.list.lock().expect("test setup: list cell mutex is never poisoned").take()
+            });
+            if let Some(found) = probe(&list) {
+                return Some(found);
+            }
+            if Instant::now() >= until {
+                return None;
+            }
+            thread::sleep(Duration::from_millis(POLL_MILLIS));
+        }
+    }
+
+    /// Every argv line the stand-in has recorded so far, oldest first —
+    /// one line per forked generation.
+    fn recorded_argv(argv_log: &Path) -> Vec<String> {
+        fs::read_to_string(argv_log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// A crashed engine is re-forked from the recipe it was spawned with,
+    /// under a fresh engine id.
+    ///
+    /// The whole live path in one test: a real substrate comes up, is
+    /// committed, dies by SIGKILL (a genuine connection-close `Crashed`,
+    /// not a `Terminated`), and a successor takes its place. Three things
+    /// would break silently without it — a `consider_restart` that never
+    /// reaches `restart_engine`, a re-fork that drops the caller's args or
+    /// boot manifest from the retained recipe, and a successor that
+    /// reuses the dead engine's id instead of minting one. The argv
+    /// assertions are the recipe tripwire: the caller's flags must
+    /// reappear verbatim and still lead the hub's own injections, while
+    /// `--rpc-port` must differ, because a port is reserved per fork and
+    /// replaying the dead one would collide.
+    #[test]
+    fn a_crashed_engine_is_restarted_under_a_fresh_id_from_the_same_recipe() {
+        let real = aether_harness_fleet::headless_bin_path().to_string_lossy().into_owned();
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let dir = env::temp_dir().join(format!("aether-engcap-restart-{}-{nanos}", process::id()));
+        fs::create_dir_all(&dir).expect("test setup: restart temp dir");
+
+        let argv_log = dir.join("argv.log");
+        let stand_in = dir.join("aether-headless");
+        write_crashing_stand_in(&stand_in, &real, &argv_log, Some(&dir.join("crashed-once")));
+
+        let (_registry, _chassis, mailer, cells) =
+            boot(restart_config(&dir.join("store"), &dir.join("engines"), &stand_in, 5));
+
+        // Recipe-fidelity markers: the stand-in records them and forwards
+        // only `--rpc-port` to the real chassis, so a restart that loses
+        // either one shows up in the argv log rather than as a boot error.
+        let caller_args = vec!["--fixture-marker".to_owned(), "seven".to_owned()];
+        let boot_manifest = dir.join("boot-manifest.json").to_string_lossy().into_owned();
+        let spawn = drive(
+            &mailer,
+            &SpawnEngine {
+                selector: default_selector(),
+                args: caller_args,
+                boot_manifest: Some(boot_manifest.clone()),
+            },
+            Duration::from_secs(FIRST_SPAWN_DEADLINE_SECS),
+            || cells.spawn.lock().expect("test setup: spawn cell mutex is never poisoned").take(),
+        );
+        let original = match spawn {
+            SpawnEngineResult::Ok { engine_id, .. } => engine_id,
+            other @ SpawnEngineResult::Err { .. } => panic!("the first generation must spawn cleanly, got {other:?}"),
+        };
+
+        // The successor is any supervised engine that is not the one that
+        // died — the restart mints a fresh id by design.
+        let successor = poll_list(&mailer, &cells, Duration::from_secs(SUCCESSOR_DEADLINE_SECS), |list| {
+            list.engines.iter().find(|e| e.engine_id != original).map(|e| e.engine_id.clone())
+        })
+        .unwrap_or_else(|| {
+            panic!("a crashed engine must be restarted under a fresh id within {SUCCESSOR_DEADLINE_SECS}s")
+        });
+        let mut reaper =
+            EngineReaper { mailer: Arc::clone(&mailer), cells: cells.clone(), engine_id: Some(successor.clone()) };
+        assert_ne!(successor, original, "the successor is a distinct engine, not the corpse re-listed");
+
+        // The original's death is on record, and it is a crash — the only
+        // reason class restart supervision acts on.
+        let died = poll_list(&mailer, &cells, Duration::from_secs(30), |list| {
+            list.recently_died.iter().find(|d| d.engine_id == original).map(|d| d.reason.clone())
+        })
+        .unwrap_or_else(|| panic!("the crashed engine {original} must leave a death record"));
+        assert!(matches!(died, DeathReason::Crashed { .. }), "a killed substrate is a crash, got {died:?}");
+
+        // The recipe replayed intact.
+        let argv = recorded_argv(&argv_log);
+        assert!(argv.len() >= 2, "the restart must have forked a second generation; argv log: {argv:?}");
+        let (first, second) = (&argv[0], &argv[1]);
+        for (generation, line) in [("original", first), ("successor", second)] {
+            assert!(
+                line.contains("--fixture-marker seven"),
+                "the {generation} generation must carry the caller's args: {line}",
+            );
+            assert!(
+                line.contains(&format!("--boot-manifest {boot_manifest}")),
+                "the {generation} generation must carry the retained boot manifest: {line}",
+            );
+            let marker_at = line.find("--fixture-marker").expect("the caller's args are present");
+            let injected_at = line.find("--rpc-port").expect("the hub injects the RPC port");
+            assert!(marker_at < injected_at, "the caller's args lead the hub's injections: {line}");
+        }
+        assert_ne!(
+            first, second,
+            "each fork reserves its own RPC port, so the two command lines cannot be identical: {argv:?}",
+        );
+
+        // Tidy up: terminate the successor, which also exercises the
+        // group teardown over a shell parent with a real grandchild.
+        let terminate = drive(&mailer, &TerminateEngine { engine_id: successor }, Duration::from_secs(30), || {
+            cells.terminate.lock().expect("test setup: terminate cell mutex is never poisoned").take()
+        });
+        assert!(matches!(terminate, TerminateEngineResult::Ok), "the successor terminates cleanly: {terminate:?}");
+        reaper.disarm();
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A crash loop stops at the burst limit, leaving a final death on
+    /// record and no live engine.
+    ///
+    /// Every generation of this stand-in dies, so an unbounded cap would
+    /// re-fork forever — burning ports, scratch dirs and processes for as
+    /// long as the hub runs. The limit is what makes automatic restart
+    /// safe to turn on, and only a real loop can show that it holds:
+    /// `admit_restart` returning `false` in a unit test proves the
+    /// arithmetic, not that the cap stops forking. After the budget is
+    /// spent the death count must stay put across a window in which a
+    /// further restart would comfortably have completed.
+    #[test]
+    fn a_crash_loop_stops_at_the_burst_limit_and_records_a_final_death() {
+        let real = aether_harness_fleet::headless_bin_path().to_string_lossy().into_owned();
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let dir = env::temp_dir().join(format!("aether-engcap-crashloop-{}-{nanos}", process::id()));
+        fs::create_dir_all(&dir).expect("test setup: crash-loop temp dir");
+
+        let argv_log = dir.join("argv.log");
+        let stand_in = dir.join("aether-headless");
+        // No once-marker: every generation crashes.
+        write_crashing_stand_in(&stand_in, &real, &argv_log, None);
+
+        // Two restarts, so the loop is the original generation plus two
+        // recoveries and then a stop — enough to prove the budget binds
+        // without paying for a long loop.
+        let burst_limit = 2_u32;
+        let expected_deaths = burst_limit as usize + 1;
+        let (_registry, _chassis, mailer, cells) =
+            boot(restart_config(&dir.join("store"), &dir.join("engines"), &stand_in, burst_limit));
+
+        let spawn = drive(
+            &mailer,
+            &SpawnEngine { selector: default_selector(), args: vec![], boot_manifest: None },
+            Duration::from_secs(FIRST_SPAWN_DEADLINE_SECS),
+            || cells.spawn.lock().expect("test setup: spawn cell mutex is never poisoned").take(),
+        );
+        assert!(
+            matches!(spawn, SpawnEngineResult::Ok { .. }),
+            "the first generation must come up before it crashes, got {spawn:?}",
+        );
+
+        // Run the loop out: the original death plus one per admitted restart.
+        let crashes = |list: &ListEnginesResult| {
+            list.recently_died.iter().filter(|d| matches!(d.reason, DeathReason::Crashed { .. })).count()
+        };
+        let reached = poll_list(&mailer, &cells, Duration::from_secs(CRASH_LOOP_DEADLINE_SECS), |list| {
+            (crashes(list) >= expected_deaths).then(|| crashes(list))
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "the loop must spend its whole budget ({expected_deaths} crashes) within {CRASH_LOOP_DEADLINE_SECS}s"
+            )
+        });
+        assert_eq!(reached, expected_deaths, "the budget admits exactly {burst_limit} restarts");
+
+        // And then stops. A cap that kept restarting would add another
+        // crash inside this window; one that stopped adds nothing.
+        thread::sleep(Duration::from_secs(LOOP_SETTLE_SECS));
+        let settled = drive(&mailer, &ListEngines {}, Duration::from_secs(15), || {
+            cells.list.lock().expect("test setup: list cell mutex is never poisoned").take()
+        });
+        assert_eq!(
+            crashes(&settled),
+            expected_deaths,
+            "past the burst limit the cap stops restarting; it forked again instead: {settled:?}",
+        );
+        assert!(settled.engines.is_empty(), "the abandoned lineage leaves no live engine: {settled:?}");
+
+        // The last death is a real recorded crash, not a silent give-up.
+        assert!(
+            settled.recently_died.iter().any(|d| matches!(d.reason, DeathReason::Crashed { .. })),
+            "the final death is recorded normally: {settled:?}",
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

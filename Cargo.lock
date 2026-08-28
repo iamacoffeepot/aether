@@ -477,6 +477,7 @@ dependencies = [
  "confique",
  "dirs",
  "inventory",
+ "libc",
  "serde",
  "serde_json",
  "tracing",
