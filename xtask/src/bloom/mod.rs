@@ -22,7 +22,8 @@ mod upgrade;
 use std::env;
 use std::path::{Path, PathBuf};
 
-use aether_bloomery::{DEFAULT_HTTP_PORT, Digest, KeyId, Outcome};
+use aether_bloomery::{BackendObjectId, DEFAULT_HTTP_PORT, Digest, KeyId, OperatorProposal, Outcome, digest_of};
+use aether_bloomery_git::command::run_ok;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 
@@ -122,6 +123,9 @@ enum BloomCommand {
     /// Run `verify.base` again on a red receipt whose failure does not describe
     /// the tree.
     Reverify(ReverifyBaseArgs),
+    /// Propose a signed change onto the day's branch (ADR-0205). The
+    /// coordinator writes it when the board is clear.
+    Propose(ProposeArgs),
     /// Hand a wedged member a candidate you produced yourself and let the
     /// ordinary gates judge it (#4957).
     Repair(RepairArgs),
@@ -198,6 +202,36 @@ struct ReverifyBaseArgs {
     /// Who is deciding. Recorded as the decider.
     #[arg(long, default_value = "operator")]
     operator: String,
+}
+
+#[derive(Args, Debug)]
+struct ProposeArgs {
+    /// A commit the coordinator's repository can already reach. Name exactly
+    /// one of this or `--from-worktree`.
+    #[arg(long)]
+    from_commit: Option<String>,
+
+    /// A worktree whose `HEAD` the coordinator's repository can already see.
+    /// Resolved to a commit, then treated as `--from-commit`.
+    #[arg(long)]
+    from_worktree: Option<PathBuf>,
+
+    /// Why the coordinator should write this. Required; a blank one is refused
+    /// at the door.
+    #[arg(long)]
+    reason: String,
+
+    /// Who is proposing. Recorded as the decider.
+    #[arg(long, default_value = "operator")]
+    operator: String,
+
+    /// Operator signing seed: 32 raw bytes or 64 hex characters, mode 0600.
+    #[arg(long)]
+    seed_file: Option<PathBuf>,
+
+    /// The `KeyId` the coordinator's allowlist names for that seed.
+    #[arg(long, default_value = "operator")]
+    signer: String,
 }
 
 #[derive(Args, Debug)]
@@ -409,6 +443,7 @@ fn run_on_with_policy(endpoint: &Endpoint, command: &BloomCommand, approval_poli
         BloomCommand::Withdraw(args) => run_withdraw(&client, args),
         BloomCommand::Retry(args) => run_retry(&client, args),
         BloomCommand::Reverify(args) => run_reverify_base(&client, args),
+        BloomCommand::Propose(args) => run_propose(&client, args),
         BloomCommand::Repair(args) => run_repair(&client, args),
         BloomCommand::Suppression(args) => run_suppression(&client, args),
         BloomCommand::Cancel(args) => run_cancel(&client, args),
@@ -509,6 +544,106 @@ fn run_reverify_base(client: &Client<'_>, args: &ReverifyBaseArgs) -> Result<Str
         idempotency_key: None,
     };
     Ok(render_outcome(&client.reverify_base(&base.to_hex(), &request)?.outcome))
+}
+
+/// Propose a signed operator change. The command derives the candidate so it
+/// can sign the proposal digest; the coordinator re-derives from the same
+/// source, records correspondence, and queues the change.
+fn run_propose(client: &Client<'_>, args: &ProposeArgs) -> Result<String> {
+    if args.reason.trim().is_empty() {
+        bail!("propose reason is required");
+    }
+    let named = usize::from(args.from_commit.is_some()) + usize::from(args.from_worktree.is_some());
+    if named != 1 {
+        bail!("propose needs exactly one of --from-commit or --from-worktree; {named} were given");
+    }
+
+    let key = OperatorKey::load(
+        KeyId(args.signer.clone()),
+        args.seed_file.as_deref().context("--seed-file is required to sign the proposal")?,
+    )?;
+    let candidate = resolve_proposal_candidate(args)?;
+    let proposal = OperatorProposal { candidate, reason: args.reason.clone(), operator: args.operator.clone() };
+    let digest = digest_of(&proposal);
+    let request = dto::ProposeRequest {
+        candidate: None,
+        from_commit: args.from_commit.clone(),
+        from_worktree: args.from_worktree.as_ref().map(|path| path.display().to_string()),
+        reason: args.reason.clone(),
+        operator: args.operator.clone(),
+        authorization: key.proposal_of(digest),
+        idempotency_key: None,
+    };
+    let outcome = client.propose(&request)?.outcome;
+    Ok(render_proposal(digest, &outcome))
+}
+
+fn resolve_proposal_candidate(args: &ProposeArgs) -> Result<aether_bloomery::CandidateRef> {
+    let (repo, revision) = match (&args.from_commit, &args.from_worktree) {
+        (Some(commit), None) => (PathBuf::from("."), commit.clone()),
+        (None, Some(path)) => {
+            let head = run_ok(path, &["rev-parse", "--verify", "--end-of-options", "HEAD"])
+                .with_context(|| format!("could not read HEAD of {}", path.display()))?;
+            (path.clone(), head)
+        }
+        _ => bail!("propose needs exactly one of --from-commit or --from-worktree"),
+    };
+    candidate_from_revision(&repo, &revision)
+}
+
+fn candidate_from_revision(repo: &Path, revision: &str) -> Result<aether_bloomery::CandidateRef> {
+    let commit_peel = format!("{revision}^{{commit}}");
+    let commit_hex = run_ok(repo, &["rev-parse", "--verify", "--end-of-options", &commit_peel])
+        .with_context(|| format!("commit `{revision}` is not reachable"))?;
+    let tree_peel = format!("{commit_hex}^{{tree}}");
+    let tree_hex = run_ok(repo, &["rev-parse", "--verify", "--end-of-options", &tree_peel])
+        .with_context(|| format!("tree of `{commit_hex}` is not reachable"))?;
+    Ok(aether_bloomery::CandidateRef {
+        tree: candidate_tree_digest(&object_id(&tree_hex)?),
+        checkout: capture_commit_digest(&object_id(&commit_hex)?),
+    })
+}
+
+fn object_id(hex: &str) -> Result<BackendObjectId> {
+    aether_bloomery::decode_hex(hex)
+        .map(BackendObjectId::new)
+        .with_context(|| format!("resolved `{hex}` is not a git object id"))
+}
+
+/// Must match `aether-chassis-bloomery`'s candidate-tree domain tag.
+fn candidate_tree_digest(tree: &BackendObjectId) -> Digest {
+    #[derive(serde::Serialize)]
+    struct CandidateTreeAddress<'a> {
+        object: &'a [u8],
+    }
+    impl aether_bloomery::ContentAddressed for CandidateTreeAddress<'_> {
+        const DOMAIN: &'static str = "aether.bloomery.candidate.tree";
+    }
+    digest_of(&CandidateTreeAddress { object: tree.as_bytes() })
+}
+
+/// Must match `aether-chassis-bloomery`'s capture-commit domain tag.
+fn capture_commit_digest(commit: &BackendObjectId) -> Digest {
+    #[derive(serde::Serialize)]
+    struct CaptureCommitAddress<'a> {
+        object: &'a [u8],
+    }
+    impl aether_bloomery::ContentAddressed for CaptureCommitAddress<'_> {
+        const DOMAIN: &'static str = "aether.bloomery.candidate.checkout";
+    }
+    digest_of(&CaptureCommitAddress { object: commit.as_bytes() })
+}
+
+fn render_proposal(digest: Digest, outcome: &Outcome) -> String {
+    match outcome {
+        Outcome::ProposalQueued { offered: true, .. } => {
+            format!("proposal {} offered to seal immediately\n", digest.to_hex())
+        }
+        Outcome::ProposalQueued { offered: false, .. } => {
+            format!("proposal {} queued behind a walking bloom\n", digest.to_hex())
+        }
+        other => format!("proposal {}: {other:?}\n", digest.to_hex()),
+    }
 }
 
 /// Hand a wedged member the candidate the operator produced and let the
@@ -729,8 +864,8 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        BloomCommand, CancelArgs, Endpoint, ReopenArgs, RepairArgs, SealArgs, SupersedeArgs, SuppressionArgs,
-        repair_body, run_on,
+        BloomCommand, CancelArgs, Endpoint, ProposeArgs, ReopenArgs, RepairArgs, SealArgs, SupersedeArgs,
+        SuppressionArgs, repair_body, run_on,
     };
     use crate::bloom::dto;
     use crate::bloom::dto::DigestHex;
@@ -1846,6 +1981,47 @@ mod tests {
         let blank =
             repair_body(&RepairArgs { reason: "   ".to_owned(), ..repair_args(&bloom_id, "wp-1") }).expect_err("blank");
         assert!(blank.to_string().contains("reason"), "a blank reason is refused before the source: {blank}");
+    }
+
+    fn propose_args() -> ProposeArgs {
+        ProposeArgs {
+            from_commit: None,
+            from_worktree: None,
+            reason: "flip an ADR status".to_owned(),
+            operator: "operator".to_owned(),
+            seed_file: None,
+            signer: "operator".to_owned(),
+        }
+    }
+
+    #[test]
+    fn propose_needs_exactly_one_source() {
+        let ((none, two, blank), log) = with_fake(
+            |_| (404, json!({ "error": "unexpected" })),
+            |port| {
+                let endpoint = Endpoint { host: "127.0.0.1".to_owned(), port, token: None };
+                let none = run_on(&endpoint, &BloomCommand::Propose(propose_args())).expect_err("no source");
+                let two = run_on(
+                    &endpoint,
+                    &BloomCommand::Propose(ProposeArgs {
+                        from_commit: Some("abc123".to_owned()),
+                        from_worktree: Some(PathBuf::from("/tmp/wt")),
+                        ..propose_args()
+                    }),
+                )
+                .expect_err("two sources");
+                let blank = run_on(
+                    &endpoint,
+                    &BloomCommand::Propose(ProposeArgs { reason: "   ".to_owned(), ..propose_args() }),
+                )
+                .expect_err("blank");
+                (none, two, blank)
+            },
+        );
+        assert!(none.to_string().contains("exactly one"), "the refusal states the rule: {none}");
+        assert!(two.to_string().contains("2 were given"), "the refusal counts what it found: {two}");
+        assert!(blank.to_string().contains("reason"), "a blank reason is refused before the source: {blank}");
+        assert!(posted(&log).is_empty(), "a refused propose must not write: {log:?}");
     }
 
     #[test]

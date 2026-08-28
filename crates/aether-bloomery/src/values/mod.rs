@@ -46,9 +46,9 @@ pub use api::{
     CommissionsView, Completeness, CoordinatorLogEntry, CoordinatorLogsView, CreateCommissionRequest,
     DEFAULT_HTTP_PORT, DispatchEvidenceView, DispatchFilePage, DispatchProcessView, DraftPatch, DraftView, DraftsView,
     ErrorView, GrantRequest, HTTP_READ_TIMEOUT, HoldRequest, JournalEntry, JournalView, MemberProjection, OutcomeView,
-    ReleaseAcceptedView, ReleaseRequest, ReopenCommissionRequest, RepairRequest, RetryRequest, ReverifyBaseRequest,
-    RevisionEvidence, ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, SealRequest, SupersedeRequest,
-    SuppressionAnswerRequest, WithdrawRequest, WorkpiecesView, WriteRevisionRequest, http_success,
+    ProposeRequest, ReleaseAcceptedView, ReleaseRequest, ReopenCommissionRequest, RepairRequest, RetryRequest,
+    ReverifyBaseRequest, RevisionEvidence, ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, SealRequest,
+    SupersedeRequest, SuppressionAnswerRequest, WithdrawRequest, WorkpiecesView, WriteRevisionRequest, http_success,
 };
 pub use approval::{
     ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, TierVerdict, gate_widening, path_in_surface, surface_additions,
@@ -78,7 +78,9 @@ pub use lane::{LANE_WORKPIECE_HEADER, pin_workpiece_description, split_lane_iden
 pub use lease::{EvictedHolder, MAX_OBSERVED_WRITES, normalize_write_paths};
 pub use model_override::{AgentSelection, ModelOverride, OverrideError, ResolvedModel, StageOverride};
 pub use narrowing::{CompositionParents, FoldContribution, NarrowingRefusal, narrow_composition};
-pub use operator::{Adjudication, Disposition, OperatorHold, OperatorRepair, Withdrawal, WithdrawalCause};
+pub use operator::{
+    Adjudication, Disposition, OperatorHold, OperatorProposal, OperatorRepair, Withdrawal, WithdrawalCause,
+};
 pub use orphan_claim::{
     ORPHAN_CLAIM_RELEASE_WORDS, OrphanClaimRelease, OrphanClaimReleaseCompletion, OrphanClaimReleaseRecord,
 };
@@ -97,7 +99,7 @@ pub use stage::{
 };
 pub use statement::{Observation, Provenance, StageReceipt, Statement};
 #[cfg(not(target_arch = "wasm32"))]
-pub use statement::{signed_approval, signed_cancel, signed_reopen};
+pub use statement::{signed_approval, signed_cancel, signed_proposal, signed_reopen};
 pub use study::{StudyCall, StudyCost, StudyRecord};
 pub use suppression::{SuppressionDisposition, SuppressionRequest, SuppressionVerdict};
 pub use surface::{SurfacePathRequest, SurfaceRequest};

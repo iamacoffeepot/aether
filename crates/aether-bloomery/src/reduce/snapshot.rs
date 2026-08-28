@@ -14,13 +14,13 @@ use serde::{Deserialize, Serialize};
 
 use super::gate::{AGGREGATE_REVIEW_GATE, AGGREGATE_VERIFY_GATE, LAND_GATE, RecordedRefusal};
 use super::{Decision, Decisions, Event, Fact, Outcome};
-use crate::digest::Digest;
+use crate::digest::{Digest, digest_of};
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
     Adjudication, BaseReceipt, BloomSpec, CandidateRef, CompositionFinding, CompositionParents, ConfigScopes,
-    DispatchKey, Evidence, EvidenceKind, MemberDependency, OperatorHold, OperatorRepair, OrphanClaimReleaseRecord,
-    ResolutionClaim, ResolvedConfigs, SpendQuiesce, StageCatalog, SuppressionDisposition, SurfaceRequest, VerifiedTree,
-    VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Withdrawal,
+    DispatchKey, Evidence, EvidenceKind, MemberDependency, OperatorHold, OperatorProposal, OperatorRepair,
+    OrphanClaimReleaseRecord, ResolutionClaim, ResolvedConfigs, SpendQuiesce, StageCatalog, SuppressionDisposition,
+    SurfaceRequest, VerifiedTree, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Withdrawal,
 };
 // Only [`Snapshot::with_green_base`] names it, and that door is behind the same cfg.
 // A plain import would be an unused one on a lib-scoped build, where the fixture
@@ -224,6 +224,14 @@ pub struct Snapshot {
     /// compiling. `#[serde(default)]` is the `member_checkpoints` precedent.
     #[serde(default)]
     pub base_trees: BTreeMap<Digest, Digest>,
+    /// Operator-supplied changes waiting for a clear board (ADR-0205).
+    ///
+    /// Ordered: the head is the next one offered to seal. Snapshot-level so
+    /// the queue survives a bloom's land and so every existing `BloomRecord`
+    /// literal stays compiling. `#[serde(default)]` is the
+    /// `orphan_releases` precedent.
+    #[serde(default)]
+    pub queued_proposals: Vec<OperatorProposal>,
 }
 
 impl Snapshot {
@@ -1553,13 +1561,16 @@ impl Snapshot {
             // is the withdrawal row `apply_withdrawal_effect` writes. A refusal
             // is inert here for a fourth: `record_refusals` folds it over the
             // whole effect set, because it is keyed by gate or by member and
-            // pairs with the dispatch that clears it.
+            // pairs with the dispatch that clears it. A proposal offer is inert
+            // for a fifth: sealing is the propose reactor's, and the queue row
+            // is `QueueProposal`.
             Decision::RedispatchStage { .. }
             | Decision::DispatchOrphanClaimRelease { .. }
             | Decision::DispatchBaseVerify { .. }
             | Decision::CancelDispatch { .. }
             | Decision::ReleaseMemberClaimRef { .. }
-            | Decision::RecordRefusal { .. } => {}
+            | Decision::RecordRefusal { .. }
+            | Decision::DispatchProposal { .. } => {}
             Decision::RecordBaseReceipt { .. } => self.apply_base_verify_effect(effect),
             Decision::RecordOrphanClaimRelease { request, target, completion } => {
                 // Opening the record and completing it write the same entry, so
@@ -1620,6 +1631,25 @@ impl Snapshot {
                     record.status = BloomStatus::Landed;
                 }
             }
+            Decision::QueueProposal { .. } | Decision::DequeueProposal { .. } => {
+                self.apply_proposal_queue_effect(effect);
+            }
+        }
+    }
+
+    /// Fold the two decisions that write the operator-proposal queue (ADR-0205).
+    ///
+    /// Split out of [`apply_effect`](Self::apply_effect) for the reason its
+    /// siblings are: they are a push/pop pair over one ordered list, and that
+    /// is only visible when they sit together.
+    fn apply_proposal_queue_effect(&mut self, effect: &Decision) {
+        match effect {
+            Decision::QueueProposal { proposal } => self.queued_proposals.push(proposal.clone()),
+            Decision::DequeueProposal { proposal } => {
+                let digest = digest_of(proposal);
+                self.queued_proposals.retain(|queued| digest_of(queued) != digest);
+            }
+            _ => {}
         }
     }
 
@@ -2174,5 +2204,51 @@ impl BloomRecord {
             // moment the member verifies, so the row stands in the log alone.
             | EvidenceKind::SuppressionRequest => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::digest::digest_of;
+    use crate::ids::IdempotencyKey;
+    use crate::values::{CandidateRef, OperatorProposal, ResolvedConfigs};
+
+    fn digest(seed: u8) -> Digest {
+        Digest::from_bytes([seed; 32])
+    }
+
+    fn proposal(reason: &str) -> OperatorProposal {
+        OperatorProposal {
+            candidate: CandidateRef { tree: digest(7), checkout: digest(8) },
+            reason: reason.into(),
+            operator: "operator".into(),
+        }
+    }
+
+    fn fold(snapshot: &Snapshot, effects: Vec<Decision>) -> Snapshot {
+        let event = Event {
+            idempotency_key: IdempotencyKey("proposal-queue".into()),
+            fact: Fact::ObserveMainline { head: digest(0) },
+        };
+        snapshot.apply(&event, &Decisions { outcome: Outcome::Duplicate, effects }, &ResolvedConfigs::default())
+    }
+
+    #[test]
+    fn queue_proposal_appends_and_dequeue_removes_by_digest() {
+        let first = proposal("first");
+        let second = proposal("second");
+        let snapshot = fold(
+            &Snapshot::new(digest(0)),
+            vec![
+                Decision::QueueProposal { proposal: first.clone() },
+                Decision::QueueProposal { proposal: second.clone() },
+            ],
+        );
+        assert_eq!(snapshot.queued_proposals, vec![first.clone(), second.clone()]);
+
+        let snapshot = fold(&snapshot, vec![Decision::DequeueProposal { proposal: first.clone() }]);
+        assert_eq!(snapshot.queued_proposals, vec![second], "dequeue removes by digest, leaving later entries");
+        assert_eq!(digest_of(&first), digest_of(&proposal("first")));
     }
 }

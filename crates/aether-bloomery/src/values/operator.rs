@@ -116,6 +116,31 @@ impl ContentAddressed for OperatorRepair {
     const DOMAIN: &'static str = "aether.bloomery.operator_repair";
 }
 
+/// The operator change the coordinator will write (ADR-0205): a signed
+/// candidate waiting to become a bloom with no members.
+///
+/// Shaped after [`OperatorRepair`]: the same [`CandidateRef`] pair, the same
+/// required non-blank `reason` and `operator` for the audit trail, and the same
+/// content-addressed request so the digest is the idempotency key. It is also a
+/// configuration kind — its address in the bloom-wide registry is what gives a
+/// memberless bloom a distinct identity, because two empty specs over one base
+/// would otherwise collide on [`BloomSpec`](crate::BloomSpec)'s digest.
+#[derive(aether_data::Kind, aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[kind(name = "aether.bloomery.operator_proposal")]
+pub struct OperatorProposal {
+    /// The candidate the operator supplied: the tree returned evidence binds,
+    /// and the commit the verifying lane checks out.
+    pub candidate: CandidateRef,
+    /// Why the operator is asking the coordinator to write this.
+    pub reason: String,
+    /// Who proposed it — the decider this request is journaled under.
+    pub operator: String,
+}
+
+impl ContentAddressed for OperatorProposal {
+    const DOMAIN: &'static str = "aether.bloomery.operator_proposal";
+}
+
 /// One edge of an operator hold (#4976): the words and the identity behind
 /// putting a bloom's dispatch on the brake, or taking it back off.
 ///

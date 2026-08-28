@@ -70,6 +70,9 @@ fn landing(
         .iter()
         .map(|member| Decision::ReleaseMembership { workpiece: member.workpiece.clone(), bloom })
         .collect();
+    if record.spec.members().is_empty() {
+        effects.push(Decision::ReleaseMembership { workpiece: WorkpieceId::composition(), bloom });
+    }
     effects.push(Decision::AdvanceMainline { from: snapshot.mainline, to: new_head });
     // The head this land produces is a tree the line has already answered for,
     // so the next bloom to seal on it should not re-ask (#4891 follow-on).
@@ -81,6 +84,9 @@ fn landing(
     // members). Spec order, so the projection writes in the bloom's own order.
     let members: Vec<WorkpieceId> = record.spec.members().iter().map(|member| member.workpiece.clone()).collect();
     effects.push(Decision::EmitReceipt(ProjectedReceipt { receipt: receipt.clone(), members }));
+    if let Some(offer) = super::propose::offer_after_land(snapshot, new_head) {
+        effects.push(offer);
+    }
 
     Decisions { outcome: Outcome::Landed(receipt), effects }
 }
@@ -147,7 +153,10 @@ mod tests {
     use crate::digest::Digest;
     use crate::ids::{BloomId, IdempotencyKey, WorkpieceId};
     use crate::reduce::{BloomStatus, Decision, Decisions, Event, Fact, Outcome, RecordedRefusal, Snapshot, reduce};
-    use crate::values::{BloomDraft, ConfigRegistry, Evidence, EvidenceKind, Membership, ResolvedConfigs, SpendWindow};
+    use crate::values::{
+        BloomDraft, CandidateRef, ConfigRegistry, Evidence, EvidenceKind, Membership, OperatorProposal,
+        ResolvedConfigs, SpendWindow,
+    };
 
     fn digest(seed: u8) -> Digest {
         Digest::from_bytes([seed; 32])
@@ -286,6 +295,29 @@ mod tests {
         assert!(
             !decisions.effects.iter().any(|effect| matches!(effect, Decision::RecordRefusal { .. })),
             "a passing land records nothing"
+        );
+    }
+
+    #[test]
+    fn a_land_offers_a_queued_proposal_on_the_new_head() {
+        let base = digest(0);
+        let (mut snapshot, bloom) = sealed(base);
+        snapshot.blooms.get_mut(&bloom).expect("the seal recorded the bloom").status = BloomStatus::Resolved;
+        let proposal = OperatorProposal {
+            candidate: CandidateRef { tree: digest(7), checkout: digest(8) },
+            reason: "flip an ADR status".into(),
+            operator: "operator".into(),
+        };
+        snapshot.queued_proposals.push(proposal.clone());
+
+        let decisions = reduce_land(&snapshot, &bloom, &digest(40));
+        assert!(matches!(decisions.outcome, Outcome::Landed(_)));
+        assert!(
+            decisions.effects.iter().any(|effect| matches!(
+                effect,
+                Decision::DispatchProposal { base, proposal: offered } if *base == digest(40) && *offered == proposal
+            )),
+            "a land on a non-empty queue offers the head against the new mainline: {decisions:?}"
         );
     }
 }

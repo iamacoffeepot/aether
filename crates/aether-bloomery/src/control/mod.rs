@@ -38,7 +38,9 @@ use serde::{Deserialize, Serialize};
 use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
 use crate::reduce::Decision;
-use crate::values::{AgentProfile, ConfigRegistry, MemberCandidate, OrphanClaimRelease, Transformation};
+use crate::values::{
+    AgentProfile, ConfigRegistry, MemberCandidate, OperatorProposal, OrphanClaimRelease, Transformation,
+};
 
 /// One active-membership mutation the store applies inside the combined
 /// [`Commit`] transaction: a workpiece claimed (or released) for a bloom. The
@@ -259,6 +261,12 @@ topic_vocabulary! {
     /// order record (ADR-0200). Appended so the prior topics' display
     /// spellings and ordering are unchanged.
     BaseVerify,
+    /// An operator-proposal offer (reducer-minted, from
+    /// [`Decision::DispatchProposal`]), drained by the propose reactor, which
+    /// seals the proposal's bytes, pushes the candidate ref, and admits a
+    /// memberless [`crate::Fact::Seal`] (ADR-0205). Appended so the prior
+    /// topics' display spellings and ordering are unchanged.
+    Proposal,
 }
 
 impl Topic {
@@ -287,6 +295,7 @@ impl Topic {
             Self::MemberClaimRelease => "topic:member_claim_release",
             Self::ScopeDispatch => "topic:scope_dispatch",
             Self::BaseVerify => "topic:base_verify",
+            Self::Proposal => "topic:proposal",
         }
     }
 
@@ -311,6 +320,7 @@ impl Topic {
             Decision::DispatchAggregateVerify { .. } => Some(Self::AggregateVerify),
             Decision::DispatchOrphanClaimRelease { .. } => Some(Self::OrphanClaimRelease),
             Decision::DispatchBaseVerify { .. } => Some(Self::BaseVerify),
+            Decision::DispatchProposal { .. } => Some(Self::Proposal),
             Decision::CancelDispatch { .. } => Some(Self::CancelDispatch),
             Decision::ReleaseMemberClaimRef { .. } => Some(Self::MemberClaimRelease),
             Decision::ClaimMembership { .. }
@@ -418,7 +428,9 @@ impl Topic {
             // went out (ADR-0206). What reads it is `/why`, off the record; a
             // topic here would enqueue a row nothing drains.
             | Decision::RecordRefusal { .. }
-            | Decision::RecordBaseReceipt { .. } => None,
+            | Decision::RecordBaseReceipt { .. }
+            | Decision::QueueProposal { .. }
+            | Decision::DequeueProposal { .. } => None,
         }
     }
 }
@@ -663,6 +675,19 @@ pub struct BaseVerifyPayload {
     pub transformation: Transformation,
     /// The catalog-calibrated profile the mechanical lane runs under.
     pub profile: AgentProfile,
+}
+
+/// An operator-proposal offer (ADR-0205): the queue head and the mainline
+/// head the memberless spec bases on. The control core enqueues it under
+/// [`Topic::Proposal`] from a [`Decision::DispatchProposal`]; the propose
+/// reactor drains it. Defined here (always compiled) so the host reactor can
+/// decode it inward, cycle-free — like [`OutboxPayload`] / [`LandPayload`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ProposalPayload {
+    /// The queue head the reactor should seal.
+    pub proposal: OperatorProposal,
+    /// The mainline head the memberless spec bases on.
+    pub base: Digest,
 }
 
 /// Which pass of the two-pass whole-bloom aggregate review (ADR-0153) a dispatch

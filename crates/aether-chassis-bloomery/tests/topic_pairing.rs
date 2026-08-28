@@ -15,7 +15,7 @@
 use aether_bloomery::Topic;
 use aether_chassis_bloomery::bloomery::{
     ClaimReleaseReactorCapability, ExecutorReactorCapability, IntegrateReactorCapability, LandReactorCapability,
-    MirrorReactorCapability,
+    MirrorReactorCapability, ProposeReactorCapability,
 };
 
 /// The topics that still have no draining host reactor, each with the issue
@@ -42,6 +42,7 @@ fn every_reducer_topic_pairs_with_exactly_one_drainer() {
         IntegrateReactorCapability::DRAINED_TOPICS,
         LandReactorCapability::DRAINED_TOPICS,
         MirrorReactorCapability::DRAINED_TOPICS,
+        ProposeReactorCapability::DRAINED_TOPICS,
     ]
     .concat();
 

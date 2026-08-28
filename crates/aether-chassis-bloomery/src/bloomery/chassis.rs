@@ -8,6 +8,8 @@
 use std::error::Error;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+#[cfg(feature = "github")]
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[cfg(feature = "github")]
@@ -36,8 +38,8 @@ use crate::bloomery::{
     DoctorReactorSetup, ExecutorReactorCapability, ExecutorReactorSetup, ExecutorShell, GithubConnectionConfig,
     IntegrateReactorCapability, IntegrateReactorSetup, JanitorReactorCapability, JanitorReactorSetup,
     LandReactorCapability, LandReactorSetup, LaneProgram, MirrorReactorCapability, MirrorReactorSetup, NotifyConfig,
-    NotifyReactorCapability, NotifyReactorSetup, ProjectionShell, SourceReplicaShell, SourceShell, candidate_push_at,
-    github_push_url, webhook_sink,
+    NotifyReactorCapability, NotifyReactorSetup, ProjectionShell, ProposeReactorCapability, ProposeReactorSetup,
+    SourceReplicaShell, SourceShell, candidate_push_at, github_push_url, webhook_sink,
 };
 use crate::control::{ControlCore, ControlSetup};
 use crate::session::{SessionConfig, SessionPoolCapability};
@@ -109,6 +111,7 @@ struct BloomeryActorSetups {
     land: LandReactorSetup,
     integrate: IntegrateReactorSetup,
     claim_release: ClaimReleaseReactorSetup,
+    propose: ProposeReactorSetup,
     notify: NotifyReactorSetup,
     janitor: JanitorReactorSetup,
     doctor: DoctorReactorSetup,
@@ -221,6 +224,99 @@ fn github_cadence_secs(coordinator: &CoordinatorConfig, configured: bool) -> u64
     }
 }
 
+/// A testing-featured binary must never `git push` to `origin` — cargo test
+/// forks exactly that binary with its cwd inside the live checkout (#4842).
+/// A local authority's remote is an absolute path, never origin, so the
+/// hermetic publication path is the one this refuse exists to protect.
+#[cfg(feature = "github")]
+fn candidate_publication(
+    github: &GithubConnectionConfig,
+    coordinator: &CoordinatorConfig,
+    repo: PathBuf,
+) -> (Arc<dyn CandidatePush>, bool) {
+    let refuse_origin =
+        (cfg!(any(test, feature = "testing")) || github.uses_fixture()) && !coordinator.uses_local_authority();
+    (candidate_push_at(refuse_origin, repo, coordinator.candidate_remote()), !refuse_origin)
+}
+
+#[cfg(feature = "github")]
+fn propose_setup(
+    correspondence: &SharedCorrespondence,
+    pusher: &Arc<dyn CandidatePush>,
+    store_path: String,
+    poll_interval_secs: u64,
+    source_configured: bool,
+    publish_candidate: bool,
+) -> ProposeReactorSetup {
+    ProposeReactorSetup {
+        correspondence: source_configured.then(|| Arc::clone(correspondence)),
+        pusher: source_configured.then(|| Arc::clone(pusher)),
+        store_path,
+        poll_interval_secs,
+        publish_candidate,
+    }
+}
+
+#[cfg(feature = "github")]
+fn claim_release_setup(
+    source: &SourceShell,
+    store_path: String,
+    poll_interval_secs: u64,
+    source_configured: bool,
+) -> ClaimReleaseReactorSetup {
+    ClaimReleaseReactorSetup { source: source_configured.then(|| source.clone()), store_path, poll_interval_secs }
+}
+
+#[cfg(feature = "github")]
+fn notify_setup(notify: &NotifyConfig, store_path: String, poll_interval_secs: u64) -> NotifyReactorSetup {
+    NotifyReactorSetup { sink: webhook_sink(notify), store_path, milestones: notify.milestones, poll_interval_secs }
+}
+
+#[cfg(feature = "github")]
+fn janitor_setup(
+    source: &SourceShell,
+    executor: Option<ExecutorShell>,
+    coordinator: &CoordinatorConfig,
+    poll_interval_secs: u64,
+    source_configured: bool,
+    repo: &Path,
+) -> JanitorReactorSetup {
+    JanitorReactorSetup {
+        source: source_configured.then(|| source.clone()),
+        executor,
+        store_path: coordinator.store_path.clone(),
+        worktree_base: coordinator.local_worktree_base.clone(),
+        target_base: coordinator.lane_target_base.clone(),
+        lane_target_budget_bytes: coordinator.lane_target_budget_bytes,
+        target_scan_interval_secs: coordinator.lane_target_scan_interval_secs,
+        evidence_retention_days: coordinator.evidence_retention_days,
+        archive_base: coordinator.archive_base.clone(),
+        poll_interval_secs,
+        repo: repo.display().to_string(),
+    }
+}
+
+#[cfg(feature = "github")]
+fn doctor_setup(
+    source: &SourceShell,
+    executor: Option<ExecutorShell>,
+    correspondence: SharedCorrespondence,
+    coordinator: &CoordinatorConfig,
+    poll_interval_secs: u64,
+    source_configured: bool,
+    board: DoctorBoard,
+) -> DoctorReactorSetup {
+    DoctorReactorSetup {
+        source: source_configured.then(|| source.clone()),
+        executor,
+        correspondence: Some(correspondence),
+        store_path: coordinator.store_path.clone(),
+        worktree_base: coordinator.local_worktree_base.clone(),
+        poll_interval_secs,
+        board,
+    }
+}
+
 #[cfg(feature = "github")]
 fn actor_setups(
     github: &GithubConnectionConfig,
@@ -243,13 +339,7 @@ fn actor_setups(
         .map_err(|error| BootError::Other(Box::new(error)))?;
     let executor_correspondence = mounted_correspondence(executor.as_ref(), &correspondence);
     let repo = coordinator.lane_repository();
-    // A testing-featured binary must never `git push` to `origin` — cargo test
-    // forks exactly that binary with its cwd inside the live checkout (#4842).
-    // A local authority's remote is an absolute path, never origin, so the
-    // hermetic publication path is the one this refuse exists to protect.
-    let refuse_origin =
-        (cfg!(any(test, feature = "testing")) || github.uses_fixture()) && !coordinator.uses_local_authority();
-    let pusher = candidate_push_at(refuse_origin, repo.clone(), coordinator.candidate_remote());
+    let (pusher, publish_candidate) = candidate_publication(github, coordinator, repo.clone());
     let doctor_board = DoctorBoard::default();
     let github_poll_interval_secs = github_cadence_secs(coordinator, configured);
 
@@ -278,14 +368,7 @@ fn actor_setups(
             heartbeat_silence_secs: coordinator.heartbeat_silence_secs()?,
             repository: repository.clone(),
             disabled_missing: github.missing_connection_knobs(),
-            // Build shape first, configuration second (#4842). A `testing`-featured
-            // binary must never reach a real `git push` whatever backend it names —
-            // `cargo test` forks exactly such a binary, and five cross-process tests
-            // boot it with no backend env and a cwd inside the real checkout, whose
-            // `origin` is the live repository. Keying on `uses_fixture()` alone left
-            // the guarantee resting on those scenarios happening not to produce an
-            // admitted capture. The `testing` feature is dev-only (no shipping
-            // manifest enables it), so this cannot refuse a real deployment's push.
+            // Same refuse-origin pusher `candidate_publication` selected (#4842).
             pusher: Arc::clone(&pusher),
         },
         land: LandReactorSetup {
@@ -303,42 +386,41 @@ fn actor_setups(
             poll_interval_secs: github_poll_interval_secs,
             repository,
         },
-        claim_release: ClaimReleaseReactorSetup {
-            source: source_configured.then(|| source.clone()),
-            store_path: coordinator.store_path.clone(),
-            poll_interval_secs: github_poll_interval_secs,
-        },
+        claim_release: claim_release_setup(
+            &source,
+            coordinator.store_path.clone(),
+            github_poll_interval_secs,
+            source_configured,
+        ),
+        propose: propose_setup(
+            &correspondence,
+            &pusher,
+            coordinator.store_path.clone(),
+            github_poll_interval_secs,
+            source_configured,
+            publish_candidate,
+        ),
         // Independent of every GitHub knob: the operator channel answers "is
         // anything stuck" whether or not a projection backend is configured,
         // and its only credential is the webhook file.
-        notify: NotifyReactorSetup {
-            sink: webhook_sink(notify),
-            store_path: coordinator.store_path.clone(),
-            milestones: notify.milestones,
-            poll_interval_secs: coordinator.poll_interval_secs,
-        },
-        janitor: JanitorReactorSetup {
-            source: source_configured.then(|| source.clone()),
-            executor: executor.clone(),
-            store_path: coordinator.store_path.clone(),
-            worktree_base: coordinator.local_worktree_base.clone(),
-            target_base: coordinator.lane_target_base.clone(),
-            lane_target_budget_bytes: coordinator.lane_target_budget_bytes,
-            target_scan_interval_secs: coordinator.lane_target_scan_interval_secs,
-            evidence_retention_days: coordinator.evidence_retention_days,
-            archive_base: coordinator.archive_base.clone(),
-            poll_interval_secs: github_poll_interval_secs,
-            repo: repo.display().to_string(),
-        },
-        doctor: DoctorReactorSetup {
-            source: source_configured.then(|| source.clone()),
-            executor: executor.clone(),
-            correspondence: Some(Arc::clone(&correspondence)),
-            store_path: coordinator.store_path.clone(),
-            worktree_base: coordinator.local_worktree_base.clone(),
-            poll_interval_secs: github_poll_interval_secs,
-            board: doctor_board.clone(),
-        },
+        notify: notify_setup(notify, coordinator.store_path.clone(), coordinator.poll_interval_secs),
+        janitor: janitor_setup(
+            &source,
+            executor.clone(),
+            coordinator,
+            github_poll_interval_secs,
+            source_configured,
+            &repo,
+        ),
+        doctor: doctor_setup(
+            &source,
+            executor.clone(),
+            Arc::clone(&correspondence),
+            coordinator,
+            github_poll_interval_secs,
+            source_configured,
+            doctor_board.clone(),
+        ),
         source: SourceSetup { shell: source, claims_enabled: source_configured, mainline: coordinator.mainline() },
         correspondence,
         pusher,
@@ -601,6 +683,7 @@ impl BootableChassis for BloomeryChassis {
             // source shell and its coordinator scalars.
             .with_actor::<LandReactorCapability>(setups.land)
             .with_actor::<ClaimReleaseReactorCapability>(setups.claim_release)
+            .with_actor::<ProposeReactorCapability>(setups.propose)
             // The unattended operator channel (#5166): each tick reads the live
             // view document, differences its loud set against the ledger, and
             // posts what is new to the configured webhook. Mounted disabled

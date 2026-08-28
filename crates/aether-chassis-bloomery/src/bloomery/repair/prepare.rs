@@ -115,12 +115,62 @@ impl Error for PrepareError {
     }
 }
 
-/// Derive the candidate pair from `source`, record both correspondence rows,
-/// and force-push the workpiece's candidate ref.
+/// The candidate pair plus the git commit hex the push half needs.
+///
+/// Split from the ref push so a proposal can record correspondence before a
+/// bloom id exists, then push once the reactor has one.
+#[derive(Clone, Debug)]
+pub struct DerivedCandidate {
+    /// The tree and checkout digests the gate binds.
+    pub candidate: CandidateRef,
+    /// The commit hex `git push` names.
+    pub commit_hex: String,
+}
+
+/// Derive the candidate pair from `source` and record both correspondence rows.
 ///
 /// `repo` is the coordinator's clone — the same cwd the production candidate
 /// pusher shells `git push` from. A worktree source is resolved there so a foreign clone's
 /// `HEAD` is refused rather than pushed as an object this process cannot see.
+///
+/// # Errors
+/// The commit is unreachable, a derived digest collides with a different
+/// object, or the correspondence store faulted.
+pub fn derive_candidate(
+    correspondence: &dyn Correspondence,
+    source: CandidateSource<'_>,
+    repo: &Path,
+) -> Result<DerivedCandidate, PrepareError> {
+    let commit_hex = match source {
+        CandidateSource::Commit(revision) => revision.trim().to_owned(),
+        CandidateSource::Worktree(path) => worktree_head(path)?,
+    };
+    let objects = resolve_commit(repo, &commit_hex, &source_label(source, &commit_hex))?;
+    let candidate =
+        CandidateRef { tree: candidate_tree_digest(&objects.tree), checkout: capture_commit_digest(&objects.commit) };
+    record_unique(correspondence, "tree", &candidate.tree, &objects.tree)?;
+    record_unique(correspondence, "checkout", &candidate.checkout, &objects.commit)?;
+    Ok(DerivedCandidate { candidate, commit_hex: objects.commit_hex })
+}
+
+/// Force-push `commit_hex` to the bloom-keyed candidate ref.
+///
+/// # Errors
+/// The pusher failed.
+pub fn push_candidate(
+    pusher: &dyn CandidatePush,
+    bloom: &BloomId,
+    workpiece: &str,
+    commit_hex: &str,
+) -> Result<(), PrepareError> {
+    let target_ref = candidate_ref_name(bloom, workpiece);
+    pusher.push(commit_hex, &target_ref).map_err(|detail| PrepareError::Push { target_ref, detail })
+}
+
+/// Derive the candidate pair from `source`, record both correspondence rows,
+/// and force-push the workpiece's candidate ref.
+///
+/// The repair door's composition of [`derive_candidate`] and [`push_candidate`].
 ///
 /// # Errors
 /// The commit is unreachable, a derived digest collides with a different
@@ -133,19 +183,9 @@ pub fn prepare_candidate(
     source: CandidateSource<'_>,
     repo: &Path,
 ) -> Result<CandidateRef, PrepareError> {
-    let commit_hex = match source {
-        CandidateSource::Commit(revision) => revision.trim().to_owned(),
-        CandidateSource::Worktree(path) => worktree_head(path)?,
-    };
-    let objects = resolve_commit(repo, &commit_hex, &source_label(source, &commit_hex))?;
-    let candidate =
-        CandidateRef { tree: candidate_tree_digest(&objects.tree), checkout: capture_commit_digest(&objects.commit) };
-    record_unique(correspondence, "tree", &candidate.tree, &objects.tree)?;
-    record_unique(correspondence, "checkout", &candidate.checkout, &objects.commit)?;
-
-    let target_ref = candidate_ref_name(bloom, workpiece);
-    pusher.push(&objects.commit_hex, &target_ref).map_err(|detail| PrepareError::Push { target_ref, detail })?;
-    Ok(candidate)
+    let derived = derive_candidate(correspondence, source, repo)?;
+    push_candidate(pusher, bloom, workpiece, &derived.commit_hex)?;
+    Ok(derived.candidate)
 }
 
 struct ResolvedObjects {
