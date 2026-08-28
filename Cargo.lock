@@ -834,9 +834,11 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-codec",
+ "aether-component",
  "aether-data",
  "aether-fleet",
  "aether-fs",
+ "aether-http",
  "aether-inventory",
  "aether-kinds",
  "aether-rpc",
