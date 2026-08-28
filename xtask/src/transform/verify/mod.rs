@@ -105,7 +105,7 @@ struct VerifyInvocation {
     /// Only `verify.suppress` states one. A member that declines to judge
     /// without a place to send the question would just be a silent pass.
     requested_exit_codes: &'static [i32],
-    /// When set, [`Self::args_under`] appends this flag and the work-order's
+    /// When set, [`Self::scheduled_args`] appends this flag and the work-order's
     /// resolved diff base. The suppression scanner is the one member that
     /// reads a git range, and without this it falls back to `origin/main`.
     diff_base_flag: Option<&'static str>,
@@ -177,34 +177,24 @@ impl VerifyInvocation {
         cmd
     }
 
-    /// The argv this invocation runs under `scope`: the stated workspace-wide
-    /// argv, or that argv with `--workspace` traded for one `-p <crate>` per
-    /// crate in the closure.
+    /// The argv this invocation runs under `scope` and `schedule`.
     ///
-    /// Traded rather than appended, because `--workspace` and `-p` are cargo's
-    /// two spellings of the same choice and a command carrying both selects the
-    /// whole workspace regardless — the run would compile every crate while
-    /// reporting itself as narrowed, which is worse than not narrowing at all.
-    /// `verify.test` states no `--workspace` (nextest's own default is the
-    /// workspace), so there the filter is a no-op and the package flags are the
-    /// whole change.
+    /// The stated workspace-wide argv, or that argv with `--workspace` traded
+    /// for one `-p <crate>` per crate. Traded rather than appended, because
+    /// `--workspace` and `-p` are cargo's two spellings of the same choice and
+    /// a command carrying both selects the whole workspace regardless — the run
+    /// would compile every crate while reporting itself as narrowed. `verify.test`
+    /// states no `--workspace` (nextest's own default is the workspace), so there
+    /// the package flags are the whole change.
     ///
-    /// `diff_base` is the work order's own resolved base — the same value
-    /// [`Scope::resolve`] receives. A member that declares [`Self::diff_base_flag`]
-    /// appends that flag and the base so it scans the candidate's range rather
-    /// than guessing `origin/main` (#5033). Absent, the stated argv is left
-    /// alone: the aggregate verify and a hand-run name no base.
-    fn args_under(&self, scope: &Scope, diff_base: Option<&str>) -> Vec<String> {
-        self.scheduled_args(scope, diff_base, TestSchedule::default())
-    }
-
-    /// [`Self::args_under`] plus the CI scheduling inputs only `verify.test`
-    /// accepts: an explicit package set and a nextest partition (#4883).
+    /// Explicit packages on `schedule` win over a closure's, because they *are*
+    /// the selection — CI's affected step already computed the reverse-dependency
+    /// set. A partition appends; it does not replace. The stated argv stays the
+    /// prefix either way, so `--all-features` cannot drop off a shard.
     ///
-    /// Explicit packages win over a closure's, because they *are* the
-    /// selection — CI's affected step already computed the reverse-dependency
-    /// set. A partition appends; it does not replace. The stated argv stays
-    /// the prefix either way, so `--all-features` cannot drop off a shard.
+    /// `diff_base` is the work order's own resolved base. A member that declares
+    /// [`Self::diff_base_flag`] appends that flag and the base so it scans the
+    /// candidate's range rather than guessing `origin/main` (#5033).
     fn scheduled_args(&self, scope: &Scope, diff_base: Option<&str>, schedule: TestSchedule<'_>) -> Vec<String> {
         let packages = if self.breadth != Breadth::Closure {
             None
@@ -798,7 +788,7 @@ pub(super) const VERIFY_MEMBER: &str = "verify.member";
 /// The typed id of the whole-workspace base verify. Same
 /// [`verify_check_members`] fan-out as [`VERIFY_CHECK`], but closure resolution
 /// is skipped: with an empty candidate range `Scope::resolve` yields an empty
-/// package set and `args_under` would strip `--workspace` while adding no `-p`,
+/// package set and `scheduled_args` would strip `--workspace` while adding no `-p`,
 /// reporting green over nothing.
 pub(super) const VERIFY_BASE: &str = "verify.base";
 
@@ -1418,7 +1408,7 @@ fn replay_package(test: &str) -> Option<&str> {
 /// to the failing test's own package when the binary-id names one, plus the
 /// nextest filter that selects that test.
 ///
-/// Mirrors [`VerifyInvocation::args_under`]: `--workspace` is dropped rather
+/// Mirrors [`VerifyInvocation::scheduled_args`]: `--workspace` is dropped rather
 /// than left beside `-p`, because cargo treats the pair as the whole workspace.
 /// An unresolvable binary id keeps the unnarrowed argv — building too much is
 /// slow, building the wrong crate is a [`ReplayVerdict::Unreached`].
@@ -2712,7 +2702,7 @@ fn check_pass(args: &TransformArgs, logs: &Path, position: Position) -> Result<C
     let cache = sccache::detect();
     let peak = peak_memory::detect();
     // A whole-workspace run skips closure resolution: `Scope::resolve` of an
-    // empty candidate range yields no packages, and `args_under` would then
+    // empty candidate range yields no packages, and `scheduled_args` would then
     // strip `--workspace` while adding no `-p`.
     let closure = if full {
         None
@@ -3178,7 +3168,7 @@ mod tests {
         let scope = closure_scope(&["aether-chassis-bloomery", "aether-math"]);
 
         let clippy = verify_command("verify.clippy").expect("verify.clippy mapped");
-        let args = clippy.args_under(&scope, None);
+        let args = clippy.scheduled_args(&scope, None, TestSchedule::default());
         assert!(
             !args.contains(&String::from("--workspace")),
             "the workspace flag would re-select everything: {args:?}"
@@ -3211,7 +3201,7 @@ mod tests {
         // default — so there the package flags are the entire narrowing.
         let test = verify_command("verify.test").expect("verify.test mapped");
         assert_eq!(
-            test.args_under(&scope, None),
+            test.scheduled_args(&scope, None, TestSchedule::default()),
             [owned(test.args), owned(&["-p", "aether-chassis-bloomery", "-p", "aether-math"])].concat(),
         );
     }
@@ -3282,7 +3272,11 @@ mod tests {
 
         for id in ["verify.fmt", "verify.dup", "verify.deps", "verify.suppress"] {
             let invocation = verify_command(id).expect("member mapped");
-            assert_eq!(invocation.args_under(&scope, None), owned(invocation.args), "{id} must not narrow");
+            assert_eq!(
+                invocation.scheduled_args(&scope, None, TestSchedule::default()),
+                owned(invocation.args),
+                "{id} must not narrow"
+            );
             assert_eq!(member_scope_notice(&invocation, &scope), None, "{id} must not claim a closure it ignored");
         }
     }
@@ -3446,7 +3440,7 @@ mod tests {
         for &id in verify_check_members() {
             let invocation = verify_command(id).expect("member mapped");
             assert_eq!(
-                invocation.args_under(&scope, None),
+                invocation.scheduled_args(&scope, None, TestSchedule::default()),
                 owned(invocation.args),
                 "{id} must dispatch its stated argv"
             );
@@ -3484,11 +3478,11 @@ mod tests {
         assert_eq!(suppress.args, &["scripts/check-suppressions.py"]);
         assert_eq!(suppress.diff_base_flag, Some("--base"));
         assert_eq!(
-            suppress.args_under(&Scope::resolve(None), Some("abc123def")),
+            suppress.scheduled_args(&Scope::resolve(None), Some("abc123def"), TestSchedule::default()),
             owned(&["scripts/check-suppressions.py", "--base", "abc123def"]),
         );
         assert_eq!(
-            suppress.args_under(&Scope::resolve(None), None),
+            suppress.scheduled_args(&Scope::resolve(None), None, TestSchedule::default()),
             owned(&["scripts/check-suppressions.py"]),
             "no work-order base leaves the stated argv, so the script keeps its own default",
         );
@@ -3514,7 +3508,7 @@ mod tests {
         let base = member_diff_base(SUPPRESS_MEMBER, None, true);
         assert_eq!(base, Some(BASE_SET_SUBJECT), "a base-set suppression scan names the tree it stands on");
         assert_eq!(
-            suppress.args_under(&Scope::resolve(None), base),
+            suppress.scheduled_args(&Scope::resolve(None), base, TestSchedule::default()),
             owned(&["scripts/check-suppressions.py", "--base", BASE_SET_SUBJECT]),
         );
 

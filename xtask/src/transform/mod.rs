@@ -645,6 +645,7 @@ mod tests {
         verify::{MemberOutcome, MemberRun, stated_requests, verify_findings},
     };
     use clap::Parser;
+    use std::iter::once;
 
     #[test]
     fn evidence_assembly_carries_status_nonce_and_exit_code() {
@@ -853,7 +854,7 @@ mod tests {
     }
 
     fn parse_transform(argv: &[&str]) -> TransformArgs {
-        Probe::try_parse_from(std::iter::once("transform").chain(argv.iter().copied()))
+        Probe::try_parse_from(once("transform").chain(argv.iter().copied()))
             .unwrap_or_else(|error| panic!("{error}"))
             .args
     }
