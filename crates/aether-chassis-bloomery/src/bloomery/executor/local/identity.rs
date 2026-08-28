@@ -116,19 +116,29 @@ impl ProcessIdentity {
     /// after the group is observed gone — a signal that was sent is not
     /// evidence the child died.
     pub fn terminate_group(&self) -> Result<(), LocalExecutorError> {
-        if self.pgid == 0 {
-            return Err(unterminated("refusing to signal process group 0"));
-        }
-        signal_group(self.pgid, "-TERM")?;
-        if wait_until_group_gone(self) {
-            return Ok(());
-        }
-        signal_group(self.pgid, "-KILL")?;
-        if wait_until_group_gone(self) {
-            return Ok(());
-        }
-        Err(unterminated(format!("process group {} is still alive after SIGKILL", self.pgid)))
+        terminate_pgid(self.pgid)
     }
+}
+
+/// Signal process group `pgid` and wait until no member remains.
+///
+/// The live-child teardown path names the group by the head pid
+/// (`process_group(0)` at spawn), even when that head is already a zombie and
+/// cannot be observed. A pid-only kill would leave harness grandchildren in
+/// the group, reparented to init.
+pub fn terminate_pgid(pgid: u32) -> Result<(), LocalExecutorError> {
+    if pgid == 0 {
+        return Err(unterminated("refusing to signal process group 0"));
+    }
+    signal_group(pgid, "-TERM")?;
+    if wait_until_pgid_gone(pgid) {
+        return Ok(());
+    }
+    signal_group(pgid, "-KILL")?;
+    if wait_until_pgid_gone(pgid) {
+        return Ok(());
+    }
+    Err(unterminated(format!("process group {pgid} is still alive after SIGKILL")))
 }
 
 /// The worktree `HEAD` a dispatch started on, recorded beside its evidence so
@@ -250,10 +260,10 @@ fn signal_group(pgid: u32, signal: &str) -> Result<(), LocalExecutorError> {
     Ok(())
 }
 
-fn wait_until_group_gone(identity: &ProcessIdentity) -> bool {
+fn wait_until_pgid_gone(pgid: u32) -> bool {
     let deadline = Instant::now() + GROUP_EXIT_BUDGET;
     loop {
-        if !group_is_live(identity) {
+        if !any_process_in_group(pgid) {
             return true;
         }
         if Instant::now() >= deadline {
@@ -261,13 +271,6 @@ fn wait_until_group_gone(identity: &ProcessIdentity) -> bool {
         }
         thread::sleep(Duration::from_millis(20));
     }
-}
-
-fn group_is_live(identity: &ProcessIdentity) -> bool {
-    if identity.attach().is_some() {
-        return true;
-    }
-    any_process_in_group(identity.pgid)
 }
 
 fn any_process_in_group(pgid: u32) -> bool {
