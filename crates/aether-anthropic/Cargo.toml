@@ -3,6 +3,7 @@ name = "aether-anthropic"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # ADR-0050 `aether.anthropic` provider vocabulary, reimplemented by ADR-0159
 # (issues #3891 / #3893) as a wasm guest component. Owns the mail kinds

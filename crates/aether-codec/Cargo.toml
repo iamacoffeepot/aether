@@ -3,6 +3,7 @@ name = "aether-codec"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # Schema-driven encode + decode of agent-supplied JSON params against
 # `aether_data::SchemaType` descriptors. ADR-0019 made every

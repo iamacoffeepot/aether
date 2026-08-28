@@ -3,6 +3,7 @@ name = "aether-chassis-desktop"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # The desktop chassis (issue #3812): winit window + wgpu render + cpal
 # audio. Produces the `aether-desktop` binary over the shared

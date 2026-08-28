@@ -3,6 +3,7 @@ name = "aether-mcp-derive"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # The `#[mcp::router]` / `#[mcp::tool]` / `#[mcp::reply]` proc macros for the
 # tool-authoring surface over the `aether.mcp.server` capability. A leaf below

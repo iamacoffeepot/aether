@@ -3,6 +3,7 @@ name = "aether-chassis-headless"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # The headless chassis (issue #3811): std-timer tick driver, no GPU, no
 # window — the fleet engine the hub forks. Produces the

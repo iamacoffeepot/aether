@@ -3,6 +3,7 @@ name = "aether-process"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # ADR-0157 `aether.process` one-shot exec capability. Owns the full stack: the
 # mail kinds (`kinds` — `Run` / `RunResult` / `ProcessError`, owned in-crate per

@@ -3,6 +3,7 @@ name = "aether-fleet"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # `aether.fleet` — the engine-management capability cluster, extracted by the
 # arc that dissolved the capabilities monolith (iamacoffeepot/aether#3735). Owns the `FleetProxy` (one outbound RPC

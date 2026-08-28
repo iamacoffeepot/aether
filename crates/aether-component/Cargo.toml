@@ -3,6 +3,7 @@ name = "aether-component"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # `aether.component` wasm-component-lifecycle capability (ADR-0022,
 # ADR-0038, ADR-0122), extracted by the arc that dissolved the capabilities

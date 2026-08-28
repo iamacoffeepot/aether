@@ -3,6 +3,7 @@ name = "aether-test-fixtures-behavior"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # Behavior-script fixtures for the #2688 end-to-end gate (ADR-0137). Each
 # `[[example]]` is one `cdylib` behavior script authored against the

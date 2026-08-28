@@ -3,6 +3,7 @@ name = "aether-kit-workbench"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # The terrain-annotation workbench extracted from `aether-kit`
 # (iamacoffeepot/aether#3953). It is the top-of-stack assembly crate: the one

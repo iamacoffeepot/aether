@@ -3,6 +3,7 @@ name = "aether-chassis-harness"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # The harness chassis (issue #3813): the standalone binary form of the
 # in-process SubstrateHarness — a loopback-driven chassis for

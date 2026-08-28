@@ -3,6 +3,7 @@ name = "aether-behavior-derive"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # Proc-macro home for `#[behavior]` (ADR-0137). Kept separate from
 # `aether-behavior` because a proc-macro crate must opt into

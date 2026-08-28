@@ -3,6 +3,7 @@ name = "aether-harness-bloomery"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # `BloomeryHarness` — the coordinator scenario harness (issue 5332), promoted
 # from `aether-chassis-bloomery`'s tests tree so any crate can take it as a

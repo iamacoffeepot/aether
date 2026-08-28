@@ -3,6 +3,7 @@ name = "aether-harness-perf"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # Perf-comparison tooling over the substrate harness (issue #3814;
 # iamacoffeepot/aether#1077). `aether-perf-trial` runs one latency sweep and

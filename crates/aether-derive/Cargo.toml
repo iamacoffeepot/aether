@@ -3,6 +3,7 @@ name = "aether-derive"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # Engine-wide derive macros that don't fit the actor or data
 # categories. The `Config` derive (ADR-0090 unit g, issue 1264)

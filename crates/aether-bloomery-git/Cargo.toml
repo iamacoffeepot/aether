@@ -3,6 +3,7 @@ name = "aether-bloomery-git"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
 # The port traits (`SourceBackend`) and the value vocabulary (`Digest`,

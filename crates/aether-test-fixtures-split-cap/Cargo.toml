@@ -3,6 +3,7 @@ name = "aether-test-fixtures-split-cap"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # ADR-0123 struct-hosted split-cap fixture: `#[actor(singleton)]` on the
 # capability struct in `src/lib.rs` (the always-on identity) plus

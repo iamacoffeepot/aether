@@ -3,6 +3,7 @@ name = "aether-chassis-hub"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # The hub chassis (issue #3810): the thin coordinator between
 # aether-mcp and the substrate fleet. Stands up trace dispatch, the

@@ -3,6 +3,7 @@ name = "aether-bloomery"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [lib]
 # A pure rlib: the canonical value vocabulary, the pure reducer, and the
