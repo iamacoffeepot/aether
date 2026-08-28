@@ -883,15 +883,13 @@ impl RunProcess for ChildProcess {
     }
 
     fn kill(&mut self) -> Result<(), LocalExecutorError> {
-        // The spawn put this child in its own process group so teardown can
-        // signal the lane *and* the harness grandchildren it forked. Signalling
-        // the head pid alone leaves those grandchildren reparented to init.
+        // The spawn put this child in its own process group (`process_group(0)`,
+        // so pid is pgid). Teardown signals that group rather than the head
+        // pid: a harness grandchild inherits the group, and observing the head
+        // first skipped group terminate when the head was already a zombie.
         #[cfg(unix)]
-        if let Some(identity) = super::identity::ProcessIdentity::observe(self.child.id()) {
-            identity.terminate_group()?;
-            self.child.wait().map_err(LocalExecutorError::Io)?;
-            return Ok(());
-        }
+        super::identity::terminate_pgid(self.child.id())?;
+        #[cfg(not(unix))]
         self.child.kill().map_err(LocalExecutorError::Io)?;
         // Reap so the killed child does not linger as a zombie; a reap fault is a
         // real failure folded into the returned error, not silently swallowed.
@@ -1721,23 +1719,27 @@ mod tests {
     #[test]
     fn killing_a_lane_child_terminates_its_grandchildren() {
         // Tripwire: spawn isolates the lane in its own process group, but
-        // teardown used to signal only the head pid. A harness grandchild
-        // inherits the group and survives `Child::kill`, reparented to init.
-        let child = super::spawn_isolated(Command::new("sh").args(["-c", "sleep 60 & exec sleep 60"])).unwrap();
-        let identity = super::super::identity::ProcessIdentity::observe(child.id()).expect("the head is live");
-        let pgid = identity.pgid;
+        // teardown used to signal only the head pid — and skip group terminate
+        // when the head had already exited (`observe` returns None for a
+        // zombie). A harness grandchild inherits the group and survives,
+        // reparented to init.
+        let child = super::spawn_isolated(Command::new("sh").args(["-c", "sleep 60 & exit 0"])).unwrap();
+        let pgid = child.id();
         let _guard = GroupGuard(pgid);
 
         let deadline = Instant::now() + Duration::from_secs(2);
-        let mut members = 0;
+        let mut leftover = 0;
+        let mut grandchild_only = false;
         while Instant::now() < deadline {
-            members = count_group(pgid);
-            if members >= 2 {
+            leftover = count_group(pgid);
+            let head_gone = super::super::identity::ProcessIdentity::observe(pgid).is_none();
+            if head_gone && leftover >= 1 {
+                grandchild_only = true;
                 break;
             }
             thread::sleep(Duration::from_millis(20));
         }
-        assert!(members >= 2, "the head must have spawned a grandchild in its group, found {members}");
+        assert!(grandchild_only, "the head must have exited leaving a grandchild in its group, found {leftover}");
 
         let mut process = super::ChildProcess { child };
         process.kill().expect("group terminate reports success");
