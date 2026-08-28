@@ -23,6 +23,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 use aether_bloomery::{BackendObjectId, DEFAULT_HTTP_PORT, Digest, KeyId, OperatorProposal, Outcome, digest_of};
+use aether_bloomery_git::command::run_ok;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 
@@ -581,9 +582,8 @@ fn resolve_proposal_candidate(args: &ProposeArgs) -> Result<aether_bloomery::Can
     let (repo, revision) = match (&args.from_commit, &args.from_worktree) {
         (Some(commit), None) => (PathBuf::from("."), commit.clone()),
         (None, Some(path)) => {
-            let head =
-                aether_bloomery_git::command::run_ok(path, &["rev-parse", "--verify", "--end-of-options", "HEAD"])
-                    .with_context(|| format!("could not read HEAD of {}", path.display()))?;
+            let head = run_ok(path, &["rev-parse", "--verify", "--end-of-options", "HEAD"])
+                .with_context(|| format!("could not read HEAD of {}", path.display()))?;
             (path.clone(), head)
         }
         _ => bail!("propose needs exactly one of --from-commit or --from-worktree"),
@@ -593,13 +593,11 @@ fn resolve_proposal_candidate(args: &ProposeArgs) -> Result<aether_bloomery::Can
 
 fn candidate_from_revision(repo: &Path, revision: &str) -> Result<aether_bloomery::CandidateRef> {
     let commit_peel = format!("{revision}^{{commit}}");
-    let commit_hex =
-        aether_bloomery_git::command::run_ok(repo, &["rev-parse", "--verify", "--end-of-options", &commit_peel])
-            .with_context(|| format!("commit `{revision}` is not reachable"))?;
+    let commit_hex = run_ok(repo, &["rev-parse", "--verify", "--end-of-options", &commit_peel])
+        .with_context(|| format!("commit `{revision}` is not reachable"))?;
     let tree_peel = format!("{commit_hex}^{{tree}}");
-    let tree_hex =
-        aether_bloomery_git::command::run_ok(repo, &["rev-parse", "--verify", "--end-of-options", &tree_peel])
-            .with_context(|| format!("tree of `{commit_hex}` is not reachable"))?;
+    let tree_hex = run_ok(repo, &["rev-parse", "--verify", "--end-of-options", &tree_peel])
+        .with_context(|| format!("tree of `{commit_hex}` is not reachable"))?;
     Ok(aether_bloomery::CandidateRef {
         tree: candidate_tree_digest(&object_id(&tree_hex)?),
         checkout: capture_commit_digest(&object_id(&commit_hex)?),

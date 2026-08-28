@@ -7,7 +7,7 @@
 use super::seal::active_unlanded_bloom;
 use super::{Decision, Decisions, Outcome, ProposalError, Snapshot};
 use crate::digest::{Digest, digest_of};
-use crate::values::{EvidenceKind, OperatorProposal};
+use crate::values::{Evidence, EvidenceKind, OperatorProposal};
 
 /// Reduce an operator proposal ([`crate::Fact::ProposeChange`]).
 ///
@@ -15,11 +15,7 @@ use crate::values::{EvidenceKind, OperatorProposal};
 /// that is not an approval, or that binds a digest other than this proposal's,
 /// is refused rather than warned about: journal write access is not
 /// authorization to write the day's branch.
-pub(super) fn reduce_propose(
-    snapshot: &Snapshot,
-    proposal: &OperatorProposal,
-    authorization: &crate::values::Evidence,
-) -> Decisions {
+pub(super) fn reduce_propose(snapshot: &Snapshot, proposal: &OperatorProposal, authorization: &Evidence) -> Decisions {
     let rejected = |error: ProposalError| Decisions::rejected(Outcome::ProposalRejected(error));
 
     if !stated(&proposal.reason) {
@@ -37,12 +33,10 @@ pub(super) fn reduce_propose(
     }
 
     let mut effects = alloc::vec![Decision::QueueProposal { proposal: proposal.clone() }];
-    let offered = if let Some(offer) = offer_queued_proposal(snapshot, Some(proposal), snapshot.mainline) {
+    let offered = offer_queued_proposal(snapshot, Some(proposal), snapshot.mainline).is_some_and(|offer| {
         effects.push(offer);
         true
-    } else {
-        false
-    };
+    });
 
     Decisions { outcome: Outcome::ProposalQueued { proposal: digest, offered }, effects }
 }
@@ -84,7 +78,7 @@ fn stated(text: &str) -> bool {
 mod tests {
     use super::{offer_after_land, reduce_propose};
     use crate::digest::{Digest, digest_of};
-    use crate::ids::IdempotencyKey;
+    use crate::ids::{IdempotencyKey, WorkpieceId};
     use crate::reduce::{BloomStatus, Decision, Event, Fact, Outcome, ProposalError, Snapshot, reduce};
     use crate::values::{
         BloomDraft, CandidateRef, ConfigRegistry, Evidence, EvidenceKind, Membership, OperatorProposal,
@@ -109,7 +103,7 @@ mod tests {
 
     fn membership(name: &str) -> Membership {
         let mut member = Membership {
-            workpiece: crate::ids::WorkpieceId(name.into()),
+            workpiece: WorkpieceId(name.into()),
             scope_revision: digest(10),
             configs: ConfigRegistry::default(),
             approval: Evidence { subject: digest(0), kind: EvidenceKind::Approval, detail: digest(200) },

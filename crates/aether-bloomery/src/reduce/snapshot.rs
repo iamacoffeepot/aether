@@ -1561,13 +1561,16 @@ impl Snapshot {
             // is the withdrawal row `apply_withdrawal_effect` writes. A refusal
             // is inert here for a fourth: `record_refusals` folds it over the
             // whole effect set, because it is keyed by gate or by member and
-            // pairs with the dispatch that clears it.
+            // pairs with the dispatch that clears it. A proposal offer is inert
+            // for a fifth: sealing is the propose reactor's, and the queue row
+            // is `QueueProposal`.
             Decision::RedispatchStage { .. }
             | Decision::DispatchOrphanClaimRelease { .. }
             | Decision::DispatchBaseVerify { .. }
             | Decision::CancelDispatch { .. }
             | Decision::ReleaseMemberClaimRef { .. }
-            | Decision::RecordRefusal { .. } => {}
+            | Decision::RecordRefusal { .. }
+            | Decision::DispatchProposal { .. } => {}
             Decision::RecordBaseReceipt { .. } => self.apply_base_verify_effect(effect),
             Decision::RecordOrphanClaimRelease { request, target, completion } => {
                 // Opening the record and completing it write the same entry, so
@@ -1631,10 +1634,6 @@ impl Snapshot {
             Decision::QueueProposal { .. } | Decision::DequeueProposal { .. } => {
                 self.apply_proposal_queue_effect(effect);
             }
-            // Snapshot-inert: sealing is the propose reactor's, and the queue
-            // row is `QueueProposal`. A topic of its own would need this
-            // decision to carry work the reducer cannot perform.
-            Decision::DispatchProposal { .. } => {}
         }
     }
 
