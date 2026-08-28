@@ -428,10 +428,9 @@ mod tests {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.github/workflows");
         for entry in fs::read_dir(&dir).expect("the workflows directory is the declared surface") {
             let path = entry.expect("workflow directory entries are readable").path();
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if name == "ci.yml" || !(name.ends_with(".yml") || name.ends_with(".yaml")) {
+            let workflow =
+                path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("yml") || ext.eq_ignore_ascii_case("yaml"));
+            if path.file_name().is_some_and(|name| name == "ci.yml") || !workflow {
                 continue;
             }
             let text = fs::read_to_string(&path).unwrap_or_else(|err| {
