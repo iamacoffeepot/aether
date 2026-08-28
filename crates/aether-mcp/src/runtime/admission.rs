@@ -43,7 +43,7 @@ pub struct RateLimiter {
 fn millis_per_minute() -> f64 {
     // Exact in binary floating point, so the conversion introduces no rounding
     // the refill arithmetic would then carry.
-    #[allow(clippy::cast_precision_loss)]
+    #[allow(clippy::cast_precision_loss)] // aether-suppression-request: exact-in-binary constant conversion
     let millis = MILLIS_PER_MINUTE as f64;
     millis
 }
@@ -63,7 +63,7 @@ impl RateLimiter {
     pub fn admit(&mut self, now_millis: u64) -> Result<(), u64> {
         let elapsed = now_millis.saturating_sub(self.last_millis);
         self.last_millis = now_millis;
-        #[allow(clippy::cast_precision_loss)]
+        #[allow(clippy::cast_precision_loss)] // aether-suppression-request: elapsed-millis refill arithmetic; loss starts past 2^53 millis
         let refill = elapsed as f64 * self.tokens_per_milli;
         self.tokens = (self.tokens + refill).min(self.burst);
 
@@ -78,7 +78,7 @@ impl RateLimiter {
         if self.tokens_per_milli <= 0.0 {
             return Err(MILLIS_PER_MINUTE);
         }
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // aether-suppression-request: ceil of a bounded positive wait, clamped to at least 1
         Err((((1.0 - self.tokens) / self.tokens_per_milli).ceil() as u64).max(1))
     }
 }
@@ -176,7 +176,7 @@ impl DeadlineTimer {
 
         // A timer below the mail layer: it carries wakes *in*, so it has no
         // inbound chain to inherit and no settlement umbrella to join.
-        #[allow(clippy::disallowed_methods)]
+        #[allow(clippy::disallowed_methods)] // aether-suppression-request: infra deadline timer below the mail layer; no inbound chain to inherit
         let thread = thread::Builder::new()
             .name("aether-mcp-deadlines".to_string())
             .spawn(move || run_timer(&queue_for_thread, &shutdown_for_thread, &mailer, self_id, epoch))

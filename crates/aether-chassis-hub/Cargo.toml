@@ -17,7 +17,7 @@ publish = false
 # type. `clap` escapes the same fate only because `cli.rs` also names it
 # directly.
 [package.metadata.cargo-machete]
-ignored = ["confique"]
+ignored = ["confique"] # aether-suppression-request: used only through derive(Config)'s emitted layer type, invisible to machete's source scan
 
 [[bin]]
 name = "aether-hub"

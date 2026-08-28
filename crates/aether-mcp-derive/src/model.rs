@@ -63,7 +63,7 @@ impl Host {
 /// over them, resolved once during parsing.
 // The protocol defines exactly these four annotation fields. Folding them into
 // an enum would invent a vocabulary neither the wire nor the attribute has.
-#[allow(clippy::struct_excessive_bools)]
+#[allow(clippy::struct_excessive_bools)] // aether-suppression-request: the protocol's own four annotation booleans, not a state machine
 #[derive(Clone, Copy)]
 pub struct Hints {
     pub read_only: bool,

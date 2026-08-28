@@ -17,10 +17,10 @@
 
 // The fixture is a deliberate embedder: it builds a bare `TestChassis` through
 // `Builder::new` rather than the composed boot seam a production chassis uses.
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods)] // aether-suppression-request: fixture embeds a bare TestChassis via Builder::new
 // A tool method's return form is the authoring contract the macro parses, so a
 // tool whose body cannot fail still declares `Result<Output, ToolError>`.
-#![allow(clippy::unnecessary_wraps)]
+#![allow(clippy::unnecessary_wraps)] // aether-suppression-request: tool authoring contract declares Result even for infallible bodies
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};

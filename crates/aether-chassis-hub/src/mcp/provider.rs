@@ -17,7 +17,7 @@
 // context and the decoded reply arrive owned, and a mapping declares
 // `Result<Output, ToolError>` even where its own body cannot fail, because
 // the macro binds it to a tool whose deferred sibling can.
-#![allow(clippy::needless_pass_by_value, clippy::unnecessary_wraps)]
+#![allow(clippy::needless_pass_by_value, clippy::unnecessary_wraps)] // aether-suppression-request: router authoring contract - owned params, Result-wrapped replies
 
 use aether_actor::{Manual, actor};
 use aether_fleet::FleetServer;

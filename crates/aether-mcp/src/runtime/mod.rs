@@ -21,7 +21,7 @@
 // `#[handler]` methods take their decoded payload by value per the ADR-0033
 // dispatch ABI; the macro-generated trampoline owns the decoded bytes so
 // callers can't see references.
-#![allow(clippy::needless_pass_by_value)]
+#![allow(clippy::needless_pass_by_value)] // aether-suppression-request: ADR-0033 dispatch ABI hands handlers their decoded payload by value
 
 pub mod admission;
 pub mod registry;

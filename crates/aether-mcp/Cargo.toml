@@ -32,7 +32,7 @@ publish = false
 # which emits a `#[derive(clap::Args)]` overlay and a `#[derive(confique::Config)]`
 # layer under the optional `runtime` feature.
 [package.metadata.cargo-machete]
-ignored = ["clap", "confique"]
+ignored = ["clap", "confique"] # aether-suppression-request: used only through derive(Config)'s emitted overlays under the runtime feature
 
 # ADR-0122 identity/runtime split, as the design's feature layout states it:
 # the kinds, the resolved configuration domain struct, and the schema

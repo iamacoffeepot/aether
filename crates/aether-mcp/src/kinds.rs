@@ -31,7 +31,7 @@ pub const SERVER_NAMESPACE: &str = "aether.mcp.server";
 // The four booleans are the protocol's own four annotation fields, named and
 // numbered by the specification. Folding them into enums or a state machine
 // would invent a vocabulary the wire does not have.
-#[allow(clippy::struct_excessive_bools)]
+#[allow(clippy::struct_excessive_bools)] // aether-suppression-request: the protocol's own four annotation booleans, not a state machine
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToolAnnotations {
     /// The tool performs no state change.

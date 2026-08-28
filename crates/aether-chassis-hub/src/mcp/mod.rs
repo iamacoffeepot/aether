@@ -8,7 +8,7 @@
 //! composes it.
 //!
 //! The layout mirrors Bloomery's routed-capability shape one level down:
-//! [`provider`] is the actor — the single `#[mcp::router]` implementation
+//! `provider` is the actor — the single `#[mcp::router]` implementation
 //! carrying every `#[mcp::tool]` method and its reply mapping — and a sibling
 //! module per tool group owns that group's boundary types and the pure
 //! projections its mappers delegate to. Today there is one group,

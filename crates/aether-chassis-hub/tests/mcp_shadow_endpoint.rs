@@ -23,7 +23,7 @@
 // The fixture is a deliberate embedder: it builds a bare `TestChassis` through
 // `Builder::new` rather than the composed boot seam `HubChassis` uses, because
 // that chassis' driver blocks on a shutdown signal.
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods)] // aether-suppression-request: fixture embeds a bare TestChassis via Builder::new; the composed boot seam blocks on shutdown
 
 use std::fmt::Write as _;
 use std::fs;
