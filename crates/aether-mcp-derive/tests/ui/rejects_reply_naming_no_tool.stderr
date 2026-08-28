@@ -1,0 +1,5 @@
+error: #[mcp::reply] names `never_declared`, which is not a #[mcp::tool] method on this impl
+  --> tests/ui/rejects_reply_naming_no_tool.rs:25:18
+   |
+25 |     #[mcp::reply(Reply, tool = never_declared)]
+   |                  ^^^^^

@@ -92,6 +92,13 @@ aether-fs = { path = "../aether-fs", default-features = false }
 aether-inventory = { path = "../aether-inventory", default-features = false }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
+# The `#[mcp::router]` / `#[mcp::tool]` / `#[mcp::reply]` proc macros,
+# re-exported from this crate's root. Unconditional and always-on, like
+# `aether-http`'s dependency on its own derive sibling: a provider that takes
+# this crate `default-features = false` to *declare* tools needs the macros as
+# much as a hosted chassis does. Proc-macro crates are host-compiled, so the
+# edge leaves a wasm build unaffected.
+aether-mcp-derive = { path = "../aether-mcp-derive" }
 # ADR-0121/ADR-0123: the `#[actor(singleton, root)]` identity on
 # `McpServerCapability`, the `#[runtime]` dispatch attribute on its runtime
 # impl, and the `Manual` / `HandlesKind` vocabulary the deferred tool surface

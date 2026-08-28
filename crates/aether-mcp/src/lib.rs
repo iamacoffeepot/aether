@@ -60,6 +60,14 @@ pub use configuration::McpServerConfiguration;
 pub use kinds::*;
 pub use tool::{Context, Outcome};
 
+// The tool-authoring macros, re-exported beside the runtime types they compile
+// down to — a provider writes `#[mcp::router]` / `#[mcp::tool]` /
+// `#[mcp::reply]` next to `mcp::Context` / `mcp::Outcome` / `mcp::ToolError`.
+// `tool` names both a module and an attribute macro here; they occupy
+// different namespaces, so `mcp::tool::Context` and `#[mcp::tool]` both
+// resolve.
+pub use aether_mcp_derive::{reply, router, tool};
+
 // The kind types the struct-hosted `#[actor]` below lifts out of the runtime
 // module must resolve at *this* file's root: the harvest reads `runtime/mod.rs`
 // off disk and emits one `HandlesKind<K>` marker per handler against the

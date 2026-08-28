@@ -841,6 +841,7 @@ dependencies = [
  "aether-http",
  "aether-inventory",
  "aether-kinds",
+ "aether-mcp-derive",
  "aether-rpc",
  "aether-substrate",
  "aether-trace",
@@ -863,6 +864,16 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "aether-mcp-derive"
+version = "0.3.0-alpha"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+ "trybuild",
 ]
 
 [[package]]
