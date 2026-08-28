@@ -518,6 +518,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process;
+    use std::slice::from_ref;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use aether_bloomery_git::command;
@@ -595,7 +596,7 @@ mod tests {
         // a review seat and train it to skip the channel.
         let weave = symbol("weave_the_lattice", "crates/demo/src/lib.rs");
         let table = Table::new(vec![symbol("digest", "crates/aether-bloomery/src/digest.rs"), weave.clone()]);
-        let (collisions, dossiers) = classify(std::slice::from_ref(&weave), &normalized_index(&table));
+        let (collisions, dossiers) = classify(from_ref(&weave), &normalized_index(&table));
         assert!(collisions.is_empty(), "a unique name does not collide");
         assert!(dossiers.is_empty(), "and has no related neighbour");
         assert!(
