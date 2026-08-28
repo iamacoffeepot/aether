@@ -92,10 +92,13 @@ pub use reactor::{
     IntegrateReactorSetup, IntegrateReactorState, IntegrateTick, JanitorPolicy, JanitorReactorCapability,
     JanitorReactorSetup, JanitorReactorState, JanitorTick, LandReactorCapability, LandReactorSetup, LandReactorState,
     LandTick, ListArchive, ListArchiveResult, MirrorReactorCapability, MirrorReactorSetup, MirrorReactorState,
-    SweepReport, SweepRequest, TargetScan, WorkingRefPruner, archive_pass, sweep,
+    ProposeReactorCapability, ProposeReactorSetup, ProposeReactorState, ProposeTick, SweepReport, SweepRequest,
+    TargetScan, WorkingRefPruner, archive_pass, sweep,
 };
 #[cfg(feature = "github")]
-pub use repair::{CandidateSource, PrepareError, prepare_candidate};
+pub use repair::{
+    CandidateSource, DerivedCandidate, PrepareError, derive_candidate, prepare_candidate, push_candidate,
+};
 pub use repair::{candidate_tree_digest, capture_commit_digest};
 #[cfg(feature = "github")]
 pub use replica::{SourceReplicaShell, github_push_url, writer_marker_present};

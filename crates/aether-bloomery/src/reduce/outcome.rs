@@ -9,8 +9,9 @@ use super::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,
     AggregateVerifyError, AttemptCompletedError, BaseReverifyError, Decision, FoldConflictError, GrantAttemptsError,
     HostFaultError, IntegrateError, LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError,
-    NarrowCompositionError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ResolveError, SealError,
-    SpliceError, SupersedeError, SuppressionDispositionError, SurfaceRequestedError, VerifyFailedError, WithdrawError,
+    NarrowCompositionError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ProposalError,
+    ResolveError, SealError, SpliceError, SupersedeError, SuppressionDispositionError, SurfaceRequestedError,
+    VerifyFailedError, WithdrawError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -800,6 +801,19 @@ pub enum Outcome {
     /// A base re-verify was refused. Appended last so every prior outcome keeps
     /// its wire discriminant.
     BaseReverifyRejected(BaseReverifyError),
+    /// An operator proposal was queued, and offered to seal if the board was
+    /// clear (ADR-0205). Appended so every prior outcome keeps its wire
+    /// discriminant.
+    ProposalQueued {
+        /// The proposal's content digest — the handle the operator reads back.
+        proposal: Digest,
+        /// Whether a [`crate::Topic::Proposal`] row went out for the queue
+        /// head. `false` means a bloom is walking and the proposal waits.
+        offered: bool,
+    },
+    /// An operator proposal was refused. Appended so every prior outcome keeps
+    /// its wire discriminant.
+    ProposalRejected(ProposalError),
 }
 
 impl Outcome {
@@ -822,6 +836,7 @@ impl Outcome {
                 | Self::WithdrawRejected(_)
                 | Self::SuppressionRejected(_)
                 | Self::BaseReverifyRejected(_)
+                | Self::ProposalRejected(_)
         )
     }
 }

@@ -42,10 +42,10 @@ use aether_bloomery::control::{
     ClaimResult, ClaimSeal, Commit, CommitResult, CompleteReleaseResult, DispatchPayload, EnumerateClaims,
     EnumerateClaimsResult, HealOp, IntegratePayload, LandPayload, LoadConfigs, LoadConfigsResult,
     MemberClaimReleasePayload, MembershipMutation, MetricsQuery, MetricsQueryResult, MetricsView, ObserveMainline,
-    ObserveMainlineResult, OrphanClaimReleasePayload, OutboxPayload, Query, QueryResult, QuerySelector, ReconcileOp,
-    RedispatchPayload, ReplayJournal, ReplayJournalResult, ReviewPass, SpendQuery, SpendQueryResult, SplicePayload,
-    Topic, TransferSeal, held_to_seal_error, held_to_supersede_error, plan_heals, reconcile_op, release_seal_mail,
-    seal_claim_mail, transfer_seal_mail,
+    ObserveMainlineResult, OrphanClaimReleasePayload, OutboxPayload, ProposalPayload, Query, QueryResult,
+    QuerySelector, ReconcileOp, RedispatchPayload, ReplayJournal, ReplayJournalResult, ReviewPass, SpendQuery,
+    SpendQueryResult, SplicePayload, Topic, TransferSeal, held_to_seal_error, held_to_supersede_error, plan_heals,
+    reconcile_op, release_seal_mail, seal_claim_mail, transfer_seal_mail,
 };
 use aether_bloomery::{
     BloomId, BloomStatus, CalibrationDocument, CalibrationLedger, ClaimRefKind, ClaimRefState, DAYS_CAP, Decision,
@@ -1431,7 +1431,8 @@ fn event_bloom(event: &Event) -> Option<BloomId> {
         | Fact::CompleteOrphanClaimRelease { .. }
         | Fact::SurfaceOverlap { .. }
         | Fact::BaseVerifyCompleted { .. }
-        | Fact::BaseReverify(_) => None,
+        | Fact::BaseReverify(_)
+        | Fact::ProposeChange { .. } => None,
     }
 }
 
@@ -1544,7 +1545,10 @@ fn collect_decision_blooms(effect: &Decision, into: &mut BTreeSet<BloomId>) {
         | Decision::DispatchOrphanClaimRelease { .. }
         | Decision::RecordSpendQuiesce { .. }
         | Decision::RecordBaseReceipt { .. }
-        | Decision::DispatchBaseVerify { .. } => {}
+        | Decision::DispatchBaseVerify { .. }
+        | Decision::QueueProposal { .. }
+        | Decision::DequeueProposal { .. }
+        | Decision::DispatchProposal { .. } => {}
     }
 }
 
@@ -1708,6 +1712,10 @@ fn outbox_payload_bytes(effect: &Decision) -> Result<Option<Vec<u8>>, WireError>
                 BaseVerifyPayload { base: *base, transformation: transformation.clone(), profile: profile.clone() };
             Some(to_vec(&payload)?)
         }
+        Decision::DispatchProposal { proposal, base } => {
+            let payload = ProposalPayload { proposal: proposal.clone(), base: *base };
+            Some(to_vec(&payload)?)
+        }
         Decision::CancelDispatch { bloom, workpiece } => {
             let payload = CancelDispatchPayload { bloom: bloom.0, workpiece: workpiece.clone() };
             Some(to_vec(&payload)?)
@@ -1756,7 +1764,9 @@ fn outbox_payload_bytes(effect: &Decision) -> Result<Option<Vec<u8>>, WireError>
         | Decision::RecordWithdrawal { .. }
         | Decision::MarkBloomWithdrawn { .. }
         | Decision::RecordAggregateGatePass { .. }
-        | Decision::RecordRefusal { .. } => None,
+        | Decision::RecordRefusal { .. }
+        | Decision::QueueProposal { .. }
+        | Decision::DequeueProposal { .. } => None,
     })
 }
 

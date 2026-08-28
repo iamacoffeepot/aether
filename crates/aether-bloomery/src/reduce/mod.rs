@@ -43,6 +43,7 @@ mod operator;
 mod operator_hold;
 mod orphan_claim;
 mod outcome;
+mod propose;
 mod readiness;
 mod review;
 mod seal;
@@ -62,9 +63,9 @@ pub use error::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError,
     AttemptCompletedError, BaseMismatch, BaseReverifyError, FoldConflictError, GrantAttemptsError, HostFaultError,
     IntegrateError, LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError,
-    NarrowCompositionError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ResolveError,
-    SealConflict, SealError, SpliceError, SupersedeError, SuppressionDispositionError, SurfaceRequestedError,
-    VerifyFailedError, WithdrawError,
+    NarrowCompositionError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ProposalError,
+    ResolveError, SealConflict, SealError, SpliceError, SupersedeError, SuppressionDispositionError,
+    SurfaceRequestedError, VerifyFailedError, WithdrawError,
 };
 pub use event::{Event, Fact};
 pub use gate::{
@@ -98,6 +99,7 @@ use observe::{reduce_observe_mainline, reduce_observe_mainline_diverged};
 use operator::{reduce_operator_adjudication, reduce_operator_repair};
 use operator_hold::{reduce_operator_hold, reduce_operator_release};
 use orphan_claim::{reduce_complete_orphan_claim_release, reduce_request_orphan_claim_release};
+use propose::reduce_propose;
 use readiness::reduce_splice_assembled;
 use review::{reduce_aggregate_review_completed, reduce_aggregate_review_executor_fault};
 use seal::{reduce_seal, reduce_supersede, reduce_surface_overlap};
@@ -211,6 +213,7 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         Fact::CompositionNarrowed { bloom, verified, tree, head, evidence, attribution } => {
             reduce_composition_narrowed(snapshot, bloom, verified, *tree, *head, evidence, attribution)
         }
+        Fact::ProposeChange { proposal, authorization } => reduce_propose(snapshot, proposal, authorization),
         // Retired: the journal holds grants the machinery decided before a
         // widening became an operator's decision, and those records replay
         // through their own recorded decisions (ADR-0190) rather than through

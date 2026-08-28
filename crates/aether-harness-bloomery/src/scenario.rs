@@ -149,6 +149,19 @@ pub enum OperatorMove {
         /// at, and what the containment check reads its surface out of.
         scope_revision: Digest,
     },
+    /// [`aether_bloomery::Fact::ProposeChange`] — a signed operator change
+    /// waiting for a clear board (ADR-0205). Appended for the reason the
+    /// harness's other additions are appended.
+    Propose {
+        /// Tick index.
+        at_tick: u32,
+        /// The tree the operator is handing in, and the commit carrying it.
+        candidate: CandidateRef,
+        /// Why.
+        reason: String,
+        /// Who.
+        operator: String,
+    },
 }
 
 impl Scenario {

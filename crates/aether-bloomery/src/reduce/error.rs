@@ -816,3 +816,25 @@ pub enum BaseReverifyError {
     /// beside one already in flight, or spent a build to re-answer a green.
     NotRed,
 }
+
+/// Why an operator proposal was refused (ADR-0205).
+///
+/// A door that admitted an unsigned or wrongly-signed proposal would make
+/// journal write access sufficient to write the day's branch, which is the
+/// authorization the ADR replaces.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum ProposalError {
+    /// The proposal states no reason. Refused rather than defaulted: a write
+    /// onto the day's branch is an act no verdict produced, so a record of it
+    /// that says nothing is the whole failure.
+    BlankReason,
+    /// The proposal names no operator, so the record would not say who asked.
+    BlankOperator,
+    /// The authorization is not an [`EvidenceKind::Approval`](crate::EvidenceKind::Approval).
+    /// An unsigned proposal is not a proposal.
+    NotAnApproval,
+    /// The authorization binds a digest other than the proposal's own. A
+    /// signature over a different request is not authorization to write this
+    /// one.
+    SubjectMismatch,
+}

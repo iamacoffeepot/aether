@@ -10,9 +10,9 @@ use super::Endpoint;
 use super::dto::{
     ApprovalStoredView, BloomView, CancelCommissionRequest, CommissionCancelledView, CommissionReopenedView,
     CommissionShowView, ConfigRequest, ConfigValueView, ConfigView, DraftPatch, DraftView, JournalEntry, JournalView,
-    OutcomeView, ReopenCommissionRequest, RepairRequest, RetryRequest, ReverifyBaseRequest, RevisionEvidence,
-    ScopeRevisionWrittenView, SealRequest, SupersedeRequest, SuppressionAnswerRequest, WithdrawRequest,
-    WriteRevisionRequest,
+    OutcomeView, ProposeRequest, ReopenCommissionRequest, RepairRequest, RetryRequest, ReverifyBaseRequest,
+    RevisionEvidence, ScopeRevisionWrittenView, SealRequest, SupersedeRequest, SuppressionAnswerRequest,
+    WithdrawRequest, WriteRevisionRequest,
 };
 use super::http;
 use super::plan::spec_id;
@@ -100,6 +100,11 @@ impl<'a> Client<'a> {
     /// ordinary gates judge it (#4957).
     pub fn repair(&self, bloom_id: &str, workpiece: &str, request: &RepairRequest) -> Result<OutcomeView> {
         self.send("POST", &format!("/blooms/{bloom_id}/members/{workpiece}/repair"), request)
+    }
+
+    /// Propose a signed operator change onto the day's branch (ADR-0205).
+    pub fn propose(&self, request: &ProposeRequest) -> Result<OutcomeView> {
+        self.send("POST", "/proposals", request)
     }
 
     /// Answer the suppression requests a member's candidate is carrying

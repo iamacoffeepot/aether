@@ -382,6 +382,41 @@ pub struct RepairRequest {
     pub idempotency_key: Option<String>,
 }
 
+/// `POST /proposals` body — the operator change the coordinator will write
+/// (ADR-0205).
+///
+/// Name exactly one source, the same one-of-three [`RepairRequest`] uses.
+/// `authorization` is the author signature over the proposal's digest; the
+/// route verifies it before admitting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposeRequest {
+    /// The candidate the operator already recorded. Required unless `from_commit`
+    /// or `from_worktree` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<CandidateRef>,
+    /// A commit reachable from the coordinator's repository. The chassis
+    /// derives the candidate and records correspondence; the propose reactor
+    /// pushes the ref once the bloom id exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_commit: Option<String>,
+    /// A worktree whose `HEAD` is a commit the coordinator's repository can
+    /// already see. Resolved, then treated as `from_commit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_worktree: Option<String>,
+    /// Why the operator is asking the coordinator to write this. Required and
+    /// non-blank.
+    pub reason: String,
+    /// Who proposed it. Required and non-blank.
+    pub operator: String,
+    /// The author signature over the proposal's digest, minted at
+    /// [`crate::AuthorityDoor::Propose`].
+    pub authorization: Statement,
+    /// Override the admit idempotency key; defaults to the proposal's own
+    /// content, so a resend is a duplicate rather than a second queue entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
 /// `POST /blooms/{id}/hold` and `POST /blooms/{id}/release` body — the operator
 /// brake (#4976).
 ///

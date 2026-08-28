@@ -36,8 +36,8 @@ use crate::bloomery::{
     DoctorReactorSetup, ExecutorReactorCapability, ExecutorReactorSetup, ExecutorShell, GithubConnectionConfig,
     IntegrateReactorCapability, IntegrateReactorSetup, JanitorReactorCapability, JanitorReactorSetup,
     LandReactorCapability, LandReactorSetup, LaneProgram, MirrorReactorCapability, MirrorReactorSetup, NotifyConfig,
-    NotifyReactorCapability, NotifyReactorSetup, ProjectionShell, SourceReplicaShell, SourceShell, candidate_push_at,
-    github_push_url, webhook_sink,
+    NotifyReactorCapability, NotifyReactorSetup, ProjectionShell, ProposeReactorCapability, ProposeReactorSetup,
+    SourceReplicaShell, SourceShell, candidate_push_at, github_push_url, webhook_sink,
 };
 use crate::control::{ControlCore, ControlSetup};
 use crate::session::{SessionConfig, SessionPoolCapability};
@@ -109,6 +109,7 @@ struct BloomeryActorSetups {
     land: LandReactorSetup,
     integrate: IntegrateReactorSetup,
     claim_release: ClaimReleaseReactorSetup,
+    propose: ProposeReactorSetup,
     notify: NotifyReactorSetup,
     janitor: JanitorReactorSetup,
     doctor: DoctorReactorSetup,
@@ -307,6 +308,13 @@ fn actor_setups(
             source: source_configured.then(|| source.clone()),
             store_path: coordinator.store_path.clone(),
             poll_interval_secs: github_poll_interval_secs,
+        },
+        propose: ProposeReactorSetup {
+            correspondence: source_configured.then(|| Arc::clone(&correspondence)),
+            pusher: source_configured.then(|| Arc::clone(&pusher)),
+            store_path: coordinator.store_path.clone(),
+            poll_interval_secs: github_poll_interval_secs,
+            publish_candidate: !refuse_origin,
         },
         // Independent of every GitHub knob: the operator channel answers "is
         // anything stuck" whether or not a projection backend is configured,
@@ -601,6 +609,7 @@ impl BootableChassis for BloomeryChassis {
             // source shell and its coordinator scalars.
             .with_actor::<LandReactorCapability>(setups.land)
             .with_actor::<ClaimReleaseReactorCapability>(setups.claim_release)
+            .with_actor::<ProposeReactorCapability>(setups.propose)
             // The unattended operator channel (#5166): each tick reads the live
             // view document, differences its loud set against the ledger, and
             // posts what is new to the configured webhook. Mounted disabled
