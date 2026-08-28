@@ -36,7 +36,7 @@ pub fn schedule_restart(mailer: &Arc<Mailer>, cap_mailbox: MailboxId, token: u64
     // An infra timer below the mail layer, like the proxy's heartbeat
     // sidecar: it fires one wake-mail and exits, with no inbound chain to
     // inherit and so no settlement umbrella to honor.
-    #[allow(clippy::disallowed_methods)] // aether-suppression-request: infra timer below the mail layer; one wake-mail then exits
+    #[allow(clippy::disallowed_methods)] // aether-suppression-request: infra timer; one wake-mail then exits
     let spawned = thread::Builder::new().name("aether-fleet-restart".into()).spawn(move || {
         thread::sleep(backoff);
         mailer.push(Mail::new(cap_mailbox, due_kind, EngineRestartDue { token }.encode_into_bytes(), 1));
