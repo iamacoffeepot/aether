@@ -1,5 +1,0 @@
-error: tool `deferring` returns mcp::Outcome, so exactly one #[mcp::reply] must map its terminal reply; a deferred call with no mapping never answers
-  --> tests/ui/rejects_missing_terminal_mapping.rs:21:8
-   |
-21 |     fn deferring(&mut self, _context: Context<'_, ()>, _input: Input) -> Outcome<Output> {
-   |        ^^^^^^^^^

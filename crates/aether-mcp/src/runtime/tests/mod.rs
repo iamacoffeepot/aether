@@ -7,7 +7,6 @@
 //! would only make this suite slower to run and harder to trust.
 
 mod admission;
-mod derive;
 mod projection;
 mod registry;
 mod response_resources;

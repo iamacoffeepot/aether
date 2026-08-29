@@ -1,5 +1,0 @@
-error: tool `deferring` already has a mapping for this reply kind
-  --> tests/ui/rejects_repeated_terminal_mapping.rs:30:18
-   |
-30 |     #[mcp::reply(Reply, tool = deferring)]
-   |                  ^^^^^
