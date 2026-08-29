@@ -33,8 +33,8 @@ use aether_chassis_bloomery::store::{
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, mailbox_id_from_path};
-use common::Coordinator;
 use common::client::{call, spawn_and_connect};
+use common::{Coordinator, Ingress};
 use serde::Serialize;
 
 /// How long a fork has to come up and answer a handshake, across however many
@@ -296,4 +296,36 @@ fn a_completed_order_is_admitted_after_replay_not_as_unknown_bloom() {
         !matches!(decided.outcome, Outcome::AttemptCompletedRejected(_)),
         "the completion was decided against the restored bloom, not refused: {decided:?}"
     );
+}
+
+// The overlap the journal holder guard exists to prevent, across two real
+// processes. The plausible bug: the store's open path ran the migrations
+// unconditionally and asked nothing about who else was already here, so a
+// supervisor restart that overlapped the outgoing process — or an operator
+// starting a second coordinator by hand — silently folded one journal from two
+// generations. WAL lets both of them write; only this guard says no.
+#[test]
+fn a_second_coordinator_refuses_a_journal_the_first_still_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("bloomery.db");
+    let db = db.to_str().unwrap();
+
+    let (holder, holder_stream) = spawn_ready(db);
+
+    // Deliberately not `spawn_and_connect`: this fork is supposed to die, and
+    // the retrying helper would keep re-forking it until its budget ran out.
+    let overlapping = Coordinator::spawn(0, &[("AETHER_STORE_PATH", db)]);
+    let refusal = overlapping
+        .await_port(Ingress::Rpc, Instant::now() + HANDSHAKE_BUDGET)
+        .expect_err("a second coordinator must not come up against a held journal");
+    assert!(refusal.contains(&holder.pid().to_string()), "the refusal names the holding pid: {refusal}");
+    assert!(refusal.contains(db), "the refusal names the journal it was kept out of: {refusal}");
+    drop(overlapping);
+
+    // The holder is SIGKILLed, so it releases nothing. Its claim is stale, not
+    // a lock: the next generation takes the journal over rather than being
+    // shut out of it by its own predecessor's crash.
+    drop(holder_stream);
+    holder.kill9();
+    let (_restarted, _stream) = spawn_ready(db);
 }
