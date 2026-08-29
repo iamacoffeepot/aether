@@ -87,6 +87,7 @@
   - [Driving a bloom over the REST control API](recipes/bloomery-rest-api.md)
   - [Amending a member's declared surface](recipes/amending-a-declared-surface.md)
   - [Supervising the coordinator with systemd](recipes/supervising-the-coordinator.md)
+  - [Supervising the hub with systemd](recipes/supervising-the-hub.md)
   - [Debugging a hung settlement](recipes/debugging-a-hung-settlement.md)
 
 # Testing and verification
