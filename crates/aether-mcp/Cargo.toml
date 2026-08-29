@@ -47,13 +47,7 @@ ignored = ["clap", "confique"] # aether-suppression-request: used only through d
 # and a marker-only guest needs neither.
 [features]
 default = ["runtime"]
-runtime = [
-    "aether-component/runtime",
-    "dep:aether-http",
-    "dep:aether-substrate",
-    "dep:clap",
-    "dep:confique",
-]
+runtime = ["dep:aether-substrate", "dep:clap", "dep:confique"]
 client = []
 
 [[bin]]
@@ -93,23 +87,6 @@ aether-fs = { path = "../aether-fs", default-features = false }
 aether-inventory = { path = "../aether-inventory", default-features = false }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
-# ADR-0121/ADR-0123: the `#[actor(singleton, root)]` identity on
-# `McpServerCapability`, the `#[runtime]` dispatch attribute on its runtime
-# impl, and the `Manual` / `HandlesKind` vocabulary the deferred tool surface
-# names. Always-on and wasm-safe, like `aether-http`'s own dependency on it —
-# the identity tier must compile without the substrate.
-aether-actor = { path = "../aether-actor" }
-# The design's authoring contract resolves a deferred tool's recipient against
-# the *component host's* carry rather than the caller's, so one `defer` call
-# site addresses both a native root cap and an embedded component
-# (`aether-http`'s `defer.rs` is the grounded precedent). `default-features =
-# false` keeps the marker tier free of wasmtime; `runtime` forwards it.
-aether-component = { path = "../aether-component", default-features = false }
-# The endpoint is a `POST /mcp` route registered with `HttpServerCapability`
-# through `#[http::router]` — no socket code belongs to this crate. Optional
-# because only the runtime half names it; the marker-and-vocabulary tier does
-# not have an HTTP boundary.
-aether-http = { path = "../aether-http", optional = true }
 # The `runtime` half of the owned library. Today it carries only the
 # `#[derive(aether_substrate::Config)]` codegen on `McpServerConfiguration`
 # (ADR-0090); the server actor follows in the runtime slice. Optional so the
@@ -152,6 +129,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+# The `#[actor]` attribute macro for the `tools.rs` test module's
+# `RouteInventorySink` loopback fixture (issue 2672) — a `#[cfg(test)]`
+# native actor at the `aether.fleet` mailbox that answers the harness's
+# `engine = Some` `aether.inventory.kinds` refresh RPC locally, so the
+# field-mismatch refresh-and-retry path is exercised end-to-end without a
+# forked substrate. Test builds only; out of the production graph.
+aether-actor = { path = "../aether-actor" }
 # iamacoffeepot/aether#2517: `features = ["test-support"]` exposes the
 # canonical `aether_substrate::testing` fixture (`TestChassis`) the
 # `tools.rs` test module boots against. Dev-dependency feature unification

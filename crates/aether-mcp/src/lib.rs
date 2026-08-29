@@ -30,16 +30,12 @@
 //!
 //! ## What this slice does not contain
 //!
-//! The `aether-mcp-derive` authoring macros (`#[mcp::tool]` /
-//! `#[mcp::router]` / `#[mcp::reply]`) and the strict stateless client belong
-//! to later steps. The module surface below is shaped for those consumers: the
-//! protocol layer parses and renders, and never dispatches; the runtime layer
-//! decides, and never parses HTTP off a socket.
-
-// ADR-0131's self-alias pattern: the `#[http::router]` macro emits absolute
-// `::aether_mcp::…` paths for the support types it names, and this crate uses
-// its own tool surface in the runtime half.
-extern crate self as aether_mcp;
+//! The `McpServerCapability` identity, the tool/resource registries, the
+//! response-resource store, the `aether-mcp-derive` authoring macros
+//! (`#[mcp::tool]` / `#[mcp::router]` / `#[mcp::reply]`), and the strict
+//! stateless [`client`](https://modelcontextprotocol.io) all belong to later
+//! steps. The module surface below is shaped for those consumers: the
+//! protocol layer parses and renders, and never dispatches.
 
 // The library half is additive to the `rmcp` binaries in this package; the
 // binary modules (`args`, `reverse`, `rpc`, `tools`) stay bin-private and are
@@ -48,7 +44,6 @@ extern crate self as aether_mcp;
 pub mod configuration;
 pub mod kinds;
 pub mod schema;
-pub mod tool;
 
 // The message model is the shared vocabulary of the server actor and the
 // strict stateless client. A marker-only provider declaring tools needs
@@ -58,43 +53,3 @@ pub mod protocol;
 
 pub use configuration::McpServerConfiguration;
 pub use kinds::*;
-pub use tool::{Context, Outcome};
-
-// The kind types the struct-hosted `#[actor]` below lifts out of the runtime
-// module must resolve at *this* file's root: the harvest reads `runtime/mod.rs`
-// off disk and emits one `HandlesKind<K>` marker per handler against the
-// identity, naming each kind unqualified. The `#[http::route]` method in that
-// impl is deliberately absent from this list — the HTTP macro expands after the
-// harvest and its minted route kind is stamped dynamically at dispatch
-// (ADR-0131), so the identity lifts no marker for it.
-// The capability's own kinds arrive through the `pub use kinds::*` above; only
-// the two it borrows from `aether-kinds` need naming here.
-use aether_kinds::MonitorNotice;
-use aether_kinds::trace::Settled;
-
-/// `aether.mcp.server` capability **identity** (ADR-0122 identity/runtime
-/// split, ADR-0123 struct-hosted form).
-///
-/// A zero-sized type carrying only the addressing: `Addressable`, one
-/// `HandlesKind` marker per handler, and the name-inventory entry, all emitted
-/// against this struct by `#[actor]` from the sibling `runtime` module read off
-/// disk. The state-bearing half — the tool and resource registries, the
-/// admission counters, the pending-call table, the ephemeral response store —
-/// lives behind the one `feature = "runtime"` gate below, so a provider that
-/// only declares tools can address `McpServerCapability` without pulling the
-/// substrate through.
-///
-/// It owns no socket. The endpoint is one `#[http::route(any, "/mcp")]`
-/// registered with `HttpServerCapability`, so every listener concern — bind
-/// address, body ceiling, connection limits — belongs to that capability's
-/// configuration rather than this one's.
-#[aether_actor::actor(singleton, root)]
-pub struct McpServerCapability;
-
-// The runtime half — the whole `aether_substrate`-typed surface — lives in the
-// `runtime/` submodule, gated once here.
-#[cfg(feature = "runtime")]
-mod runtime;
-
-#[cfg(feature = "runtime")]
-pub use runtime::McpServerState;

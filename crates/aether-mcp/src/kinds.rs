@@ -327,26 +327,3 @@ impl From<ToolError> for ToolInvocationResult {
         Self::Err { category: error.category, message: error.message }
     }
 }
-
-/// The capability's own deadline wake — not part of the public vocabulary.
-///
-/// One runtime-owned timer thread keeps a deadline heap for every deferred
-/// operation and posts this back to the capability's mailbox when the earliest
-/// one comes due; it never touches actor state itself. `generation` is what
-/// stops a reused pending-table slot from accepting a stale timer event: a
-/// correlation that completed and whose slot was refilled carries a newer
-/// generation, so the old wake finds a mismatch and does nothing.
-///
-/// It is a `Kind` because the timer reaches the actor the only way anything
-/// reaches an actor — by mail. It is `#[doc(hidden)]` because nothing outside
-/// this capability may send it: an external sender could otherwise expire
-/// another caller's in-flight tool call.
-#[doc(hidden)]
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy)]
-#[kind(name = "aether.mcp.server.request_deadline_elapsed")]
-pub struct RequestDeadlineElapsed {
-    /// Correlation of the pending operation whose deadline came due.
-    pub correlation_id: u64,
-    /// Which occupant of that pending slot the deadline was armed for.
-    pub generation: u64,
-}
