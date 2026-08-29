@@ -11,14 +11,6 @@ publish = false
 # Produces the `aether-hub` binary; the shared composition
 # layer comes from `aether-chassis`.
 
-# cargo-machete (the CI unused-deps gate) scans source without expanding
-# macros, so `confique` reads as unused: it is named only by the paths
-# `#[derive(aether_substrate::Config)]` emits for `McpEndpointConfig`'s layer
-# type. `clap` escapes the same fate only because `cli.rs` also names it
-# directly.
-[package.metadata.cargo-machete]
-ignored = ["confique"] # aether-suppression-request: used only through derive(Config)'s emitted layer type, invisible to machete's source scan
-
 [[bin]]
 name = "aether-hub"
 path = "src/bin/hub.rs"
@@ -38,19 +30,6 @@ aether-substrate = { path = "../aether-substrate" }
 # (aether-chassis), so the hub no longer depends on aether-trace directly.
 aether-fleet = { path = "../aether-fleet" }
 aether-rpc = { path = "../aether-rpc" }
-# The shadow Model Context Protocol endpoint (design migration step 4): the
-# HTTP capability that carries `POST /mcp` into the protocol capability, and
-# the protocol capability itself. The hub's tool provider is authored against
-# `aether-mcp`'s `#[mcp::router]` / `#[mcp::tool]` macros and its `Context` /
-# `Outcome` / `ToolError` vocabulary, all re-exported from that crate root.
-aether-http = { path = "../aether-http" }
-aether-mcp = { path = "../aether-mcp" }
-# `#[actor(singleton, root)]` on the tool provider and the `Manual` reply-mode
-# marker its deferred tool methods name.
-aether-actor = { path = "../aether-actor" }
-# `frame::max_frame_size()` — the installed wire ceiling the composer clamps
-# the protocol server's provider-wire ceiling against.
-aether-codec = { path = "../aether-codec" }
 # `HubCli` flattens the `SettlementOverlay` for the hub's own teardown-budget
 # knob (`--settlement-cap-secs`), resolved off its source stack.
 aether-harness-substrate = { path = "../aether-harness-substrate" }
@@ -60,14 +39,7 @@ aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
 # The bin parses `HubCli` (ADR-0090 unit d) and bridges boot faults.
 clap = { workspace = true }
-# ADR-0090 unit g: `#[derive(aether_substrate::Config)]` on `McpEndpointConfig`
-# emits a `confique::Config` layer beside the domain struct, so the derive's
-# emitted paths need the crate reachable here.
-confique = { workspace = true }
 anyhow = { workspace = true }
-# The tool provider's boundary input / output types derive the workspace wire
-# serialization beside `aether_data::Schema`.
-serde = { workspace = true, features = ["derive", "std"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
 
 # The hub blocks on a SIGINT/SIGTERM signal in
@@ -82,18 +54,8 @@ ctrlc = "3"
 [dev-dependencies]
 # The binary-store proof (relocated from the bundle, #3812) drives the
 # real hub -> RPC -> engines-cap stack over FleetHarness and resolves
-# both uploaded chassis binaries through the dist manifest. The shadow
-# Model Context Protocol endpoint test reuses its isolated-store helper
-# rather than growing a second temp-directory convention.
+# both uploaded chassis binaries through the dist manifest.
 aether-harness-fleet = { path = "../aether-harness-fleet" }
-# `features = ["test-support"]` exposes `aether_substrate::testing`
-# (`TestChassis` / `fresh_substrate`), the passive-chassis fixture the shadow
-# endpoint boots over — the real hub driver blocks on a shutdown signal.
-# Dev-dependency feature unification applies to test builds only.
-aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
-# The shadow endpoint test speaks JSON-RPC over a real socket, so it builds
-# and reads protocol messages as JSON.
-serde_json = { workspace = true }
 
 [lints]
 workspace = true
