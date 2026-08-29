@@ -1,5 +1,0 @@
-error: tool name `same_name` is declared twice on this impl
-  --> tests/ui/rejects_duplicate_tool_name.rs:25:24
-   |
-25 |     #[mcp::tool(name = "same_name", description = "The second claim.")]
-   |                        ^^^^^^^^^^^

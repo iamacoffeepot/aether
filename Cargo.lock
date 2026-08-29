@@ -329,24 +329,17 @@ dependencies = [
 name = "aether-chassis-hub"
 version = "0.3.0-alpha"
 dependencies = [
- "aether-actor",
  "aether-chassis",
- "aether-codec",
  "aether-data",
  "aether-fleet",
  "aether-harness-fleet",
  "aether-harness-substrate",
- "aether-http",
  "aether-kinds",
- "aether-mcp",
  "aether-rpc",
  "aether-substrate",
  "anyhow",
  "clap",
- "confique",
  "ctrlc",
- "serde",
- "serde_json",
  "signal-hook 0.4.4",
  "tracing",
 ]
@@ -720,24 +713,18 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-codec",
- "aether-component",
  "aether-data",
  "aether-fleet",
  "aether-fs",
- "aether-http",
  "aether-inventory",
  "aether-kinds",
- "aether-mcp-derive",
  "aether-rpc",
  "aether-substrate",
  "aether-trace",
  "anyhow",
  "axum",
  "base64",
- "clap",
- "confique",
  "futures-util",
- "inventory",
  "libc",
  "png",
  "reqwest",
@@ -750,16 +737,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
-]
-
-[[package]]
-name = "aether-mcp-derive"
-version = "0.3.0-alpha"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
- "trybuild",
 ]
 
 [[package]]

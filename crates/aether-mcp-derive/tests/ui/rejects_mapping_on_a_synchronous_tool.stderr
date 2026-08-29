@@ -1,5 +1,0 @@
-error: tool `immediate` returns Result, so it answers inside its own dispatcher and takes no #[mcp::reply] mapping
-  --> tests/ui/rejects_mapping_on_a_synchronous_tool.rs:21:8
-   |
-21 |     fn immediate(&mut self, _context: Context<'_, ()>, _input: Input) -> Result<Output, ToolError> {
-   |        ^^^^^^^^^

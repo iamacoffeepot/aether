@@ -1,5 +1,0 @@
-error: a #[mcp::tool] method must return `Result<Output, mcp::ToolError>` or `mcp::Outcome<Output>`
-  --> tests/ui/rejects_unsupported_tool_return.rs:21:76
-   |
-21 |     fn bare_output(&mut self, _context: Context<'_, ()>, _input: Input) -> Output {
-   |                                                                            ^^^^^^

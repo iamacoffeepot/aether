@@ -1,5 +1,0 @@
-error: #[mcp::router] does not support a generic impl block: the minted sibling kinds are concrete types and could not be named per instantiation
-  --> tests/ui/rejects_generic_impl.rs:10:5
-   |
-10 | impl<T> Actor for Provider<T> {
-   |     ^
