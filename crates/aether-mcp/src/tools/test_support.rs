@@ -69,7 +69,7 @@ pub(super) struct AddressRouteLoopbackParams {
     pub(super) mailbox_id: MailboxId,
     pub(super) canonical_path: String,
     pub(super) calls: Arc<Mutex<Vec<RouteEnvelope>>>,
-    pub(super) replies: Arc<Mutex<VecDeque<TerrainRouteReply>>>,
+    pub(super) replies: Arc<Mutex<VecDeque<ScriptedRouteReply>>>,
 }
 
 /// Routed-engine double for address-boundary tests. It returns a caller-chosen
@@ -79,7 +79,7 @@ pub(super) struct AddressRouteSink {
     mailbox_id: MailboxId,
     canonical_path: String,
     calls: Arc<Mutex<Vec<RouteEnvelope>>>,
-    replies: Arc<Mutex<VecDeque<TerrainRouteReply>>>,
+    replies: Arc<Mutex<VecDeque<ScriptedRouteReply>>>,
     mailer: Arc<Mailer>,
 }
 
@@ -156,17 +156,17 @@ impl NativeActor for AddressRouteSink {
     }
 }
 
-/// One dynamically-typed reply event emitted by [`TerrainRouteSink`].
+/// One dynamically-typed reply event emitted by [`ScriptedRouteSink`].
 #[derive(Clone)]
-pub(super) struct TerrainReplyEvent {
+pub(super) struct ScriptedReplyEvent {
     pub(super) kind: KindId,
     pub(super) payload: Vec<u8>,
 }
 
 /// Scripted outcome for one non-inventory terrain request.
 #[derive(Clone)]
-pub(super) struct TerrainRouteReply {
-    pub(super) events: Vec<TerrainReplyEvent>,
+pub(super) struct ScriptedRouteReply {
+    pub(super) events: Vec<ScriptedReplyEvent>,
     pub(super) settle: bool,
 }
 
@@ -174,28 +174,28 @@ pub(super) struct TerrainRouteReply {
 /// descriptors come only from `inventory`; request envelopes and reply bytes
 /// remain opaque so the test never copies the kit's Rust wire vocabulary.
 #[derive(Clone)]
-pub(super) struct TerrainRouteLoopbackParams {
+pub(super) struct ScriptedRouteLoopbackParams {
     inventory: ListKindsResult,
     calls: Arc<Mutex<Vec<RouteEnvelope>>>,
-    replies: Arc<Mutex<VecDeque<TerrainRouteReply>>>,
+    replies: Arc<Mutex<VecDeque<ScriptedRouteReply>>>,
 }
 
-pub(super) struct TerrainRouteSink {
+pub(super) struct ScriptedRouteSink {
     inventory: ListKindsResult,
     calls: Arc<Mutex<Vec<RouteEnvelope>>>,
-    replies: Arc<Mutex<VecDeque<TerrainRouteReply>>>,
+    replies: Arc<Mutex<VecDeque<ScriptedRouteReply>>>,
     mailer: Arc<Mailer>,
 }
 
 #[actor(singleton, root)]
-impl NativeActor for TerrainRouteSink {
+impl NativeActor for ScriptedRouteSink {
     // ADR-0156 §3: the canned replies + shared capture cells are construction
     // wiring, not operator config, so they ride the `Params` channel.
     type Config = ();
-    type Params = TerrainRouteLoopbackParams;
+    type Params = ScriptedRouteLoopbackParams;
     const NAMESPACE: &'static str = "aether.fleet";
 
-    fn init((): (), params: TerrainRouteLoopbackParams, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+    fn init((): (), params: ScriptedRouteLoopbackParams, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self { inventory: params.inventory, calls: params.calls, replies: params.replies, mailer: ctx.mailer() })
     }
 
@@ -209,8 +209,8 @@ impl NativeActor for TerrainRouteSink {
             #[allow(clippy::disallowed_methods)]
             // test double mirrors the engine answer expected by legacy terrain assertions
             let mailbox_id = mailbox_id_from_path(&request.address);
-            TerrainRouteReply {
-                events: vec![TerrainReplyEvent {
+            ScriptedRouteReply {
+                events: vec![ScriptedReplyEvent {
                     kind: ResolveAddressResult::ID,
                     payload: ResolveAddressResult::Ok { mailbox_id, canonical_path: request.address }
                         .encode_into_bytes(),
@@ -218,8 +218,8 @@ impl NativeActor for TerrainRouteSink {
                 settle: true,
             }
         } else if mail.kind == ListKinds::ID {
-            TerrainRouteReply {
-                events: vec![TerrainReplyEvent {
+            ScriptedRouteReply {
+                events: vec![ScriptedReplyEvent {
                     kind: ListKindsResult::ID,
                     payload: self.inventory.encode_into_bytes(),
                 }],
@@ -230,7 +230,7 @@ impl NativeActor for TerrainRouteSink {
                 .lock()
                 .expect("terrain replies mutex is never poisoned")
                 .pop_front()
-                .unwrap_or(TerrainRouteReply { events: Vec::new(), settle: true })
+                .unwrap_or(ScriptedRouteReply { events: Vec::new(), settle: true })
         };
         if mail.kind != ResolveAddress::ID {
             self.calls.lock().expect("terrain calls mutex is never poisoned").push(mail);
@@ -465,7 +465,7 @@ pub(super) fn boot_hub_with_address_route_replies(
     mailbox_id: MailboxId,
     canonical_path: &str,
     calls: Arc<Mutex<Vec<RouteEnvelope>>>,
-    replies: Arc<Mutex<VecDeque<TerrainRouteReply>>>,
+    replies: Arc<Mutex<VecDeque<ScriptedRouteReply>>>,
 ) -> (PassiveChassis<TestChassis>, u16) {
     let registry = Arc::new(Registry::new());
     for descriptor in descriptors::all() {
@@ -499,12 +499,12 @@ pub(super) fn boot_hub_with_address_route_replies(
     (chassis, port)
 }
 
-/// Hub-shaped route fixture serving live dynamic terrain descriptors and a
+/// Hub-shaped route fixture serving live dynamic descriptors and a
 /// caller-controlled queue of opaque reply events.
-pub(super) fn try_boot_hub_with_terrain_route_loopback(
+pub(super) fn try_boot_hub_with_scripted_route_loopback(
     inventory: ListKindsResult,
     calls: Arc<Mutex<Vec<RouteEnvelope>>>,
-    replies: Arc<Mutex<VecDeque<TerrainRouteReply>>>,
+    replies: Arc<Mutex<VecDeque<ScriptedRouteReply>>>,
 ) -> Result<(PassiveChassis<TestChassis>, u16), BootError> {
     let registry = Arc::new(Registry::new());
     for descriptor in descriptors::all() {
@@ -514,7 +514,7 @@ pub(super) fn try_boot_hub_with_terrain_route_loopback(
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<TraceDispatchCapability>(())
-        .with_actor::<TerrainRouteSink>(TerrainRouteLoopbackParams { inventory, calls, replies })
+        .with_actor::<ScriptedRouteSink>(ScriptedRouteLoopbackParams { inventory, calls, replies })
         .with_actor_configured::<RpcServerCapability>(
             RpcServerParams {
             peer_kind: PeerKind::Substrate {

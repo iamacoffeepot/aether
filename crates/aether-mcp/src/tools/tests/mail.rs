@@ -176,8 +176,8 @@ async fn settled_mail_reads_the_declared_reply_contract_from_the_engine_resolved
         KindDescriptor { name: "aether.test.component.reply".to_owned(), schema: SchemaType::String };
     let reply_kind_id = KindId(kind_id_from_parts(&reply_descriptor.name, &reply_descriptor.schema));
     let reply_params = serde_json::json!("decoded through engine-resolved handler contract");
-    let replies = Arc::new(Mutex::new(VecDeque::from([TerrainRouteReply {
-        events: vec![TerrainReplyEvent {
+    let replies = Arc::new(Mutex::new(VecDeque::from([ScriptedRouteReply {
+        events: vec![ScriptedReplyEvent {
             kind: reply_kind_id,
             payload: aether_codec::encode_schema(&reply_params, &reply_descriptor.schema)
                 .expect("component reply schema encodes"),

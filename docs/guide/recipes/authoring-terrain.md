@@ -15,18 +15,15 @@ This recipe has two equally valid front doors:
 - A person uses `TerrainWorkbench`: mark the terrain in its viewport, set an
   instruction and operator, then use **Stage**, **Preview**, and **Accept** or
   **Discard**.
-- An agent uses the task-level terrain tools: `terrain_marks`,
-  `terrain_editor`, `propose_terrain_edit`,
-  `set_terrain_proposal_preview`, `commit_terrain_proposal`, and
-  `discard_terrain_proposal`.
-
-The immediate `apply_terrain_brush` and `run_terrain_automaton` tools remain
-useful for intentionally live edits, but they are not the preview-first path.
+- An agent drives the same components directly over `send_mail`, with the
+  `aether.kit.mark.*`, `aether.kit.terra.*`, and `aether.kit.world.*` kinds.
+  There is no bespoke terrain tool surface: the generic harness calls carry
+  every operation, and `describe_kinds` is the authoritative source for each
+  kind's exact shape.
 
 > **Verify against current code.** The public kinds live in
 > `crates/aether-kit-terrain/src/{mark,terra,world}/` and
-> `crates/aether-kit-workbench/src/`; the task adapters are
-> `crates/aether-mcp/src/{args.rs,tools/terrain.rs,tools/mod.rs}`. The design
+> `crates/aether-kit-workbench/src/`; the design
 > contracts are [ADR-0142](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0142-terrain-mark-identity-and-revisions.md)
 > and [ADR-0143](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0143-terrain-proposal-commit-transaction.md). If a
 > kind, field, or tool below has changed, update this recipe with the code.
@@ -218,91 +215,40 @@ the root's public cache:
 
 ## Task-level MCP loop
 
-The task tools preserve semantic named records and perform the safe preflights
-that a direct wire send does not. In this vocabulary, `MarkId` is always
-`{ "value": 7 }`.
+The retired task adapters used to preflight these sends; driving the kinds
+directly, those checks are the agent's own responsibility — reject a stale or
+missing mark reference yourself before proposing against it, and require
+`Path` geometry for a `source_mark` brush input.
 
-1. **Mark:** create a path with `terrain_marks`.
+1. **Mark:** send `aether.kit.mark.create` to the MarkBook's loaded lineage
+   address and keep the reference from `MarkCreateResult::Created`. Semantic
+   selection, rename, move, and deletion are the `aether.kit.terra.*` kinds
+   on the TerraEditor.
 
-   ```json
-   {
-     "engine_id": "<engine-id>",
-     "mark_book_mailbox": "<marks-name>",
-     "operation": {
-       "create": {
-         "geometry": {
-           "path": {
-             "points": [
-               { "x_octimeters": 3968, "z_octimeters": 2048 },
-               { "x_octimeters": 4224, "z_octimeters": 2048 }
-             ]
-           }
-         },
-         "label": "ridge brush"
-       }
-     }
-   }
-   ```
+2. **Instruct and stage:** fetch the source mark with `aether.kit.mark.get`,
+   verify the reference is current and the geometry fits the operation, then
+   send `aether.kit.world.propose` to the WorldView. A brush wants a path
+   source; an automaton wants a point source, converted to a cell seed with
+   negative-safe flooring.
 
-   Keep the `reference` from `MarkCreateResult::Created`. Use
-   `terrain_editor` only for semantic selection, rename, move, or deletion;
-   for example, `set_selection` takes
-   `{"references":[{"id":{"value":7},"revision":1}]}` and sends the
-   current `aether.kit.terra.set_selection` kind.
+3. **Preview and validate:** retain `ProposalResult::Staged.proposal_id` and
+   send `aether.kit.world.set_proposal_preview`. Validate both parts of the result:
+   `PreviewSet` must name the proposal and carry its digest, while the image
+   must show the bounded edit you intended. A digest has named
+   `touched_chunks`, `triangle_count`, and optional named meter-space
+   `changed_geometry_bounds`; an operator result reports named `steps_run`,
+   `subcells_written`, and `touched_chunks` even when it fails at a budget
+   boundary.
 
-2. **Instruct and stage:** call `propose_terrain_edit`. This asks the adapter
-   to get the MarkBook record first, reject a missing or stale reference, and
-   require `Path` geometry for `"source_mark"` brush input before it sends
-   `aether.kit.world.propose`.
+4. **Commit or discard:** send `aether.kit.world.commit_proposal` (or
+   `aether.kit.world.discard_proposal`) with the same proposal id only after
+   validation. `StaleProposal`, `UnknownProposal`, `NoTouchedChunks`,
+   `StagedProposalLimitReached`, and `ProposalIdExhausted` are ordinary
+   domain rejections, not reasons to guess a replacement id.
 
-   ```json
-   {
-     "engine_id": "<engine-id>",
-     "world_mailbox": "<world-name>",
-     "operation": {
-       "apply_brush": {
-         "mark_book_mailbox": "<marks-name>",
-         "source": { "id": { "value": 7 }, "revision": 1 },
-         "geometry": "source_mark",
-         "brush": {
-           "radius_octimeters": 128,
-           "spacing_octimeters": 256,
-           "material": 3
-         },
-         "budget": { "max_steps": 2, "max_subcells": 4096 }
-       }
-     }
-   }
-   ```
-
-   `run_terrain_automaton` and the `run_automaton` proposal variant instead
-   require a point source mark; `"source_mark"` converts its octimeter point
-   to a named `{ "cell_x", "cell_z" }` seed with negative-safe flooring.
-
-3. **Preview and validate:** retain the `ProposalResult::Staged.proposal_id`,
-   then call `set_terrain_proposal_preview`:
-
-   ```json
-   {
-     "engine_id": "<engine-id>",
-     "world_mailbox": "<world-name>",
-     "proposal_id": { "value": 1 }
-   }
-   ```
-
-   Validate both parts of the result: `PreviewSet` must name the proposal and
-   carry its digest, while the image must show the bounded edit you intended.
-   A digest has named `touched_chunks`, `triangle_count`, and optional named
-   meter-space `changed_geometry_bounds`; an operator result reports named
-   `steps_run`, `subcells_written`, and `touched_chunks` even when it fails at
-   a budget boundary.
-
-4. **Commit or discard:** call `commit_terrain_proposal` with the same
-   `engine_id`, `world_mailbox`, and named `proposal_id` only after validation.
-   Call `discard_terrain_proposal` instead to keep committed terrain unchanged.
-   `StaleProposal`, `UnknownProposal`, `NoTouchedChunks`,
-   `StagedProposalLimitReached`, and `ProposalIdExhausted` are ordinary domain
-   rejections, not reasons to guess a replacement id.
+Kind names above follow the families the components register; take every
+exact request and result shape from `describe_kinds` against the live engine
+rather than from this page.
 
 ## Capture the preview you are validating
 
