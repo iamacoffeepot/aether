@@ -119,15 +119,20 @@ pub struct EntryRef<'a, M> {
 }
 
 /// The JSON sidecar written next to each entry's bytes: the caller's
-/// metadata flattened alongside the ingest sequence. Flattening keeps the
-/// metadata's own fields at the object's top level, so a consumer whose
-/// `M` is `{ a, b }` sidecars `{ a, b, uploaded_seq }` — no wrapper key.
+/// metadata flattened alongside the ingest sequence and the pin flag.
+/// Flattening keeps the metadata's own fields at the object's top level,
+/// so a consumer whose `M` is `{ a, b }` sidecars
+/// `{ a, b, uploaded_seq, pinned }` — no wrapper key. Both store-owned
+/// fields default, so a sidecar written before either existed restores as
+/// sequence zero and unpinned rather than failing to parse.
 #[derive(Serialize, serde::Deserialize)]
 struct SidecarRecord<M> {
     #[serde(flatten)]
     metadata: M,
     #[serde(default)]
     uploaded_seq: u64,
+    #[serde(default)]
+    pinned: bool,
 }
 
 /// In-memory record of one entry. The bytes live on disk at
@@ -138,6 +143,7 @@ struct Entry<M> {
     bytes_len: u64,
     /// Eviction protection independent of naming (an explicit
     /// [`ContentStore::pin`]). A named entry is also eviction-protected.
+    /// Persisted in the entry's sidecar, so it survives a restart.
     pinned: bool,
     /// Monotonic access stamp; lower = older, the LRU eviction key.
     last_access: u64,
@@ -256,7 +262,7 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
     fn persist_new(&mut self, hash: &str, bytes: &[u8], metadata: M, clock: u64) -> io::Result<()> {
         let (bytes_path, manifest_path) = self.entry_paths(hash);
         let uploaded_seq = self.next_seq;
-        let sidecar = SidecarRecord { metadata: metadata.clone(), uploaded_seq };
+        let sidecar = SidecarRecord { metadata: metadata.clone(), uploaded_seq, pinned: false };
 
         atomic_write(&bytes_path, bytes)?;
         if let Err(e) = write_sidecar(&manifest_path, &sidecar) {
@@ -278,15 +284,28 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
 
     /// Pin (or unpin) an entry by hash, protecting it from eviction
     /// independent of whether a name points at it. Returns `false` if no
-    /// entry has that hash. Persistence of the pin flag is a fast-follow —
-    /// today a pin holds for the store's lifetime.
+    /// entry has that hash.
+    ///
+    /// The flag rides the entry's own sidecar, so it is reloaded by
+    /// [`open`](Self::open) and a pin outlives the process that set it —
+    /// load-bearing for a long-lived supervised hub, whose pinned
+    /// artifacts would otherwise become ordinary LRU candidates on every
+    /// restart (ADR-0115). Rewriting the sidecar is best-effort, matching
+    /// the name map: a write failure leaves the in-memory flag correct for
+    /// this store's lifetime and warns rather than failing the call, since
+    /// the caller's pin did take effect.
     pub fn set_pinned(&mut self, hash: &str, pinned: bool) -> bool {
-        if let Some(entry) = self.entries.get_mut(hash) {
-            entry.pinned = pinned;
-            true
-        } else {
-            false
+        let Some(entry) = self.entries.get_mut(hash) else {
+            return false;
+        };
+        entry.pinned = pinned;
+        let sidecar = SidecarRecord { metadata: entry.metadata.clone(), uploaded_seq: entry.uploaded_seq, pinned };
+
+        let (_, manifest_path) = self.entry_paths(hash);
+        if let Err(e) = write_sidecar(&manifest_path, &sidecar) {
+            tracing::warn!(target: TARGET, hash = %hash, pinned, error = %e, "content store: persisting the pin flag failed; it holds only for this store's lifetime");
         }
+        true
     }
 
     /// Pin an entry by hash. Convenience for `set_pinned(hash, true)`.
@@ -300,11 +319,12 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
     /// one: `false` when the hash is already indexed, or when no complete
     /// entry (sidecar plus bytes) exists under the root.
     ///
-    /// The adopted entry starts unpinned with a fresh recency stamp —
-    /// pins and recency are per-handle in-memory state that no peer
-    /// writes to disk — while its `uploaded_seq` comes from the sidecar,
-    /// so the peer's ingest order survives and this handle's `next_seq`
-    /// advances past it rather than reissuing a sequence already spent.
+    /// The adopted entry takes its `pinned` flag and `uploaded_seq` from
+    /// the sidecar — both are recorded on disk, so a peer's pin protects
+    /// the entry here too and the peer's ingest order survives, with this
+    /// handle's `next_seq` advancing past it rather than reissuing a
+    /// sequence already spent. Only the recency stamp is fresh: it is
+    /// per-handle in-memory state nothing writes to disk.
     ///
     /// Adopting takes the name map with it. The same peer `upload` that
     /// wrote the entry may have pointed a name at it, and that name is
@@ -318,12 +338,12 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
         if self.entries.contains_key(hash) {
             return false;
         }
-        let Some(DiskEntry { metadata, uploaded_seq, bytes_len }) = read_entry::<M>(&self.root, hash) else {
+        let Some(DiskEntry { metadata, uploaded_seq, pinned, bytes_len }) = read_entry::<M>(&self.root, hash) else {
             return false;
         };
 
         let last_access = self.next_clock();
-        self.entries.insert(hash.to_owned(), Entry { metadata, bytes_len, pinned: false, last_access, uploaded_seq });
+        self.entries.insert(hash.to_owned(), Entry { metadata, bytes_len, pinned, last_access, uploaded_seq });
         self.total_bytes = self.total_bytes.saturating_add(bytes_len);
         self.next_seq = self.next_seq.max(uploaded_seq.saturating_add(1));
         self.merge_names_from_disk();
@@ -390,10 +410,13 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
     /// enumeration as the whole record.
     ///
     /// Entries this handle already holds are left exactly as they are:
-    /// their `pinned` flag and recency stamp are in-memory state no peer
-    /// can see on disk, and re-restoring over them would discard both.
-    /// No eviction runs — adopting is not an ingest, and a handle asking
-    /// what is on the root should not reclaim from it.
+    /// their recency stamp is in-memory state no peer can see on disk,
+    /// and re-restoring over them would discard it. A pin a peer set
+    /// after this handle indexed the entry is therefore not picked up —
+    /// pins are read from disk when an entry is first indexed, not
+    /// re-read for one already held. No eviction runs — adopting is not
+    /// an ingest, and a handle asking what is on the root should not
+    /// reclaim from it.
     pub fn refresh(&mut self) {
         let RestoredIndex { entries, names, .. } = restore::<M>(&self.root);
 

@@ -27,12 +27,13 @@ pub struct RestoredIndex<M> {
 }
 
 /// One entry exactly as it exists under a root: the restored sidecar
-/// metadata, the ingest sequence recorded beside it, and the byte length
-/// of the stored content. What [`read_entry`] yields, and the unit both
-/// [`restore`] and the store's miss-path adopt index from.
+/// metadata, the ingest sequence and pin flag recorded beside it, and the
+/// byte length of the stored content. What [`read_entry`] yields, and the
+/// unit both [`restore`] and the store's miss-path adopt index from.
 pub struct DiskEntry<M> {
     pub metadata: M,
     pub uploaded_seq: u64,
+    pub pinned: bool,
     pub bytes_len: u64,
 }
 
@@ -47,7 +48,12 @@ pub fn read_entry<M: DeserializeOwned>(root: &Path, hash: &str) -> Option<DiskEn
     let entries_dir = root.join("entries");
     let sidecar = read_sidecar::<M>(&entries_dir.join(format!("{hash}.manifest")))?;
     let bytes_len = fs::metadata(entries_dir.join(hash)).ok()?.len();
-    Some(DiskEntry { metadata: sidecar.metadata, uploaded_seq: sidecar.uploaded_seq, bytes_len })
+    Some(DiskEntry {
+        metadata: sidecar.metadata,
+        uploaded_seq: sidecar.uploaded_seq,
+        pinned: sidecar.pinned,
+        bytes_len,
+    })
 }
 
 /// Read the `names.json` name → hash map from `root`, logging rather
@@ -93,15 +99,13 @@ pub fn restore<M: DeserializeOwned>(root: &Path) -> RestoredIndex<M> {
                     continue;
                 };
                 // A sidecar whose bytes are missing is a torn write; `read_entry` skips it.
-                let Some(DiskEntry { metadata, uploaded_seq, bytes_len }) = read_entry::<M>(root, hash) else {
+                let Some(DiskEntry { metadata, uploaded_seq, pinned, bytes_len }) = read_entry::<M>(root, hash) else {
                     continue;
                 };
                 clock += 1;
                 max_uploaded_seq = max_uploaded_seq.max(uploaded_seq);
-                entries.insert(
-                    hash.to_owned(),
-                    Entry { metadata, bytes_len, pinned: false, last_access: clock, uploaded_seq },
-                );
+                entries
+                    .insert(hash.to_owned(), Entry { metadata, bytes_len, pinned, last_access: clock, uploaded_seq });
                 total_bytes = total_bytes.saturating_add(bytes_len);
             }
         }

@@ -46,7 +46,9 @@
 //! The store survives a `restart-hub` because the root persists across the
 //! hub child's restart. The disk budget is enforced by LRU eviction over
 //! entries that are neither pinned nor named — a named or pinned entry is
-//! kept regardless of recency.
+//! kept regardless of recency. Both protections are on disk: a name in
+//! `names.json`, a pin in the entry's own sidecar, so neither lapses when
+//! the supervised hub restarts.
 
 mod manifest;
 #[cfg(test)]
@@ -89,11 +91,13 @@ pub const DEFAULT_DISK_BUDGET_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const DEFAULT_LIST_CAP: u32 = 20;
 
 /// The hub's per-entry metadata `M` for [`ContentStore`]: the type tag
-/// plus the type-tagged manifest. The core flattens this beside the ingest
-/// sequence, so the on-disk sidecar stays `{ kind, manifest, uploaded_seq }`
-/// — the pre-extraction JSON layout, preserved bit-for-bit. `kind` is
-/// redundant with the `manifest` variant but kept for a forward-compatible
-/// read of an entry whose manifest variant a future build doesn't recognize.
+/// plus the type-tagged manifest. The core flattens this beside its own
+/// entry state, so the on-disk sidecar is
+/// `{ kind, manifest, uploaded_seq, pinned }` — the pre-extraction JSON
+/// layout plus the two store-owned fields, each of which defaults on read
+/// so an older sidecar still restores. `kind` is redundant with the
+/// `manifest` variant but kept for a forward-compatible read of an entry
+/// whose manifest variant a future build doesn't recognize.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct StoredEntry {
     kind: ArtifactKind,
@@ -167,8 +171,9 @@ impl ArtifactStore {
 
     /// Pin (or unpin) an entry by hash, protecting it from eviction
     /// independent of whether a name points at it. Returns `false` if no
-    /// entry has that hash. Persistence of the pin flag is a fast-follow —
-    /// today a pin holds for the store's lifetime (the hub process).
+    /// entry has that hash. The flag is persisted in the entry's sidecar,
+    /// so a pin survives a `restart-hub` rather than lapsing with the hub
+    /// process that set it.
     #[allow(dead_code)]
     pub fn set_pinned(&mut self, hash: &str, pinned: bool) -> bool {
         self.inner.set_pinned(hash, pinned)
