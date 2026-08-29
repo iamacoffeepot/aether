@@ -25,7 +25,6 @@ fallback or omits the runtime.
 | `aether.inventory` | live names, kinds, handlers, transforms | `aether-inventory/src` | [Inventory](../systems/inventory-and-transforms.md) |
 | `aether.trace` | causal-tree and settlement evidence | `aether-trace/src` | [Tracing](../systems/tracing-and-settlement.md) |
 | `aether.fleet` | hub fleet and artifact control | `aether-fleet/src` | [Engine fleet](../operating/engine-fleet.md) |
-| `aether.game.gateway` | trusted player/session-to-sim binding | `aether-game/src` | [Player sessions](../systems/player-sessions.md) |
 | `aether.substrate_harness` | deterministic test-chassis advance/control | `aether-harness-substrate/src` | [SubstrateHarness](../testing/substrateharness-and-fleetharness.md) |
 
 Instanced families such as `aether.tcp.listener`, `aether.tcp.session`,
@@ -71,7 +70,6 @@ the loaded component answers at `aether.component/aether.embedded:<namespace>`.
 | Namespace | Responsibility | Public source | Guide |
 |---|---|---|---|
 | `aether.anthropic` | Messages API and CLI text generation | `aether-anthropic/src` | [Content generation](../systems/content-generation.md) |
-| `aether.gemini` | image and music generation | `aether-gemini/src` | [Content generation](../systems/content-generation.md) |
 
 ## Shared/substrate kind families
 
@@ -96,11 +94,7 @@ ownership before adding to the shared crate.
 |---|---|---|
 | `aether.kit.camera*` | camera/controller actors | [Rendering and camera](../systems/rendering.md) |
 | `aether.kit.widget*` | widgets, focus, scrolling, panel/editor composition | [Widgets](../systems/widgets.md) |
-| `aether.kit.workbench*` | editor viewport/panels | [World and terrain](../systems/world-and-terrain.md) |
-| `aether.kit.world*`, `terra`, `mark` | terrain data, proposals, overlay/picking | [World and terrain](../systems/world-and-terrain.md) |
 | `aether.kit.mesh*` | DSL/OBJ loading and display | [Mesh authoring](../systems/mesh-authoring.md) |
-| `aether.sim*` | tick-native intent/fact reference sim | [Player sessions](../systems/player-sessions.md) |
-| `aether.kit.client*` | reference player client | [Player sessions](../systems/player-sessions.md) |
 | `aether.behavior*` | behavior host config and live script swap | [Behaviors](../systems/behaviors.md) |
 
 These are hosted actor APIs. Their presence depends on which component export

@@ -18,7 +18,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [features]
-# An embedding cdylib (aether-kit-workbench inline-spawns `console::ConsoleOverlay`)
+# An embedding cdylib (the shelved aether-kit-workbench inline-spawned `console::ConsoleOverlay`)
 # enables this to strip this crate's `export!` entry surface: one `export!` emits
 # the FFI entries per wasm module, so the entry-free rlib face keeps the actor
 # impls without a second `receive_p32` / `init` colliding with the embedder's own
@@ -84,12 +84,6 @@ aether-text = { path = "../aether-text" }
 # the widget editor shell and imports its `EditorConfig` vocabulary at source,
 # so it stays as a dev-dependency here.
 aether-kit-widget = { path = "../aether-kit-widget" }
-# iamacoffeepot/aether#3953: with the workbench (and, per #3952, sim / client)
-# gone, no kit system consumes the terrain vocabulary in source, so the terrain
-# rlib dependency left kit's `[dependencies]`. `camera_controller_drives_camera`
-# still runtime-loads the terrain world wasm and imports its `SetChunk` /
-# `Material` vocabulary at source, so it stays as a dev-dependency here.
-aether-kit-terrain = { path = "../aether-kit-terrain" }
 
 [lints]
 workspace = true

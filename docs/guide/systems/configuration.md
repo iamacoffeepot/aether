@@ -105,12 +105,12 @@ Over MCP there are three ways to set configuration, from coarsest to finest:
   `--config path/to/chassis.toml` on the chassis command line, or set
   `AETHER_CONFIG_FILE` as a fallback for the file path. The file is sectioned by
   subsystem, for example `[http]`, `[http-server]`, `[fs]`, `[anthropic]`,
-  `[gemini]`, `[actor]`, `[scheduler]`, `[settlement]`,
+  `[actor]`, `[scheduler]`, `[settlement]`,
   `[chassis]`, plus chassis-specific sections such as `[window]`, `[tick]`, and
   hub `[engine]`. Environment variables still override file values.
 - **Per-spawn arguments** are how a spawned engine is configured. `spawn_substrate`
   forwards its `args` to the substrate as command-line arguments — the addressed
-  machine channel (ADR-0162) — so you can spawn one engine with `--gemini-api-key …`
+  machine channel (ADR-0162) — so you can spawn one engine with `--tick-hz …`
   or `--http-disable` and leave the next one alone. Argv is where each engine's
   knobs live, since the hub's environment does not cross into its children. Flag
   names are mechanical: take the environment key, drop the `AETHER_` prefix,

@@ -137,15 +137,6 @@ was written, not that the engine completed the work. Use it only when the
 recipient intentionally has no useful reply or when a later observation is the
 actual success criterion.
 
-The current terrain-specific mutation tools are `terrain_marks`,
-`terrain_editor`, `apply_terrain_brush`, `run_terrain_automaton`,
-`propose_terrain_edit`, `commit_terrain_proposal`,
-`discard_terrain_proposal`, and `set_terrain_proposal_preview`. They require
-exact loaded component lineage names; they do not replace the fleet,
-introspection, evidence, or cleanup loop above. See
-[Authoring terrain](../recipes/authoring-terrain.md) for the domain workflow and
-the live tool schemas for current parameters.
-
 ## Source routes
 
 When prose and behavior disagree, inspect these routes in order:

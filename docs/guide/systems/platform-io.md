@@ -13,7 +13,6 @@ credential.
 | Internal process transport | [RPC](rpc.md) |
 | Text clipboard | [Clipboard](clipboard.md) |
 | Provider APIs/subprocesses | [Content generation](content-generation.md) |
-| Trusted network player tier | [Player sessions](player-sessions.md) |
 
 Across these systems, preserve the same boundary rules:
 

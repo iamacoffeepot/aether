@@ -21,7 +21,6 @@ use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
 use aether_codec::frame::install_max_frame_size;
 use aether_component::{ComponentHostCapability, ComponentHostParams};
 use aether_fs::{FsCapability, NamespaceRoots};
-use aether_game::{GameGatewayCapability, GameGatewayConfig, GameGatewayParams};
 use aether_http::HttpCapability;
 use aether_inventory::InventoryCapability;
 use aether_kinds::{Shutdown, Tick};
@@ -838,10 +837,6 @@ pub struct CommonBoot {
     /// fs cap via the builder's programmatic layer so the cap uses the exact
     /// same value.
     pub namespace_roots: NamespaceRoots,
-    /// Resolved `TurnSim` wiring for the game gateway (ADR-0156 §3 `Params`).
-    /// The default has no configured `TurnSim`, so merely linking the common
-    /// chassis opens no player listener.
-    pub game_gateway_params: GameGatewayParams,
 }
 
 /// The full-stack chassis env (desktop + headless): the resolved config *data*
@@ -983,8 +978,8 @@ impl CommonEnv {
 
     /// Read this resolved env off into the shared [`CommonBoot`] cap args in one
     /// place, so neither chassis's `compose` delta hand-copies the same
-    /// env-sourced fields. The two composer-constructed handles
-    /// (`component_host_params`, `game_gateway_params`) are supplied by the
+    /// env-sourced fields. The composer-constructed handle
+    /// (`component_host_params`) is supplied by the
     /// caller. `runtime` is dropped here — it is consumed chassis-side
     /// (`apply_filter`) before `compose` runs and is not a `CommonBoot` field.
     /// `base` and `autoload` are lifted out in `Chassis::build` before `compose`
@@ -992,19 +987,15 @@ impl CommonEnv {
     /// source stack are not threaded through: the framework mints the aborter in
     /// `composed`, and the source stack rides [`ChassisBase`].
     #[must_use]
-    pub fn into_common_boot(
-        self,
-        component_host_params: ComponentHostParams,
-        game_gateway_params: GameGatewayParams,
-    ) -> CommonBoot {
+    pub fn into_common_boot(self, component_host_params: ComponentHostParams) -> CommonBoot {
         let Self { base: _, namespace_roots, runtime: _, chassis_boot, autoload: _, package_settings: _ } = self;
-        CommonBoot { chassis_boot, component_host_params, namespace_roots, game_gateway_params }
+        CommonBoot { chassis_boot, component_host_params, namespace_roots }
     }
 }
 
 /// Wire the worker count and the full-stack app caps that desktop and headless
 /// share (`Input`, `ComponentHost`, `Fs`, `Text`, `Inventory`, `Http`, `Tcp`,
-/// `Process`, `GameGateway`). The renderer / window / audio caps each chassis
+/// `Process`). The renderer / window / audio caps each chassis
 /// adds after this in `.with_actor::<_>()` chains.
 ///
 /// The universal base stratum — the aborter, the config sources, the non-cap
@@ -1019,12 +1010,9 @@ impl CommonEnv {
 /// ADR-0156 §5: every operator-resolvable cap `Config` is resolved by the
 /// builder off the source stack [`ChassisBase`] handed it, so each cap composes
 /// with `with_actor::<_>(params)` alone — no per-cap config value, no
-/// chassis-side section string. The two exceptions ride the programmatic layer:
+/// chassis-side section string. The one exception rides the programmatic layer:
 /// the fs roots (resolved chassis-side, then passed here so the cap uses the
-/// identical value) and the game gateway's `Config`, which stays a hardcoded
-/// default so the full-stack chassis opens no player listener from a stray
-/// `AETHER_GAME_*` env var (byte-identical to the pre-inversion
-/// `GameGatewayConfig::default()`).
+/// identical value).
 ///
 /// Boot order is declaration order. ADR-0081 retired the central
 /// `LogCapability` — every actor owns its own per-actor log ring; no
@@ -1055,9 +1043,6 @@ pub fn with_full_stack_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -
         // off the source stack; the working-directory confinement root rides
         // `Params`, resolved chassis-side from the fs `save` root above.
         .with_actor::<ProcessCapability>(ProcessParams { work_root: process_work_root })
-        // Programmatic default (byte-identical to the pre-inversion `::default()`
-        // compose): no `AETHER_GAME_*` env opens a listener on the common chassis.
-        .with_actor_configured::<GameGatewayCapability>(boot.game_gateway_params, GameGatewayConfig::default())
 }
 
 /// This crate's `build.rs`-baked build provenance (ADR-0115): the source

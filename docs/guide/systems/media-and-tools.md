@@ -13,7 +13,6 @@ them into reusable camera, widget, workbench, and world behavior.
 | Keyboard, pointer, text and IME streams | [Input](input.md) |
 | Window mode/title/focus | [Window](window.md) |
 | Widget state/focus/composition | [Widgets](widgets.md) |
-| Terrain proposals, world mesh, workbench | [World and terrain](world-and-terrain.md) |
 
 Keep frame ownership explicit. Product actors may emit render/text/audio mail,
 but native callbacks and presentation remain chassis responsibilities. For

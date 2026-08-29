@@ -131,13 +131,13 @@ it warn-drops like any unaddressed name.
 
 `aether.http` is the general-purpose egress mailbox, and the `AETHER_HTTP_*`
 knobs gate it. They do **not** gate the engine's entire outbound surface. The
-provider capabilities — `aether.anthropic` and `aether.gemini` — are parallel
-egress paths registered alongside `aether.http`. Each carries its own HTTP
-client and its own provider-specific configuration, and each dials out directly
+provider capability — `aether.anthropic` — is a parallel
+egress path registered alongside `aether.http`. It carries its own HTTP
+client and its own provider-specific configuration, and dials out directly
 rather than routing through `aether.http`. The allowlist, disable flag, body cap,
 and timeout on this page apply to `aether.http` alone; a deployer locking down
-egress reckons with the provider caps' own configuration separately. Those caps
-are content generation, a subject of their own — out of scope here, named so you
+egress reckons with the provider cap's own configuration separately. That cap
+is content generation, a subject of its own — out of scope here, named so you
 know which mailbox this page governs and which it does not.
 
 ## How to use it
