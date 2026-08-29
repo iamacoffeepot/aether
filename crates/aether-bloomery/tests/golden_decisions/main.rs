@@ -29,6 +29,7 @@
 
 mod completeness;
 mod schema_digests;
+mod upcasts;
 
 use aether_bloomery::testing::{
     containment_refused_event, representative, surface_overlap_decisions, surface_overlap_event,

@@ -143,6 +143,33 @@ impl Digest {
         Self::from_slice(&bytes)
     }
 
+    /// Parse exactly 64 lowercase hex characters at compile time.
+    ///
+    /// The const twin of [`Self::from_hex`], for pinning a digest that recorded
+    /// history carries — a stored row's schema stamp — as a literal no change
+    /// to live code can move (#5500). A malformed literal fails the build at
+    /// the use site instead of parsing at runtime.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `hex` is not exactly 64 lowercase hex characters — a build
+    /// error in the const contexts this exists for.
+    #[must_use]
+    pub const fn pinned(hex: &str) -> Self {
+        let raw = hex.as_bytes();
+        assert!(raw.len() == 64, "a pinned digest is exactly 64 lowercase hex characters");
+        let mut bytes = [0_u8; 32];
+        let mut index = 0;
+        while index < 32 {
+            let (Some(high), Some(low)) = (hex_nibble(raw[index * 2]), hex_nibble(raw[index * 2 + 1])) else {
+                panic!("a pinned digest is lowercase hex");
+            };
+            bytes[index] = (high << 4) | low;
+            index += 1;
+        }
+        Self(bytes)
+    }
+
     /// sha256 of an already-encoded byte string.
     #[must_use]
     pub fn of_wire_bytes(bytes: &[u8]) -> Self {

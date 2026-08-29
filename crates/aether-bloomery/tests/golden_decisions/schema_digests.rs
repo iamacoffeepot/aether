@@ -43,7 +43,7 @@ fn pinned_schema_digests_match_the_registry() {
 fn assert_upcasts_cover_prior_lines(kind: &PersistedKind, lines: &[Digest]) {
     let current = kind.current_digest();
     let prior = &lines[..lines.len().saturating_sub(1)];
-    let upcast_digests: BTreeSet<Digest> = kind.upcasts.iter().map(|prior| kind.upcast_digest(prior)).collect();
+    let upcast_digests: BTreeSet<Digest> = kind.upcasts.iter().map(|prior| prior.digest).collect();
     for digest in prior {
         assert!(
             *digest != current,

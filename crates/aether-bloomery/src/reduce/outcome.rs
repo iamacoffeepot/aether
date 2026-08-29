@@ -921,9 +921,8 @@ mod tests {
 
     #[test]
     fn a_v1_row_carrying_a_dispatch_decodes_and_upcasts() {
-        let stamped =
-            decode_recorded_decisions(V1_ROW, Some(DECISIONS.upcast_digest(&DECISIONS.upcasts[0]).as_bytes()))
-                .expect("stamped v1 decodes");
+        let stamped = decode_recorded_decisions(V1_ROW, Some(DECISIONS.upcasts[0].digest.as_bytes()))
+            .expect("stamped v1 decodes");
         let unstamped = decode_recorded_decisions(V1_ROW, None).expect("unstamped row is v1");
         assert_eq!(stamped, unstamped);
 

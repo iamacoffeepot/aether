@@ -1144,7 +1144,7 @@ fn migrate_schema_digests(migration: &rusqlite::Transaction<'_>) -> rusqlite::Re
     if !has_column(migration, "journal", "decisions_schema_digest")? {
         migration.execute_batch("ALTER TABLE journal ADD COLUMN decisions_schema_digest BLOB;")?;
         let v2 = DECISIONS.current_digest();
-        let v1 = DECISIONS.upcast_digest(&DECISIONS.upcasts[0]);
+        let v1 = DECISIONS.upcasts[0].digest;
         migration.execute(
             "UPDATE journal SET decisions_schema_digest = ?1 \
              WHERE decisions_schema_digest IS NULL AND decisions_schema = ?2",
