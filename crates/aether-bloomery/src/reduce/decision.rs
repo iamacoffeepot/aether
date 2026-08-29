@@ -13,9 +13,9 @@ use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::port::ProjectedReceipt;
 use crate::values::{
     Adjudication, AgentProfile, BaseReceipt, CandidateRef, CompositionFinding, ConfigRegistry, Evidence,
-    MemberCandidate, MemberDependency, OperatorHold, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion,
-    ResolutionClaim, ResolvedBloom, SpendQuiesce, StageCatalog, Transformation, VerifyProof, VerifyReuse, Wedge,
-    Withdrawal,
+    MemberCandidate, MemberDependency, OperatorHold, OperatorProposal, OperatorRepair, OrphanClaimRelease,
+    OrphanClaimReleaseCompletion, ResolutionClaim, ResolvedBloom, SpendQuiesce, StageCatalog, Transformation,
+    VerifyProof, VerifyReuse, Wedge, Withdrawal,
 };
 
 /// The ordered effects a decision applies to the projection (and, in
@@ -856,5 +856,34 @@ pub enum Decision {
         transformation: Transformation,
         /// The catalog-calibrated profile the mechanical lane runs under.
         profile: AgentProfile,
+    },
+    /// Push an operator proposal onto the waiting queue (ADR-0205) — see
+    /// [`crate::Snapshot::queued_proposals`].
+    ///
+    /// Appended so every stored row stays decodable under the current shape:
+    /// new discriminants keep the v1 decisions wire frozen.
+    QueueProposal {
+        /// The signed candidate waiting for a clear board.
+        proposal: OperatorProposal,
+    },
+    /// Remove a queued proposal by its digest (ADR-0205) — the fold of a
+    /// successful memberless seal. Appended so every stored row stays
+    /// decodable under the current shape.
+    DequeueProposal {
+        /// The proposal whose digest names the queue entry to drop.
+        proposal: OperatorProposal,
+    },
+    /// Offer the queue head to the propose reactor (ADR-0205) — a
+    /// snapshot-inert outbox intent on the
+    /// [`Decision::DispatchOrphanClaimRelease`] model. Sealing needs content
+    /// the reducer does not hold, so this names the proposal and the base it
+    /// should seal against rather than sealing inline. Appended so every
+    /// stored row stays decodable under the current shape.
+    DispatchProposal {
+        /// The queue head the reactor should seal.
+        proposal: OperatorProposal,
+        /// The mainline head the memberless spec bases on — current mainline
+        /// at propose time, or the head a land just advanced to.
+        base: Digest,
     },
 }

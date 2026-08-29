@@ -352,12 +352,29 @@ pub(super) fn resume_handle_rejected(status: ExitStatus, stdout: &[u8], stderr: 
     names_the_handle && rejected
 }
 
-/// The prompt a resumed lap receives: the assembled prompt plus the one fact the
-/// resumed conversation cannot see for itself — the working tree was reset
-/// between laps, so the files it edited last time are gone. A cold launch gets
-/// the prompt unchanged.
-pub(super) fn resumed_prompt(prompt: &str, resume: Option<&str>) -> String {
-    if resume.is_none() {
+/// What state the tree is in when a turn resumes an earlier conversation —
+/// the one thing that conversation cannot see for itself, and so the one thing
+/// the prompt has to correct.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Resumed {
+    /// A retry lap in a fresh dispatch: the working tree was reset between
+    /// laps, so the files the previous turn edited are gone.
+    AfterReset,
+    /// A continuation inside the same dispatch: the tree is exactly as the
+    /// previous turn left it, plus whatever the mechanical fixers rewrote.
+    /// The construct lane's post-fixer lint repair resumes this way, and
+    /// telling it the tree was reset would send it to redo work that is
+    /// already on disk — and to redo it against findings taken from the disk
+    /// it was told to distrust.
+    SameTree,
+}
+
+/// The prompt a resumed lap receives: the assembled prompt plus whatever
+/// [`Resumed`] says the conversation is wrong about. A cold launch, and a
+/// continuation on the tree the previous turn left, both get the prompt
+/// unchanged.
+pub(super) fn resumed_prompt(prompt: &str, resume: Option<&str>, resumed: Resumed) -> String {
+    if resume.is_none() || resumed == Resumed::SameTree {
         return prompt.to_owned();
     }
     format!(
@@ -400,7 +417,9 @@ mod tests {
 
     use std::ffi::{OsStr, OsString};
 
-    use super::{Terminal, Usage, build_dir, capture, capture_resumed, record, resume_handle_rejected, resumed_prompt};
+    use super::{
+        Resumed, Terminal, Usage, build_dir, capture, capture_resumed, record, resume_handle_rejected, resumed_prompt,
+    };
 
     #[test]
     fn a_model_lane_child_builds_into_the_slot_target_the_lane_was_lent() {
@@ -477,14 +496,29 @@ mod tests {
         assert!(!resume_handle_rejected(ExitStatus::from_raw(0), b"", b"No conversation found"));
     }
 
-    // The reset tree is the one thing a resumed conversation is wrong about by
-    // default: it remembers editing files the lap-boundary reset removed, and a
-    // lap that trusts that memory reports work it never redid.
+    // A resumed conversation is wrong about the tree in exactly one direction,
+    // and which one depends on why it was resumed. A retry lap remembers
+    // editing files the lap-boundary reset removed, and a lap that trusts that
+    // memory reports work it never redid. The construct lane's post-fixer lint
+    // repair is the opposite case: it continues inside the dispatch that wrote
+    // the tree, and telling *it* the tree was reset would send it to redo the
+    // whole work order against findings taken from the disk it was told to
+    // distrust. So the notice is posture-driven, not resume-driven.
     #[test]
-    fn only_a_resumed_lap_is_told_its_tree_was_reset() {
-        assert_eq!(resumed_prompt("build it", None), "build it", "a cold launch gets the prompt unchanged");
-        assert!(resumed_prompt("build it", Some("sess-1")).starts_with("build it\n"));
-        assert!(resumed_prompt("build it", Some("sess-1")).contains("working tree was reset"));
+    fn a_resumed_lap_is_told_its_tree_was_reset_only_when_it_was() {
+        for posture in [Resumed::AfterReset, Resumed::SameTree] {
+            assert_eq!(resumed_prompt("build it", None, posture), "build it", "a cold launch is never told either way");
+        }
+
+        let retried = resumed_prompt("build it", Some("sess-1"), Resumed::AfterReset);
+        assert!(retried.starts_with("build it\n"));
+        assert!(retried.contains("working tree was reset"), "a retry lap's tree really was reset");
+
+        assert_eq!(
+            resumed_prompt("build it", Some("sess-1"), Resumed::SameTree),
+            "build it",
+            "a continuation on the tree the previous turn wrote must not be told it was reset",
+        );
     }
 
     // A harness that reports no counts renders them null, not zero: a study

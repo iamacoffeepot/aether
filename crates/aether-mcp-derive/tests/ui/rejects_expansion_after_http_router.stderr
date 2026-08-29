@@ -1,0 +1,5 @@
+error: #[http::router] has already expanded over this impl; write #[mcp::router] above it (the required order is #[mcp::router], then #[http::router], then #[runtime])
+  --> tests/ui/rejects_expansion_after_http_router.rs:15:5
+   |
+15 |     fn __aether_route_probe_get(&mut self) {}
+   |     ^^

@@ -88,6 +88,15 @@ pub struct BloomeryCli {
     /// the admission gate refuses against.
     #[arg(long = "doctor")]
     pub doctor: bool,
+
+    /// Decode every journal row of the resolved store through the persisted
+    /// registry and exit without booting (#5500). Opening runs pending
+    /// migrations exactly as boot would, so point it at a *copy* of a live
+    /// store. Exit `0` when every row decodes — the proof a candidate binary
+    /// owes before restarting the real unit — and `1` on any refusal, the
+    /// same refusal boot replay would fatal-abort on.
+    #[arg(long = "check-store")]
+    pub check_store: bool,
 }
 
 #[cfg(test)]

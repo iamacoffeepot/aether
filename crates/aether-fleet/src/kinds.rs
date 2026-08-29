@@ -73,6 +73,26 @@ pub struct EngineDied {
     pub reason: DeathReason,
 }
 
+/// `aether.fleet.restart_due` — the engines cap's own restart-backoff
+/// timer wake. Internal control-plane mail, not a user surface.
+///
+/// When the cap decides to restart a dead engine it files the spawn
+/// recipe under a token and hands that token to a one-shot timer thread;
+/// the thread sleeps out the configured backoff and fires this at the
+/// cap's own mailbox, the same wake-mail shape the proxy's heartbeat
+/// sidecar uses. The handler looks the token up and re-forks.
+///
+/// The token, not the recipe, is what crosses: a spawn recipe carries
+/// argv and a store hash, and keeping it in cap state means this kind
+/// stays a bare alarm and the recipe never needs a wire encoding. A
+/// token with no pending entry — the restart was already settled, or the
+/// cap was rebuilt around it — is a silent no-op.
+#[derive(Kind, Schema, Serialize, Deserialize, Debug, Clone, Default)]
+#[kind(name = "aether.fleet.restart_due")]
+pub struct EngineRestartDue {
+    pub token: u64,
+}
+
 /// `aether.fleet.alive` — a per-engine proxy reporting a confirmed
 /// liveness signal (a `Pong` answering its heartbeat `Ping`) to the
 /// engines cap (issue 1339). The cap stamps the engine's

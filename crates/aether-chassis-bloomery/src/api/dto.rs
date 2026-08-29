@@ -13,7 +13,7 @@ pub use aether_bloomery::{
     CommissionCancelledView, CommissionCreatedView, CommissionHeadView, CommissionReopenedView, CommissionShowView,
     CommissionsView, CoordinatorLogEntry, CoordinatorLogsView, CreateCommissionRequest, DispatchEvidenceView,
     DispatchFilePage, DispatchProcessView, DraftPatch, DraftView, DraftsView, ErrorView, GrantRequest, HoldRequest,
-    JournalEntry, JournalView, MemberProjection, OutcomeView, ReleaseAcceptedView, ReleaseRequest,
+    JournalEntry, JournalView, MemberProjection, OutcomeView, ProposeRequest, ReleaseAcceptedView, ReleaseRequest,
     ReopenCommissionRequest, RepairRequest, RetryRequest, ReverifyBaseRequest, ScopeRevisionWrittenView,
     ScopeRunOpenedView, ScopeRunRequest, SealRequest, SupersedeRequest, SuppressionAnswerRequest, WithdrawRequest,
     WorkpiecesView, WriteRevisionRequest,

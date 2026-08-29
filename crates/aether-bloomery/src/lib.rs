@@ -122,6 +122,7 @@ pub use control::ObserveMainline;
 pub use control::ObserveMainlineResult;
 pub use control::OrphanClaimReleasePayload;
 pub use control::OutboxPayload;
+pub use control::ProposalPayload;
 pub use control::Query;
 pub use control::QueryResult;
 pub use control::QuerySelector;
@@ -283,6 +284,7 @@ pub use reduce::OperatorHoldError;
 pub use reduce::OperatorRepairError;
 pub use reduce::OrphanClaimReleaseError;
 pub use reduce::Outcome;
+pub use reduce::ProposalError;
 pub use reduce::Read;
 pub use reduce::RecordedRead;
 pub use reduce::RecordedRefusal;
@@ -424,6 +426,7 @@ pub use values::NetworkProfile;
 pub use values::ORPHAN_CLAIM_RELEASE_WORDS;
 pub use values::Observation;
 pub use values::OperatorHold;
+pub use values::OperatorProposal;
 pub use values::OperatorRepair;
 pub use values::OrphanClaimRelease;
 pub use values::OrphanClaimReleaseCompletion;
@@ -433,6 +436,7 @@ pub use values::OverrideError;
 pub use values::PathOrigin;
 pub use values::PriceRates;
 pub use values::PriceTable;
+pub use values::ProposeRequest;
 pub use values::Provenance;
 pub use values::Question;
 pub use values::REVIEW_CRITIC_COMMAND;
@@ -524,6 +528,12 @@ pub use values::resolve_member_dependencies;
 pub use values::rewrites;
 #[cfg(not(target_arch = "wasm32"))]
 pub use values::signed_approval;
+#[cfg(not(target_arch = "wasm32"))]
+pub use values::signed_cancel;
+#[cfg(not(target_arch = "wasm32"))]
+pub use values::signed_proposal;
+#[cfg(not(target_arch = "wasm32"))]
+pub use values::signed_reopen;
 pub use values::split_lane_identity;
 pub use values::surface_additions;
 pub use values::surface_intersection;
@@ -531,5 +541,3 @@ pub use values::surface_union;
 pub use values::tier_verdict;
 pub use values::verify_scope;
 pub use values::widen;
-#[cfg(not(target_arch = "wasm32"))]
-pub use values::{signed_cancel, signed_reopen};

@@ -58,7 +58,7 @@ members = [
     "crates/aether-gemini",
     "crates/aether-process",
     "crates/aether-mcp",
-    "crates/aether-context-canary",
+    "crates/aether-mcp-derive",
     # Test fixtures — single-output crates sitting alongside every other
     # member: one shared `kinds` rlib plus the component cdylibs (the main
     # bundle, the typed↔reshaped replace-pair satellites, the ADR-0138

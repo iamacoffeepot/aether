@@ -1,0 +1,5 @@
+error: `owner_one` already owns the retained handler for this reply kind; one reply kind has one handler
+  --> tests/ui/rejects_two_fallback_owners.rs:36:18
+   |
+36 |     #[mcp::reply(Reply, tool = second_tool, map = map_second)]
+   |                  ^^^^^

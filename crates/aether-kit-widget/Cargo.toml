@@ -3,6 +3,7 @@ name = "aether-kit-widget"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # The widget-compositing layer (ADR-0117), split out of `aether-kit` as its
 # own cdylib. One `#[actor(instanced)]` node realizes every role in a widget

@@ -178,6 +178,27 @@ pub fn signed_reopen(signer: KeyId, seed: &[u8; 32], intent: Digest) -> Statemen
     Statement { words, provenance: Provenance::AuthorSignature(envelope), parents: Vec::new() }
 }
 
+/// The Propose door's exact statement shape, in one place (ADR-0182, ADR-0205):
+/// an author signature over `proposal`'s raw bytes, bound to `proposal`.
+///
+/// `words` is the proposal digest itself, which is what
+/// [`Statement::verify_authority`] re-checks against the binding. `parents` is
+/// empty: authorization lives inside the signed bytes, not in the derivation
+/// edge.
+///
+/// Deterministic, so a re-run re-mints a byte-identical statement and the
+/// store's duplicate check makes the re-submit a no-op.
+///
+/// Native-only, like [`sign_authorization`] — the private half of key custody
+/// is the operator's.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn signed_proposal(signer: KeyId, seed: &[u8; 32], proposal: Digest) -> Statement {
+    let words = proposal.as_bytes().to_vec();
+    let envelope = sign_authorization(signer, seed, AuthorityDoor::Propose, proposal, &words);
+    Statement { words, provenance: Provenance::AuthorSignature(envelope), parents: Vec::new() }
+}
+
 /// Where an adapter saw the observed bytes. An observation carries no
 /// authority — it becomes intent only when a person adopts its exact digest
 /// in a native signed statement (ADR-0149 §The boundary, second amendment).
@@ -215,7 +236,7 @@ mod tests {
 
     use ed25519_dalek::SigningKey;
 
-    use super::{signed_cancel, signed_reopen};
+    use super::{signed_cancel, signed_proposal, signed_reopen};
     use crate::digest::Digest;
     use crate::ids::KeyId;
     use crate::sign::{AuthorityDoor, AuthorizedSigner, Ed25519KeyProvider};
@@ -271,5 +292,32 @@ mod tests {
         );
         assert!(!reopen.verify_authority(&keys, AuthorityDoor::Cancel, intent), "a reopen must not retire anything");
         assert!(!cancel.verify_authority(&keys, AuthorityDoor::Reopen, intent), "a cancel must not restore anything");
+    }
+
+    #[test]
+    fn a_signed_proposal_verifies_only_at_the_propose_door_for_its_own_digest() {
+        let seed = [7_u8; 32];
+        let key = SigningKey::from_bytes(&seed);
+        let signer = KeyId(String::from("operator"));
+        let keys = Ed25519KeyProvider::new(BTreeMap::from([(
+            signer.clone(),
+            AuthorizedSigner { key: key.verifying_key(), ceiling: Tier::Human },
+        )]));
+        let proposal = Digest::from_bytes([3; 32]);
+        let other = Digest::from_bytes([4; 32]);
+        let statement = signed_proposal(signer, &seed, proposal);
+
+        assert!(
+            statement.verify_authority(&keys, AuthorityDoor::Propose, proposal),
+            "a proposal must verify at the Propose door over its own digest"
+        );
+        assert!(
+            !statement.verify_authority(&keys, AuthorityDoor::Reopen, proposal),
+            "a proposal minted at the wrong door would be a signature good for a restoration its signer never read"
+        );
+        assert!(
+            !statement.verify_authority(&keys, AuthorityDoor::Propose, other),
+            "a proposal bound to nothing would be a signature good for a change its signer never read"
+        );
     }
 }

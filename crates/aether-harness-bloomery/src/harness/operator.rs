@@ -13,9 +13,10 @@
 //! that wants to exercise a door's *refusal* drives the door itself.
 
 use aether_bloomery::{
-    BloomId, BloomSpec, Digest, Fact, OperatorHold, OperatorRepair, Outcome, Withdrawal, WithdrawalCause, WorkpieceId,
-    digest_of,
+    BloomId, BloomSpec, Digest, Fact, KeyId, OperatorHold, OperatorProposal, OperatorRepair, Outcome, Withdrawal,
+    WithdrawalCause, WorkpieceId, digest_of, signed_proposal,
 };
+use aether_chassis_bloomery::bloomery::verified_statement_approval;
 
 use super::ScenarioHarness;
 use super::drive::member;
@@ -31,7 +32,8 @@ impl OperatorMove {
             | Self::Release { at_tick, .. }
             | Self::Repair { at_tick, .. }
             | Self::Withdraw { at_tick, .. }
-            | Self::Amend { at_tick, .. } => *at_tick,
+            | Self::Amend { at_tick, .. }
+            | Self::Propose { at_tick, .. } => *at_tick,
         }
     }
 
@@ -48,6 +50,7 @@ impl OperatorMove {
             Self::Repair { workpiece, .. } => ("repair", workpiece.0.clone()),
             Self::Withdraw { workpiece, .. } => ("withdraw", workpiece.0.clone()),
             Self::Amend { workpiece, .. } => ("amend", workpiece.0.clone()),
+            Self::Propose { .. } => ("propose", String::new()),
         };
         format!("operator-{verb}-{subject}-{}", self.at_tick())
     }
@@ -104,6 +107,14 @@ impl ScenarioHarness {
             },
             OperatorMove::Amend { workpiece, scope_revision, .. } => {
                 return self.admit_amendment(bloom, workpiece, *scope_revision).1;
+            }
+            OperatorMove::Propose { candidate, reason, operator, .. } => {
+                let proposal =
+                    OperatorProposal { candidate: *candidate, reason: reason.clone(), operator: operator.clone() };
+                let digest = digest_of(&proposal);
+                let statement =
+                    signed_proposal(KeyId(String::from("operator")), &super::scenario::OPERATOR_SEED, digest);
+                Fact::ProposeChange { proposal, authorization: verified_statement_approval(digest, &statement) }
             }
         };
 

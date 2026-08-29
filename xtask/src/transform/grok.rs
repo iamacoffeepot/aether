@@ -22,7 +22,7 @@ use anyhow::Result;
 
 use crate::transform::TransformArgs;
 use crate::transform::lane::{
-    capture, capture_resumed, export_build_dir, resumed_prompt, without_resume, write_prompt,
+    Resumed, capture, capture_resumed, export_build_dir, resumed_prompt, without_resume, write_prompt,
 };
 use crate::transform::messages::derive_result_record;
 use crate::transform::peak_memory::PeakMemory;
@@ -169,11 +169,12 @@ fn grok_argv(
 pub(super) fn run(
     prompt: &str,
     args: &TransformArgs,
+    resumed: Resumed,
     scratch: &Scratch,
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
 ) -> Result<serde_json::Value> {
-    run_at(GROK, prompt, args, scratch, cache, peak)
+    run_at(GROK, prompt, args, resumed, scratch, cache, peak)
 }
 
 /// [`run`] against an explicit `program` — production passes [`GROK`]; tests
@@ -182,14 +183,15 @@ fn run_at(
     program: &str,
     prompt: &str,
     args: &TransformArgs,
+    resumed: Resumed,
     scratch: &Scratch,
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
 ) -> Result<serde_json::Value> {
-    let Some(transcript) = launch(program, prompt, args, scratch, cache, peak)? else {
+    let Some(transcript) = launch(program, prompt, args, resumed, scratch, cache, peak)? else {
         // Grok refused the handle before starting a billed turn — the session is
         // gone, so this lap is a cold one.
-        return run_at(program, prompt, &without_resume(args), scratch, cache, peak);
+        return run_at(program, prompt, &without_resume(args), resumed, scratch, cache, peak);
     };
     Ok(derive_result_record(&transcript))
 }
@@ -200,13 +202,14 @@ fn launch(
     program: &str,
     prompt: &str,
     args: &TransformArgs,
+    resumed: Resumed,
     scratch: &Scratch,
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
 ) -> Result<Option<String>> {
     let cwd = env::current_dir()?;
     let resume = args.resume.as_deref();
-    let prompt_file = write_prompt(&args.out, &resumed_prompt(prompt, resume))?;
+    let prompt_file = write_prompt(&args.out, &resumed_prompt(prompt, resume, resumed))?;
     let mut command = peak.command(program);
     command
         .args(grok_argv(&prompt_file.to_string_lossy(), &cwd, args.model.as_deref(), args.effort.as_deref(), resume))
@@ -232,7 +235,7 @@ mod tests {
     use crate::transform::TransformArgs;
     use crate::transform::construct::CONSTRUCT_IMPLEMENT;
     use crate::transform::harness_stub::{self, Stub};
-    use crate::transform::lane::resumed_prompt;
+    use crate::transform::lane::{Resumed, resumed_prompt};
     use crate::transform::messages::derive_result_record;
     use crate::transform::peak_memory;
     use crate::transform::scratch::Scratch;
@@ -382,7 +385,7 @@ mod tests {
 
     fn drive(stub: &Stub, args: &TransformArgs, prompt: &str) -> anyhow::Result<serde_json::Value> {
         let scratch = Scratch::prepare(&args.out, args.nonce.as_deref()).expect("scratch");
-        run_at(stub.program(), prompt, args, &scratch, None, &peak_memory::detect())
+        run_at(stub.program(), prompt, args, Resumed::AfterReset, &scratch, None, &peak_memory::detect())
     }
 
     // Tripwire: `--prompt-file` is the prompt channel. An argv test that only
@@ -423,7 +426,10 @@ mod tests {
         assert_eq!(launches.len(), 1, "a live handle forks once");
         assert_eq!(launches[0].flag("--resume"), Some("sess-1"));
         let path = launches[0].flag("--prompt-file").expect("a resumed lap still has a turn");
-        assert_eq!(fs::read_to_string(path).expect("read prompt file"), resumed_prompt(prompt, Some("sess-1")));
+        assert_eq!(
+            fs::read_to_string(path).expect("read prompt file"),
+            resumed_prompt(prompt, Some("sess-1"), Resumed::AfterReset)
+        );
         assert!(launches[0].stdin.is_empty(), "the prompt still rides the file");
     }
 

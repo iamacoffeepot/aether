@@ -12,7 +12,7 @@ use std::path::Path;
 
 use aether_bloomery::{
     Digest, KeyId, SCOPE_VERIFY_SCHEMA, ScopeRevision, ScopeVerifyInput, Statement, digest_of, signed_approval,
-    signed_cancel, signed_reopen,
+    signed_cancel, signed_proposal, signed_reopen,
 };
 use anyhow::{Result, bail};
 
@@ -73,6 +73,15 @@ impl OperatorKey {
     /// not-landed refusal is what a second attempt hits.
     pub fn reopen_of(&self, intent: Digest) -> Statement {
         signed_reopen(self.signer.clone(), &self.seed, intent)
+    }
+
+    /// The Propose-door statement over `proposal`.
+    ///
+    /// Deterministic for the same reason [`Self::approval_of`] is: a re-run
+    /// re-mints the same bytes and the store's duplicate check makes the
+    /// re-submit a no-op.
+    pub fn proposal_of(&self, proposal: Digest) -> Statement {
+        signed_proposal(self.signer.clone(), &self.seed, proposal)
     }
 }
 

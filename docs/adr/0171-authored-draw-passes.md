@@ -1,6 +1,6 @@
 # ADR-0171: Authored Draw Passes
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-04
 
 ## Context

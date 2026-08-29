@@ -1,0 +1,5 @@
+error: `read_only` and `destructive` contradict each other; state at most one
+  --> tests/ui/rejects_contradictory_hints.rs:20:5
+   |
+20 |     #[mcp::tool(name = "confused", description = "States two things at once.", read_only, destructive)]
+   |     ^

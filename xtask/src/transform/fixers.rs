@@ -69,19 +69,25 @@ impl Report {
             );
         }
     }
+
+    /// Fold a later fixer pass into this receipt: the lane ran fixers if either
+    /// pass did, and moved the tree if either moved it.
+    ///
+    /// The construct lane runs [`apply`] twice when the post-fixer lint check
+    /// buys a repair turn — once over the model's own work and once over the
+    /// repair's. One receipt for the lane, because the two bits answer "is any
+    /// line in this candidate fixer-authored", which is a property of the run
+    /// rather than of a pass.
+    pub(super) const fn merged(self, later: Self) -> Self {
+        Self { ran: self.ran || later.ran, changed: self.changed || later.changed }
+    }
 }
 
 /// Run the mechanical fixers over `worktree`. Infallible: a fixer that
 /// errors or times out is rolled back to the snapshot taken just before
 /// *that* command, and the lane still returns a report.
 pub(super) fn apply(worktree: &Path, out_dir: &Path) -> Report {
-    let dirty = dirty_paths(worktree, Some(out_dir));
-    let rust_files: Vec<String> = dirty
-        .iter()
-        .filter(|path| Path::new(path).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("rs")))
-        .filter(|path| worktree.join(path).is_file())
-        .cloned()
-        .collect();
+    let rust_files = dirty_rust_files(worktree, out_dir);
     if rust_files.is_empty() {
         return Report::default();
     }
@@ -90,8 +96,7 @@ pub(super) fn apply(worktree: &Path, out_dir: &Path) -> Report {
     // stamps its own liveness before the first thing that can take a while —
     // `workspace_members` shells out to cargo metadata (#5383).
     stamp_heartbeat(out_dir);
-    let packages =
-        workspace_members(worktree).map(|members| owning_packages(&members, &rust_files)).unwrap_or_default();
+    let packages = owning_packages_of(worktree, &rust_files);
     let before = worktree_state(worktree, out_dir);
 
     run_fixer(worktree, out_dir, "cargo", &fmt_argv(worktree, &rust_files), FMT_BUDGET, |_| {});
@@ -117,6 +122,36 @@ fn stamp_heartbeat(out_dir: &Path) {
     if fs::create_dir_all(out_dir).is_ok() {
         let _ = fs::write(out_dir.join(HEARTBEAT_FILE), b"");
     }
+}
+
+/// The dirty `.rs` files still on disk — what `cargo fmt` is pointed at, and
+/// what the package resolution below derives the `-p` set from.
+fn dirty_rust_files(worktree: &Path, out_dir: &Path) -> Vec<String> {
+    dirty_paths(worktree, Some(out_dir))
+        .into_iter()
+        .filter(|path| Path::new(path).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("rs")))
+        .filter(|path| worktree.join(path).is_file())
+        .collect()
+}
+
+/// The workspace packages that own `rust_files`, or an empty set when the
+/// package graph will not build — the same absence a prose-only dirty tree
+/// produces, and the one both callers already treat as "nothing to scope to".
+fn owning_packages_of(worktree: &Path, rust_files: &[String]) -> Vec<String> {
+    workspace_members(worktree).map(|members| owning_packages(&members, rust_files)).unwrap_or_default()
+}
+
+/// The packages a post-model pass over `worktree` is scoped to: those owning
+/// the rust files the run left dirty.
+///
+/// The construct lane's post-fixer lint check runs over exactly this set, not
+/// its reverse-dependency closure — the check exists to show the model what
+/// `--fix` could not apply *in the files it wrote*, and a closure would put a
+/// dependent crate's diagnostics in front of a model whose work order does not
+/// reach them. Shared with [`apply`] rather than re-derived, so the check
+/// cannot lint a different set than the fixer rewrote.
+pub(super) fn scoped_packages(worktree: &Path, out_dir: &Path) -> Vec<String> {
+    owning_packages_of(worktree, &dirty_rust_files(worktree, out_dir))
 }
 
 /// Longest-prefix workspace-root match: each path belongs to the package that
@@ -204,7 +239,15 @@ fn run_fixer(
     }
 }
 
-fn spawn_and_wait(
+/// Spawn `program` in `worktree` under `budget`, stamping the lane heartbeat
+/// while it waits.
+///
+/// Shared with the post-fixer lint check, which needs the isolation, the
+/// budget, and the heartbeat but not [`run_fixer`]'s snapshot-and-restore: a
+/// check only reads the tree, so a check that cannot finish has nothing to put
+/// back — and a restore there would throw away the fixer edits this pass exists
+/// to inspect.
+pub(super) fn spawn_and_wait(
     worktree: &Path,
     out_dir: &Path,
     program: &str,

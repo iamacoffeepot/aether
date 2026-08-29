@@ -136,6 +136,7 @@ fn fact_blooms(fact: &Fact) -> Vec<BloomId> {
         | Fact::RequestOrphanClaimRelease { .. }
         | Fact::CompleteOrphanClaimRelease { .. }
         | Fact::BaseVerifyCompleted { .. }
-        | Fact::BaseReverify(_) => Vec::new(),
+        | Fact::BaseReverify(_)
+        | Fact::ProposeChange { .. } => Vec::new(),
     }
 }

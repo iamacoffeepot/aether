@@ -66,6 +66,7 @@ mod drafts;
 mod evidence;
 pub mod hex;
 mod metrics;
+mod proposals;
 mod reads;
 mod response;
 mod seal;
@@ -696,6 +697,14 @@ impl NativeActor for BloomeryApiCapability {
     #[http::route(Get, "/claims")]
     fn on_get_claims(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
         let routed = ApiCapabilityState::list_claims();
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /proposals` — propose a signed operator change onto the day's
+    /// branch (ADR-0205). The signature is verified before the fact is admitted.
+    #[http::route(Post, "/proposals")]
+    fn on_post_proposal(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+        let routed = state.propose(&ctx, &ctx.request().body);
         finish(state, ctx, routed)
     }
 

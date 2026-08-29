@@ -22,8 +22,8 @@ use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneRun, LaneScript
 use aether_chassis_bloomery::bloomery::{
     BloomeryChassis, BloomeryEnv, Chassis, CoordinatorConfig, DispatchTick, DoctorReactorCapability, DoctorReport,
     DoctorTick, ExecutorReactorCapability, GithubConnectionConfig, IntegrateReactorCapability, IntegrateTick,
-    JanitorReactorCapability, JanitorTick, LandReactorCapability, LandTick, NotifyConfig, ScriptedEvidence,
-    ScriptedEvidenceResult, ScriptedUpload,
+    JanitorReactorCapability, JanitorTick, LandReactorCapability, LandTick, NotifyConfig, ProposeReactorCapability,
+    ProposeTick, ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload,
 };
 use aether_chassis_bloomery::commission::task_text;
 use aether_chassis_bloomery::control::ObserveTick;
@@ -68,7 +68,7 @@ const COORDINATOR_HANDSHAKE_BUDGET: Duration = Duration::from_mins(1);
 /// A fixture, like every other key in a test tree: what the scenario needs is
 /// a statement whose provenance is an author signature rather than the
 /// estate's own observation, and the bytes behind it are nobody's secret.
-const OPERATOR_SEED: [u8; 32] = [0x0A; 32];
+pub const OPERATOR_SEED: [u8; 32] = [0x0A; 32];
 
 /// A live scenario: a booted coordinator, the backend it runs against, and the
 /// wire connection that drives and observes it.
@@ -1098,6 +1098,11 @@ impl ScenarioHarness {
     /// Wake the land reactor once.
     pub fn land_tick(&mut self) {
         self.wire.tick(<LandReactorCapability as Addressable>::resolve(0, ()), &LandTick::default());
+    }
+
+    /// Wake the propose reactor once.
+    pub fn propose_tick(&mut self) {
+        self.wire.tick(<ProposeReactorCapability as Addressable>::resolve(0, ()), &ProposeTick::default());
     }
 
     /// Wake the control core's mainline observer once.

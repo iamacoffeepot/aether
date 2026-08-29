@@ -12,7 +12,7 @@ process profiles, binaries, packaging     aether-chassis, aether-chassis-*
 mail runtime, wasm host, scheduler, chassis traits    aether-substrate
 wire/schema/identity/math foundations                 aether-data, aether-codec, aether-math
 operator bridge                                       aether-mcp
-test harnesses and context-budget canary              aether-harness-*, aether-context-canary
+test harnesses                                        aether-harness-*
 procedural macros                                     *-derive crates
 ```
 
@@ -117,8 +117,6 @@ their compile-pass/fail fixtures beside the macro they exercise. These are
 often better executable examples than an old prose snippet.
 
 `xtask` owns repository automation such as distribution and bundle assembly.
-`aether-context-canary` runs the deterministic live MCP bring-up scenario and
-checks tool-response byte budgets.
 The standalone `fuzz/` crate is excluded from the stable workspace because it
 uses the nightly fuzzing toolchain.
 

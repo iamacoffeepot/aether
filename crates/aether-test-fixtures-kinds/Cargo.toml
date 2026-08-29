@@ -3,6 +3,7 @@ name = "aether-test-fixtures-kinds"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # Shared `Kind` definitions for the workspace's wasm test fixtures. This
 # rlib holds the schemas the bundle / satellite component crates emit and

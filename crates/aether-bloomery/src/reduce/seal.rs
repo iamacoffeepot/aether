@@ -10,20 +10,22 @@ use aether_data::Kind;
 use aether_data::Schema;
 use serde::de::DeserializeOwned;
 
+use super::aggregate_verify::aggregate_verify_dispatch;
 use super::attempt::{DispatchTargets, SealedLine, move_effects, stage_binding};
+use super::composition::composition_progress;
 use super::readiness::{ReadyLine, entry_line, ready_entries, successor_entries};
 use super::splice::{SplicedBase, checkout_from, member_construct_base, spliced_base};
 use super::{
-    BloomRecord, BloomStatus, Decision, Decisions, Outcome, SealConflict, SealError, Snapshot, StageProgress,
-    SupersedeError,
+    BloomRecord, BloomStatus, Decision, Decisions, FoldedIntegration, Outcome, SealConflict, SealError, Snapshot,
+    StageProgress, SupersedeError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{
     BaseReceipt, BaseVerdict, BloomSpec, CandidateRef, ConfigKind, ConfigResolveError, ConfigScopes, DependencyError,
-    EvidenceKind, MemberCandidate, MemberDependency, Membership, ModelOverride, ResolutionClaim, ResolvedConfigs,
-    SpendCeiling, SpendWindow, StageCatalog, Transformation, Unproducible, VerifyFailureSet, VerifyGateSet,
-    VerifyProof, resolve_member_dependencies,
+    EvidenceKind, MemberCandidate, MemberDependency, Membership, ModelOverride, OperatorProposal, ResolutionClaim,
+    ResolvedConfigs, SpendCeiling, SpendWindow, StageCatalog, Transformation, Unproducible, VerifyFailureSet,
+    VerifyGateSet, VerifyProof, resolve_member_dependencies,
 };
 
 pub(super) fn reduce_seal(
@@ -42,7 +44,7 @@ pub(super) fn reduce_seal(
     // Every member is verified: non-empty membership, no duplicate workpiece,
     // and each approval binds its own scope revision as an Approval (ADR-0149
     // "verify every member's scope and approval lineage").
-    if let Err(error) = validate_member_admission(spec.members()) {
+    if let Err(error) = validate_member_admission(spec) {
         return Decisions::rejected(Outcome::SealRejected(error));
     }
     if let Err(error) = validate_member_graph(spec.members(), edges) {
@@ -98,16 +100,24 @@ pub(super) fn reduce_seal(
             effects: vec![Decision::RecordSpendQuiesce { quiesce: Some(quiesce) }],
         };
     }
+    let proposal = match sealed_config::<OperatorProposal>(ConfigScopes::bloom_wide(spec.configs()), configs) {
+        Ok(proposal) => proposal,
+        Err(error) => return Decisions::rejected(Outcome::SealRejected(error)),
+    };
+
+    let mut effects = Vec::with_capacity(spec.members().len() * 3 + 2);
+    if snapshot.spend_quiesce.is_some() {
+        effects.push(Decision::RecordSpendQuiesce { quiesce: None });
+    }
+    if let Some(proposal) = proposal {
+        return seal_proposal(spec, bloom, catalog, proposal, effects);
+    }
     // Claim each member, then seed the ready ones at the entry stage and
     // dispatch their first attempt. Roots (no incoming *declared* edges)
     // enter at `Construct` exactly as today; a surface-derived overlap is
     // not a gate (ADR-0204). Dependents wait for a resolution claim
     // (ADR-0196). The claims come first so the dispatch effects attach to a
     // member already in `active`.
-    let mut effects = Vec::with_capacity(spec.members().len() * 3 + 2);
-    if snapshot.spend_quiesce.is_some() {
-        effects.push(Decision::RecordSpendQuiesce { quiesce: None });
-    }
     for member in spec.members() {
         effects.push(Decision::ClaimMembership { workpiece: member.workpiece.clone(), bloom });
     }
@@ -123,6 +133,41 @@ pub(super) fn reduce_seal(
         &ReadyLine { bloom_configs: spec.configs(), catalog: &catalog, base: spec.base(), base_proven: proven },
     ));
     effects.push(Decision::RecordMemberDependencies { bloom, edges: edges.to_vec() });
+    Decisions { outcome: Outcome::Sealed(bloom), effects }
+}
+
+/// Seal a memberless operator-proposal bloom (ADR-0205): the supplied
+/// candidate is the held integration, the composition sits at `Verify`, the
+/// critic is recorded passed so it is not dispatched, and the mechanical
+/// gate runs over that tree.
+fn seal_proposal(
+    spec: &BloomSpec,
+    bloom: BloomId,
+    catalog: StageCatalog,
+    proposal: OperatorProposal,
+    mut effects: Vec<Decision>,
+) -> Decisions {
+    let candidate = proposal.candidate;
+    // Occupy `active` so the executor's live-bloom check does not retire the
+    // mechanical gate as a superseded plan. The composition is not a member;
+    // this is the bloom's own slot.
+    effects.push(Decision::ClaimMembership { workpiece: WorkpieceId::composition(), bloom });
+    effects.push(Decision::RecordStageCatalog { bloom, catalog: catalog.clone() });
+    effects.push(Decision::DequeueProposal { proposal });
+    effects.push(Decision::RecordIntegration {
+        bloom,
+        integration: Some(FoldedIntegration { tree: candidate.tree, head: candidate.checkout, lineage: Vec::new() }),
+    });
+    effects.push(Decision::RecordAggregateGatePass { bloom, stage: StageId::AggregateReview });
+    effects.push(Decision::AdvanceStage {
+        bloom,
+        workpiece: WorkpieceId::composition(),
+        progress: composition_progress(StageId::Verify, 1, candidate),
+    });
+    let mut record = BloomRecord::empty(spec.clone());
+    record.stage_catalog = catalog;
+    effects.extend(aggregate_verify_dispatch(&record, bloom, candidate.tree, candidate.checkout));
+    effects.push(Decision::RecordMemberDependencies { bloom, edges: Vec::new() });
     Decisions { outcome: Outcome::Sealed(bloom), effects }
 }
 
@@ -205,11 +250,17 @@ fn refuse_member_spend_ceiling(spec: &BloomSpec) -> Result<(), SealError> {
 /// seal and the second-door supersession run it, so a successor is held to the
 /// same member validity a fresh seal is. The error is a [`SealError`] — seal's
 /// vocabulary is the canonical name for a bad membership; supersession wraps it.
-fn validate_member_admission(members: &[Membership]) -> Result<(), SealError> {
+fn validate_member_admission(spec: &BloomSpec) -> Result<(), SealError> {
+    let members = spec.members();
     // A bloom resolves into one artifact carrying a claim for every member; an
     // empty membership would trivially resolve and advance mainline on zero
-    // evidence.
+    // evidence. An operator proposal is the one empty seal the door admits:
+    // its candidate is already the artifact, and the mechanical gate still
+    // runs (ADR-0205).
     if members.is_empty() {
+        if spec.configs().address::<OperatorProposal>().is_some() {
+            return Ok(());
+        }
         return Err(SealError::EmptyMembership);
     }
     let mut seen = BTreeSet::new();
@@ -415,7 +466,7 @@ pub(super) fn reduce_supersede(
     // pass the same per-member admission a seal runs before it claims or inherits
     // anything — an empty, duplicate-workpiece, or unapproved successor is
     // refused here rather than admitted on invalid members (ADR-0149).
-    if let Err(error) = validate_member_admission(successor.members()) {
+    if let Err(error) = validate_member_admission(successor) {
         return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(error)));
     }
     if let Err(error) = validate_member_graph(successor.members(), edges) {
@@ -785,8 +836,8 @@ mod tests {
     };
     use crate::values::{
         BaseReceipt, BaseVerdict, BloomDraft, BloomSpec, CandidateRef, ConfigKind, ConfigRegistry, Evidence,
-        EvidenceKind, Forecast, MemberDependency, Membership, ResolutionClaim, ResolvedConfigs, SpendCeiling,
-        SpendQuiesce, SpendWindow, Unproducible, VerifyGateSet,
+        EvidenceKind, Forecast, MemberDependency, Membership, OperatorProposal, ResolutionClaim, ResolvedConfigs,
+        SpendCeiling, SpendQuiesce, SpendWindow, Unproducible, VerifyGateSet,
     };
 
     fn digest(seed: u8) -> Digest {
@@ -1828,6 +1879,100 @@ mod tests {
         assert!(
             !decided.effects.iter().any(|effect| matches!(effect, Decision::DispatchAttempt { .. })),
             "construct stays withheld while the receipt is pending",
+        );
+    }
+
+    fn proposal_content() -> (OperatorProposal, ConfigRegistry, ResolvedConfigs) {
+        let proposal = OperatorProposal {
+            candidate: CandidateRef { tree: digest(7), checkout: digest(8) },
+            reason: "flip an ADR status".into(),
+            operator: "operator".into(),
+        };
+        let mut registry = ConfigRegistry::default();
+        registry.insert::<OperatorProposal>(proposal.address());
+        let mut configs = ResolvedConfigs::default();
+        configs.insert(
+            proposal.address(),
+            OperatorProposal::NAME,
+            to_vec(&proposal).expect("a proposal encodes"),
+            None,
+        );
+        (proposal, registry, configs)
+    }
+
+    #[test]
+    fn an_empty_membership_is_still_refused_without_a_sealed_proposal() {
+        // Widening validate_member_admission far enough to admit a proposal
+        // bloom is one edit away from admitting any empty seal, which would
+        // resolve on zero evidence and advance mainline.
+        let spec = BloomDraft { proposals: Vec::new(), base: digest(0), ..BloomDraft::default() }.seal();
+        let decided = reduce_seal(
+            &Snapshot::new(digest(0)).with_green_base(digest(0)),
+            &spec,
+            &ResolvedConfigs::default(),
+            &SpendWindow::default(),
+            &[],
+        );
+        assert!(matches!(decided.outcome, Outcome::SealRejected(SealError::EmptyMembership)));
+    }
+
+    #[test]
+    fn a_memberless_proposal_seals_at_verify_over_the_supplied_candidate() {
+        let (proposal, registry, configs) = proposal_content();
+        let spec =
+            BloomDraft { proposals: Vec::new(), base: digest(0), configs: registry, ..BloomDraft::default() }.seal();
+        let decided = reduce_seal(
+            &Snapshot::new(digest(0)).with_green_base(digest(0)),
+            &spec,
+            &configs,
+            &SpendWindow::default(),
+            &[],
+        );
+        assert!(matches!(decided.outcome, Outcome::Sealed(_)), "got {:?}", decided.outcome);
+        assert!(
+            decided.effects.iter().any(|effect| matches!(
+                effect,
+                Decision::ClaimMembership { workpiece, .. } if workpiece.is_composition()
+            )),
+            "a proposal bloom occupies active as the composition: {decided:?}"
+        );
+        assert!(
+            !decided.effects.iter().any(|effect| matches!(
+                effect,
+                Decision::ClaimMembership { workpiece, .. } if !workpiece.is_composition()
+            )),
+            "a proposal bloom claims no member: {decided:?}"
+        );
+        assert!(
+            decided.effects.iter().any(|effect| matches!(
+                effect,
+                Decision::RecordIntegration { integration: Some(fold), .. }
+                    if fold.tree == proposal.candidate.tree && fold.head == proposal.candidate.checkout && fold.lineage.is_empty()
+            )),
+            "the supplied candidate is the held integration: {decided:?}"
+        );
+        assert!(
+            decided.effects.iter().any(|effect| matches!(
+                effect,
+                Decision::RecordAggregateGatePass { stage: StageId::AggregateReview, .. }
+            )),
+            "the critic is recorded passed rather than dispatched: {decided:?}"
+        );
+        assert!(
+            decided.effects.iter().any(|effect| matches!(
+                effect,
+                Decision::AdvanceStage { workpiece, progress, .. }
+                    if workpiece.is_composition() && progress.stage == StageId::Verify && progress.candidate == Some(proposal.candidate)
+            )),
+            "the composition sits at Verify over the supplied candidate: {decided:?}"
+        );
+        assert!(
+            decided.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateVerify { .. })),
+            "the mechanical gate dispatches over that tree: {decided:?}"
+        );
+        assert!(
+            !decided.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })),
+            "a proposal has no review seat: {decided:?}"
         );
     }
 }

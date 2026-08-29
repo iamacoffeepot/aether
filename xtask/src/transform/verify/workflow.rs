@@ -1,22 +1,23 @@
 //! The `.github/workflows/ci.yml` reader behind the CI-parity tripwire, and
 //! the `.github/workflows/transform.yml` reader behind the verifier-bit one.
 //!
-//! [`super::verify_command`]'s argv exists to reproduce, off Actions, the
-//! command each gate runs. Asserting it against a second Rust literal proves
-//! only that xtask agrees with itself: the workflow is the sole copy Actions
-//! executes, so it could be trimmed — back to default features, or without a
-//! flag — while every assertion in this crate stayed green (#4843). Reading
-//! the workflow makes the gate the source and the argv the assertion. The
-//! transform workflow's jq ladder is the same move for a second file:
+//! [`super::verify_command`] owns each gate's program, argv, environment and
+//! verdict. CI invokes the typed `verify.*` command; asserting a second copy
+//! of that argv against the workflow would prove only that the two copies
+//! still agree (#4843, #4883). The tripwire therefore checks the structure:
+//! each mechanical job reaches its arm exactly once, no raw calibrated
+//! command remains, and the test job still threads its scheduling inputs.
+//! The transform workflow's jq ladder is the same move for a second file:
 //! [`aether_bloomery::VerifyFailure::ALL`] is the source, and a transcribed
 //! table is what drifted when containment was appended.
 //!
-//! Enough YAML to reach `jobs.<job>.steps[].{name,run,env}` and no more: plain
-//! scalars including the multi-line plain form, folded and literal block
-//! scalars, and one level of nested mapping. A lookup that finds nothing
-//! panics rather than yielding an empty comparison, because a workflow this
-//! reader cannot follow has to fail the tripwire loudly instead of passing it
-//! vacuously.
+//! Enough YAML to reach the keys the tripwires compare — top-level `on` and
+//! `concurrency`, `jobs.<job>.{runs-on,if,outputs,strategy}`, and
+//! `jobs.<job>.steps[].{name,id,if,uses,run,env}` — and no more: plain scalars
+//! including the multi-line plain form, folded and literal block scalars, and
+//! one level of nested mapping. A lookup that finds nothing panics rather than
+//! yielding an empty comparison, because a workflow this reader cannot follow
+//! has to fail the tripwire loudly instead of passing it vacuously.
 
 use aether_bloomery::{VerifyFailure, VerifyFailureSet};
 
@@ -31,11 +32,19 @@ const CI_WORKFLOW: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../
 const TRANSFORM_WORKFLOW: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../.github/workflows/transform.yml"));
 
-/// One `steps:` entry of a workflow job, reduced to the keys the tripwire
-/// compares against a [`super::VerifyInvocation`].
+/// One `steps:` entry of a workflow job, reduced to the keys the tripwires
+/// compare: argv parity against a [`super::VerifyInvocation`], and the
+/// scheduling `if` / `uses` the daily-backstop assertions read.
 pub(super) struct Step {
-    /// The step's `name:`, absent on the bare `- run:` form.
+    /// The step's `name:`, absent on the bare `- run:` / `- uses:` form.
     name: Option<String>,
+    /// The step's `id:`, the selector for a nameless step the tripwire still
+    /// has to pin (the path filter).
+    id: Option<String>,
+    /// The step's `if:`, when present.
+    if_condition: Option<String>,
+    /// The step's `uses:` action, when it is not a `run:` step.
+    uses: Option<String>,
     /// The step's `run:` command, split on whitespace.
     pub(super) run: Vec<String>,
     /// The step's own `env:` block, in file order.
@@ -122,6 +131,84 @@ pub(super) fn required_jobs() -> Vec<String> {
     inner.split(',').map(str::trim).filter(|job| !job.is_empty()).map(str::to_owned).collect()
 }
 
+/// Every job key under `jobs:`, in file order.
+fn job_names() -> Vec<String> {
+    mapping(&block(&ci_lines(), "jobs")).into_iter().map(|(name, _)| name).collect()
+}
+
+/// The branch names `on.push.branches` lists, unquoted, in file order.
+fn push_branches() -> Vec<String> {
+    sequence(&block(&block(&block(&ci_lines(), "on"), "push"), "branches"))
+}
+
+/// `concurrency.group`. Integration pushes key this by sha so a later landing
+/// cannot share the earlier run's group.
+fn concurrency_group() -> String {
+    scalar(&block(&ci_lines(), "concurrency"), "group")
+        .expect("`concurrency.group` must exist in .github/workflows/ci.yml")
+}
+
+/// `concurrency.cancel-in-progress`. False on `main` and the daily ref so the
+/// run that named a red landing is not cancelled by the next bloom.
+fn cancel_in_progress() -> String {
+    scalar(&block(&ci_lines(), "concurrency"), "cancel-in-progress")
+        .expect("`concurrency.cancel-in-progress` must exist in .github/workflows/ci.yml")
+}
+
+/// `jobs.<job>.runs-on`.
+fn job_runs_on(job: &str) -> String {
+    scalar(&job_lines(job), "runs-on")
+        .unwrap_or_else(|| panic!("`jobs.{job}.runs-on` must be a scalar in .github/workflows/ci.yml"))
+}
+
+/// `jobs.<job>.if:`, when the job is conditional.
+fn job_if(job: &str) -> Option<String> {
+    scalar(&job_lines(job), "if")
+}
+
+/// `jobs.changes.outputs.code` — the path-filter bypass every other gate reads.
+fn changes_code_output() -> String {
+    scalar(&block(&job_lines("changes"), "outputs"), "code")
+        .expect("`jobs.changes.outputs.code` must exist in .github/workflows/ci.yml")
+}
+
+/// `jobs.test.strategy.matrix.shard` — one job on pull requests, three otherwise.
+fn test_shard_matrix() -> String {
+    scalar(&block(&block(&job_lines("test"), "strategy"), "matrix"), "shard")
+        .expect("`jobs.test.strategy.matrix.shard` must exist in .github/workflows/ci.yml")
+}
+
+/// The one step of `job` carrying `id`.
+fn step_with_id(job: &str, id: &str) -> Step {
+    sole(job, &format!("the id `{id}`"), |step| step.id.as_deref() == Some(id))
+}
+
+/// The workflow as a line slice. Elements are `'static` borrows of
+/// [`CI_WORKFLOW`], so a nested `block` return can outlive the `Vec` that
+/// produced it.
+fn ci_lines() -> Vec<&'static str> {
+    CI_WORKFLOW.lines().collect()
+}
+
+/// The body of `jobs.<job>`, or a panic if that job is missing.
+fn job_lines(job: &str) -> Vec<&'static str> {
+    let declaration = block(&block(&ci_lines(), "jobs"), job);
+    assert!(!declaration.is_empty(), "`jobs.{job}` must exist in .github/workflows/ci.yml");
+    declaration
+}
+
+/// Every `- item` of a block sequence, unquoted, in file order.
+fn sequence(lines: &[&str]) -> Vec<String> {
+    let indent = least_indent(lines);
+    lines
+        .iter()
+        .filter(|line| structural(line) && indentation(line) == indent && line.trim_start().starts_with("- "))
+        .map(|line| {
+            unquote(line.trim_start().strip_prefix("- ").expect("sequence filter requires the `- ` marker").trim())
+        })
+        .collect()
+}
+
 /// Every step of `jobs.<job>.steps`, in file order.
 fn steps(job: &str) -> Vec<Step> {
     let file: Vec<&str> = CI_WORKFLOW.lines().collect();
@@ -151,6 +238,9 @@ fn steps(job: &str) -> Vec<Step> {
 
             Step {
                 name: scalar(&chunk, "name"),
+                id: scalar(&chunk, "id"),
+                if_condition: scalar(&chunk, "if"),
+                uses: scalar(&chunk, "uses"),
                 run: scalar(&chunk, "run").unwrap_or_default().split_whitespace().map(str::to_owned).collect(),
                 env: mapping(&block(&chunk, "env")),
             }
@@ -284,7 +374,23 @@ fn checked_in_verifier_bit_table(workflow: &str) -> Option<String> {
 }
 
 mod tests {
-    use super::{TRANSFORM_WORKFLOW, checked_in_verifier_bit_table, verifier_bit_table};
+    use std::fs;
+    use std::path::Path;
+
+    use super::{
+        TRANSFORM_WORKFLOW, cancel_in_progress, changes_code_output, checked_in_verifier_bit_table, concurrency_group,
+        job_if, job_names, job_runs_on, named_step, push_branches, step_with_id, steps, test_shard_matrix,
+        verifier_bit_table,
+    };
+
+    /// ADR-0186's daily-branch prefix, the glob `on.push.branches` uses and the
+    /// `startsWith(github.ref, …)` arm the concurrency and filter bypass share.
+    const DAILY_BRANCH: &str = "bloomery/daily/";
+    const DAILY_REF: &str = "refs/heads/bloomery/daily/";
+
+    fn names_daily_ref(expr: &str) -> bool {
+        expr.contains(&format!("startsWith(github.ref, '{DAILY_REF}')"))
+    }
 
     #[test]
     fn the_checked_in_verifier_bit_table_is_what_the_emitter_renders() {
@@ -299,5 +405,168 @@ mod tests {
             emitted,
             "paste the emitted verifier_bit table into .github/workflows/transform.yml:\n{emitted}",
         );
+    }
+
+    #[test]
+    fn daily_landings_trigger_the_existing_push_suite() {
+        // Tripwire: a bloom lands on the day's ref without a pull request, and
+        // the PR lane ignores that ref. The backstop is this workflow's push
+        // trigger. Dropping the glob (or copying the suite into a second
+        // workflow that then drifts) is how a scoping miss stays green until
+        // sync-back.
+        let branches = push_branches();
+        let glob = format!("{DAILY_BRANCH}**");
+        assert!(
+            branches.iter().any(|branch| branch == &glob),
+            "on.push.branches must include `{glob}`, found {branches:?}"
+        );
+        assert!(
+            branches.iter().any(|branch| branch == "main"),
+            "the same push suite still notarizes main, found {branches:?}"
+        );
+
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.github/workflows");
+        for entry in fs::read_dir(&dir).expect("the workflows directory is the declared surface") {
+            let path = entry.expect("workflow directory entries are readable").path();
+            let workflow =
+                path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("yml") || ext.eq_ignore_ascii_case("yaml"));
+            if path.file_name().is_some_and(|name| name == "ci.yml") || !workflow {
+                continue;
+            }
+            let text = fs::read_to_string(&path).unwrap_or_else(|err| {
+                let path = path.display();
+                panic!("read {path}: {err}")
+            });
+            let shown = path.display();
+            assert!(
+                !text.contains(DAILY_BRANCH.trim_end_matches('/')),
+                "{shown} must not grow a daily trigger; the backstop reuses ci.yml so it cannot drift from the suite that notarizes sync-back",
+            );
+        }
+    }
+
+    #[test]
+    fn a_daily_push_forces_the_full_suite_instead_of_the_affected_subset() {
+        // Tripwire: the backstop exists to catch a wave whose affected set was
+        // wrong. Routing a daily push through the path filter or the PR
+        // package selection would let that miss decide whether the suite runs.
+        let code = changes_code_output();
+        assert!(names_daily_ref(&code), "jobs.changes.outputs.code must force true on a daily ref: {code}");
+        assert!(
+            code.contains("github.event_name == 'workflow_dispatch'"),
+            "manual dispatch still bypasses the filter: {code}"
+        );
+
+        let filter = step_with_id("changes", "filter").if_condition.expect("the path filter is conditional");
+        assert!(
+            filter.contains("github.event_name != 'workflow_dispatch'"),
+            "the path filter still skips a manual dispatch: {filter}"
+        );
+        assert!(
+            filter.contains(&format!("!startsWith(github.ref, '{DAILY_REF}')")),
+            "the path filter must skip daily refs: {filter}"
+        );
+
+        assert_eq!(
+            named_step("test", "Compute affected packages (PR only)").if_condition.as_deref(),
+            Some("github.event_name == 'pull_request'"),
+            "affected-package selection is pull_request only",
+        );
+        assert_eq!(
+            named_step("test", "Test gate").if_condition.as_deref(),
+            Some(
+                "github.event_name != 'pull_request' || steps.affected.outputs.run_all == 'true' || steps.affected.outputs.package_args != ''"
+            ),
+            "a daily push is not a pull_request, so it must take the test gate",
+        );
+    }
+
+    #[test]
+    fn integration_pushes_key_concurrency_by_commit_and_do_not_cancel() {
+        // Tripwire: a branch-ref group lets bloom N+1 cancel bloom N's run and
+        // erases the first red landing — the commit an operator has to name.
+        // GitHub allows one running + one queued run per group, so integration
+        // pushes (main and daily) each get a sha-keyed group that does not
+        // cancel; pull requests keep ref-keyed supersession.
+        let group = concurrency_group();
+        assert!(names_daily_ref(&group), "daily refs must be classified as integration pushes: {group}");
+        assert!(group.contains("github.ref == 'refs/heads/main'"), "main is the other integration push: {group}");
+        assert!(
+            group.contains("&& github.sha || github.ref"),
+            "the group must select sha for integration and ref otherwise: {group}"
+        );
+
+        let cancel = cancel_in_progress();
+        assert_ne!(cancel, "true", "unconditional cancel would drop bloom N's run when bloom N+1 lands");
+        assert_ne!(cancel, "false", "unconditional keep-alive would also hold pull-request spot runners to completion");
+        assert!(cancel.contains("github.ref != 'refs/heads/main'"), "main must not cancel in-progress: {cancel}");
+        assert!(
+            cancel.contains(&format!("!startsWith(github.ref, '{DAILY_REF}')")),
+            "daily must not cancel in-progress: {cancel}"
+        );
+    }
+
+    #[test]
+    fn daily_runs_use_the_standard_three_shard_hosted_path() {
+        // Tripwire: a daily push is a non-pull_request event, so it already
+        // takes main's hosted, sharded, disk-reclaiming path — unless someone
+        // special-cases it onto a paid label, a single shard, or the PR
+        // suppression scanner.
+        let shard = test_shard_matrix();
+        assert!(
+            shard.contains("fromJSON('[1, 2, 3]')"),
+            "non-pull_request events must run three shards, found {shard}"
+        );
+        assert!(
+            shard.contains("github.event_name == 'pull_request' && fromJSON('[1]')"),
+            "the single-job arm is pull_request only, found {shard}"
+        );
+
+        for job in job_names() {
+            let runs_on = job_runs_on(&job);
+            if runs_on.contains("runs-on=") {
+                assert!(
+                    runs_on.contains("github.event_name == 'pull_request'"),
+                    "{job} selects a paid runner outside the pull_request arm: {runs_on}"
+                );
+                assert!(
+                    runs_on.contains("|| 'ubuntu-latest'"),
+                    "{job} must fall back to ubuntu-latest off pull_request: {runs_on}"
+                );
+            } else {
+                assert_eq!(runs_on, "ubuntu-latest", "{job} must stay on the GitHub-hosted runner, found {runs_on}");
+            }
+        }
+
+        assert_eq!(
+            named_step("test", "Free disk space (GitHub-hosted only)").if_condition.as_deref(),
+            Some("github.event_name != 'pull_request'"),
+            "daily and main hosted runners still reclaim disk",
+        );
+        assert_eq!(
+            job_if("suppressions").as_deref(),
+            Some("github.event_name == 'pull_request'"),
+            "daily pushes have no PR authorization context and must skip the suppression gate",
+        );
+    }
+
+    #[test]
+    fn the_daily_backstop_does_not_mutate_or_quarantine() {
+        // Tripwire: a red daily run is an operator signal, not a coordinator
+        // control channel. A step that quarantines, dispatches, or shells out
+        // to `gh` would let workflow credentials write the day without review.
+        for job in job_names() {
+            for step in steps(&job) {
+                let name = step.name.as_deref().unwrap_or("");
+                let uses = step.uses.as_deref().unwrap_or("");
+                let run = step.run.join(" ");
+                for (field, hay) in [("name", name), ("uses", uses), ("run", &run)] {
+                    let lower = hay.to_ascii_lowercase();
+                    assert!(!lower.contains("quarantine"), "jobs.{job} {field} must not quarantine: {hay}");
+                    assert!(!lower.contains("dispatch"), "jobs.{job} {field} must not dispatch: {hay}");
+                }
+                assert!(!step.run.iter().any(|token| token == "gh"), "jobs.{job} must not invoke gh: {run}");
+            }
+        }
     }
 }

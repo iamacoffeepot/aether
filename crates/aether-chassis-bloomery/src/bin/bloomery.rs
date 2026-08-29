@@ -8,6 +8,7 @@ use std::io::{self, Write as _};
 use std::process;
 
 use aether_chassis_bloomery::bloomery::{BloomeryChassis, BloomeryCli, BloomeryEnv, Chassis, KitReport};
+use aether_chassis_bloomery::store::check_store;
 use aether_substrate::chassis::{PreludeFlags, run_chassis_prelude};
 use clap::Parser as _;
 
@@ -30,6 +31,15 @@ fn main() -> anyhow::Result<()> {
         let report = KitReport::inspect();
         io::stdout().write_all(report.render_doctor().as_bytes())?;
         if !report.is_ready() {
+            process::exit(1);
+        }
+        return Ok(());
+    }
+    if cli.check_store {
+        let env = BloomeryEnv::resolve(&cli)?;
+        let check = check_store(&env.store.path)?;
+        io::stdout().write_all(check.render().as_bytes())?;
+        if !check.is_clean() {
             process::exit(1);
         }
         return Ok(());

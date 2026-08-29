@@ -333,17 +333,24 @@ dependencies = [
 name = "aether-chassis-hub"
 version = "0.3.0-alpha"
 dependencies = [
+ "aether-actor",
  "aether-chassis",
+ "aether-codec",
  "aether-data",
  "aether-fleet",
  "aether-harness-fleet",
  "aether-harness-substrate",
+ "aether-http",
  "aether-kinds",
+ "aether-mcp",
  "aether-rpc",
  "aether-substrate",
  "anyhow",
  "clap",
+ "confique",
  "ctrlc",
+ "serde",
+ "serde_json",
  "signal-hook 0.4.4",
  "tracing",
 ]
@@ -410,19 +417,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-context-canary"
-version = "0.3.0-alpha"
-dependencies = [
- "anyhow",
- "clap",
- "rmcp",
- "serde",
- "serde_json",
- "tokio",
- "toml 0.9.12+spec-1.1.0",
-]
-
-[[package]]
 name = "aether-data"
 version = "0.3.0-alpha"
 dependencies = [
@@ -477,6 +471,7 @@ dependencies = [
  "confique",
  "dirs",
  "inventory",
+ "libc",
  "serde",
  "serde_json",
  "tracing",
@@ -834,18 +829,24 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-codec",
+ "aether-component",
  "aether-data",
  "aether-fleet",
  "aether-fs",
+ "aether-http",
  "aether-inventory",
  "aether-kinds",
+ "aether-mcp-derive",
  "aether-rpc",
  "aether-substrate",
  "aether-trace",
  "anyhow",
  "axum",
  "base64",
+ "clap",
+ "confique",
  "futures-util",
+ "inventory",
  "libc",
  "png",
  "reqwest",
@@ -858,6 +859,16 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "aether-mcp-derive"
+version = "0.3.0-alpha"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+ "trybuild",
 ]
 
 [[package]]
@@ -2568,26 +2579,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "enumflags2"
-version = "0.7.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1027f7680c853e056ebcec683615fb6fbbc07dbaa13b4d5d9442b146ded4ecef"
-dependencies = [
- "enumflags2_derive",
-]
-
-[[package]]
-name = "enumflags2_derive"
-version = "0.7.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67c78a4d8fdf9953a5c9d458f9efe940fd97a0cab0941c075a813ac594733827"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3680,17 +3671,6 @@ checksum = "07293a4e297ac234359b510362495713f75ea345d5307140414f20c69ffeb087"
 dependencies = [
  "bitflags 2.11.0",
  "libc",
-]
-
-[[package]]
-name = "landlock"
-version = "0.4.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cca98e95f35b29d469dade6724c6f96cec9236640f745a0e99b0334ec320ab1"
-dependencies = [
- "enumflags2",
- "libc",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -8074,7 +8054,6 @@ dependencies = [
  "clap",
  "determinator",
  "guppy",
- "landlock",
  "notify",
  "rmcp",
  "rusqlite",

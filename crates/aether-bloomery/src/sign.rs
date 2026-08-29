@@ -95,6 +95,10 @@ pub enum AuthorityDoor {
     /// envelope must not be replayable at the other. Appended past
     /// [`Self::Accept`] so existing door discriminants stay put.
     Reopen,
+    /// Proposing an operator change onto the day's branch, bound to the
+    /// proposal's digest. Appended past [`Self::Reopen`] so existing door
+    /// discriminants stay put.
+    Propose,
 }
 
 /// The subject an author signature actually covers (ADR-0182): the door, the

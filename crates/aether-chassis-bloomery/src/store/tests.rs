@@ -1559,10 +1559,12 @@ fn a_v15_store_gains_an_empty_candidate_hash_journal() {
 }
 
 mod schema_digest_migration {
-    use aether_bloomery::persisted::{DECISIONS, EVENT, SPEND_CEILING};
+    use aether_bloomery::persisted::{
+        DECISIONS, DECISIONS_PRE_PROPOSE_DIGEST, EVENT, EVENT_PRE_PROPOSE_DIGEST, SPEND_CEILING,
+    };
     use aether_bloomery::{
         ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, Decisions, Digest, Event, Fact, IdempotencyKey,
-        Outcome, SpendCeiling, decode_recorded_decisions,
+        Outcome, SpendCeiling, decode_recorded_decisions, decode_recorded_event,
     };
     use aether_data::Kind;
     use aether_data::wire::to_vec;
@@ -1628,13 +1630,44 @@ mod schema_digest_migration {
         let v2 = journal.iter().find(|row| row.idempotency_key == "v2").unwrap();
         let v1 = journal.iter().find(|row| row.idempotency_key == "v1").unwrap();
         assert_eq!(v2.decisions_schema_digest.as_deref(), Some(DECISIONS.current_digest().as_bytes().as_slice()));
-        assert_eq!(
-            v1.decisions_schema_digest.as_deref(),
-            Some(DECISIONS.upcast_digest(&DECISIONS.upcasts[0]).as_bytes().as_slice())
-        );
+        assert_eq!(v1.decisions_schema_digest.as_deref(), Some(DECISIONS.upcasts[0].digest.as_bytes().as_slice()));
         assert_eq!(v2.event_schema.as_deref(), Some(EVENT.current_digest().as_bytes().as_slice()));
         decode_recorded_decisions(&v2.decisions, v2.decisions_schema_digest.as_deref()).expect("v2 row still decodes");
         decode_recorded_decisions(&v1.decisions, v1.decisions_schema_digest.as_deref()).expect("v1 row still decodes");
+    }
+
+    #[test]
+    fn rows_stamped_by_a_pre_propose_binary_replay_under_the_current_one() {
+        // #5500 at test scale: the live journal's rows are stamped ee7c8fce…
+        // (decisions) and 0e738994… (event) by the pre-propose binary, while
+        // this build's current digests have moved past both. Boot replay must
+        // route the stamps through the pinned upcasts instead of aborting.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pre-propose.db").to_str().unwrap().to_owned();
+        let (event, decisions) = observe();
+        {
+            let mut store = SqliteStore::open(&path).unwrap();
+            store.append_event(&write("obs", &event, &decisions)).unwrap();
+        }
+
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE journal SET event_schema = ?1, decisions_schema_digest = ?2",
+            rusqlite::params![
+                EVENT_PRE_PROPOSE_DIGEST.as_bytes().as_slice(),
+                DECISIONS_PRE_PROPOSE_DIGEST.as_bytes().as_slice()
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut store = SqliteStore::open(&path).unwrap();
+        let journal = store.replay_journal().unwrap();
+        assert_eq!(journal.len(), 1);
+        let row = &journal[0];
+        decode_recorded_event(&row.event, row.event_schema.as_deref()).expect("a pre-propose event row replays");
+        decode_recorded_decisions(&row.decisions, row.decisions_schema_digest.as_deref())
+            .expect("a pre-propose decisions row replays");
     }
 
     #[test]

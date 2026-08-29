@@ -1,7 +1,7 @@
 # ADR-0059: Content-hashed field tags for upgradable storage
 
 - **Status:** Accepted
-- **Date:** 2026-04-27 · **Revised:** 2026-08-26 (accepted; storage TLV shipped)
+- **Date:** 2026-04-27 · **Revised:** 2026-08-26 (accepted; storage TLV shipped) · **Revised:** 2026-08-28 (container elements decode by the element's derive; #5496)
 - **Revision note:** the 2026-04 draft targeted the handle store and predates three decisions this revision resolves against: ADR-0118 (the structured wire body is `aether_data::wire`; postcard is gone), ADR-0187 (persisted rows record their writing schema), and ADR-0188 (the wire codec derives from `Schema`). The consumer that takes this ADR out of ADR-0113's parking is the coordinator's own persistence — the journal's views and projections. The draft's `Mail`-trait fork and `Envelope` rename are superseded by a lighter mapping onto today's `Kind`; renames gain a declared alias (`#[storage(was = "…")]`) instead of the draft's no-remap stance. The wire format itself — TLV records, content-hashed tags, flattening, the unknown bucket, the required/`Option` discipline — stands as resolved in 2026-04. Implementation settled four points recorded in the Decision section: the field-hash preimage is a NUL-separated fold, the TLV length is a fixed 32-bit count, the decoded payload type is `StorageData` throughout, and anonymous record names are already provided by nameless canonical schema bytes.
 
 ## Context
@@ -107,9 +107,20 @@ Plain nested structs and enums flatten into the top-level field set so recursive
 |---|---|---|
 | Plain nested struct | yes | depth-recursive `path.field` leaves; recursive evolution survives the same rules |
 | Enum (incl. `Option<T>`) | yes | `__variant` discriminant leaf + variant-prefixed leaves (only the active variant emits) |
-| `Vec<T>`, `Map<K, V>`, fixed `Array` | no | dynamic cardinality; flattening to `path[i].*` would leak runtime counts into the field-hash space |
+| `Vec<T>`, `Map<K, V>`, fixed `Array` | one record, element-encoded body | dynamic cardinality; flattening to `path[i].*` would leak runtime counts into the field-hash space, and that rejection stands |
 
-Containers stay as a single TLV record whose body is the field's ordinary `aether_data::wire` encoding. To get version-tolerance for a container's element type, lift the element to its own TLV kind and reference via `Ref<K>` (handle indirection per ADR-0045).
+A container is one TLV record whose **body encoding the element type selects** through the `StorageElement` trait (#5496). Exactly one impl exists per type — the derive a type declares is the selector, and there is deliberately no blanket impl over the wire codec:
+
+- A `#[derive(Schema)]` element contributes its **positional wire bytes**. The record body is byte-identical to the pre-#5496 opaque form and the record tag stays the schema-folded hash, so element drift moves the tag and the reader refuses by name rather than misreading positional bytes. No tolerance promise, exactly as before.
+- A `#[derive(Storage)]` element contributes a **`u32`-length-framed record stream rooted at the element type**. Element tags are the element type's own compile-time root hashes, so cardinality never enters the hash space. The container's record tag folds the reserved `__elements` segment and terminates against the `Bytes` schema instead of the container schema, so evolving the element type never moves the container's own tag: element drift inside a container decodes the way root-level drift does — unknown fields skip, missing `Option`s default, missing required fields refuse by name.
+
+Composite elements propagate the class: `Vec<T>` / `[T; N]` / `Option<T>` are tagged when `T` is, `Map<K, V>` when either side is; an all-positional composite reproduces the ordinary wire layout byte for byte (maps keep canonical ascending encoded-key order).
+
+**Elements shed their unknowns on rewrite.** A container of tagged elements assembles plain values; element-level unknown fields have no side-channel, so a rewrite by an older binary sheds fields a newer writer added inside elements. Reads stay tolerant; rewrites shed. Stated and accepted while the coordinator is a row's only writer; the upgrade, if a multi-writer consumer arrives, is a derive-required unknown-fields member on storage types — recorded here so the door stays visibly open, not built now. The root-level `StorageData` bucket still round-trips.
+
+**Derive consequences.** `#[derive(Storage)]` now emits the schema core (the `Schema` impl, cast eligibility, and the positional wire codec) itself, so a storage kind lists one derive, not two — deriving both is a duplicate-impl compile error by design. The wire-codec emission keeps legacy positional rows readable (`POSITIONAL_ROW_SCHEMA` decode); the mail-path guarantee is unchanged (`Kind::encode_into_bytes` still panics). The static leaf-uniqueness walk keeps checking the schema-folded container hash; a tagged container's runtime tag derives from its path alone, so a collision there would require a same-path sibling, which the path fold already precludes.
+
+**Migration.** Flipping an element type from `Schema` to `Storage` moves the container tag and its body layout: an ordinary breaking schema change under ADR-0187 — digest bump, named upcast, fixture row. Tolerance applies after the flip. `Ref<K>` handle indirection (ADR-0045) remains the answer when elements need identity and independent lifecycle, not just evolvable shape.
 
 **Path delimiter.** `.` joins parent path to nested field name (`addr.street`, `result.Ok.profile.bio`). User-supplied identifiers cannot contain `.` — Rust idents already exclude it, so the reservation is free.
 

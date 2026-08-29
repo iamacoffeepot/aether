@@ -3,6 +3,7 @@ name = "aether-gemini"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # ADR-0050 `aether.gemini` media-generation provider, reimplemented by ADR-0159
 # (issues #3892 / #3893) as a wasm guest component. Owns the wire kinds (`kinds`)

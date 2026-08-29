@@ -11,6 +11,7 @@ use aether_bloomery::Harness;
 use anyhow::Result;
 
 use crate::transform::claude::assemble_construct_prompt;
+use crate::transform::lane::Resumed;
 use crate::transform::messages::bound_assistant_text;
 use crate::transform::review_reports::{
     FindingClass, Reports, findings_path, load_notes, load_reports, notes_path, render_reports,
@@ -504,7 +505,7 @@ pub(super) fn run_review(args: &TransformArgs) -> Result<()> {
         args.task.as_deref(),
         None,
     );
-    let run = run_model_lane(&prompt, args)?;
+    let run = run_model_lane(&prompt, args, Resumed::AfterReset)?;
     // Claude injects the report tools and the findings file is the verdict
     // channel. Muse / grok have no injection and keep the text parse.
     let evidence = if matches!(resolve_harness(args.harness.as_deref())?, Harness::Claude) {

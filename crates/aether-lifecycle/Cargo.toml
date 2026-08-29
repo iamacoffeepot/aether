@@ -3,6 +3,7 @@ name = "aether-lifecycle"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # `aether.lifecycle` capability (ADR-0082), extracted by the arc that
 # dissolved the capabilities monolith (iamacoffeepot/aether#3749) as a leaf

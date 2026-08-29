@@ -3,7 +3,7 @@
 
 use super::NativeBinding;
 use crate::mail::{MailId, Source};
-use aether_data::{Kind, RequestId};
+use aether_data::{Kind, KindId, RequestId};
 
 impl NativeBinding {
     /// Reply path for native actors (ADR-0080 §5 / #1695). Mints the
@@ -41,6 +41,15 @@ impl NativeBinding {
             .lock()
             .expect("request context table poisoned; fail-fast per ADR-0063")
             .insert(request, context);
+    }
+
+    /// Kind of the request context stored for `request`, leaving it stored.
+    ///
+    /// # Panics
+    /// Panics if the request-context mutex is poisoned.
+    #[must_use]
+    pub fn request_context_kind(&self, request: RequestId) -> Option<KindId> {
+        self.request_contexts.lock().expect("request context table poisoned; fail-fast per ADR-0063").kind(request)
     }
 
     /// Remove and decode request context for an inbound reply.

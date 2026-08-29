@@ -79,6 +79,16 @@ impl RequestContextTable {
         self.next_seq = self.next_seq.wrapping_add(1);
     }
 
+    /// Kind of the context stored under `request`, without removing it.
+    ///
+    /// A dispatcher that serves several context kinds from one reply handler
+    /// probes with this before committing to a [`Self::take`], so a
+    /// wrong-kind guess leaves the other branch's context intact.
+    #[must_use]
+    pub fn kind(&self, request: RequestId) -> Option<KindId> {
+        self.entries.iter().find(|entry| entry.request == request).map(|entry| entry.kind)
+    }
+
     /// Remove and decode the context associated with `request`.
     ///
     /// Wrong-kind and decode failures consume the stored entry. A reply is a
@@ -303,6 +313,21 @@ mod tests {
         table.insert(RequestId(7), &TestContext { value: 42 });
         assert_eq!(table.take::<OtherContext>(RequestId(7)), None);
         assert_eq!(table.take::<TestContext>(RequestId(7)), None);
+    }
+
+    /// Probing the stored kind must leave the entry intact, so a dispatcher
+    /// that serves several context kinds from one reply handler can route on
+    /// the probe and still take the context on the branch it picks.
+    #[test]
+    fn kind_probe_reports_stored_kind_without_consuming() {
+        let mut table = RequestContextTable::new();
+        table.insert(RequestId(7), &TestContext { value: 42 });
+
+        assert_eq!(table.kind(RequestId(7)), Some(TestContext::ID));
+        assert_ne!(TestContext::ID, OtherContext::ID, "the probe distinguishes the two context kinds");
+        assert_eq!(table.kind(RequestId(8)), None, "an unstored request has no context kind");
+
+        assert_eq!(table.take::<TestContext>(RequestId(7)), Some(TestContext { value: 42 }));
     }
 
     #[test]

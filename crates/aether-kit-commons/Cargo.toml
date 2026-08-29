@@ -3,6 +3,7 @@ name = "aether-kit-commons"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # The gameplay-systems layer: reusable actors built on the engine that
 # any tile game on the substrate can load. Each system is its own module

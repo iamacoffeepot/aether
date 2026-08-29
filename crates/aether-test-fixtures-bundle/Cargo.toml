@@ -3,6 +3,7 @@ name = "aether-test-fixtures-bundle"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # The main fixture bundle: a single cdylib that consolidates the bulk of
 # the workspace's wasm test fixtures as one ADR-0096 multi-actor module

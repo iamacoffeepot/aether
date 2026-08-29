@@ -12,10 +12,10 @@ use crate::reduce::{
 use crate::values::{
     Adjudication, AgentProfile, BaseReceipt, BaseVerdict, CandidateRef, CompositionFinding, ConfigRegistry,
     Disposition, Evidence, EvidenceKind, ExecutionLimits, Harness, LandingReceipt, MemberCandidate, MemberDependency,
-    NetworkProfile, OperatorHold, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion, ReasoningEffort,
-    ResolutionClaim, ResolvedBloom, ResolvedModel, SpendQuiesce, StageBinding, StageCatalog, ToolPolicy,
-    Transformation, VerifyFailure, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Withdrawal,
-    WithdrawalCause,
+    NetworkProfile, OperatorHold, OperatorProposal, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion,
+    ReasoningEffort, ResolutionClaim, ResolvedBloom, ResolvedModel, SpendQuiesce, StageBinding, StageCatalog,
+    ToolPolicy, Transformation, VerifyFailure, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge,
+    Withdrawal, WithdrawalCause,
 };
 
 use super::digest;
@@ -253,6 +253,19 @@ fn gate_passes(bloom: BloomId) -> [Decision; 2] {
     ]
 }
 
+fn proposal_records() -> [Decision; 3] {
+    let proposal = OperatorProposal {
+        candidate: CandidateRef { tree: digest(50), checkout: digest(51) },
+        reason: "flip an ADR status".into(),
+        operator: "operator".into(),
+    };
+    [
+        Decision::QueueProposal { proposal: proposal.clone() },
+        Decision::DequeueProposal { proposal: proposal.clone() },
+        Decision::DispatchProposal { proposal, base: digest(52) },
+    ]
+}
+
 fn base_verify_records() -> [Decision; 3] {
     [
         Decision::RecordBaseReceipt {
@@ -462,6 +475,7 @@ pub fn representative() -> Decisions {
         .chain(gate_passes(bloom))
         .chain(refusal_records(bloom, workpiece))
         .chain(base_verify_records())
+        .chain(proposal_records())
         .collect(),
     }
 }

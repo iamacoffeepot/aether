@@ -1,0 +1,39 @@
+[package]
+name = "aether-mcp-derive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# The `#[mcp::router]` / `#[mcp::tool]` / `#[mcp::reply]` proc macros for the
+# tool-authoring surface over the `aether.mcp.server` capability. A leaf below
+# `aether-mcp`, which depends on it unconditionally and re-exports all three
+# through its always-available crate root, so a provider that takes `aether-mcp`
+# at the marker-and-vocabulary tier can still declare tools.
+#
+# The split exists for the same reason `aether-http-derive` sits beside
+# `aether-http`: a proc-macro crate cannot export the runtime vocabulary its
+# emitted paths name. This crate emits absolute `::aether_mcp`, `::aether_data`,
+# `::aether_actor`, `::aether_http`, and `::serde` paths and names none of those
+# types directly, so it depends on nothing but the macro toolkit. Proc-macro
+# crates are host-compiled, so the unconditional edge leaves a wasm build of the
+# parent unaffected.
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true, features = ["full"] }
+
+[dev-dependencies]
+# The parser-rejection suite. Every fixture is self-contained — it declares its
+# own actor-shaped trait and stub support types — because every branch these
+# tests reach is syntactic: the macro refuses before any emitted path would be
+# resolved. That keeps a compile-fail fixture from linking `aether-mcp`'s
+# dependency cone once per case.
+trybuild = "1"
+
+[lints]
+workspace = true

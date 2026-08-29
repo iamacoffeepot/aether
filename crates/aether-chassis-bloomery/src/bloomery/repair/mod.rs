@@ -16,7 +16,9 @@ pub use digest::{candidate_tree_digest, capture_commit_digest};
 #[cfg(feature = "github")]
 mod prepare;
 #[cfg(feature = "github")]
-pub use prepare::{CandidateSource, PrepareError, prepare_candidate};
+pub use prepare::{
+    CandidateSource, DerivedCandidate, PrepareError, derive_candidate, prepare_candidate, push_candidate,
+};
 
 #[cfg(test)]
 mod tests;

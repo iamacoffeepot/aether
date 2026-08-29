@@ -98,6 +98,11 @@ pub use commission::{
 pub(crate) mod membership;
 
 #[cfg(feature = "runtime")]
+mod check;
+#[cfg(feature = "runtime")]
+pub use check::{StoreCheck, check_store};
+
+#[cfg(feature = "runtime")]
 mod runtime;
 #[cfg(feature = "runtime")]
 pub use runtime::{

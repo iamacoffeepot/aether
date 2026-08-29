@@ -1,0 +1,5 @@
+error: #[mcp::tool] requires #[mcp::router] on the enclosing impl block (written above #[http::router] and #[runtime])
+  --> tests/ui/rejects_tool_without_router.rs:10:5
+   |
+10 |     fn unrouted(&mut self) {}
+   |     ^^

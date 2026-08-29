@@ -8,7 +8,9 @@ use anyhow::{Context, Result, bail};
 
 use aether_bloomery::{SCOPE_FILL_COMMAND, split_lane_identity};
 
-use crate::transform::lane::{execute, export_build_dir, resume_handle_rejected, resumed_prompt, without_resume};
+use crate::transform::lane::{
+    Resumed, execute, export_build_dir, resume_handle_rejected, resumed_prompt, without_resume,
+};
 use crate::transform::messages::derive_result_record;
 use crate::transform::peak_memory::PeakMemory;
 use crate::transform::review::REVIEW_CRITIC;
@@ -182,11 +184,12 @@ fn tail(s: &str, max: usize) -> &str {
 pub(super) fn run_headless_claude(
     prompt: &str,
     args: &TransformArgs,
+    resumed: Resumed,
     scratch: &Scratch,
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
 ) -> Result<serde_json::Value> {
-    run_headless_claude_at(CLAUDE, prompt, args, scratch, cache, peak)
+    run_headless_claude_at(CLAUDE, prompt, args, resumed, scratch, cache, peak)
 }
 
 /// [`run_headless_claude`] against an explicit `program` — production passes
@@ -195,6 +198,7 @@ fn run_headless_claude_at(
     program: &str,
     prompt: &str,
     args: &TransformArgs,
+    resumed: Resumed,
     scratch: &Scratch,
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
@@ -234,7 +238,7 @@ fn run_headless_claude_at(
         &args.out,
         "headless claude",
         peak,
-        Some(resumed_prompt(prompt, args.resume.as_deref()).into_bytes()),
+        Some(resumed_prompt(prompt, args.resume.as_deref(), resumed).into_bytes()),
     )?;
     // A non-zero exit is the CLI itself failing to run (auth, bad args, crash) —
     // an operational failure, distinct from a task-level error, which a completed
@@ -246,7 +250,7 @@ fn run_headless_claude_at(
         // the operational failure the comment above names; retrying that
         // cold would double the spend this pool exists to cut. Any streamed
         // byte is already a transcript, so this degrade stays empty-only.
-        return run_headless_claude_at(program, prompt, &without_resume(args), scratch, cache, peak);
+        return run_headless_claude_at(program, prompt, &without_resume(args), resumed, scratch, cache, peak);
     }
     if !run.status.success() {
         bail!(
@@ -275,7 +279,7 @@ mod tests {
     use crate::transform::TransformArgs;
     use crate::transform::construct::CONSTRUCT_IMPLEMENT;
     use crate::transform::harness_stub::{self, Stub};
-    use crate::transform::lane::{execute, resume_handle_rejected};
+    use crate::transform::lane::{Resumed, execute, resume_handle_rejected};
     use crate::transform::peak_memory;
     use crate::transform::review::REVIEW_CRITIC;
     use crate::transform::scratch::Scratch;
@@ -463,7 +467,15 @@ mod tests {
 
     fn drive(stub: &Stub, args: &TransformArgs, prompt: &str) -> anyhow::Result<serde_json::Value> {
         let scratch = Scratch::prepare(&args.out, args.nonce.as_deref()).expect("scratch");
-        run_headless_claude_at(stub.program(), prompt, args, &scratch, None, &peak_memory::detect())
+        run_headless_claude_at(
+            stub.program(),
+            prompt,
+            args,
+            Resumed::AfterReset,
+            &scratch,
+            None,
+            &peak_memory::detect(),
+        )
     }
 
     fn assert_headless_claude(launch: &harness_stub::Launch, settings: &str) {

@@ -3,6 +3,7 @@ name = "aether-render"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # `aether.render` capability, extracted by the arc that dissolved the
 # capabilities monolith (iamacoffeepot/aether#3721) as a per-cap crate. The largest of the per-cap extractions: it

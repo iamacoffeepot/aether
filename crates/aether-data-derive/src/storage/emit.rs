@@ -7,6 +7,33 @@ use syn::{Data, DataEnum, DeriveInput, Fields, Type};
 use super::attr::{TypeStorageAttr, parse_field_storage};
 use crate::{KindAttr, is_vec_u8, to_screaming_snake_case};
 
+/// `#[derive(Storage)]` selects the tagged container-element form: the
+/// element body is a length-framed record stream rooted at this type,
+/// so element schema drift inside a container decodes the way
+/// root-level drift does (#5496).
+pub(super) fn emit_tagged_element(name: &syn::Ident) -> TokenStream2 {
+    quote! {
+        impl ::aether_data::__derive_runtime::StorageElement for #name {
+            const TAGGED: bool = true;
+
+            fn contribute_element(
+                &self,
+                depth: u32,
+                out: &mut ::aether_data::__derive_runtime::Vec<u8>,
+            ) -> ::core::result::Result<(), ::aether_data::__derive_runtime::StorageError> {
+                ::aether_data::__derive_runtime::contribute_tagged_element(self, depth, out)
+            }
+
+            fn assemble_element(
+                depth: u32,
+                cursor: &mut &[u8],
+            ) -> ::core::result::Result<Self, ::aether_data::__derive_runtime::StorageError> {
+                ::aether_data::__derive_runtime::assemble_tagged_element(depth, cursor)
+            }
+        }
+    }
+}
+
 pub(super) fn emit(input: &DeriveInput, kind: &KindAttr, storage: &TypeStorageAttr) -> syn::Result<TokenStream2> {
     let name = &input.ident;
     let kind_name = &kind.name;

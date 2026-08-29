@@ -3,6 +3,7 @@ name = "aether-chassis"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # The shared chassis-composition layer (issue #3809): the boot fragments,
 # fleet-wide config registry, CLI roots, boot-time component autoload,

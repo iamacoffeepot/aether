@@ -3,6 +3,7 @@ name = "aether-kinds"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
 # ADR-0069: the data layer (typed ids, schema vocab, Kind/Schema

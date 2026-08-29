@@ -3,6 +3,7 @@ name = "aether-substrate"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # ADR-0035 Phase 1: runtime (wasmtime host, mail scheduler, kind
 # manifest, registry, control-plane dispatch, hub client) for the
@@ -20,9 +21,14 @@ default = ["wasm"]
 # trybuild dev-dep, which sets `default-features = false` so its UI
 # fixtures don't cold-compile wasmtime per fixture binary.
 wasm = ["dep:wasmtime", "dep:wasmparser"]
-# Issue 421: chassis that draw enable `render` to pull in the shared
-# offscreen pipeline + capture path. Headless and hub leave it off
-# and never link wgpu.
+# Issue 421: `render` pulls in the shared offscreen pipeline + capture
+# path. It was meant to be the per-chassis opt-in that keeps wgpu out of
+# the chassis that don't draw, but it does not currently achieve that:
+# `aether-chassis` depends on this crate with `features = ["render"]`
+# unconditionally, and it reaches wgpu a second way through
+# `aether-text` -> `aether-render`. So every chassis over the shared
+# composition layer — hub and headless included — links wgpu today.
+# Decoupling the non-drawing chassis from it is future work.
 render = ["dep:wgpu", "dep:png"]
 # iamacoffeepot/aether#2517: exposes the canonical `testing` module (the
 # cross-crate `TestChassis` fixture) to downstream crates' test builds.

@@ -11,8 +11,8 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
     Adjudication, BaseReverify, BloomSpec, CandidateRef, CompositionParents, ConfigRegistry, Evidence,
-    MemberDependency, OperatorHold, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim,
-    Statement, SuppressionDisposition, SurfaceRequest, VerifyFailureSet, Withdrawal,
+    MemberDependency, OperatorHold, OperatorProposal, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion,
+    ResolutionClaim, Statement, SuppressionDisposition, SurfaceRequest, VerifyFailureSet, Withdrawal,
 };
 
 /// An admitted fact plus its idempotency key (ADR-0149 §The control core).
@@ -818,6 +818,21 @@ pub enum Fact {
     /// Admitted only by the operator door. Last in declaration order, so every
     /// prior fact keeps its wire discriminant.
     BaseReverify(BaseReverify),
+    /// An operator proposed a change onto the day's branch (ADR-0205).
+    ///
+    /// The change is queued, and the authorization named binds the proposal's
+    /// own digest. Appended past [`Fact::BaseReverify`] so every prior fact
+    /// keeps its wire discriminant.
+    ProposeChange {
+        /// The signed candidate waiting to become a memberless bloom.
+        proposal: OperatorProposal,
+        /// The author-signed approval of this proposal's digest. The
+        /// cryptographic verification is the host route's, upstream of
+        /// admission (the reducer holds no key material); the reducer
+        /// re-checks that this evidence is an [`crate::EvidenceKind::Approval`]
+        /// bound to the proposal's own digest.
+        authorization: Evidence,
+    },
 }
 
 impl Fact {

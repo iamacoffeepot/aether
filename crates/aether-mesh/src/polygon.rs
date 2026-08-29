@@ -16,8 +16,8 @@
 //! `Polygon` is the canonical mesh form for the engine — one `Polygon`
 //! per logical face, with optional hole loops for pierced regions.
 //! Triangulation moves to display time via [`tessellate_polygon`], so
-//! consumers (notably `aether-mesh-viewer`) hand polygons to
-//! the GPU upload step rather than triangles.
+//! consumers (notably `aether-kit-commons`'s `aether.kit.mesh`
+//! export) hand polygons to the GPU upload step rather than triangles.
 //!
 //! [`mesh_polygons`] is the polygon-domain analogue of [`crate::mesh()`]:
 //! parses the same AST, runs the same CSG, but returns n-gon polygons
@@ -39,8 +39,8 @@
 //! Vertices are stored as [`Point3`] (16:16 fixed-point integers) end-
 //! to-end through the mesh pipeline — same type the BSP CSG core and
 //! cleanup passes already use. The conversion to `f32` happens at the
-//! GPU upload boundary inside `aether-mesh-viewer`, not
-//! here. Keeping the polygon-domain integer-typed eliminates the f32
+//! GPU upload boundary inside `aether-kit-commons`'s `aether.kit.mesh`
+//! export, not here. Keeping the polygon-domain integer-typed eliminates the f32
 //! noise that previously caused `is_convex` and CDT to disagree on
 //! near-collinear vertices (issue 335). The only `f32` field is
 //! [`Polygon::plane_normal`], used as a unit-vector hint for axis
@@ -290,8 +290,8 @@ fn pick(p: Point3, a: plane::Axis) -> i32 {
 /// Tessellate a polygon (with optional holes) into triangles for GPU
 /// upload. Output triangles are wound CCW around `plane_normal`. This
 /// is the display-time tessellation step ADR-0057 moves out of the
-/// cleanup pipeline — consumers like `aether-mesh-viewer`
-/// call it once per polygon when assembling render-ready geometry.
+/// cleanup pipeline — consumers like `aether-kit-commons`'s
+/// `aether.kit.mesh` export call it once per polygon when assembling render-ready geometry.
 ///
 /// Output triangles carry [`Point3`] vertices; convert via
 /// `Point3::to_f32()` at the GPU upload boundary.

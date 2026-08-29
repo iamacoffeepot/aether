@@ -5,6 +5,7 @@
 
 use aether_data::canonical::kind_id_from_parts;
 use aether_data::hash::storage_kind_id_from_name;
+use aether_data::wire::WireEncode;
 use aether_data::{Kind, Schema, Storage};
 
 #[test]
@@ -16,21 +17,21 @@ fn ui() {
     t.compile_fail("tests/ui/rejects_storage_alias_collision.rs");
 }
 
-#[derive(Debug, PartialEq, aether_data::Schema, aether_data::Storage)]
+#[derive(Debug, PartialEq, aether_data::Storage)]
 #[kind(name = "persist.address")]
 struct Address {
     street: String,
     city: String,
 }
 
-#[derive(Debug, PartialEq, aether_data::Schema, aether_data::Storage)]
+#[derive(Debug, PartialEq, aether_data::Storage)]
 #[kind(name = "persist.record")]
 struct RecordV1 {
     id: u64,
     note: Option<String>,
 }
 
-#[derive(Debug, PartialEq, aether_data::Schema, aether_data::Storage)]
+#[derive(Debug, PartialEq, aether_data::Storage)]
 #[kind(name = "persist.record")]
 struct RecordV2 {
     id: u64,
@@ -40,7 +41,7 @@ struct RecordV2 {
     addr: Address,
 }
 
-#[derive(Debug, PartialEq, aether_data::Schema, aether_data::Storage)]
+#[derive(Debug, PartialEq, aether_data::Storage)]
 #[kind(name = "persist.record")]
 struct RecordRenamed {
     id: u64,
@@ -126,7 +127,7 @@ fn nested_and_sequence_are_readable() {
     assert_eq!(decoded.value.tags, vec![String::from("t")]);
 }
 
-#[derive(Debug, aether_data::Schema, aether_data::Storage)]
+#[derive(Debug, aether_data::Storage)]
 #[storage(strict)]
 #[kind(name = "persist.strict")]
 struct StrictRecord {
@@ -147,4 +148,111 @@ fn strict_failure_names_the_unknown_leaf() {
     let rendered = err.to_string();
     assert!(rendered.contains("strict mode"), "{rendered}");
     assert!(rendered.contains("unknown field"), "{rendered}");
+}
+
+#[derive(Debug, PartialEq, aether_data::Storage)]
+#[kind(name = "persist.entry")]
+struct EntryV1 {
+    label: String,
+}
+
+#[derive(Debug, PartialEq, aether_data::Storage)]
+#[kind(name = "persist.entry")]
+struct EntryV2 {
+    label: String,
+    weight: Option<u32>,
+}
+
+#[derive(Debug, PartialEq, aether_data::Storage)]
+#[kind(name = "persist.ledger")]
+struct LedgerOld {
+    entries: Vec<EntryV1>,
+}
+
+#[derive(Debug, PartialEq, aether_data::Storage)]
+#[kind(name = "persist.ledger")]
+struct LedgerNew {
+    entries: Vec<EntryV2>,
+}
+
+#[derive(Debug, PartialEq, aether_data::Schema)]
+struct Point {
+    x: u32,
+    y: u32,
+}
+
+#[derive(Debug, PartialEq, aether_data::Schema)]
+struct PointWide {
+    x: u32,
+    y: u32,
+    z: u32,
+}
+
+#[derive(Debug, PartialEq, aether_data::Storage)]
+#[kind(name = "persist.plot")]
+struct PlotOld {
+    points: Vec<Point>,
+}
+
+#[derive(Debug, PartialEq, aether_data::Storage)]
+#[kind(name = "persist.plot")]
+struct PlotNew {
+    points: Vec<PointWide>,
+}
+
+#[test]
+fn tagged_element_drift_decodes_both_directions() {
+    let new = LedgerNew {
+        entries: vec![EntryV2 { label: "a".into(), weight: Some(3) }, EntryV2 { label: "b".into(), weight: None }],
+    };
+    let bytes = LedgerNew::encode_storage(&aether_data::StorageData::from_value(new)).unwrap();
+    let old = LedgerOld::decode_storage(&bytes).unwrap();
+    assert_eq!(old.value.entries, vec![EntryV1 { label: "a".into() }, EntryV1 { label: "b".into() }]);
+
+    let bytes = LedgerOld::encode_storage(&aether_data::StorageData::from_value(LedgerOld {
+        entries: vec![EntryV1 { label: "c".into() }],
+    }))
+    .unwrap();
+    let new = LedgerNew::decode_storage(&bytes).unwrap();
+    assert_eq!(new.value.entries, vec![EntryV2 { label: "c".into(), weight: None }]);
+}
+
+#[test]
+fn tagged_container_rewrite_sheds_element_unknowns() {
+    // Pins the documented v1 semantic: element-level unknown fields have
+    // no side-channel on a plain value, so an old reader's rewrite sheds
+    // a newer writer's element fields. Root-level unknowns still round-trip.
+    let bytes = LedgerNew::encode_storage(&aether_data::StorageData::from_value(LedgerNew {
+        entries: vec![EntryV2 { label: "a".into(), weight: Some(9) }],
+    }))
+    .unwrap();
+    let rewritten = LedgerOld::encode_storage(&LedgerOld::decode_storage(&bytes).unwrap()).unwrap();
+    let reread = LedgerNew::decode_storage(&rewritten).unwrap();
+    assert_eq!(reread.value.entries, vec![EntryV2 { label: "a".into(), weight: None }]);
+}
+
+#[test]
+fn positional_element_drift_is_a_named_miss() {
+    // A `#[derive(Schema)]` element keeps the schema-folded container tag,
+    // so element drift moves the tag and the reader refuses by name
+    // instead of misreading positional bytes.
+    let bytes = PlotNew::encode_storage(&aether_data::StorageData::from_value(PlotNew {
+        points: vec![PointWide { x: 1, y: 2, z: 3 }],
+    }))
+    .unwrap();
+    assert!(matches!(PlotOld::decode_storage(&bytes), Err(aether_data::StorageError::MissingRequiredField { .. })));
+}
+
+#[test]
+fn positional_container_body_is_the_wire_encoding() {
+    // Tripwire: the per-element positional path must reproduce the retired
+    // opaque container encoding byte for byte — the record body is exactly
+    // the container's ordinary wire bytes, so pre-element rows stay readable.
+    let points = vec![Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
+    let bytes = PlotOld::encode_storage(&aether_data::StorageData::from_value(PlotOld { points })).unwrap();
+    let decoded = PlotOld::decode_storage(&bytes).unwrap();
+    let (_, body) = decoded.get_raw::<Vec<Point>>("points").unwrap();
+    let mut expected = Vec::new();
+    WireEncode::encode(&vec![Point { x: 1, y: 2 }, Point { x: 3, y: 4 }], &mut expected).unwrap();
+    assert_eq!(body, expected.as_slice());
 }

@@ -11,6 +11,8 @@ use anyhow::Result;
 
 use crate::transform::claude::assemble_construct_prompt;
 use crate::transform::fixers::{self, Report as FixerReport};
+use crate::transform::lane::Resumed;
+use crate::transform::lint_check::{self, Report as LintReport};
 use crate::transform::{Measurements, TransformArgs, heartbeat, run_model_lane, write_evidence_json};
 
 /// The typed id of the model-driven construct lane (#3511). Recognized here so
@@ -54,7 +56,11 @@ pub(super) const CONSTRUCT_INSTRUCTIONS: &str = include_str!("construct_instruct
 /// presence-driven by [`Measurements::stamp`]. `fixers` is whether the
 /// mechanical fmt / clippy --fix pass ran and whether it moved the tree,
 /// always present so a later reader can tell a model-authored line from a
-/// fixer-authored one at the run level.
+/// fixer-authored one at the run level. `lint` is the receipt for the scoped
+/// check that followed those fixers and the one repair turn it may have
+/// bought, always present for the same reason: a lint failure at Verify reads
+/// differently once you can see whether this lane looked, what it found, and
+/// whether the model was given a chance at it.
 /// What a construct run left behind for the host to read, each stamped by the
 /// same presence rule: absent writes no key at all. Grouped because they are
 /// one thing — the deliverables of the run — and travel together from the
@@ -74,6 +80,7 @@ fn stamp_construct_evidence(
     record: &serde_json::Value,
     measured: Measurements,
     fixers: FixerReport,
+    lint: LintReport,
 ) -> serde_json::Value {
     let Deliverables { commit_message, surface_request } = deliverables;
     let mut evidence = serde_json::json!({
@@ -83,6 +90,7 @@ fn stamp_construct_evidence(
         "result_record": record,
     });
     fixers.stamp(&mut evidence);
+    lint.stamp(&mut evidence);
     measured.stamp(&mut evidence);
     // Presence-driven, like the review lane's `findings`: a run that wrote no
     // deliverable stamps no key at all, so the host reads absence as "this run
@@ -196,23 +204,27 @@ pub(super) fn run_construct(args: &TransformArgs) -> Result<()> {
         args.task.as_deref(),
         args.seeded.as_deref(),
     );
-    let run = run_model_lane(&prompt, args)?;
+    let run = run_model_lane(&prompt, args, Resumed::AfterReset)?;
 
     // The chassis stages with `git add --all` only after this process exits, so
     // everything below is the last stretch in which the lane owns the tree.
     // Fmt then a scoped MachineApplicable clippy --fix apply the class of
-    // findings that otherwise spend a Refine lap; they are best-effort, cost
-    // seconds, and cannot fail the lane. They are also the whole of the lane's
-    // post-model work: the gates that judge this candidate belong to the
+    // findings the toolchain can already write. A scoped clippy *check* over
+    // the same packages then reads what `--fix` had no suggestion for, and buys
+    // the model at most one more turn on it — so construct ends after at most
+    // one harness-driven lint-repair round rather than the moment the model
+    // ends (#5408, revisited). Everything here is still best-effort and none of
+    // it can fail the lane: the gates that judge this candidate belong to the
     // `verify.check` dispatch that follows, which is visible, is the one that
-    // records evidence, and is the only pass that decides. Construct ends when
-    // the model ends (#5408).
+    // records evidence, and remains the only pass that decides.
 
     // Everything below here is the lane still working with nothing reaching the
     // transcript. The guard drops at the end of the function so the stretch
     // through `write_evidence_json` is covered.
     let _beat = heartbeat::Beat::start(&args.out);
-    let fixers = fixers::apply(Path::new("."), &args.out);
+    let applied = fixers::apply(Path::new("."), &args.out);
+    let lint = lint_check::run(Path::new("."), args, run.record["session_id"].as_str());
+    let fixers = lint.fixers.map_or(applied, |repaired| applied.merged(repaired));
 
     // Take the commit-message deliverable before the candidate is inspected, and
     // in that order for two reasons: the file is gone by the time the host stages
@@ -237,6 +249,7 @@ pub(super) fn run_construct(args: &TransformArgs) -> Result<()> {
             &run.record,
             run.measured,
             fixers,
+            lint.report,
         ),
     )
 }
@@ -249,7 +262,7 @@ mod tests {
     use aether_bloomery::{LANE_WORKPIECE_HEADER, pin_workpiece_description};
 
     use super::{
-        COMMIT_MESSAGE_DELIVERABLE, CONSTRUCT_IMPLEMENT, CONSTRUCT_INSTRUCTIONS, Deliverables, FixerReport,
+        COMMIT_MESSAGE_DELIVERABLE, CONSTRUCT_IMPLEMENT, CONSTRUCT_INSTRUCTIONS, Deliverables, FixerReport, LintReport,
         Measurements, SURFACE_REQUEST_DELIVERABLE, porcelain_signals_candidate, stamp_construct_evidence,
         take_commit_message, take_surface_request,
     };
@@ -266,6 +279,7 @@ mod tests {
             &record,
             Measurements::default(),
             FixerReport::default(),
+            LintReport::default(),
         );
         assert_eq!(evidence["command"], CONSTRUCT_IMPLEMENT);
         assert_eq!(evidence["nonce"], "nonce-7", "the broker-matched nonce binds the evidence");
@@ -292,6 +306,7 @@ mod tests {
             &serde_json::json!({ "no_result": true }),
             Measurements::default(),
             FixerReport::default(),
+            LintReport::default(),
         );
         assert!(no_nonce["nonce"].is_null());
         assert_eq!(no_nonce["produced_candidate"], false, "an empty-candidate run stamps false");
@@ -312,6 +327,7 @@ mod tests {
             &serde_json::json!({}),
             Measurements::default(),
             FixerReport::default(),
+            LintReport::default(),
         );
         assert_eq!(evidence["commit_message"], message, "the message is carried verbatim, body included");
     }
@@ -329,6 +345,7 @@ mod tests {
             &serde_json::json!({}),
             Measurements::default(),
             FixerReport { ran: true, changed: true },
+            LintReport::default(),
         );
         assert_eq!(evidence["fixers"]["ran"], true);
         assert_eq!(evidence["fixers"]["changed"], true);
@@ -375,6 +392,7 @@ mod tests {
             &serde_json::json!({}),
             Measurements::default(),
             FixerReport::default(),
+            LintReport::default(),
         );
         assert!(evidence.get("surface_request").is_none());
     }
@@ -666,6 +684,16 @@ mod tests {
     // verdict the reducer does not consume. Lightweight authoring checks stay;
     // the heavy argv must not ride the assembled prompt; fail-closed candidate
     // language is unchanged.
+    //
+    // The lane's own post-fixer clippy check is exempt by design and this
+    // tripwire is deliberately blind to it: #5078 is a ban on the *model*
+    // volunteering the gates, and what it costs is a model turn spent
+    // reproducing a verdict the reducer reads from Verify instead. The check
+    // `lint_check` runs is harness-side, scoped to the packages the run
+    // dirtied, and happens after the model's turn — it spends no model budget
+    // and claims no verdict. This test asserts over the assembled *prompt*, so
+    // it neither sees that argv nor should: a future edit that put the check
+    // back in front of the model is what it still exists to catch.
     #[test]
     fn construct_prompt_keeps_authoring_checks_and_leaves_verify_gates_to_verify() {
         let prompt =

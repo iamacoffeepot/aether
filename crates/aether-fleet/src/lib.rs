@@ -25,4 +25,8 @@ pub use proxy::FleetProxy;
 pub use proxy::FleetProxyConfig;
 pub use server::FleetServer;
 #[cfg(not(target_family = "wasm"))]
-pub use server::{FleetConfig, FleetConfigLayer, FleetOverlay};
+// `RestartPolicy` rides along because it is the return type of the public
+// `FleetConfig::restart_policy()` — a caller that reads the resolved
+// supervision policy needs to be able to name it.
+#[cfg(not(target_family = "wasm"))]
+pub use server::{FleetConfig, FleetConfigLayer, FleetOverlay, RestartPolicy};

@@ -3,6 +3,7 @@ name = "aether-window"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # `aether.window` capability, extracted by the arc that dissolved the
 # capabilities monolith (iamacoffeepot/aether#3717) as a per-cap crate. Owns

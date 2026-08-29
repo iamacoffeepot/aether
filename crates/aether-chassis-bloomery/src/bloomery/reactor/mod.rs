@@ -43,6 +43,7 @@ mod integrate;
 mod janitor;
 mod land;
 mod mirror;
+mod propose;
 
 pub use claim_release::{
     ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, ClaimReleaseReactorState, ClaimReleaseTick,
@@ -61,6 +62,7 @@ pub use janitor::{
 };
 pub use land::{LandReactorCapability, LandReactorSetup, LandReactorState, LandTick};
 pub use mirror::{DrainTick, MirrorReactorCapability, MirrorReactorSetup, MirrorReactorState};
+pub use propose::{ProposeReactorCapability, ProposeReactorSetup, ProposeReactorState, ProposeTick};
 
 #[cfg(test)]
 mod tests;

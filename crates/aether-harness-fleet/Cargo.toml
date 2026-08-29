@@ -3,6 +3,7 @@ name = "aether-harness-fleet"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # `FleetHarness` — the real-process E2E test-support harness over the hub/RPC
 # path (issue 1451), extracted from `aether-substrate-bundle`'s tests tree

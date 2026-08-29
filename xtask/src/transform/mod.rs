@@ -28,6 +28,7 @@ mod grok;
 mod harness_stub;
 mod heartbeat;
 mod lane;
+mod lint_check;
 mod messages;
 mod muse;
 mod peak_memory;
@@ -49,6 +50,7 @@ use serde::ser::{SerializeStruct, Serializer};
 
 use crate::cargo::write_json_pretty;
 use crate::transform::construct::CONSTRUCT_IMPLEMENT;
+use crate::transform::lane::Resumed;
 use crate::transform::peak_memory::PeakMemory;
 use crate::transform::review::REVIEW_CRITIC;
 use crate::transform::review_reports::REVIEW_REPORT;
@@ -117,6 +119,22 @@ pub struct TransformArgs {
     /// `construct.implement`.
     #[arg(long)]
     seeded: Option<String>,
+    /// Packages `verify.test` restricts the suite to — CI's affected
+    /// selection (#3611, #4883). Each becomes a `-p` on the canonical nextest
+    /// argv. Refused on every other command: applying it to `verify.clippy`
+    /// would silently lint a subset while the job still claimed to be the gate.
+    #[arg(short = 'p', long = "package", value_name = "PACKAGE")]
+    package: Vec<String>,
+    /// Nextest partition `verify.test` runs — CI's shard (`slice:N/M`).
+    /// Without it each shard of the full-suite lane would run the whole suite.
+    /// Refused on every other command.
+    #[arg(long)]
+    partition: Option<String>,
+    /// Skip `verify.test`'s `cargo xtask dist` prepare: the caller already ran
+    /// the conditional component-wasm pre-build (CI's own step). Absent, the
+    /// arm prepares as it does off Actions. Refused on every other command.
+    #[arg(long)]
+    prepared: bool,
 }
 
 /// Who reads an evidence channel and what they do with it. Declared once; both
@@ -473,6 +491,7 @@ fn build_evidence(
 /// non-zero with no evidence written, distinct from a verify that ran
 /// and failed.
 pub fn run(args: &TransformArgs) -> Result<()> {
+    reject_test_schedule(args)?;
     if args.command == CONSTRUCT_IMPLEMENT {
         return construct::run_construct(args);
     }
@@ -495,6 +514,34 @@ pub fn run(args: &TransformArgs) -> Result<()> {
         return verify::run_verify_check(args, Position::Base);
     }
     verify::run_single(args)
+}
+
+/// Refuse CI scheduling inputs on every command except `verify.test`.
+///
+/// `--package`, `--partition`, and `--prepared` compose onto that one arm.
+/// Silently honouring them on `verify.clippy` (or any other verifier) would
+/// change which crates that arm judged without the job's name changing —
+/// the gate would still be called Clippy, and it would no longer be the gate.
+fn reject_test_schedule(args: &TransformArgs) -> Result<()> {
+    if args.command == "verify.test" {
+        return Ok(());
+    }
+    let mut flags = Vec::new();
+    if !args.package.is_empty() {
+        flags.push("--package");
+    }
+    if args.partition.is_some() {
+        flags.push("--partition");
+    }
+    if args.prepared {
+        flags.push("--prepared");
+    }
+    if flags.is_empty() {
+        return Ok(());
+    }
+    let command = args.command.as_str();
+    let used = flags.join(", ");
+    bail!("{command} does not take {used}; those scheduling inputs belong to verify.test")
 }
 
 /// Serialize `evidence` to `<out>/evidence.json` — the one write both model
@@ -540,16 +587,21 @@ pub fn resolve_harness(harness: Option<&str>) -> Result<Harness> {
 /// builds where an earlier one did draws on what that one compiled instead of
 /// re-paying for it, and the host's [`PeakMemory`] wrapper is resolved with them
 /// so the child's own peak is measured rather than modelled.
-fn run_model_lane(prompt: &str, args: &TransformArgs) -> Result<LaneRun> {
+/// `resumed` states what a resumed conversation is wrong about — the fact the
+/// arms correct in the prompt they pipe. A dispatch-level retry lap resumes
+/// [`Resumed::AfterReset`]; the construct lane's own post-fixer lint repair
+/// resumes [`Resumed::SameTree`], because it continues inside the dispatch that
+/// wrote the tree it is being asked to fix.
+fn run_model_lane(prompt: &str, args: &TransformArgs, resumed: Resumed) -> Result<LaneRun> {
     let harness = resolve_harness(args.harness.as_deref())?;
     let scratch = Scratch::prepare(&args.out, args.nonce.as_deref())?;
     let cache = sccache::detect();
     let peak = peak_memory::detect();
 
     let record = match harness {
-        Harness::Claude => claude::run_headless_claude(prompt, args, &scratch, cache.as_ref(), &peak)?,
-        Harness::Muse => muse::run(prompt, args, &scratch, cache.as_ref(), &peak)?,
-        Harness::Grok => grok::run(prompt, args, &scratch, cache.as_ref(), &peak)?,
+        Harness::Claude => claude::run_headless_claude(prompt, args, resumed, &scratch, cache.as_ref(), &peak)?,
+        Harness::Muse => muse::run(prompt, args, resumed, &scratch, cache.as_ref(), &peak)?,
+        Harness::Grok => grok::run(prompt, args, resumed, &scratch, cache.as_ref(), &peak)?,
         Harness::Codex => bail!("codex harness support has been removed"),
     };
 
@@ -595,9 +647,12 @@ impl Measurements {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChannelKind, EvidenceChannel, Excused, GateTiming, SuppressionRequest, build_evidence,
+        ChannelKind, EvidenceChannel, Excused, GateTiming, SuppressionRequest, TransformArgs, build_evidence,
+        reject_test_schedule,
         verify::{MemberOutcome, MemberRun, stated_requests, verify_findings},
     };
+    use clap::Parser;
+    use std::iter::once;
 
     #[test]
     fn evidence_assembly_carries_status_nonce_and_exit_code() {
@@ -797,5 +852,83 @@ mod tests {
     /// tracks serializer order rather than `BTreeMap` iteration.
     fn top_level_pretty_keys(pretty: &str) -> Vec<&str> {
         pretty.lines().filter_map(|line| line.strip_prefix("  \"").and_then(|rest| rest.split('"').next())).collect()
+    }
+
+    #[derive(Parser)]
+    struct Probe {
+        #[command(flatten)]
+        args: TransformArgs,
+    }
+
+    fn parse_transform(argv: &[&str]) -> TransformArgs {
+        Probe::try_parse_from(once("transform").chain(argv.iter().copied()))
+            .unwrap_or_else(|error| panic!("{error}"))
+            .args
+    }
+
+    fn transform_args(command: &str) -> TransformArgs {
+        parse_transform(&[command, "--out", "out"])
+    }
+
+    #[test]
+    fn verify_test_accepts_the_ci_scheduling_inputs() {
+        let args = parse_transform(&[
+            "verify.test",
+            "--out",
+            "out",
+            "-p",
+            "aether-math",
+            "--package",
+            "xtask",
+            "--partition",
+            "slice:2/3",
+            "--prepared",
+        ]);
+        assert_eq!(args.package, ["aether-math", "xtask"]);
+        assert_eq!(args.partition.as_deref(), Some("slice:2/3"));
+        assert!(args.prepared);
+        reject_test_schedule(&args).expect("verify.test owns the scheduling inputs");
+    }
+
+    #[test]
+    fn a_scheduling_modifier_is_refused_on_every_command_except_verify_test() {
+        // Tripwire: honouring `--package` on `verify.clippy` would lint a
+        // subset while the job's name stayed Clippy — the gate would no
+        // longer be the gate, and every argv assertion on the arm would
+        // stay green. The same for `--partition` (rustfmt does not take it)
+        // and `--prepared` (skipping a prepare that never ran).
+        let others = [
+            "verify.fmt",
+            "verify.clippy",
+            "verify.docs",
+            "verify.dup",
+            "verify.deps",
+            "verify.lock",
+            "verify.suppress",
+            "verify.check",
+            "verify.member",
+            "verify.base",
+            "construct.implement",
+        ];
+        for command in others {
+            let mut packaged = transform_args(command);
+            packaged.package = vec!["xtask".into()];
+            let error = reject_test_schedule(&packaged).expect_err(command).to_string();
+            assert!(error.contains(command), "{error}");
+            assert!(error.contains("--package"), "{error}");
+            assert!(error.contains("verify.test"), "{error}");
+
+            let mut partitioned = transform_args(command);
+            partitioned.partition = Some("slice:1/3".into());
+            let error = reject_test_schedule(&partitioned).expect_err(command).to_string();
+            assert!(error.contains("--partition"), "{error}");
+
+            let mut prepared = transform_args(command);
+            prepared.prepared = true;
+            let error = reject_test_schedule(&prepared).expect_err(command).to_string();
+            assert!(error.contains("--prepared"), "{error}");
+        }
+
+        assert!(reject_test_schedule(&transform_args("verify.fmt")).is_ok(), "absence is not a modifier");
     }
 }

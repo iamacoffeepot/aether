@@ -1,0 +1,5 @@
+error: tool `deferring` has 2 terminal reply mappings; a deferred call has exactly one
+  --> tests/ui/rejects_two_terminal_mappings.rs:25:8
+   |
+25 |     fn deferring(&mut self, _context: Context<'_, ()>, _input: Input) -> Outcome<Output> {
+   |        ^^^^^^^^^

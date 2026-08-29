@@ -493,29 +493,25 @@ jobs:
       # `strategy.job-total` is 1 on the pull-request lane, and
       # `slice:1/1` selects every test, so the flag is inert there.
       #
-      # The one gate still spelled here rather than as `verify.test`
-      # (iamacoffeepot/aether#4883). The arm runs the suite whole: it takes no
-      # partition, no package selection, and it re-runs `cargo xtask dist` as
-      # its own prepare, so routing this job through it would discard the
-      # affected subset, run the full suite three times over, and pay the wasm
-      # cross-build twice per shard. Aligning it needs the arm to accept those
-      # three scheduling inputs — an explicit package set, the nextest
-      # partition, and an attestation that the conditional pre-build step above
-      # already ran — which is a change to `xtask/src/transform/verify`.
-      - name: Run tests (workspace, parallel)
-        if: github.event_name != 'pull_request' || steps.affected.outputs.run_all == 'true'
-        run: cargo nextest run --all-features --profile ci --partition slice:${{ matrix.shard }}/${{ strategy.job-total }}
-        env:
-          AETHER_REQUIRE_RUNTIME: "1"
       # `package_args` interpolates package names only (alphanumeric plus
       # dashes, straight from the cargo workspace list), so the expansion
-      # is shell-safe. An empty affected set skips both test steps — the
-      # affected step's log records why.
-      - name: Run tests (affected packages)
-        if: github.event_name == 'pull_request' && steps.affected.outputs.run_all == 'false' && steps.affected.outputs.package_args != ''
-        run: cargo nextest run ${{ steps.affected.outputs.package_args }} --all-features --profile ci
-        env:
-          AETHER_REQUIRE_RUNTIME: "1"
+      # is shell-safe. An empty affected set skips the test step — the
+      # affected step's log records why. `--partition` is what stops each
+      # full-suite shard from running the whole suite; `--prepared` attests
+      # the conditional dist step above already ran (or correctly did not),
+      # so the arm does not cross-build the wasm a second time per shard.
+      - name: Test gate
+        if: github.event_name != 'pull_request' || steps.affected.outputs.run_all == 'true' || steps.affected.outputs.package_args != ''
+        run: |
+          set -uo pipefail
+          out="${RUNNER_TEMP}/verify-test"
+          status=0
+          cargo xtask transform verify.test --out "$out" \
+            --partition slice:${{ matrix.shard }}/${{ strategy.job-total }} \
+            --prepared \
+            ${{ steps.affected.outputs.package_args }} || status=$?
+          cat "$out/verify.test.log" 2>/dev/null || true
+          exit "$status"
       # iamacoffeepot/aether#2914: a failing direct SubstrateHarness visual
       # assertion that armed `substrate_harness::artifacts::ArtifactGuard`
       # leaves its actual/mask/measurements set under

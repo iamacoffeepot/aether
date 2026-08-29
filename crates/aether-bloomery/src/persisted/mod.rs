@@ -22,14 +22,24 @@
 //! - **metrics rollups, outbox, outstanding orders, parked question** — out.
 //!   The store refolds metric caches from the journal, and in-flight rows are
 //!   not sealed history.
+//!
+//! # Upcast pins are recorded history, not recomputed shapes
+//!
+//! Each [`PersistedUpcast`] pins the digest its rows actually carry, copied
+//! from the store's stamps into a literal. The pin used to be computed from a
+//! "frozen" shape module, and #5500 is why it no longer is: the frozen shape
+//! embedded live leaf types, so a change to those leaves silently moved the
+//! pin along with the code it existed to check. A literal cannot drift; the
+//! ledger test (`tests/golden_decisions/schema_digests.rs`) holds each literal
+//! against the append-only digest history, and the frozen type copies that
+//! remain (`decisions_v1`) exist only to *decode* rows whose wire layout
+//! differs structurally from today's.
 
 mod rendering;
 
 use alloc::string::String;
-use alloc::vec::Vec;
 use core::error::Error;
 use core::fmt;
-use core::ptr;
 use std::sync::OnceLock;
 
 use aether_data::Kind;
@@ -73,18 +83,19 @@ pub struct PersistedKind {
     pub schema: &'static SchemaType,
     /// The pre-column identity an absent recorded digest names.
     pub bootstrap: Bootstrap,
-    /// Prior shapes this entry can upcast, oldest first. Each schema is
-    /// digested under [`Self::name`] so the pin is computed from the shape,
-    /// never hand-maintained.
+    /// Prior shapes this entry can carry forward, oldest first, in lockstep
+    /// with the `upcasts` decoder array the read entry point passes.
     pub upcasts: &'static [PersistedUpcast],
     current: OnceLock<Digest>,
-    upcast_digests: OnceLock<Vec<Digest>>,
 }
 
 /// One prior shape a [`PersistedKind`] can carry forward.
 pub struct PersistedUpcast {
-    /// The prior shape's schema. Its digest is `schema_digest(kind, schema)`.
-    pub schema: &'static SchemaType,
+    /// The digest the prior shape's rows are stamped with — copied from
+    /// recorded history (the store's stamps, mirrored by the append-only
+    /// ledger in `tests/golden_decisions/fixtures/schema-digests.txt`) into a
+    /// literal that no change to live code can move (#5500).
+    pub digest: Digest,
 }
 
 impl PersistedKind {
@@ -100,23 +111,6 @@ impl PersistedKind {
     #[must_use]
     pub fn current_digest(&self) -> Digest {
         *self.current.get_or_init(|| digest_of_schema(self.name, self.schema))
-    }
-
-    /// Digest of a prior shape listed on this kind.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the compiled schema exceeds the rendering budget.
-    #[must_use]
-    pub fn upcast_digest(&self, upcast: &PersistedUpcast) -> Digest {
-        let cached = self
-            .upcast_digests
-            .get_or_init(|| self.upcasts.iter().map(|prior| digest_of_schema(self.name, prior.schema)).collect());
-        self.upcasts
-            .iter()
-            .position(|prior| ptr::eq(prior, upcast))
-            .and_then(|index| cached.get(index).copied())
-            .unwrap_or_else(|| digest_of_schema(self.name, upcast.schema))
     }
 }
 
@@ -205,31 +199,62 @@ fn decode_upcast<T: DeserializeOwned>(
     current: Digest,
 ) -> Result<T, PersistedSchemaError> {
     for (prior, decode) in kind.upcasts.iter().zip(upcasts.iter()) {
-        if found == kind.upcast_digest(prior).as_bytes() {
+        if found == prior.digest.as_bytes() {
             return decode(bytes).map_err(PersistedSchemaError::Decode);
         }
     }
     Err(PersistedSchemaError::NoUpcast { kind: kind.name, found: encode_hex(found), current })
 }
 
+/// The stamp on journaled decisions rows written in the frozen v1 shape
+/// (#5330) — including the pre-column rows the ADR-0187 store migration
+/// stamped retroactively.
+pub const DECISIONS_V1_DIGEST: Digest =
+    Digest::pinned("c81d9b3dc65ef7ee0f154c5498ea543a2f8bf8c4fa7ec67828215614a27a52f6");
+
+/// The stamp on journaled decisions rows written before the #5278 propose
+/// door appended `Decision` and `Outcome` variants.
+pub const DECISIONS_PRE_PROPOSE_DIGEST: Digest =
+    Digest::pinned("ee7c8fcea13dc3607ffd0733d3e9f0f6a7b90b011e77b1f36b59ca3eb82d9aab");
+
+/// The stamp on journaled event rows written before the #5278 propose door
+/// appended `Fact::ProposeChange`.
+pub const EVENT_PRE_PROPOSE_DIGEST: Digest =
+    Digest::pinned("0e7389945913e33b12660db11903787e58ce5f1f7f6e19fe64b72d6266d93117");
+
 /// Decode journaled [`Decisions`] under the writing-schema digest stamped
 /// beside them (ADR-0187).
 ///
 /// The current identity decodes as today. A missing digest is the implicit v1
 /// identity — rows written before the column existed. v1 upcasts by filling
-/// `StageProgress::reconcile_assembles_base` as `false`. Any other identity is
-/// a named refusal.
+/// `StageProgress::reconcile_assembles_base` as `false`; the pre-#5278 shape
+/// decodes as today because everything since is a tail-appended variant. Any
+/// other identity is a named refusal.
 ///
 /// # Errors
 ///
 /// [`PersistedSchemaError`] when the bytes do not decode as the named shape,
 /// or when this binary has no upcast for the recorded digest.
 pub fn decode_recorded_decisions(bytes: &[u8], schema: Option<&[u8]>) -> Result<Decisions, PersistedSchemaError> {
-    decode_persisted(&DECISIONS, schema, bytes, &[upcast_decisions_v1])
+    decode_persisted(&DECISIONS, schema, bytes, &[upcast_decisions_v1, upcast_decisions_pre_propose])
 }
 
 fn upcast_decisions_v1(bytes: &[u8]) -> Result<Decisions, WireError> {
     from_bytes::<DecisionsV1>(bytes).map(Decisions::from)
+}
+
+/// Pre-#5278 rows carry the same wire layout today's decoder reads: the fold
+/// only appended `Decision` and `Outcome` variants, so every discriminant a
+/// row of that era could hold is unmoved.
+fn upcast_decisions_pre_propose(bytes: &[u8]) -> Result<Decisions, WireError> {
+    from_bytes(bytes)
+}
+
+/// Pre-#5278 rows carry the same wire layout today's decoder reads: the fold
+/// only appended `Fact::ProposeChange`, past every discriminant a row of that
+/// era could hold.
+fn upcast_event_pre_propose(bytes: &[u8]) -> Result<Event, WireError> {
+    from_bytes(bytes)
 }
 
 /// Decode a journaled [`Event`] under the writing-schema digest stamped beside
@@ -240,7 +265,7 @@ fn upcast_decisions_v1(bytes: &[u8]) -> Result<Decisions, WireError> {
 /// [`PersistedSchemaError`] when the bytes do not decode as the named shape,
 /// or when this binary has no upcast for the recorded digest.
 pub fn decode_recorded_event(bytes: &[u8], schema: Option<&[u8]>) -> Result<Event, PersistedSchemaError> {
-    decode_persisted(&EVENT, schema, bytes, &[])
+    decode_persisted(&EVENT, schema, bytes, &[upcast_event_pre_propose])
 }
 
 /// The [`PersistedKind`] for journaled decisions.
@@ -248,9 +273,11 @@ pub static DECISIONS: PersistedKind = PersistedKind {
     name: DECISIONS_KIND,
     schema: &<Decisions as Schema>::SCHEMA,
     bootstrap: Bootstrap::Upcast(0),
-    upcasts: &[PersistedUpcast { schema: &<DecisionsV1 as Schema>::SCHEMA }],
+    upcasts: &[
+        PersistedUpcast { digest: DECISIONS_V1_DIGEST },
+        PersistedUpcast { digest: DECISIONS_PRE_PROPOSE_DIGEST },
+    ],
     current: OnceLock::new(),
-    upcast_digests: OnceLock::new(),
 };
 
 /// The [`PersistedKind`] for journaled events.
@@ -258,9 +285,8 @@ pub static EVENT: PersistedKind = PersistedKind {
     name: EVENT_KIND,
     schema: &<Event as Schema>::SCHEMA,
     bootstrap: Bootstrap::Current,
-    upcasts: &[],
+    upcasts: &[PersistedUpcast { digest: EVENT_PRE_PROPOSE_DIGEST }],
     current: OnceLock::new(),
-    upcast_digests: OnceLock::new(),
 };
 
 /// The [`PersistedKind`] for sealed [`ApprovalPolicy`].
@@ -270,7 +296,6 @@ pub static APPROVAL_POLICY: PersistedKind = PersistedKind {
     bootstrap: Bootstrap::Current,
     upcasts: &[],
     current: OnceLock::new(),
-    upcast_digests: OnceLock::new(),
 };
 
 /// The [`PersistedKind`] for sealed [`ModelOverride`].
@@ -280,7 +305,6 @@ pub static MODEL_OVERRIDE: PersistedKind = PersistedKind {
     bootstrap: Bootstrap::Current,
     upcasts: &[],
     current: OnceLock::new(),
-    upcast_digests: OnceLock::new(),
 };
 
 /// The [`PersistedKind`] for sealed [`PriceTable`].
@@ -290,7 +314,6 @@ pub static PRICE_TABLE: PersistedKind = PersistedKind {
     bootstrap: Bootstrap::Current,
     upcasts: &[],
     current: OnceLock::new(),
-    upcast_digests: OnceLock::new(),
 };
 
 /// The [`PersistedKind`] for sealed [`SpendCeiling`].
@@ -300,7 +323,6 @@ pub static SPEND_CEILING: PersistedKind = PersistedKind {
     bootstrap: Bootstrap::Current,
     upcasts: &[],
     current: OnceLock::new(),
-    upcast_digests: OnceLock::new(),
 };
 
 /// The [`PersistedKind`] for sealed [`StageCatalog`].
@@ -310,7 +332,6 @@ pub static STAGE_CATALOG: PersistedKind = PersistedKind {
     bootstrap: Bootstrap::Current,
     upcasts: &[],
     current: OnceLock::new(),
-    upcast_digests: OnceLock::new(),
 };
 
 /// Every kind this binary persists. The fixture walks this table.

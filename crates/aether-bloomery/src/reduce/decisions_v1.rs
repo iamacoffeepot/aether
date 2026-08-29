@@ -5,6 +5,14 @@
 //! that field as missing. This module freezes the pre-#5330 shape so a v1
 //! (or unstamped) journal row upcasts instead of aborting replay. Never edit
 //! these types: a later shape change adds a v2 mirror.
+//!
+//! These types exist to *decode* — the v1 identity itself is the pinned
+//! `DECISIONS_V1_DIGEST` literal in the persisted registry, never computed
+//! from these types (#5500: computing it let drift in the embedded live leaf
+//! types silently move the pin). Embedding live types here is sound for
+//! decoding exactly as long as they only ever gain tail-appended enum
+//! variants; a structural change to one of them must instead freeze a full
+//! copy in the mirror that change adds.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -22,7 +30,7 @@ use crate::values::{
 };
 
 /// Pre-#5330 [`StageProgress`]: seven fields, no `reconcile_assembles_base`.
-#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct StageProgressV1 {
     pub stage: StageId,
     pub attempts: u32,
@@ -52,7 +60,7 @@ impl From<StageProgressV1> for StageProgress {
 
 /// Pre-#5330 [`Decision`]. Discriminants match [`Decision`] in declaration order;
 /// `AdvanceStage.progress` is [`StageProgressV1`].
-#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum DecisionV1 {
     ClaimMembership {
         workpiece: WorkpieceId,
@@ -355,7 +363,7 @@ impl From<DecisionV1> for Decision {
 }
 
 /// Pre-#5330 journaled [`Decisions`] blob.
-#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct DecisionsV1 {
     pub outcome: Outcome,
     pub effects: Vec<DecisionV1>,

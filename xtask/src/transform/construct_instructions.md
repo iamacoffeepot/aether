@@ -83,7 +83,7 @@ after the shared work order so sibling lanes share a prompt-cache prefix.
 
 The workspace lints far stricter than default clippy. CI runs `-D warnings` over clippy pedantic + nursery plus a curated deny list — `[workspace.lints.clippy]` in the root `Cargo.toml` is the authority, `clippy.toml` the disallowed methods. Write to that bar from the start; Dedicated Verify remains the one lint run and will judge the candidate after this lane returns.
 
-The config files are the set. Observed trip-lints, not an enumeration — add a line when a lint repeats: bring paths into scope with `use` instead of inline qualified paths (`absolute-paths`); factor a complex field or return type into a `type` alias (`type-complexity`); inline format args (`uninlined_format_args`).
+The config files are the set. Observed trip-lints, not an enumeration — add a line when a lint repeats: bring paths into scope with `use` instead of inline qualified paths (`absolute-paths`); drop the struct's own name from its field names (`struct_field_names`); factor a complex field or return type into a `type` alias (`type-complexity`); inline format args (`uninlined_format_args`).
 
 5. **Build with the `CARGO_TARGET_DIR` already set; never set your own.** Your
    environment names a build directory that has already compiled this workspace,
