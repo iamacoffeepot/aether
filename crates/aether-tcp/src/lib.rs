@@ -49,9 +49,9 @@
 //! configs (`config`), and the send-side [`TcpWasmExt`] / [`TcpNativeExt`]
 //! facades (`route`).
 //!
-//! The `aether-game` player tier is the in-repo consumer that names these
-//! types directly (its gateway is a listener consumer and its sessions
-//! write framed bytes through [`TcpNativeExt`]). That is a downward
+//! A consumer tier (the shelved `aether-game` player tier was the in-repo
+//! example) names these types directly — a gateway as a listener consumer,
+//! sessions writing framed bytes through [`TcpNativeExt`]. That is a downward
 //! leaf→leaf dependency, not a facade: a downstream crate that wants TCP
 //! deps here directly, and pulls in nothing else.
 

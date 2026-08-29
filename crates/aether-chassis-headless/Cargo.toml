@@ -36,7 +36,6 @@ aether-http = { path = "../aether-http" }
 # The headless chassis absorbs audio mail with a typed Err reply, so it
 # names the `SetMasterGain` kind pair without the cpal runtime.
 aether-audio = { path = "../aether-audio", features = ["runtime"] }
-aether-game = { path = "../aether-game" }
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }

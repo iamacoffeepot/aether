@@ -213,7 +213,7 @@ impl BootableChassis for HeadlessChassis {
         // env-sourced `CommonBoot` fields off the shared env in one place; the
         // aborter and source stack are supplied earlier by `composed` /
         // `ChassisBase` (the base + autoload were lifted out in `Chassis::build`).
-        let common = env.into_common_boot(component_host_params, aether_game::GameGatewayParams::default());
+        let common = env.into_common_boot(component_host_params);
         // ADR-0082 §1 / PR 3b: headless uses the shared Tick-only
         // lifecycle graph (Tick self-loops, Quit escapes to Shutdown);
         // the timer pushes `LifecycleAdvance` and the driver broadcasts

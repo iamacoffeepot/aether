@@ -405,8 +405,8 @@ async fn describe_component_uses_the_engine_resolved_id_and_forwards_the_supplie
     let engine_answer = MailboxId(0x4057_0000_0000_0100);
     let engine = EngineId(Uuid::from_u128(0x4057));
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let replies = Arc::new(Mutex::new(VecDeque::from([TerrainRouteReply {
-        events: vec![TerrainReplyEvent {
+    let replies = Arc::new(Mutex::new(VecDeque::from([ScriptedRouteReply {
+        events: vec![ScriptedReplyEvent {
             kind: DescribeComponentResult::ID,
             payload: DescribeComponentResult::Ok {
                 capabilities: ComponentCapabilities {

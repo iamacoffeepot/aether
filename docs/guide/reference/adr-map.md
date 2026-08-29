@@ -99,8 +99,7 @@ Residual id types are not evidence that those native subsystems still ship.
 | Player sessions over TCP | ADR-0145 (**Proposed**, partially realized in code) |
 
 ADR-0050 contains deferred/historical provider discussion. The current
-`anthropic`, `gemini`, and shared content-generation modules define the shipped
-set.
+`anthropic` and shared content-generation modules define the shipped set.
 
 ## Testing and performance
 

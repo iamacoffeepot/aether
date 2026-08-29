@@ -12,4 +12,3 @@ mod mail;
 mod render;
 mod reply;
 mod state;
-mod terrain;

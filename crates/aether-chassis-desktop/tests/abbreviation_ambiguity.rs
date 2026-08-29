@@ -14,8 +14,8 @@
 //! link-time inventory, which is also why it cannot be a source scan.
 //!
 //! Coverage is this binary's link set — the desktop chassis, the widest real
-//! engine. Declarations reachable only from the hub (`aether-fleet`) or the kit
-//! (`aether-kit-workbench`) are outside it, which is correct rather than a gap:
+//! engine. Declarations reachable only from the hub (`aether-fleet`) or a kit
+//! cdylib are outside it, which is correct rather than a gap:
 //! a desktop engine cannot address them either.
 
 use aether_chassis_desktop::DesktopChassis;

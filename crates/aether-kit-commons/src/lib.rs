@@ -32,9 +32,9 @@
 //! (iamacoffeepot/aether#3951), the reference game-loop pair (`TurnSim` /
 //! `PlayerClient`) to `aether-kit-sim` (iamacoffeepot/aether#3952), and the
 //! terrain-annotation workbench that composed the widget / console / terrain
-//! layers to `aether-kit-workbench` (iamacoffeepot/aether#3953). None of the
-//! remaining kit systems consume those crates, so kit no longer depends on any
-//! of them at the crate level.
+//! layers to `aether-kit-workbench` (iamacoffeepot/aether#3953). All three
+//! sibling crates have since been shelved out of the workspace (dormant, not
+//! in active use; git history holds them), so kit depends on none of them.
 //!
 //! `export!` (below) packs the actors into one cdylib (ADR-0096 multi-actor
 //! module); the explicit entry type is the bare-load target, and the FFI
@@ -61,11 +61,9 @@ pub use console::{
 // explicitly named as the default. `console::ConsoleOverlay` is the kit's
 // narrow bare-load target; all other actors stay selector-only by
 // `module@actor` selector, never by list position. The widget set and its
-// `EditorShell` arbiter live in `aether-kit-widget`, the terrain stack (mark /
-// world / terra / mover) in `aether-kit-terrain`, the reference game-loop pair
-// (`TurnSim` / `PlayerClient`) in `aether-kit-sim`, and the workbench that
-// composed the widget / terrain / console layers in `aether-kit-workbench`;
-// each is exported from its own cdylib, not here.
+// `EditorShell` arbiter live in `aether-kit-widget`, exported from its own
+// cdylib, not here (the shelved terrain / sim / workbench siblings likewise
+// owned their own cdylibs while they were in the workspace).
 aether_actor::export!(
     default = console::ConsoleOverlay,
     camera::CameraComponent,

@@ -15,10 +15,10 @@ publish = false
 # (`kinds`), the listener / session init configs (`config`), and the
 # send-side `TcpWasmExt` / `TcpNativeExt` facades (`route`).
 #
-# The `aether-game` player tier is the in-repo consumer that names these
-# types directly. That is a downward leaf→leaf dependency, not a facade: a
-# downstream crate that wants TCP deps on `aether-tcp` directly, and pulls in
-# nothing else.
+# A consumer tier (the shelved `aether-game` player tier was the in-repo
+# example) names these types directly. That is a downward leaf→leaf
+# dependency, not a facade: a downstream crate that wants TCP deps on
+# `aether-tcp` directly, and pulls in nothing else.
 #
 # The ADR-0122 identity/runtime split rides the `runtime` feature: the
 # wasm-safe identities, mail kinds, and `HandlesKind` markers compile

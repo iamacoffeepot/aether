@@ -83,12 +83,6 @@ fn main() -> anyhow::Result<()> {
             Box::new(|b| {
                 b.with_actor::<aether_clipboard::ClipboardCapability>(aether_clipboard::ClipboardParams::InMemory)
             }),
-            Box::new(|b| {
-                b.with_actor_configured::<aether_game::GameGatewayCapability>(
-                    aether_game::GameGatewayParams::default(),
-                    aether_game::GameGatewayConfig::default(),
-                )
-            }),
         ],
         // Issue #2509: the standalone binary is an env-reading edge, so
         // its teardown gate honors `AETHER_SETTLEMENT_CAP_SECS` (including

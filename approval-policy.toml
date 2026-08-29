@@ -216,10 +216,6 @@ glob = "crates/aether-fs/**"
 tier = "judge"
 
 [[rules]]
-glob = "crates/aether-game/**"
-tier = "judge"
-
-[[rules]]
 glob = "crates/aether-http/**"
 tier = "judge"
 
