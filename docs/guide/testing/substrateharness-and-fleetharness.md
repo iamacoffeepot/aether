@@ -37,8 +37,7 @@ It is not a mock engine. The simplification is process/transport ownership.
 ## Builder and isolation
 
 `SubstrateHarnessBuilder` configures the boundary a test needs: target size, namespace
-roots, worker count, log/trace capacities, settlement cap, clipboard mode, and
-game gateway configuration.
+roots, worker count, log/trace capacities, settlement cap, and clipboard mode.
 
 Prefer builder-scoped values to process environment. Tests that need the
 filesystem must provide `NamespaceRoots` through the builder; doing so both
