@@ -16,6 +16,7 @@ use super::commission::{
     RecordCommissionProjection, RecordCommissionProjectionResult, ReopenCommission, ReopenCommissionResult,
     RevisionEvidence, WriteScopeRevision, WriteScopeRevisionResult,
 };
+use super::holder::{self, JournalHolderError};
 use super::kinds::{
     AckOutbox, AckOutboxResult, AppendEvent, AppendEventResult, BloomDispatchLive, BloomDispatchRollup, ClaimSeal,
     ClaimSealResult, DrainOutbox, DrainOutboxResult, EnqueueOutbox, EnqueueOutboxResult, ListBloomDispatches,
@@ -791,35 +792,84 @@ pub trait StoreBackend: Send {
 /// reopening the same file on restart resumes against the persisted journal.
 pub struct SqliteStore {
     pub(super) conn: Connection,
+    /// Whether this handle took the advisory holder claim on the journal, and
+    /// so owes it a release when it drops. A secondary connection (a reactor
+    /// opening its own, an operator tool) never claims and never releases.
+    holds_journal: bool,
 }
 
 impl SqliteStore {
     /// Open (or create) a store at `path`. `":memory:"` opens a private,
     /// non-durable in-memory database — the same code path, used by tests and
     /// the default unconfigured chassis.
+    ///
+    /// This is the *secondary* connection: the reactors that drive their own
+    /// registries and the operator tools that read a running coordinator's
+    /// journal all come through here, so it takes no holder claim. The
+    /// coordinator generation that owns the journal opens it with
+    /// [`open_as_holder`](Self::open_as_holder).
     pub fn open(path: &str) -> rusqlite::Result<Self> {
-        let mut conn = Connection::open(path)?;
-        // WAL gives a durable single-writer / many-reader journal; a `:memory:`
-        // database silently ignores the pragma (it has one connection anyway).
-        // `synchronous=NORMAL` is the WAL-appropriate durability point: a
-        // committed transaction survives an application crash (`kill -9`).
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
-        // A busy timeout so a second connection to the same file (the executor
-        // dispatch reactor opens its own to drive the intake registry, #3505) waits
-        // for the WAL write lock rather than failing fast with SQLITE_BUSY; WAL is
-        // still single-writer, so the timeout serializes the rare concurrent write.
-        conn.busy_timeout(Duration::from_secs(5))?;
-        conn.execute_batch(MIGRATIONS)?;
-        migrate_schema(&mut conn)?;
-        // Foreign keys are per-connection and default OFF. Existing tables have
-        // no REFERENCES, so turning the pragma on does not change their DML.
-        // The commission tables do use REFERENCES; enforcement is a deliberate
-        // migration decision (ADR-0199), not a free property of sharing this
-        // connection.
-        conn.pragma_update(None, "foreign_keys", "ON")?;
-        Ok(Self { conn })
+        let mut conn = connect(path)?;
+        migrate(&mut conn)?;
+        Ok(Self { conn, holds_journal: false })
     }
+
+    /// Open `path` as its sole coordinator generation, or refuse because
+    /// another live one already holds it.
+    ///
+    /// The claim is taken *before* the migrations run, so a refused open
+    /// leaves the journal exactly as it was found — never migrated, never
+    /// written. A holder whose process is gone is stale: the claim is taken
+    /// over with a log line rather than locking a crashed generation's journal
+    /// against its own restart.
+    ///
+    /// # Errors
+    /// A live holder already claimed the journal, or the claim could not be
+    /// read or written.
+    pub fn open_as_holder(path: &str) -> Result<Self, JournalHolderError> {
+        let mut conn = connect(path)?;
+        holder::claim(&conn, path)?;
+        migrate(&mut conn)?;
+        Ok(Self { conn, holds_journal: true })
+    }
+}
+
+impl Drop for SqliteStore {
+    fn drop(&mut self) {
+        if self.holds_journal {
+            holder::release(&self.conn);
+        }
+    }
+}
+
+/// A connection to `path` under the store's pragmas, before any schema exists.
+fn connect(path: &str) -> rusqlite::Result<Connection> {
+    let conn = Connection::open(path)?;
+    // WAL gives a durable single-writer / many-reader journal; a `:memory:`
+    // database silently ignores the pragma (it has one connection anyway).
+    // `synchronous=NORMAL` is the WAL-appropriate durability point: a
+    // committed transaction survives an application crash (`kill -9`).
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    // A busy timeout so a second connection to the same file (the executor
+    // dispatch reactor opens its own to drive the intake registry, #3505) waits
+    // for the WAL write lock rather than failing fast with SQLITE_BUSY; WAL is
+    // still single-writer, so the timeout serializes the rare concurrent write.
+    conn.busy_timeout(Duration::from_secs(5))?;
+    Ok(conn)
+}
+
+/// Bring `conn` to the current schema. Unconditional by design — which is why
+/// the holder guard runs in front of it rather than inside it.
+fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(MIGRATIONS)?;
+    migrate_schema(conn)?;
+    // Foreign keys are per-connection and default OFF. Existing tables have
+    // no REFERENCES, so turning the pragma on does not change their DML.
+    // The commission tables do use REFERENCES; enforcement is a deliberate
+    // migration decision (ADR-0199), not a free property of sharing this
+    // connection.
+    conn.pragma_update(None, "foreign_keys", "ON")
 }
 
 /// The store's schema version, stamped in `PRAGMA user_version`.
@@ -2887,9 +2937,13 @@ impl NativeActor for StoreCapability {
 
     const NAMESPACE: &'static str = "aether.store";
 
+    /// The one place a coordinator generation claims the journal: this
+    /// capability is the process's durable writer, so a second generation
+    /// booting against the same file is refused here, before its migrations
+    /// have touched anything.
     fn init(config: super::StoreConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<StoreCapabilityState, BootError> {
-        let store = SqliteStore::open(&config.path).map_err(|error| BootError::Other(Box::new(error)))?;
-        tracing::info!(target: "aether_chassis_bloomery::store", path = %config.path, "store opened (WAL)");
+        let store = SqliteStore::open_as_holder(&config.path).map_err(|error| BootError::Other(Box::new(error)))?;
+        tracing::info!(target: "aether_chassis_bloomery::store", path = %config.path, "store opened (WAL), journal claimed");
         Ok(StoreCapabilityState { backend: store })
     }
 
