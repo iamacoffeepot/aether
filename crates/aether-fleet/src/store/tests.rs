@@ -177,6 +177,65 @@ fn eviction_skips_pinned_and_named_entries() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// Tripwire: pin protection is load-bearing (ADR-0115) and the hub is a
+/// long-lived supervised service, so a pin held only in the store handle's
+/// memory silently lapsed on every `restart-hub` — the coordinator's own
+/// pinned binary became an ordinary LRU candidate the moment the hub came
+/// back up. The reopened store must reload the pin from disk and still
+/// prefer the unpinned sibling as the eviction victim.
+#[test]
+fn a_pin_survives_a_reopen_and_still_protects_its_entry() {
+    let root = temp_root("pin-persist");
+    let (h_pinned, h_plain) = {
+        let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
+        let h_pinned =
+            store.upload(b"pinned-aaaa", ArtifactKind::Binary, manifest("headless"), None).expect("upload lands");
+        let h_plain =
+            store.upload(b"plain-bbbbb", ArtifactKind::Binary, manifest("headless"), None).expect("upload lands");
+        assert!(store.pin(&h_pinned), "pin targets a stored entry");
+        (h_pinned, h_plain)
+        // store drops here — the hub process ends
+    };
+
+    // Restore assigns recency by directory order, so touch the sibling to
+    // make the pinned entry the unambiguous LRU victim: only the reloaded
+    // pin can spare it. The budget holds the two ~11-byte entries but not
+    // a third, so the trigger upload forces exactly one eviction.
+    let mut reopened = ArtifactStore::open(&root, 30).expect("open store");
+    assert!(reopened.get(&Selector::Hash(h_plain.clone())).is_some(), "the sibling is the more recently used entry");
+    reopened.upload(b"trigger-ccc", ArtifactKind::Binary, manifest("headless"), None).expect("upload lands");
+
+    assert!(reopened.contains(&h_pinned), "the reloaded pin protects the oldest entry from eviction");
+    assert!(!reopened.contains(&h_plain), "its unpinned sibling is evicted instead");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Tripwire: unpinning is the release half of the same durable flag. A
+/// persistence path that only records `set_pinned(hash, true)` would leave
+/// a released entry protected forever across restarts — an unbounded leak
+/// in a budgeted store, since nothing else can ever make it a candidate.
+#[test]
+fn an_unpin_survives_a_reopen_and_returns_the_entry_to_the_candidates() {
+    let root = temp_root("unpin-persist");
+    let h_released = {
+        let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
+        let hash =
+            store.upload(b"pinned-aaaa", ArtifactKind::Binary, manifest("headless"), None).expect("upload lands");
+        assert!(store.pin(&hash), "pin targets a stored entry");
+        assert!(store.set_pinned(&hash, false), "unpin targets a stored entry");
+        hash
+    };
+
+    // A budget that holds one ~11-byte entry but not two: the trigger
+    // upload evicts the older candidate, which the released entry is only
+    // if the unpin reloaded.
+    let mut reopened = ArtifactStore::open(&root, 20).expect("open store");
+    reopened.upload(b"trigger-ccc", ArtifactKind::Binary, manifest("headless"), None).expect("upload lands");
+
+    assert!(!reopened.contains(&h_released), "a reloaded unpin returns the entry to the eviction candidates");
+    let _ = fs::remove_dir_all(&root);
+}
+
 #[test]
 fn list_applies_chassis_and_caps_filters() {
     let root = temp_root("filter");

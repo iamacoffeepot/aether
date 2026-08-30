@@ -347,28 +347,28 @@ fn refresh_adopts_peer_written_entries_into_enumeration() {
     let _ = fs::remove_dir_all(&root);
 }
 
-/// Tripwire: `refresh` merges into the index rather than replacing it.
-/// `pinned` and recency are per-handle state no peer writes to disk, so a
-/// refresh that re-restored wholesale would silently unprotect every
-/// pinned entry — invisible until eviction later reclaims one the caller
-/// had pinned. The budget below forces both unpinned entries out, so only
-/// a surviving pin keeps `pinned` indexed.
+/// Tripwire: a pin rides the entry's own sidecar, so it is a property of
+/// the root rather than of the handle that set it — an entry a peer
+/// pinned must arrive protected when this handle indexes it. Adopting it
+/// unpinned would let a second handle evict an artifact the root records
+/// as pinned, and it is the same read path a restart takes, so the pin
+/// the hub set before its last shutdown would come back inert.
 #[test]
-fn refresh_preserves_a_pin_the_disk_does_not_record() {
+fn refresh_adopts_a_peer_pinned_entry_as_protected() {
     let root = temp_root("peer-refresh-pin");
     // Ten-byte payloads against a 15-byte budget: the trigger upload must
-    // evict every unpinned entry to get back under it.
+    // evict every unprotected entry to get back under it.
     let mut first: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::LruBudget(15)).expect("open store");
     let mut second: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open peer handle");
 
-    let pinned = first.upload(b"pinned-aaa", meta("a"), None).expect("upload lands");
-    assert!(first.pin(&pinned), "pin targets a stored entry");
-    second.upload(b"peers-bbbb", meta("b"), None).expect("upload lands");
+    let pinned = second.upload(b"pinned-aaa", meta("a"), None).expect("upload lands");
+    assert!(second.pin(&pinned), "pin targets a stored entry");
+    first.upload(b"plain-bbbb", meta("b"), None).expect("upload lands");
 
     first.refresh();
     first.upload(b"trigger-cc", meta("c"), None).expect("upload lands");
 
-    assert_eq!(first.entry_count(), 1, "both unpinned entries were reclaimed to hold the budget");
-    assert!(first.contains(&pinned), "the pin survived the refresh and protected its entry from eviction");
+    assert_eq!(first.entry_count(), 1, "every unpinned entry was reclaimed to hold the budget");
+    assert!(first.contains(&pinned), "the peer's pin came across with the entry and protected it from eviction");
     let _ = fs::remove_dir_all(&root);
 }
