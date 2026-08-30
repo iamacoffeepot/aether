@@ -42,8 +42,7 @@ The [operating chapter](operating/component-registry.md) covers that lifecycle.
 | [TCP](systems/tcp.md) | framed listeners and session actors |
 | [RPC](systems/rpc.md) | hub/engine process transport |
 | [Clipboard](systems/clipboard.md) | text clipboard with deterministic/headless backends |
-| [Content generation](systems/content-generation.md) | Anthropic/Gemini provider queues, the `aether.process` CLI edge, and staged media |
-| [Player sessions](systems/player-sessions.md) | trusted session/gateway tier over TCP and tick-native sim |
+| [Content generation](systems/content-generation.md) | Anthropic provider queue, the `aether.process` CLI edge, and staged media |
 
 These all cross trust or blocking boundaries. Read [Platform and network I/O](systems/platform-io.md)
 for the common rules.
@@ -63,7 +62,6 @@ For the media and product-tools overview, start with
 | [Input](systems/input.md) | key, pointer, text, IME and subscription streams |
 | [Window](systems/window.md) | mode, title, focus and unsupported replies |
 | [Widgets](systems/widgets.md) | controls, focus, scroll, panel/editor composition |
-| [World and terrain](systems/world-and-terrain.md) | chunk data, proposals, picking, mesh and workbench |
 | [Puppet controls](systems/puppet.md) | articulated character pose, gaze, expression and turntable control |
 
 Native capabilities own devices; kit actors compose them into product behavior.

@@ -57,7 +57,6 @@
     - [RPC wire and engine routing](systems/rpc.md)
     - [Clipboard](systems/clipboard.md)
     - [Content-generation capabilities](systems/content-generation.md)
-    - [Simulation and player sessions](systems/player-sessions.md)
   - [Media, interaction, and product tools](systems/media-and-tools.md)
     - [Rendering and camera](systems/rendering.md)
     - [Puppet controls](systems/puppet.md)
@@ -68,7 +67,6 @@
     - [Input streams](systems/input.md)
     - [Window](systems/window.md)
     - [Widget set and focus model](systems/widgets.md)
-    - [World, terrain, and workbench](systems/world-and-terrain.md)
 
 # Building with Aether
 
@@ -77,7 +75,6 @@
 - [Writing guest code](writing-guest-code.md)
 - [Distribution and packaging](building/distribution.md)
 - [Recipes](recipes.md)
-  - [Authoring terrain](recipes/authoring-terrain.md)
   - [Adding a config knob](recipes/adding-a-config-knob.md)
   - [Adding a mail kind](recipes/adding-a-substrate-kind.md)
   - [Drawing your first text](recipes/drawing-text.md)
@@ -90,6 +87,7 @@
   - [Driving a bloom over the REST control API](recipes/bloomery-rest-api.md)
   - [Amending a member's declared surface](recipes/amending-a-declared-surface.md)
   - [Supervising the coordinator with systemd](recipes/supervising-the-coordinator.md)
+  - [Supervising the hub with systemd](recipes/supervising-the-hub.md)
   - [Debugging a hung settlement](recipes/debugging-a-hung-settlement.md)
 
 # Testing and verification

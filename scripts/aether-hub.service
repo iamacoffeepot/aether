@@ -1,0 +1,77 @@
+# The hub chassis as a systemd user service.
+#
+#   mkdir -p ~/.config/systemd/user ~/.config/aether
+#   cp scripts/aether-hub.service ~/.config/systemd/user/aether-hub.service
+#   cp scripts/hub.env.example ~/.config/aether/hub.env
+#   $EDITOR ~/.config/aether/hub.env
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now aether-hub
+#
+# Every path, port, and cadence comes from that environment file, so this unit
+# is generic and one host's values live in one uncommitted place. The full
+# recipe — lingering on a headless host, what a restart does to the substrates
+# the hub has forked — is docs/guide/recipes/supervising-the-hub.md.
+#
+# This is a sibling of scripts/bloomery.service, not a child of anything. The
+# development tunnel (aether-tunnel, ADR-0089) forks its own hub for an MCP
+# session and supervises it there; a hub under this unit is the standing fleet
+# coordinator on the host and has no tunnel above it.
+
+[Unit]
+Description=Aether hub chassis
+Documentation=https://github.com/iamacoffeepot/aether/blob/main/docs/guide/recipes/supervising-the-hub.md
+# Give up after five failed starts inside five minutes. A hub that cannot come
+# up five times running needs a person, and a unit that has stopped trying says
+# so in `systemctl --user status aether-hub`, where a silent restart loop would
+# only say "activating" forever.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/aether/hub.env
+
+# Reap what the previous run left under the engines cap's store root. Every
+# spawn materializes the resolved substrate binary to
+# ${AETHER_FLEET_STORE_ROOT}/<engine-id>/substrate — a full copy of a chassis
+# binary per engine — and nothing removes that directory when the engine dies,
+# so anything surviving here belongs to a run that died with the hub. This is
+# safe at exactly this moment because no engine is running: the substrates are
+# this unit's children and went down with it. Give each hub on a host its own
+# AETHER_FLEET_STORE_ROOT, or this reap deletes a live engine's executable out
+# from under its neighbour. It never touches AETHER_BINARY_STORE_DIR, which is
+# the content-addressed store of uploaded binaries and components and is meant
+# to outlive a restart.
+ExecStartPre=/bin/sh -euc 'mkdir -p "${AETHER_FLEET_STORE_ROOT:?}"; rm -rf -- "${AETHER_FLEET_STORE_ROOT:?}"/*'
+
+# The wrapper below exists because ExecStart= takes a literal path for the
+# program itself with no environment expansion, and naming the binary here
+# would put the last host-specific value back into the unit. `sh -e` plus the
+# `:?` turns an environment file that never got edited into a failed start with
+# the reason in the journal rather than a hub running on a path nobody chose.
+#
+# HUB_BIN carries no AETHER_ prefix on purpose. The hub sweeps its own
+# environment at boot and warns on every AETHER_* variable no registered config
+# knob claims, so a wrapper variable named AETHER_HUB_BIN would log a spurious
+# "unknown AETHER_ env var" line on every start.
+ExecStart=/bin/sh -euc 'exec "${HUB_BIN:?}"'
+
+# A crash comes back. A deliberate `systemctl --user stop` stays stopped, and so
+# does a clean exit — the hub handles SIGTERM and exits 0.
+Restart=on-failure
+RestartSec=5s
+
+# Stopping kills the whole control group. The hub already terminates and reaps
+# each substrate it forked as it tears down, so the control-group kill is the
+# backstop for the case where it cannot: a forked substrate runs in its own
+# process group, which a signal to the hub alone would not reach, but the
+# cgroup holds it either way.
+KillMode=control-group
+TimeoutStopSec=30s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aether-hub
+
+[Install]
+WantedBy=default.target

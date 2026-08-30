@@ -197,7 +197,7 @@ impl BootableChassis for DesktopChassis {
         // `CommonBoot` fields off the shared env in one place; the aborter and
         // source stack are supplied earlier by `composed` / `ChassisBase` (the
         // base + autoload were lifted out in `Chassis::build`).
-        let common = env.into_common_boot(component_host_params, aether_game::GameGatewayParams::default());
+        let common = env.into_common_boot(component_host_params);
         // ADR-0082 §11 / issues 1378 + 1489: desktop drives the shared
         // `Tick → Render → Present → Tick` frame graph, with the `Quit`
         // escape to `Shutdown` on `Present` so OS-close / ctrlc drain the

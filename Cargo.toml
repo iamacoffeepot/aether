@@ -31,10 +31,7 @@ members = [
     "crates/aether-mesh",
     "crates/aether-kit-commons",
     "crates/aether-puppet",
-    "crates/aether-kit-sim",
-    "crates/aether-kit-terrain",
     "crates/aether-kit-widget",
-    "crates/aether-kit-workbench",
     "crates/aether-rpc",
     "crates/aether-fleet",
     "crates/aether-harness-bloomery",
@@ -44,7 +41,6 @@ members = [
     "crates/aether-window",
     "crates/aether-lifecycle",
     "crates/aether-tcp",
-    "crates/aether-game",
     "crates/aether-component",
     # Dedicated trybuild host for `aether-component`'s route contracts. Keeping
     # its dev-dependency graph narrow prevents trybuild's generated project from
@@ -55,10 +51,8 @@ members = [
     "crates/aether-render",
     "crates/aether-text",
     "crates/aether-anthropic",
-    "crates/aether-gemini",
     "crates/aether-process",
     "crates/aether-mcp",
-    "crates/aether-mcp-derive",
     # Test fixtures — single-output crates sitting alongside every other
     # member: one shared `kinds` rlib plus the component cdylibs (the main
     # bundle, the typed↔reshaped replace-pair satellites, the ADR-0138

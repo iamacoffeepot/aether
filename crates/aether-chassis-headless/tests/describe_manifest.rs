@@ -25,14 +25,11 @@ fn headless_describe_emits_manifest() {
     assert_eq!(manifest.chassis, "headless", "reports the headless profile");
     assert!(!manifest.caps.is_empty(), "the headless chassis links a non-empty cap set");
     // ADR-0155: the roster is claim-derived, so these assert the real claim
-    // path — not a hand list. `aether.fs` is a `with_full_stack_caps` cap;
-    // `aether.game.gateway` pins that `with_full_stack_caps` still composes the
-    // (inert-by-default) game gateway, which the claim reserves even though no
-    // player listener opens — catches someone dropping it from the common
-    // chain. `aether.audio` is the headless inline fail-fast sink, and
+    // path — not a hand list. `aether.fs` is a `with_full_stack_caps` cap,
+    // `aether.audio` is the headless inline fail-fast sink, and
     // `aether.rpc.server` / `aether.http.server` are the always-claim servers
     // (ADR-0155 §3) the old hand list silently omitted.
-    for expected in ["aether.fs", "aether.game.gateway", "aether.audio", "aether.rpc.server", "aether.http.server"] {
+    for expected in ["aether.fs", "aether.audio", "aether.rpc.server", "aether.http.server"] {
         assert!(
             manifest.caps.iter().any(|c| c == expected),
             "claim-derived roster must include {expected}, got {:?}",

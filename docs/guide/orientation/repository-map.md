@@ -54,8 +54,8 @@ compares these with native capabilities.
 | `aether-http`, `aether-http-derive`, `aether-tcp`, `aether-rpc` | HTTP egress and ingress with its typed route macros, TCP listeners and sessions, framed process RPC |
 | `aether-process` | deny-by-default, allowlisted one-shot subprocess execution and captured typed replies (Accepted ADR-0157) |
 | `aether-component`, `aether-lifecycle`, `aether-inventory`, `aether-trace` | wasm component hosting and the trampoline, frame stages, live name/kind lookup, causal-tree evidence |
-| `aether-fleet`, `aether-game` | hub fleet supervision and the content-addressed artifact store, the trusted player gateway |
-| `aether-anthropic`, `aether-gemini` | the two content-gen provider components (loaded on demand, not chassis fixtures), each a self-contained guest carrying its own pure DTO/string helpers |
+| `aether-fleet` | hub fleet supervision and the content-addressed artifact store |
+| `aether-anthropic` | the content-gen provider component (loaded on demand, not a chassis fixture), a self-contained guest carrying its own pure DTO/string helpers |
 | `aether-chassis` | shared chassis composition: boot fragments, config registry, CLI roots, autoload, boot-manifest and package-depot formats |
 | `aether-chassis-desktop` / `aether-chassis-headless` / `aether-chassis-hub` / `aether-chassis-harness` / `aether-chassis-bloomery` | the five checked-in chassis binaries; Bloomery is the dedicated application profile and can run standalone or through the hub launch path |
 | `aether-harness-substrate` | composable in-process substrate harness with deterministic mail, lifecycle, and settlement control |
@@ -91,9 +91,6 @@ decision.
 |---|---|
 | `aether-kit-commons` | common standalone reference actors: camera + camera-controller, console overlay, mesh viewer |
 | `aether-kit-widget` | reusable widget set and the `EditorShell` composition arbiter |
-| `aether-kit-terrain` | world / mark / terra / mover terrain-authoring actors |
-| `aether-kit-sim` | reference game-loop pair: the `TurnSim` authority and `PlayerClient` presentation actor |
-| `aether-kit-workbench` | terrain-annotation workbench assembly composing the widget / terrain / console layers |
 | `aether-mesh` | mesh DSL, parsing/serialization, cleanup, polygon tessellation, surface nets, shared eye-facing stroke ribbon geometry |
 | `aether-puppet` | the wasm-hosted mascot actor: mesh-derived pen-plotter line art, authored face controls, rigging, and render mail |
 

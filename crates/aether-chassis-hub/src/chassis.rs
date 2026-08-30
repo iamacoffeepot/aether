@@ -12,8 +12,6 @@
 //! or SIGTERM arrives; on Windows the `ctrlc` fallback covers Ctrl-C.
 
 use aether_fleet::FleetServer;
-use aether_http::{HttpServerCapability, HttpServerConfig};
-use aether_mcp::{McpServerCapability, McpServerConfiguration};
 use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
@@ -22,67 +20,15 @@ use aether_substrate::config::{ConfigError, ConfigSources, KnobRecord, validate_
 use aether_substrate::runtime::log_install::apply_filter;
 use aether_substrate::{Chassis, SubstrateBoot};
 
-use crate::mcp::HubToolProvider;
-use crate::{DEFAULT_MCP_HTTP_PORT, DEFAULT_RPC_PORT};
+use crate::DEFAULT_RPC_PORT;
 use aether_chassis::boot::{
     ActorRingConfig, ChassisBase, RegistryQueueConfig, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
     hub_residual_knobs, install_frame_size,
 };
 use aether_chassis::cli::ChassisCli;
-use aether_codec::frame::max_frame_size;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::thread;
 
 use crate::cli::HubCli;
-
-/// The hub's HTTP request deadline, in milliseconds.
-///
-/// Deliberately above `McpServerConfiguration::tool_timeout_millis` (600,000
-/// by default) so the protocol layer — which can answer `isError: true` with
-/// a diagnosis — expires a slow tool before the HTTP layer expires the whole
-/// request with a bare status code. The same field also governs the
-/// per-read slow-loris timeout, so a deadline this long is only defensible on
-/// a loopback listener behind a fully buffered proxy; a directly exposed
-/// listener must first split those two timeouts.
-const MCP_HTTP_REQUEST_TIMEOUT_MILLIS: u64 = 610_000;
-
-/// The port the hub's Model Context Protocol endpoint binds.
-///
-/// A hub-owned knob rather than a raw `HttpServerConfig.bind_addr` override,
-/// for the reason Bloomery keeps its own `HttpPortConfig`: the chassis fixes
-/// the interface (loopback, always) and the request deadline, and leaves the
-/// operator exactly the one decision that is theirs. Whether the endpoint
-/// binds at all is `AETHER_MCP_ENABLED`, not a field here — one switch, so
-/// an enabled protocol server and an unbound listener cannot disagree.
-#[derive(Clone, Debug, aether_substrate::Config)]
-#[config(env_prefix = "AETHER_MCP_HTTP", cli_prefix = "mcp-http")]
-pub struct McpEndpointConfig {
-    /// Loopback port for `POST /mcp`.
-    #[config(default = 8891)]
-    pub port: u16,
-}
-
-impl Default for McpEndpointConfig {
-    fn default() -> Self {
-        Self { port: DEFAULT_MCP_HTTP_PORT }
-    }
-}
-
-/// The listener configuration the hub gives its Model Context Protocol
-/// endpoint.
-///
-/// Three decisions live here, and each is one an operator could otherwise
-/// make wrongly: the endpoint binds loopback only, its request deadline
-/// outlasts the protocol layer's own tool ceiling, and it is enabled exactly
-/// when the protocol server is.
-fn mcp_listener(mcp: &McpServerConfiguration, port: u16) -> HttpServerConfig {
-    HttpServerConfig {
-        enabled: mcp.enabled,
-        bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port).to_string(),
-        request_timeout_millis: MCP_HTTP_REQUEST_TIMEOUT_MILLIS,
-        ..HttpServerConfig::default()
-    }
-}
 
 /// ADR-0071 marker for the hub chassis. Carries no fields — the
 /// chassis instance is the [`BuiltChassis<HubChassis>`] returned by
@@ -178,43 +124,11 @@ impl BootableChassis for HubChassis {
         // before the stack is moved into the base, then composed as an explicit
         // `with_actor_configured` override so the builder binds it.
         let rpc_port = sources.resolve::<RpcServerConfig>()?.port.unwrap_or(DEFAULT_RPC_PORT);
-        // The shadow Model Context Protocol endpoint (the design's migration
-        // step 4). Both caps are composed unconditionally so the roster —
-        // and the config manifest derived from it — is a property of the
-        // chassis rather than of the environment it booted in; what the
-        // environment decides is whether the endpoint is *enabled*. That one
-        // resolved flag also gates the HTTP listener, so a running protocol
-        // server without a listener, or a listener serving a disabled server,
-        // are both unreachable states rather than diagnosable ones.
-        let mcp = sources.resolve::<McpServerConfiguration>()?;
-        // ADR-0156 §configuration-at-the-seam: the hub's provider can forward
-        // a tool's work over `FleetServer`'s framed connections, so — unlike
-        // a purely local provider — its provider-wire ceiling must not exceed
-        // the frame ceiling this chassis installed. `install_frame_size` ran
-        // in `build` before `composed`, so the installed value is final here.
-        // The generic capability never reads the frame knob itself; this is
-        // the composer that couples them.
-        let mcp = McpServerConfiguration {
-            provider_wire_maximum_bytes: mcp.provider_wire_maximum_bytes.min(max_frame_size()),
-            ..mcp
-        };
-
-        let mcp_http = mcp_listener(&mcp, sources.resolve::<McpEndpointConfig>()?.port);
         // Install the shared base stratum by reusing `ChassisBase`'s own
         // `ComposeBase::install` — the drift-free single definition — even though
         // the hub's `Base` is the unit no-op.
         let builder =
             ChassisBase { sources, actor_ring, scheduler_tuning, registry_queues, settlement }.install(builder);
-        let builder = builder
-            // The endpoint's port is resolved above rather than carried by a
-            // capability's own config, so it needs declaring here: an
-            // undeclared member's key is absent from the composition-derived
-            // known set, and `validate_env` would then refuse the very
-            // variable this chassis reads.
-            .declare_config_member::<McpEndpointConfig>()
-            .with_actor_configured::<HttpServerCapability>((), mcp_http)
-            .with_actor_configured::<McpServerCapability>((), mcp)
-            .with_actor::<HubToolProvider>(());
         Ok(builder.with_actor::<FleetServer>(()).with_actor_configured::<RpcServerCapability>(
             RpcServerParams {
                 peer_kind: PeerKind::Substrate {
@@ -320,91 +234,10 @@ fn shutdown_signal() -> &'static str {
 }
 
 #[cfg(test)]
-mod endpoint_tests {
-    use super::{DEFAULT_MCP_HTTP_PORT, McpServerConfiguration, mcp_listener};
-
-    /// The endpoint's listener is off unless the protocol server is on.
-    ///
-    /// The two flags are separate knobs on separate capabilities, and the
-    /// shadow posture depends on them agreeing: a listener bound while the
-    /// protocol server is disabled answers every caller `503` from an
-    /// unadvertised port, and a protocol server enabled behind no listener
-    /// is unreachable with nothing to say so. Deriving one from the other is
-    /// the decision this pins.
-    #[test]
-    fn the_listener_binds_exactly_when_the_protocol_server_is_enabled() {
-        for enabled in [false, true] {
-            let mcp = McpServerConfiguration { enabled, ..McpServerConfiguration::default() };
-
-            let listener = mcp_listener(&mcp, DEFAULT_MCP_HTTP_PORT);
-
-            assert_eq!(listener.enabled, enabled, "the listener tracks the protocol server's enabled flag");
-            assert!(
-                listener.bind_addr.starts_with("127.0.0.1:"),
-                "the endpoint is loopback-only; a public listener needs encryption and authentication in front of \
-                 it: {}",
-                listener.bind_addr,
-            );
-        }
-    }
-
-    /// Tripwire: the HTTP request deadline must outlast the protocol layer's
-    /// tool ceiling.
-    ///
-    /// The same `request_timeout_millis` governs the handler response
-    /// deadline, so if it ever drops to or below `tool_timeout_millis` the
-    /// HTTP layer expires a slow tool first — and it can only answer a bare
-    /// status code, where the protocol layer would have answered
-    /// `isError: true` naming what timed out. Raising the tool ceiling
-    /// without raising this one is the edit that breaks it, and it breaks
-    /// only for calls slow enough that nobody runs them in a test.
-    #[test]
-    fn the_request_deadline_outlasts_the_tool_ceiling() {
-        let mcp = McpServerConfiguration::default();
-
-        let listener = mcp_listener(&mcp, DEFAULT_MCP_HTTP_PORT);
-
-        assert!(
-            listener.request_timeout_millis > mcp.tool_timeout_millis,
-            "the HTTP deadline ({}) must outlast the tool ceiling ({}) so a slow tool is expired by the layer that \
-             can explain it",
-            listener.request_timeout_millis,
-            mcp.tool_timeout_millis,
-        );
-    }
-}
-
-#[cfg(test)]
 mod config_manifest_tests {
     use super::HubChassis;
     use aether_chassis::boot::hub_residual_knobs;
     use aether_substrate::chassis::config_manifest;
-
-    /// Every knob the shadow endpoint reads is a knob the hub admits.
-    ///
-    /// `validate_env` refuses an `AETHER_*` variable outside the
-    /// composition-derived known set, so a member the chassis *resolves*
-    /// but never *declares* produces the worst possible failure: setting
-    /// the documented variable makes the hub refuse to boot, and the
-    /// variable that turns the endpoint on is the one an operator reaches
-    /// for first. The endpoint's own port knob is exactly that shape — it
-    /// belongs to no capability's config — so it is declared by hand, and
-    /// this is what holds the declaration to the resolve.
-    #[test]
-    fn the_shadow_endpoint_knobs_are_known_keys() {
-        let manifest = config_manifest::<HubChassis>().expect("hub config manifest");
-        let known = manifest.known_keys(&hub_residual_knobs());
-
-        assert!(known.contains("AETHER_MCP_ENABLED"), "the switch that enables the endpoint must be settable");
-        assert!(
-            known.contains("AETHER_MCP_HTTP_PORT"),
-            "the hand-declared endpoint port member must reach the known-key set",
-        );
-        assert!(
-            known.contains("AETHER_HTTP_SERVER_MAX_REQUEST_BYTES"),
-            "the endpoint's listener rides HttpServerConfig, so its knobs are the hub's too",
-        );
-    }
 
     #[test]
     fn hub_known_keys_are_composition_derived_and_exclude_fleet_knobs() {

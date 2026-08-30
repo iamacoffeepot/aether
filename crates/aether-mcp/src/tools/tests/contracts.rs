@@ -5,8 +5,8 @@ use super::super::contracts::{
     diff_contracts,
 };
 use super::super::test_support::{
-    TerrainReplyEvent, TerrainRouteReply, boot_hub, boot_hub_with_route_loopback, connect_mcp,
-    try_boot_hub_with_terrain_route_loopback,
+    ScriptedReplyEvent, ScriptedRouteReply, boot_hub, boot_hub_with_route_loopback, connect_mcp,
+    try_boot_hub_with_scripted_route_loopback,
 };
 use super::super::*;
 use crate::args::{CompareComponentContractsArgs, ComponentContractSubject};
@@ -202,16 +202,16 @@ async fn router_dispatches_a_fresh_compatible_comparison_with_explicit_subject_i
     let second_engine = EngineId(Uuid::from_u128(0x0047_5503));
     let calls = Arc::new(Mutex::new(Vec::new()));
     let replies = Arc::new(Mutex::new(VecDeque::from([
-        TerrainRouteReply {
-            events: vec![TerrainReplyEvent {
+        ScriptedRouteReply {
+            events: vec![ScriptedReplyEvent {
                 kind: DescribeComponentResult::ID,
                 payload: DescribeComponentResult::Ok { capabilities: ComponentCapabilities::default() }
                     .encode_into_bytes(),
             }],
             settle: true,
         },
-        TerrainRouteReply {
-            events: vec![TerrainReplyEvent {
+        ScriptedRouteReply {
+            events: vec![ScriptedReplyEvent {
                 kind: DescribeComponentResult::ID,
                 payload: DescribeComponentResult::Ok { capabilities: ComponentCapabilities::default() }
                     .encode_into_bytes(),
@@ -220,7 +220,7 @@ async fn router_dispatches_a_fresh_compatible_comparison_with_explicit_subject_i
         },
     ])));
     let inventory = ListKindsResult { kinds: Vec::new() };
-    let Ok((_chassis, port)) = try_boot_hub_with_terrain_route_loopback(inventory, Arc::clone(&calls), replies) else {
+    let Ok((_chassis, port)) = try_boot_hub_with_scripted_route_loopback(inventory, Arc::clone(&calls), replies) else {
         return;
     };
     let output = connect_mcp(port)

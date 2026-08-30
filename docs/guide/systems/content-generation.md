@@ -6,10 +6,11 @@ its own credentials and runs the pure request/response logic, but owns no
 socket, subprocess, or disk: it reaches the network through `aether.http`, the
 `claude` CLI through `aether.process`, and artifact staging through `aether.fs`,
 addressing each edge capability by mail (ADR-0159). The shipped provider
-namespaces are `aether.anthropic` and `aether.gemini`.
+namespace is `aether.anthropic` (the `aether.gemini` image/music provider is
+shelved out of the workspace; git history holds it).
 
-Provider access is opt-in. The default chassis composition carries neither
-component; a workload that wants one uploads and loads it. A pure-rendering or
+Provider access is opt-in. The default chassis composition carries no
+provider component; a workload that wants one uploads and loads it. A pure-rendering or
 CI substrate links none of the provider machinery at boot.
 
 ## Loading a provider
@@ -20,18 +21,16 @@ key and per-request tuning ride init-config bytes (ADR-0090 §5), so the raw key
 never touches process env or the wire beyond the component's own `Config`:
 
 ```text
-upload_component(staged_path, name)             # aether_anthropic / aether_gemini
+upload_component(staged_path, name)             # aether_anthropic
 spawn_substrate(components=[{selector, config_path}])   # boot-manifest load
   # or, on a running engine:
 load_component(engine_id, selector, config_path)
 ```
 
 `config_path` points at the component's init-config bytes — for anthropic the
-API key, timeout, and CLI-binary override; for gemini the API key, disable flag,
-timeout, and the namespace-relative staging directory the chassis used to
-resolve for the native cap. A loaded component registers at
-`aether.component/aether.embedded:aether.anthropic` (or `:aether.gemini`); mail
-its request kinds to that lineage address.
+API key, timeout, and CLI-binary override. A loaded component registers at
+`aether.component/aether.embedded:aether.anthropic`; mail its request kinds to
+that lineage address.
 
 ## Shipped operations
 
@@ -39,8 +38,6 @@ its request kinds to that lineage address.
 |---|---|---|
 | `aether.anthropic.messages.send` | Anthropic Messages API | text/model/usage or typed error |
 | `aether.anthropic.cli.send` | local Claude CLI adapter | text/usage or typed error |
-| `aether.gemini.nanobanana.generate` | model-validated image generation | staged PNG path plus metadata |
-| `aether.gemini.lyria.generate` | Lyria music generation | staged WAV paths plus usage |
 
 Each request carries a caller-supplied `request_id` echoed by its result. This
 is application correlation in addition to Aether's mail correlation. The wire
@@ -57,29 +54,27 @@ ported pure logic, stashes the caller's reply handle as a context, and dispatche
 one edge request; the reply handler recovers the context, runs the ported
 parser, and replies the provider `_result` kind to the original caller.
 
-- **Messages API and Gemini HTTPS** ride `aether.http.fetch`. The component sets
+- **The Messages API** rides `aether.http.fetch`. The component sets
   the `x-api-key` / auth header from its init-config and feeds the `FetchResult`
   body to the parser. Egress is bounded per-sender at the `aether.http` edge
   (ADR-0158), so the component queues nothing itself — no false early settlement.
 - **The `claude` CLI backend** rides `aether.process.run`. The allowlist must
   admit `claude`; an allowlist that omits it yields the graceful `CliNotFound`
   skip the kind already models. No API key rides this path.
-- **Gemini artifact staging** rides `aether.fs.write` to the `save` namespace at
-  `gen/<uuid>.{png,wav}`; the reply carries the staged path. Reference images for
-  Nano Banana ride `aether.fs.read`, one read per referenced path before the
-  fetch.
+- **Artifact staging** (a provider returning binary media) rides
+  `aether.fs.write` to the `save` namespace at `gen/<uuid>.<ext>`; the reply
+  carries the staged path.
 
-A large render or long clip can approach the `aether.http` body cap
+A large response can approach the `aether.http` body cap
 (`AETHER_HTTP_MAX_BODY_BYTES`, 16 MB default) and the RPC frame budget
 (`AETHER_MAX_FRAME_SIZE`), since the artifact bytes ride the fetch reply and then
 mail; raise those knobs for multi-megabyte payloads.
 
 ## Output staging
 
-Binary media does not ride inline in reply mail. Successful Gemini generation
+Binary media does not ride inline in reply mail. A generating provider
 writes under the component's configured staging directory and returns relative
-paths such as `gen/<uuid>.png` or `gen/<uuid>.wav` — never a literal `save://`
-address. Treat the returned path as an engine-side artifact reference:
+paths such as `gen/<uuid>.png` — never a literal `save://` address. Treat the returned path as an engine-side artifact reference:
 
 - it is not automatically a path on the MCP client's machine;
 - with a staging directory under the `save` namespace, a later consumer reads it
@@ -109,11 +104,9 @@ invocation keep guest prompts as data, not shell fragments.
 
 ## Provider validation and errors
 
-Validate before paid work when possible. Gemini image requests check model ids,
-aspect ratio, image size, reference counts, and required fields against the
-selected model. Music requests validate mutually exclusive options. Typed error
-families distinguish retryable rate limits from authorization, content policy,
-unsupported inputs, unknown models, and adapter failure.
+Validate before paid work when possible. Typed error families distinguish
+retryable rate limits from authorization, content policy, unsupported inputs,
+unknown models, and adapter failure.
 
 Callers should branch on the error enum, not substring-match display text.
 Retries need their own budget and must respect reported retry timing; settlement
@@ -150,7 +143,6 @@ allowlists to drive the deterministic refusal paths. Useful boundaries include:
 ## Change route
 
 - Anthropic kinds + guest component: `crates/aether-anthropic/src/`
-- Gemini kinds + guest component + pure provider logic: `crates/aether-gemini/src/`
 - Edge capabilities the components mail: `crates/aether-http/`, `crates/aether-process/`, `crates/aether-fs/`
 - Decision: ADR-0159 (guest-hosted providers), ADR-0050 (kind vocabulary), ADR-0139 (reply correlation), ADR-0158 (egress bound)
 - Configuration: [Configuration](configuration.md)

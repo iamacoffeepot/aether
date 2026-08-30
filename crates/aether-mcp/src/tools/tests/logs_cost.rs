@@ -103,16 +103,16 @@ async fn actor_logs_and_cost_route_to_the_engine_resolved_mailbox_id() {
     let engine_answer = MailboxId(0x4057_0000_0000_0200);
     let calls = Arc::new(Mutex::new(Vec::new()));
     let replies = Arc::new(Mutex::new(VecDeque::from([
-        TerrainRouteReply {
-            events: vec![TerrainReplyEvent {
+        ScriptedRouteReply {
+            events: vec![ScriptedReplyEvent {
                 kind: aether_kinds::LogTailResult::ID,
                 payload: aether_kinds::LogTailResult::Ok { entries: Vec::new(), next_since: 0, truncated_before: None }
                     .encode_into_bytes(),
             }],
             settle: true,
         },
-        TerrainRouteReply {
-            events: vec![TerrainReplyEvent {
+        ScriptedRouteReply {
+            events: vec![ScriptedReplyEvent {
                 kind: aether_kinds::CostTailResult::ID,
                 payload: aether_kinds::CostTailResult::Ok { rows: Vec::new() }.encode_into_bytes(),
             }],

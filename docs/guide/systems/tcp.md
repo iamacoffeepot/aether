@@ -92,9 +92,9 @@ must define:
 - idle and shutdown timeouts;
 - behavior on malformed or unknown frames.
 
-The [player-session tier](player-sessions.md) is an example of adding trusted
-identity and pacing above TCP rather than exposing the simulation directly to a
-raw connection.
+(The shelved `aether-game` player-session tier was the in-repo example of
+adding trusted identity and pacing above TCP rather than exposing the
+simulation directly to a raw connection.)
 
 ## Change route
 

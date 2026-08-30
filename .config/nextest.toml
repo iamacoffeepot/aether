@@ -20,51 +20,15 @@ slow-timeout = { period = "60s", terminate-after = 1 }
 filter = "(package(=aether-component) | package(=aether-fleet) | package(=aether-rpc) | package(=aether-actor) | package(=aether-tcp) | package(=aether-substrate) | package(=aether-chassis-headless) | package(=aether-chassis-hub) | package(=aether-chassis-bloomery) | package(=aether-harness-bloomery) | package(=aether-http) | package(=aether-render) | package(=aether-text)) & kind(test)"
 retries = 1
 
-# `terrain_workbench_scenario` (aether-kit-workbench) is a heavy integration
-# binary — four cold wasm component loads (mark/world/terra/workbench) plus a
-# font load and six GPU captures in one test, versus siblings that load one or
-# two components — and iamacoffeepot/aether#3627 saw it cross the 120s class cap
-# on main's full-suite job (~123.8s on two back-to-back pushes). Locally the
-# scenario completes in ~3s: our dev box has hardware GPU acceleration and 8
-# idle cores, while CI's shared 2-core runner falls back to a software
-# rasterizer under full-suite contention (the same dev-box vs. CI gap #1275
-# measured for the derive-crate fixtures below), so a local timing isn't a
-# usable headroom baseline here. Every wait in the test is bounded
-# (`wait_for_idle` panics after 16 frames), so this is slow-but-completing
-# rather than a hang; widen generously, matching the `fleetharness_replace`
-# precedent below.
-[[profile.ci.overrides]]
-filter = "package(=aether-kit-workbench) & binary(terrain_workbench_scenario)"
-slow-timeout = { period = "300s", terminate-after = 1 }
-
-# Two more heavy binaries iamacoffeepot/aether#3768 sized against the chassis
+# A heavy binary iamacoffeepot/aether#3768 sized against the chassis
 # bundle's 180s cap: `widget_render_interaction` (aether-kit-widget) cold-loads
-# the widget wasm plus a font and runs multi-capture verdicts, and
-# `world_case_atlas` (aether-kit-terrain) renders and scores a whole contact
-# sheet per test. The default 60s class cap would be a silent tightening under
-# CI's software-rasterizer contention; widen them to the same 300s backstop as
-# `terrain_workbench_scenario` above.
+# the widget wasm plus a font and runs multi-capture verdicts. The default 60s
+# class cap would be a silent tightening under CI's software-rasterizer
+# contention; widen it to the same 300s backstop as `fleetharness_replace`
+# below.
 [[profile.ci.overrides]]
-filter = "(package(=aether-kit-widget) & binary(widget_render_interaction)) | (package(=aether-kit-terrain) & binary(world_case_atlas))"
+filter = "package(=aether-kit-widget) & binary(widget_render_interaction)"
 slow-timeout = { period = "300s", terminate-after = 1 }
-
-# `proposal_scenario` (aether-kit-terrain) drives real wasm through a staged
-# proposal capacity cycle and is the lone outlier in its package: it ran 53.4s
-# and 54.4s on the last two green `main` pushes against the 60s default, while
-# every sibling binary in the crate finishes inside 15s. That is ~90% of budget
-# with no headroom, so it was a tripwire waiting for any contention to trip it —
-# which is exactly what happened when `route_bounds` above began saturating both
-# cores of the GitHub-hosted runner for the whole of its shard. How sensitive it
-# is to that shows in the measurement run above: landing in a shard without
-# `route_bounds`, the same test finished in 22.2s, a 2.4x swing on shard
-# composition alone. So 180s here is headroom for the swing, not for the
-# test. Widen only this
-# binary, matching the sibling-outlier stance the `world_case_atlas` entry above
-# takes; the rest of the package genuinely belongs on the 60s default, so a
-# package-wide `kind(test)` cap here would be a silent loosening.
-[[profile.ci.overrides]]
-filter = "package(=aether-kit-terrain) & binary(proposal_scenario)"
-slow-timeout = { period = "180s", terminate-after = 1 }
 
 # Every binary under `crates/aether-kit-commons/tests/` cold-loads and compiles
 # `aether_kit_commons.wasm` and boots a wgpu `SubstrateHarness`, so they are one

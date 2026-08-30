@@ -102,6 +102,13 @@ mod check;
 #[cfg(feature = "runtime")]
 pub use check::{StoreCheck, check_store};
 
+// The advisory claim one coordinator generation takes on a journal, checked
+// before the schema migrations so a refused open never writes.
+#[cfg(feature = "runtime")]
+mod holder;
+#[cfg(feature = "runtime")]
+pub use holder::JournalHolderError;
+
 #[cfg(feature = "runtime")]
 mod runtime;
 #[cfg(feature = "runtime")]
