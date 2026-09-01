@@ -54,6 +54,8 @@ the `RenderCapability` actor. It handles these payload kinds:
 | `aether.render.update_texture` | `{ texture_id, x, y, width, height, pixels }` | overwrite a sub-rect of a texture (atlas growth) |
 | `aether.render.destroy_texture` | `{ texture_id }` | release a registered texture; fire-and-forget |
 | `aether.render.draw_textured_quads` | `{ texture_id, space, clip, blend, quads }` | per-tick textured alpha-blended quads; accumulates into the frame |
+| `aether.render.draw_solid_quads` | `{ space, clip, quads }` | per-tick flat-colored alpha-blended rects; accumulates into the frame |
+| `aether.render.draw_screen_triangles` | `{ clip, triangles }` | per-tick window-pixel triangles at any orientation; accumulates into the frame |
 | `aether.render.material.textured` | `{ texture_id, blend, rects }` | per-tick depth-tested world-space textured rects |
 | `aether.render.material.coverage` | `{ texture_id, rects }` | per-tick depth-tested world-space coverage bands from an R8 texture |
 | `aether.render.capture_frame` | `{ mails, after_mails }` | atomic "set state, read back a PNG, clean up" |
@@ -136,6 +138,19 @@ the scene through the camera's `view_proj`. `Screen`-space quads draw today; the
 path. Sprites, HUD images, and the `aether.text` capability all compose this
 surface.
 
+**Screen triangles are the overlay's free-form primitive.**
+`draw_screen_triangles` takes triangles whose three corners are window pixels
+— top-left origin, y down, one linear RGBA per corner interpolated across the
+face — and records them in the same overlay pass, through the same pipeline, in
+submission order with the quad batches. Either winding draws; the batch carries
+the same optional `clip` scissor. It exists because 2D content built from
+rotated geometry had no aspect-correct path: a quad is `{x, y, width, height}`
+with no orientation, and `draw_triangle` is world-space, so with no camera
+loaded its identity `view_proj` spans `-1..=1` on both axes and stretches
+everything by the window's aspect ratio. Pixel coordinates are absolute, so a
+ribbon at an angle, a gauge, or a graph edge holds its proportions on any
+window without a camera actor publishing a projection for flat content.
+
 **World-space materials are textured and depth-tested** ([ADR-0140](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0140-render-material-pass.md)).
 The material pass records after the triangle pass and before the screen overlay,
 loading the main pass depth buffer with writes disabled. Components send typed
@@ -200,7 +215,8 @@ guest-visible wire change.
 **The production headless chassis absorbs draw and camera mail.** It composes
 `HeadlessRenderCapability` on the same `aether.render` mailbox:
 `DrawTriangle`, `aether.view_projection`, `update_texture`, `destroy_texture`,
-`draw_textured_quads`, and `aether.render.material.*` no-op (a desktop-built
+`draw_textured_quads`, `draw_solid_quads`, `draw_screen_triangles`, and
+`aether.render.material.*` no-op (a desktop-built
 component mailing them every frame doesn't warn-storm), and
 `aether.render.capture_frame` and `create_texture` reply `Err` so a request
 fails fast instead of hanging. The minimal hub chassis does not install an

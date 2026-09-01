@@ -48,9 +48,9 @@ pub use program::{
 };
 pub use quad::{
     CompositeBlend, OverlayDraw, QUAD_UNIFORM_BYTES, QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE,
-    QUAD_VERTICES_PER_QUAD, QuadPipeline, RealizedTexture, TextureBindings, build_quad_pipeline,
-    build_texture_bindings, push_screen_quad_vertices, push_world_quad_vertices, realize_texture,
-    realize_writable_texture, record_quad_overlay_pass, upload_texture_full,
+    QUAD_VERTICES_PER_QUAD, QUAD_VERTICES_PER_TRIANGLE, QuadPipeline, RealizedTexture, TextureBindings,
+    build_quad_pipeline, build_texture_bindings, push_screen_quad_vertices, push_screen_triangle_vertices,
+    push_world_quad_vertices, realize_texture, realize_writable_texture, record_quad_overlay_pass, upload_texture_full,
 };
 pub use targets::{Targets, record_resolve_pass};
 

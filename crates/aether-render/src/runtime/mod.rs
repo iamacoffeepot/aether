@@ -121,9 +121,9 @@ pub use self::texture::{TextureRegistry, WHITE_TEXTURE_ID};
 
 use super::{
     CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DRAW_TRIANGLE_BYTES, DestroyGeometry,
-    DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawSolidQuads, DrawTexturedQuads, DrawTriangle, Frame,
-    Occluded, PreSettled, ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult, ProgramTimings,
-    ProgramTimingsResult, RenderCapability, UpdateGeometry, UpdateTexture, ViewProjection,
+    DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawScreenTriangles, DrawSolidQuads, DrawTexturedQuads,
+    DrawTriangle, Frame, Occluded, PreSettled, ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult,
+    ProgramTimings, ProgramTimingsResult, RenderCapability, UpdateGeometry, UpdateTexture, ViewProjection,
 };
 
 /// Wedge-to-`Err` cap for a parked capture (ADR-0161): if a capture's
@@ -188,9 +188,12 @@ pub struct RenderCapabilityState {
     last_submission: Option<wgpu::SubmissionIndex>,
     /// ADR-0161 R4: committed-overlay observation sink for the substrate
     /// harness's `committed_overlay_snapshot`. `record_overlay_batches`
-    /// populates it with the batches that *survived* record-time rejection
-    /// (missing texture / invalid clip / past budget), so the snapshot
-    /// reflects what was drawn — not the raw accumulator. `Mutex` only
+    /// populates it with the quad batches that *survived* record-time
+    /// rejection (missing texture / invalid clip / past budget), so the
+    /// snapshot reflects what was drawn — not the raw accumulator. Screen
+    /// triangle batches are absent by shape: the sink's element is
+    /// `DrawTexturedQuads`, and a triangle batch carries neither a quad list
+    /// nor a projection to report. `Mutex` only
     /// because `record_overlay_batches` takes `&Mutex<_>` (the harness sink's
     /// shape); the pumped state is single-threaded, so it never contends.
     overlay_observation: Mutex<Vec<DrawTexturedQuads>>,
@@ -979,6 +982,20 @@ impl NativeActor for RenderCapability {
         state.quad_frame.push(batch);
     }
 
+    /// `DrawScreenTriangles` (iamacoffeepot/aether#5504), on the owned
+    /// `quad_frame` — arbitrary window-pixel triangles on the overlay pass's
+    /// screen path, so flat 2D content keeps its proportions on a non-square
+    /// window without a camera publishing a projection for it.
+    #[handler::single]
+    fn on_draw_screen_triangles(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawScreenTriangles) {
+        state.observe(<DrawScreenTriangles as Kind>::ID);
+        if state.warn_drop_if_unusable("draw_screen_triangles") {
+            return;
+        }
+        let batch = QuadBatch::screen_triangles(mail, &mut state.textures);
+        state.quad_frame.push(batch);
+    }
+
     /// `DrawMaterialTextured` (ADR-0140), on the owned material stream.
     #[handler::single]
     fn on_draw_material_textured(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawMaterialTextured) {
@@ -1246,6 +1263,7 @@ impl NativeActor for RenderCapability {
 #[cfg(test)]
 mod tests {
     use super::super::{SolidQuad, TextureFormat, TextureSampling, TextureUsage};
+    use super::quad::OverlayGeometry;
     use super::texture::StagedTexture;
     use super::*;
     use aether_data::{KindId, MailId, MailboxId, Source, SourceAddr};
@@ -1675,13 +1693,12 @@ mod tests {
 
         assert_eq!(state.quad_frame.len(), 1, "one QuadBatch should be in the accumulator");
         assert_eq!(state.quad_frame[0].texture_id, WHITE_TEXTURE_ID, "batch must use the reserved white texture id");
-        assert_eq!(state.quad_frame[0].quads.len(), 1, "batch must contain the one expanded quad");
-        assert_eq!(
-            state.quad_frame[0].quads[0].tint,
-            Rgba::new(1.0, 0.0, 0.5, 0.8),
-            "expanded quad tint must match the SolidQuad color",
-        );
-        assert_eq!(state.quad_frame[0].quads[0].width, 30.0);
+        let OverlayGeometry::Quads { quads, .. } = &state.quad_frame[0].geometry else {
+            panic!("a solid-quad submission must accumulate as quad geometry");
+        };
+        assert_eq!(quads.len(), 1, "batch must contain the one expanded quad");
+        assert_eq!(quads[0].tint, Rgba::new(1.0, 0.0, 0.5, 0.8), "expanded quad tint must match the SolidQuad color");
+        assert_eq!(quads[0].width, 30.0);
 
         let white =
             state.textures.entries.get(&WHITE_TEXTURE_ID).expect("white texture must be lazily inserted on first send");

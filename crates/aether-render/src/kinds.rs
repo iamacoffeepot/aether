@@ -518,6 +518,54 @@ pub struct DrawSolidQuads {
     pub quads: Vec<SolidQuad>,
 }
 
+/// One corner of a [`ScreenTriangle`]. `(x, y)` is a window-pixel
+/// position with the top-left origin and y pointing down — the same
+/// convention `QuadSpace::Screen` quads address in. `color` is a linear
+/// RGBA value whose alpha scales the blend; the three corner colors
+/// interpolate across the face, so a single flat fill repeats one color
+/// and a gradient states three. Not a kind on its own — only addressable
+/// inside `ScreenTriangle`.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ScreenVertex {
+    pub x: f32,
+    pub y: f32,
+    pub color: Rgba,
+}
+
+/// One triangle in a `DrawScreenTriangles` batch — three window-pixel
+/// corners at any orientation. Either winding draws (the overlay
+/// pipeline does not cull). Not a kind on its own — only addressable
+/// inside `DrawScreenTriangles.triangles`.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ScreenTriangle {
+    pub a: ScreenVertex,
+    pub b: ScreenVertex,
+    pub c: ScreenVertex,
+}
+
+/// `aether.render.draw_screen_triangles` — draw a batch of
+/// alpha-blended triangles whose corners are window pixels. The
+/// aspect-correct 2D counterpart to `aether.draw_triangle`: pixel
+/// coordinates are absolute, so a rotated shape keeps its proportions
+/// on any window, and no camera has to publish a projection for flat
+/// content. Where `draw_solid_quads` fills axis-aligned rects, this
+/// fills arbitrary geometry — ribbons at an angle, gauges, graph edges.
+///
+/// Rides the same overlay pass and pipeline as the quad batches
+/// (ADR-0105), in the second pass after the world pass: alpha-blended,
+/// painter's order within the frame, no depth test. Accumulated per
+/// frame with the same immediate-mode contract as `aether.draw_triangle`
+/// — resend every frame the triangles should appear, or they vanish next
+/// frame. Fire-and-forget; no reply.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.render.draw_screen_triangles")]
+pub struct DrawScreenTriangles {
+    /// Optional framebuffer-pixel scissor applied to this batch. `None`
+    /// leaves the draw unclipped.
+    pub clip: Option<ClipRect>,
+    pub triangles: Vec<ScreenTriangle>,
+}
+
 /// Shared world rect for material draws. `(x, y, z)` is the rect's
 /// origin corner and `right` / `up` are the world directions its
 /// `width` and `height` extend along: a corner at fractional `(u, v)`
