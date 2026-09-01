@@ -1431,15 +1431,15 @@ fn assert_diamond_pixels(img: &Image, center: (u32, u32), radius: u32, inset: u3
     }
 }
 
-/// Capture one diamond of the given radius, centred in a `width`×`height`
-/// frame, and return the decoded frame.
-#[allow(clippy::cast_precision_loss)]
-fn capture_diamond(width: u32, height: u32, radius: u32) -> Image {
-    let center = (width as f32 / 2.0, height as f32 / 2.0);
+/// Capture one diamond at `center` in a `width`×`height` frame and
+/// return the decoded frame. The centre is stated in pixels rather than
+/// derived from the frame, so the scenario's expected geometry is the
+/// literal the assertion reads back.
+fn capture_diamond(width: u32, height: u32, center: (f32, f32), radius: f32) -> Image {
     let mut harness = SubstrateHarness::builder().size(width, height).with_render().build().expect("boot");
     let draw = envelope(
         "aether.render",
-        &DrawScreenTriangles { clip: None, triangles: diamond(center, radius as f32, Rgba::new(1.0, 1.0, 1.0, 1.0)) },
+        &DrawScreenTriangles { clip: None, triangles: diamond(center, radius, Rgba::new(1.0, 1.0, 1.0, 1.0)) },
     );
 
     let captured =
@@ -1460,9 +1460,8 @@ fn screen_triangles_hold_pixel_geometry_across_aspect_ratios() {
     if !require_wgpu_only() {
         return;
     }
-    let radius = 30;
-    let wide = capture_diamond(200, 100, radius);
-    assert_diamond_pixels(&wide, (100, 50), radius, 4, "2:1 frame");
+    let wide = capture_diamond(200, 100, (100.0, 50.0), 30.0);
+    assert_diamond_pixels(&wide, (100, 50), 30, 4, "2:1 frame");
 
     // The diamond covers half its bounding box: 2 * 30² of 200×100.
     let covered = coverage(&wide, background_top_left(&wide), 5);
@@ -1472,8 +1471,8 @@ fn screen_triangles_hold_pixel_geometry_across_aspect_ratios() {
          the captured frame is effectively empty or entirely filled",
     );
 
-    let square = capture_diamond(100, 100, radius);
-    assert_diamond_pixels(&square, (50, 50), radius, 4, "1:1 frame");
+    let square = capture_diamond(100, 100, (50.0, 50.0), 30.0);
+    assert_diamond_pixels(&square, (50, 50), 30, 4, "1:1 frame");
 }
 
 /// iamacoffeepot/aether#5504: a screen-triangle batch carries the same
