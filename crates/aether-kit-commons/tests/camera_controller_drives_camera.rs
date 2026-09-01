@@ -163,7 +163,12 @@ fn held_key_pans_the_camera_over_the_painted_world() {
                 "aspect",
                 HarnessOp::send_and_settle(
                     camera.as_str(),
-                    &WindowSize { window: TEST_WINDOW_ID, width: WINDOW_WIDTH, height: WINDOW_HEIGHT },
+                    &WindowSize {
+                        window: TEST_WINDOW_ID,
+                        width: WINDOW_WIDTH,
+                        height: WINDOW_HEIGHT,
+                        scale_factor: 1.0,
+                    },
                 ),
             ),
             ("settle", HarnessOp::advance(2)),

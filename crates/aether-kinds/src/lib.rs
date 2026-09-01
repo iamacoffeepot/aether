@@ -1118,6 +1118,13 @@ mod control_plane {
     /// space, so the quad faces the camera and never skews; `scale` picks
     /// the distance-vs-size relationship.
     ///
+    /// `Screen` addresses *physical* framebuffer pixels, the same space
+    /// `WindowSize.width` / `height` report — not the logical pixels the
+    /// mouse kinds carry. Convert between the two with
+    /// `WindowSize.scale_factor` (`physical = logical × scale_factor`);
+    /// a `size_pixels` chosen for a 1x display renders at half apparent
+    /// size on a 2x one unless it is scaled.
+    ///
     /// The render cap implements `Screen`; `World` ships in the vocabulary
     /// now but warn-drops at encode until the world-anchor path lands.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]

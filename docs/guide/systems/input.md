@@ -44,7 +44,7 @@ Every event below carries its source `WindowId`:
 | `MouseButton` | button plus cursor position at press |
 | `MouseButtonRelease` | button plus cursor position at release |
 | `MouseWheel` | normalized deltas plus cursor position |
-| `WindowSize` | physical-pixel width and height |
+| `WindowSize` | physical-pixel width and height, plus the display `scale_factor` |
 | `TextInput` | committed, layout-resolved text |
 | `ImePreedit` | in-flight composition text and optional byte-offset span |
 | `Modifiers` | Shift, Ctrl, Alt, and Meta state |
@@ -53,6 +53,26 @@ The window actor also publishes `WindowOpened` and `WindowClosed` through the
 same selector machinery. Lifecycle/control events and user input therefore
 share one source identity without pretending they are all one generic
 peripheral.
+
+## Two pixel spaces
+
+The mouse kinds report the cursor in **logical** pixels. `WindowSize.width` /
+`height` and `QuadSpace::Screen` — the space solid quads, textured quads, and
+`aether.text.draw` address — are **physical** pixels. `WindowSize.scale_factor`
+is what relates them:
+
+```text
+physical = logical × scale_factor
+```
+
+So hit-testing the cursor against screen-space geometry, or sizing HUD text for
+the display it lands on, scales through the cached `scale_factor` rather than
+assuming the two spaces coincide. They do coincide at `1.0`, which is why the
+mismatch is invisible on a standard-density display and off by exactly 2x on a
+2x one. The desktop chassis publishes a fresh `WindowSize` on
+`ScaleFactorChanged` as well as on resize, so a subscriber that caches the
+latest value never carries a stale factor across a drag between displays; a
+synthetic window publishes `1.0`.
 
 ## Subscribe by kind and window
 

@@ -200,6 +200,7 @@ fn edge_on_outline_stays_visible_and_keeps_apparent_width() {
                         window: OUTLINE_WINDOW_ID,
                         width: OUTLINE_WINDOW_WIDTH,
                         height: OUTLINE_WINDOW_HEIGHT,
+                        scale_factor: 1.0,
                     },
                 ),
             ),
