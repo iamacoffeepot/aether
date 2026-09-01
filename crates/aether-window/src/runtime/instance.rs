@@ -186,6 +186,13 @@ pub trait WindowEndpoint {
 /// Inert state for a named window endpoint on a headless chassis.
 pub struct HeadlessWindowInstanceState;
 
+/// The endpoint's half of the headless refusals. Written out here rather than
+/// shared with the root's identical five (`runtime::mod`): a handler set's
+/// `HandlesKind` markers travel through a `macro_rules!` bridge that lives with
+/// the set, and these two identities compile in the marker-only build where
+/// this whole runtime module is `cfg`-ed away — so an inherited handler would
+/// take the endpoint's control markers with it and break every typed
+/// `WindowMailboxExt` send from a wasm guest.
 #[runtime]
 impl NativeActor for HeadlessWindowInstance {
     type State = HeadlessWindowInstanceState;

@@ -384,7 +384,7 @@ accessors are associated functions over `Self::State`:
 
 ```rust
 #[handler_set]
-pub trait WindowSubscriptions {
+pub trait WindowManagerSurface {
     fn subscribers(state: &mut Self::State) -> &mut WindowSubscribers;
 
     #[handler::single]
@@ -400,12 +400,12 @@ table is emitted — the capability struct's `#[actor]` reads it back off that
 attribute when it harvests the file, so the set is named once:
 
 ```rust
-#[runtime(handler_set(WindowSubscriptions))]
+#[runtime(handler_set(WindowManagerSurface))]
 impl NativeActor for DesktopWindowCapability {
     // only desktop-specific handlers here
 }
 
-impl WindowSubscriptions for DesktopWindowCapability {
+impl WindowManagerSurface for DesktopWindowCapability {
     type State = DesktopWindowCapabilityState;
 
     fn subscribers(state: &mut Self::State) -> &mut WindowSubscribers {

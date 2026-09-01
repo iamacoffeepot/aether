@@ -3,10 +3,11 @@
 use aether_actor::runtime;
 
 use super::{
-    ApplyWindowCommand, ApplyWindowCommandResult, CloseWindowResult, CreateWindow, CreateWindowResult,
-    FocusWindowResult, HeadlessWindowCapability, ListWindows, ListWindowsResult, RequestWindowRedrawResult,
-    SetWindowModeResult, SetWindowTitleResult, SubscribeWindow, SubscribeWindowResult, SubscribeWindowSelf,
-    UnsubscribeAllWindows, UnsubscribeWindow, UnsubscribeWindowSelf, WindowCommand,
+    ApplyWindowCommand, ApplyWindowCommandResult, CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult,
+    FocusWindow, FocusWindowResult, HeadlessWindowCapability, ListWindows, ListWindowsResult, RequestWindowRedraw,
+    RequestWindowRedrawResult, SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult,
+    SubscribeWindow, SubscribeWindowResult, SubscribeWindowSelf, UnsubscribeAllWindows, UnsubscribeWindow,
+    UnsubscribeWindowSelf, WindowCommand,
 };
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -98,6 +99,45 @@ impl NativeActor for HeadlessWindowCapability {
 
     #[handler::single]
     fn on_unsubscribe_all(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: UnsubscribeAllWindows) {}
+
+    // The five per-window commands, refused at the root as well as at an
+    // endpoint (iamacoffeepot/aether#5505). Both identities are addressable, so
+    // a command sent to either has to be answered rather than dropped on the
+    // floor — a silent no-op reads as success to a caller whose mail settled.
+    // The endpoint's identical five stay written out beside these rather than
+    // shared through a handler set, because a set's `HandlesKind` markers reach
+    // an adopter through a `macro_rules!` bridge that lives with the set, and
+    // both identities also compile in the marker-only build where this whole
+    // runtime module is `cfg`-ed away.
+
+    #[handler::single]
+    fn on_close(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: CloseWindow) -> CloseWindowResult {
+        CloseWindowResult::Err { error: unsupported() }
+    }
+
+    #[handler::single]
+    fn on_set_mode(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: SetWindowMode) -> SetWindowModeResult {
+        SetWindowModeResult::Err { error: unsupported() }
+    }
+
+    #[handler::single]
+    fn on_set_title(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: SetWindowTitle) -> SetWindowTitleResult {
+        SetWindowTitleResult::Err { error: unsupported() }
+    }
+
+    #[handler::single]
+    fn on_focus(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: FocusWindow) -> FocusWindowResult {
+        FocusWindowResult::Err { error: unsupported() }
+    }
+
+    #[handler::single]
+    fn on_request_redraw(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        _mail: RequestWindowRedraw,
+    ) -> RequestWindowRedrawResult {
+        RequestWindowRedrawResult::Err { error: unsupported() }
+    }
 }
 
 #[cfg(feature = "synthetic")]
@@ -106,5 +146,7 @@ pub mod synthetic;
 #[cfg(feature = "desktop")]
 pub mod desktop;
 
+#[cfg(any(feature = "desktop", feature = "synthetic"))]
+mod manager;
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 mod subscribers;

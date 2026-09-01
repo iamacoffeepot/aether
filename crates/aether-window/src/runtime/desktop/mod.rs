@@ -37,7 +37,8 @@ use winit::monitor::{MonitorHandle as WinitMonitorHandle, VideoModeHandle};
 use winit::window::{Fullscreen, Window, WindowId as WinitWindowId};
 
 use self::input::{TextSource, ime_cursor_span, map_mouse_button, map_winit_keycode, normalize_wheel, text_input_gate};
-use super::subscribers::{WindowSubscribers, WindowSubscriptions};
+use super::manager::WindowManagerSurface;
+use super::subscribers::WindowSubscribers;
 use crate::{
     ApplyWindowCommand, ApplyWindowCommandResult, CloseWindowResult, CreateWindow, CreateWindowResult,
     DesktopWindowCapability, DesktopWindowInstance, FocusWindowResult, ListWindows, ListWindowsResult,
@@ -635,7 +636,7 @@ fn predicted_window_id(name: &str) -> WindowId {
     WindowId(WindowInstance::resolve(WindowCapability::resolve(0, ()).0, name).0)
 }
 
-#[runtime(handler_set(WindowSubscriptions))]
+#[runtime(handler_set(WindowManagerSurface))]
 impl NativeActor for DesktopWindowCapability {
     type State = DesktopWindowCapabilityState;
 
@@ -810,11 +811,24 @@ impl NativeActor for DesktopWindowCapability {
     }
 }
 
-impl WindowSubscriptions for DesktopWindowCapability {
+impl WindowManagerSurface for DesktopWindowCapability {
     type State = DesktopWindowCapabilityState;
 
     fn subscribers(state: &mut Self::State) -> &mut WindowSubscribers {
         &mut state.subscribers
+    }
+
+    /// The same filter `on_list` publishes: an attaching window is not yet
+    /// anyone's to address, and a closing one still is — its endpoint answers
+    /// `window … is not live` for itself rather than being hidden from the
+    /// count the caller was just shown.
+    fn routable_windows(state: &Self::State) -> Vec<WindowId> {
+        state
+            .windows
+            .iter()
+            .filter(|(_, window)| window.lifecycle != DesktopWindowLifecycle::Attaching)
+            .map(|(id, _)| *id)
+            .collect()
     }
 }
 
