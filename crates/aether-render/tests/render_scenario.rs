@@ -59,9 +59,10 @@ use aether_kinds::{
 use aether_math::{Rgb, Rgba};
 use aether_render::QuadBlend;
 use aether_render::{
-    CreateTexture, CreateTextureResult, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawSolidQuads,
-    DrawTexturedQuads, DrawTriangle, MaterialCoverageRect, MaterialRect, MaterialTexturedRect, SolidQuad,
-    TextureFormat, TextureSampling, TextureUsage, TexturedQuad, UpdateTexture, Vertex, WHITE_TEXTURE_ID,
+    CreateTexture, CreateTextureResult, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured,
+    DrawScreenTriangles, DrawSolidQuads, DrawTexturedQuads, DrawTriangle, MaterialCoverageRect, MaterialRect,
+    MaterialTexturedRect, ScreenTriangle, ScreenVertex, SolidQuad, TextureFormat, TextureSampling, TextureUsage,
+    TexturedQuad, UpdateTexture, Vertex, WHITE_TEXTURE_ID,
 };
 use aether_substrate::render as substrate_render;
 use aether_substrate::render::{QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD};
@@ -1393,6 +1394,115 @@ fn textured_quad_clip_bounds_pixels() {
     assert!(
         !pixel_is_lit(&img, 12, 20, bg, tolerance),
         "pixel inside the textured quad but outside the clip rect should remain clear",
+    );
+}
+
+/// One diamond — a square rotated 45° — as two `ScreenTriangle`s,
+/// centred on `center` with `radius` pixels from the centre to each tip.
+/// Rotated geometry no quad can express, and its four tips sit on the
+/// two axes through the centre, so a frame that stretches one axis moves
+/// them unequally.
+fn diamond(center: (f32, f32), radius: f32, color: Rgba) -> Vec<ScreenTriangle> {
+    let (cx, cy) = center;
+    let corner = |x: f32, y: f32| ScreenVertex { x, y, color };
+    let (top, right, bottom, left) =
+        (corner(cx, cy - radius), corner(cx + radius, cy), corner(cx, cy + radius), corner(cx - radius, cy));
+
+    vec![ScreenTriangle { a: top.clone(), b: right, c: bottom.clone() }, ScreenTriangle { a: top, b: bottom, c: left }]
+}
+
+/// Assert the diamond `diamond()` produced landed on the pixels it named:
+/// each tip lit `inset` pixels short of itself and clear `inset` pixels
+/// past it. Absolute pixel positions, so the four bounds hold only if the
+/// frame's aspect ratio never entered the projection.
+fn assert_diamond_pixels(img: &Image, center: (u32, u32), radius: u32, inset: u32, label: &str) {
+    let (cx, cy) = center;
+    let (bg, tolerance) = (background_top_left(img), 5);
+    let (inner, outer) = (radius - inset, radius + inset);
+    for (x, y, tip) in
+        [(cx - inner, cy, "left"), (cx + inner, cy, "right"), (cx, cy - inner, "top"), (cx, cy + inner, "bottom")]
+    {
+        assert!(pixel_is_lit(img, x, y, bg, tolerance), "{label}: ({x}, {y}) inside the {tip} tip should be painted");
+    }
+    for (x, y, tip) in
+        [(cx - outer, cy, "left"), (cx + outer, cy, "right"), (cx, cy - outer, "top"), (cx, cy + outer, "bottom")]
+    {
+        assert!(!pixel_is_lit(img, x, y, bg, tolerance), "{label}: ({x}, {y}) past the {tip} tip should stay clear");
+    }
+}
+
+/// Capture one diamond at `center` in a `width`×`height` frame and
+/// return the decoded frame. The centre is stated in pixels rather than
+/// derived from the frame, so the scenario's expected geometry is the
+/// literal the assertion reads back.
+fn capture_diamond(width: u32, height: u32, center: (f32, f32), radius: f32) -> Image {
+    let mut harness = SubstrateHarness::builder().size(width, height).with_render().build().expect("boot");
+    let draw = envelope(
+        "aether.render",
+        &DrawScreenTriangles { clip: None, triangles: diamond(center, radius, Rgba::new(1.0, 1.0, 1.0, 1.0)) },
+    );
+
+    let captured =
+        harness.execute(vec![("snap", HarnessOp::capture_with_mails(vec![draw], vec![]))]).expect("capture diamond");
+    decode_png(captured.captured("snap").expect("snap step ran")).expect("decode diamond png")
+}
+
+/// iamacoffeepot/aether#5504: `draw_screen_triangles` places arbitrary
+/// triangles at absolute window pixels, so a rotated shape keeps its
+/// proportions whatever the window's aspect ratio is — the gap that sent
+/// flat-2D callers through the world-space `aether.draw_triangle` path,
+/// where an identity `view_proj` spans -1..=1 on both axes and stretches
+/// everything by the aspect ratio — a diamond drawn that way on a 2:1
+/// frame comes out twice as wide as it is tall. Here the same four tips
+/// hold on a 2:1 frame and on a square one.
+#[test]
+fn screen_triangles_hold_pixel_geometry_across_aspect_ratios() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let wide = capture_diamond(200, 100, (100.0, 50.0), 30.0);
+    assert_diamond_pixels(&wide, (100, 50), 30, 4, "2:1 frame");
+
+    // The diamond covers half its bounding box: 2 * 30² of 200×100.
+    let covered = coverage(&wide, background_top_left(&wide), 5);
+    assert!(
+        (0.06..0.12).contains(&covered),
+        "diamond coverage {covered} fell outside the expected band (0.06, 0.12); \
+         the captured frame is effectively empty or entirely filled",
+    );
+
+    let square = capture_diamond(100, 100, (50.0, 50.0), 30.0);
+    assert_diamond_pixels(&square, (50, 50), 30, 4, "1:1 frame");
+}
+
+/// iamacoffeepot/aether#5504: a screen-triangle batch carries the same
+/// per-batch framebuffer scissor the quad batches do — the clip is a
+/// field of the kind, so a batch that dropped it on the way into the
+/// accumulator would still draw a perfectly placed, unclipped shape.
+#[test]
+fn screen_triangle_clip_bounds_pixels() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
+    let draw = envelope(
+        "aether.render",
+        &DrawScreenTriangles {
+            clip: Some(ClipRect { x: 24.0, y: 16.0, width: 16.0, height: 16.0 }),
+            triangles: diamond((32.0, 24.0), 20.0, Rgba::new(1.0, 1.0, 1.0, 1.0)),
+        },
+    );
+
+    let captured = harness
+        .execute(vec![("snap", HarnessOp::capture_with_mails(vec![draw], vec![]))])
+        .expect("capture clipped screen triangles");
+    let img = decode_png(captured.captured("snap").expect("snap step ran")).expect("decode clipped triangle png");
+    let bg = background_top_left(&img);
+    let tolerance = 5;
+    assert!(pixel_is_lit(&img, 32, 24, bg, tolerance), "pixel inside the triangle clip rect should be painted");
+    assert!(
+        !pixel_is_lit(&img, 20, 24, bg, tolerance),
+        "pixel inside the triangle but outside the clip rect should remain clear",
     );
 }
 

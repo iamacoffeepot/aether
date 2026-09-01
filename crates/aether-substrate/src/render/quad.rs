@@ -23,12 +23,18 @@ use std::slice;
 /// Bytes per expanded quad vertex: `anchor vec3<f32>` (12) +
 /// `offset_px vec2<f32>` (8) + `uv vec2<f32>` (8) + `tint vec4<f32>`
 /// (16) + `k f32` (4) + `is_screen u32` (4) = 52.
-/// [`push_screen_quad_vertices`] and [`push_world_quad_vertices`] both
-/// write exactly this stride per vertex.
+/// [`push_screen_quad_vertices`], [`push_world_quad_vertices`], and
+/// [`push_screen_triangle_vertices`] all write exactly this stride per
+/// vertex.
 pub const QUAD_VERTEX_STRIDE: u64 = 52;
 
 /// Vertices one quad expands to: two triangles, six vertices.
 pub const QUAD_VERTICES_PER_QUAD: usize = 6;
+
+/// Vertices one caller-supplied overlay triangle expands to. A triangle
+/// is already the rasterizer's primitive, so it expands one-to-one —
+/// unlike a quad, which is a rect the expansion has to corner out.
+pub const QUAD_VERTICES_PER_TRIANGLE: usize = 3;
 
 /// Maximum size of the per-frame quad vertex buffer. The render cap's
 /// overlay encode drops the pass with a warn rather than overflow the
@@ -496,18 +502,57 @@ pub fn push_screen_quad_vertices(out: &mut Vec<u8>, rect: [f32; 4], uv: [f32; 4]
     let corners =
         [(x0, y0, u0, v0), (x0, y1, u0, v1), (x1, y1, u1, v1), (x0, y0, u0, v0), (x1, y1, u1, v1), (x1, y0, u1, v0)];
     for (px, py, u, v) in corners {
-        // anchor (0,0,0) + offset_px (pixel pos) + uv + tint + k=0
-        let floats: [f32; 12] = [
-            0.0, 0.0, 0.0, // anchor (unused on screen path)
-            px, py, // offset_px: absolute pixel position
-            u, v, // uv
-            tint[0], tint[1], tint[2], tint[3], // tint
-            0.0,     // k (unused on screen path)
-        ];
-        out.extend_from_slice(bytemuck::cast_slice(&floats));
-        let is_screen: u32 = 1;
-        out.extend_from_slice(bytemuck::cast_slice(&[is_screen]));
+        push_overlay_vertex(out, [0.0; 3], [px, py], [u, v], tint, 0.0, true);
     }
+}
+
+/// Push the three vertices of one screen-space triangle into `out` as
+/// raw bytes, in the same 52-byte layout ([`QUAD_VERTEX_STRIDE`]) and on
+/// the same `is_screen` path [`push_screen_quad_vertices`] writes — the
+/// only difference is that the caller supplies the corners instead of
+/// the expansion cornering out a rect, so the triangle can sit at any
+/// orientation. `positions` are absolute window pixels (top-left origin,
+/// y down) and `tints` the matching per-vertex RGBA, interpolated across
+/// the face. The uv is pinned to the texture centre: this path draws the
+/// reserved flat white texture, so the sample carries no detail the
+/// tint does not already state. Cull mode is off, so either winding
+/// draws.
+pub fn push_screen_triangle_vertices(out: &mut Vec<u8>, positions: [[f32; 2]; 3], tints: [[f32; 4]; 3]) {
+    for (position, tint) in positions.into_iter().zip(tints) {
+        push_overlay_vertex(out, [0.0; 3], position, [0.5, 0.5], tint, 0.0, true);
+    }
+}
+
+/// Write one overlay vertex into `out` in the unified world-aware
+/// layout: `anchor vec3`, `offset_px vec2`, `uv vec2`, `tint vec4`,
+/// `k f32`, `is_screen u32` — [`QUAD_VERTEX_STRIDE`] bytes. The single
+/// writer for every overlay path, so the byte layout the pipeline's
+/// `VertexBufferLayout` describes is stated once.
+fn push_overlay_vertex(
+    out: &mut Vec<u8>,
+    anchor: [f32; 3],
+    offset_px: [f32; 2],
+    uv: [f32; 2],
+    tint: [f32; 4],
+    k: f32,
+    is_screen: bool,
+) {
+    let floats: [f32; 12] = [
+        anchor[0],
+        anchor[1],
+        anchor[2],
+        offset_px[0],
+        offset_px[1],
+        uv[0],
+        uv[1],
+        tint[0],
+        tint[1],
+        tint[2],
+        tint[3],
+        k,
+    ];
+    out.extend_from_slice(bytemuck::cast_slice(&floats));
+    out.extend_from_slice(bytemuck::cast_slice(&[u32::from(is_screen)]));
 }
 
 /// Push the six vertices (two triangles) for one world-anchored quad
@@ -539,16 +584,7 @@ pub fn push_world_quad_vertices(
     let corners =
         [(x0, y0, u0, v0), (x0, y1, u0, v1), (x1, y1, u1, v1), (x0, y0, u0, v0), (x1, y1, u1, v1), (x1, y0, u1, v0)];
     for (ox, oy, u, v) in corners {
-        let floats: [f32; 12] = [
-            anchor[0], anchor[1], anchor[2], // anchor: world-space point
-            ox, oy, // offset_px: pixel offset (y-down)
-            u, v, // uv
-            tint[0], tint[1], tint[2], tint[3], // tint
-            k,       // scale factor
-        ];
-        out.extend_from_slice(bytemuck::cast_slice(&floats));
-        let is_screen: u32 = 0;
-        out.extend_from_slice(bytemuck::cast_slice(&[is_screen]));
+        push_overlay_vertex(out, anchor, [ox, oy], [u, v], tint, k, false);
     }
 }
 

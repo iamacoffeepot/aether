@@ -9,7 +9,8 @@ use aether_data::MailboxId;
 use aether_kinds::MonitorNotice;
 use aether_substrate::{InboundMail, MonitorHandle, Subname};
 
-use super::subscribers::{WindowSubscribers, WindowSubscriptions};
+use super::manager::WindowManagerSurface;
+use super::subscribers::WindowSubscribers;
 use crate::{
     ApplyWindowCommand, ApplyWindowCommandResult, CloseWindowResult, CreateWindow, CreateWindowResult,
     FocusWindowResult, InjectWindowEvent, ListWindows, ListWindowsResult, RequestWindowRedrawResult, RetireWindow,
@@ -111,7 +112,7 @@ fn answer(reply: &mut Option<Box<InboundMail>>, result: &CreateWindowResult) {
     }
 }
 
-#[runtime(handler_set(WindowSubscriptions))]
+#[runtime(handler_set(WindowManagerSurface))]
 impl NativeActor for SyntheticWindowCapability {
     type State = SyntheticWindowCapabilityState;
     type Config = ();
@@ -284,11 +285,18 @@ impl NativeActor for SyntheticWindowCapability {
     }
 }
 
-impl WindowSubscriptions for SyntheticWindowCapability {
+impl WindowManagerSurface for SyntheticWindowCapability {
     type State = SyntheticWindowCapabilityState;
 
     fn subscribers(state: &mut Self::State) -> &mut WindowSubscribers {
         &mut state.subscribers
+    }
+
+    /// Every window this runtime enumerates is applied and routable — a
+    /// reservation is not a window here until its child's birth is
+    /// authoritative, and it is absent from `windows` until then.
+    fn routable_windows(state: &Self::State) -> Vec<WindowId> {
+        state.windows.keys().copied().collect()
     }
 }
 
@@ -309,9 +317,9 @@ mod tests {
     use aether_substrate::testing::boot_authority;
 
     use super::*;
-    // The subscription request kinds moved to the `WindowSubscriptions` set,
+    // The subscription request kinds moved to the `WindowManagerSurface` set,
     // so the manager module no longer imports them for `use super::*` to carry.
-    use crate::{SubscribeWindow, SubscribeWindowResult, UnsubscribeWindow};
+    use crate::{SetWindowTitle, SubscribeWindow, SubscribeWindowResult, UnsubscribeWindow};
 
     fn test_state() -> SyntheticWindowCapabilityState {
         SyntheticWindowCapabilityState {
@@ -519,6 +527,83 @@ mod tests {
         assert_eq!(windows.iter().map(|window| window.id).collect::<Vec<_>>(), [window.id]);
 
         assert!(matches!(report.reply::<CreateWindowResult>("duplicate"), Ok(CreateWindowResult::Err { .. })));
+    }
+
+    /// The five per-window commands are the *endpoint's* handlers, so a
+    /// root-addressed one used to fall through the manager's dispatch and
+    /// settle with no reply and no effect — which reads as success to a caller
+    /// that sees only the status (iamacoffeepot/aether#5505).
+    ///
+    /// The sole-window case has to come back as the endpoint's own
+    /// `Ok { title }` under the *caller's* correlation and leave the window
+    /// retitled, which is the whole of the re-dispatch: an answer minted by the
+    /// root, or none at all, fails here. The zero- and two-window cases are
+    /// what stops the root from quietly picking a window instead.
+    #[test]
+    fn root_addressed_commands_reach_the_sole_window_and_refuse_when_it_is_ambiguous() {
+        let mut harness = SubstrateHarness::start().expect("boot synthetic harness");
+        let report = harness
+            .execute(vec![
+                (
+                    "windowless",
+                    HarnessOp::send_and_await_reply(
+                        WindowCapability::NAMESPACE,
+                        &SetWindowTitle { title: "Nobody".to_owned() },
+                    ),
+                ),
+                (
+                    "created",
+                    HarnessOp::send_and_await_reply(
+                        WindowCapability::NAMESPACE,
+                        &CreateWindow { spec: spec("main", "Main") },
+                    ),
+                ),
+                (
+                    "routed",
+                    HarnessOp::send_and_await_reply(
+                        WindowCapability::NAMESPACE,
+                        &SetWindowTitle { title: "Routed".to_owned() },
+                    ),
+                ),
+                (
+                    "second",
+                    HarnessOp::send_and_await_reply(
+                        WindowCapability::NAMESPACE,
+                        &CreateWindow { spec: spec("palette", "Tools") },
+                    ),
+                ),
+                (
+                    "ambiguous",
+                    HarnessOp::send_and_await_reply(
+                        WindowCapability::NAMESPACE,
+                        &SetWindowTitle { title: "Ambiguous".to_owned() },
+                    ),
+                ),
+                ("listed", HarnessOp::send_and_await_reply(WindowCapability::NAMESPACE, &ListWindows)),
+            ])
+            .expect("root-addressed window commands settle");
+
+        assert!(
+            matches!(report.reply::<SetWindowTitleResult>("windowless"), Ok(SetWindowTitleResult::Err { .. })),
+            "a root-addressed command with no window to route to is refused, not swallowed",
+        );
+        assert!(matches!(
+            report.reply::<SetWindowTitleResult>("routed"),
+            Ok(SetWindowTitleResult::Ok { title }) if title == "Routed"
+        ));
+        assert!(
+            matches!(report.reply::<SetWindowTitleResult>("ambiguous"), Ok(SetWindowTitleResult::Err { .. })),
+            "with several windows live the root names the requirement rather than choosing one",
+        );
+
+        let Ok(ListWindowsResult::Ok { windows }) = report.reply::<ListWindowsResult>("listed") else {
+            panic!("synthetic list succeeds");
+        };
+        assert_eq!(
+            windows.iter().map(|window| (window.name.as_str(), window.title.as_str())).collect::<BTreeMap<_, _>>(),
+            BTreeMap::from([("main", "Routed"), ("palette", "Tools")]),
+            "the routed command applied to the sole window and the refused one applied to nothing",
+        );
     }
 
     #[test]

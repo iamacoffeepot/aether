@@ -112,6 +112,14 @@ apply it asynchronously, so the reply does not prove observed focus.
 There is no implicit focused or current target. The boot window is named
 `main` and is simply the first `WindowSpec` realized after winit resumes.
 
+The five child operations may also be addressed to the manager, which
+re-dispatches them at the sole window when exactly one is live and answers with
+that window's own reply. It is a convenience for the single-window engine, not a
+current target: with no window, or with several, the manager replies the
+operation's `Err` naming the situation rather than choosing one, and the caller
+names the window itself. The headless manager and its endpoints both refuse all
+five, so an op that cannot be applied is always answered rather than dropped.
+
 For an MCP `send_mail` request, `mode` remains a field of the
 `aether.window.set_mode` params object and the optional windowed dimensions
 sit beside it:
