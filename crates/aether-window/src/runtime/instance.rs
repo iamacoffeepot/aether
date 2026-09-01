@@ -11,13 +11,15 @@ use aether_data::{Kind, MailId};
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 use aether_substrate::InboundMail;
 
-use super::{BootError, NativeActor, NativeCtx, NativeInitCtx, UnsupportedWindowCommands};
-use crate::HeadlessWindowInstance;
+use super::{BootError, NativeActor, NativeCtx, NativeInitCtx, unsupported};
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 use crate::{
-    ApplyWindowCommand, ApplyWindowCommandResult, CloseWindow, CloseWindowResult, FocusWindow, FocusWindowResult,
-    RequestWindowRedraw, RequestWindowRedrawResult, RetireWindow, SetWindowMode, SetWindowModeResult, SetWindowTitle,
-    SetWindowTitleResult, WindowCapability, WindowCommand, WindowForwardContext, WindowId,
+    ApplyWindowCommand, ApplyWindowCommandResult, RetireWindow, WindowCapability, WindowCommand, WindowForwardContext,
+    WindowId,
+};
+use crate::{
+    CloseWindow, CloseWindowResult, FocusWindow, FocusWindowResult, HeadlessWindowInstance, RequestWindowRedraw,
+    RequestWindowRedrawResult, SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult,
 };
 
 /// Retained public requests for one concrete forwarding child.
@@ -184,7 +186,14 @@ pub trait WindowEndpoint {
 /// Inert state for a named window endpoint on a headless chassis.
 pub struct HeadlessWindowInstanceState;
 
-#[runtime(handler_set(UnsupportedWindowCommands))]
+/// The endpoint's half of the headless refusals. Written out here rather than
+/// shared with the root's identical five (`runtime::mod`): a handler set's
+/// `HandlesKind` markers travel through a `macro_rules!` bridge that lives with
+/// the set, and these two identities compile in the marker-only build where
+/// this whole runtime module is `cfg`-ed away — so an inherited handler would
+/// take the endpoint's control markers with it and break every typed
+/// `WindowMailboxExt` send from a wasm guest.
+#[runtime]
 impl NativeActor for HeadlessWindowInstance {
     type State = HeadlessWindowInstanceState;
     type Config = ();
@@ -194,8 +203,33 @@ impl NativeActor for HeadlessWindowInstance {
     fn init(_config: (), _ctx: &mut NativeInitCtx<'_>) -> Result<HeadlessWindowInstanceState, BootError> {
         Ok(HeadlessWindowInstanceState)
     }
-}
 
-impl UnsupportedWindowCommands for HeadlessWindowInstance {
-    type State = HeadlessWindowInstanceState;
+    #[handler::single]
+    fn on_close(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: CloseWindow) -> CloseWindowResult {
+        CloseWindowResult::Err { error: unsupported() }
+    }
+
+    #[handler::single]
+    fn on_set_mode(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: SetWindowMode) -> SetWindowModeResult {
+        SetWindowModeResult::Err { error: unsupported() }
+    }
+
+    #[handler::single]
+    fn on_set_title(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: SetWindowTitle) -> SetWindowTitleResult {
+        SetWindowTitleResult::Err { error: unsupported() }
+    }
+
+    #[handler::single]
+    fn on_focus(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: FocusWindow) -> FocusWindowResult {
+        FocusWindowResult::Err { error: unsupported() }
+    }
+
+    #[handler::single]
+    fn on_request_redraw(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        _mail: RequestWindowRedraw,
+    ) -> RequestWindowRedrawResult {
+        RequestWindowRedrawResult::Err { error: unsupported() }
+    }
 }

@@ -1,6 +1,6 @@
 //! Fail-fast runtime for chassis without a window peripheral.
 
-use aether_actor::{handler_set, runtime};
+use aether_actor::runtime;
 
 use super::{
     ApplyWindowCommand, ApplyWindowCommandResult, CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult,
@@ -22,46 +22,7 @@ fn unsupported() -> String {
 
 mod instance;
 
-/// The five per-window commands, refused (ADR-0169).
-///
-/// Both headless identities carry them for the same reason: the root and the
-/// endpoint are each addressable, so a command sent to either has to be
-/// *answered* rather than dropped on the floor — a silent no-op reads as
-/// success to a caller whose mail settled (iamacoffeepot/aether#5505). There
-/// is no window on this chassis, so both answers are the same one.
-#[handler_set]
-pub trait UnsupportedWindowCommands {
-    #[handler::single]
-    fn on_close(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: CloseWindow) -> CloseWindowResult {
-        CloseWindowResult::Err { error: unsupported() }
-    }
-
-    #[handler::single]
-    fn on_set_mode(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: SetWindowMode) -> SetWindowModeResult {
-        SetWindowModeResult::Err { error: unsupported() }
-    }
-
-    #[handler::single]
-    fn on_set_title(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: SetWindowTitle) -> SetWindowTitleResult {
-        SetWindowTitleResult::Err { error: unsupported() }
-    }
-
-    #[handler::single]
-    fn on_focus(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: FocusWindow) -> FocusWindowResult {
-        FocusWindowResult::Err { error: unsupported() }
-    }
-
-    #[handler::single]
-    fn on_request_redraw(
-        _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        _mail: RequestWindowRedraw,
-    ) -> RequestWindowRedrawResult {
-        RequestWindowRedrawResult::Err { error: unsupported() }
-    }
-}
-
-#[runtime(handler_set(UnsupportedWindowCommands))]
+#[runtime]
 impl NativeActor for HeadlessWindowCapability {
     type State = HeadlessWindowCapabilityState;
     type Config = ();
@@ -138,10 +99,45 @@ impl NativeActor for HeadlessWindowCapability {
 
     #[handler::single]
     fn on_unsubscribe_all(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: UnsubscribeAllWindows) {}
-}
 
-impl UnsupportedWindowCommands for HeadlessWindowCapability {
-    type State = HeadlessWindowCapabilityState;
+    // The five per-window commands, refused at the root as well as at an
+    // endpoint (iamacoffeepot/aether#5505). Both identities are addressable, so
+    // a command sent to either has to be answered rather than dropped on the
+    // floor — a silent no-op reads as success to a caller whose mail settled.
+    // The endpoint's identical five stay written out beside these rather than
+    // shared through a handler set, because a set's `HandlesKind` markers reach
+    // an adopter through a `macro_rules!` bridge that lives with the set, and
+    // both identities also compile in the marker-only build where this whole
+    // runtime module is `cfg`-ed away.
+
+    #[handler::single]
+    fn on_close(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: CloseWindow) -> CloseWindowResult {
+        CloseWindowResult::Err { error: unsupported() }
+    }
+
+    #[handler::single]
+    fn on_set_mode(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: SetWindowMode) -> SetWindowModeResult {
+        SetWindowModeResult::Err { error: unsupported() }
+    }
+
+    #[handler::single]
+    fn on_set_title(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: SetWindowTitle) -> SetWindowTitleResult {
+        SetWindowTitleResult::Err { error: unsupported() }
+    }
+
+    #[handler::single]
+    fn on_focus(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: FocusWindow) -> FocusWindowResult {
+        FocusWindowResult::Err { error: unsupported() }
+    }
+
+    #[handler::single]
+    fn on_request_redraw(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        _mail: RequestWindowRedraw,
+    ) -> RequestWindowRedrawResult {
+        RequestWindowRedrawResult::Err { error: unsupported() }
+    }
 }
 
 #[cfg(feature = "synthetic")]
