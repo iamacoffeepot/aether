@@ -30,7 +30,7 @@ use objc2::MainThreadMarker;
 use objc2_app_kit::NSApplication;
 #[cfg(target_os = "macos")]
 use objc2_foundation::NSProcessInfo;
-use winit::dpi::PhysicalSize;
+use winit::dpi::{PhysicalSize, Pixel};
 use winit::event::{ElementState, Ime, WindowEvent};
 use winit::keyboard::PhysicalKey;
 use winit::monitor::{MonitorHandle as WinitMonitorHandle, VideoModeHandle};
@@ -666,12 +666,14 @@ fn predicted_window_id(name: &str) -> WindowId {
     WindowId(WindowInstance::resolve(WindowCapability::resolve(0, ()).0, name).0)
 }
 
-/// winit reports the scale factor as `f64`; the wire carries `f32`. Every
-/// real value is a small ratio (1.0, 1.5, 2.0, …), so the narrowing is
-/// exact in practice and the cast is the whole conversion.
-#[allow(clippy::cast_possible_truncation)]
+/// winit reports the scale factor as `f64`; `WindowSize` carries `f32`,
+/// the width every other coordinate in the input vocabulary uses.
+/// `dpi::Pixel::from_f64` is the narrowing winit itself applies to every
+/// dpi quantity it hands back as `f32` (`to_logical::<f32>`,
+/// `LogicalPosition<f32>`), so this stays the library's own conversion
+/// rather than a second, hand-rolled one.
 fn narrow_scale_factor(scale_factor: f64) -> f32 {
-    scale_factor as f32
+    <f32 as Pixel>::from_f64(scale_factor)
 }
 
 #[runtime(handler_set(WindowSubscriptions))]
