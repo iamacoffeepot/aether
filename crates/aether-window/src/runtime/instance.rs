@@ -11,15 +11,13 @@ use aether_data::{Kind, MailId};
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 use aether_substrate::InboundMail;
 
-use super::{BootError, NativeActor, NativeCtx, NativeInitCtx, unsupported};
+use super::{BootError, NativeActor, NativeCtx, NativeInitCtx, UnsupportedWindowCommands};
+use crate::HeadlessWindowInstance;
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 use crate::{
-    ApplyWindowCommand, ApplyWindowCommandResult, RetireWindow, WindowCapability, WindowCommand, WindowForwardContext,
-    WindowId,
-};
-use crate::{
-    CloseWindow, CloseWindowResult, FocusWindow, FocusWindowResult, HeadlessWindowInstance, RequestWindowRedraw,
-    RequestWindowRedrawResult, SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult,
+    ApplyWindowCommand, ApplyWindowCommandResult, CloseWindow, CloseWindowResult, FocusWindow, FocusWindowResult,
+    RequestWindowRedraw, RequestWindowRedrawResult, RetireWindow, SetWindowMode, SetWindowModeResult, SetWindowTitle,
+    SetWindowTitleResult, WindowCapability, WindowCommand, WindowForwardContext, WindowId,
 };
 
 /// Retained public requests for one concrete forwarding child.
@@ -186,7 +184,7 @@ pub trait WindowEndpoint {
 /// Inert state for a named window endpoint on a headless chassis.
 pub struct HeadlessWindowInstanceState;
 
-#[runtime]
+#[runtime(handler_set(UnsupportedWindowCommands))]
 impl NativeActor for HeadlessWindowInstance {
     type State = HeadlessWindowInstanceState;
     type Config = ();
@@ -196,33 +194,8 @@ impl NativeActor for HeadlessWindowInstance {
     fn init(_config: (), _ctx: &mut NativeInitCtx<'_>) -> Result<HeadlessWindowInstanceState, BootError> {
         Ok(HeadlessWindowInstanceState)
     }
+}
 
-    #[handler::single]
-    fn on_close(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: CloseWindow) -> CloseWindowResult {
-        CloseWindowResult::Err { error: unsupported() }
-    }
-
-    #[handler::single]
-    fn on_set_mode(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: SetWindowMode) -> SetWindowModeResult {
-        SetWindowModeResult::Err { error: unsupported() }
-    }
-
-    #[handler::single]
-    fn on_set_title(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: SetWindowTitle) -> SetWindowTitleResult {
-        SetWindowTitleResult::Err { error: unsupported() }
-    }
-
-    #[handler::single]
-    fn on_focus(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: FocusWindow) -> FocusWindowResult {
-        FocusWindowResult::Err { error: unsupported() }
-    }
-
-    #[handler::single]
-    fn on_request_redraw(
-        _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        _mail: RequestWindowRedraw,
-    ) -> RequestWindowRedrawResult {
-        RequestWindowRedrawResult::Err { error: unsupported() }
-    }
+impl UnsupportedWindowCommands for HeadlessWindowInstance {
+    type State = HeadlessWindowInstanceState;
 }
