@@ -1397,11 +1397,11 @@ fn textured_quad_clip_bounds_pixels() {
     );
 }
 
-/// One axis-aligned diamond — a square rotated 45° — as two
-/// `ScreenTriangle`s, centred on `center` with `radius` pixels from the
-/// centre to each tip. Rotated geometry no quad can express, and its tips
-/// are on the two axes, so a frame that stretches one axis moves them
-/// unequally.
+/// One diamond — a square rotated 45° — as two `ScreenTriangle`s,
+/// centred on `center` with `radius` pixels from the centre to each tip.
+/// Rotated geometry no quad can express, and its four tips sit on the
+/// two axes through the centre, so a frame that stretches one axis moves
+/// them unequally.
 fn diamond(center: (f32, f32), radius: f32, color: Rgba) -> Vec<ScreenTriangle> {
     let (cx, cy) = center;
     let corner = |x: f32, y: f32| ScreenVertex { x, y, color };
@@ -1452,9 +1452,9 @@ fn capture_diamond(width: u32, height: u32, center: (f32, f32), radius: f32) -> 
 /// proportions whatever the window's aspect ratio is — the gap that sent
 /// flat-2D callers through the world-space `aether.draw_triangle` path,
 /// where an identity `view_proj` spans -1..=1 on both axes and stretches
-/// everything by the aspect ratio. A 60-pixel-wide diamond on a 2:1
-/// frame would land 120 pixels wide there; here the same tips hold on a
-/// 2:1 frame and on a square one.
+/// everything by the aspect ratio — a diamond drawn that way on a 2:1
+/// frame comes out twice as wide as it is tall. Here the same four tips
+/// hold on a 2:1 frame and on a square one.
 #[test]
 fn screen_triangles_hold_pixel_geometry_across_aspect_ratios() {
     if !require_wgpu_only() {
