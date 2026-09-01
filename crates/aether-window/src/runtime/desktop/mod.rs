@@ -122,8 +122,10 @@ struct DesktopWindowState {
     width: u32,
     height: u32,
     /// Physical pixels per logical pixel, as winit last reported it. Kept
-    /// on the window because `WindowSize` publishes it and the cursor
-    /// stream is logical while the size is physical.
+    /// on the window because `WindowSize` publishes it: every coordinate
+    /// this runtime forwards is already physical (winit's `CursorMoved`
+    /// carries a `PhysicalPosition`), so the factor is what a consumer
+    /// needs to size a logical measure, not to read the cursor.
     scale_factor: f32,
     cursor: (f32, f32),
     composing: bool,

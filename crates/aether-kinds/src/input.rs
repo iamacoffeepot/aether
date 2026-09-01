@@ -91,8 +91,9 @@ pub struct KeyRelease {
 /// coordinates, matching `MouseMove` — so a click event is
 /// self-contained and needs no external cursor correlation. Omits `Eq`
 /// because the `f32` fields make it non-`Eq`, same as `MouseMove`. Those
-/// coordinates are logical pixels — multiply by `WindowSize.scale_factor`
-/// to reach the physical pixels `WindowSize` and `QuadSpace::Screen` use.
+/// coordinates are physical pixels, the same space `WindowSize` and
+/// `QuadSpace::Screen` speak, so hit-testing a click against screen-space
+/// geometry needs no scale conversion.
 #[derive(Copy, Clone, Debug, Default, PartialEq, aether_data::Kind, aether_data::Schema, Serialize, Deserialize)]
 #[kind(name = "aether.mouse_button")]
 pub struct MouseButton {
@@ -106,8 +107,8 @@ pub struct MouseButton {
 /// release, carrying the same `button` code the press carried and the
 /// cursor position at release time. Components tracking press-move-release
 /// drag pair subscription to both kinds so they can commit on release.
-/// `x` / `y` are logical pixels — multiply by `WindowSize.scale_factor` to
-/// reach the physical pixels `WindowSize` and `QuadSpace::Screen` use.
+/// `x` / `y` are physical pixels, the same space `WindowSize` and
+/// `QuadSpace::Screen` speak.
 #[derive(Copy, Clone, Debug, Default, PartialEq, aether_data::Kind, aether_data::Schema, Serialize, Deserialize)]
 #[kind(name = "aether.mouse_button_release")]
 pub struct MouseButtonRelease {
@@ -120,9 +121,9 @@ pub struct MouseButtonRelease {
 /// A mouse-wheel scroll. `delta_x` / `delta_y` carry the scroll amount
 /// (line deltas normalized to pixels by the driver); `x` / `y` carry the
 /// cursor position at scroll time in window coordinates, so wheel-zoom-at-
-/// cursor needs no external cursor correlation. `x` / `y` are logical
-/// pixels — multiply by `WindowSize.scale_factor` to reach the physical
-/// pixels `WindowSize` and `QuadSpace::Screen` use.
+/// cursor needs no external cursor correlation. `x` / `y` — and a
+/// touchpad's pixel-precise deltas — are physical pixels, the same space
+/// `WindowSize` and `QuadSpace::Screen` speak.
 #[derive(Copy, Clone, Debug, Default, PartialEq, aether_data::Kind, aether_data::Schema, Serialize, Deserialize)]
 #[kind(name = "aether.mouse_wheel")]
 pub struct MouseWheel {
@@ -133,9 +134,14 @@ pub struct MouseWheel {
     pub y: f32,
 }
 
-/// Cursor position in window coordinates, as logical pixels cast to f32.
-/// Multiply by `WindowSize.scale_factor` to reach the physical pixels
-/// `WindowSize` and `QuadSpace::Screen` use.
+/// Cursor position in window coordinates, as physical pixels cast to f32
+/// — the desktop chassis forwards winit's `CursorMoved` position, which is
+/// a `PhysicalPosition`, without converting it. That is the same space
+/// `WindowSize.width` / `height` and `QuadSpace::Screen` use, so pointing
+/// the cursor at screen-space geometry is a direct comparison and needs no
+/// `scale_factor` anywhere in it. A consumer that genuinely wants logical
+/// pixels divides by `WindowSize.scale_factor`; the conversion runs away
+/// from this kind, never toward it.
 #[derive(Copy, Clone, Debug, Default, PartialEq, aether_data::Kind, aether_data::Schema, Serialize, Deserialize)]
 #[kind(name = "aether.mouse_move")]
 pub struct MouseMove {
@@ -144,19 +150,26 @@ pub struct MouseMove {
     pub y: f32,
 }
 
-/// Current window size in physical pixels, plus the display scale factor
-/// that bridges the engine's two pixel spaces: `physical = logical ×
-/// scale_factor`.
+/// Current window size in physical pixels, plus the display's scale
+/// factor: `physical = logical × scale_factor`.
 ///
-/// `width` / `height` are physical pixels, and so is `QuadSpace::Screen`
-/// (the space solid quads, textured quads, and `aether.text.draw` address).
-/// The cursor position on `MouseMove`, `MouseButton`,
-/// `MouseButtonRelease`, and `MouseWheel` is *logical* pixels. So a
-/// component hit-testing the cursor against screen-space geometry — or
-/// sizing HUD text for the display it is on — scales the cursor by
-/// `scale_factor` rather than assuming the two spaces coincide. They do
-/// coincide at `scale_factor == 1.0`, which is why the mismatch is
-/// invisible on a 1x display and off by exactly 2x on a 2x one.
+/// Every pixel quantity the engine puts on the wire is physical, and they
+/// agree: `width` / `height` here, `QuadSpace::Screen` (the space solid
+/// quads, textured quads, and `aether.text.draw` address), and the cursor
+/// position on `MouseMove`, `MouseButton`, `MouseButtonRelease`, and
+/// `MouseWheel`. So pointer-against-screen-space math — hover, hit-testing,
+/// dragging a handle — compares the two directly and must **not** apply
+/// `scale_factor`; doing so misses by exactly the scale factor on a
+/// non-1x display.
+///
+/// `scale_factor` is for the conversions that cross into logical space,
+/// which is where a *measure* rather than a coordinate lives: multiply to
+/// size a logical UI quantity into physical pixels — a 16-logical-pixel
+/// label, a 44-logical-pixel touch target — so it keeps its apparent size
+/// on any display; divide to hand a consumer that genuinely wants logical
+/// coordinates. At `scale_factor == 1.0` the two spaces coincide, which is
+/// why a mistake in either direction is invisible on a standard-density
+/// display and off by 2x on a 2x one.
 ///
 /// Published by the desktop chassis on startup (once the window exists),
 /// on every `WindowEvent::Resized` that isn't a zero-dimension minimize,
