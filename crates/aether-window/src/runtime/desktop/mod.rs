@@ -30,7 +30,7 @@ use objc2::MainThreadMarker;
 use objc2_app_kit::NSApplication;
 #[cfg(target_os = "macos")]
 use objc2_foundation::NSProcessInfo;
-use winit::dpi::PhysicalSize;
+use winit::dpi::{PhysicalSize, Pixel};
 use winit::event::{ElementState, Ime, WindowEvent};
 use winit::keyboard::PhysicalKey;
 use winit::monitor::{MonitorHandle as WinitMonitorHandle, VideoModeHandle};
@@ -121,6 +121,12 @@ struct DesktopWindowState {
     mode: WindowMode,
     width: u32,
     height: u32,
+    /// Physical pixels per logical pixel, as winit last reported it. Kept
+    /// on the window because `WindowSize` publishes it: every coordinate
+    /// this runtime forwards is already physical (winit's `CursorMoved`
+    /// carries a `PhysicalPosition`), so the factor is what a consumer
+    /// needs to size a logical measure, not to read the cursor.
+    scale_factor: f32,
     cursor: (f32, f32),
     composing: bool,
     modifiers: Modifiers,
@@ -200,6 +206,7 @@ impl DesktopWindowCapabilityState {
                 mode: pending.spec.mode.clone(),
                 width: size.width,
                 height: size.height,
+                scale_factor: narrow_scale_factor(window.scale_factor()),
                 cursor: (0.0, 0.0),
                 composing: false,
                 modifiers: Modifiers { window: id, ..Modifiers::default() },
@@ -336,7 +343,7 @@ impl DesktopWindowCapabilityState {
         }
         self.publish(ctx, id, &WindowOpened { window: info.clone() });
         if info.width != 0 && info.height != 0 {
-            self.publish(ctx, id, &WindowSize { window: id, width: info.width, height: info.height });
+            self.publish(ctx, id, &self.window_size(id, info.width, info.height));
         }
         Vec::new()
     }
@@ -430,10 +437,27 @@ impl DesktopWindowCapabilityState {
                     self.pending_host_effects.push(WindowHostEffect::Occluded { id, occluded });
                 }
                 if size.width != 0 && size.height != 0 {
-                    self.publish(ctx, id, &WindowSize { window: id, width: size.width, height: size.height });
+                    self.publish(ctx, id, &self.window_size(id, size.width, size.height));
                     if let Some(window) = self.native_windows.get(&id) {
                         window.request_redraw();
                     }
+                }
+            }
+            // Dragging a window between displays of different density
+            // changes the logical-to-physical ratio without necessarily
+            // changing the physical size, so the cached `WindowSize` a
+            // subscriber holds would otherwise keep the stale factor.
+            // winit follows this with its own `Resized`; republishing here
+            // costs one duplicate mail and closes the gap when it doesn't.
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                let Some(state) = self.windows.get_mut(&id) else {
+                    return;
+                };
+                state.scale_factor = narrow_scale_factor(scale_factor);
+                let (width, height) = (state.width, state.height);
+
+                if width != 0 && height != 0 {
+                    self.publish(ctx, id, &self.window_size(id, width, height));
                 }
             }
             WindowEvent::Occluded(occluded) => {
@@ -457,7 +481,7 @@ impl DesktopWindowCapabilityState {
                         state.height = size.height;
                     }
                     if size.width != 0 && size.height != 0 {
-                        self.publish(ctx, id, &WindowSize { window: id, width: size.width, height: size.height });
+                        self.publish(ctx, id, &self.window_size(id, size.width, size.height));
                     }
                 }
                 self.pending_host_effects.push(WindowHostEffect::Dirty { id });
@@ -627,6 +651,15 @@ impl DesktopWindowCapabilityState {
         }
     }
 
+    /// The `WindowSize` event for a physical size, carrying the scale
+    /// factor the window last reported. A window that has already left the
+    /// map reports `1.0` rather than suppressing the publish, so the two
+    /// pixel spaces still coincide for whoever reads it.
+    fn window_size(&self, id: WindowId, width: u32, height: u32) -> WindowSize {
+        let scale_factor = self.windows.get(&id).map_or(1.0, |state| state.scale_factor);
+        WindowSize { window: id, width, height, scale_factor }
+    }
+
     fn publish<K: Kind, A>(&self, ctx: &mut NativeCtx<'_, Single, A>, window: WindowId, event: &K) {
         ctx.fanout(self.subscribers.recipients(window, K::ID), event);
     }
@@ -634,6 +667,16 @@ impl DesktopWindowCapabilityState {
 
 fn predicted_window_id(name: &str) -> WindowId {
     WindowId(WindowInstance::resolve(WindowCapability::resolve(0, ()).0, name).0)
+}
+
+/// winit reports the scale factor as `f64`; `WindowSize` carries `f32`,
+/// the width every other coordinate in the input vocabulary uses.
+/// `dpi::Pixel::from_f64` is the narrowing winit itself applies to every
+/// dpi quantity it hands back as `f32` (`to_logical::<f32>`,
+/// `LogicalPosition<f32>`), so this stays the library's own conversion
+/// rather than a second, hand-rolled one.
+fn narrow_scale_factor(scale_factor: f64) -> f32 {
+    <f32 as Pixel>::from_f64(scale_factor)
 }
 
 #[runtime(handler_set(WindowManagerSurface))]
@@ -914,6 +957,7 @@ mod tests {
                 mode: WindowMode::Windowed,
                 width: 640,
                 height: 480,
+                scale_factor: 1.0,
                 cursor: (0.0, 0.0),
                 composing: false,
                 modifiers: Modifiers { window: id, ..Modifiers::default() },

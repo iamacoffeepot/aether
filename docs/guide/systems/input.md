@@ -40,11 +40,11 @@ Every event below carries its source `WindowId`:
 |---|---|
 | `Key` | physical key `code` on press |
 | `KeyRelease` | the matching physical key `code` |
-| `MouseMove` | cursor `x`, `y` in window coordinates |
+| `MouseMove` | cursor `x`, `y` in physical-pixel window coordinates |
 | `MouseButton` | button plus cursor position at press |
 | `MouseButtonRelease` | button plus cursor position at release |
 | `MouseWheel` | normalized deltas plus cursor position |
-| `WindowSize` | physical-pixel width and height |
+| `WindowSize` | physical-pixel width and height, plus the display `scale_factor` |
 | `TextInput` | committed, layout-resolved text |
 | `ImePreedit` | in-flight composition text and optional byte-offset span |
 | `Modifiers` | Shift, Ctrl, Alt, and Meta state |
@@ -53,6 +53,44 @@ The window actor also publishes `WindowOpened` and `WindowClosed` through the
 same selector machinery. Lifecycle/control events and user input therefore
 share one source identity without pretending they are all one generic
 peripheral.
+
+## Pixels on the wire are physical
+
+Every pixel quantity the engine publishes is a **physical** pixel, and they all
+agree with each other:
+
+- the cursor position on `MouseMove`, `MouseButton`, `MouseButtonRelease`, and
+  `MouseWheel` (the desktop chassis forwards winit's `PhysicalPosition`
+  unconverted),
+- `WindowSize.width` / `height`,
+- `QuadSpace::Screen` — the space solid quads, textured quads, and
+  `aether.text.draw` address.
+
+So pointer-against-screen-space math is a direct comparison:
+
+```rust
+// Correct: both sides are already physical pixels.
+let hovered = cursor.x >= rect.x && cursor.x < rect.x + rect.width;
+```
+
+Do **not** scale the cursor before that comparison. Multiplying by
+`scale_factor` here misses the target by exactly the scale factor — on a 2x
+display, by 2x — and the bug is invisible on a standard-density display because
+the factor is then `1.0`.
+
+`WindowSize.scale_factor` exists for the conversions that genuinely cross into
+logical space, where a *measure* rather than a coordinate lives:
+
+```text
+physical = logical × scale_factor
+```
+
+Multiply to size a logical measure into physical pixels — a 16-logical-pixel
+label, a 44-logical-pixel touch target — so it keeps its apparent size on any
+display. Divide to hand logical coordinates to a consumer that wants them. The
+desktop chassis publishes a fresh `WindowSize` on `ScaleFactorChanged` as well
+as on resize, so a subscriber that caches the latest value never carries a stale
+factor across a drag between displays; a synthetic window publishes `1.0`.
 
 ## Subscribe by kind and window
 

@@ -100,7 +100,13 @@ fn the_sheet_stands_behind_the_ink() {
 
     harness
         .execute(vec![
-            ("size", HarnessOp::send_and_settle(PUPPET, &WindowSize { window: WindowId(1), width: 128, height: 96 })),
+            (
+                "size",
+                HarnessOp::send_and_settle(
+                    PUPPET,
+                    &WindowSize { window: WindowId(1), width: 128, height: 96, scale_factor: 1.0 },
+                ),
+            ),
             (
                 "subject",
                 HarnessOp::send_and_settle(

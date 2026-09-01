@@ -248,7 +248,7 @@ fn backquote_key_opens_console_overlay() {
             "size",
             HarnessOp::send_and_settle(
                 console_address(),
-                &WindowSize { window: TEST_WINDOW_ID, width: WINDOW_WIDTH, height: WINDOW_HEIGHT },
+                &WindowSize { window: TEST_WINDOW_ID, width: WINDOW_WIDTH, height: WINDOW_HEIGHT, scale_factor: 1.0 },
             ),
         )])
         .expect("window size");
@@ -289,7 +289,12 @@ fn editor_shell_exclusively_forwards_console_input_while_window_size_stays_direc
                 "size-direct-fanout",
                 HarnessOp::window_event(
                     TEST_WINDOW_ID,
-                    &WindowSize { window: TEST_WINDOW_ID, width: WINDOW_WIDTH, height: WINDOW_HEIGHT },
+                    &WindowSize {
+                        window: TEST_WINDOW_ID,
+                        width: WINDOW_WIDTH,
+                        height: WINDOW_HEIGHT,
+                        scale_factor: 1.0,
+                    },
                 ),
             ),
             (
@@ -327,7 +332,12 @@ fn markdown_command_output_renders_into_history_band() {
                 "size",
                 HarnessOp::send_and_settle(
                     console_address(),
-                    &WindowSize { window: TEST_WINDOW_ID, width: WINDOW_WIDTH, height: WINDOW_HEIGHT },
+                    &WindowSize {
+                        window: TEST_WINDOW_ID,
+                        width: WINDOW_WIDTH,
+                        height: WINDOW_HEIGHT,
+                        scale_factor: 1.0,
+                    },
                 ),
             ),
             ("settle", HarnessOp::advance(8)),
@@ -379,7 +389,12 @@ fn configured_font_override_renders_into_history_band() {
                 "size",
                 HarnessOp::send_and_settle(
                     console_address(),
-                    &WindowSize { window: TEST_WINDOW_ID, width: WINDOW_WIDTH, height: WINDOW_HEIGHT },
+                    &WindowSize {
+                        window: TEST_WINDOW_ID,
+                        width: WINDOW_WIDTH,
+                        height: WINDOW_HEIGHT,
+                        scale_factor: 1.0,
+                    },
                 ),
             ),
             ("settle", HarnessOp::advance(8)),

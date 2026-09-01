@@ -257,7 +257,7 @@ fn mounted_staged_at(
     harness
         .execute(vec![(
             "canvas",
-            HarnessOp::send_and_settle(PUPPET, &WindowSize { window: WindowId(0), width, height }),
+            HarnessOp::send_and_settle(PUPPET, &WindowSize { window: WindowId(0), width, height, scale_factor: 1.0 }),
         )])
         .expect("the canvas announcement settles");
 
