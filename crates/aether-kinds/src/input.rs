@@ -175,8 +175,10 @@ pub struct MouseMove {
 /// on every `WindowEvent::Resized` that isn't a zero-dimension minimize,
 /// and on `WindowEvent::ScaleFactorChanged` (dragging a window between
 /// displays of different density) so a cached value never goes stale.
-/// Headless and hub chassis never publish — they have no window; a
-/// synthetic window publishes `scale_factor: 1.0`. A client that needs to
+/// Headless and hub chassis never publish — they have no window. Neither
+/// does the synthetic harness window manager: it derives no size of its
+/// own, so a harness test injects whatever value it wants observed, and
+/// every in-tree one injects `scale_factor: 1.0`. A client that needs to
 /// map pixel-space input (e.g. `MouseMove`) to clip-space geometry
 /// subscribes to this kind and caches the latest value; the initial value
 /// arrives right after the component's auto-subscribe fires, without any
@@ -189,7 +191,7 @@ pub struct WindowSize {
     pub height: u32,
     /// Physical pixels per logical pixel, as the display reports it
     /// (winit's `Window::scale_factor`). `1.0` on a standard-density
-    /// display and from every synthetic window.
+    /// display, and in every in-tree harness injection.
     pub scale_factor: f32,
 }
 
