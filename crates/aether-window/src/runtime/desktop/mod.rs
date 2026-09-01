@@ -908,8 +908,10 @@ pub fn resolve_fullscreen(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::fmt::Debug;
     use std::sync::mpsc;
 
+    use aether_kinds::mouse_button;
     use aether_substrate::Registry;
     use aether_substrate::actor::native::SpawnError;
     use aether_substrate::actor::native::binding::NativeBinding;
@@ -1245,5 +1247,116 @@ mod tests {
         assert_eq!(dispatch.parent_mail, Some(parent));
         assert_eq!(dispatch.sender.addr, SourceAddr::Component(manager));
         assert_eq!(Key::decode_from_bytes(dispatch.payload.bytes()), Some(Key { window: WindowId(5), code: 41 }),);
+    }
+
+    /// A live window at a chosen display density, registered under winit's
+    /// dummy id so [`DesktopWindowCapabilityState::window_event`] — winit
+    /// event in, published kind out — can be driven without an event loop.
+    fn insert_scaled_window(
+        state: &mut DesktopWindowCapabilityState,
+        id: WindowId,
+        scale_factor: f32,
+    ) -> WinitWindowId {
+        insert_window(state, id, "main", false);
+        state.windows.get_mut(&id).expect("live window").scale_factor = scale_factor;
+        let winit_id = WinitWindowId::dummy();
+        state.winit_windows.insert(winit_id, id);
+        winit_id
+    }
+
+    /// The sole recorded publication of kind `K`, decoded.
+    fn sole_published<K: Kind + PartialEq + Debug>(recorded: &[OwnedDispatch]) -> K {
+        let mut matched = recorded.iter().filter(|dispatch| dispatch.kind == K::ID);
+        let dispatch = matched.next().unwrap_or_else(|| panic!("{} was published", K::NAME));
+        assert!(matched.next().is_none(), "{} was published exactly once", K::NAME);
+        K::decode_from_bytes(dispatch.payload.bytes()).unwrap_or_else(|| panic!("{} decodes", K::NAME))
+    }
+
+    // Tripwire: every pixel coordinate this translation publishes is a
+    // *physical* pixel, forwarded from winit unconverted, and the display
+    // density rides beside it on `WindowSize` rather than being folded into
+    // any of it. The mouse kinds documented themselves as logical for months
+    // while this arm cast winit's `PhysicalPosition` straight onto the wire,
+    // and a consumer that believed the docs and multiplied by `scale_factor`
+    // missed every hover target by exactly 2x on a 2x display
+    // (iamacoffeepot/aether#5509) — the docs were corrected, but nothing
+    // asserted the space, so the same drift could recur in either direction.
+    //
+    // The window here is at `2.0`, which is what makes the assertion bite: a
+    // conversion inserted anywhere between the winit event and the published
+    // kind moves the cursor's 400.0 to 200.0 or 800.0, and the resize's
+    // 1280x960 to 640x480 or 2560x1920. At the `1.0` every other window
+    // fixture uses, both spaces coincide and every such mistake passes.
+    #[test]
+    fn published_pixel_quantities_stay_in_winits_physical_space_on_a_scaled_display() {
+        use winit::dpi::PhysicalPosition;
+        use winit::event::{DeviceId, MouseButton as WinitMouseButton, MouseScrollDelta, TouchPhase};
+
+        let registry = Arc::new(Registry::new());
+        let (tx, rx) = mpsc::channel();
+        let subscriber = registry.register_inbox(
+            &boot_authority(),
+            "test.window.pixel-space",
+            Arc::new(move |dispatch: OwnedDispatch| {
+                dispatch.discharge();
+                tx.send(dispatch).expect("record published input");
+            }) as Arc<dyn InboxHandler>,
+        );
+        let binding =
+            Arc::new(NativeBinding::new_for_test(Arc::new(Mailer::new(Arc::clone(&registry))), MailboxId(0xA37E)));
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+
+        let mut state = test_state();
+        let id = WindowId(1);
+        let winit_id = insert_scaled_window(&mut state, id, 2.0);
+        for kind in [MouseMove::ID, MouseButton::ID, MouseWheel::ID, WindowSize::ID] {
+            state.subscribers.subscribe(&mut ctx, crate::WindowSelector::All, kind, subscriber);
+        }
+
+        let device_id = DeviceId::dummy();
+        state.window_event(
+            winit_id,
+            WindowEvent::CursorMoved { device_id, position: PhysicalPosition::new(400.0, 300.0) },
+            &mut ctx,
+        );
+        state.window_event(
+            winit_id,
+            WindowEvent::MouseInput { device_id, state: ElementState::Pressed, button: WinitMouseButton::Left },
+            &mut ctx,
+        );
+        state.window_event(
+            winit_id,
+            WindowEvent::MouseWheel {
+                device_id,
+                delta: MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, -120.0)),
+                phase: TouchPhase::Moved,
+            },
+            &mut ctx,
+        );
+        state.window_event(winit_id, WindowEvent::Resized(PhysicalSize::new(1280, 960)), &mut ctx);
+        drop(ctx);
+
+        let recorded = rx.try_iter().collect::<Vec<_>>();
+
+        assert_eq!(
+            sole_published::<MouseMove>(&recorded),
+            MouseMove { window: id, x: 400.0, y: 300.0 },
+            "the cursor reaches the wire at winit's physical position, unscaled",
+        );
+        assert_eq!(
+            sole_published::<MouseButton>(&recorded),
+            MouseButton { window: id, button: mouse_button::LEFT, x: 400.0, y: 300.0 },
+            "a click reports the same physical position the move published",
+        );
+        assert_eq!(
+            sole_published::<MouseWheel>(&recorded),
+            MouseWheel { window: id, delta_x: 0.0, delta_y: -120.0, x: 400.0, y: 300.0 },
+            "a wheel event's pixel delta and cursor position share that space",
+        );
+        assert_eq!(
+            sole_published::<WindowSize>(&recorded),
+            WindowSize { window: id, width: 1280, height: 960, scale_factor: 2.0 },
+            "the size is the physical one winit reported and the factor rides beside it",
+        );
     }
 }
