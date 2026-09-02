@@ -61,6 +61,26 @@
 //! reporting the count as [`TooltipShed`] so the host can word the tail. And
 //! [`TooltipConfig::hanging_indent_pixels`] insets the continuation rows of a
 //! wrapped line, so a two-row stat reads as one stat.
+//!
+//! # How a wrapped line and a paragraph differ
+//!
+//! Round-4 note 19: "the spaces after a line break are a bit weird. I think
+//! I'd prefer if it was aligned to the first line of text and then new
+//! paragraphs just had a break (empty line)." So the plate keeps two rules,
+//! and they are opposites on purpose:
+//!
+//! - A line that **wrapped** is one thought that ran out of measure. Its
+//!   continuation rows start flush with its first row — the kit's default,
+//!   [`TooltipConfig::hanging_indent_pixels`] at `0` — because a wrapped
+//!   sentence indented in the middle reads as a new item beginning.
+//! - A **new paragraph** is a new thought, and takes a blank row. A
+//!   [`TooltipLine`] with no words in it is exactly that blank row, and so is
+//!   a blank line inside one line's own text: `"first\n\nsecond"` is two
+//!   paragraphs with one empty row between them.
+//!
+//! Neither is a section: a [`TooltipSection`] boundary is a **rule**, which is
+//! round-2 note 24's answer and stays. A blank row divides two paragraphs of
+//! one block; a rule divides two blocks.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -126,6 +146,15 @@ pub struct TooltipSection {
     /// also the unit the shed ladder drops
     /// ([`TooltipConfig::max_height_pixels`]), so a plate out of room never
     /// ends a sentence halfway.
+    ///
+    /// A line with **no words in it is a paragraph break** and draws one empty
+    /// row (round-4 note 19), so a section whose lines are paragraphs is
+    /// written with the blanks in it:
+    /// `TooltipSection::new(["First.", "", "Second."])`. A blank at the very
+    /// top or bottom of the plate is dropped, the same rule
+    /// [`wrap_to_width_hanging`](crate::set::wrap_to_width_hanging) applies
+    /// inside one line — a break needs something on both sides of it to be
+    /// a break.
     pub lines: Vec<TooltipLine>,
 }
 
@@ -186,9 +215,13 @@ pub struct TooltipConfig {
     /// [`TooltipShed`] so the host can word the tail.
     #[serde(default)]
     pub max_height_pixels: f32,
-    /// How far the continuation rows of a wrapped line are inset. `0` (the
-    /// default) is a flush block; a hanging indent makes a two-row stat read
-    /// as one stat rather than as two lines that happen to be adjacent.
+    /// How far the continuation rows of a wrapped line are inset. `0` — the
+    /// default, and what the kit's own plates use — is a **flush** block: a
+    /// sentence that wrapped stays aligned with the row it started on, which
+    /// is what round-4 note 19 asked for. A hanging indent is the opt-in for
+    /// the one case that wants it: a list of stats, where an inset
+    /// continuation makes a two-row stat read as one stat rather than as two
+    /// lines that happen to be adjacent.
     #[serde(default)]
     pub hanging_indent_pixels: f32,
     /// The side of the anchor the plate prefers.
@@ -214,7 +247,8 @@ pub struct TooltipConfig {
 
 /// One wrapped row of the plate: the type role it is set at, the indent it
 /// starts at (zero, or the hanging indent on a continuation), and the ink the
-/// host asked for if it asked for one.
+/// host asked for if it asked for one. A row with no `text` is a paragraph
+/// break: it takes its line box and draws nothing in it.
 struct PlateLine {
     text: String,
     role: TextRole,
@@ -251,6 +285,13 @@ impl PlateLine {
 struct PlateEntry {
     section: usize,
     lines: Vec<PlateLine>,
+}
+
+impl PlateEntry {
+    /// Whether this entry is a paragraph break rather than words.
+    fn is_break(&self) -> bool {
+        self.lines.iter().all(|line| line.text.is_empty())
+    }
 }
 
 /// How many section boundaries a run of entries crosses — one rule each.
@@ -319,30 +360,46 @@ impl TooltipWidget {
     /// role or an ink of its own on that line. `TextRole::Title` is
     /// deliberately not used: that is the size a *screen's* one title is set
     /// at, and a 22-pixel line on a hover plate is a headline, not a name.
+    ///
+    /// A source line with no words in it is a **paragraph break** (round-4
+    /// note 19): it becomes one empty row, at the caption line box, rather
+    /// than vanishing. It is not the title even when it comes first, and a
+    /// break at either end of the plate is dropped — a break needs something
+    /// on both sides of it to be one.
     fn wrapped_entries(&self) -> Vec<PlateEntry> {
         let measure_width = self.wrap_width();
         let mut first_line = true;
-        let mut entries = Vec::new();
+        let mut entries: Vec<PlateEntry> = Vec::new();
         for (index, section) in self.sections.iter().enumerate() {
             for source in &section.lines {
-                let role = source.role.unwrap_or(if first_line {
+                let is_break = source.text.trim().is_empty();
+                let role = source.role.unwrap_or(if first_line && !is_break {
                     TextRole::Body
                 } else {
                     TextRole::Caption
                 });
-                first_line = false;
+                first_line = first_line && is_break;
                 let size = self.theme.text_size_pixels(role);
-                let lines: Vec<PlateLine> =
+                let mut lines: Vec<PlateLine> =
                     wrap_to_width_hanging(&source.text, measure_width, self.hanging_indent_pixels, |run| {
                         self.text_width(run, size)
                     })
                     .into_iter()
                     .map(|line| PlateLine { text: line.text, role, indent: line.indent_pixels, ink: source.ink })
                     .collect();
+                if is_break {
+                    lines = alloc::vec![PlateLine { text: String::new(), role, indent: 0.0, ink: source.ink }];
+                }
                 if !lines.is_empty() {
                     entries.push(PlateEntry { section: index, lines });
                 }
             }
+        }
+        while entries.first().is_some_and(PlateEntry::is_break) {
+            entries.remove(0);
+        }
+        while entries.last().is_some_and(PlateEntry::is_break) {
+            entries.pop();
         }
         entries
     }
@@ -442,15 +499,18 @@ impl TooltipWidget {
             for line in &entry.lines {
                 let size = line.size_pixels(&self.theme);
                 let line_height = line.height(&self.theme);
-                items.push(WidgetDrawItem::Text {
-                    x: left + pad + line.indent,
-                    y: text_origin_y(line_top, line_height, size),
-                    font_id: self.theme.font_id,
-                    text: line.text.clone(),
-                    size_pixels: size,
-                    color: line.ink(&self.theme),
-                    clip: None,
-                });
+                // A paragraph break takes its row and draws nothing in it.
+                if !line.text.is_empty() {
+                    items.push(WidgetDrawItem::Text {
+                        x: left + pad + line.indent,
+                        y: text_origin_y(line_top, line_height, size),
+                        font_id: self.theme.font_id,
+                        text: line.text.clone(),
+                        size_pixels: size,
+                        color: line.ink(&self.theme),
+                        clip: None,
+                    });
+                }
                 line_top += line_height;
             }
         }
@@ -692,6 +752,54 @@ mod tests {
             widget.text_width(&entry.lines[1].text, size) <= widget.wrap_width() - 12.0,
             "a continuation wraps that much earlier, so the right edge does not move",
         );
+    }
+
+    #[test]
+    fn a_blank_line_is_a_paragraph_break_worth_exactly_one_empty_row() {
+        // Tripwire: round-4 note 19 — "new paragraphs just had a break (empty
+        // line)". A blank line used to wrap to nothing and vanish, so a host
+        // that wrote its paragraphs with the breaks in them got one run-on
+        // block. The break has to cost one line box, draw nothing in it, and
+        // not become the plate's title by arriving first.
+        let run_on = tooltip(vec![section(&["Life", "Your health pool."])]);
+        let broken = tooltip(vec![section(&["Life", "", "Your health pool."])]);
+
+        let entries = broken.wrapped_entries();
+        assert_eq!(entries.len(), 3, "the break is an entry of its own: {:?}", entry_text(&broken));
+        assert!(entries[1].is_break());
+        assert_eq!(entries[1].lines.len(), 1, "one row, not two and not none");
+        assert_eq!(entries[0].lines[0].role, TextRole::Body, "the first words are still the name");
+        assert_eq!(entries[2].lines[0].role, TextRole::Caption);
+
+        let gap = entries[1].lines[0].height(&broken.theme);
+        assert_eq!(gap, broken.theme.caption_size_pixels * LINE_LEADING, "a break is one caption line box");
+        let grew = broken.plate_size(&entries)[1] - run_on.plate_size(&run_on.wrapped_entries())[1];
+        assert!((grew - gap).abs() < f32::EPSILON, "the plate grew by exactly that row: {grew} vs {gap}");
+        assert!(
+            broken
+                .overlay_items()
+                .0
+                .iter()
+                .all(|item| !matches!(item, WidgetDrawItem::Text { text, .. } if text.is_empty())),
+            "and the empty row draws no glyph run",
+        );
+
+        // A break inside one line's own text is the same break.
+        let inline = tooltip(vec![section(&["Life\n\nYour health pool."])]);
+        let inline_entries = inline.wrapped_entries();
+        assert_eq!(inline_entries.len(), 1, "one source line is still one shed unit");
+        assert_eq!(inline_entries[0].lines[1].text, "", "with an empty row between its paragraphs");
+    }
+
+    #[test]
+    fn a_break_at_either_end_of_the_plate_is_not_a_break() {
+        // Tripwire: the same rule `wrap_to_width_hanging` keeps inside one
+        // line. A blank at the top or the bottom is padding nobody asked for,
+        // and a leading one must not take the title's role with it.
+        let padded = tooltip(vec![section(&["", "Life", "A pool.", ""])]);
+        let entries = padded.wrapped_entries();
+        assert_eq!(entry_text(&padded), vec![String::from("Life"), String::from("A pool.")]);
+        assert_eq!(entries[0].lines[0].role, TextRole::Body, "the first words are the name, not the blank above it");
     }
 
     #[test]
