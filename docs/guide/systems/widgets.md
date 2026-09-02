@@ -449,7 +449,7 @@ row it explains.
 
 ## The toast region
 
-`ToastConfig { max_standing, lifetime_frames, theme, state }` spawns
+`ToastConfig { max_standing, lifetime_frames, role, theme, state }` spawns
 `ToastWidget` — the one place a refusal or a confirmation appears. Anything
 mails it `ToastNotice { severity, text }`, so a save result, a planner refusal,
 and a confirmation all arrive through the same door and land in the same place
@@ -462,6 +462,13 @@ bar** down its left edge: `theme.info` (a blue-grey report), `theme.warning`
 (orange), or `theme.error` (red), never the accent. The text wraps at the
 region's width with one spacing unit of padding and the plate grows downward —
 a notice is never elided, because a cut-off refusal says less than nothing.
+
+`role` is the step of the theme's type scale a notice's line is set at
+(`TextRole::Body` by default — the reading size the region drew at before the
+field existed). "Toast text can be larger" (round-4 note 15) is a theme fact,
+not a toast fact: the region names a role and the theme resolves the size, so
+one field moves the line box, the wrap measure, and the reported stack height
+together rather than leaving a larger line to overprint a body-sized box.
 
 A widget never sees a tick, so a notice's life is counted in **frames the root
 asked it to draw**: `lifetime_frames` `Collect`s (240 is four seconds at sixty
