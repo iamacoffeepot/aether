@@ -66,9 +66,17 @@ pub struct Theme {
     /// Alpha multiplier applied to a base color on
     /// [`ThemeState::Disabled`].
     pub disabled_alpha: f32,
-    /// Validation-warning outline role.
+    /// The neutral end of the severity scale — an informational notice, a
+    /// confirmation, a bar on a toast that reports rather than complains. A
+    /// cool blue-grey, so it reads as neither a warning nor something to
+    /// press. It exists because the three severities have to be *three*
+    /// colours: a notice drawn in the outline role is a notice nobody sees,
+    /// and one drawn in the accent claims to be the primary action.
+    pub info: Rgba,
+    /// Validation-warning outline role, and the warning end of the severity
+    /// scale a notice is coloured by.
     pub warning: Rgba,
-    /// Validation-error outline role.
+    /// Validation-error outline role, and the error end of that same scale.
     pub error: Rgba,
     /// The current item of a list, a tab strip, a segmented control, or
     /// a dropdown — a *state*, never an affordance. Distinct from
@@ -214,6 +222,9 @@ impl Theme {
         hover_overlay: Rgba::new(1.0, 1.0, 1.0, 0.08),
         pressed_overlay: Rgba::new(0.0, 0.0, 0.0, 0.12),
         disabled_alpha: 0.4,
+        // A cool blue-grey, well away from the warm accent: the severity a
+        // reader should read and not act on.
+        info: Rgba::from_srgb8(0x6b, 0x99, 0xcc, 0xff),
         warning: Rgba::from_srgb8(0xe2, 0xa8, 0x4a, 0xff),
         error: Rgba::from_srgb8(0xe0, 0x62, 0x58, 0xff),
         // `#3b4330` — the raised surface lifted toward the accent: a
