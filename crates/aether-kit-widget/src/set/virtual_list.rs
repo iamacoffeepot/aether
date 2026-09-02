@@ -19,6 +19,13 @@
 //! its viewport draws that many short rows and leaves the rest of the frame
 //! empty — it never spreads them to fill it, which would turn a two-item list
 //! into a pair of slabs and its selected row into a half-screen block.
+//!
+//! The list measures, like every other content-sized widget in the kit: it
+//! holds a [`FontMetricsAdapter`] and, once the theme font's advances land,
+//! elides a row too long for its frame with an ellipsis rather than letting
+//! the slot clip cut it mid-glyph (the studio's gap 17). The same
+//! metrics give the whole item vector's widest row, which the list reports as
+//! its intrinsic width so a column can be sized to what it holds.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -27,13 +34,19 @@ use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::keycode::{KEY_DOWN, KEY_PAGE_DOWN, KEY_PAGE_UP, KEY_UP};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease};
+use aether_text::FontMetricsResult;
 
 use crate::set::defaults::WidgetDefaults;
-use crate::set::{push_control_outlines, quad, release_left, reply_with_draw_items, text_origin_y};
+use crate::set::{
+    accept_font_metrics_result, apply_text_theme, elide_to_width, measured_text_width, pump_text_font_metrics,
+    push_control_outlines, quad, release_left, reply_if_hidden, text_origin_y,
+};
 use crate::state::{InteractionState, emit_state_changed};
-use crate::theme::{TextRole, Theme};
+use crate::text_edit::FontMetricsAdapter;
+use crate::theme::{SetTheme, TextRole, Theme};
 use crate::{
-    Collect, SetWidgetState, VirtualListConfig, VirtualListSelected, WidgetControlState, WidgetDrawItem, WidgetFrame,
+    Collect, SetWidgetState, VirtualListConfig, VirtualListSelected, WidgetControlState, WidgetDrawItem,
+    WidgetDrawList, WidgetFrame,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +83,16 @@ pub struct VirtualListWidget {
     frame: WidgetFrame,
     state: InteractionState,
     pressed: bool,
+    /// Single-flight exact metrics for the active theme font: a row is elided
+    /// to the width it actually has, and the list reports the widest row it
+    /// holds as its intrinsic width.
+    font_metrics: FontMetricsAdapter,
+    /// The widest measured row, remembered across frames. A virtual list
+    /// exists so that a frame never touches every item, and the intrinsic
+    /// width is the one number that has to — so it is measured once and
+    /// forgotten ([`VirtualListWidget::forget_measurements`]) whenever the
+    /// items, the font, or the theme's type size change under it.
+    widest_row_width: Option<f32>,
 }
 
 impl VirtualListWidget {
@@ -161,6 +184,62 @@ impl VirtualListWidget {
         (row_offset < window.len()).then(|| window.first_index + row_offset)
     }
 
+    /// Drop the cached row measurement. Called wherever the items, the font,
+    /// or the type scale change, which is every input the measurement has.
+    fn forget_measurements(&mut self) {
+        self.widest_row_width = None;
+    }
+
+    /// The width a row's text actually has: the frame less one `pad` at each
+    /// end, so an elided row does not touch the list's right edge.
+    fn text_width_budget(&self) -> f32 {
+        self.theme.pad.mul_add(-2.0, self.frame.width).max(0.0)
+    }
+
+    /// One line as it will be drawn: elided to the row's own width with an
+    /// [`ELLIPSIS`](crate::set::ELLIPSIS) once the theme font's metrics
+    /// resolve, whole before that. The slot clip still bounds the row either
+    /// way — this is what stops the clip from being the *first* thing that
+    /// cuts, because a hard clip cuts mid-glyph and an ellipsis says a name
+    /// was too long.
+    fn fitted_text(&self, text: &str, size_pixels: f32) -> String {
+        self.font_metrics.resolved().map_or_else(
+            || String::from(text),
+            |metrics| {
+                elide_to_width(text, self.text_width_budget(), |run| measured_text_width(metrics, run, size_pixels))
+            },
+        )
+    }
+
+    /// The `[width, height]` this list asks a layout for: the widest row it
+    /// holds plus one `pad` either side, by the configured row height times
+    /// the configured viewport. `None` until the font's metrics resolve, and
+    /// for a list with no rows to measure — a slot sized from a guess would
+    /// resize the moment the real advances landed.
+    fn intrinsic(&mut self) -> Option<[f32; 2]> {
+        let widest = self.widest_row_width()?;
+        #[allow(clippy::cast_precision_loss)] // a viewport of rows a reader could scroll cannot lose precision
+        let height = self.theme.row_height * self.visible_row_count as f32;
+        let width = self.theme.pad.mul_add(2.0, widest);
+        (width.is_finite() && height.is_finite()).then_some([width, height])
+    }
+
+    /// The widest row in the whole item vector, measured once per change to
+    /// the items or the font and cached.
+    fn widest_row_width(&mut self) -> Option<f32> {
+        if let Some(widest) = self.widest_row_width {
+            return Some(widest);
+        }
+        let metrics = self.font_metrics.resolved()?;
+        if self.items.is_empty() {
+            return None;
+        }
+        let size = self.theme.label_size_pixels;
+        let widest = self.items.iter().map(|item| measured_text_width(metrics, item, size)).fold(0.0_f32, f32::max);
+        self.widest_row_width = Some(widest);
+        Some(widest)
+    }
+
     /// The empty state: one caption-role, muted line at the top of the
     /// viewport. A list with nothing in it reads as told-you-so rather than as
     /// a control that failed to draw.
@@ -173,7 +252,7 @@ impl VirtualListWidget {
             x: self.theme.pad,
             y: text_origin_y(0.0, self.theme.row_height.min(self.frame.height), size),
             font_id: self.theme.font_id,
-            text: self.empty_text.clone(),
+            text: self.fitted_text(&self.empty_text, size),
             size_pixels: size,
             color: self.theme.fill(self.theme.text_muted, self.state.supporting_theme_state(false)),
             clip: None,
@@ -219,7 +298,7 @@ impl VirtualListWidget {
                 x: self.theme.pad,
                 y: text_origin_y(row_y, row_height, self.theme.label_size_pixels),
                 font_id: self.theme.font_id,
-                text: item.clone(),
+                text: self.fitted_text(item, self.theme.label_size_pixels),
                 size_pixels: self.theme.label_size_pixels,
                 color: self.theme.fill(text_base, self.state.supporting_theme_state(false)),
                 clip: None,
@@ -261,6 +340,7 @@ impl WasmActor for VirtualListWidget {
     const NAMESPACE: &'static str = "aether.kit.widget.virtual_list";
 
     fn init(config: VirtualListConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        let font_id = config.theme.font_id;
         let visible_row_count = usize_from_u32(config.visible_row_count);
         let selected_index = initial_selection(config.initial_selected_index, config.items.len());
         let first_index = selected_index.map_or(0, |selected_index| {
@@ -276,7 +356,15 @@ impl WasmActor for VirtualListWidget {
             frame: WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
             state: InteractionState::new(config.state),
             pressed: false,
+            font_metrics: FontMetricsAdapter::new(font_id),
+            widest_row_width: None,
         })
+    }
+
+    /// Ask for the theme font's metrics; rows are elided against real
+    /// advances as soon as there are any (inline children run `wire`).
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+        pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
 
     #[handler::single]
@@ -287,8 +375,28 @@ impl WasmActor for VirtualListWidget {
         self.selected_index = initial_selection(config.initial_selected_index, self.items.len());
         self.first_index = 0;
         self.reveal_selection();
+        self.font_metrics.set_desired(config.theme.font_id);
         self.theme = config.theme;
+        self.forget_measurements();
         self.apply_control_state(ctx, config.state);
+        pump_text_font_metrics(ctx, &mut self.font_metrics);
+    }
+
+    /// Restyle: adopt the fanned theme and request metrics for its font. The
+    /// list declares this rather than adopting the shared default, because a
+    /// new font or type size invalidates every row it measured.
+    #[handler::single]
+    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
+        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
+        self.forget_measurements();
+    }
+
+    /// Install a font-metrics reply; the next `Collect` elides and measures
+    /// against real advances.
+    #[handler::single]
+    fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
+        accept_font_metrics_result(ctx, &mut self.font_metrics, result);
+        self.forget_measurements();
     }
 
     #[handler::single]
@@ -331,9 +439,18 @@ impl WasmActor for VirtualListWidget {
         }
     }
 
+    /// Reply the realized rows, each elided to the width it has, plus the
+    /// intrinsic the widest row asks for.
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        reply_with_draw_items(ctx, &self.state, || self.draw_items());
+        if reply_if_hidden(ctx, &self.state) {
+            return;
+        }
+        let intrinsic = self.intrinsic();
+        let items = self.draw_items();
+        if let Some(parent) = ctx.parent() {
+            parent.send(&WidgetDrawList { intrinsic, items, overlay: Vec::new() });
+        }
     }
 }
 
@@ -407,8 +524,10 @@ fn valid_frame(frame: &WidgetFrame) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::set::ELLIPSIS;
     use crate::theme::ThemeState;
     use crate::{WidgetDrawItem, WidgetValidation};
+    use aether_kinds::{CachedFontMetrics, FontMetrics};
     use alloc::format;
     use alloc::vec;
 
@@ -425,7 +544,37 @@ mod tests {
             frame: WidgetFrame { x: 10.0, y: 20.0, width: 100.0, height: 120.0 },
             state: InteractionState::new(WidgetControlState::default()),
             pressed: false,
+            font_metrics: FontMetricsAdapter::new(Theme::DEFAULT.font_id),
+            widest_row_width: None,
         }
+    }
+
+    /// The same list with a resolved metric table whose every glyph advances
+    /// half an em, so a row's width is `chars * size / 2` — exact without
+    /// depending on a real font file.
+    fn measured_list(item_count: usize, visible_row_count: usize) -> VirtualListWidget {
+        let mut widget = list(item_count, visible_row_count, 0);
+        widget.font_metrics.take_pending_request();
+        widget.font_metrics.accept_reply(Some(CachedFontMetrics::new(&FontMetrics {
+            units_per_em: 1000.0,
+            ascent: 800.0,
+            descent: -200.0,
+            line_gap: 0.0,
+            default_advance: 500.0,
+            advances: Vec::new(),
+        })));
+        widget
+    }
+
+    fn row_text(widget: &VirtualListWidget) -> Vec<String> {
+        widget
+            .draw_items()
+            .into_iter()
+            .filter_map(|item| match item {
+                WidgetDrawItem::Text { text, .. } => Some(text),
+                WidgetDrawItem::Quad { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+            })
+            .collect()
     }
 
     #[test]
@@ -587,6 +736,55 @@ mod tests {
 
         widget.selected_index = None;
         assert!(row_fills(&widget).iter().all(|color| *color == widget.theme.surface_raised));
+    }
+
+    #[test]
+    fn a_row_too_long_for_the_frame_is_elided_and_only_once_the_font_resolves() {
+        // Tripwire: an unmeasured row must draw whole — the slot clip is the
+        // fallback, and eliding against a guessed advance would cut a name
+        // that fits. Once the advances land the row is cut to the frame less
+        // one pad each side, with the mark inside that budget.
+        let long = String::from("a name far too long for this narrow list");
+        let mut unmeasured = list(1, 5, 0);
+        unmeasured.items = alloc::vec![long.clone()];
+        assert_eq!(row_text(&unmeasured), alloc::vec![long.clone()], "no metrics, no elision");
+
+        let mut widget = measured_list(1, 5);
+        widget.items = alloc::vec![long];
+        let drawn = row_text(&widget);
+        assert!(drawn[0].ends_with(ELLIPSIS), "the cut row says it was cut: {drawn:?}");
+        let size = widget.theme.label_size_pixels;
+        let metrics = widget.font_metrics.resolved().expect("the test table is installed");
+        assert!(
+            measured_text_width(metrics, &drawn[0], size) <= widget.text_width_budget(),
+            "and the mark is inside the budget, not appended past it: {drawn:?}",
+        );
+    }
+
+    #[test]
+    fn the_intrinsic_width_is_the_widest_row_in_the_whole_vector_plus_a_pad_each_side() {
+        // Tripwire: the intrinsic must measure the *items*, not the realized
+        // window — a width that changed as the reader scrolled would resize
+        // the column under them. It is also the one thing here that touches
+        // every item, so it is cached until an input to it changes.
+        let mut widget = measured_list(40, 5);
+        widget.items[17] = String::from("the widest row of them all");
+        widget.forget_measurements();
+
+        let size = widget.theme.label_size_pixels;
+        let expected = {
+            let metrics = widget.font_metrics.resolved().expect("the test table is installed");
+            widget.theme.pad.mul_add(2.0, measured_text_width(metrics, &widget.items[17], size))
+        };
+        let [width, height] = widget.intrinsic().expect("a measured, non-empty list reports an intrinsic");
+        assert!((width - expected).abs() < f32::EPSILON, "{width} is not the widest row plus a pad each side");
+        assert_eq!(height, widget.theme.row_height * 5.0, "the height is the configured viewport, not the item count");
+
+        widget.first_index = 30;
+        assert_eq!(widget.intrinsic().map(|size| size[0]), Some(width), "scrolling past the widest row keeps it");
+
+        assert_eq!(list(40, 5, 0).intrinsic(), None, "an unmeasured list asks for nothing");
+        assert_eq!(measured_list(0, 5).intrinsic(), None, "and neither does one with no rows to measure");
     }
 
     #[test]

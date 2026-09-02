@@ -234,6 +234,30 @@ into a pair of slabs, with a selected row half the viewport high.) Hidden lists
 answer every `Collect` with an empty draw list; disabled and read-only lists
 reject both pointer and keyboard selection changes.
 
+The list measures its rows. Like the label and the tooltip it drives the
+single-flight `FontMetricsRequest`, and once the advances land a row too long
+for its frame is **elided** — cut on a character boundary with an ellipsis
+(`set::elide_to_width`, `set::ELLIPSIS`) that fits inside the frame less one
+`pad` at each end. Before the metrics arrive a row draws whole and the slot
+clip bounds it as it always did; the clip stays the backstop either way, but it
+cuts mid-glyph, which reads as a name that ends oddly rather than as a name
+that was too long. The same helper is public, so a consumer cutting its own
+row uses the kit's rule:
+
+```rust
+use aether_kit_widget::set::elide_to_width;
+
+let shown = elide_to_width(name, column_width, |run| measure(run));
+```
+
+Those metrics also give the list its `WidgetDrawList::intrinsic`: `[widest row
+in the whole item vector + 2 × pad, theme.row_height × visible_row_count]`. It
+measures the items, not the realized window, so the width does not change as
+the reader scrolls — and because that is the one thing here that touches every
+item, it is measured once and re-measured only when the items, the font, or the
+type scale change. It is `None` until the metrics resolve and for a list with
+no rows.
+
 `initial_selected_index` is an `Option`, and a list whose model holds no
 current item shows none — no row lights up, rather than the first row lighting
 as if it had been chosen. The selected row, when there is one, fills with
