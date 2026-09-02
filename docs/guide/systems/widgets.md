@@ -653,7 +653,15 @@ no surface of its own; the button under the pointer, or held down, composites
 its hover or pressed overlay over the control's own fill, so it lights up as
 that surface lifted rather than as a separate element. A press steps by `step`
 through the same clamp, snap, and commit path Up/Down use, so the two routes
-cannot drift. The value text stays left-aligned at one `pad`, the text box
+cannot drift. A button **held down** keeps stepping: after half a second
+(30 `Collect`s) it repeats ten times a second, and the repeat stops the moment
+the button is released or the pointer slides off it. A held arrow *key* does
+the same by doing nothing at all — the platform's key repeat arrives as
+repeated `aether.key` presses and the step path holds no arm, unlike the button
+and the toggle, which arm a key precisely so a repeat cannot fire a second
+click (round-4 note 14). The key's cadence is the platform's; the button's is
+the widget's, counted in the frames the root asks it to draw, the same clock
+the toast region ages its notices by. The value text stays left-aligned at one `pad`, the text box
 shrinks by the column, and the column never takes more than half the frame — a
 numeric too narrow for both stays a value rather than becoming two arrows. A
 read-only or disabled numeric has no live stepper targets.
