@@ -1101,7 +1101,7 @@ mod tests {
         // goes on saying how much is off screen.
         let widget = list(100_000, 5, 0);
         let bar = widget.scroll_bar().expect("bar");
-        assert!((bar.thumb_height - bar.width * MIN_THUMB_RATIO).abs() < f32::EPSILON, "{bar:?}");
+        assert!(bar.width.mul_add(-MIN_THUMB_RATIO, bar.thumb_height).abs() < f32::EPSILON, "{bar:?}");
         assert!(bar.thumb_height < bar.height, "and it is still a thumb inside a track, not the whole track");
     }
 
@@ -1127,7 +1127,7 @@ mod tests {
         let bar = widget.scroll_bar().expect("bar");
         widget.press_scroll_bar(bar, bar.thumb_height * 0.5);
         assert_eq!(widget.first_index, 0, "grabbing the thumb where it stands moves nothing");
-        widget.drag_thumb(bar.thumb_height * 0.5 + bar.travel());
+        widget.drag_thumb(bar.thumb_height.mul_add(0.5, bar.travel()));
         assert_eq!(widget.first_index, 195, "and dragging it the length of the track reaches the end");
 
         widget.thumb_grab_pixels = None;
