@@ -78,7 +78,7 @@ pub use image::ImageWidget;
 pub use label::LabelWidget;
 pub use menu_bar::MenuBarWidget;
 pub use numeric::NumericWidget;
-pub use placement::{PlacementBounds, PlacementSide, place_plate};
+pub use placement::{PlacementBounds, PlacementSide, place_plate, place_plate_avoiding};
 pub use popover::Popover;
 pub use radio::RadioGroupWidget;
 pub use segmented::SegmentedWidget;
@@ -89,7 +89,7 @@ pub use text_area::TextAreaWidget;
 pub use text_field::TextFieldWidget;
 pub use toast::{ToastConfig, ToastNotice, ToastRegionChanged, ToastSeverity, ToastWidget};
 pub use toggle::ToggleWidget;
-pub use tooltip::{TooltipConfig, TooltipSection, TooltipWidget};
+pub use tooltip::{TooltipConfig, TooltipLine, TooltipSection, TooltipShed, TooltipWidget};
 pub use virtual_list::VirtualListWidget;
 
 use alloc::string::String;
@@ -909,6 +909,61 @@ pub fn reveal_wrap_width(size_pixels: f32) -> f32 {
     approx_text_width(REVEAL_WRAP_CHARS, size_pixels)
 }
 
+/// The mark a run that did not fit ends with. One character, not three dots:
+/// three dots is a sentence's own punctuation and reads as one where the text
+/// happens to end in prose.
+pub const ELLIPSIS: char = '…';
+
+/// `text` cut to the widest whole-character prefix that still leaves room for
+/// an [`ELLIPSIS`] inside `max_width`, or `text` itself when it already fits.
+/// `measure` reports the pixel width of a candidate, the same contract
+/// [`wrap_to_width`] takes.
+///
+/// This is what a row cut by a clip is missing (the list's gap 17): a clip
+/// slices the glyph the boundary lands on, so a name that did not fit looks
+/// like a name that ends oddly, while an ellipsis says a name was cut. The cut
+/// is always on a character boundary — never inside a `char`, and never inside
+/// a glyph, because the last kept character is the last one measured to fit.
+///
+/// A `max_width` too narrow for even the ellipsis yields the empty string:
+/// there is no honest mark to draw in a column that narrow, and drawing one
+/// anyway would be the only thing in the row.
+#[must_use]
+pub fn elide_to_width(text: &str, max_width: f32, measure: impl Fn(&str) -> f32) -> String {
+    if !max_width.is_finite() || measure(text) <= max_width {
+        return String::from(text);
+    }
+    let with_ellipsis = |kept: &str| {
+        let mut candidate = String::with_capacity(kept.len() + ELLIPSIS.len_utf8());
+        candidate.push_str(kept);
+        candidate.push(ELLIPSIS);
+        candidate
+    };
+    let boundaries: Vec<usize> = text.char_indices().map(|(byte, _)| byte).collect();
+    let Some(last) = boundaries.len().checked_sub(1) else {
+        return String::new();
+    };
+
+    // The widest prefix that fits, by bisection over character counts: the
+    // whole run is already known not to fit, and fitting is monotone in the
+    // count, so this is `log n` measures rather than one per character.
+    let (mut low, mut high) = (0usize, last);
+    let mut best = None;
+    while low <= high {
+        let mid = low + (high - low) / 2;
+        let candidate = with_ellipsis(&text[..boundaries[mid]]);
+        if measure(&candidate) <= max_width {
+            best = Some(candidate);
+            low = mid + 1;
+        } else if mid == 0 {
+            break;
+        } else {
+            high = mid - 1;
+        }
+    }
+    best.unwrap_or_default()
+}
+
 /// Break `text` into lines no wider than `max_width`, splitting only between
 /// words. `measure` reports the pixel width of a candidate line, so a caller
 /// wraps against whatever it will actually draw with — exact glyph advances
@@ -921,9 +976,43 @@ pub fn reveal_wrap_width(size_pixels: f32) -> f32 {
 /// respect it reads far worse than one long line.
 #[must_use]
 pub fn wrap_to_width(text: &str, max_width: f32, measure: impl Fn(&str) -> f32) -> Vec<String> {
-    let mut lines = Vec::new();
+    wrap_to_width_hanging(text, max_width, 0.0, measure).into_iter().map(|line| line.text).collect()
+}
+
+/// One line [`wrap_to_width_hanging`] produced, with the indent it is drawn
+/// at: `0.0` for the first line of a paragraph, the hanging indent for every
+/// continuation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WrappedLine {
+    pub indent_pixels: f32,
+    pub text: String,
+}
+
+/// [`wrap_to_width`] with a **hanging indent**: the first line of a paragraph
+/// starts at the margin and every continuation is inset by `indent_pixels`,
+/// wrapping that much earlier so the right edge stays where it was. A wrapped
+/// entry then reads as one entry rather than as two — which is what a stat
+/// line on a hover card needs, and is ordinary typography (the studio's
+/// gap 18).
+///
+/// `0.0` is exactly [`wrap_to_width`]. A `\n` starts a new paragraph, so the
+/// line after an author's own break is a first line again, not a continuation.
+#[must_use]
+pub fn wrap_to_width_hanging(
+    text: &str,
+    max_width: f32,
+    indent_pixels: f32,
+    measure: impl Fn(&str) -> f32,
+) -> Vec<WrappedLine> {
+    let indent = if indent_pixels.is_finite() {
+        indent_pixels.max(0.0)
+    } else {
+        0.0
+    };
+    let mut lines: Vec<WrappedLine> = Vec::new();
     for paragraph in text.split('\n') {
         let mut line = String::new();
+        let mut first = true;
         for word in paragraph.split_whitespace() {
             if line.is_empty() {
                 line.push_str(word);
@@ -933,20 +1022,40 @@ pub fn wrap_to_width(text: &str, max_width: f32, measure: impl Fn(&str) -> f32) 
             candidate.push_str(&line);
             candidate.push(' ');
             candidate.push_str(word);
-            if measure(&candidate) <= max_width {
+            let budget = if first {
+                max_width
+            } else {
+                max_width - indent
+            };
+            if measure(&candidate) <= budget {
                 line = candidate;
             } else {
-                lines.push(mem::replace(&mut line, String::from(word)));
+                lines.push(WrappedLine {
+                    indent_pixels: if first {
+                        0.0
+                    } else {
+                        indent
+                    },
+                    text: mem::replace(&mut line, String::from(word)),
+                });
+                first = false;
             }
         }
-        lines.push(line);
+        lines.push(WrappedLine {
+            indent_pixels: if first {
+                0.0
+            } else {
+                indent
+            },
+            text: line,
+        });
     }
     // A trailing empty line is the split's artifact, not an author's break;
     // one leading/trailing blank would otherwise pad every plate.
-    while lines.last().is_some_and(String::is_empty) {
+    while lines.last().is_some_and(|line| line.text.is_empty()) {
         lines.pop();
     }
-    while lines.first().is_some_and(String::is_empty) {
+    while lines.first().is_some_and(|line| line.text.is_empty()) {
         lines.remove(0);
     }
     lines
@@ -1067,6 +1176,24 @@ mod tests {
     #[allow(clippy::cast_precision_loss)]
     fn mono(run: &str) -> f32 {
         run.chars().count() as f32 * MONO_ADVANCE
+    }
+
+    #[test]
+    fn a_run_is_cut_on_a_character_boundary_with_room_kept_for_the_ellipsis() {
+        // Tripwire: the ellipsis has to be *inside* the budget, not appended
+        // past it — a cut that ignores the mark's own width is a row that
+        // still overflows, only now by one glyph. And the cut must land on a
+        // character boundary, which for a multi-byte run is the difference
+        // between an elision and a panic.
+        assert_eq!(elide_to_width("abcdef", 100.0, mono), "abcdef", "a run that fits is untouched");
+        assert_eq!(elide_to_width("abcdef", 50.0, mono), "abcd…", "four characters plus the mark is five");
+        assert_eq!(elide_to_width("abcdef", 15.0, mono), "…", "only the mark fits");
+        assert_eq!(elide_to_width("abcdef", 5.0, mono), "", "not even the mark fits, so nothing is drawn");
+        assert_eq!(elide_to_width("", 5.0, mono), "", "an empty run measures zero and is returned whole");
+
+        let wide = elide_to_width("→→→→→→", 40.0, mono);
+        assert_eq!(wide, "→→→…", "a multi-byte run is cut between characters");
+        assert!(wide.ends_with(ELLIPSIS));
     }
 
     /// A reveal over a 100-pixel-wide, 24-pixel-tall slot.

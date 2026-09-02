@@ -170,9 +170,20 @@ impl Popover {
     /// should not have to learn a second "this is standing over the screen"
     /// look. Empty while it is closed.
     ///
-    /// Put these in the root's **overlay**, not its chrome: chrome flattens
-    /// *before* the children, which is the wrong end for something that
-    /// stands over them.
+    /// Put these in the root's **overlay** —
+    /// [`Composite::extend_overlay`](crate::composite::Composite::extend_overlay),
+    /// not `extend_chrome`: chrome flattens *before* the children, which is
+    /// the wrong end for something that stands over them.
+    ///
+    /// Then raise the popover's own children into the same lane with
+    /// [`Composite::set_slot_overlay`](crate::composite::Composite::set_slot_overlay)
+    /// while it is open. A popover's controls are ordinary widgets of the root
+    /// — that is the whole reason this is a module and not a widget — and
+    /// ordinary draws are exactly what an overlay fill cuts text out from
+    /// under, so a plate whose children stayed in the ordinary lane would
+    /// paint over its own buttons and delete their labels. Plate and children
+    /// in one lane is the group; the root's clip subtraction then reaches only
+    /// the primary content the popover is standing over.
     #[must_use]
     pub fn plate_items(&self, theme: &Theme) -> Vec<WidgetDrawItem> {
         let Some(plate) = self.plate.map(PlacementBounds::sane) else {

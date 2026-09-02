@@ -136,6 +136,13 @@ the label draws at the start rather than at a guessed width. A run wider than
 its frame also stays flush left, so overflow clips at the slot's right edge
 instead of pushing the head of the string out of view.
 
+The label reports that measured run as its `WidgetDrawList::intrinsic` —
+`[measured width, theme.row_height]`, with no pad either side because a label
+reserves none — so a layout can size a column to the words it holds instead of
+to a share of the row. Like the button's, it is `None` until the theme font's
+metrics resolve; a slot sized from a guess would resize the moment the real
+advances arrived.
+
 Clipped text is readable on hover. When a label's or a text field's run is
 wider than the frame it lives in and the pointer is over it, the widget raises
 the whole run on an overlay plate: `surface_raised` with a one-pixel `outline`
@@ -227,6 +234,30 @@ into a pair of slabs, with a selected row half the viewport high.) Hidden lists
 answer every `Collect` with an empty draw list; disabled and read-only lists
 reject both pointer and keyboard selection changes.
 
+The list measures its rows. Like the label and the tooltip it drives the
+single-flight `FontMetricsRequest`, and once the advances land a row too long
+for its frame is **elided** — cut on a character boundary with an ellipsis
+(`set::elide_to_width`, `set::ELLIPSIS`) that fits inside the frame less one
+`pad` at each end. Before the metrics arrive a row draws whole and the slot
+clip bounds it as it always did; the clip stays the backstop either way, but it
+cuts mid-glyph, which reads as a name that ends oddly rather than as a name
+that was too long. The same helper is public, so a consumer cutting its own
+row uses the kit's rule:
+
+```rust
+use aether_kit_widget::set::elide_to_width;
+
+let shown = elide_to_width(name, column_width, |run| measure(run));
+```
+
+Those metrics also give the list its `WidgetDrawList::intrinsic`: `[widest row
+in the whole item vector + 2 × pad, theme.row_height × visible_row_count]`. It
+measures the items, not the realized window, so the width does not change as
+the reader scrolls — and because that is the one thing here that touches every
+item, it is measured once and re-measured only when the items, the font, or the
+type scale change. It is `None` until the metrics resolve and for a list with
+no rows.
+
 `initial_selected_index` is an `Option`, and a list whose model holds no
 current item shows none — no row lights up, rather than the first row lighting
 as if it had been chosen. The selected row, when there is one, fills with
@@ -316,8 +347,9 @@ not a menu.
 
 ## Tooltips
 
-`TooltipConfig { sections, max_width_pixels, side, bounds, theme, state }`
-spawns `TooltipWidget` — the anchored plate that says what the thing under the
+`TooltipConfig { sections, max_width_pixels, max_height_pixels,
+hanging_indent_pixels, side, avoid, bounds, theme, state }` spawns
+`TooltipWidget` — the anchored plate that says what the thing under the
 pointer *is*. The widget's assigned `WidgetFrame` is the **anchor**: a host
 points a tooltip at a row by handing it that row's rectangle, and the plate
 stands beside it, in the widget's overlay so the rows under it stay readable.
@@ -337,6 +369,40 @@ explained and takes `TextRole::Body` in `text_primary`; every line after it is
 used — that is the size a screen's one title is set at, and a 22-pixel line on
 a hover plate is a headline.
 
+A section's lines are `TooltipLine { text, role, ink }`, both options `None`
+for that rule. `TooltipSection::new(["Life", "Your health pool."])` takes plain
+strings (`TooltipLine: From<String> + From<&str>`), so a host that only has
+words writes only words. The escapes are for the distinctions a role cannot
+carry, because a role carries one ink: which line of a card the reader's search
+matched, or which stat is not being counted. Set `ink` on those lines and leave
+the rest alone.
+
+A hover card over a canvas needs three more things, and they are the remaining
+fields:
+
+- **`avoid`** — rectangles the plate would rather not cover, in the anchor's
+  window pixels. `place_plate_avoiding` tries all four sides under the usual
+  flip-and-clamp and takes the one covering the least of them, with **the first
+  entry outranking the rest**: a card gets clear of the thing it is about — the
+  hovered node, which is what keeps it attached — before it weighs any other
+  obstacle. Ties keep the preferred side, and an empty `avoid` is exactly
+  `place_plate`. Nothing guarantees a clear placement; a plate bigger than the
+  gaps covers something whichever side it takes, and the least-covering side is
+  the honest answer.
+- **`max_height_pixels`** — the tallest the plate may stand (`0` is no budget).
+  Over it the plate **sheds**: it drops trailing whole entries — one source
+  line, wrapped rows and all — until it fits, so a reader never gets a stat
+  ending in "per". A section left with nothing takes its rule with it, and a
+  budget nothing fits in sheds everything and draws no plate. The count goes up
+  as `TooltipShed { dropped }` whenever it changes, so the host — the only one
+  that knows what the dropped entries said — can word the tail or re-send a
+  shorter card. Re-sending the config resets the count, so the next frame
+  reports the new card's tail.
+- **`hanging_indent_pixels`** — how far the continuation rows of a wrapped line
+  are inset (`0` is a flush block). Continuations wrap that much earlier, so
+  the right edge does not move, and a two-row stat reads as one stat.
+  `set::wrap_to_width_hanging` is the same rule as a public helper.
+
 `side` is the side of the anchor the plate prefers and `bounds` is the region
 it must stay inside, in the same window pixels the frame is assigned in. A
 plate that would run past those bounds **flips to the other side of the
@@ -351,8 +417,10 @@ says the pointer has rested long enough, and flips it back when the pointer
 moves on. A tooltip with no sections likewise draws nothing. There is
 deliberately no third `shown` field — the dwell, the row, and the words are all
 the host's knowledge, and the widget takes the finished lines and nothing else.
-The tooltip reports nothing up and is neither pointer- nor focus-eligible: a
-plate that took hover would steal it from the row it explains.
+The tooltip reports no *value* up — `TooltipShed` is the one thing it says, and
+it is about the plate, not about what the plate means — and it is neither
+pointer- nor focus-eligible: a plate that took hover would steal it from the
+row it explains.
 
 ## The toast region
 
@@ -455,10 +523,13 @@ what the module holds:
 - **What it looks like.** `Popover::plate_items(&theme)` is a `surface_raised`
   fill inside a one-pixel `outline` ring — the plate a dropdown's list and a
   menu's items already wear, so a reader learns one "this stands over the
-  screen" look. Put those items in the root's **overlay**, never its chrome:
-  chrome flattens before the children, which is the wrong end for something
-  that stands over them, and the overlay is what the root's clip subtraction
-  cuts the covered text out from under.
+  screen" look. Put those items in the root's **overlay**
+  (`Composite::extend_overlay`), never its chrome: chrome flattens before the
+  children, which is the wrong end for something that stands over them, and
+  the overlay is what the root's clip subtraction cuts the covered text out
+  from under. Raise the popover's own children into that same lane with
+  `Composite::set_slot_overlay(child, true)` while it is open — see [the
+  overlay lane](#root-owned-focus-and-input) below.
 - **When it goes away.** `Popover::press(x, y)` dismisses on a press outside
   the plate and reports `true` so the root consumes that press instead of also
   delivering it to whatever was under it; a press on the plate reports `false`
@@ -713,7 +784,27 @@ bar's plate — puts those draws in `WidgetDrawList::overlay` instead of
 offset by each slot origin on the way up like any other draw but never
 intersected with the slot clip, and the root emits the whole cluster's overlay
 after every ordinary quad and glyph, so the list escapes its one-row slot and
-lands over the widgets below it. Its counterpart on the input side is the
+lands over the widgets below it.
+
+A *root* reaches the same lane two ways, for the plate that hosts other
+children rather than escaping its own slot. `Composite::extend_overlay(items)`
+is the overlay's counterpart to `extend_chrome` — the node's own draws, laid
+down before any slot's — and `Composite::set_slot_overlay(child, true)` moves
+one registered slot's ordinary `items` into the overlay, keeping its origin,
+its slot clip, and its place in registration order. Together they make a
+**group**: a popover's plate through `extend_overlay`, its children through
+`set_slot_overlay` while it is open, flattened plate-first in layout order.
+
+That grouping is what the clip subtraction reads. The root cuts ordinary text
+out from under overlay fills once, per lane — the ordinary items against the
+overlay's fills, the overlay's items against nothing — so a plate hides the
+primary content it stands over and can never delete the labels of the children
+standing on it. Within one lane fills are simply under glyphs, as everywhere
+else in the kit. There is no layer number and no z-index on any draw kind: the
+group is a set of slots the root already ordered, and the lane is the two-step
+order the root already emits in.
+
+The overlay's counterpart on the input side is the
 **modal pointer grab**: `Focus::begin_grab(child)` routes every pointer event
 to that child until `end_grab`, outranking drag capture, and hover edges are
 suppressed while it holds so nothing under the overlay lights up. The widget

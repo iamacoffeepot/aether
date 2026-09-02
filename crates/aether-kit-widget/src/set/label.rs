@@ -23,6 +23,10 @@
 //! label its text does not fit: a run wider than the frame reveals itself
 //! whole on a raised overlay plate while the pointer is over it, so text
 //! clipped by a narrow column is readable without resizing anything.
+//!
+//! That measurement is also what the label reports up as its
+//! [`WidgetDrawList::intrinsic`], so a consumer sizing a column of labels
+//! sizes it to the words rather than to a share of the row.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -230,6 +234,14 @@ impl WasmActor for LabelWidget {
     /// inked muted for a caption, plus the hover reveal when the run does not
     /// fit.
     ///
+    /// The same measurement is reported as the draw list's `intrinsic`
+    /// (gap 16) — `[measured width, theme row height]`, with no pad either
+    /// side, because a label reserves none. A layout that wants a column to
+    /// fit the words in it has the number the label already computed, instead
+    /// of a share of the row or a character-count estimate. It is `None` until
+    /// the theme font's metrics resolve, exactly as the button's is: a slot
+    /// sized from a guess would resize the moment the real advances landed.
+    ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::single]
@@ -255,8 +267,9 @@ impl WasmActor for LabelWidget {
         }
 
         let overlay = self.overflow_overlay(size, text_x, measured);
+        let intrinsic = measured.map(|text_width| [text_width, self.theme.row_height]);
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { intrinsic: None, items, overlay });
+            parent.send(&WidgetDrawList { intrinsic, items, overlay });
         }
     }
 
