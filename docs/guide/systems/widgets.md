@@ -656,7 +656,16 @@ through the same clamp, snap, and commit path Up/Down use, so the two routes
 cannot drift. The value text stays left-aligned at one `pad`, the text box
 shrinks by the column, and the column never takes more than half the frame — a
 numeric too narrow for both stays a value rather than becoming two arrows. A
-read-only or disabled numeric has no live stepper targets. Nothing in
+read-only or disabled numeric has no live stepper targets.
+
+The value's box is **padded on both sides and clipped at its own margin**: the
+text starts one `pad` in and every part of it the reader can see — glyphs,
+selection band, IME underline, caret — carries a clip that ends one `pad` short
+of the hairline. So a value that fits has the same space at each end, and one
+that does not is cut at that margin rather than printing across the seam and
+under the arrows (round-4 note 6). A control with no gutter — a plain text
+field — has no seam to be held off and carries no clip; its slot is already its
+own frame. Nothing in
 `NumericConfig` changed: steppers are what a numeric *is*, not something to opt
 into.
 
@@ -667,7 +676,14 @@ guessing at it. The widest value is whichever *bound* renders longer, formatted
 exactly the way the field formats a committed value (`-100 .. 20` is widest at
 its minimum: the sign is a character like any other), capped at the edit
 buffer's own 32-character bound so an effectively unbounded range asks for a
-field rather than a wall. The trailing row height is the stepper column. Like
+field rather than a wall. The endpoints, and only the endpoints, because the
+number has to be stable: a width that also weighed the value on screen would
+resize the slot on every keystroke, so a fractional `step` that renders an
+interior value longer than either bound (`0 .. 100` by `0.5` holds `"12.5"`) is
+the clip's business rather than the width's. The trailing row height is the
+stepper column, so a host that takes this number gets a field three digits fit
+in with a pad at each end — which is the other half of round-4 note 6, and the
+half the host owns. Like
 the button's intrinsic, it is `None` until the real advances land — a slot
 sized from the per-character approximation would be resized the moment they
 arrived — and, like the button's, the reference panel does not yet consume it.

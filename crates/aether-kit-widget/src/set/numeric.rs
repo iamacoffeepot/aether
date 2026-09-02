@@ -298,6 +298,14 @@ impl NumericWidget {
     /// capped at the edit buffer's own character bound so an effectively
     /// unbounded range (a non-finite bound resolves to `f32::MAX`) asks for a
     /// field rather than a wall.
+    ///
+    /// The endpoints, and only the endpoints, because this number has to be
+    /// **stable**: a width that also weighed the value on screen would resize
+    /// the slot under the reader on every keystroke. A fractional `step` can
+    /// therefore render an interior value longer than either bound (`0 .. 100`
+    /// by `0.5` holds `"12.5"`, wider than `"100"`); that one is the clip's
+    /// job, not the width's — see
+    /// [`SingleLineEdit::content_clip`](crate::set::SingleLineEdit).
     fn widest_value_width(&self, metrics: &CachedFontMetrics) -> f32 {
         let bounds = self.bounds();
         [bounds.min, bounds.max]
@@ -311,6 +319,12 @@ impl NumericWidget {
     /// allows, one pad each side of it, and the stepper column at a row's
     /// height — so a consumer sizes the field to what it can hold instead of
     /// guessing.
+    ///
+    /// Round-4 note 6 is the failure this answers from the widget's side: a
+    /// level field sized by eye rather than from this number is a field three
+    /// digits do not fit in, and the digits then ran under the arrows. A host
+    /// that takes the intrinsic gets a box whose value has one `pad` at each
+    /// end and a square column beyond it.
     ///
     /// `None` until the theme font's metrics land, the same pre-measurement
     /// silence the button keeps: a slot sized from the per-character
@@ -928,6 +942,64 @@ mod tests {
             widget.intrinsic().expect("measured")[0],
             advance.mul_add(capped, theme.pad * 2.0) + theme.row_height
         );
+    }
+
+    #[test]
+    fn three_digits_fit_the_field_the_range_asks_for_and_stop_a_pad_short_of_the_seam() {
+        // Tripwire: round-4 note 6 — "lack of symmetry in the space of the
+        // left padding and right padding of the number text. Three digits
+        // overflows and is drawn behind the arrows." At the width this range
+        // asks for, the widest value it can hold starts one pad in and ends
+        // exactly one pad short of the hairline; and whatever width the host
+        // actually gives, the clip holds the value off the arrows.
+        let mut widget = numeric(1.0, 100.0, 1.0, 1.0);
+        with_metrics(&mut widget);
+        let theme = &Theme::DEFAULT;
+        let advance = theme.value_size_pixels * 0.5;
+        let [width, height] = widget.intrinsic().expect("measured");
+        assert_eq!(
+            [width, height],
+            [advance.mul_add(3.0, theme.pad * 2.0) + theme.row_height, theme.row_height],
+            "\"100\" plus a pad each side plus the square stepper column",
+        );
+
+        widget.frame = WidgetFrame { x: 0.0, y: 0.0, width, height };
+        widget.committed_value = 100.0;
+        widget.edit = TextEditState::new(String::from("100"));
+        let column = widget.steppers().expect("a laid-out numeric has its column");
+        assert_eq!(column.left, width - theme.row_height, "the column is the square the intrinsic reserved");
+
+        let clip = content_clip_of(&widget, column).expect("a gutter means a seam to be held off");
+        assert_eq!(clip.width, column.left - theme.pad, "the value's box ends one pad before the hairline");
+        let metrics = widget.resolved_metrics().expect("measured");
+        assert_eq!(
+            theme.pad + measured_text_width(metrics, "100", theme.value_size_pixels),
+            clip.width,
+            "so the widest value the range holds ends exactly at that margin: left pad == right pad",
+        );
+
+        // Half the width the field asked for: the value is cut at its own
+        // margin rather than printing across the hairline.
+        widget.frame.width = width * 0.5;
+        let narrow_column = widget.steppers().expect("column");
+        let narrow = content_clip_of(&widget, narrow_column).expect("clip");
+        assert!(narrow.width < narrow_column.left, "the clip never reaches the arrows: {narrow:?}");
+    }
+
+    /// The bound the collect path puts on the value's own draws, read without
+    /// standing up an actor: the same `SingleLineEdit` `on_collect` builds.
+    fn content_clip_of(widget: &NumericWidget, column: StepperColumn) -> Option<crate::WidgetClipRect> {
+        let displayed = widget.edit.displayed();
+        let mut edit = SingleLineEdit::new(
+            &displayed,
+            widget.resolved_metrics(),
+            &widget.theme,
+            &widget.state,
+            ThemeState::Normal,
+            &widget.frame,
+        );
+        edit.gutter = column.width;
+        edit.content_clip()
     }
 
     #[test]
