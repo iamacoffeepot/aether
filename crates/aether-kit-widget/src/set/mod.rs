@@ -526,7 +526,7 @@ pub(super) fn reply_single_line_edit(
 /// `aether.text` treats a `Screen` draw `origin` as the *pen* start and puts
 /// the baseline one **ascent** below it, so the origin is the baseline minus
 /// that ascent. The theme does not fan the font's own metrics to widgets (see
-/// [`APPROX_ADVANCE_RATIO`]), so the ratios are the shipped font's, applied
+/// `APPROX_ADVANCE_RATIO`), so the ratios are the shipped font's, applied
 /// uniformly: getting them from a `CachedFontMetrics` would mean the table
 /// carrying ascent (it carries advances only) and every widget holding a
 /// metrics adapter (five do not).
