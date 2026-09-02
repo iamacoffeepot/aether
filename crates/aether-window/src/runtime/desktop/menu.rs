@@ -17,6 +17,9 @@
 use crate::WindowId;
 
 /// The muda item id for one caller-numbered item in one window's menu.
+/// Only the platforms that install a menu build one; the parser below is
+/// unconditional because a foreign id can arrive from any menu library.
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub(super) fn menu_item_id(window: WindowId, item: u32) -> String {
     format!("{}:{item}", window.0)
 }
