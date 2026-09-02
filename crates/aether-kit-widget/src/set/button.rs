@@ -237,7 +237,7 @@ impl WasmActor for ButtonWidget {
         if !self.label.is_empty() {
             items.push(WidgetDrawItem::Text {
                 // Left-padded until the measurement lands, centered after.
-                x: measured.map_or(self.theme.pad, |text_width| centered_text_x(width, text_width, self.theme.pad)),
+                x: measured.map_or(self.theme.pad, |text_width| centered_text_x(width, text_width)),
                 y: text_origin_y(0.0, height, size),
                 font_id: self.theme.font_id,
                 text: self.label.clone(),
@@ -281,11 +281,29 @@ mod tests {
     }
 
     #[test]
-    fn a_measured_label_centers_and_an_oversized_one_falls_back_to_the_padded_origin() {
-        let pad = 8.0;
-        assert_eq!(centered_text_x(100.0, 40.0, pad), 30.0, "even margins either side");
-        assert_eq!(centered_text_x(100.0, 99.0, pad), pad, "a label wider than the frame allows stays padded");
-        assert_eq!(centered_text_x(100.0, 84.0, pad), pad, "exactly pad-wide margins are the crossover");
+    fn a_label_is_centered_at_every_frame_width_and_the_intrinsic_reserves_a_pad_each_side() {
+        // Tripwire: the owner's asymmetric-Remove-button note. Whatever frame
+        // the consumer hands down, the margins either side of the label must
+        // be equal — the old `.max(pad)` clamp made them 8 and 2 on a frame a
+        // few pixels under the intrinsic width.
+        for width in [100.0_f32, 90.0, 84.0, 80.0, 41.0] {
+            let text_width = 40.0_f32;
+            let x = centered_text_x(width, text_width);
+            let right_margin = width - (x + text_width);
+            assert!((x - right_margin).abs() < 1e-4, "frame {width}: margins {x} / {right_margin} are not equal");
+        }
+        assert_eq!(centered_text_x(100.0, 40.0), 30.0, "even margins either side");
+        assert_eq!(centered_text_x(40.0, 60.0), 0.0, "a label wider than its whole frame keeps its start visible");
+    }
+
+    #[test]
+    fn the_reported_intrinsic_width_is_the_label_plus_one_pad_each_side() {
+        // Tripwire: a layout sizes a slot from this number, so it has to be
+        // exactly what `centered_text_x` then reproduces as equal margins.
+        let button = button();
+        let text_width = 40.0_f32;
+        let intrinsic = button.theme.pad.mul_add(2.0, text_width);
+        assert_eq!(centered_text_x(intrinsic, text_width), button.theme.pad, "the intrinsic width pads exactly once");
     }
 
     #[test]

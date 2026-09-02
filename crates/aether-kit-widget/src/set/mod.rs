@@ -435,11 +435,24 @@ fn measured_text_width(metrics: &CachedFontMetrics, text: &str, size_pixels: f32
 }
 
 /// The local x at which a run `text_width` pixels wide sits centered in a
-/// `width`-wide frame, never left of `pad`. A label wider than the frame
-/// allows therefore falls back to the same left-padded origin an unmeasured
-/// draw uses, instead of hanging off the left edge.
-fn centered_text_x(width: f32, text_width: f32, pad: f32) -> f32 {
-    ((width - text_width) * 0.5).max(pad)
+/// `width`-wide frame, never left of the frame's own left edge.
+///
+/// Centering is the whole rule: the margins either side are equal at every
+/// width, which is what a reader checks first and what the owner's
+/// asymmetric-Remove-button note was about. Clamping the origin to `pad` — the
+/// earlier rule — looked harmless but broke exactly that, because a frame
+/// narrower than `text_width + 2 * pad` got a full pad on the left and
+/// whatever was left over on the right. `pad` is therefore what the button's
+/// *intrinsic width* reserves ([`ButtonWidget`]'s
+/// `WidgetDrawList::intrinsic` is `measured + 2 * pad`), not a floor the draw
+/// re-applies; a frame at or above that width centers with at least a pad
+/// either side by construction.
+///
+/// The `0.0` clamp only catches a label wider than its whole frame, where no
+/// origin is symmetric and hanging off the left would lose the start of the
+/// text as well as the end.
+fn centered_text_x(width: f32, text_width: f32) -> f32 {
+    ((width - text_width) * 0.5).max(0.0)
 }
 
 fn release_left<T>(pressed: &mut T, released: T, release: MouseButtonRelease) {
