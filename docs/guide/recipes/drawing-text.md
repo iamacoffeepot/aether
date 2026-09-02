@@ -49,8 +49,7 @@ shows for one frame; stop sending it and it vanishes.
   "color": { "r": 1.0, "g": 1.0, "b": 1.0, "a": 1.0 }, // RGBA, linear
   "origin": [24.0, 24.0],
   "space": "Screen",
-  "clip": null,
-  "layer": 0
+  "clip": null
 }
 ```
 
@@ -80,7 +79,7 @@ wait for that settled result and repeat the capture.
     { "recipient_name": "aether.text", "kind_name": "aether.text.draw",
       "params": { "font_id": 0, "text": "hello aether", "size_pixels": 32.0,
                   "color": { "r": 1.0, "g": 1.0, "b": 1.0, "a": 1.0 },
-                  "origin": [24.0, 24.0], "space": "Screen", "clip": null, "layer": 0 } }
+                  "origin": [24.0, 24.0], "space": "Screen", "clip": null } }
   ]
 }
 ```
@@ -104,8 +103,7 @@ instance — use `World { anchor, scale }` instead of `Screen`.
       "scale": { "Distance": { "reference_distance": 10.0 } }
     }
   },
-  "clip": null,
-  "layer": 0
+  "clip": null
 }
 ```
 

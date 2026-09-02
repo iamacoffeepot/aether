@@ -218,7 +218,6 @@ impl WasmActor for BundleComponent {
             blend: QuadBlend::Straight,
             space: QuadSpace::Screen,
             clip: None,
-            layer: 0,
             quads: alloc::vec![TexturedQuad {
                 x: 0.0,
                 y: 0.0,

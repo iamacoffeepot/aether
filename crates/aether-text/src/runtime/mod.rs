@@ -343,7 +343,6 @@ impl TextCapabilityState {
 struct TextQuadRun {
     space: QuadSpace,
     clip: Option<aether_kinds::ClipRect>,
-    layer: u8,
     quads: Vec<TexturedQuad>,
 }
 
@@ -585,16 +584,15 @@ impl NativeActor for TextCapability {
             state.upload_glyph(ctx, texture_id, &entry);
         }
         if !quads.is_empty() {
-            emit_draw(ctx, texture_id, mail.space, mail.clip, mail.layer, quads);
+            emit_draw(ctx, texture_id, mail.space, mail.clip, quads);
         }
     }
 
     /// Lay out and draw an authored sequence of text items in immediate mode.
-    /// Adjacent items with the same projection, clip, and layer share one
-    /// textured-quad send; every other transition preserves the authored order
-    /// as a separate run. Each item's glyph uploads are sent before any
-    /// subsequent run flush, preserving `aether.render` FIFO upload-before-use
-    /// ordering.
+    /// Adjacent items with the same projection and clip share one textured-quad
+    /// send; every other transition preserves the authored order as a separate
+    /// run. Each item's glyph uploads are sent before any subsequent run
+    /// flush, preserving `aether.render` FIFO upload-before-use ordering.
     #[handler::single]
     fn on_draw_batch(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DrawTextBatch) {
         let Some(texture_id) = state.atlas_texture_for_draw(ctx) else {
@@ -617,20 +615,18 @@ impl NativeActor for TextCapability {
             if let Some(run) = &mut pending
                 && run.space == item.space
                 && run.clip == item.clip
-                && run.layer == item.layer
             {
                 run.quads.extend(quads);
             } else {
                 if let Some(run) = pending.take() {
-                    emit_draw(ctx, texture_id, run.space, run.clip, run.layer, run.quads);
+                    emit_draw(ctx, texture_id, run.space, run.clip, run.quads);
                 }
-                pending =
-                    Some(TextQuadRun { space: item.space.clone(), clip: item.clip.clone(), layer: item.layer, quads });
+                pending = Some(TextQuadRun { space: item.space.clone(), clip: item.clip.clone(), quads });
             }
         }
 
         if let Some(run) = pending {
-            emit_draw(ctx, texture_id, run.space, run.clip, run.layer, run.quads);
+            emit_draw(ctx, texture_id, run.space, run.clip, run.quads);
         }
     }
 }
@@ -686,7 +682,6 @@ mod tests {
                 origin,
                 space: QuadSpace::Screen,
                 clip: None,
-                layer: 0,
             },
         );
     }
@@ -705,7 +700,6 @@ mod tests {
             origin,
             space: QuadSpace::Screen,
             clip,
-            layer: 0,
         }
     }
 

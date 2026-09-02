@@ -765,7 +765,6 @@ f 4 5 8
             space: QuadSpace::Screen,
             clip: None,
             blend: QuadBlend::Premultiplied,
-            layer: 0,
             quads: vec![TexturedQuad {
                 x: 0.0,
                 y: 0.0,

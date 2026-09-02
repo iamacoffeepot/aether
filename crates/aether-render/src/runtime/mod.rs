@@ -116,7 +116,7 @@ use self::device::DeviceRecovery;
 pub use self::geometry::{GeometryRegistry, RealizedGeometry, StagedGeometry};
 pub use self::material::MaterialBatch;
 use self::program::ProgramRegistry;
-pub use self::quad::{QuadBatch, sort_by_layer};
+pub use self::quad::QuadBatch;
 pub use self::texture::{TextureRegistry, WHITE_TEXTURE_ID};
 
 use super::{
@@ -545,11 +545,6 @@ impl RenderCapabilityState {
         commit_or_replay(&mut self.frame_vertices, &mut self.last_submitted, replay_cache_when_idle);
         commit_or_replay(&mut self.material_frame, &mut self.material_last_submitted, replay_cache_when_idle);
         commit_or_replay(&mut self.quad_frame, &mut self.quad_last_submitted, replay_cache_when_idle);
-        // The overlay's layer order is settled once here, on the committed
-        // scene, rather than at each `record_passes` — a multi-window frame
-        // records the same committed batches once per dirty target, and a
-        // replayed idle frame is already sorted.
-        sort_by_layer(&mut self.quad_last_submitted);
     }
 
     /// Drop only scene caches that may have been submitted ambiguously on
@@ -1680,7 +1675,6 @@ mod tests {
             DrawSolidQuads {
                 space: QuadSpace::Screen,
                 clip: None,
-                layer: 0,
                 quads: vec![SolidQuad {
                     x: 10.0,
                     y: 20.0,

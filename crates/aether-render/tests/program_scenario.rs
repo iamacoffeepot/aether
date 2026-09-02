@@ -158,7 +158,6 @@ fn output_overlay(texture_id: u32) -> DrawTexturedQuads {
         blend: QuadBlend::Straight,
         space: QuadSpace::Screen,
         clip: None,
-        layer: 0,
         quads: vec![TexturedQuad {
             x: 16.0,
             y: 8.0,
@@ -382,7 +381,6 @@ fn mismatched_binding_dispatch_drops_and_frame_survives() {
             &DrawSolidQuads {
                 space: QuadSpace::Screen,
                 clip: None,
-                layer: 0,
                 quads: vec![SolidQuad {
                     x: 2.0,
                     y: 2.0,

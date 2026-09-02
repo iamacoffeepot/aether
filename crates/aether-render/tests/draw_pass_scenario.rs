@@ -200,7 +200,6 @@ fn output_overlay(texture_id: u32) -> DrawTexturedQuads {
         blend: QuadBlend::Straight,
         space: QuadSpace::Screen,
         clip: None,
-        layer: 0,
         quads: vec![TexturedQuad {
             x: QUAD_ORIGIN.0,
             y: QUAD_ORIGIN.1,
@@ -221,7 +220,6 @@ fn control_quad() -> DrawSolidQuads {
     DrawSolidQuads {
         space: QuadSpace::Screen,
         clip: None,
-        layer: 0,
         quads: vec![SolidQuad { x: 2.0, y: 2.0, width: 5.0, height: 5.0, color: Rgba::new(1.0, 1.0, 1.0, 1.0) }],
     }
 }

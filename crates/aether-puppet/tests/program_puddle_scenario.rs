@@ -200,7 +200,6 @@ fn develop(
         blend: QuadBlend::Straight,
         space: QuadSpace::Screen,
         clip: None,
-        layer: 0,
         quads: vec![TexturedQuad {
             x: 0.0,
             y: 0.0,

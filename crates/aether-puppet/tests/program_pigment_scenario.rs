@@ -202,7 +202,6 @@ fn developed_plane(
         blend: QuadBlend::Straight,
         space: QuadSpace::Screen,
         clip: None,
-        layer: 0,
         quads: vec![TexturedQuad {
             x: QUAD_ORIGIN.0 as f32,
             y: QUAD_ORIGIN.1 as f32,

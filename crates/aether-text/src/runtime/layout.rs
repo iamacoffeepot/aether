@@ -20,12 +20,11 @@ pub fn emit_draw(
     texture_id: u32,
     space: QuadSpace,
     clip: Option<ClipRect>,
-    layer: u8,
     quads: Vec<TexturedQuad>,
 ) {
     // A rasterized glyph atlas is an ordinary image: coverage rides
     // alpha and the colour beside it was never scaled by it.
-    let draw = DrawTexturedQuads { texture_id, space, clip, blend: QuadBlend::Straight, layer, quads };
+    let draw = DrawTexturedQuads { texture_id, space, clip, blend: QuadBlend::Straight, quads };
     ctx.actor::<RenderCapability>().send(&draw);
 }
 

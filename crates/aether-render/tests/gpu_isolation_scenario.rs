@@ -88,7 +88,6 @@ fn control_quad() -> DrawSolidQuads {
     DrawSolidQuads {
         space: QuadSpace::Screen,
         clip: None,
-        layer: 0,
         quads: vec![SolidQuad { x: 8.0, y: 8.0, width: 32.0, height: 32.0, color: Rgba::new(1.0, 0.0, 1.0, 1.0) }],
     }
 }
@@ -290,7 +289,6 @@ fn destroyed_texture_ids_drop_cleanly_and_are_never_reissued() {
         blend: QuadBlend::Straight,
         space: QuadSpace::Screen,
         clip: None,
-        layer: 0,
         quads: vec![TexturedQuad {
             x: 0.0,
             y: 0.0,

@@ -333,7 +333,6 @@ fn overlay(texture_id: u32, width: usize, height: usize) -> DrawTexturedQuads {
         blend: QuadBlend::Straight,
         space: QuadSpace::Screen,
         clip: None,
-        layer: 0,
         quads: vec![TexturedQuad {
             x: 0.0,
             y: 0.0,

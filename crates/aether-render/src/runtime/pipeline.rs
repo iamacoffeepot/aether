@@ -215,7 +215,6 @@ pub(super) fn record_overlay_batches(
                         space: space.clone(),
                         clip: batch.clip.clone(),
                         blend: batch.blend,
-                        layer: batch.layer,
                         quads: quads.clone(),
                     });
                 }
