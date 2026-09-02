@@ -394,7 +394,7 @@ fn framebuffer_clip(rect: WidgetClipRect) -> ClipRect {
 /// Collect the filtered text subsequence into authored-order text items.
 /// Invalid clips omit their items before the root converts the remaining clips
 /// into framebuffer coordinates.
-fn text_items(list: &WidgetDrawList, layer: u8) -> Vec<DrawText> {
+fn text_items(list: &WidgetDrawList) -> Vec<DrawText> {
     let mut items: Vec<DrawText> = Vec::new();
     for item in &list.items {
         if let WidgetDrawItem::Text { x, y, font_id, text, size_pixels, color, .. } = item {
@@ -409,7 +409,7 @@ fn text_items(list: &WidgetDrawList, layer: u8) -> Vec<DrawText> {
                 origin: [*x, *y],
                 space: QuadSpace::Screen,
                 clip: clip.framebuffer(),
-                layer,
+                layer: 0,
             });
         }
     }
@@ -423,37 +423,24 @@ fn text_items(list: &WidgetDrawList, layer: u8) -> Vec<DrawText> {
 /// peer compositor in another crate (the terrain workbench panel) reuses the
 /// same single-sender flush for its own composite.
 pub fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
-    emit_layer(ctx, list, ORDINARY_LAYER);
+    emit_layer(ctx, list);
     if !list.overlay.is_empty() {
-        emit_layer(
-            ctx,
-            &WidgetDrawList { intrinsic: None, items: list.overlay.clone(), overlay: Vec::new() },
-            OVERLAY_LAYER,
-        );
+        emit_layer(ctx, &WidgetDrawList { intrinsic: None, items: list.overlay.clone(), overlay: Vec::new() });
     }
 }
 
-/// The render layer a cluster's ordinary draws go to.
-const ORDINARY_LAYER: u8 = 0;
-
-/// The render layer a cluster's overlay goes to: the render cap records it
-/// after every ordinary batch of the frame, text included, so an open
-/// dropdown's list covers the glyphs under it even though those glyphs
-/// reach the render cap one hop later than the list's fill.
-const OVERLAY_LAYER: u8 = 1;
-
 /// One layer of a flattened list — its `items` — as solid / textured runs
-/// then one text batch, every batch tagged `layer` for the render cap's
-/// overlay ordering. Called for the ordinary items and again for the
-/// overlay.
-fn emit_layer(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList, layer: u8) {
+/// then one text batch. Called for the ordinary items and again for the
+/// overlay, so an overlay's quads and glyphs are submitted after every
+/// ordinary quad and glyph respectively.
+fn emit_layer(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
     for run in direct_runs(list) {
         match run {
             DirectRun::Solid { clip, quads } => {
                 ctx.actor::<RenderCapability>().send(&DrawSolidQuads {
                     space: QuadSpace::Screen,
                     clip: clip.framebuffer(),
-                    layer,
+                    layer: 0,
                     quads,
                 });
             }
@@ -463,13 +450,13 @@ fn emit_layer(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList, layer: u8) {
                     blend: QuadBlend::Straight,
                     space: QuadSpace::Screen,
                     clip: clip.framebuffer(),
-                    layer,
+                    layer: 0,
                     quads,
                 });
             }
         }
     }
-    let items = text_items(list, layer);
+    let items = text_items(list);
     if !items.is_empty() {
         ctx.actor::<TextCapability>().send(&DrawTextBatch { items });
     }
@@ -614,7 +601,7 @@ mod tests {
             ],
         };
 
-        let items = text_items(&list, 0);
+        let items = text_items(&list);
         assert_eq!(items.len(), 3, "three valid text items survive filtering");
         assert!(items.iter().map(|item| item.text.as_str()).eq(["first", "second", "third"]));
         assert!(items.iter().map(|item| item.origin[0]).eq([10.0, 20.0, 40.0]));
