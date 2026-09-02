@@ -300,6 +300,33 @@ and each is the general form of a specific complaint.
   applies under a state the build is not in (another class's start, an
   ascendancy-gated passive) is not drawn until that state holds. Clutter is
   every element that cannot currently matter.
+- **Signify only what is not obvious.** A resize cursor belongs on a
+  splitter, where the affordance is hidden; a move cursor over a map that
+  every reader knows pans is noise. A signifier on the default gesture is
+  intrusive, and it dilutes the ones that matter.
+- **A control's parts are one element.** A number field and its steppers
+  share one frame and one fill; a field and its clear button likewise.
+  Two adjacent boxes read as two controls fighting.
+- **Empty collapses.** A container with nothing chosen (an inset for an
+  ascendancy that is not picked) starts collapsed and collapses when its
+  content goes; an expanded empty box is a promise the screen is not
+  keeping.
+- **One colour, one state, everywhere.** The allocated colour appears on
+  allocated things only. A ring drawn in the "taken" gold before anything
+  is taken says the opposite of the truth.
+- **A result says why it matched.** A search that lights a node shows,
+  on that node, the line that matched; a hit with no visible reason reads
+  as a mistake.
+- **Own versus derived, separated.** What this node gives and what the
+  path to it costs are two facts; a tooltip that blends them makes the
+  reader do the subtraction.
+- **A setting is a control, not a file.** If a person can change it, the
+  screen offers the control; the file is the store behind it, never the
+  interface.
+- **Labels stay complete under a heading.** "Fire resistance", not "Fire"
+  under a "Resistances" heading the reader may not see at the same time.
+- **Keep an affordance the reader has learned** unless they ask for it to
+  go; when they ask for its *look* to change, change the look.
 - **Generate what can be generated.** A name, a summary line, a default:
   when the data implies one ("Wander of Kinetic Blast Ranger" from weapon,
   skill, and class), offer it rather than an empty field.
