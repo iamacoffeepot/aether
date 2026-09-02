@@ -331,6 +331,14 @@ and each is the general form of a specific complaint.
   under a "Resistances" heading the reader may not see at the same time.
 - **Keep an affordance the reader has learned** unless they ask for it to
   go; when they ask for its *look* to change, change the look.
+- **A box is sized from measured text, never from a character count.**
+  A plate, a tooltip, a toast, a list cell: its width comes from the
+  face's real advances (the kit measures through its font metrics), not
+  from characters times an average. Over a proportional face the average
+  is wrong by a glyph every few words, and the text walks out of the box
+  the estimate drew. If the measure is not available yet, draw nothing
+  rather than a guessed box. (Owner, round 3, live: "the text is going
+  outside the bounds of the box.")
 - **Generate what can be generated.** A name, a summary line, a default:
   when the data implies one ("Wander of Kinetic Blast Ranger" from weapon,
   skill, and class), offer it rather than an empty field.
