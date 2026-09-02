@@ -1,18 +1,18 @@
 // `#[handler]` methods take their decoded mail by value per the ADR-0033
 // dispatch ABI (see `widget/mod.rs`).
 #![allow(clippy::needless_pass_by_value)]
-// The tab count crosses into pixel arithmetic for the pre-metrics even split.
-#![allow(clippy::cast_precision_loss)]
 
 //! The tab strip: one row of tabs selecting one of several parallel content
 //! sets.
 //!
 //! Each tab is sized to its label plus padding — never equal thirds of the
-//! row — and the selected tab is marked twice, by the selection role and an
-//! underline, so it is prominent at a glance. A press selects; a focused
-//! Left/Right moves the selection and clamps at the ends. The strip owns
-//! nothing but the choice: which content the selected tab shows is the
-//! root's business.
+//! row — and the selected tab is marked by an underline along its bottom
+//! edge, nothing more: every tab keeps the same raised fill, so the strip
+//! reads as a row of places with one marked rather than a row of buttons with
+//! one lit, and hover stays the only fill change the pointer causes. A press
+//! selects; a focused Left/Right moves the selection and clamps at the ends.
+//! The strip owns nothing but the choice: which content the selected tab
+//! shows is the root's business.
 //!
 //! Sizing a tab to its label needs the label's real width, so the strip
 //! drives the same single-flight
@@ -31,8 +31,9 @@ use aether_kinds::{Key, MouseButton, MouseButtonRelease, MouseMove};
 use aether_text::FontMetricsResult;
 
 use crate::set::{
-    WidgetDefaults, accept_font_metrics_result, apply_text_theme, clamp_option_index, measured_text_width,
-    pump_text_font_metrics, push_control_outlines, quad, release_left, reply_if_hidden, text_origin_y,
+    WidgetDefaults, accept_font_metrics_result, apply_text_theme, clamp_option_index, even_split_widths,
+    measured_text_width, pump_text_font_metrics, push_control_outlines, quad, release_left, reply_if_hidden,
+    slot_at_local_x, text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
@@ -79,11 +80,11 @@ impl TabStripWidget {
             .iter()
             .map(|label| metrics.map(|metrics| self.theme.pad.mul_add(2.0, measured_text_width(metrics, label, size))))
             .collect();
-        measured.unwrap_or_else(|| even_split(self.labels.len(), self.frame.width, self.theme.space(1)))
+        measured.unwrap_or_else(|| even_split_widths(self.labels.len(), self.frame.width, self.theme.space(1)))
     }
 
     fn tab_at_pointer_x(&self, pointer_x: f32) -> Option<usize> {
-        tab_at_local_x(&self.tab_widths(), self.theme.space(1), pointer_x - self.frame.x)
+        slot_at_local_x(&self.tab_widths(), self.theme.space(1), pointer_x - self.frame.x)
     }
 
     /// Select the tab under the pointer. Returns the new index only when the
@@ -285,9 +286,7 @@ impl WasmActor for TabStripWidget {
         }
     }
 
-    /// Reply the strip's local draw: one filled tab per label, the selected
-    /// one in the selection role under an underline, and the focus /
-    /// validation outlines.
+    /// Reply the strip's local draw.
     ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
@@ -296,6 +295,16 @@ impl WasmActor for TabStripWidget {
         if reply_if_hidden(ctx, &self.state) {
             return;
         }
+        if let Some(parent) = ctx.parent() {
+            parent.send(&WidgetDrawList { intrinsic: None, items: self.draw_items(), overlay: Vec::new() });
+        }
+    }
+}
+
+impl TabStripWidget {
+    /// The strip's local draw: one raised tab per label, an underline under the
+    /// selected one, and the focus / validation outlines.
+    fn draw_items(&self) -> Vec<WidgetDrawItem> {
         let height = self.frame.height;
         let gap = self.theme.space(1);
         let size = self.theme.label_size_pixels;
@@ -306,17 +315,14 @@ impl WasmActor for TabStripWidget {
         for (index, (label, tab_width)) in self.labels.iter().zip(self.tab_widths()).enumerate() {
             let selected = index == self.selected_index;
             let theme_state = self.tab_theme_state(index);
-            let base = if selected {
-                self.theme.selection
-            } else {
-                self.theme.surface_raised
-            };
-            items.push(quad(left, 0.0, tab_width, height, self.theme.fill(base, theme_state)));
+            items.push(quad(left, 0.0, tab_width, height, self.theme.fill(self.theme.surface_raised, theme_state)));
 
             if selected {
-                // The second mark. The fill alone reads as "lit"; the underline
-                // says "this one", and survives a theme whose selection sits
-                // close to its raised surface.
+                // The only mark. A tab is a place, not a row of a list: filling
+                // the selected one turns the strip into a wall of buttons with
+                // one lit, while an underline on a plain tab reads as "you are
+                // here" at a glance. Hover keeps its own overlay, so the
+                // pointer still says which tab it is over.
                 items.push(quad(
                     left,
                     height - UNDERLINE_THICKNESS,
@@ -327,11 +333,6 @@ impl WasmActor for TabStripWidget {
             }
 
             if !label.is_empty() {
-                let ink = if selected {
-                    self.theme.selection_text
-                } else {
-                    self.theme.text_primary
-                };
                 items.push(WidgetDrawItem::Text {
                     // A measured tab is its label plus one pad each side, so
                     // the padded origin centers the label; the interim even
@@ -341,7 +342,7 @@ impl WasmActor for TabStripWidget {
                     font_id: self.theme.font_id,
                     text: label.clone(),
                     size_pixels: size,
-                    color: self.theme.fill(ink, theme_state),
+                    color: self.theme.fill(self.theme.text_primary, theme_state),
                     clip: None,
                 });
             }
@@ -350,39 +351,8 @@ impl WasmActor for TabStripWidget {
         }
 
         push_control_outlines(&mut items, self.frame.width, height, &self.state, &self.theme);
-        if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { intrinsic: None, items, overlay: Vec::new() });
-        }
+        items
     }
-}
-
-/// The tab a strip-local `x` lands in, over `widths` laid out left to right
-/// from `0.0` with `gap` between them. `None` in a gap, left of the first
-/// tab, or past the last — a tab strip is a row of separate targets, not one
-/// partitioned bar, so the space between two tabs belongs to neither.
-fn tab_at_local_x(widths: &[f32], gap: f32, local_x: f32) -> Option<usize> {
-    if !local_x.is_finite() || local_x < 0.0 {
-        return None;
-    }
-    let mut left = 0.0;
-    for (index, width) in widths.iter().enumerate() {
-        if local_x < left + width {
-            return (local_x >= left).then_some(index);
-        }
-        left += width + gap;
-    }
-    None
-}
-
-/// The interim tab widths the strip lays out with before its font's metrics
-/// arrive: the row split evenly, the gaps taken out first. Replaced by the
-/// measured widths on the first `Collect` after the reply lands.
-fn even_split(count: usize, width: f32, gap: f32) -> Vec<f32> {
-    if count == 0 {
-        return Vec::new();
-    }
-    let tabs = count as f32;
-    alloc::vec![((tabs - 1.0).mul_add(-gap, width) / tabs).max(0.0); count]
 }
 
 #[cfg(test)]
@@ -403,26 +373,6 @@ mod tests {
     }
 
     #[test]
-    fn a_pointer_buckets_into_the_tab_it_is_over_and_into_no_tab_in_a_gap() {
-        let widths = [30.0, 50.0, 20.0];
-        assert_eq!(tab_at_local_x(&widths, 4.0, 0.0), Some(0));
-        assert_eq!(tab_at_local_x(&widths, 4.0, 29.9), Some(0));
-        assert_eq!(tab_at_local_x(&widths, 4.0, 31.0), None, "the gap after the first tab selects nothing");
-        assert_eq!(tab_at_local_x(&widths, 4.0, 34.0), Some(1));
-        assert_eq!(tab_at_local_x(&widths, 4.0, 88.0), Some(2));
-        assert_eq!(tab_at_local_x(&widths, 4.0, 108.0), None, "past the last tab is off the strip");
-        assert_eq!(tab_at_local_x(&widths, 4.0, -1.0), None);
-        assert_eq!(tab_at_local_x(&[], 4.0, 0.0), None);
-    }
-
-    #[test]
-    fn unequal_tab_widths_bucket_by_their_own_extents() {
-        // The bug an even split hides: with widths 10 / 90, x = 50 is the
-        // second tab, while thirds-of-the-row arithmetic calls it the first.
-        assert_eq!(tab_at_local_x(&[10.0, 90.0], 0.0, 50.0), Some(1));
-    }
-
-    #[test]
     fn pointer_selection_and_arrow_steps_clamp_at_the_ends() {
         let mut strip = strip(3, 0);
         assert_eq!(strip.step(false), None, "left at the start is clamped");
@@ -438,6 +388,39 @@ mod tests {
         let mut strip = strip(3, 0);
         assert_eq!(strip.select_at(15.0), None, "no change, no TabSelected");
         assert_eq!(strip.pressed_tab, Some(0));
+    }
+
+    #[test]
+    fn the_selected_tab_is_marked_by_its_underline_alone() {
+        // Tripwire: filling the selected tab turns a strip of places into a row
+        // of buttons with one lit — every tab keeps the raised surface, and the
+        // underline is the whole mark. Hover is the only fill the pointer
+        // changes, which a re-added selection fill would drown out.
+        let strip = strip(3, 1);
+        let items = strip.draw_items();
+        let (tabs, underlines): (Vec<_>, Vec<_>) = items
+            .iter()
+            .filter_map(|item| match item {
+                WidgetDrawItem::Quad { y, height, color, .. } => Some((*y, *height, *color)),
+                WidgetDrawItem::Text { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+            })
+            .partition(|(_, height, _)| *height == strip.frame.height);
+        assert_eq!(tabs.len(), 3, "one full-height fill per tab");
+        assert!(
+            tabs.iter().all(|(_, _, color)| *color == strip.theme.surface_raised),
+            "the selected tab carries no fill of its own; fills were {tabs:?}",
+        );
+        assert_eq!(
+            underlines,
+            vec![(strip.frame.height - UNDERLINE_THICKNESS, UNDERLINE_THICKNESS, strip.theme.text_primary)],
+            "exactly one underline, along the selected tab's bottom edge",
+        );
+        assert!(
+            items
+                .iter()
+                .all(|item| !matches!(item, WidgetDrawItem::Text { color, .. } if *color != strip.theme.text_primary)),
+            "every tab label reads in the primary ink; items were {items:?}",
+        );
     }
 
     #[test]

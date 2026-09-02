@@ -27,7 +27,9 @@ use aether_kinds::mouse_button;
 use aether_kinds::{Key, KeyRelease, MouseButton, MouseButtonRelease, MouseMove};
 use aether_math::Rgba;
 
-use crate::set::{ActivationArms, WidgetDefaults, push_control_outlines, quad, reply_if_hidden, text_origin_y};
+use crate::set::{
+    ActivationArms, WidgetDefaults, push_control_outlines, push_rect_border, quad, reply_if_hidden, text_origin_y,
+};
 use crate::state::{InteractionState, emit_state_changed};
 use crate::theme::{Theme, ThemeState};
 use crate::{
@@ -305,7 +307,7 @@ impl DropdownWidget {
                 clip: None,
             });
         }
-        push_list_border(&mut items, top, width, list_height, 1.0, self.theme.outline);
+        push_rect_border(&mut items, 0.0, top, width, list_height, 1.0, self.theme.outline);
         items
     }
 }
@@ -496,15 +498,6 @@ fn push_chevron(items: &mut Vec<WidgetDrawItem>, right_x: f32, center_y: f32, si
         let y = (row as f32).mul_add(row_height, top);
         items.push(quad(width.mul_add(-0.5, center_x), y, width, row_height, color));
     }
-}
-
-/// A `thickness`-pixel ring around the open list's rect — the same four thin
-/// quads the shared border helper draws, at the list's own vertical offset.
-fn push_list_border(items: &mut Vec<WidgetDrawItem>, top: f32, width: f32, height: f32, thickness: f32, color: Rgba) {
-    items.push(quad(0.0, top, width, thickness, color));
-    items.push(quad(0.0, top + height - thickness, width, thickness, color));
-    items.push(quad(0.0, top, thickness, height, color));
-    items.push(quad(width - thickness, top, thickness, height, color));
 }
 
 /// The boot selection clamped into the option vector; `None` when there is

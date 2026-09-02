@@ -467,6 +467,9 @@ pub enum WidgetKind {
     /// sets — `config` decodes as [`TabStripConfig`]. Appended to
     /// preserve established discriminants.
     TabStrip,
+    /// A row of application menus — `config` decodes as [`MenuBarConfig`].
+    /// Appended to preserve established discriminants.
+    MenuBar,
 }
 
 impl WidgetKind {
@@ -500,6 +503,7 @@ impl WidgetKind {
             Self::Numeric => aether_data::mailbox_id_from_name("aether.kit.widget.numeric").0,
             Self::Dropdown => aether_data::mailbox_id_from_name("aether.kit.widget.dropdown").0,
             Self::TabStrip => aether_data::mailbox_id_from_name("aether.kit.widget.tab_strip").0,
+            Self::MenuBar => aether_data::mailbox_id_from_name("aether.kit.widget.menu_bar").0,
             Self::Composite | Self::Scroll | Self::BehaviorHost => return None,
         };
         Some(tag)
@@ -783,6 +787,51 @@ pub struct TabStripConfig {
     pub state: WidgetControlState,
 }
 
+/// One entry of a [`Menu`]: its label, the accelerator it advertises at the
+/// right edge (`"Cmd+S"`, or empty), whether it can be activated, and whether
+/// a divider follows it. Schema-only; nested in [`MenuBarConfig`].
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct MenuItem {
+    pub label: String,
+    #[serde(default)]
+    pub shortcut: String,
+    #[serde(default = "MenuItem::enabled_default")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub separator_after: bool,
+}
+
+impl MenuItem {
+    const fn enabled_default() -> bool {
+        true
+    }
+}
+
+/// One titled menu of a [`MenuBarConfig`]. Schema-only.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct Menu {
+    pub title: String,
+    pub items: Vec<MenuItem>,
+}
+
+/// `aether.kit.widget.menu_bar.config` — one row of menu titles across the
+/// top of a screen, the place an application's commands live (File, Edit,
+/// View, Help). A press on a title opens that menu's items below it in the
+/// widget's overlay ([`WidgetDrawList::overlay`]) under the root's pointer
+/// grab, reported through [`MenuOpenChanged`]; while a menu is open, moving
+/// the pointer over another title opens that one instead. A press on an
+/// enabled item activates it ([`MenuItemActivated`]) and closes; Escape or a
+/// press elsewhere closes without activating. The bar is one row high; each
+/// title is sized to its text plus padding.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
+#[kind(name = "aether.kit.widget.menu_bar.config")]
+pub struct MenuBarConfig {
+    pub menus: Vec<Menu>,
+    pub theme: Theme,
+    #[serde(default)]
+    pub state: WidgetControlState,
+}
+
 /// `aether.kit.widget.button.config` — a momentary push button showing
 /// `label`, firing [`ButtonClicked`] on a press-then-release-inside.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
@@ -1017,6 +1066,24 @@ pub struct DropdownOpenChanged {
 #[kind(name = "aether.kit.widget.tab_strip.selected")]
 pub struct TabSelected {
     pub index: u32,
+}
+
+/// `aether.kit.widget.menu_bar.activated` — the item `item` of the menu
+/// `menu` (both indices into the config) was activated.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[kind(name = "aether.kit.widget.menu_bar.activated")]
+pub struct MenuItemActivated {
+    pub menu: u32,
+    pub item: u32,
+}
+
+/// `aether.kit.widget.menu_bar.open_changed` — a menu opened (`open: true`,
+/// the root grants the sender the pointer grab) or every menu closed
+/// (`open: false`, the root ends it). Reported once per edge.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[kind(name = "aether.kit.widget.menu_bar.open_changed")]
+pub struct MenuOpenChanged {
+    pub open: bool,
 }
 
 /// `aether.kit.widget.frame` — the layout rect the root assigns a child,

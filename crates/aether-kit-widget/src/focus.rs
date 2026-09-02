@@ -195,15 +195,23 @@ impl Focus {
         Some(FocusTransition { previous, next })
     }
 
-    pub fn focus_hit(&mut self, x: f32, y: f32) -> Option<FocusTransition> {
+    /// The topmost keyboard-focusable child under the point, whether or not
+    /// focusing it would change anything. A root needs this to tell "the press
+    /// landed on a control" from "the press landed on nothing", because the
+    /// second is what clears focus — and [`Self::focus_hit`] answers `None` to
+    /// both.
+    #[must_use]
+    pub fn focus_hit_test(&self, x: f32, y: f32) -> Option<MailboxId> {
         let point = Vec3::new(x, y, 0.0);
-        let hit = self
-            .entries
+        self.entries
             .iter()
             .rev()
             .find(|entry| entry.focus_live() && entry.rect.contains_point(point))
-            .map(|entry| entry.child)?;
-        self.set_focus(Some(hit))
+            .map(|entry| entry.child)
+    }
+
+    pub fn focus_hit(&mut self, x: f32, y: f32) -> Option<FocusTransition> {
+        self.set_focus(Some(self.focus_hit_test(x, y)?))
     }
 
     /// Move through the live focus ring in the requested direction, wrapping.

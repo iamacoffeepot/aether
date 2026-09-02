@@ -36,8 +36,7 @@ use alloc::string::String;
 use crate::set::defaults::WidgetDefaults;
 use crate::set::{
     apply_text_control_state, apply_text_theme, arm_text_drag, pump_text_font_metrics, release_left,
-    reply_with_draw_items, single_line_edit_draw_items, single_line_hit_byte, text_control_theme_state,
-    update_text_modifiers,
+    reply_single_line_edit, single_line_hit_byte, text_control_theme_state, update_text_modifiers,
 };
 use crate::state::InteractionState;
 use crate::text_edit::{EditPolicy, FontMetricsAdapter, TextEditState, TextSpan};
@@ -267,23 +266,23 @@ impl WasmActor for TextFieldWidget {
 
     /// Reply the field's local draw: a box, any selection band, the text plus a
     /// preedit at the caret, the composition underline / cursor, the caret when
-    /// focused, and a focus ring.
+    /// focused, and a focus ring — plus, while the pointer is over a field whose
+    /// contents are too wide for the box, the overlay plate that shows the whole
+    /// string.
     ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        reply_with_draw_items(ctx, &self.state, || {
-            single_line_edit_draw_items(
-                &self.edit.displayed(),
-                self.font_metrics.resolved(),
-                &self.theme,
-                &self.state,
-                self.theme_state(),
-                self.frame.width,
-                self.frame.height,
-            )
-        });
+        reply_single_line_edit(
+            ctx,
+            &self.edit.displayed(),
+            self.font_metrics.resolved(),
+            &self.theme,
+            &self.state,
+            self.theme_state(),
+            &self.frame,
+        );
     }
 }
 

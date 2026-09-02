@@ -64,6 +64,7 @@ use aether_kinds::{
     FrameReduction, FrameVerdict, ImePreedit, Key, KeyRelease, LoadComponent, LoadResult, LogTailResult, Modifiers,
     MouseButton, MouseButtonRelease, MouseMove, MouseWheel, NamedMail, TextInput, Tick, WindowId,
 };
+use aether_kit_widget::set::text_baseline_y;
 use aether_kit_widget::{
     ButtonConfig, EditorConfig, EditorRegionRect, LabelConfig, NumericConfig, PanelConfig, RegionInputLanes,
     RegionSpec, ScrollConfig, ScrollExtent, ScrollOffset, SegmentedConfig, SetTheme, SetWidgetState, SliderConfig,
@@ -1473,6 +1474,150 @@ fn focus_ring_follows_tab() {
     );
 }
 
+/// **Bug class: clipped text with no way to read it.** A label or field whose
+/// run is wider than its slot is cut off at the slot's right edge, and the
+/// reader has no gesture that shows the rest. Hovering it must raise the whole
+/// run on an overlay plate wider than the slot; one whose text fits must raise
+/// nothing, or the plate becomes chrome that covers its neighbours on every
+/// hover.
+#[test]
+fn hovering_overflowing_text_reveals_it_on_an_overlay_plate() {
+    let Some(wasm_path) = require_runtime("aether_kit_widget") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let label = |subname: &str, text: &str| WidgetChildSpec {
+        subname: subname.to_owned(),
+        kind: WidgetKind::Label,
+        origin: [0.0, 0.0],
+        clip: None,
+        config: LabelConfig { text: text.to_owned(), ..LabelConfig::default() }.encode_into_bytes(),
+    };
+
+    let mut harness = build_bench();
+    boot_panel_with_children(
+        &mut harness,
+        &wasm,
+        vec![
+            label("wide", "a label whose text runs well past the width of its own slot"),
+            label("narrow", "short"),
+            text_field_child("long_field", "a field value far too long to fit inside its own box"),
+        ],
+    );
+
+    // The plate is an overlay quad, so it escapes the slot clip the panel
+    // registered and lands in an unclipped batch — and it is the only thing in
+    // the panel that can be wider than the panel itself, the stack's own
+    // background being exactly `PANEL_WIDTH`.
+    let plate_widths = |harness: &SubstrateHarness| -> Vec<f32> {
+        harness
+            .committed_overlay_snapshot()
+            .iter()
+            .filter(|batch| batch.texture_id == WHITE_TEXTURE_ID && batch.clip.is_none())
+            .flat_map(|batch| batch.quads.iter().map(|quad| quad.width))
+            .filter(|width| *width > PANEL_WIDTH)
+            .collect()
+    };
+
+    let panel = panel_address();
+    let hover = |x: f32, y: f32| MouseMove { window: TEST_WINDOW_ID, x, y };
+    let (wide_top, _) = row_band(0, 1.0);
+    let narrow_top = wide_top + ROW_HEIGHT + GAP;
+    let field_top = narrow_top + ROW_HEIGHT + GAP;
+
+    harness
+        .execute(vec![
+            ("hover_wide", HarnessOp::send_and_settle(&panel, &hover(PANEL_X + 20.0, wide_top + 12.0))),
+            ("draw", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
+        ])
+        .expect("hover the overflowing label");
+    let over_wide = plate_widths(&harness);
+
+    harness
+        .execute(vec![
+            ("hover_narrow", HarnessOp::send_and_settle(&panel, &hover(PANEL_X + 20.0, narrow_top + 12.0))),
+            ("draw", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
+        ])
+        .expect("hover the label that fits");
+    let over_narrow = plate_widths(&harness);
+
+    harness
+        .execute(vec![
+            ("hover_field", HarnessOp::send_and_settle(&panel, &hover(PANEL_X + 20.0, field_top + 12.0))),
+            ("draw", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
+        ])
+        .expect("hover the overflowing text field");
+    let over_field = plate_widths(&harness);
+    eprintln!(
+        "overlay plate widths: wide label {over_wide:?}, narrow label {over_narrow:?}, text field {over_field:?}",
+    );
+    assert!(
+        !over_wide.is_empty(),
+        "hovering the overflowing label must raise a plate wider than its slot ({PANEL_WIDTH}); \
+         no overlay quad outgrew the panel",
+    );
+    assert!(
+        over_narrow.is_empty(),
+        "a label whose run fits must raise no plate at all; oversized overlay quads were {over_narrow:?}",
+    );
+    assert!(
+        !over_field.is_empty(),
+        "a text field whose value overruns its box owes the same reveal; no overlay quad outgrew the panel",
+    );
+}
+
+/// **Bug class: a control stays active after the pointer goes elsewhere.**
+/// Pressing a field and then pressing away from it left the field focused —
+/// still ringed, still taking every keystroke — because the root only ever set
+/// focus on a hit and had no branch for a press that hit nothing focusable.
+/// Tab onto the slider, confirm its ring, then press the label row (a
+/// pointer-eligible but non-focusable widget, the same as pressing bare panel
+/// background) and require the ring to be gone.
+#[test]
+fn a_press_on_nothing_focusable_clears_focus() {
+    let Some(wasm_path) = require_runtime("aether_kit_widget") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut harness = build_bench();
+    boot_panel(&mut harness, &wasm);
+
+    let (slider_top, _) = row_band(SLIDER_ROW, 1.0);
+    let (label_top, _) = row_band(LABEL_ROW, 1.0);
+    let ring_edge = || {
+        vec![check(
+            FrameReduction::Coverage,
+            rect(PANEL_X + BORDER + 1.0, slider_top, PANEL_X + PANEL_WIDTH - BORDER, slider_top + BORDER),
+            SURFACE_SRGB,
+            PARTITION_TOLERANCE,
+        )]
+    };
+
+    let panel = panel_address();
+    harness
+        .execute(vec![("tab", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB }))])
+        .expect("focus the slider");
+    let focused = coverage(&capture(&mut harness, ring_edge()).results[0]);
+
+    let away_x = PANEL_X + PANEL_WIDTH * 0.5;
+    let away_y = label_top + ROW_HEIGHT * 0.5;
+    harness
+        .execute(vec![
+            ("press_away", HarnessOp::send_and_settle(&panel, &press(away_x, away_y))),
+            ("release_away", HarnessOp::send_and_settle(&panel, &release(away_x, away_y))),
+        ])
+        .expect("press away from the slider");
+    let after = coverage(&capture(&mut harness, ring_edge()).results[0]);
+
+    eprintln!("slider focus ring: focused={focused:.3} → after pressing away={after:.3}");
+    assert!(focused > 0.5, "Tab should ring the slider; ring coverage over its top edge was {focused:.3}");
+    assert!(
+        after < 0.1,
+        "pressing away from every focusable control must clear focus and take the ring with it; \
+         coverage over the slider's top edge stayed {after:.3}",
+    );
+}
+
 /// **Bug class: measured selection / composition / caret geometry drifting from
 /// the edited UTF-8 value.** The measured click is deliberately chosen where
 /// the warm-up approximation resolves to the *next* character, so the final
@@ -1578,8 +1723,15 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
         "selection first-cell coverage: typed {typed_first:.3} → selected {selected_first:.3}; \
          neighbor {typed_exclusion:.3} → {selected_exclusion_coverage:.3}",
     );
+    // The cell saturates when the accent band fills it, and only partly lights
+    // at rest, from glyph ink alone. The resting share is the larger of the two
+    // numbers to move: centering the text on its cap box (rather than on an em
+    // box measured from the draw origin) lifted the glyphs into this band, so
+    // resting coverage rose from roughly a third to three quarters. Saturation
+    // is what the band has to prove, with the gap still there to say it is the
+    // band and not the glyphs doing it.
     assert!(
-        selected_first > 0.75 && selected_first > typed_first + 0.25,
+        selected_first > 0.95 && selected_first > typed_first + 0.2,
         "the first measured selection cell (`c`) must be accent-filled; resting coverage was \
          {typed_first:.3}, selected was {selected_first:.3}",
     );
@@ -1612,7 +1764,7 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
         ])
         .expect("ime preedit");
 
-    let underline_y = text_top + (ROW_HEIGHT - size) * 0.5 + size;
+    let underline_y = text_baseline_y(text_top, ROW_HEIGHT, size);
     let preedit_underline = rect(boundary_x + 1.0, underline_y, after_five_x - 1.0, underline_y + 2.0);
     let underline_exclusion =
         rect(after_five_x + 1.0, underline_y, after_five_x + (after_four_x - boundary_x) - 1.0, underline_y + 2.0);
@@ -1633,8 +1785,11 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
         "composition coverage: cursor-span {cursor_span:.3}, next-cell {cursor_exclusion:.3}, \
          underline {underline:.3}, after-underline {underline_after:.3}",
     );
+    // Saturation plus a gap, for the same reason the selection band above uses
+    // it: the neighbouring cell is lit by glyph ink alone, and centering the
+    // text on its cap box moved more of that ink into the measured band.
     assert!(
-        cursor_span > 0.75 && cursor_span > cursor_exclusion + 0.25,
+        cursor_span > 0.95 && cursor_span > cursor_exclusion + 0.2,
         "the full IME cursor selection must fill the first preedit cell only; span coverage was \
          {cursor_span:.3}, neighboring cell was {cursor_exclusion:.3}",
     );
@@ -1892,7 +2047,11 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
     let preedit_x = content_x + metrics.caret_x("las", 3, size);
     let preedit_cursor_end_x = preedit_x + metrics.caret_x("üx", 1, size);
     let preedit_end_x = preedit_x + metrics.caret_x("üx", 2, size);
-    let underline_y = PANEL_Y + (row_height - size) * 0.5 + size;
+    // The composition underline sits on the text's baseline, which is where
+    // the shared placement rule puts it — the same helper every widget draws
+    // its one line of text by, so this mirrors the rule rather than restating
+    // one font's metrics.
+    let underline_y = text_baseline_y(PANEL_Y, row_height, size);
     let composition_checks = vec![
         check(
             FrameReduction::Coverage,

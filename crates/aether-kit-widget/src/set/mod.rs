@@ -19,6 +19,8 @@
 //!   that opens on demand, drawn in the overlay layer.
 //! - [`TabStripWidget`] — one row of content-sized tabs selecting a parallel
 //!   content set.
+//! - [`MenuBarWidget`] — a row of application menus whose items open in the
+//!   overlay layer.
 //!
 //! Each caches its assigned [`WidgetFrame`] rect
 //! and its [`Theme`], answers every
@@ -38,6 +40,7 @@ pub mod defaults;
 pub mod dropdown;
 pub mod image;
 pub mod label;
+pub mod menu_bar;
 pub mod numeric;
 pub mod radio;
 pub mod segmented;
@@ -53,6 +56,7 @@ pub use defaults::WidgetDefaults;
 pub use dropdown::DropdownWidget;
 pub use image::ImageWidget;
 pub use label::LabelWidget;
+pub use menu_bar::MenuBarWidget;
 pub use numeric::NumericWidget;
 pub use radio::RadioGroupWidget;
 pub use segmented::SegmentedWidget;
@@ -63,6 +67,7 @@ pub use text_field::TextFieldWidget;
 pub use toggle::ToggleWidget;
 pub use virtual_list::VirtualListWidget;
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_actor::WasmCtx;
@@ -291,14 +296,30 @@ pub(crate) fn quad(x: f32, y: f32, width: f32, height: f32, color: Rgba) -> Widg
 }
 
 /// Push a `thickness`-pixel border ring around the `width` × `height` local
-/// rect — four thin quads (top, bottom, left, right). A focused widget draws
-/// this from `theme.accent` so the focus ring reads without the root holding
-/// any per-widget-type visual knowledge.
+/// rect whose top-left is `(x, y)` — four thin quads (top, bottom, left,
+/// right). The offset form is what an overlay plate needs: a dropdown's list
+/// and a menu's items are rings around a rect the widget's own origin is not
+/// the corner of.
+pub(crate) fn push_rect_border(
+    items: &mut Vec<WidgetDrawItem>,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    thickness: f32,
+    color: Rgba,
+) {
+    items.push(quad(x, y, width, thickness, color));
+    items.push(quad(x, y + height - thickness, width, thickness, color));
+    items.push(quad(x, y, thickness, height, color));
+    items.push(quad(x + width - thickness, y, thickness, height, color));
+}
+
+/// Push a `thickness`-pixel border ring around the whole `width` × `height`
+/// local rect. A focused widget draws this from `theme.accent` so the focus
+/// ring reads without the root holding any per-widget-type visual knowledge.
 pub(crate) fn push_border(items: &mut Vec<WidgetDrawItem>, width: f32, height: f32, thickness: f32, color: Rgba) {
-    items.push(quad(0.0, 0.0, width, thickness, color));
-    items.push(quad(0.0, height - thickness, width, thickness, color));
-    items.push(quad(0.0, 0.0, thickness, height, color));
-    items.push(quad(width - thickness, 0.0, thickness, height, color));
+    push_rect_border(items, 0.0, 0.0, width, height, thickness, color);
 }
 
 fn push_inset_border(
@@ -425,7 +446,7 @@ fn single_line_edit_draw_items(
     if let Some(span) = displayed.preedit_span {
         let x0 = pad + prefix_width(span.start_byte);
         let x1 = pad + prefix_width(span.end_byte);
-        items.push(quad(x0, text_y + size, (x1 - x0).max(1.0), 1.0, theme.accent));
+        items.push(quad(x0, text_baseline_y(0.0, height, size), (x1 - x0).max(1.0), 1.0, theme.accent));
         if let Some(cursor) = displayed.preedit_cursor_span.filter(|cursor| cursor.is_collapsed()) {
             let cursor_x = pad + prefix_width(cursor.end_byte);
             items.push(quad(cursor_x, pad, 1.0, caret_height, theme.accent));
@@ -439,13 +460,216 @@ fn single_line_edit_draw_items(
     items
 }
 
+/// How far below a `Screen` draw's origin `aether.text` puts the baseline, as
+/// a fraction of the draw size: the font's ascent. The kit ships (and every
+/// stock widget draws with) `RobotoMono`, whose hhea ascent is `2146 / 2048`
+/// em — well over one em, which is why an origin computed as if the line were
+/// `size_pixels` tall sank the glyphs.
+const FONT_ASCENT_RATIO: f32 = 1.047_851_6;
+
+/// How far above the baseline a capital letter reaches, as a fraction of the
+/// draw size — `RobotoMono`'s OS/2 cap height, `1456 / 2048` em. The cap box is
+/// what a reader sees as "the text", so it is the box the row centers.
+const FONT_CAP_HEIGHT_RATIO: f32 = 0.710_937_5;
+
+/// The `Screen`-space baseline y for a single line of `size_pixels` text
+/// vertically centered in a row `row_height` tall whose top is `row_top`
+/// (widget-local): half a cap height below the row's middle, so the cap box
+/// the reader sees is centered and the descenders hang into the lower half.
+#[must_use]
+pub fn text_baseline_y(row_top: f32, row_height: f32, size_pixels: f32) -> f32 {
+    size_pixels.mul_add(FONT_CAP_HEIGHT_RATIO, row_height).mul_add(0.5, row_top)
+}
+
+/// Reply one single-line editor's frame: its ordinary draw, plus the hover
+/// overflow plate when the contents are too wide for the box. Shared by the
+/// text field and the numeric editor, which draw the same box.
+pub(super) fn reply_single_line_edit(
+    ctx: &WasmCtx<'_>,
+    displayed: &DisplayedEdit,
+    metrics: Option<&CachedFontMetrics>,
+    theme: &Theme,
+    state: &InteractionState,
+    theme_state: ThemeState,
+    frame: &WidgetFrame,
+) {
+    if reply_if_hidden(ctx, state) {
+        return;
+    }
+    let size = theme.value_size_pixels;
+    let items = single_line_edit_draw_items(displayed, metrics, theme, state, theme_state, frame.width, frame.height);
+
+    let measured =
+        metrics.filter(|_| state.hovered()).map(|metrics| measured_text_width(metrics, &displayed.text, size));
+    let overlay = measured.map_or_else(Vec::new, |text_width| {
+        overflow_reveal_items(
+            theme,
+            &displayed.text,
+            theme.pad,
+            text_width,
+            size,
+            theme.fill(theme.text_primary, theme_state),
+            frame,
+        )
+    });
+
+    if let Some(parent) = ctx.parent() {
+        parent.send(&WidgetDrawList { intrinsic: None, items, overlay });
+    }
+}
+
 /// The `Screen`-space `DrawText` origin y that vertically centers a single
 /// line of `size_pixels` text in a row `row_height` tall whose top is
-/// `row_top` (widget-local). `aether.text` treats a `Screen` draw `origin`
-/// as the line box's top-left and places the baseline one ascent below it,
-/// so centering the em box keeps the glyph ink inside the row without the
-/// font's exact ascent — which the theme does not fan to widgets (see
-/// [`APPROX_ADVANCE_RATIO`]).
-pub(crate) fn text_origin_y(row_top: f32, row_height: f32, size_pixels: f32) -> f32 {
-    (row_height - size_pixels).mul_add(0.5, row_top)
+/// `row_top` (widget-local) — the one rule every widget that draws one line
+/// of text places it by.
+///
+/// `aether.text` treats a `Screen` draw `origin` as the *pen* start and puts
+/// the baseline one **ascent** below it, so the origin is the baseline minus
+/// that ascent. The theme does not fan the font's own metrics to widgets (see
+/// `APPROX_ADVANCE_RATIO`), so the ratios are the shipped font's, applied
+/// uniformly: getting them from a `CachedFontMetrics` would mean the table
+/// carrying ascent (it carries advances only) and every widget holding a
+/// metrics adapter (five do not).
+#[must_use]
+pub fn text_origin_y(row_top: f32, row_height: f32, size_pixels: f32) -> f32 {
+    size_pixels.mul_add(-FONT_ASCENT_RATIO, text_baseline_y(row_top, row_height, size_pixels))
+}
+
+/// The overlay plate a widget raises when its one line of text does not fit
+/// the frame it lives in and the pointer is over it: the run redrawn whole on
+/// a `surface_raised` plate with a one-pixel `outline` ring, starting at the
+/// widget's own origin and reaching one `pad` past the run's end. The plate
+/// therefore covers the widget and whatever sits to its right, and the root
+/// cuts ordinary text out from under an overlay fill so the covered widgets'
+/// glyphs do not print through it.
+///
+/// Empty unless the run actually overflows (`text_x + text_width` past the
+/// frame's right edge) — a widget whose text fits raises nothing, so the
+/// reveal reads as "there is more here" rather than as chrome.
+pub(crate) fn overflow_reveal_items(
+    theme: &Theme,
+    text: &str,
+    text_x: f32,
+    text_width: f32,
+    size_pixels: f32,
+    ink: Rgba,
+    frame: &WidgetFrame,
+) -> Vec<WidgetDrawItem> {
+    let plate_width = text_x + text_width + theme.pad;
+    if text.is_empty() || !plate_width.is_finite() || text_x + text_width <= frame.width || frame.height <= 0.0 {
+        return Vec::new();
+    }
+
+    let mut items = Vec::with_capacity(6);
+    items.push(quad(0.0, 0.0, plate_width, frame.height, theme.surface_raised));
+    push_border(&mut items, plate_width, frame.height, 1.0, theme.outline);
+    items.push(WidgetDrawItem::Text {
+        x: text_x,
+        y: text_origin_y(0.0, frame.height, size_pixels),
+        font_id: theme.font_id,
+        text: String::from(text),
+        size_pixels,
+        color: ink,
+        clip: None,
+    });
+    items
+}
+/// The slot a row-local `x` lands in, over `widths` laid out left to right
+/// from `0.0` with `gap` between them. `None` in a gap, left of the first
+/// slot, or past the last — a row of content-sized targets (a tab strip's
+/// tabs, a menu bar's titles) is a row of separate targets, not one
+/// partitioned bar, so the space between two of them belongs to neither.
+fn slot_at_local_x(widths: &[f32], gap: f32, local_x: f32) -> Option<usize> {
+    if !local_x.is_finite() || local_x < 0.0 {
+        return None;
+    }
+    let mut left = 0.0;
+    for (index, width) in widths.iter().enumerate() {
+        if local_x < left + width {
+            return (local_x >= left).then_some(index);
+        }
+        left += width + gap;
+    }
+    None
+}
+
+/// The local x of slot `index`'s left edge in that same layout.
+fn slot_left(widths: &[f32], gap: f32, index: usize) -> f32 {
+    widths.iter().take(index).map(|width| width + gap).sum()
+}
+
+/// The interim widths a content-sized row lays out with before its font's
+/// metrics arrive: the row split evenly, the gaps taken out first. Replaced by
+/// the measured widths on the first `Collect` after the reply lands.
+fn even_split_widths(count: usize, width: f32, gap: f32) -> Vec<f32> {
+    if count == 0 {
+        return Vec::new();
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let slots = count as f32;
+    alloc::vec![((slots - 1.0).mul_add(-gap, width) / slots).max(0.0); count]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame() -> WidgetFrame {
+        WidgetFrame { x: 0.0, y: 0.0, width: 100.0, height: 24.0 }
+    }
+
+    #[test]
+    fn the_overflow_plate_appears_only_for_a_run_that_does_not_fit() {
+        // Tripwire: the reveal is a signal, not chrome. A plate raised over a
+        // run that already fits would cover the widget to its right on every
+        // hover, for nothing.
+        let theme = Theme::DEFAULT;
+        let fits = overflow_reveal_items(&theme, "short", theme.pad, 40.0, 14.0, theme.text_primary, &frame());
+        assert!(fits.is_empty(), "a run inside the frame raises no plate");
+
+        let empty = overflow_reveal_items(&theme, "", theme.pad, 400.0, 14.0, theme.text_primary, &frame());
+        assert!(empty.is_empty(), "there is nothing to reveal about an empty run");
+
+        let overflows =
+            overflow_reveal_items(&theme, "far too long", theme.pad, 160.0, 14.0, theme.text_primary, &frame());
+        let WidgetDrawItem::Quad { x, y, width, height, .. } = overflows[0] else {
+            panic!("the plate leads with its fill");
+        };
+        assert_eq!((x, y, height), (0.0, 0.0, 24.0), "the plate starts at the widget's own origin");
+        assert_eq!(width, theme.pad.mul_add(2.0, 160.0), "and reaches one pad past the run");
+        assert!(width > frame().width, "a plate that did not outgrow the frame would reveal nothing");
+        assert!(
+            matches!(overflows.last(), Some(WidgetDrawItem::Text { text, .. }) if text == "far too long"),
+            "the whole run draws over the plate",
+        );
+    }
+
+    #[test]
+    fn a_pointer_buckets_into_the_slot_it_is_over_and_into_no_slot_in_a_gap() {
+        let widths = [30.0, 50.0, 20.0];
+        assert_eq!(slot_at_local_x(&widths, 4.0, 0.0), Some(0));
+        assert_eq!(slot_at_local_x(&widths, 4.0, 29.9), Some(0));
+        assert_eq!(slot_at_local_x(&widths, 4.0, 31.0), None, "the gap after the first slot selects nothing");
+        assert_eq!(slot_at_local_x(&widths, 4.0, 34.0), Some(1));
+        assert_eq!(slot_at_local_x(&widths, 4.0, 88.0), Some(2));
+        assert_eq!(slot_at_local_x(&widths, 4.0, 108.0), None, "past the last slot is off the row");
+        assert_eq!(slot_at_local_x(&widths, 4.0, -1.0), None);
+        assert_eq!(slot_at_local_x(&[], 4.0, 0.0), None);
+    }
+
+    #[test]
+    fn unequal_slot_widths_bucket_by_their_own_extents() {
+        // The bug an even split hides: with widths 10 / 90, x = 50 is the
+        // second slot, while halves-of-the-row arithmetic calls it the first.
+        assert_eq!(slot_at_local_x(&[10.0, 90.0], 0.0, 50.0), Some(1));
+    }
+
+    #[test]
+    fn a_slot_starts_past_every_earlier_slot_and_the_gaps_between_them() {
+        let widths = [30.0, 50.0, 20.0];
+        assert_eq!(slot_left(&widths, 4.0, 0), 0.0);
+        assert_eq!(slot_left(&widths, 4.0, 1), 34.0);
+        assert_eq!(slot_left(&widths, 4.0, 2), 88.0);
+        assert_eq!(slot_at_local_x(&widths, 4.0, slot_left(&widths, 4.0, 2)), Some(2), "the left edge is inclusive");
+    }
 }

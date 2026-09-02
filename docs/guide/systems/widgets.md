@@ -2,8 +2,8 @@
 
 `aether-kit-widget` ships a set of guest-side widgets — a slider, a text field, a
 multiline text area, a radio group, a fixed-row virtual list, a button, a label,
-an image, a toggle, a segmented control, a tab strip, a dropdown, and a numeric
-editor — as ordinary `#[actor(instanced, composable)]` types.
+an image, a toggle, a segmented control, a tab strip, a dropdown, a menu bar,
+and a numeric editor — as ordinary `#[actor(instanced, composable)]` types.
 A panel root spawns them as inline children (ADR-0114) and drives them entirely
 by mail, so composing an editor panel is a matter of laying out widgets and
 translating their value events, never re-deriving hit rects, focus, or per-row
@@ -52,7 +52,8 @@ widget sends can misreport it.
 - **Config, down.** One `Config` kind per widget — `SliderConfig`,
   `TextFieldConfig`, `TextAreaConfig`, `RadioConfig`, `VirtualListConfig`,
   `ButtonConfig`, `LabelConfig`, `ImageConfig`, `ToggleConfig`,
-  `SegmentedConfig`, `TabStripConfig`, `DropdownConfig`, `NumericConfig` — each embedding a
+  `SegmentedConfig`, `TabStripConfig`, `DropdownConfig`, `MenuBarConfig`,
+  `NumericConfig` — each embedding a
   `theme: Theme`. The
   config is both the value
   `spawn_inline_child::<WidgetPanel, W>(subname, &config)` boots the widget with and a
@@ -79,7 +80,8 @@ widget sends can misreport it.
   draw muted but leave input routing; read-only Slider, Radio, TextField,
   TextArea, VirtualList, Toggle, Segmented, TabStrip, and Numeric controls
   remain focusable but reject mutation. Button and Label ignore read-only and
-  validation.
+  validation; the menu bar ignores read-only too — it holds no value to
+  protect — while becoming disabled or hidden closes any menu it had open.
 - **Interaction, down.** The root sends `FocusGained` / `FocusLost` and
   `HoverGained` / `HoverLost`. Hover comes from explicit edges, not from a child
   inferring absence from raw motion. Pressed and hover select an exclusive fill
@@ -93,9 +95,9 @@ widget sends can misreport it.
   once.
 
   `ToggleChanged { on }`, `SegmentedSelected { index }`, `TabSelected
-  { index }`, and `NumericChanged { value, committed }` use that same
-  source-attributed lane; Numeric applies the preview/commit distinction to
-  typed values.
+  { index }`, `MenuItemActivated { menu, item }`, and `NumericChanged { value,
+  committed }` use that same source-attributed lane; Numeric applies the
+  preview/commit distinction to typed values.
 
 Every stock widget is `#[actor(instanced, composable)]`, so it satisfies
 `ChildOf<P>` for any Wasm actor parent in the same resident module. A custom
@@ -117,14 +119,23 @@ before roles existed.
 
 `align` places the run in the assigned frame: `Start` at the frame's left edge,
 `Center` on its width, `End` flush with its right edge — which is what a column
-of numbers wants, so magnitudes line up on their last digit. Centering and
-end-alignment need the run's measured width, so such a label drives the same
-single-flight `FontMetricsRequest` the text field and text area do and lays out
-against the resolved `CachedFontMetrics`. Until those metrics arrive the label
-draws at the start rather than at a guessed width, and a `Start` label never
-sends the request at all. A run wider than its frame also stays flush left, so
-overflow clips at the slot's right edge instead of pushing the head of the
-string out of view.
+of numbers wants, so magnitudes line up on their last digit. Every label drives
+the same single-flight `FontMetricsRequest` the text field and text area do and
+lays out against the resolved `CachedFontMetrics`. Until those metrics arrive
+the label draws at the start rather than at a guessed width. A run wider than
+its frame also stays flush left, so overflow clips at the slot's right edge
+instead of pushing the head of the string out of view.
+
+Clipped text is readable on hover. When a label's or a text field's run is
+wider than the frame it lives in and the pointer is over it, the widget raises
+the whole run on an overlay plate: `surface_raised` with a one-pixel `outline`
+ring, starting at the widget's own origin and reaching one `pad` past the end
+of the run — so it covers its own slot and whatever sits to its right, and the
+root's overlay cutout keeps the covered widgets' glyphs from printing through
+it. Nothing is raised while the run fits, so the plate is a signal rather than
+chrome. This is why a label is pointer-eligible (for hover) while remaining
+non-focusable: pressing one still clears focus, exactly as pressing bare panel
+background does.
 
 Selection is a state, not an affordance, and every widget that has a current
 item draws it the same way: the chosen row of a virtual list, the chosen bucket
@@ -134,6 +145,31 @@ A radio group's unselected markers stay on `surface_raised` and so read as
 empty slots beside the lit one. None of these use `accent`, which means the
 primary action and the focus ring and nothing else — so a chosen row never
 reads as a button waiting to be pressed.
+
+## Placing one line of text
+
+Every widget that draws a single line — label, button, text field, numeric,
+list row, segmented bucket, tab, dropdown row — places it with one shared
+rule, `aether_kit_widget::set::text_origin_y(row_top, row_height,
+size_pixels)`. Reach for it rather than deriving an origin at the draw site;
+per-widget arithmetic is how the set drifted out of alignment once already.
+
+The rule exists because `aether.text` places a `Screen` draw's `origin` at the
+*pen*, not at the ink: the baseline lands one **ascent** below the origin, and
+an ascent is not the draw size. The kit's font (RobotoMono) has an ascent of
+`2146 / 2048` em, so an origin computed as though the line were `size_pixels`
+tall sank every glyph about a fifth of the size below centre — a visible sag in
+a 24-pixel row, and the reason text on buttons and inputs read as sitting low
+and to the right. `text_origin_y` instead centres the **cap box**, which is
+what a reader sees as the text: the baseline sits half a cap height below the
+row's middle (`text_baseline_y`, which the composition underlines also draw
+on), and the origin is that baseline minus one ascent.
+
+Horizontal centring is separate and needs the run's measured width, which is
+the sum of its glyph advances at the size the draw uses: `centered_text_x`
+places it and never pushes the run left of one `pad`. A widget that has not
+resolved its font's metrics yet draws left-padded rather than guessing, so the
+label never jumps when the measurement lands.
 
 ## Fixed-row virtual lists
 
@@ -147,11 +183,15 @@ uniform-height choices.
 
 Up and Down move selection by one. PageUp and PageDown move by the configured
 nonzero visible-row count. Movement clamps at the item-vector ends and shifts
-the realized window only enough to reveal the selected row. A click divides
-the assigned frame height by the number of rows actually realized, so a short
-list fills its viewport and the frame's bottom edge remains exclusive. Hidden
-lists answer every `Collect` with an empty draw list; disabled and read-only
-lists reject both pointer and keyboard selection changes.
+the realized window only enough to reveal the selected row. A row is always one
+configured row tall — the viewport divided by `visible_row_count`, never by the
+number of rows the list happens to hold — so a list with fewer items than its
+viewport draws that many normal rows at the top and leaves the rest of the
+frame empty, and hit testing below the last realized row selects nothing. (A
+list that spread its items to fill the frame instead turned a two-item list
+into a pair of slabs, with a selected row half the viewport high.) Hidden lists
+answer every `Collect` with an empty draw list; disabled and read-only lists
+reject both pointer and keyboard selection changes.
 
 `initial_selected_index` is an `Option`, and a list whose model holds no
 current item shows none — no row lights up, rather than the first row lighting
@@ -188,6 +228,57 @@ takes that option and closes, a press anywhere else closes without a change.
 including the close that focus loss, a re-sent config, or becoming disabled or
 read-only forces. An empty option vector, a zero-row list, and a read-only or
 unavailable dropdown never open at all.
+
+## Menu bars
+
+`MenuBarConfig { menus, theme, state }` is the row of application menus a
+screen's commands live in — File, Edit, View, Help — so a verb that is not a
+control on the pane still has an address a person can find. Each `Menu` is a
+`title` and its `items`, and each `MenuItem` is a `label`, the `shortcut` it
+advertises (`"Cmd+S"`, or empty), whether it is `enabled`, and whether a
+divider follows it (`separator_after`).
+
+Closed, the bar is one row on `theme.surface_raised`. Each title is as wide as
+its own text plus one `theme.pad` either side — never an even split of the row
+— laid out left to right from the bar's local origin with `theme.space(1)`
+between them, so the space between two titles belongs to neither. Like the tab
+strip, that sizing needs real glyph widths, so the bar drives the same
+single-flight font-metrics request the text controls do and splits the row
+evenly only as an interim, for the frame or two before the measurement lands.
+The title under the pointer takes the hover overlay, and so does the title
+whose menu is open, so the bar says which menu the plate below it belongs to.
+
+A press and release on a title opens that menu. The items are drawn in the
+**overlay** (`WidgetDrawList::overlay`) as a plate hanging directly below the
+title: `theme.surface_raised` inside a one-pixel `theme.outline` ring, as wide
+as the widest item's label plus accelerator plus padding and never narrower
+than the title it hangs from, one `theme.row_height` per item. An item's label
+sits at `pad` in `theme.text_primary` — `text_muted` when it is disabled — and
+its `shortcut` is right-aligned in `text_muted`; honouring the accelerator
+itself is the root's business, the bar only advertises it. An item with
+`separator_after` is followed by a one-pixel `theme.outline` divider with
+`theme.space(1)` either side, and that band belongs to no item: a press there
+selects nothing, exactly as the gap between two titles does. A trailing
+`separator_after` on the last item draws nothing.
+
+While a menu is open the bar holds the pointer grab, so it sees every move and
+every press on the window. Moving over a different title opens that menu
+instead, and Left/Right do the same by keyboard, clamping at the ends. The item
+under the pointer takes the hover overlay; Up/Down walk that highlight over the
+enabled items only, skipping the disabled ones and clamping at the ends, and
+Enter activates the highlighted item. A press on an enabled item reports
+`MenuItemActivated { menu, item }` and closes; a press on a disabled item does
+nothing at all — not even close — so a mis-aimed press leaves the menu standing
+to try again. A press anywhere else, a title included, closes without
+activating, which is what makes pressing the open title read as the toggle it
+looks like.
+
+`MenuOpenChanged { open }` reports each open and close edge exactly once —
+including the close that Escape, focus loss, a re-sent config, or becoming
+unavailable forces, and *excluding* a switch from one menu to another, which is
+not a new open edge and does not disturb the grab the root already holds. A
+menu with no items never opens: an empty plate under a pointer grab is a trap,
+not a menu.
 
 ## Image widget
 
@@ -245,11 +336,15 @@ there selects nothing. That sizing needs the label's real width, so the strip
 drives the same single-flight font-metrics request the text controls do and
 splits the row evenly only as an interim, for the frame or two before the
 measurement lands. The hit buckets and the draw read the same widths, so a
-press always lands in the tab under the pointer. The selected tab is marked
-twice — filled with `theme.selection` and inked in `theme.selection_text`,
-under a two-pixel `theme.text_primary` underline along its bottom edge —
-while the others draw `text_primary` on the row's own `surface_raised`; hover
-and press are the usual `Theme::fill` overlays. A left press selects, focused
+press always lands in the tab under the pointer. The selected tab is marked by a
+two-pixel `theme.text_primary` underline along its bottom edge and nothing
+else: every tab keeps the row's own `surface_raised` fill and `text_primary`
+ink, so the strip reads as a row of places with one marked rather than a row of
+buttons with one lit, and hover and press stay the only fills the pointer
+changes (the usual `Theme::fill` overlays). The tab strip is the one current-item
+control that does not take the selection role — a segmented control divides one
+bar and needs the fill to say which part is chosen, while a tab already reads as
+a place you are standing in. A left press selects, focused
 Left/Right moves the selection and clamps at the ends, and `TabSelected {
 index }` reports only actual changes. The strip owns nothing but the choice:
 swapping the content behind the selected tab is the root's business.
@@ -294,6 +389,28 @@ questions:
   Shift+Tab backward. Traversal wraps and skips hidden/disabled/static entries.
   A live availability change moves focus forward when its holder disappears
   and clears hover/capture through named transition effects.
+- **What clears focus?** A left press that lands on *no* focusable child —
+  bare panel background, a label, the gap between two rows. Clicking away from
+  a control is how a person says they are done with it, so the field they were
+  typing in stops being active and takes its `FocusLost`.
+
+That last rule is the one a consumer root has to copy deliberately, because it
+is the branch that is easy to leave out: `Focus::focus_hit` answers `None` both
+when the press hit nothing focusable *and* when it hit the already-focused
+child, so a root that only reacts to its `Some` never clears anything and a
+pressed input stays lit forever. Ask `Focus::focus_hit_test(x, y)` for the
+focusable child under the point and hand the answer — `Some` or `None` — to
+`Focus::set_focus`, then fan the returned transition:
+
+```rust
+let focusable = self.focus.focus_hit_test(press.x, press.y);
+if let Some(transition) = self.focus.set_focus(focusable) {
+    apply_focus(ctx, transition);   // FocusLost to `previous`, FocusGained to `next`
+}
+```
+
+Clearing focus cancels nothing else: drag capture, the modal grab, and every
+child's own value are untouched.
 
 Drag capture is the kit's own policy over the raw button vocabulary: a left
 press that hits a widget sets capture on that child, moves route to it while
@@ -303,8 +420,9 @@ drifts off it. `MouseButton.button` and `MouseButtonRelease.button` use the
 engine constants in `aether_kinds::mouse_button`; `LEFT` is `0`, including for a
 synthetic `aether.mouse_button` sent over MCP.
 
-A widget that must draw outside its own slot — an open dropdown's list — puts
-those draws in `WidgetDrawList::overlay` instead of `items`. The overlay is
+A widget that must draw outside its own slot — an open dropdown's list, a menu
+bar's plate — puts those draws in `WidgetDrawList::overlay` instead of
+`items`. The overlay is
 offset by each slot origin on the way up like any other draw but never
 intersected with the slot clip, and the root emits the whole cluster's overlay
 after every ordinary quad and glyph, so the list escapes its one-row slot and
@@ -312,11 +430,12 @@ lands over the widgets below it. Its counterpart on the input side is the
 **modal pointer grab**: `Focus::begin_grab(child)` routes every pointer event
 to that child until `end_grab`, outranking drag capture, and hover edges are
 suppressed while it holds so nothing under the overlay lights up. The widget
-asks for the grab by reporting `DropdownOpenChanged { open: true }` and gives
-it back with `open: false` — that is why the close edge is reported for every
-way a list can close, including focus loss. Without the grab a press that
-lands outside the widget's own rect would go to whatever is under it, and the
-open list would have no way to learn it should close.
+asks for the grab by reporting `DropdownOpenChanged { open: true }` — or
+`MenuOpenChanged { open: true }`, which the root answers the same way — and
+gives it back with `open: false`; that is why the close edge is reported for
+every way a list or a menu can close, including focus loss. Without the grab a
+press that lands outside the widget's own rect would go to whatever is under
+it, and the open list would have no way to learn it should close.
 
 A focused Button activates once on Enter press (repeat presses are suppressed
 until release) and once on Space release after a matching Space press. Focus
