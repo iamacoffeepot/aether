@@ -73,6 +73,7 @@
 - [Choose the owning extension point](building/extension-points.md)
 - [Capability module anatomy](capability-anatomy.md)
 - [Writing guest code](writing-guest-code.md)
+- [Designing a screen](building/designing-a-screen.md)
 - [Distribution and packaging](building/distribution.md)
 - [Recipes](recipes.md)
   - [Adding a config knob](recipes/adding-a-config-knob.md)
