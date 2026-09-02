@@ -23,9 +23,7 @@ use aether_text::{FontMetricsRequest, FontMetricsResult, FontRef, TextCapability
 use alloc::string::{String, ToString};
 
 use crate::set::defaults::WidgetDefaults;
-use crate::set::{
-    arm_text_drag, release_left, reply_with_draw_items, single_line_edit_draw_items, single_line_hit_byte,
-};
+use crate::set::{arm_text_drag, release_left, reply_single_line_edit, single_line_hit_byte};
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::{EditPolicy, TextEditState, TextSpan};
 use crate::theme::{SetTheme, Theme, ThemeState};
@@ -544,17 +542,15 @@ impl WasmActor for NumericWidget {
 
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        reply_with_draw_items(ctx, &self.state, || {
-            single_line_edit_draw_items(
-                &self.edit.displayed(),
-                self.resolved_metrics(),
-                &self.theme,
-                &self.state,
-                self.theme_state(),
-                self.frame.width,
-                self.frame.height,
-            )
-        });
+        reply_single_line_edit(
+            ctx,
+            &self.edit.displayed(),
+            self.resolved_metrics(),
+            &self.theme,
+            &self.state,
+            self.theme_state(),
+            &self.frame,
+        );
     }
 }
 

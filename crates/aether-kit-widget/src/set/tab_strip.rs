@@ -6,11 +6,13 @@
 //! sets.
 //!
 //! Each tab is sized to its label plus padding — never equal thirds of the
-//! row — and the selected tab is marked twice, by the selection role and an
-//! underline, so it is prominent at a glance. A press selects; a focused
-//! Left/Right moves the selection and clamps at the ends. The strip owns
-//! nothing but the choice: which content the selected tab shows is the
-//! root's business.
+//! row — and the selected tab is marked by an underline along its bottom
+//! edge, nothing more: every tab keeps the same raised fill, so the strip
+//! reads as a row of places with one marked rather than a row of buttons with
+//! one lit, and hover stays the only fill change the pointer causes. A press
+//! selects; a focused Left/Right moves the selection and clamps at the ends.
+//! The strip owns nothing but the choice: which content the selected tab
+//! shows is the root's business.
 //!
 //! Sizing a tab to its label needs the label's real width, so the strip
 //! drives the same single-flight
@@ -284,9 +286,7 @@ impl WasmActor for TabStripWidget {
         }
     }
 
-    /// Reply the strip's local draw: one filled tab per label, the selected
-    /// one in the selection role under an underline, and the focus /
-    /// validation outlines.
+    /// Reply the strip's local draw.
     ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
@@ -295,6 +295,16 @@ impl WasmActor for TabStripWidget {
         if reply_if_hidden(ctx, &self.state) {
             return;
         }
+        if let Some(parent) = ctx.parent() {
+            parent.send(&WidgetDrawList { intrinsic: None, items: self.draw_items(), overlay: Vec::new() });
+        }
+    }
+}
+
+impl TabStripWidget {
+    /// The strip's local draw: one raised tab per label, an underline under the
+    /// selected one, and the focus / validation outlines.
+    fn draw_items(&self) -> Vec<WidgetDrawItem> {
         let height = self.frame.height;
         let gap = self.theme.space(1);
         let size = self.theme.label_size_pixels;
@@ -305,17 +315,14 @@ impl WasmActor for TabStripWidget {
         for (index, (label, tab_width)) in self.labels.iter().zip(self.tab_widths()).enumerate() {
             let selected = index == self.selected_index;
             let theme_state = self.tab_theme_state(index);
-            let base = if selected {
-                self.theme.selection
-            } else {
-                self.theme.surface_raised
-            };
-            items.push(quad(left, 0.0, tab_width, height, self.theme.fill(base, theme_state)));
+            items.push(quad(left, 0.0, tab_width, height, self.theme.fill(self.theme.surface_raised, theme_state)));
 
             if selected {
-                // The second mark. The fill alone reads as "lit"; the underline
-                // says "this one", and survives a theme whose selection sits
-                // close to its raised surface.
+                // The only mark. A tab is a place, not a row of a list: filling
+                // the selected one turns the strip into a wall of buttons with
+                // one lit, while an underline on a plain tab reads as "you are
+                // here" at a glance. Hover keeps its own overlay, so the
+                // pointer still says which tab it is over.
                 items.push(quad(
                     left,
                     height - UNDERLINE_THICKNESS,
@@ -326,11 +333,6 @@ impl WasmActor for TabStripWidget {
             }
 
             if !label.is_empty() {
-                let ink = if selected {
-                    self.theme.selection_text
-                } else {
-                    self.theme.text_primary
-                };
                 items.push(WidgetDrawItem::Text {
                     // A measured tab is its label plus one pad each side, so
                     // the padded origin centers the label; the interim even
@@ -340,7 +342,7 @@ impl WasmActor for TabStripWidget {
                     font_id: self.theme.font_id,
                     text: label.clone(),
                     size_pixels: size,
-                    color: self.theme.fill(ink, theme_state),
+                    color: self.theme.fill(self.theme.text_primary, theme_state),
                     clip: None,
                 });
             }
@@ -349,9 +351,7 @@ impl WasmActor for TabStripWidget {
         }
 
         push_control_outlines(&mut items, self.frame.width, height, &self.state, &self.theme);
-        if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { intrinsic: None, items, overlay: Vec::new() });
-        }
+        items
     }
 }
 
@@ -388,6 +388,39 @@ mod tests {
         let mut strip = strip(3, 0);
         assert_eq!(strip.select_at(15.0), None, "no change, no TabSelected");
         assert_eq!(strip.pressed_tab, Some(0));
+    }
+
+    #[test]
+    fn the_selected_tab_is_marked_by_its_underline_alone() {
+        // Tripwire: filling the selected tab turns a strip of places into a row
+        // of buttons with one lit — every tab keeps the raised surface, and the
+        // underline is the whole mark. Hover is the only fill the pointer
+        // changes, which a re-added selection fill would drown out.
+        let strip = strip(3, 1);
+        let items = strip.draw_items();
+        let (tabs, underlines): (Vec<_>, Vec<_>) = items
+            .iter()
+            .filter_map(|item| match item {
+                WidgetDrawItem::Quad { y, height, color, .. } => Some((*y, *height, *color)),
+                WidgetDrawItem::Text { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+            })
+            .partition(|(_, height, _)| *height == strip.frame.height);
+        assert_eq!(tabs.len(), 3, "one full-height fill per tab");
+        assert!(
+            tabs.iter().all(|(_, _, color)| *color == strip.theme.surface_raised),
+            "the selected tab carries no fill of its own; fills were {tabs:?}",
+        );
+        assert_eq!(
+            underlines,
+            vec![(strip.frame.height - UNDERLINE_THICKNESS, UNDERLINE_THICKNESS, strip.theme.text_primary)],
+            "exactly one underline, along the selected tab's bottom edge",
+        );
+        assert!(
+            items
+                .iter()
+                .all(|item| !matches!(item, WidgetDrawItem::Text { color, .. } if *color != strip.theme.text_primary)),
+            "every tab label reads in the primary ink; items were {items:?}",
+        );
     }
 
     #[test]

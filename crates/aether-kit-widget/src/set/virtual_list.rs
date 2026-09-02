@@ -14,6 +14,11 @@
 //! action". A model that holds no selection lights no row, and a list with no
 //! items at all says so in one muted caption line instead of drawing an empty
 //! rectangle.
+//!
+//! A row is always one configured row tall. A list holding fewer items than
+//! its viewport draws that many short rows and leaves the rest of the frame
+//! empty — it never spreads them to fill it, which would turn a two-item list
+//! into a pair of slabs and its selected row into a half-screen block.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -129,13 +134,18 @@ impl VirtualListWidget {
         }
     }
 
-    fn window_row_height(&self, window: VisibleRowWindow) -> Option<f32> {
-        let visible_row_count = window.len();
-        if visible_row_count == 0 || !valid_frame(&self.frame) {
+    /// One row's height: the viewport divided by the row count the list was
+    /// *configured* for, never by the number it happens to have realized. A
+    /// list holding fewer items than its viewport therefore draws its rows at
+    /// their normal height with the rest of the viewport left empty — dividing
+    /// by the realized count instead stretched two items over the whole frame,
+    /// so a short list rendered as one giant row.
+    fn row_height(&self) -> Option<f32> {
+        if self.visible_row_count == 0 || !valid_frame(&self.frame) {
             return None;
         }
         #[allow(clippy::cast_precision_loss)]
-        let divisor = visible_row_count as f32;
+        let divisor = self.visible_row_count as f32;
         let row_height = self.frame.height / divisor;
         (row_height.is_finite() && row_height > 0.0).then_some(row_height)
     }
@@ -145,7 +155,7 @@ impl VirtualListWidget {
         if !local_y.is_finite() || local_y < 0.0 || local_y >= self.frame.height {
             return None;
         }
-        let row_height = self.window_row_height(window)?;
+        let row_height = self.row_height()?;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let row_offset = (local_y / row_height).floor() as usize;
         (row_offset < window.len()).then(|| window.first_index + row_offset)
@@ -179,7 +189,7 @@ impl VirtualListWidget {
         }
         let window = self.window();
         let visible_row_count = window.len();
-        let Some(row_height) = self.window_row_height(window) else {
+        let Some(row_height) = self.row_height() else {
             return Vec::new();
         };
 
@@ -490,8 +500,30 @@ mod tests {
         assert_eq!(widget.row_at_local_y(0.0), None);
 
         let short = list(2, 5, 0);
-        assert_eq!(short.row_at_local_y(59.999), Some(0));
-        assert_eq!(short.row_at_local_y(60.0), Some(1));
+        assert_eq!(short.row_at_local_y(23.999), Some(0));
+        assert_eq!(short.row_at_local_y(24.0), Some(1));
+        assert_eq!(short.row_at_local_y(48.0), None, "the empty viewport under the last item is not a row");
+    }
+
+    #[test]
+    fn a_short_list_keeps_its_rows_one_configured_row_tall() {
+        // Tripwire: row height divides the viewport by the *configured* row
+        // count. Dividing by the realized count stretched a two-item list over
+        // its whole frame — two slabs, and a selected row half the viewport
+        // high, which is what a short list looked like in the studio.
+        let widget = list(2, 5, 1);
+        let items = widget.draw_items();
+        let quads: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                WidgetDrawItem::Quad { y, height, color, .. } => Some((*y, *height, *color)),
+                WidgetDrawItem::Text { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+            })
+            .collect();
+
+        assert_eq!(quads.len(), 2, "two items realize two row quads and no filler for the empty viewport");
+        assert_eq!(quads[0], (0.0, 24.0, widget.theme.surface_raised));
+        assert_eq!(quads[1], (24.0, 24.0, widget.theme.selection), "the selected row is one row high");
     }
 
     #[test]

@@ -81,6 +81,13 @@ impl InteractionState {
         self.focused
     }
 
+    /// Whether the root reports the pointer over this widget. Read by the
+    /// widgets that reveal clipped content on hover.
+    #[must_use]
+    pub(super) fn hovered(&self) -> bool {
+        self.hovered
+    }
+
     /// Exclusive fill priority: Disabled → Pressed → Hover → Normal.
     #[must_use]
     pub(super) fn theme_state(&self, pressed: bool) -> ThemeState {

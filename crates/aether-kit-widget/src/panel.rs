@@ -292,8 +292,13 @@ where
             Some(SpawnedChild {
                 id,
                 width_pixels: None,
+                // Pointer-eligible for hover only: a label whose text is wider
+                // than its slot reveals the rest on a raised plate while the
+                // pointer is over it, and hover edges follow the pointer hit
+                // table. Still never focusable, so a press on a label clears
+                // focus like a press on the background.
+                pointer_eligible: true,
                 height_pixels: row,
-                pointer_eligible: false,
                 focusable: false,
                 state: config.state,
                 type_namespace: <LabelWidget as Addressable>::NAMESPACE,
@@ -805,7 +810,7 @@ fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, ro
     let profile = match host_spec.wrapped {
         WidgetKind::Label => {
             let config = decode_named::<LabelConfig>(&spec.subname, &host_spec.wrapped_config)?;
-            ChildProfile { height: row, pointer_eligible: false, focusable: false, state: config.state }
+            ChildProfile { height: row, pointer_eligible: true, focusable: false, state: config.state }
         }
         WidgetKind::Image => {
             let config = decode_named::<ImageConfig>(&spec.subname, &host_spec.wrapped_config)?;
@@ -1044,6 +1049,14 @@ impl WasmActor for WidgetPanel {
     /// the press; any press forwards to the hit child. A modal grab (an open
     /// dropdown) takes every press before any of that: the grab holder must
     /// see the press that lands outside it, which is how it learns to close.
+    ///
+    /// A left press that lands on no focusable child **clears** focus — the
+    /// panel background, a label, the gap between two rows. Clicking away from
+    /// a control is how a person says "I am done with that one", so the field
+    /// they were typing in must stop being active and take its `FocusLost`.
+    /// Nothing else is cancelled: a drag capture, a modal grab, and every
+    /// child's own value are untouched. A root that forks this panel copies
+    /// the rule — leaving it out is what keeps a pressed input lit forever.
     #[handler::single]
     fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, press: MouseButton) {
         if let Some(grabbed) = self.focus.grabbed() {
@@ -1055,7 +1068,8 @@ impl WasmActor for WidgetPanel {
             if let Some(child) = hit {
                 self.focus.begin_capture(child);
             }
-            if let Some(transition) = self.focus.focus_hit(press.x, press.y) {
+            let focusable = self.focus.focus_hit_test(press.x, press.y);
+            if let Some(transition) = self.focus.set_focus(focusable) {
                 apply_focus(ctx, transition);
             }
             hit

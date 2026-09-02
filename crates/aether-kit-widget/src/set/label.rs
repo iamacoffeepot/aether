@@ -4,36 +4,44 @@
 
 //! The static label (issue 2660).
 //!
-//! Non-interactive text — the trivial widget. It takes no input and is not
-//! focus-eligible (the root's focus register skips it); it only draws its
-//! configured text each `Collect`.
+//! Non-interactive text — the trivial widget. It is not focus-eligible (the
+//! root's focus register skips it, so a press on a label clears focus like a
+//! press on the background) and it acts on no input except the hover edges the
+//! root derives; it only draws its configured text each `Collect`.
 //!
 //! The label is where the screen's type scale surfaces: its
 //! [`TextRole`] picks the size the theme sets that step at, and `Caption`
 //! additionally draws in the muted ink, so hierarchy is a property of the
 //! configured role rather than a pixel size chosen at the call site.
 //!
-//! A non-`Start` [`TextAlign`] needs the run's measured width, so such a label
-//! drives the same single-flight
+//! The label measures its run: it drives the same single-flight
 //! [`FontMetricsRequest`](aether_text::FontMetricsRequest) the measured text
 //! controls do and lays out against the resolved
-//! [`aether_kinds::CachedFontMetrics`]. A `Start` label
-//! never asks — it draws at the frame's left edge either way — and an
-//! unmeasured run falls back to `Start` rather than to a guessed width.
+//! [`aether_kinds::CachedFontMetrics`]. An unmeasured run falls back to
+//! `Start` rather than to a guessed width. The measurement is what a
+//! non-`Start` [`TextAlign`] places the run by, and it is also what tells the
+//! label its text does not fit: a run wider than the frame reveals itself
+//! whole on a raised overlay plate while the pointer is over it, so text
+//! clipped by a narrow column is readable without resizing anything.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Mail, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::CachedFontMetrics;
 use aether_math::Rgba;
 use aether_text::FontMetricsResult;
 
-use crate::set::{apply_static_control_state, pump_text_font_metrics, reply_if_hidden, text_origin_y};
+use crate::set::{
+    apply_static_control_state, overflow_reveal_items, pump_text_font_metrics, reply_if_hidden, text_origin_y,
+};
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::{FontMetricsAdapter, SingleLineLayout};
 use crate::theme::{SetTheme, TextRole, Theme};
-use crate::{Collect, LabelConfig, SetWidgetState, TextAlign, WidgetDrawItem, WidgetDrawList, WidgetFrame};
+use crate::{
+    Collect, HoverGained, HoverLost, LabelConfig, SetWidgetState, TextAlign, WidgetDrawItem, WidgetDrawList,
+    WidgetFrame,
+};
 
 /// A static text label. Holds the text plus the cached theme / frame.
 pub struct LabelWidget {
@@ -47,28 +55,43 @@ pub struct LabelWidget {
     /// Read-only and validation are inapplicable to a static label; visibility
     /// and enabled still control absence and muted presentation consistently.
     state: InteractionState,
-    /// Single-flight exact metrics, only ever requested for an alignment that
-    /// needs the run's measured width.
+    /// Single-flight exact metrics for the active theme font: the run's width
+    /// places a non-`Start` alignment and decides whether the text overflows.
     font_metrics: FontMetricsAdapter,
 }
 
 impl LabelWidget {
-    /// Start a font-metrics request when the alignment needs a measured width.
-    /// A `Start` label draws flush left, so it never spends a request or a
-    /// per-label metrics cache on a width it will not read.
+    /// Start a font-metrics request when one is due. Every label measures: a
+    /// `Start` label draws flush left either way, but the width is also how it
+    /// knows its text is wider than its slot and owes the hover reveal.
     fn pump_font_metrics(&mut self, ctx: &mut WasmCtx<'_>) {
-        if self.align != TextAlign::Start {
-            pump_text_font_metrics(ctx, &mut self.font_metrics);
-        }
+        pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
 
     /// The run's measured width at `size_pixels`, or `None` while the metrics
-    /// are still in flight (or the alignment does not need one).
+    /// are still in flight.
     fn measured_width(&self, size_pixels: f32) -> Option<f32> {
-        if self.align == TextAlign::Start {
-            return None;
-        }
         self.font_metrics.resolved().map(|metrics| SingleLineLayout::build(&self.text, metrics, size_pixels).width())
+    }
+
+    /// The hover reveal: the whole run on a raised plate, drawn from the
+    /// label's own origin, whenever the pointer is over a label whose text
+    /// overflows its frame. Empty otherwise.
+    fn overflow_overlay(&self, size_pixels: f32, text_x: f32, text_width: Option<f32>) -> Vec<WidgetDrawItem> {
+        if !self.state.hovered() {
+            return Vec::new();
+        }
+        text_width.map_or_else(Vec::new, |text_width| {
+            overflow_reveal_items(
+                &self.theme,
+                &self.text,
+                text_x,
+                text_width,
+                size_pixels,
+                self.theme.fill(self.ink(), self.state.theme_state(false)),
+                &self.frame,
+            )
+        })
     }
 
     /// The ink the role reads in: a caption is a quieter aside, so it draws
@@ -100,6 +123,12 @@ fn align_x(align: TextAlign, frame_width: f32, text_width: Option<f32>) -> f32 {
 /// A label widget. Spawned inline by a panel root with a [`LabelConfig`];
 /// draws its text and reports nothing up.
 ///
+/// The label declares its own hover handlers rather than adopting
+/// [`WidgetDefaults`](crate::set::WidgetDefaults): it needs the `#[fallback]`
+/// below to absorb the raw pointer mail its hover eligibility earns it, and
+/// the `#[actor]` macro cannot emit both an adopted set and a fallback (the
+/// set delegation moves the mail the fallback tail then reads).
+///
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `LabelConfig` again to change the text or theme in place.
@@ -121,14 +150,14 @@ impl WasmActor for LabelWidget {
         })
     }
 
-    /// Kick off the font-metrics request when the configured alignment needs a
-    /// measured width (inline children run `wire`).
+    /// Kick off the font-metrics request for the initial theme font (inline
+    /// children run `wire`).
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         self.pump_font_metrics(ctx);
     }
 
     /// Change the text / role / alignment / theme in place from a re-sent
-    /// config, and request metrics when the new alignment needs them.
+    /// config, and request metrics for the new theme font.
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: LabelConfig) {
         self.text = config.text;
@@ -148,8 +177,7 @@ impl WasmActor for LabelWidget {
         apply_static_control_state(ctx, &mut self.state, set.state);
     }
 
-    /// Restyle: adopt the fanned theme and request metrics for its font when
-    /// the alignment needs them.
+    /// Restyle: adopt the fanned theme and request metrics for its font.
     #[handler::single]
     fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
         self.font_metrics.set_desired(set.theme.font_id);
@@ -161,6 +189,18 @@ impl WasmActor for LabelWidget {
     #[handler::single]
     fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
         self.frame = frame;
+    }
+
+    /// The pointer entered the label: an overflowing run now reveals itself.
+    #[handler::single]
+    fn on_hover_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: HoverGained) {
+        self.state.set_hovered(true);
+    }
+
+    /// The pointer left: the reveal goes away with it.
+    #[handler::single]
+    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
+        self.state.set_hovered(false);
     }
 
     /// Install a font-metrics reply and pump any deferred newer request. A
@@ -181,7 +221,8 @@ impl WasmActor for LabelWidget {
 
     /// Reply the label's local draw: its text at the size its role is set at,
     /// placed by its alignment (start-aligned until the run is measured) and
-    /// inked muted for a caption.
+    /// inked muted for a caption, plus the hover reveal when the run does not
+    /// fit.
     ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
@@ -191,10 +232,13 @@ impl WasmActor for LabelWidget {
             return;
         }
         let size = self.theme.text_size_pixels(self.role);
+        let measured = self.measured_width(size);
+        let text_x = align_x(self.align, self.frame.width, measured);
+
         let mut items: Vec<WidgetDrawItem> = Vec::new();
         if !self.text.is_empty() {
             items.push(WidgetDrawItem::Text {
-                x: align_x(self.align, self.frame.width, self.measured_width(size)),
+                x: text_x,
                 y: text_origin_y(0.0, self.frame.height, size),
                 font_id: self.theme.font_id,
                 text: self.text.clone(),
@@ -203,15 +247,78 @@ impl WasmActor for LabelWidget {
                 clip: None,
             });
         }
+
+        let overlay = self.overflow_overlay(size, text_x, measured);
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { intrinsic: None, items, overlay: Vec::new() });
+            parent.send(&WidgetDrawList { intrinsic: None, items, overlay });
         }
     }
+
+    /// A hover-eligible label sits in the root's pointer hit table, so raw
+    /// motion and presses over it are routed here. It acts on the hover edges
+    /// the root derives, never on raw pointer mail, so the rest is dropped
+    /// rather than warned about once per kind.
+    #[allow(clippy::unused_self)] // the fallback ABI always receives the actor
+    #[fallback]
+    fn on_other(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Mail<'_>) {}
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aether_kinds::{FontMetrics, GlyphAdvance};
+    use alloc::vec;
+
+    /// A label with a resolved metric table whose every glyph advances half an
+    /// em, so a run's width is `chars * size / 2` — enough to make "fits" and
+    /// "overflows" exact without depending on a real font file.
+    fn measured_label(text: &str, frame_width: f32) -> LabelWidget {
+        let mut font_metrics = FontMetricsAdapter::new(0);
+        font_metrics.take_pending_request();
+        font_metrics.accept_reply(Some(CachedFontMetrics::new(&FontMetrics {
+            units_per_em: 1000.0,
+            ascent: 800.0,
+            descent: -200.0,
+            line_gap: 0.0,
+            default_advance: 500.0,
+            advances: vec![GlyphAdvance { codepoint: u32::from('m'), advance_units: 500.0 }],
+        })));
+        LabelWidget {
+            text: String::from(text),
+            role: TextRole::Body,
+            align: TextAlign::Start,
+            theme: Theme::DEFAULT,
+            frame: WidgetFrame { x: 0.0, y: 0.0, width: frame_width, height: 24.0 },
+            state: InteractionState::new(crate::WidgetControlState::default()),
+            font_metrics,
+        }
+    }
+
+    #[test]
+    fn only_a_hovered_label_whose_run_overflows_raises_the_reveal() {
+        // Tripwire: the reveal is what makes clipped label text readable, and
+        // it must appear on exactly that case — a label that fits, or one
+        // nobody is pointing at, raises a plate over its neighbours for
+        // nothing.
+        let size = Theme::DEFAULT.label_size_pixels;
+        let width = |label: &LabelWidget| label.measured_width(size);
+
+        let mut wide = measured_label("mmmmmmmmmmmmmmmm", 40.0);
+        assert!(wide.overflow_overlay(size, 0.0, width(&wide)).is_empty(), "an un-hovered label reveals nothing");
+        wide.state.set_hovered(true);
+        assert!(!wide.overflow_overlay(size, 0.0, width(&wide)).is_empty(), "hovering an overflowing run reveals it");
+
+        let mut narrow = measured_label("mm", 200.0);
+        narrow.state.set_hovered(true);
+        assert!(narrow.overflow_overlay(size, 0.0, width(&narrow)).is_empty(), "a run that fits reveals nothing");
+
+        let mut unmeasured = measured_label("mmmmmmmmmmmmmmmm", 40.0);
+        unmeasured.state.set_hovered(true);
+        assert!(
+            unmeasured.overflow_overlay(size, 0.0, None).is_empty(),
+            "an unmeasured run has no width to raise a plate to",
+        );
+    }
 
     #[test]
     fn alignment_places_a_measured_run_and_falls_back_to_the_start_unmeasured() {
