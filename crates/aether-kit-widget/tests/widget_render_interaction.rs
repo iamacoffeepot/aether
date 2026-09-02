@@ -2564,13 +2564,17 @@ fn assert_advanced_control_raster(harness: &mut SubstrateHarness) {
 
     let snapshot = harness.committed_overlay_snapshot();
     assert_advanced_control_snapshot(&snapshot);
-    let numeric_clip = row_clip(numeric_top);
+    // The value's glyphs carry the numeric's own content clip (round-4
+    // note 6) intersected with its slot row: the box less the stepper column
+    // and one pad, so nothing the reader typed can reach the arrows.
+    let numeric_clip =
+        ClipRect { x: PANEL_X, y: numeric_top, width: PANEL_WIDTH - ROW_HEIGHT - PAD, height: ROW_HEIGHT };
     let numeric_glyphs: usize = snapshot
         .iter()
         .filter(|batch| batch.texture_id != WHITE_TEXTURE_ID && batch.clip.as_ref() == Some(&numeric_clip))
         .map(|batch| batch.quads.len())
         .sum();
-    assert_eq!(numeric_glyphs, 4, "canonical `12.5` renders four resident glyphs");
+    assert_eq!(numeric_glyphs, 4, "canonical `12.5` renders four resident glyphs, held off the stepper column");
 }
 
 /// The three issue-2926 controls share one explicit panel scene so pointer,
