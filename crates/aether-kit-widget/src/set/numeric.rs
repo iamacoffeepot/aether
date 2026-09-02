@@ -12,26 +12,38 @@
 //! selection and parse paths as typed edits.
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_clipboard::{ClipboardCapability, ClipboardMailboxExt, GetClipboardTextResult, SetClipboardTextResult};
-use aether_kinds::keycode::{
-    KEY_A, KEY_BACKSPACE, KEY_C, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP, KEY_V, KEY_X,
-};
+use aether_clipboard::{GetClipboardTextResult, SetClipboardTextResult};
+use aether_kinds::keycode::{KEY_DOWN, KEY_ENTER, KEY_UP};
 use aether_kinds::{
-    CachedFontMetrics, ImePreedit, Key, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput,
+    CachedFontMetrics, ImePreedit, Key, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput, mouse_button,
 };
 use aether_text::{FontMetricsRequest, FontMetricsResult, FontRef, TextCapability};
 use alloc::string::{String, ToString};
 
 use crate::set::defaults::WidgetDefaults;
-use crate::set::{arm_text_drag, release_left, reply_single_line_edit, single_line_hit_byte};
+use crate::set::{
+    SingleLineEdit, accept_clipboard_paste, arm_text_drag, edit_command, push_triangle, quad, release_left,
+    reply_single_line_edit, report_clipboard_copy, run_edit_key, single_line_hit_byte,
+};
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::{EditPolicy, TextEditState, TextSpan};
 use crate::theme::{SetTheme, Theme, ThemeState};
-use crate::{Collect, FocusLost, NumericChanged, NumericConfig, SetWidgetState, WidgetControlState, WidgetFrame};
+use crate::{
+    Collect, FocusLost, HoverLost, NumericChanged, NumericConfig, SetWidgetState, WidgetControlState, WidgetDrawItem,
+    WidgetFrame,
+};
 
 /// Retained edit-buffer bound; comfortably exceeds every canonical finite
 /// `f32` literal while preventing unbounded typed or pasted intermediates.
 const NUMERIC_EDIT_MAX_CHARS: u32 = 32;
+
+/// How much of a stepper button the arrow inside it fills, on both axes. Small
+/// enough that the arrow reads as a mark on a button rather than as the button.
+const ARROW_EXTENT_FRACTION: f32 = 0.45;
+
+/// Rows [`push_triangle`] uses for one arrow at the sizes a stepper button
+/// comes to — only a `Vec::with_capacity` hint, never a correctness bound.
+const TRIANGLE_ROWS_PER_ARROW: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct NumericEmission {
@@ -65,16 +77,57 @@ impl NumericBounds {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StepDirection {
     Down,
     Up,
 }
 
-#[derive(Debug, PartialEq)]
-struct CutEdit {
-    copied: String,
-    emission: Option<NumericEmission>,
+/// The two stacked stepper buttons at the editor's right end. The column is
+/// square — one row height wide — so each button is a comfortable target, and
+/// it never takes more than half the frame, which is what keeps a narrow
+/// numeric from becoming two arrows and no text.
+#[derive(Debug, Clone, Copy)]
+struct StepperColumn {
+    /// The column's left edge in widget-local pixels.
+    left: f32,
+    width: f32,
+    /// The boundary between the up button (above) and the down button (below).
+    split_y: f32,
+    height: f32,
+}
+
+impl StepperColumn {
+    /// The column a `width` × `height` numeric frame reserves, or `None` when
+    /// the frame is too small to give one up without swallowing the text.
+    fn of(width: f32, height: f32) -> Option<Self> {
+        let column = height.min(width * 0.5);
+        (column >= 1.0 && height >= 2.0).then_some(Self {
+            left: width - column,
+            width: column,
+            split_y: height * 0.5,
+            height,
+        })
+    }
+
+    /// Which button a widget-local point lands on, `None` outside the column.
+    fn hit(self, local_x: f32, local_y: f32) -> Option<StepDirection> {
+        let inside =
+            local_x >= self.left && local_x < self.left + self.width && local_y >= 0.0 && local_y < self.height;
+        inside.then_some(if local_y < self.split_y {
+            StepDirection::Up
+        } else {
+            StepDirection::Down
+        })
+    }
+
+    /// One button's local rect as `(top, height)`.
+    fn button_span(self, direction: StepDirection) -> (f32, f32) {
+        match direction {
+            StepDirection::Up => (0.0, self.split_y),
+            StepDirection::Down => (self.split_y, self.height - self.split_y),
+        }
+    }
 }
 
 /// A single-line numeric editor with an independent display buffer and
@@ -91,6 +144,10 @@ pub struct NumericWidget {
     modifiers: Modifiers,
     dragging: bool,
     paste_pending: bool,
+    /// Which stepper button the pointer is over, for its hover overlay.
+    hovered_stepper: Option<StepDirection>,
+    /// Which stepper button is held down, for its pressed overlay.
+    pressed_stepper: Option<StepDirection>,
     desired_font_id: u32,
     current_font_id: Option<u32>,
     inflight_font_id: Option<u32>,
@@ -112,6 +169,8 @@ impl NumericWidget {
             modifiers: Modifiers::default(),
             dragging: false,
             paste_pending: false,
+            hovered_stepper: None,
+            pressed_stepper: None,
             desired_font_id,
             current_font_id: None,
             inflight_font_id: None,
@@ -175,29 +234,6 @@ impl NumericWidget {
         } else {
             None
         }
-    }
-
-    fn delete_backward(&mut self) -> Option<NumericEmission> {
-        let before = String::from(self.edit.value());
-        self.edit.clear_composition();
-        self.edit.delete_backward();
-        if self.edit.value() == before {
-            None
-        } else {
-            self.preview()
-        }
-    }
-
-    fn copy_selection(&self) -> Option<String> {
-        let selection = self.edit.selection();
-        (!selection.is_collapsed()).then(|| String::from(&self.edit.value()[selection.start_byte..selection.end_byte]))
-    }
-
-    fn cut_selection(&mut self) -> Option<CutEdit> {
-        let copied = self.copy_selection()?;
-        self.edit.clear_composition();
-        self.edit.delete_backward();
-        Some(CutEdit { copied, emission: self.preview() })
     }
 
     fn commit_buffer(&mut self) -> Option<NumericEmission> {
@@ -293,6 +329,55 @@ impl NumericWidget {
         }
     }
 
+    fn steppers(&self) -> Option<StepperColumn> {
+        StepperColumn::of(self.frame.width, self.frame.height)
+    }
+
+    /// Which stepper button a window-space point lands on. `None` once the
+    /// control is unavailable, so a disabled numeric's arrows are inert
+    /// targets rather than live ones drawn grey.
+    fn stepper_at(&self, event_x: f32, event_y: f32) -> Option<StepDirection> {
+        if !self.state.can_mutate() {
+            return None;
+        }
+        self.steppers()?.hit(event_x - self.frame.x, event_y - self.frame.y)
+    }
+
+    /// The stepper column's own draw: a divider off the text box, a fill per
+    /// button carrying its own hover / pressed overlay, and the two arrows.
+    fn stepper_items(&self, column: StepperColumn) -> Vec<WidgetDrawItem> {
+        let theme = &self.theme;
+        let mut items = Vec::with_capacity(2 + TRIANGLE_ROWS_PER_ARROW * 2);
+        for direction in [StepDirection::Up, StepDirection::Down] {
+            let (top, height) = column.button_span(direction);
+            let button_state = if !self.state.can_mutate() {
+                ThemeState::Disabled
+            } else if self.pressed_stepper == Some(direction) {
+                ThemeState::Pressed
+            } else if self.hovered_stepper == Some(direction) {
+                ThemeState::Hover
+            } else {
+                ThemeState::Normal
+            };
+            items.push(quad(column.left, top, column.width, height, theme.fill(theme.surface, button_state)));
+
+            let arrow_width = (column.width * ARROW_EXTENT_FRACTION).max(1.0);
+            let arrow_height = (height * ARROW_EXTENT_FRACTION).max(1.0);
+            push_triangle(
+                &mut items,
+                column.width.mul_add(0.5, column.left),
+                (height - arrow_height).mul_add(0.5, top),
+                arrow_width,
+                arrow_height,
+                direction == StepDirection::Up,
+                theme.fill(theme.text_primary, button_state),
+            );
+        }
+        // One hairline separating the arrows from the value they change.
+        items.push(quad(column.left, 0.0, 1.0, column.height, theme.outline));
+        items
+    }
+
     fn hit_byte(&self, event_x: f32) -> usize {
         single_line_hit_byte(
             self.edit.value(),
@@ -318,6 +403,8 @@ impl NumericWidget {
             }
             if !self.state.is_available() {
                 self.dragging = false;
+                self.hovered_stepper = None;
+                self.pressed_stepper = None;
             }
             emit_state_changed(ctx, &self.state);
         }
@@ -340,6 +427,7 @@ impl WidgetDefaults for NumericWidget {
     fn cancel_activation(&mut self) {
         self.dragging = false;
         self.paste_pending = false;
+        self.pressed_stepper = None;
         self.edit.clear_composition();
     }
 }
@@ -371,6 +459,8 @@ impl WasmActor for NumericWidget {
         self.edit = TextEditState::new(Self::canonical(initial));
         self.dragging = false;
         self.paste_pending = false;
+        self.hovered_stepper = None;
+        self.pressed_stepper = None;
         self.apply_control_state(ctx, config.state);
         self.pump_font_metrics(ctx);
     }
@@ -397,6 +487,7 @@ impl WasmActor for NumericWidget {
         self.state.lose_focus();
         self.dragging = false;
         self.paste_pending = false;
+        self.pressed_stepper = None;
         self.edit.clear_composition();
     }
 
@@ -409,44 +500,17 @@ impl WasmActor for NumericWidget {
         }
     }
 
+    /// Enter commits and Up/Down step; every other editing key resolves
+    /// through the set's shared vocabulary, so the numeric buffer honours the
+    /// same select-all / copy / cut / paste, Delete, Home/End, and word-motion
+    /// chords a text field does — Cmd as well as Ctrl. A repeated press is
+    /// another edit, never a suppressed repeat.
     #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         if !self.state.is_available() {
             return;
         }
-        if self.modifiers.ctrl {
-            match key.code {
-                KEY_A => self.edit.select_all(),
-                KEY_C => {
-                    if let Some(text) = self.copy_selection() {
-                        ctx.actor::<ClipboardCapability>().set_text(&text);
-                    }
-                }
-                KEY_X if self.state.can_mutate() => {
-                    if let Some(cut) = self.cut_selection() {
-                        ctx.actor::<ClipboardCapability>().set_text(&cut.copied);
-                        if let Some(emission) = cut.emission {
-                            Self::emit(ctx, emission);
-                        }
-                    }
-                }
-                KEY_V if self.state.can_mutate() && !self.paste_pending => {
-                    self.paste_pending = true;
-                    ctx.actor::<ClipboardCapability>().get_text();
-                }
-                _ => {}
-            }
-            return;
-        }
-        let extend = self.modifiers.shift;
         match key.code {
-            KEY_BACKSPACE if self.state.can_mutate() => {
-                if let Some(emission) = self.delete_backward() {
-                    Self::emit(ctx, emission);
-                }
-            }
-            KEY_LEFT => self.edit.move_left(extend),
-            KEY_RIGHT => self.edit.move_right(extend),
             KEY_ENTER if self.state.can_mutate() => {
                 if let Some(emission) = self.commit_buffer() {
                     Self::emit(ctx, emission);
@@ -454,13 +518,31 @@ impl WasmActor for NumericWidget {
             }
             KEY_DOWN if self.state.can_mutate() => Self::emit(ctx, self.stepped(StepDirection::Down)),
             KEY_UP if self.state.can_mutate() => Self::emit(ctx, self.stepped(StepDirection::Up)),
-            _ => {}
+            code => {
+                let Some(command) = edit_command(code, self.modifiers) else {
+                    return;
+                };
+                if run_edit_key(ctx, &mut self.edit, &mut self.paste_pending, command, self.state.can_mutate())
+                    && let Some(emission) = self.preview()
+                {
+                    Self::emit(ctx, emission);
+                }
+            }
         }
     }
 
     #[handler::single]
     //noinspection DuplicatedCode -- actor macros require one pointer handler per concrete widget type.
-    fn on_mouse_button(&mut self, _ctx: &mut WasmCtx<'_>, press: MouseButton) {
+    /// A press on a stepper button steps the value there and then; anywhere
+    /// else in the box places the caret and arms a selection drag.
+    fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, press: MouseButton) {
+        if press.button == mouse_button::LEFT
+            && let Some(direction) = self.stepper_at(press.x, press.y)
+        {
+            self.pressed_stepper = Some(direction);
+            Self::emit(ctx, self.stepped(direction));
+            return;
+        }
         let Some(event_x) = arm_text_drag(&self.state, &mut self.dragging, press) else {
             return;
         };
@@ -468,7 +550,10 @@ impl WasmActor for NumericWidget {
     }
 
     #[handler::single]
+    /// Track which stepper the pointer is over (its hover overlay), and
+    /// extend the selection while a text drag is live.
     fn on_mouse_move(&mut self, _ctx: &mut WasmCtx<'_>, moved: MouseMove) {
+        self.hovered_stepper = self.stepper_at(moved.x, moved.y);
         if self.dragging && self.state.is_available() {
             let byte = self.hit_byte(moved.x);
             self.edit.extend_to(byte);
@@ -478,6 +563,15 @@ impl WasmActor for NumericWidget {
     #[handler::single]
     fn on_mouse_button_release(&mut self, _ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
         release_left(&mut self.dragging, false, release);
+        release_left(&mut self.pressed_stepper, None, release);
+    }
+
+    /// The pointer leaving the control clears the stepper hover the root's
+    /// hover fact alone cannot: hover is per-widget, the overlay per-button.
+    #[handler::single]
+    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
+        self.state.set_hovered(false);
+        self.hovered_stepper = None;
     }
 
     #[handler::single]
@@ -501,29 +595,22 @@ impl WasmActor for NumericWidget {
 
     #[handler::single]
     fn on_get_clipboard_text_result(&mut self, ctx: &mut WasmCtx<'_>, result: GetClipboardTextResult) {
-        if !self.paste_pending {
-            return;
-        }
-        self.paste_pending = false;
-        match result {
-            GetClipboardTextResult::Ok { text } if self.state.can_mutate() => {
-                if let Some(emission) = self.insert_text(&text) {
-                    Self::emit(ctx, emission);
-                }
-            }
-            GetClipboardTextResult::Ok { .. } => {}
-            GetClipboardTextResult::Err { error } => {
-                tracing::warn!(target: "aether_kit_widget", %error, "numeric clipboard paste failed");
-            }
+        if accept_clipboard_paste(
+            &mut self.paste_pending,
+            &mut self.edit,
+            Self::policy(),
+            self.state.can_mutate(),
+            result,
+        ) && let Some(emission) = self.preview()
+        {
+            Self::emit(ctx, emission);
         }
     }
 
     #[handler::single]
     #[allow(clippy::unused_self)]
     fn on_set_clipboard_text_result(&mut self, _ctx: &mut WasmCtx<'_>, result: SetClipboardTextResult) {
-        if let SetClipboardTextResult::Err { error } = result {
-            tracing::warn!(target: "aether_kit_widget", %error, "numeric clipboard copy failed");
-        }
+        report_clipboard_copy(&result);
     }
 
     #[handler::single]
@@ -542,21 +629,28 @@ impl WasmActor for NumericWidget {
 
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        reply_single_line_edit(
-            ctx,
-            &self.edit.displayed(),
+        let column = self.steppers();
+        let displayed = self.edit.displayed();
+        let mut edit = SingleLineEdit::new(
+            &displayed,
             self.resolved_metrics(),
             &self.theme,
             &self.state,
             self.theme_state(),
             &self.frame,
         );
+        if let Some(column) = column {
+            edit.gutter = column.width;
+            edit.gutter_items = self.stepper_items(column);
+        }
+        reply_single_line_edit(ctx, edit);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::set::{EditCommand, apply_edit_command};
 
     fn numeric(min: f32, max: f32, step: f32, initial: f32) -> NumericWidget {
         NumericWidget::configured(NumericConfig {
@@ -625,15 +719,36 @@ mod tests {
     }
 
     #[test]
-    fn copy_cut_and_paste_core_share_selection_and_preview_paths() {
+    fn cut_and_paste_run_through_the_same_preview_path_typing_does() {
+        // The buffer/committed split is numeric's own: a cut empties the
+        // buffer to an unparseable state that must emit nothing, and the
+        // paste back must preview rather than commit.
         let mut widget = numeric(-10.0, 20.0, 0.5, 12.5);
         widget.edit.select_all();
-        assert_eq!(widget.copy_selection().as_deref(), Some("12.5"));
-        let cut = widget.cut_selection().expect("selected text cuts");
-        assert_eq!(cut, CutEdit { copied: String::from("12.5"), emission: None });
+        let cut = apply_edit_command(&mut widget.edit, EditCommand::Cut, true);
+        assert_eq!(cut.copy.as_deref(), Some("12.5"));
+        assert!(cut.changed);
         assert_eq!(widget.edit.value(), "");
-        assert_eq!(widget.insert_text(&cut.copied), Some(NumericEmission { value: 12.5, committed: false }));
+        assert_eq!(widget.preview(), None, "an empty buffer is not a number");
+
+        assert_eq!(widget.insert_text("12.5"), Some(NumericEmission { value: 12.5, committed: false }));
         assert_eq!(widget.edit.value(), "12.5");
+    }
+
+    #[test]
+    fn a_held_backspace_keeps_deleting_and_delete_forward_is_wired() {
+        // Tripwire: the owner's note. Editing keys must not inherit the
+        // button's repeat suppression — every repeated press is another edit.
+        let mut widget = numeric(-100.0, 100.0, 0.0, 0.0);
+        widget.edit = TextEditState::new(String::from("12345"));
+        for _ in 0..3 {
+            apply_edit_command(&mut widget.edit, EditCommand::DeleteBackward, true);
+        }
+        assert_eq!(widget.edit.value(), "12", "three repeats delete three characters");
+
+        widget.edit.move_to_start(false);
+        apply_edit_command(&mut widget.edit, EditCommand::DeleteForward, true);
+        assert_eq!(widget.edit.value(), "2");
     }
 
     #[test]
@@ -663,6 +778,81 @@ mod tests {
         let selection = widget.edit.selection();
         assert!(widget.edit.value().is_char_boundary(selection.start_byte));
         assert!(widget.edit.value().is_char_boundary(selection.end_byte));
+    }
+
+    #[test]
+    fn the_stepper_column_splits_into_an_up_and_a_down_target_at_the_right_end() {
+        // The owner's note: the value must be clickable up and down, so each
+        // half of the column has to be a real target and the text has to keep
+        // the rest of the frame.
+        let column = StepperColumn::of(120.0, 24.0).expect("a normal numeric row has steppers");
+        assert_eq!((column.left, column.width), (96.0, 24.0), "a square column, one row height wide");
+        assert_eq!(column.hit(100.0, 4.0), Some(StepDirection::Up), "the top half steps up");
+        assert_eq!(column.hit(100.0, 20.0), Some(StepDirection::Down), "the bottom half steps down");
+        assert_eq!(column.hit(95.9, 12.0), None, "left of the column is the text box");
+        assert_eq!(column.hit(100.0, 24.0), None, "below the frame is nobody's");
+
+        let narrow = StepperColumn::of(20.0, 24.0).expect("a narrow numeric still gets steppers");
+        assert_eq!(narrow.width, 10.0, "the column never takes more than half the frame");
+        assert!(StepperColumn::of(0.0, 0.0).is_none(), "an unlaid-out frame has no column to place");
+    }
+
+    #[test]
+    fn a_stepper_press_steps_and_commits_the_same_way_the_arrow_keys_do() {
+        // Tripwire: the button must reuse the clamp/snap/commit path, not a
+        // second one that could drift from what Up/Down does.
+        let mut widget = numeric(0.0, 10.0, 0.5, 2.0);
+        widget.frame = WidgetFrame { x: 10.0, y: 20.0, width: 120.0, height: 24.0 };
+
+        assert_eq!(widget.stepper_at(10.0 + 100.0, 20.0 + 4.0), Some(StepDirection::Up));
+        assert_eq!(widget.stepper_at(10.0 + 100.0, 20.0 + 20.0), Some(StepDirection::Down));
+        assert_eq!(widget.stepper_at(10.0 + 20.0, 20.0 + 12.0), None, "a press in the text box places a caret");
+
+        assert_eq!(widget.stepped(StepDirection::Up), NumericEmission { value: 2.5, committed: true });
+        assert_eq!(widget.edit.value(), "2.5", "the buffer is canonicalized like a keyed step");
+
+        widget.committed_value = 10.0;
+        widget.edit = TextEditState::new(String::from("10"));
+        assert_eq!(widget.stepped(StepDirection::Up), NumericEmission { value: 10.0, committed: true }, "clamped");
+    }
+
+    #[test]
+    fn an_unavailable_numeric_has_no_live_stepper_targets() {
+        let mut widget = numeric(0.0, 10.0, 0.5, 2.0);
+        widget.frame = WidgetFrame { x: 0.0, y: 0.0, width: 120.0, height: 24.0 };
+        let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
+        widget.state.replace(read_only);
+        assert_eq!(widget.stepper_at(100.0, 4.0), None, "a read-only value is not steppable by pointer either");
+    }
+
+    #[test]
+    fn the_stepper_column_draws_two_buttons_and_leaves_the_text_the_rest() {
+        let mut widget = numeric(0.0, 10.0, 0.5, 2.0);
+        widget.frame = WidgetFrame { x: 0.0, y: 0.0, width: 120.0, height: 24.0 };
+        widget.hovered_stepper = Some(StepDirection::Up);
+        let column = widget.steppers().expect("steppers");
+        let items = widget.stepper_items(column);
+
+        let fills: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                WidgetDrawItem::Quad { x, y, width, height, color, .. }
+                    if (*width - column.width).abs() < 1e-4 && *height > 1.0 =>
+                {
+                    Some((*x, *y, *height, *color))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fills.len(), 2, "one fill per button; items were {items:?}");
+        assert_eq!(fills[0].0, column.left, "both buttons start at the column's left edge");
+        assert_eq!((fills[0].1, fills[1].1), (0.0, column.split_y), "stacked, up above down");
+        assert_eq!(
+            fills[0].3,
+            Theme::DEFAULT.fill(Theme::DEFAULT.surface, ThemeState::Hover),
+            "the hovered button carries the hover overlay on its own",
+        );
+        assert_eq!(fills[1].3, Theme::DEFAULT.fill(Theme::DEFAULT.surface, ThemeState::Normal));
     }
 
     #[test]

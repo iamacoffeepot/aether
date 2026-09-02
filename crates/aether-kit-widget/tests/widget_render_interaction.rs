@@ -73,7 +73,7 @@ use aether_kit_widget::{
 };
 use aether_math::Rgba;
 use aether_render::RenderCapability;
-use aether_render::{DrawTexturedQuads, WHITE_TEXTURE_ID};
+use aether_render::{DrawTexturedQuads, TexturedQuad, WHITE_TEXTURE_ID};
 use aether_test_fixtures_kinds::{DrainEditorInputs, DrainEditorInputsResult, EditorRegionProbeConfig};
 use aether_text::{FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult, TextCapability};
 
@@ -626,8 +626,9 @@ fn assert_advanced_control_snapshot(snapshot: &[DrawTexturedQuads]) {
 
     let numeric_y = PANEL_Y + (ROW_HEIGHT + GAP) * 2.0;
     let numeric = solid_for(snapshot, &row_clip(numeric_y));
-    assert_eq!(numeric.quads.len(), 1, "blurred canonical numeric draw has only its background solid");
-    assert_eq!(numeric.quads[0].tint, Theme::DEFAULT.surface_raised);
+    assert_eq!(numeric.quads[0].tint, Theme::DEFAULT.surface_raised, "the blurred numeric still fills its own box");
+    assert_eq!(numeric.quads[0].width, PANEL_WIDTH, "and the box is still the whole slot");
+    assert_stepper_column(numeric, numeric_y);
 
     let disabled_y = PANEL_Y + (ROW_HEIGHT + GAP) * 3.0;
     let disabled = solid_for(snapshot, &row_clip(disabled_y));
@@ -641,6 +642,49 @@ fn assert_advanced_control_snapshot(snapshot: &[DrawTexturedQuads]) {
     assert!(
         snapshot.iter().all(|batch| batch.clip.as_ref() != Some(&hidden_clip)),
         "hidden numeric retains its slot but contributes no overlay batch",
+    );
+}
+
+/// The numeric's stepper column, as it lands in the composited batch: two
+/// stacked button fills a row height wide at the slot's right end, a hairline
+/// separating them from the value, and a quad-built arrow centered in each.
+///
+/// Reads the roles rather than a quad count, because the arrows are a stack of
+/// rows whose number follows the button height — a count would pin the
+/// rasterization of the triangle, which is not what this asserts.
+fn assert_stepper_column(batch: &DrawTexturedQuads, row_y: f32) {
+    let column_left = PANEL_X + PANEL_WIDTH - ROW_HEIGHT;
+    let quads_with =
+        |tint: Rgba| -> Vec<&TexturedQuad> { batch.quads.iter().filter(|quad| quad.tint == tint).collect() };
+
+    let buttons = quads_with(Theme::DEFAULT.fill(Theme::DEFAULT.surface, ThemeState::Normal));
+    assert_eq!(buttons.len(), 2, "one fill per stepper button; batch: {batch:?}");
+    for button in &buttons {
+        assert_eq!(button.x, column_left, "the column is one row height wide at the slot's right end");
+        assert_eq!(button.width, ROW_HEIGHT);
+        assert_eq!(button.height, ROW_HEIGHT * 0.5, "the two buttons split the row evenly");
+    }
+    assert_eq!(buttons[0].y, row_y, "up sits above");
+    assert_eq!(buttons[1].y, row_y + ROW_HEIGHT * 0.5, "down sits below");
+
+    let dividers = quads_with(Theme::DEFAULT.outline);
+    assert_eq!(dividers.len(), 1, "one hairline divides the arrows from the value they change");
+    assert_eq!((dividers[0].x, dividers[0].width, dividers[0].height), (column_left, 1.0, ROW_HEIGHT));
+
+    let arrows = quads_with(Theme::DEFAULT.fill(Theme::DEFAULT.text_primary, ThemeState::Normal));
+    assert!(arrows.len() >= 2, "each button carries an arrow built from quad rows; batch: {batch:?}");
+    let column_center = column_left + ROW_HEIGHT * 0.5;
+    for row in &arrows {
+        assert!(
+            (row.x + row.width * 0.5 - column_center).abs() < 0.01,
+            "every arrow row is centered in the column; row {row:?}",
+        );
+        assert!(row.width <= ROW_HEIGHT, "an arrow never outgrows its button");
+    }
+    assert!(
+        arrows.iter().any(|row| row.y < row_y + ROW_HEIGHT * 0.5)
+            && arrows.iter().any(|row| row.y >= row_y + ROW_HEIGHT * 0.5),
+        "both buttons carry one, not one button twice",
     );
 }
 
@@ -1982,8 +2026,9 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
         let solid = solid_for(&snapshot, &area_clip);
         assert_eq!(
             solid.quads.len(),
-            8,
-            "background + two selection bands + caret + four focus edges; snapshot: {snapshot:?}",
+            4,
+            "background + two selection bands + caret, and no focus ring: this area took focus from a pointer \
+             press, and a ring marks keyboard focus only; snapshot: {snapshot:?}",
         );
         assert_eq!(solid.quads[0].x, PANEL_X);
         assert_eq!(solid.quads[0].y, PANEL_Y);
@@ -2088,8 +2133,9 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
         let solid = solid_for(&snapshot, &area_clip);
         assert_eq!(
             solid.quads.len(),
-            7,
-            "background + IME cursor band + underline + four focus edges; snapshot: {snapshot:?}",
+            3,
+            "background + IME cursor band + underline, and still no focus ring behind them: focus here came \
+             from a pointer press; snapshot: {snapshot:?}",
         );
         assert_eq!(solid.quads[1].x, preedit_x);
         assert_eq!(solid.quads[1].y, selection_top);
@@ -2200,6 +2246,63 @@ fn control_state_drives_exact_overlay_batches_and_runtime_updates() {
         .expect("runtime state update snapshot");
 
     assert_updated_control_snapshot(&harness.committed_overlay_snapshot(), slider_y, hover_y);
+}
+
+/// The focus ring is keyboard focus's marker and nothing else's.
+///
+/// The bug class: a control the pointer just pressed kept a ring around it,
+/// which says nothing a person who has just clicked does not already know and
+/// reads as a stuck highlight — the owner's report was a clicked tab still
+/// boxed. The opposite failure is the one that makes a panel unusable from the
+/// keyboard, so both halves have to be pinned in one capture: after a press on
+/// the first slider and a Tab onto the second, the pressed one must draw only
+/// its track and fill while the Tab-focused one must draw its ring.
+///
+/// Two sliders, because a slider's ordinary draw is exactly two quads, so a
+/// four-quad ring is unmistakable in the count as well as in the roles.
+#[test]
+fn a_pointer_press_leaves_no_focus_ring_while_tab_traversal_draws_one() {
+    let Some(wasm_path) = require_runtime("aether_kit_widget") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut harness = build_bench();
+
+    let children = vec![
+        slider_child("pressed", WidgetControlState::default()),
+        slider_child("tabbed", WidgetControlState::default()),
+    ];
+    boot_panel_with_children(&mut harness, &wasm, children);
+
+    let panel = panel_address();
+    let pressed_y = PANEL_Y;
+    let tabbed_y = PANEL_Y + ROW_HEIGHT + GAP;
+    harness
+        .execute(vec![
+            // A press focuses the first slider — routing moves, the mark must not.
+            ("press", HarnessOp::send_and_settle(&panel, &press(PANEL_X + 20.0, pressed_y + ROW_HEIGHT * 0.5))),
+            ("release", HarnessOp::send_and_settle(&panel, &release(PANEL_X + 20.0, pressed_y + ROW_HEIGHT * 0.5))),
+            // Tab then walks focus onto the second, which is the case a ring is for.
+            ("tab", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("capture", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
+        ])
+        .expect("pointer then keyboard focus");
+
+    let snapshot = harness.committed_overlay_snapshot();
+    let pressed = solid_for(&snapshot, &row_clip(pressed_y));
+    assert_eq!(
+        pressed.quads.len(),
+        2,
+        "a pointer-focused slider draws its track and fill and nothing more; snapshot: {snapshot:?}",
+    );
+
+    let tabbed = solid_for(&snapshot, &row_clip(tabbed_y));
+    assert_eq!(tabbed.quads.len(), 6, "track + fill + a four-quad focus ring; snapshot: {snapshot:?}");
+    assert!(
+        tabbed.quads[2..6].iter().all(|quad| quad.tint == Theme::DEFAULT.accent),
+        "the Tab-focused slider's ring is drawn in the accent role",
+    );
+    assert_eq!(tabbed.quads[2].y, tabbed_y, "and it rings the slot itself, with no validation ring to inset past");
 }
 
 fn drive_toggle_and_segmented(harness: &mut SubstrateHarness, panel: &str) {

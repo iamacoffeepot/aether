@@ -82,11 +82,13 @@ widget sends can misreport it.
   remain focusable but reject mutation. Button and Label ignore read-only and
   validation; the menu bar ignores read-only too — it holds no value to
   protect — while becoming disabled or hidden closes any menu it had open.
-- **Interaction, down.** The root sends `FocusGained` / `FocusLost` and
-  `HoverGained` / `HoverLost`. Hover comes from explicit edges, not from a child
-  inferring absence from raw motion. Pressed and hover select an exclusive fill
-  (Disabled → Pressed → Hover → Normal); focus and validation are separate
-  outlines, so both remain visible together.
+- **Interaction, down.** The root sends `FocusGained { keyboard }` /
+  `FocusLost` and `HoverGained` / `HoverLost`. Hover comes from explicit edges,
+  not from a child inferring absence from raw motion. Pressed and hover select
+  an exclusive fill (Disabled → Pressed → Hover → Normal); focus and validation
+  are separate outlines, so both remain visible together. `keyboard` says how
+  focus arrived, which is what decides whether a ring is drawn at all — see
+  [the focus-visible rule](#the-focus-ring-marks-keyboard-focus).
 - **Value, up.** `SliderChanged { value, committed }`, `TextCommitted { text }`,
   `RadioSelected { index }`, `VirtualListSelected { selected_index }`, and
   `ButtonClicked` flow to the parent through `ctx.parent()`. A slider streams
@@ -129,13 +131,37 @@ instead of pushing the head of the string out of view.
 Clipped text is readable on hover. When a label's or a text field's run is
 wider than the frame it lives in and the pointer is over it, the widget raises
 the whole run on an overlay plate: `surface_raised` with a one-pixel `outline`
-ring, starting at the widget's own origin and reaching one `pad` past the end
-of the run — so it covers its own slot and whatever sits to its right, and the
-root's overlay cutout keeps the covered widgets' glyphs from printing through
-it. Nothing is raised while the run fits, so the plate is a signal rather than
-chrome. This is why a label is pointer-eligible (for hover) while remaining
-non-focusable: pressing one still clears focus, exactly as pressing bare panel
-background does.
+ring, starting at the widget's own origin — so it covers its own slot and
+whatever sits to its right, and the root's overlay cutout keeps the covered
+widgets' glyphs from printing through it. Nothing is raised while the run fits,
+so the plate is a signal rather than chrome. This is why a label is
+pointer-eligible (for hover) while remaining non-focusable: pressing one still
+clears focus, exactly as pressing bare panel background does.
+
+The plate is a box, not a line. A run long enough to need revealing is usually
+long enough to run off the window if it is drawn in one line, so the plate
+wraps at a reading measure — `reveal_wrap_width(size_pixels)`, about
+`REVEAL_WRAP_CHARS` (40) body characters — and is then sized to its *longest
+wrapped line* plus one `pad` either side, one row per line. Past roughly that
+measure the eye loses the line it is on coming back from the right edge, which
+is the same reason prose is set in columns.
+
+The wrapper is public, so a consumer building its own tooltip or hint plate
+gets the same shape without copying the rule:
+
+```rust
+use aether_kit_widget::set::{reveal_wrap_width, wrap_to_width};
+
+// `measure` is yours: exact glyph advances from a resolved `CachedFontMetrics`
+// once the font settles, an approximation before that.
+let lines = wrap_to_width(hint, reveal_wrap_width(size_pixels), measure);
+```
+
+It breaks only between words. A word wider than the measure keeps its own line,
+unsplit and over budget — the measure is a reading preference and cutting a
+word in half to honour it reads far worse than one long line. A `\n` in the
+source is the author's own break and always survives, so a longer hint can be
+divided into paragraphs deliberately.
 
 Selection is a state, not an affordance, and every widget that has a current
 item draws it the same way: the chosen row of a virtual list, the chosen bucket
@@ -353,8 +379,23 @@ swapping the content behind the selected tab is the root's business.
 step, initial, theme, state }`. It reuses the shared `TextEditState`, named
 `TextSpan`, and measured `SingleLineLayout`, so pointer placement, dragging,
 selection, replacement, and clipboard edits stay on UTF-8 boundaries. Typed
-characters arrive only through `TextInput`; `Key` remains navigation and
-control (`Backspace`, Left/Right, Enter, Up/Down, and Ctrl+A/C/X/V).
+characters arrive only through `TextInput`; `Key` is navigation and control —
+Enter, Up/Down, and everything in
+[the shared editing vocabulary](#the-editing-vocabulary-every-text-control-shares).
+
+A numeric also carries **steppers**, because a value with a step has an obvious
+pointer gesture and asking for the keyboard to use it is asking a person to
+find out that Up/Down work. Two stacked buttons sit at the right end in a
+square column one row height wide: up above, down below, each an arrow drawn
+from quad rows rather than a glyph, because the theme's font is whatever the
+consumer loaded and a missing-glyph box on a control whose whole point is being
+clickable is the worst place for one. A press steps by `step` through the same
+clamp, snap, and commit path Up/Down use, so the two routes cannot drift; each
+button carries its own hover and pressed overlay. The text box shrinks by the
+column, and the column never takes more than half the frame — a numeric too
+narrow for both stays a value rather than becoming two arrows. A read-only or
+disabled numeric has no live stepper targets. Nothing in `NumericConfig`
+changed: steppers are what a numeric *is*, not something to opt into.
 
 Numeric keeps the visible buffer separate from its last committed number.
 Empty, `-`, `.`, and other invalid or non-finite intermediates remain visible
@@ -362,10 +403,50 @@ and emit nothing. A finite edit is clamped and snapped for a
 `NumericChanged { committed: false }` preview without rewriting what the user
 typed. Enter or focus loss canonicalizes a valid value and emits
 `committed: true`; an invalid buffer reverts to the last canonical value
-without an event. Up/Down step from the current valid value, falling back to
-the committed value, and immediately canonicalize and commit. Copy never
-mutates, while cut and asynchronous paste pass through the same selection,
-parse, clamp, and preview path.
+without an event. Up/Down and the steppers step from the current valid value,
+falling back to the committed value, and immediately canonicalize and commit.
+Copy never mutates, while cut and asynchronous paste pass through the same
+selection, parse, clamp, and preview path.
+
+## The editing vocabulary every text control shares
+
+The text field, the text area, and the numeric editor read the same keys,
+because a person who learns one of them has learned all three. `edit_command`
+resolves a `Key` press plus the cached `Modifiers` into one `EditCommand`, and
+`apply_edit_command` carries it out against `TextEditState`:
+
+| Chord | What it does |
+| --- | --- |
+| `Ctrl`/`Cmd` + `A` `C` `X` `V` | Select all, copy, cut, paste |
+| `Backspace` / `Delete` | Delete before / after the caret |
+| `Left` / `Right` | One character, `Shift` to extend the selection |
+| `Alt` or `Ctrl` + `Left`/`Right` | One word |
+| `Cmd` + `Left`/`Right` | To the line's edge |
+| `Home` / `End` | To the line's edge; with `Ctrl`/`Cmd`, the whole buffer |
+
+**The chord modifier is `ctrl` *or* `meta`, always.** Cmd is the chord on
+macOS and Ctrl everywhere else, and a widget cannot ask the substrate which
+platform its window is on — the input cap reports the physical modifiers and
+nothing more. Accepting either costs nothing here, because no control in the
+set binds the two to different meanings; a control that ever needs to should
+say so loudly rather than quietly diverging.
+
+Enter is deliberately outside the table: it is the one key whose meaning is the
+control's own — commit in a field, commit-on-`Ctrl`/`Cmd` and newline otherwise
+in an area, commit in a numeric — so each widget handles it before consulting
+the shared vocabulary. `Up`/`Down` are the same (vertical motion in an area,
+stepping in a numeric).
+
+**Nothing on this path suppresses a key repeat.** A held Backspace arrives as a
+stream of `aether.key` presses and every one of them deletes. That is the
+opposite of what a Button wants — `ActivationArms::press_key` ignores a repeat
+while a key is armed, so a held Enter fires one click, not a hundred — and the
+two rules must not be confused: repeat suppression belongs to activation, never
+to editing.
+
+`mutable` gates only the destructive half. A read-only or disabled control
+still selects, copies, and moves its caret; it just cannot delete, cut, or
+paste. A read-only field a person cannot copy out of is worse than useless.
 
 ## Root-owned focus and input
 
@@ -405,12 +486,39 @@ focusable child under the point and hand the answer — `Some` or `None` — to
 ```rust
 let focusable = self.focus.focus_hit_test(press.x, press.y);
 if let Some(transition) = self.focus.set_focus(focusable) {
-    apply_focus(ctx, transition);   // FocusLost to `previous`, FocusGained to `next`
+    // FocusLost to `previous`, FocusGained to `next`. `false`: this focus came
+    // from a press, so the child it lands on must not draw a ring.
+    apply_focus(ctx, transition, false);
 }
 ```
 
 Clearing focus cancels nothing else: drag capture, the modal grab, and every
 child's own value are untouched.
+
+### The focus ring marks keyboard focus
+
+`FocusGained` carries a `keyboard` flag, and a child draws its focus ring only
+when that flag was `true`. The reference panel passes `true` from Tab
+traversal and `false` from a pointer press or from an availability move that
+had to relocate focus; a consumer root copies the same two answers.
+
+The rule is what the ring is *for*. A person walking a panel with Tab has no
+other way to tell which control the next keystroke reaches, so the ring is the
+only thing standing between them and typing into the wrong field. A person who
+just clicked a control already knows where they are — they pointed at it — so a
+box drawn around it afterwards adds a mark that says nothing and reads as a
+stuck highlight, which is exactly how a clicked tab looked before this rule
+existed.
+
+Focus itself is unchanged by the flag: a pressed control is still focused, still
+receives the keyboard, and still takes `FocusLost` when focus moves on.
+`InteractionState` keeps the two apart — `focused()` answers what focus *means*
+and `focus_visible()` answers whether to *mark* it — and the split matters most
+in the text controls, where the **caret follows `focused()`**. A caret marks the
+insertion point, which a click establishes exactly as a Tab does, so a clicked
+field shows its caret and no ring. Only the ring is keyboard-conditional:
+`push_control_outlines` and the Button's own border are the whole list of draws
+that consult `focus_visible()`.
 
 Drag capture is the kit's own policy over the raw button vocabulary: a left
 press that hits a widget sets capture on that child, moves route to it while

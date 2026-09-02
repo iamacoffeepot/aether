@@ -1102,10 +1102,17 @@ pub struct WidgetFrame {
 }
 
 /// `aether.kit.widget.focus_gained` — the root tells a child it now holds
-/// keyboard focus, so the child draws its focus ring and caret. Fieldless.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+/// keyboard focus, so the child takes keys and draws its caret. `keyboard`
+/// says how focus arrived: `true` for Tab / Shift+Tab (and any other
+/// keyboard traversal), `false` for a pointer press. A child draws its
+/// **focus ring only for keyboard focus** — the platform's focus-visible
+/// rule: a person who just clicked a tab already knows where focus is, and
+/// a box around it reads as a second, unasked-for state.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[kind(name = "aether.kit.widget.focus_gained")]
-pub struct FocusGained;
+pub struct FocusGained {
+    pub keyboard: bool,
+}
 
 /// `aether.kit.widget.focus_lost` — the root tells a child it no longer holds
 /// keyboard focus, so the child stops drawing its focus ring and caret.

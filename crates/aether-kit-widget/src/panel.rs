@@ -687,13 +687,15 @@ fn reference_stack(theme: &Theme) -> Vec<WidgetChildSpec> {
 
 /// Send a focus transition down: `FocusLost` to the child that lost focus,
 /// `FocusGained` to the one that gained it.
-fn apply_focus<M: aether_actor::ReplyMode>(ctx: &mut WasmCtx<'_, M>, transition: FocusTransition) {
+/// `keyboard` rides on the gain so the child knows whether to draw its
+/// ring (see [`FocusGained`]).
+fn apply_focus<M: aether_actor::ReplyMode>(ctx: &mut WasmCtx<'_, M>, transition: FocusTransition, keyboard: bool) {
     let FocusTransition { previous, next } = transition;
     if let Some(prev) = previous {
         ctx.send_to(prev, &FocusLost);
     }
     if let Some(gained) = next {
-        ctx.send_to(gained, &FocusGained);
+        ctx.send_to(gained, &FocusGained { keyboard });
     }
 }
 
@@ -714,7 +716,7 @@ fn apply_availability<M: aether_actor::ReplyMode>(ctx: &mut WasmCtx<'_, M>, effe
         apply_hover(ctx, hover);
     }
     if let Some(focus) = effects.focus {
-        apply_focus(ctx, focus);
+        apply_focus(ctx, focus, false);
     }
 }
 
@@ -1070,7 +1072,7 @@ impl WasmActor for WidgetPanel {
             }
             let focusable = self.focus.focus_hit_test(press.x, press.y);
             if let Some(transition) = self.focus.set_focus(focusable) {
-                apply_focus(ctx, transition);
+                apply_focus(ctx, transition, false);
             }
             hit
         } else {
@@ -1131,7 +1133,7 @@ impl WasmActor for WidgetPanel {
                 FocusDirection::Forward
             };
             if let Some(transition) = self.focus.move_focus(direction) {
-                apply_focus(ctx, transition);
+                apply_focus(ctx, transition, true);
             }
             return;
         }
