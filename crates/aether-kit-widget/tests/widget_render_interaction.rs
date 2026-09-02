@@ -613,7 +613,11 @@ fn assert_advanced_control_snapshot(snapshot: &[DrawTexturedQuads]) {
     assert_eq!(segmented.quads[0].x, PANEL_X);
     assert_eq!(segmented.quads[0].width, segment_width);
     assert_eq!(segmented.quads[1].x, PANEL_X + segment_width);
-    assert_eq!(segmented.quads[1].tint, Theme::DEFAULT.accent, "middle segment remains selected");
+    assert_eq!(
+        segmented.quads[1].tint,
+        Theme::DEFAULT.selection,
+        "middle segment remains selected, in the selection role"
+    );
     assert_eq!(segmented.quads[2].x, PANEL_X + segment_width);
     assert_eq!(segmented.quads[2].width, 1.0, "divider follows its segment fill");
     assert_eq!(segmented.quads[3].x, PANEL_X + segment_width * 2.0);
@@ -2609,7 +2613,7 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
         .execute(vec![("initial", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new()))])
         .expect("initial virtual-list capture");
     let initial = harness.committed_overlay_snapshot();
-    assert_virtual_list_rows(&initial, 0, Theme::DEFAULT.accent, 0);
+    assert_virtual_list_rows(&initial, 0, Theme::DEFAULT.selection, 0);
     assert_five_virtual_list_glyph_rows(&initial);
 
     let panel = panel_address();
@@ -2658,7 +2662,7 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
     );
 
     let paged = harness.committed_overlay_snapshot();
-    assert_virtual_list_rows(&paged, 4, Theme::DEFAULT.fill(Theme::DEFAULT.accent, ThemeState::Hover), 8);
+    assert_virtual_list_rows(&paged, 4, Theme::DEFAULT.fill(Theme::DEFAULT.selection, ThemeState::Hover), 8);
     assert_five_virtual_list_glyph_rows(&paged);
     let paged_solids = solid_for(&paged, &virtual_list_clip());
     assert!(
@@ -2706,7 +2710,7 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
         tail_log.join("\n"),
     );
     let tail = harness.committed_overlay_snapshot();
-    assert_virtual_list_rows(&tail, 4, Theme::DEFAULT.fill(Theme::DEFAULT.accent, ThemeState::Hover), 8);
+    assert_virtual_list_rows(&tail, 4, Theme::DEFAULT.fill(Theme::DEFAULT.selection, ThemeState::Hover), 8);
     assert_five_virtual_list_glyph_rows(&tail);
 
     let hidden = WidgetControlState { visible: false, ..WidgetControlState::default() };
