@@ -408,6 +408,36 @@ mod tests {
     }
 
     #[test]
+    fn a_grab_outranks_capture_and_survives_until_it_is_ended() {
+        let mut focus = focus_with_three();
+        focus.begin_capture(MailboxId(1));
+        focus.begin_grab(MailboxId(3));
+        assert_eq!(focus.grabbed(), Some(MailboxId(3)));
+        assert_eq!(focus.pointer_target(5.0, 5.0), Some(MailboxId(3)), "the grab takes a press over a captor's hit");
+
+        // A release clears capture; the grab is modal and outlives it.
+        focus.release_capture(5.0, 5.0);
+        assert_eq!(focus.pointer_target(5.0, 5.0), Some(MailboxId(3)));
+
+        focus.end_grab();
+        assert_eq!(focus.grabbed(), None);
+        assert_eq!(focus.pointer_target(5.0, 5.0), Some(MailboxId(1)));
+    }
+
+    #[test]
+    fn a_grab_is_refused_for_a_child_that_is_not_live_for_the_pointer() {
+        let mut focus = focus_with_three();
+        focus.begin_grab(MailboxId(2));
+        assert_eq!(focus.grabbed(), None, "a pointer-ineligible child cannot hold the modal grab");
+
+        let mut hidden = available();
+        hidden.visible = false;
+        focus.update_availability(MailboxId(3), &hidden);
+        focus.begin_grab(MailboxId(3));
+        assert_eq!(focus.grabbed(), None, "an unavailable child cannot hold it either");
+    }
+
+    #[test]
     fn empty_and_all_unavailable_tables_do_not_route() {
         let mut empty = Focus::new();
         assert_eq!(empty.move_focus(FocusDirection::Forward), None);

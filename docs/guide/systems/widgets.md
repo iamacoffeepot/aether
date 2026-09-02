@@ -2,7 +2,7 @@
 
 `aether-kit-widget` ships a set of guest-side widgets — a slider, a text field, a
 multiline text area, a radio group, a fixed-row virtual list, a button, a label,
-an image, a toggle, a segmented control, and a numeric editor — as ordinary
+an image, a toggle, a segmented control, a dropdown, and a numeric editor — as ordinary
 `#[actor(instanced, composable)]` types.
 A panel root spawns them as inline children (ADR-0114) and drives them entirely
 by mail, so composing an editor panel is a matter of laying out widgets and
@@ -35,7 +35,8 @@ widget sends can misreport it.
 - **Config, down.** One `Config` kind per widget — `SliderConfig`,
   `TextFieldConfig`, `TextAreaConfig`, `RadioConfig`, `VirtualListConfig`,
   `ButtonConfig`, `LabelConfig`, `ImageConfig`, `ToggleConfig`,
-  `SegmentedConfig`, `NumericConfig` — each embedding a `theme: Theme`. The
+  `SegmentedConfig`, `DropdownConfig`, `NumericConfig` — each embedding a
+  `theme: Theme`. The
   config is both the value
   `spawn_inline_child::<WidgetPanel, W>(subname, &config)` boots the widget with and a
   re-sendable mail: send a widget its config kind again to reconfigure it in
@@ -103,6 +104,33 @@ the assigned frame height by the number of rows actually realized, so a short
 list fills its viewport and the frame's bottom edge remains exclusive. Hidden
 lists answer every `Collect` with an empty draw list; disabled and read-only
 lists reject both pointer and keyboard selection changes.
+
+## Dropdowns
+
+`DropdownConfig { options, initial_selected_index, placeholder, open_row_count,
+theme, state }` is the control for one current choice whose alternatives are
+secondary. Closed it is a single row reading the chosen option — or
+`placeholder` in muted ink while nothing is chosen — with a chevron at its
+right end. A press-and-release inside the row opens the list, as does Enter or
+a matching Space release while focused; Escape closes it.
+
+Open, the list hangs directly below the closed row: up to `open_row_count` rows
+of `theme.row_height`, the frame's full width, on a raised surface inside a
+one-pixel outline ring. The current option is drawn in the **selection** role
+(`theme.selection` / `selection_text`), never the accent — a chosen thing is a
+state, not a button. The option under the pointer takes the hover overlay, and
+Up/Down walk that highlight by the keyboard, scrolling the realized window only
+enough to keep it visible, exactly as a virtual list reveals its selection. A
+longer `options` vector than `open_row_count` therefore scrolls inside the
+realized rows rather than growing the list.
+
+While the list is open every left press is the dropdown's: a press on a row
+takes that option and closes, a press anywhere else closes without a change.
+`DropdownSelected { index }` reports only an actual change of choice, and
+`DropdownOpenChanged { open }` reports each open and close edge exactly once —
+including the close that focus loss, a re-sent config, or becoming disabled or
+read-only forces. An empty option vector, a zero-row list, and a read-only or
+unavailable dropdown never open at all.
 
 ## Image widget
 
@@ -177,9 +205,10 @@ order, static pointer/focus eligibility, dynamic visible/enabled availability,
 the hovered and focused children, and the drag-captured child. It answers four
 questions:
 
-- **Where does a pointer event go?** To the drag-captured child if one holds
-  capture — so a drag that leaves a widget's rect still reaches it — otherwise
-  to the topmost child under the cursor.
+- **Where does a pointer event go?** To the child holding the modal grab if
+  there is one, then to the drag-captured child if one holds capture — so a
+  drag that leaves a widget's rect still reaches it — otherwise to the topmost
+  child under the cursor.
 - **Where does a keyboard event go?** To the focused child.
 - **Where does hover live?** Independent hit testing yields a named
   `HoverTransition`; sibling crossings send lost before gained even while
@@ -196,6 +225,21 @@ track the cursor past the end of its track and a button cancel when the release
 drifts off it. `MouseButton.button` and `MouseButtonRelease.button` use the
 engine constants in `aether_kinds::mouse_button`; `LEFT` is `0`, including for a
 synthetic `aether.mouse_button` sent over MCP.
+
+A widget that must draw outside its own slot — an open dropdown's list — puts
+those draws in `WidgetDrawList::overlay` instead of `items`. The overlay is
+offset by each slot origin on the way up like any other draw but never
+intersected with the slot clip, and the root emits the whole cluster's overlay
+after every ordinary quad and glyph, so the list escapes its one-row slot and
+lands over the widgets below it. Its counterpart on the input side is the
+**modal pointer grab**: `Focus::begin_grab(child)` routes every pointer event
+to that child until `end_grab`, outranking drag capture, and hover edges are
+suppressed while it holds so nothing under the overlay lights up. The widget
+asks for the grab by reporting `DropdownOpenChanged { open: true }` and gives
+it back with `open: false` — that is why the close edge is reported for every
+way a list can close, including focus loss. Without the grab a press that
+lands outside the widget's own rect would go to whatever is under it, and the
+open list would have no way to learn it should close.
 
 A focused Button activates once on Enter press (repeat presses are suppressed
 until release) and once on Space release after a matching Space press. Focus
