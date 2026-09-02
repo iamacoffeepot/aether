@@ -239,6 +239,106 @@ rectangles and strings (as a query kind), most items are also a test.
 11. Squint test: with the screen blurred, the biggest and brightest shape is
     the most important fact.
 
+## Rules learned from use
+
+The steps above are the design pass. The rules below came out of watching a
+person use a screen built by them; each is stated so a reviewer can check it,
+and each is the general form of a specific complaint.
+
+- **Native where the platform has it.** Menus, cursors, the application's
+  name in the platform's own chrome, the window title: use the platform's
+  mechanism on a chassis that has one (a native menu bar on the desktop),
+  and draw the kit's version only where there is none. A person expects the
+  platform's shape and finds the in-window copy strange, however correct.
+  (Nielsen: consistency and standards.)
+- **Every text control honours the platform's editing conventions.**
+  Select-all on the platform's modifier (Cmd on macOS, Ctrl elsewhere), key
+  repeat on a held key, word-wise movement, cut / copy / paste. A control
+  that takes typing and drops one of these is a bug, not a wish.
+- **A control that cannot complete an action does what it can and says
+  what it could not.** Allocating a path with too few points allocates up
+  to the budget and reports how far it got; it does not refuse the whole
+  path. (Nielsen: user control; error prevention over error refusal.)
+- **The pointer says what a drag will do.** A resizable edge shows a resize
+  cursor along its axis; a movable thing shows a move cursor; a control that
+  will not take the press shows not-allowed. Signifiers precede action.
+- **Group by category with a divider between groups, never within.**
+  Attributes together, resistances together, pools together; one rule
+  between groups. A list of fifteen rows with no grouping is a table nobody
+  can scan. (Gestalt: proximity and common region.)
+- **Names are specific.** "Rotation time", not "Time"; "Energy shield", not
+  "Shield". A generic word beside a specific number tells the reader nothing
+  about which number it is.
+- **No jargon without its sentence.** A hint like "dim = not counted yet" is
+  either a full sentence a newcomer understands or it is not shown.
+- **Diagnostics live behind a debug mode.** Node ids, mailbox ids, frame
+  counters: useful to whoever is fixing the screen, noise to whoever is
+  using it. A View → Debug toggle, off by default.
+- **Notices have one place.** Refusals and confirmations appear in a single
+  dedicated region the reader learns once, coloured by severity (info,
+  warning, error), and leave on their own after a few seconds. A message
+  that appears wherever there was room, and stays, is read as part of the
+  screen.
+- **Search is a first-class control.** When a screen holds more than a
+  reader can scan, the search field is visible without opening anything,
+  at the top of the region it searches.
+- **Numeric inputs carry steppers.** A number a person adjusts by one gets
+  an up and a down beside the field; typing is the other way in, not the
+  only way.
+- **Hover explains.** A value with context the reader may not carry
+  (which act a level is, what a stat is, where a number came from) explains
+  itself on hover in a tooltip that is a neat measured box: wrapped at a
+  maximum width, sections divided, never broken mid-thought.
+- **A focus ring marks keyboard focus only.** A control the reader just
+  clicked does not also grow a box; Tab traversal does show one. (The
+  platform focus-visible rule.)
+- **Padding is symmetric.** A label centred in its button has the same
+  space on both sides; a control inside a plate sits at least two spacing
+  units from the plate's edge; a glyph used as a control (`+`, `−`) is
+  optically centred.
+- **Hide what the context disables.** A node, start, or option that only
+  applies under a state the build is not in (another class's start, an
+  ascendancy-gated passive) is not drawn until that state holds. Clutter is
+  every element that cannot currently matter.
+- **Signify only what is not obvious.** A resize cursor belongs on a
+  splitter, where the affordance is hidden; a move cursor over a map that
+  every reader knows pans is noise. A signifier on the default gesture is
+  intrusive, and it dilutes the ones that matter.
+- **A control's parts are one element.** A number field and its steppers
+  share one frame and one fill; a field and its clear button likewise.
+  Two adjacent boxes read as two controls fighting.
+- **Empty collapses.** A container with nothing chosen (an inset for an
+  ascendancy that is not picked) starts collapsed and collapses when its
+  content goes; an expanded empty box is a promise the screen is not
+  keeping.
+- **One colour, one state, everywhere.** The allocated colour appears on
+  allocated things only. A ring drawn in the "taken" gold before anything
+  is taken says the opposite of the truth.
+- **A result says why it matched.** A search that lights a node shows,
+  on that node, the line that matched; a hit with no visible reason reads
+  as a mistake.
+- **Own versus derived, separated.** What this node gives and what the
+  path to it costs are two facts; a tooltip that blends them makes the
+  reader do the subtraction.
+- **A setting is a control, not a file.** If a person can change it, the
+  screen offers the control; the file is the store behind it, never the
+  interface.
+- **Labels stay complete under a heading.** "Fire resistance", not "Fire"
+  under a "Resistances" heading the reader may not see at the same time.
+- **Keep an affordance the reader has learned** unless they ask for it to
+  go; when they ask for its *look* to change, change the look.
+- **A box is sized from measured text, never from a character count.**
+  A plate, a tooltip, a toast, a list cell: its width comes from the
+  face's real advances (the kit measures through its font metrics), not
+  from characters times an average. Over a proportional face the average
+  is wrong by a glyph every few words, and the text walks out of the box
+  the estimate drew. If the measure is not available yet, draw nothing
+  rather than a guessed box. (Owner, round 3, live: "the text is going
+  outside the bounds of the box.")
+- **Generate what can be generated.** A name, a summary line, a default:
+  when the data implies one ("Wander of Kinetic Blast Ranger" from weapon,
+  skill, and class), offer it rather than an empty field.
+
 ## What the kit has to provide
 
 The method assumes a few things the widget kit does not yet express. Each is a
