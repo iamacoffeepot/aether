@@ -222,7 +222,7 @@ impl Theme {
         // Ink on a selected row stays the primary text.
         selection_text: Rgba::from_srgb8(0xe6, 0xe4, 0xd6, 0xff),
         pad: 8.0,
-        gap: 8.0,
+        gap: 6.0,
         row_height: 24.0,
         label_size_pixels: 14.0,
         value_size_pixels: 14.0,

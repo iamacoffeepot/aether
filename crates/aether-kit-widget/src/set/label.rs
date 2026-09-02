@@ -17,7 +17,7 @@
 //! drives the same single-flight
 //! [`FontMetricsRequest`](aether_text::FontMetricsRequest) the measured text
 //! controls do and lays out against the resolved
-//! [`CachedFontMetrics`](aether_kinds::CachedFontMetrics). A `Start` label
+//! [`aether_kinds::CachedFontMetrics`]. A `Start` label
 //! never asks — it draws at the frame's left edge either way — and an
 //! unmeasured run falls back to `Start` rather than to a guessed width.
 
