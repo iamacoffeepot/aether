@@ -909,6 +909,61 @@ pub fn reveal_wrap_width(size_pixels: f32) -> f32 {
     approx_text_width(REVEAL_WRAP_CHARS, size_pixels)
 }
 
+/// The mark a run that did not fit ends with. One character, not three dots:
+/// three dots is a sentence's own punctuation and reads as one where the text
+/// happens to end in prose.
+pub const ELLIPSIS: char = '…';
+
+/// `text` cut to the widest whole-character prefix that still leaves room for
+/// an [`ELLIPSIS`] inside `max_width`, or `text` itself when it already fits.
+/// `measure` reports the pixel width of a candidate, the same contract
+/// [`wrap_to_width`] takes.
+///
+/// This is what a row cut by a clip is missing (the list's gap 17): a clip
+/// slices the glyph the boundary lands on, so a name that did not fit looks
+/// like a name that ends oddly, while an ellipsis says a name was cut. The cut
+/// is always on a character boundary — never inside a `char`, and never inside
+/// a glyph, because the last kept character is the last one measured to fit.
+///
+/// A `max_width` too narrow for even the ellipsis yields the empty string:
+/// there is no honest mark to draw in a column that narrow, and drawing one
+/// anyway would be the only thing in the row.
+#[must_use]
+pub fn elide_to_width(text: &str, max_width: f32, measure: impl Fn(&str) -> f32) -> String {
+    if !max_width.is_finite() || measure(text) <= max_width {
+        return String::from(text);
+    }
+    let with_ellipsis = |kept: &str| {
+        let mut candidate = String::with_capacity(kept.len() + ELLIPSIS.len_utf8());
+        candidate.push_str(kept);
+        candidate.push(ELLIPSIS);
+        candidate
+    };
+    let boundaries: Vec<usize> = text.char_indices().map(|(byte, _)| byte).collect();
+    let Some(last) = boundaries.len().checked_sub(1) else {
+        return String::new();
+    };
+
+    // The widest prefix that fits, by bisection over character counts: the
+    // whole run is already known not to fit, and fitting is monotone in the
+    // count, so this is `log n` measures rather than one per character.
+    let (mut low, mut high) = (0usize, last);
+    let mut best = None;
+    while low <= high {
+        let mid = low + (high - low) / 2;
+        let candidate = with_ellipsis(&text[..boundaries[mid]]);
+        if measure(&candidate) <= max_width {
+            best = Some(candidate);
+            low = mid + 1;
+        } else if mid == 0 {
+            break;
+        } else {
+            high = mid - 1;
+        }
+    }
+    best.unwrap_or_default()
+}
+
 /// Break `text` into lines no wider than `max_width`, splitting only between
 /// words. `measure` reports the pixel width of a candidate line, so a caller
 /// wraps against whatever it will actually draw with — exact glyph advances
@@ -1067,6 +1122,24 @@ mod tests {
     #[allow(clippy::cast_precision_loss)]
     fn mono(run: &str) -> f32 {
         run.chars().count() as f32 * MONO_ADVANCE
+    }
+
+    #[test]
+    fn a_run_is_cut_on_a_character_boundary_with_room_kept_for_the_ellipsis() {
+        // Tripwire: the ellipsis has to be *inside* the budget, not appended
+        // past it — a cut that ignores the mark's own width is a row that
+        // still overflows, only now by one glyph. And the cut must land on a
+        // character boundary, which for a multi-byte run is the difference
+        // between an elision and a panic.
+        assert_eq!(elide_to_width("abcdef", 100.0, mono), "abcdef", "a run that fits is untouched");
+        assert_eq!(elide_to_width("abcdef", 50.0, mono), "abcd…", "four characters plus the mark is five");
+        assert_eq!(elide_to_width("abcdef", 15.0, mono), "…", "only the mark fits");
+        assert_eq!(elide_to_width("abcdef", 5.0, mono), "", "not even the mark fits, so nothing is drawn");
+        assert_eq!(elide_to_width("", 5.0, mono), "", "an empty run measures zero and is returned whole");
+
+        let wide = elide_to_width("→→→→→→", 40.0, mono);
+        assert_eq!(wide, "→→→…", "a multi-byte run is cut between characters");
+        assert!(wide.ends_with(ELLIPSIS));
     }
 
     /// A reveal over a 100-pixel-wide, 24-pixel-tall slot.
