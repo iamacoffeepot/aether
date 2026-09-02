@@ -69,15 +69,19 @@ pub use virtual_list::VirtualListWidget;
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::mem;
 
 use aether_actor::WasmCtx;
-use aether_kinds::keycode::{KEY_ENTER, KEY_SPACE};
+use aether_clipboard::{ClipboardCapability, ClipboardMailboxExt, GetClipboardTextResult, SetClipboardTextResult};
+use aether_kinds::keycode::{
+    KEY_A, KEY_BACKSPACE, KEY_C, KEY_DELETE, KEY_END, KEY_ENTER, KEY_HOME, KEY_LEFT, KEY_RIGHT, KEY_SPACE, KEY_V, KEY_X,
+};
 use aether_kinds::{CachedFontMetrics, Modifiers, MouseButton, MouseButtonRelease, mouse_button};
 use aether_math::Rgba;
 use aether_text::{FontMetricsRequest, FontMetricsResult, FontRef, TextCapability};
 
 use crate::state::{InteractionState, emit_state_changed};
-use crate::text_edit::{DisplayedEdit, FontMetricsAdapter, SingleLineLayout, TextEditState};
+use crate::text_edit::{DisplayedEdit, EditPolicy, FontMetricsAdapter, SingleLineLayout, TextEditState};
 use crate::theme::{Theme, ThemeState};
 use crate::{WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame};
 
@@ -155,6 +159,215 @@ impl ActivationArms {
         self.pointer_pressed = false;
         self.keyboard_arm = None;
     }
+}
+
+/// How far one caret movement travels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EditStep {
+    /// One `char`.
+    Character,
+    /// To the far side of the adjacent word.
+    Word,
+    /// To the near end of the line the caret is on.
+    LineEdge,
+    /// To the near end of the whole buffer.
+    DocumentEdge,
+}
+
+/// One editing intent a key press resolved to, independent of which control
+/// received it. Every text control in the set maps its `Key` mail through
+/// [`edit_command`] so the chords cannot drift apart between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EditCommand {
+    SelectAll,
+    Copy,
+    Cut,
+    Paste,
+    DeleteBackward,
+    DeleteForward,
+    MoveLeft { step: EditStep, extend: bool },
+    MoveRight { step: EditStep, extend: bool },
+}
+
+/// Whether the platform's editing-chord modifier is held. Both `ctrl` and
+/// `meta` count, always: Cmd is the chord on macOS and Ctrl everywhere else,
+/// and a widget cannot ask which platform its window is on — the substrate
+/// reports the physical modifiers and nothing more. Accepting either is what
+/// the owner's Cmd+A note asks for, and it costs nothing, because no control in
+/// the set binds the two modifiers to different meanings.
+fn edit_chord(modifiers: Modifiers) -> bool {
+    modifiers.ctrl || modifiers.meta
+}
+
+/// The caret-movement distance an arrow press asks for under `modifiers`:
+/// Cmd/meta jumps to the line edge (the macOS convention), Ctrl or Alt steps a
+/// word (the Windows/Linux and macOS conventions respectively), bare arrows
+/// step one character.
+fn arrow_step(modifiers: Modifiers) -> EditStep {
+    if modifiers.meta {
+        EditStep::LineEdge
+    } else if modifiers.ctrl || modifiers.alt {
+        EditStep::Word
+    } else {
+        EditStep::Character
+    }
+}
+
+/// Resolve one key press into the editing intent it names, or `None` when the
+/// key is not part of the shared editing vocabulary (Enter, Up/Down, and every
+/// other key stay each control's own business).
+///
+/// Nothing here is suppressed on repeat: an editing key held down is meant to
+/// keep editing, which is exactly the difference between this and the button's
+/// [`ActivationArms::press_key`], where a repeat must not fire a second click.
+pub(super) fn edit_command(code: u32, modifiers: Modifiers) -> Option<EditCommand> {
+    let chord = edit_chord(modifiers);
+    let extend = modifiers.shift;
+    let command = match code {
+        KEY_A if chord => EditCommand::SelectAll,
+        KEY_C if chord => EditCommand::Copy,
+        KEY_X if chord => EditCommand::Cut,
+        KEY_V if chord => EditCommand::Paste,
+        KEY_BACKSPACE => EditCommand::DeleteBackward,
+        KEY_DELETE => EditCommand::DeleteForward,
+        KEY_LEFT => EditCommand::MoveLeft { step: arrow_step(modifiers), extend },
+        KEY_RIGHT => EditCommand::MoveRight { step: arrow_step(modifiers), extend },
+        KEY_HOME if chord => EditCommand::MoveLeft { step: EditStep::DocumentEdge, extend },
+        KEY_END if chord => EditCommand::MoveRight { step: EditStep::DocumentEdge, extend },
+        KEY_HOME => EditCommand::MoveLeft { step: EditStep::LineEdge, extend },
+        KEY_END => EditCommand::MoveRight { step: EditStep::LineEdge, extend },
+        _ => return None,
+    };
+    Some(command)
+}
+
+/// What applying an [`EditCommand`] leaves for the widget to do. The edit
+/// itself already happened; these are the parts only the widget can carry out.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct EditEffect {
+    /// The committed text changed — re-preview, re-scroll, re-emit.
+    pub(super) changed: bool,
+    /// Put this run on the clipboard (a copy, or the copied half of a cut).
+    pub(super) copy: Option<String>,
+    /// Ask the clipboard for its text; its reply completes the paste.
+    pub(super) request_paste: bool,
+}
+
+/// Apply one resolved command to an editing core. `mutable` gates every
+/// command that would change the text — a read-only or unavailable control
+/// still selects, copies, and moves its caret.
+pub(super) fn apply_edit_command(edit: &mut TextEditState, command: EditCommand, mutable: bool) -> EditEffect {
+    let mut effect = EditEffect::default();
+    match command {
+        EditCommand::SelectAll => edit.select_all(),
+        EditCommand::Copy => effect.copy = selected_text(edit),
+        EditCommand::Cut if mutable => {
+            effect.copy = selected_text(edit);
+            if effect.copy.is_some() {
+                edit.clear_composition();
+                edit.delete_backward();
+                effect.changed = true;
+            }
+        }
+        EditCommand::Paste if mutable => effect.request_paste = true,
+        EditCommand::DeleteBackward | EditCommand::DeleteForward if !mutable => {}
+        EditCommand::DeleteBackward => {
+            edit.clear_composition();
+            effect.changed = changed_by(edit, TextEditState::delete_backward);
+        }
+        EditCommand::DeleteForward => {
+            edit.clear_composition();
+            effect.changed = changed_by(edit, TextEditState::delete_forward);
+        }
+        EditCommand::MoveLeft { step, extend } => match step {
+            EditStep::Character => edit.move_left(extend),
+            EditStep::Word => edit.move_word_left(extend),
+            EditStep::LineEdge => edit.move_to_line_start(extend),
+            EditStep::DocumentEdge => edit.move_to_start(extend),
+        },
+        EditCommand::MoveRight { step, extend } => match step {
+            EditStep::Character => edit.move_right(extend),
+            EditStep::Word => edit.move_word_right(extend),
+            EditStep::LineEdge => edit.move_to_line_end(extend),
+            EditStep::DocumentEdge => edit.move_to_end(extend),
+        },
+        EditCommand::Cut | EditCommand::Paste => {}
+    }
+    effect
+}
+
+/// Resolve `key` against the shared editing vocabulary and carry it out,
+/// clipboard traffic included. Returns whether the committed text changed, so
+/// a control that previews or rescrolls on every edit can act on one bool.
+///
+/// `paste_pending` is the control's own single-flight guard: a second Paste
+/// while a clipboard read is outstanding is dropped rather than queued.
+pub(super) fn run_edit_key(
+    ctx: &mut WasmCtx<'_>,
+    edit: &mut TextEditState,
+    paste_pending: &mut bool,
+    command: EditCommand,
+    mutable: bool,
+) -> bool {
+    let effect = apply_edit_command(edit, command, mutable);
+    if let Some(text) = effect.copy {
+        ctx.actor::<ClipboardCapability>().set_text(&text);
+    }
+    if effect.request_paste && !*paste_pending {
+        *paste_pending = true;
+        ctx.actor::<ClipboardCapability>().get_text();
+    }
+    effect.changed
+}
+
+/// Settle one outstanding clipboard read into `edit`. Returns whether text
+/// actually landed. A reply that arrives with no paste in flight, or after the
+/// control stopped being mutable, is dropped.
+pub(super) fn accept_clipboard_paste(
+    paste_pending: &mut bool,
+    edit: &mut TextEditState,
+    policy: EditPolicy,
+    mutable: bool,
+    result: GetClipboardTextResult,
+) -> bool {
+    if !mem::take(paste_pending) {
+        return false;
+    }
+    match result {
+        GetClipboardTextResult::Ok { text } if mutable => {
+            edit.clear_composition();
+            edit.insert(&text, policy)
+        }
+        GetClipboardTextResult::Ok { .. } => false,
+        GetClipboardTextResult::Err { error } => {
+            tracing::warn!(target: "aether_kit_widget", %error, "widget clipboard paste failed");
+            false
+        }
+    }
+}
+
+/// Log a failed clipboard write. Nothing to undo — the copy simply did not
+/// land — but a silent failure would leave a paste pasting stale text.
+pub(super) fn report_clipboard_copy(result: &SetClipboardTextResult) {
+    if let SetClipboardTextResult::Err { error } = result {
+        tracing::warn!(target: "aether_kit_widget", %error, "widget clipboard copy failed");
+    }
+}
+
+/// The selected run as an owned `String`, `None` when the selection is
+/// collapsed (there is nothing to copy, and an empty clipboard write would
+/// silently destroy what was on it).
+fn selected_text(edit: &TextEditState) -> Option<String> {
+    let selection = edit.selection();
+    (!selection.is_collapsed()).then(|| String::from(&edit.value()[selection.start_byte..selection.end_byte]))
+}
+
+/// Run `edit_fn` and report whether it actually changed the committed text —
+/// what a numeric control needs to decide whether to re-preview.
+fn changed_by(edit: &mut TextEditState, edit_fn: impl FnOnce(&mut TextEditState)) -> bool {
+    let before = edit.value().len();
+    edit_fn(edit);
+    edit.value().len() != before
 }
 
 fn text_control_theme_state(state: &InteractionState, dragging: bool) -> ThemeState {

@@ -99,6 +99,41 @@ pub(super) struct DisplayedEdit {
     pub(super) composing: bool,
 }
 
+/// Whether `c` belongs to a word rather than separating two. Alphanumeric plus
+/// `_` — the classification every plain-text editor's word motion uses, and the
+/// one a numeric buffer (`-12.5`) also wants, where the sign and the point are
+/// separators.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// The byte offset one word-motion step left of `byte`: back over any run of
+/// separators, then back over the word that run was preceded by. Clamps at `0`.
+fn word_start_before(text: &str, byte: usize) -> usize {
+    let mut at = byte;
+    while let Some(c) = text[..at].chars().next_back().filter(|c| !is_word_char(*c)) {
+        at -= c.len_utf8();
+    }
+    while let Some(c) = text[..at].chars().next_back().filter(|c| is_word_char(*c)) {
+        at -= c.len_utf8();
+    }
+    at
+}
+
+/// The byte offset one word-motion step right of `byte`: forward over any run
+/// of separators, then forward over the word that follows. Clamps at the
+/// document end.
+fn word_end_after(text: &str, byte: usize) -> usize {
+    let mut at = byte;
+    while let Some(c) = text[at..].chars().next().filter(|c| !is_word_char(*c)) {
+        at += c.len_utf8();
+    }
+    while let Some(c) = text[at..].chars().next().filter(|c| is_word_char(*c)) {
+        at += c.len_utf8();
+    }
+    at
+}
+
 /// Floor `byte` to a `char` boundary of `text`, clamping to `text.len()` first.
 fn floor_boundary(text: &str, mut byte: usize) -> usize {
     if byte >= text.len() {
@@ -303,6 +338,45 @@ impl TextEditState {
         if let Some(next) = self.text[self.caret..].chars().next() {
             self.caret += next.len_utf8();
         }
+        if !extend {
+            self.anchor = self.caret;
+        }
+    }
+
+    /// Move the caret one word left — over any run of separators, then over
+    /// the word before it. `extend` keeps the anchor fixed. The step always
+    /// starts from the active caret, so a word move out of a selection
+    /// continues from the end the caret is on rather than jumping.
+    pub fn move_word_left(&mut self, extend: bool) {
+        self.caret = word_start_before(&self.text, self.caret);
+        if !extend {
+            self.anchor = self.caret;
+        }
+    }
+
+    /// Move the caret one word right — over any run of separators, then over
+    /// the word after it. `extend` keeps the anchor fixed.
+    pub fn move_word_right(&mut self, extend: bool) {
+        self.caret = word_end_after(&self.text, self.caret);
+        if !extend {
+            self.anchor = self.caret;
+        }
+    }
+
+    /// Move the caret to the start of the line it is on — the byte after the
+    /// preceding `\n`, or the document start. `extend` keeps the anchor fixed.
+    /// A single-line control has one line, so this is its document start.
+    pub fn move_to_line_start(&mut self, extend: bool) {
+        self.caret = self.text[..self.caret].rfind('\n').map_or(0, |byte| byte + 1);
+        if !extend {
+            self.anchor = self.caret;
+        }
+    }
+
+    /// Move the caret to the end of the line it is on — the next `\n`, or the
+    /// document end. `extend` keeps the anchor fixed.
+    pub fn move_to_line_end(&mut self, extend: bool) {
+        self.caret = self.text[self.caret..].find('\n').map_or(self.text.len(), |offset| self.caret + offset);
         if !extend {
             self.anchor = self.caret;
         }
@@ -652,6 +726,63 @@ mod tests {
         s.place_caret(2);
         s.extend_to(usize::MAX);
         assert_eq!(s.selection(), TextSpan::new(2, 2));
+    }
+
+    #[test]
+    fn word_motion_crosses_separators_then_the_word_and_stops_at_the_edges() {
+        let mut s = state("hello wide_world, 42");
+        s.move_to_start(false);
+        s.move_word_right(false);
+        assert_eq!(s.caret(), 5, "over `hello`");
+        s.move_word_right(false);
+        assert_eq!(s.caret(), 16, "over the space and `wide_world` — `_` is a word char");
+        s.move_word_right(false);
+        assert_eq!(s.caret(), 20, "over `, ` and `42`");
+        s.move_word_right(false);
+        assert_eq!(s.caret(), 20, "the document end is a stop, not a wrap");
+
+        s.move_word_left(false);
+        assert_eq!(s.caret(), 18, "back to the start of `42`");
+        s.move_word_left(true);
+        assert_eq!(s.selection(), TextSpan::new(6, 18), "an extended word step keeps the anchor");
+        s.move_to_start(false);
+        s.move_word_left(false);
+        assert_eq!(s.caret(), 0, "the document start is a stop too");
+    }
+
+    #[test]
+    fn word_motion_never_lands_mid_codepoint() {
+        // A multibyte word must be stepped over whole: landing inside `é`
+        // would panic the very next slice.
+        let mut s = state("café über");
+        s.move_to_start(false);
+        s.move_word_right(false);
+        assert_eq!(s.value()[..s.caret()].to_owned(), "café");
+        s.move_word_right(false);
+        assert_eq!(s.caret(), s.value().len());
+        s.move_word_left(false);
+        assert!(s.value().is_char_boundary(s.caret()));
+        assert_eq!(&s.value()[s.caret()..], "über");
+    }
+
+    #[test]
+    fn line_edges_are_the_line_the_caret_is_on_not_the_document() {
+        // Home/End in a text area must stop at the line; the same call in a
+        // single-line field is the document edge because there is one line.
+        let mut s = state("first\nsecond\nthird");
+        s.place_caret(9); // inside `second`
+        s.move_to_line_start(false);
+        assert_eq!(s.caret(), 6);
+        s.move_to_line_end(false);
+        assert_eq!(s.caret(), 12);
+        s.move_to_line_end(false);
+        assert_eq!(s.caret(), 12, "already at the end is a stop, not a jump to the next line");
+
+        let mut one_line = state("just one");
+        one_line.move_to_line_start(false);
+        assert_eq!(one_line.caret(), 0);
+        one_line.move_to_line_end(true);
+        assert_eq!(one_line.selection(), TextSpan::new(0, 8), "an extended line-end selects the whole field");
     }
 
     #[test]

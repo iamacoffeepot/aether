@@ -12,18 +12,19 @@
 //! selection and parse paths as typed edits.
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_clipboard::{ClipboardCapability, ClipboardMailboxExt, GetClipboardTextResult, SetClipboardTextResult};
-use aether_kinds::keycode::{
-    KEY_A, KEY_BACKSPACE, KEY_C, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP, KEY_V, KEY_X,
-};
+use aether_clipboard::{GetClipboardTextResult, SetClipboardTextResult};
+use aether_kinds::keycode::{KEY_DOWN, KEY_ENTER, KEY_UP};
 use aether_kinds::{
-    CachedFontMetrics, ImePreedit, Key, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput,
+    CachedFontMetrics, ImePreedit, Key, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput, mouse_button,
 };
 use aether_text::{FontMetricsRequest, FontMetricsResult, FontRef, TextCapability};
 use alloc::string::{String, ToString};
 
 use crate::set::defaults::WidgetDefaults;
-use crate::set::{arm_text_drag, release_left, reply_single_line_edit, single_line_hit_byte};
+use crate::set::{
+    SingleLineEdit, accept_clipboard_paste, arm_text_drag, edit_command, push_triangle, quad, release_left,
+    reply_single_line_edit, report_clipboard_copy, run_edit_key, single_line_hit_byte,
+};
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::{EditPolicy, TextEditState, TextSpan};
 use crate::theme::{SetTheme, Theme, ThemeState};
@@ -175,29 +176,6 @@ impl NumericWidget {
         } else {
             None
         }
-    }
-
-    fn delete_backward(&mut self) -> Option<NumericEmission> {
-        let before = String::from(self.edit.value());
-        self.edit.clear_composition();
-        self.edit.delete_backward();
-        if self.edit.value() == before {
-            None
-        } else {
-            self.preview()
-        }
-    }
-
-    fn copy_selection(&self) -> Option<String> {
-        let selection = self.edit.selection();
-        (!selection.is_collapsed()).then(|| String::from(&self.edit.value()[selection.start_byte..selection.end_byte]))
-    }
-
-    fn cut_selection(&mut self) -> Option<CutEdit> {
-        let copied = self.copy_selection()?;
-        self.edit.clear_composition();
-        self.edit.delete_backward();
-        Some(CutEdit { copied, emission: self.preview() })
     }
 
     fn commit_buffer(&mut self) -> Option<NumericEmission> {
@@ -414,39 +392,7 @@ impl WasmActor for NumericWidget {
         if !self.state.is_available() {
             return;
         }
-        if self.modifiers.ctrl {
-            match key.code {
-                KEY_A => self.edit.select_all(),
-                KEY_C => {
-                    if let Some(text) = self.copy_selection() {
-                        ctx.actor::<ClipboardCapability>().set_text(&text);
-                    }
-                }
-                KEY_X if self.state.can_mutate() => {
-                    if let Some(cut) = self.cut_selection() {
-                        ctx.actor::<ClipboardCapability>().set_text(&cut.copied);
-                        if let Some(emission) = cut.emission {
-                            Self::emit(ctx, emission);
-                        }
-                    }
-                }
-                KEY_V if self.state.can_mutate() && !self.paste_pending => {
-                    self.paste_pending = true;
-                    ctx.actor::<ClipboardCapability>().get_text();
-                }
-                _ => {}
-            }
-            return;
-        }
-        let extend = self.modifiers.shift;
         match key.code {
-            KEY_BACKSPACE if self.state.can_mutate() => {
-                if let Some(emission) = self.delete_backward() {
-                    Self::emit(ctx, emission);
-                }
-            }
-            KEY_LEFT => self.edit.move_left(extend),
-            KEY_RIGHT => self.edit.move_right(extend),
             KEY_ENTER if self.state.can_mutate() => {
                 if let Some(emission) = self.commit_buffer() {
                     Self::emit(ctx, emission);
@@ -454,7 +400,16 @@ impl WasmActor for NumericWidget {
             }
             KEY_DOWN if self.state.can_mutate() => Self::emit(ctx, self.stepped(StepDirection::Down)),
             KEY_UP if self.state.can_mutate() => Self::emit(ctx, self.stepped(StepDirection::Up)),
-            _ => {}
+            code => {
+                let Some(command) = edit_command(code, self.modifiers) else {
+                    return;
+                };
+                if run_edit_key(ctx, &mut self.edit, &mut self.paste_pending, command, self.state.can_mutate())
+                    && let Some(emission) = self.preview()
+                {
+                    Self::emit(ctx, emission);
+                }
+            }
         }
     }
 
@@ -501,31 +456,29 @@ impl WasmActor for NumericWidget {
 
     #[handler::single]
     fn on_get_clipboard_text_result(&mut self, ctx: &mut WasmCtx<'_>, result: GetClipboardTextResult) {
-        if !self.paste_pending {
-            return;
-        }
-        self.paste_pending = false;
-        match result {
-            GetClipboardTextResult::Ok { text } if self.state.can_mutate() => {
-                if let Some(emission) = self.insert_text(&text) {
-                    Self::emit(ctx, emission);
-                }
-            }
-            GetClipboardTextResult::Ok { .. } => {}
-            GetClipboardTextResult::Err { error } => {
-                tracing::warn!(target: "aether_kit_widget", %error, "numeric clipboard paste failed");
-            }
+        if accept_clipboard_paste(
+            &mut self.paste_pending,
+            &mut self.edit,
+            Self::policy(),
+            self.state.can_mutate(),
+            result,
+        ) && let Some(emission) = self.preview()
+        {
+            Self::emit(ctx, emission);
         }
     }
 
     #[handler::single]
     #[allow(clippy::unused_self)]
     fn on_set_clipboard_text_result(&mut self, _ctx: &mut WasmCtx<'_>, result: SetClipboardTextResult) {
-        if let SetClipboardTextResult::Err { error } = result {
-            tracing::warn!(target: "aether_kit_widget", %error, "numeric clipboard copy failed");
-        }
+        report_clipboard_copy(&result);
     }
 
+    /// Enter commits and Up/Down step; every other editing key resolves
+    /// through the set's shared vocabulary, so the numeric buffer honours the
+    /// same select-all / copy / cut / paste, Delete, Home/End, and word-motion
+    /// chords a text field does — Cmd as well as Ctrl. A repeated press is
+    /// another edit, never a suppressed repeat.
     #[handler::single]
     fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
         let pump_deferred = match result {
@@ -557,6 +510,7 @@ impl WasmActor for NumericWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::set::{EditCommand, apply_edit_command};
 
     fn numeric(min: f32, max: f32, step: f32, initial: f32) -> NumericWidget {
         NumericWidget::configured(NumericConfig {
@@ -625,14 +579,19 @@ mod tests {
     }
 
     #[test]
-    fn copy_cut_and_paste_core_share_selection_and_preview_paths() {
+    fn cut_and_paste_run_through_the_same_preview_path_typing_does() {
+        // The buffer/committed split is numeric's own: a cut empties the
+        // buffer to an unparseable state that must emit nothing, and the
+        // paste back must preview rather than commit.
         let mut widget = numeric(-10.0, 20.0, 0.5, 12.5);
         widget.edit.select_all();
-        assert_eq!(widget.copy_selection().as_deref(), Some("12.5"));
-        let cut = widget.cut_selection().expect("selected text cuts");
-        assert_eq!(cut, CutEdit { copied: String::from("12.5"), emission: None });
+        let cut = apply_edit_command(&mut widget.edit, EditCommand::Cut, true);
+        assert_eq!(cut.copy.as_deref(), Some("12.5"));
+        assert!(cut.changed);
         assert_eq!(widget.edit.value(), "");
-        assert_eq!(widget.insert_text(&cut.copied), Some(NumericEmission { value: 12.5, committed: false }));
+        assert_eq!(widget.preview(), None, "an empty buffer is not a number");
+
+        assert_eq!(widget.insert_text("12.5"), Some(NumericEmission { value: 12.5, committed: false }));
         assert_eq!(widget.edit.value(), "12.5");
     }
 
@@ -663,6 +622,22 @@ mod tests {
         let selection = widget.edit.selection();
         assert!(widget.edit.value().is_char_boundary(selection.start_byte));
         assert!(widget.edit.value().is_char_boundary(selection.end_byte));
+    }
+
+    #[test]
+    fn a_held_backspace_keeps_deleting_and_delete_forward_is_wired() {
+        // Tripwire: the owner's note. Editing keys must not inherit the
+        // button's repeat suppression — every repeated press is another edit.
+        let mut widget = numeric(-100.0, 100.0, 0.0, 0.0);
+        widget.edit = TextEditState::new(String::from("12345"));
+        for _ in 0..3 {
+            apply_edit_command(&mut widget.edit, EditCommand::DeleteBackward, true);
+        }
+        assert_eq!(widget.edit.value(), "12", "three repeats delete three characters");
+
+        widget.edit.move_to_start(false);
+        apply_edit_command(&mut widget.edit, EditCommand::DeleteForward, true);
+        assert_eq!(widget.edit.value(), "2");
     }
 
     #[test]
