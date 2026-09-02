@@ -27,6 +27,13 @@ horizontal glyph run, uploads atlas misses before use, and emits one or more
 applies projection, clipping, blending, and frame lifetime. See
 [Rendering & camera](rendering.md).
 
+Because those batches leave `aether.text` a mail hop after the `draw` arrived,
+glyphs always record after every batch an actor submitted to `aether.render`
+directly that frame — so a caller that needs to cover its own text raises the
+covering batch's [draw layer](rendering.md) instead of reordering sends, and
+`DrawText` carries a `layer` of its own that rides onto the glyph batch it
+emits (glyph runs on different layers stay separate batches).
+
 `TextCapability` is available as a lightweight addressing identity under the
 `text` feature. Its fontdue-backed native state is compiled only with
 `text-runtime`; wasm senders can use the kinds without linking fontdue or

@@ -53,9 +53,9 @@ the `RenderCapability` actor. It handles these payload kinds:
 | `aether.render.create_texture` | `{ width, height, format, sampling, usage, pixels }` → `create_texture_result` | register an `Rgba8`, `R8`, `R32Float`, `R16Float`, or `Rgba16Float` texture; reply carries the `texture_id` |
 | `aether.render.update_texture` | `{ texture_id, x, y, width, height, pixels }` | overwrite a sub-rect of a texture (atlas growth) |
 | `aether.render.destroy_texture` | `{ texture_id }` | release a registered texture; fire-and-forget |
-| `aether.render.draw_textured_quads` | `{ texture_id, space, clip, blend, quads }` | per-tick textured alpha-blended quads; accumulates into the frame |
-| `aether.render.draw_solid_quads` | `{ space, clip, quads }` | per-tick flat-colored alpha-blended rects; accumulates into the frame |
-| `aether.render.draw_screen_triangles` | `{ clip, triangles }` | per-tick window-pixel triangles at any orientation; accumulates into the frame |
+| `aether.render.draw_textured_quads` | `{ texture_id, space, clip, blend, layer, quads }` | per-tick textured alpha-blended quads; accumulates into the frame |
+| `aether.render.draw_solid_quads` | `{ space, clip, layer, quads }` | per-tick flat-colored alpha-blended rects; accumulates into the frame |
+| `aether.render.draw_screen_triangles` | `{ clip, layer, triangles }` | per-tick window-pixel triangles at any orientation; accumulates into the frame |
 | `aether.render.material.textured` | `{ texture_id, blend, rects }` | per-tick depth-tested world-space textured rects |
 | `aether.render.material.coverage` | `{ texture_id, rects }` | per-tick depth-tested world-space coverage bands from an R8 texture |
 | `aether.render.capture_frame` | `{ mails, after_mails }` | atomic "set state, read back a PNG, clean up" |
@@ -150,6 +150,21 @@ loaded its identity `view_proj` spans `-1..=1` on both axes and stretches
 everything by the window's aspect ratio. Pixel coordinates are absolute, so a
 ribbon at an angle, a gauge, or a graph edge holds its proportions on any
 window without a camera actor publishing a projection for flat content.
+
+**Draw layers order the overlay above submission order.** Every overlay batch
+kind — `draw_solid_quads`, `draw_textured_quads`, `draw_screen_triangles` —
+carries a `layer: u8`. The cap records the frame's accumulated batches in
+ascending `layer` and, within one layer, in submission order: a stable sort at
+commit time, so a frame that leaves every batch on layer `0` records in exactly
+the order it was submitted, exactly as before layers existed. A higher layer
+therefore draws over every lower one no matter who submitted first. The layer
+exists because submission order is not an author's to choose across caps: text
+is not drawn directly, so an `aether.text.draw` reaches `aether.render` as a
+`draw_textured_quads` one mail hop later and lands after every batch an actor
+submitted itself that frame. A widget popup that must cover text beneath it
+states `layer: 1` rather than trying to win a race it cannot win. Layers are a
+z-order over the one overlay pass, not extra passes — batches on any layer
+share the pipeline, the blend, and the absence of a depth test.
 
 **World-space materials are textured and depth-tested** ([ADR-0140](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0140-render-material-pass.md)).
 The material pass records after the triangle pass and before the screen overlay,

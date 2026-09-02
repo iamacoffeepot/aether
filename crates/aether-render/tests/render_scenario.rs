@@ -408,6 +408,7 @@ fn textured_quad_draws_screen_space_rect() {
             blend: QuadBlend::Straight,
             space: QuadSpace::Screen,
             clip: None,
+            layer: 0,
             quads: vec![TexturedQuad {
                 x: quad_x,
                 y: quad_y,
@@ -547,6 +548,7 @@ fn committed_overlay_snapshot_is_typed_ordered_and_latest_frame_bounded() {
             &DrawSolidQuads {
                 space: QuadSpace::Screen,
                 clip: Some(solid_clip.clone()),
+                layer: 0,
                 quads: vec![solid_quad.clone()],
             },
         ),
@@ -557,6 +559,7 @@ fn committed_overlay_snapshot_is_typed_ordered_and_latest_frame_bounded() {
                 blend: QuadBlend::Straight,
                 space: textured_space.clone(),
                 clip: Some(textured_clip.clone()),
+                layer: 0,
                 quads: vec![textured_quad.clone()],
             },
         ),
@@ -611,6 +614,7 @@ fn committed_overlay_snapshot_excludes_record_time_rejections() {
         space: QuadSpace::Screen,
         clip: None,
         blend: QuadBlend::Straight,
+        layer: 0,
         quads: vec![valid_quad.clone()],
     };
     let submissions = vec![
@@ -621,6 +625,7 @@ fn committed_overlay_snapshot_excludes_record_time_rejections() {
                 space: QuadSpace::Screen,
                 clip: None,
                 blend: QuadBlend::Straight,
+                layer: 0,
                 quads: Vec::new(),
             },
         ),
@@ -631,6 +636,7 @@ fn committed_overlay_snapshot_excludes_record_time_rejections() {
                 blend: QuadBlend::Straight,
                 space: QuadSpace::Screen,
                 clip: Some(ClipRect { x: 74.0, y: 0.0, width: 5.0, height: 5.0 }),
+                layer: 0,
                 quads: vec![valid_quad.clone()],
             },
         ),
@@ -661,6 +667,7 @@ fn committed_overlay_snapshot_excludes_record_time_rejections() {
         blend: QuadBlend::Straight,
         space: QuadSpace::Screen,
         clip: None,
+        layer: 0,
         quads: vec![valid_quad; over_budget_count],
     };
     let overflow = harness
@@ -774,6 +781,7 @@ fn target_color_stats_distinguishes_quadrant_colors_on_real_capture() {
             blend: QuadBlend::Straight,
             space: QuadSpace::Screen,
             clip: None,
+            layer: 0,
             quads: vec![TexturedQuad {
                 x: 16.0,
                 y: 12.0,
@@ -855,6 +863,7 @@ fn destroyed_texture_draw_drops_from_frame() {
                 blend: QuadBlend::Straight,
                 space: QuadSpace::Screen,
                 clip: None,
+                layer: 0,
                 quads: vec![TexturedQuad {
                     x: 16.0,
                     y: 12.0,
@@ -946,6 +955,7 @@ fn r8_texture_updates_and_draws_red_channel_only() {
                 blend: QuadBlend::Straight,
                 space: QuadSpace::Screen,
                 clip: None,
+                layer: 0,
                 quads: vec![TexturedQuad {
                     x: 16.0,
                     y: 16.0,
@@ -1250,6 +1260,7 @@ fn solid_quad_draws_screen_space_rect() {
         &DrawSolidQuads {
             space: QuadSpace::Screen,
             clip: None,
+            layer: 0,
             quads: vec![SolidQuad {
                 x: quad_x,
                 y: quad_y,
@@ -1298,6 +1309,77 @@ fn solid_quad_draws_screen_space_rect() {
     );
 }
 
+/// One opaque solid quad covering another at the same screen rect, so the
+/// captured pixel names which batch recorded last.
+fn stacked_solid_quads(first: (u8, Rgba), second: (u8, Rgba)) -> Vec<NamedMail> {
+    let batch = |layer: u8, color: Rgba| {
+        envelope(
+            "aether.render",
+            &DrawSolidQuads {
+                space: QuadSpace::Screen,
+                clip: None,
+                layer,
+                quads: vec![SolidQuad { x: 16.0, y: 12.0, width: 24.0, height: 18.0, color }],
+            },
+        )
+    };
+    vec![batch(first.0, first.1), batch(second.0, second.1)]
+}
+
+/// The overlay draw-layer rule: batches record in ascending `layer`, and
+/// within one layer in submission order. Two opaque solid quads stack on
+/// the same screen rect, so the captured pixel is decided entirely by
+/// which batch recorded last.
+///
+/// The first frame submits blue at layer 1 *before* red at layer 0 — the
+/// widget-popup case, where the covering batch cannot be submitted last
+/// because text reaches `aether.render` a mail hop later. Blue must win.
+/// The second frame submits the same pair both at layer 0, where nothing
+/// reorders and the later red must win — the submission order every
+/// pre-layer drawing depends on, unchanged.
+///
+/// The named bugs: no ordering at all (red wins the first frame, layers
+/// ignored); a descending sort (the first frame inverts); a sort applied
+/// somewhere the record path does not read (the first frame inverts
+/// while `sort_by_layer`'s own unit test stays green); and a comparison
+/// that reorders same-layer batches, which shows up as red losing the
+/// second frame.
+#[test]
+fn overlay_layers_order_batches_above_submission_order() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
+
+    let blue = Rgba::new(0.0, 0.0, 1.0, 1.0);
+    let red = Rgba::new(1.0, 0.0, 0.0, 1.0);
+    let captured = harness
+        .execute(vec![
+            ("raised", HarnessOp::capture_with_mails(stacked_solid_quads((1, blue), (0, red)), vec![])),
+            ("advance", HarnessOp::advance(1)),
+            ("flat", HarnessOp::capture_with_mails(stacked_solid_quads((0, blue), (0, red)), vec![])),
+        ])
+        .expect("capture both stacking orders");
+
+    // Centre of the shared 24x18 rect at (16, 12).
+    let (probe_x, probe_y) = (28, 21);
+    let raised =
+        rgba_at(&decode_png(captured.captured("raised").expect("raised step ran")).expect("decode"), probe_x, probe_y);
+    assert!(
+        raised[2] > raised[0],
+        "the layer-1 blue batch was submitted first but must still record last and cover the layer-0 red; \
+         probe={raised:?}",
+    );
+
+    let flat =
+        rgba_at(&decode_png(captured.captured("flat").expect("flat step ran")).expect("decode"), probe_x, probe_y);
+    assert!(
+        flat[0] > flat[2],
+        "within one layer the later red batch must still cover the earlier blue — the layer sort is stable; \
+         probe={flat:?}",
+    );
+}
+
 /// Issue #2855: a per-batch clip rect becomes a GPU scissor. A clipped
 /// solid batch can only light pixels inside the clip, and the following
 /// unclipped batch resets to the full framebuffer instead of inheriting
@@ -1313,6 +1395,7 @@ fn solid_quad_clip_bounds_pixels_and_does_not_leak() {
         &DrawSolidQuads {
             space: QuadSpace::Screen,
             clip: Some(ClipRect { x: 20.0, y: 12.0, width: 12.0, height: 10.0 }),
+            layer: 0,
             quads: vec![SolidQuad { x: 10.0, y: 8.0, width: 44.0, height: 30.0, color: Rgba::new(1.0, 0.0, 0.0, 1.0) }],
         },
     );
@@ -1321,6 +1404,7 @@ fn solid_quad_clip_bounds_pixels_and_does_not_leak() {
         &DrawSolidQuads {
             space: QuadSpace::Screen,
             clip: None,
+            layer: 0,
             quads: vec![SolidQuad { x: 44.0, y: 30.0, width: 8.0, height: 8.0, color: Rgba::new(0.0, 1.0, 0.0, 1.0) }],
         },
     );
@@ -1370,6 +1454,7 @@ fn textured_quad_clip_bounds_pixels() {
             blend: QuadBlend::Straight,
             space: QuadSpace::Screen,
             clip: Some(ClipRect { x: 18.0, y: 14.0, width: 14.0, height: 12.0 }),
+            layer: 0,
             quads: vec![TexturedQuad {
                 x: 8.0,
                 y: 8.0,
@@ -1439,7 +1524,11 @@ fn capture_diamond(width: u32, height: u32, center: (f32, f32), radius: f32) -> 
     let mut harness = SubstrateHarness::builder().size(width, height).with_render().build().expect("boot");
     let draw = envelope(
         "aether.render",
-        &DrawScreenTriangles { clip: None, triangles: diamond(center, radius, Rgba::new(1.0, 1.0, 1.0, 1.0)) },
+        &DrawScreenTriangles {
+            clip: None,
+            layer: 0,
+            triangles: diamond(center, radius, Rgba::new(1.0, 1.0, 1.0, 1.0)),
+        },
     );
 
     let captured =
@@ -1489,6 +1578,7 @@ fn screen_triangle_clip_bounds_pixels() {
         "aether.render",
         &DrawScreenTriangles {
             clip: Some(ClipRect { x: 24.0, y: 16.0, width: 16.0, height: 16.0 }),
+            layer: 0,
             triangles: diamond((32.0, 24.0), 20.0, Rgba::new(1.0, 1.0, 1.0, 1.0)),
         },
     );
@@ -1533,6 +1623,7 @@ fn capture_frame_checks_return_substrate_verdict() {
         &DrawSolidQuads {
             space: QuadSpace::Screen,
             clip: None,
+            layer: 0,
             quads: vec![SolidQuad {
                 x: quad_x,
                 y: quad_y,
@@ -1720,6 +1811,7 @@ fn capture_frame_region_scopes_reduction_to_one_widget_rect() {
         &DrawSolidQuads {
             space: QuadSpace::Screen,
             clip: None,
+            layer: 0,
             quads: vec![
                 SolidQuad {
                     x: first_x,
@@ -1867,6 +1959,7 @@ fn artifact_guard_persists_actual_mask_and_measurements_on_panic() {
         &DrawSolidQuads {
             space: QuadSpace::Screen,
             clip: None,
+            layer: 0,
             quads: vec![SolidQuad {
                 x: quad_x,
                 y: quad_y,
@@ -2091,6 +2184,7 @@ fn writable_texture_realizes_cleared_and_samples_transparent() {
                 blend: QuadBlend::Straight,
                 space: QuadSpace::Screen,
                 clip: None,
+                layer: 0,
                 quads: vec![TexturedQuad {
                     x: 16.0,
                     y: 12.0,
@@ -2109,6 +2203,7 @@ fn writable_texture_realizes_cleared_and_samples_transparent() {
             &DrawSolidQuads {
                 space: QuadSpace::Screen,
                 clip: None,
+                layer: 0,
                 quads: vec![SolidQuad {
                     x: 2.0,
                     y: 2.0,
@@ -2218,6 +2313,7 @@ fn r32float_textures_realize_and_drop_from_color_passes() {
                 blend: QuadBlend::Straight,
                 space: QuadSpace::Screen,
                 clip: None,
+                layer: 0,
                 quads: vec![TexturedQuad {
                     x: 16.0,
                     y: 8.0,
@@ -2315,6 +2411,7 @@ fn nearest_sampling_preserves_label_texel_identity() {
         blend: QuadBlend::Straight,
         space: QuadSpace::Screen,
         clip: None,
+        layer: 0,
         quads: vec![TexturedQuad {
             x: 16.0,
             y,
@@ -2378,6 +2475,7 @@ fn composited_red(harness: &mut SubstrateHarness, label: &'static str, texture_i
             blend,
             space: QuadSpace::Screen,
             clip: None,
+            layer: 0,
             quads: vec![TexturedQuad {
                 x: 8.0,
                 y: 8.0,

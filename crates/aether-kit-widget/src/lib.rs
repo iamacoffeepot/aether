@@ -409,6 +409,7 @@ fn text_items(list: &WidgetDrawList) -> Vec<DrawText> {
                 origin: [*x, *y],
                 space: QuadSpace::Screen,
                 clip: clip.framebuffer(),
+                layer: 0,
             });
         }
     }
@@ -439,6 +440,7 @@ fn emit_layer(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
                 ctx.actor::<RenderCapability>().send(&DrawSolidQuads {
                     space: QuadSpace::Screen,
                     clip: clip.framebuffer(),
+                    layer: 0,
                     quads,
                 });
             }
@@ -448,6 +450,7 @@ fn emit_layer(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
                     blend: QuadBlend::Straight,
                     space: QuadSpace::Screen,
                     clip: clip.framebuffer(),
+                    layer: 0,
                     quads,
                 });
             }
