@@ -21,11 +21,11 @@
 //! [`CachedFontMetrics`]. Until then it falls
 //! back to the proportional approximation as a bounded font-warm-up placement.
 //!
-//! Editing keys resolve through the set's shared vocabulary
-//! ([`edit_command`](crate::set::edit_command)): Backspace and Delete, Home and
-//! End, character / word / line-edge caret motion, and select-all, copy, cut,
-//! and paste on Ctrl *or* Cmd. Enter is the field's own — it commits. Page Up
-//! and Page Down have no meaning in one line and are ignored.
+//! Editing keys resolve through the set's shared `edit_command` vocabulary:
+//! Backspace and Delete, Home and End, character / word / line-edge caret
+//! motion, and select-all, copy, cut, and paste on Ctrl *or* Cmd. Enter is the
+//! field's own — it commits. Page Up and Page Down have no meaning in one line
+//! and are ignored.
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_clipboard::{GetClipboardTextResult, SetClipboardTextResult};
