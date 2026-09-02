@@ -117,14 +117,23 @@ before roles existed.
 
 `align` places the run in the assigned frame: `Start` at the frame's left edge,
 `Center` on its width, `End` flush with its right edge — which is what a column
-of numbers wants, so magnitudes line up on their last digit. Centering and
-end-alignment need the run's measured width, so such a label drives the same
-single-flight `FontMetricsRequest` the text field and text area do and lays out
-against the resolved `CachedFontMetrics`. Until those metrics arrive the label
-draws at the start rather than at a guessed width, and a `Start` label never
-sends the request at all. A run wider than its frame also stays flush left, so
-overflow clips at the slot's right edge instead of pushing the head of the
-string out of view.
+of numbers wants, so magnitudes line up on their last digit. Every label drives
+the same single-flight `FontMetricsRequest` the text field and text area do and
+lays out against the resolved `CachedFontMetrics`. Until those metrics arrive
+the label draws at the start rather than at a guessed width. A run wider than
+its frame also stays flush left, so overflow clips at the slot's right edge
+instead of pushing the head of the string out of view.
+
+Clipped text is readable on hover. When a label's or a text field's run is
+wider than the frame it lives in and the pointer is over it, the widget raises
+the whole run on an overlay plate: `surface_raised` with a one-pixel `outline`
+ring, starting at the widget's own origin and reaching one `pad` past the end
+of the run — so it covers its own slot and whatever sits to its right, and the
+root's overlay cutout keeps the covered widgets' glyphs from printing through
+it. Nothing is raised while the run fits, so the plate is a signal rather than
+chrome. This is why a label is pointer-eligible (for hover) while remaining
+non-focusable: pressing one still clears focus, exactly as pressing bare panel
+background does.
 
 Selection is a state, not an affordance, and every widget that has a current
 item draws it the same way: the chosen row of a virtual list, the chosen bucket
@@ -134,6 +143,31 @@ A radio group's unselected markers stay on `surface_raised` and so read as
 empty slots beside the lit one. None of these use `accent`, which means the
 primary action and the focus ring and nothing else — so a chosen row never
 reads as a button waiting to be pressed.
+
+## Placing one line of text
+
+Every widget that draws a single line — label, button, text field, numeric,
+list row, segmented bucket, tab, dropdown row — places it with one shared
+rule, `aether_kit_widget::set::text_origin_y(row_top, row_height,
+size_pixels)`. Reach for it rather than deriving an origin at the draw site;
+per-widget arithmetic is how the set drifted out of alignment once already.
+
+The rule exists because `aether.text` places a `Screen` draw's `origin` at the
+*pen*, not at the ink: the baseline lands one **ascent** below the origin, and
+an ascent is not the draw size. The kit's font (RobotoMono) has an ascent of
+`2146 / 2048` em, so an origin computed as though the line were `size_pixels`
+tall sank every glyph about a fifth of the size below centre — a visible sag in
+a 24-pixel row, and the reason text on buttons and inputs read as sitting low
+and to the right. `text_origin_y` instead centres the **cap box**, which is
+what a reader sees as the text: the baseline sits half a cap height below the
+row's middle (`text_baseline_y`, which the composition underlines also draw
+on), and the origin is that baseline minus one ascent.
+
+Horizontal centring is separate and needs the run's measured width, which is
+the sum of its glyph advances at the size the draw uses: `centered_text_x`
+places it and never pushes the run left of one `pad`. A widget that has not
+resolved its font's metrics yet draws left-padded rather than guessing, so the
+label never jumps when the measurement lands.
 
 ## Fixed-row virtual lists
 
@@ -147,11 +181,15 @@ uniform-height choices.
 
 Up and Down move selection by one. PageUp and PageDown move by the configured
 nonzero visible-row count. Movement clamps at the item-vector ends and shifts
-the realized window only enough to reveal the selected row. A click divides
-the assigned frame height by the number of rows actually realized, so a short
-list fills its viewport and the frame's bottom edge remains exclusive. Hidden
-lists answer every `Collect` with an empty draw list; disabled and read-only
-lists reject both pointer and keyboard selection changes.
+the realized window only enough to reveal the selected row. A row is always one
+configured row tall — the viewport divided by `visible_row_count`, never by the
+number of rows the list happens to hold — so a list with fewer items than its
+viewport draws that many normal rows at the top and leaves the rest of the
+frame empty, and hit testing below the last realized row selects nothing. (A
+list that spread its items to fill the frame instead turned a two-item list
+into a pair of slabs, with a selected row half the viewport high.) Hidden lists
+answer every `Collect` with an empty draw list; disabled and read-only lists
+reject both pointer and keyboard selection changes.
 
 `initial_selected_index` is an `Option`, and a list whose model holds no
 current item shows none — no row lights up, rather than the first row lighting
@@ -245,11 +283,15 @@ there selects nothing. That sizing needs the label's real width, so the strip
 drives the same single-flight font-metrics request the text controls do and
 splits the row evenly only as an interim, for the frame or two before the
 measurement lands. The hit buckets and the draw read the same widths, so a
-press always lands in the tab under the pointer. The selected tab is marked
-twice — filled with `theme.selection` and inked in `theme.selection_text`,
-under a two-pixel `theme.text_primary` underline along its bottom edge —
-while the others draw `text_primary` on the row's own `surface_raised`; hover
-and press are the usual `Theme::fill` overlays. A left press selects, focused
+press always lands in the tab under the pointer. The selected tab is marked by a
+two-pixel `theme.text_primary` underline along its bottom edge and nothing
+else: every tab keeps the row's own `surface_raised` fill and `text_primary`
+ink, so the strip reads as a row of places with one marked rather than a row of
+buttons with one lit, and hover and press stay the only fills the pointer
+changes (the usual `Theme::fill` overlays). The tab strip is the one current-item
+control that does not take the selection role — a segmented control divides one
+bar and needs the fill to say which part is chosen, while a tab already reads as
+a place you are standing in. A left press selects, focused
 Left/Right moves the selection and clamps at the ends, and `TabSelected {
 index }` reports only actual changes. The strip owns nothing but the choice:
 swapping the content behind the selected tab is the root's business.
@@ -294,6 +336,28 @@ questions:
   Shift+Tab backward. Traversal wraps and skips hidden/disabled/static entries.
   A live availability change moves focus forward when its holder disappears
   and clears hover/capture through named transition effects.
+- **What clears focus?** A left press that lands on *no* focusable child —
+  bare panel background, a label, the gap between two rows. Clicking away from
+  a control is how a person says they are done with it, so the field they were
+  typing in stops being active and takes its `FocusLost`.
+
+That last rule is the one a consumer root has to copy deliberately, because it
+is the branch that is easy to leave out: `Focus::focus_hit` answers `None` both
+when the press hit nothing focusable *and* when it hit the already-focused
+child, so a root that only reacts to its `Some` never clears anything and a
+pressed input stays lit forever. Ask `Focus::focus_hit_test(x, y)` for the
+focusable child under the point and hand the answer — `Some` or `None` — to
+`Focus::set_focus`, then fan the returned transition:
+
+```rust
+let focusable = self.focus.focus_hit_test(press.x, press.y);
+if let Some(transition) = self.focus.set_focus(focusable) {
+    apply_focus(ctx, transition);   // FocusLost to `previous`, FocusGained to `next`
+}
+```
+
+Clearing focus cancels nothing else: drag capture, the modal grab, and every
+child's own value are untouched.
 
 Drag capture is the kit's own policy over the raw button vocabulary: a left
 press that hits a widget sets capture on that child, moves route to it while

@@ -180,11 +180,14 @@ fn centroid_check(rect: FrameRect, background: [u8; 3]) -> FrameCheck {
 }
 
 /// A row to assert: its human label, the window y its glyph centroid should
-/// land near (its vertical center), and the region-scoped check that scores
-/// it.
+/// land near (its vertical center), the window x it should land near when the
+/// row centers its run horizontally too (`None` for a start-aligned row, whose
+/// centroid x is a property of the string, not the layout), and the
+/// region-scoped check that scores it.
 struct RowCheck {
     name: &'static str,
     center_y: f32,
+    center_x: Option<f32>,
     check: FrameCheck,
 }
 
@@ -211,11 +214,15 @@ fn row_checks() -> Vec<RowCheck> {
         RowCheck {
             name: "label",
             center_y: center(label_top),
+            center_x: None,
             check: centroid_check(rect(PANEL_X, label_top), SURFACE_SRGB),
         },
         RowCheck {
             name: "button",
             center_y: center(button_top),
+            // The button is the one row that centers its label horizontally,
+            // against the measured run width.
+            center_x: Some(PANEL_X + PANEL_WIDTH * 0.5),
             check: centroid_check(rect(PANEL_X, button_top), ACCENT_SRGB),
         },
     ];
@@ -224,6 +231,7 @@ fn row_checks() -> Vec<RowCheck> {
         rows.push(RowCheck {
             name: ["radio[0]", "radio[1]", "radio[2]"][i as usize],
             center_y: center(top),
+            center_x: None,
             check: centroid_check(rect(PANEL_X + RADIO_TEXT_INSET, top), SURFACE_SRGB),
         });
     }
@@ -300,10 +308,11 @@ fn panel_glyphs_sit_inside_their_row_frames() {
 
     assert_eq!(verdict.results.len(), rows.len(), "one result per requested check");
 
-    // A quarter of the row height: the corrected origin centers glyphs well
-    // inside this band, while the removed ascent sag sits a full ascent
-    // (~13px at 14px text) below — far outside it.
-    let tolerance_y = ROW_HEIGHT * 0.25;
+    // Two pixels in a 24-pixel row. The corrected origin lands every row
+    // inside ±1 (measured: +0.1 to +0.8); the em-box origin it replaced put
+    // them at +2.6 to +3.5, which the old quarter-row band waved through. The
+    // band has to be tighter than the mistake it is meant to catch.
+    let tolerance = 2.0;
     for (row, result) in rows.iter().zip(&verdict.results) {
         let FrameCheckResult::Centroid { centroid, .. } = result else {
             panic!("row {} scored a non-Centroid result: {result:?}", row.name);
@@ -311,17 +320,32 @@ fn panel_glyphs_sit_inside_their_row_frames() {
         let centroid = centroid.unwrap_or_else(|| panic!("row {} drew no glyphs (empty mask)", row.name));
         let offset = centroid[1] - row.center_y;
         eprintln!(
-            "row {}: centroid_y={:.1} row_center={:.1} offset={:+.1} (tol ±{tolerance_y:.1})",
-            row.name, centroid[1], row.center_y, offset,
+            "row {}: centroid=({:.1}, {:.1}) row_center_y={:.1} offset_y={:+.1} (tol ±{tolerance:.1})",
+            row.name, centroid[0], centroid[1], row.center_y, offset,
         );
         assert!(
-            offset.abs() <= tolerance_y,
-            "row {} glyphs must sit within {tolerance_y:.1}px of the row center {:.1}; \
-             centroid landed at y={:.1} (offset {:+.1}) — the one-ascent sag this fix removes",
+            offset.abs() <= tolerance,
+            "row {} glyphs must sit within {tolerance:.1}px of the row center {:.1}; \
+             centroid landed at y={:.1} (offset {:+.1}) — the sag an em-box origin reintroduces",
             row.name,
             row.center_y,
             centroid[1],
             offset,
         );
+
+        // Both axes for the one row that centers horizontally: the label is
+        // placed by the measured run width, and a measurement taken at a
+        // different size than the draw, or a padded origin added twice, would
+        // push the ink off the button's own center.
+        if let Some(center_x) = row.center_x {
+            let offset_x = centroid[0] - center_x;
+            assert!(
+                offset_x.abs() <= tolerance,
+                "row {} glyphs must also sit within {tolerance:.1}px of the button's horizontal center \
+                 {center_x:.1}; centroid landed at x={:.1} (offset {offset_x:+.1})",
+                row.name,
+                centroid[0],
+            );
+        }
     }
 }

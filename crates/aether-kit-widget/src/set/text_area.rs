@@ -17,7 +17,7 @@ use aether_text::FontMetricsResult;
 use crate::set::defaults::WidgetDefaults;
 use crate::set::{
     apply_text_control_state, apply_text_theme, pump_text_font_metrics, push_control_outlines, quad, release_left,
-    reply_with_draw_items, text_control_theme_state, text_origin_y, update_text_modifiers,
+    reply_with_draw_items, text_baseline_y, text_control_theme_state, text_origin_y, update_text_modifiers,
 };
 use crate::state::InteractionState;
 use crate::text_edit::{EditPolicy, FontMetricsAdapter, SingleLineLayout, TextEditState, TextSpan};
@@ -274,7 +274,7 @@ impl TextAreaWidget {
                 let x1 = self.theme.pad + layout.caret_x(span.end_byte);
                 items.push(quad(
                     x0,
-                    text_origin_y(row_top, row_height, size) + size,
+                    text_baseline_y(row_top, row_height, size),
                     (x1 - x0).max(1.0),
                     1.0,
                     self.theme.accent,
