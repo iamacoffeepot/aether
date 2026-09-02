@@ -706,6 +706,9 @@ fn solid_for<'a>(snapshot: &'a [DrawTexturedQuads], clip: &ClipRect) -> &'a Draw
         .unwrap_or_else(|| panic!("missing solid batch for {clip:?}; snapshot: {snapshot:?}"))
 }
 
+/// The two quads a standing scroll bar contributes: its track and its thumb.
+const SCROLL_BAR_QUADS: usize = 2;
+
 fn virtual_list_clip() -> ClipRect {
     ClipRect { x: PANEL_X, y: PANEL_Y, width: PANEL_WIDTH, height: ROW_HEIGHT * 5.0 }
 }
@@ -720,9 +723,11 @@ fn assert_virtual_list_rows(
     let batch = solid_for(snapshot, &clip);
     assert_eq!(
         batch.quads.len(),
-        5 + outline_quad_count,
-        "five realized row quads plus the requested outlines only; snapshot: {snapshot:?}",
+        5 + SCROLL_BAR_QUADS + outline_quad_count,
+        "five realized row quads, the scroll bar's track and thumb, and the requested outlines only; \
+         snapshot: {snapshot:?}",
     );
+    assert_scroll_bar(batch);
     for (row_offset, quad) in batch.quads[..5].iter().enumerate() {
         assert_eq!(quad.x, PANEL_X);
         assert_eq!(quad.y, PANEL_Y + row_offset as f32 * ROW_HEIGHT);
@@ -735,6 +740,28 @@ fn assert_virtual_list_rows(
         };
         assert_eq!(quad.tint, expected_tint, "row offset {row_offset} has the wrong selection/state fill");
     }
+}
+
+/// The track and the thumb the list draws once its vector overflows its
+/// viewport — round-4 note 3. The two quads sit at the frame's right edge, in
+/// the `outline` and `text_muted` roles rather than in colours of their own,
+/// and the thumb is a proper part of the track: a thumb as long as the track
+/// is a bar that says nothing about how much is off screen.
+fn assert_scroll_bar(batch: &DrawTexturedQuads) {
+    let bar = &batch.quads[5..5 + SCROLL_BAR_QUADS];
+    let (track, thumb) = (&bar[0], &bar[1]);
+    assert_eq!(track.tint, Theme::DEFAULT.outline, "the track is the outline role; batch: {batch:?}");
+    assert_eq!(
+        thumb.tint,
+        Theme::DEFAULT.fill(Theme::DEFAULT.text_muted, ThemeState::Normal),
+        "and the thumb the muted-text one; batch: {batch:?}",
+    );
+    assert_eq!((track.x, track.width), (thumb.x, thumb.width), "both stand in the same column");
+    assert_eq!(track.x + track.width, PANEL_X + PANEL_WIDTH, "flush with the list's right edge");
+    assert_eq!(track.y, PANEL_Y, "the track is the whole viewport");
+    assert_eq!(track.height, ROW_HEIGHT * 5.0);
+    assert!(thumb.height < track.height, "the thumb is a share of the track: {thumb:?}");
+    assert!(thumb.y >= track.y && thumb.y + thumb.height <= track.y + track.height, "and inside it: {thumb:?}");
 }
 
 fn assert_five_virtual_list_glyph_rows(snapshot: &[DrawTexturedQuads]) {
@@ -2935,11 +2962,11 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
     assert_five_virtual_list_glyph_rows(&paged);
     let paged_solids = solid_for(&paged, &virtual_list_clip());
     assert!(
-        paged_solids.quads[5..9].iter().all(|quad| quad.tint == Theme::DEFAULT.warning),
+        paged_solids.quads[7..11].iter().all(|quad| quad.tint == Theme::DEFAULT.warning),
         "the outer validation outline must precede focus",
     );
     assert!(
-        paged_solids.quads[9..13].iter().all(|quad| quad.tint == Theme::DEFAULT.accent),
+        paged_solids.quads[11..15].iter().all(|quad| quad.tint == Theme::DEFAULT.accent),
         "the focus outline must remain visible inset after validation",
     );
 

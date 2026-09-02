@@ -27,6 +27,18 @@
 //! it mid-glyph (the studio's gap 17). The same metrics give the widest row of
 //! the whole item vector, which the list reports as its intrinsic width so a
 //! column can be sized to what it holds.
+//!
+//! # The scroll bar
+//!
+//! Round-4 note 3 — "binding a gem isn't scrollable, doesn't have a scroll bar
+//! indicating how many entries are in the list. Would be nice. Or where in the
+//! list you are." Both halves of that are one bar: its **length** is the
+//! visible share of the vector, so a short thumb says the list is long, and
+//! its **position** is where the reader is. It stands whenever the vector
+//! overflows the viewport, never only on hover — a bar that appears when
+//! touched cannot answer "how many entries are there" for a reader who has not
+//! touched it. The wheel moves the window and so does dragging the thumb; the
+//! two write the same `first_index`, which is the list's whole scroll state.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -34,7 +46,7 @@ use alloc::vec::Vec;
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::keycode::{KEY_DOWN, KEY_PAGE_DOWN, KEY_PAGE_UP, KEY_UP};
 use aether_kinds::mouse_button;
-use aether_kinds::{Key, MouseButton, MouseButtonRelease};
+use aether_kinds::{Key, MouseButton, MouseButtonRelease, MouseMove, MouseWheel};
 use aether_text::FontMetricsResult;
 
 use crate::set::defaults::WidgetDefaults;
@@ -44,7 +56,7 @@ use crate::set::{
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
-use crate::theme::{SetTheme, TextRole, Theme};
+use crate::theme::{SetTheme, TextRole, Theme, ThemeState};
 use crate::{
     Collect, SetWidgetState, VirtualListConfig, VirtualListSelected, WidgetControlState, WidgetDrawItem,
     WidgetDrawList, WidgetFrame,
@@ -60,6 +72,98 @@ impl VisibleRowWindow {
     fn len(self) -> usize {
         self.end_exclusive_index.saturating_sub(self.first_index)
     }
+}
+
+/// How wide the scroll bar's track is, in spacing units — two, which is eight
+/// pixels on the four-pixel grid: wide enough to grab with a pointer, narrow
+/// enough that it reads as an edge of the list rather than a column in it.
+const SCROLL_BAR_UNITS: u8 = 2;
+
+/// The shortest a thumb may get, as a multiple of the track's width. A list of
+/// thousands would otherwise compute a thumb a pixel tall — unreadable, and
+/// impossible to grab — so past this the thumb stops shrinking and only its
+/// travel goes on saying how much is off screen.
+const MIN_THUMB_RATIO: f32 = 1.5;
+
+/// The scroll bar's geometry in widget-local pixels: the track down the
+/// frame's right edge, and the thumb standing in it.
+///
+/// The thumb's `height` is the visible share of the whole item vector and its
+/// `top` is where the reader is, which is the pair of facts round-4 note 3
+/// asked for. Both are derived from `first_index` every frame — the bar holds
+/// no scroll state of its own, so a wheel, a drag, and a keyboard reveal all
+/// move it by moving the one window the list already had.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ScrollBar {
+    /// The track's left edge in widget-local pixels.
+    left: f32,
+    width: f32,
+    height: f32,
+    thumb_top: f32,
+    thumb_height: f32,
+}
+
+impl ScrollBar {
+    fn contains(self, local_x: f32, local_y: f32) -> bool {
+        local_x >= self.left && local_x < self.left + self.width && local_y >= 0.0 && local_y < self.height
+    }
+
+    fn thumb_contains(self, local_y: f32) -> bool {
+        local_y >= self.thumb_top && local_y < self.thumb_top + self.thumb_height
+    }
+
+    /// How far the thumb can travel: the track less the thumb itself. Zero for
+    /// a thumb that fills its track, which is a list that does not overflow.
+    fn travel(self) -> f32 {
+        (self.height - self.thumb_height).max(0.0)
+    }
+}
+
+/// The bar a list of `item_count` items showing `visible_row_count` of them
+/// from `first_index` stands with, or `None` when there is nothing to say: a
+/// vector that fits its viewport, an unlaid-out frame, or a frame too narrow
+/// to give the track up without swallowing the rows.
+#[allow(clippy::cast_precision_loss)] // a row count a reader could scroll cannot lose precision
+fn scroll_bar(
+    frame: &WidgetFrame,
+    track_width: f32,
+    first_index: usize,
+    visible_row_count: usize,
+    item_count: usize,
+) -> Option<ScrollBar> {
+    if !valid_frame(frame) || visible_row_count == 0 || item_count <= visible_row_count {
+        return None;
+    }
+    let width = track_width.min(frame.width * 0.5);
+    if !width.is_finite() || width < 1.0 {
+        return None;
+    }
+    let height = frame.height;
+    let share = visible_row_count as f32 / item_count as f32;
+    let thumb_height = (height * share).max(width * MIN_THUMB_RATIO).min(height);
+    let max_first_index = item_count - visible_row_count;
+    let progress = first_index.min(max_first_index) as f32 / max_first_index as f32;
+    Some(ScrollBar {
+        left: frame.width - width,
+        width,
+        height,
+        thumb_top: progress * (height - thumb_height),
+        thumb_height,
+    })
+}
+
+/// The first realized row a thumb whose top stands at `thumb_top` means — the
+/// inverse of the `progress` [`scroll_bar`] draws with, so a drag and the bar
+/// it moves cannot disagree about where the reader is.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn first_index_at(bar: ScrollBar, thumb_top: f32, visible_row_count: usize, item_count: usize) -> usize {
+    let max_first_index = item_count.saturating_sub(visible_row_count);
+    let travel = bar.travel();
+    if max_first_index == 0 || travel <= 0.0 || !thumb_top.is_finite() {
+        return 0;
+    }
+    let progress = (thumb_top / travel).clamp(0.0, 1.0);
+    ((progress * max_first_index as f32).round() as usize).min(max_first_index)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +198,13 @@ pub struct VirtualListWidget {
     /// forgotten ([`VirtualListWidget::forget_measurements`]) whenever the
     /// items, the font, or the theme's type size change under it.
     widest_row_width: Option<f32>,
+    /// How far down the thumb the pointer grabbed it, while a thumb drag is
+    /// live. `None` is no drag — the bar is otherwise pure geometry.
+    thumb_grab_pixels: Option<f32>,
+    /// Wheel pixels not yet worth a whole row. The window moves in rows, so a
+    /// trackpad's stream of sub-row deltas would otherwise round to nothing
+    /// and the list would not move at all.
+    wheel_residual_pixels: f32,
 }
 
 impl VirtualListWidget {
@@ -149,6 +260,9 @@ impl VirtualListWidget {
         if changed && !self.state.can_mutate() {
             self.pressed = false;
         }
+        if changed && !self.state.is_available() {
+            self.thumb_grab_pixels = None;
+        }
         changed
     }
 
@@ -192,9 +306,103 @@ impl VirtualListWidget {
     }
 
     /// The width a row's text actually has: the frame less one `pad` at each
-    /// end, so an elided row does not touch the list's right edge.
+    /// end, and less the scroll bar's track when one stands, so an elided row
+    /// does not touch the list's right edge or run under the bar.
     fn text_width_budget(&self) -> f32 {
-        self.theme.pad.mul_add(-2.0, self.frame.width).max(0.0)
+        self.theme.pad.mul_add(-2.0, self.frame.width - self.reserved_track_width()).max(0.0)
+    }
+
+    /// The track's configured width — a metric, not a measurement, so it
+    /// scales with a theme scaled for a dense display.
+    fn track_width(&self) -> f32 {
+        self.theme.space(SCROLL_BAR_UNITS).max(1.0)
+    }
+
+    /// The bar this list stands with right now, or `None` when its vector
+    /// fits its viewport.
+    fn scroll_bar(&self) -> Option<ScrollBar> {
+        scroll_bar(&self.frame, self.track_width(), self.first_index, self.visible_row_count, self.items.len())
+    }
+
+    /// How much width the bar takes from the rows. Zero when no bar stands, so
+    /// a list that fits its viewport gives its whole frame to its text.
+    fn reserved_track_width(&self) -> f32 {
+        self.scroll_bar().map_or(0.0, |bar| bar.width)
+    }
+
+    /// The topmost row the window can start at.
+    fn max_first_index(&self) -> usize {
+        self.items.len().saturating_sub(self.visible_row_count)
+    }
+
+    /// Move the window to `first_index`, clamped. Selection is untouched: a
+    /// reader scrolling to look at something has not chosen it.
+    fn scroll_to(&mut self, first_index: usize) {
+        self.first_index = first_index.min(self.max_first_index());
+    }
+
+    /// Scroll by content pixels, carrying the sub-row remainder. Positive
+    /// moves the window down the vector.
+    #[allow(clippy::cast_possible_truncation)] // the row delta is bounded by the wheel's own pixels
+    fn scroll_by_pixels(&mut self, pixels: f32) {
+        let Some(row_height) = self.row_height() else {
+            return;
+        };
+        if !pixels.is_finite() {
+            return;
+        }
+        let carried = self.wheel_residual_pixels + pixels;
+        let rows = (carried / row_height).trunc();
+        self.wheel_residual_pixels = row_height.mul_add(-rows, carried);
+        let steps = rows as i64;
+        let moved = if steps >= 0 {
+            self.first_index.saturating_add(steps.unsigned_abs() as usize)
+        } else {
+            self.first_index.saturating_sub(steps.unsigned_abs() as usize)
+        };
+        self.scroll_to(moved);
+    }
+
+    /// Take the thumb at `local_y`, from the point on it the pointer grabbed —
+    /// or, for a press on the bare track, from its middle, so the press
+    /// carries the reader to where they pointed.
+    fn press_scroll_bar(&mut self, bar: ScrollBar, local_y: f32) {
+        self.thumb_grab_pixels = Some(if bar.thumb_contains(local_y) {
+            local_y - bar.thumb_top
+        } else {
+            bar.thumb_height * 0.5
+        });
+        self.drag_thumb(local_y);
+    }
+
+    /// Move the window to wherever a live thumb drag now points.
+    fn drag_thumb(&mut self, local_y: f32) {
+        let (Some(grab), Some(bar)) = (self.thumb_grab_pixels, self.scroll_bar()) else {
+            return;
+        };
+        self.scroll_to(first_index_at(bar, local_y - grab, self.visible_row_count, self.items.len()));
+    }
+
+    /// The bar's own draw: the track in the outline role, the thumb in the
+    /// muted-text one so it reads as a mark on the list rather than as a
+    /// control to press. Both are existing style roles — a scroll bar is not
+    /// a new colour in the theme.
+    fn scroll_bar_items(&self, bar: ScrollBar) -> [WidgetDrawItem; 2] {
+        let thumb_state = if self.thumb_grab_pixels.is_some() {
+            ThemeState::Pressed
+        } else {
+            self.state.supporting_theme_state(false)
+        };
+        [
+            quad(bar.left, 0.0, bar.width, bar.height, self.theme.outline),
+            quad(
+                bar.left,
+                bar.thumb_top,
+                bar.width,
+                bar.thumb_height,
+                self.theme.fill(self.theme.text_muted, thumb_state),
+            ),
+        ]
     }
 
     /// One line as it will be drawn: elided to the row's own width with an
@@ -213,15 +421,26 @@ impl VirtualListWidget {
     }
 
     /// The `[width, height]` this list asks a layout for: the widest row it
-    /// holds plus one `pad` either side, by the configured row height times
-    /// the configured viewport. `None` until the font's metrics resolve, and
-    /// for a list with no rows to measure — a slot sized from a guess would
-    /// resize the moment the real advances landed.
+    /// holds plus one `pad` either side and the scroll bar's track when the
+    /// vector overflows, by the configured row height times the configured
+    /// viewport. `None` until the font's metrics resolve, and for a list with
+    /// no rows to measure — a slot sized from a guess would resize the moment
+    /// the real advances landed.
+    ///
+    /// The track is counted whenever the vector overflows rather than only
+    /// once a frame exists to hang a bar on: the intrinsic is what *makes* the
+    /// frame, so a width that ignored the bar would size a slot the bar then
+    /// took a track's worth of text out of.
     fn intrinsic(&mut self) -> Option<[f32; 2]> {
         let widest = self.widest_row_width()?;
         #[allow(clippy::cast_precision_loss)] // a viewport of rows a reader could scroll cannot lose precision
         let height = self.theme.row_height * self.visible_row_count as f32;
-        let width = self.theme.pad.mul_add(2.0, widest);
+        let track = if self.visible_row_count > 0 && self.items.len() > self.visible_row_count {
+            self.track_width()
+        } else {
+            0.0
+        };
+        let width = self.theme.pad.mul_add(2.0, widest) + track;
         (width.is_finite() && height.is_finite()).then_some([width, height])
     }
 
@@ -305,6 +524,9 @@ impl VirtualListWidget {
                 clip: None,
             });
         }
+        if let Some(bar) = self.scroll_bar() {
+            items.extend(self.scroll_bar_items(bar));
+        }
         push_control_outlines(&mut items, self.frame.width, self.frame.height, &self.state, &self.theme);
         items
     }
@@ -325,6 +547,7 @@ impl WidgetDefaults for VirtualListWidget {
 
     fn cancel_activation(&mut self) {
         self.pressed = false;
+        self.thumb_grab_pixels = None;
     }
 }
 
@@ -359,6 +582,8 @@ impl WasmActor for VirtualListWidget {
             pressed: false,
             font_metrics: FontMetricsAdapter::new(font_id),
             widest_row_width: None,
+            thumb_grab_pixels: None,
+            wheel_residual_pixels: 0.0,
         })
     }
 
@@ -375,6 +600,8 @@ impl WasmActor for VirtualListWidget {
         self.visible_row_count = usize_from_u32(config.visible_row_count);
         self.selected_index = initial_selection(config.initial_selected_index, self.items.len());
         self.first_index = 0;
+        self.thumb_grab_pixels = None;
+        self.wheel_residual_pixels = 0.0;
         self.reveal_selection();
         self.font_metrics.set_desired(config.theme.font_id);
         self.theme = config.theme;
@@ -405,22 +632,57 @@ impl WasmActor for VirtualListWidget {
         self.apply_control_state(ctx, set.state);
     }
 
+    /// A press on the scroll bar takes the thumb; anywhere else in the frame
+    /// chooses the row under it. The bar is checked first and does not need
+    /// the list to be mutable: reading where you are in a read-only list is
+    /// not a change to it.
     #[handler::single]
     fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, press: MouseButton) {
-        if press.button != mouse_button::LEFT || !self.state.can_mutate() {
+        if press.button != mouse_button::LEFT || !self.state.is_available() {
+            return;
+        }
+        let (local_x, local_y) = (press.x - self.frame.x, press.y - self.frame.y);
+        if let Some(bar) = self.scroll_bar()
+            && bar.contains(local_x, local_y)
+        {
+            self.press_scroll_bar(bar, local_y);
+            return;
+        }
+        if !self.state.can_mutate() {
             return;
         }
         self.pressed = true;
-        if let Some(selected_index) = self.row_at_local_y(press.y - self.frame.y)
+        if let Some(selected_index) = self.row_at_local_y(local_y)
             && let Some(selected_index) = self.select_if_mutable(selected_index)
         {
             Self::emit(ctx, selected_index);
         }
     }
 
+    /// Carry a live thumb drag. The root captures the pointer on press, so the
+    /// drag keeps following even once it leaves the narrow track.
+    #[handler::single]
+    fn on_mouse_move(&mut self, _ctx: &mut WasmCtx<'_>, moved: MouseMove) {
+        if self.thumb_grab_pixels.is_some() {
+            self.drag_thumb(moved.y - self.frame.y);
+        }
+    }
+
+    /// The wheel moves the realized window and nothing else — the reader is
+    /// looking, not choosing. Positive `delta_y` is a roll away from the
+    /// reader, which moves the content down and the window up: the same
+    /// negation the kit's scroll actor applies.
+    #[handler::single]
+    fn on_mouse_wheel(&mut self, _ctx: &mut WasmCtx<'_>, wheel: MouseWheel) {
+        if self.state.is_available() {
+            self.scroll_by_pixels(-wheel.delta_y);
+        }
+    }
+
     #[handler::single]
     fn on_mouse_button_release(&mut self, _ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
         release_left(&mut self.pressed, false, release);
+        release_left(&mut self.thumb_grab_pixels, None, release);
     }
 
     #[handler::single]
@@ -526,7 +788,6 @@ fn valid_frame(frame: &WidgetFrame) -> bool {
 mod tests {
     use super::*;
     use crate::set::ELLIPSIS;
-    use crate::theme::ThemeState;
     use crate::{WidgetDrawItem, WidgetValidation};
     use aether_kinds::{CachedFontMetrics, FontMetrics};
     use alloc::format;
@@ -547,6 +808,8 @@ mod tests {
             pressed: false,
             font_metrics: FontMetricsAdapter::new(Theme::DEFAULT.font_id),
             widest_row_width: None,
+            thumb_grab_pixels: None,
+            wheel_residual_pixels: 0.0,
         }
     }
 
@@ -689,7 +952,7 @@ mod tests {
             })
             .collect();
         assert_eq!(text, vec!["row 2", "row 3", "row 4", "row 5", "row 6"]);
-        assert_eq!(items.len(), 10, "five row quads and five labels only");
+        assert_eq!(items.len(), 12, "five row quads, five labels, and the bar's track and thumb only");
     }
 
     #[test]
@@ -775,7 +1038,7 @@ mod tests {
         let size = widget.theme.label_size_pixels;
         let expected = {
             let metrics = widget.font_metrics.resolved().expect("the test table is installed");
-            widget.theme.pad.mul_add(2.0, measured_text_width(metrics, &widget.items[17], size))
+            widget.theme.pad.mul_add(2.0, measured_text_width(metrics, &widget.items[17], size)) + widget.track_width()
         };
         let [width, height] = widget.intrinsic().expect("a measured, non-empty list reports an intrinsic");
         assert!((width - expected).abs() < f32::EPSILON, "{width} is not the widest row plus a pad each side");
@@ -786,6 +1049,115 @@ mod tests {
 
         assert_eq!(list(40, 5, 0).intrinsic(), None, "an unmeasured list asks for nothing");
         assert_eq!(measured_list(0, 5).intrinsic(), None, "and neither does one with no rows to measure");
+    }
+
+    #[test]
+    fn the_thumb_is_the_visible_share_long_and_stands_where_the_reader_is() {
+        // Tripwire: round-4 note 3 asked the bar for two facts — how many
+        // entries there are, and where in them you are. The first is the
+        // thumb's length as a fraction of the track, the second is its
+        // position, and a bar that got either from anything but the realized
+        // window would answer the wrong question.
+        let mut widget = list(20, 5, 0);
+        let bar = widget.scroll_bar().expect("a vector past its viewport stands a bar");
+        assert_eq!((bar.left, bar.width), (100.0 - widget.track_width(), widget.track_width()));
+        assert_eq!(bar.height, 120.0, "the track is the whole viewport");
+        assert!((bar.thumb_height - 120.0 * 5.0 / 20.0).abs() < f32::EPSILON, "five of twenty: {bar:?}");
+        assert_eq!(bar.thumb_top, 0.0, "at the top of the vector the thumb is at the top of the track");
+
+        widget.first_index = 15;
+        let tail = widget.scroll_bar().expect("bar");
+        assert!((tail.thumb_top - tail.travel()).abs() < 1e-3, "at the end it reaches the bottom: {tail:?}");
+
+        widget.first_index = 7;
+        let middle = widget.scroll_bar().expect("bar");
+        assert!(middle.thumb_top > 0.0 && middle.thumb_top < middle.travel(), "and in between: {middle:?}");
+    }
+
+    #[test]
+    fn a_list_that_fits_its_viewport_stands_no_bar_and_keeps_its_whole_width() {
+        // Tripwire: the bar is present whenever the list overflows and absent
+        // when it does not — never on hover. A bar over a list that fits is a
+        // control saying there is more to see when there is not, and it would
+        // also take a track's width of text away for nothing.
+        let short = list(3, 5, 0);
+        assert_eq!(short.scroll_bar(), None);
+        assert_eq!(short.reserved_track_width(), 0.0);
+        assert_eq!(short.text_width_budget(), short.theme.pad.mul_add(-2.0, 100.0));
+
+        let long = list(200, 5, 0);
+        assert!(long.scroll_bar().is_some());
+        assert_eq!(long.text_width_budget(), long.theme.pad.mul_add(-2.0, 100.0 - long.track_width()));
+
+        let mut unlaid = list(200, 5, 0);
+        unlaid.frame = WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 };
+        assert_eq!(unlaid.scroll_bar(), None, "an unlaid-out frame has no bar to place");
+    }
+
+    #[test]
+    fn a_very_long_list_keeps_a_thumb_big_enough_to_see_and_to_grab() {
+        // Tripwire: the share of a hundred thousand rows is a fraction of a
+        // pixel. Past the floor the thumb stops shrinking and only its travel
+        // goes on saying how much is off screen.
+        let widget = list(100_000, 5, 0);
+        let bar = widget.scroll_bar().expect("bar");
+        assert!((bar.thumb_height - bar.width * MIN_THUMB_RATIO).abs() < f32::EPSILON, "{bar:?}");
+        assert!(bar.thumb_height < bar.height, "and it is still a thumb inside a track, not the whole track");
+    }
+
+    #[test]
+    fn dragging_the_thumb_and_the_bar_it_draws_agree_about_where_the_reader_is() {
+        // Tripwire: the drag maps a thumb position back to a first row and the
+        // draw maps a first row forward to a thumb position. Two rules that
+        // disagreed would make the thumb jump away from the pointer on the
+        // first frame of every drag.
+        let mut widget = list(200, 5, 0);
+        let bar = widget.scroll_bar().expect("bar");
+        assert_eq!(first_index_at(bar, -10.0, 5, 200), 0, "above the track is the top of the vector");
+        assert_eq!(first_index_at(bar, bar.travel() + 10.0, 5, 200), 195, "and below it the end");
+        for first_index in [0usize, 1, 40, 97, 194, 195] {
+            widget.first_index = first_index;
+            let drawn = widget.scroll_bar().expect("bar");
+            assert_eq!(first_index_at(drawn, drawn.thumb_top, 5, 200), first_index, "round trip at {first_index}");
+        }
+
+        // A press on the thumb keeps the point that was grabbed under the
+        // pointer; a press on the bare track carries the reader to it.
+        widget.first_index = 0;
+        let bar = widget.scroll_bar().expect("bar");
+        widget.press_scroll_bar(bar, bar.thumb_height * 0.5);
+        assert_eq!(widget.first_index, 0, "grabbing the thumb where it stands moves nothing");
+        widget.drag_thumb(bar.thumb_height * 0.5 + bar.travel());
+        assert_eq!(widget.first_index, 195, "and dragging it the length of the track reaches the end");
+
+        widget.thumb_grab_pixels = None;
+        widget.first_index = 0;
+        widget.press_scroll_bar(bar, bar.height * 0.5);
+        assert!(widget.first_index > 0, "a press on the bare track carries the reader there: {}", widget.first_index);
+    }
+
+    #[test]
+    fn the_wheel_moves_the_window_in_whole_rows_and_carries_the_remainder() {
+        // Tripwire: the window is a row index, so a trackpad's stream of
+        // sub-row deltas would round to nothing and the list would sit still.
+        // Selection is untouched either way — a reader scrolling to look at
+        // something has not chosen it.
+        let mut widget = list(200, 5, 3);
+        let row_height = widget.row_height().expect("a laid-out list has a row height");
+        assert_eq!(row_height, 24.0);
+
+        for _ in 0..4 {
+            widget.scroll_by_pixels(row_height * 0.25);
+        }
+        assert_eq!(widget.first_index, 1, "four quarter-rows are one row");
+        assert_eq!(widget.selected_index, Some(3), "and the selection did not move with the window");
+
+        widget.scroll_by_pixels(-row_height * 8.0);
+        assert_eq!(widget.first_index, 0, "the window clamps at the top");
+        widget.scroll_by_pixels(row_height * 1000.0);
+        assert_eq!(widget.first_index, 195, "and at the last full page");
+        widget.scroll_by_pixels(f32::NAN);
+        assert_eq!(widget.first_index, 195, "a non-finite wheel moves nothing");
     }
 
     #[test]
@@ -856,11 +1228,11 @@ mod tests {
         widget.replace_control_state(control);
         widget.state.gain_focus(true);
         let items = widget.draw_items();
-        assert_eq!(items.len(), 18, "ten row items plus two four-quad outlines");
-        for item in &items[10..14] {
+        assert_eq!(items.len(), 20, "ten row items, the bar's two quads, and two four-quad outlines");
+        for item in &items[12..16] {
             assert!(matches!(item, WidgetDrawItem::Quad { color, .. } if *color == widget.theme.warning));
         }
-        for item in &items[14..18] {
+        for item in &items[16..20] {
             assert!(matches!(item, WidgetDrawItem::Quad { color, .. } if *color == widget.theme.accent));
         }
     }
