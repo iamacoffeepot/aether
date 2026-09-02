@@ -2,8 +2,8 @@
 
 `aether-kit-widget` ships a set of guest-side widgets — a slider, a text field, a
 multiline text area, a radio group, a fixed-row virtual list, a button, a label,
-an image, a toggle, a segmented control, and a numeric editor — as ordinary
-`#[actor(instanced, composable)]` types.
+an image, a toggle, a segmented control, a tab strip, and a numeric editor — as
+ordinary `#[actor(instanced, composable)]` types.
 A panel root spawns them as inline children (ADR-0114) and drives them entirely
 by mail, so composing an editor panel is a matter of laying out widgets and
 translating their value events, never re-deriving hit rects, focus, or per-row
@@ -35,7 +35,8 @@ widget sends can misreport it.
 - **Config, down.** One `Config` kind per widget — `SliderConfig`,
   `TextFieldConfig`, `TextAreaConfig`, `RadioConfig`, `VirtualListConfig`,
   `ButtonConfig`, `LabelConfig`, `ImageConfig`, `ToggleConfig`,
-  `SegmentedConfig`, `NumericConfig` — each embedding a `theme: Theme`. The
+  `SegmentedConfig`, `TabStripConfig`, `NumericConfig` — each embedding a
+  `theme: Theme`. The
   config is both the value
   `spawn_inline_child::<WidgetPanel, W>(subname, &config)` boots the widget with and a
   re-sendable mail: send a widget its config kind again to reconfigure it in
@@ -59,8 +60,8 @@ widget sends can misreport it.
   `WidgetStateChanged` so panel routing cannot drift. Hidden widgets keep their
   slot and answer `Collect` with an empty `WidgetDrawList`; disabled widgets
   draw muted but leave input routing; read-only Slider, Radio, TextField,
-  TextArea, VirtualList, Toggle, Segmented, and Numeric controls remain
-  focusable but reject mutation. Button and Label ignore read-only and
+  TextArea, VirtualList, Toggle, Segmented, TabStrip, and Numeric controls
+  remain focusable but reject mutation. Button and Label ignore read-only and
   validation.
 - **Interaction, down.** The root sends `FocusGained` / `FocusLost` and
   `HoverGained` / `HoverLost`. Hover comes from explicit edges, not from a child
@@ -74,9 +75,10 @@ widget sends can misreport it.
   release, so a consumer previews the drag and commits the expensive work
   once.
 
-  `ToggleChanged { on }`, `SegmentedSelected { index }`, and
-  `NumericChanged { value, committed }` use that same source-attributed lane;
-  Numeric applies the preview/commit distinction to typed values.
+  `ToggleChanged { on }`, `SegmentedSelected { index }`, `TabSelected
+  { index }`, and `NumericChanged { value, committed }` use that same
+  source-attributed lane; Numeric applies the preview/commit distinction to
+  typed values.
 
 Every stock widget is `#[actor(instanced, composable)]`, so it satisfies
 `ChildOf<P>` for any Wasm actor parent in the same resident module. A custom
@@ -131,7 +133,7 @@ applied to their configured tint. Images are never pointer- or focus-eligible;
 read-only and validation state have no visual or behavioral meaning for this
 static leaf.
 
-## Toggle, segmented, and numeric controls
+## Toggle, segmented, tab strip, and numeric controls
 
 `WidgetKind::Toggle` spawns `ToggleWidget` from `ToggleConfig { label,
 initial, theme, state }`. A left press arms the switch and a release back
@@ -148,6 +150,25 @@ Left/Right movement clamps at the first and last option. Empty option lists
 have no hit buckets. `SegmentedSelected { index }` reports only actual changes;
 selected, hovered, pressed, disabled, validation, and focus presentation use
 the common theme/state contract.
+
+`WidgetKind::TabStrip` spawns `TabStripWidget` from `TabStripConfig { labels,
+initial_index, theme, state }` — one row of tabs over parallel content sets
+viewed one at a time. Unlike the segmented control, the row is not divided
+evenly: each tab is as wide as its own label plus one `theme.pad` either side,
+laid out left to right from the strip's local origin with `theme.space(1)`
+between them, so the space between two tabs belongs to neither and a press
+there selects nothing. That sizing needs the label's real width, so the strip
+drives the same single-flight font-metrics request the text controls do and
+splits the row evenly only as an interim, for the frame or two before the
+measurement lands. The hit buckets and the draw read the same widths, so a
+press always lands in the tab under the pointer. The selected tab is marked
+twice — filled with `theme.selection` and inked in `theme.selection_text`,
+under a two-pixel `theme.text_primary` underline along its bottom edge —
+while the others draw `text_primary` on the row's own `surface_raised`; hover
+and press are the usual `Theme::fill` overlays. A left press selects, focused
+Left/Right moves the selection and clamps at the ends, and `TabSelected {
+index }` reports only actual changes. The strip owns nothing but the choice:
+swapping the content behind the selected tab is the root's business.
 
 `WidgetKind::Numeric` spawns `NumericWidget` from `NumericConfig { min, max,
 step, initial, theme, state }`. It reuses the shared `TextEditState`, named
@@ -199,7 +220,13 @@ synthetic `aether.mouse_button` sent over MCP.
 
 A focused Button activates once on Enter press (repeat presses are suppressed
 until release) and once on Space release after a matching Space press. Focus
-loss or unavailability cancels the keyboard arm.
+loss or unavailability cancels the keyboard arm. Its label sits centered in the
+frame on both axes once the configured font's metrics resolve; until then it
+draws left-padded, because a guessed width would center the label wrong and
+then visibly jump when the real one arrived. That measurement also gives the
+button its `WidgetDrawList::intrinsic` — `[label width + 2 × pad, row height]`
+— so a layout can size a slot to the label it holds; like the image widget's
+natural size, the reference panel does not yet consume it.
 
 TextField and TextArea share the same UTF-8-safe edit, selection, and IME
 state. Once the configured font resolves, pointer placement, caret motion,

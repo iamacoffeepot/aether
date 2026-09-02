@@ -65,7 +65,7 @@ use aether_actor::WasmCtx;
 use aether_kinds::keycode::{KEY_ENTER, KEY_SPACE};
 use aether_kinds::{CachedFontMetrics, Modifiers, MouseButton, MouseButtonRelease, mouse_button};
 use aether_math::Rgba;
-use aether_text::{FontMetricsRequest, FontRef, TextCapability};
+use aether_text::{FontMetricsRequest, FontMetricsResult, FontRef, TextCapability};
 
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::{DisplayedEdit, FontMetricsAdapter, SingleLineLayout, TextEditState};
@@ -184,6 +184,40 @@ fn apply_text_theme(ctx: &mut WasmCtx<'_>, font_metrics: &mut FontMetricsAdapter
     font_metrics.set_desired(next.font_id);
     *theme = next;
     pump_text_font_metrics(ctx, font_metrics);
+}
+
+/// Install a font-metrics reply and pump whatever newer request the settled
+/// flight deferred. A stale reply — its font is no longer the desired one —
+/// is dropped by the adapter.
+fn accept_font_metrics_result(ctx: &mut WasmCtx<'_>, font_metrics: &mut FontMetricsAdapter, result: FontMetricsResult) {
+    let pump_deferred = match result {
+        FontMetricsResult::Ok { metrics } => font_metrics.accept_reply(Some(CachedFontMetrics::new(&metrics))),
+        FontMetricsResult::Err { error } => {
+            tracing::warn!(target: "aether_kit_widget", %error, "widget font metrics failed");
+            font_metrics.accept_reply(None)
+        }
+    };
+    if pump_deferred {
+        pump_text_font_metrics(ctx, font_metrics);
+    }
+}
+
+/// The measured pixel width of one line of `text` at `size_pixels` — the sum
+/// of its glyphs' advances. A widget that sizes or centers against its text
+/// calls this only once the font's metrics resolve, and keeps its unmeasured
+/// draw until then rather than guessing a width from the per-character
+/// approximation ([`APPROX_ADVANCE_RATIO`]), which would place the text wrong
+/// and then visibly jump.
+fn measured_text_width(metrics: &CachedFontMetrics, text: &str, size_pixels: f32) -> f32 {
+    SingleLineLayout::build(text, metrics, size_pixels).width()
+}
+
+/// The local x at which a run `text_width` pixels wide sits centered in a
+/// `width`-wide frame, never left of `pad`. A label wider than the frame
+/// allows therefore falls back to the same left-padded origin an unmeasured
+/// draw uses, instead of hanging off the left edge.
+fn centered_text_x(width: f32, text_width: f32, pad: f32) -> f32 {
+    ((width - text_width) * 0.5).max(pad)
 }
 
 fn release_left<T>(pressed: &mut T, released: T, release: MouseButtonRelease) {
