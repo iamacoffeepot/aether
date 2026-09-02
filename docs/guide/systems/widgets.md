@@ -136,6 +136,13 @@ the label draws at the start rather than at a guessed width. A run wider than
 its frame also stays flush left, so overflow clips at the slot's right edge
 instead of pushing the head of the string out of view.
 
+The label reports that measured run as its `WidgetDrawList::intrinsic` —
+`[measured width, theme.row_height]`, with no pad either side because a label
+reserves none — so a layout can size a column to the words it holds instead of
+to a share of the row. Like the button's, it is `None` until the theme font's
+metrics resolve; a slot sized from a guess would resize the moment the real
+advances arrived.
+
 Clipped text is readable on hover. When a label's or a text field's run is
 wider than the frame it lives in and the pointer is over it, the widget raises
 the whole run on an overlay plate: `surface_raised` with a one-pixel `outline`
