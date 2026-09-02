@@ -574,42 +574,6 @@ pub(crate) fn overflow_reveal_items(
     });
     items
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn frame() -> WidgetFrame {
-        WidgetFrame { x: 0.0, y: 0.0, width: 100.0, height: 24.0 }
-    }
-
-    #[test]
-    fn the_overflow_plate_appears_only_for_a_run_that_does_not_fit() {
-        // Tripwire: the reveal is a signal, not chrome. A plate raised over a
-        // run that already fits would cover the widget to its right on every
-        // hover, for nothing.
-        let theme = Theme::DEFAULT;
-        let fits = overflow_reveal_items(&theme, "short", theme.pad, 40.0, 14.0, theme.text_primary, &frame());
-        assert!(fits.is_empty(), "a run inside the frame raises no plate");
-
-        let empty = overflow_reveal_items(&theme, "", theme.pad, 400.0, 14.0, theme.text_primary, &frame());
-        assert!(empty.is_empty(), "there is nothing to reveal about an empty run");
-
-        let overflows =
-            overflow_reveal_items(&theme, "far too long", theme.pad, 160.0, 14.0, theme.text_primary, &frame());
-        let WidgetDrawItem::Quad { x, y, width, height, .. } = overflows[0] else {
-            panic!("the plate leads with its fill");
-        };
-        assert_eq!((x, y, height), (0.0, 0.0, 24.0), "the plate starts at the widget's own origin");
-        assert_eq!(width, theme.pad.mul_add(2.0, 160.0), "and reaches one pad past the run");
-        assert!(width > frame().width, "a plate that did not outgrow the frame would reveal nothing");
-        assert!(
-            matches!(overflows.last(), Some(WidgetDrawItem::Text { text, .. }) if text == "far too long"),
-            "the whole run draws over the plate",
-        );
-    }
-}
-
 /// The slot a row-local `x` lands in, over `widths` laid out left to right
 /// from `0.0` with `gap` between them. `None` in a gap, left of the first
 /// slot, or past the last — a row of content-sized targets (a tab strip's
@@ -649,6 +613,36 @@ fn even_split_widths(count: usize, width: f32, gap: f32) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn frame() -> WidgetFrame {
+        WidgetFrame { x: 0.0, y: 0.0, width: 100.0, height: 24.0 }
+    }
+
+    #[test]
+    fn the_overflow_plate_appears_only_for_a_run_that_does_not_fit() {
+        // Tripwire: the reveal is a signal, not chrome. A plate raised over a
+        // run that already fits would cover the widget to its right on every
+        // hover, for nothing.
+        let theme = Theme::DEFAULT;
+        let fits = overflow_reveal_items(&theme, "short", theme.pad, 40.0, 14.0, theme.text_primary, &frame());
+        assert!(fits.is_empty(), "a run inside the frame raises no plate");
+
+        let empty = overflow_reveal_items(&theme, "", theme.pad, 400.0, 14.0, theme.text_primary, &frame());
+        assert!(empty.is_empty(), "there is nothing to reveal about an empty run");
+
+        let overflows =
+            overflow_reveal_items(&theme, "far too long", theme.pad, 160.0, 14.0, theme.text_primary, &frame());
+        let WidgetDrawItem::Quad { x, y, width, height, .. } = overflows[0] else {
+            panic!("the plate leads with its fill");
+        };
+        assert_eq!((x, y, height), (0.0, 0.0, 24.0), "the plate starts at the widget's own origin");
+        assert_eq!(width, theme.pad.mul_add(2.0, 160.0), "and reaches one pad past the run");
+        assert!(width > frame().width, "a plate that did not outgrow the frame would reveal nothing");
+        assert!(
+            matches!(overflows.last(), Some(WidgetDrawItem::Text { text, .. }) if text == "far too long"),
+            "the whole run draws over the plate",
+        );
+    }
 
     #[test]
     fn a_pointer_buckets_into_the_slot_it_is_over_and_into_no_slot_in_a_gap() {
