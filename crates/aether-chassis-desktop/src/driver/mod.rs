@@ -440,7 +440,7 @@ impl DriverCapability for DesktopDriverCapability {
     #[allow(clippy::too_many_lines)]
     fn boot(self, ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
         let Self { event_loop, boot, window, render_config, assets_dir } = self;
-        let aether_chassis::WindowSettings { mode, size, title, wireframe } = window;
+        let aether_chassis::WindowSettings { mode, size, title, app_name, wireframe } = window;
         let initial_window = WindowSpec {
             name: INITIAL_WINDOW_NAME.to_owned(),
             title,
@@ -463,7 +463,7 @@ impl DriverCapability for DesktopDriverCapability {
         // owns native window creation, identity, controls, and event routing;
         // `about_to_wait` drains it inline between frames.
         let (window_slot, window_wake_slot) =
-            ctx.boot_pumped_actor::<DesktopWindowCapability>((), DesktopWindowParams)?;
+            ctx.boot_pumped_actor::<DesktopWindowCapability>((), DesktopWindowParams { app_name })?;
 
         DesktopWindowApplication::<DesktopRenderIntegration>::install_wake(
             event_loop.create_proxy(),

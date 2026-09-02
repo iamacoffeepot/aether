@@ -16,7 +16,7 @@ use winit::window::{Window, WindowId as WinitWindowId};
 use crate::{WindowId, WindowMode, WindowSpec};
 
 use super::{
-    DesktopWindowCapabilityState, DesktopWindowLifecycle, WindowHostAction, WindowHostEffect, resolve_fullscreen,
+    DesktopWindowCapabilityState, DesktopWindowLifecycle, WindowHostAction, WindowHostEffect, menu, resolve_fullscreen,
 };
 use crate::DesktopWindowCapability;
 
@@ -199,7 +199,18 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
         ),
     ) {
         self.integration.drain_available();
-        let (actions, effects) = self.drain_and_take_work(host_turn);
+        // muda delivers menu clicks on its own process-wide channel rather
+        // than through winit's event loop, so every turn drains it here — one
+        // non-blocking `try_iter` — and folds the activations into the same
+        // host turn the callback's own event rides, ahead of it so a click and
+        // the key event that may accompany it stay in arrival order.
+        let activations = menu::drain_menu_activations();
+        let (actions, effects) = self.drain_and_take_work(|state, ctx| {
+            for raw in &activations {
+                state.menu_activated(raw, ctx);
+            }
+            host_turn(state, ctx);
+        });
         let (dirty, last_window_closed) = self.apply_work(event_loop, actions, effects);
         self.pending_dirty.extend(dirty);
 
