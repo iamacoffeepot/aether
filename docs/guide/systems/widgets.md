@@ -2,8 +2,8 @@
 
 `aether-kit-widget` ships a set of guest-side widgets — a slider, a text field, a
 multiline text area, a radio group, a fixed-row virtual list, a button, a label,
-an image, a toggle, a segmented control, a tab strip, a dropdown, and a numeric
-editor — as ordinary `#[actor(instanced, composable)]` types.
+an image, a toggle, a segmented control, a tab strip, a dropdown, a menu bar,
+and a numeric editor — as ordinary `#[actor(instanced, composable)]` types.
 A panel root spawns them as inline children (ADR-0114) and drives them entirely
 by mail, so composing an editor panel is a matter of laying out widgets and
 translating their value events, never re-deriving hit rects, focus, or per-row
@@ -52,7 +52,8 @@ widget sends can misreport it.
 - **Config, down.** One `Config` kind per widget — `SliderConfig`,
   `TextFieldConfig`, `TextAreaConfig`, `RadioConfig`, `VirtualListConfig`,
   `ButtonConfig`, `LabelConfig`, `ImageConfig`, `ToggleConfig`,
-  `SegmentedConfig`, `TabStripConfig`, `DropdownConfig`, `NumericConfig` — each embedding a
+  `SegmentedConfig`, `TabStripConfig`, `DropdownConfig`, `MenuBarConfig`,
+  `NumericConfig` — each embedding a
   `theme: Theme`. The
   config is both the value
   `spawn_inline_child::<WidgetPanel, W>(subname, &config)` boots the widget with and a
@@ -79,7 +80,8 @@ widget sends can misreport it.
   draw muted but leave input routing; read-only Slider, Radio, TextField,
   TextArea, VirtualList, Toggle, Segmented, TabStrip, and Numeric controls
   remain focusable but reject mutation. Button and Label ignore read-only and
-  validation.
+  validation; the menu bar ignores read-only too — it holds no value to
+  protect — while becoming disabled or hidden closes any menu it had open.
 - **Interaction, down.** The root sends `FocusGained` / `FocusLost` and
   `HoverGained` / `HoverLost`. Hover comes from explicit edges, not from a child
   inferring absence from raw motion. Pressed and hover select an exclusive fill
@@ -93,9 +95,9 @@ widget sends can misreport it.
   once.
 
   `ToggleChanged { on }`, `SegmentedSelected { index }`, `TabSelected
-  { index }`, and `NumericChanged { value, committed }` use that same
-  source-attributed lane; Numeric applies the preview/commit distinction to
-  typed values.
+  { index }`, `MenuItemActivated { menu, item }`, and `NumericChanged { value,
+  committed }` use that same source-attributed lane; Numeric applies the
+  preview/commit distinction to typed values.
 
 Every stock widget is `#[actor(instanced, composable)]`, so it satisfies
 `ChildOf<P>` for any Wasm actor parent in the same resident module. A custom
@@ -188,6 +190,57 @@ takes that option and closes, a press anywhere else closes without a change.
 including the close that focus loss, a re-sent config, or becoming disabled or
 read-only forces. An empty option vector, a zero-row list, and a read-only or
 unavailable dropdown never open at all.
+
+## Menu bars
+
+`MenuBarConfig { menus, theme, state }` is the row of application menus a
+screen's commands live in — File, Edit, View, Help — so a verb that is not a
+control on the pane still has an address a person can find. Each `Menu` is a
+`title` and its `items`, and each `MenuItem` is a `label`, the `shortcut` it
+advertises (`"Cmd+S"`, or empty), whether it is `enabled`, and whether a
+divider follows it (`separator_after`).
+
+Closed, the bar is one row on `theme.surface_raised`. Each title is as wide as
+its own text plus one `theme.pad` either side — never an even split of the row
+— laid out left to right from the bar's local origin with `theme.space(1)`
+between them, so the space between two titles belongs to neither. Like the tab
+strip, that sizing needs real glyph widths, so the bar drives the same
+single-flight font-metrics request the text controls do and splits the row
+evenly only as an interim, for the frame or two before the measurement lands.
+The title under the pointer takes the hover overlay, and so does the title
+whose menu is open, so the bar says which menu the plate below it belongs to.
+
+A press and release on a title opens that menu. The items are drawn in the
+**overlay** (`WidgetDrawList::overlay`) as a plate hanging directly below the
+title: `theme.surface_raised` inside a one-pixel `theme.outline` ring, as wide
+as the widest item's label plus accelerator plus padding and never narrower
+than the title it hangs from, one `theme.row_height` per item. An item's label
+sits at `pad` in `theme.text_primary` — `text_muted` when it is disabled — and
+its `shortcut` is right-aligned in `text_muted`; honouring the accelerator
+itself is the root's business, the bar only advertises it. An item with
+`separator_after` is followed by a one-pixel `theme.outline` divider with
+`theme.space(1)` either side, and that band belongs to no item: a press there
+selects nothing, exactly as the gap between two titles does. A trailing
+`separator_after` on the last item draws nothing.
+
+While a menu is open the bar holds the pointer grab, so it sees every move and
+every press on the window. Moving over a different title opens that menu
+instead, and Left/Right do the same by keyboard, clamping at the ends. The item
+under the pointer takes the hover overlay; Up/Down walk that highlight over the
+enabled items only, skipping the disabled ones and clamping at the ends, and
+Enter activates the highlighted item. A press on an enabled item reports
+`MenuItemActivated { menu, item }` and closes; a press on a disabled item does
+nothing at all — not even close — so a mis-aimed press leaves the menu standing
+to try again. A press anywhere else, a title included, closes without
+activating, which is what makes pressing the open title read as the toggle it
+looks like.
+
+`MenuOpenChanged { open }` reports each open and close edge exactly once —
+including the close that Escape, focus loss, a re-sent config, or becoming
+unavailable forces, and *excluding* a switch from one menu to another, which is
+not a new open edge and does not disturb the grab the root already holds. A
+menu with no items never opens: an empty plate under a pointer grab is a trap,
+not a menu.
 
 ## Image widget
 
@@ -303,8 +356,9 @@ drifts off it. `MouseButton.button` and `MouseButtonRelease.button` use the
 engine constants in `aether_kinds::mouse_button`; `LEFT` is `0`, including for a
 synthetic `aether.mouse_button` sent over MCP.
 
-A widget that must draw outside its own slot — an open dropdown's list — puts
-those draws in `WidgetDrawList::overlay` instead of `items`. The overlay is
+A widget that must draw outside its own slot — an open dropdown's list, a menu
+bar's plate — puts those draws in `WidgetDrawList::overlay` instead of
+`items`. The overlay is
 offset by each slot origin on the way up like any other draw but never
 intersected with the slot clip, and the root emits the whole cluster's overlay
 after every ordinary quad and glyph, so the list escapes its one-row slot and
@@ -312,11 +366,12 @@ lands over the widgets below it. Its counterpart on the input side is the
 **modal pointer grab**: `Focus::begin_grab(child)` routes every pointer event
 to that child until `end_grab`, outranking drag capture, and hover edges are
 suppressed while it holds so nothing under the overlay lights up. The widget
-asks for the grab by reporting `DropdownOpenChanged { open: true }` and gives
-it back with `open: false` — that is why the close edge is reported for every
-way a list can close, including focus loss. Without the grab a press that
-lands outside the widget's own rect would go to whatever is under it, and the
-open list would have no way to learn it should close.
+asks for the grab by reporting `DropdownOpenChanged { open: true }` — or
+`MenuOpenChanged { open: true }`, which the root answers the same way — and
+gives it back with `open: false`; that is why the close edge is reported for
+every way a list or a menu can close, including focus loss. Without the grab a
+press that lands outside the widget's own rect would go to whatever is under
+it, and the open list would have no way to learn it should close.
 
 A focused Button activates once on Enter press (repeat presses are suppressed
 until release) and once on Space release after a matching Space press. Focus
