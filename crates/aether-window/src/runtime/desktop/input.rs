@@ -1,5 +1,5 @@
 use aether_kinds::{keycode, mouse_button};
-use winit::event::{MouseButton as WinitMouseButton, MouseScrollDelta};
+use winit::event::{ElementState, MouseButton as WinitMouseButton, MouseScrollDelta};
 use winit::keyboard::KeyCode;
 
 /// Translate a winit `KeyCode` into the engine's stable named-key u32
@@ -127,6 +127,31 @@ pub(super) fn text_input_gate(composing: &mut bool, source: TextSource) -> Optio
             *composing = false;
             None
         }
+    }
+}
+
+/// The key edge one winit `KeyEvent` publishes.
+pub(super) enum KeyEdge {
+    Press,
+    Release,
+}
+
+/// Decide which edge a winit key event publishes, if any.
+///
+/// The whole of the decision is what to do with `repeat`. An auto-repeat is
+/// an ordinary press: the platform's own key repeat is what makes a held
+/// Backspace delete more than one character, and dropping repeats left every
+/// text field one-shot (iamacoffeepot/aether#5518). No release separates the
+/// repeats, so a consumer counting edges reads a held key as one
+/// press-and-hold while a consumer acting per press acts per repeat — which is
+/// what a text field wants. winit never sets `repeat` on a release, so a
+/// `true` there would mean a lift the platform never made and publishes
+/// nothing rather than a phantom edge.
+pub(super) fn key_edge(state: ElementState, repeat: bool) -> Option<KeyEdge> {
+    match state {
+        ElementState::Pressed => Some(KeyEdge::Press),
+        ElementState::Released if !repeat => Some(KeyEdge::Release),
+        ElementState::Released => None,
     }
 }
 
@@ -304,5 +329,26 @@ mod tests {
         let (x, y) = normalize_wheel(delta);
         assert_eq!(x, 12.0);
         assert_eq!(y, -3.0);
+    }
+}
+
+#[cfg(test)]
+mod key_edge_tests {
+    use winit::event::ElementState;
+
+    use super::{KeyEdge, key_edge};
+
+    /// The repeat policy, which is the only judgment in the key translation.
+    /// The bug it catches is the one this arm shipped with: suppressing
+    /// repeats, so a held Backspace deleted exactly one character. The
+    /// release half is the opposite failure — treating every repeat as a
+    /// press *and* a release would make a held key read as N taps to anything
+    /// counting edges.
+    #[test]
+    fn a_repeat_is_a_press_and_never_a_release() {
+        assert!(matches!(key_edge(ElementState::Pressed, false), Some(KeyEdge::Press)));
+        assert!(matches!(key_edge(ElementState::Pressed, true), Some(KeyEdge::Press)));
+        assert!(matches!(key_edge(ElementState::Released, false), Some(KeyEdge::Release)));
+        assert!(key_edge(ElementState::Released, true).is_none());
     }
 }

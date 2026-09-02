@@ -120,6 +120,99 @@ pub enum SetWindowTitleResult {
     Err { error: String },
 }
 
+/// One command in a native menu.
+///
+/// `id` is the caller's own opaque handle: it rides back verbatim on the
+/// [`WindowMenuActivated`] the platform publishes when the item is chosen, so
+/// a component numbers its items however it likes and switches on the number.
+/// `shortcut` is advisory accelerator text in muda's grammar (`"Cmd+S"`,
+/// `"Ctrl+Shift+P"`); the platform renders it where it can and ignores an
+/// unparseable value rather than refusing the whole menu. An empty string
+/// requests no accelerator.
+#[derive(aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct WindowMenuItem {
+    pub id: u32,
+    pub label: String,
+    pub shortcut: String,
+    pub enabled: bool,
+    pub separator_after: bool,
+}
+
+/// One top-level menu — a title in the bar and the items beneath it.
+#[derive(aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct WindowMenu {
+    pub title: String,
+    pub items: Vec<WindowMenuItem>,
+}
+
+/// Install a native menu bar for the addressed window.
+///
+/// An empty `menus` list installs a bar carrying only the platform's own
+/// application menu, where the platform has one.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[kind(name = "aether.window.set_menu")]
+pub struct SetWindowMenu {
+    pub menus: Vec<WindowMenu>,
+}
+
+/// Reply to [`SetWindowMenu`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[kind(name = "aether.window.set_menu_result")]
+pub enum SetWindowMenuResult {
+    Ok,
+    Err { error: String },
+}
+
+/// Published when a native menu item is chosen, carrying the window whose
+/// menu owns the item and the caller's own [`WindowMenuItem::id`].
+///
+/// Routed by the same selector-aware subscription family as [`aether_kinds::Key`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
+#[kind(name = "aether.window.menu_activated")]
+pub struct WindowMenuActivated {
+    pub window: WindowId,
+    pub id: u32,
+}
+
+/// The pointer shape a window asks the platform to draw.
+///
+/// The four resize shapes name the axis the drag moves along, so a component
+/// hovering a resizable edge or a movable splitter says what the gesture does
+/// rather than which corner it is near. `ResizeDiagonalRising` runs
+/// bottom-left to top-right; `ResizeDiagonalFalling` runs top-left to
+/// bottom-right.
+#[derive(aether_data::Schema, Serialize, Deserialize, Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum CursorIcon {
+    #[default]
+    Default,
+    Pointer,
+    Text,
+    Move,
+    ResizeHorizontal,
+    ResizeVertical,
+    ResizeDiagonalRising,
+    ResizeDiagonalFalling,
+    Grab,
+    Grabbing,
+    NotAllowed,
+    Wait,
+}
+
+/// Set the addressed window's pointer shape.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
+#[kind(name = "aether.window.set_cursor")]
+pub struct SetWindowCursor {
+    pub icon: CursorIcon,
+}
+
+/// Reply to [`SetWindowCursor`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[kind(name = "aether.window.set_cursor_result")]
+pub enum SetWindowCursorResult {
+    Ok,
+    Err { error: String },
+}
+
 /// Bring the addressed window to the foreground.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
 #[kind(name = "aether.window.focus")]
@@ -159,8 +252,32 @@ pub(crate) enum WindowCommand {
     Close,
     SetMode { mode: WindowMode, width: Option<u32>, height: Option<u32> },
     SetTitle { title: String },
+    SetMenu { menus: Vec<WindowMenu> },
+    SetCursor { icon: CursorIcon },
     Focus,
     RequestRedraw,
+}
+
+impl WindowCommand {
+    /// This command's own `Err` reply, carrying `error`.
+    ///
+    /// Every manager needs the same mapping — a chassis with no window
+    /// peripheral refuses all seven, and a concrete one refuses whichever
+    /// names a window it cannot reach — and the reply variant has to match the
+    /// command or the forwarding child aborts on the correlation check
+    /// (`runtime::instance::complete`). One mapping, so a new command wires its
+    /// refusal once.
+    pub(crate) fn refused(&self, error: String) -> ApplyWindowCommandResult {
+        match self {
+            Self::Close => ApplyWindowCommandResult::Close(CloseWindowResult::Err { error }),
+            Self::SetMode { .. } => ApplyWindowCommandResult::SetMode(SetWindowModeResult::Err { error }),
+            Self::SetTitle { .. } => ApplyWindowCommandResult::SetTitle(SetWindowTitleResult::Err { error }),
+            Self::SetMenu { .. } => ApplyWindowCommandResult::SetMenu(SetWindowMenuResult::Err { error }),
+            Self::SetCursor { .. } => ApplyWindowCommandResult::SetCursor(SetWindowCursorResult::Err { error }),
+            Self::Focus => ApplyWindowCommandResult::Focus(FocusWindowResult::Err { error }),
+            Self::RequestRedraw => ApplyWindowCommandResult::RequestRedraw(RequestWindowRedrawResult::Err { error }),
+        }
+    }
 }
 
 /// Manager-private result returned to the forwarding child.
@@ -170,6 +287,8 @@ pub(crate) enum ApplyWindowCommandResult {
     Close(CloseWindowResult),
     SetMode(SetWindowModeResult),
     SetTitle(SetWindowTitleResult),
+    SetMenu(SetWindowMenuResult),
+    SetCursor(SetWindowCursorResult),
     Focus(FocusWindowResult),
     RequestRedraw(RequestWindowRedrawResult),
 }

@@ -7,14 +7,15 @@ use aether_substrate::actor::native::NativeCtx;
 use super::subscribers::{WindowSubscribers, validate_subscriber_mailbox};
 use crate::{
     CloseWindow, CloseWindowResult, FocusWindow, FocusWindowResult, RequestWindowRedraw, RequestWindowRedrawResult,
-    SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, SubscribeWindow, SubscribeWindowResult,
-    SubscribeWindowSelf, UnsubscribeAllWindows, UnsubscribeWindow, UnsubscribeWindowSelf, WindowId,
+    SetWindowCursor, SetWindowCursorResult, SetWindowMenu, SetWindowMenuResult, SetWindowMode, SetWindowModeResult,
+    SetWindowTitle, SetWindowTitleResult, SubscribeWindow, SubscribeWindowResult, SubscribeWindowSelf,
+    UnsubscribeAllWindows, UnsubscribeWindow, UnsubscribeWindowSelf, WindowId,
 };
 
 /// Re-dispatch one root-addressed per-window command at the sole live window,
 /// answering the *original* requester rather than this manager.
 ///
-/// The five command kinds are the window endpoint's (`runtime::instance`), so
+/// The seven command kinds are the window endpoint's (`runtime::instance`), so
 /// the root owns no copy of their semantics: it forwards the request verbatim
 /// with the requester's own `reply_to` pinned, and the endpoint's existing
 /// retain-and-answer plumbing replies straight to the caller under the
@@ -156,6 +157,22 @@ pub trait WindowManagerSurface {
     fn on_set_title(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: SetWindowTitle) {
         if let Err(error) = route_to_sole_window(&Self::routable_windows(state), ctx, &mail) {
             ctx.reply(&SetWindowTitleResult::Err { error });
+        }
+    }
+
+    /// Install the sole window's native menu bar.
+    #[handler::manual]
+    fn on_set_menu(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: SetWindowMenu) {
+        if let Err(error) = route_to_sole_window(&Self::routable_windows(state), ctx, &mail) {
+            ctx.reply(&SetWindowMenuResult::Err { error });
+        }
+    }
+
+    /// Set the sole window's pointer shape.
+    #[handler::manual]
+    fn on_set_cursor(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: SetWindowCursor) {
+        if let Err(error) = route_to_sole_window(&Self::routable_windows(state), ctx, &mail) {
+            ctx.reply(&SetWindowCursorResult::Err { error });
         }
     }
 

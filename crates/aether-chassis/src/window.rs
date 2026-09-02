@@ -32,10 +32,22 @@ pub struct WindowConfig {
     /// [`parse_window_mode_env`]; a present-but-unparseable value hard-errors
     /// the boot (ADR-0090 §4), while an absent value resolves to `Windowed`.
     pub mode: Option<String>,
-    /// Window title at boot; unset uses "aether".
+    /// Window title at boot; unset uses the application name.
     ///
-    /// Lowered via [`Self::lower`]; empty / unset → `"aether"`.
+    /// Lowered via [`Self::lower`]; empty / unset → [`Self::app_name`]'s
+    /// resolved value.
     pub title: Option<String>,
+    /// The product's name, as the platform shows it: the macOS application
+    /// menu, and the window title when `title` is unset. Unset uses
+    /// `"Aether"`.
+    ///
+    /// The env key is pinned to `AETHER_APP_NAME` and the flag to `--app-name`
+    /// (not `AETHER_WINDOW_APP_NAME` / `--window-app-name`) because the name
+    /// is the *application's*, not one window's — it rides in this group only
+    /// because the window cap is what shows it, the same way `wireframe`
+    /// rides here without being a window knob.
+    #[config(env = "AETHER_APP_NAME", cli_long = "app-name")]
+    pub app_name: Option<String>,
     /// GPU wireframe mode at boot: off (default), line, or overlay.
     ///
     /// The env key is pinned back to `AETHER_WIREFRAME` (not
@@ -58,8 +70,10 @@ pub struct WindowSettings {
     pub mode: WindowMode,
     /// Initial windowed size (`Some` only for a `windowed:WxH` mode).
     pub size: Option<(u32, u32)>,
-    /// Window title at boot; `"aether"` when unset or empty.
+    /// Window title at boot; the resolved `app_name` when unset or empty.
     pub title: String,
+    /// The product name the platform shows, `"Aether"` when unset or empty.
+    pub app_name: String,
     /// Resolved `AETHER_WIREFRAME` config value, threaded verbatim to the
     /// desktop render driver's `WireframeMode::from_config_value`.
     pub wireframe: Option<String>,
@@ -71,9 +85,11 @@ impl WindowConfig {
     /// `mode` delegates to [`parse_window_mode_env`], and a present-but-bad
     /// `AETHER_WINDOW_MODE` value hard-errors the boot (ADR-0090 §4) rather
     /// than silently defaulting; an absent value resolves to `Windowed`.
-    /// `title` maps `None` (unset or empty — the derive filters empty →
-    /// `None`) to `"aether"` and passes a provided value through verbatim;
-    /// `wireframe` rides through unchanged.
+    /// `app_name` maps `None` (unset or empty — the derive filters empty →
+    /// `None`) to `"Aether"`, and `title` falls through to that resolved name
+    /// rather than a second literal, so an application named once is titled to
+    /// match; a provided `title` passes through verbatim. `wireframe` rides
+    /// through unchanged.
     ///
     /// # Errors
     ///
@@ -92,9 +108,10 @@ impl WindowConfig {
                 )
             })?,
         };
-        let title = self.title.unwrap_or_else(|| "aether".to_owned());
+        let app_name = self.app_name.unwrap_or_else(|| "Aether".to_owned());
+        let title = self.title.unwrap_or_else(|| app_name.clone());
 
-        Ok(WindowSettings { mode, size, title, wireframe: self.wireframe })
+        Ok(WindowSettings { mode, size, title, app_name, wireframe: self.wireframe })
     }
 }
 
@@ -189,16 +206,30 @@ mod tests {
 
     use super::*;
 
+    /// The title falls through to the application name rather than a second
+    /// literal (iamacoffeepot/aether#5518): naming the product once has to
+    /// title its window too, or a shipped app comes up called `aether` next to
+    /// a menu bar that says something else.
     #[test]
-    fn lower_title_none_returns_default() {
-        // Unset title → "aether" default.
-        assert_eq!(WindowConfig::default().lower().expect("default config lowers cleanly").title, "aether");
+    fn an_unset_title_follows_the_application_name() {
+        let defaults = WindowConfig::default().lower().expect("default config lowers cleanly");
+        assert_eq!((defaults.app_name.as_str(), defaults.title.as_str()), ("Aether", "Aether"));
+
+        let named = WindowConfig { app_name: Some("Lunaris".to_owned()), ..WindowConfig::default() }
+            .lower()
+            .expect("no mode set, so lowering succeeds");
+        assert_eq!((named.app_name.as_str(), named.title.as_str()), ("Lunaris", "Lunaris"));
     }
 
     #[test]
     fn lower_title_some_returns_value() {
-        // Provided title passes through verbatim.
-        let cfg = WindowConfig { mode: None, title: Some("my game".to_owned()), wireframe: None };
+        // Provided title passes through verbatim, independent of the app name.
+        let cfg = WindowConfig {
+            mode: None,
+            title: Some("my game".to_owned()),
+            app_name: Some("Lunaris".to_owned()),
+            wireframe: None,
+        };
         assert_eq!(cfg.lower().expect("no mode set, so lowering succeeds").title, "my game");
     }
 
@@ -207,7 +238,7 @@ mod tests {
         // A present-but-unparseable AETHER_WINDOW_MODE aborts the boot (ADR-0090
         // §4) instead of silently falling back to Windowed. The rendered error
         // must name the offending value so the operator can spot the typo.
-        let cfg = WindowConfig { mode: Some("windoze".to_owned()), title: None, wireframe: None };
+        let cfg = WindowConfig { mode: Some("windoze".to_owned()), ..WindowConfig::default() };
         let err = cfg.lower().expect_err("a bad window mode must be a hard config error");
         let rendered = err.to_string();
         assert!(rendered.contains("windoze"), "error must name the offending value, got: {rendered}");

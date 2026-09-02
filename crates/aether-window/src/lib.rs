@@ -150,6 +150,16 @@ pub trait WindowMailboxExt: WindowMailboxForward + Sized {
         self.forward(&SetWindowTitle { title: title.to_owned() });
     }
 
+    /// Install this window's native menu bar.
+    fn set_menu(&self, menus: Vec<WindowMenu>) {
+        self.forward(&SetWindowMenu { menus });
+    }
+
+    /// Set this window's pointer shape.
+    fn set_cursor(&self, icon: CursorIcon) {
+        self.forward(&SetWindowCursor { icon });
+    }
+
     /// Bring this window to the foreground.
     fn focus(&self) {
         self.forward(&FocusWindow);
@@ -258,7 +268,7 @@ mod runtime;
 #[cfg(feature = "desktop")]
 pub use runtime::desktop::{
     DesktopWindowApplication, DesktopWindowIntegration, DesktopWindowParams, DesktopWindowUserEvent, WindowHostAction,
-    WindowHostEffect, resolve_fullscreen,
+    WindowHostEffect, resolve_fullscreen, set_application_name,
 };
 
 #[cfg(feature = "synthetic")]
@@ -267,8 +277,9 @@ pub use kinds::InjectWindowEvent;
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseWindow, FocusWindow, ListWindows, RequestWindowRedraw, SetWindowMode, SetWindowTitle, WasmActorMailbox,
-        WasmActorMailboxWithContext, WindowCapability, WindowInstance, WindowMailboxExt, WindowManagerMailboxExt,
+        CloseWindow, FocusWindow, ListWindows, RequestWindowRedraw, SetWindowCursor, SetWindowMenu, SetWindowMode,
+        SetWindowTitle, WasmActorMailbox, WasmActorMailboxWithContext, WindowCapability, WindowInstance,
+        WindowMailboxExt, WindowManagerMailboxExt,
     };
     use aether_actor::{Addressable, HandlesKind};
 
@@ -304,6 +315,8 @@ mod tests {
         assert_handles::<CloseWindow>();
         assert_handles::<SetWindowMode>();
         assert_handles::<SetWindowTitle>();
+        assert_handles::<SetWindowMenu>();
+        assert_handles::<SetWindowCursor>();
         assert_handles::<FocusWindow>();
         assert_handles::<RequestWindowRedraw>();
     }

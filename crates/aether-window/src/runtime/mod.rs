@@ -5,9 +5,9 @@ use aether_actor::runtime;
 use super::{
     ApplyWindowCommand, ApplyWindowCommandResult, CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult,
     FocusWindow, FocusWindowResult, HeadlessWindowCapability, ListWindows, ListWindowsResult, RequestWindowRedraw,
-    RequestWindowRedrawResult, SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult,
-    SubscribeWindow, SubscribeWindowResult, SubscribeWindowSelf, UnsubscribeAllWindows, UnsubscribeWindow,
-    UnsubscribeWindowSelf, WindowCommand,
+    RequestWindowRedrawResult, SetWindowCursor, SetWindowCursorResult, SetWindowMenu, SetWindowMenuResult,
+    SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, SubscribeWindow, SubscribeWindowResult,
+    SubscribeWindowSelf, UnsubscribeAllWindows, UnsubscribeWindow, UnsubscribeWindowSelf,
 };
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -49,16 +49,7 @@ impl NativeActor for HeadlessWindowCapability {
         _ctx: &mut NativeCtx<'_>,
         mail: ApplyWindowCommand,
     ) -> ApplyWindowCommandResult {
-        let error = unsupported();
-        match mail.command {
-            WindowCommand::Close => ApplyWindowCommandResult::Close(CloseWindowResult::Err { error }),
-            WindowCommand::SetMode { .. } => ApplyWindowCommandResult::SetMode(SetWindowModeResult::Err { error }),
-            WindowCommand::SetTitle { .. } => ApplyWindowCommandResult::SetTitle(SetWindowTitleResult::Err { error }),
-            WindowCommand::Focus => ApplyWindowCommandResult::Focus(FocusWindowResult::Err { error }),
-            WindowCommand::RequestRedraw => {
-                ApplyWindowCommandResult::RequestRedraw(RequestWindowRedrawResult::Err { error })
-            }
-        }
+        mail.command.refused(unsupported())
     }
 
     #[handler::single]
@@ -100,11 +91,11 @@ impl NativeActor for HeadlessWindowCapability {
     #[handler::single]
     fn on_unsubscribe_all(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: UnsubscribeAllWindows) {}
 
-    // The five per-window commands, refused at the root as well as at an
+    // The seven per-window commands, refused at the root as well as at an
     // endpoint (iamacoffeepot/aether#5505). Both identities are addressable, so
     // a command sent to either has to be answered rather than dropped on the
     // floor — a silent no-op reads as success to a caller whose mail settled.
-    // The endpoint's identical five stay written out beside these rather than
+    // The endpoint's identical seven stay written out beside these rather than
     // shared through a handler set, because a set's `HandlesKind` markers reach
     // an adopter through a `macro_rules!` bridge that lives with the set, and
     // both identities also compile in the marker-only build where this whole
@@ -123,6 +114,20 @@ impl NativeActor for HeadlessWindowCapability {
     #[handler::single]
     fn on_set_title(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: SetWindowTitle) -> SetWindowTitleResult {
         SetWindowTitleResult::Err { error: unsupported() }
+    }
+
+    #[handler::single]
+    fn on_set_menu(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: SetWindowMenu) -> SetWindowMenuResult {
+        SetWindowMenuResult::Err { error: unsupported() }
+    }
+
+    #[handler::single]
+    fn on_set_cursor(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        _mail: SetWindowCursor,
+    ) -> SetWindowCursorResult {
+        SetWindowCursorResult::Err { error: unsupported() }
     }
 
     #[handler::single]

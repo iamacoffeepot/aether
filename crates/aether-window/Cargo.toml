@@ -31,7 +31,7 @@ runtime = ["dep:aether-substrate"]
 # `DesktopWindowCapability` that drives a real winit window. Pulls the
 # substrate runtime (via `runtime`) plus winit; default features stay
 # `runtime`-only, so headless / harness / wasm consumers never build winit.
-desktop = ["runtime", "dep:winit", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
+desktop = ["runtime", "dep:winit", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:muda", "dep:tracing"]
 # Deterministic in-memory window manager and raw event injection surface for
 # real-substrate harness tests. Production chassis do not enable this feature.
 synthetic = ["runtime"]
@@ -47,6 +47,9 @@ aether-substrate = { path = "../aether-substrate", optional = true }
 # The winit window handle the desktop runtime mutates. Gated behind the
 # `desktop` feature so only a desktop chassis build pulls it.
 winit = { version = "0.30", optional = true }
+# The desktop runtime's only log site: a menu shortcut the platform cannot
+# parse into an accelerator. Gated with the rest of the desktop half.
+tracing = { workspace = true, default-features = false, features = ["std"], optional = true }
 
 # The `#[actor]` macro emits a `cfg(not(target_family = "wasm"))`-gated
 # `inventory::submit!` HandlerEntry per handler, so native builds need
@@ -59,7 +62,15 @@ inventory = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6", optional = true }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder"], optional = true }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSProcessInfo"], optional = true }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSProcessInfo", "NSString"], optional = true }
+
+# The native menu bar (ADR-0212). muda drives the macOS application menu and
+# the Windows per-window bar; every other target has no bar to drive, so the
+# dependency is scoped to the two platforms that do and `set_menu` fail-fasts
+# elsewhere. `default-features = false` drops muda's Linux-only gtk / libxdo
+# extras, which nothing here builds.
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+muda = { version = "0.19", default-features = false, optional = true }
 
 [dev-dependencies]
 # The selector/unsubscribe/drop integration scenarios boot the in-process

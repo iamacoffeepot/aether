@@ -3,9 +3,11 @@
 > **Governing ADRs:** [ADR-0035](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0035-substrate-chassis-split.md)
 > (the substrate/chassis split) and
 > [ADR-0164](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0164-window-actor-owns-native-window-integration.md)
-> (the application-scoped multi-window manager), and
+> (the application-scoped multi-window manager),
 > [ADR-0167](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0167-window-manager-supervises-addressable-window-actors.md)
-> (addressable named window children).
+> (addressable named window children), and
+> [ADR-0212](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0212-native-window-chrome.md)
+> (native menu bar, cursor icons, application name).
 
 `aether-window` is the bespoke home of window behavior. The application-scoped
 `WindowCapability` manager owns global lifecycle and event routing, while each
@@ -98,6 +100,8 @@ The request/reply families are:
 | `close` | named child; no input | acknowledgement |
 | `set_mode` | named child; mode and optional windowed size | resolved mode and size |
 | `set_title` | named child; title | applied title |
+| `set_menu` | named child; `Vec<WindowMenu>` | acknowledgement, or `Err` where the platform has no bar |
+| `set_cursor` | named child; `CursorIcon` | acknowledgement |
 | `focus` | named child; no input | request acknowledgement |
 | `request_redraw` | named child; no input | request acknowledgement |
 
@@ -112,7 +116,7 @@ apply it asynchronously, so the reply does not prove observed focus.
 There is no implicit focused or current target. The boot window is named
 `main` and is simply the first `WindowSpec` realized after winit resumes.
 
-The five child operations may also be addressed to the manager, which
+The seven child operations may also be addressed to the manager, which
 re-dispatches them at the sole window when exactly one is live and answers with
 that window's own reply. It is a convenience for the single-window engine, not a
 current target: with no window, or with several, the manager replies the
@@ -222,7 +226,7 @@ variants share the neutral `WindowInstance` identity:
   deterministic in-memory window map, the same selector-aware routing
   behavior, and monitored pooled `SyntheticWindowInstance` children.
 - `WindowInstance` is the neutral named child facade. Its desktop and synthetic
-  runtimes forward the five id-less controls to their manager. A matching
+  runtimes forward the seven id-less controls to their manager. A matching
   headless runtime defines fail-fast handlers, but the headless manager does not
   spawn child endpoints.
 - The hub installs no window actor.
@@ -240,7 +244,113 @@ modules.
 The initial desktop window still reads `AETHER_WINDOW_MODE` and
 `AETHER_WINDOW_TITLE`. `AETHER_WINDOW_MODE` accepts `windowed`,
 `windowed:WxH`, `fullscreen-borderless`, or `exclusive:WxH@HZ`; invalid input
-warns and falls back to windowed mode. See [Configuration](configuration.md).
+warns and falls back to windowed mode. `AETHER_APP_NAME` / `--app-name`
+(default `Aether`) names the product; see [Native chrome](#native-chrome)
+below and [Configuration](configuration.md).
+
+## Native chrome
+
+Three surfaces cover what the platform draws around the client area, and one
+input rule keeps the client area behaving the way the platform does.
+
+### The menu bar
+
+`set_menu` installs a real menu bar for the addressed window:
+
+```rust
+main.set_menu(vec![WindowMenu {
+    title: "File".to_owned(),
+    items: vec![
+        WindowMenuItem {
+            id: 1,
+            label: "Save".to_owned(),
+            shortcut: "Cmd+S".to_owned(),
+            enabled: true,
+            separator_after: true,
+        },
+        WindowMenuItem {
+            id: 2,
+            label: "Close".to_owned(),
+            shortcut: "Cmd+W".to_owned(),
+            enabled: true,
+            separator_after: false,
+        },
+    ],
+}]);
+```
+
+**Send window ops detached from a frame's chain.** The desktop window is
+a pumped actor: it runs when the winit loop turns, which happens once the
+frame advances, and the frame advances once the tick's causal chain has
+settled. A `set_menu`, `set_title`, or `set_cursor` sent from a tick
+handler with the chained `send` therefore puts the window's own mail
+inside the chain the frame is waiting on, and the frame loop wedges
+(`gate desktop.frame_advance wedged`, then a fatal abort). From a
+component, address the window by the id every input and size event
+carries — a window id *is* a mailbox id — and send detached:
+
+```rust
+ctx.actor::<WindowCapability>().at::<WindowInstance>(size.window.0).send_detached(&SetWindowMenu { menus });
+```
+
+The reply (`set_menu_result` and its siblings) still reaches the sender.
+
+`id` is the caller's own opaque number. It rides back verbatim on
+`aether.window.menu_activated { window, id }`, which reaches subscribers
+through the same selector-aware family every window-originated kind uses:
+
+```rust
+windows.subscribe::<WindowMenuActivated>(WindowSelector::All);
+```
+
+`shortcut` is accelerator text in muda's grammar — `"Cmd+S"`,
+`"Ctrl+Shift+P"`, `""` for none. The platform renders it and, where it can,
+honours it: on macOS a matching keystroke fires the item rather than reaching
+the window, which is the native behaviour. A shortcut the platform cannot
+parse costs that item its accelerator and logs a warning; it does not fail the
+menu.
+
+Platform coverage is [muda](https://crates.io/crates/muda)'s: the macOS
+application menu bar and the Windows per-window bar. Every other target, and
+the headless chassis at the root and at a window mailbox alike, replies `Err`
+naming the situation rather than hanging — draw an in-window menu bar there.
+Two further asymmetries follow from the platforms themselves: macOS has one
+menu bar per *application*, so the last window to install one owns it (its
+activations still reach that window's own subscribers), and macOS prepends an
+application submenu carrying About / Hide / Show All / Quit, titled with the
+application name.
+
+### Cursor icons
+
+`set_cursor` sets the addressed window's pointer shape, so a hovered element
+can say what the gesture does before it starts:
+
+```rust
+main.set_cursor(CursorIcon::ResizeHorizontal);
+```
+
+The vocabulary names the movement, not the platform shape: `Default`,
+`Pointer`, `Text`, `Move`, `ResizeHorizontal`, `ResizeVertical`,
+`ResizeDiagonalRising` (bottom-left to top-right), `ResizeDiagonalFalling`,
+`Grab`, `Grabbing`, `NotAllowed`, `Wait`.
+
+### The application name
+
+`AETHER_APP_NAME` / `--app-name` (default `Aether`) is the product's name as
+the platform shows it. It titles the macOS application menu and its Quit item,
+names the macOS process — which is what the platform draws the first menu-bar
+item from, and which otherwise reads as the basename of whatever file was
+executed — and supplies the boot window's title when `AETHER_WINDOW_TITLE` is
+unset. It resolves through the ordinary derive-`Config` path alongside the
+window knobs.
+
+### Key repeat
+
+A held key repeats at the platform's own rate, and every repeat publishes an
+ordinary `aether.key` press. No `aether.key_release` separates them, so a
+consumer pairing press with release reads a held key as one press-and-hold,
+while a consumer acting per press acts per repeat — which is what makes a held
+Backspace delete repeatedly in a text field.
 
 ## Testing and extension
 
