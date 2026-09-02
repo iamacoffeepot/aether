@@ -43,6 +43,7 @@ pub use kinds::*;
 pub mod composite;
 mod editor;
 pub mod focus;
+pub mod layout;
 mod panel;
 pub mod routing;
 mod scroll;

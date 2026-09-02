@@ -348,6 +348,53 @@ camera-owning viewport, a non-input-owning `ConsoleOverlay`, and the one
 `EditorShell` routing their three non-overlapping regions; git history holds
 it.)
 
+## Layout
+
+A panel root hands each child a `WidgetFrame { x, y, width, height }` and
+nothing else, so every consumer that laid out a screen used to compute those
+rectangles by hand — a few hundred lines of `x + pad`, `width - 2.0 * pad`,
+`y += 28.0` per screen, with the design decision buried inside the arithmetic
+and no single place where the pane's width and the viewport's width agree. The
+`layout` module is that arithmetic named. It is pure `f32` geometry over
+`WidgetFrame` — no actor, no mail — so a consumer computes a whole screen's
+frames in one function, asserts them in a unit test, and only then mails them
+down.
+
+Use it in the order a screen is actually designed. **Regions first**: `dock(window,
+DockSide::Right, 320.0)` returns a `Docked { pane, viewport }` whose two
+rectangles tile the window exactly. A tool pane belongs beside the thing it
+operates on, not floating over it — an overlay hides the content the controls
+act on, and the viewport can no longer be sized honestly. `pane_extent` is
+clamped into the window, so an oversized pane leaves a zero-width viewport
+rather than a negative one. Reach for `inset(frame, theme.pad)` to put the
+breathing room inside a region once, instead of in each child's own maths.
+
+**Rows next.** A `Column { origin, width, gap }` stacks `Row`s down a region
+and `place(&rows)` returns a `Placed { frames, height }` — one frame per cell
+in row-then-cell order, plus the total occupied height for stacking a second
+column below or sizing a scroll extent. The column owns one `gap`, used both
+between rows and between the cells of a row; feed it from `Theme::space` and
+every space on the screen is a whole number of spacing units, which is most of
+what a reader perceives as "designed".
+
+**Cells last, sized to content.** `Row::single(height)` is the full-width case
+— a heading, a slider, a field that spans the pane. `Row::cells(height, cells)`
+takes explicit `Cell`s: `Cell::Fixed(pixels)` for a control whose content
+determines its width (a button at its measured label width, an icon, a
+fixed-width numeric field) and `Cell::Share(weight)` for the one thing that
+should absorb what is left. Shares divide the width remaining *after* every
+fixed cell and every gap is subtracted, so adding a button to a row narrows its
+text field by exactly the button plus one gap with no second place to keep in
+agreement. A row of three `Fixed` buttons leaves its remainder empty at the
+right — deliberately, because equal thirds size a control to its container,
+which stretches "OK" to a third of the pane and clips "Regenerate terrain" in
+the same row.
+
+Degenerate input clamps rather than propagating: a negative or NaN length
+becomes zero and a NaN position becomes zero, so a layout computed before the
+window size is known collapses to empty rectangles instead of poisoning every
+frame downstream with NaN.
+
 ## The reference panel
 
 `WidgetPanel` (export `aether.kit.widget.panel`) is the worked example — the
