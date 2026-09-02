@@ -53,10 +53,11 @@ pub trait WidgetDefaults {
         *self.widget_theme() = set.theme;
     }
 
-    /// Take keyboard focus.
+    /// Take focus, carrying through how it arrived so only a keyboard
+    /// traversal lights a ring.
     #[handler::single]
-    fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: FocusGained) {
-        self.widget_state().gain_focus();
+    fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, gained: FocusGained) {
+        self.widget_state().gain_focus(gained.keyboard);
     }
 
     /// Release keyboard focus, cancelling any activation it was carrying.

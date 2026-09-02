@@ -618,7 +618,7 @@ mod tests {
         assert!(widget.replace_control_state(read_only.clone()));
         assert!(!widget.replace_control_state(read_only), "same state emits no second change");
         assert!(!widget.state.can_mutate());
-        widget.state.gain_focus();
+        widget.state.gain_focus(true);
         assert!(widget.state.focused(), "read-only remains keyboard-focusable");
     }
 
@@ -636,7 +636,7 @@ mod tests {
     fn hover_focus_and_control_state_follow_shared_interaction_rules() {
         let mut widget = list(20, 5, 0);
         widget.state.set_hovered(true);
-        widget.state.gain_focus();
+        widget.state.gain_focus(true);
         assert_eq!(widget.state.theme_state(false), ThemeState::Hover);
         assert!(widget.state.focused());
         widget.state.lose_focus();
@@ -655,7 +655,7 @@ mod tests {
             ..WidgetControlState::default()
         };
         widget.replace_control_state(control);
-        widget.state.gain_focus();
+        widget.state.gain_focus(true);
         let items = widget.draw_items();
         assert_eq!(items.len(), 18, "ten row items plus two four-quad outlines");
         for item in &items[10..14] {

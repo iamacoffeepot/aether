@@ -8,7 +8,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_kinds::keycode::{KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP};
+use aether_clipboard::{GetClipboardTextResult, SetClipboardTextResult};
+use aether_kinds::keycode::{KEY_DOWN, KEY_ENTER, KEY_UP};
 use aether_kinds::{
     CachedFontMetrics, ImePreedit, Key, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput, mouse_button,
 };
@@ -16,8 +17,9 @@ use aether_text::FontMetricsResult;
 
 use crate::set::defaults::WidgetDefaults;
 use crate::set::{
-    apply_text_control_state, apply_text_theme, pump_text_font_metrics, push_control_outlines, quad, release_left,
-    reply_with_draw_items, text_baseline_y, text_control_theme_state, text_origin_y, update_text_modifiers,
+    accept_clipboard_paste, apply_text_control_state, apply_text_theme, edit_command, pump_text_font_metrics,
+    push_control_outlines, quad, release_left, reply_with_draw_items, report_clipboard_copy, run_edit_key,
+    text_baseline_y, text_control_theme_state, text_origin_y, update_text_modifiers,
 };
 use crate::state::InteractionState;
 use crate::text_edit::{EditPolicy, FontMetricsAdapter, SingleLineLayout, TextEditState, TextSpan};
@@ -85,6 +87,9 @@ pub struct TextAreaWidget {
     state: InteractionState,
     modifiers: Modifiers,
     dragging: bool,
+    /// Whether a clipboard read is outstanding; a second paste chord while one
+    /// is in flight is dropped rather than queued.
+    paste_pending: bool,
     preferred_x_pixels: Option<f32>,
     scroll_top: usize,
     font_metrics: FontMetricsAdapter,
@@ -131,7 +136,7 @@ impl TextAreaWidget {
     fn enter_action(&self) -> EnterAction {
         if !self.state.can_mutate() {
             EnterAction::Ignore
-        } else if self.modifiers.ctrl {
+        } else if self.modifiers.ctrl || self.modifiers.meta {
             EnterAction::Commit
         } else {
             EnterAction::InsertNewline
@@ -331,6 +336,7 @@ impl WidgetDefaults for TextAreaWidget {
 
     fn cancel_activation(&mut self) {
         self.dragging = false;
+        self.paste_pending = false;
         self.preferred_x_pixels = None;
         self.edit.clear_composition();
     }
@@ -357,6 +363,7 @@ impl WasmActor for TextAreaWidget {
             state: InteractionState::new(config.state),
             modifiers: Modifiers::default(),
             dragging: false,
+            paste_pending: false,
             preferred_x_pixels: None,
             scroll_top: 0,
         };
@@ -376,6 +383,7 @@ impl WasmActor for TextAreaWidget {
         self.font_metrics.set_desired(config.theme.font_id);
         self.theme = config.theme;
         self.dragging = false;
+        self.paste_pending = false;
         self.preferred_x_pixels = None;
         self.scroll_top = 0;
         self.apply_control_state(ctx, config.state);
@@ -395,8 +403,8 @@ impl WasmActor for TextAreaWidget {
     }
 
     #[handler::single]
-    fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: FocusGained) {
-        self.state.gain_focus();
+    fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, gained: FocusGained) {
+        self.state.gain_focus(gained.keyboard);
         self.reconcile_scroll();
     }
 
@@ -404,6 +412,7 @@ impl WasmActor for TextAreaWidget {
     fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
         self.state.lose_focus();
         self.dragging = false;
+        self.paste_pending = false;
         self.preferred_x_pixels = None;
         self.edit.clear_composition();
     }
@@ -419,6 +428,11 @@ impl WasmActor for TextAreaWidget {
         }
     }
 
+    /// Vertical motion and the Enter policy are the area's own; every other
+    /// editing key resolves through the set's shared vocabulary, so Home/End
+    /// reach the ends of the *line* the caret is on and word motion, Delete,
+    /// and the Ctrl-or-Cmd clipboard chords work here exactly as in a field.
+    /// A repeated press is another edit, never a suppressed repeat.
     #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         if !self.state.is_available() {
@@ -426,18 +440,6 @@ impl WasmActor for TextAreaWidget {
         }
         let extend = self.modifiers.shift;
         match key.code {
-            KEY_BACKSPACE if self.state.can_mutate() => {
-                self.edit.delete_backward();
-                self.after_horizontal_or_edit();
-            }
-            KEY_LEFT => {
-                self.edit.move_left(extend);
-                self.after_horizontal_or_edit();
-            }
-            KEY_RIGHT => {
-                self.edit.move_right(extend);
-                self.after_horizontal_or_edit();
-            }
             KEY_UP => self.move_vertical(VerticalDirection::Up, extend),
             KEY_DOWN => self.move_vertical(VerticalDirection::Down, extend),
             KEY_ENTER => match self.enter_action() {
@@ -453,8 +455,28 @@ impl WasmActor for TextAreaWidget {
                     }
                 }
             },
-            _ => {}
+            code => {
+                if let Some(command) = edit_command(code, self.modifiers) {
+                    run_edit_key(ctx, &mut self.edit, &mut self.paste_pending, command, self.state.can_mutate());
+                    self.after_horizontal_or_edit();
+                }
+            }
         }
+    }
+
+    /// Settle an outstanding clipboard read into the buffer.
+    #[handler::single]
+    fn on_get_clipboard_text_result(&mut self, _ctx: &mut WasmCtx<'_>, result: GetClipboardTextResult) {
+        let (policy, mutable) = (self.policy(), self.state.can_mutate());
+        if accept_clipboard_paste(&mut self.paste_pending, &mut self.edit, policy, mutable, result) {
+            self.after_horizontal_or_edit();
+        }
+    }
+
+    #[handler::single]
+    #[allow(clippy::unused_self)]
+    fn on_set_clipboard_text_result(&mut self, _ctx: &mut WasmCtx<'_>, result: SetClipboardTextResult) {
+        report_clipboard_copy(&result);
     }
 
     #[handler::single]
@@ -565,11 +587,12 @@ mod tests {
             state: InteractionState::new(WidgetControlState::default()),
             modifiers: Modifiers::default(),
             dragging: false,
+            paste_pending: false,
             preferred_x_pixels: None,
             scroll_top: 0,
             font_metrics,
         };
-        area.state.gain_focus();
+        area.state.gain_focus(true);
         area.reconcile_scroll();
         area
     }

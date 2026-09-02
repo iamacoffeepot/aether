@@ -21,12 +21,15 @@
 //! [`CachedFontMetrics`]. Until then it falls
 //! back to the proportional approximation as a bounded font-warm-up placement.
 //!
-//! The chassis keycode vocabulary also includes Delete, Home, End, Page Up,
-//! and Page Down. `TextFieldWidget` does not yet implement behavior for those
-//! keys.
+//! Editing keys resolve through the set's shared `edit_command` vocabulary:
+//! Backspace and Delete, Home and End, character / word / line-edge caret
+//! motion, and select-all, copy, cut, and paste on Ctrl *or* Cmd. Enter is the
+//! field's own — it commits. Page Up and Page Down have no meaning in one line
+//! and are ignored.
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_kinds::keycode::{KEY_BACKSPACE, KEY_ENTER, KEY_LEFT, KEY_RIGHT};
+use aether_clipboard::{GetClipboardTextResult, SetClipboardTextResult};
+use aether_kinds::keycode::KEY_ENTER;
 use aether_kinds::{
     CachedFontMetrics, ImePreedit, Key, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput,
 };
@@ -35,8 +38,9 @@ use alloc::string::String;
 
 use crate::set::defaults::WidgetDefaults;
 use crate::set::{
-    apply_text_control_state, apply_text_theme, arm_text_drag, pump_text_font_metrics, release_left,
-    reply_single_line_edit, single_line_hit_byte, text_control_theme_state, update_text_modifiers,
+    SingleLineEdit, accept_clipboard_paste, apply_text_control_state, apply_text_theme, arm_text_drag, edit_command,
+    pump_text_font_metrics, release_left, reply_single_line_edit, report_clipboard_copy, run_edit_key,
+    single_line_hit_byte, text_control_theme_state, update_text_modifiers,
 };
 use crate::state::InteractionState;
 use crate::text_edit::{EditPolicy, FontMetricsAdapter, TextEditState, TextSpan};
@@ -57,6 +61,9 @@ pub struct TextFieldWidget {
     /// Whether a left-button drag is in progress (a pointer move only extends
     /// the selection while the button is held, never on a bare hover).
     dragging: bool,
+    /// Whether a clipboard read is outstanding; a second paste chord while one
+    /// is in flight is dropped rather than queued.
+    paste_pending: bool,
     /// Single-flight exact metrics for the active theme font.
     font_metrics: FontMetricsAdapter,
 }
@@ -110,6 +117,7 @@ impl WidgetDefaults for TextFieldWidget {
 
     fn cancel_activation(&mut self) {
         self.dragging = false;
+        self.paste_pending = false;
         self.edit.clear_composition();
     }
 }
@@ -135,6 +143,7 @@ impl WasmActor for TextFieldWidget {
             frame: WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
             modifiers: Modifiers::default(),
             dragging: false,
+            paste_pending: false,
             font_metrics: FontMetricsAdapter::new(desired_font_id),
         })
     }
@@ -153,6 +162,8 @@ impl WasmActor for TextFieldWidget {
         self.max_chars = config.max_chars;
         self.font_metrics.set_desired(config.theme.font_id);
         self.theme = config.theme;
+        self.dragging = false;
+        self.paste_pending = false;
         self.apply_control_state(ctx, config.state);
         self.pump_font_metrics(ctx);
     }
@@ -179,26 +190,40 @@ impl WasmActor for TextFieldWidget {
         self.edit.insert(&input.text, self.policy());
     }
 
-    /// Editing keys: Backspace deletes, Left / Right move the caret (extending
-    /// the selection while Shift is held), Enter commits the current contents up
-    /// to the panel root.
+    /// Editing keys go through the set's shared vocabulary; Enter is the
+    /// field's own, committing the current contents up to the panel root.
+    ///
+    /// Nothing is suppressed on repeat — a held Backspace arrives as a stream
+    /// of `Key` presses and every one of them deletes.
     #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         if !self.state.is_available() {
             return;
         }
-        let extend = self.modifiers.shift;
-        match key.code {
-            KEY_BACKSPACE if self.state.can_mutate() => self.edit.delete_backward(),
-            KEY_LEFT => self.edit.move_left(extend),
-            KEY_RIGHT => self.edit.move_right(extend),
-            KEY_ENTER if self.state.can_mutate() => {
-                if let Some(parent) = ctx.parent() {
-                    parent.send(&TextCommitted { text: String::from(self.edit.value()) });
-                }
+        if key.code == KEY_ENTER {
+            if self.state.can_mutate()
+                && let Some(parent) = ctx.parent()
+            {
+                parent.send(&TextCommitted { text: String::from(self.edit.value()) });
             }
-            _ => {}
+            return;
         }
+        if let Some(command) = edit_command(key.code, self.modifiers) {
+            run_edit_key(ctx, &mut self.edit, &mut self.paste_pending, command, self.state.can_mutate());
+        }
+    }
+
+    /// Settle an outstanding clipboard read into the buffer.
+    #[handler::single]
+    fn on_get_clipboard_text_result(&mut self, _ctx: &mut WasmCtx<'_>, result: GetClipboardTextResult) {
+        let (policy, mutable) = (self.policy(), self.state.can_mutate());
+        accept_clipboard_paste(&mut self.paste_pending, &mut self.edit, policy, mutable, result);
+    }
+
+    #[handler::single]
+    #[allow(clippy::unused_self)]
+    fn on_set_clipboard_text_result(&mut self, _ctx: &mut WasmCtx<'_>, result: SetClipboardTextResult) {
+        report_clipboard_copy(&result);
     }
 
     /// A left press places the caret at the pointer and arms a drag; other
@@ -276,12 +301,14 @@ impl WasmActor for TextFieldWidget {
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         reply_single_line_edit(
             ctx,
-            &self.edit.displayed(),
-            self.font_metrics.resolved(),
-            &self.theme,
-            &self.state,
-            self.theme_state(),
-            &self.frame,
+            SingleLineEdit::new(
+                &self.edit.displayed(),
+                self.font_metrics.resolved(),
+                &self.theme,
+                &self.state,
+                self.theme_state(),
+                &self.frame,
+            ),
         );
     }
 }
@@ -300,6 +327,7 @@ mod tests {
             frame: WidgetFrame { x: 0.0, y: 0.0, width: 100.0, height: 24.0 },
             modifiers: Modifiers::default(),
             dragging: false,
+            paste_pending: false,
             font_metrics: FontMetricsAdapter::new(7),
         }
     }
