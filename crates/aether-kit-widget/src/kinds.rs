@@ -112,6 +112,36 @@ impl WidgetClipRect {
             && (self.x + self.width).is_finite()
             && (self.y + self.height).is_finite()
     }
+
+    /// This rectangle with `hole` cut out of it: the up-to-four strips (left,
+    /// right, top, bottom) that together cover everything of `self` outside
+    /// `hole`. `self` alone when the two do not overlap; nothing when `hole`
+    /// covers it. The root uses it to keep a cluster's ordinary text out from
+    /// under its overlay, since text reaches the render cap a hop after the
+    /// overlay's fill and would otherwise print through it.
+    #[must_use]
+    pub(super) fn subtract(self, hole: Self) -> Vec<Self> {
+        let right = self.x + self.width;
+        let bottom = self.y + self.height;
+        let hole_right = hole.x + hole.width;
+        let hole_bottom = hole.y + hole.height;
+        let cut_x = self.x.max(hole.x);
+        let cut_y = self.y.max(hole.y);
+        let cut_right = right.min(hole_right);
+        let cut_bottom = bottom.min(hole_bottom);
+        if !hole.is_valid() || cut_right <= cut_x || cut_bottom <= cut_y {
+            return alloc::vec![self];
+        }
+        [
+            Self { x: self.x, y: self.y, width: cut_x - self.x, height: self.height },
+            Self { x: cut_right, y: self.y, width: right - cut_right, height: self.height },
+            Self { x: cut_x, y: self.y, width: cut_right - cut_x, height: cut_y - self.y },
+            Self { x: cut_x, y: cut_bottom, width: cut_right - cut_x, height: bottom - cut_bottom },
+        ]
+        .into_iter()
+        .filter(|strip| strip.is_valid())
+        .collect()
+    }
 }
 
 /// Result of composing two optional widget clips. Two absent clips are
