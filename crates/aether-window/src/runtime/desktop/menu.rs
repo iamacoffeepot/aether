@@ -57,6 +57,12 @@ mod platform {
     /// The platform's own application submenu, which macOS draws first in the
     /// bar and names after the application. Windows has no such convention, so
     /// the caller's menus are the whole bar there.
+    ///
+    /// `app_name` titles this submenu and its About / Quit items, but macOS
+    /// overrides the *drawn* title with the application's own name — for an
+    /// unbundled binary, the name of the executed file, which is why the fleet
+    /// names that file after the application (ADR-0212,
+    /// iamacoffeepot/aether#5518).
     #[cfg(target_os = "macos")]
     fn application_submenu(app_name: &str) -> Result<Submenu, String> {
         let app = Submenu::new(app_name, true);
