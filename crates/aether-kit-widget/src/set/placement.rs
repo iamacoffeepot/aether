@@ -10,6 +10,12 @@
 //! past the bounds, and clamp what is left into the bounds so the plate is
 //! never half off the region.
 //!
+//! A plate over a canvas wants one thing more: to keep off the furniture that
+//! is already on it. [`place_plate_avoiding`] adds a list of rectangles the
+//! plate would rather not cover and picks the side that covers the least of
+//! them, ranking the first entry above all the rest — the caller's lever for
+//! "this one is the thing the plate is about".
+//!
 //! Pure `f32` geometry — no actor, no mail — so a consumer computes a plate's
 //! rectangle and asserts it in a unit test before anything is drawn.
 //!
@@ -58,6 +64,19 @@ impl PlacementBounds {
 
     fn bottom(self) -> f32 {
         self.y + self.height
+    }
+
+    /// The area this rectangle and `other` share, in square pixels. Zero when
+    /// they only touch — an edge in common is not a cover.
+    #[must_use]
+    fn overlap_area(self, other: Self) -> f32 {
+        let (a, b) = (self.sane(), other.sane());
+        let width = a.right().min(b.right()) - a.x.max(b.x);
+        let height = a.bottom().min(b.bottom()) - a.y.max(b.y);
+        if width <= 0.0 || height <= 0.0 {
+            return 0.0;
+        }
+        width * height
     }
 }
 
@@ -108,6 +127,19 @@ impl PlacementSide {
     /// subtracted from its near one.
     const fn is_after(self) -> bool {
         matches!(self, Self::Below | Self::Right)
+    }
+
+    /// The sides a plate will try, in order, when it is allowed to move off
+    /// its preference to get clear of an obstacle: this side, its opposite,
+    /// then the other axis. Preference first, so a plate with nothing in its
+    /// way lands exactly where [`place_plate`] would put it.
+    const fn candidates(self) -> [Self; 4] {
+        match self {
+            Self::Below => [Self::Below, Self::Above, Self::Right, Self::Left],
+            Self::Above => [Self::Above, Self::Below, Self::Right, Self::Left],
+            Self::Right => [Self::Right, Self::Left, Self::Below, Self::Above],
+            Self::Left => [Self::Left, Self::Right, Self::Below, Self::Above],
+        }
     }
 }
 
@@ -172,6 +204,62 @@ pub fn place_plate(
     } else {
         [main, cross]
     }
+}
+
+/// [`place_plate`], then moved off its preferred side when that would cover
+/// something the caller named in `avoid`.
+///
+/// Each of the four sides is placed by the ordinary flip-and-clamp rule, and
+/// the one that covers the least of `avoid` wins. **The first entry outranks
+/// every other**: a candidate is judged first on how much of `avoid[0]` it
+/// covers and only then on the total it covers of the rest. That ordering is
+/// the caller's lever — a hover card's first obstacle is the thing the card is
+/// *about*, which it must stay attached to and never cover, while the rest of
+/// the frame's furniture is a preference. Ties go to the earlier candidate, so
+/// the preferred side is kept whenever moving would buy nothing, and an empty
+/// `avoid` is exactly [`place_plate`].
+///
+/// Nothing here guarantees a clear placement: a plate larger than the gaps
+/// between the obstacles covers something whichever side it takes, and the
+/// least-covering side is then the honest answer rather than a refusal to
+/// draw.
+#[must_use]
+pub fn place_plate_avoiding(
+    anchor: PlacementBounds,
+    width: f32,
+    height: f32,
+    side: PlacementSide,
+    gap: f32,
+    bounds: PlacementBounds,
+    avoid: &[PlacementBounds],
+) -> [f32; 2] {
+    let placed = |side: PlacementSide| place_plate(anchor, width, height, side, gap, bounds);
+    if avoid.is_empty() {
+        return placed(side);
+    }
+
+    let cost = |origin: [f32; 2]| {
+        let plate = PlacementBounds { x: origin[0], y: origin[1], width, height };
+        let first = avoid.first().map_or(0.0, |rect| plate.overlap_area(*rect));
+        let rest: f32 = avoid.iter().skip(1).map(|rect| plate.overlap_area(*rect)).sum();
+        (first, rest)
+    };
+
+    side.candidates()
+        .into_iter()
+        .map(|candidate| {
+            let origin = placed(candidate);
+            (cost(origin), origin)
+        })
+        .reduce(|best, next| {
+            let better = next.0.0.total_cmp(&best.0.0).then_with(|| next.0.1.total_cmp(&best.0.1)).is_lt();
+            if better {
+                next
+            } else {
+                best
+            }
+        })
+        .map_or_else(|| placed(side), |(_, origin)| origin)
 }
 
 /// Where `side` puts the plate's near edge on the axis it displaces along,
@@ -266,6 +354,31 @@ mod tests {
         assert!(
             (tall_x - BOUNDS.x).abs() < f32::EPSILON && (tall_y - BOUNDS.y).abs() < f32::EPSILON,
             "a plate larger than its bounds starts at their origin: {tall_x}, {tall_y}",
+        );
+    }
+
+    #[test]
+    fn a_plate_takes_the_side_that_covers_the_least_of_what_it_was_told_to_avoid() {
+        // Tripwire: the ranking is the whole point of `avoid`. A hover card
+        // must get off the thing it is about first — that is what keeps it
+        // attached to its own node — and only then off the rest of the frame,
+        // so a candidate clear of `avoid[0]` outranks one that is merely clear
+        // of more total area.
+        let anchor = PlacementBounds { x: 180.0, y: 140.0, width: 20.0, height: 20.0 };
+        let card = |avoid: &[PlacementBounds]| {
+            place_plate_avoiding(anchor, 120.0, 80.0, PlacementSide::Below, 4.0, BOUNDS, avoid)
+        };
+
+        assert_eq!(card(&[]), place_plate(anchor, 120.0, 80.0, PlacementSide::Below, 4.0, BOUNDS), "nothing to avoid");
+
+        let band = PlacementBounds { x: 0.0, y: 160.0, width: 400.0, height: 120.0 };
+        assert_eq!(card(&[band]), [180.0, 56.0], "below, left and right all sit in the band, so the plate goes above");
+
+        let over_the_top = PlacementBounds { x: 150.0, y: 40.0, width: 200.0, height: 120.0 };
+        assert_eq!(
+            card(&[band, over_the_top]),
+            [180.0, 56.0],
+            "and it stays above even though that is the only side the second obstacle covers",
         );
     }
 

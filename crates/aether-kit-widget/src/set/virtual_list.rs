@@ -20,12 +20,13 @@
 //! empty — it never spreads them to fill it, which would turn a two-item list
 //! into a pair of slabs and its selected row into a half-screen block.
 //!
-//! The list measures, like every other content-sized widget in the kit: it
-//! holds a [`FontMetricsAdapter`] and, once the theme font's advances land,
-//! elides a row too long for its frame with an ellipsis rather than letting
-//! the slot clip cut it mid-glyph (the studio's gap 17). The same
-//! metrics give the whole item vector's widest row, which the list reports as
-//! its intrinsic width so a column can be sized to what it holds.
+//! The list measures, like every other content-sized widget in the kit. It
+//! drives the same single-flight font-metrics request the label and the
+//! tooltip do, and once the theme font's advances land it elides a row too
+//! long for its frame with an ellipsis rather than letting the slot clip cut
+//! it mid-glyph (the studio's gap 17). The same metrics give the widest row of
+//! the whole item vector, which the list reports as its intrinsic width so a
+//! column can be sized to what it holds.
 
 use alloc::string::String;
 use alloc::vec::Vec;

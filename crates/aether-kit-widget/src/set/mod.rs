@@ -78,7 +78,7 @@ pub use image::ImageWidget;
 pub use label::LabelWidget;
 pub use menu_bar::MenuBarWidget;
 pub use numeric::NumericWidget;
-pub use placement::{PlacementBounds, PlacementSide, place_plate};
+pub use placement::{PlacementBounds, PlacementSide, place_plate, place_plate_avoiding};
 pub use popover::Popover;
 pub use radio::RadioGroupWidget;
 pub use segmented::SegmentedWidget;
@@ -89,7 +89,7 @@ pub use text_area::TextAreaWidget;
 pub use text_field::TextFieldWidget;
 pub use toast::{ToastConfig, ToastNotice, ToastRegionChanged, ToastSeverity, ToastWidget};
 pub use toggle::ToggleWidget;
-pub use tooltip::{TooltipConfig, TooltipSection, TooltipWidget};
+pub use tooltip::{TooltipConfig, TooltipLine, TooltipSection, TooltipShed, TooltipWidget};
 pub use virtual_list::VirtualListWidget;
 
 use alloc::string::String;
@@ -976,9 +976,43 @@ pub fn elide_to_width(text: &str, max_width: f32, measure: impl Fn(&str) -> f32)
 /// respect it reads far worse than one long line.
 #[must_use]
 pub fn wrap_to_width(text: &str, max_width: f32, measure: impl Fn(&str) -> f32) -> Vec<String> {
-    let mut lines = Vec::new();
+    wrap_to_width_hanging(text, max_width, 0.0, measure).into_iter().map(|line| line.text).collect()
+}
+
+/// One line [`wrap_to_width_hanging`] produced, with the indent it is drawn
+/// at: `0.0` for the first line of a paragraph, the hanging indent for every
+/// continuation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WrappedLine {
+    pub indent_pixels: f32,
+    pub text: String,
+}
+
+/// [`wrap_to_width`] with a **hanging indent**: the first line of a paragraph
+/// starts at the margin and every continuation is inset by `indent_pixels`,
+/// wrapping that much earlier so the right edge stays where it was. A wrapped
+/// entry then reads as one entry rather than as two — which is what a stat
+/// line on a hover card needs, and is ordinary typography (the studio's
+/// gap 18).
+///
+/// `0.0` is exactly [`wrap_to_width`]. A `\n` starts a new paragraph, so the
+/// line after an author's own break is a first line again, not a continuation.
+#[must_use]
+pub fn wrap_to_width_hanging(
+    text: &str,
+    max_width: f32,
+    indent_pixels: f32,
+    measure: impl Fn(&str) -> f32,
+) -> Vec<WrappedLine> {
+    let indent = if indent_pixels.is_finite() {
+        indent_pixels.max(0.0)
+    } else {
+        0.0
+    };
+    let mut lines: Vec<WrappedLine> = Vec::new();
     for paragraph in text.split('\n') {
         let mut line = String::new();
+        let mut first = true;
         for word in paragraph.split_whitespace() {
             if line.is_empty() {
                 line.push_str(word);
@@ -988,20 +1022,40 @@ pub fn wrap_to_width(text: &str, max_width: f32, measure: impl Fn(&str) -> f32) 
             candidate.push_str(&line);
             candidate.push(' ');
             candidate.push_str(word);
-            if measure(&candidate) <= max_width {
+            let budget = if first {
+                max_width
+            } else {
+                max_width - indent
+            };
+            if measure(&candidate) <= budget {
                 line = candidate;
             } else {
-                lines.push(mem::replace(&mut line, String::from(word)));
+                lines.push(WrappedLine {
+                    indent_pixels: if first {
+                        0.0
+                    } else {
+                        indent
+                    },
+                    text: mem::replace(&mut line, String::from(word)),
+                });
+                first = false;
             }
         }
-        lines.push(line);
+        lines.push(WrappedLine {
+            indent_pixels: if first {
+                0.0
+            } else {
+                indent
+            },
+            text: line,
+        });
     }
     // A trailing empty line is the split's artifact, not an author's break;
     // one leading/trailing blank would otherwise pad every plate.
-    while lines.last().is_some_and(String::is_empty) {
+    while lines.last().is_some_and(|line| line.text.is_empty()) {
         lines.pop();
     }
-    while lines.first().is_some_and(String::is_empty) {
+    while lines.first().is_some_and(|line| line.text.is_empty()) {
         lines.remove(0);
     }
     lines

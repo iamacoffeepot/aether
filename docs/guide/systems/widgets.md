@@ -347,8 +347,9 @@ not a menu.
 
 ## Tooltips
 
-`TooltipConfig { sections, max_width_pixels, side, bounds, theme, state }`
-spawns `TooltipWidget` — the anchored plate that says what the thing under the
+`TooltipConfig { sections, max_width_pixels, max_height_pixels,
+hanging_indent_pixels, side, avoid, bounds, theme, state }` spawns
+`TooltipWidget` — the anchored plate that says what the thing under the
 pointer *is*. The widget's assigned `WidgetFrame` is the **anchor**: a host
 points a tooltip at a row by handing it that row's rectangle, and the plate
 stands beside it, in the widget's overlay so the rows under it stay readable.
@@ -368,6 +369,40 @@ explained and takes `TextRole::Body` in `text_primary`; every line after it is
 used — that is the size a screen's one title is set at, and a 22-pixel line on
 a hover plate is a headline.
 
+A section's lines are `TooltipLine { text, role, ink }`, both options `None`
+for that rule. `TooltipSection::new(["Life", "Your health pool."])` takes plain
+strings (`TooltipLine: From<String> + From<&str>`), so a host that only has
+words writes only words. The escapes are for the distinctions a role cannot
+carry, because a role carries one ink: which line of a card the reader's search
+matched, or which stat is not being counted. Set `ink` on those lines and leave
+the rest alone.
+
+A hover card over a canvas needs three more things, and they are the remaining
+fields:
+
+- **`avoid`** — rectangles the plate would rather not cover, in the anchor's
+  window pixels. `place_plate_avoiding` tries all four sides under the usual
+  flip-and-clamp and takes the one covering the least of them, with **the first
+  entry outranking the rest**: a card gets clear of the thing it is about — the
+  hovered node, which is what keeps it attached — before it weighs any other
+  obstacle. Ties keep the preferred side, and an empty `avoid` is exactly
+  `place_plate`. Nothing guarantees a clear placement; a plate bigger than the
+  gaps covers something whichever side it takes, and the least-covering side is
+  the honest answer.
+- **`max_height_pixels`** — the tallest the plate may stand (`0` is no budget).
+  Over it the plate **sheds**: it drops trailing whole entries — one source
+  line, wrapped rows and all — until it fits, so a reader never gets a stat
+  ending in "per". A section left with nothing takes its rule with it, and a
+  budget nothing fits in sheds everything and draws no plate. The count goes up
+  as `TooltipShed { dropped }` whenever it changes, so the host — the only one
+  that knows what the dropped entries said — can word the tail or re-send a
+  shorter card. Re-sending the config resets the count, so the next frame
+  reports the new card's tail.
+- **`hanging_indent_pixels`** — how far the continuation rows of a wrapped line
+  are inset (`0` is a flush block). Continuations wrap that much earlier, so
+  the right edge does not move, and a two-row stat reads as one stat.
+  `set::wrap_to_width_hanging` is the same rule as a public helper.
+
 `side` is the side of the anchor the plate prefers and `bounds` is the region
 it must stay inside, in the same window pixels the frame is assigned in. A
 plate that would run past those bounds **flips to the other side of the
@@ -382,8 +417,10 @@ says the pointer has rested long enough, and flips it back when the pointer
 moves on. A tooltip with no sections likewise draws nothing. There is
 deliberately no third `shown` field — the dwell, the row, and the words are all
 the host's knowledge, and the widget takes the finished lines and nothing else.
-The tooltip reports nothing up and is neither pointer- nor focus-eligible: a
-plate that took hover would steal it from the row it explains.
+The tooltip reports no *value* up — `TooltipShed` is the one thing it says, and
+it is about the plate, not about what the plate means — and it is neither
+pointer- nor focus-eligible: a plate that took hover would steal it from the
+row it explains.
 
 ## The toast region
 
