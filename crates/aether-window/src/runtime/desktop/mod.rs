@@ -78,18 +78,22 @@ fn activate_legacy_application(application: &NSApplication) {
 #[cfg(not(target_os = "macos"))]
 fn activate_application() {}
 
-/// Name this process for whatever the platform shows an application name in.
+/// Name this process for the surfaces macOS derives from a process name: `ps`
+/// and Activity Monitor, the standard About panel, and the items winit builds
+/// into its default menu (`About …`, `Quit …`).
 ///
-/// macOS draws the first menu-bar item from the running application's name,
-/// which for a binary outside an `.app` bundle is `NSProcessInfo.processName`
-/// — the basename of the executed file. A fleet-spawned engine runs a
-/// content-addressed binary the hub materializes as `…/<engine>/substrate`, so
-/// the bar read `substrate` (iamacoffeepot/aether#5518). Naming the process
-/// from the chassis's own `app_name` knob is what makes it read `Aether`, or
-/// whatever the product is called.
+/// It does **not** name the menu bar's bold first title. That one comes from
+/// the *application's* name, which for an executable outside an `.app` bundle
+/// macOS takes from the executed file itself at launch — reachable neither
+/// through this call nor by writing `CFBundleName` into the main bundle's info
+/// dictionary afterwards, both of which were tried against a live bar
+/// (iamacoffeepot/aether#5518). The lever that does move it is the file name,
+/// so the fleet materializes a spawned engine's binary under its `--app-name`
+/// (`aether_fleet`'s `exec_file_name`) instead of the flat `substrate` that
+/// published the hub's storage layout as the product's name.
 ///
-/// Call it on the application thread before the event loop opens; every other
-/// platform has nothing to set and this is a no-op there.
+/// Call it on the application thread; every other platform has nothing to set
+/// and this is a no-op there.
 #[cfg(target_os = "macos")]
 pub fn set_application_name(app_name: &str) {
     if MainThreadMarker::new().is_none() {
@@ -106,8 +110,8 @@ pub fn set_application_name(_app_name: &str) {}
 /// The manager needs no native handle or initial identity at boot — its
 /// registry comes from [`NativeInitCtx`], and the application host reserves
 /// the boot window before winit begins dispatching callbacks. What it does
-/// need is the application's name, which the platform application menu is
-/// titled with and which no window-local state can supply.
+/// need is the application's name, which the platform application menu names
+/// its About and Quit items after and which no window-local state can supply.
 pub struct DesktopWindowParams {
     pub app_name: String,
 }

@@ -337,12 +337,25 @@ The vocabulary names the movement, not the platform shape: `Default`,
 ### The application name
 
 `AETHER_APP_NAME` / `--app-name` (default `Aether`) is the product's name as
-the platform shows it. It titles the macOS application menu and its Quit item,
-names the macOS process — which is what the platform draws the first menu-bar
-item from, and which otherwise reads as the basename of whatever file was
-executed — and supplies the boot window's title when `AETHER_WINDOW_TITLE` is
+the platform shows it. It titles the macOS application menu's About and Quit
+items, names the macOS process (`ps`, Activity Monitor, the standard About
+panel), and supplies the boot window's title when `AETHER_WINDOW_TITLE` is
 unset. It resolves through the ordinary derive-`Config` path alongside the
 window knobs.
+
+One macOS surface it cannot reach from inside the process is the bold first
+title in the menu bar. macOS draws that from the *application's* name, and an
+executable outside an `.app` bundle has no bundle name, so the platform uses
+the file it executed — fixed at launch, moved by neither
+`NSProcessInfo.setProcessName` nor a `CFBundleName` written into the main
+bundle's info dictionary. The fleet therefore materializes a spawned engine's
+binary under the name the spawn's own `--app-name` gives (an application name
+that is not a plain file name — a separator, a control character, `.`, `..`, or
+over 64 characters — falls back to the neutral `substrate`), so a hub-spawned
+desktop engine is named from launch. A binary executed directly is named after
+that file: run `aether-desktop` and the bar reads `aether-desktop`, so ship a
+product under a copy or symlink named for it, or inside a real `.app` bundle
+with a `CFBundleName`.
 
 ### Key repeat
 

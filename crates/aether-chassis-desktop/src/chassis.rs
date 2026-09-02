@@ -97,10 +97,11 @@ impl Chassis for DesktopChassis {
         let package_settings = env.package_settings.clone();
         apply_manifest_window_settings(&mut env.base.sources, &package_settings)?;
         let window = env.base.sources.resolve::<WindowConfig>()?.lower()?;
-        // Before the event loop opens: macOS names the application menu from
-        // the process name, and winit builds its default bar during launch, so
-        // a later call would be naming a bar that is already drawn
-        // (iamacoffeepot/aether#5518).
+        // Before the event loop dispatches: winit builds its default menu from
+        // the process name during launch, so a later call would be naming
+        // items that are already drawn. The bar's own first title is not one
+        // of these surfaces — macOS takes that from the executed file, which
+        // the fleet names (iamacoffeepot/aether#5518).
         aether_window::set_application_name(&window.app_name);
         // ADR-0161 R3: the render tuning `Config` (vertex-buffer cap) resolves off
         // the same stack the pooled `with_actor::<RenderCapability>` path resolved

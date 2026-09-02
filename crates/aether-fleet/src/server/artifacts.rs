@@ -368,9 +368,60 @@ pub fn realize_executable(src: &Path, dest: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// The file name a spawn's binary is materialized under, taken from the
+/// spawn's own `--app-name` when it carries one.
+///
+/// The file name is user interface on macOS. An executable outside an `.app`
+/// bundle has no bundle name, so the platform names the running application
+/// after the file it executed, and that name is what the menu bar draws as its
+/// bold first title — ahead of every menu the application installs, and
+/// unreachable from inside the process: neither `NSProcessInfo.processName`
+/// nor a `CFBundleName` written into the main bundle's info dictionary moves
+/// it (iamacoffeepot/aether#5518). Materializing every engine as `substrate`
+/// therefore published the store's layout as the product's name.
+///
+/// So the spawn's own `--app-name` — the same flag the desktop chassis titles
+/// its window and application menu from — names the file, and an engine that
+/// does not pass one keeps the neutral default. The value is a file name, not
+/// a path: anything carrying a separator, a control character, `.`, `..`, or
+/// more than [`MAX_EXEC_FILE_NAME_CHARS`] characters is refused back to the
+/// default rather than sanitized into something the caller did not write, so
+/// this can never reach outside the engine's own scratch directory.
+pub fn exec_file_name(args: &[String]) -> String {
+    args.iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, arg)| {
+            arg.strip_prefix("--app-name=")
+                .or_else(|| (arg == "--app-name").then(|| args.get(index + 1).map(String::as_str)).flatten())
+        })
+        .and_then(sanitize_exec_file_name)
+        .unwrap_or_else(|| DEFAULT_EXEC_FILE_NAME.to_owned())
+}
+
+/// What an engine that names no application is materialized as.
+const DEFAULT_EXEC_FILE_NAME: &str = "substrate";
+
+/// The longest application name that may reach the filesystem. Well past any
+/// real product name and well inside every path-component limit.
+const MAX_EXEC_FILE_NAME_CHARS: usize = 64;
+
+/// `Some` when `app_name` is usable as a plain file name inside the engine's
+/// scratch directory, `None` when the caller must fall back to the default.
+fn sanitize_exec_file_name(app_name: &str) -> Option<String> {
+    let name = app_name.trim();
+    let usable = !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name.chars().count() <= MAX_EXEC_FILE_NAME_CHARS
+        && !name.chars().any(|character| matches!(character, '/' | '\\') || character.is_control());
+
+    usable.then(|| name.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{bootstrap_ingest, validate_manifest};
+    use super::{bootstrap_ingest, exec_file_name, validate_manifest};
     use crate::store::{ArtifactStore, DEFAULT_DISK_BUDGET_BYTES};
     use aether_kinds::BinaryManifest;
 
@@ -489,5 +540,28 @@ mod tests {
         assert_eq!(store.entry_count(), 0, "a nonconforming bootstrap bin is skipped, not stored");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The materialized file name is what macOS draws as the application's
+    /// name in the menu bar, so it is both a user-visible string and a path
+    /// component built from caller-supplied argv. Both halves matter: an
+    /// application name has to survive into the file name in each spelling
+    /// clap accepts, and a name that is not a plain file name has to fall
+    /// back rather than steer the write out of the engine's scratch dir.
+    #[test]
+    fn an_application_name_becomes_the_file_name_only_while_it_stays_one() {
+        let named = |args: &[&str]| exec_file_name(&args.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>());
+
+        assert_eq!(named(&["--rpc-port", "8901", "--app-name", "Lunaris"]), "Lunaris");
+        assert_eq!(named(&["--app-name=Lunaris"]), "Lunaris");
+        assert_eq!(named(&["--app-name", "Draft", "--app-name", "Lunaris"]), "Lunaris");
+        assert_eq!(named(&["--rpc-port", "8901"]), "substrate");
+
+        assert_eq!(named(&["--app-name", "../../etc/cron.d/x"]), "substrate");
+        assert_eq!(named(&["--app-name", ".."]), "substrate");
+        assert_eq!(named(&["--app-name", "  "]), "substrate");
+        assert_eq!(named(&["--app-name", "Lun\u{0}aris"]), "substrate");
+        assert_eq!(named(&["--app-name"]), "substrate");
+        assert_eq!(named(&["--app-name", &"L".repeat(65)]), "substrate");
     }
 }
