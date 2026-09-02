@@ -46,7 +46,8 @@ pub use std::time::{Duration, Instant};
 // parent's `use runtime::*` glob reaches them alongside the rest of the
 // runtime half.
 pub use super::artifacts::{
-    bootstrap_ingest, ingest_binary, ingest_component, realize_executable, resolve_component, resolve_selector,
+    bootstrap_ingest, exec_file_name, ingest_binary, ingest_component, realize_executable, resolve_component,
+    resolve_selector,
 };
 pub use super::fleet::{free_local_port, resolve_fleet_store_root, settle_err};
 
@@ -470,7 +471,12 @@ impl FleetServerState {
         // fork-exec'able, so materialize the resolved entry to an
         // executable temp file under this engine's own scratch dir and
         // fork that (ADR-0115 §Execution); the caller never sees the path.
-        let exec_path = self.fleet_store_root.join(engine_id.0.simple().to_string()).join("substrate");
+        //
+        // The file's *name*, though, the user does see: macOS names an
+        // unbundled application after the file it executed and draws that
+        // name as the menu bar's first title, so the spawn's own
+        // `--app-name` names the file (`exec_file_name`, ADR-0212).
+        let exec_path = self.fleet_store_root.join(engine_id.0.simple().to_string()).join(exec_file_name(&recipe.args));
         realize_executable(exec_source, &exec_path)
             .map_err(|e| post(format!("materializing binary {} to {}: {e}", recipe.hash, exec_path.display())))?;
 
