@@ -645,9 +645,12 @@ fn assert_advanced_control_snapshot(snapshot: &[DrawTexturedQuads]) {
     );
 }
 
-/// The numeric's stepper column, as it lands in the composited batch: two
-/// stacked button fills a row height wide at the slot's right end, a hairline
-/// separating them from the value, and a quad-built arrow centered in each.
+/// The numeric's anatomy, as it lands in the composited batch: **one** fill
+/// over the whole slot, a hairline a row height in from its right end, and a
+/// quad-built arrow centered in each half of the column that hairline closes
+/// off. An untouched stepper column paints no surface of its own — the owner's
+/// note was that the field and its arrows read as two elements fighting, and a
+/// second fill at the right end is what that looks like.
 ///
 /// Reads the roles rather than a quad count, because the arrows are a stack of
 /// rows whose number follows the button height — a count would pin the
@@ -657,15 +660,9 @@ fn assert_stepper_column(batch: &DrawTexturedQuads, row_y: f32) {
     let quads_with =
         |tint: Rgba| -> Vec<&TexturedQuad> { batch.quads.iter().filter(|quad| quad.tint == tint).collect() };
 
-    let buttons = quads_with(Theme::DEFAULT.fill(Theme::DEFAULT.surface, ThemeState::Normal));
-    assert_eq!(buttons.len(), 2, "one fill per stepper button; batch: {batch:?}");
-    for button in &buttons {
-        assert_eq!(button.x, column_left, "the column is one row height wide at the slot's right end");
-        assert_eq!(button.width, ROW_HEIGHT);
-        assert_eq!(button.height, ROW_HEIGHT * 0.5, "the two buttons split the row evenly");
-    }
-    assert_eq!(buttons[0].y, row_y, "up sits above");
-    assert_eq!(buttons[1].y, row_y + ROW_HEIGHT * 0.5, "down sits below");
+    let fills = quads_with(Theme::DEFAULT.surface_raised);
+    assert_eq!(fills.len(), 1, "one fill for the whole control, steppers included; batch: {batch:?}");
+    assert_eq!((fills[0].x, fills[0].width), (PANEL_X, PANEL_WIDTH), "and it spans the slot");
 
     let dividers = quads_with(Theme::DEFAULT.outline);
     assert_eq!(dividers.len(), 1, "one hairline divides the arrows from the value they change");
@@ -685,6 +682,16 @@ fn assert_stepper_column(batch: &DrawTexturedQuads, row_y: f32) {
         arrows.iter().any(|row| row.y < row_y + ROW_HEIGHT * 0.5)
             && arrows.iter().any(|row| row.y >= row_y + ROW_HEIGHT * 0.5),
         "both buttons carry one, not one button twice",
+    );
+
+    let painted = [
+        Theme::DEFAULT.surface_raised,
+        Theme::DEFAULT.outline,
+        Theme::DEFAULT.fill(Theme::DEFAULT.text_primary, ThemeState::Normal),
+    ];
+    assert!(
+        batch.quads.iter().all(|quad| painted.contains(&quad.tint)),
+        "the numeric paints one fill, one hairline, and its arrows — nothing else; batch: {batch:?}",
     );
 }
 
