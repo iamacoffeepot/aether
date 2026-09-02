@@ -10,6 +10,13 @@
 //! buffer. Enter or blur commits and canonicalizes, while an invalid commit
 //! reverts. Up/Down step and commit immediately. Clipboard edits use the same
 //! selection and parse paths as typed edits.
+//!
+//! The value and its steppers are **one** control, not a field with a second
+//! box bolted to its right: one fill covers the whole frame, the stepper
+//! column is a region inside that frame separated from the value by a
+//! hairline, and validation / focus outlines ring the lot. A stepper button
+//! composites its hover or pressed overlay over the control's own fill, so the
+//! button under the pointer lights up without ever reading as its own surface.
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_clipboard::{GetClipboardTextResult, SetClipboardTextResult};
@@ -17,16 +24,18 @@ use aether_kinds::keycode::{KEY_DOWN, KEY_ENTER, KEY_UP};
 use aether_kinds::{
     CachedFontMetrics, ImePreedit, Key, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput, mouse_button,
 };
-use aether_text::{FontMetricsRequest, FontMetricsResult, FontRef, TextCapability};
+use aether_math::Rgba;
+use aether_text::FontMetricsResult;
 use alloc::string::{String, ToString};
 
 use crate::set::defaults::WidgetDefaults;
 use crate::set::{
-    SingleLineEdit, accept_clipboard_paste, arm_text_drag, edit_command, push_triangle, quad, release_left,
-    reply_single_line_edit, report_clipboard_copy, run_edit_key, single_line_hit_byte,
+    SingleLineEdit, accept_clipboard_paste, accept_font_metrics_result, apply_text_theme, arm_text_drag, edit_command,
+    measured_text_width, pump_text_font_metrics, push_triangle, quad, release_left, reply_single_line_edit,
+    report_clipboard_copy, run_edit_key, single_line_box_fill, single_line_hit_byte,
 };
 use crate::state::{InteractionState, emit_state_changed};
-use crate::text_edit::{EditPolicy, TextEditState, TextSpan};
+use crate::text_edit::{EditPolicy, FontMetricsAdapter, TextEditState, TextSpan};
 use crate::theme::{SetTheme, Theme, ThemeState};
 use crate::{
     Collect, FocusLost, HoverLost, NumericChanged, NumericConfig, SetWidgetState, WidgetControlState, WidgetDrawItem,
@@ -83,10 +92,10 @@ enum StepDirection {
     Up,
 }
 
-/// The two stacked stepper buttons at the editor's right end. The column is
-/// square — one row height wide — so each button is a comfortable target, and
-/// it never takes more than half the frame, which is what keeps a narrow
-/// numeric from becoming two arrows and no text.
+/// The two stacked stepper buttons inside the editor's frame, at its right
+/// end. The column is square — one row height wide — so each button is a
+/// comfortable target, and it never takes more than half the frame, which is
+/// what keeps a narrow numeric from becoming two arrows and no text.
 #[derive(Debug, Clone, Copy)]
 struct StepperColumn {
     /// The column's left edge in widget-local pixels.
@@ -148,15 +157,14 @@ pub struct NumericWidget {
     hovered_stepper: Option<StepDirection>,
     /// Which stepper button is held down, for its pressed overlay.
     pressed_stepper: Option<StepDirection>,
-    desired_font_id: u32,
-    current_font_id: Option<u32>,
-    inflight_font_id: Option<u32>,
-    metrics: Option<CachedFontMetrics>,
+    /// Single-flight exact metrics for the active theme font: what places the
+    /// caret and what sizes the field to its range.
+    font_metrics: FontMetricsAdapter,
 }
 
 impl NumericWidget {
     fn configured(config: NumericConfig) -> Self {
-        let desired_font_id = config.theme.font_id;
+        let font_metrics = FontMetricsAdapter::new(config.theme.font_id);
         let mut widget = Self {
             min: config.min,
             max: config.max,
@@ -171,10 +179,7 @@ impl NumericWidget {
             paste_pending: false,
             hovered_stepper: None,
             pressed_stepper: None,
-            desired_font_id,
-            current_font_id: None,
-            inflight_font_id: None,
-            metrics: None,
+            font_metrics,
         };
         let initial = widget.normalize(config.initial).or_else(|| widget.normalize(0.0)).unwrap_or(0.0);
         widget.committed_value = initial;
@@ -280,53 +285,39 @@ impl NumericWidget {
         }
     }
 
-    fn set_desired_font_id(&mut self, desired_font_id: u32) {
-        if self.desired_font_id == desired_font_id {
-            return;
-        }
-        self.desired_font_id = desired_font_id;
-        self.current_font_id = None;
-        self.metrics = None;
-    }
-
     fn resolved_metrics(&self) -> Option<&CachedFontMetrics> {
-        (self.current_font_id == Some(self.desired_font_id)).then_some(self.metrics.as_ref()).flatten()
+        self.font_metrics.resolved()
     }
 
-    fn pending_request(&self) -> Option<u32> {
-        if self.inflight_font_id.is_some()
-            || (self.current_font_id == Some(self.desired_font_id) && self.metrics.is_some())
-        {
-            None
-        } else {
-            Some(self.desired_font_id)
-        }
+    /// The measured width of the widest value this range can hold: whichever
+    /// bound renders longer, formatted exactly the way the field formats a
+    /// committed value.
+    ///
+    /// Both bounds, not just `max`, because `-100 .. 20` is widest at its
+    /// minimum — the sign is a character like any other. The formatted text is
+    /// capped at the edit buffer's own character bound so an effectively
+    /// unbounded range (a non-finite bound resolves to `f32::MAX`) asks for a
+    /// field rather than a wall.
+    fn widest_value_width(&self, metrics: &CachedFontMetrics) -> f32 {
+        let bounds = self.bounds();
+        [bounds.min, bounds.max]
+            .map(|value| Self::canonical(value).chars().take(NUMERIC_EDIT_MAX_CHARS as usize).collect::<String>())
+            .iter()
+            .map(|text| measured_text_width(metrics, text, self.theme.value_size_pixels))
+            .fold(0.0, f32::max)
     }
 
-    fn take_pending_request(&mut self) -> Option<u32> {
-        let id = self.pending_request()?;
-        self.inflight_font_id = Some(id);
-        Some(id)
-    }
-
-    fn accept_reply(&mut self, metrics: Option<CachedFontMetrics>) -> bool {
-        let Some(id) = self.inflight_font_id.take() else {
-            return false;
-        };
-        if id != self.desired_font_id {
-            return true;
-        }
-        if let Some(metrics) = metrics {
-            self.current_font_id = Some(id);
-            self.metrics = Some(metrics);
-        }
-        false
-    }
-
-    fn pump_font_metrics(&mut self, ctx: &mut WasmCtx<'_>) {
-        if let Some(id) = self.take_pending_request() {
-            ctx.actor::<TextCapability>().send(&FontMetricsRequest { font: FontRef::Id(id) });
-        }
+    /// The size a layout should give this numeric: the widest value its range
+    /// allows, one pad each side of it, and the stepper column at a row's
+    /// height — so a consumer sizes the field to what it can hold instead of
+    /// guessing.
+    ///
+    /// `None` until the theme font's metrics land, the same pre-measurement
+    /// silence the button keeps: a slot sized from the per-character
+    /// approximation would be resized the moment the real advances arrived.
+    fn intrinsic(&self) -> Option<[f32; 2]> {
+        let width = self.theme.pad.mul_add(2.0, self.widest_value_width(self.resolved_metrics()?));
+        Some([width + self.theme.row_height, self.theme.row_height])
     }
 
     fn steppers(&self) -> Option<StepperColumn> {
@@ -343,23 +334,38 @@ impl NumericWidget {
         self.steppers()?.hit(event_x - self.frame.x, event_y - self.frame.y)
     }
 
-    /// The stepper column's own draw: a divider off the text box, a fill per
-    /// button carrying its own hover / pressed overlay, and the two arrows.
-    fn stepper_items(&self, column: StepperColumn) -> Vec<WidgetDrawItem> {
+    /// Which presentation one stepper button is in. `Disabled` follows the
+    /// control, not the button: a numeric that cannot be mutated has no live
+    /// arrows, so both draw faded however the pointer moves over them.
+    fn stepper_state(&self, direction: StepDirection) -> ThemeState {
+        if !self.state.can_mutate() {
+            ThemeState::Disabled
+        } else if self.pressed_stepper == Some(direction) {
+            ThemeState::Pressed
+        } else if self.hovered_stepper == Some(direction) {
+            ThemeState::Hover
+        } else {
+            ThemeState::Normal
+        }
+    }
+
+    /// The stepper column's draw, inside the control's one frame: the hairline
+    /// that separates the arrows from the value they change, an overlay on the
+    /// button the pointer is on or holding, and the two arrows.
+    ///
+    /// No fill of its own. `box_fill` is the colour the frame is already
+    /// painted, and a button's overlay composites over exactly that, so an
+    /// untouched column is bare control surface and a touched button is that
+    /// same surface lifted — never a second box beside the value.
+    fn stepper_items(&self, column: StepperColumn, box_fill: Rgba) -> Vec<WidgetDrawItem> {
         let theme = &self.theme;
-        let mut items = Vec::with_capacity(2 + TRIANGLE_ROWS_PER_ARROW * 2);
+        let mut items = Vec::with_capacity(3 + TRIANGLE_ROWS_PER_ARROW * 2);
         for direction in [StepDirection::Up, StepDirection::Down] {
             let (top, height) = column.button_span(direction);
-            let button_state = if !self.state.can_mutate() {
-                ThemeState::Disabled
-            } else if self.pressed_stepper == Some(direction) {
-                ThemeState::Pressed
-            } else if self.hovered_stepper == Some(direction) {
-                ThemeState::Hover
-            } else {
-                ThemeState::Normal
-            };
-            items.push(quad(column.left, top, column.width, height, theme.fill(theme.surface, button_state)));
+            let button_state = self.stepper_state(direction);
+            if matches!(button_state, ThemeState::Hover | ThemeState::Pressed) {
+                items.push(quad(column.left, top, column.width, height, theme.fill(box_fill, button_state)));
+            }
 
             let arrow_width = (column.width * ARROW_EXTENT_FRACTION).max(1.0);
             let arrow_height = (height * ARROW_EXTENT_FRACTION).max(1.0);
@@ -373,7 +379,8 @@ impl NumericWidget {
                 theme.fill(theme.text_primary, button_state),
             );
         }
-        // One hairline separating the arrows from the value they change.
+        // The one seam inside the control: a hairline separating the arrows
+        // from the value they change.
         items.push(quad(column.left, 0.0, 1.0, column.height, theme.outline));
         items
     }
@@ -444,7 +451,7 @@ impl WasmActor for NumericWidget {
     }
 
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        self.pump_font_metrics(ctx);
+        pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
 
     #[handler::single]
@@ -452,7 +459,7 @@ impl WasmActor for NumericWidget {
         self.min = config.min;
         self.max = config.max;
         self.step = config.step;
-        self.set_desired_font_id(config.theme.font_id);
+        self.font_metrics.set_desired(config.theme.font_id);
         self.theme = config.theme;
         let initial = self.normalize(config.initial).or_else(|| self.normalize(0.0)).unwrap_or(0.0);
         self.committed_value = initial;
@@ -462,7 +469,7 @@ impl WasmActor for NumericWidget {
         self.hovered_stepper = None;
         self.pressed_stepper = None;
         self.apply_control_state(ctx, config.state);
-        self.pump_font_metrics(ctx);
+        pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
 
     #[handler::single]
@@ -472,9 +479,7 @@ impl WasmActor for NumericWidget {
 
     #[handler::single]
     fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        self.set_desired_font_id(set.theme.font_id);
-        self.theme = set.theme;
-        self.pump_font_metrics(ctx);
+        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
     }
 
     #[handler::single]
@@ -615,33 +620,28 @@ impl WasmActor for NumericWidget {
 
     #[handler::single]
     fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
-        let pump_deferred = match result {
-            FontMetricsResult::Ok { metrics } => self.accept_reply(Some(CachedFontMetrics::new(&metrics))),
-            FontMetricsResult::Err { error } => {
-                tracing::warn!(target: "aether_kit_widget", %error, "numeric font metrics failed");
-                self.accept_reply(None)
-            }
-        };
-        if pump_deferred {
-            self.pump_font_metrics(ctx);
-        }
+        accept_font_metrics_result(ctx, &mut self.font_metrics, result);
     }
 
+    /// Reply the control's one draw: the shared single-line box, the stepper
+    /// column inside it, the outlines around the lot, and the width this
+    /// numeric's own range asks a layout for.
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        let column = self.steppers();
+        let theme_state = self.theme_state();
         let displayed = self.edit.displayed();
         let mut edit = SingleLineEdit::new(
             &displayed,
             self.resolved_metrics(),
             &self.theme,
             &self.state,
-            self.theme_state(),
+            theme_state,
             &self.frame,
         );
-        if let Some(column) = column {
+        edit.intrinsic = self.intrinsic();
+        if let Some(column) = self.steppers() {
             edit.gutter = column.width;
-            edit.gutter_items = self.stepper_items(column);
+            edit.gutter_items = self.stepper_items(column, single_line_box_fill(&self.theme, theme_state));
         }
         reply_single_line_edit(ctx, edit);
     }
@@ -650,6 +650,9 @@ impl WasmActor for NumericWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aether_kinds::FontMetrics;
+    use alloc::vec::Vec;
+
     use crate::set::{EditCommand, apply_edit_command};
 
     fn numeric(min: f32, max: f32, step: f32, initial: f32) -> NumericWidget {
@@ -825,13 +828,35 @@ mod tests {
         assert_eq!(widget.stepper_at(100.0, 4.0), None, "a read-only value is not steppable by pointer either");
     }
 
+    /// Every glyph half the draw size wide, so a measured width is exactly
+    /// `chars * size * 0.5` and the intrinsic arithmetic is checkable by hand.
+    fn uniform_metrics() -> CachedFontMetrics {
+        CachedFontMetrics::new(&FontMetrics {
+            units_per_em: 1000.0,
+            ascent: 800.0,
+            descent: -200.0,
+            line_gap: 0.0,
+            default_advance: 500.0,
+            advances: Vec::new(),
+        })
+    }
+
+    fn with_metrics(widget: &mut NumericWidget) {
+        widget.font_metrics.take_pending_request();
+        widget.font_metrics.accept_reply(Some(uniform_metrics()));
+    }
+
     #[test]
-    fn the_stepper_column_draws_two_buttons_and_leaves_the_text_the_rest() {
+    fn the_stepper_column_overlays_the_control_fill_instead_of_painting_a_second_box() {
+        // Tripwire: the owner's note. The steppers are part of the numeric,
+        // not a box beside it — only the button under the pointer paints, and
+        // it paints the control's own fill lifted, never another palette role.
         let mut widget = numeric(0.0, 10.0, 0.5, 2.0);
         widget.frame = WidgetFrame { x: 0.0, y: 0.0, width: 120.0, height: 24.0 };
         widget.hovered_stepper = Some(StepDirection::Up);
         let column = widget.steppers().expect("steppers");
-        let items = widget.stepper_items(column);
+        let box_fill = single_line_box_fill(&Theme::DEFAULT, ThemeState::Normal);
+        let items = widget.stepper_items(column, box_fill);
 
         let fills: Vec<_> = items
             .iter()
@@ -839,20 +864,70 @@ mod tests {
                 WidgetDrawItem::Quad { x, y, width, height, color, .. }
                     if (*width - column.width).abs() < 1e-4 && *height > 1.0 =>
                 {
-                    Some((*x, *y, *height, *color))
+                    Some((*x, *y, *color))
                 }
                 _ => None,
             })
             .collect();
-        assert_eq!(fills.len(), 2, "one fill per button; items were {items:?}");
-        assert_eq!(fills[0].0, column.left, "both buttons start at the column's left edge");
-        assert_eq!((fills[0].1, fills[1].1), (0.0, column.split_y), "stacked, up above down");
-        assert_eq!(
-            fills[0].3,
-            Theme::DEFAULT.fill(Theme::DEFAULT.surface, ThemeState::Hover),
-            "the hovered button carries the hover overlay on its own",
+        assert_eq!(fills.len(), 1, "only the touched button paints; items were {items:?}");
+        assert_eq!((fills[0].0, fills[0].1), (column.left, 0.0), "the hovered up button, at the column's left edge");
+        assert_eq!(fills[0].2, Theme::DEFAULT.fill(box_fill, ThemeState::Hover), "the control's fill, lifted");
+
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, WidgetDrawItem::Quad { color, .. } if *color == Theme::DEFAULT.surface)),
+            "no part of the column fills itself from a second surface role; items were {items:?}",
         );
-        assert_eq!(fills[1].3, Theme::DEFAULT.fill(Theme::DEFAULT.surface, ThemeState::Normal));
+        let hairlines = items.iter().filter(|item| {
+            matches!(item, WidgetDrawItem::Quad { x, width, height, color, .. }
+                if *x == column.left && *width == 1.0 && *height == column.height && *color == Theme::DEFAULT.outline)
+        });
+        assert_eq!(hairlines.count(), 1, "one hairline is the whole seam; items were {items:?}");
+    }
+
+    #[test]
+    fn the_intrinsic_width_fits_the_widest_value_the_range_allows_plus_pads_and_the_column() {
+        // Tripwire: a consumer sizes the field from this number, so it has to
+        // hold the range's longest formatted value — here the negative bound,
+        // not `max` — with a pad each side and the stepper column beside it.
+        let mut widget = numeric(-100.0, 20.0, 1.0, 0.0);
+        assert_eq!(widget.intrinsic(), None, "no guessed size before the font's advances land");
+
+        with_metrics(&mut widget);
+        let theme = &Theme::DEFAULT;
+        let advance = theme.value_size_pixels * 0.5;
+        let intrinsic = widget.intrinsic().expect("measured");
+        assert_eq!(
+            intrinsic,
+            [advance.mul_add(4.0, theme.pad * 2.0) + theme.row_height, theme.row_height],
+            "\"-100\" plus two pads plus a square stepper column",
+        );
+
+        let mut wider_max = numeric(-1.0, 20000.0, 1.0, 0.0);
+        with_metrics(&mut wider_max);
+        assert_eq!(
+            wider_max.intrinsic().expect("measured")[0],
+            advance.mul_add(5.0, theme.pad * 2.0) + theme.row_height,
+            "the widest bound wins whichever end it is",
+        );
+    }
+
+    #[test]
+    fn an_unbounded_range_asks_for_a_field_rather_than_a_wall() {
+        // Tripwire: the bounds fall back to f32::MIN / MAX, whose canonical
+        // text is 39 characters — wider than the buffer can ever hold, so the
+        // reported width is capped at the buffer's own bound.
+        let mut widget = numeric(f32::NAN, f32::NAN, 1.0, 0.0);
+        with_metrics(&mut widget);
+        let theme = &Theme::DEFAULT;
+        let advance = theme.value_size_pixels * 0.5;
+        #[allow(clippy::cast_precision_loss)]
+        let capped = NUMERIC_EDIT_MAX_CHARS as f32;
+        assert_eq!(
+            widget.intrinsic().expect("measured")[0],
+            advance.mul_add(capped, theme.pad * 2.0) + theme.row_height
+        );
     }
 
     #[test]
