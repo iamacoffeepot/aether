@@ -10,7 +10,7 @@
 //! `open_row_count` option rows below it in its **overlay**
 //! ([`WidgetDrawList::overlay`]) so the list escapes the slot clip and lands
 //! over every ordinary draw of the cluster. While open it asks the root for
-//! the pointer grab through [`DropdownOpenChanged`], so a press anywhere on
+//! the pointer grab through [`crate::DropdownOpenChanged`], so a press anywhere on
 //! the window reaches it: a press on a row selects and closes, any other
 //! press closes without a change. The current row is drawn in the selection
 //! role, never the accent — a chosen thing is a state, not a button.
