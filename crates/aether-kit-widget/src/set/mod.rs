@@ -295,14 +295,30 @@ pub(crate) fn quad(x: f32, y: f32, width: f32, height: f32, color: Rgba) -> Widg
 }
 
 /// Push a `thickness`-pixel border ring around the `width` × `height` local
-/// rect — four thin quads (top, bottom, left, right). A focused widget draws
-/// this from `theme.accent` so the focus ring reads without the root holding
-/// any per-widget-type visual knowledge.
+/// rect whose top-left is `(x, y)` — four thin quads (top, bottom, left,
+/// right). The offset form is what an overlay plate needs: a dropdown's list
+/// and a menu's items are rings around a rect the widget's own origin is not
+/// the corner of.
+pub(crate) fn push_rect_border(
+    items: &mut Vec<WidgetDrawItem>,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    thickness: f32,
+    color: Rgba,
+) {
+    items.push(quad(x, y, width, thickness, color));
+    items.push(quad(x, y + height - thickness, width, thickness, color));
+    items.push(quad(x, y, thickness, height, color));
+    items.push(quad(x + width - thickness, y, thickness, height, color));
+}
+
+/// Push a `thickness`-pixel border ring around the whole `width` × `height`
+/// local rect. A focused widget draws this from `theme.accent` so the focus
+/// ring reads without the root holding any per-widget-type visual knowledge.
 pub(crate) fn push_border(items: &mut Vec<WidgetDrawItem>, width: f32, height: f32, thickness: f32, color: Rgba) {
-    items.push(quad(0.0, 0.0, width, thickness, color));
-    items.push(quad(0.0, height - thickness, width, thickness, color));
-    items.push(quad(0.0, 0.0, thickness, height, color));
-    items.push(quad(width - thickness, 0.0, thickness, height, color));
+    push_rect_border(items, 0.0, 0.0, width, height, thickness, color);
 }
 
 fn push_inset_border(
@@ -452,4 +468,74 @@ fn single_line_edit_draw_items(
 /// [`APPROX_ADVANCE_RATIO`]).
 pub(crate) fn text_origin_y(row_top: f32, row_height: f32, size_pixels: f32) -> f32 {
     (row_height - size_pixels).mul_add(0.5, row_top)
+}
+
+/// The slot a row-local `x` lands in, over `widths` laid out left to right
+/// from `0.0` with `gap` between them. `None` in a gap, left of the first
+/// slot, or past the last — a row of content-sized targets (a tab strip's
+/// tabs, a menu bar's titles) is a row of separate targets, not one
+/// partitioned bar, so the space between two of them belongs to neither.
+fn slot_at_local_x(widths: &[f32], gap: f32, local_x: f32) -> Option<usize> {
+    if !local_x.is_finite() || local_x < 0.0 {
+        return None;
+    }
+    let mut left = 0.0;
+    for (index, width) in widths.iter().enumerate() {
+        if local_x < left + width {
+            return (local_x >= left).then_some(index);
+        }
+        left += width + gap;
+    }
+    None
+}
+
+/// The local x of slot `index`'s left edge in that same layout.
+fn slot_left(widths: &[f32], gap: f32, index: usize) -> f32 {
+    widths.iter().take(index).map(|width| width + gap).sum()
+}
+
+/// The interim widths a content-sized row lays out with before its font's
+/// metrics arrive: the row split evenly, the gaps taken out first. Replaced by
+/// the measured widths on the first `Collect` after the reply lands.
+fn even_split_widths(count: usize, width: f32, gap: f32) -> Vec<f32> {
+    if count == 0 {
+        return Vec::new();
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let slots = count as f32;
+    alloc::vec![((slots - 1.0).mul_add(-gap, width) / slots).max(0.0); count]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pointer_buckets_into_the_slot_it_is_over_and_into_no_slot_in_a_gap() {
+        let widths = [30.0, 50.0, 20.0];
+        assert_eq!(slot_at_local_x(&widths, 4.0, 0.0), Some(0));
+        assert_eq!(slot_at_local_x(&widths, 4.0, 29.9), Some(0));
+        assert_eq!(slot_at_local_x(&widths, 4.0, 31.0), None, "the gap after the first slot selects nothing");
+        assert_eq!(slot_at_local_x(&widths, 4.0, 34.0), Some(1));
+        assert_eq!(slot_at_local_x(&widths, 4.0, 88.0), Some(2));
+        assert_eq!(slot_at_local_x(&widths, 4.0, 108.0), None, "past the last slot is off the row");
+        assert_eq!(slot_at_local_x(&widths, 4.0, -1.0), None);
+        assert_eq!(slot_at_local_x(&[], 4.0, 0.0), None);
+    }
+
+    #[test]
+    fn unequal_slot_widths_bucket_by_their_own_extents() {
+        // The bug an even split hides: with widths 10 / 90, x = 50 is the
+        // second slot, while halves-of-the-row arithmetic calls it the first.
+        assert_eq!(slot_at_local_x(&[10.0, 90.0], 0.0, 50.0), Some(1));
+    }
+
+    #[test]
+    fn a_slot_starts_past_every_earlier_slot_and_the_gaps_between_them() {
+        let widths = [30.0, 50.0, 20.0];
+        assert_eq!(slot_left(&widths, 4.0, 0), 0.0);
+        assert_eq!(slot_left(&widths, 4.0, 1), 34.0);
+        assert_eq!(slot_left(&widths, 4.0, 2), 88.0);
+        assert_eq!(slot_at_local_x(&widths, 4.0, slot_left(&widths, 4.0, 2)), Some(2), "the left edge is inclusive");
+    }
 }

@@ -1,8 +1,6 @@
 // `#[handler]` methods take their decoded mail by value per the ADR-0033
 // dispatch ABI (see `widget/mod.rs`).
 #![allow(clippy::needless_pass_by_value)]
-// The tab count crosses into pixel arithmetic for the pre-metrics even split.
-#![allow(clippy::cast_precision_loss)]
 
 //! The tab strip: one row of tabs selecting one of several parallel content
 //! sets.
@@ -31,8 +29,9 @@ use aether_kinds::{Key, MouseButton, MouseButtonRelease, MouseMove};
 use aether_text::FontMetricsResult;
 
 use crate::set::{
-    WidgetDefaults, accept_font_metrics_result, apply_text_theme, clamp_option_index, measured_text_width,
-    pump_text_font_metrics, push_control_outlines, quad, release_left, reply_if_hidden, text_origin_y,
+    WidgetDefaults, accept_font_metrics_result, apply_text_theme, clamp_option_index, even_split_widths,
+    measured_text_width, pump_text_font_metrics, push_control_outlines, quad, release_left, reply_if_hidden,
+    slot_at_local_x, text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
@@ -79,11 +78,11 @@ impl TabStripWidget {
             .iter()
             .map(|label| metrics.map(|metrics| self.theme.pad.mul_add(2.0, measured_text_width(metrics, label, size))))
             .collect();
-        measured.unwrap_or_else(|| even_split(self.labels.len(), self.frame.width, self.theme.space(1)))
+        measured.unwrap_or_else(|| even_split_widths(self.labels.len(), self.frame.width, self.theme.space(1)))
     }
 
     fn tab_at_pointer_x(&self, pointer_x: f32) -> Option<usize> {
-        tab_at_local_x(&self.tab_widths(), self.theme.space(1), pointer_x - self.frame.x)
+        slot_at_local_x(&self.tab_widths(), self.theme.space(1), pointer_x - self.frame.x)
     }
 
     /// Select the tab under the pointer. Returns the new index only when the
@@ -356,35 +355,6 @@ impl WasmActor for TabStripWidget {
     }
 }
 
-/// The tab a strip-local `x` lands in, over `widths` laid out left to right
-/// from `0.0` with `gap` between them. `None` in a gap, left of the first
-/// tab, or past the last — a tab strip is a row of separate targets, not one
-/// partitioned bar, so the space between two tabs belongs to neither.
-fn tab_at_local_x(widths: &[f32], gap: f32, local_x: f32) -> Option<usize> {
-    if !local_x.is_finite() || local_x < 0.0 {
-        return None;
-    }
-    let mut left = 0.0;
-    for (index, width) in widths.iter().enumerate() {
-        if local_x < left + width {
-            return (local_x >= left).then_some(index);
-        }
-        left += width + gap;
-    }
-    None
-}
-
-/// The interim tab widths the strip lays out with before its font's metrics
-/// arrive: the row split evenly, the gaps taken out first. Replaced by the
-/// measured widths on the first `Collect` after the reply lands.
-fn even_split(count: usize, width: f32, gap: f32) -> Vec<f32> {
-    if count == 0 {
-        return Vec::new();
-    }
-    let tabs = count as f32;
-    alloc::vec![((tabs - 1.0).mul_add(-gap, width) / tabs).max(0.0); count]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,26 +370,6 @@ mod tests {
             hovered_tab: None,
             font_metrics: FontMetricsAdapter::new(0),
         }
-    }
-
-    #[test]
-    fn a_pointer_buckets_into_the_tab_it_is_over_and_into_no_tab_in_a_gap() {
-        let widths = [30.0, 50.0, 20.0];
-        assert_eq!(tab_at_local_x(&widths, 4.0, 0.0), Some(0));
-        assert_eq!(tab_at_local_x(&widths, 4.0, 29.9), Some(0));
-        assert_eq!(tab_at_local_x(&widths, 4.0, 31.0), None, "the gap after the first tab selects nothing");
-        assert_eq!(tab_at_local_x(&widths, 4.0, 34.0), Some(1));
-        assert_eq!(tab_at_local_x(&widths, 4.0, 88.0), Some(2));
-        assert_eq!(tab_at_local_x(&widths, 4.0, 108.0), None, "past the last tab is off the strip");
-        assert_eq!(tab_at_local_x(&widths, 4.0, -1.0), None);
-        assert_eq!(tab_at_local_x(&[], 4.0, 0.0), None);
-    }
-
-    #[test]
-    fn unequal_tab_widths_bucket_by_their_own_extents() {
-        // The bug an even split hides: with widths 10 / 90, x = 50 is the
-        // second tab, while thirds-of-the-row arithmetic calls it the first.
-        assert_eq!(tab_at_local_x(&[10.0, 90.0], 0.0, 50.0), Some(1));
     }
 
     #[test]
