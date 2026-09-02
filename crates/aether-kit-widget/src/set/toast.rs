@@ -26,6 +26,11 @@
 //! save result, a planner refusal, and a confirmation all arrive through the
 //! same door and land in the same place.
 //!
+//! Round-4 note 15 — "toast text can be larger" — is [`ToastConfig::role`]:
+//! the region names a step on the theme's type scale and the theme resolves
+//! the size, rather than the region carrying a pixel size of its own. The
+//! plate follows the role it is given, line box and wrap measure alike.
+//!
 //! # How a widget tells the time
 //!
 //! It counts the frames it is asked to draw. Widgets never subscribe to the
@@ -56,7 +61,7 @@ use crate::set::{
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
-use crate::theme::{SetTheme, Theme};
+use crate::theme::{SetTheme, TextRole, Theme};
 use crate::{Collect, SetWidgetState, WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame};
 
 /// What a notice is: a report, a caution, or a failure. The three are drawn
@@ -121,6 +126,18 @@ pub struct ToastConfig {
     /// How many `Collect` frames a notice stands for before it leaves. Zero
     /// keeps every notice until the cap pushes it out.
     pub lifetime_frames: u32,
+    /// The type step a notice's line is set at. [`TextRole::Body`] — the
+    /// reading size, which is what the region drew before this field existed —
+    /// unless a host asks for another.
+    ///
+    /// Round-4 note 15 is one word long: "toast text can be larger." The size
+    /// is a *theme* fact, not a toast fact — the kit has one type scale and a
+    /// widget names its step on it rather than carrying a pixel size of its
+    /// own — so the region takes a role and the theme resolves it. The whole
+    /// plate follows: the line box, the wrap measure, and therefore how far
+    /// down the region the stack reaches.
+    #[serde(default)]
+    pub role: TextRole,
     pub theme: Theme,
     #[serde(default)]
     pub state: WidgetControlState,
@@ -131,6 +148,7 @@ impl Default for ToastConfig {
         Self {
             max_standing: DEFAULT_MAX_STANDING,
             lifetime_frames: DEFAULT_LIFETIME_FRAMES,
+            role: TextRole::default(),
             theme: Theme::default(),
             state: WidgetControlState::default(),
         }
@@ -201,6 +219,8 @@ pub struct ToastWidget {
     standing: Vec<Standing>,
     max_standing: usize,
     lifetime_frames: u32,
+    /// The type step every notice's line is set at.
+    role: TextRole,
     theme: Theme,
     frame: WidgetFrame,
     state: InteractionState,
@@ -210,10 +230,17 @@ pub struct ToastWidget {
 }
 
 impl ToastWidget {
-    /// One line's width at the body size: measured once the font's metrics
-    /// resolve, approximated for the frame or two before that.
+    /// The pixel size the region's configured role comes to in the live
+    /// theme. One lookup, so the wrap, the line box, and the draw cannot be
+    /// set at three different sizes.
+    fn size_pixels(&self) -> f32 {
+        self.theme.text_size_pixels(self.role)
+    }
+
+    /// One line's width at the region's own type size: measured once the
+    /// font's metrics resolve, approximated for the frame or two before that.
     fn text_width(&self, text: &str) -> f32 {
-        let size = self.theme.label_size_pixels;
+        let size = self.size_pixels();
         self.font_metrics.resolved().map_or_else(
             || approx_text_width(text.chars().count(), size),
             |metrics| measured_text_width(metrics, text, size),
@@ -232,9 +259,9 @@ impl ToastWidget {
         (self.theme.space_unit_pixels * BAR_UNIT_RATIO).max(1.0)
     }
 
-    /// One line's box height at the body size.
+    /// One line's box height at the region's own type size.
     fn line_height(&self) -> f32 {
-        self.theme.label_size_pixels * LINE_LEADING
+        self.size_pixels() * LINE_LEADING
     }
 
     /// One notice wrapped to the region's width. Never elided: the round-3
@@ -316,7 +343,7 @@ impl ToastWidget {
         let pad = self.theme.space(PAD_UNITS);
         let bar = self.bar_width();
         let line_height = self.line_height();
-        let size = self.theme.label_size_pixels;
+        let size = self.size_pixels();
 
         let mut items = Vec::new();
         let mut top = 0.0;
@@ -394,6 +421,7 @@ impl WasmActor for ToastWidget {
             standing: Vec::new(),
             max_standing: usize::try_from(config.max_standing).unwrap_or(usize::MAX),
             lifetime_frames: config.lifetime_frames,
+            role: config.role,
             theme: config.theme,
             state: InteractionState::new(config.state),
             frame: WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
@@ -421,6 +449,7 @@ impl WasmActor for ToastWidget {
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: ToastConfig) {
         self.max_standing = usize::try_from(config.max_standing).unwrap_or(usize::MAX);
         self.lifetime_frames = config.lifetime_frames;
+        self.role = config.role;
         let before = self.standing.len();
         self.standing.truncate(self.max_standing);
         let changed = self.standing.len() != before;
@@ -488,6 +517,7 @@ mod tests {
             standing: Vec::new(),
             max_standing,
             lifetime_frames,
+            role: TextRole::Body,
             theme: Theme::DEFAULT,
             state: InteractionState::new(WidgetControlState::default()),
             frame: WidgetFrame { x: 400.0, y: 40.0, width: 320.0, height: 200.0 },
@@ -553,6 +583,34 @@ mod tests {
         assert!(toasts.plate_heights()[0] > short, "and the plate grew with it");
         for line in &wrapped {
             assert!(toasts.text_width(line) <= toasts.text_width_budget(), "{line:?} ran past the region's own width");
+        }
+    }
+
+    #[test]
+    fn the_configured_role_sets_the_line_box_and_the_wrap_together() {
+        // Tripwire: round-4 note 15. One role has to reach every size the
+        // plate is built from — a bigger line drawn at a body-sized line box
+        // overprints its neighbour, and one wrapped at the body measure runs
+        // past the region's width. The default is the reading size the region
+        // drew at before the field existed.
+        let text = "Not enough passive points remain to allocate the whole path.";
+        let mut body = region(3, 0);
+        assert_eq!(body.role, TextRole::Body, "the default is what the region always drew at");
+        assert_eq!(body.size_pixels(), Theme::DEFAULT.label_size_pixels);
+        assert!(body.raise(notice(text)));
+
+        let mut heading = region(3, 0);
+        heading.role = TextRole::Heading;
+        assert!(heading.raise(notice(text)));
+
+        assert!(heading.line_height() > body.line_height(), "a larger role takes a taller line box");
+        assert!(
+            heading.wrapped(&heading.standing[0]).len() >= body.wrapped(&body.standing[0]).len(),
+            "and wraps no later than the smaller one at the same region width",
+        );
+        assert!(heading.plate_heights()[0] > body.plate_heights()[0], "so the plate grows with the type");
+        for line in &heading.wrapped(&heading.standing[0]) {
+            assert!(heading.text_width(line) <= heading.text_width_budget(), "{line:?} ran past the region's width");
         }
     }
 
