@@ -186,15 +186,22 @@ impl Composite {
     /// chrome stays in this node's local space for its eventual parent to
     /// constrain. A slot still `None` (called before completion) contributes
     /// nothing; call once [`Self::is_complete`].
+    ///
+    /// A child's `overlay` is offset by its slot origin like any draw but never
+    /// intersected with the slot clip, and lands in the flattened list's own
+    /// `overlay` — so an open dropdown's list escapes its row and the root
+    /// emits it after every ordinary item of the whole cluster.
     #[must_use]
     pub fn flatten(&self, intrinsic: Option<[f32; 2]>) -> WidgetDrawList {
         let mut items = self.chrome.clone();
+        let mut overlay = Vec::new();
         for slot in &self.slots {
             if let Some(list) = &slot.list {
                 items.extend(list.items.iter().filter_map(|item| item.offset(slot.origin).intersect_clip(slot.clip)));
+                overlay.extend(list.overlay.iter().map(|item| item.offset(slot.origin)));
             }
         }
-        WidgetDrawList { intrinsic, items }
+        WidgetDrawList { intrinsic, items, overlay }
     }
 }
 
@@ -233,7 +240,7 @@ mod tests {
     }
 
     fn list(items: Vec<WidgetDrawItem>) -> WidgetDrawList {
-        WidgetDrawList { intrinsic: None, items }
+        WidgetDrawList { intrinsic: None, items, overlay: Vec::new() }
     }
 
     #[test]

@@ -421,6 +421,17 @@ fn text_items(list: &WidgetDrawList) -> Vec<DrawText> {
 /// peer compositor in another crate (the terrain workbench panel) reuses the
 /// same single-sender flush for its own composite.
 pub fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
+    emit_layer(ctx, list);
+    if !list.overlay.is_empty() {
+        emit_layer(ctx, &WidgetDrawList { intrinsic: None, items: list.overlay.clone(), overlay: Vec::new() });
+    }
+}
+
+/// One layer of a flattened list — its `items` — as solid / textured runs
+/// then one text batch. Called for the ordinary items and again for the
+/// overlay, so an overlay's quads and glyphs are submitted after every
+/// ordinary quad and glyph respectively.
+fn emit_layer(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
     for run in direct_runs(list) {
         match run {
             DirectRun::Solid { clip, quads } => {
@@ -483,6 +494,7 @@ mod tests {
         let b = WidgetClipRect { x: 5.0, y: 6.0, width: 7.0, height: 8.0 };
         let list = WidgetDrawList {
             intrinsic: None,
+            overlay: Vec::new(),
             items: vec![
                 quad(0.0, Some(a)),
                 textured(7, 1.0, Some(a)),
@@ -556,8 +568,11 @@ mod tests {
     #[test]
     fn direct_planner_keeps_unclipped_solids_one_batch_and_omits_invalid_clips() {
         let invalid = WidgetClipRect { x: 0.0, y: 0.0, width: -1.0, height: 2.0 };
-        let list =
-            WidgetDrawList { intrinsic: None, items: vec![quad(1.0, None), quad(2.0, Some(invalid)), quad(3.0, None)] };
+        let list = WidgetDrawList {
+            intrinsic: None,
+            items: vec![quad(1.0, None), quad(2.0, Some(invalid)), quad(3.0, None)],
+            overlay: Vec::new(),
+        };
         let runs = direct_runs(&list);
         assert_eq!(runs.len(), 1);
         assert!(matches!(
@@ -572,6 +587,7 @@ mod tests {
         let invalid = WidgetClipRect { x: 0.0, y: 0.0, width: -1.0, height: 2.0 };
         let list = WidgetDrawList {
             intrinsic: None,
+            overlay: Vec::new(),
             items: vec![
                 text(10.0, "first", None),
                 quad(0.0, None),

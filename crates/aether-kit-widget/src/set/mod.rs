@@ -31,12 +31,14 @@
 
 pub mod button;
 pub mod defaults;
+pub mod dropdown;
 pub mod image;
 pub mod label;
 pub mod numeric;
 pub mod radio;
 pub mod segmented;
 pub mod slider;
+pub mod tab_strip;
 pub mod text_area;
 pub mod text_field;
 pub mod toggle;
@@ -44,12 +46,14 @@ pub mod virtual_list;
 
 pub use button::ButtonWidget;
 pub use defaults::WidgetDefaults;
+pub use dropdown::DropdownWidget;
 pub use image::ImageWidget;
 pub use label::LabelWidget;
 pub use numeric::NumericWidget;
 pub use radio::RadioGroupWidget;
 pub use segmented::SegmentedWidget;
 pub use slider::SliderWidget;
+pub use tab_strip::TabStripWidget;
 pub use text_area::TextAreaWidget;
 pub use text_field::TextFieldWidget;
 pub use toggle::ToggleWidget;
@@ -224,7 +228,7 @@ pub(super) fn reply_if_hidden(ctx: &WasmCtx<'_>, state: &InteractionState) -> bo
         return false;
     }
     if let Some(parent) = ctx.parent() {
-        parent.send(&WidgetDrawList { intrinsic: None, items: Vec::new() });
+        parent.send(&WidgetDrawList { intrinsic: None, items: Vec::new(), overlay: Vec::new() });
     }
     true
 }
@@ -238,7 +242,7 @@ fn reply_with_draw_items(
         return;
     }
     if let Some(parent) = ctx.parent() {
-        parent.send(&WidgetDrawList { intrinsic: None, items: draw_items() });
+        parent.send(&WidgetDrawList { intrinsic: None, items: draw_items(), overlay: Vec::new() });
     }
 }
 

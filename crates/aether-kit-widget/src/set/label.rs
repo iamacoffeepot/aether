@@ -99,7 +99,7 @@ impl WasmActor for LabelWidget {
             });
         }
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { intrinsic: None, items });
+            parent.send(&WidgetDrawList { intrinsic: None, items, overlay: Vec::new() });
         }
     }
 }

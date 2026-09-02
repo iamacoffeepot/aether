@@ -36,7 +36,7 @@ use aether_data::MailboxId;
 use aether_math::{Rgba, Vec2};
 use serde::{Deserialize, Serialize};
 
-use crate::theme::Theme;
+use crate::theme::{TextRole, Theme};
 
 /// `aether.kit.widget.collect` — a per-frame poll a compositing node
 /// sends to each of its children in layout order. The child answers with
@@ -276,11 +276,20 @@ impl WidgetDrawItem {
 /// content size (`[width, height]`) when the parent needs it to position a
 /// content-sized slot — a cached event, never a pull — and `None` when the
 /// widget's size is externally fixed.
+///
+/// `overlay` is the widget's draws that must land **over everything else the
+/// cluster draws this frame** — an open dropdown's list, a popover — in the
+/// same local coordinates as `items`. A compositing parent offsets a child's
+/// overlay by the child's slot origin like any draw, but never intersects it
+/// with the slot clip (the whole point is to escape the slot), and carries it
+/// up as its own `overlay` so the root emits every overlay after every
+/// ordinary item. Empty for the ordinary widget.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[kind(name = "aether.kit.widget.draw_list")]
 pub struct WidgetDrawList {
     pub intrinsic: Option<[f32; 2]>,
     pub items: Vec<WidgetDrawItem>,
+    pub overlay: Vec<WidgetDrawItem>,
 }
 
 /// The fixed size of a scroll viewport or its authored content, in logical
@@ -420,6 +429,14 @@ pub enum WidgetKind {
     /// A typed and steppable bounded number — `config` decodes as
     /// [`NumericConfig`]. Appended to preserve established discriminants.
     Numeric,
+    /// One current choice with the alternatives in a list that opens on
+    /// demand — `config` decodes as [`DropdownConfig`]. Appended to
+    /// preserve established discriminants.
+    Dropdown,
+    /// A single row of tabs selecting one of several parallel content
+    /// sets — `config` decodes as [`TabStripConfig`]. Appended to
+    /// preserve established discriminants.
+    TabStrip,
 }
 
 impl WidgetKind {
@@ -451,6 +468,8 @@ impl WidgetKind {
             Self::Toggle => aether_data::mailbox_id_from_name("aether.kit.widget.toggle").0,
             Self::Segmented => aether_data::mailbox_id_from_name("aether.kit.widget.segmented").0,
             Self::Numeric => aether_data::mailbox_id_from_name("aether.kit.widget.numeric").0,
+            Self::Dropdown => aether_data::mailbox_id_from_name("aether.kit.widget.dropdown").0,
+            Self::TabStrip => aether_data::mailbox_id_from_name("aether.kit.widget.tab_strip").0,
             Self::Composite | Self::Scroll | Self::BehaviorHost => return None,
         };
         Some(tag)
@@ -679,8 +698,56 @@ pub struct RadioConfig {
 #[kind(name = "aether.kit.widget.virtual_list.config")]
 pub struct VirtualListConfig {
     pub items: Vec<String>,
-    pub initial_selected_index: u32,
+    /// The row selected at boot, or `None` for no selection — a list whose
+    /// model holds no current item shows none, rather than lighting its
+    /// first row as if it did.
+    pub initial_selected_index: Option<u32>,
     pub visible_row_count: u32,
+    /// The one caption line drawn in place of rows when `items` is empty
+    /// (`"No saved builds"`), in the caption role and muted ink. An empty
+    /// string draws nothing.
+    #[serde(default)]
+    pub empty_text: String,
+    pub theme: Theme,
+    #[serde(default)]
+    pub state: WidgetControlState,
+}
+
+/// `aether.kit.widget.dropdown.config` — one current choice among
+/// `options`, shown closed as the current option's name (or `placeholder`
+/// when nothing is selected) with a chevron, and opened by a press into a
+/// list of at most `open_row_count` realized rows drawn in the widget's
+/// overlay (see [`WidgetDrawList::overlay`]) below the closed row. A press on
+/// a row selects it and closes; Escape or a press elsewhere closes without a
+/// change. While open the widget holds the root's pointer grab, reported
+/// through [`DropdownOpenChanged`]. Use it for a choice whose current value is
+/// what matters and whose alternatives are secondary; three or more options.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
+#[kind(name = "aether.kit.widget.dropdown.config")]
+pub struct DropdownConfig {
+    pub options: Vec<String>,
+    pub initial_selected_index: Option<u32>,
+    /// What the closed row reads when nothing is selected.
+    #[serde(default)]
+    pub placeholder: String,
+    /// Rows the open list realizes at once; a longer option vector scrolls
+    /// inside them.
+    pub open_row_count: u32,
+    pub theme: Theme,
+    #[serde(default)]
+    pub state: WidgetControlState,
+}
+
+/// `aether.kit.widget.tab_strip.config` — one horizontal row of `labels`,
+/// each sized to its text plus padding, with the selected tab marked by the
+/// selection role and an underline. A press or a focused Left/Right selects.
+/// Tabs are for parallel content sets viewed one at a time; keep labels to a
+/// word or two.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
+#[kind(name = "aether.kit.widget.tab_strip.config")]
+pub struct TabStripConfig {
+    pub labels: Vec<String>,
+    pub initial_index: u32,
     pub theme: Theme,
     #[serde(default)]
     pub state: WidgetControlState,
@@ -755,9 +822,29 @@ impl Default for NumericConfig {
 #[kind(name = "aether.kit.widget.label.config")]
 pub struct LabelConfig {
     pub text: String,
+    /// Which step of the type scale the text is set at; `Body` unless the
+    /// label is a title, a heading, or a caption.
+    #[serde(default)]
+    pub role: TextRole,
+    /// Where the text sits in the assigned frame. `End` is what a column of
+    /// numbers wants, so magnitudes line up on their last digit.
+    #[serde(default)]
+    pub align: TextAlign,
     pub theme: Theme,
     #[serde(default)]
     pub state: WidgetControlState,
+}
+
+/// Horizontal placement of a run of text inside the frame that carries it.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextAlign {
+    /// Flush with the frame's left edge (after padding, where a widget pads).
+    #[default]
+    Start,
+    /// Centred on the frame's width.
+    Center,
+    /// Flush with the frame's right edge.
+    End,
 }
 
 /// How an [`ImageConfig`]'s natural size maps into its parent-owned frame.
@@ -874,6 +961,32 @@ pub struct SegmentedSelected {
 pub struct NumericChanged {
     pub value: f32,
     pub committed: bool,
+}
+
+/// `aether.kit.widget.dropdown.selected` — the dropdown's current choice
+/// changed to `index`. Emitted only on an actual change.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[kind(name = "aether.kit.widget.dropdown.selected")]
+pub struct DropdownSelected {
+    pub index: u32,
+}
+
+/// `aether.kit.widget.dropdown.open_changed` — the dropdown opened or closed
+/// its list. The root answers `open: true` by granting the sender the pointer
+/// grab ([`crate::focus::Focus::begin_grab`]) so a press anywhere reaches it,
+/// and `open: false` by ending the grab.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[kind(name = "aether.kit.widget.dropdown.open_changed")]
+pub struct DropdownOpenChanged {
+    pub open: bool,
+}
+
+/// `aether.kit.widget.tab_strip.selected` — the selected tab changed to
+/// `index`. Emitted only on an actual change.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[kind(name = "aether.kit.widget.tab_strip.selected")]
+pub struct TabSelected {
+    pub index: u32,
 }
 
 /// `aether.kit.widget.frame` — the layout rect the root assigns a child,

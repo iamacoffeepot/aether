@@ -60,16 +60,17 @@ use crate::focus::{
     AvailabilityEffects, Focus, FocusDirection, FocusEligibility, FocusRect, FocusTransition, HoverTransition,
 };
 use crate::set::{
-    ButtonWidget, ImageWidget, LabelWidget, NumericWidget, RadioGroupWidget, SegmentedWidget, SliderWidget,
-    TextAreaWidget, TextFieldWidget, ToggleWidget, VirtualListWidget, quad,
+    ButtonWidget, DropdownWidget, ImageWidget, LabelWidget, NumericWidget, RadioGroupWidget, SegmentedWidget,
+    SliderWidget, TabStripWidget, TextAreaWidget, TextFieldWidget, ToggleWidget, VirtualListWidget, quad,
 };
-use crate::theme::{SetTheme, Theme};
+use crate::theme::{SetTheme, TextRole, Theme};
 use crate::{
-    ButtonClicked, ButtonConfig, Collect, FocusGained, FocusLost, HoverGained, HoverLost, ImageConfig, LabelConfig,
-    NumericChanged, NumericConfig, PanelConfig, RadioConfig, RadioSelected, ScrollConfig, ScrollExtent, ScrollOutcome,
-    ScrollResidual, ScrollWidget, SegmentedConfig, SegmentedSelected, SliderChanged, SliderConfig, TextAreaConfig,
-    TextCommitted, TextFieldConfig, ToggleChanged, ToggleConfig, VirtualListConfig, VirtualListSelected, Widget,
-    WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged,
+    ButtonClicked, ButtonConfig, Collect, DropdownConfig, FocusGained, FocusLost, HoverGained, HoverLost, ImageConfig,
+    LabelConfig, NumericChanged, NumericConfig, PanelConfig, RadioConfig, RadioSelected, ScrollConfig, ScrollExtent,
+    ScrollOutcome, ScrollResidual, ScrollWidget, SegmentedConfig, SegmentedSelected, SliderChanged, SliderConfig,
+    TabStripConfig, TextAlign, TextAreaConfig, TextCommitted, TextFieldConfig, ToggleChanged, ToggleConfig,
+    VirtualListConfig, VirtualListSelected, Widget, WidgetChildSpec, WidgetClipRect, WidgetControlState,
+    WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged,
 };
 use crate::{FrameDischarge, decode_nested_widget_config};
 use crate::{accept_open_child_list, emit, flush_membership};
@@ -361,9 +362,11 @@ where
         }),
         WidgetKind::Button => spawn_button_child::<P>(ctx, spec, row),
         WidgetKind::VirtualList => spawn_virtual_list_child::<P>(ctx, spec, row),
-        WidgetKind::Toggle | WidgetKind::Segmented | WidgetKind::Numeric => {
-            spawn_row_control_child::<P>(ctx, spec, row)
-        }
+        WidgetKind::Toggle
+        | WidgetKind::Segmented
+        | WidgetKind::Numeric
+        | WidgetKind::Dropdown
+        | WidgetKind::TabStrip => spawn_row_control_child::<P>(ctx, spec, row),
         WidgetKind::BehaviorHost => spawn_behavior_host(ctx, spec, row),
         WidgetKind::Composite => spawn_composite_child::<P>(ctx, spec, layout, row),
         WidgetKind::Scroll => spawn_scroll_child::<P>(ctx, spec, layout),
@@ -539,6 +542,30 @@ fn spawn_row_control_child<P: WasmActor>(
                 scroll_viewport: None,
             })
         }),
+        WidgetKind::Dropdown => decode_child::<DropdownConfig>(spec).and_then(|config| {
+            spawn::<P, DropdownWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+                id,
+                width_pixels: None,
+                height_pixels: row,
+                pointer_eligible: true,
+                focusable: true,
+                state: config.state,
+                type_namespace: <DropdownWidget as Addressable>::NAMESPACE,
+                scroll_viewport: None,
+            })
+        }),
+        WidgetKind::TabStrip => decode_child::<TabStripConfig>(spec).and_then(|config| {
+            spawn::<P, TabStripWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+                id,
+                width_pixels: None,
+                height_pixels: row,
+                pointer_eligible: true,
+                focusable: true,
+                state: config.state,
+                type_namespace: <TabStripWidget as Addressable>::NAMESPACE,
+                scroll_viewport: None,
+            })
+        }),
         _ => None,
     }
 }
@@ -580,8 +607,14 @@ fn reference_stack(theme: &Theme) -> Vec<WidgetChildSpec> {
         spec(
             "label",
             WidgetKind::Label,
-            LabelConfig { text: String::from("Controls"), theme: theme.clone(), state: WidgetControlState::default() }
-                .encode_into_bytes(),
+            LabelConfig {
+                text: String::from("Controls"),
+                role: TextRole::Body,
+                align: TextAlign::Start,
+                theme: theme.clone(),
+                state: WidgetControlState::default(),
+            }
+            .encode_into_bytes(),
         ),
         spec(
             "slider",
@@ -800,6 +833,14 @@ fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, ro
         }
         WidgetKind::Numeric => {
             let config = decode_named::<NumericConfig>(&spec.subname, &host_spec.wrapped_config)?;
+            ChildProfile { height: row, pointer_eligible: true, focusable: true, state: config.state }
+        }
+        WidgetKind::Dropdown => {
+            let config = decode_named::<DropdownConfig>(&spec.subname, &host_spec.wrapped_config)?;
+            ChildProfile { height: row, pointer_eligible: true, focusable: true, state: config.state }
+        }
+        WidgetKind::TabStrip => {
+            let config = decode_named::<TabStripConfig>(&spec.subname, &host_spec.wrapped_config)?;
             ChildProfile { height: row, pointer_eligible: true, focusable: true, state: config.state }
         }
         WidgetKind::Composite | WidgetKind::Scroll | WidgetKind::BehaviorHost => return None,

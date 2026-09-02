@@ -82,6 +82,11 @@ pub struct Focus {
     focused: Option<MailboxId>,
     hovered: Option<MailboxId>,
     capture: Option<MailboxId>,
+    /// The modal pointer grab an open dropdown or popover holds: every
+    /// pointer event routes here until it ends, across releases, so a press
+    /// outside the widget's own slot still reaches it (to select a row drawn
+    /// in its overlay, or to dismiss). Outranks drag capture.
+    grab: Option<MailboxId>,
 }
 
 impl Focus {
@@ -95,6 +100,27 @@ impl Focus {
         self.focused = None;
         self.hovered = None;
         self.capture = None;
+        self.grab = None;
+    }
+
+    /// Route every pointer event to `child` until [`Self::end_grab`] — the
+    /// modal grab a widget asks for while its overlay is open (a dropdown's
+    /// list). Ignored for a child the table does not hold live.
+    pub fn begin_grab(&mut self, child: MailboxId) {
+        if self.entries.iter().any(|entry| entry.child == child && entry.pointer_live()) {
+            self.grab = Some(child);
+        }
+    }
+
+    /// End the modal grab, if any. Hover is not recomputed here: the next
+    /// motion event re-derives it.
+    pub fn end_grab(&mut self) {
+        self.grab = None;
+    }
+
+    #[must_use]
+    pub fn grabbed(&self) -> Option<MailboxId> {
+        self.grab
     }
 
     /// Register one fixed layout entry. Dynamic visibility/enabled state may be
@@ -130,7 +156,7 @@ impl Focus {
 
     #[must_use]
     pub fn pointer_target(&self, x: f32, y: f32) -> Option<MailboxId> {
-        self.capture.or_else(|| self.hit_test(x, y))
+        self.grab.or(self.capture).or_else(|| self.hit_test(x, y))
     }
 
     #[must_use]

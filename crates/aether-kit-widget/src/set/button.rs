@@ -196,7 +196,7 @@ impl WasmActor for ButtonWidget {
             push_border(&mut items, width, height, 2.0, self.theme.accent);
         }
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { intrinsic: None, items });
+            parent.send(&WidgetDrawList { intrinsic: None, items, overlay: Vec::new() });
         }
     }
 }

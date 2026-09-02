@@ -504,7 +504,8 @@ fn virtual_list_child(subname: &str, state: WidgetControlState) -> WidgetChildSp
         clip: None,
         config: VirtualListConfig {
             items: (0..200).map(|index| format!("{index:03}")).collect(),
-            initial_selected_index: 0,
+            initial_selected_index: Some(0),
+            empty_text: String::new(),
             visible_row_count: 5,
             theme: Theme::DEFAULT,
             state,
@@ -2343,7 +2344,7 @@ fn nested_scroll_relays_live_font_theme_to_real_label_glyphs() {
         config: LabelConfig {
             text: "Nested scroll label".to_owned(),
             theme: Theme { font_id: u32::MAX, ..Theme::DEFAULT },
-            state: WidgetControlState::default(),
+            ..LabelConfig::default()
         }
         .encode_into_bytes(),
     };

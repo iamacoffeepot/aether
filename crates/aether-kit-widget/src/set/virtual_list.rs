@@ -298,7 +298,8 @@ fn usize_from_u32(value: u32) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
 }
 
-fn initial_selection(initial_selected_index: u32, item_count: usize) -> Option<usize> {
+fn initial_selection(initial_selected_index: Option<u32>, item_count: usize) -> Option<usize> {
+    let initial_selected_index = initial_selected_index?;
     if item_count == 0 {
         return None;
     }
@@ -414,10 +415,11 @@ mod tests {
 
     #[test]
     fn initial_selection_is_none_for_empty_and_clamped_for_nonempty() {
-        assert_eq!(initial_selection(0, 0), None);
-        assert_eq!(initial_selection(0, 1), Some(0));
-        assert_eq!(initial_selection(99, 5), Some(4));
-        assert_eq!(initial_selection(u32::MAX, usize::MAX), Some(usize_from_u32(u32::MAX)));
+        assert_eq!(initial_selection(Some(0), 0), None);
+        assert_eq!(initial_selection(None, 5), None, "no selection asked for is no selection");
+        assert_eq!(initial_selection(Some(0), 1), Some(0));
+        assert_eq!(initial_selection(Some(99), 5), Some(4));
+        assert_eq!(initial_selection(Some(u32::MAX), usize::MAX), Some(usize_from_u32(u32::MAX)));
     }
 
     #[test]
