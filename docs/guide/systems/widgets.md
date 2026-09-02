@@ -455,10 +455,13 @@ what the module holds:
 - **What it looks like.** `Popover::plate_items(&theme)` is a `surface_raised`
   fill inside a one-pixel `outline` ring — the plate a dropdown's list and a
   menu's items already wear, so a reader learns one "this stands over the
-  screen" look. Put those items in the root's **overlay**, never its chrome:
-  chrome flattens before the children, which is the wrong end for something
-  that stands over them, and the overlay is what the root's clip subtraction
-  cuts the covered text out from under.
+  screen" look. Put those items in the root's **overlay**
+  (`Composite::extend_overlay`), never its chrome: chrome flattens before the
+  children, which is the wrong end for something that stands over them, and
+  the overlay is what the root's clip subtraction cuts the covered text out
+  from under. Raise the popover's own children into that same lane with
+  `Composite::set_slot_overlay(child, true)` while it is open — see [the
+  overlay lane](#root-owned-focus-and-input) below.
 - **When it goes away.** `Popover::press(x, y)` dismisses on a press outside
   the plate and reports `true` so the root consumes that press instead of also
   delivering it to whatever was under it; a press on the plate reports `false`
@@ -713,7 +716,27 @@ bar's plate — puts those draws in `WidgetDrawList::overlay` instead of
 offset by each slot origin on the way up like any other draw but never
 intersected with the slot clip, and the root emits the whole cluster's overlay
 after every ordinary quad and glyph, so the list escapes its one-row slot and
-lands over the widgets below it. Its counterpart on the input side is the
+lands over the widgets below it.
+
+A *root* reaches the same lane two ways, for the plate that hosts other
+children rather than escaping its own slot. `Composite::extend_overlay(items)`
+is the overlay's counterpart to `extend_chrome` — the node's own draws, laid
+down before any slot's — and `Composite::set_slot_overlay(child, true)` moves
+one registered slot's ordinary `items` into the overlay, keeping its origin,
+its slot clip, and its place in registration order. Together they make a
+**group**: a popover's plate through `extend_overlay`, its children through
+`set_slot_overlay` while it is open, flattened plate-first in layout order.
+
+That grouping is what the clip subtraction reads. The root cuts ordinary text
+out from under overlay fills once, per lane — the ordinary items against the
+overlay's fills, the overlay's items against nothing — so a plate hides the
+primary content it stands over and can never delete the labels of the children
+standing on it. Within one lane fills are simply under glyphs, as everywhere
+else in the kit. There is no layer number and no z-index on any draw kind: the
+group is a set of slots the root already ordered, and the lane is the two-step
+order the root already emits in.
+
+The overlay's counterpart on the input side is the
 **modal pointer grab**: `Focus::begin_grab(child)` routes every pointer event
 to that child until `end_grab`, outranking drag capture, and hover edges are
 suppressed while it holds so nothing under the overlay lights up. The widget

@@ -403,6 +403,15 @@ fn framebuffer_clip(rect: WidgetClipRect) -> ClipRect {
 /// the overlay leaves uncovered ([`WidgetClipRect::subtract`]), and omitted
 /// when nothing is left. An unclipped text item (root chrome with no clip)
 /// cannot be cut and is drawn as authored.
+///
+/// The cut is per *lane*, which is what makes a plate able to hold children.
+/// This runs once over the ordinary items with the overlay's fills as holes,
+/// and again over the overlay's own items with no holes at all — so a plate a
+/// root raised together with the children standing on it
+/// ([`Composite::set_slot_overlay`](crate::composite::Composite::set_slot_overlay))
+/// hides the primary content under it and none of its own group's labels. In
+/// one lane the fills are simply under the glyphs, as everywhere else in the
+/// kit.
 fn text_items(list: &WidgetDrawList) -> Vec<DrawText> {
     let holes = overlay_fills(&list.overlay);
     let mut items: Vec<DrawText> = Vec::new();
@@ -643,6 +652,38 @@ mod tests {
         assert_eq!(items[0].text, "half");
         let clip = items[0].clip.clone().expect("the half-covered row keeps a finite clip");
         assert_eq!((clip.y, clip.height), (76.0, 12.0), "only the strip below the fill survives");
+    }
+
+    #[test]
+    fn an_overlay_plate_cuts_the_content_under_it_and_never_its_own_group() {
+        // Tripwire: the two `text_items` passes `emit` makes are what let a
+        // popover's plate host the root's own controls. Cutting the overlay's
+        // text against the overlay's fills — one lane, one subtraction — would
+        // delete every label on the plate, which is the defect that kept the
+        // studio's plates in chrome.
+        let plate = WidgetClipRect { x: 100.0, y: 100.0, width: 200.0, height: 80.0 };
+        let list = WidgetDrawList {
+            intrinsic: None,
+            items: vec![text(110.0, "primary content", Some(plate))],
+            overlay: vec![
+                WidgetDrawItem::Quad {
+                    x: plate.x,
+                    y: plate.y,
+                    width: plate.width,
+                    height: plate.height,
+                    color: Rgba::WHITE,
+                    clip: None,
+                },
+                text(110.0, "a button on the plate", Some(plate)),
+            ],
+        };
+
+        assert!(text_items(&list).is_empty(), "the content the plate stands over sends no glyphs");
+        let overlay_lane = WidgetDrawList { intrinsic: None, items: list.overlay, overlay: Vec::new() };
+        assert!(
+            text_items(&overlay_lane).iter().map(|item| item.text.as_str()).eq(["a button on the plate"]),
+            "and the plate's own group keeps its label",
+        );
     }
 
     #[test]
