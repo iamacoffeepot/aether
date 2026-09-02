@@ -15,13 +15,17 @@ use crate::{WidgetControlState, WidgetStateChanged, WidgetValidation};
 pub struct InteractionState {
     control: WidgetControlState,
     focused: bool,
+    /// How the focus this widget holds arrived. A ring is the keyboard's
+    /// "you are here" marker, so only keyboard-arrived focus draws one; the
+    /// caret and the routing consequences of focus do not consult this.
+    focus_from_keyboard: bool,
     hovered: bool,
 }
 
 impl InteractionState {
     #[must_use]
     pub(super) fn new(control: WidgetControlState) -> Self {
-        Self { control, focused: false, hovered: false }
+        Self { control, focused: false, focus_from_keyboard: false, hovered: false }
     }
 
     #[must_use]
@@ -57,14 +61,19 @@ impl InteractionState {
         self.is_available() && !self.control.read_only
     }
 
-    pub(super) fn gain_focus(&mut self) {
+    /// Take focus, recording whether it arrived from the keyboard — the root
+    /// passes `true` for Tab traversal, `false` for a pointer press or an
+    /// availability move (see [`crate::FocusGained`]).
+    pub(super) fn gain_focus(&mut self, keyboard: bool) {
         self.focused = self.is_available();
+        self.focus_from_keyboard = self.focused && keyboard;
     }
 
     /// Losing focus clears only the focus fact. Hover remains root-owned and
     /// survives until the panel sends [`crate::HoverLost`].
     pub(super) fn lose_focus(&mut self) {
         self.focused = false;
+        self.focus_from_keyboard = false;
     }
 
     pub(super) fn set_hovered(&mut self, hovered: bool) {
@@ -73,12 +82,25 @@ impl InteractionState {
 
     pub(super) fn clear_transient(&mut self) {
         self.focused = false;
+        self.focus_from_keyboard = false;
         self.hovered = false;
     }
 
     #[must_use]
     pub(super) fn focused(&self) -> bool {
         self.focused
+    }
+
+    /// Whether this widget should *show* that it is focused — i.e. draw its
+    /// focus ring. True only while focus arrived from the keyboard: a person
+    /// who just clicked a tab knows where they are and does not need a box
+    /// drawn around it, while a person walking the panel with Tab has no other
+    /// way to tell. A caret is not a ring — a text control keeps drawing one
+    /// whichever way focus arrived, so [`focused`](Self::focused) is what that
+    /// draw asks.
+    #[must_use]
+    pub(super) fn focus_visible(&self) -> bool {
+        self.focused && self.focus_from_keyboard
     }
 
     /// Whether the root reports the pointer over this widget. Read by the
@@ -150,9 +172,37 @@ mod tests {
     }
 
     #[test]
+    fn only_keyboard_focus_is_visible_focus() {
+        // Tripwire: the owner's note. A pointer press focuses the control it
+        // hit — routing depends on that — but must not leave a ring behind on
+        // a tab the person just clicked.
+        let mut state = InteractionState::new(WidgetControlState::default());
+        state.gain_focus(false);
+        assert!(state.focused(), "a press still moves focus");
+        assert!(!state.focus_visible(), "a pressed control draws no ring");
+
+        state.gain_focus(true);
+        assert!(state.focus_visible(), "Tab traversal is what a ring marks");
+
+        state.lose_focus();
+        assert!(!state.focus_visible());
+        state.gain_focus(false);
+        assert!(!state.focus_visible(), "the keyboard fact does not survive a re-focus by pointer");
+    }
+
+    #[test]
+    fn an_unavailable_widget_takes_neither_focus_nor_its_ring() {
+        let hidden = WidgetControlState { visible: false, ..WidgetControlState::default() };
+        let mut state = InteractionState::new(hidden);
+        state.gain_focus(true);
+        assert!(!state.focused());
+        assert!(!state.focus_visible());
+    }
+
+    #[test]
     fn unavailable_update_clears_focus_hover_and_mutation() {
         let mut state = InteractionState::new(WidgetControlState::default());
-        state.gain_focus();
+        state.gain_focus(true);
         state.set_hovered(true);
 
         let mut hidden = state.control().clone();
@@ -166,7 +216,7 @@ mod tests {
     #[test]
     fn focus_loss_preserves_root_owned_hover() {
         let mut state = InteractionState::new(WidgetControlState::default());
-        state.gain_focus();
+        state.gain_focus(true);
         state.set_hovered(true);
 
         state.lose_focus();

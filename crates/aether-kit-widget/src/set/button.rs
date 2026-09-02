@@ -246,7 +246,9 @@ impl WasmActor for ButtonWidget {
                 clip: None,
             });
         }
-        if self.state.focused() {
+        // Keyboard focus only: the button a pointer just pressed shows its
+        // press, and a ring left over from the click says nothing more.
+        if self.state.focus_visible() {
             push_border(&mut items, width, height, 2.0, self.theme.accent);
         }
 

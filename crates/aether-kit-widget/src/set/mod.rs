@@ -341,6 +341,10 @@ fn push_inset_border(
 /// Draw validation and focus as orthogonal outlines. Validation owns the outer
 /// ring; when both are present focus moves inward so neither signal covers the
 /// other.
+///
+/// The focus ring is *keyboard* focus's marker only
+/// ([`InteractionState::focus_visible`]): a control the pointer just pressed is
+/// obviously the one you are on, so boxing it adds a mark that says nothing.
 pub(super) fn push_control_outlines(
     items: &mut Vec<WidgetDrawItem>,
     width: f32,
@@ -352,7 +356,7 @@ pub(super) fn push_control_outlines(
     if let Some(color) = validation {
         push_border(items, width, height, 2.0, color);
     }
-    if state.focused() {
+    if state.focus_visible() {
         push_inset_border(
             items,
             width,

@@ -395,8 +395,8 @@ impl WasmActor for TextAreaWidget {
     }
 
     #[handler::single]
-    fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: FocusGained) {
-        self.state.gain_focus();
+    fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, gained: FocusGained) {
+        self.state.gain_focus(gained.keyboard);
         self.reconcile_scroll();
     }
 
@@ -569,7 +569,7 @@ mod tests {
             scroll_top: 0,
             font_metrics,
         };
-        area.state.gain_focus();
+        area.state.gain_focus(true);
         area.reconcile_scroll();
         area
     }
