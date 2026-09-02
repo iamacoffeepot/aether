@@ -672,6 +672,16 @@ fn single_line_hit_byte(text: &str, metrics: Option<&CachedFontMetrics>, size_pi
     text.char_indices().nth(index).map_or(text.len(), |(byte, _)| byte)
 }
 
+/// The one fill a single-line control's frame is painted with, whole.
+///
+/// The numeric's stepper column composites its per-button hover / pressed
+/// overlay over this same colour rather than filling itself from another
+/// palette role, which is what keeps the column a region of the control's own
+/// surface instead of a second box butted against it.
+pub(super) fn single_line_box_fill(theme: &Theme, theme_state: ThemeState) -> Rgba {
+    theme.fill(theme.surface_raised, theme_state)
+}
+
 fn single_line_edit_draw_items(edit: &SingleLineEdit<'_>) -> Vec<WidgetDrawItem> {
     let SingleLineEdit { displayed, metrics, theme, state, theme_state, frame, .. } = edit;
     let (theme_state, width, height) = (*theme_state, frame.width, frame.height);
@@ -689,7 +699,7 @@ fn single_line_edit_draw_items(edit: &SingleLineEdit<'_>) -> Vec<WidgetDrawItem>
     };
 
     let mut items = Vec::new();
-    items.push(quad(0.0, 0.0, width, height, theme.fill(theme.surface_raised, theme_state)));
+    items.push(quad(0.0, 0.0, width, height, single_line_box_fill(theme, theme_state)));
     if let Some(span) = displayed.selection_span {
         let x0 = pad + prefix_width(span.start_byte);
         let x1 = pad + prefix_width(span.end_byte);
@@ -771,10 +781,16 @@ pub(super) struct SingleLineEdit<'a> {
     /// The chrome that fills that gutter, drawn over the box and under the
     /// validation / focus outlines so a ring still frames the whole control.
     pub(super) gutter_items: Vec<WidgetDrawItem>,
+    /// The `[width, height]` this control asks a layout for, once it can
+    /// measure what it holds — the numeric's range plus its chrome. `None`
+    /// until the theme font's metrics resolve, so a layout never sizes a slot
+    /// to a guess.
+    pub(super) intrinsic: Option<[f32; 2]>,
 }
 
 impl<'a> SingleLineEdit<'a> {
-    /// The default shape: no gutter, no chrome — one plain edit box.
+    /// The default shape: no gutter, no chrome, no intrinsic — one plain edit
+    /// box that takes the frame it is given.
     pub(super) fn new(
         displayed: &'a DisplayedEdit,
         metrics: Option<&'a CachedFontMetrics>,
@@ -783,7 +799,17 @@ impl<'a> SingleLineEdit<'a> {
         theme_state: ThemeState,
         frame: &'a WidgetFrame,
     ) -> Self {
-        Self { displayed, metrics, theme, state, theme_state, frame, gutter: 0.0, gutter_items: Vec::new() }
+        Self {
+            displayed,
+            metrics,
+            theme,
+            state,
+            theme_state,
+            frame,
+            gutter: 0.0,
+            gutter_items: Vec::new(),
+            intrinsic: None,
+        }
     }
 
     /// The width the text box actually gets, once the gutter is taken out.
@@ -801,6 +827,7 @@ pub(super) fn reply_single_line_edit(ctx: &WasmCtx<'_>, edit: SingleLineEdit<'_>
     }
     let theme = edit.theme;
     let size = theme.value_size_pixels;
+    let intrinsic = edit.intrinsic;
     let items = single_line_edit_draw_items(&edit);
 
     let overlay = edit.metrics.filter(|_| edit.state.hovered()).map_or_else(Vec::new, |metrics| {
@@ -820,7 +847,7 @@ pub(super) fn reply_single_line_edit(ctx: &WasmCtx<'_>, edit: SingleLineEdit<'_>
     });
 
     if let Some(parent) = ctx.parent() {
-        parent.send(&WidgetDrawList { intrinsic: None, items, overlay });
+        parent.send(&WidgetDrawList { intrinsic, items, overlay });
     }
 }
 

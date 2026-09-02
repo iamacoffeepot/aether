@@ -385,17 +385,36 @@ Enter, Up/Down, and everything in
 
 A numeric also carries **steppers**, because a value with a step has an obvious
 pointer gesture and asking for the keyboard to use it is asking a person to
-find out that Up/Down work. Two stacked buttons sit at the right end in a
-square column one row height wide: up above, down below, each an arrow drawn
-from quad rows rather than a glyph, because the theme's font is whatever the
-consumer loaded and a missing-glyph box on a control whose whole point is being
-clickable is the worst place for one. A press steps by `step` through the same
-clamp, snap, and commit path Up/Down use, so the two routes cannot drift; each
-button carries its own hover and pressed overlay. The text box shrinks by the
-column, and the column never takes more than half the frame — a numeric too
-narrow for both stays a value rather than becoming two arrows. A read-only or
-disabled numeric has no live stepper targets. Nothing in `NumericConfig`
-changed: steppers are what a numeric *is*, not something to opt into.
+find out that Up/Down work. They are part of the same control, not a second box
+butted against it: **one** fill covers the whole frame, and the validation and
+focus outlines ring the whole frame. Inside it, at the right end, a square
+column one row height wide is closed off from the value by a one-pixel
+`outline` hairline and split into two buttons — up above, down below, each an
+arrow drawn from quad rows rather than a glyph, because the theme's font is
+whatever the consumer loaded and a missing-glyph box on a control whose whole
+point is being clickable is the worst place for one. An untouched column paints
+no surface of its own; the button under the pointer, or held down, composites
+its hover or pressed overlay over the control's own fill, so it lights up as
+that surface lifted rather than as a separate element. A press steps by `step`
+through the same clamp, snap, and commit path Up/Down use, so the two routes
+cannot drift. The value text stays left-aligned at one `pad`, the text box
+shrinks by the column, and the column never takes more than half the frame — a
+numeric too narrow for both stays a value rather than becoming two arrows. A
+read-only or disabled numeric has no live stepper targets. Nothing in
+`NumericConfig` changed: steppers are what a numeric *is*, not something to opt
+into.
+
+Once the theme font's metrics resolve, a numeric reports its
+`WidgetDrawList::intrinsic` — `[widest value width + 2 × pad + row height, row
+height]` — so a consumer sizes the field to the range it configured instead of
+guessing at it. The widest value is whichever *bound* renders longer, formatted
+exactly the way the field formats a committed value (`-100 .. 20` is widest at
+its minimum: the sign is a character like any other), capped at the edit
+buffer's own 32-character bound so an effectively unbounded range asks for a
+field rather than a wall. The trailing row height is the stepper column. Like
+the button's intrinsic, it is `None` until the real advances land — a slot
+sized from the per-character approximation would be resized the moment they
+arrived — and, like the button's, the reference panel does not yet consume it.
 
 Numeric keeps the visible buffer separate from its last committed number.
 Empty, `-`, `.`, and other invalid or non-finite intermediates remain visible
