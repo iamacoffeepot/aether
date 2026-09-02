@@ -117,6 +117,10 @@ every time.
 | Parallel content sets, one viewed at a time | Tabs, one row, 1–2 word labels | "Tab labels should usually be 1-2 words"; "prominently highlight the selected tab" ([NN/g tabs](https://www.nngroup.com/articles/tabs-used-right/)) |
 | Secondary detail under an always-visible primary | Expander | "Some primary content should always be visible, but related secondary content may be hidden until needed" (WinUI expander) |
 | Content the reader needs most of | **Not** an accordion | "Accordions should be avoided when your audience needs most or all of the content on the page" ([NN/g accordions](https://www.nngroup.com/articles/accordions-complex-content/)) |
+| A value whose meaning the reader may not carry | **Tooltip** (`TooltipWidget`), sections divided by a rule, wrapped at a reading measure | Hover explains, in a neat measured box; the host owns the dwell and the words, the kit owns the box |
+| A refusal or a confirmation | **Toast region** (`ToastWidget`), one per screen, coloured by severity | Notices have one place, one severity colour each (never the accent), and leave on their own after a few seconds |
+| A split between two regions the reader sets | **Splitter** (`SplitterWidget`), two lit pixels over a generous strip | Keep an affordance the reader has learned; the pointer says what a drag will do — the widget reports the hover, the host sets the cursor |
+| A group of controls raised over the primary view | **Popover** (`set::popover`), drawn in the root's overlay, light-dismissed | A setting is a control, not a file; a pop-up takes priority over what it covers, through the overlay's clip subtraction and never a draw layer |
 
 Two consequences worth stating because they are the common mistakes:
 
@@ -252,7 +256,9 @@ small, separable change and belongs in the kit rather than in any one consumer:
 - **Controls**: a dropdown that draws its open list outside its slot, a tab
   strip, and an expander with a chevron; a button that centres its label with
   a minimum width; a list with an empty state and a genuine no-selection
-  state.
+  state. The transient surfaces a screen composes over its own content — the
+  tooltip, the toast region, the splitter, and the popover's plate and
+  dismissal — are in the kit too, so a second screen does not hand-roll them.
 - **Text**: a proportional UI face with tabular figures, and text measurement
   a consumer can ask for so alignment is computed, not counted.
 
