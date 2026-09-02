@@ -105,6 +105,13 @@ pub struct SplitterConfig {
     /// away from it.
     #[serde(default)]
     pub inverted: bool,
+    /// A bare handle draws no mark while the pointer is on it. An edge the
+    /// reader can already see (the border of a plate) needs none: the
+    /// pointer's resize shape is the whole signal, and a line lighting under
+    /// it is one more thing on the screen. A bare handle still reports every
+    /// hover and move.
+    #[serde(default)]
+    pub bare: bool,
     pub theme: Theme,
     #[serde(default)]
     pub state: WidgetControlState,
@@ -151,6 +158,7 @@ pub struct SplitterWidget {
     max_pixels: f32,
     position_pixels: f32,
     inverted: bool,
+    bare: bool,
     drag: Option<Drag>,
     theme: Theme,
     frame: WidgetFrame,
@@ -218,7 +226,7 @@ impl SplitterWidget {
         let (width, height) = (self.frame.width, self.frame.height);
         let lit = self.state.hovered() || self.drag.is_some();
         let sized = width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0;
-        if !lit || !sized || !self.state.can_mutate() {
+        if self.bare || !lit || !sized || !self.state.can_mutate() {
             return Vec::new();
         }
         let thickness = self.mark_thickness();
@@ -291,6 +299,7 @@ impl WasmActor for SplitterWidget {
             max_pixels: config.max_pixels,
             position_pixels: config.position_pixels,
             inverted: config.inverted,
+            bare: config.bare,
             drag: None,
             theme: config.theme,
             state: InteractionState::new(config.state),
@@ -309,6 +318,7 @@ impl WasmActor for SplitterWidget {
         self.min_pixels = config.min_pixels;
         self.max_pixels = config.max_pixels;
         self.inverted = config.inverted;
+        self.bare = config.bare;
         self.drag = None;
         self.theme = config.theme;
         self.position_pixels = self.clamped(config.position_pixels);
@@ -407,6 +417,7 @@ mod tests {
             max_pixels: 560.0,
             position_pixels: 360.0,
             inverted,
+            bare: false,
             drag: None,
             theme: Theme::DEFAULT,
             frame: WidgetFrame { x: 358.0, y: 30.0, width: 4.0, height: 700.0 },

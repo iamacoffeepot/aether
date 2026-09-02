@@ -387,10 +387,14 @@ glyphs under them from printing through.
 
 ## Splitters
 
-`SplitterConfig { axis, min_pixels, max_pixels, position_pixels, inverted,
+`SplitterConfig { axis, min_pixels, max_pixels, position_pixels, inverted, bare,
 theme, state }` spawns `SplitterWidget` — the drag handle on the edge between
 two regions. It owns one scalar: the pane width, console height, or plate side
 the host resizes with, held between `min_pixels` and `max_pixels`.
+
+`bare` (default `false`) drops the lit mark: an edge the reader already sees,
+such as the border of a plate, is signalled by the pointer's resize shape
+alone, and the handle still reports every hover and move.
 
 `SplitterAxis` says which motion moves it. `Horizontal` is a vertical edge
 dragged left and right (the docked pane), `Vertical` a horizontal edge dragged
