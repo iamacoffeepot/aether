@@ -21,6 +21,21 @@
 //!   content set.
 //! - [`MenuBarWidget`] — a row of application menus whose items open in the
 //!   overlay layer.
+//! - [`TooltipWidget`] — an anchored plate saying what the thing under the
+//!   pointer is, drawn in the overlay layer.
+//! - [`ToastWidget`] — the one region transient notices appear in, coloured
+//!   by severity and gone on their own.
+//! - [`SplitterWidget`] — the drag handle on the edge between two regions.
+//!
+//! Two of the surfaces here are not widgets, because neither is a control:
+//!
+//! - [`placement`] — where an overlay plate stands beside its anchor and
+//!   inside its region ([`place_plate`]), shared by the tooltip and the
+//!   popover.
+//! - [`popover`] — a plate hosting *other* children over the primary view.
+//!   Hosting interactive children is a root's job in this kit, so a popover
+//!   is a value a root owns ([`Popover`]) rather than an actor; the module
+//!   doc says why.
 //!
 //! Each caches its assigned [`WidgetFrame`] rect
 //! and its [`Theme`], answers every
@@ -42,13 +57,18 @@ pub mod image;
 pub mod label;
 pub mod menu_bar;
 pub mod numeric;
+pub mod placement;
+pub mod popover;
 pub mod radio;
 pub mod segmented;
 pub mod slider;
+pub mod splitter;
 pub mod tab_strip;
 pub mod text_area;
 pub mod text_field;
+pub mod toast;
 pub mod toggle;
+pub mod tooltip;
 pub mod virtual_list;
 
 pub use button::ButtonWidget;
@@ -58,13 +78,18 @@ pub use image::ImageWidget;
 pub use label::LabelWidget;
 pub use menu_bar::MenuBarWidget;
 pub use numeric::NumericWidget;
+pub use placement::{PlacementBounds, PlacementSide, place_plate};
+pub use popover::Popover;
 pub use radio::RadioGroupWidget;
 pub use segmented::SegmentedWidget;
 pub use slider::SliderWidget;
+pub use splitter::{SplitterAxis, SplitterConfig, SplitterHover, SplitterMoved, SplitterWidget};
 pub use tab_strip::TabStripWidget;
 pub use text_area::TextAreaWidget;
 pub use text_field::TextFieldWidget;
+pub use toast::{ToastConfig, ToastNotice, ToastRegionChanged, ToastSeverity, ToastWidget};
 pub use toggle::ToggleWidget;
+pub use tooltip::{TooltipConfig, TooltipSection, TooltipWidget};
 pub use virtual_list::VirtualListWidget;
 
 use alloc::string::String;

@@ -3,7 +3,8 @@
 `aether-kit-widget` ships a set of guest-side widgets — a slider, a text field, a
 multiline text area, a radio group, a fixed-row virtual list, a button, a label,
 an image, a toggle, a segmented control, a tab strip, a dropdown, a menu bar,
-and a numeric editor — as ordinary `#[actor(instanced, composable)]` types.
+a numeric editor, a tooltip, a toast region, and a splitter — as ordinary
+`#[actor(instanced, composable)]` types.
 A panel root spawns them as inline children (ADR-0114) and drives them entirely
 by mail, so composing an editor panel is a matter of laying out widgets and
 translating their value events, never re-deriving hit rects, focus, or per-row
@@ -39,6 +40,13 @@ the focus ring, so a chosen row and a pressable button never share a look.
 `Theme::scaled(factor)` multiplies every metric and leaves every color alone,
 which is how a consumer takes the display's scale factor without restating the
 scale.
+
+`info`, `warning`, and `error` are the **severity scale** — a notice that
+reports, one that cautions, and one that failed. `warning` and `error` double
+as the validation outline roles, and `info` exists because the three have to be
+three distinguishable colours: a notice drawn in `outline` is a notice nobody
+sees, and one drawn in `accent` claims to be the primary action. None of the
+three is ever the accent.
 
 ## State and interaction mail
 
@@ -305,6 +313,154 @@ unavailable forces, and *excluding* a switch from one menu to another, which is
 not a new open edge and does not disturb the grab the root already holds. A
 menu with no items never opens: an empty plate under a pointer grab is a trap,
 not a menu.
+
+## Tooltips
+
+`TooltipConfig { sections, max_width_pixels, side, bounds, theme, state }`
+spawns `TooltipWidget` — the anchored plate that says what the thing under the
+pointer *is*. The widget's assigned `WidgetFrame` is the **anchor**: a host
+points a tooltip at a row by handing it that row's rectangle, and the plate
+stands beside it, in the widget's overlay so the rows under it stay readable.
+
+The plate is measured, not padded to a grid. Every line wraps at
+`max_width_pixels` (`0` takes `reveal_wrap_width` at the caption size — the
+same reading measure the hover reveal uses), the box is exactly as wide as its
+longest wrapped line plus one spacing unit either side and exactly as tall as
+the line boxes it holds, and a `TooltipSection` boundary is a one-pixel
+`outline` rule with a spacing unit either side rather than a blank line. An
+empty section draws nothing at all, rule included, so a section a host had no
+words for cannot leave a divider hanging.
+
+The first line of the first section is the **name** of the thing being
+explained and takes `TextRole::Body` in `text_primary`; every line after it is
+`TextRole::Caption` in `text_muted`. `TextRole::Title` is deliberately not
+used — that is the size a screen's one title is set at, and a 22-pixel line on
+a hover plate is a headline.
+
+`side` is the side of the anchor the plate prefers and `bounds` is the region
+it must stay inside, in the same window pixels the frame is assigned in. A
+plate that would run past those bounds **flips to the other side of the
+anchor** (`set::place_plate`), then clamps on the cross axis — so a tooltip on
+the last row of a pane stands above that row instead of half off the pane, and
+never covers the row it is about. A widget cannot ask the window how big it is,
+so the host that owns the region names it in the config.
+
+Visibility is `WidgetControlState::visible`, the lane every stock widget
+already has: the host flips it with `SetWidgetState` when its own dwell timer
+says the pointer has rested long enough, and flips it back when the pointer
+moves on. A tooltip with no sections likewise draws nothing. There is
+deliberately no third `shown` field — the dwell, the row, and the words are all
+the host's knowledge, and the widget takes the finished lines and nothing else.
+The tooltip reports nothing up and is neither pointer- nor focus-eligible: a
+plate that took hover would steal it from the row it explains.
+
+## The toast region
+
+`ToastConfig { max_standing, lifetime_frames, theme, state }` spawns
+`ToastWidget` — the one place a refusal or a confirmation appears. Anything
+mails it `ToastNotice { severity, text }`, so a save result, a planner refusal,
+and a confirmation all arrive through the same door and land in the same place
+the reader learned once.
+
+The widget's frame is the region. Notices stack down from its top edge at its
+width, newest first, up to `max_standing` (the oldest leaves to make room), and
+each one is a `surface_raised` plate inside a hairline ring with a **severity
+bar** down its left edge: `theme.info` (a blue-grey report), `theme.warning`
+(orange), or `theme.error` (red), never the accent. The text wraps at the
+region's width with one spacing unit of padding and the plate grows downward —
+a notice is never elided, because a cut-off refusal says less than nothing.
+
+A widget never sees a tick, so a notice's life is counted in **frames the root
+asked it to draw**: `lifetime_frames` `Collect`s (240 is four seconds at sixty
+a second), `0` meaning only the cap removes a notice. Ageing runs before the
+draw and before the hidden-widget branch, so a hidden region still runs its
+clock down instead of saving up a stack of stale refusals; a region that
+becomes unavailable drops what it was holding.
+
+`ToastRegionChanged { standing, height_pixels }` reports the edge — one
+arrived, one aged out, the cap pushed one off — and never every frame. The
+height is how far down the region the stack reaches, which is the rectangle a
+host passes to whatever else is drawing under the notices (a tree view being
+told what is covered) without re-deriving the geometry. The plates draw in the
+overlay, so within the cluster the root's clip subtraction already keeps the
+glyphs under them from printing through.
+
+## Splitters
+
+`SplitterConfig { axis, min_pixels, max_pixels, position_pixels, inverted,
+theme, state }` spawns `SplitterWidget` — the drag handle on the edge between
+two regions. It owns one scalar: the pane width, console height, or plate side
+the host resizes with, held between `min_pixels` and `max_pixels`.
+
+`SplitterAxis` says which motion moves it. `Horizontal` is a vertical edge
+dragged left and right (the docked pane), `Vertical` a horizontal edge dragged
+up and down, and `Corner` one side length of a square plate dragged by its
+corner — the **mean of both axes**, because a square invites a diagonal drag
+and taking one axis alone makes half of every drag do nothing. `inverted`
+flips the direction for a region anchored to the far edge: a plate pinned to
+the bottom-right grows as its top-left corner is pulled up and left.
+
+The position follows the pointer's **travel** from where the press landed, not
+its absolute position, so grabbing the strip anywhere along its width does not
+jump the split. `SplitterMoved { position_pixels }` streams the clamped value
+while the drag is live and goes quiet at either end of the range rather than
+re-sending the same number every frame; there is no preview/commit split,
+because a region resize is applied as it happens.
+
+The widget's frame is the **hit strip** and can be as generous as the host
+likes; the mark drawn in it is two logical pixels (half a spacing unit, so it
+scales with `Theme::scaled`) of `theme.accent`, lit only while the pointer is
+on the strip or a drag is live. `Corner` lights the two edges the drag pulls,
+as an L. Nothing is drawn at rest: a resizable edge is a signifier that appears
+when it is relevant, not a permanent rule down the screen.
+
+`SplitterHover { entered }` reports the pointer crossing the strip so the
+**host** can mail `aether.window.set_cursor`. The widget never touches the
+window cap, and the decision is genuinely the host's: a resize cursor belongs
+on a splitter whose affordance is hidden, and is intrusive over a view whose
+gesture everyone already knows.
+
+The drag asks for no new pointer routing. A left press on a pointer-eligible
+child already gives that child the root's drag capture, which lasts exactly as
+long as the button is held — the life of a resize gesture. (The modal grab an
+open dropdown holds is the wrong tool: it outranks capture and persists across
+releases, so it would have to be handed back for a gesture that is over when
+the button comes up.)
+
+## Popovers
+
+A popover is a plate hosting *other* children over the primary view, dismissed
+by a press outside it or by Escape. It ships as the `set::popover` module and
+the plain `Popover` value a root owns beside its `Focus`, **not** as a widget —
+because hosting interactive children is a root's job in this kit. Pointer and
+keyboard routing, hit rectangles, focus traversal, and drag capture all live in
+the root's `Focus` table over the root's own direct children; `ScrollWidget`
+re-frames and re-composites its content and keeps only a wheel hit table, and
+the compositing `Widget` node routes no input at all. A widget that owned its
+children's input would be a second input root inside a widget, which is what
+`EditorShell` is for one level up.
+
+What two screens' popovers actually share is three decisions, and those are
+what the module holds:
+
+- **Where the plate stands.** `Popover::open(plate)` takes a rectangle the host
+  has already chosen; `Popover::open_beside(anchor, width, height, side, gap,
+  bounds)` places it with the same flip-and-clamp rule the tooltip uses and
+  returns the plate it took. `Popover::plate()` is where the root frames the
+  popover's children.
+- **What it looks like.** `Popover::plate_items(&theme)` is a `surface_raised`
+  fill inside a one-pixel `outline` ring — the plate a dropdown's list and a
+  menu's items already wear, so a reader learns one "this stands over the
+  screen" look. Put those items in the root's **overlay**, never its chrome:
+  chrome flattens before the children, which is the wrong end for something
+  that stands over them, and the overlay is what the root's clip subtraction
+  cuts the covered text out from under.
+- **When it goes away.** `Popover::press(x, y)` dismisses on a press outside
+  the plate and reports `true` so the root consumes that press instead of also
+  delivering it to whatever was under it; a press on the plate reports `false`
+  and routes to the popover's children as usual. `Popover::key(code)` does the
+  same for Escape and claims nothing else, so the focused child keeps its
+  typing.
 
 ## Image widget
 
