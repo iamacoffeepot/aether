@@ -394,6 +394,20 @@ explained and takes `TextRole::Body` in `text_primary`; every line after it is
 used — that is the size a screen's one title is set at, and a 22-pixel line on
 a hover plate is a headline.
 
+A **wrapped line** and a **new paragraph** are opposite cases, and the plate
+keeps both rules (round-4 note 19 — "I'd prefer if it was aligned to the first
+line of text and then new paragraphs just had a break (empty line)"). A line
+that wrapped is one thought that ran out of measure, so its continuation rows
+start flush with its first row: `hanging_indent_pixels` is `0` by default and
+the kit's own plates leave it there. A new paragraph is a new thought, and
+takes a **blank row**: a `TooltipLine` with no words in it draws one empty
+line box, and so does a blank line inside one line's own text
+(`"first\n\nsecond"`). A blank at the very top or bottom of the plate is
+dropped — a break needs something on both sides of it — and a leading blank
+never takes the title role from the first real line. Neither of these is a
+section: a section boundary stays a **rule**, so a blank row divides two
+paragraphs of one block while a rule divides two blocks.
+
 A section's lines are `TooltipLine { text, role, ink }`, both options `None`
 for that rule. `TooltipSection::new(["Life", "Your health pool."])` takes plain
 strings (`TooltipLine: From<String> + From<&str>`), so a host that only has
@@ -424,8 +438,10 @@ fields:
   shorter card. Re-sending the config resets the count, so the next frame
   reports the new card's tail.
 - **`hanging_indent_pixels`** — how far the continuation rows of a wrapped line
-  are inset (`0` is a flush block). Continuations wrap that much earlier, so
-  the right edge does not move, and a two-row stat reads as one stat.
+  are inset. `0` is the default and the flush block described above; the indent
+  is the opt-in for the one case that wants it, a list of stats where an inset
+  continuation makes a two-row stat read as one stat. Continuations wrap that
+  much earlier, so the right edge does not move.
   `set::wrap_to_width_hanging` is the same rule as a public helper.
 
 `side` is the side of the anchor the plate prefers and `bounds` is the region
