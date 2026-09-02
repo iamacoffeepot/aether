@@ -13,6 +13,14 @@
 //! from its own layout, never from mail-arrival order), and an interior
 //! node's flattened list becomes its parent's slot payload — so a subtree
 //! carries its own internal order wherever it is placed.
+//!
+//! There are two lanes, not two layers. Everything above happens once in the
+//! ordinary lane and once in the overlay: a slot the node marked overlay
+//! ([`Composite::set_slot_overlay`]) flattens its draws into the overlay
+//! beside the node's own overlay chrome ([`Composite::extend_overlay`]), in
+//! the same chrome-then-slots order. That is how a plate and the children it
+//! hosts stay one group — which is what the root's clip subtraction reads to
+//! decide whose text a fill may cut.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -28,12 +36,15 @@ use crate::{ChildrenChanged, MembershipEntry, WidgetClipRect, WidgetDrawItem, Wi
 /// without the caller re-supplying it); `origin` is the offset applied to
 /// every draw the child reports; `list` is that child's draws for the current
 /// frame, `None` until it replies. `clip` is the optional parent-local bound
-/// enforced over every draw returned by the child subtree.
+/// enforced over every draw returned by the child subtree. `overlay` puts the
+/// child's ordinary draws in the overlay lane instead of the ordinary one —
+/// see [`Composite::set_slot_overlay`].
 struct Slot {
     child: MailboxId,
     subname: String,
     origin: Vec2,
     clip: Option<WidgetClipRect>,
+    overlay: bool,
     list: Option<WidgetDrawList>,
 }
 
@@ -56,6 +67,7 @@ enum MembershipDelta {
 pub struct Composite {
     slots: Vec<Slot>,
     chrome: Vec<WidgetDrawItem>,
+    overlay_chrome: Vec<WidgetDrawItem>,
     pending_membership: Vec<MembershipDelta>,
 }
 
@@ -85,7 +97,7 @@ impl Composite {
         if self.slots.iter().any(|slot| slot.child == child) {
             return;
         }
-        self.slots.push(Slot { child, subname: String::from(subname), origin, clip, list: None });
+        self.slots.push(Slot { child, subname: String::from(subname), origin, clip, overlay: false, list: None });
         self.pending_membership.push(MembershipDelta::Added {
             subname: String::from(subname),
             type_namespace: String::from(type_namespace),
@@ -103,6 +115,32 @@ impl Composite {
         };
         slot.origin = origin;
         slot.clip = clip;
+        true
+    }
+
+    /// Put a registered slot's ordinary draws in the **overlay lane** rather
+    /// than the ordinary one, without touching its membership, layout, or
+    /// current-frame reply. Returns whether a slot was found.
+    ///
+    /// This is the lane a plate that *hosts* the root's own children needs
+    /// (the studio's gap 15). A popover's plate stands over the primary
+    /// content, so it goes in the overlay — but a popover's controls are
+    /// ordinary widgets of the root, and ordinary draws are what an overlay
+    /// fill cuts text out from under. Marking the popover's children overlay
+    /// too moves the whole group into one lane: the plate goes down first
+    /// ([`Self::extend_overlay`]), the group's children follow in slot order,
+    /// the fill still cuts the primary content's glyphs under it, and it
+    /// cannot cut its own children's — they are not in the lane the
+    /// subtraction reads.
+    ///
+    /// There is no layer number and no z-index here: the group is a set of
+    /// slots the root already ordered, and the lane is the two-step order the
+    /// root already emits in.
+    pub fn set_slot_overlay(&mut self, child: MailboxId, overlay: bool) -> bool {
+        let Some(slot) = self.slots.iter_mut().find(|slot| slot.child == child) else {
+            return false;
+        };
+        slot.overlay = overlay;
         true
     }
 
@@ -142,11 +180,12 @@ impl Composite {
         Some(ChildrenChanged { added, removed })
     }
 
-    /// Begin a frame: clear the chrome buffer and reset every slot to
+    /// Begin a frame: clear both chrome buffers and reset every slot to
     /// unfilled, so the completion counter re-counts this frame's replies.
-    /// The slot set (children + origins) is untouched.
+    /// The slot set (children + origins + lanes) is untouched.
     pub fn begin_frame(&mut self) {
         self.chrome.clear();
+        self.overlay_chrome.clear();
         for slot in &mut self.slots {
             slot.list = None;
         }
@@ -157,6 +196,15 @@ impl Composite {
     /// the children — the fills-under-labels layering.
     pub fn extend_chrome(&mut self, items: impl IntoIterator<Item = WidgetDrawItem>) {
         self.chrome.extend(items);
+    }
+
+    /// Append one of the node's own draws to its **overlay** chrome (local
+    /// coordinates): the same fills-under-children rule, one lane up. The
+    /// node's overlay chrome flattens before any slot's overlay, so a plate
+    /// laid down here stands under the group of children raised onto it with
+    /// [`Self::set_slot_overlay`] and over everything in the ordinary lane.
+    pub fn extend_overlay(&mut self, items: impl IntoIterator<Item = WidgetDrawItem>) {
+        self.overlay_chrome.extend(items);
     }
 
     /// File a child's reply into its slot, attributed by the child's
@@ -191,15 +239,28 @@ impl Composite {
     /// intersected with the slot clip, and lands in the flattened list's own
     /// `overlay` — so an open dropdown's list escapes its row and the root
     /// emits it after every ordinary item of the whole cluster.
+    ///
+    /// A slot marked with [`Self::set_slot_overlay`] puts its ordinary `items`
+    /// in that same `overlay`, still offset by its origin and still cut to its
+    /// slot clip: the clip is where the root framed the child, which the lane
+    /// does not change. The lane order is the node's overlay chrome first,
+    /// then each overlay slot in registration order, so a plate and the
+    /// children standing on it arrive in the order the root laid them out.
     #[must_use]
     pub fn flatten(&self, intrinsic: Option<[f32; 2]>) -> WidgetDrawList {
         let mut items = self.chrome.clone();
-        let mut overlay = Vec::new();
+        let mut overlay = self.overlay_chrome.clone();
         for slot in &self.slots {
-            if let Some(list) = &slot.list {
-                items.extend(list.items.iter().filter_map(|item| item.offset(slot.origin).intersect_clip(slot.clip)));
-                overlay.extend(list.overlay.iter().map(|item| item.offset(slot.origin)));
+            let Some(list) = &slot.list else {
+                continue;
+            };
+            let placed = list.items.iter().filter_map(|item| item.offset(slot.origin).intersect_clip(slot.clip));
+            if slot.overlay {
+                overlay.extend(placed);
+            } else {
+                items.extend(placed);
             }
+            overlay.extend(list.overlay.iter().map(|item| item.offset(slot.origin)));
         }
         WidgetDrawList { intrinsic, items, overlay }
     }
@@ -467,6 +528,61 @@ mod tests {
                 Some(WidgetClipRect { x: 16.0, y: 13.0, width: 10.0, height: 8.0 }),
                 Some(WidgetClipRect { x: 17.0, y: 13.0, width: 9.0, height: 8.0 }),
             ],
+        );
+    }
+
+    #[test]
+    fn an_overlay_group_flattens_plate_then_children_into_the_overlay_lane() {
+        // Tripwire: a popover's plate stands over the primary content, and its
+        // controls are ordinary widgets of the root. Leaving those controls in
+        // the ordinary lane puts them under the plate *and* under the clip
+        // subtraction, which deletes their labels; the group has to arrive in
+        // one lane, plate first, children after, each still cut to the slot the
+        // root framed it in.
+        let mut root = Composite::new();
+        let plate = MailboxId(1);
+        let outside = MailboxId(2);
+        root.register_slot(
+            plate,
+            Vec2::new(100.0, 0.0),
+            Some(WidgetClipRect { x: 0.0, y: 0.0, width: 40.0, height: 10.0 }),
+            "on_plate",
+            "aether.kit.widget",
+        );
+        root.register_slot(outside, Vec2::new(200.0, 0.0), None, "under_plate", "aether.kit.widget");
+        assert!(root.set_slot_overlay(plate, true));
+        assert!(!root.set_slot_overlay(MailboxId(99), true), "an unregistered child has no lane to set");
+
+        root.begin_frame();
+        root.extend_chrome([quad(0.0, 0.1)]);
+        root.extend_overlay([quad(1.0, 0.2)]);
+        assert!(root.fill(
+            plate,
+            list(vec![
+                quad(2.0, 0.3),
+                clipped_quad(50.0, 0.4, WidgetClipRect { x: 50.0, y: 0.0, width: 4.0, height: 4.0 })
+            ])
+        ));
+        assert!(root.fill(outside, list(vec![quad(3.0, 0.5)])));
+
+        let flat = root.flatten(None);
+        let tags = |items: &[WidgetDrawItem]| {
+            items
+                .iter()
+                .map(|item| match item {
+                    WidgetDrawItem::Quad { color, .. } => color.r,
+                    WidgetDrawItem::TexturedQuad { .. } | WidgetDrawItem::Text { .. } => {
+                        unreachable!("test builds only solid quads")
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(tags(&flat.items), vec![0.1, 0.5], "only the ordinary chrome and the ordinary slot");
+        assert_eq!(
+            tags(&flat.overlay),
+            vec![0.2, 0.3],
+            "the node's own overlay chrome first, then the overlay slot — and the child draw \
+             that fell outside its slot clip is dropped there exactly as it would be here",
         );
     }
 
