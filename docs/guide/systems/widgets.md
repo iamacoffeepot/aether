@@ -23,6 +23,23 @@ emit) and the theme
 covers the layer above those: the state and interaction mail every widget
 speaks and the focus/hover/input model the root owns.
 
+The theme carries a type scale and a selection role alongside its palette, and
+both exist so one visual token carries one meaning. `TextRole` names the step a
+run of text is set at — `Title`, `Heading`, `Body`, `Caption` — and
+`Theme::text_size_pixels(role)` resolves it against `title_size_pixels`,
+`heading_size_pixels`, `label_size_pixels`, and `caption_size_pixels`, so
+hierarchy on a screen is a property of what a line *is*, never a pixel size
+picked at a call site. `space_unit_pixels` with `Theme::space(steps)` is the
+matching rule for distance: every gap a layout draws is a whole number of
+units, so the whole screen lands on one grid. `selection` and `selection_text`
+are the current item of a list, a radio group, a segmented control, a tab
+strip, or a dropdown — a *state*, drawn as a lit row rather than as something
+to press; `accent` and `accent_text` stay reserved for the primary action and
+the focus ring, so a chosen row and a pressable button never share a look.
+`Theme::scaled(factor)` multiplies every metric and leaves every color alone,
+which is how a consumer takes the display's scale factor without restating the
+scale.
+
 ## State and interaction mail
 
 A widget reacts to config, style, layout, external state, and root-owned
@@ -86,11 +103,41 @@ and verifies the ctx is actually running `MyPanel` before allocating the child
 alias; data-driven by-tag composition enforces the same cardinality and
 placement facts at runtime.
 
+## Labels, type roles, and the selection role
+
+`WidgetKind::Label` spawns the non-interactive `LabelWidget` from
+`LabelConfig { text, role, align, theme, state }`. The label is where the type
+scale reaches the screen: it draws at `theme.text_size_pixels(role)`, and a
+`Caption` additionally inks with `text_muted` — a hint, a unit, or an
+empty-state line is quieter than body text by construction, not because a
+caller remembered to dim it. `Body` is the default and is what every label drew
+before roles existed.
+
+`align` places the run in the assigned frame: `Start` at the frame's left edge,
+`Center` on its width, `End` flush with its right edge — which is what a column
+of numbers wants, so magnitudes line up on their last digit. Centering and
+end-alignment need the run's measured width, so such a label drives the same
+single-flight `FontMetricsRequest` the text field and text area do and lays out
+against the resolved `CachedFontMetrics`. Until those metrics arrive the label
+draws at the start rather than at a guessed width, and a `Start` label never
+sends the request at all. A run wider than its frame also stays flush left, so
+overflow clips at the slot's right edge instead of pushing the head of the
+string out of view.
+
+Selection is a state, not an affordance, and every widget that has a current
+item draws it the same way: the chosen row of a virtual list, the chosen bucket
+of a segmented control, and the marker of a radio group's chosen option fill
+with `theme.selection`, and the text on them inks with `theme.selection_text`.
+A radio group's unselected markers stay on `surface_raised` and so read as
+empty slots beside the lit one. None of these use `accent`, which means the
+primary action and the focus ring and nothing else — so a chosen row never
+reads as a button waiting to be pressed.
+
 ## Fixed-row virtual lists
 
-`VirtualListConfig { items, initial_selected_index, visible_row_count, theme,
-state }` retains the complete string vector while realizing at most
-`visible_row_count` rows. The panel fixes the slot height at
+`VirtualListConfig { items, initial_selected_index, visible_row_count,
+empty_text, theme, state }` retains the complete string vector while realizing
+at most `visible_row_count` rows. The panel fixes the slot height at
 `theme.row_height * visible_row_count` and clips the slot to that viewport;
 an empty item vector or zero-row viewport is not pointer- or focus-eligible.
 This bounded realization is the intended path for hundreds or thousands of
@@ -103,6 +150,15 @@ the assigned frame height by the number of rows actually realized, so a short
 list fills its viewport and the frame's bottom edge remains exclusive. Hidden
 lists answer every `Collect` with an empty draw list; disabled and read-only
 lists reject both pointer and keyboard selection changes.
+
+`initial_selected_index` is an `Option`, and a list whose model holds no
+current item shows none — no row lights up, rather than the first row lighting
+as if it had been chosen. The selected row, when there is one, fills with
+`theme.selection` over `theme.selection_text`. A list with no items at all
+draws `empty_text` as a single caption-role, muted line at the top of its
+viewport (`"No saved builds"`), so an empty result says so instead of leaving a
+blank rectangle the reader has to interpret; an empty `empty_text` draws
+nothing.
 
 ## Image widget
 
@@ -145,9 +201,10 @@ common validation/focus outlines.
 options, initial_index, theme, state }`. The assigned row is divided into
 equal-width named segments. A pointer press selects its bucket, and focused
 Left/Right movement clamps at the first and last option. Empty option lists
-have no hit buckets. `SegmentedSelected { index }` reports only actual changes;
-selected, hovered, pressed, disabled, validation, and focus presentation use
-the common theme/state contract.
+have no hit buckets. `SegmentedSelected { index }` reports only actual changes.
+The selected bucket fills with `theme.selection` over `theme.selection_text`;
+hovered, pressed, disabled, validation, and focus presentation use the common
+theme/state contract.
 
 `WidgetKind::Numeric` spawns `NumericWidget` from `NumericConfig { min, max,
 step, initial, theme, state }`. It reuses the shared `TextEditState`, named

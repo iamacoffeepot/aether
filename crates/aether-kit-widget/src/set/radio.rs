@@ -8,6 +8,11 @@
 //! theme's row height. A left click selects the row under the cursor; while
 //! focused, Up / Down move the selection (clamped at the ends). The selected
 //! index reports up as [`RadioSelected`].
+//!
+//! The chosen option is a state, not an affordance: its marker fills with the
+//! theme's selection role and its label inks with `selection_text`, so an
+//! unselected marker reads as an empty slot and the accent goes on meaning
+//! "the primary action" and nothing else.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -180,15 +185,21 @@ impl WasmActor for RadioGroupWidget {
             #[allow(clippy::cast_precision_loss)]
             let row_y = i as f32 * row_height;
             let marker_y = (row_height - marker).mul_add(0.5, row_y);
-            let base = if i == self.selected {
-                self.theme.accent
+            let selected = i == self.selected;
+            let base = if selected {
+                self.theme.selection
             } else {
                 self.theme.surface_raised
             };
-            let marker_state = if i == self.selected {
+            let marker_state = if selected {
                 self.state.theme_state(self.pressed)
             } else {
                 self.state.supporting_theme_state(false)
+            };
+            let ink = if selected {
+                self.theme.selection_text
+            } else {
+                self.theme.text_primary
             };
             items.push(quad(pad, marker_y, marker, marker, self.theme.fill(base, marker_state)));
             items.push(WidgetDrawItem::Text {
@@ -197,7 +208,7 @@ impl WasmActor for RadioGroupWidget {
                 font_id: self.theme.font_id,
                 text: option.clone(),
                 size_pixels: size,
-                color: self.theme.fill(self.theme.text_primary, self.state.supporting_theme_state(false)),
+                color: self.theme.fill(ink, self.state.supporting_theme_state(false)),
                 clip: None,
             });
         }

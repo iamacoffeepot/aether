@@ -8,6 +8,12 @@
 //! window visible in its assigned frame. Selection is retained independently
 //! from realization and keyboard movement reveals it without drawing the
 //! offscreen rows.
+//!
+//! Selection is a state, not an affordance: the current row draws in the
+//! theme's selection role, never in the accent that means "the primary
+//! action". A model that holds no selection lights no row, and a list with no
+//! items at all says so in one muted caption line instead of drawing an empty
+//! rectangle.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -20,7 +26,7 @@ use aether_kinds::{Key, MouseButton, MouseButtonRelease};
 use crate::set::defaults::WidgetDefaults;
 use crate::set::{push_control_outlines, quad, release_left, reply_with_draw_items, text_origin_y};
 use crate::state::{InteractionState, emit_state_changed};
-use crate::theme::Theme;
+use crate::theme::{TextRole, Theme};
 use crate::{
     Collect, SetWidgetState, VirtualListConfig, VirtualListSelected, WidgetControlState, WidgetDrawItem, WidgetFrame,
 };
@@ -49,6 +55,9 @@ enum SelectionMove {
 /// allocates draw items for only the current `VisibleRowWindow`.
 pub struct VirtualListWidget {
     items: Vec<String>,
+    /// The one line drawn in place of rows while `items` is empty; empty text
+    /// draws nothing.
+    empty_text: String,
     selected_index: Option<usize>,
     first_index: usize,
     visible_row_count: usize,
@@ -142,9 +151,31 @@ impl VirtualListWidget {
         (row_offset < window.len()).then(|| window.first_index + row_offset)
     }
 
+    /// The empty state: one caption-role, muted line at the top of the
+    /// viewport. A list with nothing in it reads as told-you-so rather than as
+    /// a control that failed to draw.
+    fn empty_draw_items(&self) -> Vec<WidgetDrawItem> {
+        if self.empty_text.is_empty() || !valid_frame(&self.frame) {
+            return Vec::new();
+        }
+        let size = self.theme.text_size_pixels(TextRole::Caption);
+        alloc::vec![WidgetDrawItem::Text {
+            x: self.theme.pad,
+            y: text_origin_y(0.0, self.theme.row_height.min(self.frame.height), size),
+            font_id: self.theme.font_id,
+            text: self.empty_text.clone(),
+            size_pixels: size,
+            color: self.theme.fill(self.theme.text_muted, self.state.supporting_theme_state(false)),
+            clip: None,
+        }]
+    }
+
     fn draw_items(&self) -> Vec<WidgetDrawItem> {
         if !self.state.is_visible() {
             return Vec::new();
+        }
+        if self.items.is_empty() {
+            return self.empty_draw_items();
         }
         let window = self.window();
         let visible_row_count = window.len();
@@ -159,7 +190,7 @@ impl VirtualListWidget {
             let item_index = window.first_index + row_offset;
             let selected = self.selected_index == Some(item_index);
             let base = if selected {
-                self.theme.accent
+                self.theme.selection
             } else {
                 self.theme.surface_raised
             };
@@ -170,7 +201,7 @@ impl VirtualListWidget {
             };
             items.push(quad(0.0, row_y, self.frame.width, row_height, self.theme.fill(base, row_state)));
             let text_base = if selected {
-                self.theme.accent_text
+                self.theme.selection_text
             } else {
                 self.theme.text_primary
             };
@@ -227,6 +258,7 @@ impl WasmActor for VirtualListWidget {
         });
         Ok(Self {
             items: config.items,
+            empty_text: config.empty_text,
             selected_index,
             first_index,
             visible_row_count,
@@ -240,6 +272,7 @@ impl WasmActor for VirtualListWidget {
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: VirtualListConfig) {
         self.items = config.items;
+        self.empty_text = config.empty_text;
         self.visible_row_count = usize_from_u32(config.visible_row_count);
         self.selected_index = initial_selection(config.initial_selected_index, self.items.len());
         self.first_index = 0;
@@ -374,6 +407,7 @@ mod tests {
         let selected_index = (item_count > 0).then_some(selected_index.min(item_count.saturating_sub(1)));
         VirtualListWidget {
             items,
+            empty_text: String::new(),
             selected_index,
             first_index: 0,
             visible_row_count,
@@ -474,6 +508,53 @@ mod tests {
             .collect();
         assert_eq!(text, vec!["row 2", "row 3", "row 4", "row 5", "row 6"]);
         assert_eq!(items.len(), 10, "five row quads and five labels only");
+    }
+
+    #[test]
+    fn an_empty_list_draws_its_line_as_one_muted_caption_and_otherwise_nothing() {
+        let mut widget = list(0, 5, 0);
+        assert!(widget.draw_items().is_empty(), "an empty list with no line to say draws nothing at all");
+
+        widget.empty_text = String::from("No saved builds");
+        let items = widget.draw_items();
+        assert_eq!(items.len(), 1, "the empty state is one line, with no row chrome behind it");
+        let WidgetDrawItem::Text { text, size_pixels, color, .. } = &items[0] else {
+            panic!("the empty state must draw text, not a quad");
+        };
+        assert_eq!(text, "No saved builds");
+        assert_eq!(*size_pixels, widget.theme.caption_size_pixels, "the empty line is set at the caption step");
+        assert_eq!(*color, widget.theme.text_muted, "and inked muted");
+    }
+
+    #[test]
+    fn the_selection_role_fills_the_current_row_and_no_row_without_one() {
+        // Tripwire: the accent means "the primary action" and nothing else, so
+        // a chosen row must never carry it, and a model holding no selection
+        // must light no row at all.
+        let mut widget = list(4, 4, 2);
+        let row_fills = |widget: &VirtualListWidget| {
+            widget
+                .draw_items()
+                .into_iter()
+                .filter_map(|item| match item {
+                    WidgetDrawItem::Quad { color, .. } => Some(color),
+                    WidgetDrawItem::Text { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            row_fills(&widget),
+            vec![
+                widget.theme.surface_raised,
+                widget.theme.surface_raised,
+                widget.theme.selection,
+                widget.theme.surface_raised
+            ]
+        );
+
+        widget.selected_index = None;
+        assert!(row_fills(&widget).iter().all(|color| *color == widget.theme.surface_raised));
     }
 
     #[test]

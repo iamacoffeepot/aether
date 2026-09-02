@@ -3,6 +3,10 @@
 #![allow(clippy::needless_pass_by_value, clippy::cast_precision_loss)]
 
 //! Horizontal exclusive segmented control (issue 2926).
+//!
+//! The chosen segment is a state, not an affordance: it fills with the theme's
+//! selection role and inks with `selection_text`, leaving the accent to mean
+//! "the primary action" and nothing else.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -221,7 +225,7 @@ impl WasmActor for SegmentedWidget {
                 let x = index as f32 * segment_width;
                 let selected = index == self.selected;
                 let base = if selected {
-                    self.theme.accent
+                    self.theme.selection
                 } else {
                     self.theme.surface_raised
                 };
@@ -248,7 +252,7 @@ impl WasmActor for SegmentedWidget {
                         size_pixels: size,
                         color: self.theme.fill(
                             if selected {
-                                self.theme.accent_text
+                                self.theme.selection_text
                             } else {
                                 self.theme.text_primary
                             },
