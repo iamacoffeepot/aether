@@ -8,6 +8,14 @@
 //! capture); the matching release fires [`ButtonClicked`] only if it lands
 //! back inside — a press-then-release-inside, so a press that drags off and
 //! releases elsewhere cancels. The armed state draws the pressed overlay.
+//!
+//! The label sits centered in the frame, both axes. Centering it horizontally
+//! needs the label's real width, so the button drives the same single-flight
+//! [`FontMetricsRequest`](aether_text::FontMetricsRequest) the text controls
+//! do and keeps the left-padded draw until the measurement lands — a guessed
+//! width would center the label wrong and then visibly jump. The measurement
+//! also gives the button its intrinsic size, so a layout can size a slot to
+//! the label it holds.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -15,18 +23,24 @@ use alloc::vec::Vec;
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, KeyRelease, MouseButton, MouseButtonRelease};
+use aether_text::FontMetricsResult;
 
 use crate::set::defaults::WidgetDefaults;
-use crate::set::{ActivationArms, push_border, quad, reply_if_hidden, text_origin_y};
+use crate::set::{
+    ActivationArms, accept_font_metrics_result, apply_text_theme, centered_text_x, measured_text_width,
+    pump_text_font_metrics, push_border, quad, reply_if_hidden, text_origin_y,
+};
 use crate::state::{InteractionState, emit_state_changed};
-use crate::theme::Theme;
+use crate::text_edit::FontMetricsAdapter;
+use crate::theme::{SetTheme, Theme};
 use crate::{
     ButtonClicked, ButtonConfig, Collect, SetWidgetState, WidgetControlState, WidgetDrawItem, WidgetDrawList,
     WidgetFrame,
 };
 
 /// A momentary push button. Holds its label plus the cached theme / frame /
-/// focus and the armed (`pressed`) state.
+/// focus, the armed (`pressed`) state, and the single-flight font-metrics
+/// adapter that feeds the centered label and the reported intrinsic size.
 pub struct ButtonWidget {
     label: String,
     theme: Theme,
@@ -34,9 +48,24 @@ pub struct ButtonWidget {
     state: InteractionState,
     /// Shared pointer/keyboard activation state; a release-inside fires the click.
     arms: ActivationArms,
+    /// Single-flight exact metrics for the active theme font.
+    font_metrics: FontMetricsAdapter,
 }
 
 impl ButtonWidget {
+    /// The label's measured pixel width, `None` until the theme font's
+    /// metrics resolve.
+    ///
+    /// This is the sum of the glyphs' advances, not their ink bounds — the
+    /// metric table carries no ink extents — so a single-glyph label like `+`
+    /// is centered on its advance and its ink can sit a hair off the frame's
+    /// optical center.
+    fn measured_label_width(&self) -> Option<f32> {
+        self.font_metrics
+            .resolved()
+            .map(|metrics| measured_text_width(metrics, &self.label, self.theme.label_size_pixels))
+    }
+
     /// Resolve a release: returns `true` (a click fired) only if the button
     /// was armed and the release landed back inside. Disarms either way.
     fn release_at(&mut self, x: f32, y: f32) -> bool {
@@ -107,21 +136,43 @@ impl WasmActor for ButtonWidget {
     const NAMESPACE: &'static str = "aether.kit.widget.button";
 
     fn init(config: ButtonConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        let desired_font_id = config.theme.font_id;
         Ok(ButtonWidget {
             label: config.label,
             theme: config.theme,
             state: InteractionState::new(config.state),
             frame: WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
             arms: ActivationArms::default(),
+            font_metrics: FontMetricsAdapter::new(desired_font_id),
         })
     }
 
-    /// Relabel / restyle in place from a re-sent config.
+    /// Kick off the font-metrics request for the initial theme font.
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+        pump_text_font_metrics(ctx, &mut self.font_metrics);
+    }
+
+    /// Relabel / restyle in place from a re-sent config, and request metrics
+    /// for the new theme font.
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: ButtonConfig) {
         self.label = config.label;
+        self.font_metrics.set_desired(config.theme.font_id);
         self.theme = config.theme;
         self.apply_control_state(ctx, config.state);
+        pump_text_font_metrics(ctx, &mut self.font_metrics);
+    }
+
+    /// Restyle: adopt the fanned theme and request metrics for its font.
+    #[handler::single]
+    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
+        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
+    }
+
+    /// Install a font-metrics reply; the next `Collect` centers the label.
+    #[handler::single]
+    fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
+        accept_font_metrics_result(ctx, &mut self.font_metrics, result);
     }
 
     /// Read-only and validation are deliberately inapplicable to a momentary
@@ -165,7 +216,8 @@ impl WasmActor for ButtonWidget {
     }
 
     /// Reply the button's local draw: a filled rect (pressed overlay when
-    /// armed), the label, and a focus ring.
+    /// armed), the centered label, and a focus ring, plus the intrinsic size
+    /// the label asks for once it is measured.
     ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
@@ -178,12 +230,14 @@ impl WasmActor for ButtonWidget {
         let height = self.frame.height;
         let theme_state = self.state.theme_state(self.pressed());
         let size = self.theme.label_size_pixels;
+        let measured = self.measured_label_width();
 
         let mut items: Vec<WidgetDrawItem> = Vec::new();
         items.push(quad(0.0, 0.0, width, height, self.theme.fill(self.theme.accent, theme_state)));
         if !self.label.is_empty() {
             items.push(WidgetDrawItem::Text {
-                x: self.theme.pad,
+                // Left-padded until the measurement lands, centered after.
+                x: measured.map_or(self.theme.pad, |text_width| centered_text_x(width, text_width, self.theme.pad)),
                 y: text_origin_y(0.0, height, size),
                 font_id: self.theme.font_id,
                 text: self.label.clone(),
@@ -195,8 +249,12 @@ impl WasmActor for ButtonWidget {
         if self.state.focused() {
             push_border(&mut items, width, height, 2.0, self.theme.accent);
         }
+
+        // The label plus one pad each side, at the theme's row height: what a
+        // layout needs to size a slot to this button's own label.
+        let intrinsic = measured.map(|text_width| [self.theme.pad.mul_add(2.0, text_width), self.theme.row_height]);
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { intrinsic: None, items });
+            parent.send(&WidgetDrawList { intrinsic, items, overlay: Vec::new() });
         }
     }
 }
@@ -216,7 +274,16 @@ mod tests {
             state: InteractionState::new(WidgetControlState::default()),
             frame: WidgetFrame { x: 10.0, y: 10.0, width: 40.0, height: 20.0 },
             arms: ActivationArms::default(),
+            font_metrics: FontMetricsAdapter::new(0),
         }
+    }
+
+    #[test]
+    fn a_measured_label_centers_and_an_oversized_one_falls_back_to_the_padded_origin() {
+        let pad = 8.0;
+        assert_eq!(centered_text_x(100.0, 40.0, pad), 30.0, "even margins either side");
+        assert_eq!(centered_text_x(100.0, 99.0, pad), pad, "a label wider than the frame allows stays padded");
+        assert_eq!(centered_text_x(100.0, 84.0, pad), pad, "exactly pad-wide margins are the crossover");
     }
 
     #[test]

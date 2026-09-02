@@ -82,6 +82,11 @@ pub struct Focus {
     focused: Option<MailboxId>,
     hovered: Option<MailboxId>,
     capture: Option<MailboxId>,
+    /// The modal pointer grab an open dropdown or popover holds: every
+    /// pointer event routes here until it ends, across releases, so a press
+    /// outside the widget's own slot still reaches it (to select a row drawn
+    /// in its overlay, or to dismiss). Outranks drag capture.
+    grab: Option<MailboxId>,
 }
 
 impl Focus {
@@ -95,6 +100,27 @@ impl Focus {
         self.focused = None;
         self.hovered = None;
         self.capture = None;
+        self.grab = None;
+    }
+
+    /// Route every pointer event to `child` until [`Self::end_grab`] — the
+    /// modal grab a widget asks for while its overlay is open (a dropdown's
+    /// list). Ignored for a child the table does not hold live.
+    pub fn begin_grab(&mut self, child: MailboxId) {
+        if self.entries.iter().any(|entry| entry.child == child && entry.pointer_live()) {
+            self.grab = Some(child);
+        }
+    }
+
+    /// End the modal grab, if any. Hover is not recomputed here: the next
+    /// motion event re-derives it.
+    pub fn end_grab(&mut self) {
+        self.grab = None;
+    }
+
+    #[must_use]
+    pub fn grabbed(&self) -> Option<MailboxId> {
+        self.grab
     }
 
     /// Register one fixed layout entry. Dynamic visibility/enabled state may be
@@ -130,7 +156,7 @@ impl Focus {
 
     #[must_use]
     pub fn pointer_target(&self, x: f32, y: f32) -> Option<MailboxId> {
-        self.capture.or_else(|| self.hit_test(x, y))
+        self.grab.or(self.capture).or_else(|| self.hit_test(x, y))
     }
 
     #[must_use]
@@ -379,6 +405,36 @@ mod tests {
             Some(HoverTransition { previous: Some(MailboxId(1)), next: Some(MailboxId(3)) })
         );
         assert_eq!(focus.pointer_target(5.0, 45.0), Some(MailboxId(3)));
+    }
+
+    #[test]
+    fn a_grab_outranks_capture_and_survives_until_it_is_ended() {
+        let mut focus = focus_with_three();
+        focus.begin_capture(MailboxId(1));
+        focus.begin_grab(MailboxId(3));
+        assert_eq!(focus.grabbed(), Some(MailboxId(3)));
+        assert_eq!(focus.pointer_target(5.0, 5.0), Some(MailboxId(3)), "the grab takes a press over a captor's hit");
+
+        // A release clears capture; the grab is modal and outlives it.
+        focus.release_capture(5.0, 5.0);
+        assert_eq!(focus.pointer_target(5.0, 5.0), Some(MailboxId(3)));
+
+        focus.end_grab();
+        assert_eq!(focus.grabbed(), None);
+        assert_eq!(focus.pointer_target(5.0, 5.0), Some(MailboxId(1)));
+    }
+
+    #[test]
+    fn a_grab_is_refused_for_a_child_that_is_not_live_for_the_pointer() {
+        let mut focus = focus_with_three();
+        focus.begin_grab(MailboxId(2));
+        assert_eq!(focus.grabbed(), None, "a pointer-ineligible child cannot hold the modal grab");
+
+        let mut hidden = available();
+        hidden.visible = false;
+        focus.update_availability(MailboxId(3), &hidden);
+        focus.begin_grab(MailboxId(3));
+        assert_eq!(focus.grabbed(), None, "an unavailable child cannot hold it either");
     }
 
     #[test]

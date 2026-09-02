@@ -246,7 +246,7 @@ impl WasmActor for SliderWidget {
         ));
         push_control_outlines(&mut items, width, height, &self.state, &self.theme);
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { intrinsic: None, items });
+            parent.send(&WidgetDrawList { intrinsic: None, items, overlay: Vec::new() });
         }
     }
 }

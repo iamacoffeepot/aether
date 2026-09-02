@@ -346,7 +346,8 @@ fn virtual_list_spec(subname: &str, state: WidgetControlState) -> WidgetChildSpe
         clip: None,
         config: VirtualListConfig {
             items: (0..200).map(|index| format!("Row {index:03}")).collect(),
-            initial_selected_index: 0,
+            initial_selected_index: Some(0),
+            empty_text: String::new(),
             visible_row_count: 5,
             theme: Theme::DEFAULT,
             state,

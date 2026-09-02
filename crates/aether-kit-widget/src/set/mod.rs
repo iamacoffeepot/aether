@@ -15,6 +15,10 @@
 //! - [`ToggleWidget`] — a boolean switch.
 //! - [`SegmentedWidget`] — a horizontal exclusive choice.
 //! - [`NumericWidget`] — a typed and steppable bounded number.
+//! - [`DropdownWidget`] — one current choice with its alternatives in a list
+//!   that opens on demand, drawn in the overlay layer.
+//! - [`TabStripWidget`] — one row of content-sized tabs selecting a parallel
+//!   content set.
 //!
 //! Each caches its assigned [`WidgetFrame`] rect
 //! and its [`Theme`], answers every
@@ -31,12 +35,14 @@
 
 pub mod button;
 pub mod defaults;
+pub mod dropdown;
 pub mod image;
 pub mod label;
 pub mod numeric;
 pub mod radio;
 pub mod segmented;
 pub mod slider;
+pub mod tab_strip;
 pub mod text_area;
 pub mod text_field;
 pub mod toggle;
@@ -44,12 +50,14 @@ pub mod virtual_list;
 
 pub use button::ButtonWidget;
 pub use defaults::WidgetDefaults;
+pub use dropdown::DropdownWidget;
 pub use image::ImageWidget;
 pub use label::LabelWidget;
 pub use numeric::NumericWidget;
 pub use radio::RadioGroupWidget;
 pub use segmented::SegmentedWidget;
 pub use slider::SliderWidget;
+pub use tab_strip::TabStripWidget;
 pub use text_area::TextAreaWidget;
 pub use text_field::TextFieldWidget;
 pub use toggle::ToggleWidget;
@@ -61,7 +69,7 @@ use aether_actor::WasmCtx;
 use aether_kinds::keycode::{KEY_ENTER, KEY_SPACE};
 use aether_kinds::{CachedFontMetrics, Modifiers, MouseButton, MouseButtonRelease, mouse_button};
 use aether_math::Rgba;
-use aether_text::{FontMetricsRequest, FontRef, TextCapability};
+use aether_text::{FontMetricsRequest, FontMetricsResult, FontRef, TextCapability};
 
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::{DisplayedEdit, FontMetricsAdapter, SingleLineLayout, TextEditState};
@@ -182,6 +190,40 @@ fn apply_text_theme(ctx: &mut WasmCtx<'_>, font_metrics: &mut FontMetricsAdapter
     pump_text_font_metrics(ctx, font_metrics);
 }
 
+/// Install a font-metrics reply and pump whatever newer request the settled
+/// flight deferred. A stale reply — its font is no longer the desired one —
+/// is dropped by the adapter.
+fn accept_font_metrics_result(ctx: &mut WasmCtx<'_>, font_metrics: &mut FontMetricsAdapter, result: FontMetricsResult) {
+    let pump_deferred = match result {
+        FontMetricsResult::Ok { metrics } => font_metrics.accept_reply(Some(CachedFontMetrics::new(&metrics))),
+        FontMetricsResult::Err { error } => {
+            tracing::warn!(target: "aether_kit_widget", %error, "widget font metrics failed");
+            font_metrics.accept_reply(None)
+        }
+    };
+    if pump_deferred {
+        pump_text_font_metrics(ctx, font_metrics);
+    }
+}
+
+/// The measured pixel width of one line of `text` at `size_pixels` — the sum
+/// of its glyphs' advances. A widget that sizes or centers against its text
+/// calls this only once the font's metrics resolve, and keeps its unmeasured
+/// draw until then rather than guessing a width from the per-character
+/// approximation ([`APPROX_ADVANCE_RATIO`]), which would place the text wrong
+/// and then visibly jump.
+fn measured_text_width(metrics: &CachedFontMetrics, text: &str, size_pixels: f32) -> f32 {
+    SingleLineLayout::build(text, metrics, size_pixels).width()
+}
+
+/// The local x at which a run `text_width` pixels wide sits centered in a
+/// `width`-wide frame, never left of `pad`. A label wider than the frame
+/// allows therefore falls back to the same left-padded origin an unmeasured
+/// draw uses, instead of hanging off the left edge.
+fn centered_text_x(width: f32, text_width: f32, pad: f32) -> f32 {
+    ((width - text_width) * 0.5).max(pad)
+}
+
 fn release_left<T>(pressed: &mut T, released: T, release: MouseButtonRelease) {
     if release.button == mouse_button::LEFT {
         *pressed = released;
@@ -224,7 +266,7 @@ pub(super) fn reply_if_hidden(ctx: &WasmCtx<'_>, state: &InteractionState) -> bo
         return false;
     }
     if let Some(parent) = ctx.parent() {
-        parent.send(&WidgetDrawList { intrinsic: None, items: Vec::new() });
+        parent.send(&WidgetDrawList { intrinsic: None, items: Vec::new(), overlay: Vec::new() });
     }
     true
 }
@@ -238,7 +280,7 @@ fn reply_with_draw_items(
         return;
     }
     if let Some(parent) = ctx.parent() {
-        parent.send(&WidgetDrawList { intrinsic: None, items: draw_items() });
+        parent.send(&WidgetDrawList { intrinsic: None, items: draw_items(), overlay: Vec::new() });
     }
 }
 

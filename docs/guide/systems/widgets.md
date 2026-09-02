@@ -2,8 +2,8 @@
 
 `aether-kit-widget` ships a set of guest-side widgets — a slider, a text field, a
 multiline text area, a radio group, a fixed-row virtual list, a button, a label,
-an image, a toggle, a segmented control, and a numeric editor — as ordinary
-`#[actor(instanced, composable)]` types.
+an image, a toggle, a segmented control, a tab strip, a dropdown, and a numeric
+editor — as ordinary `#[actor(instanced, composable)]` types.
 A panel root spawns them as inline children (ADR-0114) and drives them entirely
 by mail, so composing an editor panel is a matter of laying out widgets and
 translating their value events, never re-deriving hit rects, focus, or per-row
@@ -23,6 +23,23 @@ emit) and the theme
 covers the layer above those: the state and interaction mail every widget
 speaks and the focus/hover/input model the root owns.
 
+The theme carries a type scale and a selection role alongside its palette, and
+both exist so one visual token carries one meaning. `TextRole` names the step a
+run of text is set at — `Title`, `Heading`, `Body`, `Caption` — and
+`Theme::text_size_pixels(role)` resolves it against `title_size_pixels`,
+`heading_size_pixels`, `label_size_pixels`, and `caption_size_pixels`, so
+hierarchy on a screen is a property of what a line *is*, never a pixel size
+picked at a call site. `space_unit_pixels` with `Theme::space(steps)` is the
+matching rule for distance: every gap a layout draws is a whole number of
+units, so the whole screen lands on one grid. `selection` and `selection_text`
+are the current item of a list, a radio group, a segmented control, a tab
+strip, or a dropdown — a *state*, drawn as a lit row rather than as something
+to press; `accent` and `accent_text` stay reserved for the primary action and
+the focus ring, so a chosen row and a pressable button never share a look.
+`Theme::scaled(factor)` multiplies every metric and leaves every color alone,
+which is how a consumer takes the display's scale factor without restating the
+scale.
+
 ## State and interaction mail
 
 A widget reacts to config, style, layout, external state, and root-owned
@@ -35,7 +52,8 @@ widget sends can misreport it.
 - **Config, down.** One `Config` kind per widget — `SliderConfig`,
   `TextFieldConfig`, `TextAreaConfig`, `RadioConfig`, `VirtualListConfig`,
   `ButtonConfig`, `LabelConfig`, `ImageConfig`, `ToggleConfig`,
-  `SegmentedConfig`, `NumericConfig` — each embedding a `theme: Theme`. The
+  `SegmentedConfig`, `TabStripConfig`, `DropdownConfig`, `NumericConfig` — each embedding a
+  `theme: Theme`. The
   config is both the value
   `spawn_inline_child::<WidgetPanel, W>(subname, &config)` boots the widget with and a
   re-sendable mail: send a widget its config kind again to reconfigure it in
@@ -59,8 +77,8 @@ widget sends can misreport it.
   `WidgetStateChanged` so panel routing cannot drift. Hidden widgets keep their
   slot and answer `Collect` with an empty `WidgetDrawList`; disabled widgets
   draw muted but leave input routing; read-only Slider, Radio, TextField,
-  TextArea, VirtualList, Toggle, Segmented, and Numeric controls remain
-  focusable but reject mutation. Button and Label ignore read-only and
+  TextArea, VirtualList, Toggle, Segmented, TabStrip, and Numeric controls
+  remain focusable but reject mutation. Button and Label ignore read-only and
   validation.
 - **Interaction, down.** The root sends `FocusGained` / `FocusLost` and
   `HoverGained` / `HoverLost`. Hover comes from explicit edges, not from a child
@@ -74,9 +92,10 @@ widget sends can misreport it.
   release, so a consumer previews the drag and commits the expensive work
   once.
 
-  `ToggleChanged { on }`, `SegmentedSelected { index }`, and
-  `NumericChanged { value, committed }` use that same source-attributed lane;
-  Numeric applies the preview/commit distinction to typed values.
+  `ToggleChanged { on }`, `SegmentedSelected { index }`, `TabSelected
+  { index }`, and `NumericChanged { value, committed }` use that same
+  source-attributed lane; Numeric applies the preview/commit distinction to
+  typed values.
 
 Every stock widget is `#[actor(instanced, composable)]`, so it satisfies
 `ChildOf<P>` for any Wasm actor parent in the same resident module. A custom
@@ -86,11 +105,41 @@ and verifies the ctx is actually running `MyPanel` before allocating the child
 alias; data-driven by-tag composition enforces the same cardinality and
 placement facts at runtime.
 
+## Labels, type roles, and the selection role
+
+`WidgetKind::Label` spawns the non-interactive `LabelWidget` from
+`LabelConfig { text, role, align, theme, state }`. The label is where the type
+scale reaches the screen: it draws at `theme.text_size_pixels(role)`, and a
+`Caption` additionally inks with `text_muted` — a hint, a unit, or an
+empty-state line is quieter than body text by construction, not because a
+caller remembered to dim it. `Body` is the default and is what every label drew
+before roles existed.
+
+`align` places the run in the assigned frame: `Start` at the frame's left edge,
+`Center` on its width, `End` flush with its right edge — which is what a column
+of numbers wants, so magnitudes line up on their last digit. Centering and
+end-alignment need the run's measured width, so such a label drives the same
+single-flight `FontMetricsRequest` the text field and text area do and lays out
+against the resolved `CachedFontMetrics`. Until those metrics arrive the label
+draws at the start rather than at a guessed width, and a `Start` label never
+sends the request at all. A run wider than its frame also stays flush left, so
+overflow clips at the slot's right edge instead of pushing the head of the
+string out of view.
+
+Selection is a state, not an affordance, and every widget that has a current
+item draws it the same way: the chosen row of a virtual list, the chosen bucket
+of a segmented control, and the marker of a radio group's chosen option fill
+with `theme.selection`, and the text on them inks with `theme.selection_text`.
+A radio group's unselected markers stay on `surface_raised` and so read as
+empty slots beside the lit one. None of these use `accent`, which means the
+primary action and the focus ring and nothing else — so a chosen row never
+reads as a button waiting to be pressed.
+
 ## Fixed-row virtual lists
 
-`VirtualListConfig { items, initial_selected_index, visible_row_count, theme,
-state }` retains the complete string vector while realizing at most
-`visible_row_count` rows. The panel fixes the slot height at
+`VirtualListConfig { items, initial_selected_index, visible_row_count,
+empty_text, theme, state }` retains the complete string vector while realizing
+at most `visible_row_count` rows. The panel fixes the slot height at
 `theme.row_height * visible_row_count` and clips the slot to that viewport;
 an empty item vector or zero-row viewport is not pointer- or focus-eligible.
 This bounded realization is the intended path for hundreds or thousands of
@@ -103,6 +152,42 @@ the assigned frame height by the number of rows actually realized, so a short
 list fills its viewport and the frame's bottom edge remains exclusive. Hidden
 lists answer every `Collect` with an empty draw list; disabled and read-only
 lists reject both pointer and keyboard selection changes.
+
+`initial_selected_index` is an `Option`, and a list whose model holds no
+current item shows none — no row lights up, rather than the first row lighting
+as if it had been chosen. The selected row, when there is one, fills with
+`theme.selection` over `theme.selection_text`. A list with no items at all
+draws `empty_text` as a single caption-role, muted line at the top of its
+viewport (`"No saved builds"`), so an empty result says so instead of leaving a
+blank rectangle the reader has to interpret; an empty `empty_text` draws
+nothing.
+
+## Dropdowns
+
+`DropdownConfig { options, initial_selected_index, placeholder, open_row_count,
+theme, state }` is the control for one current choice whose alternatives are
+secondary. Closed it is a single row reading the chosen option — or
+`placeholder` in muted ink while nothing is chosen — with a chevron at its
+right end. A press-and-release inside the row opens the list, as does Enter or
+a matching Space release while focused; Escape closes it.
+
+Open, the list hangs directly below the closed row: up to `open_row_count` rows
+of `theme.row_height`, the frame's full width, on a raised surface inside a
+one-pixel outline ring. The current option is drawn in the **selection** role
+(`theme.selection` / `selection_text`), never the accent — a chosen thing is a
+state, not a button. The option under the pointer takes the hover overlay, and
+Up/Down walk that highlight by the keyboard, scrolling the realized window only
+enough to keep it visible, exactly as a virtual list reveals its selection. A
+longer `options` vector than `open_row_count` therefore scrolls inside the
+realized rows rather than growing the list.
+
+While the list is open every left press is the dropdown's: a press on a row
+takes that option and closes, a press anywhere else closes without a change.
+`DropdownSelected { index }` reports only an actual change of choice, and
+`DropdownOpenChanged { open }` reports each open and close edge exactly once —
+including the close that focus loss, a re-sent config, or becoming disabled or
+read-only forces. An empty option vector, a zero-row list, and a read-only or
+unavailable dropdown never open at all.
 
 ## Image widget
 
@@ -131,7 +216,7 @@ applied to their configured tint. Images are never pointer- or focus-eligible;
 read-only and validation state have no visual or behavioral meaning for this
 static leaf.
 
-## Toggle, segmented, and numeric controls
+## Toggle, segmented, tab strip, and numeric controls
 
 `WidgetKind::Toggle` spawns `ToggleWidget` from `ToggleConfig { label,
 initial, theme, state }`. A left press arms the switch and a release back
@@ -145,9 +230,29 @@ common validation/focus outlines.
 options, initial_index, theme, state }`. The assigned row is divided into
 equal-width named segments. A pointer press selects its bucket, and focused
 Left/Right movement clamps at the first and last option. Empty option lists
-have no hit buckets. `SegmentedSelected { index }` reports only actual changes;
-selected, hovered, pressed, disabled, validation, and focus presentation use
-the common theme/state contract.
+have no hit buckets. `SegmentedSelected { index }` reports only actual changes.
+The selected bucket fills with `theme.selection` over `theme.selection_text`;
+hovered, pressed, disabled, validation, and focus presentation use the common
+theme/state contract.
+
+`WidgetKind::TabStrip` spawns `TabStripWidget` from `TabStripConfig { labels,
+initial_index, theme, state }` — one row of tabs over parallel content sets
+viewed one at a time. Unlike the segmented control, the row is not divided
+evenly: each tab is as wide as its own label plus one `theme.pad` either side,
+laid out left to right from the strip's local origin with `theme.space(1)`
+between them, so the space between two tabs belongs to neither and a press
+there selects nothing. That sizing needs the label's real width, so the strip
+drives the same single-flight font-metrics request the text controls do and
+splits the row evenly only as an interim, for the frame or two before the
+measurement lands. The hit buckets and the draw read the same widths, so a
+press always lands in the tab under the pointer. The selected tab is marked
+twice — filled with `theme.selection` and inked in `theme.selection_text`,
+under a two-pixel `theme.text_primary` underline along its bottom edge —
+while the others draw `text_primary` on the row's own `surface_raised`; hover
+and press are the usual `Theme::fill` overlays. A left press selects, focused
+Left/Right moves the selection and clamps at the ends, and `TabSelected {
+index }` reports only actual changes. The strip owns nothing but the choice:
+swapping the content behind the selected tab is the root's business.
 
 `WidgetKind::Numeric` spawns `NumericWidget` from `NumericConfig { min, max,
 step, initial, theme, state }`. It reuses the shared `TextEditState`, named
@@ -177,9 +282,10 @@ order, static pointer/focus eligibility, dynamic visible/enabled availability,
 the hovered and focused children, and the drag-captured child. It answers four
 questions:
 
-- **Where does a pointer event go?** To the drag-captured child if one holds
-  capture — so a drag that leaves a widget's rect still reaches it — otherwise
-  to the topmost child under the cursor.
+- **Where does a pointer event go?** To the child holding the modal grab if
+  there is one, then to the drag-captured child if one holds capture — so a
+  drag that leaves a widget's rect still reaches it — otherwise to the topmost
+  child under the cursor.
 - **Where does a keyboard event go?** To the focused child.
 - **Where does hover live?** Independent hit testing yields a named
   `HoverTransition`; sibling crossings send lost before gained even while
@@ -197,9 +303,30 @@ drifts off it. `MouseButton.button` and `MouseButtonRelease.button` use the
 engine constants in `aether_kinds::mouse_button`; `LEFT` is `0`, including for a
 synthetic `aether.mouse_button` sent over MCP.
 
+A widget that must draw outside its own slot — an open dropdown's list — puts
+those draws in `WidgetDrawList::overlay` instead of `items`. The overlay is
+offset by each slot origin on the way up like any other draw but never
+intersected with the slot clip, and the root emits the whole cluster's overlay
+after every ordinary quad and glyph, so the list escapes its one-row slot and
+lands over the widgets below it. Its counterpart on the input side is the
+**modal pointer grab**: `Focus::begin_grab(child)` routes every pointer event
+to that child until `end_grab`, outranking drag capture, and hover edges are
+suppressed while it holds so nothing under the overlay lights up. The widget
+asks for the grab by reporting `DropdownOpenChanged { open: true }` and gives
+it back with `open: false` — that is why the close edge is reported for every
+way a list can close, including focus loss. Without the grab a press that
+lands outside the widget's own rect would go to whatever is under it, and the
+open list would have no way to learn it should close.
+
 A focused Button activates once on Enter press (repeat presses are suppressed
 until release) and once on Space release after a matching Space press. Focus
-loss or unavailability cancels the keyboard arm.
+loss or unavailability cancels the keyboard arm. Its label sits centered in the
+frame on both axes once the configured font's metrics resolve; until then it
+draws left-padded, because a guessed width would center the label wrong and
+then visibly jump when the real one arrived. That measurement also gives the
+button its `WidgetDrawList::intrinsic` — `[label width + 2 × pad, row height]`
+— so a layout can size a slot to the label it holds; like the image widget's
+natural size, the reference panel does not yet consume it.
 
 TextField and TextArea share the same UTF-8-safe edit, selection, and IME
 state. Once the configured font resolves, pointer placement, caret motion,
@@ -290,6 +417,53 @@ concrete peer-first assembly of this model — a specialized tool panel, a
 camera-owning viewport, a non-input-owning `ConsoleOverlay`, and the one
 `EditorShell` routing their three non-overlapping regions; git history holds
 it.)
+
+## Layout
+
+A panel root hands each child a `WidgetFrame { x, y, width, height }` and
+nothing else, so every consumer that laid out a screen used to compute those
+rectangles by hand — a few hundred lines of `x + pad`, `width - 2.0 * pad`,
+`y += 28.0` per screen, with the design decision buried inside the arithmetic
+and no single place where the pane's width and the viewport's width agree. The
+`layout` module is that arithmetic named. It is pure `f32` geometry over
+`WidgetFrame` — no actor, no mail — so a consumer computes a whole screen's
+frames in one function, asserts them in a unit test, and only then mails them
+down.
+
+Use it in the order a screen is actually designed. **Regions first**: `dock(window,
+DockSide::Right, 320.0)` returns a `Docked { pane, viewport }` whose two
+rectangles tile the window exactly. A tool pane belongs beside the thing it
+operates on, not floating over it — an overlay hides the content the controls
+act on, and the viewport can no longer be sized honestly. `pane_extent` is
+clamped into the window, so an oversized pane leaves a zero-width viewport
+rather than a negative one. Reach for `inset(frame, theme.pad)` to put the
+breathing room inside a region once, instead of in each child's own maths.
+
+**Rows next.** A `Column { origin, width, gap }` stacks `Row`s down a region
+and `place(&rows)` returns a `Placed { frames, height }` — one frame per cell
+in row-then-cell order, plus the total occupied height for stacking a second
+column below or sizing a scroll extent. The column owns one `gap`, used both
+between rows and between the cells of a row; feed it from `Theme::space` and
+every space on the screen is a whole number of spacing units, which is most of
+what a reader perceives as "designed".
+
+**Cells last, sized to content.** `Row::single(height)` is the full-width case
+— a heading, a slider, a field that spans the pane. `Row::cells(height, cells)`
+takes explicit `Cell`s: `Cell::Fixed(pixels)` for a control whose content
+determines its width (a button at its measured label width, an icon, a
+fixed-width numeric field) and `Cell::Share(weight)` for the one thing that
+should absorb what is left. Shares divide the width remaining *after* every
+fixed cell and every gap is subtracted, so adding a button to a row narrows its
+text field by exactly the button plus one gap with no second place to keep in
+agreement. A row of three `Fixed` buttons leaves its remainder empty at the
+right — deliberately, because equal thirds size a control to its container,
+which stretches "OK" to a third of the pane and clips "Regenerate terrain" in
+the same row.
+
+Degenerate input clamps rather than propagating: a negative or NaN length
+becomes zero and a NaN position becomes zero, so a layout computed before the
+window size is known collapses to empty rectangles instead of poisoning every
+frame downstream with NaN.
 
 ## The reference panel
 

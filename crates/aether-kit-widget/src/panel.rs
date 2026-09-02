@@ -34,9 +34,14 @@
 //!   (plus text) from one root render sender.
 //! - **Value.** Each value-up event (`SliderChanged` / `TextCommitted` /
 //!   `RadioSelected` / `VirtualListSelected` / `ButtonClicked` / `ToggleChanged` /
-//!   `SegmentedSelected` / `NumericChanged`), attributed by
+//!   `SegmentedSelected` / `NumericChanged` / `DropdownSelected` /
+//!   `TabSelected`), attributed by
 //!   `ctx.source_mailbox()`, is the seam a real editor translates into
 //!   world-knob driver mail; the reference logs it.
+//! - **Grab.** `DropdownOpenChanged` is the one events-up kind the root
+//!   answers itself: an open list takes the modal pointer grab
+//!   (`Focus::begin_grab`) so every press reaches it wherever it lands, and
+//!   the close gives it back.
 
 use alloc::string::String;
 use alloc::vec;
@@ -60,16 +65,18 @@ use crate::focus::{
     AvailabilityEffects, Focus, FocusDirection, FocusEligibility, FocusRect, FocusTransition, HoverTransition,
 };
 use crate::set::{
-    ButtonWidget, ImageWidget, LabelWidget, NumericWidget, RadioGroupWidget, SegmentedWidget, SliderWidget,
-    TextAreaWidget, TextFieldWidget, ToggleWidget, VirtualListWidget, quad,
+    ButtonWidget, DropdownWidget, ImageWidget, LabelWidget, NumericWidget, RadioGroupWidget, SegmentedWidget,
+    SliderWidget, TabStripWidget, TextAreaWidget, TextFieldWidget, ToggleWidget, VirtualListWidget, quad,
 };
-use crate::theme::{SetTheme, Theme};
+use crate::theme::{SetTheme, TextRole, Theme};
 use crate::{
-    ButtonClicked, ButtonConfig, Collect, FocusGained, FocusLost, HoverGained, HoverLost, ImageConfig, LabelConfig,
-    NumericChanged, NumericConfig, PanelConfig, RadioConfig, RadioSelected, ScrollConfig, ScrollExtent, ScrollOutcome,
-    ScrollResidual, ScrollWidget, SegmentedConfig, SegmentedSelected, SliderChanged, SliderConfig, TextAreaConfig,
-    TextCommitted, TextFieldConfig, ToggleChanged, ToggleConfig, VirtualListConfig, VirtualListSelected, Widget,
-    WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged,
+    ButtonClicked, ButtonConfig, Collect, DropdownConfig, DropdownOpenChanged, DropdownSelected, FocusGained,
+    FocusLost, HoverGained, HoverLost, ImageConfig, LabelConfig, NumericChanged, NumericConfig, PanelConfig,
+    RadioConfig, RadioSelected, ScrollConfig, ScrollExtent, ScrollOutcome, ScrollResidual, ScrollWidget,
+    SegmentedConfig, SegmentedSelected, SliderChanged, SliderConfig, TabSelected, TabStripConfig, TextAlign,
+    TextAreaConfig, TextCommitted, TextFieldConfig, ToggleChanged, ToggleConfig, VirtualListConfig,
+    VirtualListSelected, Widget, WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame,
+    WidgetKind, WidgetStateChanged,
 };
 use crate::{FrameDischarge, decode_nested_widget_config};
 use crate::{accept_open_child_list, emit, flush_membership};
@@ -361,9 +368,11 @@ where
         }),
         WidgetKind::Button => spawn_button_child::<P>(ctx, spec, row),
         WidgetKind::VirtualList => spawn_virtual_list_child::<P>(ctx, spec, row),
-        WidgetKind::Toggle | WidgetKind::Segmented | WidgetKind::Numeric => {
-            spawn_row_control_child::<P>(ctx, spec, row)
-        }
+        WidgetKind::Toggle
+        | WidgetKind::Segmented
+        | WidgetKind::Numeric
+        | WidgetKind::Dropdown
+        | WidgetKind::TabStrip => spawn_row_control_child::<P>(ctx, spec, row),
         WidgetKind::BehaviorHost => spawn_behavior_host(ctx, spec, row),
         WidgetKind::Composite => spawn_composite_child::<P>(ctx, spec, layout, row),
         WidgetKind::Scroll => spawn_scroll_child::<P>(ctx, spec, layout),
@@ -539,6 +548,30 @@ fn spawn_row_control_child<P: WasmActor>(
                 scroll_viewport: None,
             })
         }),
+        WidgetKind::Dropdown => decode_child::<DropdownConfig>(spec).and_then(|config| {
+            spawn::<P, DropdownWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+                id,
+                width_pixels: None,
+                height_pixels: row,
+                pointer_eligible: true,
+                focusable: true,
+                state: config.state,
+                type_namespace: <DropdownWidget as Addressable>::NAMESPACE,
+                scroll_viewport: None,
+            })
+        }),
+        WidgetKind::TabStrip => decode_child::<TabStripConfig>(spec).and_then(|config| {
+            spawn::<P, TabStripWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+                id,
+                width_pixels: None,
+                height_pixels: row,
+                pointer_eligible: true,
+                focusable: true,
+                state: config.state,
+                type_namespace: <TabStripWidget as Addressable>::NAMESPACE,
+                scroll_viewport: None,
+            })
+        }),
         _ => None,
     }
 }
@@ -580,8 +613,14 @@ fn reference_stack(theme: &Theme) -> Vec<WidgetChildSpec> {
         spec(
             "label",
             WidgetKind::Label,
-            LabelConfig { text: String::from("Controls"), theme: theme.clone(), state: WidgetControlState::default() }
-                .encode_into_bytes(),
+            LabelConfig {
+                text: String::from("Controls"),
+                role: TextRole::Body,
+                align: TextAlign::Start,
+                theme: theme.clone(),
+                state: WidgetControlState::default(),
+            }
+            .encode_into_bytes(),
         ),
         spec(
             "slider",
@@ -696,6 +735,8 @@ fn behavior_mirror_kinds() -> Vec<u64> {
         ToggleConfig::ID.0,
         SegmentedConfig::ID.0,
         NumericConfig::ID.0,
+        DropdownConfig::ID.0,
+        TabStripConfig::ID.0,
         SliderChanged::ID.0,
         TextCommitted::ID.0,
         ButtonClicked::ID.0,
@@ -704,6 +745,9 @@ fn behavior_mirror_kinds() -> Vec<u64> {
         ToggleChanged::ID.0,
         SegmentedSelected::ID.0,
         NumericChanged::ID.0,
+        DropdownSelected::ID.0,
+        DropdownOpenChanged::ID.0,
+        TabSelected::ID.0,
         FocusGained::ID.0,
         FocusLost::ID.0,
         HoverGained::ID.0,
@@ -800,6 +844,14 @@ fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, ro
         }
         WidgetKind::Numeric => {
             let config = decode_named::<NumericConfig>(&spec.subname, &host_spec.wrapped_config)?;
+            ChildProfile { height: row, pointer_eligible: true, focusable: true, state: config.state }
+        }
+        WidgetKind::Dropdown => {
+            let config = decode_named::<DropdownConfig>(&spec.subname, &host_spec.wrapped_config)?;
+            ChildProfile { height: row, pointer_eligible: true, focusable: true, state: config.state }
+        }
+        WidgetKind::TabStrip => {
+            let config = decode_named::<TabStripConfig>(&spec.subname, &host_spec.wrapped_config)?;
             ChildProfile { height: row, pointer_eligible: true, focusable: true, state: config.state }
         }
         WidgetKind::Composite | WidgetKind::Scroll | WidgetKind::BehaviorHost => return None,
@@ -968,9 +1020,15 @@ impl WasmActor for WidgetPanel {
     }
 
     /// A left press sets focus + drag capture on the hit child and forwards
-    /// the press; any press forwards to the hit child.
+    /// the press; any press forwards to the hit child. A modal grab (an open
+    /// dropdown) takes every press before any of that: the grab holder must
+    /// see the press that lands outside it, which is how it learns to close.
     #[handler::single]
     fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, press: MouseButton) {
+        if let Some(grabbed) = self.focus.grabbed() {
+            ctx.send_to(grabbed, &press);
+            return;
+        }
         let target = if press.button == mouse_button::LEFT {
             let hit = self.focus.hit_test(press.x, press.y);
             if let Some(child) = hit {
@@ -1001,10 +1059,16 @@ impl WasmActor for WidgetPanel {
         }
     }
 
-    /// A move forwards to the captured (dragged) or hit child.
+    /// A move forwards to the grabbed, captured (dragged), or hit child —
+    /// `pointer_target`'s own precedence, so an open dropdown tracks the
+    /// pointer over rows drawn outside its slot. Hover edges are suppressed
+    /// while a grab holds: nothing under a modal overlay should light up, and
+    /// the next motion after the grab ends re-derives hover anyway.
     #[handler::single]
     fn on_mouse_move(&mut self, ctx: &mut WasmCtx<'_>, moved: MouseMove) {
-        if let Some(transition) = self.focus.update_hover(moved.x, moved.y) {
+        if self.focus.grabbed().is_none()
+            && let Some(transition) = self.focus.update_hover(moved.x, moved.y)
+        {
             apply_hover(ctx, transition);
         }
         if let Some(child) = self.focus.pointer_target(moved.x, moved.y) {
@@ -1211,6 +1275,44 @@ impl WasmActor for WidgetPanel {
             widget = self.child_name(ctx.source_mailbox()),
             index = selected.index,
             "widget segmented selected",
+        );
+    }
+
+    /// A dropdown's choice. The map-editor seam; the reference logs it.
+    #[handler::manual]
+    fn on_dropdown_selected(&mut self, ctx: &mut WasmCtx<'_, Manual>, selected: DropdownSelected) {
+        tracing::info!(
+            target: "aether_kit_widget",
+            widget = self.child_name(ctx.source_mailbox()),
+            index = selected.index,
+            "widget dropdown selected",
+        );
+    }
+
+    /// A dropdown's list opened or closed. Not a value event: the root answers
+    /// it by granting or ending the modal pointer grab, so a press anywhere on
+    /// the window reaches the open list — the one input fact a widget cannot
+    /// arrange for itself.
+    #[handler::manual]
+    fn on_dropdown_open_changed(&mut self, ctx: &mut WasmCtx<'_, Manual>, changed: DropdownOpenChanged) {
+        let Some(source) = ctx.source_mailbox() else {
+            return;
+        };
+        if changed.open {
+            self.focus.begin_grab(source);
+        } else if self.focus.grabbed() == Some(source) {
+            self.focus.end_grab();
+        }
+    }
+
+    /// A tab strip's selection. The map-editor seam; the reference logs it.
+    #[handler::manual]
+    fn on_tab_selected(&mut self, ctx: &mut WasmCtx<'_, Manual>, selected: TabSelected) {
+        tracing::info!(
+            target: "aether_kit_widget",
+            widget = self.child_name(ctx.source_mailbox()),
+            index = selected.index,
+            "widget tab selected",
         );
     }
 

@@ -43,6 +43,7 @@ pub use kinds::*;
 pub mod composite;
 mod editor;
 pub mod focus;
+pub mod layout;
 mod panel;
 pub mod routing;
 mod scroll;
@@ -393,25 +394,61 @@ fn framebuffer_clip(rect: WidgetClipRect) -> ClipRect {
 /// Collect the filtered text subsequence into authored-order text items.
 /// Invalid clips omit their items before the root converts the remaining clips
 /// into framebuffer coordinates.
+///
+/// Text reaches the render cap one hop after the quads a cluster sends
+/// directly, so a fill drawn in the cluster's overlay can never cover the
+/// glyphs under it by draw order alone. The hierarchy answers that the way a
+/// plate always has — by not drawing what it covers: every ordinary text item
+/// whose clip lies under an overlay fill is re-clipped to the part of its rect
+/// the overlay leaves uncovered ([`WidgetClipRect::subtract`]), and omitted
+/// when nothing is left. An unclipped text item (root chrome with no clip)
+/// cannot be cut and is drawn as authored.
 fn text_items(list: &WidgetDrawList) -> Vec<DrawText> {
+    let holes = overlay_fills(&list.overlay);
     let mut items: Vec<DrawText> = Vec::new();
     for item in &list.items {
         if let WidgetDrawItem::Text { x, y, font_id, text, size_pixels, color, .. } = item {
             let Some(clip) = PreparedClip::for_item(item) else {
                 continue;
             };
-            items.push(DrawText {
+            let draw = |clip: Option<ClipRect>| DrawText {
                 font_id: *font_id,
                 text: text.clone(),
                 size_pixels: *size_pixels,
                 color: *color,
                 origin: [*x, *y],
                 space: QuadSpace::Screen,
-                clip: clip.framebuffer(),
-            });
+                clip,
+            };
+            match clip {
+                PreparedClip::Finite { rect } if !holes.is_empty() => {
+                    let mut remaining = vec![rect];
+                    for hole in &holes {
+                        remaining = remaining.into_iter().flat_map(|rect| rect.subtract(*hole)).collect();
+                    }
+                    items.extend(remaining.into_iter().map(|rect| draw(Some(framebuffer_clip(rect)))));
+                }
+                prepared => items.push(draw(prepared.framebuffer())),
+            }
         }
     }
     items
+}
+
+/// The rectangles an overlay fills — its solid and textured quads, as they
+/// land after the composite's offsets — which is what ordinary text has to
+/// stay out from under. Overlay text casts no hole.
+fn overlay_fills(overlay: &[WidgetDrawItem]) -> Vec<WidgetClipRect> {
+    overlay
+        .iter()
+        .filter_map(|item| match item {
+            WidgetDrawItem::Quad { x, y, width, height, .. }
+            | WidgetDrawItem::TexturedQuad { x, y, width, height, .. } => {
+                Some(WidgetClipRect { x: *x, y: *y, width: *width, height: *height })
+            }
+            WidgetDrawItem::Text { .. } => None,
+        })
+        .collect()
 }
 
 /// Emit a flattened subtree as the cluster's single render + text sender.
@@ -421,6 +458,17 @@ fn text_items(list: &WidgetDrawList) -> Vec<DrawText> {
 /// peer compositor in another crate (the terrain workbench panel) reuses the
 /// same single-sender flush for its own composite.
 pub fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
+    emit_layer(ctx, list);
+    if !list.overlay.is_empty() {
+        emit_layer(ctx, &WidgetDrawList { intrinsic: None, items: list.overlay.clone(), overlay: Vec::new() });
+    }
+}
+
+/// One layer of a flattened list — its `items` — as solid / textured runs
+/// then one text batch. Called for the ordinary items and again for the
+/// overlay, so an overlay's quads and glyphs are submitted after every
+/// ordinary quad and glyph respectively.
+fn emit_layer(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
     for run in direct_runs(list) {
         match run {
             DirectRun::Solid { clip, quads } => {
@@ -483,6 +531,7 @@ mod tests {
         let b = WidgetClipRect { x: 5.0, y: 6.0, width: 7.0, height: 8.0 };
         let list = WidgetDrawList {
             intrinsic: None,
+            overlay: Vec::new(),
             items: vec![
                 quad(0.0, Some(a)),
                 textured(7, 1.0, Some(a)),
@@ -556,8 +605,11 @@ mod tests {
     #[test]
     fn direct_planner_keeps_unclipped_solids_one_batch_and_omits_invalid_clips() {
         let invalid = WidgetClipRect { x: 0.0, y: 0.0, width: -1.0, height: 2.0 };
-        let list =
-            WidgetDrawList { intrinsic: None, items: vec![quad(1.0, None), quad(2.0, Some(invalid)), quad(3.0, None)] };
+        let list = WidgetDrawList {
+            intrinsic: None,
+            items: vec![quad(1.0, None), quad(2.0, Some(invalid)), quad(3.0, None)],
+            overlay: Vec::new(),
+        };
         let runs = direct_runs(&list);
         assert_eq!(runs.len(), 1);
         assert!(matches!(
@@ -568,10 +620,37 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_text_under_an_overlay_fill_is_cut_to_what_the_fill_leaves() {
+        // Tripwire: a glyph run reaches the render cap a hop after the
+        // overlay's fill, so the root must not send the part of it the fill
+        // covers — a row wholly under an open dropdown's list sends nothing,
+        // a row the list half covers sends only its uncovered strip.
+        let row = |y: f32| WidgetClipRect { x: 10.0, y, width: 200.0, height: 24.0 };
+        let list = WidgetDrawList {
+            intrinsic: None,
+            items: vec![text(12.0, "covered", Some(row(40.0))), text(12.0, "half", Some(row(64.0)))],
+            overlay: vec![WidgetDrawItem::Quad {
+                x: 10.0,
+                y: 40.0,
+                width: 200.0,
+                height: 36.0,
+                color: Rgba::WHITE,
+                clip: None,
+            }],
+        };
+        let items = text_items(&list);
+        assert_eq!(items.len(), 1, "the wholly covered row sends no glyphs");
+        assert_eq!(items[0].text, "half");
+        let clip = items[0].clip.clone().expect("the half-covered row keeps a finite clip");
+        assert_eq!((clip.y, clip.height), (76.0, 12.0), "only the strip below the fill survives");
+    }
+
+    #[test]
     fn text_items_preserve_authored_order_and_omit_clipped_out_items() {
         let invalid = WidgetClipRect { x: 0.0, y: 0.0, width: -1.0, height: 2.0 };
         let list = WidgetDrawList {
             intrinsic: None,
+            overlay: Vec::new(),
             items: vec![
                 text(10.0, "first", None),
                 quad(0.0, None),

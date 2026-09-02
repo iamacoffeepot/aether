@@ -70,6 +70,13 @@ pub struct Theme {
     pub warning: Rgba,
     /// Validation-error outline role.
     pub error: Rgba,
+    /// The current item of a list, a tab strip, a segmented control, or
+    /// a dropdown — a *state*, never an affordance. Distinct from
+    /// `accent` so a chosen row and a pressable button never share a
+    /// look (one meaning per visual token).
+    pub selection: Rgba,
+    /// Text/iconography drawn on top of a `selection`-filled row.
+    pub selection_text: Rgba,
     /// Inner padding, in pixels, a widget reserves between its
     /// border and its content.
     pub pad: f32,
@@ -83,13 +90,83 @@ pub struct Theme {
     /// Font size, in pixels, for a widget's value text (e.g. a
     /// slider's live numeric readout).
     pub value_size_pixels: f32,
+    /// Font size, in pixels, for a title — the one line that names
+    /// what the screen shows ([`TextRole::Title`]).
+    pub title_size_pixels: f32,
+    /// Font size, in pixels, for a section heading
+    /// ([`TextRole::Heading`]).
+    pub heading_size_pixels: f32,
+    /// Font size, in pixels, for a caption or hint, one step under the
+    /// body size ([`TextRole::Caption`]).
+    pub caption_size_pixels: f32,
+    /// The spacing unit, in pixels. Every gap a layout draws is a whole
+    /// number of these (the 4-pixel grid: one unit between a label and
+    /// its field, two between rows, four between groups) — see
+    /// [`Theme::space`]. `pad` and `gap` are the two most common
+    /// multiples, kept as fields for the widgets that draw with them.
+    pub space_unit_pixels: f32,
     /// Session-scoped font id to draw label/value text with.
     /// Placeholder `0` here — the panel root stamps the real id
     /// once its `load_font_result` arrives.
     pub font_id: u32,
 }
 
+/// Which step of the type scale a run of text is set at. A screen shows
+/// hierarchy by size before anything else, so every text a widget draws
+/// names its role rather than a pixel size; the theme resolves the size
+/// ([`Theme::text_size_pixels`]). `Body` is the default and what every
+/// stock widget drew before roles existed.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextRole {
+    /// The one line that names what the screen shows.
+    Title,
+    /// A section heading.
+    Heading,
+    /// Control labels, values, list rows — the reading size.
+    #[default]
+    Body,
+    /// A hint, a unit, an empty-state line — quieter than body.
+    Caption,
+}
+
 impl Theme {
+    /// The font size this theme sets `role` at.
+    #[must_use]
+    pub fn text_size_pixels(&self, role: TextRole) -> f32 {
+        match role {
+            TextRole::Title => self.title_size_pixels,
+            TextRole::Heading => self.heading_size_pixels,
+            TextRole::Body => self.label_size_pixels,
+            TextRole::Caption => self.caption_size_pixels,
+        }
+    }
+
+    /// `steps` spacing units, in pixels — the only way a layout should
+    /// produce a gap, so every gap on the screen lands on the grid.
+    #[must_use]
+    pub fn space(&self, steps: u8) -> f32 {
+        self.space_unit_pixels * f32::from(steps)
+    }
+
+    /// This theme with every metric multiplied by `factor` and every
+    /// colour untouched — how a consumer takes the display's scale
+    /// factor without restating the scale.
+    #[must_use]
+    pub fn scaled(self, factor: f32) -> Self {
+        Self {
+            pad: self.pad * factor,
+            gap: self.gap * factor,
+            row_height: self.row_height * factor,
+            label_size_pixels: self.label_size_pixels * factor,
+            value_size_pixels: self.value_size_pixels * factor,
+            title_size_pixels: self.title_size_pixels * factor,
+            heading_size_pixels: self.heading_size_pixels * factor,
+            caption_size_pixels: self.caption_size_pixels * factor,
+            space_unit_pixels: self.space_unit_pixels * factor,
+            ..self
+        }
+    }
+
     /// Resolve a widget's actual draw color: `base` unchanged for
     /// [`ThemeState::Normal`]; `hover_overlay` / `pressed_overlay`
     /// alpha-composited over `base` as standard src-over (the overlay
@@ -139,11 +216,22 @@ impl Theme {
         disabled_alpha: 0.4,
         warning: Rgba::from_srgb8(0xe2, 0xa8, 0x4a, 0xff),
         error: Rgba::from_srgb8(0xe0, 0x62, 0x58, 0xff),
+        // `#3b4330` — the raised surface lifted toward the accent: a
+        // chosen row reads as lit, not as a button.
+        selection: Rgba::from_srgb8(0x3b, 0x43, 0x30, 0xff),
+        // Ink on a selected row stays the primary text.
+        selection_text: Rgba::from_srgb8(0xe6, 0xe4, 0xd6, 0xff),
         pad: 8.0,
         gap: 6.0,
         row_height: 24.0,
         label_size_pixels: 14.0,
         value_size_pixels: 14.0,
+        // The Material type scale at 1×: title 22, heading 16, body 14,
+        // caption 12.
+        title_size_pixels: 22.0,
+        heading_size_pixels: 16.0,
+        caption_size_pixels: 12.0,
+        space_unit_pixels: 4.0,
         font_id: 0,
     };
 }
