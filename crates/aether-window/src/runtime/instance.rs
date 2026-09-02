@@ -19,7 +19,8 @@ use crate::{
 };
 use crate::{
     CloseWindow, CloseWindowResult, FocusWindow, FocusWindowResult, HeadlessWindowInstance, RequestWindowRedraw,
-    RequestWindowRedrawResult, SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult,
+    RequestWindowRedrawResult, SetWindowCursor, SetWindowCursorResult, SetWindowMenu, SetWindowMenuResult,
+    SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult,
 };
 
 /// Retained public requests for one concrete forwarding child.
@@ -75,6 +76,14 @@ pub(super) fn complete<M: ReplyMode>(
             inbound.reply(&reply);
             false
         }
+        ApplyWindowCommandResult::SetMenu(reply) if inbound.kind() == SetWindowMenu::ID => {
+            inbound.reply(&reply);
+            false
+        }
+        ApplyWindowCommandResult::SetCursor(reply) if inbound.kind() == SetWindowCursor::ID => {
+            inbound.reply(&reply);
+            false
+        }
         ApplyWindowCommandResult::Focus(reply) if inbound.kind() == FocusWindow::ID => {
             inbound.reply(&reply);
             false
@@ -111,6 +120,12 @@ pub(super) fn unwire(state: &mut WindowInstanceState) {
             }
             kind if kind == SetWindowTitle::ID => {
                 inbound.reply(&SetWindowTitleResult::Err { error });
+            }
+            kind if kind == SetWindowMenu::ID => {
+                inbound.reply(&SetWindowMenuResult::Err { error });
+            }
+            kind if kind == SetWindowCursor::ID => {
+                inbound.reply(&SetWindowCursorResult::Err { error });
             }
             kind if kind == FocusWindow::ID => {
                 inbound.reply(&FocusWindowResult::Err { error });
@@ -158,6 +173,18 @@ pub trait WindowEndpoint {
         forward(Self::endpoint(state), ctx, WindowCommand::SetTitle { title: mail.title });
     }
 
+    /// Ask the manager to install this window's native menu bar.
+    #[handler::manual]
+    fn on_set_menu(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: SetWindowMenu) {
+        forward(Self::endpoint(state), ctx, WindowCommand::SetMenu { menus: mail.menus });
+    }
+
+    /// Ask the manager to set this window's pointer shape.
+    #[handler::manual]
+    fn on_set_cursor(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: SetWindowCursor) {
+        forward(Self::endpoint(state), ctx, WindowCommand::SetCursor { icon: mail.icon });
+    }
+
     /// Ask the manager to bring this window to the foreground.
     #[handler::manual]
     fn on_focus(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, _mail: FocusWindow) {
@@ -187,7 +214,7 @@ pub trait WindowEndpoint {
 pub struct HeadlessWindowInstanceState;
 
 /// The endpoint's half of the headless refusals. Written out here rather than
-/// shared with the root's identical five (`runtime::mod`): a handler set's
+/// shared with the root's identical seven (`runtime::mod`): a handler set's
 /// `HandlesKind` markers travel through a `macro_rules!` bridge that lives with
 /// the set, and these two identities compile in the marker-only build where
 /// this whole runtime module is `cfg`-ed away — so an inherited handler would
@@ -220,6 +247,20 @@ impl NativeActor for HeadlessWindowInstance {
     }
 
     #[handler::single]
+    fn on_set_menu(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: SetWindowMenu) -> SetWindowMenuResult {
+        SetWindowMenuResult::Err { error: unsupported() }
+    }
+
+    #[handler::single]
+    fn on_set_cursor(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        _mail: SetWindowCursor,
+    ) -> SetWindowCursorResult {
+        SetWindowCursorResult::Err { error: unsupported() }
+    }
+
+    #[handler::single]
     fn on_focus(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: FocusWindow) -> FocusWindowResult {
         FocusWindowResult::Err { error: unsupported() }
     }
@@ -231,5 +272,81 @@ impl NativeActor for HeadlessWindowInstance {
         _mail: RequestWindowRedraw,
     ) -> RequestWindowRedrawResult {
         RequestWindowRedrawResult::Err { error: unsupported() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use aether_data::{Kind, MailboxId};
+    use aether_substrate::Registry;
+    use aether_substrate::actor::native::binding::NativeBinding;
+    use aether_substrate::actor::native::{Dispatch, NativeCtx};
+    use aether_substrate::mail::mailer::Mailer;
+    use aether_substrate::mail::{MailId, Source};
+
+    use super::super::HeadlessWindowCapabilityState;
+    use super::{HeadlessWindowInstanceState, SetWindowCursor, SetWindowCursorResult, SetWindowMenu};
+    use crate::{CursorIcon, HeadlessWindowCapability, HeadlessWindowInstance, SetWindowMenuResult};
+
+    /// A window op a headless chassis cannot perform has to come back as that
+    /// op's own `Err`, at the root and at a window endpoint alike, because the
+    /// alternative is not a no-op — an unhandled kind settles with no reply and
+    /// the caller waits out its whole settlement budget for an answer that is
+    /// never coming.
+    ///
+    /// The advertised-surface half is the part a new op actually gets wrong:
+    /// the `Err` arms below are easy to remember and the *registration* is not,
+    /// and an identity that advertises a kind is an identity that dispatches
+    /// it. So the pair — advertised, and answered — is what pins "replies
+    /// rather than hangs" without booting a real headless engine.
+    #[test]
+    fn headless_refuses_the_native_chrome_ops_at_both_identities_rather_than_dropping_them() {
+        let mailer = Arc::new(Mailer::new(Arc::new(Registry::new())));
+        let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(1)));
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+
+        for advertised in [
+            <HeadlessWindowCapability as Dispatch<HeadlessWindowCapabilityState>>::capabilities(),
+            <HeadlessWindowInstance as Dispatch<HeadlessWindowInstanceState>>::capabilities(),
+        ] {
+            let kinds = advertised.handlers.iter().map(|handler| handler.id).collect::<Vec<_>>();
+            assert!(kinds.contains(&SetWindowMenu::ID), "the headless identity advertises aether.window.set_menu");
+            assert!(kinds.contains(&SetWindowCursor::ID), "the headless identity advertises aether.window.set_cursor");
+        }
+
+        assert!(matches!(
+            HeadlessWindowCapability::on_set_menu(
+                &mut HeadlessWindowCapabilityState,
+                &mut ctx,
+                SetWindowMenu { menus: Vec::new() },
+            ),
+            SetWindowMenuResult::Err { .. }
+        ));
+        assert!(matches!(
+            HeadlessWindowInstance::on_set_menu(
+                &mut HeadlessWindowInstanceState,
+                &mut ctx,
+                SetWindowMenu { menus: Vec::new() },
+            ),
+            SetWindowMenuResult::Err { .. }
+        ));
+        assert!(matches!(
+            HeadlessWindowCapability::on_set_cursor(
+                &mut HeadlessWindowCapabilityState,
+                &mut ctx,
+                SetWindowCursor { icon: CursorIcon::Move },
+            ),
+            SetWindowCursorResult::Err { .. }
+        ));
+        assert!(matches!(
+            HeadlessWindowInstance::on_set_cursor(
+                &mut HeadlessWindowInstanceState,
+                &mut ctx,
+                SetWindowCursor { icon: CursorIcon::Move },
+            ),
+            SetWindowCursorResult::Err { .. }
+        ));
     }
 }

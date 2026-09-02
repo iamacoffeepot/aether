@@ -14,8 +14,9 @@ use super::subscribers::WindowSubscribers;
 use crate::{
     ApplyWindowCommand, ApplyWindowCommandResult, CloseWindowResult, CreateWindow, CreateWindowResult,
     FocusWindowResult, InjectWindowEvent, ListWindows, ListWindowsResult, RequestWindowRedrawResult, RetireWindow,
-    SetWindowModeResult, SetWindowTitleResult, SyntheticWindowCapability, SyntheticWindowInstance, WindowCapability,
-    WindowClosed, WindowCommand, WindowId, WindowInfo, WindowInstance, WindowMode, WindowOpened, WindowSpec,
+    SetWindowCursorResult, SetWindowMenuResult, SetWindowModeResult, SetWindowTitleResult, SyntheticWindowCapability,
+    SyntheticWindowInstance, WindowCapability, WindowClosed, WindowCommand, WindowId, WindowInfo, WindowInstance,
+    WindowMode, WindowOpened, WindowSpec,
 };
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone};
@@ -247,6 +248,20 @@ impl NativeActor for SyntheticWindowCapability {
                 };
                 window.title.clone_from(&title);
                 ApplyWindowCommandResult::SetTitle(SetWindowTitleResult::Ok { title })
+            }
+            // A deterministic runtime has no bar to install and no pointer to
+            // shape, so both accept for a live window and refuse for an
+            // unknown one — the liveness half is the whole of what a scenario
+            // can observe, and storing menus nothing reads back would be state
+            // with no reader.
+            WindowCommand::SetMenu { .. } if state.windows.contains_key(&mail.window) => {
+                ApplyWindowCommandResult::SetMenu(SetWindowMenuResult::Ok)
+            }
+            WindowCommand::SetCursor { .. } if state.windows.contains_key(&mail.window) => {
+                ApplyWindowCommandResult::SetCursor(SetWindowCursorResult::Ok)
+            }
+            command @ (WindowCommand::SetMenu { .. } | WindowCommand::SetCursor { .. }) => {
+                command.refused(format!("unknown window {:?}", mail.window))
             }
             WindowCommand::Focus => {
                 if !state.windows.contains_key(&mail.window) {
@@ -529,7 +544,7 @@ mod tests {
         assert!(matches!(report.reply::<CreateWindowResult>("duplicate"), Ok(CreateWindowResult::Err { .. })));
     }
 
-    /// The five per-window commands are the *endpoint's* handlers, so a
+    /// The seven per-window commands are the *endpoint's* handlers, so a
     /// root-addressed one used to fall through the manager's dispatch and
     /// settle with no reply and no effect — which reads as success to a caller
     /// that sees only the status (iamacoffeepot/aether#5505).
@@ -604,6 +619,49 @@ mod tests {
             BTreeMap::from([("main", "Routed"), ("palette", "Tools")]),
             "the routed command applied to the sole window and the refused one applied to nothing",
         );
+    }
+
+    /// A new per-window command has four places to be wired — the endpoint's
+    /// forwarding handler, the manager's apply arm, the endpoint's
+    /// correlation arm in `complete`, and its shutdown arm in `unwire` — and
+    /// only the first is compile-checked. A missing apply arm leaves the
+    /// caller with no reply; a missing correlation arm `fatal_abort`s the
+    /// endpoint on the way back. Driving both new commands through a live
+    /// window's own mailbox and reading their replies is what covers the round
+    /// trip the reducer-only tests cannot see.
+    #[test]
+    fn the_native_chrome_commands_round_trip_through_a_windows_own_endpoint() {
+        use crate::{
+            CursorIcon, SetWindowCursor, SetWindowCursorResult, SetWindowMenu, SetWindowMenuResult, WindowMenu,
+        };
+
+        let mut harness = SubstrateHarness::start().expect("boot synthetic harness");
+        let main = format!("{}://main", WindowCapability::NAMESPACE);
+        let report = harness
+            .execute(vec![
+                (
+                    "created",
+                    HarnessOp::send_and_await_reply(
+                        WindowCapability::NAMESPACE,
+                        &CreateWindow { spec: spec("main", "Main") },
+                    ),
+                ),
+                (
+                    "menu",
+                    HarnessOp::send_and_await_reply(
+                        main.clone(),
+                        &SetWindowMenu { menus: vec![WindowMenu { title: "File".to_owned(), items: Vec::new() }] },
+                    ),
+                ),
+                (
+                    "cursor",
+                    HarnessOp::send_and_await_reply(main, &SetWindowCursor { icon: CursorIcon::ResizeHorizontal }),
+                ),
+            ])
+            .expect("native chrome commands settle at the window endpoint");
+
+        assert!(matches!(report.reply::<SetWindowMenuResult>("menu"), Ok(SetWindowMenuResult::Ok)));
+        assert!(matches!(report.reply::<SetWindowCursorResult>("cursor"), Ok(SetWindowCursorResult::Ok)));
     }
 
     #[test]

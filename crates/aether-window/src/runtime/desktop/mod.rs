@@ -8,8 +8,10 @@
 //! host turn as a [`WindowHostEffect`].
 
 mod application;
+mod cursor;
 mod input;
 mod instance;
+mod menu;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
@@ -36,14 +38,20 @@ use winit::keyboard::PhysicalKey;
 use winit::monitor::{MonitorHandle as WinitMonitorHandle, VideoModeHandle};
 use winit::window::{Fullscreen, Window, WindowId as WinitWindowId};
 
-use self::input::{TextSource, ime_cursor_span, map_mouse_button, map_winit_keycode, normalize_wheel, text_input_gate};
+use self::cursor::map_cursor_icon;
+use self::input::{
+    KeyEdge, TextSource, ime_cursor_span, key_edge, map_mouse_button, map_winit_keycode, normalize_wheel,
+    text_input_gate,
+};
+use self::menu::{apply_menu, parse_menu_item_id};
 use super::manager::WindowManagerSurface;
 use super::subscribers::WindowSubscribers;
 use crate::{
     ApplyWindowCommand, ApplyWindowCommandResult, CloseWindowResult, CreateWindow, CreateWindowResult,
     DesktopWindowCapability, DesktopWindowInstance, FocusWindowResult, ListWindows, ListWindowsResult,
-    RequestWindowRedrawResult, RetireWindow, SetWindowModeResult, SetWindowTitleResult, WindowCapability, WindowClosed,
-    WindowCommand, WindowId, WindowInfo, WindowInstance, WindowOpened, WindowSpec,
+    RequestWindowRedrawResult, RetireWindow, SetWindowCursorResult, SetWindowMenuResult, SetWindowModeResult,
+    SetWindowTitleResult, WindowCapability, WindowClosed, WindowCommand, WindowId, WindowInfo, WindowInstance,
+    WindowMenuActivated, WindowOpened, WindowSpec,
 };
 
 pub use application::{DesktopWindowApplication, DesktopWindowIntegration, DesktopWindowUserEvent};
@@ -70,13 +78,45 @@ fn activate_legacy_application(application: &NSApplication) {
 #[cfg(not(target_os = "macos"))]
 fn activate_application() {}
 
+/// Name this process for whatever the platform shows an application name in.
+///
+/// macOS draws the first menu-bar item from the running application's name,
+/// which for a binary outside an `.app` bundle is `NSProcessInfo.processName`
+/// — the basename of the executed file. A fleet-spawned engine runs a
+/// content-addressed binary the hub materializes as `…/<engine>/substrate`, so
+/// the bar read `substrate` (iamacoffeepot/aether#5518). Naming the process
+/// from the chassis's own `app_name` knob is what makes it read `Aether`, or
+/// whatever the product is called.
+///
+/// Call it on the application thread before the event loop opens; every other
+/// platform has nothing to set and this is a no-op there.
+#[cfg(target_os = "macos")]
+pub fn set_application_name(app_name: &str) {
+    if MainThreadMarker::new().is_none() {
+        return;
+    }
+    NSProcessInfo::processInfo().setProcessName(&objc2_foundation::NSString::from_str(app_name));
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn set_application_name(_app_name: &str) {}
+
 /// Construction input for the application-scoped desktop window manager.
 ///
-/// The manager needs no native handle or initial identity at boot. Its
+/// The manager needs no native handle or initial identity at boot — its
 /// registry comes from [`NativeInitCtx`], and the application host reserves
-/// the boot window before winit begins dispatching callbacks.
-#[derive(Default)]
-pub struct DesktopWindowParams;
+/// the boot window before winit begins dispatching callbacks. What it does
+/// need is the application's name, which the platform application menu is
+/// titled with and which no window-local state can supply.
+pub struct DesktopWindowParams {
+    pub app_name: String,
+}
+
+impl Default for DesktopWindowParams {
+    fn default() -> Self {
+        Self { app_name: "Aether".to_owned() }
+    }
+}
 
 /// Host-only work that must be realized while a winit callback supplies an
 /// `ActiveEventLoop`.
@@ -157,6 +197,10 @@ impl DesktopWindowState {
 /// `BTreeMap` makes `ListWindows` naturally ordered; the hash maps provide
 /// constant-time native lookup without exposing winit identities on the wire.
 pub struct DesktopWindowCapabilityState {
+    /// The product name the platform application menu is titled with. Boot
+    /// input rather than window-local state: macOS has one application menu
+    /// for the whole process, whichever window installs it.
+    app_name: String,
     windows: BTreeMap<WindowId, DesktopWindowState>,
     native_windows: HashMap<WindowId, Arc<Window>>,
     winit_windows: HashMap<WinitWindowId, WindowId>,
@@ -407,6 +451,101 @@ impl DesktopWindowCapabilityState {
         Vec::new()
     }
 
+    /// The synchronous half of the per-window command family: resolve the
+    /// native window once, then apply. A command naming a window that is gone
+    /// or not yet live comes back as that command's own `Err` rather than a
+    /// generic one, because the forwarding child matches the reply variant
+    /// against the request it retained.
+    fn apply_at_window(&mut self, id: WindowId, command: WindowCommand) -> ApplyWindowCommandResult {
+        let window = match self.live_window(id) {
+            Ok(window) => window,
+            Err(error) => return command.refused(error),
+        };
+        match command {
+            // Answered from the close queue, never here.
+            WindowCommand::Close => command.refused(format!("close for {id:?} did not reach the close queue")),
+            WindowCommand::SetMode { mode, width, height } => self.apply_mode(id, &window, mode, width, height),
+            WindowCommand::SetTitle { title } => {
+                window.set_title(&title);
+                if let Some(state) = self.windows.get_mut(&id) {
+                    state.title.clone_from(&title);
+                }
+                ApplyWindowCommandResult::SetTitle(SetWindowTitleResult::Ok { title })
+            }
+            WindowCommand::SetMenu { menus } => {
+                ApplyWindowCommandResult::SetMenu(match apply_menu(&self.app_name, &window, id, &menus) {
+                    Ok(()) => SetWindowMenuResult::Ok,
+                    Err(error) => SetWindowMenuResult::Err { error },
+                })
+            }
+            WindowCommand::SetCursor { icon } => {
+                window.set_cursor(map_cursor_icon(icon));
+                ApplyWindowCommandResult::SetCursor(SetWindowCursorResult::Ok)
+            }
+            WindowCommand::Focus => {
+                window.set_minimized(false);
+                window.set_visible(true);
+                activate_application();
+                window.focus_window();
+                ApplyWindowCommandResult::Focus(FocusWindowResult::Ok)
+            }
+            WindowCommand::RequestRedraw => {
+                window.request_redraw();
+                ApplyWindowCommandResult::RequestRedraw(RequestWindowRedrawResult::Ok)
+            }
+        }
+    }
+
+    /// The one command whose reply is not the value the caller asked for: an
+    /// OS may clamp or refuse a size, so the reply reports the size winit
+    /// resolved rather than the one requested.
+    fn apply_mode(
+        &mut self,
+        id: WindowId,
+        window: &Window,
+        mode: WindowMode,
+        width: Option<u32>,
+        height: Option<u32>,
+    ) -> ApplyWindowCommandResult {
+        let fullscreen = match resolve_fullscreen(&mode, window.current_monitor().as_ref()) {
+            Ok(fullscreen) => fullscreen,
+            Err(error) => return ApplyWindowCommandResult::SetMode(SetWindowModeResult::Err { error }),
+        };
+        window.set_fullscreen(fullscreen);
+        if matches!(mode, WindowMode::Windowed)
+            && let (Some(width), Some(height)) = (width, height)
+        {
+            let _ = window.request_inner_size(PhysicalSize::new(width, height));
+        }
+        window.request_redraw();
+
+        let size = window.inner_size();
+        if let Some(state) = self.windows.get_mut(&id) {
+            state.mode = mode.clone();
+            state.width = size.width;
+            state.height = size.height;
+        }
+        ApplyWindowCommandResult::SetMode(SetWindowModeResult::Ok { mode, width: size.width, height: size.height })
+    }
+
+    /// Publish one muda menu activation as [`WindowMenuActivated`], to the
+    /// same selector-aware subscribers every other window-originated kind
+    /// reaches.
+    ///
+    /// muda's channel is process-wide, so an id this manager never minted —
+    /// a predefined Quit, another library's menu — resolves to no window and
+    /// is dropped rather than attributed to whichever window happens to parse
+    /// out of it.
+    pub fn menu_activated<A>(&mut self, raw: &str, ctx: &mut NativeCtx<'_, Single, A>) {
+        let Some((window, item)) = parse_menu_item_id(raw) else {
+            return;
+        };
+        if self.windows.get(&window).is_none_or(|state| state.lifecycle != DesktopWindowLifecycle::Live) {
+            return;
+        }
+        self.publish(ctx, window, &WindowMenuActivated { window, id: item });
+    }
+
     /// Translate one native window event and publish typed input directly to
     /// selector-aware subscribers.
     #[allow(clippy::too_many_lines)]
@@ -499,15 +638,14 @@ impl DesktopWindowCapabilityState {
                 if let Some(text) = committed {
                     self.publish(ctx, id, &TextInput { window: id, text });
                 }
-                if !event.repeat
-                    && let Some(code) = match event.physical_key {
-                        PhysicalKey::Code(code) => map_winit_keycode(code),
-                        PhysicalKey::Unidentified(_) => None,
-                    }
-                {
-                    match event.state {
-                        ElementState::Pressed => self.publish(ctx, id, &Key { window: id, code }),
-                        ElementState::Released => self.publish(ctx, id, &KeyRelease { window: id, code }),
+                if let Some(code) = match event.physical_key {
+                    PhysicalKey::Code(code) => map_winit_keycode(code),
+                    PhysicalKey::Unidentified(_) => None,
+                } {
+                    match key_edge(event.state, event.repeat) {
+                        Some(KeyEdge::Press) => self.publish(ctx, id, &Key { window: id, code }),
+                        Some(KeyEdge::Release) => self.publish(ctx, id, &KeyRelease { window: id, code }),
+                        None => {}
                     }
                 }
             }
@@ -690,10 +828,11 @@ impl NativeActor for DesktopWindowCapability {
 
     fn init(
         (): (),
-        _params: DesktopWindowParams,
+        params: DesktopWindowParams,
         _ctx: &mut NativeInitCtx<'_>,
     ) -> Result<DesktopWindowCapabilityState, BootError> {
         Ok(DesktopWindowCapabilityState {
+            app_name: params.app_name,
             windows: BTreeMap::new(),
             native_windows: HashMap::new(),
             winit_windows: HashMap::new(),
@@ -755,93 +894,27 @@ impl NativeActor for DesktopWindowCapability {
         }
     }
 
+    /// Apply one per-window command at its native window.
+    ///
+    /// `Close` is the exception every other arm is not: it cannot answer here,
+    /// because the window is only gone once the integration has detached its
+    /// render target and the manager has retired its child, so it hands its
+    /// `InboundMail` to the close queue and is answered from
+    /// [`DesktopWindowCapabilityState::finish_window_close`]. Everything else
+    /// resolves against the live `Arc<Window>` on this same turn — this is a
+    /// pumped actor, so this *is* the winit thread — and replies immediately.
     #[handler::manual]
     fn on_apply_command(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: ApplyWindowCommand) {
         let reply = ctx.take_inbound();
-        let result = match mail.command {
-            WindowCommand::Close => {
-                if let Err((error, reply)) = state.queue_close(mail.window, Some(Box::new(reply)))
-                    && let Some(reply) = reply
-                {
-                    reply.reply(&ApplyWindowCommandResult::Close(CloseWindowResult::Err { error }));
-                }
-                return;
+        if matches!(mail.command, WindowCommand::Close) {
+            if let Err((error, reply)) = state.queue_close(mail.window, Some(Box::new(reply)))
+                && let Some(reply) = reply
+            {
+                reply.reply(&ApplyWindowCommandResult::Close(CloseWindowResult::Err { error }));
             }
-            WindowCommand::SetMode { mode, width, height } => {
-                let window = match state.live_window(mail.window) {
-                    Ok(window) => window,
-                    Err(error) => {
-                        reply.reply(&ApplyWindowCommandResult::SetMode(SetWindowModeResult::Err { error }));
-                        return;
-                    }
-                };
-                let fullscreen = match resolve_fullscreen(&mode, window.current_monitor().as_ref()) {
-                    Ok(fullscreen) => fullscreen,
-                    Err(error) => {
-                        reply.reply(&ApplyWindowCommandResult::SetMode(SetWindowModeResult::Err { error }));
-                        return;
-                    }
-                };
-                window.set_fullscreen(fullscreen);
-                if matches!(mode, WindowMode::Windowed)
-                    && let (Some(width), Some(height)) = (width, height)
-                {
-                    let _ = window.request_inner_size(PhysicalSize::new(width, height));
-                }
-                window.request_redraw();
-                let size = window.inner_size();
-                if let Some(state) = state.windows.get_mut(&mail.window) {
-                    state.mode = mode.clone();
-                    state.width = size.width;
-                    state.height = size.height;
-                }
-                ApplyWindowCommandResult::SetMode(SetWindowModeResult::Ok {
-                    mode,
-                    width: size.width,
-                    height: size.height,
-                })
-            }
-            WindowCommand::SetTitle { title } => {
-                let window = match state.live_window(mail.window) {
-                    Ok(window) => window,
-                    Err(error) => {
-                        reply.reply(&ApplyWindowCommandResult::SetTitle(SetWindowTitleResult::Err { error }));
-                        return;
-                    }
-                };
-                window.set_title(&title);
-                if let Some(state) = state.windows.get_mut(&mail.window) {
-                    state.title.clone_from(&title);
-                }
-                ApplyWindowCommandResult::SetTitle(SetWindowTitleResult::Ok { title })
-            }
-            WindowCommand::Focus => {
-                let window = match state.live_window(mail.window) {
-                    Ok(window) => window,
-                    Err(error) => {
-                        reply.reply(&ApplyWindowCommandResult::Focus(FocusWindowResult::Err { error }));
-                        return;
-                    }
-                };
-                window.set_minimized(false);
-                window.set_visible(true);
-                activate_application();
-                window.focus_window();
-                ApplyWindowCommandResult::Focus(FocusWindowResult::Ok)
-            }
-            WindowCommand::RequestRedraw => {
-                let window = match state.live_window(mail.window) {
-                    Ok(window) => window,
-                    Err(error) => {
-                        reply.reply(&ApplyWindowCommandResult::RequestRedraw(RequestWindowRedrawResult::Err { error }));
-                        return;
-                    }
-                };
-                window.request_redraw();
-                ApplyWindowCommandResult::RequestRedraw(RequestWindowRedrawResult::Ok)
-            }
-        };
-        reply.reply(&result);
+            return;
+        }
+        reply.reply(&state.apply_at_window(mail.window, mail.command));
     }
 
     #[handler::single]
@@ -927,6 +1000,7 @@ mod tests {
 
     fn test_state() -> DesktopWindowCapabilityState {
         DesktopWindowCapabilityState {
+            app_name: "Aether".to_owned(),
             windows: BTreeMap::new(),
             native_windows: HashMap::new(),
             winit_windows: HashMap::new(),
