@@ -250,8 +250,33 @@ use aether_kit_widget::set::elide_to_width;
 let shown = elide_to_width(name, column_width, |run| measure(run));
 ```
 
+A list whose vector overflows its viewport draws a **scroll bar** down its
+right edge: a `theme.outline` track two spacing units wide, and a
+`theme.text_muted` thumb whose length is the visible share of the whole vector
+and whose position is where the reader is. It is present whenever the list
+overflows — never only on hover, because a bar that appears when touched cannot
+answer "how many entries are there" for a reader who has not touched it — and
+absent when the vector fits, where it would claim there is more to see. Past a
+floor of one and a half track widths the thumb stops shrinking, so a list of
+thousands still has something to grab, and only its travel goes on saying how
+much is off screen.
+
+Three things move it, and all three write the one `first_index` the list
+already had: a keyboard reveal, the **wheel** (whole rows, with the sub-row
+remainder carried so a trackpad's stream of small deltas still moves the list),
+and **dragging the thumb** — a press on the thumb keeps the grabbed point under
+the pointer, a press on the bare track carries the reader to where they
+pointed. Scrolling never changes selection: a reader looking at something has
+not chosen it. The bar takes its track's width out of the row text budget, so
+an elided row never runs under it, and a press on the bar chooses no row. A
+virtual list joins the same wheel-only hit table a `ScrollWidget` does (see
+[Scroll containers and wheel ownership](#scroll-containers-and-wheel-ownership)),
+so a root that forks the reference panel routes `MouseWheel` to it by
+`Focus::hit_test` rather than by pointer capture.
+
 Those metrics also give the list its `WidgetDrawList::intrinsic`: `[widest row
-in the whole item vector + 2 × pad, theme.row_height × visible_row_count]`. It
+in the whole item vector + 2 × pad + the scroll bar's track when the vector
+overflows, theme.row_height × visible_row_count]`. It
 measures the items, not the realized window, so the width does not change as
 the reader scrolls — and because that is the one thing here that touches every
 item, it is measured once and re-measured only when the items, the font, or the
@@ -864,8 +889,9 @@ nested scroll viewport is hit-testable only where that frame intersects its
 ancestor viewport. A nested scroll config's viewport extent must exactly match
 the content extent its parent assigned it, or the slot is rejected.
 
-A wheel always targets the deepest scroll viewport under the cursor using
-`Focus::hit_test`; it never follows pointer capture. The consuming actor
+A wheel always targets the deepest **self-scrolling** child under the cursor
+using `Focus::hit_test` — a scroll viewport, or a virtual list, which owns the
+row window it realizes — and it never follows pointer capture. The consuming actor
 converts chassis deltas once (`x_pixels = -delta_x`, `y_pixels = -delta_y`),
 then clamps each axis independently. It emits
 `ScrollOutcome { container, offset, consumed, residual }`. If an axis
