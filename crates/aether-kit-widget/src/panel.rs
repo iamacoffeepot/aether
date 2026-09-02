@@ -65,18 +65,19 @@ use crate::focus::{
     AvailabilityEffects, Focus, FocusDirection, FocusEligibility, FocusRect, FocusTransition, HoverTransition,
 };
 use crate::set::{
-    ButtonWidget, DropdownWidget, ImageWidget, LabelWidget, NumericWidget, RadioGroupWidget, SegmentedWidget,
-    SliderWidget, TabStripWidget, TextAreaWidget, TextFieldWidget, ToggleWidget, VirtualListWidget, quad,
+    ButtonWidget, DropdownWidget, ImageWidget, LabelWidget, MenuBarWidget, NumericWidget, RadioGroupWidget,
+    SegmentedWidget, SliderWidget, TabStripWidget, TextAreaWidget, TextFieldWidget, ToggleWidget, VirtualListWidget,
+    quad,
 };
 use crate::theme::{SetTheme, TextRole, Theme};
 use crate::{
     ButtonClicked, ButtonConfig, Collect, DropdownConfig, DropdownOpenChanged, DropdownSelected, FocusGained,
-    FocusLost, HoverGained, HoverLost, ImageConfig, LabelConfig, NumericChanged, NumericConfig, PanelConfig,
-    RadioConfig, RadioSelected, ScrollConfig, ScrollExtent, ScrollOutcome, ScrollResidual, ScrollWidget,
-    SegmentedConfig, SegmentedSelected, SliderChanged, SliderConfig, TabSelected, TabStripConfig, TextAlign,
-    TextAreaConfig, TextCommitted, TextFieldConfig, ToggleChanged, ToggleConfig, VirtualListConfig,
-    VirtualListSelected, Widget, WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame,
-    WidgetKind, WidgetStateChanged,
+    FocusLost, HoverGained, HoverLost, ImageConfig, LabelConfig, MenuBarConfig, MenuItemActivated, MenuOpenChanged,
+    NumericChanged, NumericConfig, PanelConfig, RadioConfig, RadioSelected, ScrollConfig, ScrollExtent, ScrollOutcome,
+    ScrollResidual, ScrollWidget, SegmentedConfig, SegmentedSelected, SliderChanged, SliderConfig, TabSelected,
+    TabStripConfig, TextAlign, TextAreaConfig, TextCommitted, TextFieldConfig, ToggleChanged, ToggleConfig,
+    VirtualListConfig, VirtualListSelected, Widget, WidgetChildSpec, WidgetClipRect, WidgetControlState,
+    WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged,
 };
 use crate::{FrameDischarge, decode_nested_widget_config};
 use crate::{accept_open_child_list, emit, flush_membership};
@@ -372,7 +373,8 @@ where
         | WidgetKind::Segmented
         | WidgetKind::Numeric
         | WidgetKind::Dropdown
-        | WidgetKind::TabStrip => spawn_row_control_child::<P>(ctx, spec, row),
+        | WidgetKind::TabStrip
+        | WidgetKind::MenuBar => spawn_row_control_child::<P>(ctx, spec, row),
         WidgetKind::BehaviorHost => spawn_behavior_host(ctx, spec, row),
         WidgetKind::Composite => spawn_composite_child::<P>(ctx, spec, layout, row),
         WidgetKind::Scroll => spawn_scroll_child::<P>(ctx, spec, layout),
@@ -572,6 +574,18 @@ fn spawn_row_control_child<P: WasmActor>(
                 scroll_viewport: None,
             })
         }),
+        WidgetKind::MenuBar => decode_child::<MenuBarConfig>(spec).and_then(|config| {
+            spawn::<P, MenuBarWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+                id,
+                width_pixels: None,
+                height_pixels: row,
+                pointer_eligible: true,
+                focusable: true,
+                state: config.state,
+                type_namespace: <MenuBarWidget as Addressable>::NAMESPACE,
+                scroll_viewport: None,
+            })
+        }),
         _ => None,
     }
 }
@@ -737,6 +751,7 @@ fn behavior_mirror_kinds() -> Vec<u64> {
         NumericConfig::ID.0,
         DropdownConfig::ID.0,
         TabStripConfig::ID.0,
+        MenuBarConfig::ID.0,
         SliderChanged::ID.0,
         TextCommitted::ID.0,
         ButtonClicked::ID.0,
@@ -748,6 +763,8 @@ fn behavior_mirror_kinds() -> Vec<u64> {
         DropdownSelected::ID.0,
         DropdownOpenChanged::ID.0,
         TabSelected::ID.0,
+        MenuItemActivated::ID.0,
+        MenuOpenChanged::ID.0,
         FocusGained::ID.0,
         FocusLost::ID.0,
         HoverGained::ID.0,
@@ -852,6 +869,10 @@ fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, ro
         }
         WidgetKind::TabStrip => {
             let config = decode_named::<TabStripConfig>(&spec.subname, &host_spec.wrapped_config)?;
+            ChildProfile { height: row, pointer_eligible: true, focusable: true, state: config.state }
+        }
+        WidgetKind::MenuBar => {
+            let config = decode_named::<MenuBarConfig>(&spec.subname, &host_spec.wrapped_config)?;
             ChildProfile { height: row, pointer_eligible: true, focusable: true, state: config.state }
         }
         WidgetKind::Composite | WidgetKind::Scroll | WidgetKind::BehaviorHost => return None,
@@ -1303,6 +1324,32 @@ impl WasmActor for WidgetPanel {
         } else if self.focus.grabbed() == Some(source) {
             self.focus.end_grab();
         }
+    }
+
+    /// A menu bar opened a menu or closed every menu — the same grab handshake
+    /// as a dropdown's list.
+    #[handler::manual]
+    fn on_menu_open_changed(&mut self, ctx: &mut WasmCtx<'_, Manual>, changed: MenuOpenChanged) {
+        let Some(source) = ctx.source_mailbox() else {
+            return;
+        };
+        if changed.open {
+            self.focus.begin_grab(source);
+        } else if self.focus.grabbed() == Some(source) {
+            self.focus.end_grab();
+        }
+    }
+
+    /// A menu item's activation. The map-editor seam; the reference logs it.
+    #[handler::manual]
+    fn on_menu_item_activated(&mut self, ctx: &mut WasmCtx<'_, Manual>, activated: MenuItemActivated) {
+        tracing::info!(
+            target: "aether_kit_widget",
+            widget = self.child_name(ctx.source_mailbox()),
+            menu = activated.menu,
+            item = activated.item,
+            "widget menu item activated",
+        );
     }
 
     /// A tab strip's selection. The map-editor seam; the reference logs it.

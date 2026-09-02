@@ -19,6 +19,8 @@
 //!   that opens on demand, drawn in the overlay layer.
 //! - [`TabStripWidget`] — one row of content-sized tabs selecting a parallel
 //!   content set.
+//! - [`MenuBarWidget`] — a row of application menus whose items open in the
+//!   overlay layer.
 //!
 //! Each caches its assigned [`WidgetFrame`] rect
 //! and its [`Theme`], answers every
@@ -38,6 +40,7 @@ pub mod defaults;
 pub mod dropdown;
 pub mod image;
 pub mod label;
+pub mod menu_bar;
 pub mod numeric;
 pub mod radio;
 pub mod segmented;
@@ -53,6 +56,7 @@ pub use defaults::WidgetDefaults;
 pub use dropdown::DropdownWidget;
 pub use image::ImageWidget;
 pub use label::LabelWidget;
+pub use menu_bar::MenuBarWidget;
 pub use numeric::NumericWidget;
 pub use radio::RadioGroupWidget;
 pub use segmented::SegmentedWidget;
