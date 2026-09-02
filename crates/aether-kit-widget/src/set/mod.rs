@@ -535,6 +535,49 @@ pub(crate) fn push_border(items: &mut Vec<WidgetDrawItem>, width: f32, height: f
     push_rect_border(items, 0.0, 0.0, width, height, thickness, color);
 }
 
+/// The most rows [`push_triangle`] builds an arrow from. An arrow this size is
+/// a handful of pixels tall, so the cap only bounds a pathological frame.
+const TRIANGLE_MAX_ROWS: usize = 16;
+
+/// Push a solid isoceles triangle, built from horizontal quad rows, centered
+/// on `center_x` and filling the `width` × `height` box whose top is `top_y`.
+/// `pointing_up` puts the apex at the top.
+///
+/// A triangle rather than a `▲` glyph because the kit's draw list has no
+/// polygon and the theme's font is whatever the consumer loaded — asking it for
+/// an arrowhead is asking for a missing-glyph box on the one control whose
+/// whole point is being clickable.
+pub(crate) fn push_triangle(
+    items: &mut Vec<WidgetDrawItem>,
+    center_x: f32,
+    top_y: f32,
+    width: f32,
+    height: f32,
+    pointing_up: bool,
+    color: Rgba,
+) {
+    if !(width > 0.0 && height > 0.0) {
+        return;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let rows = (height.ceil() as usize).clamp(1, TRIANGLE_MAX_ROWS);
+    #[allow(clippy::cast_precision_loss)]
+    let row_height = height / rows as f32;
+    for row in 0..rows {
+        #[allow(clippy::cast_precision_loss)]
+        let center_fraction = (row as f32 + 0.5) / rows as f32;
+        let fraction = if pointing_up {
+            center_fraction
+        } else {
+            1.0 - center_fraction
+        };
+        let row_width = width * fraction;
+        #[allow(clippy::cast_precision_loss)]
+        let y = row_height.mul_add(row as f32, top_y);
+        items.push(quad(center_x - row_width * 0.5, y, row_width, row_height, color));
+    }
+}
+
 fn push_inset_border(
     items: &mut Vec<WidgetDrawItem>,
     width: f32,
@@ -616,15 +659,10 @@ fn single_line_hit_byte(text: &str, metrics: Option<&CachedFontMetrics>, size_pi
     text.char_indices().nth(index).map_or(text.len(), |(byte, _)| byte)
 }
 
-fn single_line_edit_draw_items(
-    displayed: &DisplayedEdit,
-    metrics: Option<&CachedFontMetrics>,
-    theme: &Theme,
-    state: &InteractionState,
-    theme_state: ThemeState,
-    width: f32,
-    height: f32,
-) -> Vec<WidgetDrawItem> {
+fn single_line_edit_draw_items(edit: &SingleLineEdit<'_>) -> Vec<WidgetDrawItem> {
+    let SingleLineEdit { displayed, metrics, theme, state, theme_state, frame, .. } = edit;
+    let (theme_state, width, height) = (*theme_state, frame.width, frame.height);
+    let metrics = *metrics;
     let pad = theme.pad;
     let size = theme.value_size_pixels;
     let text_y = text_origin_y(0.0, height, size);
@@ -669,10 +707,14 @@ fn single_line_edit_draw_items(
             items.push(quad(cursor_x, pad, 1.0, caret_height, theme.accent));
         }
     }
+    // The caret marks the insertion point, which a pointer click establishes
+    // just as a Tab does, so it follows plain focus rather than the ring's
+    // keyboard-only rule.
     if state.focused() && !displayed.composing {
         let caret_x = pad + prefix_width(displayed.caret_byte);
         items.push(quad(caret_x, pad, 1.0, caret_height, theme.accent));
     }
+    items.extend(edit.gutter_items.iter().cloned());
     push_control_outlines(&mut items, width, height, state, theme);
     items
 }
@@ -698,35 +740,69 @@ pub fn text_baseline_y(row_top: f32, row_height: f32, size_pixels: f32) -> f32 {
     size_pixels.mul_add(FONT_CAP_HEIGHT_RATIO, row_height).mul_add(0.5, row_top)
 }
 
+/// Everything one single-line editor's frame draw needs. A struct rather than
+/// an argument list because the numeric editor adds two of the fields (a
+/// reserved gutter and the chrome that lives in it) the text field leaves at
+/// their empty defaults.
+pub(super) struct SingleLineEdit<'a> {
+    pub(super) displayed: &'a DisplayedEdit,
+    pub(super) metrics: Option<&'a CachedFontMetrics>,
+    pub(super) theme: &'a Theme,
+    pub(super) state: &'a InteractionState,
+    pub(super) theme_state: ThemeState,
+    pub(super) frame: &'a WidgetFrame,
+    /// Pixels reserved at the frame's right end for widget-owned chrome — the
+    /// numeric editor's stepper column. The text box, and the width the hover
+    /// reveal measures overflow against, end there.
+    pub(super) gutter: f32,
+    /// The chrome that fills that gutter, drawn over the box and under the
+    /// validation / focus outlines so a ring still frames the whole control.
+    pub(super) gutter_items: Vec<WidgetDrawItem>,
+}
+
+impl<'a> SingleLineEdit<'a> {
+    /// The default shape: no gutter, no chrome — one plain edit box.
+    pub(super) fn new(
+        displayed: &'a DisplayedEdit,
+        metrics: Option<&'a CachedFontMetrics>,
+        theme: &'a Theme,
+        state: &'a InteractionState,
+        theme_state: ThemeState,
+        frame: &'a WidgetFrame,
+    ) -> Self {
+        Self { displayed, metrics, theme, state, theme_state, frame, gutter: 0.0, gutter_items: Vec::new() }
+    }
+
+    /// The width the text box actually gets, once the gutter is taken out.
+    fn content_width(&self) -> f32 {
+        (self.frame.width - self.gutter).max(0.0)
+    }
+}
+
 /// Reply one single-line editor's frame: its ordinary draw, plus the hover
 /// overflow plate when the contents are too wide for the box. Shared by the
 /// text field and the numeric editor, which draw the same box.
-pub(super) fn reply_single_line_edit(
-    ctx: &WasmCtx<'_>,
-    displayed: &DisplayedEdit,
-    metrics: Option<&CachedFontMetrics>,
-    theme: &Theme,
-    state: &InteractionState,
-    theme_state: ThemeState,
-    frame: &WidgetFrame,
-) {
-    if reply_if_hidden(ctx, state) {
+pub(super) fn reply_single_line_edit(ctx: &WasmCtx<'_>, edit: SingleLineEdit<'_>) {
+    if reply_if_hidden(ctx, edit.state) {
         return;
     }
+    let theme = edit.theme;
     let size = theme.value_size_pixels;
-    let items = single_line_edit_draw_items(displayed, metrics, theme, state, theme_state, frame.width, frame.height);
+    let items = single_line_edit_draw_items(&edit);
 
-    let measured =
-        metrics.filter(|_| state.hovered()).map(|metrics| measured_text_width(metrics, &displayed.text, size));
-    let overlay = measured.map_or_else(Vec::new, |text_width| {
+    let overlay = edit.metrics.filter(|_| edit.state.hovered()).map_or_else(Vec::new, |metrics| {
+        let measure = |run: &str| measured_text_width(metrics, run, size);
         overflow_reveal_items(
-            theme,
-            &displayed.text,
-            theme.pad,
-            text_width,
-            size,
-            theme.fill(theme.text_primary, theme_state),
-            frame,
+            &RevealPlate {
+                theme,
+                text: &edit.displayed.text,
+                text_x: theme.pad,
+                size_pixels: size,
+                ink: theme.fill(theme.text_primary, edit.theme_state),
+                content_width: edit.content_width(),
+                row_height: edit.frame.height,
+            },
+            &measure,
         )
     });
 
@@ -752,43 +828,130 @@ pub fn text_origin_y(row_top: f32, row_height: f32, size_pixels: f32) -> f32 {
     size_pixels.mul_add(-FONT_ASCENT_RATIO, text_baseline_y(row_top, row_height, size_pixels))
 }
 
-/// The overlay plate a widget raises when its one line of text does not fit
-/// the frame it lives in and the pointer is over it: the run redrawn whole on
-/// a `surface_raised` plate with a one-pixel `outline` ring, starting at the
-/// widget's own origin and reaching one `pad` past the run's end. The plate
-/// therefore covers the widget and whatever sits to its right, and the root
-/// cuts ordinary text out from under an overlay fill so the covered widgets'
-/// glyphs do not print through it.
+/// How wide the kit lets a hover reveal or a tooltip run before it wraps, in
+/// body characters. A reading measure, not a limit the content chose: past
+/// roughly this the eye loses the line it is on coming back from the right
+/// edge, and a plate that is one enormously long line is exactly the "breaks
+/// up weirdly" the owner saw.
+pub const REVEAL_WRAP_CHARS: usize = 40;
+
+/// The pixel width [`REVEAL_WRAP_CHARS`] comes to at `size_pixels`, by the
+/// per-character approximation. A *maximum* is the one place the approximation
+/// is honest on its own terms — the wrap points themselves are decided by the
+/// caller's real `measure`, so a proportional font wraps exactly.
+#[must_use]
+pub fn reveal_wrap_width(size_pixels: f32) -> f32 {
+    approx_text_width(REVEAL_WRAP_CHARS, size_pixels)
+}
+
+/// Break `text` into lines no wider than `max_width`, splitting only between
+/// words. `measure` reports the pixel width of a candidate line, so a caller
+/// wraps against whatever it will actually draw with — exact glyph advances
+/// once the font's metrics resolve, an approximation before that.
 ///
-/// Empty unless the run actually overflows (`text_x + text_width` past the
-/// frame's right edge) — a widget whose text fits raises nothing, so the
-/// reveal reads as "there is more here" rather than as chrome.
-pub(crate) fn overflow_reveal_items(
-    theme: &Theme,
-    text: &str,
-    text_x: f32,
-    text_width: f32,
-    size_pixels: f32,
-    ink: Rgba,
-    frame: &WidgetFrame,
-) -> Vec<WidgetDrawItem> {
-    let plate_width = text_x + text_width + theme.pad;
-    if text.is_empty() || !plate_width.is_finite() || text_x + text_width <= frame.width || frame.height <= 0.0 {
+/// A `\n` in the source is an author's own break and is always honoured,
+/// blank lines included, so a caller can divide a tooltip into paragraphs. A
+/// single word wider than `max_width` keeps its own line unsplit and over
+/// budget: `max_width` is a reading measure, and breaking a word in half to
+/// respect it reads far worse than one long line.
+#[must_use]
+pub fn wrap_to_width(text: &str, max_width: f32, measure: impl Fn(&str) -> f32) -> Vec<String> {
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut line = String::new();
+        for word in paragraph.split_whitespace() {
+            if line.is_empty() {
+                line.push_str(word);
+                continue;
+            }
+            let mut candidate = String::with_capacity(line.len() + 1 + word.len());
+            candidate.push_str(&line);
+            candidate.push(' ');
+            candidate.push_str(word);
+            if measure(&candidate) <= max_width {
+                line = candidate;
+            } else {
+                lines.push(mem::replace(&mut line, String::from(word)));
+            }
+        }
+        lines.push(line);
+    }
+    // A trailing empty line is the split's artifact, not an author's break;
+    // one leading/trailing blank would otherwise pad every plate.
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    while lines.first().is_some_and(String::is_empty) {
+        lines.remove(0);
+    }
+    lines
+}
+
+/// The plate a widget raises over its own slot when its text does not fit and
+/// the pointer is on it. See [`overflow_reveal_items`].
+pub(crate) struct RevealPlate<'a> {
+    pub(crate) theme: &'a Theme,
+    pub(crate) text: &'a str,
+    /// Where the run starts inside the plate — one `pad`, for every caller so
+    /// far. Also the left margin the plate's width accounts for.
+    pub(crate) text_x: f32,
+    pub(crate) size_pixels: f32,
+    pub(crate) ink: Rgba,
+    /// The width the run has to fit in before a plate is owed: the widget's
+    /// frame minus any chrome gutter.
+    pub(crate) content_width: f32,
+    /// One wrapped line's height — the widget's own row height.
+    pub(crate) row_height: f32,
+}
+
+/// The overlay plate a widget raises when its text does not fit the frame it
+/// lives in and the pointer is over it: the run redrawn whole on a
+/// `surface_raised` plate with a one-pixel `outline` ring, starting at the
+/// widget's own origin. The plate covers the widget and whatever sits to its
+/// right, and the root cuts ordinary text out from under an overlay fill so
+/// the covered widgets' glyphs do not print through it.
+///
+/// The run wraps at [`reveal_wrap_width`] on word boundaries
+/// ([`wrap_to_width`]), and the plate is sized to its *longest wrapped line*
+/// plus a margin either side and to one `row_height` per line — so the box is
+/// neat and measured however long the text is, instead of running off the
+/// window in one line.
+///
+/// Empty unless the run actually overflows `content_width` — a widget whose
+/// text fits raises nothing, so the reveal reads as "there is more here"
+/// rather than as chrome.
+pub(crate) fn overflow_reveal_items(plate: &RevealPlate<'_>, measure: &dyn Fn(&str) -> f32) -> Vec<WidgetDrawItem> {
+    let RevealPlate { theme, text, text_x, size_pixels, ink, content_width, row_height } = *plate;
+    let text_width = measure(text);
+    if text.is_empty() || !text_width.is_finite() || text_x + text_width <= content_width || row_height <= 0.0 {
         return Vec::new();
     }
 
-    let mut items = Vec::with_capacity(6);
-    items.push(quad(0.0, 0.0, plate_width, frame.height, theme.surface_raised));
-    push_border(&mut items, plate_width, frame.height, 1.0, theme.outline);
-    items.push(WidgetDrawItem::Text {
-        x: text_x,
-        y: text_origin_y(0.0, frame.height, size_pixels),
-        font_id: theme.font_id,
-        text: String::from(text),
-        size_pixels,
-        color: ink,
-        clip: None,
-    });
+    let lines = wrap_to_width(text, reveal_wrap_width(size_pixels), measure);
+    let longest = lines.iter().map(|line| measure(line)).fold(0.0_f32, f32::max);
+    let plate_width = text_x + longest + theme.pad;
+    #[allow(clippy::cast_precision_loss)]
+    let plate_height = lines.len() as f32 * row_height;
+    if !plate_width.is_finite() || plate_height <= 0.0 {
+        return Vec::new();
+    }
+
+    let mut items = Vec::with_capacity(5 + lines.len());
+    items.push(quad(0.0, 0.0, plate_width, plate_height, theme.surface_raised));
+    push_border(&mut items, plate_width, plate_height, 1.0, theme.outline);
+    for (index, line) in lines.into_iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let row_top = index as f32 * row_height;
+        items.push(WidgetDrawItem::Text {
+            x: text_x,
+            y: text_origin_y(row_top, row_height, size_pixels),
+            font_id: theme.font_id,
+            text: line,
+            size_pixels,
+            color: ink,
+            clip: None,
+        });
+    }
     items
 }
 /// The slot a row-local `x` lands in, over `widths` laid out left to right
@@ -830,9 +993,38 @@ fn even_split_widths(count: usize, width: f32, gap: f32) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aether_kinds::WindowId;
 
-    fn frame() -> WidgetFrame {
-        WidgetFrame { x: 0.0, y: 0.0, width: 100.0, height: 24.0 }
+    /// A fixed-advance measure, so a wrap point is arithmetic a reader can
+    /// check: every character is `MONO_ADVANCE` pixels wide.
+    const MONO_ADVANCE: f32 = 10.0;
+
+    #[allow(clippy::cast_precision_loss)]
+    fn mono(run: &str) -> f32 {
+        run.chars().count() as f32 * MONO_ADVANCE
+    }
+
+    /// A reveal over a 100-pixel-wide, 24-pixel-tall slot.
+    fn plate<'a>(theme: &'a Theme, text: &'a str) -> RevealPlate<'a> {
+        RevealPlate {
+            theme,
+            text,
+            text_x: theme.pad,
+            size_pixels: 14.0,
+            ink: theme.text_primary,
+            content_width: 100.0,
+            row_height: 24.0,
+        }
+    }
+
+    fn plate_lines(items: &[WidgetDrawItem]) -> Vec<&str> {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                WidgetDrawItem::Text { text, .. } => Some(text.as_str()),
+                WidgetDrawItem::Quad { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+            })
+            .collect()
     }
 
     #[test]
@@ -841,24 +1033,157 @@ mod tests {
         // run that already fits would cover the widget to its right on every
         // hover, for nothing.
         let theme = Theme::DEFAULT;
-        let fits = overflow_reveal_items(&theme, "short", theme.pad, 40.0, 14.0, theme.text_primary, &frame());
-        assert!(fits.is_empty(), "a run inside the frame raises no plate");
+        assert!(overflow_reveal_items(&plate(&theme, "short"), &mono).is_empty(), "a run inside the slot raises none");
+        assert!(overflow_reveal_items(&plate(&theme, ""), &mono).is_empty(), "an empty run has nothing to reveal");
 
-        let empty = overflow_reveal_items(&theme, "", theme.pad, 400.0, 14.0, theme.text_primary, &frame());
-        assert!(empty.is_empty(), "there is nothing to reveal about an empty run");
-
-        let overflows =
-            overflow_reveal_items(&theme, "far too long", theme.pad, 160.0, 14.0, theme.text_primary, &frame());
-        let WidgetDrawItem::Quad { x, y, width, height, .. } = overflows[0] else {
+        let overflows = overflow_reveal_items(&plate(&theme, "far too long to fit"), &mono);
+        let WidgetDrawItem::Quad { x, y, height, .. } = overflows[0] else {
             panic!("the plate leads with its fill");
         };
-        assert_eq!((x, y, height), (0.0, 0.0, 24.0), "the plate starts at the widget's own origin");
-        assert_eq!(width, theme.pad.mul_add(2.0, 160.0), "and reaches one pad past the run");
-        assert!(width > frame().width, "a plate that did not outgrow the frame would reveal nothing");
-        assert!(
-            matches!(overflows.last(), Some(WidgetDrawItem::Text { text, .. }) if text == "far too long"),
-            "the whole run draws over the plate",
+        assert_eq!((x, y, height), (0.0, 0.0, 24.0), "the plate starts at the widget's own origin, one line tall");
+        assert_eq!(plate_lines(&overflows), vec!["far too long to fit"], "a run under the measure stays one line");
+    }
+
+    #[test]
+    fn a_long_reveal_wraps_at_words_and_sizes_its_box_to_the_longest_line() {
+        // The owner's note: an over-long reveal used to run off in one line.
+        // The plate must wrap at the reading measure, never mid-word, and be
+        // exactly as wide as its longest wrapped line plus a margin each side.
+        let theme = Theme::DEFAULT;
+        let text = "Raise or lower the selected terrain region by the configured brush strength";
+        let items = overflow_reveal_items(&plate(&theme, text), &mono);
+        let lines = plate_lines(&items);
+
+        let wrap_width = reveal_wrap_width(14.0);
+        assert!(lines.len() > 1, "a run this long must wrap");
+        for line in &lines {
+            assert!(mono(line) <= wrap_width || !line.contains(' '), "line {line:?} exceeds the measure");
+            assert!(text.contains(line), "line {line:?} is not a run of the source — a word was split");
+        }
+        assert_eq!(lines.join(" "), text, "wrapping loses no word and adds none");
+
+        let WidgetDrawItem::Quad { width, height, .. } = items[0] else {
+            panic!("the plate leads with its fill");
+        };
+        let longest = lines.iter().copied().map(mono).fold(0.0_f32, f32::max);
+        assert_eq!(width, theme.pad.mul_add(2.0, longest), "the box is the longest line plus a margin each side");
+        #[allow(clippy::cast_precision_loss)]
+        let expected_height = lines.len() as f32 * 24.0;
+        assert_eq!(height, expected_height, "one row per wrapped line");
+    }
+
+    #[test]
+    fn wrapping_never_splits_a_word_and_honours_an_authored_break() {
+        // A word wider than the measure is over budget on its own line rather
+        // than cut in half, and an explicit newline is the author's break.
+        assert_eq!(
+            wrap_to_width("antidisestablishmentarianism x", 50.0, mono),
+            vec!["antidisestablishmentarianism", "x"]
         );
+        assert_eq!(wrap_to_width("a\nb", 1000.0, mono), vec!["a", "b"], "an authored break survives a wide measure");
+        assert!(wrap_to_width("   ", 100.0, mono).is_empty(), "blank text wraps to no lines at all");
+        assert_eq!(wrap_to_width("one two three", 75.0, mono), vec!["one two", "three"], "breaks land between words");
+    }
+
+    /// Modifier state for a chord test, named by the keys held — any
+    /// combination of `"ctrl"`, `"meta"`, `"alt"`, `"shift"` in one string, so
+    /// each call site reads as the chord it is testing rather than as four
+    /// positional bools.
+    fn mods(held: &str) -> Modifiers {
+        Modifiers {
+            window: WindowId(1),
+            ctrl: held.contains("ctrl"),
+            meta: held.contains("meta"),
+            alt: held.contains("alt"),
+            shift: held.contains("shift"),
+        }
+    }
+
+    #[test]
+    fn the_clipboard_chords_answer_to_cmd_as_well_as_ctrl() {
+        // Tripwire: the owner's note. On macOS the chord modifier is Cmd, and
+        // a widget cannot ask the substrate which platform it is on, so both
+        // must resolve to the same command everywhere.
+        for chord in [mods("ctrl"), mods("meta")] {
+            assert_eq!(edit_command(KEY_A, chord), Some(EditCommand::SelectAll));
+            assert_eq!(edit_command(KEY_C, chord), Some(EditCommand::Copy));
+            assert_eq!(edit_command(KEY_X, chord), Some(EditCommand::Cut));
+            assert_eq!(edit_command(KEY_V, chord), Some(EditCommand::Paste));
+        }
+        let bare = mods("");
+        assert_eq!(edit_command(KEY_A, bare), None, "a bare `a` is a typed character, not select-all");
+        assert_eq!(edit_command(KEY_V, bare), None);
+    }
+
+    #[test]
+    fn deletion_and_caret_motion_resolve_to_the_step_the_modifiers_name() {
+        let bare = mods("");
+        assert_eq!(edit_command(KEY_BACKSPACE, bare), Some(EditCommand::DeleteBackward));
+        assert_eq!(edit_command(KEY_DELETE, bare), Some(EditCommand::DeleteForward));
+        assert_eq!(
+            edit_command(KEY_LEFT, bare),
+            Some(EditCommand::MoveLeft { step: EditStep::Character, extend: false })
+        );
+        assert_eq!(
+            edit_command(KEY_RIGHT, mods("shift")),
+            Some(EditCommand::MoveRight { step: EditStep::Character, extend: true }),
+            "Shift extends whatever the step is",
+        );
+        assert_eq!(
+            edit_command(KEY_LEFT, mods("alt")),
+            Some(EditCommand::MoveLeft { step: EditStep::Word, extend: false }),
+            "Alt+Left is a word step",
+        );
+        assert_eq!(
+            edit_command(KEY_LEFT, mods("ctrl")),
+            Some(EditCommand::MoveLeft { step: EditStep::Word, extend: false }),
+            "Ctrl+Left is the same word step on the other platforms",
+        );
+        assert_eq!(
+            edit_command(KEY_RIGHT, mods("meta")),
+            Some(EditCommand::MoveRight { step: EditStep::LineEdge, extend: false }),
+            "Cmd+Right is the line edge, not a word",
+        );
+        assert_eq!(
+            edit_command(KEY_HOME, bare),
+            Some(EditCommand::MoveLeft { step: EditStep::LineEdge, extend: false })
+        );
+        assert_eq!(
+            edit_command(KEY_END, mods("ctrl")),
+            Some(EditCommand::MoveRight { step: EditStep::DocumentEdge, extend: false }),
+            "the chord widens Home/End to the whole buffer",
+        );
+        assert_eq!(edit_command(KEY_ENTER, bare), None, "Enter is each control's own");
+    }
+
+    #[test]
+    fn a_read_only_control_still_selects_and_copies_but_never_edits() {
+        // Tripwire: `mutable` gates the destructive half only. A read-only
+        // field a person cannot copy out of is worse than useless.
+        let mut edit = TextEditState::new(String::from("locked"));
+        assert_eq!(apply_edit_command(&mut edit, EditCommand::SelectAll, false), EditEffect::default());
+        let copy = apply_edit_command(&mut edit, EditCommand::Copy, false);
+        assert_eq!(copy.copy.as_deref(), Some("locked"));
+        assert!(!copy.changed);
+
+        for destructive in [EditCommand::Cut, EditCommand::Paste, EditCommand::DeleteBackward] {
+            assert_eq!(apply_edit_command(&mut edit, destructive, false), EditEffect::default(), "{destructive:?}");
+        }
+        assert_eq!(edit.value(), "locked", "nothing destructive got through");
+
+        let paste = apply_edit_command(&mut edit, EditCommand::Paste, true);
+        assert!(paste.request_paste, "a mutable control asks the clipboard");
+    }
+
+    #[test]
+    fn a_collapsed_selection_copies_nothing_rather_than_an_empty_string() {
+        // Tripwire: an empty clipboard write would silently destroy whatever
+        // the person had copied before pressing Ctrl+C on nothing.
+        let mut edit = TextEditState::new(String::from("abc"));
+        edit.place_caret(1);
+        assert_eq!(apply_edit_command(&mut edit, EditCommand::Copy, true).copy, None);
+        assert_eq!(apply_edit_command(&mut edit, EditCommand::Cut, true), EditEffect::default());
+        assert_eq!(edit.value(), "abc", "a cut with nothing selected deletes nothing");
     }
 
     #[test]

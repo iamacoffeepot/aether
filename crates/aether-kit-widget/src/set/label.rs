@@ -33,7 +33,8 @@ use aether_math::Rgba;
 use aether_text::FontMetricsResult;
 
 use crate::set::{
-    apply_static_control_state, overflow_reveal_items, pump_text_font_metrics, reply_if_hidden, text_origin_y,
+    RevealPlate, apply_static_control_state, overflow_reveal_items, pump_text_font_metrics, reply_if_hidden,
+    text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::{FontMetricsAdapter, SingleLineLayout};
@@ -78,20 +79,25 @@ impl LabelWidget {
     /// label's own origin, whenever the pointer is over a label whose text
     /// overflows its frame. Empty otherwise.
     fn overflow_overlay(&self, size_pixels: f32, text_x: f32, text_width: Option<f32>) -> Vec<WidgetDrawItem> {
-        if !self.state.hovered() {
+        if !self.state.hovered() || text_width.is_none() {
             return Vec::new();
         }
-        text_width.map_or_else(Vec::new, |text_width| {
-            overflow_reveal_items(
-                &self.theme,
-                &self.text,
+        let Some(metrics) = self.font_metrics.resolved() else {
+            return Vec::new();
+        };
+        let measure = |run: &str| SingleLineLayout::build(run, metrics, size_pixels).width();
+        overflow_reveal_items(
+            &RevealPlate {
+                theme: &self.theme,
+                text: &self.text,
                 text_x,
-                text_width,
                 size_pixels,
-                self.theme.fill(self.ink(), self.state.theme_state(false)),
-                &self.frame,
-            )
-        })
+                ink: self.theme.fill(self.ink(), self.state.theme_state(false)),
+                content_width: self.frame.width,
+                row_height: self.frame.height,
+            },
+            &measure,
+        )
     }
 
     /// The ink the role reads in: a caption is a quieter aside, so it draws

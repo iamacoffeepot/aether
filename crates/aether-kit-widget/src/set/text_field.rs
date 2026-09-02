@@ -301,12 +301,14 @@ impl WasmActor for TextFieldWidget {
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         reply_single_line_edit(
             ctx,
-            &self.edit.displayed(),
-            self.font_metrics.resolved(),
-            &self.theme,
-            &self.state,
-            self.theme_state(),
-            &self.frame,
+            SingleLineEdit::new(
+                &self.edit.displayed(),
+                self.font_metrics.resolved(),
+                &self.theme,
+                &self.state,
+                self.theme_state(),
+                &self.frame,
+            ),
         );
     }
 }
