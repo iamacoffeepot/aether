@@ -15,6 +15,10 @@
 //! - [`ToggleWidget`] — a boolean switch.
 //! - [`SegmentedWidget`] — a horizontal exclusive choice.
 //! - [`NumericWidget`] — a typed and steppable bounded number.
+//! - [`DropdownWidget`] — one current choice with its alternatives in a list
+//!   that opens on demand, drawn in the overlay layer.
+//! - [`TabStripWidget`] — one row of content-sized tabs selecting a parallel
+//!   content set.
 //!
 //! Each caches its assigned [`WidgetFrame`] rect
 //! and its [`Theme`], answers every
