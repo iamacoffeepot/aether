@@ -380,16 +380,16 @@ impl TooltipWidget {
                 });
                 first_line = first_line && is_break;
                 let size = self.theme.text_size_pixels(role);
-                let mut lines: Vec<PlateLine> =
+                let lines: Vec<PlateLine> = if is_break {
+                    alloc::vec![PlateLine { text: String::new(), role, indent: 0.0, ink: source.ink }]
+                } else {
                     wrap_to_width_hanging(&source.text, measure_width, self.hanging_indent_pixels, |run| {
                         self.text_width(run, size)
                     })
                     .into_iter()
                     .map(|line| PlateLine { text: line.text, role, indent: line.indent_pixels, ink: source.ink })
-                    .collect();
-                if is_break {
-                    lines = alloc::vec![PlateLine { text: String::new(), role, indent: 0.0, ink: source.ink }];
-                }
+                    .collect()
+                };
                 if !lines.is_empty() {
                     entries.push(PlateEntry { section: index, lines });
                 }

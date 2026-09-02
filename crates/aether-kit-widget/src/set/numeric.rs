@@ -75,7 +75,7 @@ const STEPPER_REPEAT_INTERVAL_FRAMES: u32 = 6;
 /// the root asked it to draw — the same clock the toast region ages by.
 fn stepper_repeats_at(frames_held: u32) -> bool {
     frames_held >= STEPPER_REPEAT_DELAY_FRAMES
-        && (frames_held - STEPPER_REPEAT_DELAY_FRAMES) % STEPPER_REPEAT_INTERVAL_FRAMES == 0
+        && (frames_held - STEPPER_REPEAT_DELAY_FRAMES).is_multiple_of(STEPPER_REPEAT_INTERVAL_FRAMES)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
