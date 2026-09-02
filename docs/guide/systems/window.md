@@ -279,6 +279,22 @@ main.set_menu(vec![WindowMenu {
 }]);
 ```
 
+**Send window ops detached from a frame's chain.** The desktop window is
+a pumped actor: it runs when the winit loop turns, which happens once the
+frame advances, and the frame advances once the tick's causal chain has
+settled. A `set_menu`, `set_title`, or `set_cursor` sent from a tick
+handler with the chained `send` therefore puts the window's own mail
+inside the chain the frame is waiting on, and the frame loop wedges
+(`gate desktop.frame_advance wedged`, then a fatal abort). From a
+component, address the window by the id every input and size event
+carries — a window id *is* a mailbox id — and send detached:
+
+```rust
+ctx.actor::<WindowCapability>().at::<WindowInstance>(size.window.0).send_detached(&SetWindowMenu { menus });
+```
+
+The reply (`set_menu_result` and its siblings) still reaches the sender.
+
 `id` is the caller's own opaque number. It rides back verbatim on
 `aether.window.menu_activated { window, id }`, which reaches subscribers
 through the same selector-aware family every window-originated kind uses:
