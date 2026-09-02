@@ -66,6 +66,6 @@ impl WasmActor for UiWidget {
         for _ in 0..self.config.quad_count {
             quads.push(SolidQuad { x: 0.0, y: 0.0, width: 4.0, height: 4.0, color: Rgba::new(0.2, 0.4, 0.8, 1.0) });
         }
-        ctx.actor::<RenderCapability>().send(&DrawSolidQuads { space: QuadSpace::Screen, clip: None, quads });
+        ctx.actor::<RenderCapability>().send(&DrawSolidQuads { space: QuadSpace::Screen, clip: None, layer: 0, quads });
     }
 }

@@ -385,6 +385,7 @@ fn overlay(texture_id: u32, left: u32) -> DrawTexturedQuads {
         blend: QuadBlend::Straight,
         space: QuadSpace::Screen,
         clip: None,
+        layer: 0,
         quads: vec![TexturedQuad {
             x: left as f32,
             y: RECT_TOP as f32,

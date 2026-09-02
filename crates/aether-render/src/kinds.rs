@@ -11,6 +11,24 @@
 //! `QuadSpace` / `QuadScale` projection types also stay central — the
 //! `aether.text.draw` kind in `aether-kinds` consumes them — so the quad
 //! draw kinds below import them from there.
+//!
+//! # Overlay draw layers
+//!
+//! Every overlay batch kind ([`DrawSolidQuads`], [`DrawTexturedQuads`],
+//! [`DrawScreenTriangles`]) carries a `layer: u8`. The cap records the
+//! frame's accumulated batches in ascending `layer`, and within one layer
+//! in submission order — a stable sort as the frame commits, so layer `0`
+//! alone reproduces the plain submission order the overlay pass has always
+//! had.
+//! A higher layer therefore draws over every lower one no matter who
+//! submitted first.
+//!
+//! The layer exists because submission order is not an author's to
+//! choose across caps. Text is not drawn directly: `aether.text.draw`
+//! lays glyphs out and emits its [`DrawTexturedQuads`] one mail hop
+//! later, so within a frame every glyph would otherwise land after every
+//! batch any actor submitted directly. A widget's popup fill states
+//! `layer: 1` and covers the text drawn beneath it.
 
 use aether_data::MailId;
 use aether_kinds::{ClipRect, QuadSpace, WindowId};
@@ -483,6 +501,10 @@ pub struct DrawTexturedQuads {
     /// ordinary uploaded image, `Premultiplied` for a texture a render
     /// program wrote.
     pub blend: QuadBlend,
+    /// Overlay draw layer (see the module docs' layer rule): batches
+    /// record in ascending `layer`, and within one layer in submission
+    /// order. `0` is the ordinary layer.
+    pub layer: u8,
     pub quads: Vec<TexturedQuad>,
 }
 
@@ -515,6 +537,10 @@ pub struct DrawSolidQuads {
     /// Optional framebuffer-pixel scissor applied to this batch. `None`
     /// leaves the draw unclipped.
     pub clip: Option<ClipRect>,
+    /// Overlay draw layer (see the module docs' layer rule): batches
+    /// record in ascending `layer`, and within one layer in submission
+    /// order. `0` is the ordinary layer.
+    pub layer: u8,
     pub quads: Vec<SolidQuad>,
 }
 
@@ -563,6 +589,10 @@ pub struct DrawScreenTriangles {
     /// Optional framebuffer-pixel scissor applied to this batch. `None`
     /// leaves the draw unclipped.
     pub clip: Option<ClipRect>,
+    /// Overlay draw layer (see the module docs' layer rule): batches
+    /// record in ascending `layer`, and within one layer in submission
+    /// order. `0` is the ordinary layer.
+    pub layer: u8,
     pub triangles: Vec<ScreenTriangle>,
 }
 

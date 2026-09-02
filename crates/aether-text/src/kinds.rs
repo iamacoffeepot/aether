@@ -87,6 +87,14 @@ pub struct DrawText {
     /// Optional framebuffer-pixel scissor applied to the emitted glyph
     /// quad batch. `None` leaves the text unclipped.
     pub clip: Option<ClipRect>,
+    /// Overlay draw layer, forwarded onto the emitted
+    /// `aether.render.draw_textured_quads`. `0` is the ordinary layer;
+    /// the renderer records batches in ascending layer and, within one
+    /// layer, in submission order. Glyphs reach `aether.render` one mail
+    /// hop after a direct draw does, so a caller that wants to cover its
+    /// own text raises the covering batch's layer rather than reordering
+    /// sends.
+    pub layer: u8,
 }
 
 /// `aether.text.draw_batch` — the batched form of [`DrawText`]. Every item

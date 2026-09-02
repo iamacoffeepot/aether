@@ -26,16 +26,29 @@ pub enum OverlayGeometry {
 }
 
 /// One accumulated overlay batch (ADR-0105): the texture it samples, the
-/// scissor and blend it draws under, and its geometry. Cloned out of the
-/// accumulator at record time so the cap dispatcher thread can keep
-/// appending the next frame's batches while the driver thread expands
-/// these.
+/// scissor and blend it draws under, the layer it draws on, and its
+/// geometry. Cloned out of the accumulator at record time so the cap
+/// dispatcher thread can keep appending the next frame's batches while
+/// the driver thread expands these.
 #[derive(Clone)]
 pub struct QuadBatch {
     pub texture_id: u32,
     pub clip: Option<ClipRect>,
     pub blend: QuadBlend,
+    /// Ascending draw order across batches; `0` is the ordinary layer.
+    /// [`sort_by_layer`] orders the frame by it.
+    pub layer: u8,
     pub geometry: OverlayGeometry,
+}
+
+/// Order a frame's accumulated batches for the overlay pass: ascending
+/// `layer`, submission order preserved inside each layer.
+///
+/// The stability is the contract, not an implementation detail — an
+/// all-layer-`0` frame must record in exactly the order it was submitted
+/// in, which is what every drawing that predates layers depends on.
+pub fn sort_by_layer(batches: &mut [QuadBatch]) {
+    batches.sort_by_key(|batch| batch.layer);
 }
 
 impl QuadBatch {
@@ -46,6 +59,7 @@ impl QuadBatch {
             texture_id: mail.texture_id,
             clip: mail.clip,
             blend: mail.blend,
+            layer: mail.layer,
             geometry: OverlayGeometry::Quads { space: mail.space, quads: mail.quads },
         }
     }
@@ -78,6 +92,7 @@ impl QuadBatch {
             texture_id: super::texture::WHITE_TEXTURE_ID,
             clip: mail.clip,
             blend: QuadBlend::Straight,
+            layer: mail.layer,
             geometry: OverlayGeometry::Quads { space: mail.space, quads },
         }
     }
@@ -93,7 +108,42 @@ impl QuadBatch {
             texture_id: super::texture::WHITE_TEXTURE_ID,
             clip: mail.clip,
             blend: QuadBlend::Straight,
+            layer: mail.layer,
             geometry: OverlayGeometry::ScreenTriangles(mail.triangles),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OverlayGeometry, QuadBatch, sort_by_layer};
+    use crate::QuadBlend;
+
+    /// The ordering `record_overlay_batches` consumes, pinned as an
+    /// explicit sequence: ascending layer, submission order preserved
+    /// inside each layer. `texture_id` stands in for submission order.
+    ///
+    /// The named bugs are the choices this function makes rather than
+    /// std's sort: keying on a field other than `layer`, ordering
+    /// descending so a raised batch draws *under* the ordinary one, and
+    /// the function no-oping. (Stability at scale is not provable here —
+    /// std's unstable sort agrees with the stable one on inputs this
+    /// small, so the assertion this test can honestly make is the key and
+    /// the direction.)
+    #[test]
+    fn sort_by_layer_orders_ascending_and_keeps_same_layer_order() {
+        let batch = |texture_id: u32, layer: u8| QuadBatch {
+            texture_id,
+            clip: None,
+            blend: QuadBlend::Straight,
+            layer,
+            geometry: OverlayGeometry::ScreenTriangles(Vec::new()),
+        };
+
+        let mut batches = vec![batch(0, 1), batch(1, 0), batch(2, 1), batch(3, 0), batch(4, 2)];
+        sort_by_layer(&mut batches);
+
+        let order: Vec<(u32, u8)> = batches.iter().map(|batch| (batch.texture_id, batch.layer)).collect();
+        assert_eq!(order, vec![(1, 0), (3, 0), (0, 1), (2, 1), (4, 2)]);
     }
 }

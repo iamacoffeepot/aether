@@ -128,7 +128,7 @@ impl ConsoleOverlay {
             y += self.row_height();
         }
 
-        ctx.actor::<RenderCapability>().send(&DrawSolidQuads { space: QuadSpace::Screen, clip: None, quads });
+        ctx.actor::<RenderCapability>().send(&DrawSolidQuads { space: QuadSpace::Screen, clip: None, layer: 0, quads });
 
         let Some(font_id) = self.font_id else {
             return;
@@ -151,6 +151,7 @@ impl ConsoleOverlay {
             origin: [HORIZONTAL_PADDING, input_y],
             space: QuadSpace::Screen,
             clip: None,
+            layer: 0,
         });
         ctx.actor::<TextCapability>().send(&DrawText {
             font_id,
@@ -160,6 +161,7 @@ impl ConsoleOverlay {
             origin: [HORIZONTAL_PADDING + self.measure(&self.config.prompt), input_y],
             space: QuadSpace::Screen,
             clip: None,
+            layer: 0,
         });
     }
 
@@ -217,6 +219,7 @@ impl ConsoleOverlay {
                 origin: [x, y],
                 space: QuadSpace::Screen,
                 clip: None,
+                layer: 0,
             });
             if run.tone == MarkdownTone::Strong {
                 ctx.actor::<TextCapability>().send(&DrawText {
@@ -227,6 +230,7 @@ impl ConsoleOverlay {
                     origin: [x + self.config.theme.markdown.strong_offset_pixels.max(0.0), y],
                     space: QuadSpace::Screen,
                     clip: None,
+                    layer: 0,
                 });
             }
             x += self.measure(&run.text);

@@ -145,6 +145,7 @@ fn text_draws_a_screen_space_string() {
         origin: [0.0, 0.0],
         space: QuadSpace::Screen,
         clip: None,
+        layer: 0,
     };
 
     // First draw: lazily creates the atlas texture (fire-and-forget — a
@@ -276,6 +277,7 @@ fn capture_pins_current_tick_content_not_stale_frame() {
         origin: [0.0, 0.0],
         space: QuadSpace::Screen,
         clip: None,
+        layer: 0,
     };
     harness
         .execute(vec![
@@ -305,6 +307,7 @@ fn capture_pins_current_tick_content_not_stale_frame() {
         let solid = DrawSolidQuads {
             space: QuadSpace::Screen,
             clip: None,
+            layer: 0,
             quads: vec![SolidQuad {
                 x: quad_x as f32,
                 y: quad_y as f32,
@@ -321,6 +324,7 @@ fn capture_pins_current_tick_content_not_stale_frame() {
             origin: [0.0, 0.0],
             space: QuadSpace::Screen,
             clip: None,
+            layer: 0,
         };
         // Order matters: the direct solid quad is dispatched first, so it lands
         // on the first drain and is the batch a mid-fill commit would strand.
@@ -400,6 +404,7 @@ fn text_draw_clip_bounds_glyph_pixels() {
         origin: [8.0, 8.0],
         space: QuadSpace::Screen,
         clip: None,
+        layer: 0,
     };
     harness
         .execute(vec![
@@ -561,6 +566,7 @@ fn text_screen_origin_shifts_centroid() {
         origin: [0.0, 0.0],
         space: QuadSpace::Screen,
         clip: None,
+        layer: 0,
     };
 
     // Prime pass: lazily creates the atlas texture; nothing draws yet.
@@ -680,6 +686,7 @@ fn text_draws_world_space_label() {
         origin: [0.0, 0.0],
         space: QuadSpace::World { anchor, scale: QuadScale::Distance { reference_distance: 10.0 } },
         clip: None,
+        layer: 0,
     };
     let draw_px = DrawText {
         font_id,
@@ -689,6 +696,7 @@ fn text_draws_world_space_label() {
         origin: [0.0, 0.0],
         space: QuadSpace::World { anchor, scale: QuadScale::Pixels },
         clip: None,
+        layer: 0,
     };
 
     // Prime: the first draw lazily creates the atlas texture and draws

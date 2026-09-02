@@ -288,6 +288,7 @@ fn develop(harness: &mut SubstrateHarness, raster: &[f32]) -> Vec<f32> {
         blend: QuadBlend::Straight,
         space: QuadSpace::Screen,
         clip: None,
+        layer: 0,
         quads: vec![TexturedQuad {
             x: 0.0,
             y: 0.0,
@@ -355,6 +356,7 @@ fn depth_weights(harness: &mut SubstrateHarness) -> [f32; 2] {
         blend: QuadBlend::Straight,
         space: QuadSpace::Screen,
         clip: None,
+        layer: 0,
         quads: vec![TexturedQuad {
             x: 0.0,
             y: 0.0,
