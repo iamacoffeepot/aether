@@ -250,8 +250,33 @@ use aether_kit_widget::set::elide_to_width;
 let shown = elide_to_width(name, column_width, |run| measure(run));
 ```
 
+A list whose vector overflows its viewport draws a **scroll bar** down its
+right edge: a `theme.outline` track two spacing units wide, and a
+`theme.text_muted` thumb whose length is the visible share of the whole vector
+and whose position is where the reader is. It is present whenever the list
+overflows — never only on hover, because a bar that appears when touched cannot
+answer "how many entries are there" for a reader who has not touched it — and
+absent when the vector fits, where it would claim there is more to see. Past a
+floor of one and a half track widths the thumb stops shrinking, so a list of
+thousands still has something to grab, and only its travel goes on saying how
+much is off screen.
+
+Three things move it, and all three write the one `first_index` the list
+already had: a keyboard reveal, the **wheel** (whole rows, with the sub-row
+remainder carried so a trackpad's stream of small deltas still moves the list),
+and **dragging the thumb** — a press on the thumb keeps the grabbed point under
+the pointer, a press on the bare track carries the reader to where they
+pointed. Scrolling never changes selection: a reader looking at something has
+not chosen it. The bar takes its track's width out of the row text budget, so
+an elided row never runs under it, and a press on the bar chooses no row. A
+virtual list joins the same wheel-only hit table a `ScrollWidget` does (see
+[Scroll containers and wheel ownership](#scroll-containers-and-wheel-ownership)),
+so a root that forks the reference panel routes `MouseWheel` to it by
+`Focus::hit_test` rather than by pointer capture.
+
 Those metrics also give the list its `WidgetDrawList::intrinsic`: `[widest row
-in the whole item vector + 2 × pad, theme.row_height × visible_row_count]`. It
+in the whole item vector + 2 × pad + the scroll bar's track when the vector
+overflows, theme.row_height × visible_row_count]`. It
 measures the items, not the realized window, so the width does not change as
 the reader scrolls — and because that is the one thing here that touches every
 item, it is measured once and re-measured only when the items, the font, or the
@@ -369,6 +394,20 @@ explained and takes `TextRole::Body` in `text_primary`; every line after it is
 used — that is the size a screen's one title is set at, and a 22-pixel line on
 a hover plate is a headline.
 
+A **wrapped line** and a **new paragraph** are opposite cases, and the plate
+keeps both rules (round-4 note 19 — "I'd prefer if it was aligned to the first
+line of text and then new paragraphs just had a break (empty line)"). A line
+that wrapped is one thought that ran out of measure, so its continuation rows
+start flush with its first row: `hanging_indent_pixels` is `0` by default and
+the kit's own plates leave it there. A new paragraph is a new thought, and
+takes a **blank row**: a `TooltipLine` with no words in it draws one empty
+line box, and so does a blank line inside one line's own text
+(`"first\n\nsecond"`). A blank at the very top or bottom of the plate is
+dropped — a break needs something on both sides of it — and a leading blank
+never takes the title role from the first real line. Neither of these is a
+section: a section boundary stays a **rule**, so a blank row divides two
+paragraphs of one block while a rule divides two blocks.
+
 A section's lines are `TooltipLine { text, role, ink }`, both options `None`
 for that rule. `TooltipSection::new(["Life", "Your health pool."])` takes plain
 strings (`TooltipLine: From<String> + From<&str>`), so a host that only has
@@ -399,8 +438,10 @@ fields:
   shorter card. Re-sending the config resets the count, so the next frame
   reports the new card's tail.
 - **`hanging_indent_pixels`** — how far the continuation rows of a wrapped line
-  are inset (`0` is a flush block). Continuations wrap that much earlier, so
-  the right edge does not move, and a two-row stat reads as one stat.
+  are inset. `0` is the default and the flush block described above; the indent
+  is the opt-in for the one case that wants it, a list of stats where an inset
+  continuation makes a two-row stat read as one stat. Continuations wrap that
+  much earlier, so the right edge does not move.
   `set::wrap_to_width_hanging` is the same rule as a public helper.
 
 `side` is the side of the anchor the plate prefers and `bounds` is the region
@@ -424,7 +465,7 @@ row it explains.
 
 ## The toast region
 
-`ToastConfig { max_standing, lifetime_frames, theme, state }` spawns
+`ToastConfig { max_standing, lifetime_frames, role, theme, state }` spawns
 `ToastWidget` — the one place a refusal or a confirmation appears. Anything
 mails it `ToastNotice { severity, text }`, so a save result, a planner refusal,
 and a confirmation all arrive through the same door and land in the same place
@@ -437,6 +478,13 @@ bar** down its left edge: `theme.info` (a blue-grey report), `theme.warning`
 (orange), or `theme.error` (red), never the accent. The text wraps at the
 region's width with one spacing unit of padding and the plate grows downward —
 a notice is never elided, because a cut-off refusal says less than nothing.
+
+`role` is the step of the theme's type scale a notice's line is set at
+(`TextRole::Body` by default — the reading size the region drew at before the
+field existed). "Toast text can be larger" (round-4 note 15) is a theme fact,
+not a toast fact: the region names a role and the theme resolves the size, so
+one field moves the line box, the wrap measure, and the reported stack height
+together rather than leaving a larger line to overprint a body-sized box.
 
 A widget never sees a tick, so a notice's life is counted in **frames the root
 asked it to draw**: `lifetime_frames` `Collect`s (240 is four seconds at sixty
@@ -628,10 +676,27 @@ no surface of its own; the button under the pointer, or held down, composites
 its hover or pressed overlay over the control's own fill, so it lights up as
 that surface lifted rather than as a separate element. A press steps by `step`
 through the same clamp, snap, and commit path Up/Down use, so the two routes
-cannot drift. The value text stays left-aligned at one `pad`, the text box
+cannot drift. A button **held down** keeps stepping: after half a second
+(30 `Collect`s) it repeats ten times a second, and the repeat stops the moment
+the button is released or the pointer slides off it. A held arrow *key* does
+the same by doing nothing at all — the platform's key repeat arrives as
+repeated `aether.key` presses and the step path holds no arm, unlike the button
+and the toggle, which arm a key precisely so a repeat cannot fire a second
+click (round-4 note 14). The key's cadence is the platform's; the button's is
+the widget's, counted in the frames the root asks it to draw, the same clock
+the toast region ages its notices by. The value text stays left-aligned at one `pad`, the text box
 shrinks by the column, and the column never takes more than half the frame — a
 numeric too narrow for both stays a value rather than becoming two arrows. A
-read-only or disabled numeric has no live stepper targets. Nothing in
+read-only or disabled numeric has no live stepper targets.
+
+The value's box is **padded on both sides and clipped at its own margin**: the
+text starts one `pad` in and every part of it the reader can see — glyphs,
+selection band, IME underline, caret — carries a clip that ends one `pad` short
+of the hairline. So a value that fits has the same space at each end, and one
+that does not is cut at that margin rather than printing across the seam and
+under the arrows (round-4 note 6). A control with no gutter — a plain text
+field — has no seam to be held off and carries no clip; its slot is already its
+own frame. Nothing in
 `NumericConfig` changed: steppers are what a numeric *is*, not something to opt
 into.
 
@@ -642,7 +707,14 @@ guessing at it. The widest value is whichever *bound* renders longer, formatted
 exactly the way the field formats a committed value (`-100 .. 20` is widest at
 its minimum: the sign is a character like any other), capped at the edit
 buffer's own 32-character bound so an effectively unbounded range asks for a
-field rather than a wall. The trailing row height is the stepper column. Like
+field rather than a wall. The endpoints, and only the endpoints, because the
+number has to be stable: a width that also weighed the value on screen would
+resize the slot on every keystroke, so a fractional `step` that renders an
+interior value longer than either bound (`0 .. 100` by `0.5` holds `"12.5"`) is
+the clip's business rather than the width's. The trailing row height is the
+stepper column, so a host that takes this number gets a field three digits fit
+in with a pad at each end — which is the other half of round-4 note 6, and the
+half the host owns. Like
 the button's intrinsic, it is `None` until the real advances land — a slot
 sized from the per-character approximation would be resized the moment they
 arrived — and, like the button's, the reference panel does not yet consume it.
@@ -864,8 +936,9 @@ nested scroll viewport is hit-testable only where that frame intersects its
 ancestor viewport. A nested scroll config's viewport extent must exactly match
 the content extent its parent assigned it, or the slot is rejected.
 
-A wheel always targets the deepest scroll viewport under the cursor using
-`Focus::hit_test`; it never follows pointer capture. The consuming actor
+A wheel always targets the deepest **self-scrolling** child under the cursor
+using `Focus::hit_test` — a scroll viewport, or a virtual list, which owns the
+row window it realizes — and it never follows pointer capture. The consuming actor
 converts chassis deltas once (`x_pixels = -delta_x`, `y_pixels = -delta_y`),
 then clamps each axis independently. It emits
 `ScrollOutcome { container, offset, consumed, residual }`. If an axis

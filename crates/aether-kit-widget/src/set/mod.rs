@@ -108,7 +108,7 @@ use aether_text::{FontMetricsRequest, FontMetricsResult, FontRef, TextCapability
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::{DisplayedEdit, EditPolicy, FontMetricsAdapter, SingleLineLayout, TextEditState};
 use crate::theme::{Theme, ThemeState};
-use crate::{WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame};
+use crate::{WidgetClipRect, WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeyboardArm {
@@ -722,18 +722,29 @@ fn single_line_edit_draw_items(edit: &SingleLineEdit<'_>) -> Vec<WidgetDrawItem>
             |layout| layout.caret_x(byte),
         )
     };
+    // Everything the reader typed lives inside the value's own box, never in
+    // the gutter beside it (round-4 note 6).
+    let content_clip = edit.content_clip();
+    let content_quad = |x: f32, y: f32, quad_width: f32, quad_height: f32, color: Rgba| WidgetDrawItem::Quad {
+        x,
+        y,
+        width: quad_width,
+        height: quad_height,
+        color,
+        clip: content_clip,
+    };
 
     let mut items = Vec::new();
     items.push(quad(0.0, 0.0, width, height, single_line_box_fill(theme, theme_state)));
     if let Some(span) = displayed.selection_span {
         let x0 = pad + prefix_width(span.start_byte);
         let x1 = pad + prefix_width(span.end_byte);
-        items.push(quad(x0, pad, (x1 - x0).max(1.0), caret_height, theme.accent));
+        items.push(content_quad(x0, pad, (x1 - x0).max(1.0), caret_height, theme.accent));
     }
     if let Some(span) = displayed.preedit_cursor_span.filter(|span| !span.is_collapsed()) {
         let x0 = pad + prefix_width(span.start_byte);
         let x1 = pad + prefix_width(span.end_byte);
-        items.push(quad(x0, pad, (x1 - x0).max(1.0), caret_height, theme.accent));
+        items.push(content_quad(x0, pad, (x1 - x0).max(1.0), caret_height, theme.accent));
     }
     if !displayed.text.is_empty() {
         items.push(WidgetDrawItem::Text {
@@ -743,16 +754,16 @@ fn single_line_edit_draw_items(edit: &SingleLineEdit<'_>) -> Vec<WidgetDrawItem>
             text: displayed.text.clone(),
             size_pixels: size,
             color: theme.fill(theme.text_primary, theme_state),
-            clip: None,
+            clip: content_clip,
         });
     }
     if let Some(span) = displayed.preedit_span {
         let x0 = pad + prefix_width(span.start_byte);
         let x1 = pad + prefix_width(span.end_byte);
-        items.push(quad(x0, text_baseline_y(0.0, height, size), (x1 - x0).max(1.0), 1.0, theme.accent));
+        items.push(content_quad(x0, text_baseline_y(0.0, height, size), (x1 - x0).max(1.0), 1.0, theme.accent));
         if let Some(cursor) = displayed.preedit_cursor_span.filter(|cursor| cursor.is_collapsed()) {
             let cursor_x = pad + prefix_width(cursor.end_byte);
-            items.push(quad(cursor_x, pad, 1.0, caret_height, theme.accent));
+            items.push(content_quad(cursor_x, pad, 1.0, caret_height, theme.accent));
         }
     }
     // The caret marks the insertion point, which a pointer click establishes
@@ -760,7 +771,7 @@ fn single_line_edit_draw_items(edit: &SingleLineEdit<'_>) -> Vec<WidgetDrawItem>
     // keyboard-only rule.
     if state.focused() && !displayed.composing {
         let caret_x = pad + prefix_width(displayed.caret_byte);
-        items.push(quad(caret_x, pad, 1.0, caret_height, theme.accent));
+        items.push(content_quad(caret_x, pad, 1.0, caret_height, theme.accent));
     }
     items.extend(edit.gutter_items.iter().cloned());
     push_control_outlines(&mut items, width, height, state, theme);
@@ -840,6 +851,27 @@ impl<'a> SingleLineEdit<'a> {
     /// The width the text box actually gets, once the gutter is taken out.
     fn content_width(&self) -> f32 {
         (self.frame.width - self.gutter).max(0.0)
+    }
+
+    /// The bound every drawn part of the value carries when the control keeps
+    /// a gutter — the box less one `pad` at the gutter end, which is the same
+    /// `pad` the text starts at.
+    ///
+    /// Round-4 note 6: "lack of symmetry in the space of the left padding and
+    /// right padding of the number text. Three digits overflows and is drawn
+    /// behind the arrows." The two are one defect. The value is *padded* on
+    /// the left by starting at `pad` and on the right by ending a `pad` short
+    /// of the seam, and it is *held there* by this clip, so a number wider
+    /// than its box is cut at its own margin instead of printing across the
+    /// hairline and under the arrows. A control with no gutter has no seam to
+    /// hold it off and keeps `None`: its slot clip is already its own frame.
+    fn content_clip(&self) -> Option<WidgetClipRect> {
+        (self.gutter > 0.0).then(|| WidgetClipRect {
+            x: 0.0,
+            y: 0.0,
+            width: (self.content_width() - self.theme.pad).max(0.0),
+            height: self.frame.height,
+        })
     }
 }
 

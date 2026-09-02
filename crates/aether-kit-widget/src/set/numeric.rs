@@ -54,6 +54,30 @@ const ARROW_EXTENT_FRACTION: f32 = 0.45;
 /// comes to — only a `Vec::with_capacity` hint, never a correctness bound.
 const TRIANGLE_ROWS_PER_ARROW: usize = 8;
 
+/// How long a stepper button must be held before it starts repeating, in the
+/// root's per-frame `Collect`s — half a second at sixty a second. Long enough
+/// that a deliberate single click never turns into two, short enough that a
+/// person holding the button to travel is not left waiting.
+const STEPPER_REPEAT_DELAY_FRAMES: u32 = 30;
+
+/// How often a held stepper repeats once it has started, in the same frames —
+/// ten steps a second. The cadence a held arrow *key* has is the platform's,
+/// so these two are not the same number by construction; this is the one the
+/// widget owns.
+const STEPPER_REPEAT_INTERVAL_FRAMES: u32 = 6;
+
+/// Whether a stepper held for `frames_held` collects steps again this frame.
+///
+/// Round-4 note 14 asked for a held arrow key to keep stepping; a press and
+/// hold on the arrow *button* is the same gesture with the other hand, and a
+/// spinner that answers one and not the other is a spinner whose two routes
+/// disagree. A widget never sees a tick, so the cadence is counted in frames
+/// the root asked it to draw — the same clock the toast region ages by.
+fn stepper_repeats_at(frames_held: u32) -> bool {
+    frames_held >= STEPPER_REPEAT_DELAY_FRAMES
+        && (frames_held - STEPPER_REPEAT_DELAY_FRAMES).is_multiple_of(STEPPER_REPEAT_INTERVAL_FRAMES)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct NumericEmission {
     value: f32,
@@ -157,6 +181,9 @@ pub struct NumericWidget {
     hovered_stepper: Option<StepDirection>,
     /// Which stepper button is held down, for its pressed overlay.
     pressed_stepper: Option<StepDirection>,
+    /// How many collects that button has been held for, which is how the
+    /// press-and-hold repeat tells the time ([`stepper_repeats_at`]).
+    stepper_held_frames: u32,
     /// Single-flight exact metrics for the active theme font: what places the
     /// caret and what sizes the field to its range.
     font_metrics: FontMetricsAdapter,
@@ -179,6 +206,7 @@ impl NumericWidget {
             paste_pending: false,
             hovered_stepper: None,
             pressed_stepper: None,
+            stepper_held_frames: 0,
             font_metrics,
         };
         let initial = widget.normalize(config.initial).or_else(|| widget.normalize(0.0)).unwrap_or(0.0);
@@ -251,6 +279,37 @@ impl NumericWidget {
         Some(NumericEmission { value, committed: true })
     }
 
+    /// One arrow press — tapped or auto-repeated — as a step. `None` for a key
+    /// that is not an arrow.
+    ///
+    /// Round-4 note 14: "holding the up/down arrow on an input box for numbers
+    /// should increment/decrement the value consistently." The platform's own
+    /// key repeat reaches a widget as repeated `aether.key` presses, so this
+    /// stays **stateless**. The button and the toggle arm a key precisely so a
+    /// repeat cannot fire a second click; a numeric that copied that arm would
+    /// step once and then sit still under a held arrow.
+    fn key_step(&mut self, code: u32) -> Option<NumericEmission> {
+        let direction = match code {
+            KEY_UP => StepDirection::Up,
+            KEY_DOWN => StepDirection::Down,
+            _ => return None,
+        };
+        Some(self.stepped(direction))
+    }
+
+    /// Advance a live press-and-hold on a stepper by one frame, yielding the
+    /// step it owes. The repeat stops the moment the pointer leaves the button
+    /// it is holding, which is what lets a person who changed their mind slide
+    /// off it rather than having to undo what it kept doing.
+    fn held_stepper_step(&mut self) -> Option<NumericEmission> {
+        let direction = self.pressed_stepper?;
+        if !self.state.can_mutate() || self.hovered_stepper != Some(direction) {
+            return None;
+        }
+        self.stepper_held_frames = self.stepper_held_frames.saturating_add(1);
+        stepper_repeats_at(self.stepper_held_frames).then(|| self.stepped(direction))
+    }
+
     fn stepped(&mut self, direction: StepDirection) -> NumericEmission {
         let base = self.parsed_buffer().unwrap_or(self.committed_value);
         let amount = if self.step.is_finite() && self.step > 0.0 {
@@ -298,6 +357,14 @@ impl NumericWidget {
     /// capped at the edit buffer's own character bound so an effectively
     /// unbounded range (a non-finite bound resolves to `f32::MAX`) asks for a
     /// field rather than a wall.
+    ///
+    /// The endpoints, and only the endpoints, because this number has to be
+    /// **stable**: a width that also weighed the value on screen would resize
+    /// the slot under the reader on every keystroke. A fractional `step` can
+    /// therefore render an interior value longer than either bound (`0 .. 100`
+    /// by `0.5` holds `"12.5"`, wider than `"100"`); that one is the clip's
+    /// job, not the width's — see
+    /// [`SingleLineEdit::content_clip`](crate::set::SingleLineEdit).
     fn widest_value_width(&self, metrics: &CachedFontMetrics) -> f32 {
         let bounds = self.bounds();
         [bounds.min, bounds.max]
@@ -311,6 +378,12 @@ impl NumericWidget {
     /// allows, one pad each side of it, and the stepper column at a row's
     /// height — so a consumer sizes the field to what it can hold instead of
     /// guessing.
+    ///
+    /// Round-4 note 6 is the failure this answers from the widget's side: a
+    /// level field sized by eye rather than from this number is a field three
+    /// digits do not fit in, and the digits then ran under the arrows. A host
+    /// that takes the intrinsic gets a box whose value has one `pad` at each
+    /// end and a square column beyond it.
     ///
     /// `None` until the theme font's metrics land, the same pre-measurement
     /// silence the button keeps: a slot sized from the per-character
@@ -509,7 +582,9 @@ impl WasmActor for NumericWidget {
     /// through the set's shared vocabulary, so the numeric buffer honours the
     /// same select-all / copy / cut / paste, Delete, Home/End, and word-motion
     /// chords a text field does — Cmd as well as Ctrl. A repeated press is
-    /// another edit, never a suppressed repeat.
+    /// another edit, never a suppressed repeat: round-4 note 14 wants a held
+    /// arrow to keep stepping, and the platform's key repeat is exactly a
+    /// stream of presses ([`NumericWidget::key_step`]).
     #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         if !self.state.is_available() {
@@ -521,8 +596,11 @@ impl WasmActor for NumericWidget {
                     Self::emit(ctx, emission);
                 }
             }
-            KEY_DOWN if self.state.can_mutate() => Self::emit(ctx, self.stepped(StepDirection::Down)),
-            KEY_UP if self.state.can_mutate() => Self::emit(ctx, self.stepped(StepDirection::Up)),
+            code @ (KEY_DOWN | KEY_UP) if self.state.can_mutate() => {
+                if let Some(emission) = self.key_step(code) {
+                    Self::emit(ctx, emission);
+                }
+            }
             code => {
                 let Some(command) = edit_command(code, self.modifiers) else {
                     return;
@@ -538,13 +616,19 @@ impl WasmActor for NumericWidget {
 
     #[handler::single]
     //noinspection DuplicatedCode -- actor macros require one pointer handler per concrete widget type.
-    /// A press on a stepper button steps the value there and then; anywhere
-    /// else in the box places the caret and arms a selection drag.
+    /// A press on a stepper button steps the value there and then and starts
+    /// the press-and-hold repeat; anywhere else in the box places the caret
+    /// and arms a selection drag.
     fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, press: MouseButton) {
         if press.button == mouse_button::LEFT
             && let Some(direction) = self.stepper_at(press.x, press.y)
         {
             self.pressed_stepper = Some(direction);
+            // The pointer is demonstrably on that button, whether or not a
+            // move has arrived to say so — and the held repeat reads this to
+            // decide it is still there.
+            self.hovered_stepper = Some(direction);
+            self.stepper_held_frames = 0;
             Self::emit(ctx, self.stepped(direction));
             return;
         }
@@ -623,11 +707,19 @@ impl WasmActor for NumericWidget {
         accept_font_metrics_result(ctx, &mut self.font_metrics, result);
     }
 
-    /// Reply the control's one draw: the shared single-line box, the stepper
-    /// column inside it, the outlines around the lot, and the width this
-    /// numeric's own range asks a layout for.
+    /// Advance a held stepper's repeat by one frame, then reply the control's
+    /// one draw: the shared single-line box, the stepper column inside it, the
+    /// outlines around the lot, and the width this numeric's own range asks a
+    /// layout for.
+    ///
+    /// The repeat is timed here because a widget never sees a tick — the
+    /// root's per-frame `Collect` is the only regular pulse that reaches a
+    /// child, the same clock the toast region ages its notices by.
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
+        if let Some(emission) = self.held_stepper_step() {
+            Self::emit(ctx, emission);
+        }
         let theme_state = self.theme_state();
         let displayed = self.edit.displayed();
         let mut edit = SingleLineEdit::new(
@@ -820,6 +912,68 @@ mod tests {
     }
 
     #[test]
+    fn a_held_arrow_key_steps_on_every_repeat() {
+        // Tripwire: round-4 note 14. The platform's key repeat arrives as
+        // repeated `aether.key` presses, so the step path must hold no arm.
+        // The button and the toggle deliberately arm a key so a repeat cannot
+        // fire a second click; copying that here is the bug — a held arrow
+        // would step once and then sit still.
+        let mut widget = numeric(0.0, 10.0, 0.5, 2.0);
+        for step in 1..=4u8 {
+            let emission = widget.key_step(KEY_UP).expect("an arrow is a step, however many times it arrives");
+            assert_eq!(emission, NumericEmission { value: 0.5f32.mul_add(f32::from(step), 2.0), committed: true });
+        }
+        assert_eq!(widget.committed_value, 4.0, "four repeats moved four steps");
+
+        for _ in 0..2 {
+            widget.key_step(KEY_DOWN).expect("and the other way");
+        }
+        assert_eq!(widget.committed_value, 3.0);
+        assert_eq!(widget.key_step(KEY_ENTER), None, "a key that is not an arrow is not a step");
+    }
+
+    #[test]
+    fn a_held_stepper_button_repeats_after_a_delay_and_stops_when_the_pointer_leaves() {
+        // Tripwire: round-4 note 14 with the other hand. A press and hold on
+        // the arrow *button* is the same gesture as a held arrow key, so a
+        // spinner that answers one and not the other has two routes that
+        // disagree. The delay is what keeps a deliberate single click from
+        // becoming two, and letting go of the button — by releasing it or by
+        // sliding off it — has to stop the repeat.
+        assert!(!stepper_repeats_at(0), "the press itself already stepped; the frame after it must not");
+        assert!(!stepper_repeats_at(STEPPER_REPEAT_DELAY_FRAMES - 1), "nothing before the delay");
+        assert!(stepper_repeats_at(STEPPER_REPEAT_DELAY_FRAMES), "then the first repeat");
+        assert!(!stepper_repeats_at(STEPPER_REPEAT_DELAY_FRAMES + 1));
+        assert!(stepper_repeats_at(STEPPER_REPEAT_DELAY_FRAMES + STEPPER_REPEAT_INTERVAL_FRAMES), "then the cadence");
+
+        let mut widget = numeric(0.0, 100.0, 1.0, 0.0);
+        widget.frame = WidgetFrame { x: 0.0, y: 0.0, width: 120.0, height: 24.0 };
+        assert_eq!(widget.held_stepper_step(), None, "nothing is held, so no frame owes a step");
+
+        widget.pressed_stepper = Some(StepDirection::Up);
+        widget.hovered_stepper = Some(StepDirection::Up);
+        widget.stepper_held_frames = 0;
+        let steps = (0..STEPPER_REPEAT_DELAY_FRAMES + STEPPER_REPEAT_INTERVAL_FRAMES)
+            .filter(|_| widget.held_stepper_step().is_some())
+            .count();
+        assert_eq!(steps, 2, "one repeat at the delay and one an interval later");
+        assert_eq!(widget.committed_value, 2.0);
+
+        widget.hovered_stepper = None;
+        for _ in 0..STEPPER_REPEAT_DELAY_FRAMES * 2 {
+            assert_eq!(widget.held_stepper_step(), None, "a pointer slid off the button repeats nothing");
+        }
+        assert_eq!(widget.committed_value, 2.0);
+
+        let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
+        widget.hovered_stepper = Some(StepDirection::Up);
+        widget.state.replace(read_only);
+        for _ in 0..STEPPER_REPEAT_DELAY_FRAMES * 2 {
+            assert_eq!(widget.held_stepper_step(), None, "and neither does a control that cannot be mutated");
+        }
+    }
+
+    #[test]
     fn an_unavailable_numeric_has_no_live_stepper_targets() {
         let mut widget = numeric(0.0, 10.0, 0.5, 2.0);
         widget.frame = WidgetFrame { x: 0.0, y: 0.0, width: 120.0, height: 24.0 };
@@ -928,6 +1082,64 @@ mod tests {
             widget.intrinsic().expect("measured")[0],
             advance.mul_add(capped, theme.pad * 2.0) + theme.row_height
         );
+    }
+
+    #[test]
+    fn three_digits_fit_the_field_the_range_asks_for_and_stop_a_pad_short_of_the_seam() {
+        // Tripwire: round-4 note 6 — "lack of symmetry in the space of the
+        // left padding and right padding of the number text. Three digits
+        // overflows and is drawn behind the arrows." At the width this range
+        // asks for, the widest value it can hold starts one pad in and ends
+        // exactly one pad short of the hairline; and whatever width the host
+        // actually gives, the clip holds the value off the arrows.
+        let mut widget = numeric(1.0, 100.0, 1.0, 1.0);
+        with_metrics(&mut widget);
+        let theme = &Theme::DEFAULT;
+        let advance = theme.value_size_pixels * 0.5;
+        let [width, height] = widget.intrinsic().expect("measured");
+        assert_eq!(
+            [width, height],
+            [advance.mul_add(3.0, theme.pad * 2.0) + theme.row_height, theme.row_height],
+            "\"100\" plus a pad each side plus the square stepper column",
+        );
+
+        widget.frame = WidgetFrame { x: 0.0, y: 0.0, width, height };
+        widget.committed_value = 100.0;
+        widget.edit = TextEditState::new(String::from("100"));
+        let column = widget.steppers().expect("a laid-out numeric has its column");
+        assert_eq!(column.left, width - theme.row_height, "the column is the square the intrinsic reserved");
+
+        let clip = content_clip_of(&widget, column).expect("a gutter means a seam to be held off");
+        assert_eq!(clip.width, column.left - theme.pad, "the value's box ends one pad before the hairline");
+        let metrics = widget.resolved_metrics().expect("measured");
+        assert_eq!(
+            theme.pad + measured_text_width(metrics, "100", theme.value_size_pixels),
+            clip.width,
+            "so the widest value the range holds ends exactly at that margin: left pad == right pad",
+        );
+
+        // Half the width the field asked for: the value is cut at its own
+        // margin rather than printing across the hairline.
+        widget.frame.width = width * 0.5;
+        let narrow_column = widget.steppers().expect("column");
+        let narrow = content_clip_of(&widget, narrow_column).expect("clip");
+        assert!(narrow.width < narrow_column.left, "the clip never reaches the arrows: {narrow:?}");
+    }
+
+    /// The bound the collect path puts on the value's own draws, read without
+    /// standing up an actor: the same `SingleLineEdit` `on_collect` builds.
+    fn content_clip_of(widget: &NumericWidget, column: StepperColumn) -> Option<crate::WidgetClipRect> {
+        let displayed = widget.edit.displayed();
+        let mut edit = SingleLineEdit::new(
+            &displayed,
+            widget.resolved_metrics(),
+            &widget.theme,
+            &widget.state,
+            ThemeState::Normal,
+            &widget.frame,
+        );
+        edit.gutter = column.width;
+        edit.content_clip()
     }
 
     #[test]
