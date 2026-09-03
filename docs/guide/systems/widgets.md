@@ -733,7 +733,23 @@ there selects nothing. That sizing needs the label's real width, so the strip
 drives the same single-flight font-metrics request the text controls do and
 splits the row evenly only as an interim, for the frame or two before the
 measurement lands. The hit buckets and the draw read the same widths, so a
-press always lands in the tab under the pointer. The selected tab is marked by a
+press always lands in the tab under the pointer.
+
+Those widths are then **fitted into the strip's own frame**, because a strip in
+a resizable pane is regularly handed less room than its tabs ask for. The
+shortfall is a water-fill, not a proportional scale: each tab takes the smaller
+of what it asked for and an equal share of what is left, shortest first, so a
+narrow tab keeps its natural width and only the wide ones give anything up. A
+tab the fit shrank elides its label into the width it got, and every tab
+centers its run in its own cell — so the padding either side of a label is
+equal on every tab at every strip width, the last one included. Without the
+fit the last tab alone ran off the frame's right edge for the root's slot clip
+to cut, which is what the owner saw as `Search` having less space to the right
+of its label than to its left. The strip reports the row it *wanted* as its
+`WidgetDrawList::intrinsic` — `[every tab at its natural width + one
+theme.space(1) between them, row height]` — so a layout that sizes the strip's
+slot to it never triggers the fit at all; like the image widget's natural size,
+the reference panel does not yet consume it. The selected tab is marked by a
 two-pixel `theme.text_primary` underline along its bottom edge and nothing
 else: every tab keeps the row's own `surface_raised` fill and `text_primary`
 ink, so the strip reads as a row of places with one marked rather than a row of
@@ -1012,7 +1028,10 @@ draws left-padded, because a guessed width would center the label wrong and
 then visibly jump when the real one arrived. That measurement also gives the
 button its `WidgetDrawList::intrinsic` — `[label width + 2 × pad, row height]`
 — so a layout can size a slot to the label it holds; like the image widget's
-natural size, the reference panel does not yet consume it.
+natural size, the reference panel does not yet consume it. A frame *narrower*
+than that intrinsic elides the label into the frame before centering it, so the
+margins stay equal at any width and a label that did not fit ends in the kit's
+elision mark rather than on a glyph the root's slot clip sliced in half.
 
 TextField and TextArea share the same UTF-8-safe edit, selection, and IME
 state. Once the configured font resolves, pointer placement, caret motion,
