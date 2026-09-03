@@ -152,7 +152,7 @@ pub struct TooltipSection {
     /// written with the blanks in it:
     /// `TooltipSection::new(["First.", "", "Second."])`. A blank at the very
     /// top or bottom of the plate is dropped, the same rule
-    /// [`wrap_to_width_hanging`](crate::set::wrap_to_width_hanging) applies
+    /// [`wrap_to_width_hanging`] applies
     /// inside one line — a break needs something on both sides of it to be
     /// a break.
     pub lines: Vec<TooltipLine>,
