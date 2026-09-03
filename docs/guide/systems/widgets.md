@@ -118,6 +118,50 @@ and verifies the ctx is actually running `MyPanel` before allocating the child
 alias; data-driven by-tag composition enforces the same cardinality and
 placement facts at runtime.
 
+## Buttons, emphasis, and tone
+
+`WidgetKind::Button` spawns `ButtonWidget` from `ButtonConfig { label,
+emphasis, tone, theme, state }`. A left press inside arms it and the matching
+release inside fires `ButtonClicked`; a release that drifts off cancels.
+Enter fires on its press, Space on its matching release.
+
+`emphasis` is `ButtonEmphasis { Filled, Tonal, Outlined, Text }` and ranks how
+loudly the verb asks to be pressed — Material 3's ladder, loudest first. It
+defaults to `Filled`, which is the accent plate every button drew before the
+field existed, so an existing consumer keeps its look. `tone` is `ButtonTone {
+Neutral, Danger }` and says what the verb does to the reader's work; it
+defaults to `Neutral`. The pair resolves to three inks:
+
+| `emphasis` | Plate | Stroke | Label |
+|---|---|---|---|
+| `Filled` | the tone's role (`accent`, or `error` for `Danger`) | — | `accent_text` |
+| `Tonal` | `Theme::tonal(role)` — `surface_raised` carried a fifth of the way toward the role | — | `text_primary`, or `error` for `Danger` |
+| `Outlined` | — (a hover wash) | `outline`, or `error` for `Danger` | `text_primary`, or `error` for `Danger` |
+| `Text` | — (a hover wash) | — | `text_primary`, or `error` for `Danger` |
+
+`Theme::tonal(role)` is derived rather than stored, so a theme that moves its
+accent moves every tonal plate with it, and it is deliberately not
+`selection`: a chosen row and a secondary verb must not share a look. A
+neutral verb at the quiet ranks reads in the primary ink rather than the
+accent, because the accent means *the* primary action — a screen that letters
+four secondary verbs in it has spent the token again. The filled ranks carry
+hover and press in their plate through `Theme::fill`; the plateless ranks have
+no plate to carry it, so the same role-agnostic `hover_overlay` /
+`pressed_overlay` is drawn as the whole background instead.
+
+Everything else is identical at every step of the ladder: the label is
+measured, centered, and elided the same way, the reported
+`WidgetDrawList::intrinsic` is the same label plus one `theme.pad` either
+side, and the hit rectangle is the whole frame. A quieter button is a quieter
+look, never a smaller target — a host may rank a verb down without its row
+moving.
+
+The rule for *which* rank a verb takes is
+[the screen-design method](../building/designing-a-screen.md): one filled verb
+per region, secondary verbs tonal or outlined, a verb that throws work away
+outlined in the error colour, and a dialog's row is one filled confirm beside
+a text cancel.
+
 ## Labels, type roles, and the selection role
 
 `WidgetKind::Label` spawns the non-interactive `LabelWidget` from
@@ -382,6 +426,16 @@ secondary. Closed it is a single row reading the chosen option — or
 right end. A press-and-release inside the row opens the list, as does Enter or
 a matching Space release while focused; Escape closes it.
 
+The closed row's run is **elided into `frame.width − 2 × pad − the chevron
+column`** — the same column the intrinsic reserves (the mark, at half the
+label size, plus one spacing unit of clear space). A name too long for the
+row therefore stops a spacing unit short of the mark and carries an ellipsis,
+instead of running up against it: charged against the bare frame, `Choose an
+ascendancy` ended flush against the chevron with no gap at all. A run that
+fits is untouched — the column takes room from the measure, never a glyph
+from a run that had room — and the run is drawn whole until the font's
+advances resolve, since a guessed width cuts the wrong word.
+
 Open, the list hangs directly below the closed row: up to `open_row_count` rows
 of `theme.row_height`, the frame's full width, on a raised surface inside a
 one-pixel outline ring. The current option is drawn in the **selection** role
@@ -587,8 +641,13 @@ The widget's frame is the region. Notices stack down from its top edge at its
 width, newest first, up to `max_standing` (the oldest leaves to make room), and
 each one is a `surface_raised` plate inside a hairline ring with a **severity
 bar** down its left edge: `theme.info` (a blue-grey report), `theme.warning`
-(orange), or `theme.error` (red), never the accent. The text wraps at the
-region's width with one spacing unit of padding and the plate grows downward —
+(orange), or `theme.error` (red), never the accent. The line starts
+`theme.space(2)` clear of that bar — round-8 note 17, "toaster left text
+padding can be increased a tad" — and the plate keeps one spacing unit of
+padding at its other three edges; the bar already occupies the left edge, so
+matching the right pad to the inset would push the line off-centre rather than
+balance it. The inset is charged against the wrap measure, so the text wraps
+at what is actually left of the region's width and the plate grows downward —
 a notice is never elided, because a cut-off refusal says less than nothing.
 
 `role` is the step of the theme's type scale a notice's line is set at
@@ -825,9 +884,15 @@ hovered, pressed, disabled, validation, and focus presentation use the common
 theme/state contract.
 
 `WidgetKind::TabStrip` spawns `TabStripWidget` from `TabStripConfig { labels,
-initial_index, theme, state }` — one row of tabs over parallel content sets
-viewed one at a time. Unlike the segmented control, the row is not divided
-evenly: each tab is as wide as its own label plus one `theme.pad` either side,
+initial_index, style, theme, state }` — one row of tabs over parallel content
+sets viewed one at a time. `style` is `TabStripStyle { Chips, Filled }` and
+picks between the two shapes below; it defaults to `Chips`, which is what
+every strip drew before the field existed. Selection is identical in both: a
+left press selects, focused Left/Right moves and clamps, and `TabSelected {
+index }` reports only actual changes.
+
+**`Chips`** — content-sized tabs sitting in the section. Unlike the segmented
+control, the row is not divided evenly: each tab is as wide as its own label plus one `theme.pad` either side,
 laid out left to right from the strip's local origin with `theme.space(1)`
 between them, so the space between two tabs belongs to neither and a press
 there selects nothing. That sizing needs the label's real width, so the strip
@@ -858,9 +923,38 @@ buttons with one lit, and hover and press stay the only fills the pointer
 changes (the usual `Theme::fill` overlays). The tab strip is the one current-item
 control that does not take the selection role — a segmented control divides one
 bar and needs the fill to say which part is chosen, while a tab already reads as
-a place you are standing in. A left press selects, focused
-Left/Right moves the selection and clamps at the ends, and `TabSelected {
-index }` reports only actual changes. The strip owns nothing but the choice:
+a place you are standing in.
+
+**`Filled`** — Material 3's primary tabs, and the answer to "they don't feel
+like typical tabs … buttons that take the space and feel more dominant"
+(round-8 note 14). The tabs divide the strip's **whole frame** with nothing
+between them, so every pixel of the bar belongs to a tab and a press in the
+middle of the row always selects one. They divide it by what is *in* them,
+not evenly: each tab keeps its own measured run plus one `theme.pad` either
+side, and the leftover width is shared equally among all of them. Equal
+*slack*, not equal width — a row with room for every label never cuts one,
+which an even split does not give you (at the studio's own pane it put
+`Build` in a share three times wider than the word and elided `Equipment` to
+`Equipm…` beside it). Only when the runs do not fit at all does
+`fit_row_widths`' water-fill shrink the widest tabs, and only then does a
+label elide, so the first word to be cut is the longest one. The underline
+and the hit buckets follow the resulting widths, whichever rule produced
+them. No tab carries a plate; the
+current one is marked by a two-pixel `theme.accent` underline **the width of
+its own tab** at the strip's bottom edge, and a one-pixel `theme.outline` rule
+runs under the whole strip, drawn first so the underline lights its own span
+of it — the row reads as the top edge of the content it switches. The accent
+is spent as a *mark* and never as a fill, so no tab is plated in the primary
+action's colour. With no plate to carry the pointer's answer, a hovered or
+pressed tab draws the role-agnostic `hover_overlay` / `pressed_overlay` as its
+whole background. A share too narrow for its label elides it with the kit's
+ellipsis and centres the run in the share, the same rule the fitted chips
+follow.
+
+A filled strip reports `WidgetDrawList::intrinsic` as `[non-finite, row
+height]`: it takes whatever width it is given, so there is nothing for a
+layout to size a slot to, and a reader of that field takes a component only
+when it is finite and non-negative. The strip owns nothing but the choice:
 swapping the content behind the selected tab is the root's business.
 
 `WidgetKind::Numeric` spawns `NumericWidget` from `NumericConfig { min, max,

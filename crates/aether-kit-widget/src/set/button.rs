@@ -17,6 +17,12 @@
 //! also gives the button its intrinsic size, so a layout can size a slot to
 //! the label it holds.
 //!
+//! **How loud the button is** is [`ButtonEmphasis`] and [`ButtonTone`], and
+//! that is the whole of it: the plate, the stroke, and the label's ink come
+//! from the pair, while the measurement, the centering, the elision, the
+//! reported intrinsic, and the hit rectangle are the same at every step of
+//! the ladder. A quieter button is a quieter look, never a smaller target.
+//!
 //! A frame narrower than that intrinsic width **elides** the label before
 //! centering it. Centering alone keeps the margins equal only while the label
 //! fits; past that it hangs the run off both ends for the root's slot clip to
@@ -37,19 +43,20 @@ use alloc::vec::Vec;
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, KeyRelease, MouseButton, MouseButtonRelease};
+use aether_math::Rgba;
 use aether_text::FontMetricsResult;
 
 use crate::set::defaults::WidgetDefaults;
 use crate::set::{
     ActivationArms, accept_font_metrics_result, apply_text_theme, centered_text_x, elide_to_width, measured_text_width,
-    pump_text_font_metrics, push_border, quad, reply_if_hidden, text_origin_y,
+    pointer_wash, pump_text_font_metrics, push_border, quad, reply_if_hidden, text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{SetTheme, Theme};
 use crate::{
-    ButtonClicked, ButtonConfig, Collect, SetWidgetState, WidgetControlState, WidgetDrawItem, WidgetDrawList,
-    WidgetFrame,
+    ButtonClicked, ButtonConfig, ButtonEmphasis, ButtonTone, Collect, SetWidgetState, WidgetControlState,
+    WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 
 /// A momentary push button. Holds its label plus the cached theme / frame /
@@ -57,6 +64,10 @@ use crate::{
 /// adapter that feeds the centered label and the reported intrinsic size.
 pub struct ButtonWidget {
     label: String,
+    /// How loudly this verb asks to be pressed.
+    emphasis: ButtonEmphasis,
+    /// What it does to the reader's work.
+    tone: ButtonTone,
     theme: Theme,
     frame: WidgetFrame,
     state: InteractionState,
@@ -197,6 +208,8 @@ impl WasmActor for ButtonWidget {
         let desired_font_id = config.theme.font_id;
         Ok(ButtonWidget {
             label: config.label,
+            emphasis: config.emphasis,
+            tone: config.tone,
             theme: config.theme,
             state: InteractionState::new(config.state),
             frame: WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
@@ -215,6 +228,8 @@ impl WasmActor for ButtonWidget {
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: ButtonConfig) {
         self.label = config.label;
+        self.emphasis = config.emphasis;
+        self.tone = config.tone;
         self.font_metrics.set_desired(config.theme.font_id);
         self.theme = config.theme;
         self.apply_control_state(ctx, config.state);
@@ -273,9 +288,9 @@ impl WasmActor for ButtonWidget {
         }
     }
 
-    /// Reply the button's local draw: a filled rect (pressed overlay when
-    /// armed), the centered label, and a focus ring, plus the intrinsic size
-    /// the label asks for once it is measured.
+    /// Reply the button's local draw — the plate or wash its emphasis calls
+    /// for, its stroke, the centered label, and a focus ring — plus the
+    /// intrinsic size the label asks for once it is measured.
     ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
@@ -284,14 +299,97 @@ impl WasmActor for ButtonWidget {
         if reply_if_hidden(ctx, &self.state) {
             return;
         }
+        if let Some(parent) = ctx.parent() {
+            parent.send(&WidgetDrawList { intrinsic: self.intrinsic(), items: self.draw_items(), overlay: Vec::new() });
+        }
+    }
+}
+
+/// The hairline a button's outline is stroked at.
+const STROKE_THICKNESS: f32 = 1.0;
+
+/// The three inks one (emphasis, tone) pair resolves to: the plate under the
+/// label, the stroke around it, and the label's own colour. `None` is a part
+/// the emphasis does not draw at all — a text button has neither plate nor
+/// stroke, which is what makes it the quietest thing on the screen.
+struct ButtonInk {
+    plate: Option<Rgba>,
+    stroke: Option<Rgba>,
+    label: Rgba,
+}
+
+impl ButtonWidget {
+    /// The label plus one pad each side, at the theme's row height: what a
+    /// layout needs to size a slot to this button's own label. `None` until
+    /// the label is measured.
+    ///
+    /// The same number at every emphasis. A host measures its cells from
+    /// this, so a verb ranked down to text would otherwise move the row it
+    /// sits in — the rank is a look, not a size.
+    fn intrinsic(&self) -> Option<[f32; 2]> {
+        self.measured_label_width().map(|text_width| [self.theme.pad.mul_add(2.0, text_width), self.theme.row_height])
+    }
+
+    /// The colour this button's tone speaks in: the accent for an ordinary
+    /// verb, the error role for one that throws work away.
+    fn tone_role(&self) -> Rgba {
+        match self.tone {
+            ButtonTone::Neutral => self.theme.accent,
+            ButtonTone::Danger => self.theme.error,
+        }
+    }
+
+    /// The plate, stroke, and label ink for this button's rank.
+    ///
+    /// The one rule worth stating: on the quiet emphases a *neutral* verb
+    /// reads in the primary ink, not in the accent. The accent is the
+    /// primary action's token (`designing-a-screen.md` §6), and a screen
+    /// whose four secondary verbs are all lettered in it has spent the token
+    /// again — which is the owner's "a single yellow button for everything"
+    /// in a thinner form. A danger verb keeps its colour at every rank,
+    /// because what it destroys does not get quieter.
+    fn ink(&self) -> ButtonInk {
+        let role = self.tone_role();
+        let quiet = match self.tone {
+            ButtonTone::Neutral => self.theme.text_primary,
+            ButtonTone::Danger => self.theme.error,
+        };
+        match self.emphasis {
+            ButtonEmphasis::Filled => ButtonInk { plate: Some(role), stroke: None, label: self.theme.accent_text },
+            ButtonEmphasis::Tonal => ButtonInk { plate: Some(self.theme.tonal(role)), stroke: None, label: quiet },
+            ButtonEmphasis::Outlined => ButtonInk {
+                plate: None,
+                stroke: Some(match self.tone {
+                    ButtonTone::Neutral => self.theme.outline,
+                    ButtonTone::Danger => self.theme.error,
+                }),
+                label: quiet,
+            },
+            ButtonEmphasis::Text => ButtonInk { plate: None, stroke: None, label: quiet },
+        }
+    }
+
+    /// The button's local draw: its plate or wash, its stroke, the centered
+    /// label, and the keyboard focus ring.
+    fn draw_items(&self) -> Vec<WidgetDrawItem> {
         let width = self.frame.width;
         let height = self.frame.height;
         let theme_state = self.state.theme_state(self.pressed());
         let size = self.theme.label_size_pixels;
-        let measured = self.measured_label_width();
+        let ink = self.ink();
 
         let mut items: Vec<WidgetDrawItem> = Vec::new();
-        items.push(quad(0.0, 0.0, width, height, self.theme.fill(self.theme.accent, theme_state)));
+        match ink.plate {
+            Some(plate) => items.push(quad(0.0, 0.0, width, height, self.theme.fill(plate, theme_state))),
+            None => {
+                if let Some(wash) = pointer_wash(&self.theme, theme_state) {
+                    items.push(quad(0.0, 0.0, width, height, wash));
+                }
+            }
+        }
+        if let Some(stroke) = ink.stroke {
+            push_border(&mut items, width, height, STROKE_THICKNESS, self.theme.fill(stroke, theme_state));
+        }
         if let Some((run, run_x)) = self.draw_run() {
             items.push(WidgetDrawItem::Text {
                 x: run_x,
@@ -299,7 +397,7 @@ impl WasmActor for ButtonWidget {
                 font_id: self.theme.font_id,
                 text: run,
                 size_pixels: size,
-                color: self.theme.fill(self.theme.accent_text, theme_state),
+                color: self.theme.fill(ink.label, theme_state),
                 clip: None,
             });
         }
@@ -308,13 +406,7 @@ impl WasmActor for ButtonWidget {
         if self.state.focus_visible() {
             push_border(&mut items, width, height, 2.0, self.theme.accent);
         }
-
-        // The label plus one pad each side, at the theme's row height: what a
-        // layout needs to size a slot to this button's own label.
-        let intrinsic = measured.map(|text_width| [self.theme.pad.mul_add(2.0, text_width), self.theme.row_height]);
-        if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { intrinsic, items, overlay: Vec::new() });
-        }
+        items
     }
 }
 
@@ -332,6 +424,8 @@ mod tests {
     fn button() -> ButtonWidget {
         ButtonWidget {
             label: String::from("go"),
+            emphasis: ButtonEmphasis::Filled,
+            tone: ButtonTone::Neutral,
             theme: Theme::DEFAULT,
             state: InteractionState::new(WidgetControlState::default()),
             frame: WidgetFrame { x: 10.0, y: 10.0, width: 40.0, height: 20.0 },
@@ -465,6 +559,141 @@ mod tests {
         let text_width = 40.0_f32;
         let intrinsic = button.theme.pad.mul_add(2.0, text_width);
         assert_eq!(centered_text_x(intrinsic, text_width), button.theme.pad, "the intrinsic width pads exactly once");
+    }
+
+    /// The same button at a chosen rank and tone.
+    fn styled(emphasis: ButtonEmphasis, tone: ButtonTone) -> ButtonWidget {
+        ButtonWidget { emphasis, tone, ..button() }
+    }
+
+    /// The full-frame fill a button draws under its label — its plate, or the
+    /// wash a plateless rank shows the pointer. `None` when it draws neither.
+    fn plate(button: &ButtonWidget) -> Option<Rgba> {
+        button.draw_items().iter().find_map(|item| match item {
+            WidgetDrawItem::Quad { width, height, color, .. }
+                if *width == button.frame.width && *height == button.frame.height =>
+            {
+                Some(*color)
+            }
+            _ => None,
+        })
+    }
+
+    /// The hairline rows of a button's stroke — the quads that are neither
+    /// the full-frame plate nor as thick as the focus ring.
+    fn stroke(button: &ButtonWidget) -> Vec<Rgba> {
+        button
+            .draw_items()
+            .iter()
+            .filter_map(|item| match item {
+                WidgetDrawItem::Quad { width, height, color, .. }
+                    if (*width == STROKE_THICKNESS || *height == STROKE_THICKNESS) =>
+                {
+                    Some(*color)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every colour the button puts on the screen.
+    fn inks(button: &ButtonWidget) -> Vec<Rgba> {
+        button
+            .draw_items()
+            .iter()
+            .map(|item| match item {
+                WidgetDrawItem::Quad { color, .. } | WidgetDrawItem::Text { color, .. } => *color,
+                WidgetDrawItem::TexturedQuad { tint, .. } => *tint,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn only_the_filled_rank_plates_a_verb_in_the_accent() {
+        // Tripwire: the owner's round-8 note 5 — "a single yellow button for
+        // everything is kinda meh". The accent means *the* primary action, so
+        // exactly one rank may wear it as a plate; the rest are a quiet plate,
+        // a stroke, and nothing at all. A ladder whose steps resolve to the
+        // same fill is the defect back with four names on it.
+        let theme = Theme::DEFAULT;
+        assert_eq!(plate(&styled(ButtonEmphasis::Filled, ButtonTone::Neutral)), Some(theme.accent));
+
+        let tonal = plate(&styled(ButtonEmphasis::Tonal, ButtonTone::Neutral)).expect("a tonal verb keeps a plate");
+        assert_ne!(tonal, theme.accent, "the second rank is not the first one repainted");
+        assert_ne!(tonal, theme.surface_raised, "nor the bare surface: a plate nobody can see is not a button");
+        assert_ne!(tonal, theme.selection, "and never the chosen-row look — one meaning per visual token");
+
+        assert_eq!(plate(&styled(ButtonEmphasis::Outlined, ButtonTone::Neutral)), None, "an outlined verb has no fill");
+        assert_eq!(plate(&styled(ButtonEmphasis::Text, ButtonTone::Neutral)), None, "and a text verb has no chrome");
+
+        assert!(
+            stroke(&styled(ButtonEmphasis::Outlined, ButtonTone::Neutral)).iter().all(|ink| *ink == theme.outline),
+            "the outlined rank is drawn in the outline role",
+        );
+        assert!(stroke(&styled(ButtonEmphasis::Text, ButtonTone::Neutral)).is_empty(), "the text rank strokes nothing");
+        assert!(
+            !inks(&styled(ButtonEmphasis::Outlined, ButtonTone::Neutral)).contains(&theme.accent)
+                && !inks(&styled(ButtonEmphasis::Text, ButtonTone::Neutral)).contains(&theme.accent),
+            "a secondary verb spends the accent nowhere, ink included",
+        );
+    }
+
+    #[test]
+    fn a_verb_that_throws_work_away_reads_in_the_error_role_at_every_rank() {
+        // Tripwire: the tone has to reach every branch of the ladder. A
+        // danger verb that keeps the accent at one rank is a delete button
+        // that looks like the primary action — the single worst confusion
+        // this table can produce — and one that loses the error colour at
+        // another says nothing about what it destroys.
+        let theme = Theme::DEFAULT;
+        for emphasis in [ButtonEmphasis::Filled, ButtonEmphasis::Tonal, ButtonEmphasis::Outlined, ButtonEmphasis::Text]
+        {
+            let button = styled(emphasis, ButtonTone::Danger);
+            let inks = inks(&button);
+            assert!(!inks.contains(&theme.accent), "{emphasis:?} danger wears the accent: {inks:?}");
+            match emphasis {
+                ButtonEmphasis::Filled => assert_eq!(plate(&button), Some(theme.error), "the loudest danger is plated"),
+                _ => assert!(inks.contains(&theme.error), "{emphasis:?} danger drops the error role: {inks:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_plateless_rank_still_answers_the_pointer() {
+        // Tripwire: the filled ranks carry the hover in their plate
+        // (`Theme::fill`), so an outlined or text button with no plate has
+        // nowhere to put it — and a verb that does not light up under the
+        // pointer reads as a label. The wash is the same role-agnostic
+        // overlay every other widget hovers with.
+        let theme = Theme::DEFAULT;
+        for emphasis in [ButtonEmphasis::Outlined, ButtonEmphasis::Text] {
+            let mut button = styled(emphasis, ButtonTone::Neutral);
+            assert_eq!(plate(&button), None, "{emphasis:?} draws nothing at rest");
+            button.state.set_hovered(true);
+            assert_eq!(plate(&button), Some(theme.hover_overlay), "{emphasis:?} washes under the pointer");
+            button.arms.press_pointer(&button.frame, true, 20.0, 20.0);
+            assert_eq!(plate(&button), Some(theme.pressed_overlay), "{emphasis:?} darkens under the press");
+        }
+    }
+
+    #[test]
+    fn the_rank_moves_neither_the_label_nor_the_size_a_layout_reserves() {
+        // Tripwire: a host sizes a cell from the reported intrinsic and the
+        // button centres its run in whatever frame comes back. If a rank
+        // changed either — an outlined button reserving room for its stroke,
+        // say — a row of verbs would shift as one of them was ranked down,
+        // and a dialog's confirm and cancel would stop lining up.
+        let filled = measured_button("Regenerate terrain", 8.0, 14.0, 90.0, 500.0);
+        let (run, run_x) = filled.draw_run().expect("a measured button draws");
+        let intrinsic = filled.intrinsic().expect("and reports its size");
+        for emphasis in [ButtonEmphasis::Tonal, ButtonEmphasis::Outlined, ButtonEmphasis::Text] {
+            for tone in [ButtonTone::Neutral, ButtonTone::Danger] {
+                let ranked =
+                    ButtonWidget { emphasis, tone, ..measured_button("Regenerate terrain", 8.0, 14.0, 90.0, 500.0) };
+                assert_eq!(ranked.draw_run(), Some((run.clone(), run_x)), "{emphasis:?}/{tone:?} moved the label");
+                assert_eq!(ranked.intrinsic(), Some(intrinsic), "{emphasis:?}/{tone:?} changed the reserved size");
+            }
+        }
     }
 
     #[test]

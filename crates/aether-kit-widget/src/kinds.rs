@@ -317,6 +317,11 @@ impl WidgetDrawItem {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[kind(name = "aether.kit.widget.draw_list")]
 pub struct WidgetDrawList {
+    /// The measured content size, per axis. A **non-finite** component means
+    /// the widget asks for nothing on that axis — a filled tab strip takes
+    /// whatever width it is given and reports only its row height — and a
+    /// reader of this field takes a component only when it is finite and
+    /// non-negative, exactly as the panel does when it sizes a slot.
     pub intrinsic: Option<[f32; 2]>,
     pub items: Vec<WidgetDrawItem>,
     pub overlay: Vec<WidgetDrawItem>,
@@ -834,9 +839,37 @@ pub struct DropdownConfig {
 pub struct TabStripConfig {
     pub labels: Vec<String>,
     pub initial_index: u32,
+    /// Which of the two tab shapes the strip draws.
+    /// [`TabStripStyle::Chips`] — the content-sized row every strip drew
+    /// before the field existed — unless a host asks for the filled row.
+    #[serde(default)]
+    pub style: TabStripStyle,
     pub theme: Theme,
     #[serde(default)]
     pub state: WidgetControlState,
+}
+
+/// The two shapes a row of tabs takes.
+///
+/// The owner's round-8 note 14: "the tab buttons are good but they don't feel
+/// like typical tabs … like they aren't small buttons in the section but
+/// buttons that take the space and feel more dominant." Both shapes select
+/// the same way and report the same [`TabSelected`]; what changes is whether
+/// the row is a set of content-sized chips sitting in the section or the
+/// section's own top edge.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TabStripStyle {
+    /// Content-sized tabs on the raised surface, one gap between them, the
+    /// current one underlined in the primary ink. What the strip has always
+    /// drawn.
+    #[default]
+    Chips,
+    /// Material 3 primary tabs: the tabs divide the strip's whole frame
+    /// evenly with no chrome of their own, the current one carries an accent
+    /// underline the width of its tab, and a hairline rule in the outline
+    /// role runs under the row — so the strip reads as the top edge of the
+    /// content it switches rather than as buttons placed on it.
+    Filled,
 }
 
 /// One entry of a [`Menu`]: its label, the accelerator it advertises at the
@@ -884,12 +917,69 @@ pub struct MenuBarConfig {
     pub state: WidgetControlState,
 }
 
+/// How loudly a button asks to be pressed — the rank Material 3 sets its
+/// button styles in, and the reason a region of five verbs does not read as
+/// five equal demands.
+///
+/// The owner's round-8 note 5: "a single yellow button for everything is
+/// kinda meh." A screen that fills every verb with the accent has said
+/// "primary action" five times, so it has said it nowhere; the accent means
+/// the primary action only while one verb per region carries it. The ladder
+/// below is the one every published system agrees on, loudest first.
+///
+/// Nothing else about the button changes with the emphasis: the label is
+/// measured, centered, and elided the same way, the reported intrinsic is
+/// the same label plus the same pads, and the hit rectangle is the whole
+/// frame at every step. A quieter button is a quieter *look*, never a
+/// smaller target.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ButtonEmphasis {
+    /// A filled plate in the tone's own colour — the accent, or the error
+    /// role for a destructive verb. The one primary verb of a region.
+    #[default]
+    Filled,
+    /// A quiet plate ([`Theme::tonal`]) under the tone's colour: a verb that
+    /// belongs beside the primary one without competing with it.
+    Tonal,
+    /// No plate, a hairline stroke, and a hover wash. The secondary verb of a
+    /// region, and — in the danger tone — the shape a verb that throws work
+    /// away takes.
+    Outlined,
+    /// Label and hover wash only. The quietest verb on the screen: a dialog's
+    /// cancel, a "not now".
+    Text,
+}
+
+/// What a verb does to the reader's work, which is the one thing a colour
+/// role is allowed to say about a button.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ButtonTone {
+    /// An ordinary verb. Filled and tonal plates take the accent; outlined
+    /// and text buttons read in the primary ink, so the accent keeps meaning
+    /// the primary action alone.
+    #[default]
+    Neutral,
+    /// A verb that throws work away — delete, discard, reset. Every emphasis
+    /// takes [`Theme::error`], so the colour that means failure everywhere
+    /// else on the screen means "this destroys something" here too.
+    Danger,
+}
+
 /// `aether.kit.widget.button.config` — a momentary push button showing
 /// `label`, firing [`ButtonClicked`] on a press-then-release-inside.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.kit.widget.button.config")]
 pub struct ButtonConfig {
     pub label: String,
+    /// How loudly this verb asks to be pressed. [`ButtonEmphasis::Filled`] —
+    /// the accent plate every button drew before the ladder existed — unless
+    /// a host ranks it lower.
+    #[serde(default)]
+    pub emphasis: ButtonEmphasis,
+    /// What the verb does to the reader's work. [`ButtonTone::Neutral`]
+    /// unless it throws work away.
+    #[serde(default)]
+    pub tone: ButtonTone,
     pub theme: Theme,
     #[serde(default)]
     pub state: WidgetControlState,

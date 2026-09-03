@@ -17,6 +17,10 @@
 //! the window reaches it: a press on a row selects and closes, any other
 //! press closes without a change. The current row is drawn in the selection
 //! role, never the accent — a chosen thing is a state, not a button.
+//!
+//! The closed row's run is elided into the frame less its pads and the
+//! chevron column, so a name too long for the row stops one spacing unit
+//! short of the mark with an ellipsis rather than running under it.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -30,7 +34,7 @@ use aether_math::Rgba;
 use aether_text::FontMetricsResult;
 
 use crate::set::{
-    ActivationArms, WidgetDefaults, accept_font_metrics_result, apply_text_theme, measured_text_width,
+    ActivationArms, WidgetDefaults, accept_font_metrics_result, apply_text_theme, elide_to_width, measured_text_width,
     pump_text_font_metrics, push_control_outlines, push_rect_border, quad, reply_if_hidden, text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
@@ -241,6 +245,33 @@ impl DropdownWidget {
         self.theme.label_size_pixels.mul_add(CHEVRON_SIZE_RATIO, self.theme.space(CHEVRON_GAP_UNITS))
     }
 
+    /// The run the closed row has room for: its text elided into the frame
+    /// less one `pad` either side and the chevron column.
+    ///
+    /// The column is what the [`Self::intrinsic`] already reserves, and the
+    /// draw has to charge itself the same thing or the reservation is a
+    /// number nobody honours. Drawn against the bare frame instead, a run
+    /// wider than the row ran under the mark and out the other side for the
+    /// slot clip to cut — `Choose an ascendancy` ended flush against the
+    /// chevron with no gap at all, which is the owner's note. Charging the
+    /// column stops the run one spacing unit short of the mark at every
+    /// width, so a name that was cut says so and the mark keeps its air.
+    ///
+    /// Whole while the measurement is outstanding, the frame or two before
+    /// there is a width to elide against — the same rule every measured run
+    /// in the kit follows, since a guessed width cuts the wrong word.
+    fn closed_row_run(&self, text: &str) -> String {
+        let size = self.theme.label_size_pixels;
+        self.font_metrics.resolved().map_or_else(
+            || String::from(text),
+            |metrics| {
+                elide_to_width(text, self.theme.pad.mul_add(-2.0, self.frame.width) - self.chevron_column(), |run| {
+                    measured_text_width(metrics, run, size)
+                })
+            },
+        )
+    }
+
     /// Drop the cached option measurement — every input to it changed.
     fn forget_measurements(&mut self) {
         self.widest_option_width = None;
@@ -291,12 +322,13 @@ impl DropdownWidget {
         let mut items = Vec::new();
         items.push(quad(0.0, 0.0, width, height, self.theme.fill(self.theme.surface_raised, theme_state)));
         let (text, ink) = self.closed_row_text();
-        if !text.is_empty() {
+        let run = self.closed_row_run(text);
+        if !run.is_empty() {
             items.push(WidgetDrawItem::Text {
                 x: self.theme.pad,
                 y: text_origin_y(0.0, height, size),
                 font_id: self.theme.font_id,
-                text: String::from(text),
+                text: run,
                 size_pixels: size,
                 color: self.theme.fill(ink, theme_state),
                 clip: None,
@@ -629,6 +661,7 @@ fn revealed_first_index(
 mod tests {
     use super::*;
     use crate::WidgetControlState;
+    use crate::set::ELLIPSIS;
     use aether_kinds::{CachedFontMetrics, FontMetrics};
     use alloc::format;
     use alloc::vec;
@@ -666,6 +699,42 @@ mod tests {
             advances: Vec::new(),
         })));
         widget
+    }
+
+    #[test]
+    fn a_name_too_long_for_the_closed_row_stops_before_the_chevron() {
+        // Tripwire: the deployed capture. With the placeholder `Choose an
+        // ascendancy` the run reached the chevron and sat flush against it —
+        // no gap, the mark reading as the last letter of the word. The row
+        // has to charge itself the same chevron column the intrinsic already
+        // reserves, so the run stops one spacing unit short of the mark and
+        // an ellipsis says the name was cut.
+        let mut widget = measured(4, 3, None);
+        widget.placeholder = String::from("Choose an ascendancy");
+        widget.forget_measurements();
+        let metrics = widget.font_metrics.resolved().expect("measured");
+        let size = widget.theme.label_size_pixels;
+        let budget = widget.theme.pad.mul_add(-2.0, widget.frame.width) - widget.chevron_column();
+        assert!(measured_text_width(metrics, &widget.placeholder, size) > budget, "the placeholder really is too long");
+
+        let run = widget.closed_row_run(&widget.placeholder);
+        assert!(run.ends_with(ELLIPSIS), "a cut name carries the mark that says so: {run:?}");
+        let run_right = widget.theme.pad + measured_text_width(metrics, &run, size);
+        let chevron_left = widget.frame.width - widget.theme.pad - widget.chevron_column();
+        assert!(
+            run_right <= chevron_left + 1e-3,
+            "the run ends at {run_right}, past the chevron column's left edge at {chevron_left}",
+        );
+        let mark_left =
+            widget.theme.label_size_pixels.mul_add(-CHEVRON_SIZE_RATIO, widget.frame.width - widget.theme.pad);
+        assert!(
+            run_right + widget.theme.space(CHEVRON_GAP_UNITS) <= mark_left + 1e-3,
+            "the run reaches the mark at {mark_left}: a spacing unit of clear space is the point of the column",
+        );
+
+        // A name that fits is untouched: the column takes room from the
+        // measure, never a glyph from a run that had room.
+        assert_eq!(widget.closed_row_run("Marauder"), "Marauder");
     }
 
     fn opened(option_count: usize, open_row_count: usize, selected_index: Option<usize>) -> DropdownWidget {

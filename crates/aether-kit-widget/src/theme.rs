@@ -137,6 +137,11 @@ pub enum TextRole {
     Caption,
 }
 
+/// How far a tonal plate is carried from the raised surface toward its role
+/// colour. Far enough that the plate reads as belonging to the role, near
+/// enough that it never competes with the filled plate beside it.
+const TONAL_MIX: f32 = 0.22;
+
 impl Theme {
     /// The font size this theme sets `role` at.
     #[must_use]
@@ -190,6 +195,25 @@ impl Theme {
             ThemeState::Pressed => Self::composite_over(base, self.pressed_overlay),
             ThemeState::Disabled => Rgba::new(base.r, base.g, base.b, base.a * self.disabled_alpha),
         }
+    }
+
+    /// A **tonal** plate in `role`: the raised surface carried a fifth of
+    /// the way toward it, keeping the surface's own alpha.
+    ///
+    /// This is the quiet middle of the emphasis ladder — louder than an
+    /// outline, quieter than a filled plate — and it is derived rather than
+    /// stored because a stored token would be a second thing to restyle: a
+    /// theme that moves its `accent` moves every tonal plate with it, the
+    /// same way [`Self::fill`] moves every hover.
+    ///
+    /// It is deliberately **not** `selection`. A chosen row and a secondary
+    /// verb must not share a look (one meaning per visual token), which a
+    /// tonal button reusing the selection role would break the moment the two
+    /// stood side by side.
+    #[must_use]
+    pub fn tonal(&self, role: Rgba) -> Rgba {
+        let blended = self.surface_raised.lerp(role, TONAL_MIX);
+        Rgba::new(blended.r, blended.g, blended.b, self.surface_raised.a)
     }
 
     /// Standard src-over blend of `overlay` atop `base`, preserving
