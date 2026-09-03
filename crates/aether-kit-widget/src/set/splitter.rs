@@ -42,6 +42,7 @@
 //! do nothing.
 
 use alloc::vec::Vec;
+use core::mem;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{MouseButton, MouseButtonRelease, MouseMove, mouse_button};
@@ -160,6 +161,9 @@ pub struct SplitterWidget {
     inverted: bool,
     bare: bool,
     drag: Option<Drag>,
+    /// A leave the widget has not reported yet, because the pointer walked
+    /// off the strip with the button still down. See [`SplitterWidget::leave`].
+    leave_pending: bool,
     theme: Theme,
     frame: WidgetFrame,
     state: InteractionState,
@@ -254,6 +258,40 @@ impl SplitterWidget {
             parent.send(&SplitterHover { entered });
         }
     }
+
+    /// The pointer is on the strip. Reports whether the enter goes up — an
+    /// unavailable strip takes no hover at all — and cancels any leave a live
+    /// drag had deferred, because the pointer came back before the gesture
+    /// ended and the crossing it would have reported never completed.
+    fn enter(&mut self) -> bool {
+        self.state.set_hovered(true);
+        self.leave_pending = false;
+        self.state.hovered()
+    }
+
+    /// The pointer left the strip. Reports whether the leave goes up **now**.
+    ///
+    /// It does not while a drag is live: the pointer wanders off a four-pixel
+    /// strip within the first few pixels of every resize, and a host that put
+    /// a resize cursor on the edge must keep it for the whole gesture rather
+    /// than flicker it back on the first frame. The leave is remembered
+    /// instead and goes up when the drag ends ([`Self::take_owed_leave`]), so
+    /// exactly one `entered: false` is reported for exactly one crossing.
+    fn leave(&mut self) -> bool {
+        self.state.set_hovered(false);
+        if self.drag.is_some() {
+            self.leave_pending = true;
+            return false;
+        }
+        true
+    }
+
+    /// Whether a deferred leave is now owed: the drag is over and the pointer
+    /// left the strip while it was live. Taking it clears it, so a release and
+    /// the collect after it cannot both report the same crossing.
+    fn take_owed_leave(&mut self) -> bool {
+        self.drag.is_none() && mem::take(&mut self.leave_pending)
+    }
 }
 
 /// The lit mark's thickness as a fraction of the spacing unit — the owner's
@@ -274,7 +312,8 @@ impl WidgetDefaults for SplitterWidget {
     }
 
     /// Drop a live drag. The split keeps wherever it had reached — a drag
-    /// interrupted by losing focus is finished, not undone.
+    /// interrupted by losing focus is finished, not undone. A leave deferred
+    /// by that drag stays owed and goes up on the next `Collect`.
     fn cancel_activation(&mut self) {
         self.drag = None;
     }
@@ -301,6 +340,7 @@ impl WasmActor for SplitterWidget {
             inverted: config.inverted,
             bare: config.bare,
             drag: None,
+            leave_pending: false,
             theme: config.theme,
             state: InteractionState::new(config.state),
             frame: WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
@@ -340,19 +380,21 @@ impl WasmActor for SplitterWidget {
     }
 
     /// Enter hover — and say so, so the host can put a resize pointer on it.
+    /// A pointer that came back mid-drag cancels the leave that drag deferred.
     #[handler::single]
     fn on_hover_gained(&mut self, ctx: &mut WasmCtx<'_>, _gained: HoverGained) {
-        self.state.set_hovered(true);
-        if self.state.hovered() {
+        if self.enter() {
             Self::report_hover(ctx, true);
         }
     }
 
-    /// Leave hover — and say so, so the host can put the pointer back.
+    /// Leave hover — and say so, so the host can put the pointer back, unless
+    /// a drag is still live and owns the cursor until the button comes up.
     #[handler::single]
     fn on_hover_lost(&mut self, ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
-        self.state.set_hovered(false);
-        Self::report_hover(ctx, false);
+        if self.leave() {
+            Self::report_hover(ctx, false);
+        }
     }
 
     /// A left press on the strip begins the drag. The root gives the child
@@ -383,11 +425,17 @@ impl WasmActor for SplitterWidget {
         }
     }
 
-    /// The release ends the drag wherever it reached.
+    /// The release ends the drag wherever it reached, and pays out the leave
+    /// the drag deferred — a pointer that came up off the strip has left it,
+    /// and the host is owed the edge that puts its cursor back.
     #[handler::single]
-    fn on_mouse_button_release(&mut self, _ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
-        if release.button == mouse_button::LEFT {
-            self.drag = None;
+    fn on_mouse_button_release(&mut self, ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
+        if release.button != mouse_button::LEFT {
+            return;
+        }
+        self.drag = None;
+        if self.take_owed_leave() {
+            Self::report_hover(ctx, false);
         }
     }
 
@@ -397,6 +445,12 @@ impl WasmActor for SplitterWidget {
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
+        // A drag cancelled by anything but a release — focus loss, the host
+        // disabling the strip — leaves the same debt, and this is the first
+        // moment after it with a ctx to pay it from.
+        if self.take_owed_leave() {
+            Self::report_hover(ctx, false);
+        }
         if reply_if_hidden(ctx, &self.state) {
             return;
         }
@@ -419,6 +473,7 @@ mod tests {
             inverted,
             bare: false,
             drag: None,
+            leave_pending: false,
             theme: Theme::DEFAULT,
             frame: WidgetFrame { x: 358.0, y: 30.0, width: 4.0, height: 700.0 },
             state: InteractionState::new(WidgetControlState::default()),
@@ -471,6 +526,45 @@ mod tests {
         assert_eq!(widget.dragged_position(900.0, 400.0), Some(280.0), "crossed ends collapse to the minimum");
         widget.min_pixels = f32::NAN;
         assert_eq!(widget.clamped(500.0), 100.0);
+    }
+
+    #[test]
+    fn a_pointer_that_leaves_the_strip_mid_drag_holds_its_leave_until_the_button_comes_up() {
+        // Tripwire: round-5 note 14 — "clicking the border of the left panel
+        // it remains highlighted even after clicking other things". The
+        // pointer leaves a four-pixel strip within the first few pixels of
+        // every resize, so the crossing has to be *held*, not dropped: a leave
+        // sent mid-drag flickers the host's resize cursor back, and a leave
+        // never sent leaves the cursor — and, when the release lands
+        // elsewhere, the mark — stuck on.
+        let mut widget = grabbed(SplitterAxis::Horizontal, false);
+        widget.enter();
+        assert!(!widget.leave(), "the leave waits for the drag");
+        assert!(!widget.take_owed_leave(), "and nothing is owed while the drag holds");
+        assert_eq!(widget.draw_items().len(), 1, "the mark stays lit for the whole gesture");
+
+        widget.drag = None;
+        assert!(widget.take_owed_leave(), "the drag's end pays it out");
+        assert!(!widget.take_owed_leave(), "exactly once");
+        assert!(widget.draw_items().is_empty(), "and the strip goes unlit with it");
+    }
+
+    #[test]
+    fn an_ordinary_crossing_reports_at_once_and_a_pointer_that_came_back_owes_nothing() {
+        // Tripwire: the deferral is for a live drag only. Holding an ordinary
+        // leave would keep a resize cursor on a pointer that has moved on, and
+        // a pointer that returned mid-drag has not crossed out at all.
+        let mut widget = splitter(SplitterAxis::Horizontal, false);
+        assert!(widget.enter());
+        assert!(widget.leave(), "with no drag behind it the leave goes up immediately");
+        assert!(!widget.take_owed_leave());
+
+        let mut dragging = grabbed(SplitterAxis::Horizontal, false);
+        dragging.enter();
+        assert!(!dragging.leave());
+        assert!(dragging.enter(), "the pointer came back");
+        dragging.drag = None;
+        assert!(!dragging.take_owed_leave(), "so the crossing it deferred never completed");
     }
 
     #[test]

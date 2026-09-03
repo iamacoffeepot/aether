@@ -95,19 +95,44 @@ impl Focus {
         Self::default()
     }
 
+    /// Drop the layout table — the entries, and only the entries.
+    ///
+    /// A root rebuilds this table whenever its layout changes, which during a
+    /// drag is *every frame of the drag*: the studio's left pane rebuilt on
+    /// every `SplitterMoved`. So a rebuild is a statement about where the
+    /// children are, never about whether the person is still holding the
+    /// button — focus, hover, the drag capture, and the modal grab all survive
+    /// it. A `clear` that dropped the capture ended the resize on its first
+    /// pixel, and a `clear` that dropped the hover left the strip lit with
+    /// nothing to send it a `HoverLost` (round-5 notes 1 and 14).
+    ///
+    /// What survives is validated against the table that replaces it, entry by
+    /// entry, at every read: a child the rebuild did not re-register routes
+    /// nothing ([`Self::pointer_target`], [`Self::keyboard_target`]) and its
+    /// hover leaves through an ordinary [`HoverTransition`] on the next
+    /// motion, which is what tells the widget to go unlit.
     pub fn clear(&mut self) {
         self.entries.clear();
-        self.focused = None;
-        self.hovered = None;
-        self.capture = None;
-        self.grab = None;
+    }
+
+    /// Whether the table holds `child` live for the pointer right now — the
+    /// check every retained routing answer passes through, so a capture or a
+    /// grab held over a rebuild that dropped its child is inert rather than a
+    /// black hole every press falls into.
+    fn pointer_live_child(&self, child: MailboxId) -> bool {
+        self.entries.iter().any(|entry| entry.child == child && entry.pointer_live())
+    }
+
+    /// The same, for the keyboard ring.
+    fn focus_live_child(&self, child: MailboxId) -> bool {
+        self.entries.iter().any(|entry| entry.child == child && entry.focus_live())
     }
 
     /// Route every pointer event to `child` until [`Self::end_grab`] — the
     /// modal grab a widget asks for while its overlay is open (a dropdown's
     /// list). Ignored for a child the table does not hold live.
     pub fn begin_grab(&mut self, child: MailboxId) {
-        if self.entries.iter().any(|entry| entry.child == child && entry.pointer_live()) {
+        if self.pointer_live_child(child) {
             self.grab = Some(child);
         }
     }
@@ -120,7 +145,7 @@ impl Focus {
 
     #[must_use]
     pub fn grabbed(&self) -> Option<MailboxId> {
-        self.grab
+        self.grab.filter(|child| self.pointer_live_child(*child))
     }
 
     /// Register one fixed layout entry. Dynamic visibility/enabled state may be
@@ -156,16 +181,16 @@ impl Focus {
 
     #[must_use]
     pub fn pointer_target(&self, x: f32, y: f32) -> Option<MailboxId> {
-        self.grab.or(self.capture).or_else(|| self.hit_test(x, y))
+        self.grabbed().or_else(|| self.captured()).or_else(|| self.hit_test(x, y))
     }
 
     #[must_use]
     pub fn keyboard_target(&self) -> Option<MailboxId> {
-        self.focused
+        self.focused.filter(|child| self.focus_live_child(*child))
     }
 
     pub fn begin_capture(&mut self, child: MailboxId) {
-        if self.entries.iter().any(|entry| entry.child == child && entry.pointer_live()) {
+        if self.pointer_live_child(child) {
             self.capture = Some(child);
         }
     }
@@ -178,7 +203,7 @@ impl Focus {
 
     #[must_use]
     pub fn captured(&self) -> Option<MailboxId> {
-        self.capture
+        self.capture.filter(|child| self.pointer_live_child(*child))
     }
 
     pub fn set_focus(&mut self, next: Option<MailboxId>) -> Option<FocusTransition> {
@@ -443,6 +468,53 @@ mod tests {
         focus.update_availability(MailboxId(3), &hidden);
         focus.begin_grab(MailboxId(3));
         assert_eq!(focus.grabbed(), None, "an unavailable child cannot hold it either");
+    }
+
+    #[test]
+    fn a_relayout_keeps_the_drag_it_was_routing_and_still_reports_the_hover_it_left() {
+        // Tripwire: round-5 notes 1 and 14. A root that rebuilds its table on
+        // every `SplitterMoved` rebuilds it on the drag's first pixel, so a
+        // `clear` that dropped the capture made the pane unresizable — and one
+        // that dropped the hover left the strip lit, because the widget only
+        // goes unlit when a `HoverLost` reaches it.
+        let mut focus = focus_with_three();
+        focus.begin_capture(MailboxId(1));
+        focus.update_hover(5.0, 5.0);
+
+        focus.clear();
+        register(&mut focus, 1, 0.0, 0.0, true, true);
+        register(&mut focus, 2, 0.0, 20.0, false, false);
+        register(&mut focus, 3, 0.0, 40.0, true, true);
+
+        assert_eq!(focus.captured(), Some(MailboxId(1)), "the drag survives the rebuild");
+        assert_eq!(focus.pointer_target(900.0, 900.0), Some(MailboxId(1)), "and still owns the pointer");
+        assert_eq!(
+            focus.update_hover(5.0, 45.0),
+            Some(HoverTransition { previous: Some(MailboxId(1)), next: Some(MailboxId(3)) }),
+            "the child the pointer left is still told it lost the hover",
+        );
+    }
+
+    #[test]
+    fn a_retained_capture_focus_or_grab_routes_nothing_once_its_child_is_gone() {
+        // Tripwire: what survives a rebuild is validated against the table
+        // that replaced it. A capture left pointing at a child the relayout
+        // dropped would swallow every press on the panel.
+        let mut focus = focus_with_three();
+        focus.set_focus(Some(MailboxId(1)));
+        focus.begin_capture(MailboxId(1));
+        focus.begin_grab(MailboxId(3));
+
+        focus.clear();
+        register(&mut focus, 3, 0.0, 40.0, true, true);
+
+        assert_eq!(focus.captured(), None, "the captor is not in the new table");
+        assert_eq!(focus.keyboard_target(), None, "and neither is the focused child");
+        assert_eq!(focus.grabbed(), Some(MailboxId(3)), "the grab's child is, so the grab still holds");
+        assert_eq!(focus.pointer_target(5.0, 45.0), Some(MailboxId(3)));
+
+        focus.end_grab();
+        assert_eq!(focus.pointer_target(5.0, 5.0), None, "and nothing is registered where the captor used to be");
     }
 
     #[test]
