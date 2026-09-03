@@ -3,7 +3,8 @@
 `aether-kit-widget` ships a set of guest-side widgets — a slider, a text field, a
 multiline text area, a radio group, a fixed-row virtual list, a button, a label,
 an image, a toggle, a segmented control, a tab strip, a dropdown, a menu bar,
-a numeric editor, a tooltip, a toast region, and a splitter — as ordinary
+a numeric editor, a tooltip, a toast region, a dialog plate, and a splitter —
+as ordinary
 `#[actor(instanced, composable)]` types.
 A panel root spawns them as inline children (ADR-0114) and drives them entirely
 by mail, so composing an editor panel is a matter of laying out widgets and
@@ -267,15 +268,25 @@ remainder carried so a trackpad's stream of small deltas still moves the list),
 and **dragging the thumb** — a press on the thumb keeps the grabbed point under
 the pointer, a press on the bare track carries the reader to where they
 pointed. Scrolling never changes selection: a reader looking at something has
-not chosen it. The bar takes its track's width out of the row text budget, so
-an elided row never runs under it, and a press on the bar chooses no row. A
+not chosen it. A press on the bar chooses no row.
+
+The bar owns a **gutter** at the frame's right end — its track plus one
+spacing unit of gap — and a row is laid out, filled, and elided inside what is
+left, so the bar stands beside the rows rather than on them. (A row fill that
+ran the whole frame width put the track on top of the row it marked, which is
+what "the scrollbar has no padding with the inner content to the left so it
+just draws over it" was.) The reported intrinsic counts the same gutter, so a
+slot sized from it does not hand the bar back a gutter's worth of the text it
+just asked for. A host drawing its own rows against a kit list's geometry
+reserves the same width: `Theme::space(2)` of track plus `Theme::space(1)` of
+gap, whenever the vector overflows the viewport. A
 virtual list joins the same wheel-only hit table a `ScrollWidget` does (see
 [Scroll containers and wheel ownership](#scroll-containers-and-wheel-ownership)),
 so a root that forks the reference panel routes `MouseWheel` to it by
 `Focus::hit_test` rather than by pointer capture.
 
 Those metrics also give the list its `WidgetDrawList::intrinsic`: `[widest row
-in the whole item vector + 2 × pad + the scroll bar's track when the vector
+in the whole item vector + 2 × pad + the scroll bar's gutter when the vector
 overflows, theme.row_height × visible_row_count]`. It
 measures the items, not the realized window, so the width does not change as
 the reader scrolls — and because that is the one thing here that touches every
@@ -540,12 +551,31 @@ window cap, and the decision is genuinely the host's: a resize cursor belongs
 on a splitter whose affordance is hidden, and is intrusive over a view whose
 gesture everyone already knows.
 
+A leave that lands **mid-drag is held** until the button comes up. The pointer
+walks off a four-pixel strip within the first few pixels of every resize, so a
+crossing reported there would flicker the host's resize cursor back while the
+gesture is still running; one dropped instead would leave the cursor — and,
+when the release lands elsewhere, the lit mark — stuck on. The widget defers
+it, cancels it if the pointer comes back, and reports exactly one
+`entered: false` when the drag ends off the strip, whether it ended on a
+release or on a focus loss.
+
 The drag asks for no new pointer routing. A left press on a pointer-eligible
 child already gives that child the root's drag capture, which lasts exactly as
 long as the button is held — the life of a resize gesture. (The modal grab an
 open dropdown holds is the wrong tool: it outranks capture and persists across
 releases, so it would have to be handed back for a gesture that is over when
 the button comes up.)
+
+It does ask one thing of the host: **do not respawn the strip mid-drag**. A
+root that rebuilds its layout on every `SplitterMoved` — which is the ordinary
+way to host a resizable pane — calls `Focus::clear` and re-registers on the
+drag's first pixel, and that is fine, because `clear` drops the entries and
+only the entries (see [Rebuilding the table under a live
+gesture](#rebuilding-the-table-under-a-live-gesture)). What the capture cannot
+survive is the child itself going away: a rebuild that despawns the splitter
+and spawns a new one hands the drag a `MailboxId` that no longer exists, and
+the resize dies with it. Spawn the strip once and re-frame it.
 
 ## Popovers
 
@@ -584,6 +614,68 @@ what the module holds:
   and routes to the popover's children as usual. `Popover::key(code)` does the
   same for Escape and claims nothing else, so the focused child keeps its
   typing.
+
+## Dialogs
+
+`DialogConfig { title, min_width_pixels, min_height_pixels, theme, state }`
+spawns `DialogWidget` — the plate a modal stands on. The widget's assigned
+`WidgetFrame` **is** the plate's rectangle; the config only says what is
+written on it and how small it may get.
+
+The plate is a `surface_raised` fill inside a one-pixel `outline` ring — the
+same plate a popover, a dropdown's list, and a menu's items wear — with a
+title row and a hairline rule under it. Every band is derived from the type
+scale and the spacing grid rather than from one row height: the plate is inset
+two spacing units on every edge, the title is set at `TextRole::Heading` in the
+primary ink, its row is the heading size plus one unit above and below, and the
+rule takes a unit either side of the hairline (the band a tooltip's section
+rules already occupy). An empty `title` draws no title row and no rule at all,
+so a confirmation with nothing to name is a bare frame rather than a rule with
+nothing above it.
+
+`DialogPlaced { frame, body }` reports the geometry up, in the same window
+pixels the frame was assigned in, **whenever it changes and never every
+frame** — the host re-frames its children off this mail, and sending it every
+collect is a relayout per tick. `body` is the rectangle inside the chrome: it
+is where the host frames its own slot children, so they land under the title
+rather than over it. `frame` is the plate *as drawn*, which is the assigned
+frame grown to the minimum the title needs, so the host can hand it to its
+peers as the rectangle they are occluded by.
+
+The minimum is what keeps the title readable. The plate never goes narrower
+than its measured title plus a pad each side, nor shorter than its own chrome,
+and `min_width_pixels` / `min_height_pixels` raise either floor. The title's
+floor arrives with the font's advances rather than being guessed from a
+character count — before the metrics land the plate is exactly the frame it was
+given, and nothing jumps.
+
+The dialog **hosts no children and dismisses nothing**, for the reason the
+popover is a module rather than a widget: input routing is the root's job. Its
+children are the root's own widgets, framed inside `body`; light dismiss and
+Escape are `Popover::press` and `Popover::key`, which the host already owns for
+every other plate on the screen. Register the dialog's slot *before* the
+children standing on it and raise them into the overlay lane with
+`Composite::set_slot_overlay(child, true)`, so the plate arrives under its own
+contents and over the screen it covers.
+
+**Resizing** uses the handle the kit already has. Frame a `SplitterWidget` with
+`bare: true` over the plate's right edge (`SplitterAxis::Horizontal`), another
+over its bottom edge (`Vertical`), and a third over the bottom-right corner
+(`Corner`), and re-frame the dialog on each `SplitterMoved`:
+
+```rust
+// The three strips, derived from the plate the dialog reported.
+let grip = theme.space(2);
+let right = WidgetFrame { x: plate.x + plate.width - grip, y: plate.y, width: grip, height: plate.height - grip };
+let bottom = WidgetFrame { x: plate.x, y: plate.y + plate.height - grip, width: plate.width - grip, height: grip };
+let corner = WidgetFrame { x: right.x, y: bottom.y, width: grip, height: grip };
+```
+
+`bare` is the point: the edge of a plate is something the reader can already
+see, so the pointer's resize shape is the whole signal and a line lighting
+under it is one more thing on the screen. The dialog clamps whatever size it is
+handed and reports what it actually took, so a strip dragged past the minimum
+moves nothing rather than cutting the title in half.
 
 ## Image widget
 
@@ -816,6 +908,31 @@ if let Some(transition) = self.focus.set_focus(focusable) {
 
 Clearing focus cancels nothing else: drag capture, the modal grab, and every
 child's own value are untouched.
+
+### Rebuilding the table under a live gesture
+
+`Focus::clear` drops the **entries and only the entries**. Focus, hover, the
+drag capture, and the modal grab all survive it, and each is validated against
+the table that replaces them at every read: a child the rebuild did not
+re-register routes nothing, and its hover leaves through an ordinary
+`HoverTransition` on the next motion.
+
+That is not a convenience, it is what makes a resizable pane work. A root that
+hosts a splitter rebuilds its layout on every `SplitterMoved` — that *is* the
+resize — which means it calls `clear` and re-registers on the drag's first
+pixel. A `clear` that also dropped the capture ended the drag there, so the
+pane could not be moved; one that dropped the hover left the strip lit forever,
+because a widget only goes unlit when a `HoverLost` reaches it and there was no
+longer any record that it had the hover to lose.
+
+Two things a consumer root still owns:
+
+- **Re-register, do not respawn.** What survives is a `MailboxId`. A rebuild
+  that despawns and re-spawns its children hands the capture an id that no
+  longer exists, and the gesture dies whatever `Focus` does. Spawn children
+  once; re-frame them.
+- **`Focus::new()` is the reset.** A root switching screens wholesale wants a
+  fresh table, not a cleared one carrying the last screen's hover.
 
 ### The focus ring marks keyboard focus
 

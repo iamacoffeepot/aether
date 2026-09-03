@@ -120,6 +120,7 @@ every time.
 | A value whose meaning the reader may not carry | **Tooltip** (`TooltipWidget`), sections divided by a rule, wrapped at a reading measure | Hover explains, in a neat measured box; the host owns the dwell and the words, the kit owns the box |
 | A refusal or a confirmation | **Toast region** (`ToastWidget`), one per screen, coloured by severity | Notices have one place, one severity colour each (never the accent), and leave on their own after a few seconds |
 | A split between two regions the reader sets | **Splitter** (`SplitterWidget`), two lit pixels over a generous strip | Keep an affordance the reader has learned; the pointer says what a drag will do — the widget reports the hover, the host sets the cursor |
+| A task the reader opened and must finish or leave | **Dialog** (`DialogWidget`), a titled plate over the screen, resized from its own edges | A modal is a place, so it says where it is: a name at the top, a rule under the name, and a body that is the reader's to resize when what is in it does not fit |
 | A group of controls raised over the primary view | **Popover** (`set::popover`), drawn in the root's overlay, light-dismissed | A setting is a control, not a file; a pop-up takes priority over what it covers, through the overlay's clip subtraction and never a draw layer |
 
 Two consequences worth stating because they are the common mistakes:
