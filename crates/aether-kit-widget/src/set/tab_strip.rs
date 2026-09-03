@@ -26,8 +26,11 @@
 //! Material 3's primary tabs, and the owner's round-8 note 14: "the tab
 //! buttons are good but they don't feel like typical tabs … like they aren't
 //! small buttons in the section but buttons that take the space and feel more
-//! dominant." A filled strip divides its whole frame evenly between its tabs
-//! with nothing between them, draws no chrome under any of them, marks the
+//! dominant." A filled strip divides its whole frame between its tabs with
+//! nothing between them — each keeping its own label plus its pads and the
+//! leftover shared equally, so a row with room for every word cuts none of
+//! them and the widest tab is the first to give width up when the room runs
+//! out — draws no chrome under any of them, marks the
 //! current one with an accent underline the width of its tab, and runs a
 //! hairline rule in the outline role under the row — so the strip *is* the
 //! top edge of the content it switches rather than a set of controls placed
@@ -58,7 +61,7 @@ use aether_text::FontMetricsResult;
 use crate::set::{
     WidgetDefaults, accept_font_metrics_result, apply_text_theme, centered_text_x, clamp_option_index, elide_to_width,
     even_split_widths, fit_row_widths, measured_text_width, pointer_wash, pump_text_font_metrics,
-    push_control_outlines, quad, release_left, reply_if_hidden, slot_at_local_x, text_origin_y,
+    push_control_outlines, quad, release_left, reply_if_hidden, slot_at_local_x, spread_row_widths, text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
@@ -71,6 +74,17 @@ use crate::{
 /// Thickness, in pixels, of the selected tab's bottom-edge underline — the
 /// second of the two marks the selected tab carries.
 const UNDERLINE_THICKNESS: f32 = 2.0;
+
+/// Slack, in pixels, the elision budget allows for the round trip through the
+/// layout arithmetic.
+///
+/// A tab's natural width is `2·pad + run`, and taking the pads back off it
+/// does not land on exactly `run` again in binary floating point. Charged
+/// against the exact remainder, a tab sized to its own label elides it by a
+/// fraction of a pixel — `Build` came back as `Bu…` in a tab laid out at
+/// `Build`'s own width. Half a pixel is far under a glyph and far over the
+/// error, so the budget carries it.
+const FIT_SLACK: f32 = 0.5;
 
 /// Thickness, in pixels, of the hairline a filled strip rules its whole
 /// bottom edge with — the line that makes the row the content's top edge
@@ -140,10 +154,20 @@ impl TabStripWidget {
     fn tab_widths(&self) -> Vec<f32> {
         let gap = self.tab_gap();
         match self.style {
-            // Filled tabs partition the frame: no measurement is involved, so
-            // there is no interim layout and no fit — every tab is an equal
-            // share at every width, from the first frame.
-            TabStripStyle::Filled => even_split_widths(self.labels.len(), self.frame.width, gap),
+            // Filled tabs partition the frame, but they partition it by what
+            // is *in* them: each keeps its own label plus its pads and the
+            // leftover is shared equally, so a strip with room for every word
+            // cuts none of them. An even split does not have that property —
+            // at the studio's pane it gave `Build` three times the width of
+            // its word while `Equipment` elided in the share beside it. Only
+            // when the labels do not fit at all does the water-fill shrink
+            // the widest, which is when the longest label is also the right
+            // one to cut. The even split survives as the interim, for the
+            // frame or two before the measurement lands.
+            TabStripStyle::Filled => self.natural_tab_widths().map_or_else(
+                || even_split_widths(self.labels.len(), self.frame.width, gap),
+                |natural| spread_row_widths(natural, self.frame.width, gap),
+            ),
             TabStripStyle::Chips => self.natural_tab_widths().map_or_else(
                 || even_split_widths(self.labels.len(), self.frame.width, gap),
                 |natural| fit_row_widths(natural, self.frame.width, gap),
@@ -428,7 +452,7 @@ impl TabStripWidget {
             || (label.into(), left + self.theme.pad),
             |metrics| {
                 let measure = |run: &str| measured_text_width(metrics, run, size);
-                let run = elide_to_width(label, self.theme.pad.mul_add(-2.0, tab_width), measure);
+                let run = elide_to_width(label, self.theme.pad.mul_add(-2.0, tab_width) + FIT_SLACK, measure);
                 let run_x = left + centered_text_x(tab_width, measure(&run));
                 (run, run_x)
             },
@@ -733,21 +757,18 @@ mod tests {
     }
 
     #[test]
-    fn filled_tabs_divide_the_whole_strip_and_leave_no_gap_between_them() {
+    fn filled_tabs_take_the_whole_strip_and_leave_no_gap_between_them() {
         // Tripwire: the owner's round-8 note 14 — the tabs should "take the
-        // space" rather than sit in it as small buttons. A filled row that
-        // kept the chips' content sizing or their gap is that note unfixed,
-        // and a gap between two filled tabs is worse than a look: it is a
-        // press in the middle of the bar that selects nothing.
+        // space" rather than sit in it as small buttons. A filled row whose
+        // tabs do not reach the frame's right edge is that note unfixed, and
+        // a gap between two filled tabs is worse than a look: it is a press
+        // in the middle of the bar that selects nothing. (How the width is
+        // *divided* is the next test's business, not this one's.)
         for width in [720.0_f32, 400.0, 180.0] {
             let strip = filled_strip(width);
             let widths = strip.tab_widths();
             assert_eq!(widths.len(), strip.labels.len());
             assert!((widths.iter().sum::<f32>() - width).abs() < 1e-3, "strip {width}: {widths:?} is not the frame");
-            assert!(
-                widths.windows(2).all(|pair| (pair[0] - pair[1]).abs() < 1e-3),
-                "strip {width}: shares are uneven: {widths:?}",
-            );
             for index in 0..strip.labels.len() {
                 let left = slot_left(&widths, 0.0, index);
                 assert_eq!(
@@ -758,6 +779,86 @@ mod tests {
                 assert_eq!(strip.tab_at_pointer_x(left + 0.001), Some(index), "and its very left edge");
             }
         }
+    }
+
+    /// The deployed studio's filled strip, measured: the five tabs of the
+    /// owner's capture at the display scale they run it at (2×), framed at
+    /// `width` physical pixels — so 630 is the ~315-logical-pixel pane the
+    /// note came from.
+    fn captured_strip(width: f32) -> TabStripWidget {
+        let mut font_metrics = FontMetricsAdapter::new(0);
+        assert_eq!(font_metrics.take_pending_request(), Some(0), "the strip asks for its theme font once");
+        assert!(!font_metrics.accept_reply(Some(proportional_metrics())));
+        TabStripWidget {
+            labels: ["Build", "Skills", "Target", "Equipment", "Search"].into_iter().map(String::from).collect(),
+            selected_index: 0,
+            style: TabStripStyle::Filled,
+            theme: Theme::DEFAULT.scaled(2.0),
+            frame: WidgetFrame { x: 0.0, y: 0.0, width, height: 48.0 },
+            state: InteractionState::new(WidgetControlState::default()),
+            pressed_tab: None,
+            hovered_tab: None,
+            font_metrics,
+        }
+    }
+
+    /// Every tab's drawn run, left to right, at the widths the strip laid out.
+    fn drawn_runs(strip: &TabStripWidget) -> Vec<String> {
+        let widths = strip.tab_widths();
+        strip
+            .labels
+            .iter()
+            .enumerate()
+            .map(|(index, label)| {
+                strip
+                    .tab_run(label, slot_left(&widths, strip.tab_gap(), index), widths[index])
+                    .expect("every tab here has room for at least its mark")
+                    .0
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_filled_strip_with_room_for_every_word_cuts_none_of_them() {
+        // Tripwire: the deployed capture. Dividing the bar *evenly* gave
+        // `Build` a share three times wider than its word while `Equipment`
+        // elided to `Equipm…` in the share beside it — a strip cutting a
+        // label it had room for, which no amount of "it is a filled tab"
+        // excuses (§5: nothing is cut). Content first, slack shared: each tab
+        // keeps its run plus its pads and the leftover is split equally.
+        let strip = captured_strip(630.0);
+        let natural = strip.natural_tab_widths().expect("measured");
+        assert!(natural.iter().sum::<f32>() < strip.frame.width, "the pane really does have room for all five");
+
+        let widths = strip.tab_widths();
+        for (index, label) in strip.labels.iter().enumerate() {
+            assert!(widths[index] >= natural[index] - 1e-3, "tab {index} {label:?} was squeezed under its own word");
+        }
+        assert_eq!(drawn_runs(&strip), strip.labels, "a strip with room for every word cut one of them");
+
+        let slack: Vec<f32> = widths.iter().zip(&natural).map(|(width, natural)| width - natural).collect();
+        assert!(slack.windows(2).all(|pair| (pair[0] - pair[1]).abs() < 1e-3), "the leftover is not shared: {slack:?}");
+        assert!((widths.iter().sum::<f32>() - strip.frame.width).abs() < 1e-3, "and the row still fills the frame");
+        assert!(widths[3] > widths[0], "the longest word takes the widest tab: {widths:?}");
+    }
+
+    #[test]
+    fn a_filled_strip_short_of_room_shrinks_the_widest_word_first() {
+        // Tripwire: the other half of the rule. Once the labels genuinely do
+        // not fit, something has to give — and it must be the tab whose word
+        // is longest, not whichever one the arithmetic reached last. A short
+        // label that fits is never cut to pay for a long one.
+        let strip = captured_strip(500.0);
+        let natural = strip.natural_tab_widths().expect("measured");
+        assert!(natural.iter().sum::<f32>() > strip.frame.width, "this frame is genuinely short of room");
+
+        let widths = strip.tab_widths();
+        let runs = drawn_runs(&strip);
+        assert_eq!(widths[0], natural[0], "`Build` fits and keeps its own width");
+        assert_eq!(runs[0], "Build", "so it is drawn whole");
+        assert!(widths[3] < natural[3], "`Equipment`, the longest, gives the shortfall up");
+        assert!(runs[3].ends_with(ELLIPSIS), "and says it was cut: {:?}", runs[3]);
+        assert!((widths.iter().sum::<f32>() - strip.frame.width).abs() < 1e-3, "the shrunk row still fills the frame");
     }
 
     #[test]

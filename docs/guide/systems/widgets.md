@@ -917,9 +917,19 @@ a place you are standing in.
 
 **`Filled`** — Material 3's primary tabs, and the answer to "they don't feel
 like typical tabs … buttons that take the space and feel more dominant"
-(round-8 note 14). The tabs divide the strip's **whole frame** evenly with
-nothing between them, so every pixel of the bar belongs to a tab and a press
-in the middle of the row always selects one. No tab carries a plate; the
+(round-8 note 14). The tabs divide the strip's **whole frame** with nothing
+between them, so every pixel of the bar belongs to a tab and a press in the
+middle of the row always selects one. They divide it by what is *in* them,
+not evenly: each tab keeps its own measured run plus one `theme.pad` either
+side, and the leftover width is shared equally among all of them. Equal
+*slack*, not equal width — a row with room for every label never cuts one,
+which an even split does not give you (at the studio's own pane it put
+`Build` in a share three times wider than the word and elided `Equipment` to
+`Equipm…` beside it). Only when the runs do not fit at all does
+`fit_row_widths`' water-fill shrink the widest tabs, and only then does a
+label elide, so the first word to be cut is the longest one. The underline
+and the hit buckets follow the resulting widths, whichever rule produced
+them. No tab carries a plate; the
 current one is marked by a two-pixel `theme.accent` underline **the width of
 its own tab** at the strip's bottom edge, and a one-pixel `theme.outline` rule
 runs under the whole strip, drawn first so the underline lights its own span
