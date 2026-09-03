@@ -1227,6 +1227,43 @@ fn even_split_widths(count: usize, width: f32, gap: f32) -> Vec<f32> {
     alloc::vec![((slots - 1.0).mul_add(-gap, width) / slots).max(0.0); count]
 }
 
+/// `natural` content widths **spread across** a `row_width`-wide row with
+/// `gap` between them: every cell keeps its own content width and the
+/// leftover is shared equally, or — when the contents do not fit at all —
+/// [`fit_row_widths`]'s water-fill shrinks the widest.
+///
+/// This is the sizing a row of cells that owns its whole frame wants: a
+/// filled tab strip divides the bar between its tabs, so there is no width
+/// left over to leave blank, but dividing it *evenly* ignores what is in each
+/// cell. At the studio's own pane that put `Build` in a share three times
+/// wider than the word and elided `Equipment` to `Equipm…` in the share
+/// beside it — a row with room for every label cutting one of them, which is
+/// the one thing §5 of the screen-design method forbids outright.
+///
+/// So content comes first and the slack is the only thing shared: each cell
+/// gets its measured run plus its pads, and every cell then takes an equal
+/// share of what is left over. Equal *slack*, not equal width — the cells
+/// stay proportional to their words while the row still ends exactly at the
+/// frame's right edge. Only when the contents overflow does anything shrink,
+/// and then the water-fill lands the shortfall on the widest cells alone, so
+/// the first label to be cut is the longest one rather than whichever cell
+/// happened to be last.
+fn spread_row_widths(natural: Vec<f32>, row_width: f32, gap: f32) -> Vec<f32> {
+    let count = natural.len();
+    if count == 0 {
+        return natural;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let slots = count as f32;
+    let available = (slots - 1.0).mul_add(-gap, row_width).max(0.0);
+    let content: f32 = natural.iter().sum();
+    if content > available {
+        return fit_row_widths(natural, row_width, gap);
+    }
+    let slack = (available - content) / slots;
+    natural.into_iter().map(|width| width + slack).collect()
+}
+
 /// `natural` content widths fitted into a `row_width`-wide row with `gap`
 /// between them: returned untouched when they already fit, and shrunk to fit
 /// when they do not.
