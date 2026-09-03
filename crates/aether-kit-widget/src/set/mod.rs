@@ -21,6 +21,8 @@
 //!   content set.
 //! - [`MenuBarWidget`] — a row of application menus whose items open in the
 //!   overlay layer.
+//! - [`DialogWidget`] — the plate a modal stands on: a title, a rule under
+//!   it, and a body rectangle the host lays its own children into.
 //! - [`TooltipWidget`] — an anchored plate saying what the thing under the
 //!   pointer is, drawn in the overlay layer.
 //! - [`ToastWidget`] — the one region transient notices appear in, coloured
@@ -52,6 +54,7 @@
 
 pub mod button;
 pub mod defaults;
+pub mod dialog;
 pub mod dropdown;
 pub mod image;
 pub mod label;
@@ -73,6 +76,7 @@ pub mod virtual_list;
 
 pub use button::ButtonWidget;
 pub use defaults::WidgetDefaults;
+pub use dialog::{DialogConfig, DialogPlaced, DialogWidget};
 pub use dropdown::DropdownWidget;
 pub use image::ImageWidget;
 pub use label::LabelWidget;

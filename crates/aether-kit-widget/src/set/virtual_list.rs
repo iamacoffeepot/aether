@@ -79,6 +79,12 @@ impl VisibleRowWindow {
 /// enough that it reads as an edge of the list rather than a column in it.
 const SCROLL_BAR_UNITS: u8 = 2;
 
+/// How much clear space stands between a row's text and the scroll bar's
+/// track, in spacing units. One: the bar is a mark on the list's edge, and a
+/// row that runs up against it reads as text the bar is printing over
+/// (round-5 note 8).
+const SCROLL_BAR_GAP_UNITS: u8 = 1;
+
 /// The shortest a thumb may get, as a multiple of the track's width. A list of
 /// thousands would otherwise compute a thumb a pixel tall — unreadable, and
 /// impossible to grab — so past this the thumb stops shrinking and only its
@@ -305,11 +311,19 @@ impl VirtualListWidget {
         self.widest_row_width = None;
     }
 
-    /// The width a row's text actually has: the frame less one `pad` at each
-    /// end, and less the scroll bar's track when one stands, so an elided row
-    /// does not touch the list's right edge or run under the bar.
+    /// The width a row's text actually has: the row it is drawn in, less one
+    /// `pad` at each end, so an elided row does not touch either edge of the
+    /// space it was given.
     fn text_width_budget(&self) -> f32 {
-        self.theme.pad.mul_add(-2.0, self.frame.width - self.reserved_track_width()).max(0.0)
+        self.theme.pad.mul_add(-2.0, self.row_width()).max(0.0)
+    }
+
+    /// How wide a row is: the frame less whatever the scroll bar's gutter
+    /// takes off its right end. A row stops where the gutter starts — it does
+    /// not run under the bar and get covered by it (round-5 note 8), which is
+    /// what a full-frame row fill did.
+    fn row_width(&self) -> f32 {
+        (self.frame.width - self.bar_gutter_width()).max(0.0)
     }
 
     /// The track's configured width — a metric, not a measurement, so it
@@ -324,10 +338,11 @@ impl VirtualListWidget {
         scroll_bar(&self.frame, self.track_width(), self.first_index, self.visible_row_count, self.items.len())
     }
 
-    /// How much width the bar takes from the rows. Zero when no bar stands, so
-    /// a list that fits its viewport gives its whole frame to its text.
-    fn reserved_track_width(&self) -> f32 {
-        self.scroll_bar().map_or(0.0, |bar| bar.width)
+    /// How much of the frame's right end the bar owns: its track plus one
+    /// spacing unit of gap. Zero when no bar stands, so a list that fits its
+    /// viewport gives its whole frame to its rows.
+    fn bar_gutter_width(&self) -> f32 {
+        self.scroll_bar().map_or(0.0, |bar| bar.width + self.theme.space(SCROLL_BAR_GAP_UNITS))
     }
 
     /// The topmost row the window can start at.
@@ -427,20 +442,20 @@ impl VirtualListWidget {
     /// no rows to measure — a slot sized from a guess would resize the moment
     /// the real advances landed.
     ///
-    /// The track is counted whenever the vector overflows rather than only
+    /// The gutter is counted whenever the vector overflows rather than only
     /// once a frame exists to hang a bar on: the intrinsic is what *makes* the
     /// frame, so a width that ignored the bar would size a slot the bar then
-    /// took a track's worth of text out of.
+    /// took a gutter's worth of text out of.
     fn intrinsic(&mut self) -> Option<[f32; 2]> {
         let widest = self.widest_row_width()?;
         #[allow(clippy::cast_precision_loss)] // a viewport of rows a reader could scroll cannot lose precision
         let height = self.theme.row_height * self.visible_row_count as f32;
-        let track = if self.visible_row_count > 0 && self.items.len() > self.visible_row_count {
-            self.track_width()
+        let gutter = if self.visible_row_count > 0 && self.items.len() > self.visible_row_count {
+            self.track_width() + self.theme.space(SCROLL_BAR_GAP_UNITS)
         } else {
             0.0
         };
-        let width = self.theme.pad.mul_add(2.0, widest) + track;
+        let width = self.theme.pad.mul_add(2.0, widest) + gutter;
         (width.is_finite() && height.is_finite()).then_some([width, height])
     }
 
@@ -492,6 +507,7 @@ impl VirtualListWidget {
             return Vec::new();
         };
 
+        let row_width = self.row_width();
         let mut items = Vec::with_capacity(visible_row_count.saturating_mul(2).saturating_add(8));
         for (row_offset, item) in self.items[window.first_index..window.end_exclusive_index].iter().enumerate() {
             #[allow(clippy::cast_precision_loss)]
@@ -508,7 +524,7 @@ impl VirtualListWidget {
             } else {
                 self.state.supporting_theme_state(false)
             };
-            items.push(quad(0.0, row_y, self.frame.width, row_height, self.theme.fill(base, row_state)));
+            items.push(quad(0.0, row_y, row_width, row_height, self.theme.fill(base, row_state)));
             let text_base = if selected {
                 self.theme.selection_text
             } else {
@@ -1026,6 +1042,42 @@ mod tests {
     }
 
     #[test]
+    fn a_row_stops_a_spacing_unit_short_of_the_bar_standing_beside_it() {
+        // Tripwire: round-5 note 8 — "the scrollbar has no padding with the
+        // inner content to the left so it just draws over it". A row laid out
+        // across the whole frame runs under the track, so the bar prints on
+        // top of the row's fill and, for a long enough name, its text. The
+        // gutter is the track plus one spacing unit, and both the fill and the
+        // elision budget stop at it.
+        let mut widget = measured_list(200, 5);
+        widget.items = (0..200).map(|index| format!("a skill gem with a long name {index}")).collect();
+        widget.forget_measurements();
+        let bar = widget.scroll_bar().expect("a vector past its viewport stands a bar");
+
+        let size = widget.theme.label_size_pixels;
+        let metrics = widget.font_metrics.resolved().expect("the test table is installed");
+        for item in widget.draw_items() {
+            match item {
+                WidgetDrawItem::Quad { x, width, .. } => {
+                    assert!(x + width <= bar.left || x >= bar.left, "a row fill straddles the bar's left edge");
+                }
+                WidgetDrawItem::Text { x, text, .. } => {
+                    let right = x + measured_text_width(metrics, &text, size);
+                    assert!(right < bar.left, "{text:?} runs to {right}, past the bar at {}", bar.left);
+                }
+                WidgetDrawItem::TexturedQuad { .. } => panic!("a list draws no textures"),
+            }
+        }
+
+        let row_fill_right = widget.row_width();
+        assert_eq!(
+            bar.left - row_fill_right,
+            widget.theme.space(SCROLL_BAR_GAP_UNITS),
+            "and the gap between the row and the track is one spacing unit",
+        );
+    }
+
+    #[test]
     fn the_intrinsic_width_is_the_widest_row_in_the_whole_vector_plus_a_pad_each_side() {
         // Tripwire: the intrinsic must measure the *items*, not the realized
         // window — a width that changed as the reader scrolled would resize
@@ -1038,7 +1090,9 @@ mod tests {
         let size = widget.theme.label_size_pixels;
         let expected = {
             let metrics = widget.font_metrics.resolved().expect("the test table is installed");
-            widget.theme.pad.mul_add(2.0, measured_text_width(metrics, &widget.items[17], size)) + widget.track_width()
+            widget.theme.pad.mul_add(2.0, measured_text_width(metrics, &widget.items[17], size))
+                + widget.track_width()
+                + widget.theme.space(SCROLL_BAR_GAP_UNITS)
         };
         let [width, height] = widget.intrinsic().expect("a measured, non-empty list reports an intrinsic");
         assert!((width - expected).abs() < f32::EPSILON, "{width} is not the widest row plus a pad each side");
@@ -1082,12 +1136,14 @@ mod tests {
         // also take a track's width of text away for nothing.
         let short = list(3, 5, 0);
         assert_eq!(short.scroll_bar(), None);
-        assert_eq!(short.reserved_track_width(), 0.0);
+        assert_eq!(short.bar_gutter_width(), 0.0);
+        assert_eq!(short.row_width(), 100.0);
         assert_eq!(short.text_width_budget(), short.theme.pad.mul_add(-2.0, 100.0));
 
         let long = list(200, 5, 0);
         assert!(long.scroll_bar().is_some());
-        assert_eq!(long.text_width_budget(), long.theme.pad.mul_add(-2.0, 100.0 - long.track_width()));
+        assert_eq!(long.bar_gutter_width(), long.track_width() + long.theme.space(SCROLL_BAR_GAP_UNITS));
+        assert_eq!(long.text_width_budget(), long.theme.pad.mul_add(-2.0, long.row_width()));
 
         let mut unlaid = list(200, 5, 0);
         unlaid.frame = WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 };
