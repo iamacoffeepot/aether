@@ -1233,7 +1233,10 @@ bar's plate — puts those draws in `WidgetDrawList::overlay` instead of
 offset by each slot origin on the way up like any other draw but never
 intersected with the slot clip, and the root emits the whole cluster's overlay
 after every ordinary quad and glyph, so the list escapes its one-row slot and
-lands over the widgets below it.
+lands over the widgets below it. Inside the overlay a child's escaping draws
+land after **every** slot the parent laid down, not at their own slot's
+position: a dropdown halfway up a group has to stand over the siblings
+registered after it, which is most of the ones its list drops across.
 
 A *root* reaches the same lane two ways, for the plate that hosts other
 children rather than escaping its own slot. `Composite::extend_overlay(items)`
