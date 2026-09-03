@@ -20,18 +20,22 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::iter::once;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::keycode::{KEY_DOWN, KEY_ESCAPE, KEY_UP};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, KeyRelease, MouseButton, MouseButtonRelease, MouseMove};
 use aether_math::Rgba;
+use aether_text::FontMetricsResult;
 
 use crate::set::{
-    ActivationArms, WidgetDefaults, push_control_outlines, push_rect_border, quad, reply_if_hidden, text_origin_y,
+    ActivationArms, WidgetDefaults, accept_font_metrics_result, apply_text_theme, measured_text_width,
+    pump_text_font_metrics, push_control_outlines, push_rect_border, quad, reply_if_hidden, text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
-use crate::theme::{Theme, ThemeState};
+use crate::text_edit::FontMetricsAdapter;
+use crate::theme::{SetTheme, Theme, ThemeState};
 use crate::{
     Collect, DropdownConfig, DropdownOpenChanged, DropdownSelected, FocusLost, SetWidgetState, WidgetDrawItem,
     WidgetDrawList, WidgetFrame,
@@ -96,6 +100,13 @@ pub struct DropdownWidget {
     /// Shared pointer/keyboard activation state; a release-inside toggles the
     /// list while it is closed.
     arms: ActivationArms,
+    /// Single-flight exact metrics for the active theme font. A dropdown draws
+    /// no measured text of its own — every row is one line in a frame the host
+    /// gave it — but it cannot say how wide it *wants* to be without them.
+    font_metrics: FontMetricsAdapter,
+    /// The widest option run, remembered across frames and forgotten whenever
+    /// the options, the font, or the type size change under it.
+    widest_option_width: Option<f32>,
 }
 
 impl DropdownWidget {
@@ -223,6 +234,52 @@ impl DropdownWidget {
             })
     }
 
+    /// How much of the closed row's right end the chevron owns: the mark
+    /// itself plus one spacing unit of clear space before it, so the current
+    /// option's name never runs into the "there are alternatives" mark.
+    fn chevron_column(&self) -> f32 {
+        self.theme.label_size_pixels.mul_add(CHEVRON_SIZE_RATIO, self.theme.space(CHEVRON_GAP_UNITS))
+    }
+
+    /// Drop the cached option measurement — every input to it changed.
+    fn forget_measurements(&mut self) {
+        self.widest_option_width = None;
+    }
+
+    /// The `[width, height]` this dropdown asks a layout for: the widest run
+    /// the closed row could ever read, one `pad` either side, and the chevron
+    /// column; by one theme row. `None` until the font's advances resolve, so
+    /// a cell is never sized from a guess it would then visibly resize away
+    /// from (the studio's gap 26).
+    ///
+    /// The placeholder counts as one of those runs. It is what the closed row
+    /// reads while nothing is chosen, so a cell that fitted only the options
+    /// would clip the one thing the control says before it is used.
+    fn intrinsic(&mut self) -> Option<[f32; 2]> {
+        let widest = self.widest_option_width()?;
+        let width = self.theme.pad.mul_add(2.0, widest) + self.chevron_column();
+        (width.is_finite() && self.theme.row_height.is_finite()).then_some([width, self.theme.row_height])
+    }
+
+    /// The widest run the closed row can hold — every option and the
+    /// placeholder — measured once per change and cached.
+    fn widest_option_width(&mut self) -> Option<f32> {
+        if let Some(widest) = self.widest_option_width {
+            return Some(widest);
+        }
+        let metrics = self.font_metrics.resolved()?;
+        let size = self.theme.label_size_pixels;
+        let widest = self
+            .options
+            .iter()
+            .map(String::as_str)
+            .chain(once(self.placeholder.as_str()))
+            .map(|run| measured_text_width(metrics, run, size))
+            .fold(0.0_f32, f32::max);
+        self.widest_option_width = Some(widest);
+        Some(widest)
+    }
+
     /// The closed row: its fill, the current text, the chevron, and the
     /// common validation / focus outlines.
     fn draw_items(&self) -> Vec<WidgetDrawItem> {
@@ -339,13 +396,16 @@ impl WidgetDefaults for DropdownWidget {
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send
 /// it its `DropdownConfig` again to replace the options or the choice in
-/// place.
+/// place. It reports the width its widest option needs on its draw list's
+/// `intrinsic` once the theme font's metrics resolve, so a host can size the
+/// cell it sits in to the control rather than to a share of the row.
 #[actor(instanced, composable, handler_set(WidgetDefaults))]
 impl WasmActor for DropdownWidget {
     type Config = DropdownConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.dropdown";
 
     fn init(config: DropdownConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        let font_id = config.theme.font_id;
         Ok(DropdownWidget {
             selected_index: initial_selection(config.initial_selected_index, config.options.len()),
             options: config.options,
@@ -358,7 +418,33 @@ impl WasmActor for DropdownWidget {
             state: InteractionState::new(config.state),
             frame: WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
             arms: ActivationArms::default(),
+            font_metrics: FontMetricsAdapter::new(font_id),
+            widest_option_width: None,
         })
+    }
+
+    /// Ask for the theme font's metrics; the dropdown reports the width its
+    /// widest option needs as soon as there are real advances to measure it
+    /// with (inline children run `wire`).
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+        pump_text_font_metrics(ctx, &mut self.font_metrics);
+    }
+
+    /// Restyle: adopt the fanned theme and request metrics for its font. The
+    /// dropdown declares this rather than adopting the shared default, because
+    /// a new font or type size invalidates every option it measured.
+    #[handler::single]
+    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
+        apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
+        self.forget_measurements();
+    }
+
+    /// Install a font-metrics reply; the next `Collect` reports an intrinsic
+    /// measured against real advances.
+    #[handler::single]
+    fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
+        accept_font_metrics_result(ctx, &mut self.font_metrics, result);
+        self.forget_measurements();
     }
 
     /// Replace the options / choice / theme in place from a re-sent config.
@@ -372,11 +458,14 @@ impl WasmActor for DropdownWidget {
         self.open_row_count = usize::try_from(config.open_row_count).unwrap_or(usize::MAX);
         self.first_index = 0;
         self.arms.clear();
+        self.font_metrics.set_desired(config.theme.font_id);
         self.theme = config.theme;
+        self.forget_measurements();
         closed.emit(ctx);
         if self.state.replace(config.state) {
             emit_state_changed(ctx, &self.state);
         }
+        pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
 
     /// Update external availability; a dropdown that can no longer be chosen
@@ -461,7 +550,7 @@ impl WasmActor for DropdownWidget {
     }
 
     /// Reply the dropdown's local draw: the closed row as ordinary items, the
-    /// open list as overlay.
+    /// open list as overlay, and the width its widest option asks for.
     ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
@@ -470,14 +559,19 @@ impl WasmActor for DropdownWidget {
         if reply_if_hidden(ctx, &self.state) {
             return;
         }
+        let intrinsic = self.intrinsic();
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { intrinsic: None, items: self.draw_items(), overlay: self.overlay_items() });
+            parent.send(&WidgetDrawList { intrinsic, items: self.draw_items(), overlay: self.overlay_items() });
         }
     }
 }
 
 /// The chevron's height as a fraction of the label size.
 const CHEVRON_SIZE_RATIO: f32 = 0.5;
+
+/// How much clear space the closed row reserves between the current option's
+/// name and the chevron, in spacing units.
+const CHEVRON_GAP_UNITS: u8 = 1;
 
 /// The rows the solid chevron triangle is drawn from. Four bars read as a
 /// triangle at every size the row heights in play produce, and stay legible
@@ -535,6 +629,7 @@ fn revealed_first_index(
 mod tests {
     use super::*;
     use crate::WidgetControlState;
+    use aether_kinds::{CachedFontMetrics, FontMetrics};
     use alloc::format;
     use alloc::vec;
 
@@ -551,7 +646,26 @@ mod tests {
             frame: WidgetFrame { x: 10.0, y: 20.0, width: 100.0, height: 24.0 },
             state: InteractionState::new(WidgetControlState::default()),
             arms: ActivationArms::default(),
+            font_metrics: FontMetricsAdapter::new(Theme::DEFAULT.font_id),
+            widest_option_width: None,
         }
+    }
+
+    /// The same dropdown with a resolved metric table whose every glyph
+    /// advances half an em, so a run's width is `chars * size / 2` — exact
+    /// without depending on a real font file.
+    fn measured(option_count: usize, open_row_count: usize, selected_index: Option<usize>) -> DropdownWidget {
+        let mut widget = dropdown(option_count, open_row_count, selected_index);
+        widget.font_metrics.take_pending_request();
+        widget.font_metrics.accept_reply(Some(CachedFontMetrics::new(&FontMetrics {
+            units_per_em: 1000.0,
+            ascent: 800.0,
+            descent: -200.0,
+            line_gap: 0.0,
+            default_advance: 500.0,
+            advances: Vec::new(),
+        })));
+        widget
     }
 
     fn opened(option_count: usize, open_row_count: usize, selected_index: Option<usize>) -> DropdownWidget {
@@ -741,6 +855,48 @@ mod tests {
 
         widget.selected_index = Some(1);
         assert_eq!(widget.closed_row_text(), ("option 1", Theme::DEFAULT.text_primary));
+    }
+
+    #[test]
+    fn the_intrinsic_is_the_widest_run_the_closed_row_can_hold_plus_its_pads_and_chevron() {
+        // Tripwire: the studio's gap 26 — a dropdown that reports no intrinsic
+        // forces every host to give it a full-width row, because a cell sized
+        // to a share of its row is the one thing the screen's method forbids.
+        // The number has to follow the *widest* option (not the current one,
+        // which would resize the cell on every choice), count the placeholder
+        // (what the row reads before anything is chosen), and leave the chevron
+        // its column — a width that ignored it draws the name under the mark.
+        let mut widget = measured(6, 3, Some(0));
+        widget.options[4] = String::from("a considerably longer option than the rest");
+        widget.forget_measurements();
+
+        let size = widget.theme.label_size_pixels;
+        let expected = {
+            let metrics = widget.font_metrics.resolved().expect("the test table is installed");
+            widget.theme.pad.mul_add(2.0, measured_text_width(metrics, &widget.options[4], size))
+                + widget.chevron_column()
+        };
+        let [width, height] = widget.intrinsic().expect("a measured dropdown reports one");
+        assert!((width - expected).abs() < f32::EPSILON, "{width} is not the widest option plus pads and chevron");
+        assert_eq!(height, widget.theme.row_height, "one row tall, whatever the open list would be");
+
+        widget.selected_index = Some(0);
+        assert_eq!(widget.intrinsic().map(|size| size[0]), Some(width), "the current choice does not move it");
+
+        let mut placeheld = measured(2, 3, None);
+        placeheld.placeholder = String::from("a placeholder longer than any option");
+        placeheld.forget_measurements();
+        let widest = placeheld.widest_option_width().expect("measured");
+        let placeholder_width = {
+            let metrics = placeheld.font_metrics.resolved().expect("the test table is installed");
+            measured_text_width(metrics, &placeheld.placeholder, size)
+        };
+        assert!(
+            (widest - placeholder_width).abs() < f32::EPSILON,
+            "the placeholder is one of the runs the row can read",
+        );
+
+        assert_eq!(dropdown(6, 3, Some(0)).intrinsic(), None, "an unmeasured dropdown asks for nothing");
     }
 
     #[test]
