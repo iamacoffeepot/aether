@@ -126,6 +126,7 @@ use aether_text::{DrawText, DrawTextBatch, TextCapability};
 
 use crate::composite::Composite;
 use crate::kinds::WidgetClipIntersection;
+use crate::set::FONT_LINE_BOX_RATIO;
 
 /// A compositing widget node. `config` fixes its role and layout;
 /// `composite` accumulates its subtree each frame; `spawned` guards the
@@ -391,73 +392,154 @@ fn framebuffer_clip(rect: WidgetClipRect) -> ClipRect {
     ClipRect { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
 }
 
+/// The fills a glyph run has to stay out from under: every fill that lands
+/// after it. Built by walking a lane backwards, so at each text item the set
+/// holds exactly the lane's later fills — seeded, for the ordinary lane, with
+/// the whole overlay, which is after all of it.
+///
+/// `bounds` is the union of the set. Almost no glyph run in a frame has a
+/// later fill anywhere near it, and one rejection against the union answers
+/// that without touching the list.
+#[derive(Default)]
+struct LaterFills {
+    rects: Vec<WidgetClipRect>,
+    bounds: Option<WidgetClipRect>,
+}
+
+impl LaterFills {
+    fn push(&mut self, rect: WidgetClipRect) {
+        self.bounds = Some(self.bounds.map_or(rect, |bounds| bounds.union(rect)));
+        self.rects.push(rect);
+    }
+
+    /// `clip` with every later fill that stands over the run cut out of it:
+    /// `clip` alone when none of them does, nothing when together they cover
+    /// the run.
+    ///
+    /// `run` is the box the glyphs occupy and `hairline` the thickness under
+    /// which a fill is a mark rather than an occluder. Both tests guard the
+    /// same failure — cutting a run's scissor where no glyph of it was
+    /// meaningfully hidden, which costs batches without changing what a reader
+    /// sees:
+    ///
+    /// - A fill that misses the run is skipped. A text item's clip is
+    ///   routinely far larger than its glyphs — every row of a list carries
+    ///   the whole viewport, with the scroll bar's column inside it — so
+    ///   without this each row's scissor would come back as strips around the
+    ///   rows below it and the bar beside it.
+    /// - A hairline is skipped ([`WidgetClipRect::is_hairline`]): a caret, an
+    ///   IME underline, a rule, and a focus ring's stroke are all drawn after
+    ///   the run they touch, and reading them as holes would split a focused
+    ///   field's run into strips around a one-pixel bar.
+    fn cut(&self, clip: WidgetClipRect, run: WidgetClipRect, hairline: f32) -> Vec<WidgetClipRect> {
+        if !self.bounds.is_some_and(|bounds| run.overlaps(bounds)) {
+            return vec![clip];
+        }
+        let mut remaining = vec![clip];
+        for hole in &self.rects {
+            if remaining.is_empty() {
+                break;
+            }
+            if !hole.overlaps(run) || hole.is_hairline(hairline) || !remaining.iter().any(|part| part.overlaps(*hole)) {
+                continue;
+            }
+            remaining = remaining.into_iter().flat_map(|part| part.subtract(*hole)).collect();
+        }
+        remaining
+    }
+}
+
+/// A generous ceiling on one character's advance, as a fraction of the draw
+/// size — an em, which no Latin face in normal use exceeds. It bounds the box
+/// a run occupies from its origin, and errs wide on purpose: too wide costs a
+/// batch when a fill happens to sit beside a run, while too narrow would stop
+/// a fill covering the run's tail from clipping it. The kit's other estimate,
+/// `set::APPROX_ADVANCE_RATIO`, aims at the middle instead, because a caret
+/// placed too far right is as wrong as one placed too far left.
+const GLYPH_ADVANCE_CEILING: f32 = 1.0;
+
+/// How thin a fill has to be to read as a mark on the text it crosses rather
+/// than something standing over it, as a fraction of the draw size. Half a
+/// draw size is well above every stroke the kit draws over a run — a caret and
+/// an IME underline are one pixel, a rule and a focus ring two — and well
+/// below the shortest thing that stands over a line, which is a row.
+const HAIRLINE_RATIO: f32 = 0.5;
+
+/// The box one text item occupies: from its pen origin, one line tall
+/// (`set::FONT_LINE_BOX_RATIO`) and at most one em per character wide.
+/// `aether.text` lays every run out on a single line — it has no line break —
+/// so one box covers it.
+fn glyph_box(x: f32, y: f32, text: &str, size_pixels: f32) -> WidgetClipRect {
+    #[allow(clippy::cast_precision_loss)] // a run long enough to lose precision here is already far off-screen
+    let chars = text.chars().count() as f32;
+    WidgetClipRect {
+        x,
+        y,
+        width: chars * size_pixels * GLYPH_ADVANCE_CEILING,
+        height: size_pixels * FONT_LINE_BOX_RATIO,
+    }
+}
+
 /// Collect the filtered text subsequence into authored-order text items.
 /// Invalid clips omit their items before the root converts the remaining clips
 /// into framebuffer coordinates.
 ///
 /// Text reaches the render cap one hop after the quads a cluster sends
-/// directly, so a fill drawn in the cluster's overlay can never cover the
-/// glyphs under it by draw order alone. The hierarchy answers that the way a
-/// plate always has — by not drawing what it covers: every ordinary text item
-/// whose clip lies under an overlay fill is re-clipped to the part of its rect
-/// the overlay leaves uncovered ([`WidgetClipRect::subtract`]), and omitted
-/// when nothing is left. An unclipped text item (root chrome with no clip)
-/// cannot be cut and is drawn as authored.
+/// directly, so no fill can cover the glyphs authored before it by draw order
+/// alone. The hierarchy answers that the way a plate always has — by not
+/// drawing what it covers: a text item's clip is re-clipped to the part of its
+/// rect the fills **after it** leave uncovered
+/// ([`WidgetClipRect::subtract`]), and omitted when nothing is left. Only the
+/// fills that reach the run's own line take part ([`LaterFills::cut`]); a clip
+/// is a scissor bound and is routinely much larger than the glyphs inside it.
+/// An unclipped text item (root chrome with no clip) cannot be cut and is
+/// drawn as authored.
 ///
-/// The cut is per *lane*, which is what makes a plate able to hold children.
-/// This runs once over the ordinary items with the overlay's fills as holes,
-/// and again over the overlay's own items with no holes at all — so a plate a
-/// root raised together with the children standing on it
-/// ([`Composite::set_slot_overlay`](crate::composite::Composite::set_slot_overlay))
-/// hides the primary content under it and none of its own group's labels. In
-/// one lane the fills are simply under the glyphs, as everywhere else in the
-/// kit.
+/// The subtraction is **positional**, which is what makes a plate able to hold
+/// children *and* a control on that plate able to open over its own siblings.
+/// A fill only cuts the glyphs authored before it, so a plate's own fill
+/// leaves the labels its children draw after it whole, while an open dropdown
+/// list — registered after the controls it stands over — cuts every one of
+/// them. The rule reads the same in both lanes: [`emit`] runs it over the
+/// ordinary items with the overlay's fills already in the set (the overlay is
+/// entirely after the ordinary lane) and again over the overlay's own items
+/// from empty.
 fn text_items(list: &WidgetDrawList) -> Vec<DrawText> {
-    let holes = overlay_fills(&list.overlay);
+    let mut later = LaterFills::default();
+    for rect in list.overlay.iter().filter_map(WidgetDrawItem::covered_rect) {
+        later.push(rect);
+    }
     let mut items: Vec<DrawText> = Vec::new();
-    for item in &list.items {
-        if let WidgetDrawItem::Text { x, y, font_id, text, size_pixels, color, .. } = item {
-            let Some(clip) = PreparedClip::for_item(item) else {
-                continue;
-            };
-            let draw = |clip: Option<ClipRect>| DrawText {
-                font_id: *font_id,
-                text: text.clone(),
-                size_pixels: *size_pixels,
-                color: *color,
-                origin: [*x, *y],
-                space: QuadSpace::Screen,
-                clip,
-            };
-            match clip {
-                PreparedClip::Finite { rect } if !holes.is_empty() => {
-                    let mut remaining = vec![rect];
-                    for hole in &holes {
-                        remaining = remaining.into_iter().flat_map(|rect| rect.subtract(*hole)).collect();
-                    }
-                    items.extend(remaining.into_iter().map(|rect| draw(Some(framebuffer_clip(rect)))));
-                }
-                prepared => items.push(draw(prepared.framebuffer())),
+    for item in list.items.iter().rev() {
+        let WidgetDrawItem::Text { x, y, font_id, text, size_pixels, color, .. } = item else {
+            if let Some(rect) = item.covered_rect() {
+                later.push(rect);
             }
+            continue;
+        };
+        let Some(clip) = PreparedClip::for_item(item) else {
+            continue;
+        };
+        let draw = |clip: Option<ClipRect>| DrawText {
+            font_id: *font_id,
+            text: text.clone(),
+            size_pixels: *size_pixels,
+            color: *color,
+            origin: [*x, *y],
+            space: QuadSpace::Screen,
+            clip,
+        };
+        match clip {
+            PreparedClip::Finite { rect } => {
+                let run = glyph_box(*x, *y, text, *size_pixels);
+                let hairline = size_pixels * HAIRLINE_RATIO;
+                items.extend(later.cut(rect, run, hairline).into_iter().map(|part| draw(Some(framebuffer_clip(part)))));
+            }
+            PreparedClip::Unbounded => items.push(draw(None)),
         }
     }
+    items.reverse();
     items
-}
-
-/// The rectangles an overlay fills — its solid and textured quads, as they
-/// land after the composite's offsets — which is what ordinary text has to
-/// stay out from under. Overlay text casts no hole.
-fn overlay_fills(overlay: &[WidgetDrawItem]) -> Vec<WidgetClipRect> {
-    overlay
-        .iter()
-        .filter_map(|item| match item {
-            WidgetDrawItem::Quad { x, y, width, height, .. }
-            | WidgetDrawItem::TexturedQuad { x, y, width, height, .. } => {
-                Some(WidgetClipRect { x: *x, y: *y, width: *width, height: *height })
-            }
-            WidgetDrawItem::Text { .. } => None,
-        })
-        .collect()
 }
 
 /// Emit a flattened subtree as the cluster's single render + text sender.
@@ -507,14 +589,37 @@ fn emit_layer(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::set::text_origin_y;
     use aether_math::Rgba;
 
     fn quad(x: f32, clip: Option<WidgetClipRect>) -> WidgetDrawItem {
         WidgetDrawItem::Quad { x, y: 0.0, width: 1.0, height: 1.0, color: Rgba::WHITE, clip }
     }
 
+    fn fill(rect: WidgetClipRect) -> WidgetDrawItem {
+        WidgetDrawItem::Quad {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+            color: Rgba::WHITE,
+            clip: None,
+        }
+    }
+
+    /// A one-line run at `x`, its pen origin at the top of whatever bounds it —
+    /// which is where a widget puts a run inside the row it clipped it to, and
+    /// what the flatten reads to decide which fills reach the line.
     fn text(x: f32, label: &str, clip: Option<WidgetClipRect>) -> WidgetDrawItem {
-        WidgetDrawItem::Text { x, y: 0.0, font_id: 1, text: label.into(), size_pixels: 12.0, color: Rgba::WHITE, clip }
+        WidgetDrawItem::Text {
+            x,
+            y: clip.map_or(0.0, |rect| rect.y),
+            font_id: 1,
+            text: label.into(),
+            size_pixels: 12.0,
+            color: Rgba::WHITE,
+            clip,
+        }
     }
 
     fn textured(texture_id: u32, x: f32, clip: Option<WidgetClipRect>) -> WidgetDrawItem {
@@ -655,34 +760,127 @@ mod tests {
     }
 
     #[test]
-    fn an_overlay_plate_cuts_the_content_under_it_and_never_its_own_group() {
-        // Tripwire: the two `text_items` passes `emit` makes are what let a
-        // popover's plate host the root's own controls. Cutting the overlay's
-        // text against the overlay's fills — one lane, one subtraction — would
-        // delete every label on the plate, which is the defect that kept the
-        // studio's plates in chrome.
+    fn an_overlay_plate_cuts_the_content_under_it_and_only_the_labels_its_list_covers() {
+        // Tripwire: the subtraction inside a lane is positional, which is the
+        // whole of gap 30. A plate's fill is authored before the labels its
+        // children draw, so it must leave them whole — cutting a lane's text
+        // against all of its fills would delete every label on the plate, the
+        // defect that kept the studio's plates in chrome. A list one of those
+        // controls opens is authored *after* them, so it must cut the ones it
+        // covers — not cutting them at all was the studio's dialog printing
+        // its own row text through its open dropdown.
         let plate = WidgetClipRect { x: 100.0, y: 100.0, width: 200.0, height: 80.0 };
+        let row = |y: f32| WidgetClipRect { x: 110.0, y, width: 180.0, height: 20.0 };
+        let opened_list = WidgetClipRect { x: 110.0, y: 130.0, width: 180.0, height: 45.0 };
         let list = WidgetDrawList {
             intrinsic: None,
             items: vec![text(110.0, "primary content", Some(plate))],
             overlay: vec![
-                WidgetDrawItem::Quad {
-                    x: plate.x,
-                    y: plate.y,
-                    width: plate.width,
-                    height: plate.height,
-                    color: Rgba::WHITE,
-                    clip: None,
-                },
-                text(110.0, "a button on the plate", Some(plate)),
+                fill(plate),
+                text(110.0, "the picker's own row", Some(row(110.0))),
+                text(110.0, "a button under the list", Some(row(140.0))),
+                fill(opened_list),
+                text(115.0, "an option in the list", Some(row(135.0))),
             ],
         };
 
         assert!(text_items(&list).is_empty(), "the content the plate stands over sends no glyphs");
         let overlay_lane = WidgetDrawList { intrinsic: None, items: list.overlay, overlay: Vec::new() };
         assert!(
-            text_items(&overlay_lane).iter().map(|item| item.text.as_str()).eq(["a button on the plate"]),
-            "and the plate's own group keeps its label",
+            text_items(&overlay_lane)
+                .iter()
+                .map(|item| item.text.as_str())
+                .eq(["the picker's own row", "an option in the list"]),
+            "the plate leaves the labels drawn on it whole, its open list deletes the one it covers, \
+             and the list's own option is authored after the list's fill",
+        );
+    }
+
+    #[test]
+    fn one_run_crossed_by_two_later_fills_loses_both_bands() {
+        // Tripwire: the holes accumulate across the lane rather than the last
+        // one walked winning. Two controls opening over the same row — a menu
+        // and a tooltip — each owe their bite out of it.
+        let run = WidgetClipRect { x: 0.0, y: 0.0, width: 100.0, height: 10.0 };
+        let column = |x: f32| WidgetClipRect { x, y: -2.0, width: 10.0, height: 24.0 };
+        let list = WidgetDrawList {
+            intrinsic: None,
+            overlay: Vec::new(),
+            items: vec![text(0.0, "a run that fills its whole row", Some(run)), fill(column(20.0)), fill(column(60.0))],
+        };
+
+        let mut spans: Vec<(f32, f32)> = text_items(&list)
+            .iter()
+            .map(|item| {
+                let clip = item.clip.clone().expect("a cut run keeps a finite clip");
+                (clip.x, clip.width)
+            })
+            .collect();
+        spans.sort_by(|left, right| left.0.total_cmp(&right.0));
+        assert_eq!(spans, vec![(0.0, 20.0), (30.0, 30.0), (70.0, 30.0)]);
+    }
+
+    #[test]
+    fn a_caret_inside_the_line_marks_the_run_rather_than_standing_over_it() {
+        // Tripwire: a field draws its caret after the value, inside the row's
+        // padding. Reading it as a hole cuts the run's one scissor into strips
+        // around a one-pixel bar — same pixels, three batches per focused
+        // field, every frame — where a fill that genuinely stands over the
+        // line reaches past it.
+        // The real placement rule on both sides: the run sits at the pen
+        // origin its row centers it on, the caret inside the row's padding.
+        let row = WidgetClipRect { x: 0.0, y: 0.0, width: 100.0, height: 24.0 };
+        let value = WidgetDrawItem::Text {
+            x: 4.0,
+            y: text_origin_y(row.y, row.height, 14.0),
+            font_id: 1,
+            text: "value".into(),
+            size_pixels: 14.0,
+            color: Rgba::WHITE,
+            clip: Some(row),
+        };
+        let caret = WidgetClipRect { x: 40.0, y: 4.0, width: 1.0, height: 16.0 };
+        let list = WidgetDrawList { intrinsic: None, overlay: Vec::new(), items: vec![value, fill(caret)] };
+
+        let items = text_items(&list);
+        assert_eq!(items.len(), 1, "the run stays one item; got {items:?}");
+        assert_eq!(
+            items[0].clip.clone().map(|clip| (clip.x, clip.width)),
+            Some((row.x, row.width)),
+            "and keeps its whole scissor",
+        );
+    }
+
+    #[test]
+    fn a_fill_the_viewport_clipped_away_punches_no_hole() {
+        // Tripwire: the hole is what a fill *paints*, not the rectangle it was
+        // authored at. A virtual list's row scrolled above its viewport keeps
+        // its full geometry and is clipped to nothing visible; reading the
+        // geometry would erase the header text it was scrolled behind.
+        let header = WidgetClipRect { x: 0.0, y: 0.0, width: 200.0, height: 20.0 };
+        let viewport = WidgetClipRect { x: 0.0, y: 20.0, width: 200.0, height: 100.0 };
+        let list = WidgetDrawList {
+            intrinsic: None,
+            overlay: Vec::new(),
+            items: vec![
+                text(0.0, "header", Some(header)),
+                WidgetDrawItem::Quad {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 200.0,
+                    height: 24.0,
+                    color: Rgba::WHITE,
+                    clip: Some(viewport),
+                },
+            ],
+        };
+
+        let items = text_items(&list);
+        assert!(items.iter().map(|item| item.text.as_str()).eq(["header"]));
+        assert_eq!(
+            items[0].clip.clone().map(|clip| (clip.y, clip.height)),
+            Some((header.y, header.height)),
+            "the scrolled row paints nothing over the header, so it takes nothing out of it",
         );
     }
 

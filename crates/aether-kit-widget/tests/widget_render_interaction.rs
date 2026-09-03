@@ -1597,14 +1597,38 @@ fn hovering_overflowing_text_reveals_it_on_an_overlay_plate() {
     // registered and lands in an unclipped batch — and it is the only thing in
     // the panel that can be wider than the panel itself, the stack's own
     // background being exactly `PANEL_WIDTH`.
-    let plate_widths = |harness: &SubstrateHarness| -> Vec<f32> {
+    // The plate's own rectangles, as `(x, y, width, height)` — the overlay's
+    // unclipped white quads wider than the panel, which is the only thing in
+    // the stack that can outgrow it.
+    let plate_rects = |harness: &SubstrateHarness| -> Vec<(f32, f32, f32, f32)> {
         harness
             .committed_overlay_snapshot()
             .iter()
             .filter(|batch| batch.texture_id == WHITE_TEXTURE_ID && batch.clip.is_none())
-            .flat_map(|batch| batch.quads.iter().map(|quad| quad.width))
-            .filter(|width| *width > PANEL_WIDTH)
+            .flat_map(|batch| batch.quads.iter().map(|quad| (quad.x, quad.y, quad.width, quad.height)))
+            .filter(|(_, _, width, _)| *width > PANEL_WIDTH)
             .collect()
+    };
+    let plate_widths = |harness: &SubstrateHarness| -> Vec<f32> {
+        plate_rects(harness).into_iter().map(|(_, _, width, _)| width).collect()
+    };
+    // The revealed run's own glyphs, which the root's clip subtraction must
+    // leave whole: the plate's fill is authored *before* the run standing on
+    // it, so it casts no hole over it. Read as glyph quads (any texture but
+    // the white one) whose center lands inside the plate's own bounds.
+    let glyphs_on_the_plate = |harness: &SubstrateHarness| -> usize {
+        let plate = plate_rects(harness);
+        harness
+            .committed_overlay_snapshot()
+            .iter()
+            .filter(|batch| batch.texture_id != WHITE_TEXTURE_ID)
+            .flat_map(|batch| batch.quads.iter().map(|quad| (quad.x + quad.width / 2.0, quad.y + quad.height / 2.0)))
+            .filter(|(x, y)| {
+                plate.iter().any(|(plate_x, plate_y, width, height)| {
+                    *x >= *plate_x && *x <= plate_x + width && *y >= *plate_y && *y <= plate_y + height
+                })
+            })
+            .count()
     };
 
     let panel = panel_address();
@@ -1620,6 +1644,7 @@ fn hovering_overflowing_text_reveals_it_on_an_overlay_plate() {
         ])
         .expect("hover the overflowing label");
     let over_wide = plate_widths(&harness);
+    let revealed_glyphs = glyphs_on_the_plate(&harness);
 
     harness
         .execute(vec![
@@ -1651,6 +1676,12 @@ fn hovering_overflowing_text_reveals_it_on_an_overlay_plate() {
     assert!(
         !over_field.is_empty(),
         "a text field whose value overruns its box owes the same reveal; no overlay quad outgrew the panel",
+    );
+    assert!(
+        revealed_glyphs > 0,
+        "the plate exists to be read: its own run must reach the atlas with the plate's bounds still \
+         standing over it. Cutting a lane's glyphs against all of its fills instead of only the ones \
+         authored after them deletes the run the reveal was raised for; no glyph landed on the plate",
     );
 }
 

@@ -113,12 +113,51 @@ impl WidgetClipRect {
             && (self.y + self.height).is_finite()
     }
 
+    /// Whether the two rectangles share any area. Edge contact is not an
+    /// overlap, matching [`Self::subtract`], which leaves `self` whole for it.
+    /// An invalid rectangle overlaps nothing.
+    #[must_use]
+    pub(super) fn overlaps(self, other: Self) -> bool {
+        self.is_valid()
+            && other.is_valid()
+            && self.x < other.x + other.width
+            && other.x < self.x + self.width
+            && self.y < other.y + other.height
+            && other.y < self.y + self.height
+    }
+
+    /// Whether this rectangle is a hairline at `thickness` — thinner than that
+    /// on one axis, so it marks what it crosses rather than standing over it.
+    /// A caret, an IME underline, a rule, and a focus ring's stroke are all
+    /// drawn after the run they touch and are one or two pixels through.
+    #[must_use]
+    pub(super) fn is_hairline(self, thickness: f32) -> bool {
+        self.width < thickness || self.height < thickness
+    }
+
+    /// The smallest rectangle containing both. Used only as a conservative
+    /// bound over a set of fills, so an invalid operand yields the other.
+    #[must_use]
+    pub(super) fn union(self, other: Self) -> Self {
+        if !self.is_valid() {
+            return other;
+        }
+        if !other.is_valid() {
+            return self;
+        }
+        let x = self.x.min(other.x);
+        let y = self.y.min(other.y);
+        let right = (self.x + self.width).max(other.x + other.width);
+        let bottom = (self.y + self.height).max(other.y + other.height);
+        Self { x, y, width: right - x, height: bottom - y }
+    }
+
     /// This rectangle with `hole` cut out of it: the up-to-four strips (left,
     /// right, top, bottom) that together cover everything of `self` outside
     /// `hole`. `self` alone when the two do not overlap; nothing when `hole`
-    /// covers it. The root uses it to keep a cluster's ordinary text out from
-    /// under its overlay, since text reaches the render cap a hop after the
-    /// overlay's fill and would otherwise print through it.
+    /// covers it. The root uses it to keep a glyph run out from under every
+    /// fill drawn after it, since text reaches the render cap a hop after the
+    /// quads and would otherwise print through them.
     #[must_use]
     pub(super) fn subtract(self, hole: Self) -> Vec<Self> {
         let right = self.x + self.width;
@@ -288,6 +327,25 @@ impl WidgetDrawItem {
             }
         }
         Some(item)
+    }
+
+    /// The rectangle this item actually paints — its geometry narrowed by its
+    /// own clip — or `None` for text, which casts no hole, and for a fill its
+    /// clip erases. This is the hole a fill punches in the glyph runs authored
+    /// before it: reading the geometry alone would let a row scrolled out of a
+    /// viewport cut text the viewport clip already spared it from.
+    #[must_use]
+    pub(super) fn covered_rect(&self) -> Option<WidgetClipRect> {
+        let (rect, clip) = match self {
+            Self::Quad { x, y, width, height, clip, .. } | Self::TexturedQuad { x, y, width, height, clip, .. } => {
+                (WidgetClipRect { x: *x, y: *y, width: *width, height: *height }, *clip)
+            }
+            Self::Text { .. } => return None,
+        };
+        match intersect_widget_clips(Some(rect), clip) {
+            WidgetClipIntersection::Finite { rect } => Some(rect),
+            WidgetClipIntersection::Unbounded | WidgetClipIntersection::Empty => None,
+        }
     }
 
     /// This item's effective clip, rejecting an invalid explicit rectangle.
