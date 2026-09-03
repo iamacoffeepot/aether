@@ -426,6 +426,16 @@ secondary. Closed it is a single row reading the chosen option — or
 right end. A press-and-release inside the row opens the list, as does Enter or
 a matching Space release while focused; Escape closes it.
 
+The closed row's run is **elided into `frame.width − 2 × pad − the chevron
+column`** — the same column the intrinsic reserves (the mark, at half the
+label size, plus one spacing unit of clear space). A name too long for the
+row therefore stops a spacing unit short of the mark and carries an ellipsis,
+instead of running up against it: charged against the bare frame, `Choose an
+ascendancy` ended flush against the chevron with no gap at all. A run that
+fits is untouched — the column takes room from the measure, never a glyph
+from a run that had room — and the run is drawn whole until the font's
+advances resolve, since a guessed width cuts the wrong word.
+
 Open, the list hangs directly below the closed row: up to `open_row_count` rows
 of `theme.row_height`, the frame's full width, on a raised surface inside a
 one-pixel outline ring. The current option is drawn in the **selection** role
