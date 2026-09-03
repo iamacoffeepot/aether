@@ -118,6 +118,50 @@ and verifies the ctx is actually running `MyPanel` before allocating the child
 alias; data-driven by-tag composition enforces the same cardinality and
 placement facts at runtime.
 
+## Buttons, emphasis, and tone
+
+`WidgetKind::Button` spawns `ButtonWidget` from `ButtonConfig { label,
+emphasis, tone, theme, state }`. A left press inside arms it and the matching
+release inside fires `ButtonClicked`; a release that drifts off cancels.
+Enter fires on its press, Space on its matching release.
+
+`emphasis` is `ButtonEmphasis { Filled, Tonal, Outlined, Text }` and ranks how
+loudly the verb asks to be pressed — Material 3's ladder, loudest first. It
+defaults to `Filled`, which is the accent plate every button drew before the
+field existed, so an existing consumer keeps its look. `tone` is `ButtonTone {
+Neutral, Danger }` and says what the verb does to the reader's work; it
+defaults to `Neutral`. The pair resolves to three inks:
+
+| `emphasis` | Plate | Stroke | Label |
+|---|---|---|---|
+| `Filled` | the tone's role (`accent`, or `error` for `Danger`) | — | `accent_text` |
+| `Tonal` | `Theme::tonal(role)` — `surface_raised` carried a fifth of the way toward the role | — | `text_primary`, or `error` for `Danger` |
+| `Outlined` | — (a hover wash) | `outline`, or `error` for `Danger` | `text_primary`, or `error` for `Danger` |
+| `Text` | — (a hover wash) | — | `text_primary`, or `error` for `Danger` |
+
+`Theme::tonal(role)` is derived rather than stored, so a theme that moves its
+accent moves every tonal plate with it, and it is deliberately not
+`selection`: a chosen row and a secondary verb must not share a look. A
+neutral verb at the quiet ranks reads in the primary ink rather than the
+accent, because the accent means *the* primary action — a screen that letters
+four secondary verbs in it has spent the token again. The filled ranks carry
+hover and press in their plate through `Theme::fill`; the plateless ranks have
+no plate to carry it, so the same role-agnostic `hover_overlay` /
+`pressed_overlay` is drawn as the whole background instead.
+
+Everything else is identical at every step of the ladder: the label is
+measured, centered, and elided the same way, the reported
+`WidgetDrawList::intrinsic` is the same label plus one `theme.pad` either
+side, and the hit rectangle is the whole frame. A quieter button is a quieter
+look, never a smaller target — a host may rank a verb down without its row
+moving.
+
+The rule for *which* rank a verb takes is
+[the screen-design method](../building/designing-a-screen.md): one filled verb
+per region, secondary verbs tonal or outlined, a verb that throws work away
+outlined in the error colour, and a dialog's row is one filled confirm beside
+a text cancel.
+
 ## Labels, type roles, and the selection role
 
 `WidgetKind::Label` spawns the non-interactive `LabelWidget` from

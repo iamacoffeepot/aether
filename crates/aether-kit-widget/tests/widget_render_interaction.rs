@@ -422,7 +422,8 @@ fn button_child(subname: &str, label: &str, state: WidgetControlState) -> Widget
         kind: WidgetKind::Button,
         origin: [0.0, 0.0],
         clip: None,
-        config: ButtonConfig { label: label.to_owned(), theme: Theme::DEFAULT, state }.encode_into_bytes(),
+        config: ButtonConfig { label: label.to_owned(), theme: Theme::DEFAULT, state, ..ButtonConfig::default() }
+            .encode_into_bytes(),
     }
 }
 
