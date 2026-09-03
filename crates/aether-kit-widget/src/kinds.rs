@@ -730,8 +730,51 @@ pub struct RadioConfig {
     pub state: WidgetControlState,
 }
 
+/// One verb bound to a single row of a [`VirtualListConfig`] — the `×` that
+/// unbinds *this* skill, the `Change gem` that re-picks *this* one.
+///
+/// The list draws it as a real button at the row's right edge, with the same
+/// [`ButtonEmphasis`] / [`ButtonTone`] ladder, the same measured-label-plus-two-pads
+/// width, the same elision and the same hover / pressed answer a
+/// [`ButtonConfig`] draws with — it is the kit's button face, drawn inside a row
+/// the list owns rather than in a slot a layout gave it. A press on one reports
+/// [`VirtualListAction`] and leaves the selection alone; a press anywhere else
+/// on the row selects as it always did.
+///
+/// Rank a row verb **down**. A column of rows each carrying a filled accent
+/// plate has spent the primary-action token once per row
+/// (`designing-a-screen.md` §6), which is the same defect as a screen of five
+/// yellow buttons; [`ButtonEmphasis::Text`] or `Outlined` is the row verb's
+/// rank, and `Danger` is what says the `×` throws work away. Schema-only;
+/// nested in [`VirtualListRow`].
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct RowAction {
+    pub label: String,
+    /// How loudly this row's verb asks to be pressed.
+    #[serde(default)]
+    pub emphasis: ButtonEmphasis,
+    /// What it does to the reader's work — `Danger` for the one that unbinds.
+    #[serde(default)]
+    pub tone: ButtonTone,
+}
+
+impl RowAction {
+    /// A quiet neutral verb: label only, no plate. The rank a row verb takes
+    /// unless it destroys something.
+    #[must_use]
+    pub fn text(label: impl Into<String>) -> Self {
+        Self { label: label.into(), emphasis: ButtonEmphasis::Text, tone: ButtonTone::Neutral }
+    }
+
+    /// A verb that throws this row's work away — the `×` on a bound skill.
+    #[must_use]
+    pub fn danger(label: impl Into<String>) -> Self {
+        Self { label: label.into(), emphasis: ButtonEmphasis::Text, tone: ButtonTone::Danger }
+    }
+}
+
 /// One row of a [`VirtualListConfig`]: what it says, what it says at its right
-/// edge, and which step of the type scale it is set at.
+/// edge, which step of the type scale it is set at, and the verbs bound to it.
 ///
 /// `trailing` is the row's **second column** — a version, a count, a price, a
 /// key — set in its own right-aligned column at the row's right edge. The
@@ -746,6 +789,12 @@ pub struct RadioConfig {
 /// the muted ink — without the host writing its own rows. The default is
 /// `Body`, the size every list row was set at before roles reached the list.
 ///
+/// `actions` are the verbs bound to this row — see [`RowAction`]. They stand
+/// as buttons at the row's right end, in the order written, and the leading
+/// text elides against the space they leave exactly as it elides against the
+/// scroll bar's gutter. An empty vector is the plain row, laid out as it
+/// always was.
+///
 /// A row is written as a plain string wherever it is only words
 /// (`VirtualListRow: From<String> + From<&str>`). Schema-only; nested in
 /// [`VirtualListConfig`].
@@ -759,11 +808,24 @@ pub struct VirtualListRow {
     /// The type step both runs of this row are set at.
     #[serde(default)]
     pub role: TextRole,
+    /// The verbs bound to this row, drawn as buttons at its right end.
+    #[serde(default)]
+    pub actions: Vec<RowAction>,
+}
+
+impl VirtualListRow {
+    /// The same row carrying `actions` — the builder form, so a row written
+    /// from a plain string still reads as one line.
+    #[must_use]
+    pub fn with_actions(mut self, actions: Vec<RowAction>) -> Self {
+        self.actions = actions;
+        self
+    }
 }
 
 impl From<String> for VirtualListRow {
     fn from(text: String) -> Self {
-        Self { text, trailing: None, role: TextRole::default() }
+        Self { text, trailing: None, role: TextRole::default(), actions: Vec::new() }
     }
 }
 
@@ -1150,6 +1212,23 @@ pub struct RadioSelected {
 #[kind(name = "aether.kit.widget.virtual_list.selected")]
 pub struct VirtualListSelected {
     pub selected_index: u32,
+}
+
+/// `aether.kit.widget.virtual_list.action` — a verb bound to one row of a
+/// virtual list was pressed: `row_index` into the config's `items`,
+/// `action_index` into that row's [`RowAction`] vector. Which list it came from
+/// is the root's `source_mailbox` attribution, exactly as for
+/// [`VirtualListSelected`].
+///
+/// It is not a selection. A press on a row's verb reports this and leaves the
+/// list's selection where it was, so "remove the third skill" costs one press
+/// rather than select-then-remove — which is the whole reason a verb sits on
+/// the row instead of under the list.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[kind(name = "aether.kit.widget.virtual_list.action")]
+pub struct VirtualListAction {
+    pub row_index: u32,
+    pub action_index: u32,
 }
 
 /// `aether.kit.widget.button.clicked` — a button's value-up event, fired once

@@ -112,7 +112,9 @@ use aether_text::{FontMetricsRequest, FontMetricsResult, FontRef, TextCapability
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::{DisplayedEdit, EditPolicy, FontMetricsAdapter, SingleLineLayout, TextEditState};
 use crate::theme::{Theme, ThemeState};
-use crate::{WidgetClipRect, WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame};
+use crate::{
+    ButtonEmphasis, ButtonTone, WidgetClipRect, WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeyboardArm {
@@ -591,6 +593,163 @@ pub(crate) fn pointer_wash(theme: &Theme, state: ThemeState) -> Option<Rgba> {
 /// ring reads without the root holding any per-widget-type visual knowledge.
 pub(crate) fn push_border(items: &mut Vec<WidgetDrawItem>, width: f32, height: f32, thickness: f32, color: Rgba) {
     push_rect_border(items, 0.0, 0.0, width, height, thickness, color);
+}
+
+/// The hairline a button's outline is stroked at.
+pub(crate) const BUTTON_STROKE_THICKNESS: f32 = 1.0;
+
+/// The three inks one (emphasis, tone) pair resolves to: the plate under the
+/// label, the stroke around it, and the label's own colour. `None` is a part
+/// the emphasis does not draw at all — a text button has neither plate nor
+/// stroke, which is what makes it the quietest thing on the screen.
+pub(crate) struct ButtonInk {
+    plate: Option<Rgba>,
+    stroke: Option<Rgba>,
+    label: Rgba,
+}
+
+/// The plate, stroke, and label ink one rank of the button ladder draws in.
+///
+/// The one rule worth stating: on the quiet emphases a *neutral* verb reads in
+/// the primary ink, not in the accent. The accent is the primary action's token
+/// (`designing-a-screen.md` §6), and a screen whose four secondary verbs are
+/// all lettered in it has spent the token again — which is the owner's "a
+/// single yellow button for everything" in a thinner form. A danger verb keeps
+/// its colour at every rank, because what it destroys does not get quieter.
+pub(crate) fn button_ink(theme: &Theme, emphasis: ButtonEmphasis, tone: ButtonTone) -> ButtonInk {
+    let role = match tone {
+        ButtonTone::Neutral => theme.accent,
+        ButtonTone::Danger => theme.error,
+    };
+    let quiet = match tone {
+        ButtonTone::Neutral => theme.text_primary,
+        ButtonTone::Danger => theme.error,
+    };
+    match emphasis {
+        ButtonEmphasis::Filled => ButtonInk { plate: Some(role), stroke: None, label: theme.accent_text },
+        ButtonEmphasis::Tonal => ButtonInk { plate: Some(theme.tonal(role)), stroke: None, label: quiet },
+        ButtonEmphasis::Outlined => ButtonInk {
+            plate: None,
+            stroke: Some(match tone {
+                ButtonTone::Neutral => theme.outline,
+                ButtonTone::Danger => theme.error,
+            }),
+            label: quiet,
+        },
+        ButtonEmphasis::Text => ButtonInk { plate: None, stroke: None, label: quiet },
+    }
+}
+
+/// The label run a `width`-wide button face has room for, and the local x it is
+/// drawn at, relative to that face's own left edge.
+///
+/// The whole label centered when it fits; elided into the frame and *then*
+/// centered when the frame is narrower than the intrinsic, so the margins are
+/// equal at any width and a cut label carries the mark saying so instead of
+/// being sliced by the root's slot clip. Left-padded and whole while the
+/// measurement is still outstanding. `None` when there is nothing to draw: an
+/// empty label, or a frame too narrow to hold even the elision mark.
+///
+/// **The pads are given up before the label is.** A pad each side is what the
+/// *intrinsic* reserves — what a layout should give this button if it can —
+/// not room the draw has to leave inside whatever frame it was actually
+/// handed. Charged against the padded budget alone, a control the size of its
+/// own mark drew **nothing at all**: a `−` does not fit a frame minus two pads,
+/// and neither does the ellipsis that would say it was cut, so `elide_to_width`
+/// answered with the empty string and the ascendancy inset's collapse button
+/// rendered as an empty outlined square. So the padded budget is the preference
+/// and the frame is the limit.
+pub(crate) fn button_run(
+    label: &str,
+    width: f32,
+    theme: &Theme,
+    metrics: Option<&CachedFontMetrics>,
+) -> Option<(String, f32)> {
+    let size = theme.label_size_pixels;
+    let (run, run_x) = metrics.map_or_else(
+        || (String::from(label), theme.pad),
+        |metrics| {
+            let measure = |run: &str| measured_text_width(metrics, run, size);
+            let padded = elide_to_width(label, theme.pad.mul_add(-2.0, width), measure);
+            let run = if padded.is_empty() {
+                elide_to_width(label, width, measure)
+            } else {
+                padded
+            };
+            let run_x = centered_text_x(width, measure(&run));
+            (run, run_x)
+        },
+    );
+    (!run.is_empty()).then_some((run, run_x))
+}
+
+/// The width a button face asks for: its measured label plus one `pad` each
+/// side. The caller owns the "not measured yet" case, because the two that ask
+/// answer it differently — a button reports no intrinsic at all until the
+/// advances land, while a verb inside a list row approximates rather than
+/// occupying no width and letting the name elide into the space it is about to
+/// take.
+pub(crate) fn button_face_width(label: &str, theme: &Theme, metrics: &CachedFontMetrics) -> f32 {
+    theme.pad.mul_add(2.0, measured_text_width(metrics, label, theme.label_size_pixels))
+}
+
+/// One button face: the rect it occupies in its drawer's local coordinates, and
+/// the verb it carries.
+pub(crate) struct ButtonFace<'a> {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub label: &'a str,
+    pub emphasis: ButtonEmphasis,
+    pub tone: ButtonTone,
+}
+
+/// Push a button face — its plate or pointer wash, its stroke, and its
+/// centered, elided label — into `items`.
+///
+/// Shared so that a verb drawn inside another widget's interior (a virtual
+/// list's row actions) is the *same* control as one a layout gave a slot to:
+/// one ladder, one elision rule, one hover answer. A second copy of this draw
+/// would be a second button that drifts from the first.
+pub(crate) fn push_button_face(
+    items: &mut Vec<WidgetDrawItem>,
+    face: &ButtonFace<'_>,
+    theme: &Theme,
+    theme_state: ThemeState,
+    metrics: Option<&CachedFontMetrics>,
+) {
+    let ink = button_ink(theme, face.emphasis, face.tone);
+    match ink.plate {
+        Some(plate) => items.push(quad(face.x, face.y, face.width, face.height, theme.fill(plate, theme_state))),
+        None => {
+            if let Some(wash) = pointer_wash(theme, theme_state) {
+                items.push(quad(face.x, face.y, face.width, face.height, wash));
+            }
+        }
+    }
+    if let Some(stroke) = ink.stroke {
+        push_rect_border(
+            items,
+            face.x,
+            face.y,
+            face.width,
+            face.height,
+            BUTTON_STROKE_THICKNESS,
+            theme.fill(stroke, theme_state),
+        );
+    }
+    if let Some((run, run_x)) = button_run(face.label, face.width, theme, metrics) {
+        items.push(WidgetDrawItem::Text {
+            x: face.x + run_x,
+            y: text_origin_y(face.y, face.height, theme.label_size_pixels),
+            font_id: theme.font_id,
+            text: run,
+            size_pixels: theme.label_size_pixels,
+            color: theme.fill(ink.label, theme_state),
+            clip: None,
+        });
+    }
 }
 
 /// The most rows [`push_triangle`] builds an arrow from. An arrow this size is

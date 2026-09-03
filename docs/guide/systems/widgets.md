@@ -105,6 +105,11 @@ widget sends can misreport it.
   release, so a consumer previews the drag and commits the expensive work
   once.
 
+  `VirtualListAction { row_index, action_index }` reports a verb bound to one
+  list row (see [row verbs](#a-verb-can-sit-on-the-row)) and is deliberately
+  *not* a selection: the press that fires it leaves the list's current row
+  where it was.
+
   `ToggleChanged { on }`, `SegmentedSelected { index }`, `TabSelected
   { index }`, `MenuItemActivated { menu, item }`, and `NumericChanged { value,
   committed }` use that same source-attributed lane; Numeric applies the
@@ -376,8 +381,8 @@ no rows.
 
 ### A row is two columns and a type step
 
-An item is a `VirtualListRow { text, trailing, role }`, and a row that is only
-words is written as one (`VirtualListRow: From<String> + From<&str>`), so
+An item is a `VirtualListRow { text, trailing, role, actions }`, and a row that
+is only words is written as one (`VirtualListRow: From<String> + From<&str>`), so
 `(0..n).map(VirtualListRow::from)` is the whole of the plain case.
 
 `trailing` is the row's **second column**: a version, a count, a price, a key.
@@ -405,8 +410,52 @@ a list of *choices* is read down its fills, and rules on one are chrome. Turn
 it on for a list of *entries*, where a reader has to see which trailing belongs
 to which name.
 
-The reported intrinsic counts both columns and the gap between them, so a slot
+The reported intrinsic counts every column and the gaps between them, so a slot
 sized from it holds the whole row rather than only its name.
+
+### A verb can sit on the row
+
+A row's `actions` are the verbs bound to *that* row — the `×` that unbinds this
+skill, the `Change gem` that re-picks this one:
+
+```rust
+use aether_kit_widget::{RowAction, VirtualListRow};
+
+let row = VirtualListRow::from(name)
+    .with_actions(vec![RowAction::text("Change gem"), RowAction::danger("×")]);
+```
+
+Each is drawn as a **real button** at the row's right end — the kit's own button
+face, so a row verb has the same `ButtonEmphasis` / `ButtonTone` ladder, the
+same measured-label-plus-two-pads width, the same elision, and the same hover /
+pressed answer a `ButtonConfig` draws with. They are written left to right, so
+the verb written last is the one at the row's edge.
+
+The block is the row's **third column**, reserved before the text exactly as
+the second one is: the widest verb block among the realized rows is the column
+every row gives up, so the names elide on one edge, the trailing run ends
+against the verbs rather than under them, and the reported intrinsic counts the
+block. A row with no `actions` is laid out precisely as it always was.
+
+A press on a verb arms it and the release-inside fires `VirtualListAction {
+row_index, action_index }` — the button's own press-then-release-inside, so a
+press that slides off the verb cancels, which is what a `×` deserves. It
+reports **no selection**: a press anywhere else on the row still selects as it
+always did, and the whole point of a verb on the row is that removing the third
+skill does not cost a select first. A list that cannot be changed — disabled
+*or* read-only — draws every verb in the disabled state and takes no press on
+one.
+
+Row verbs are **pointer-first**. The kit's keyboard traversal moves between
+widgets (the root's Tab) and a list is one focus stop whose arrows and page
+keys are its selection; there is no focus traversal *into* a row, so no key is
+bound to a row verb. A verb that must be reachable from the keyboard gets a
+button of its own beside the list, bound to the selected row.
+
+Rank a row verb **down**. A column of rows each carrying a filled accent plate
+has spent the primary-action token once per row, which is the same defect as a
+screen of five yellow buttons — `RowAction::text` (quiet, neutral) and
+`RowAction::danger` (quiet, error-inked) are the two the kit names for it.
 
 `initial_selected_index` is an `Option`, and a list whose model holds no
 current item shows none — no row lights up, rather than the first row lighting
