@@ -41,20 +41,19 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_math::Rgba;
-
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, KeyRelease, MouseButton, MouseButtonRelease};
+use aether_math::Rgba;
 use aether_text::FontMetricsResult;
 
 use crate::set::defaults::WidgetDefaults;
 use crate::set::{
     ActivationArms, accept_font_metrics_result, apply_text_theme, centered_text_x, elide_to_width, measured_text_width,
-    pump_text_font_metrics, push_border, quad, reply_if_hidden, text_origin_y,
+    pointer_wash, pump_text_font_metrics, push_border, quad, reply_if_hidden, text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
-use crate::theme::{SetTheme, Theme, ThemeState};
+use crate::theme::{SetTheme, Theme};
 use crate::{
     ButtonClicked, ButtonConfig, ButtonEmphasis, ButtonTone, Collect, SetWidgetState, WidgetControlState,
     WidgetDrawItem, WidgetDrawList, WidgetFrame,
@@ -370,19 +369,6 @@ impl ButtonWidget {
         }
     }
 
-    /// The wash a plateless button shows the pointer with. A filled or tonal
-    /// button carries the hover in its plate ([`Theme::fill`]); an outlined
-    /// or text one has no plate to carry it, so the same role-agnostic
-    /// overlay is drawn as the whole background instead — otherwise the
-    /// quiet ranks would be the two that never answer the pointer.
-    fn wash(&self, theme_state: ThemeState) -> Option<Rgba> {
-        match theme_state {
-            ThemeState::Hover => Some(self.theme.hover_overlay),
-            ThemeState::Pressed => Some(self.theme.pressed_overlay),
-            ThemeState::Normal | ThemeState::Disabled => None,
-        }
-    }
-
     /// The button's local draw: its plate or wash, its stroke, the centered
     /// label, and the keyboard focus ring.
     fn draw_items(&self) -> Vec<WidgetDrawItem> {
@@ -396,7 +382,7 @@ impl ButtonWidget {
         match ink.plate {
             Some(plate) => items.push(quad(0.0, 0.0, width, height, self.theme.fill(plate, theme_state))),
             None => {
-                if let Some(wash) = self.wash(theme_state) {
+                if let Some(wash) = pointer_wash(&self.theme, theme_state) {
                     items.push(quad(0.0, 0.0, width, height, wash));
                 }
             }
