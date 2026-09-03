@@ -751,7 +751,7 @@ mod tests {
             for index in 0..strip.labels.len() {
                 let left = slot_left(&widths, 0.0, index);
                 assert_eq!(
-                    strip.tab_at_pointer_x(left + widths[index] * 0.5),
+                    strip.tab_at_pointer_x(widths[index].mul_add(0.5, left)),
                     Some(index),
                     "the middle of tab {index}"
                 );

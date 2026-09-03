@@ -182,6 +182,18 @@ const DEFAULT_LIFETIME_FRAMES: u32 = 240;
 /// dialog.
 const PAD_UNITS: u8 = 1;
 
+/// How far clear of the severity bar the line starts, in spacing units.
+///
+/// Round-8 note 17: "toaster left text padding can be increased a tad. Feels
+/// kinda like there's not enough breathing room." One unit put the first
+/// glyph four pixels from three pixels of colour, and the two read as one
+/// crowded edge; two units separate the bar from the sentence it is
+/// colouring. It is the *left* inset alone — the bar already occupies the
+/// plate's left edge, so matching the right pad to it would push the line
+/// off-centre rather than balance it — and it is charged against the wrap
+/// measure, so the plate still grows from the text it actually holds.
+const TEXT_INSET_UNITS: u8 = 2;
+
 /// How tall one wrapped line's box is, as a multiple of its own type size.
 const LINE_LEADING: f32 = 1.4;
 
@@ -248,9 +260,16 @@ impl ToastWidget {
     }
 
     /// The width a notice's text has to run in: the region minus the severity
-    /// bar and one unit of padding either side of the line.
+    /// bar, the inset that holds the line clear of it, and the plate's own
+    /// padding at the right edge.
     fn text_width_budget(&self) -> f32 {
-        self.theme.space(PAD_UNITS).mul_add(-2.0, self.frame.width - self.bar_width()).max(0.0)
+        (self.frame.width - self.text_left() - self.theme.space(PAD_UNITS)).max(0.0)
+    }
+
+    /// The local x a notice's line starts at: past the severity bar and the
+    /// inset that keeps it off the colour.
+    fn text_left(&self) -> f32 {
+        self.bar_width() + self.theme.space(TEXT_INSET_UNITS)
     }
 
     /// The severity bar's width. Derived from the spacing unit rather than
@@ -354,7 +373,7 @@ impl ToastWidget {
             let mut line_top = top + pad;
             for line in self.wrapped(notice) {
                 items.push(WidgetDrawItem::Text {
-                    x: bar + pad,
+                    x: self.text_left(),
                     y: text_origin_y(line_top, line_height, size),
                     font_id: self.theme.font_id,
                     text: line,
@@ -611,6 +630,44 @@ mod tests {
         assert!(heading.plate_heights()[0] > body.plate_heights()[0], "so the plate grows with the type");
         for line in &heading.wrapped(&heading.standing[0]) {
             assert!(heading.text_width(line) <= heading.text_width_budget(), "{line:?} ran past the region's width");
+        }
+    }
+
+    #[test]
+    fn a_notices_line_starts_two_units_clear_of_the_severity_bar() {
+        // Tripwire: the owner's round-8 note 17 — "toaster left text padding
+        // can be increased a tad. Feels kinda like there's not enough
+        // breathing room." The bar and the line were one spacing unit apart,
+        // which at the four-pixel grid is three pixels of colour and four of
+        // air before the first glyph. The inset has to reach the wrap too:
+        // widening the gap without taking it out of the measure runs the last
+        // word off the plate, which is the round-3 complaint this region was
+        // rebuilt to answer.
+        let mut toasts = region(3, 0);
+        assert!(toasts.raise(notice(
+            "Not enough passive points remain to allocate the whole path; the studio allocated as far as the \
+             budget reached and stopped there.",
+        )));
+        let inset = toasts.theme.space(2);
+        let lines: Vec<(f32, String)> = toasts
+            .overlay_items()
+            .iter()
+            .filter_map(|item| match item {
+                WidgetDrawItem::Text { x, text, .. } => Some((*x, text.clone())),
+                _ => None,
+            })
+            .collect();
+        assert!(lines.len() > 1, "the notice wrapped: {lines:?}");
+        for (x, line) in &lines {
+            assert!(
+                (x - (toasts.bar_width() + inset)).abs() < f32::EPSILON,
+                "{line:?} starts at {x}, not two units past the {} bar",
+                toasts.bar_width(),
+            );
+            assert!(
+                x + toasts.text_width(line) <= toasts.frame.width - toasts.theme.space(PAD_UNITS) + 1e-3,
+                "{line:?} runs off the plate the wider inset left it",
+            );
         }
     }
 
