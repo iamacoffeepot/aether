@@ -253,7 +253,8 @@ fn button_spec(subname: &str, state: WidgetControlState) -> WidgetChildSpec {
         kind: WidgetKind::Button,
         origin: [0.0, 0.0],
         clip: None,
-        config: ButtonConfig { label: "Run".to_owned(), theme: Theme::DEFAULT, state }.encode_into_bytes(),
+        config: ButtonConfig { label: "Run".to_owned(), theme: Theme::DEFAULT, state, ..ButtonConfig::default() }
+            .encode_into_bytes(),
     }
 }
 

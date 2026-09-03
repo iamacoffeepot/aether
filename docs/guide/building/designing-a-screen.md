@@ -340,6 +340,17 @@ and each is the general form of a specific complaint.
   the estimate drew. If the measure is not available yet, draw nothing
   rather than a guessed box. (Owner, round 3, live: "the text is going
   outside the bounds of the box.")
+- **Buttons are ranked, and only one per region is filled.** Material's
+  emphasis ladder — filled, filled tonal, outlined, text — exists because a
+  region of five equally loud verbs has no primary verb. One filled verb per
+  region (the thing the reader came to do); the verbs beside it are tonal or
+  outlined; the ones a reader rarely wants are text. A verb that throws work
+  away — delete, discard, reset — is outlined in the **error** colour, not
+  filled, so the loudest thing on the screen is never the destructive one. A
+  dialog's action row is one filled confirm and a text cancel. In the kit this
+  is `ButtonConfig { emphasis, tone }`; the rank changes the look and nothing
+  about the size or the target. (Owner, round 8: "a single yellow button for
+  everything is kinda meh.")
 - **Generate what can be generated.** A name, a summary line, a default:
   when the data implies one ("Wander of Kinetic Blast Ranger" from weapon,
   skill, and class), offer it rather than an empty field.

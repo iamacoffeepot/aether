@@ -701,7 +701,7 @@ fn reference_stack(theme: &Theme) -> Vec<WidgetChildSpec> {
         spec(
             "button",
             WidgetKind::Button,
-            ButtonConfig { label: String::from("Apply"), theme: theme.clone(), state: WidgetControlState::default() }
+            ButtonConfig { label: String::from("Apply"), theme: theme.clone(), ..ButtonConfig::default() }
                 .encode_into_bytes(),
         ),
     ]
