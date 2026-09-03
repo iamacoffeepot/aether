@@ -28,6 +28,23 @@
 //! the whole item vector, which the list reports as its intrinsic width so a
 //! column can be sized to what it holds.
 //!
+//! # A row is two columns and a type step
+//!
+//! A [`VirtualListRow`] is its `text`, an optional `trailing` run, and the
+//! `role` both are set at. The trailing run is the row's **second column**: a
+//! version, a count, a key — set right-aligned against the row's own right
+//! pad, with the widest trailing run among the *realized* rows deciding the
+//! column every one of them shares. The leading run elides into what is left
+//! and the trailing never does, because a name cut short still names the thing
+//! while an amount cut short is a wrong number. `role` lets a list carry a
+//! name at [`TextRole::Body`] and a detail at [`TextRole::Caption`] — muted,
+//! like a caption-role label — without the host drawing its own rows.
+//!
+//! [`VirtualListConfig::ruled`] adds a hairline between rows, `n - 1` of them
+//! for `n` realized rows. It is off by default: a list of choices is read down
+//! its fills, and rules on one are chrome. It is for a list of *entries*,
+//! where a reader has to see which trailing belongs to which name.
+//!
 //! # The scroll bar
 //!
 //! Round-4 note 3 — "binding a gem isn't scrollable, doesn't have a scroll bar
@@ -47,6 +64,7 @@ use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::keycode::{KEY_DOWN, KEY_PAGE_DOWN, KEY_PAGE_UP, KEY_UP};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease, MouseMove, MouseWheel};
+use aether_math::Rgba;
 use aether_text::FontMetricsResult;
 
 use crate::set::defaults::WidgetDefaults;
@@ -58,8 +76,8 @@ use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{SetTheme, TextRole, Theme, ThemeState};
 use crate::{
-    Collect, SetWidgetState, VirtualListConfig, VirtualListSelected, WidgetControlState, WidgetDrawItem,
-    WidgetDrawList, WidgetFrame,
+    Collect, SetWidgetState, VirtualListConfig, VirtualListRow, VirtualListSelected, WidgetControlState,
+    WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +102,16 @@ const SCROLL_BAR_UNITS: u8 = 2;
 /// row that runs up against it reads as text the bar is printing over
 /// (round-5 note 8).
 const SCROLL_BAR_GAP_UNITS: u8 = 1;
+
+/// How much clear space stands between a row's leading run and its trailing
+/// column, in spacing units. One — enough that the two read as two columns,
+/// little enough that a short name and its amount still read as one row.
+const TRAILING_GAP_UNITS: u8 = 1;
+
+/// How thick the rule between two rows of a `ruled` list is. A hairline: the
+/// rule is there to separate entries, and anything heavier reads as a table
+/// border the rows are trapped in.
+const ROW_RULE_THICKNESS: f32 = 1.0;
 
 /// The shortest a thumb may get, as a multiple of the track's width. A list of
 /// thousands would otherwise compute a thumb a pixel tall — unreadable, and
@@ -183,7 +211,7 @@ enum SelectionMove {
 /// A fixed-row virtual list. The item vector is retained, but every collect
 /// allocates draw items for only the current `VisibleRowWindow`.
 pub struct VirtualListWidget {
-    items: Vec<String>,
+    items: Vec<VirtualListRow>,
     /// The one line drawn in place of rows while `items` is empty; empty text
     /// draws nothing.
     empty_text: String,
@@ -198,6 +226,8 @@ pub struct VirtualListWidget {
     /// to the width it actually has, and the list reports the widest row it
     /// holds as its intrinsic width.
     font_metrics: FontMetricsAdapter,
+    /// Whether a hairline stands between rows.
+    ruled: bool,
     /// The widest measured row, remembered across frames. A virtual list
     /// exists so that a frame never touches every item, and the intrinsic
     /// width is the one number that has to — so it is measured once and
@@ -311,11 +341,51 @@ impl VirtualListWidget {
         self.widest_row_width = None;
     }
 
-    /// The width a row's text actually has: the row it is drawn in, less one
-    /// `pad` at each end, so an elided row does not touch either edge of the
+    /// The width a row's two columns share: the row they are drawn in, less
+    /// one `pad` at each end, so nothing in a row touches either edge of the
     /// space it was given.
     fn text_width_budget(&self) -> f32 {
         self.theme.pad.mul_add(-2.0, self.row_width()).max(0.0)
+    }
+
+    /// The width the *leading* run has once the trailing column is reserved:
+    /// the row's budget less that column and one spacing unit of clear space.
+    /// A window with no trailing runs reserves nothing, so an ordinary list is
+    /// laid out exactly as it was.
+    ///
+    /// This is why the leading elides and the trailing does not: the trailing
+    /// column is subtracted *first* and the name takes what is left. An amount
+    /// cut to `12…` is worse than no amount at all, while a name cut to
+    /// `Increased Critic…` still names the thing.
+    fn leading_width_budget(&self, trailing_column: f32) -> f32 {
+        let reserved = if trailing_column > 0.0 {
+            trailing_column + self.theme.space(TRAILING_GAP_UNITS)
+        } else {
+            0.0
+        };
+        (self.text_width_budget() - reserved).max(0.0)
+    }
+
+    /// One row's measured trailing width, or `0.0` for a row without one and
+    /// while the font's advances are still in flight.
+    fn trailing_width(&self, row: &VirtualListRow) -> f32 {
+        let (Some(trailing), Some(metrics)) = (row.trailing.as_deref(), self.font_metrics.resolved()) else {
+            return 0.0;
+        };
+        measured_text_width(metrics, trailing, self.theme.text_size_pixels(row.role))
+    }
+
+    /// The trailing column this window's rows share: the widest trailing run
+    /// among the rows **on screen**. One column for the realized window rather
+    /// than for the whole vector, because the reader compares what they can
+    /// see — and a column sized by an off-screen row would leave a visible gap
+    /// nothing stands in. `0.0` when no realized row has a trailing run, which
+    /// is the ordinary single-column list.
+    fn trailing_column(&self, window: VisibleRowWindow) -> f32 {
+        self.items[window.first_index..window.end_exclusive_index]
+            .iter()
+            .map(|row| self.trailing_width(row))
+            .fold(0.0_f32, f32::max)
     }
 
     /// How wide a row is: the frame less whatever the scroll bar's gutter
@@ -426,12 +496,10 @@ impl VirtualListWidget {
     /// way — this is what stops the clip from being the *first* thing that
     /// cuts, because a hard clip cuts mid-glyph and an ellipsis says a name
     /// was too long.
-    fn fitted_text(&self, text: &str, size_pixels: f32) -> String {
+    fn fitted_text(&self, text: &str, size_pixels: f32, budget: f32) -> String {
         self.font_metrics.resolved().map_or_else(
             || String::from(text),
-            |metrics| {
-                elide_to_width(text, self.text_width_budget(), |run| measured_text_width(metrics, run, size_pixels))
-            },
+            |metrics| elide_to_width(text, budget, |run| measured_text_width(metrics, run, size_pixels)),
         )
     }
 
@@ -460,7 +528,9 @@ impl VirtualListWidget {
     }
 
     /// The widest row in the whole item vector, measured once per change to
-    /// the items or the font and cached.
+    /// the items or the font and cached. A row with a trailing run is as wide
+    /// as both its columns and the gap between them: a slot sized from this
+    /// has to hold the whole row, not just its name.
     fn widest_row_width(&mut self) -> Option<f32> {
         if let Some(widest) = self.widest_row_width {
             return Some(widest);
@@ -469,10 +539,48 @@ impl VirtualListWidget {
         if self.items.is_empty() {
             return None;
         }
-        let size = self.theme.label_size_pixels;
-        let widest = self.items.iter().map(|item| measured_text_width(metrics, item, size)).fold(0.0_f32, f32::max);
+        let gap = self.theme.space(TRAILING_GAP_UNITS);
+        let widest = self
+            .items
+            .iter()
+            .map(|row| {
+                let size = self.theme.text_size_pixels(row.role);
+                let trailing =
+                    row.trailing.as_deref().map_or(0.0, |trailing| gap + measured_text_width(metrics, trailing, size));
+                measured_text_width(metrics, &row.text, size) + trailing
+            })
+            .fold(0.0_f32, f32::max);
         self.widest_row_width = Some(widest);
         Some(widest)
+    }
+
+    /// The ink both of a row's runs are set in: the selected row's own ink, or
+    /// the role's — a caption row is a quieter detail line and draws muted,
+    /// exactly as a caption-role label does.
+    fn row_ink(&self, row: &VirtualListRow, selected: bool) -> Rgba {
+        let base = match (selected, row.role) {
+            (true, _) => self.theme.selection_text,
+            (false, TextRole::Caption) => self.theme.text_muted,
+            (false, _) => self.theme.text_primary,
+        };
+        self.theme.fill(base, self.state.supporting_theme_state(false))
+    }
+
+    /// The hairlines standing between the realized rows of a `ruled` list —
+    /// `n - 1` of them for `n` rows, each on the row boundary it divides. A
+    /// rule under the last row would underline the list rather than separate
+    /// anything, and one above the first would be a second top edge.
+    fn rule_items(&self, visible_row_count: usize, row_height: f32, row_width: f32) -> Vec<WidgetDrawItem> {
+        if !self.ruled || visible_row_count < 2 {
+            return Vec::new();
+        }
+        (1..visible_row_count)
+            .map(|row_offset| {
+                #[allow(clippy::cast_precision_loss)]
+                let y = row_offset as f32 * row_height;
+                quad(0.0, y, row_width, ROW_RULE_THICKNESS, self.theme.outline)
+            })
+            .collect()
     }
 
     /// The empty state: one caption-role, muted line at the top of the
@@ -487,7 +595,7 @@ impl VirtualListWidget {
             x: self.theme.pad,
             y: text_origin_y(0.0, self.theme.row_height.min(self.frame.height), size),
             font_id: self.theme.font_id,
-            text: self.fitted_text(&self.empty_text, size),
+            text: self.fitted_text(&self.empty_text, size, self.text_width_budget()),
             size_pixels: size,
             color: self.theme.fill(self.theme.text_muted, self.state.supporting_theme_state(false)),
             clip: None,
@@ -508,7 +616,9 @@ impl VirtualListWidget {
         };
 
         let row_width = self.row_width();
-        let mut items = Vec::with_capacity(visible_row_count.saturating_mul(2).saturating_add(8));
+        let trailing_column = self.trailing_column(window);
+        let leading_budget = self.leading_width_budget(trailing_column);
+        let mut items = Vec::with_capacity(visible_row_count.saturating_mul(3).saturating_add(8));
         for (row_offset, item) in self.items[window.first_index..window.end_exclusive_index].iter().enumerate() {
             #[allow(clippy::cast_precision_loss)]
             let row_y = row_offset as f32 * row_height;
@@ -525,21 +635,34 @@ impl VirtualListWidget {
                 self.state.supporting_theme_state(false)
             };
             items.push(quad(0.0, row_y, row_width, row_height, self.theme.fill(base, row_state)));
-            let text_base = if selected {
-                self.theme.selection_text
-            } else {
-                self.theme.text_primary
-            };
+
+            let size = self.theme.text_size_pixels(item.role);
+            let ink = self.row_ink(item, selected);
             items.push(WidgetDrawItem::Text {
                 x: self.theme.pad,
-                y: text_origin_y(row_y, row_height, self.theme.label_size_pixels),
+                y: text_origin_y(row_y, row_height, size),
                 font_id: self.theme.font_id,
-                text: self.fitted_text(item, self.theme.label_size_pixels),
-                size_pixels: self.theme.label_size_pixels,
-                color: self.theme.fill(text_base, self.state.supporting_theme_state(false)),
+                text: self.fitted_text(&item.text, size, leading_budget),
+                size_pixels: size,
+                color: ink,
                 clip: None,
             });
+            // The trailing run is set flush against the row's right pad, so
+            // every row's second column ends on one edge. It is drawn whole:
+            // the column was reserved for the widest of them.
+            if let Some(trailing) = item.trailing.as_deref().filter(|_| trailing_column > 0.0) {
+                items.push(WidgetDrawItem::Text {
+                    x: row_width - self.theme.pad - self.trailing_width(item),
+                    y: text_origin_y(row_y, row_height, size),
+                    font_id: self.theme.font_id,
+                    text: String::from(trailing),
+                    size_pixels: size,
+                    color: ink,
+                    clip: None,
+                });
+            }
         }
+        items.extend(self.rule_items(visible_row_count, row_height, row_width));
         if let Some(bar) = self.scroll_bar() {
             items.extend(self.scroll_bar_items(bar));
         }
@@ -573,7 +696,11 @@ impl WidgetDefaults for VirtualListWidget {
 ///
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
-/// its `VirtualListConfig` again to replace the item vector or viewport.
+/// its `VirtualListConfig` again to replace the item vector or viewport. An
+/// item is a `VirtualListRow { text, trailing, role }` — write plain strings
+/// through `VirtualListRow::from` for a one-column list, set `trailing` for a
+/// second right-aligned column, and set `ruled` on the config to divide the
+/// rows with a hairline.
 #[actor(instanced, composable, handler_set(WidgetDefaults))]
 impl WasmActor for VirtualListWidget {
     type Config = VirtualListConfig;
@@ -596,6 +723,7 @@ impl WasmActor for VirtualListWidget {
             frame: WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
             state: InteractionState::new(config.state),
             pressed: false,
+            ruled: config.ruled,
             font_metrics: FontMetricsAdapter::new(font_id),
             widest_row_width: None,
             thumb_grab_pixels: None,
@@ -613,6 +741,7 @@ impl WasmActor for VirtualListWidget {
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: VirtualListConfig) {
         self.items = config.items;
         self.empty_text = config.empty_text;
+        self.ruled = config.ruled;
         self.visible_row_count = usize_from_u32(config.visible_row_count);
         self.selected_index = initial_selection(config.initial_selected_index, self.items.len());
         self.first_index = 0;
@@ -810,10 +939,11 @@ mod tests {
     use alloc::vec;
 
     fn list(item_count: usize, visible_row_count: usize, selected_index: usize) -> VirtualListWidget {
-        let items = (0..item_count).map(|index| format!("row {index}")).collect();
+        let items = (0..item_count).map(|index| VirtualListRow::from(format!("row {index}"))).collect();
         let selected_index = (item_count > 0).then_some(selected_index.min(item_count.saturating_sub(1)));
         VirtualListWidget {
             items,
+            ruled: false,
             empty_text: String::new(),
             selected_index,
             first_index: 0,
@@ -1026,11 +1156,11 @@ mod tests {
         // one pad each side, with the mark inside that budget.
         let long = String::from("a name far too long for this narrow list");
         let mut unmeasured = list(1, 5, 0);
-        unmeasured.items = alloc::vec![long.clone()];
+        unmeasured.items = alloc::vec![VirtualListRow::from(long.clone())];
         assert_eq!(row_text(&unmeasured), alloc::vec![long.clone()], "no metrics, no elision");
 
         let mut widget = measured_list(1, 5);
-        widget.items = alloc::vec![long];
+        widget.items = alloc::vec![VirtualListRow::from(long)];
         let drawn = row_text(&widget);
         assert!(drawn[0].ends_with(ELLIPSIS), "the cut row says it was cut: {drawn:?}");
         let size = widget.theme.label_size_pixels;
@@ -1038,6 +1168,92 @@ mod tests {
         assert!(
             measured_text_width(metrics, &drawn[0], size) <= widget.text_width_budget(),
             "and the mark is inside the budget, not appended past it: {drawn:?}",
+        );
+    }
+
+    /// The drawn runs of a list as `(x, text)`, in draw order — a row's
+    /// leading run then its trailing one.
+    fn drawn_runs(widget: &VirtualListWidget) -> Vec<(f32, String)> {
+        widget
+            .draw_items()
+            .into_iter()
+            .filter_map(|item| match item {
+                WidgetDrawItem::Text { x, text, .. } => Some((x, text)),
+                WidgetDrawItem::Quad { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn one_trailing_column_serves_every_visible_row_and_only_the_name_elides() {
+        // Tripwire: two failures the second column exists to prevent. If each
+        // row placed its own trailing run against the right pad, the two would
+        // still line up — but the *leading* budget would differ per row, so the
+        // names would elide at ragged points; and if the trailing were elided
+        // like the leading, a reader would get `21/…`, which is a wrong number
+        // rather than a shortened one. The column is the widest trailing among
+        // the visible rows, subtracted from every row's leading budget first.
+        let mut widget = measured_list(2, 5);
+        widget.items = vec![
+            VirtualListRow {
+                text: String::from("a gem name far too long for this narrow list"),
+                trailing: Some(String::from("21/20")),
+                role: TextRole::Body,
+            },
+            VirtualListRow { text: String::from("short"), trailing: Some(String::from("1")), role: TextRole::Body },
+        ];
+        widget.forget_measurements();
+
+        let size = widget.theme.label_size_pixels;
+        let (column, wide_width, narrow_width) = {
+            let metrics = widget.font_metrics.resolved().expect("the test table is installed");
+            let wide = measured_text_width(metrics, "21/20", size);
+            (wide, wide, measured_text_width(metrics, "1", size))
+        };
+        assert!(narrow_width < wide_width, "the two trailing runs are different widths");
+        assert_eq!(widget.trailing_column(widget.window()), column, "the widest of them is the column");
+
+        let runs = drawn_runs(&widget);
+        assert_eq!(runs.len(), 4, "two rows, two runs each: {runs:?}");
+        assert_eq!(runs[1].1, "21/20");
+        assert_eq!(runs[3].1, "1", "the narrow amount is drawn whole, not padded and not cut");
+        let right_edge = widget.row_width() - widget.theme.pad;
+        assert!((runs[1].0 + wide_width - right_edge).abs() < f32::EPSILON, "the wide amount ends at the right pad");
+        assert!((runs[3].0 + narrow_width - right_edge).abs() < f32::EPSILON, "and so does the narrow one");
+
+        assert!(runs[0].1.ends_with(ELLIPSIS), "the name gave way: {:?}", runs[0].1);
+        let budget = widget.leading_width_budget(column);
+        assert_eq!(budget, widget.text_width_budget() - column - widget.theme.space(TRAILING_GAP_UNITS));
+        let metrics = widget.font_metrics.resolved().expect("the test table is installed");
+        assert!(measured_text_width(metrics, &runs[0].1, size) <= budget, "and stopped clear of the column");
+    }
+
+    #[test]
+    fn a_ruled_list_draws_one_hairline_between_each_pair_of_realized_rows() {
+        // Tripwire: `n - 1`, never `n`. A rule under the last row underlines
+        // the list rather than dividing anything, and a rule above the first
+        // draws a second top edge on the frame the panel already bounded.
+        let mut widget = list(3, 5, 0);
+        assert!(widget.rule_items(3, 24.0, 100.0).is_empty(), "an unruled list draws none");
+
+        widget.ruled = true;
+        let rules = widget.rule_items(3, 24.0, 100.0);
+        assert_eq!(rules.len(), 2, "three rows, two rules");
+        for (index, rule) in rules.iter().enumerate() {
+            let WidgetDrawItem::Quad { x, y, width, height, color, .. } = rule else {
+                panic!("a rule is a quad: {rule:?}");
+            };
+            #[allow(clippy::cast_precision_loss)]
+            let expected_y = (index + 1) as f32 * 24.0;
+            assert_eq!((*x, *y, *width, *height), (0.0, expected_y, 100.0, ROW_RULE_THICKNESS));
+            assert_eq!(*color, widget.theme.outline, "a divider is the outline role, not a colour of its own");
+        }
+
+        assert!(widget.rule_items(1, 24.0, 100.0).is_empty(), "one row has nothing to divide");
+        assert_eq!(
+            widget.draw_items().iter().filter(|item| matches!(item, WidgetDrawItem::Quad { height, .. } if (*height - ROW_RULE_THICKNESS).abs() < f32::EPSILON)).count(),
+            2,
+            "and the rules reach the list's own draw",
         );
     }
 
@@ -1050,7 +1266,8 @@ mod tests {
         // gutter is the track plus one spacing unit, and both the fill and the
         // elision budget stop at it.
         let mut widget = measured_list(200, 5);
-        widget.items = (0..200).map(|index| format!("a skill gem with a long name {index}")).collect();
+        widget.items =
+            (0..200).map(|index| VirtualListRow::from(format!("a skill gem with a long name {index}"))).collect();
         widget.forget_measurements();
         let bar = widget.scroll_bar().expect("a vector past its viewport stands a bar");
 
@@ -1084,13 +1301,13 @@ mod tests {
         // the column under them. It is also the one thing here that touches
         // every item, so it is cached until an input to it changes.
         let mut widget = measured_list(40, 5);
-        widget.items[17] = String::from("the widest row of them all");
+        widget.items[17] = VirtualListRow::from("the widest row of them all");
         widget.forget_measurements();
 
         let size = widget.theme.label_size_pixels;
         let expected = {
             let metrics = widget.font_metrics.resolved().expect("the test table is installed");
-            widget.theme.pad.mul_add(2.0, measured_text_width(metrics, &widget.items[17], size))
+            widget.theme.pad.mul_add(2.0, measured_text_width(metrics, &widget.items[17].text, size))
                 + widget.track_width()
                 + widget.theme.space(SCROLL_BAR_GAP_UNITS)
         };

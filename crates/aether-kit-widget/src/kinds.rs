@@ -725,13 +725,56 @@ pub struct RadioConfig {
     pub state: WidgetControlState,
 }
 
+/// One row of a [`VirtualListConfig`]: what it says, what it says at its right
+/// edge, and which step of the type scale it is set at.
+///
+/// `trailing` is the row's **second column** — a version, a count, a price, a
+/// key — set in its own right-aligned column at the row's right edge. The
+/// column is as wide as the widest trailing run among the *visible* rows, so
+/// the numbers line up and a reader comparing two of them reads down one edge
+/// instead of hunting through two sentences. The leading `text` elides into
+/// whatever is left; the trailing run never does, because a truncated amount
+/// is worse than no amount.
+///
+/// `role` sets the row's type step, so a list can carry a name at
+/// [`TextRole::Body`] and a detail at [`TextRole::Caption`] — which draws in
+/// the muted ink — without the host writing its own rows. The default is
+/// `Body`, the size every list row was set at before roles reached the list.
+///
+/// A row is written as a plain string wherever it is only words
+/// (`VirtualListRow: From<String> + From<&str>`). Schema-only; nested in
+/// [`VirtualListConfig`].
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct VirtualListRow {
+    pub text: String,
+    /// The run set in the row's right-hand column, or `None` for a row that is
+    /// only its leading text.
+    #[serde(default)]
+    pub trailing: Option<String>,
+    /// The type step both runs of this row are set at.
+    #[serde(default)]
+    pub role: TextRole,
+}
+
+impl From<String> for VirtualListRow {
+    fn from(text: String) -> Self {
+        Self { text, trailing: None, role: TextRole::default() }
+    }
+}
+
+impl From<&str> for VirtualListRow {
+    fn from(text: &str) -> Self {
+        Self::from(String::from(text))
+    }
+}
+
 /// `aether.kit.widget.virtual_list.config` — a fixed-row viewport over a
 /// potentially large item vector. The panel fixes the viewport height from
 /// `visible_row_count`; the actor realizes only that bounded row window.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.kit.widget.virtual_list.config")]
 pub struct VirtualListConfig {
-    pub items: Vec<String>,
+    pub items: Vec<VirtualListRow>,
     /// The row selected at boot, or `None` for no selection — a list whose
     /// model holds no current item shows none, rather than lighting its
     /// first row as if it did.
@@ -742,6 +785,15 @@ pub struct VirtualListConfig {
     /// string draws nothing.
     #[serde(default)]
     pub empty_text: String,
+    /// Whether a one-pixel `theme.outline` rule stands between rows. `false`
+    /// (the default) is the plain list: rows are told apart by their own fills
+    /// and the selection. `true` is for a list whose rows are *entries* rather
+    /// than choices — a row of two columns, or a row long enough that the eye
+    /// loses which trailing belongs to which name. The rule falls between
+    /// rows only: `n` realized rows get `n - 1` rules, so the list is never
+    /// underlined at its own bottom edge.
+    #[serde(default)]
+    pub ruled: bool,
     pub theme: Theme,
     #[serde(default)]
     pub state: WidgetControlState,
