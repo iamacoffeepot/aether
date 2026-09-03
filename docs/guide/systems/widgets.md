@@ -213,11 +213,24 @@ places it and never pushes the run left of one `pad`. A widget that has not
 resolved its font's metrics yet draws left-padded rather than guessing, so the
 label never jumps when the measurement lands.
 
+`set::text_cap_height(size_pixels)` is that cap band as a number, for a caller
+placing something *beside* a run — an inline icon, a rule, a swatch — that has
+to stand exactly as tall as the letters do.
+
+**Never send a glyph the face lacks.** Nothing in the text path errors or skips
+one: `aether.text` looks the character up in the font's cmap, gets glyph index
+`0`, and rasterizes `.notdef` — in the vendored RobotoMono, a hollow box —
+while the kit's measurement (`CachedFontMetrics::measure`, the same table every
+widget sizes from) falls back to the `.notdef` advance. So an unsupported
+character is silently a box of the right width in every box measured around it.
+A host that wants `⌘` in a label ships a face that has it, or writes
+`Command`.
+
 ## Fixed-row virtual lists
 
 `VirtualListConfig { items, initial_selected_index, visible_row_count,
-empty_text, theme, state }` retains the complete string vector while realizing
-at most `visible_row_count` rows. The panel fixes the slot height at
+empty_text, ruled, theme, state }` retains the complete row vector while
+realizing at most `visible_row_count` rows. The panel fixes the slot height at
 `theme.row_height * visible_row_count` and clips the slot to that viewport;
 an empty item vector or zero-row viewport is not pointer- or focus-eligible.
 This bounded realization is the intended path for hundreds or thousands of
@@ -294,6 +307,40 @@ item, it is measured once and re-measured only when the items, the font, or the
 type scale change. It is `None` until the metrics resolve and for a list with
 no rows.
 
+### A row is two columns and a type step
+
+An item is a `VirtualListRow { text, trailing, role }`, and a row that is only
+words is written as one (`VirtualListRow: From<String> + From<&str>`), so
+`(0..n).map(VirtualListRow::from)` is the whole of the plain case.
+
+`trailing` is the row's **second column**: a version, a count, a price, a key.
+It is set right-aligned against the row's own right pad, and the widest
+trailing run among the **realized** rows decides the column every visible row
+shares, with one spacing unit of clear space before it. The column is
+subtracted from the leading budget *first*, so the two rules that follow are
+one rule: the **leading run elides** into what is left (the same
+`elide_to_width` cut, with the ellipsis), and the **trailing run never does** —
+a name cut short still names the thing, while an amount cut to `21/…` is a
+wrong number. The column is the realized window's rather than the whole
+vector's because a reader compares what is on screen, and a column sized by an
+off-screen row leaves a gap nothing stands in.
+
+`role` sets the type step both runs are drawn at, defaulting to
+`TextRole::Body`. A `Caption` row draws at the caption size in the muted ink,
+exactly as a caption-role label does, so a list can carry a name and a detail
+line without the host drawing its own rows. A selected row keeps
+`theme.selection_text` whatever its role.
+
+`ruled: true` puts a one-pixel `theme.outline` hairline between rows — `n - 1`
+of them for `n` realized rows, never a rule under the last one (that underlines
+the list) or above the first (that is a second top edge). It is off by default:
+a list of *choices* is read down its fills, and rules on one are chrome. Turn
+it on for a list of *entries*, where a reader has to see which trailing belongs
+to which name.
+
+The reported intrinsic counts both columns and the gap between them, so a slot
+sized from it holds the whole row rather than only its name.
+
 `initial_selected_index` is an `Option`, and a list whose model holds no
 current item shows none — no row lights up, rather than the first row lighting
 as if it had been chosen. The selected row, when there is one, fills with
@@ -321,6 +368,21 @@ Up/Down walk that highlight by the keyboard, scrolling the realized window only
 enough to keep it visible, exactly as a virtual list reveals its selection. A
 longer `options` vector than `open_row_count` therefore scrolls inside the
 realized rows rather than growing the list.
+
+The dropdown reports an **intrinsic** like every other content-sized control:
+`[widest run the closed row can hold + 2 × pad + the chevron column,
+theme.row_height]`, where the chevron column is the mark (half the label size)
+plus one spacing unit of clear space before it. The widest *run* is every
+option **and the placeholder** — the placeholder is what the row reads before
+anything is chosen, so a cell that fitted only the options would clip the one
+thing the control says at rest — and it is the widest rather than the current
+one, so choosing does not resize the cell under the reader. Like the label's
+and the list's, it is `None` until the theme font's advances resolve (the
+dropdown drives the same single-flight `FontMetricsRequest`) and is
+re-reported when the options, the font, or the type scale change. Before it
+existed a host had to give every dropdown a full-width row of its own, which is
+right for a control that is its row's whole subject and wrong for a sort
+control that belongs beside the field it orders.
 
 While the list is open every left press is the dropdown's: a press on a row
 takes that option and closes, a press anywhere else closes without a change.
@@ -419,13 +481,29 @@ never takes the title role from the first real line. Neither of these is a
 section: a section boundary stays a **rule**, so a blank row divides two
 paragraphs of one block while a rule divides two blocks.
 
-A section's lines are `TooltipLine { text, role, ink }`, both options `None`
-for that rule. `TooltipSection::new(["Life", "Your health pool."])` takes plain
-strings (`TooltipLine: From<String> + From<&str>`), so a host that only has
-words writes only words. The escapes are for the distinctions a role cannot
-carry, because a role carries one ink: which line of a card the reader's search
-matched, or which stat is not being counted. Set `ink` on those lines and leave
-the rest alone.
+A section's lines are `TooltipLine { text, role, ink, icon }`, every option
+`None` for that rule. `TooltipSection::new(["Life", "Your health pool."])`
+takes plain strings (`TooltipLine: From<String> + From<&str>`), so a host that
+only has words writes only words. The escapes are for the distinctions a role
+cannot carry, because a role carries one ink: which line of a card the reader's
+search matched, or which stat is not being counted. Set `ink` on those lines
+and leave the rest alone.
+
+`icon` draws a mark **before** the line's words, for the things a reader
+recognizes by colour and shape before they read the name at all — an instilled
+gem, a rarity, a damage type. `TooltipIcon { texture_id, width_pixels,
+height_pixels }` names a texture the **host** registered through
+`aether.render.create_texture` (the widget draws it and never creates,
+updates, or destroys one) plus that texture's own size, which is the aspect the
+plate preserves. What it is drawn at is the line's own **cap band**
+(`set::text_cap_height`), so a 64-pixel icon and a 16-pixel one stand exactly
+as tall as the capitals beside them. The icon's footprint — itself plus one
+spacing unit — comes out of that line's measure and goes into the plate's
+width, so an icon makes a line **wrap earlier** rather than run past the box;
+the continuation rows are inset to the words' own start, so a wrapped line
+reads as one entry indented under its icon. It takes the first row only (one
+thought, one icon), and an icon on a line with no words draws nothing, because
+that line is a paragraph break.
 
 A hover card over a canvas needs three more things, and they are the remaining
 fields:
