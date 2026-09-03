@@ -272,6 +272,29 @@ impl DropdownWidget {
         )
     }
 
+    /// The run one open-list row has room for: its text elided into the list
+    /// plate's width less one `pad` either side.
+    ///
+    /// The plate is exactly as wide as the closed row it drops from, and a
+    /// modifier's name is far longer than the cell a layout gave the control,
+    /// so an option drawn whole ran out past the plate's own right edge and
+    /// over whatever stood beside it — nothing clips it, which is the point of
+    /// the overlay lane and also why the row owes itself the measure. No
+    /// chevron column here: the mark belongs to the closed row.
+    ///
+    /// Whole while the measurement is outstanding, like [`Self::closed_row_run`].
+    fn list_row_run(&self, text: &str) -> String {
+        let size = self.theme.label_size_pixels;
+        self.font_metrics.resolved().map_or_else(
+            || String::from(text),
+            |metrics| {
+                elide_to_width(text, self.theme.pad.mul_add(-2.0, self.frame.width), |run| {
+                    measured_text_width(metrics, run, size)
+                })
+            },
+        )
+    }
+
     /// Drop the cached option measurement — every input to it changed.
     fn forget_measurements(&mut self) {
         self.widest_option_width = None;
@@ -386,7 +409,7 @@ impl DropdownWidget {
                 x: self.theme.pad,
                 y: text_origin_y(row_y, row_height, self.theme.label_size_pixels),
                 font_id: self.theme.font_id,
-                text: option.clone(),
+                text: self.list_row_run(option),
                 size_pixels: self.theme.label_size_pixels,
                 color: if current {
                     self.theme.selection_text
@@ -735,6 +758,41 @@ mod tests {
         // A name that fits is untouched: the column takes room from the
         // measure, never a glyph from a run that had room.
         assert_eq!(widget.closed_row_run("Marauder"), "Marauder");
+    }
+
+    #[test]
+    fn an_option_too_long_for_the_list_plate_is_cut_to_it() {
+        // Tripwire: the deployed capture. The plate is exactly the width of
+        // the closed row it drops from, and nothing clips the overlay lane —
+        // that is what it buys — so `#% increased Physical Damage, +# to
+        // Accuracy Rating` drew straight out past the plate's right edge and
+        // over the Tier column beside it. The row owes itself the measure the
+        // closed row already takes.
+        let mut widget = measured(4, 3, None);
+        widget.options[1] = String::from("#% increased Physical Damage, +# to Accuracy Rating");
+        widget.forget_measurements();
+        assert_eq!(widget.open_list(), DropdownEffects::opened());
+
+        let metrics = widget.font_metrics.resolved().expect("measured");
+        let size = widget.theme.label_size_pixels;
+        let budget = widget.theme.pad.mul_add(-2.0, widget.frame.width);
+        assert!(measured_text_width(metrics, &widget.options[1], size) > budget, "the option really is too long");
+
+        for run in row_text(&widget.overlay_items()) {
+            let right = widget.theme.pad + measured_text_width(metrics, run, size);
+            assert!(
+                right <= widget.frame.width - widget.theme.pad + 1e-3,
+                "row {run:?} ends at {right}, past the plate's inner right edge",
+            );
+        }
+        assert!(
+            row_text(&widget.overlay_items()).iter().any(|run| run.ends_with(ELLIPSIS)),
+            "a cut option carries the mark that says so",
+        );
+        assert!(
+            row_text(&widget.overlay_items()).contains(&"option 0"),
+            "an option that fits keeps every letter it had",
+        );
     }
 
     fn opened(option_count: usize, open_row_count: usize, selected_index: Option<usize>) -> DropdownWidget {
