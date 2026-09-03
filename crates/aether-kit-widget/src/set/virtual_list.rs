@@ -45,7 +45,7 @@
 //! Round-9 note 4 — "skills should be removed via 'x' button bound to row",
 //! drawn as `"Spark" ——— [Change gem] [x]`. A row's `actions` are
 //! [`RowAction`]s, and the list draws each as a real button at the row's right
-//! end: the kit's own [button face](crate::set::push_button_face), so one
+//! end: the kit's own button face (`push_button_face` in `set`), so one
 //! emphasis ladder, one elision rule, and one hover answer serve a verb whether
 //! it stands in a slot of its own or inside a row this widget owns.
 //!
