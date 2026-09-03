@@ -137,6 +137,17 @@ the label draws at the start rather than at a guessed width. A run wider than
 its frame also stays flush left, so overflow clips at the slot's right edge
 instead of pushing the head of the string out of view.
 
+A measured run wider than its frame is **elided** — the same `elide_to_width`
+cut with the same `ELLIPSIS` the list's rows and a button's label take, against
+the whole frame since a label reserves no pad. The slot clip stays the backstop
+and still bounds an unmeasured run, but a clip cuts mid-glyph: a stat row in a
+column narrower than its words read `Physical damage mitigat`, which reads as a
+name that ends oddly rather than as a name that was too long. This is a safety
+net rather than a layout — a column sized from the intrinsic below never
+reaches it, the reported width stays the *whole* run's, and the hover reveal
+still carries the whole text — so what it changes is only what a column too
+narrow for its words looks like.
+
 The label reports that measured run as its `WidgetDrawList::intrinsic` —
 `[measured width, theme.row_height]`, with no pad either side because a label
 reserves none — so a layout can size a column to the words it holds instead of
@@ -209,9 +220,21 @@ on), and the origin is that baseline minus one ascent.
 
 Horizontal centring is separate and needs the run's measured width, which is
 the sum of its glyph advances at the size the draw uses: `centered_text_x`
-places it and never pushes the run left of one `pad`. A widget that has not
-resolved its font's metrics yet draws left-padded rather than guessing, so the
-label never jumps when the measurement lands.
+places it so the margins either side are equal at every frame width. A widget
+that has not resolved its font's metrics yet draws left-padded rather than
+guessing, so the label never jumps when the measurement lands.
+
+**A pad is what the intrinsic reserves, not room the draw must leave.** Both
+halves of placing a run have learned this the hard way. `centered_text_x` used
+to clamp the origin to one `pad`, which made the margins 8 and 2 on a frame a
+few pixels under the intrinsic width — the asymmetric Remove button. A button
+then elided against the frame *less* a pad each side, which on a one-glyph
+control sized to its own mark left room for neither the mark nor the ellipsis
+that would say it was cut, so the run came back empty and the ascendancy
+inset's collapse button drew as an empty outlined square. A frame smaller than
+the intrinsic is a caller saying there is no more room; the widget gives up its
+pads, then elides, and only draws nothing when the frame cannot hold even the
+ellipsis.
 
 `set::text_cap_height(size_pixels)` is that cap band as a number, for a caller
 placing something *beside* a run — an inline icon, a rule, a swatch — that has

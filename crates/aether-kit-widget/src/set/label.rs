@@ -37,8 +37,8 @@ use aether_math::Rgba;
 use aether_text::FontMetricsResult;
 
 use crate::set::{
-    RevealPlate, apply_static_control_state, overflow_reveal_items, pump_text_font_metrics, reply_if_hidden,
-    text_origin_y,
+    RevealPlate, apply_static_control_state, elide_to_width, overflow_reveal_items, pump_text_font_metrics,
+    reply_if_hidden, text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::{FontMetricsAdapter, SingleLineLayout};
@@ -77,6 +77,40 @@ impl LabelWidget {
     /// are still in flight.
     fn measured_width(&self, size_pixels: f32) -> Option<f32> {
         self.font_metrics.resolved().map(|metrics| SingleLineLayout::build(&self.text, metrics, size_pixels).width())
+    }
+
+    /// The run this label draws and the width it comes to: the whole text
+    /// while it fits its frame, and the text **elided** with the kit's
+    /// ellipsis when it does not.
+    ///
+    /// The label was the one text widget that let the root's slot clip do
+    /// this cut, and a clip cuts mid-glyph: a stat row read `Physical damage
+    /// mitigat`, which is a name that ends oddly rather than a name that was
+    /// too long. The list and the button already cut with the mark that says
+    /// so ([`elide_to_width`]), and this is the same rule in the last place
+    /// it was missing.
+    ///
+    /// It is a **backstop, not a layout**. A column sized from the label's
+    /// reported intrinsic — which stays the *whole* run's width, so it is
+    /// still the number a consumer sizes to — never reaches this, and the
+    /// hover reveal still carries the whole text on its plate. What this
+    /// changes is only what a column too narrow for its words looks like.
+    ///
+    /// `None` for the width until the metrics land: an unmeasured run draws
+    /// whole and flush at the start, the frame or two before there is a width
+    /// to cut against, exactly as its alignment does.
+    fn drawn_run(&self, size_pixels: f32, measured: Option<f32>) -> (String, Option<f32>) {
+        let (Some(metrics), Some(measured)) = (self.font_metrics.resolved(), measured) else {
+            return (self.text.clone(), None);
+        };
+        if measured <= self.frame.width {
+            return (self.text.clone(), Some(measured));
+        }
+
+        let measure = |run: &str| SingleLineLayout::build(run, metrics, size_pixels).width();
+        let run = elide_to_width(&self.text, self.frame.width, measure);
+        let width = measure(&run);
+        (run, Some(width))
     }
 
     /// The hover reveal: the whole run on a raised plate, drawn from the
@@ -251,15 +285,19 @@ impl WasmActor for LabelWidget {
         }
         let size = self.theme.text_size_pixels(self.role);
         let measured = self.measured_width(size);
-        let text_x = align_x(self.align, self.frame.width, measured);
+        // The drawn run may be cut; `measured` is the whole run's width and
+        // stays that, because it is what the reveal fires on and what the
+        // intrinsic reports. The alignment places what is actually drawn.
+        let (run, drawn) = self.drawn_run(size, measured);
+        let text_x = align_x(self.align, self.frame.width, drawn);
 
         let mut items: Vec<WidgetDrawItem> = Vec::new();
-        if !self.text.is_empty() {
+        if !run.is_empty() {
             items.push(WidgetDrawItem::Text {
                 x: text_x,
                 y: text_origin_y(0.0, self.frame.height, size),
                 font_id: self.theme.font_id,
-                text: self.text.clone(),
+                text: run,
                 size_pixels: size,
                 color: self.theme.fill(self.ink(), self.state.theme_state(false)),
                 clip: None,
@@ -287,6 +325,8 @@ mod tests {
     use super::*;
     use aether_kinds::{FontMetrics, GlyphAdvance};
     use alloc::vec;
+
+    use crate::set::ELLIPSIS;
 
     /// A label with a resolved metric table whose every glyph advances half an
     /// em, so a run's width is `chars * size / 2` — enough to make "fits" and
@@ -337,6 +377,49 @@ mod tests {
             unmeasured.overflow_overlay(size, 0.0, None).is_empty(),
             "an unmeasured run has no width to raise a plate to",
         );
+    }
+
+    #[test]
+    fn a_run_wider_than_its_frame_is_cut_with_the_mark_that_says_so() {
+        // Tripwire: **the label cuts its own run; the slot clip is only the
+        // backstop.** A clip cuts mid-glyph, so a stat row in a column
+        // narrower than its words read `Physical damage mitigat` — a name
+        // that ends oddly rather than a name that was too long. The list and
+        // the button already elide; this was the last widget that did not.
+        //
+        // The two things the cut must not touch are asserted with it: the
+        // reported width stays the *whole* run's, because that is what a
+        // consumer sizes a column from and what the reveal fires on, and the
+        // reveal still carries the whole text.
+        let size = Theme::DEFAULT.label_size_pixels;
+        let mut label = measured_label("mmmmmmmmmmmmmmmm", 40.0);
+        let measured = label.measured_width(size);
+        let (run, drawn) = label.drawn_run(size, measured);
+
+        assert!(measured.expect("measured") > label.frame.width, "the fixture's run really does overflow");
+        assert_ne!(run, label.text, "the whole run was pushed at a frame that cannot hold it");
+        assert!(run.ends_with(ELLIPSIS), "a cut run carries the mark saying it was cut: {run:?}");
+        assert!(
+            drawn.expect("measured") <= label.frame.width,
+            "the drawn run {run:?} is still wider than the frame it was cut to",
+        );
+        assert_eq!(
+            label.measured_width(size),
+            measured,
+            "the reported width is the whole run's — a column sizes to the words, not to the cut",
+        );
+
+        label.state.set_hovered(true);
+        assert!(
+            !label.overflow_overlay(size, 0.0, measured).is_empty(),
+            "the reveal is what makes the cut text readable, so it must still fire",
+        );
+
+        // A run that fits is untouched, and an unmeasured one is drawn whole
+        // rather than cut against a width nobody has yet.
+        let fits = measured_label("mm", 200.0);
+        assert_eq!(fits.drawn_run(size, fits.measured_width(size)), (String::from("mm"), fits.measured_width(size)));
+        assert_eq!(label.drawn_run(size, None), (label.text.clone(), None));
     }
 
     #[test]
