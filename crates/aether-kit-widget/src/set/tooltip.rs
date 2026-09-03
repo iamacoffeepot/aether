@@ -62,6 +62,14 @@
 //! [`TooltipConfig::hanging_indent_pixels`] insets the continuation rows of a
 //! wrapped line, so a two-row stat reads as one stat.
 //!
+//! [`TooltipLine::icon`] is the fifth: a mark drawn **before** the line's
+//! words, because some things are recognized by their colour and shape before
+//! they are read — an instilled gem is its icon first and its name second. The
+//! host registers the image through `aether.render.create_texture` and hands
+//! the plate the id; the plate scales it to the line's own cap band, keeps its
+//! aspect, and takes the room for it out of that line's measure, so an icon
+//! makes a line wrap earlier rather than run past the box.
+//!
 //! # How a wrapped line and a paragraph differ
 //!
 //! Round-4 note 19: "the spaces after a line break are a bit weird. I think
@@ -93,18 +101,67 @@ use serde::{Deserialize, Serialize};
 use crate::set::placement::{PlacementBounds, PlacementSide, place_plate_avoiding};
 use crate::set::{
     WidgetDefaults, accept_font_metrics_result, apply_text_theme, approx_text_width, measured_text_width,
-    pump_text_font_metrics, push_rect_border, quad, reply_if_hidden, reveal_wrap_width, text_origin_y,
-    wrap_to_width_hanging,
+    pump_text_font_metrics, push_rect_border, quad, reply_if_hidden, reveal_wrap_width, text_baseline_y,
+    text_cap_height, text_origin_y, wrap_to_width_hanging,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{SetTheme, TextRole, Theme};
 use crate::{Collect, SetWidgetState, WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame};
 
-/// One line of a tooltip section, as the host wrote it: the words, and the
-/// two presentation escapes a hover card needs (the studio's gap 18).
+/// A mark drawn inline at the head of a [`TooltipLine`], before its words.
 ///
-/// Both escapes are `None` by default, which is the kit's own rule — the
+/// It exists because some things are recognized by their colour and shape
+/// before they are read at all — an instilled gem, a rarity, a damage type —
+/// and a card that names them in words makes the reader translate back. The
+/// host owns the texture: it registers the image once through
+/// `aether.render.create_texture` and hands the tooltip the session id it got
+/// back, along with the texture's **own** pixel size, which is what the plate
+/// preserves the aspect of. The widget draws it and nothing else — it never
+/// creates, updates, or destroys a texture.
+///
+/// The drawn size is not `width_pixels` × `height_pixels`: the icon is scaled
+/// to the line's own cap band ([`text_cap_height`]) with its aspect kept, so a
+/// 64-pixel icon and a 16-pixel one both stand exactly as tall as the capitals
+/// beside them. Schema-only; nested in [`TooltipLine`].
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Default)]
+pub struct TooltipIcon {
+    /// The session-scoped texture id `aether.render.create_texture` replied
+    /// with. Non-owning: the host that made it keeps it alive.
+    pub texture_id: u32,
+    /// The texture's own width in pixels — the numerator of the aspect the
+    /// scaled icon keeps, not the width it is drawn at.
+    pub width_pixels: f32,
+    /// The texture's own height in pixels.
+    pub height_pixels: f32,
+}
+
+/// The `[width, height]` `icon` is drawn at on a line set at `size_pixels`:
+/// the line's cap band tall, aspect preserved. `None` for an icon whose
+/// declared size is not a positive, finite rectangle — a plate would rather
+/// draw the words alone than a mark of unknowable shape.
+fn scaled_icon(icon: TooltipIcon, size_pixels: f32) -> Option<[f32; 2]> {
+    let (declared_width, declared_height) = (icon.width_pixels, icon.height_pixels);
+    if !declared_width.is_finite() || !declared_height.is_finite() || declared_width <= 0.0 || declared_height <= 0.0 {
+        return None;
+    }
+    let height = text_cap_height(size_pixels);
+    let width = height * (declared_width / declared_height);
+    (height.is_finite() && height > 0.0 && width.is_finite() && width > 0.0).then_some([width, height])
+}
+
+/// How much of a line's measure its icon takes: the scaled icon plus one
+/// spacing unit of clear space before the words. Zero when there is no icon,
+/// so a line without one is measured exactly as it was.
+fn icon_footprint(icon: Option<TooltipIcon>, size_pixels: f32, gap: f32) -> f32 {
+    icon.and_then(|icon| scaled_icon(icon, size_pixels)).map_or(0.0, |[width, _]| width + gap)
+}
+
+/// One line of a tooltip section, as the host wrote it: the words, the icon
+/// that stands before them, and the two presentation escapes a hover card
+/// needs (the studio's gap 18).
+///
+/// Every option is `None` by default, which is the kit's own rule — the
 /// plate's first line is the name and is set at [`TextRole::Body`] in the
 /// primary ink, every line after it at [`TextRole::Caption`] in the muted
 /// one. A host overrides `ink` for the lines it needs to *distinguish*: which
@@ -120,11 +177,24 @@ pub struct TooltipLine {
     /// The ink this line is drawn in, or `None` for the role's own ink.
     #[serde(default)]
     pub ink: Option<Rgba>,
+    /// The mark drawn at the head of this line, before its words: the icon of
+    /// the thing the line is about, when the thing is recognized by its colour
+    /// and shape faster than by its name.
+    ///
+    /// It takes the line's first row only — a wrapped line is one thought, and
+    /// one thought has one icon — and the words start one spacing unit after
+    /// it. The line's measure shrinks by that footprint, so an icon makes a
+    /// line wrap earlier rather than run past the plate, and the continuation
+    /// rows are inset to the words' own start, so a wrapped line reads as one
+    /// entry indented under its icon. An icon on a line with **no words** is a
+    /// paragraph break and draws nothing: a break is a break.
+    #[serde(default)]
+    pub icon: Option<TooltipIcon>,
 }
 
 impl From<String> for TooltipLine {
     fn from(text: String) -> Self {
-        Self { text, role: None, ink: None }
+        Self { text, role: None, ink: None, icon: None }
     }
 }
 
@@ -246,19 +316,28 @@ pub struct TooltipConfig {
 }
 
 /// One wrapped row of the plate: the type role it is set at, the indent it
-/// starts at (zero, or the hanging indent on a continuation), and the ink the
-/// host asked for if it asked for one. A row with no `text` is a paragraph
-/// break: it takes its line box and draws nothing in it.
+/// starts at (the icon's footprint, plus the hanging indent on a
+/// continuation), the ink the host asked for if it asked for one, and the icon
+/// this row draws before its words. A row with no `text` is a paragraph break:
+/// it takes its line box and draws nothing in it.
 struct PlateLine {
     text: String,
     role: TextRole,
     indent: f32,
     ink: Option<Rgba>,
+    icon: Option<TooltipIcon>,
 }
 
 impl PlateLine {
     fn size_pixels(&self, theme: &Theme) -> f32 {
         theme.text_size_pixels(self.role)
+    }
+
+    /// The icon this row draws and the `[width, height]` it is drawn at, or
+    /// `None` for a row with no icon or an unusable one.
+    fn icon_draw(&self, theme: &Theme) -> Option<(u32, [f32; 2])> {
+        let icon = self.icon?;
+        scaled_icon(icon, self.size_pixels(theme)).map(|size| (icon.texture_id, size))
     }
 
     /// How tall this line's own box is. A line box is its type size times the
@@ -380,14 +459,22 @@ impl TooltipWidget {
                 });
                 first_line = first_line && is_break;
                 let size = self.theme.text_size_pixels(role);
+                let footprint = icon_footprint(source.icon, size, self.theme.space(1));
                 let lines: Vec<PlateLine> = if is_break {
-                    alloc::vec![PlateLine { text: String::new(), role, indent: 0.0, ink: source.ink }]
+                    alloc::vec![PlateLine { text: String::new(), role, indent: 0.0, ink: source.ink, icon: None }]
                 } else {
-                    wrap_to_width_hanging(&source.text, measure_width, self.hanging_indent_pixels, |run| {
+                    wrap_to_width_hanging(&source.text, measure_width - footprint, self.hanging_indent_pixels, |run| {
                         self.text_width(run, size)
                     })
                     .into_iter()
-                    .map(|line| PlateLine { text: line.text, role, indent: line.indent_pixels, ink: source.ink })
+                    .enumerate()
+                    .map(|(row, line)| PlateLine {
+                        text: line.text,
+                        role,
+                        indent: footprint + line.indent_pixels,
+                        ink: source.ink,
+                        icon: (row == 0).then_some(source.icon).flatten(),
+                    })
                     .collect()
                 };
                 if !lines.is_empty() {
@@ -404,8 +491,9 @@ impl TooltipWidget {
         entries
     }
 
-    /// The plate's own size: as wide as its longest wrapped line (indent
-    /// included) plus one unit either side, and as tall as the line boxes it
+    /// The plate's own size: as wide as its longest wrapped line (indent, and
+    /// so any icon's footprint, included) plus one unit either side, and as
+    /// tall as the line boxes it
     /// holds plus the rules between its sections and that same unit top and
     /// bottom. Nothing is rounded up to a row height — a plate padded to a
     /// grid is the "too much vertical padding" the note was about.
@@ -499,6 +587,24 @@ impl TooltipWidget {
             for line in &entry.lines {
                 let size = line.size_pixels(&self.theme);
                 let line_height = line.height(&self.theme);
+                // The icon sits in the line's cap band: its bottom on the
+                // baseline, its top where a capital's is, so it reads as part
+                // of the line rather than as a picture beside it.
+                if let Some((texture_id, [icon_width, icon_height])) = line.icon_draw(&self.theme) {
+                    items.push(WidgetDrawItem::TexturedQuad {
+                        texture_id,
+                        x: left + pad,
+                        y: text_baseline_y(line_top, line_height, size) - icon_height,
+                        width: icon_width,
+                        height: icon_height,
+                        u0: 0.0,
+                        v0: 0.0,
+                        u1: 1.0,
+                        v1: 1.0,
+                        tint: Rgba::WHITE,
+                        clip: None,
+                    });
+                }
                 // A paragraph break takes its row and draws nothing in it.
                 if !line.text.is_empty() {
                     items.push(WidgetDrawItem::Text {
@@ -546,7 +652,9 @@ impl WidgetDefaults for TooltipWidget {
 /// # Agent
 /// Not loaded directly — the root spawns it as an inline child and re-sends
 /// `TooltipConfig` to change what it says and what it is anchored beside.
-/// Hide it with `aether.kit.widget.set_state`.
+/// Hide it with `aether.kit.widget.set_state`. A line's `icon` is a texture id
+/// the host got from `aether.render.create_texture`; register the image first
+/// and pass the texture's own pixel size, not the size you want it drawn at.
 #[actor(instanced, composable, handler_set(WidgetDefaults))]
 impl WasmActor for TooltipWidget {
     type Config = TooltipConfig;
@@ -726,7 +834,12 @@ mod tests {
         let widget = tooltip(vec![TooltipSection {
             lines: vec![
                 TooltipLine::from("Life"),
-                TooltipLine { text: String::from("the line the search hit"), role: None, ink: Some(matched) },
+                TooltipLine {
+                    text: String::from("the line the search hit"),
+                    role: None,
+                    ink: Some(matched),
+                    icon: None,
+                },
             ],
         }]);
         let entries = widget.wrapped_entries();
@@ -751,6 +864,78 @@ mod tests {
         assert!(
             widget.text_width(&entry.lines[1].text, size) <= widget.wrap_width() - 12.0,
             "a continuation wraps that much earlier, so the right edge does not move",
+        );
+    }
+
+    #[test]
+    fn an_icon_widens_the_plate_by_its_own_footprint_and_the_words_start_after_it() {
+        // Tripwire: the icon has to take room *and* be paid for. A plate whose
+        // width ignored the icon would draw the mark over its own left pad or
+        // push the words past the box; a text x that ignored it would print the
+        // words on top of the mark. Both are the same missing footprint.
+        let icon = TooltipIcon { texture_id: 7, width_pixels: 64.0, height_pixels: 32.0 };
+        let plain = tooltip(vec![section(&["Cold"])]);
+        let marked = tooltip(vec![TooltipSection {
+            lines: vec![TooltipLine { text: String::from("Cold"), role: None, ink: None, icon: Some(icon) }],
+        }]);
+
+        let size = marked.theme.text_size_pixels(TextRole::Body);
+        let [icon_width, icon_height] = scaled_icon(icon, size).expect("a positive icon scales");
+        assert!((icon_height - text_cap_height(size)).abs() < f32::EPSILON, "the icon stands in the cap band");
+        assert!(icon_height.mul_add(-2.0, icon_width).abs() < 1e-3, "and keeps its own 2:1 aspect");
+
+        let footprint = icon_width + marked.theme.space(1);
+        let grew = marked.plate_size(&marked.wrapped_entries())[0] - plain.plate_size(&plain.wrapped_entries())[0];
+        assert!((grew - footprint).abs() < 1e-3, "the plate grew by the icon and one gap: {grew} vs {footprint}");
+
+        let (items, _) = marked.overlay_items();
+        let drawn = items
+            .iter()
+            .find_map(|item| match item {
+                WidgetDrawItem::TexturedQuad { texture_id, x, width, .. } => Some((*texture_id, *x, *width)),
+                _ => None,
+            })
+            .expect("the icon is drawn");
+        let words = items
+            .iter()
+            .find_map(|item| match item {
+                WidgetDrawItem::Text { x, .. } => Some(*x),
+                _ => None,
+            })
+            .expect("the words are drawn");
+        assert_eq!(drawn.0, 7, "the host's own texture id, borrowed not owned");
+        assert!((words - (drawn.1 + drawn.2 + marked.theme.space(1))).abs() < 1e-3, "the words start after the icon");
+    }
+
+    #[test]
+    fn a_wrapped_line_with_an_icon_hangs_its_continuations_at_the_words_start() {
+        // Tripwire: round-4 note 19's flush rule is about the *words*. With an
+        // icon in front of them, a continuation row that started at the plate's
+        // pad would run back under the mark, and the line would read as two.
+        let icon = TooltipIcon { texture_id: 3, width_pixels: 32.0, height_pixels: 32.0 };
+        let widget = tooltip(vec![TooltipSection {
+            lines: vec![TooltipLine {
+                text: String::from("Anger instilled, adding a good deal of fire damage to every hit"),
+                role: None,
+                ink: None,
+                icon: Some(icon),
+            }],
+        }]);
+
+        let entry = widget.wrapped_entries().remove(0);
+        assert!(entry.lines.len() > 1, "the line wrapped");
+        let footprint =
+            scaled_icon(icon, entry.lines[0].size_pixels(&widget.theme)).expect("scales")[0] + widget.theme.space(1);
+        assert!((entry.lines[0].indent - footprint).abs() < 1e-3, "the first row starts after the icon");
+        assert!(
+            entry.lines[1..].iter().all(|line| (line.indent - footprint).abs() < 1e-3),
+            "and every continuation starts at that same x, not back under the mark",
+        );
+        assert!(entry.lines[1].icon.is_none(), "one thought, one icon: only the first row draws it");
+        let size = entry.lines[1].size_pixels(&widget.theme);
+        assert!(
+            widget.text_width(&entry.lines[1].text, size) <= widget.wrap_width() - footprint,
+            "and the measure shrank by the footprint, so the right edge did not move",
         );
     }
 
