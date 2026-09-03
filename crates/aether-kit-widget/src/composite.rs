@@ -22,11 +22,13 @@
 //! hosts stay one group — which is what the root's clip subtraction reads to
 //! decide whose text a fill may cut.
 //!
-//! A child's *own* overlay — an open dropdown's list escaping its slot — is
-//! held back and appended after every slot has laid its draws down, rather
-//! than spliced in where its slot sits. Its contract is that it stands over
-//! everything the cluster draws, and half the siblings it must cover are
-//! registered after it.
+//! A **raised** child's own overlay — an open dropdown's list escaping its
+//! slot — is held back and appended after every slot has laid its draws down,
+//! rather than spliced in where its slot sits: it shares this lane with the
+//! group, and half the siblings it must cover are registered after it. An
+//! unraised child's overlay keeps its authored position, because its own
+//! siblings are not in this lane and what is — a plate some group raised
+//! after it — stands over it by right.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -256,27 +258,34 @@ impl Composite {
     pub fn flatten(&self, intrinsic: Option<[f32; 2]>) -> WidgetDrawList {
         let mut items = self.chrome.clone();
         let mut overlay = self.overlay_chrome.clone();
-        // A child's own overlay escapes its slot to stand over *everything*
-        // this node draws, so it is held back and appended after every slot
-        // has laid its draws down. Extending the lane inside the loop would
-        // splice it in at its own slot's position, which is behind every
-        // sibling registered after it — the reason a dialog's rows and its
-        // Cancel button printed through a dropdown list opened halfway up the
-        // group, whichever lane the group rode in.
-        let mut escaping: Vec<WidgetDrawItem> = Vec::new();
+        // A raised child's own overlay is held back to the end of the lane.
+        // Its siblings ride the same lane, so splicing it in where its slot
+        // sits leaves it behind every one of them registered after it — the
+        // reason a dialog's rows and its Cancel button printed through a
+        // dropdown list opened halfway up the group.
+        //
+        // An *unraised* child's overlay keeps its authored position, because
+        // its siblings are not in this lane and the things that are — the
+        // plates a group raised after it — legitimately stand over it. A
+        // numeric in the sheet behind a standing question still reports its
+        // hover reveal; held back, that plate landed over the question and
+        // blanked the title.
+        let mut raised_escapes: Vec<WidgetDrawItem> = Vec::new();
         for slot in &self.slots {
             let Some(list) = &slot.list else {
                 continue;
             };
             let placed = list.items.iter().filter_map(|item| item.offset(slot.origin).intersect_clip(slot.clip));
+            let escaping = list.overlay.iter().map(|item| item.offset(slot.origin));
             if slot.overlay {
                 overlay.extend(placed);
+                raised_escapes.extend(escaping);
             } else {
                 items.extend(placed);
+                overlay.extend(escaping);
             }
-            escaping.extend(list.overlay.iter().map(|item| item.offset(slot.origin)));
         }
-        overlay.extend(escaping);
+        overlay.extend(raised_escapes);
         WidgetDrawList { intrinsic, items, overlay }
     }
 }
@@ -320,15 +329,18 @@ mod tests {
     }
 
     #[test]
-    fn a_childs_own_overlay_lands_after_every_sibling_the_node_laid_down() {
-        // Tripwire: `WidgetDrawList::overlay` means "over everything else the
-        // cluster draws this frame". Extending the lane inside the slot loop
-        // spliced a child's escaping overlay in at its own slot's position
-        // instead — behind every sibling registered after it, which is a
-        // dropdown opened halfway up a dialog standing behind the rows below
-        // it, and behind the root's own clip subtraction with it.
+    fn a_raised_childs_overlay_lands_last_and_an_unraised_ones_keeps_its_place() {
+        // Tripwire: both halves of who a child's overlay has to clear. A
+        // *raised* child shares this lane with its siblings, so splicing its
+        // overlay in at its own slot leaves it behind every one of them
+        // registered after it — a dropdown opened halfway up a dialog,
+        // standing behind the rows below it. An *unraised* child's siblings
+        // are in the other lane, and what shares this one is the plate a group
+        // raised after it; held back to the end, a background field's hover
+        // reveal landed over that plate and blanked its title.
         let mut root = Composite::new();
-        let (dropdown, below) = (MailboxId(1), MailboxId(2));
+        let (background, dropdown, below) = (MailboxId(1), MailboxId(2), MailboxId(3));
+        root.register_slot(background, Vec2::ZERO, None, "background", "aether.kit.widget");
         root.register_slot(dropdown, Vec2::ZERO, None, "dropdown", "aether.kit.widget");
         root.register_slot(below, Vec2::ZERO, None, "below", "aether.kit.widget");
         assert!(root.set_slot_overlay(dropdown, true));
@@ -337,27 +349,32 @@ mod tests {
         root.begin_frame();
         root.extend_overlay([quad(0.0, 0.1)]);
         assert!(root.fill(
+            background,
+            WidgetDrawList { intrinsic: None, items: vec![quad(4.0, 0.6)], overlay: vec![quad(5.0, 0.5)] },
+        ));
+        assert!(root.fill(
             dropdown,
             WidgetDrawList { intrinsic: None, items: vec![quad(1.0, 0.2)], overlay: vec![quad(2.0, 0.3)] },
         ));
         assert!(root.fill(below, list(vec![quad(3.0, 0.4)])));
 
+        let tag = |item: &WidgetDrawItem| match item {
+            WidgetDrawItem::Quad { color, .. } => color.r,
+            WidgetDrawItem::TexturedQuad { .. } | WidgetDrawItem::Text { .. } => {
+                unreachable!("test builds only solid quads")
+            }
+        };
         let flat = root.flatten(None);
-        let tags: Vec<f32> = flat
-            .overlay
-            .iter()
-            .map(|item| match item {
-                WidgetDrawItem::Quad { color, .. } => color.r,
-                WidgetDrawItem::TexturedQuad { .. } | WidgetDrawItem::Text { .. } => {
-                    unreachable!("test builds only solid quads")
-                }
-            })
-            .collect();
         assert_eq!(
-            tags,
-            vec![0.1, 0.2, 0.4, 0.3],
-            "the node's overlay chrome, then every slot's raised draws in registration order, \
-             then the escaping overlay last",
+            flat.overlay.iter().map(tag).collect::<Vec<_>>(),
+            vec![0.1, 0.5, 0.2, 0.4, 0.3],
+            "the node's overlay chrome, the unraised child's overlay where its slot sits, the raised \
+             group in registration order, and the group's escaping overlay last",
+        );
+        assert_eq!(
+            flat.items.iter().map(tag).collect::<Vec<_>>(),
+            vec![0.6],
+            "and the unraised child's own draws stay in the ordinary lane",
         );
     }
 

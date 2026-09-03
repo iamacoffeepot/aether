@@ -1233,10 +1233,15 @@ bar's plate — puts those draws in `WidgetDrawList::overlay` instead of
 offset by each slot origin on the way up like any other draw but never
 intersected with the slot clip, and the root emits the whole cluster's overlay
 after every ordinary quad and glyph, so the list escapes its one-row slot and
-lands over the widgets below it. Inside the overlay a child's escaping draws
-land after **every** slot the parent laid down, not at their own slot's
-position: a dropdown halfway up a group has to stand over the siblings
-registered after it, which is most of the ones its list drops across.
+lands over the widgets below it. Inside the overlay, where those draws land
+depends on which lane their own slot rides in. A **raised** child's escaping
+draws are held to the end, after every slot the parent laid down: a dropdown
+halfway up a group shares the lane with its siblings and has to stand over the
+ones registered after it, which is most of the ones its list drops across. An
+**unraised** child's keep their authored position, because its siblings are in
+the other lane and what shares this one — the plate a group raised after it —
+stands over it by right. A field in the sheet behind a standing question still
+reports its hover reveal; that plate belongs under the question, not over it.
 
 A *root* reaches the same lane two ways, for the plate that hosts other
 children rather than escaping its own slot. `Composite::extend_overlay(items)`
