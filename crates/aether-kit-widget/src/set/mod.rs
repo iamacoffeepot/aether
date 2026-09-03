@@ -570,6 +570,22 @@ pub(crate) fn push_rect_border(
     items.push(quad(x + width - thickness, y, thickness, height, color));
 }
 
+/// The wash a control with **no plate of its own** answers the pointer with.
+///
+/// A filled control carries hover and press in its plate ([`Theme::fill`]
+/// composites the overlay into the fill). A control that draws no plate — an
+/// outlined or text button, a filled tab — has nowhere to put that, so the
+/// same role-agnostic overlay is drawn as its whole background instead.
+/// Without it the quiet ranks would be the ones that never answer the
+/// pointer, which reads as "not a control".
+pub(crate) fn pointer_wash(theme: &Theme, state: ThemeState) -> Option<Rgba> {
+    match state {
+        ThemeState::Hover => Some(theme.hover_overlay),
+        ThemeState::Pressed => Some(theme.pressed_overlay),
+        ThemeState::Normal | ThemeState::Disabled => None,
+    }
+}
+
 /// Push a `thickness`-pixel border ring around the whole `width` × `height`
 /// local rect. A focused widget draws this from `theme.accent` so the focus
 /// ring reads without the root holding any per-widget-type visual knowledge.

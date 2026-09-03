@@ -21,7 +21,19 @@
 //! draw — reads them from one place, so a press always lands in the tab the
 //! reader sees under the pointer.
 //!
-//! Those widths are then **fitted into the strip's own frame**, because a
+//! Those chips are one of the two shapes a strip takes
+//! ([`TabStripConfig::style`]). The other is [`TabStripStyle::Filled`] —
+//! Material 3's primary tabs, and the owner's round-8 note 14: "the tab
+//! buttons are good but they don't feel like typical tabs … like they aren't
+//! small buttons in the section but buttons that take the space and feel more
+//! dominant." A filled strip divides its whole frame evenly between its tabs
+//! with nothing between them, draws no chrome under any of them, marks the
+//! current one with an accent underline the width of its tab, and runs a
+//! hairline rule in the outline role under the row — so the strip *is* the
+//! top edge of the content it switches rather than a set of controls placed
+//! on it. It asks for no width of its own: it takes the frame it is given.
+//!
+//! The chips' widths are then **fitted into the strip's own frame**, because a
 //! strip in a resizable pane is regularly handed less room than its tabs ask
 //! for. Laying them out at their natural widths anyway does not make the row
 //! wider — it runs the last tab off the right edge for the root's slot clip
@@ -40,18 +52,19 @@ use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::keycode::{KEY_LEFT, KEY_RIGHT};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease, MouseMove};
+use aether_math::Rgba;
 use aether_text::FontMetricsResult;
 
 use crate::set::{
     WidgetDefaults, accept_font_metrics_result, apply_text_theme, centered_text_x, clamp_option_index, elide_to_width,
-    even_split_widths, fit_row_widths, measured_text_width, pump_text_font_metrics, push_control_outlines, quad,
-    release_left, reply_if_hidden, slot_at_local_x, text_origin_y,
+    even_split_widths, fit_row_widths, measured_text_width, pointer_wash, pump_text_font_metrics,
+    push_control_outlines, quad, release_left, reply_if_hidden, slot_at_local_x, text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{SetTheme, Theme, ThemeState};
 use crate::{
-    Collect, HoverLost, SetWidgetState, TabSelected, TabStripConfig, WidgetControlState, WidgetDrawItem,
+    Collect, HoverLost, SetWidgetState, TabSelected, TabStripConfig, TabStripStyle, WidgetControlState, WidgetDrawItem,
     WidgetDrawList, WidgetFrame,
 };
 
@@ -59,12 +72,19 @@ use crate::{
 /// second of the two marks the selected tab carries.
 const UNDERLINE_THICKNESS: f32 = 2.0;
 
+/// Thickness, in pixels, of the hairline a filled strip rules its whole
+/// bottom edge with — the line that makes the row the content's top edge
+/// rather than a band floating above it.
+const RULE_THICKNESS: f32 = 1.0;
+
 /// The tab strip widget. Holds its labels and selected tab plus the cached
 /// theme / frame, the per-tab pointer state, and the single-flight
 /// font-metrics adapter the tab widths are measured against.
 pub struct TabStripWidget {
     labels: Vec<String>,
     selected_index: usize,
+    /// Which of the two shapes the row is drawn in.
+    style: TabStripStyle,
     theme: Theme,
     frame: WidgetFrame,
     state: InteractionState,
@@ -118,15 +138,45 @@ impl TabStripWidget {
     /// reply, never the intended look. Every tab reflows to its own label the
     /// moment the measurement lands.
     fn tab_widths(&self) -> Vec<f32> {
-        let gap = self.theme.space(1);
-        self.natural_tab_widths().map_or_else(
-            || even_split_widths(self.labels.len(), self.frame.width, gap),
-            |natural| fit_row_widths(natural, self.frame.width, gap),
-        )
+        let gap = self.tab_gap();
+        match self.style {
+            // Filled tabs partition the frame: no measurement is involved, so
+            // there is no interim layout and no fit — every tab is an equal
+            // share at every width, from the first frame.
+            TabStripStyle::Filled => even_split_widths(self.labels.len(), self.frame.width, gap),
+            TabStripStyle::Chips => self.natural_tab_widths().map_or_else(
+                || even_split_widths(self.labels.len(), self.frame.width, gap),
+                |natural| fit_row_widths(natural, self.frame.width, gap),
+            ),
+        }
+    }
+
+    /// The space between two tabs. Chips are separate targets with a gap that
+    /// belongs to neither; filled tabs divide one bar, so there is nothing
+    /// between them and every pixel of the strip belongs to a tab.
+    fn tab_gap(&self) -> f32 {
+        match self.style {
+            TabStripStyle::Chips => self.theme.space(1),
+            TabStripStyle::Filled => 0.0,
+        }
+    }
+
+    /// The size the strip reports up.
+    ///
+    /// A chip row asks for the width at which no tab has to shrink. A filled
+    /// row asks for no width at all — it divides whatever frame it is given,
+    /// so there is nothing for a layout to size a slot to; the non-finite
+    /// component is how [`WidgetDrawList::intrinsic`] says "nothing on this
+    /// axis", and the row height is still worth reporting.
+    fn intrinsic(&self) -> Option<[f32; 2]> {
+        match self.style {
+            TabStripStyle::Chips => self.natural_row_width().map(|width| [width, self.theme.row_height]),
+            TabStripStyle::Filled => Some([f32::NAN, self.theme.row_height]),
+        }
     }
 
     fn tab_at_pointer_x(&self, pointer_x: f32) -> Option<usize> {
-        slot_at_local_x(&self.tab_widths(), self.theme.space(1), pointer_x - self.frame.x)
+        slot_at_local_x(&self.tab_widths(), self.tab_gap(), pointer_x - self.frame.x)
     }
 
     /// Select the tab under the pointer. Returns the new index only when the
@@ -238,6 +288,7 @@ impl WasmActor for TabStripWidget {
         Ok(TabStripWidget {
             selected_index: clamp_option_index(config.initial_index, config.labels.len()),
             labels: config.labels,
+            style: config.style,
             theme: config.theme,
             state: InteractionState::new(config.state),
             frame: WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
@@ -259,6 +310,7 @@ impl WasmActor for TabStripWidget {
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: TabStripConfig) {
         self.selected_index = clamp_option_index(config.initial_index, config.labels.len());
         self.labels = config.labels;
+        self.style = config.style;
         self.font_metrics.set_desired(config.theme.font_id);
         self.theme = config.theme;
         self.pressed_tab = None;
@@ -342,31 +394,75 @@ impl WasmActor for TabStripWidget {
         if reply_if_hidden(ctx, &self.state) {
             return;
         }
-        let intrinsic = self.natural_row_width().map(|width| [width, self.theme.row_height]);
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { intrinsic, items: self.draw_items(), overlay: Vec::new() });
+            parent.send(&WidgetDrawList { intrinsic: self.intrinsic(), items: self.draw_items(), overlay: Vec::new() });
         }
     }
 }
 
 impl TabStripWidget {
-    /// The strip's local draw: one raised tab per label, an underline under the
-    /// selected one, and the focus / validation outlines.
+    /// The strip's local draw in the shape its style asks for, plus the
+    /// focus / validation outlines both shapes share.
     fn draw_items(&self) -> Vec<WidgetDrawItem> {
-        let height = self.frame.height;
-        let gap = self.theme.space(1);
+        let mut items = match self.style {
+            TabStripStyle::Chips => self.chip_items(),
+            TabStripStyle::Filled => self.filled_items(),
+        };
+        push_control_outlines(&mut items, self.frame.width, self.frame.height, &self.state, &self.theme);
+        items
+    }
+
+    /// The run tab `index` has room for and the local x it is drawn at, in
+    /// the cell that starts at `left` and is `tab_width` wide.
+    ///
+    /// A tab at its natural width holds its whole label and centering puts
+    /// exactly one pad either side; a tab that had to give width up holds an
+    /// elided label and centers that, so the margins stay equal whatever
+    /// width the tab ended up with — an even share of a narrow filled strip
+    /// included. The interim even split of a chip row has no measurement to
+    /// elide or center against, so it stays left-padded until the widths
+    /// settle. `None` when there is nothing to draw.
+    fn tab_run(&self, label: &str, left: f32, tab_width: f32) -> Option<(String, f32)> {
         let size = self.theme.label_size_pixels;
-        let text_y = text_origin_y(0.0, height, size);
-        let metrics = self.font_metrics.resolved();
+        let (run, run_x) = self.font_metrics.resolved().map_or_else(
+            || (label.into(), left + self.theme.pad),
+            |metrics| {
+                let measure = |run: &str| measured_text_width(metrics, run, size);
+                let run = elide_to_width(label, self.theme.pad.mul_add(-2.0, tab_width), measure);
+                let run_x = left + centered_text_x(tab_width, measure(&run));
+                (run, run_x)
+            },
+        );
+        (!run.is_empty()).then_some((run, run_x))
+    }
+
+    /// One label drawn in `ink`, at the row's shared baseline.
+    fn label_item(&self, run: String, run_x: f32, ink: Rgba) -> WidgetDrawItem {
+        let size = self.theme.label_size_pixels;
+        WidgetDrawItem::Text {
+            x: run_x,
+            y: text_origin_y(0.0, self.frame.height, size),
+            font_id: self.theme.font_id,
+            text: run,
+            size_pixels: size,
+            color: ink,
+            clip: None,
+        }
+    }
+
+    /// The chip row: one raised tab per label with a gap between them, and an
+    /// underline under the selected one.
+    fn chip_items(&self) -> Vec<WidgetDrawItem> {
+        let height = self.frame.height;
+        let gap = self.tab_gap();
 
         let mut items = Vec::new();
         let mut left = 0.0;
         for (index, (label, tab_width)) in self.labels.iter().zip(self.tab_widths()).enumerate() {
-            let selected = index == self.selected_index;
             let theme_state = self.tab_theme_state(index);
             items.push(quad(left, 0.0, tab_width, height, self.theme.fill(self.theme.surface_raised, theme_state)));
 
-            if selected {
+            if index == self.selected_index {
                 // The only mark. A tab is a place, not a row of a list: filling
                 // the selected one turns the strip into a wall of buttons with
                 // one lit, while an underline on a plain tab reads as "you are
@@ -381,38 +477,60 @@ impl TabStripWidget {
                 ));
             }
 
-            // The run the tab actually has room for, centered in it. A tab at
-            // its natural width holds its whole label and centering puts
-            // exactly one pad either side; a tab the fit shrank holds an
-            // elided label and centers that, so the margins stay equal
-            // whatever width the tab ended up with. The interim even split has
-            // no measurement to elide or center against, so it stays
-            // left-padded until the widths settle.
-            let (run, run_x) = metrics.map_or_else(
-                || (label.clone(), left + self.theme.pad),
-                |metrics| {
-                    let measure = |run: &str| measured_text_width(metrics, run, size);
-                    let run = elide_to_width(label, self.theme.pad.mul_add(-2.0, tab_width), measure);
-                    let run_x = left + centered_text_x(tab_width, measure(&run));
-                    (run, run_x)
-                },
-            );
-            if !run.is_empty() {
-                items.push(WidgetDrawItem::Text {
-                    x: run_x,
-                    y: text_y,
-                    font_id: self.theme.font_id,
-                    text: run,
-                    size_pixels: size,
-                    color: self.theme.fill(self.theme.text_primary, theme_state),
-                    clip: None,
-                });
+            if let Some((run, run_x)) = self.tab_run(label, left, tab_width) {
+                items.push(self.label_item(run, run_x, self.theme.fill(self.theme.text_primary, theme_state)));
             }
 
             left += tab_width + gap;
         }
+        items
+    }
 
-        push_control_outlines(&mut items, self.frame.width, height, &self.state, &self.theme);
+    /// The filled row (Material 3 primary tabs): the frame divided evenly,
+    /// no plate under any tab, a rule under the whole strip, and an accent
+    /// underline the width of the current tab.
+    ///
+    /// The rule goes down first so the underline paints over its own span:
+    /// the current tab's mark is a continuation of the content's edge, lit,
+    /// rather than a second line beside it. The accent is spent as a *mark*
+    /// here and never as a fill — no tab is plated in it — so it still says
+    /// "the live one" without claiming to be a button.
+    fn filled_items(&self) -> Vec<WidgetDrawItem> {
+        let height = self.frame.height;
+        let gap = self.tab_gap();
+
+        let mut items = alloc::vec![quad(
+            0.0,
+            height - RULE_THICKNESS,
+            self.frame.width,
+            RULE_THICKNESS,
+            self.theme.fill(self.theme.outline, self.state.theme_state(false)),
+        )];
+        let mut left = 0.0;
+        for (index, (label, tab_width)) in self.labels.iter().zip(self.tab_widths()).enumerate() {
+            let theme_state = self.tab_theme_state(index);
+            // No plate to carry the pointer's answer, so the wash is drawn as
+            // the tab's whole background instead.
+            if let Some(wash) = pointer_wash(&self.theme, theme_state) {
+                items.push(quad(left, 0.0, tab_width, height, wash));
+            }
+
+            if index == self.selected_index {
+                items.push(quad(
+                    left,
+                    height - UNDERLINE_THICKNESS,
+                    tab_width,
+                    UNDERLINE_THICKNESS,
+                    self.theme.fill(self.theme.accent, theme_state),
+                ));
+            }
+
+            if let Some((run, run_x)) = self.tab_run(label, left, tab_width) {
+                items.push(self.label_item(run, run_x, self.theme.fill(self.theme.text_primary, theme_state)));
+            }
+
+            left += tab_width + gap;
+        }
         items
     }
 }
@@ -424,7 +542,7 @@ mod tests {
     use aether_kinds::{CachedFontMetrics, FontMetrics, GlyphAdvance};
     use alloc::vec;
 
-    use crate::set::ELLIPSIS;
+    use crate::set::{ELLIPSIS, slot_left};
 
     /// A proportional advance table, so a tab's width is the label's own and
     /// two tabs with the same character count are not the same width.
@@ -460,6 +578,7 @@ mod tests {
                 .map(String::from)
                 .collect(),
             selected_index: 0,
+            style: TabStripStyle::Chips,
             theme: Theme::DEFAULT,
             frame: WidgetFrame { x: 0.0, y: 0.0, width, height: 24.0 },
             state: InteractionState::new(WidgetControlState::default()),
@@ -576,10 +695,145 @@ mod tests {
         assert_eq!(strip.tab_widths(), measured_strip(natural + 100.0).tab_widths(), "the intrinsic width fits whole");
     }
 
+    /// The studio's own strip in the filled shape, measured, framed at
+    /// `width`.
+    fn filled_strip(width: f32) -> TabStripWidget {
+        TabStripWidget { style: TabStripStyle::Filled, ..measured_strip(width) }
+    }
+
+    /// Every full-height quad a strip draws, as `(left, width, colour)` — the
+    /// per-tab chrome a reader sees behind the labels.
+    fn full_height_quads(strip: &TabStripWidget) -> Vec<(f32, f32, Rgba)> {
+        strip
+            .draw_items()
+            .iter()
+            .filter_map(|item| match item {
+                WidgetDrawItem::Quad { x, width, height, color, .. } if *height == strip.frame.height => {
+                    Some((*x, *width, *color))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The strip's horizontal bars shorter than a tab: `(top, left, width,
+    /// height, colour)`. The rule under the row and the current tab's
+    /// underline are both in here.
+    fn bars(strip: &TabStripWidget) -> Vec<(f32, f32, f32, f32, Rgba)> {
+        strip
+            .draw_items()
+            .iter()
+            .filter_map(|item| match item {
+                WidgetDrawItem::Quad { x, y, width, height, color, .. } if *height < strip.frame.height => {
+                    Some((*y, *x, *width, *height, *color))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn filled_tabs_divide_the_whole_strip_and_leave_no_gap_between_them() {
+        // Tripwire: the owner's round-8 note 14 — the tabs should "take the
+        // space" rather than sit in it as small buttons. A filled row that
+        // kept the chips' content sizing or their gap is that note unfixed,
+        // and a gap between two filled tabs is worse than a look: it is a
+        // press in the middle of the bar that selects nothing.
+        for width in [720.0_f32, 400.0, 180.0] {
+            let strip = filled_strip(width);
+            let widths = strip.tab_widths();
+            assert_eq!(widths.len(), strip.labels.len());
+            assert!((widths.iter().sum::<f32>() - width).abs() < 1e-3, "strip {width}: {widths:?} is not the frame");
+            assert!(
+                widths.windows(2).all(|pair| (pair[0] - pair[1]).abs() < 1e-3),
+                "strip {width}: shares are uneven: {widths:?}",
+            );
+            for index in 0..strip.labels.len() {
+                let left = slot_left(&widths, 0.0, index);
+                assert_eq!(
+                    strip.tab_at_pointer_x(left + widths[index] * 0.5),
+                    Some(index),
+                    "the middle of tab {index}"
+                );
+                assert_eq!(strip.tab_at_pointer_x(left + 0.001), Some(index), "and its very left edge");
+            }
+        }
+    }
+
+    #[test]
+    fn a_filled_strip_plates_no_tab_and_marks_the_current_one_with_an_accent_underline() {
+        // Tripwire: the shape *is* the note. A filled row that kept the
+        // chips' raised plate is a row of buttons again; one without the rule
+        // under it floats over the content instead of being its top edge; and
+        // an underline that is not the current tab's own width says nothing
+        // about which tab is live.
+        let strip = TabStripWidget { selected_index: 2, ..filled_strip(600.0) };
+        let widths = strip.tab_widths();
+        assert!(full_height_quads(&strip).is_empty(), "a filled tab carries no chrome of its own at rest");
+
+        let expected_left = slot_left(&widths, 0.0, 2);
+        assert_eq!(
+            bars(&strip),
+            alloc::vec![
+                (strip.frame.height - RULE_THICKNESS, 0.0, strip.frame.width, RULE_THICKNESS, strip.theme.outline),
+                (
+                    strip.frame.height - UNDERLINE_THICKNESS,
+                    expected_left,
+                    widths[2],
+                    UNDERLINE_THICKNESS,
+                    strip.theme.accent,
+                ),
+            ],
+            "the rule runs under the whole row and the accent underline is exactly the current tab",
+        );
+    }
+
+    #[test]
+    fn a_filled_tab_too_narrow_for_its_label_elides_it_inside_its_share() {
+        // Tripwire: an even share is not a promise of room. `Sequences` in a
+        // sixth of a narrow strip does not fit, and a run laid out at its
+        // natural width would hang off both ends of its share for the next
+        // tab's label to collide with — the same defect the chips' fit
+        // fixed, arriving by the other door.
+        let strip = filled_strip(240.0);
+        let metrics = strip.font_metrics.resolved().expect("measured");
+        let size = strip.theme.label_size_pixels;
+        let widths = strip.tab_widths();
+        let mut elided = 0;
+        for (index, label) in strip.labels.iter().enumerate() {
+            let left = slot_left(&widths, 0.0, index);
+            let (run, run_x) = strip.tab_run(label, left, widths[index]).expect("every share here holds a mark");
+            let run_width = measured_text_width(metrics, &run, size);
+            assert!(run_x >= left - 1e-3, "tab {index}: {run:?} starts left of its share");
+            assert!(run_x + run_width <= left + widths[index] + 1e-3, "tab {index}: {run:?} runs past its share");
+            if run != *label {
+                assert!(run.ends_with(ELLIPSIS), "tab {index}: a cut label carries the mark that says so: {run:?}");
+                elided += 1;
+            }
+        }
+        assert!(elided > 0, "a 240-pixel strip cannot hold all six labels whole; nothing elided");
+    }
+
+    #[test]
+    fn a_filled_strip_asks_for_no_width_and_a_chip_row_asks_for_its_own() {
+        // Tripwire: a host sizes a measured cell from the reported intrinsic.
+        // A filled strip that reported the chips' natural row would have the
+        // host reserve a content width for tabs that then divide whatever
+        // they are given — the two would disagree at every frame — while a
+        // chip row that stopped reporting one would be fitted forever.
+        let filled = filled_strip(600.0).intrinsic().expect("a filled row still reports its height");
+        assert!(!filled[0].is_finite(), "a filled row asks for no width: {filled:?}");
+        assert_eq!(filled[1], Theme::DEFAULT.row_height, "and for one row of height");
+
+        let chips = measured_strip(600.0).intrinsic().expect("a measured chip row reports one");
+        assert_eq!(chips[0], measured_strip(600.0).natural_row_width().expect("measured"), "chips ask for their row");
+    }
+
     fn strip(labels: usize, selected_index: usize) -> TabStripWidget {
         TabStripWidget {
             labels: (0..labels).map(|index| format!("tab-{index}")).collect(),
             selected_index,
+            style: TabStripStyle::Chips,
             theme: Theme::DEFAULT,
             frame: WidgetFrame { x: 10.0, y: 0.0, width: 120.0, height: 24.0 },
             state: InteractionState::new(WidgetControlState::default()),

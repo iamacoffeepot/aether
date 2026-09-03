@@ -869,9 +869,15 @@ hovered, pressed, disabled, validation, and focus presentation use the common
 theme/state contract.
 
 `WidgetKind::TabStrip` spawns `TabStripWidget` from `TabStripConfig { labels,
-initial_index, theme, state }` — one row of tabs over parallel content sets
-viewed one at a time. Unlike the segmented control, the row is not divided
-evenly: each tab is as wide as its own label plus one `theme.pad` either side,
+initial_index, style, theme, state }` — one row of tabs over parallel content
+sets viewed one at a time. `style` is `TabStripStyle { Chips, Filled }` and
+picks between the two shapes below; it defaults to `Chips`, which is what
+every strip drew before the field existed. Selection is identical in both: a
+left press selects, focused Left/Right moves and clamps, and `TabSelected {
+index }` reports only actual changes.
+
+**`Chips`** — content-sized tabs sitting in the section. Unlike the segmented
+control, the row is not divided evenly: each tab is as wide as its own label plus one `theme.pad` either side,
 laid out left to right from the strip's local origin with `theme.space(1)`
 between them, so the space between two tabs belongs to neither and a press
 there selects nothing. That sizing needs the label's real width, so the strip
@@ -902,9 +908,28 @@ buttons with one lit, and hover and press stay the only fills the pointer
 changes (the usual `Theme::fill` overlays). The tab strip is the one current-item
 control that does not take the selection role — a segmented control divides one
 bar and needs the fill to say which part is chosen, while a tab already reads as
-a place you are standing in. A left press selects, focused
-Left/Right moves the selection and clamps at the ends, and `TabSelected {
-index }` reports only actual changes. The strip owns nothing but the choice:
+a place you are standing in.
+
+**`Filled`** — Material 3's primary tabs, and the answer to "they don't feel
+like typical tabs … buttons that take the space and feel more dominant"
+(round-8 note 14). The tabs divide the strip's **whole frame** evenly with
+nothing between them, so every pixel of the bar belongs to a tab and a press
+in the middle of the row always selects one. No tab carries a plate; the
+current one is marked by a two-pixel `theme.accent` underline **the width of
+its own tab** at the strip's bottom edge, and a one-pixel `theme.outline` rule
+runs under the whole strip, drawn first so the underline lights its own span
+of it — the row reads as the top edge of the content it switches. The accent
+is spent as a *mark* and never as a fill, so no tab is plated in the primary
+action's colour. With no plate to carry the pointer's answer, a hovered or
+pressed tab draws the role-agnostic `hover_overlay` / `pressed_overlay` as its
+whole background. A share too narrow for its label elides it with the kit's
+ellipsis and centres the run in the share, the same rule the fitted chips
+follow.
+
+A filled strip reports `WidgetDrawList::intrinsic` as `[non-finite, row
+height]`: it takes whatever width it is given, so there is nothing for a
+layout to size a slot to, and a reader of that field takes a component only
+when it is finite and non-negative. The strip owns nothing but the choice:
 swapping the content behind the selected tab is the root's business.
 
 `WidgetKind::Numeric` spawns `NumericWidget` from `NumericConfig { min, max,

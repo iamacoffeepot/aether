@@ -839,9 +839,37 @@ pub struct DropdownConfig {
 pub struct TabStripConfig {
     pub labels: Vec<String>,
     pub initial_index: u32,
+    /// Which of the two tab shapes the strip draws.
+    /// [`TabStripStyle::Chips`] — the content-sized row every strip drew
+    /// before the field existed — unless a host asks for the filled row.
+    #[serde(default)]
+    pub style: TabStripStyle,
     pub theme: Theme,
     #[serde(default)]
     pub state: WidgetControlState,
+}
+
+/// The two shapes a row of tabs takes.
+///
+/// The owner's round-8 note 14: "the tab buttons are good but they don't feel
+/// like typical tabs … like they aren't small buttons in the section but
+/// buttons that take the space and feel more dominant." Both shapes select
+/// the same way and report the same [`TabSelected`]; what changes is whether
+/// the row is a set of content-sized chips sitting in the section or the
+/// section's own top edge.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TabStripStyle {
+    /// Content-sized tabs on the raised surface, one gap between them, the
+    /// current one underlined in the primary ink. What the strip has always
+    /// drawn.
+    #[default]
+    Chips,
+    /// Material 3 primary tabs: the tabs divide the strip's whole frame
+    /// evenly with no chrome of their own, the current one carries an accent
+    /// underline the width of its tab, and a hairline rule in the outline
+    /// role runs under the row — so the strip reads as the top edge of the
+    /// content it switches rather than as buttons placed on it.
+    Filled,
 }
 
 /// One entry of a [`Menu`]: its label, the accelerator it advertises at the
