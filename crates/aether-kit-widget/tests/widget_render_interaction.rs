@@ -709,6 +709,14 @@ fn solid_for<'a>(snapshot: &'a [DrawTexturedQuads], clip: &ClipRect) -> &'a Draw
 /// The two quads a standing scroll bar contributes: its track and its thumb.
 const SCROLL_BAR_QUADS: usize = 2;
 
+/// What a standing scroll bar takes off the right end of every row: its
+/// two-unit track plus one spacing unit of gap. A row is filled inside what is
+/// left, so the bar stands beside the rows rather than printing on them
+/// (round-5 note 8).
+fn scroll_bar_gutter() -> f32 {
+    Theme::DEFAULT.space(2) + Theme::DEFAULT.space(1)
+}
+
 fn virtual_list_clip() -> ClipRect {
     ClipRect { x: PANEL_X, y: PANEL_Y, width: PANEL_WIDTH, height: ROW_HEIGHT * 5.0 }
 }
@@ -731,7 +739,7 @@ fn assert_virtual_list_rows(
     for (row_offset, quad) in batch.quads[..5].iter().enumerate() {
         assert_eq!(quad.x, PANEL_X);
         assert_eq!(quad.y, PANEL_Y + row_offset as f32 * ROW_HEIGHT);
-        assert_eq!(quad.width, PANEL_WIDTH);
+        assert_eq!(quad.width, PANEL_WIDTH - scroll_bar_gutter(), "a row fill stops where the bar's gutter starts");
         assert_eq!(quad.height, ROW_HEIGHT);
         let expected_tint = if row_offset == selected_row_offset {
             selected_tint
