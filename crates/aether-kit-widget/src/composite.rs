@@ -22,13 +22,13 @@
 //! hosts stay one group — which is what the root's clip subtraction reads to
 //! decide whose text a fill may cut.
 //!
-//! A **raised** child's own overlay — an open dropdown's list escaping its
-//! slot — is held back and appended after every slot has laid its draws down,
-//! rather than spliced in where its slot sits: it shares this lane with the
-//! group, and half the siblings it must cover are registered after it. An
-//! unraised child's overlay keeps its authored position, because its own
-//! siblings are not in this lane and what is — a plate some group raised
-//! after it — stands over it by right.
+//! The overlay lane is assembled in four parts, not woven in slot order:
+//! what unraised children escaped into it (a hover reveal, a toast, a
+//! dropdown's list), then the node's own overlay chrome, then the slots it
+//! raised, then what *those* children escaped. Registration order cannot tell
+//! "over everything" from "over my siblings" on its own — a toast registered
+//! after a question is not standing over the question, while a dropdown opened
+//! halfway up that question is standing over the rows below it.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -257,19 +257,22 @@ impl Composite {
     #[must_use]
     pub fn flatten(&self, intrinsic: Option<[f32; 2]>) -> WidgetDrawList {
         let mut items = self.chrome.clone();
-        let mut overlay = self.overlay_chrome.clone();
-        // A raised child's own overlay is held back to the end of the lane.
-        // Its siblings ride the same lane, so splicing it in where its slot
-        // sits leaves it behind every one of them registered after it — the
-        // reason a dialog's rows and its Cancel button printed through a
-        // dropdown list opened halfway up the group.
+        // The overlay lane is assembled in four parts rather than woven in
+        // slot order, because "over everything" and "over my siblings" are
+        // different claims and registration order cannot tell them apart.
         //
-        // An *unraised* child's overlay keeps its authored position, because
-        // its siblings are not in this lane and the things that are — the
-        // plates a group raised after it — legitimately stand over it. A
-        // numeric in the sheet behind a standing question still reports its
-        // hover reveal; held back, that plate landed over the question and
-        // blanked the title.
+        // `escaped` is what unraised children raise out of the ordinary lane —
+        // a dropdown's open list, a hover reveal, a toast. It escapes its own
+        // slot, not the group standing over the whole cluster, so it goes
+        // first, under the plate.
+        //
+        // `raised` is the group: the node's own overlay chrome (its plate)
+        // followed by every slot it lifted into this lane, in slot order.
+        // `raised_escapes` is what those children raise in turn, held to the
+        // very end — the group shares one lane, so a dropdown opened halfway
+        // up it must clear the siblings registered after it.
+        let mut escaped: Vec<WidgetDrawItem> = Vec::new();
+        let mut raised: Vec<WidgetDrawItem> = Vec::new();
         let mut raised_escapes: Vec<WidgetDrawItem> = Vec::new();
         for slot in &self.slots {
             let Some(list) = &slot.list else {
@@ -278,13 +281,17 @@ impl Composite {
             let placed = list.items.iter().filter_map(|item| item.offset(slot.origin).intersect_clip(slot.clip));
             let escaping = list.overlay.iter().map(|item| item.offset(slot.origin));
             if slot.overlay {
-                overlay.extend(placed);
+                raised.extend(placed);
                 raised_escapes.extend(escaping);
             } else {
                 items.extend(placed);
-                overlay.extend(escaping);
+                escaped.extend(escaping);
             }
         }
+
+        let mut overlay = escaped;
+        overlay.extend(self.overlay_chrome.iter().cloned());
+        overlay.extend(raised);
         overlay.extend(raised_escapes);
         WidgetDrawList { intrinsic, items, overlay }
     }
@@ -329,15 +336,16 @@ mod tests {
     }
 
     #[test]
-    fn a_raised_childs_overlay_lands_last_and_an_unraised_ones_keeps_its_place() {
-        // Tripwire: both halves of who a child's overlay has to clear. A
-        // *raised* child shares this lane with its siblings, so splicing its
-        // overlay in at its own slot leaves it behind every one of them
-        // registered after it — a dropdown opened halfway up a dialog,
-        // standing behind the rows below it. An *unraised* child's siblings
-        // are in the other lane, and what shares this one is the plate a group
-        // raised after it; held back to the end, a background field's hover
-        // reveal landed over that plate and blanked its title.
+    fn the_overlay_lane_puts_what_escaped_under_the_plate_and_the_groups_own_escape_last() {
+        // Tripwire: the two claims registration order cannot tell apart. A
+        // *raised* child shares this lane with its siblings, so leaving its
+        // overlay at its own slot puts it behind every one of them registered
+        // after it — a dropdown opened halfway up a dialog, standing behind
+        // the rows below it. An *unraised* child escaped its slot, not the
+        // group: its overlay belongs under the plate, wherever its slot sits.
+        // Ordered after the group instead, a background field's hover reveal
+        // and a toast raised behind a standing question cut that question's
+        // own title out of the frame.
         let mut root = Composite::new();
         let (background, dropdown, below) = (MailboxId(1), MailboxId(2), MailboxId(3));
         root.register_slot(background, Vec2::ZERO, None, "background", "aether.kit.widget");
@@ -367,9 +375,9 @@ mod tests {
         let flat = root.flatten(None);
         assert_eq!(
             flat.overlay.iter().map(tag).collect::<Vec<_>>(),
-            vec![0.1, 0.5, 0.2, 0.4, 0.3],
-            "the node's overlay chrome, the unraised child's overlay where its slot sits, the raised \
-             group in registration order, and the group's escaping overlay last",
+            vec![0.5, 0.1, 0.2, 0.4, 0.3],
+            "what the unraised child escaped, then the node's overlay chrome, then the raised group \
+             in registration order, then the group's own escaping overlay last",
         );
         assert_eq!(
             flat.items.iter().map(tag).collect::<Vec<_>>(),

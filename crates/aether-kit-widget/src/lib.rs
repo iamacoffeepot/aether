@@ -774,11 +774,13 @@ mod tests {
         let background = MailboxId(1);
         let title = MailboxId(2);
         let ok = MailboxId(3);
+        let toast = MailboxId(4);
 
         let mut composite = Composite::new();
         composite.register_slot(background, Vec2::ZERO, None, "sheet_numeric", "aether.kit.widget");
         composite.register_slot(title, Vec2::ZERO, None, "picker_title", "aether.kit.widget");
         composite.register_slot(ok, Vec2::ZERO, None, "picker_ok", "aether.kit.widget");
+        composite.register_slot(toast, Vec2::ZERO, None, "toast_region", "aether.kit.widget");
         composite.set_slot_overlay(title, true);
         composite.set_slot_overlay(ok, true);
         composite.begin_frame();
@@ -811,11 +813,23 @@ mod tests {
             },
         );
 
+        // A toast standing while the question does — registered after the
+        // whole group, and still not part of it.
+        composite.fill(
+            toast,
+            WidgetDrawList {
+                intrinsic: None,
+                items: Vec::new(),
+                overlay: vec![fill(WidgetClipRect { x: 280.0, y: 344.0, width: 460.0, height: 40.0 })],
+            },
+        );
+
         let flat = composite.flatten(None);
         let overlay_lane = WidgetDrawList { intrinsic: None, items: flat.overlay, overlay: Vec::new() };
         assert!(
             text_items(&overlay_lane).iter().any(|item| item.text == "Pick a gem"),
-            "the question's own title keeps its run: nothing a widget behind the plate raises stands over it",
+            "the question's own title keeps its run: nothing a widget outside the group raises stands \
+             over it, whether that widget was registered before the group or after it",
         );
     }
 

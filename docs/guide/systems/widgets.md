@@ -1233,15 +1233,23 @@ bar's plate — puts those draws in `WidgetDrawList::overlay` instead of
 offset by each slot origin on the way up like any other draw but never
 intersected with the slot clip, and the root emits the whole cluster's overlay
 after every ordinary quad and glyph, so the list escapes its one-row slot and
-lands over the widgets below it. Inside the overlay, where those draws land
-depends on which lane their own slot rides in. A **raised** child's escaping
-draws are held to the end, after every slot the parent laid down: a dropdown
-halfway up a group shares the lane with its siblings and has to stand over the
-ones registered after it, which is most of the ones its list drops across. An
-**unraised** child's keep their authored position, because its siblings are in
-the other lane and what shares this one — the plate a group raised after it —
-stands over it by right. A field in the sheet behind a standing question still
-reports its hover reveal; that plate belongs under the question, not over it.
+lands over the widgets below it.
+
+Inside the overlay lane the parent assembles four parts rather than weaving
+them in slot order, because "over everything" and "over my siblings" are
+different claims and registration order cannot tell them apart. First comes
+what **unraised** children escaped — a hover reveal, a toast, a dropdown's list
+from a widget that is not part of any group; it escaped its own slot, not the
+plate standing over the cluster. Then the node's own overlay chrome, then the
+slots it **raised**, in slot order — the group. Last, what those raised
+children escaped in turn: a dropdown opened halfway up a group shares the lane
+with its siblings and has to stand over the ones registered after it, which is
+most of the ones its list drops across.
+
+The middle two parts are why a group's labels survive: everything outside the
+group is behind its plate, wherever its slot happens to sit. A toast raised
+while a question stands is registered long after the question's title and is
+still not standing over it.
 
 A *root* reaches the same lane two ways, for the plate that hosts other
 children rather than escaping its own slot. `Composite::extend_overlay(items)`
