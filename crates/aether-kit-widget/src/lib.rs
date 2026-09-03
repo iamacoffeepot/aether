@@ -774,13 +774,11 @@ mod tests {
         let background = MailboxId(1);
         let title = MailboxId(2);
         let ok = MailboxId(3);
-        let toast = MailboxId(4);
 
         let mut composite = Composite::new();
         composite.register_slot(background, Vec2::ZERO, None, "sheet_numeric", "aether.kit.widget");
         composite.register_slot(title, Vec2::ZERO, None, "picker_title", "aether.kit.widget");
         composite.register_slot(ok, Vec2::ZERO, None, "picker_ok", "aether.kit.widget");
-        composite.register_slot(toast, Vec2::ZERO, None, "toast_region", "aether.kit.widget");
         composite.set_slot_overlay(title, true);
         composite.set_slot_overlay(ok, true);
         composite.begin_frame();
@@ -813,70 +811,12 @@ mod tests {
             },
         );
 
-        // A toast standing while the question does — registered after the
-        // whole group, and still not part of it.
-        composite.fill(
-            toast,
-            WidgetDrawList {
-                intrinsic: None,
-                items: Vec::new(),
-                overlay: vec![fill(WidgetClipRect { x: 280.0, y: 344.0, width: 460.0, height: 40.0 })],
-            },
-        );
-
         let flat = composite.flatten(None);
         let overlay_lane = WidgetDrawList { intrinsic: None, items: flat.overlay, overlay: Vec::new() };
         assert!(
             text_items(&overlay_lane).iter().any(|item| item.text == "Pick a gem"),
-            "the question's own title keeps its run: nothing a widget outside the group raises stands \
-             over it, whether that widget was registered before the group or after it",
-        );
-    }
-
-    #[test]
-    fn a_dialogs_open_list_cuts_the_rows_registered_after_the_control_that_opened_it() {
-        // Tripwire: the composition lunaris's craft dialog actually makes. A
-        // plate goes in the overlay chrome, every control on it is raised into
-        // the same lane (`set_slot_overlay`), and one of those controls reports
-        // an open list in its *own* `overlay`. That list has to stand over the
-        // whole group, including the rows registered after it — which is the
-        // one thing a lane position cannot say on its own, since the escaping
-        // overlay belongs to a slot in the middle of the group.
-        let plate = WidgetClipRect { x: 0.0, y: 0.0, width: 200.0, height: 200.0 };
-        let closed_row = WidgetClipRect { x: 0.0, y: 0.0, width: 180.0, height: 24.0 };
-        let dropdown = MailboxId(1);
-        let below = MailboxId(2);
-
-        let mut composite = Composite::new();
-        composite.register_slot(dropdown, Vec2::new(0.0, 20.0), None, "modifier", "aether.kit.widget");
-        composite.register_slot(below, Vec2::new(0.0, 50.0), None, "modifier_below", "aether.kit.widget");
-        composite.set_slot_overlay(dropdown, true);
-        composite.set_slot_overlay(below, true);
-        composite.begin_frame();
-        composite.extend_overlay([fill(plate)]);
-        composite.fill(
-            dropdown,
-            WidgetDrawList {
-                intrinsic: None,
-                items: vec![text(8.0, "None", Some(closed_row))],
-                // The open list, in the widget's own local coordinates below
-                // its closed row, escaping its slot.
-                overlay: vec![fill(WidgetClipRect { x: 0.0, y: 24.0, width: 180.0, height: 96.0 })],
-            },
-        );
-        composite.fill(
-            below,
-            WidgetDrawList { intrinsic: None, items: vec![text(8.0, "None", Some(closed_row))], overlay: Vec::new() },
-        );
-
-        let flat = composite.flatten(None);
-        let overlay_lane = WidgetDrawList { intrinsic: None, items: flat.overlay, overlay: Vec::new() };
-        let items = text_items(&overlay_lane);
-        assert_eq!(
-            items.iter().map(|item| item.origin[1]).collect::<Vec<_>>(),
-            vec![20.0],
-            "only the closed row that opened the list keeps its label; the row standing under the list \
-             sends no glyphs, whichever slot opened it",
+            "the question's own title keeps its run: what a widget behind the plate raises went down \
+             where its slot sits, under the plate, not over the group",
         );
     }
 

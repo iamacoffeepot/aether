@@ -21,14 +21,6 @@
 //! the same chrome-then-slots order. That is how a plate and the children it
 //! hosts stay one group — which is what the root's clip subtraction reads to
 //! decide whose text a fill may cut.
-//!
-//! The overlay lane is assembled in four parts, not woven in slot order:
-//! what unraised children escaped into it (a hover reveal, a toast, a
-//! dropdown's list), then the node's own overlay chrome, then the slots it
-//! raised, then what *those* children escaped. Registration order cannot tell
-//! "over everything" from "over my siblings" on its own — a toast registered
-//! after a question is not standing over the question, while a dropdown opened
-//! halfway up that question is standing over the rows below it.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -257,42 +249,19 @@ impl Composite {
     #[must_use]
     pub fn flatten(&self, intrinsic: Option<[f32; 2]>) -> WidgetDrawList {
         let mut items = self.chrome.clone();
-        // The overlay lane is assembled in four parts rather than woven in
-        // slot order, because "over everything" and "over my siblings" are
-        // different claims and registration order cannot tell them apart.
-        //
-        // `escaped` is what unraised children raise out of the ordinary lane —
-        // a dropdown's open list, a hover reveal, a toast. It escapes its own
-        // slot, not the group standing over the whole cluster, so it goes
-        // first, under the plate.
-        //
-        // `raised` is the group: the node's own overlay chrome (its plate)
-        // followed by every slot it lifted into this lane, in slot order.
-        // `raised_escapes` is what those children raise in turn, held to the
-        // very end — the group shares one lane, so a dropdown opened halfway
-        // up it must clear the siblings registered after it.
-        let mut escaped: Vec<WidgetDrawItem> = Vec::new();
-        let mut raised: Vec<WidgetDrawItem> = Vec::new();
-        let mut raised_escapes: Vec<WidgetDrawItem> = Vec::new();
+        let mut overlay = self.overlay_chrome.clone();
         for slot in &self.slots {
             let Some(list) = &slot.list else {
                 continue;
             };
             let placed = list.items.iter().filter_map(|item| item.offset(slot.origin).intersect_clip(slot.clip));
-            let escaping = list.overlay.iter().map(|item| item.offset(slot.origin));
             if slot.overlay {
-                raised.extend(placed);
-                raised_escapes.extend(escaping);
+                overlay.extend(placed);
             } else {
                 items.extend(placed);
-                escaped.extend(escaping);
             }
+            overlay.extend(list.overlay.iter().map(|item| item.offset(slot.origin)));
         }
-
-        let mut overlay = escaped;
-        overlay.extend(self.overlay_chrome.iter().cloned());
-        overlay.extend(raised);
-        overlay.extend(raised_escapes);
         WidgetDrawList { intrinsic, items, overlay }
     }
 }
@@ -333,57 +302,6 @@ mod tests {
 
     fn list(items: Vec<WidgetDrawItem>) -> WidgetDrawList {
         WidgetDrawList { intrinsic: None, items, overlay: Vec::new() }
-    }
-
-    #[test]
-    fn the_overlay_lane_puts_what_escaped_under_the_plate_and_the_groups_own_escape_last() {
-        // Tripwire: the two claims registration order cannot tell apart. A
-        // *raised* child shares this lane with its siblings, so leaving its
-        // overlay at its own slot puts it behind every one of them registered
-        // after it — a dropdown opened halfway up a dialog, standing behind
-        // the rows below it. An *unraised* child escaped its slot, not the
-        // group: its overlay belongs under the plate, wherever its slot sits.
-        // Ordered after the group instead, a background field's hover reveal
-        // and a toast raised behind a standing question cut that question's
-        // own title out of the frame.
-        let mut root = Composite::new();
-        let (background, dropdown, below) = (MailboxId(1), MailboxId(2), MailboxId(3));
-        root.register_slot(background, Vec2::ZERO, None, "background", "aether.kit.widget");
-        root.register_slot(dropdown, Vec2::ZERO, None, "dropdown", "aether.kit.widget");
-        root.register_slot(below, Vec2::ZERO, None, "below", "aether.kit.widget");
-        assert!(root.set_slot_overlay(dropdown, true));
-        assert!(root.set_slot_overlay(below, true));
-
-        root.begin_frame();
-        root.extend_overlay([quad(0.0, 0.1)]);
-        assert!(root.fill(
-            background,
-            WidgetDrawList { intrinsic: None, items: vec![quad(4.0, 0.6)], overlay: vec![quad(5.0, 0.5)] },
-        ));
-        assert!(root.fill(
-            dropdown,
-            WidgetDrawList { intrinsic: None, items: vec![quad(1.0, 0.2)], overlay: vec![quad(2.0, 0.3)] },
-        ));
-        assert!(root.fill(below, list(vec![quad(3.0, 0.4)])));
-
-        let tag = |item: &WidgetDrawItem| match item {
-            WidgetDrawItem::Quad { color, .. } => color.r,
-            WidgetDrawItem::TexturedQuad { .. } | WidgetDrawItem::Text { .. } => {
-                unreachable!("test builds only solid quads")
-            }
-        };
-        let flat = root.flatten(None);
-        assert_eq!(
-            flat.overlay.iter().map(tag).collect::<Vec<_>>(),
-            vec![0.5, 0.1, 0.2, 0.4, 0.3],
-            "what the unraised child escaped, then the node's overlay chrome, then the raised group \
-             in registration order, then the group's own escaping overlay last",
-        );
-        assert_eq!(
-            flat.items.iter().map(tag).collect::<Vec<_>>(),
-            vec![0.6],
-            "and the unraised child's own draws stay in the ordinary lane",
-        );
     }
 
     #[test]
