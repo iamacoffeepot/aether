@@ -371,9 +371,9 @@ impl WidgetDrawItem {
 /// overlay by the child's slot origin like any draw, but never intersects it
 /// with the slot clip (the whole point is to escape the slot), and carries it
 /// up as its own `overlay` so the root emits every overlay after every
-/// ordinary item. Within that lane it lands after every slot the parent laid
-/// down, not at its own slot's position, so it stands over the siblings
-/// registered after it as well. Empty for the ordinary widget.
+/// ordinary item. Within that lane it lands at its own slot's position, so a
+/// control that must stand over its own siblings is registered after them.
+/// Empty for the ordinary widget.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[kind(name = "aether.kit.widget.draw_list")]
 pub struct WidgetDrawList {

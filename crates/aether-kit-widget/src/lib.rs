@@ -761,49 +761,62 @@ mod tests {
     }
 
     #[test]
-    fn a_dialogs_open_list_cuts_the_rows_registered_after_the_control_that_opened_it() {
-        // Tripwire: the composition lunaris's craft dialog actually makes. A
-        // plate goes in the overlay chrome, every control on it is raised into
-        // the same lane (`set_slot_overlay`), and one of those controls reports
-        // an open list in its *own* `overlay`. That list has to stand over the
-        // whole group, including the rows registered after it — which is the
-        // one thing a lane position cannot say on its own, since the escaping
-        // overlay belongs to a slot in the middle of the group.
-        let plate = WidgetClipRect { x: 0.0, y: 0.0, width: 200.0, height: 200.0 };
-        let closed_row = WidgetClipRect { x: 0.0, y: 0.0, width: 180.0, height: 24.0 };
-        let dropdown = MailboxId(1);
-        let below = MailboxId(2);
+    fn a_background_widgets_own_overlay_stays_under_a_plate_raised_after_it() {
+        // Tripwire: the studio's gem question. A numeric in the sheet behind
+        // it is still latched hovered when the question opens, and a hovered
+        // single-line edit whose value overruns its box reports an overflow
+        // reveal plate in its own overlay — an overlay that has not escaped a
+        // group, because its slot is not in one. That plate belongs where its
+        // slot sits, under the plate the question raised after it. Holding
+        // every child's overlay back to the end of the lane put it over the
+        // question instead and blanked the title.
+        let title_row = WidgetClipRect { x: 300.0, y: 350.0, width: 420.0, height: 20.0 };
+        let background = MailboxId(1);
+        let title = MailboxId(2);
+        let ok = MailboxId(3);
 
         let mut composite = Composite::new();
-        composite.register_slot(dropdown, Vec2::new(0.0, 20.0), None, "modifier", "aether.kit.widget");
-        composite.register_slot(below, Vec2::new(0.0, 50.0), None, "modifier_below", "aether.kit.widget");
-        composite.set_slot_overlay(dropdown, true);
-        composite.set_slot_overlay(below, true);
+        composite.register_slot(background, Vec2::ZERO, None, "sheet_numeric", "aether.kit.widget");
+        composite.register_slot(title, Vec2::ZERO, None, "picker_title", "aether.kit.widget");
+        composite.register_slot(ok, Vec2::ZERO, None, "picker_ok", "aether.kit.widget");
+        composite.set_slot_overlay(title, true);
+        composite.set_slot_overlay(ok, true);
         composite.begin_frame();
-        composite.extend_overlay([fill(plate)]);
+        // The question's plate, raised before the controls standing on it.
+        composite.extend_overlay([fill(WidgetClipRect { x: 290.0, y: 340.0, width: 440.0, height: 300.0 })]);
         composite.fill(
-            dropdown,
+            background,
             WidgetDrawList {
                 intrinsic: None,
-                items: vec![text(8.0, "None", Some(closed_row))],
-                // The open list, in the widget's own local coordinates below
-                // its closed row, escaping its slot.
-                overlay: vec![fill(WidgetClipRect { x: 0.0, y: 24.0, width: 180.0, height: 96.0 })],
+                items: vec![text(8.0, "24.0", Some(WidgetClipRect { x: 0.0, y: 350.0, width: 100.0, height: 20.0 }))],
+                // The reveal plate, over the numeric and whatever sits to its
+                // right — which is where the question is standing.
+                overlay: vec![fill(WidgetClipRect { x: 0.0, y: 350.0, width: 800.0, height: 20.0 })],
             },
         );
         composite.fill(
-            below,
-            WidgetDrawList { intrinsic: None, items: vec![text(8.0, "None", Some(closed_row))], overlay: Vec::new() },
+            title,
+            WidgetDrawList {
+                intrinsic: None,
+                items: vec![text(302.0, "Pick a gem", Some(title_row))],
+                overlay: Vec::new(),
+            },
+        );
+        composite.fill(
+            ok,
+            WidgetDrawList {
+                intrinsic: None,
+                items: vec![fill(WidgetClipRect { x: 300.0, y: 600.0, width: 80.0, height: 24.0 })],
+                overlay: Vec::new(),
+            },
         );
 
         let flat = composite.flatten(None);
         let overlay_lane = WidgetDrawList { intrinsic: None, items: flat.overlay, overlay: Vec::new() };
-        let items = text_items(&overlay_lane);
-        assert_eq!(
-            items.iter().map(|item| item.origin[1]).collect::<Vec<_>>(),
-            vec![20.0],
-            "only the closed row that opened the list keeps its label; the row standing under the list \
-             sends no glyphs, whichever slot opened it",
+        assert!(
+            text_items(&overlay_lane).iter().any(|item| item.text == "Pick a gem"),
+            "the question's own title keeps its run: what a widget behind the plate raises went down \
+             where its slot sits, under the plate, not over the group",
         );
     }
 
