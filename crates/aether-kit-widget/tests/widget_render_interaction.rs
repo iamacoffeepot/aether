@@ -68,8 +68,8 @@ use aether_kit_widget::set::text_baseline_y;
 use aether_kit_widget::{
     ButtonConfig, EditorConfig, EditorRegionRect, LabelConfig, NumericConfig, PanelConfig, RegionInputLanes,
     RegionSpec, ScrollConfig, ScrollExtent, ScrollOffset, SegmentedConfig, SetTheme, SetWidgetState, SliderConfig,
-    TextAreaConfig, TextFieldConfig, Theme, ThemeState, ToggleConfig, VirtualListConfig, WidgetChildSpec, WidgetConfig,
-    WidgetControlState, WidgetDrawItem, WidgetKind, WidgetValidation,
+    TextAreaConfig, TextFieldConfig, Theme, ThemeState, ToggleConfig, VirtualListConfig, VirtualListRow,
+    WidgetChildSpec, WidgetConfig, WidgetControlState, WidgetDrawItem, WidgetKind, WidgetValidation,
 };
 use aether_math::Rgba;
 use aether_render::RenderCapability;
@@ -504,9 +504,10 @@ fn virtual_list_child(subname: &str, state: WidgetControlState) -> WidgetChildSp
         origin: [0.0, 0.0],
         clip: None,
         config: VirtualListConfig {
-            items: (0..200).map(|index| format!("{index:03}")).collect(),
+            items: (0..200).map(|index| VirtualListRow::from(format!("{index:03}"))).collect(),
             initial_selected_index: Some(0),
             empty_text: String::new(),
+            ruled: false,
             visible_row_count: 5,
             theme: Theme::DEFAULT,
             state,

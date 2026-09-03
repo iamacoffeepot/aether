@@ -41,7 +41,7 @@ use aether_kinds::{
 };
 use aether_kit_widget::{
     ButtonConfig, PanelConfig, RadioConfig, SetWidgetState, SliderConfig, TextFieldConfig, Theme, VirtualListConfig,
-    WidgetChildSpec, WidgetControlState, WidgetKind,
+    VirtualListRow, WidgetChildSpec, WidgetControlState, WidgetKind,
 };
 
 const TEST_WINDOW_ID: WindowId = WindowId(1);
@@ -345,9 +345,10 @@ fn virtual_list_spec(subname: &str, state: WidgetControlState) -> WidgetChildSpe
         origin: [0.0, 0.0],
         clip: None,
         config: VirtualListConfig {
-            items: (0..200).map(|index| format!("Row {index:03}")).collect(),
+            items: (0..200).map(|index| VirtualListRow::from(format!("Row {index:03}"))).collect(),
             initial_selected_index: Some(0),
             empty_text: String::new(),
+            ruled: false,
             visible_row_count: 5,
             theme: Theme::DEFAULT,
             state,
