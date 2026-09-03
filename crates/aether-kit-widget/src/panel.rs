@@ -121,6 +121,12 @@ pub struct SpawnedChild {
     pub state: WidgetControlState,
     pub type_namespace: &'static str,
     pub scroll_viewport: Option<ScrollExtent>,
+    /// Whether this child scrolls **itself** on the wheel: a virtual list owns
+    /// its realized window, so the wheel over it belongs to it rather than to
+    /// the nearest scroll container. It joins the same wheel-only hit table a
+    /// scroll viewport does, which is what keeps a drag capture from stealing
+    /// a wheel gesture.
+    pub wheel_eligible: bool,
 }
 
 struct VirtualListProfile {
@@ -234,7 +240,7 @@ impl WidgetPanel {
             FocusEligibility { pointer: child.pointer_eligible, keyboard: child.focusable },
             &child.state,
         );
-        if child.scroll_viewport.is_some() {
+        if child.scroll_viewport.is_some() || child.wheel_eligible {
             self.scroll_focus.register(
                 child.id,
                 focus_rect,
@@ -302,6 +308,7 @@ where
                 focusable: false,
                 state: config.state,
                 type_namespace: <LabelWidget as Addressable>::NAMESPACE,
+                wheel_eligible: false,
                 scroll_viewport: None,
             })
         }),
@@ -315,6 +322,7 @@ where
                 focusable: false,
                 state: config.state,
                 type_namespace: <ImageWidget as Addressable>::NAMESPACE,
+                wheel_eligible: false,
                 scroll_viewport: None,
             })
         }),
@@ -328,6 +336,7 @@ where
                 focusable: true,
                 state: config.state,
                 type_namespace: <SliderWidget as Addressable>::NAMESPACE,
+                wheel_eligible: false,
                 scroll_viewport: None,
             })
         }),
@@ -342,6 +351,7 @@ where
                 focusable: true,
                 state: config.state,
                 type_namespace: <RadioGroupWidget as Addressable>::NAMESPACE,
+                wheel_eligible: false,
                 scroll_viewport: None,
             })
         }),
@@ -355,6 +365,7 @@ where
                 focusable: true,
                 state: config.state,
                 type_namespace: <TextFieldWidget as Addressable>::NAMESPACE,
+                wheel_eligible: false,
                 scroll_viewport: None,
             })
         }),
@@ -369,6 +380,7 @@ where
                 focusable: true,
                 state: config.state,
                 type_namespace: <TextAreaWidget as Addressable>::NAMESPACE,
+                wheel_eligible: false,
                 scroll_viewport: None,
             })
         }),
@@ -401,6 +413,7 @@ fn spawn_button_child<P: WasmActor>(
         focusable: true,
         state: config.state,
         type_namespace: <ButtonWidget as Addressable>::NAMESPACE,
+        wheel_eligible: false,
         scroll_viewport: None,
     })
 }
@@ -421,6 +434,7 @@ fn spawn_virtual_list_child<P: WasmActor>(
         focusable: profile.eligible,
         state,
         type_namespace: <VirtualListWidget as Addressable>::NAMESPACE,
+        wheel_eligible: true,
         scroll_viewport: None,
     })
 }
@@ -473,6 +487,7 @@ fn spawn_composite_child<P: WasmActor>(
             focusable: false,
             state: WidgetControlState::default(),
             type_namespace: <Widget as Addressable>::NAMESPACE,
+            wheel_eligible: false,
             scroll_viewport: None,
         })
     })
@@ -505,6 +520,7 @@ fn spawn_scroll_child<P: WasmActor>(
             focusable: false,
             state: WidgetControlState::default(),
             type_namespace: <ScrollWidget as Addressable>::NAMESPACE,
+            wheel_eligible: false,
             scroll_viewport: Some(viewport),
         })
     })
@@ -528,6 +544,7 @@ fn spawn_row_control_child<P: WasmActor>(
                 focusable: true,
                 state: config.state,
                 type_namespace: <ToggleWidget as Addressable>::NAMESPACE,
+                wheel_eligible: false,
                 scroll_viewport: None,
             })
         }),
@@ -540,6 +557,7 @@ fn spawn_row_control_child<P: WasmActor>(
                 focusable: true,
                 state: config.state,
                 type_namespace: <SegmentedWidget as Addressable>::NAMESPACE,
+                wheel_eligible: false,
                 scroll_viewport: None,
             })
         }),
@@ -552,6 +570,7 @@ fn spawn_row_control_child<P: WasmActor>(
                 focusable: true,
                 state: config.state,
                 type_namespace: <NumericWidget as Addressable>::NAMESPACE,
+                wheel_eligible: false,
                 scroll_viewport: None,
             })
         }),
@@ -564,6 +583,7 @@ fn spawn_row_control_child<P: WasmActor>(
                 focusable: true,
                 state: config.state,
                 type_namespace: <DropdownWidget as Addressable>::NAMESPACE,
+                wheel_eligible: false,
                 scroll_viewport: None,
             })
         }),
@@ -576,6 +596,7 @@ fn spawn_row_control_child<P: WasmActor>(
                 focusable: true,
                 state: config.state,
                 type_namespace: <TabStripWidget as Addressable>::NAMESPACE,
+                wheel_eligible: false,
                 scroll_viewport: None,
             })
         }),
@@ -588,6 +609,7 @@ fn spawn_row_control_child<P: WasmActor>(
                 focusable: true,
                 state: config.state,
                 type_namespace: <MenuBarWidget as Addressable>::NAMESPACE,
+                wheel_eligible: false,
                 scroll_viewport: None,
             })
         }),
@@ -930,6 +952,7 @@ fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, ro
             focusable: profile.focusable,
             state: profile.state,
             type_namespace: <aether_behavior::BehaviorHost as Addressable>::NAMESPACE,
+            wheel_eligible: false,
             scroll_viewport: None,
         }),
         Err(error) => {
@@ -1113,9 +1136,10 @@ impl WasmActor for WidgetPanel {
         }
     }
 
-    /// Route a wheel to the topmost scroll viewport under the cursor. This is
-    /// deliberately a fresh `hit_test`, not `pointer_target`: a button's drag
-    /// capture owns move/release, not a separate wheel gesture.
+    /// Route a wheel to the topmost self-scrolling child under the cursor — a
+    /// scroll viewport, or a virtual list, which owns the window it realizes.
+    /// This is deliberately a fresh `hit_test`, not `pointer_target`: a
+    /// button's drag capture owns move/release, not a separate wheel gesture.
     #[handler::single]
     fn on_mouse_wheel(&mut self, ctx: &mut WasmCtx<'_>, wheel: MouseWheel) {
         if let Some(child) = self.scroll_focus.hit_test(wheel.x, wheel.y) {
