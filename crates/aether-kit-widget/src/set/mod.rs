@@ -93,7 +93,7 @@ pub use text_area::TextAreaWidget;
 pub use text_field::TextFieldWidget;
 pub use toast::{ToastConfig, ToastNotice, ToastRegionChanged, ToastSeverity, ToastWidget};
 pub use toggle::ToggleWidget;
-pub use tooltip::{TooltipConfig, TooltipLine, TooltipSection, TooltipShed, TooltipWidget};
+pub use tooltip::{TooltipConfig, TooltipIcon, TooltipLine, TooltipSection, TooltipShed, TooltipWidget};
 pub use virtual_list::VirtualListWidget;
 
 use alloc::string::String;
@@ -801,6 +801,17 @@ const FONT_CAP_HEIGHT_RATIO: f32 = 0.710_937_5;
 #[must_use]
 pub fn text_baseline_y(row_top: f32, row_height: f32, size_pixels: f32) -> f32 {
     size_pixels.mul_add(FONT_CAP_HEIGHT_RATIO, row_height).mul_add(0.5, row_top)
+}
+
+/// The height of the **cap band** one line of `size_pixels` text draws in: the
+/// box from the baseline up to the top of a capital, which is what a reader
+/// sees as "the text" (it is also the box [`text_baseline_y`] centers). It is
+/// what an inline mark beside a run — a tooltip line's icon — is scaled to, so
+/// the mark and the words read as one line rather than as a picture with a
+/// caption.
+#[must_use]
+pub fn text_cap_height(size_pixels: f32) -> f32 {
+    size_pixels * FONT_CAP_HEIGHT_RATIO
 }
 
 /// Everything one single-line editor's frame draw needs. A struct rather than
