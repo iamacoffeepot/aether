@@ -23,6 +23,13 @@
 //! cut mid-glyph, and a label that did not fit then reads as a label that ends
 //! oddly. Eliding first keeps the run inside the frame at any width, so the
 //! margins stay equal and a cut label says so.
+//!
+//! It elides against the frame **less** a pad each side while the frame can
+//! afford that, and against the whole frame when it cannot. The pads belong to
+//! the intrinsic width — what a layout should give this button — and a frame
+//! smaller than them is a caller saying there is no more room, not a reason to
+//! draw nothing: a one-glyph control sized to its own mark has a frame narrower
+//! than two pads at every display scale.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -82,6 +89,21 @@ impl ButtonWidget {
     /// still outstanding, the frame or two before there is a width to center
     /// or elide against. `None` when there is nothing to draw: an empty
     /// label, or a frame too narrow to hold even the elision mark.
+    ///
+    /// **The pads are given up before the label is.** A pad each side is
+    /// what the *intrinsic* reserves — what a layout should give this
+    /// button if it can — not room the draw has to leave inside whatever
+    /// frame it was actually handed; that is the same rule
+    /// [`centered_text_x`] states for the origin, and eliding is where it
+    /// was missing. Charged against the padded budget alone, a control the
+    /// size of its own mark drew **nothing at all**: a `−` does not fit a
+    /// frame minus two pads, and neither does the ellipsis that would say
+    /// it was cut, so `elide_to_width` answered with the empty string and
+    /// the ascendancy inset's collapse button rendered as an empty
+    /// outlined square. So the padded budget is the preference and the
+    /// frame is the limit — a run that cannot afford its pads takes the
+    /// whole frame rather than disappearing, because a button drawing no
+    /// mark at all is worse than one whose mark reaches its edges.
     fn draw_run(&self) -> Option<(String, f32)> {
         let size = self.theme.label_size_pixels;
         let width = self.frame.width;
@@ -89,7 +111,12 @@ impl ButtonWidget {
             || (self.label.clone(), self.theme.pad),
             |metrics| {
                 let measure = |run: &str| measured_text_width(metrics, run, size);
-                let run = elide_to_width(&self.label, self.theme.pad.mul_add(-2.0, width), measure);
+                let padded = elide_to_width(&self.label, self.theme.pad.mul_add(-2.0, width), measure);
+                let run = if padded.is_empty() {
+                    elide_to_width(&self.label, width, measure)
+                } else {
+                    padded
+                };
                 let run_x = centered_text_x(width, measure(&run));
                 (run, run_x)
             },
@@ -329,6 +356,71 @@ mod tests {
         assert_eq!(centered_text_x(40.0, 60.0), 0.0, "a label wider than its whole frame keeps its start visible");
     }
 
+    /// A button whose metrics have resolved against a font of the given
+    /// `advance` per glyph, at the theme numbers a caller really uses.
+    fn measured_button(label: &str, pad: f32, size: f32, width: f32, advance: f32) -> ButtonWidget {
+        let mut button = button();
+        let mut font_metrics = FontMetricsAdapter::new(0);
+        assert_eq!(font_metrics.take_pending_request(), Some(0));
+        assert!(!font_metrics.accept_reply(Some(CachedFontMetrics::new(&FontMetrics {
+            units_per_em: 1000.0,
+            ascent: 800.0,
+            descent: -200.0,
+            line_gap: 0.0,
+            default_advance: advance,
+            advances: alloc::vec![GlyphAdvance { codepoint: u32::from(ELLIPSIS), advance_units: advance }],
+        }))));
+        button.font_metrics = font_metrics;
+        button.label = String::from(label);
+        button.theme.pad = pad;
+        button.theme.label_size_pixels = size;
+        button.frame.width = width;
+        button
+    }
+
+    #[test]
+    fn a_control_too_narrow_for_its_pads_draws_its_mark_instead_of_nothing() {
+        // Tripwire: **the pads are the intrinsic's, and a button gives them
+        // up before it gives up its label.** A one-glyph control sized to
+        // its own mark — the ascendancy inset's collapse button, a square
+        // of one body line carrying a `−` at the body size — has a frame
+        // narrower than two pads at any display scale. Elided against the
+        // padded budget alone, neither the mark nor the ellipsis fits, so
+        // the run came back empty and the button drew a filled square with
+        // nothing on it: a control that says nothing about what it does,
+        // which is what a capture of the studio caught.
+        //
+        // The numbers are the inset's own at scale 2 — pad 16, a 32-pixel
+        // mark of 0.6 em, a 44-pixel frame — so this reproduces the screen
+        // that had it rather than a shape invented for the test.
+        let button = measured_button("\u{2212}", 16.0, 32.0, 44.0, 600.0);
+        let metrics = button.font_metrics.resolved().expect("measured");
+        let mark = measured_text_width(metrics, &button.label, button.theme.label_size_pixels);
+
+        assert!(mark > button.theme.pad.mul_add(-2.0, button.frame.width), "the frame cannot afford both pads");
+        assert!(mark <= button.frame.width, "and the mark does fit the frame itself, which is the whole point");
+
+        let (run, run_x) = button.draw_run().expect("a control with room for its mark must draw it");
+        assert_eq!(run, button.label, "the mark is drawn whole, not elided to an ellipsis or to nothing");
+        assert!(
+            (run_x - (button.frame.width - mark) / 2.0).abs() < 1e-3,
+            "and centred in the frame it was given: {run_x} on a {} frame",
+            button.frame.width,
+        );
+
+        // The preference is unchanged where the frame can afford it: a
+        // wide button still elides against the padded budget, so a long
+        // label keeps a pad of clear space beside its ellipsis.
+        let wide = measured_button("Regenerate terrain", 16.0, 32.0, 200.0, 600.0);
+        let run = wide.draw_run().expect("a wide button draws").0;
+        let measured = measured_text_width(metrics, &run, wide.theme.label_size_pixels);
+        assert!(run.ends_with(ELLIPSIS), "a label past the measure is still cut with the mark that says so");
+        assert!(
+            measured <= wide.theme.pad.mul_add(-2.0, wide.frame.width),
+            "a frame that can afford its pads still keeps them: {run:?} is {measured} wide",
+        );
+    }
+
     #[test]
     fn a_button_too_narrow_for_its_label_elides_it_and_still_centers_it() {
         // Tripwire: the same defect the tab strip's last tab had. Centering a
@@ -354,9 +446,7 @@ mod tests {
             button.frame.width = width;
             let metrics = button.font_metrics.resolved().expect("measured");
             let size = button.theme.label_size_pixels;
-            let Some((run, run_x)) = button.draw_run() else {
-                continue;
-            };
+            let (run, run_x) = button.draw_run().expect("every width here has room for at least the elision mark");
             let run_width = measured_text_width(metrics, &run, size);
             let (left_margin, right_margin) = (run_x, width - (run_x + run_width));
             assert!(
