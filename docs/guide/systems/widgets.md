@@ -631,8 +631,13 @@ The widget's frame is the region. Notices stack down from its top edge at its
 width, newest first, up to `max_standing` (the oldest leaves to make room), and
 each one is a `surface_raised` plate inside a hairline ring with a **severity
 bar** down its left edge: `theme.info` (a blue-grey report), `theme.warning`
-(orange), or `theme.error` (red), never the accent. The text wraps at the
-region's width with one spacing unit of padding and the plate grows downward —
+(orange), or `theme.error` (red), never the accent. The line starts
+`theme.space(2)` clear of that bar — round-8 note 17, "toaster left text
+padding can be increased a tad" — and the plate keeps one spacing unit of
+padding at its other three edges; the bar already occupies the left edge, so
+matching the right pad to the inset would push the line off-centre rather than
+balance it. The inset is charged against the wrap measure, so the text wraps
+at what is actually left of the region's width and the plate grows downward —
 a notice is never elided, because a cut-off refusal says less than nothing.
 
 `role` is the step of the theme's type scale a notice's line is set at
