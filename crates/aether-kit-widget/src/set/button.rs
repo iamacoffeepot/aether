@@ -16,6 +16,13 @@
 //! width would center the label wrong and then visibly jump. The measurement
 //! also gives the button its intrinsic size, so a layout can size a slot to
 //! the label it holds.
+//!
+//! A frame narrower than that intrinsic width **elides** the label before
+//! centering it. Centering alone keeps the margins equal only while the label
+//! fits; past that it hangs the run off both ends for the root's slot clip to
+//! cut mid-glyph, and a label that did not fit then reads as a label that ends
+//! oddly. Eliding first keeps the run inside the frame at any width, so the
+//! margins stay equal and a cut label says so.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -27,7 +34,7 @@ use aether_text::FontMetricsResult;
 
 use crate::set::defaults::WidgetDefaults;
 use crate::set::{
-    ActivationArms, accept_font_metrics_result, apply_text_theme, centered_text_x, measured_text_width,
+    ActivationArms, accept_font_metrics_result, apply_text_theme, centered_text_x, elide_to_width, measured_text_width,
     pump_text_font_metrics, push_border, quad, reply_if_hidden, text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
@@ -64,6 +71,30 @@ impl ButtonWidget {
         self.font_metrics
             .resolved()
             .map(|metrics| measured_text_width(metrics, &self.label, self.theme.label_size_pixels))
+    }
+
+    /// The label run this frame has room for, and the local x it is drawn
+    /// at: the whole label centered when it fits, and — when the frame is
+    /// narrower than the intrinsic width — the label elided into the frame
+    /// and that centered, so the margins are equal at any width and a cut
+    /// label carries the mark saying so instead of being sliced by the
+    /// root's slot clip. Left-padded and whole while the measurement is
+    /// still outstanding, the frame or two before there is a width to center
+    /// or elide against. `None` when there is nothing to draw: an empty
+    /// label, or a frame too narrow to hold even the elision mark.
+    fn draw_run(&self) -> Option<(String, f32)> {
+        let size = self.theme.label_size_pixels;
+        let width = self.frame.width;
+        let (run, run_x) = self.font_metrics.resolved().map_or_else(
+            || (self.label.clone(), self.theme.pad),
+            |metrics| {
+                let measure = |run: &str| measured_text_width(metrics, run, size);
+                let run = elide_to_width(&self.label, self.theme.pad.mul_add(-2.0, width), measure);
+                let run_x = centered_text_x(width, measure(&run));
+                (run, run_x)
+            },
+        );
+        (!run.is_empty()).then_some((run, run_x))
     }
 
     /// Resolve a release: returns `true` (a click fired) only if the button
@@ -234,13 +265,12 @@ impl WasmActor for ButtonWidget {
 
         let mut items: Vec<WidgetDrawItem> = Vec::new();
         items.push(quad(0.0, 0.0, width, height, self.theme.fill(self.theme.accent, theme_state)));
-        if !self.label.is_empty() {
+        if let Some((run, run_x)) = self.draw_run() {
             items.push(WidgetDrawItem::Text {
-                // Left-padded until the measurement lands, centered after.
-                x: measured.map_or(self.theme.pad, |text_width| centered_text_x(width, text_width)),
+                x: run_x,
                 y: text_origin_y(0.0, height, size),
                 font_id: self.theme.font_id,
-                text: self.label.clone(),
+                text: run,
                 size_pixels: size,
                 color: self.theme.fill(self.theme.accent_text, theme_state),
                 clip: None,
@@ -265,6 +295,9 @@ impl WasmActor for ButtonWidget {
 mod tests {
     use super::*;
     use aether_kinds::keycode::{KEY_ENTER, KEY_SPACE};
+    use aether_kinds::{CachedFontMetrics, FontMetrics, GlyphAdvance};
+
+    use crate::set::ELLIPSIS;
 
     use crate::WidgetControlState;
     use crate::set::KeyboardArm;
@@ -294,6 +327,44 @@ mod tests {
         }
         assert_eq!(centered_text_x(100.0, 40.0), 30.0, "even margins either side");
         assert_eq!(centered_text_x(40.0, 60.0), 0.0, "a label wider than its whole frame keeps its start visible");
+    }
+
+    #[test]
+    fn a_button_too_narrow_for_its_label_elides_it_and_still_centers_it() {
+        // Tripwire: the same defect the tab strip's last tab had. Centering a
+        // run wider than its frame hangs it off both ends, and the root's slot
+        // clip then cuts whichever end leaves the frame — so the margins the
+        // reader actually sees are not equal, and the label ends on a sliced
+        // glyph rather than a mark saying it was cut.
+        let mut button = button();
+        let mut font_metrics = FontMetricsAdapter::new(0);
+        assert_eq!(font_metrics.take_pending_request(), Some(0));
+        assert!(!font_metrics.accept_reply(Some(CachedFontMetrics::new(&FontMetrics {
+            units_per_em: 1000.0,
+            ascent: 800.0,
+            descent: -200.0,
+            line_gap: 0.0,
+            default_advance: 500.0,
+            advances: alloc::vec![GlyphAdvance { codepoint: u32::from(ELLIPSIS), advance_units: 500.0 }],
+        }))));
+        button.font_metrics = font_metrics;
+        button.label = String::from("Regenerate terrain");
+
+        for width in [400.0_f32, 200.0, 60.0, 30.0] {
+            button.frame.width = width;
+            let metrics = button.font_metrics.resolved().expect("measured");
+            let size = button.theme.label_size_pixels;
+            let Some((run, run_x)) = button.draw_run() else {
+                continue;
+            };
+            let run_width = measured_text_width(metrics, &run, size);
+            let (left_margin, right_margin) = (run_x, width - (run_x + run_width));
+            assert!(
+                (left_margin - right_margin).abs() < 1e-3,
+                "width {width}: {run:?} sits {left_margin} from the left and {right_margin} from the right",
+            );
+            assert!(run_width <= width, "width {width}: the run {run:?} is {run_width} wide and leaves the frame");
+        }
     }
 
     #[test]

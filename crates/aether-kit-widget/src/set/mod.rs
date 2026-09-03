@@ -1200,6 +1200,58 @@ fn even_split_widths(count: usize, width: f32, gap: f32) -> Vec<f32> {
     alloc::vec![((slots - 1.0).mul_add(-gap, width) / slots).max(0.0); count]
 }
 
+/// `natural` content widths fitted into a `row_width`-wide row with `gap`
+/// between them: returned untouched when they already fit, and shrunk to fit
+/// when they do not.
+///
+/// A row of content-sized cells can be handed a frame narrower than its
+/// content asks for — a tab strip sits in a pane the reader can drag in, and
+/// six tabs stop fitting long before the pane hits its minimum. Laying the
+/// cells out at their natural widths anyway does not make the row wider; it
+/// runs the last cell off the right edge, where the root's slot clip slices
+/// it. The reader then sees the *last* cell alone with its padding cut — the
+/// owner's "padding on right of text isn't symmetric" — while every cell
+/// before it looks correct, which is exactly what makes the cause hard to see
+/// from the screen.
+///
+/// The shrink is a water-fill, not a proportional scale: each cell takes the
+/// smaller of what it asked for and an equal share of what is left, shortest
+/// first, so a narrow cell keeps its natural width and the pressure lands on
+/// the wide ones that caused it. Proportional scaling would take pixels off
+/// `Tree` to pay for `Sequences`, shrinking a cell that fits perfectly well.
+/// At the extreme — every cell over its share — the rule degenerates to the
+/// even split, the same layout a row with no measurement uses.
+///
+/// Cells are shrunk, never their text: a caller draws the fitted width and
+/// elides its run into it ([`elide_to_width`]), so a cut label says it was
+/// cut instead of ending on a sliced glyph.
+fn fit_row_widths(mut natural: Vec<f32>, row_width: f32, gap: f32) -> Vec<f32> {
+    let count = natural.len();
+    if count == 0 {
+        return natural;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let slots = count as f32;
+    let available = (slots - 1.0).mul_add(-gap, row_width).max(0.0);
+    if natural.iter().sum::<f32>() <= available {
+        return natural;
+    }
+
+    let mut order: Vec<usize> = (0..count).collect();
+    order.sort_unstable_by(|left, right| natural[*left].total_cmp(&natural[*right]));
+    let mut budget = available;
+    let mut left_to_place = count;
+    for index in order {
+        #[allow(clippy::cast_precision_loss)]
+        let share = budget / left_to_place as f32;
+        let taken = natural[index].min(share).max(0.0);
+        natural[index] = taken;
+        budget -= taken;
+        left_to_place -= 1;
+    }
+    natural
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
