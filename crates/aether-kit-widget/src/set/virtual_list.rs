@@ -100,7 +100,7 @@ use crate::set::{
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
-use crate::theme::{SetTheme, TextRole, Theme, ThemeState};
+use crate::theme::{SetTheme, TextInk, TextRole, Theme, ThemeState};
 use crate::{
     Collect, HoverLost, RowAction, SetWidgetState, VirtualListAction, VirtualListConfig, VirtualListRow,
     VirtualListSelected, WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
@@ -803,14 +803,19 @@ impl VirtualListWidget {
         Some(widest)
     }
 
-    /// The ink both of a row's runs are set in: the selected row's own ink, or
-    /// the role's — a caption row is a quieter detail line and draws muted,
-    /// exactly as a caption-role label does.
-    fn row_ink(&self, row: &VirtualListRow, selected: bool) -> Rgba {
-        let base = match (selected, row.role) {
-            (true, _) => self.theme.selection_text,
-            (false, TextRole::Caption) => self.theme.text_muted,
-            (false, _) => self.theme.text_primary,
+    /// The ink one run of a row is set in.
+    ///
+    /// A run with no ink of its own follows the row: `selection_text` on the
+    /// chosen row, the muted ink at [`TextRole::Caption`] — a caption row is a
+    /// quieter detail line and draws exactly as a caption-role label does —
+    /// and the primary ink otherwise. A run that **names** an ink keeps it on
+    /// the chosen row too: a name is written in its tier's colour because that
+    /// is what the tier is, and a tier that disappears the moment the reader
+    /// clicks the row is a tier the reader cannot compare.
+    fn run_ink(&self, ink: TextInk, row: &VirtualListRow, selected: bool) -> Rgba {
+        let base = match ink {
+            TextInk::Inherited if selected => self.theme.selection_text,
+            ink => self.theme.text_ink(ink, row.role),
         };
         self.theme.fill(base, self.state.supporting_theme_state(false))
     }
@@ -887,14 +892,13 @@ impl VirtualListWidget {
             items.push(quad(0.0, row_y, row_width, row_height, self.theme.fill(base, row_state)));
 
             let size = self.theme.text_size_pixels(item.role);
-            let ink = self.row_ink(item, selected);
             items.push(WidgetDrawItem::Text {
                 x: self.theme.pad,
                 y: text_origin_y(row_y, row_height, size),
                 font_id: self.theme.font_id,
                 text: self.fitted_text(&item.text, size, leading_budget),
                 size_pixels: size,
-                color: ink,
+                color: self.run_ink(item.ink, item, selected),
                 clip: None,
             });
             // The trailing run is set flush against the row's right pad — or
@@ -908,7 +912,7 @@ impl VirtualListWidget {
                     font_id: self.theme.font_id,
                     text: String::from(trailing),
                     size_pixels: size,
-                    color: ink,
+                    color: self.run_ink(TextInk::Inherited, item, selected),
                     clip: None,
                 });
             }
@@ -1271,6 +1275,48 @@ mod tests {
             .collect()
     }
 
+    /// The runs one list draws, each with the ink it is written in, in draw
+    /// order — so a row of two columns reads as its leading run then its
+    /// trailing one.
+    fn row_runs(widget: &VirtualListWidget) -> Vec<(String, Rgba)> {
+        widget
+            .draw_items()
+            .into_iter()
+            .filter_map(|item| match item {
+                WidgetDrawItem::Text { text, color, .. } => Some((text, color)),
+                WidgetDrawItem::Quad { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_named_ink_colours_the_name_alone_and_outlives_the_row_being_chosen() {
+        // Tripwire: the owner's round-11 note 7 — an item's rarity is said by
+        // the colour of its name and by nothing else. Two ways to lose it.
+        // Apply the row's ink to the whole row and the trailing column comes
+        // out in four colours, so a reader can no longer compare the numbers
+        // they are lined up to compare. Let the chosen row's `selection_text`
+        // win over a named ink — which is what the ink resolution did before
+        // there was one — and the tier vanishes on the one row the reader
+        // pointed at, which is the row they are asking about.
+        let theme = Theme::DEFAULT;
+        let mut widget = measured_list(2, 2);
+        widget.items = vec![
+            VirtualListRow { trailing: Some(String::from("21/20")), ..VirtualListRow::from("Astral Plate") }
+                .with_ink(TextInk::RarityLegendary),
+            VirtualListRow { trailing: Some(String::from("1")), ..VirtualListRow::from("Iron Ring") },
+        ];
+        widget.selected_index = Some(0);
+        widget.forget_measurements();
+
+        let runs = row_runs(&widget);
+        assert_eq!(runs.len(), 4, "two rows of two columns: {runs:?}");
+        assert_eq!(runs[0].1, theme.rarity_legendary, "the chosen row's name kept its tier");
+        assert_eq!(runs[1].1, theme.selection_text, "its amount did not take the tier with it");
+        assert_eq!(runs[2].1, theme.text_primary, "an inkless row is written exactly as it was");
+        assert_eq!(runs[3].1, theme.text_primary);
+    }
+
     #[test]
     fn window_clamps_zero_one_beginning_middle_and_tail() {
         assert_eq!(clamped_window(0, 5, 0), VisibleRowWindow { first_index: 0, end_exclusive_index: 0 });
@@ -1483,12 +1529,14 @@ mod tests {
                 text: String::from("a gem name far too long for this narrow list"),
                 trailing: Some(String::from("21/20")),
                 role: TextRole::Body,
+                ink: TextInk::default(),
                 actions: Vec::new(),
             },
             VirtualListRow {
                 text: String::from("short"),
                 trailing: Some(String::from("1")),
                 role: TextRole::Body,
+                ink: TextInk::default(),
                 actions: Vec::new(),
             },
         ];
@@ -1677,6 +1725,7 @@ mod tests {
             text: String::from("a skill gem with a name far too long for this row"),
             trailing: Some(String::from("21/20")),
             role: TextRole::Body,
+            ink: TextInk::default(),
             actions: vec![RowAction::text("Change"), RowAction::danger("x")],
         };
         widget.forget_measurements();

@@ -85,6 +85,24 @@ pub struct Theme {
     pub selection: Rgba,
     /// Text/iconography drawn on top of a `selection`-filled row.
     pub selection_text: Rgba,
+    /// The four rungs of the **rarity ladder** — the ink a name is written in
+    /// when the thing it names carries a tier. `rarity_common` is the plain
+    /// ink; the three above it are a cool blue, a yellow and a warm gold, the
+    /// register a reader of loot lists already knows.
+    ///
+    /// They are inks, never fills: a tier is said by the colour of the *name*,
+    /// so a list can carry four tiers without four plates fighting the
+    /// selection for the row. Each clears 4.5 against the raised surface and
+    /// 3.0 against every fill a row can draw under it — the hover wash and the
+    /// selection included — so the ladder survives the row it lands on being
+    /// chosen or pointed at ([`TextInk`]).
+    pub rarity_common: Rgba,
+    /// One step up the rarity ladder — a cool blue.
+    pub rarity_uncommon: Rgba,
+    /// Two steps up the rarity ladder — a yellow.
+    pub rarity_rare: Rgba,
+    /// The top of the rarity ladder — a warm gold.
+    pub rarity_legendary: Rgba,
     /// Inner padding, in pixels, a widget reserves between its
     /// border and its content.
     pub pad: f32,
@@ -137,6 +155,49 @@ pub enum TextRole {
     Caption,
 }
 
+/// Which named ink a run of text is written in. [`TextRole`]'s partner: the
+/// role resolves the *size* a run is set at, this resolves the *colour*, and
+/// the theme owns both so a consumer names a meaning rather than a value
+/// ([`Theme::text_ink`]).
+///
+/// It exists because a row is more than one run. A list row's name and its
+/// trailing amount, a dropdown option and the row it stands in — before this,
+/// one ink covered the whole row, so "this run muted, that one in the tag's
+/// colour" could not be said at all and a name could not carry its own tier
+/// (the studio's gaps 27 and 31). `Inherited` is the default and is what every
+/// run drew before the field existed.
+///
+/// The rarity rungs are a **generic four-step ladder**, not a game's
+/// vocabulary: anything with a tier — a drop, a tier list, a plan — writes its
+/// names in them. What the four rungs *mean* belongs to the host; what they
+/// look like, and that each stays legible on every fill a row draws under it,
+/// belongs to the theme.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextInk {
+    /// Whatever the run would have been written in without an ink: the primary
+    /// ink at most roles, the muted ink at [`TextRole::Caption`], and a widget
+    /// is free to override it further (a selected list row keeps
+    /// `selection_text`). The default.
+    #[default]
+    Inherited,
+    /// The muted ink, whatever the role's size — the "and why it is here" half
+    /// of a row, quieter than the name in front of it.
+    Muted,
+    /// The accent. A **run**, never a plate: the accent means the primary
+    /// action and a screen that plates four things in it has spent the token,
+    /// but one lettered run — a tag, a match, a live value — is the token used
+    /// once and read once.
+    Accent,
+    /// The plain rung of the rarity ladder.
+    RarityCommon,
+    /// One step up the rarity ladder.
+    RarityUncommon,
+    /// Two steps up the rarity ladder.
+    RarityRare,
+    /// The top of the rarity ladder.
+    RarityLegendary,
+}
+
 /// The contrast ratio a control's own face — a tonal plate, a stroke around an
 /// outlined one — has to clear against the surface it stands on. WCAG 2.2
 /// §1.4.11's non-text minimum: below it a reader cannot see where the control
@@ -166,6 +227,31 @@ impl Theme {
             TextRole::Heading => self.heading_size_pixels,
             TextRole::Body => self.label_size_pixels,
             TextRole::Caption => self.caption_size_pixels,
+        }
+    }
+
+    /// The colour this theme writes `ink` in, at `role`.
+    ///
+    /// `role` is consulted only for [`TextInk::Inherited`], which is the point
+    /// of the pair: a caption is quieter than a body run by construction, and
+    /// every other ink says its colour outright and keeps it whatever size the
+    /// run is set at. A widget that inks a run differently again — a selected
+    /// list row in `selection_text` — layers that over an `Inherited` run and
+    /// leaves a named ink alone, because the reason a name is written in a
+    /// rarity colour does not stop applying when its row is chosen.
+    #[must_use]
+    pub fn text_ink(&self, ink: TextInk, role: TextRole) -> Rgba {
+        match ink {
+            TextInk::Inherited => match role {
+                TextRole::Caption => self.text_muted,
+                TextRole::Title | TextRole::Heading | TextRole::Body => self.text_primary,
+            },
+            TextInk::Muted => self.text_muted,
+            TextInk::Accent => self.accent,
+            TextInk::RarityCommon => self.rarity_common,
+            TextInk::RarityUncommon => self.rarity_uncommon,
+            TextInk::RarityRare => self.rarity_rare,
+            TextInk::RarityLegendary => self.rarity_legendary,
         }
     }
 
@@ -345,6 +431,16 @@ impl Theme {
         selection: Rgba::from_srgb8(0x3b, 0x43, 0x30, 0xff),
         // Ink on a selected row stays the primary text.
         selection_text: Rgba::from_srgb8(0xe6, 0xe4, 0xd6, 0xff),
+        // The rarity ladder. `common` is the primary ink — an untiered name is
+        // written exactly as any other name is — and the three above it are
+        // lifted well past their "natural" saturation on purpose: each has to
+        // stay legible on the *brightest* fill a row draws, which is a
+        // selected row under the pointer, so a deep gold that reads on the
+        // plate would vanish there.
+        rarity_common: Rgba::from_srgb8(0xe6, 0xe4, 0xd6, 0xff),
+        rarity_uncommon: Rgba::from_srgb8(0x9f, 0xc0, 0xff, 0xff),
+        rarity_rare: Rgba::from_srgb8(0xf2, 0xd7, 0x5c, 0xff),
+        rarity_legendary: Rgba::from_srgb8(0xe5, 0xb3, 0x71, 0xff),
         pad: 8.0,
         gap: 6.0,
         row_height: 24.0,
@@ -426,6 +522,36 @@ mod tests {
             Theme::contrast_ratio(theme.outline, theme.surface_raised) < FACE_CONTRAST_TARGET,
             "the divider role is still the quiet hairline; the edge is a second token, not a rename of it",
         );
+    }
+
+    #[test]
+    fn every_rarity_ink_reads_on_every_fill_a_row_can_draw_under_it() {
+        // Tripwire: a rarity ink is chosen for its hue, and a hue picked on a
+        // white page or against the plate alone goes illegible the moment its
+        // row is pointed at or chosen — the two fills a list row spends most
+        // of its life on. A deep gold-brown, the obvious choice for the top
+        // rung, measures 2.4 on a selected row under the pointer. This is what
+        // stops the next palette edit from shipping one.
+        let theme = Theme::DEFAULT;
+        let fills = [
+            theme.surface_raised,
+            theme.fill(theme.surface_raised, ThemeState::Hover),
+            theme.selection,
+            theme.fill(theme.selection, ThemeState::Hover),
+        ];
+        let ladder = [TextInk::RarityCommon, TextInk::RarityUncommon, TextInk::RarityRare, TextInk::RarityLegendary];
+
+        for ink in ladder {
+            let color = theme.text_ink(ink, TextRole::Body);
+            assert!(
+                Theme::contrast_ratio(color, theme.surface_raised) >= 4.5,
+                "{ink:?} is body text on the plate and does not clear 4.5 there",
+            );
+            for fill in fills {
+                let ratio = Theme::contrast_ratio(color, fill);
+                assert!(ratio >= 3.0, "{ink:?} reads at only {ratio} on one of the row's own fills");
+            }
+        }
     }
 
     #[test]
