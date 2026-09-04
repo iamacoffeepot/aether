@@ -15,10 +15,12 @@
 //! items at all says so in one muted caption line instead of drawing an empty
 //! rectangle.
 //!
-//! A row is always one configured row tall. A list holding fewer items than
-//! its viewport draws that many short rows and leaves the rest of the frame
-//! empty — it never spreads them to fill it, which would turn a two-item list
-//! into a pair of slabs and its selected row into a half-screen block.
+//! A row is one configured row tall until some row asks otherwise (see [A row
+//! that is a table entry](#a-row-that-is-a-table-entry)). A list holding fewer
+//! items than its viewport draws that many short rows and leaves the rest of
+//! the frame empty — it never spreads them to fill it, which would turn a
+//! two-item list into a pair of slabs and its selected row into a half-screen
+//! block.
 //!
 //! The list measures, like every other content-sized widget in the kit. It
 //! drives the same single-flight font-metrics request the label and the
@@ -117,6 +119,48 @@
 //! for `n` realized rows. It is off by default: a list of choices is read down
 //! its fills, and rules on one are chrome. It is for a list of *entries*,
 //! where a reader has to see which trailing belongs to which name.
+//!
+//! # A row that is a table entry
+//!
+//! A statistic and the sentence that qualifies it are one entry, and a table
+//! of them is read by its **spacing** before its type
+//! (`designing-a-screen.md` §4): gaps inside a group small, gaps between
+//! groups large, whitespace before any rule. A list of evenly spaced rows has
+//! no gaps to make large, which is why a table drawn on one had to spend a
+//! blank row to open a block and had nowhere to put a note but on a row of its
+//! own — where it reads as a statistic whose value failed to draw (the
+//! studio's gaps 38 and 39).
+//!
+//! Four fields on [`VirtualListRow`] answer that, and each is opt-in:
+//!
+//! - **`note`** is the row's second line — caption size, muted ink, wrapped to
+//!   the row's own text budget, three lines at most with the last elided. The
+//!   sentence touches the number it qualifies and nothing else.
+//! - **`indent`** starts the leading run and the note that many spacing units
+//!   in, and takes the same width off what they are elided and wrapped
+//!   against. The trailing column and the verbs do not move: a value
+//!   right-aligns on one edge whatever rung its name sits on.
+//! - **`space_before`** is ground above the row, not a taller plate — a group
+//!   gap, and the first row's is honoured too.
+//! - **`rule_above`** puts a hairline in [`Theme::outline`] across the row's
+//!   text budget at the **top of that space**: the rule, then the air, then
+//!   the row.
+//!
+//! Set any of them on any row and **every** row of that list is as tall as
+//! what it holds: its role's pitch (the theme's `row_height` is the body
+//! pitch, and the other roles scale by their type step against the body size),
+//! plus a line per line of its note, plus its own space. The list then keeps a
+//! prefix-sum **offset table** — one `f32` per item, rebuilt when the vector,
+//! the frame, the font or the theme changes — and the realized window, the hit
+//! test, the reported hover, the scroll extent and the thumb are all read from
+//! it by bisection rather than by walking from the top.
+//!
+//! Set none of them and there is no table: the pitch is the frame divided by
+//! the configured row count exactly as it always was, the bar is drawn from
+//! the same three counts, and a vector of ten thousand plain rows spends
+//! nothing on heights it did not ask for. That fast path is the reason the
+//! four fields are a vocabulary a *table* opts into rather than a cost every
+//! list pays.
 //!
 //! # The scroll bar
 //!
@@ -1545,12 +1589,19 @@ impl WidgetDefaults for VirtualListWidget {
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `VirtualListConfig` again to replace the item vector or viewport. An
-/// item is a `VirtualListRow { text, trailing, role, ink, actions }` — write
-/// plain strings through `VirtualListRow::from` for a one-column list, set
-/// `trailing` for a second right-aligned column, `ink` to colour the name,
+/// item is a
+/// `VirtualListRow { text, trailing, role, ink, actions, note, indent, space_before, rule_above }`
+/// — write plain strings through `VirtualListRow::from` for a one-column list,
+/// set `trailing` for a second right-aligned column, `ink` to colour the name,
 /// hang `actions` (`RowAction::text` / `RowAction::danger`) on a row for verbs
 /// at its right end, and set `ruled` on the config to divide the rows with a
 /// hairline.
+///
+/// For a **table** rather than a list of choices, the last four are the
+/// vocabulary: `with_note` for the sentence under a statistic, `with_indent`
+/// for a figure derived from the one above it, `with_space_before` to open a
+/// block, `with_rule_above` for the hairline over that space. Any of them
+/// makes every row of the list as tall as what it holds.
 #[actor(instanced, composable, handler_set(WidgetDefaults))]
 impl WasmActor for VirtualListWidget {
     type Config = VirtualListConfig;
