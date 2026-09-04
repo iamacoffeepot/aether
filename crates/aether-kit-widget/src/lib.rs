@@ -55,7 +55,7 @@ pub mod theme;
 pub use editor::EditorShell;
 pub use panel::WidgetPanel;
 pub use scroll::ScrollWidget;
-pub use theme::{SetTheme, Theme, ThemeState};
+pub use theme::{SetTheme, TextInk, TextRole, Theme, ThemeState};
 
 // A cdylib carries one `export!` (the shared init/receive FFI entry); the macro
 // emits the wasm32 FFI shims and the `aether.kinds` custom section for every

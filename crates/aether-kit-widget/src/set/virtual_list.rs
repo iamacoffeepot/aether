@@ -28,6 +28,27 @@
 //! the whole item vector, which the list reports as its intrinsic width so a
 //! column can be sized to what it holds.
 //!
+//! # The row under the pointer
+//!
+//! The list keeps its rows out of the host's hit table — the list owns them,
+//! realizes a window of them, and scrolls that window under a pointer that has
+//! not moved — so a host that wanted to explain the row a reader is resting on
+//! had to redo the list's own geometry and got it wrong the moment the list
+//! scrolled (the studio's gap 19). The list says it instead:
+//! [`VirtualListHover`] carries the row under the pointer, or `None` once the
+//! pointer has left the rows, and is sent whenever that answer *changes* — from
+//! a pointer move, a wheel, a thumb drag, or a new item vector arriving under a
+//! still pointer. The scroll bar's gutter is not a row, so a thumb drag reports
+//! nothing rather than the row it happens to pass.
+//!
+//! A pointed-at row draws a face of its own: the kit's hover wash over the
+//! plain surface, the same one a dropdown's open list has always drawn under
+//! the pointer. It composes with the selection rather than replacing it — a
+//! chosen row under the pointer is the selection carrying that wash — so all
+//! four states are four faces. Before this the *widget-wide* hover flag lit the
+//! selected row wherever in the list the pointer was, which lit the first gem
+//! when the reader pointed at the fourth.
+//!
 //! # A row is two columns and a type step
 //!
 //! A [`VirtualListRow`] is its `text`, an optional `trailing` run, and the
@@ -39,6 +60,13 @@
 //! while an amount cut short is a wrong number. `role` lets a list carry a
 //! name at [`TextRole::Body`] and a detail at [`TextRole::Caption`] — muted,
 //! like a caption-role label — without the host drawing its own rows.
+//!
+//! `ink` colours the **leading run only** ([`TextInk`]), so a name can say its
+//! own tier without a suffix after it or a plate behind the row. The trailing
+//! run keeps the row ink whatever the name is written in: a column of amounts
+//! is read down one edge, and four colours down it is a column nobody can
+//! compare. A named ink survives the row being chosen, because what a tier says
+//! about a thing does not stop being true when the reader clicks it.
 //!
 //! # A verb can sit on the row
 //!
@@ -100,10 +128,10 @@ use crate::set::{
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
-use crate::theme::{SetTheme, TextRole, Theme, ThemeState};
+use crate::theme::{SetTheme, TextInk, TextRole, Theme, ThemeState};
 use crate::{
-    Collect, HoverLost, RowAction, SetWidgetState, VirtualListAction, VirtualListConfig, VirtualListRow,
-    VirtualListSelected, WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    Collect, HoverLost, RowAction, SetWidgetState, VirtualListAction, VirtualListConfig, VirtualListHover,
+    VirtualListRow, VirtualListSelected, WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,6 +351,13 @@ pub struct VirtualListWidget {
     /// answers for itself.
     hovered_action: Option<RowActionIndex>,
     pressed_action: Option<RowActionIndex>,
+    /// Where the pointer last was in widget-local pixels, and the row that
+    /// resolved to. The position is kept because the *row* under a still
+    /// pointer changes on its own — the wheel and the thumb move the realized
+    /// window beneath it — so the hover has to be recomputed from a remembered
+    /// point rather than only when a `MouseMove` arrives.
+    pointer_local: Option<(f32, f32)>,
+    hovered_row: Option<usize>,
 }
 
 impl VirtualListWidget {
@@ -373,6 +408,36 @@ impl VirtualListWidget {
         }
     }
 
+    /// The row the pointer resolves to right now, or `None` when the pointer
+    /// is off the list, over the scroll bar's gutter, or past the last
+    /// realized row.
+    ///
+    /// The gutter is not a row: while a thumb drag is carrying the window the
+    /// pointer is on the bar, and reporting whichever row happens to pass
+    /// under it would stand a tooltip on a row the reader is not looking at.
+    fn pointer_row(&self) -> Option<usize> {
+        let (local_x, local_y) = self.pointer_local.filter(|_| self.state.is_available())?;
+        (local_x >= 0.0 && local_x < self.row_width()).then(|| self.row_at_local_y(local_y)).flatten()
+    }
+
+    /// Recompute the hovered row and report it if it changed.
+    ///
+    /// Called from everything that can move a row out from under the pointer —
+    /// the pointer itself, the wheel, a thumb drag, a fresh item vector — so
+    /// the fact the host is told stays true while the list scrolls under a
+    /// still pointer, which is the half of the studio's gap 19 that a host
+    /// redoing the geometry itself could never get right.
+    fn settle_hovered_row(&mut self, ctx: &WasmCtx<'_>) {
+        let next = self.pointer_row();
+        if self.hovered_row == next {
+            return;
+        }
+        self.hovered_row = next;
+        if let Some(parent) = ctx.parent() {
+            parent.send(&VirtualListHover { row: next.and_then(|row| u32::try_from(row).ok()) });
+        }
+    }
+
     /// Report one row's verb. Not a selection, and never accompanied by one:
     /// the press that fires this chose nothing.
     fn emit_action(ctx: &WasmCtx<'_>, index: RowActionIndex) {
@@ -401,6 +466,7 @@ impl VirtualListWidget {
     fn apply_control_state(&mut self, ctx: &WasmCtx<'_>, next: WidgetControlState) {
         if self.replace_control_state(next) {
             emit_state_changed(ctx, &self.state);
+            self.settle_hovered_row(ctx);
         }
     }
 
@@ -803,14 +869,45 @@ impl VirtualListWidget {
         Some(widest)
     }
 
-    /// The ink both of a row's runs are set in: the selected row's own ink, or
-    /// the role's — a caption row is a quieter detail line and draws muted,
-    /// exactly as a caption-role label does.
-    fn row_ink(&self, row: &VirtualListRow, selected: bool) -> Rgba {
-        let base = match (selected, row.role) {
-            (true, _) => self.theme.selection_text,
-            (false, TextRole::Caption) => self.theme.text_muted,
-            (false, _) => self.theme.text_primary,
+    /// The fill one row draws, from the two facts that can be true of it.
+    ///
+    /// Four faces, and the ladder between them is the point. A row the pointer
+    /// is on takes the kit's role-agnostic hover wash over the plain surface —
+    /// the same face a dropdown's open list has always drawn under the pointer,
+    /// so the two lists answer a pointer alike. A chosen row is the selection
+    /// role, a *state* rather than a wash. Chosen **and** pointed at composes
+    /// the two: the selection carrying that same hover.
+    ///
+    /// Before this the widget-wide hover flag lit the *selected* row wherever
+    /// in the list the pointer was, so pointing at the fourth gem lit the
+    /// first — the owner's round-11 note 13, "the current behavior only has
+    /// the selected element being activated when hovering over ANY item".
+    fn row_fill(&self, selected: bool, hovered: bool) -> Rgba {
+        let base = match (selected, hovered) {
+            (true, _) => self.theme.selection,
+            (false, true) => self.theme.fill(self.theme.surface_raised, ThemeState::Hover),
+            (false, false) => self.theme.surface_raised,
+        };
+        let state = match self.state.supporting_theme_state(selected && self.pressed) {
+            ThemeState::Normal if selected && hovered => ThemeState::Hover,
+            state => state,
+        };
+        self.theme.fill(base, state)
+    }
+
+    /// The ink one run of a row is set in.
+    ///
+    /// A run with no ink of its own follows the row: `selection_text` on the
+    /// chosen row, the muted ink at [`TextRole::Caption`] — a caption row is a
+    /// quieter detail line and draws exactly as a caption-role label does —
+    /// and the primary ink otherwise. A run that **names** an ink keeps it on
+    /// the chosen row too: a name is written in its tier's colour because that
+    /// is what the tier is, and a tier that disappears the moment the reader
+    /// clicks the row is a tier the reader cannot compare.
+    fn run_ink(&self, ink: TextInk, row: &VirtualListRow, selected: bool) -> Rgba {
+        let base = match ink {
+            TextInk::Inherited if selected => self.theme.selection_text,
+            ink => self.theme.text_ink(ink, row.role),
         };
         self.theme.fill(base, self.state.supporting_theme_state(false))
     }
@@ -874,27 +971,17 @@ impl VirtualListWidget {
             let row_y = row_offset as f32 * row_height;
             let item_index = window.first_index + row_offset;
             let selected = self.selected_index == Some(item_index);
-            let base = if selected {
-                self.theme.selection
-            } else {
-                self.theme.surface_raised
-            };
-            let row_state = if selected {
-                self.state.theme_state(self.pressed)
-            } else {
-                self.state.supporting_theme_state(false)
-            };
-            items.push(quad(0.0, row_y, row_width, row_height, self.theme.fill(base, row_state)));
+            let hovered = self.hovered_row == Some(item_index);
+            items.push(quad(0.0, row_y, row_width, row_height, self.row_fill(selected, hovered)));
 
             let size = self.theme.text_size_pixels(item.role);
-            let ink = self.row_ink(item, selected);
             items.push(WidgetDrawItem::Text {
                 x: self.theme.pad,
                 y: text_origin_y(row_y, row_height, size),
                 font_id: self.theme.font_id,
                 text: self.fitted_text(&item.text, size, leading_budget),
                 size_pixels: size,
-                color: ink,
+                color: self.run_ink(item.ink, item, selected),
                 clip: None,
             });
             // The trailing run is set flush against the row's right pad — or
@@ -908,7 +995,7 @@ impl VirtualListWidget {
                     font_id: self.theme.font_id,
                     text: String::from(trailing),
                     size_pixels: size,
-                    color: ink,
+                    color: self.run_ink(TextInk::Inherited, item, selected),
                     clip: None,
                 });
             }
@@ -945,16 +1032,18 @@ impl WidgetDefaults for VirtualListWidget {
 
 /// A fixed-row virtual list. Spawned inline by a panel root with a
 /// [`VirtualListConfig`]; reports [`VirtualListSelected`] when selection
-/// changes and [`VirtualListAction`] when a verb bound to a row is pressed.
+/// changes, [`VirtualListAction`] when a verb bound to a row is pressed, and
+/// [`VirtualListHover`] when the row under the pointer changes.
 ///
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `VirtualListConfig` again to replace the item vector or viewport. An
-/// item is a `VirtualListRow { text, trailing, role, actions }` — write plain
-/// strings through `VirtualListRow::from` for a one-column list, set `trailing`
-/// for a second right-aligned column, hang `actions` (`RowAction::text` /
-/// `RowAction::danger`) on a row for verbs at its right end, and set `ruled` on
-/// the config to divide the rows with a hairline.
+/// item is a `VirtualListRow { text, trailing, role, ink, actions }` — write
+/// plain strings through `VirtualListRow::from` for a one-column list, set
+/// `trailing` for a second right-aligned column, `ink` to colour the name,
+/// hang `actions` (`RowAction::text` / `RowAction::danger`) on a row for verbs
+/// at its right end, and set `ruled` on the config to divide the rows with a
+/// hairline.
 #[actor(instanced, composable, handler_set(WidgetDefaults))]
 impl WasmActor for VirtualListWidget {
     type Config = VirtualListConfig;
@@ -984,6 +1073,8 @@ impl WasmActor for VirtualListWidget {
             wheel_residual_pixels: 0.0,
             hovered_action: None,
             pressed_action: None,
+            pointer_local: None,
+            hovered_row: None,
         })
     }
 
@@ -1010,6 +1101,8 @@ impl WasmActor for VirtualListWidget {
         self.theme = config.theme;
         self.forget_measurements();
         self.apply_control_state(ctx, config.state);
+        // A fresh vector under a still pointer is a different row under it.
+        self.settle_hovered_row(ctx);
         pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
 
@@ -1046,6 +1139,7 @@ impl WasmActor for VirtualListWidget {
             return;
         }
         let (local_x, local_y) = (press.x - self.frame.x, press.y - self.frame.y);
+        self.pointer_local = Some((local_x, local_y));
         match self.press_target(local_x, local_y) {
             Some(PressTarget::ScrollBar(bar)) => self.press_scroll_bar(bar, local_y),
             Some(PressTarget::Action(index)) => self.pressed_action = Some(index),
@@ -1057,28 +1151,38 @@ impl WasmActor for VirtualListWidget {
             }
             None => {}
         }
+        // A press on a row reveals it, which can move the window: the pointer
+        // is where it was and the row under it may not be.
+        self.settle_hovered_row(ctx);
     }
 
-    /// Carry a live thumb drag, or follow the pointer across the row verbs. The
-    /// root captures the pointer on press, so the drag keeps following even
-    /// once it leaves the narrow track.
+    /// Carry a live thumb drag, or follow the pointer across the rows and the
+    /// verbs on them. The root captures the pointer on press, so the drag keeps
+    /// following even once it leaves the narrow track.
     #[handler::single]
-    fn on_mouse_move(&mut self, _ctx: &mut WasmCtx<'_>, moved: MouseMove) {
+    fn on_mouse_move(&mut self, ctx: &mut WasmCtx<'_>, moved: MouseMove) {
+        self.pointer_local = Some((moved.x - self.frame.x, moved.y - self.frame.y));
         if self.thumb_grab_pixels.is_some() {
             self.drag_thumb(moved.y - self.frame.y);
-            return;
+        } else {
+            self.hovered_action = self
+                .state
+                .can_mutate()
+                .then(|| self.action_at(moved.x - self.frame.x, moved.y - self.frame.y))
+                .flatten();
         }
-        self.hovered_action =
-            self.state.can_mutate().then(|| self.action_at(moved.x - self.frame.x, moved.y - self.frame.y)).flatten();
+        self.settle_hovered_row(ctx);
     }
 
-    /// The pointer left the list, so no verb of it is under the pointer any
-    /// more — the widget-wide hover fact the shared handler keeps says nothing
-    /// about which verb it was over.
+    /// The pointer left the list, so no row and no verb of it is under the
+    /// pointer any more — the widget-wide hover fact the shared handler keeps
+    /// says nothing about *which* row or verb it was over.
     #[handler::single]
-    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
+    fn on_hover_lost(&mut self, ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
         self.state.set_hovered(false);
         self.hovered_action = None;
+        self.pointer_local = None;
+        self.settle_hovered_row(ctx);
     }
 
     /// The wheel moves the realized window and nothing else — the reader is
@@ -1086,9 +1190,10 @@ impl WasmActor for VirtualListWidget {
     /// reader, which moves the content down and the window up: the same
     /// negation the kit's scroll actor applies.
     #[handler::single]
-    fn on_mouse_wheel(&mut self, _ctx: &mut WasmCtx<'_>, wheel: MouseWheel) {
+    fn on_mouse_wheel(&mut self, ctx: &mut WasmCtx<'_>, wheel: MouseWheel) {
         if self.state.is_available() {
             self.scroll_by_pixels(-wheel.delta_y);
+            self.settle_hovered_row(ctx);
         }
     }
 
@@ -1127,6 +1232,9 @@ impl WasmActor for VirtualListWidget {
         if let Some(selected_index) = self.move_selection_if_mutable(movement) {
             Self::emit(ctx, selected_index);
         }
+        // A keyboard reveal moves the window as surely as the wheel does, so
+        // the row under a pointer that has not moved is a different row now.
+        self.settle_hovered_row(ctx);
     }
 
     /// Reply the realized rows, each elided to the width it has, plus the
@@ -1240,6 +1348,8 @@ mod tests {
             wheel_residual_pixels: 0.0,
             hovered_action: None,
             pressed_action: None,
+            pointer_local: None,
+            hovered_row: None,
         }
     }
 
@@ -1269,6 +1379,98 @@ mod tests {
                 WidgetDrawItem::Quad { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
             })
             .collect()
+    }
+
+    /// The runs one list draws, each with the ink it is written in, in draw
+    /// order — so a row of two columns reads as its leading run then its
+    /// trailing one.
+    fn row_runs(widget: &VirtualListWidget) -> Vec<(String, Rgba)> {
+        widget
+            .draw_items()
+            .into_iter()
+            .filter_map(|item| match item {
+                WidgetDrawItem::Text { text, color, .. } => Some((text, color)),
+                WidgetDrawItem::Quad { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_row_under_the_pointer_follows_the_realized_window() {
+        // Tripwire: the studio's gap 19 — the list keeps its rows out of the
+        // host's hit table, so the only way a host could follow the pointer
+        // was to divide the list's rectangle by its visible row count itself,
+        // which names the right item only while every item is realized. This
+        // is that arithmetic done where the window actually lives: the
+        // pointer has not moved, the wheel has, and the answer moves with it.
+        // A hover computed from the pointer alone would still say row 2 after
+        // the scroll and stand a tooltip on the wrong gem.
+        let mut widget = measured_list(200, 5);
+        let row_height = widget.row_height().expect("a laid-out list has a row height");
+        widget.pointer_local = Some((widget.theme.pad, row_height.mul_add(2.0, 1.0)));
+        assert_eq!(widget.pointer_row(), Some(2));
+
+        widget.scroll_by_pixels(row_height * 7.0);
+        assert_eq!(widget.window().first_index, 7, "the wheel moved the window under a pointer that did not move");
+        assert_eq!(widget.pointer_row(), Some(9), "so the same point is a different item");
+
+        widget.pointer_local = Some((widget.row_width() + 1.0, row_height.mul_add(2.0, 1.0)));
+        assert_eq!(widget.pointer_row(), None, "the scroll bar's gutter is not a row");
+
+        widget.pointer_local = None;
+        assert_eq!(widget.pointer_row(), None, "and a pointer that left the list is on nothing");
+    }
+
+    #[test]
+    fn pointed_chosen_and_both_at_once_are_three_fills_and_none_of_them_is_the_plain_row() {
+        // Tripwire: the owner's round-11 note 13 — "the current behavior only
+        // has the selected element being activated when hovering over ANY item
+        // in the list". The widget-wide hover flag lit the *chosen* row
+        // wherever the pointer was, so a list answered the pointer by
+        // brightening a row somewhere else. The four faces have to be four:
+        // collapse hovered onto plain and the row under the pointer says
+        // nothing, collapse hovered onto selected and pointing at a row claims
+        // it was chosen, and collapse the composite onto either and the reader
+        // cannot tell whether the row they are pointing at is the current one.
+        let widget = measured_list(10, 5);
+        let faces = [
+            widget.row_fill(false, false),
+            widget.row_fill(false, true),
+            widget.row_fill(true, false),
+            widget.row_fill(true, true),
+        ];
+
+        for (first, second) in (0..faces.len()).flat_map(|i| (i + 1..faces.len()).map(move |j| (i, j))) {
+            assert_ne!(faces[first], faces[second], "row face {first} and row face {second} are one fill");
+        }
+    }
+
+    #[test]
+    fn a_named_ink_colours_the_name_alone_and_outlives_the_row_being_chosen() {
+        // Tripwire: the owner's round-11 note 7 — an item's rarity is said by
+        // the colour of its name and by nothing else. Two ways to lose it.
+        // Apply the row's ink to the whole row and the trailing column comes
+        // out in four colours, so a reader can no longer compare the numbers
+        // they are lined up to compare. Let the chosen row's `selection_text`
+        // win over a named ink — which is what the ink resolution did before
+        // there was one — and the tier vanishes on the one row the reader
+        // pointed at, which is the row they are asking about.
+        let theme = Theme::DEFAULT;
+        let mut widget = measured_list(2, 2);
+        widget.items = vec![
+            VirtualListRow { trailing: Some(String::from("21/20")), ..VirtualListRow::from("Astral Plate") }
+                .with_ink(TextInk::RarityLegendary),
+            VirtualListRow { trailing: Some(String::from("1")), ..VirtualListRow::from("Iron Ring") },
+        ];
+        widget.selected_index = Some(0);
+        widget.forget_measurements();
+
+        let runs = row_runs(&widget);
+        assert_eq!(runs.len(), 4, "two rows of two columns: {runs:?}");
+        assert_eq!(runs[0].1, theme.rarity_legendary, "the chosen row's name kept its tier");
+        assert_eq!(runs[1].1, theme.selection_text, "its amount did not take the tier with it");
+        assert_eq!(runs[2].1, theme.text_primary, "an inkless row is written exactly as it was");
+        assert_eq!(runs[3].1, theme.text_primary);
     }
 
     #[test]
@@ -1483,12 +1685,14 @@ mod tests {
                 text: String::from("a gem name far too long for this narrow list"),
                 trailing: Some(String::from("21/20")),
                 role: TextRole::Body,
+                ink: TextInk::default(),
                 actions: Vec::new(),
             },
             VirtualListRow {
                 text: String::from("short"),
                 trailing: Some(String::from("1")),
                 role: TextRole::Body,
+                ink: TextInk::default(),
                 actions: Vec::new(),
             },
         ];
@@ -1549,6 +1753,50 @@ mod tests {
         let row_y = row_offset as f32 * row_height;
         let item = &widget.items[widget.window().first_index + row_offset];
         widget.action_rects(item, row_y, row_height)
+    }
+
+    #[test]
+    fn every_row_ends_its_verbs_on_its_own_right_pad_one_gap_apart() {
+        // Tripwire: the owner's round-11 note 4 — "the buttons should be flush
+        // with each other and the last button should be flush with the end of
+        // the list item". Three ways to lose that, none of which the
+        // two-equal-verbs case above would catch. Left-align a row's block
+        // inside the *shared* column and every row carrying fewer or narrower
+        // verbs than the widest one ends short of the edge with a band of
+        // slack after it. Right-align against the frame instead of the row and
+        // the block slides under the scroll bar's gutter. Add the gap once for
+        // the block rather than once per pair and a third verb overlaps its
+        // neighbour.
+        let mut widget = actioned_list(40, 240.0);
+        widget.items[1] = VirtualListRow::from("one verb").with_actions(vec![RowAction::text("Change")]);
+        widget.items[2] = VirtualListRow::from("three verbs").with_actions(vec![
+            RowAction::text("Change"),
+            RowAction::text("Copy"),
+            RowAction::danger("x"),
+        ]);
+        widget.items[3] = VirtualListRow::from("no verbs at all");
+        widget.forget_measurements();
+
+        let gap = widget.theme.space(ACTION_GAP_UNITS);
+        let right_edge = widget.row_width() - widget.theme.pad;
+        assert!(widget.row_width() < widget.frame.width, "this list scrolls, so the gutter really is off the row");
+
+        for row_offset in 0..widget.window().len() {
+            let rects = realized_action_rects(&widget, row_offset);
+            let Some(last) = rects.last() else {
+                continue;
+            };
+            assert!(
+                (last.x + last.width - right_edge).abs() < 1e-3,
+                "row {row_offset} leaves slack after its last verb: {rects:?}",
+            );
+            for pair in rects.windows(2) {
+                assert!(
+                    (pair[1].x - (pair[0].x + pair[0].width) - gap).abs() < 1e-3,
+                    "row {row_offset} does not hold one gap unit between its verbs: {rects:?}",
+                );
+            }
+        }
     }
 
     #[test]
@@ -1633,6 +1881,7 @@ mod tests {
             text: String::from("a skill gem with a name far too long for this row"),
             trailing: Some(String::from("21/20")),
             role: TextRole::Body,
+            ink: TextInk::default(),
             actions: vec![RowAction::text("Change"), RowAction::danger("x")],
         };
         widget.forget_measurements();

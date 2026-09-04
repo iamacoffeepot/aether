@@ -610,6 +610,16 @@ pub(crate) struct ButtonInk {
 
 /// The plate, stroke, and label ink one rank of the button ladder draws in.
 ///
+/// **Every rank draws a different face**, and that is the ladder's whole job:
+/// a filled verb is a saturated plate, a tonal one a quiet plate at a fixed
+/// contrast step off the surface ([`Theme::tonal`]), an outlined one no plate
+/// and a stroke that clears the same step ([`Theme::edge`]), and a text one
+/// neither. Two ranks that resolve to the same face are the owner's round-11
+/// note 4 — a `Change gem` and a `×` on one row that read alike — so the ranks
+/// are separated by *structure* (plate / stroke / nothing) before colour, and
+/// the two that carry colour are separated from their background by measured
+/// contrast rather than by a fixed mix.
+///
 /// The one rule worth stating: on the quiet emphases a *neutral* verb reads in
 /// the primary ink, not in the accent. The accent is the primary action's token
 /// (`designing-a-screen.md` §6), and a screen whose four secondary verbs are
@@ -631,7 +641,7 @@ pub(crate) fn button_ink(theme: &Theme, emphasis: ButtonEmphasis, tone: ButtonTo
         ButtonEmphasis::Outlined => ButtonInk {
             plate: None,
             stroke: Some(match tone {
-                ButtonTone::Neutral => theme.outline,
+                ButtonTone::Neutral => theme.edge(),
                 ButtonTone::Danger => theme.error,
             }),
             label: quiet,

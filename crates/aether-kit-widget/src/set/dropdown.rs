@@ -39,10 +39,10 @@ use crate::set::{
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
-use crate::theme::{SetTheme, Theme, ThemeState};
+use crate::theme::{SetTheme, TextInk, TextRole, Theme, ThemeState};
 use crate::{
-    Collect, DropdownConfig, DropdownOpenChanged, DropdownSelected, FocusLost, SetWidgetState, WidgetDrawItem,
-    WidgetDrawList, WidgetFrame,
+    Collect, DropdownConfig, DropdownOpenChanged, DropdownOption, DropdownSelected, FocusLost, SetWidgetState,
+    WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 
 /// Which way a keyboard step moves the highlighted row of an open list.
@@ -88,7 +88,7 @@ impl DropdownEffects {
 /// The dropdown widget. Holds its options and current choice plus the
 /// cached theme / frame.
 pub struct DropdownWidget {
-    options: Vec<String>,
+    options: Vec<DropdownOption>,
     selected_index: Option<usize>,
     placeholder: String,
     open_row_count: usize,
@@ -229,12 +229,17 @@ impl DropdownWidget {
     }
 
     /// The text the closed row reads and the ink it reads in: the current
-    /// option in primary ink, or the placeholder in muted ink.
+    /// option in **its own** ink, or the placeholder in muted ink.
+    ///
+    /// The current option's ink follows it onto the closed row because the
+    /// closed row is that option said again — a picker whose open list colours
+    /// a name by its tier and whose closed row then writes it in the plain ink
+    /// tells the reader the tier changed when they chose it.
     fn closed_row_text(&self) -> (&str, Rgba) {
         self.selected_index
             .and_then(|index| self.options.get(index))
             .map_or((self.placeholder.as_str(), self.theme.text_muted), |option| {
-                (option.as_str(), self.theme.text_primary)
+                (option.text.as_str(), self.theme.text_ink(option.ink, TextRole::Body))
             })
     }
 
@@ -326,7 +331,7 @@ impl DropdownWidget {
         let widest = self
             .options
             .iter()
-            .map(String::as_str)
+            .map(|option| option.text.as_str())
             .chain(once(self.placeholder.as_str()))
             .map(|run| measured_text_width(metrics, run, size))
             .fold(0.0_f32, f32::max);
@@ -409,12 +414,14 @@ impl DropdownWidget {
                 x: self.theme.pad,
                 y: text_origin_y(row_y, row_height, self.theme.label_size_pixels),
                 font_id: self.theme.font_id,
-                text: self.list_row_run(option),
+                text: self.list_row_run(&option.text),
                 size_pixels: self.theme.label_size_pixels,
-                color: if current {
-                    self.theme.selection_text
-                } else {
-                    self.theme.text_primary
+                // A named ink outlives the chosen row's own, the same way a
+                // list row's does: what an option's colour says about it is
+                // still true once it is the current one.
+                color: match option.ink {
+                    TextInk::Inherited if current => self.theme.selection_text,
+                    ink => self.theme.text_ink(ink, TextRole::Body),
                 },
                 clip: None,
             });
@@ -691,7 +698,7 @@ mod tests {
 
     fn dropdown(option_count: usize, open_row_count: usize, selected_index: Option<usize>) -> DropdownWidget {
         DropdownWidget {
-            options: (0..option_count).map(|index| format!("option {index}")).collect(),
+            options: (0..option_count).map(|index| DropdownOption::from(format!("option {index}"))).collect(),
             selected_index,
             placeholder: String::from("Choose"),
             open_row_count,
@@ -769,14 +776,14 @@ mod tests {
         // over the Tier column beside it. The row owes itself the measure the
         // closed row already takes.
         let mut widget = measured(4, 3, None);
-        widget.options[1] = String::from("#% increased Physical Damage, +# to Accuracy Rating");
+        widget.options[1] = DropdownOption::from("#% increased Physical Damage, +# to Accuracy Rating");
         widget.forget_measurements();
         assert_eq!(widget.open_list(), DropdownEffects::opened());
 
         let metrics = widget.font_metrics.resolved().expect("measured");
         let size = widget.theme.label_size_pixels;
         let budget = widget.theme.pad.mul_add(-2.0, widget.frame.width);
-        assert!(measured_text_width(metrics, &widget.options[1], size) > budget, "the option really is too long");
+        assert!(measured_text_width(metrics, &widget.options[1].text, size) > budget, "the option really is too long");
 
         for run in row_text(&widget.overlay_items()) {
             let right = widget.theme.pad + measured_text_width(metrics, run, size);
@@ -985,6 +992,29 @@ mod tests {
     }
 
     #[test]
+    fn an_options_ink_follows_it_onto_the_closed_row_and_onto_the_chosen_one() {
+        // Tripwire: the owner's round-11 note 7 — a name wears its tier
+        // wherever it is written, and a picker writes each name twice. Ink the
+        // open list only and choosing a rare item turns its name plain, which
+        // reads as the choice having changed what the item is; let the current
+        // row's `selection_text` win over a named ink and the tier is missing
+        // from precisely the row the reader is looking at.
+        let theme = Theme::DEFAULT;
+        let mut widget = dropdown(6, 3, Some(1));
+        widget.options[1] = DropdownOption::from("Astral Plate").with_ink(TextInk::RarityRare);
+        widget.open = true;
+
+        assert_eq!(widget.closed_row_text(), ("Astral Plate", theme.rarity_rare));
+        assert!(
+            widget.overlay_items().iter().any(|item| matches!(
+                item,
+                WidgetDrawItem::Text { text, color, .. } if text == "Astral Plate" && *color == theme.rarity_rare
+            )),
+            "the open list writes the current option in its own ink too",
+        );
+    }
+
+    #[test]
     fn the_intrinsic_is_the_widest_run_the_closed_row_can_hold_plus_its_pads_and_chevron() {
         // Tripwire: the studio's gap 26 — a dropdown that reports no intrinsic
         // forces every host to give it a full-width row, because a cell sized
@@ -994,13 +1024,13 @@ mod tests {
         // (what the row reads before anything is chosen), and leave the chevron
         // its column — a width that ignored it draws the name under the mark.
         let mut widget = measured(6, 3, Some(0));
-        widget.options[4] = String::from("a considerably longer option than the rest");
+        widget.options[4] = DropdownOption::from("a considerably longer option than the rest");
         widget.forget_measurements();
 
         let size = widget.theme.label_size_pixels;
         let expected = {
             let metrics = widget.font_metrics.resolved().expect("the test table is installed");
-            widget.theme.pad.mul_add(2.0, measured_text_width(metrics, &widget.options[4], size))
+            widget.theme.pad.mul_add(2.0, measured_text_width(metrics, &widget.options[4].text, size))
                 + widget.chevron_column()
         };
         let [width, height] = widget.intrinsic().expect("a measured dropdown reports one");

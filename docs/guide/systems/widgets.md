@@ -108,7 +108,9 @@ widget sends can misreport it.
   `VirtualListAction { row_index, action_index }` reports a verb bound to one
   list row (see [row verbs](#a-verb-can-sit-on-the-row)) and is deliberately
   *not* a selection: the press that fires it leaves the list's current row
-  where it was.
+  where it was. `VirtualListHover { row }` reports the row the pointer is
+  resting on (see [the row under the pointer](#the-row-under-the-pointer)) and
+  is not a selection either — the reader is looking, not choosing.
 
   `ToggleChanged { on }`, `SegmentedSelected { index }`, `TabSelected
   { index }`, `MenuItemActivated { menu, item }`, and `NumericChanged { value,
@@ -140,19 +142,33 @@ defaults to `Neutral`. The pair resolves to three inks:
 | `emphasis` | Plate | Stroke | Label |
 |---|---|---|---|
 | `Filled` | the tone's role (`accent`, or `error` for `Danger`) | — | `accent_text` |
-| `Tonal` | `Theme::tonal(role)` — `surface_raised` carried a fifth of the way toward the role | — | `text_primary`, or `error` for `Danger` |
-| `Outlined` | — (a hover wash) | `outline`, or `error` for `Danger` | `text_primary`, or `error` for `Danger` |
+| `Tonal` | `Theme::tonal(role)` — `surface_raised` carried toward the role until it clears 3.0 against it | — | `text_primary`, or `error` for `Danger` |
+| `Outlined` | — (a hover wash) | `Theme::edge()`, or `error` for `Danger` | `text_primary`, or `error` for `Danger` |
 | `Text` | — (a hover wash) | — | `text_primary`, or `error` for `Danger` |
 
-`Theme::tonal(role)` is derived rather than stored, so a theme that moves its
-accent moves every tonal plate with it, and it is deliberately not
-`selection`: a chosen row and a secondary verb must not share a look. A
-neutral verb at the quiet ranks reads in the primary ink rather than the
-accent, because the accent means *the* primary action — a screen that letters
-four secondary verbs in it has spent the token again. The filled ranks carry
-hover and press in their plate through `Theme::fill`; the plateless ranks have
-no plate to carry it, so the same role-agnostic `hover_overlay` /
-`pressed_overlay` is drawn as the whole background instead.
+**The four ranks are four faces, and that is checked rather than assumed.** A
+rank is told apart by whether it carries a plate, a stroke, or neither, before
+any question of colour; and the two that carry colour are separated from the
+surface they stand on by a *measured* step — `Theme::contrast_ratio` against
+`surface_raised`, at the WCAG 1.4.11 non-text minimum of 3.0. Two ways that was
+lost, both of which the owner reported: a tonal plate at a fixed 22% mix
+measured 2.74 for a neutral verb and 1.79 for a danger one, and a dialog draws
+its plate in `surface_raised`, so a tonal `Cancel` on one read as lettering on
+the plate; and the outlined rank borrowed `outline` — the *divider* token,
+1.36 against the raised surface — so an outlined verb and a text verb drew the
+same face. `Theme::edge()` is a second token derived from `outline` and carried
+to the same 3.0 step, which leaves the hairline between two list rows as quiet
+as it was meant to be.
+
+`Theme::tonal(role)` and `Theme::edge()` are both derived rather than stored,
+so a theme that moves its accent moves every tonal plate with it, and the tonal
+plate is deliberately not `selection`: a chosen row and a secondary verb must
+not share a look. A neutral verb at the quiet ranks reads in the primary ink
+rather than the accent, because the accent means *the* primary action — a
+screen that letters four secondary verbs in it has spent the token again. The
+filled ranks carry hover and press in their plate through `Theme::fill`; the
+plateless ranks have no plate to carry it, so the same role-agnostic
+`hover_overlay` / `pressed_overlay` is drawn as the whole background instead.
 
 Everything else is identical at every step of the ladder: the label is
 measured, centered, and elided the same way, the reported
@@ -247,6 +263,39 @@ A radio group's unselected markers stay on `surface_raised` and so read as
 empty slots beside the lit one. None of these use `accent`, which means the
 primary action and the focus ring and nothing else — so a chosen row never
 reads as a button waiting to be pressed.
+
+### Naming an ink
+
+`TextRole` is half a pair. It resolves the **size** a run is set at;
+`TextInk` resolves its **colour**, and `Theme::text_ink(ink, role)` resolves
+both against the theme so a consumer names a meaning rather than reaching for
+an `Rgba`:
+
+| `TextInk` | Resolves to |
+|---|---|
+| `Inherited` (default) | whatever the run would have drawn without an ink — `text_primary`, or `text_muted` at `TextRole::Caption`, and a widget may override it further |
+| `Muted` | `text_muted`, whatever the role's size |
+| `Accent` | `accent` — as a **run**, never a plate |
+| `RarityCommon` / `RarityUncommon` / `RarityRare` / `RarityLegendary` | the four rungs of the theme's rarity ladder |
+
+It exists because a row is more than one run. A list row's name and its
+trailing amount, a dropdown option and the closed row it is repeated on —
+before this one ink covered a whole row, so "this run muted, that one in the
+tag's colour" could not be said, and a name could not carry its own tier.
+
+The **rarity ladder** is a generic four-step scale: anything with a tier — a
+drop, a tier list, a plan — writes its names in it. `rarity_common` is the
+plain ink, and the three above it are a cool blue, a yellow and a warm gold.
+What the rungs *mean* is the host's; what they look like is the theme's, and
+each is chosen so it clears 4.5 against the raised surface and 3.0 against
+**every fill a row can draw under it** — the hover wash and the selection
+included. That is why the top rung is a warm gold rather than the obvious deep
+gold-brown: the deep one measures 2.4 on a chosen row under the pointer.
+
+`Accent` is a run and not a plate for the same reason the button ladder
+reserves the filled accent for one verb: the accent means the primary action,
+and a screen that plates four things in it has spent the token. One lettered
+run — a tag, a match, a live value — is the token used once and read once.
 
 ## Placing one line of text
 
@@ -379,11 +428,45 @@ item, it is measured once and re-measured only when the items, the font, or the
 type scale change. It is `None` until the metrics resolve and for a list with
 no rows.
 
+### The row under the pointer
+
+A list keeps its rows out of the host's hit table — the list owns them,
+realizes a window of them, and scrolls that window under a pointer that has
+not moved — so a host wanting to explain the row a reader is resting on had to
+divide the list's rectangle by its visible row count itself, which names the
+right item only while every item is realized. The list says it instead:
+
+```rust
+#[handler::manual]
+fn on_virtual_list_hover(&mut self, ctx: &mut WasmCtx<'_, Manual>, hover: VirtualListHover) {
+    // `hover.row` is an index into the config's `items`, or `None` once the
+    // pointer has left the rows.
+}
+```
+
+`VirtualListHover { row: Option<u32> }` is sent whenever that answer
+**changes** — from a pointer move, a wheel, a thumb drag, or a fresh item
+vector arriving under a still pointer — and is attributed by
+`ctx.source_mailbox()` like every other value-up event. The scroll bar's
+gutter is not a row, so a thumb drag reports nothing rather than whichever row
+happens to pass under the pointer. It is not a selection and never becomes
+one: hovering a row says the reader is looking at it, which is what a tooltip
+answers, and says nothing about what they have chosen.
+
+A pointed-at row draws a face of its own — the kit's role-agnostic hover wash
+over the plain surface, the same face a dropdown's open list draws under the
+pointer, so the two lists answer a pointer alike. It **composes** with the
+selection rather than replacing it: a chosen row under the pointer is the
+selection carrying that wash, so all four states of a row are four distinct
+fills. Before this the *widget-wide* hover flag lit the selected row wherever
+in the list the pointer was, so pointing at the fourth gem lit the first.
+
 ### A row is two columns and a type step
 
-An item is a `VirtualListRow { text, trailing, role, actions }`, and a row that
-is only words is written as one (`VirtualListRow: From<String> + From<&str>`), so
-`(0..n).map(VirtualListRow::from)` is the whole of the plain case.
+An item is a `VirtualListRow { text, trailing, role, ink, actions }`, and a row
+that is only words is written as one (`VirtualListRow: From<String> +
+From<&str>`), so `(0..n).map(VirtualListRow::from)` is the whole of the plain
+case.
 
 `trailing` is the row's **second column**: a version, a count, a price, a key.
 It is set right-aligned against the row's own right pad, and the widest
@@ -402,6 +485,22 @@ off-screen row leaves a gap nothing stands in.
 exactly as a caption-role label does, so a list can carry a name and a detail
 line without the host drawing its own rows. A selected row keeps
 `theme.selection_text` whatever its role.
+
+`ink` colours the **leading run only** ([`TextInk`](#naming-an-ink)), so a name
+can say its own tier without a `(unique)` suffix after it or a plate behind the
+whole row:
+
+```rust
+use aether_kit_widget::{TextInk, VirtualListRow};
+
+let row = VirtualListRow::from(item.name).with_ink(TextInk::RarityRare);
+```
+
+The trailing run keeps the row ink whatever the name is written in — a column
+of amounts is read down one edge, and four colours down it is a column nobody
+can compare. A named ink **outlives the row being chosen**: `selection_text`
+wins over `Inherited` and over nothing else, because what a tier says about a
+thing does not stop being true when the reader clicks it.
 
 `ruled: true` puts a one-pixel `theme.outline` hairline between rows — `n - 1`
 of them for `n` realized rows, never a rule under the last one (that underlines
@@ -472,7 +571,17 @@ nothing.
 theme, state }` is the control for one current choice whose alternatives are
 secondary. Closed it is a single row reading the chosen option — or
 `placeholder` in muted ink while nothing is chosen — with a chevron at its
-right end. A press-and-release inside the row opens the list, as does Enter or
+right end.
+
+An option is a `DropdownOption { text, ink }`, and one that is only words is
+written as one (`DropdownOption: From<String> + From<&str>`), so
+`names.map(DropdownOption::from)` is the whole of the plain case. `ink` is the
+same [`TextInk`](#naming-an-ink) a list row carries, and it follows the option
+onto the **closed row**, because the closed row is that option said again in a
+smaller space: a picker that colours a name by its tier in the open list and
+then writes it plain once chosen tells the reader the choice changed what the
+thing is. Like a list row's, a named ink outlives the option being the current
+one. A press-and-release inside the row opens the list, as does Enter or
 a matching Space release while focused; Escape closes it.
 
 The closed row's run is **elided into `frame.width − 2 × pad − the chevron

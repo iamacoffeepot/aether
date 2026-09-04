@@ -36,7 +36,7 @@ use aether_data::MailboxId;
 use aether_math::{Rgba, Vec2};
 use serde::{Deserialize, Serialize};
 
-use crate::theme::{TextRole, Theme};
+use crate::theme::{TextInk, TextRole, Theme};
 
 /// `aether.kit.widget.collect` — a per-frame poll a compositing node
 /// sends to each of its children in layout order. The child answers with
@@ -849,6 +849,14 @@ impl RowAction {
 /// the muted ink — without the host writing its own rows. The default is
 /// `Body`, the size every list row was set at before roles reached the list.
 ///
+/// `ink` colours the **leading run only** — the row's name. It is the answer
+/// to "this one is rare and that one is not" without a `(unique)` suffix after
+/// the name or a plate behind the whole row, and it survives the row being
+/// selected or pointed at, because a tier does not stop applying when a reader
+/// touches it. The trailing run keeps the row's own ink whatever this says: a
+/// column of amounts is read down one edge, and four colours down it is a
+/// column nobody can compare.
+///
 /// `actions` are the verbs bound to this row — see [`RowAction`]. They stand
 /// as buttons at the row's right end, in the order written, and the leading
 /// text elides against the space they leave exactly as it elides against the
@@ -868,6 +876,10 @@ pub struct VirtualListRow {
     /// The type step both runs of this row are set at.
     #[serde(default)]
     pub role: TextRole,
+    /// The ink the leading run is written in. [`TextInk::Inherited`] — the
+    /// default — is the row ink every list drew before the field existed.
+    #[serde(default)]
+    pub ink: TextInk,
     /// The verbs bound to this row, drawn as buttons at its right end.
     #[serde(default)]
     pub actions: Vec<RowAction>,
@@ -881,11 +893,18 @@ impl VirtualListRow {
         self.actions = actions;
         self
     }
+
+    /// The same row with its name written in `ink`.
+    #[must_use]
+    pub fn with_ink(mut self, ink: TextInk) -> Self {
+        self.ink = ink;
+        self
+    }
 }
 
 impl From<String> for VirtualListRow {
     fn from(text: String) -> Self {
-        Self { text, trailing: None, role: TextRole::default(), actions: Vec::new() }
+        Self { text, trailing: None, role: TextRole::default(), ink: TextInk::default(), actions: Vec::new() }
     }
 }
 
@@ -926,6 +945,46 @@ pub struct VirtualListConfig {
     pub state: WidgetControlState,
 }
 
+/// One choice of a [`DropdownConfig`]: what it reads, and the ink it reads in.
+///
+/// The ink is here for the same reason it is on [`VirtualListRow`] — a name
+/// carries its own tier — and it follows the option onto the **closed row**,
+/// because the closed row is that option said again in a smaller space. An
+/// option is written as a plain string wherever it is only words
+/// (`DropdownOption: From<String> + From<&str>`), so a picker of plain names
+/// is `options.map(DropdownOption::from)` and nothing else. Schema-only;
+/// nested in [`DropdownConfig`].
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct DropdownOption {
+    pub text: String,
+    /// The ink this option is written in, open and closed alike.
+    /// [`TextInk::Inherited`] — the default — is the primary ink every option
+    /// drew before the field existed.
+    #[serde(default)]
+    pub ink: TextInk,
+}
+
+impl DropdownOption {
+    /// The same option written in `ink`.
+    #[must_use]
+    pub fn with_ink(mut self, ink: TextInk) -> Self {
+        self.ink = ink;
+        self
+    }
+}
+
+impl From<String> for DropdownOption {
+    fn from(text: String) -> Self {
+        Self { text, ink: TextInk::default() }
+    }
+}
+
+impl From<&str> for DropdownOption {
+    fn from(text: &str) -> Self {
+        Self::from(String::from(text))
+    }
+}
+
 /// `aether.kit.widget.dropdown.config` — one current choice among
 /// `options`, shown closed as the current option's name (or `placeholder`
 /// when nothing is selected) with a chevron, and opened by a press into a
@@ -938,7 +997,7 @@ pub struct VirtualListConfig {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.kit.widget.dropdown.config")]
 pub struct DropdownConfig {
-    pub options: Vec<String>,
+    pub options: Vec<DropdownOption>,
     pub initial_selected_index: Option<u32>,
     /// What the closed row reads when nothing is selected.
     #[serde(default)]
@@ -1289,6 +1348,29 @@ pub struct VirtualListSelected {
 pub struct VirtualListAction {
     pub row_index: u32,
     pub action_index: u32,
+}
+
+/// `aether.kit.widget.virtual_list.hover` — the row the pointer is resting on
+/// changed: `row` is an index into the config's `items`, or `None` once the
+/// pointer has left the rows. Which list it came from is the root's
+/// `source_mailbox` attribution, exactly as for [`VirtualListSelected`].
+///
+/// A list keeps its rows out of the host's hit table on purpose — the list owns
+/// them, realizes a window of them, and scrolls that window under a pointer
+/// that has not moved. So a host that wants to explain the row under the
+/// pointer had a choice between doing the list's own geometry a second time and
+/// getting it wrong the moment the list scrolled, or explaining nothing (the
+/// studio's gap 19). This is the list saying it instead: sent when the answer
+/// *changes*, from a pointer move, a wheel, a thumb drag, or the items being
+/// replaced under a still pointer.
+///
+/// It is not a selection and it does not become one. Hovering a row says the
+/// reader is looking at it — the tooltip a list of gems owes them — and nothing
+/// about what they have chosen.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[kind(name = "aether.kit.widget.virtual_list.hover")]
+pub struct VirtualListHover {
+    pub row: Option<u32>,
 }
 
 /// `aether.kit.widget.button.clicked` — a button's value-up event, fired once

@@ -511,8 +511,8 @@ mod tests {
         assert_eq!(plate(&styled(ButtonEmphasis::Text, ButtonTone::Neutral)), None, "and a text verb has no chrome");
 
         assert!(
-            stroke(&styled(ButtonEmphasis::Outlined, ButtonTone::Neutral)).iter().all(|ink| *ink == theme.outline),
-            "the outlined rank is drawn in the outline role",
+            stroke(&styled(ButtonEmphasis::Outlined, ButtonTone::Neutral)).iter().all(|ink| *ink == theme.edge()),
+            "the outlined rank is drawn in the control-edge role derived from the outline",
         );
         assert!(stroke(&styled(ButtonEmphasis::Text, ButtonTone::Neutral)).is_empty(), "the text rank strokes nothing");
         assert!(
@@ -520,6 +520,39 @@ mod tests {
                 && !inks(&styled(ButtonEmphasis::Text, ButtonTone::Neutral)).contains(&theme.accent),
             "a secondary verb spends the accent nowhere, ink included",
         );
+    }
+
+    #[test]
+    fn the_four_ranks_draw_four_different_faces() {
+        // Tripwire: the owner's round-11 note 4 — a tonal `Change gem` and an
+        // outlined-danger `×` on one row "read alike". A rank is told apart by
+        // its *face* before its colour, so the four have to differ in whether
+        // they carry a plate, a stroke, or neither, and the two that carry
+        // colour have to clear their background by a measured step. Two ranks
+        // that resolve to the same (plate, stroke) shape are the defect back
+        // with four names on it, and a stroke lost in the divider role — which
+        // is what `outline` gave the outlined rank — is the text rank wearing
+        // a border nobody can see.
+        let theme = Theme::DEFAULT;
+        let face = |emphasis| {
+            let button = styled(emphasis, ButtonTone::Neutral);
+            (plate(&button), stroke(&button).first().copied())
+        };
+
+        let faces = [
+            face(ButtonEmphasis::Filled),
+            face(ButtonEmphasis::Tonal),
+            face(ButtonEmphasis::Outlined),
+            face(ButtonEmphasis::Text),
+        ];
+        for (first, second) in (0..faces.len()).flat_map(|i| (i + 1..faces.len()).map(move |j| (i, j))) {
+            assert_ne!(faces[first], faces[second], "rank {first} and rank {second} draw one face");
+        }
+
+        for (rank, ink) in faces.iter().enumerate().filter_map(|(rank, face)| Some((rank, face.0.or(face.1)?))) {
+            let ratio = Theme::contrast_ratio(ink, theme.surface_raised);
+            assert!(ratio >= 3.0, "rank {rank}'s face reads at only {ratio} against the surface it stands on");
+        }
     }
 
     #[test]
