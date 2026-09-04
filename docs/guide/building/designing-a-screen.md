@@ -205,6 +205,7 @@ words, situations, or actions mean the same thing."
 | Hover / pressed | pointer feedback, as overlays over any role | — |
 | Disabled | alpha over the role | a different colour |
 | Disclosure | a small chevron beside the title | a large filled button |
+| Category ink | what a word *names* — its tier, its element, its kind | a plate behind the row, or the accent |
 
 A theme that has one accent and one text size cannot express this table, which
 is the honest reason a panel built on it ends up with gold meaning four
@@ -368,6 +369,23 @@ and each is the general form of a specific complaint.
   to invisible on the brightest. `Theme::contrast_ratio` is in the kit so this
   is a number in a test rather than an opinion in a review. (Owner, round 11:
   "Cancel button is blending in with the background of the new item modal.")
+- **A vocabulary told apart by colour needs colours, not a colour.** When a
+  screen writes a set of tags — damage types, factions, kinds — and draws them
+  all in one ink, the colour is decoration and the reader gets nothing from it;
+  the ink has to be *what the word names*, mapped in one function so the same
+  tag is the same colour everywhere. Tags are inks on words, never plates: a
+  row of four plates fights the selection for the row it sits in. The colours
+  are measured like every other (`TextInk`, the kit's hue set). (Owner, round
+  12: "Spell tags are all the same colour regardless of tag.")
+- **Controls bound to one row are one block, and the block ends where the row
+  does.** Two verbs on a row sit edge to edge with nothing between them and the
+  last one ends on the row's own edge — not on its inner pad, which leaves the
+  last control floating short of the end and reads as a mistake. Touching faces
+  are separated by a hairline where their emphasis does not already separate
+  them. The general form: a group of controls that act on one thing looks like
+  one thing. (Owner, round 12: "the buttons for the skill remove and skill
+  change aren't flush with each other (touching) … and the 'x' button isn't
+  touching the end of the entry.")
 - **Generate what can be generated.** A name, a summary line, a default:
   when the data implies one ("Wander of Kinetic Blast Ranger" from weapon,
   skill, and class), offer it rather than an empty field.

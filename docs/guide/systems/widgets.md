@@ -687,6 +687,39 @@ existed a host had to give every dropdown a full-width row of its own, which is
 right for a control that is its row's whole subject and wrong for a sort
 control that belongs beside the field it orders.
 
+### The option under the pointer
+
+The open list is drawn in the overlay, out of the root's hit table, so the same
+problem a virtual list has ([above](#the-row-under-the-pointer)) is the
+dropdown's: a host that wants to explain the option a reader is resting on can
+only redo this widget's geometry, and gets it wrong the moment an arrow key
+scrolls the realized window. The dropdown says it instead:
+
+```rust
+#[handler::manual]
+fn on_dropdown_hover(&mut self, ctx: &mut WasmCtx<'_, Manual>, hover: DropdownHover) {
+    // `hover.option` indexes the config's `options`; `x`/`y`/`width`/`height`
+    // are that row's rectangle in window pixels.
+}
+```
+
+`DropdownHover { option: Option<u32>, x, y, width, height }` is sent whenever
+the answer **changes** — a pointer move, an arrow key scrolling the window
+under a still pointer, the list closing — and is attributed by
+`ctx.source_mailbox()` like every other value-up event. `None` is the pointer
+having left the rows or the list having closed, and carries a zero rectangle:
+it is the event that takes the explanation down.
+
+The rectangle is the option's **row in the open list**, in the same window-pixel
+space the panel gives a widget its frame in, so a host stands a tooltip or an
+item card on the row without measuring anything. It is honest for the escaping
+overlay: the overlay is offset by its slot's origin and never clipped or moved,
+so the row draws exactly there. An option the list has not realized has no
+rectangle rather than a plausible wrong one.
+
+It is not a choice and does not become one — the reader is looking, not picking,
+and `DropdownSelected` still reports what they take.
+
 While the list is open every left press is the dropdown's: a press on a row
 takes that option and closes, a press anywhere else closes without a change.
 `DropdownSelected { index }` reports only an actual change of choice, and

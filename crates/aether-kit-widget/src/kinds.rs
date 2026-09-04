@@ -1489,6 +1489,36 @@ pub struct DropdownOpenChanged {
     pub open: bool,
 }
 
+/// `aether.kit.widget.dropdown.hover` — the option under the pointer in the
+/// **open** list changed: `option` is an index into the config's `options`, or
+/// `None` once the pointer has left the list or the list has closed. Which
+/// dropdown it came from is the root's `source_mailbox` attribution, exactly as
+/// for [`DropdownSelected`].
+///
+/// The dropdown's twin of [`VirtualListHover`], and it exists for the same
+/// reason: the open list is drawn in the widget's overlay out of the host's hit
+/// table, so a host that wants to explain the option a reader is resting on had
+/// a choice between redoing the list's geometry — which is wrong the moment the
+/// list scrolls — and explaining nothing. It is not a choice and does not
+/// become one: the reader is looking, not picking, and `DropdownSelected` still
+/// reports what they take.
+///
+/// `x` / `y` / `width` / `height` are that option's **row rectangle** in the
+/// open list, in the same window-pixel space the panel gives a widget its
+/// frame in, so a host can stand a tooltip on the row without measuring
+/// anything. The overlay is offset by its slot's origin and never clipped or
+/// moved, so the rectangle is where the row really draws. It is all zeroes when
+/// `option` is `None`, which is the event that says to take the tooltip down.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+#[kind(name = "aether.kit.widget.dropdown.hover")]
+pub struct DropdownHover {
+    pub option: Option<u32>,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
 /// `aether.kit.widget.tab_strip.selected` — the selected tab changed to
 /// `index`. Emitted only on an actual change.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]

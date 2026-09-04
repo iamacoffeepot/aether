@@ -21,6 +21,17 @@
 //! The closed row's run is elided into the frame less its pads and the
 //! chevron column, so a name too long for the row stops one spacing unit
 //! short of the mark with an ellipsis rather than running under it.
+//!
+//! # The option under the pointer
+//!
+//! The open list is drawn in the overlay, out of the root's hit table, so a
+//! host cannot ask which option a reader is resting on — it would have to redo
+//! this widget's geometry and would get it wrong the moment the realized window
+//! scrolled. [`DropdownHover`] is the list saying it instead, the twin of the
+//! virtual list's [`VirtualListHover`](crate::VirtualListHover): the option
+//! index when it **changes**, `None` on leaving the rows or closing, and that
+//! option's row rectangle in window pixels so a tooltip can be stood on the row
+//! without measuring. It is not a choice — the reader is looking, not picking.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -41,8 +52,8 @@ use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{SetTheme, TextInk, TextRole, Theme, ThemeState};
 use crate::{
-    Collect, DropdownConfig, DropdownOpenChanged, DropdownOption, DropdownSelected, FocusLost, SetWidgetState,
-    WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    Collect, DropdownConfig, DropdownHover, DropdownOpenChanged, DropdownOption, DropdownSelected, FocusLost,
+    HoverLost, SetWidgetState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 
 /// Which way a keyboard step moves the highlighted row of an open list.
@@ -98,6 +109,13 @@ pub struct DropdownWidget {
     /// The row the pointer or the arrow keys are on while open. Drawn with
     /// the hover overlay; Enter and Space commit it.
     highlighted_index: Option<usize>,
+    /// Where the pointer last was, in window pixels, or `None` once it left.
+    /// Kept rather than recomputed because the option under a *still* pointer
+    /// changes whenever the realized window moves under it.
+    pointer_window: Option<(f32, f32)>,
+    /// The option [`DropdownHover`] last reported, so the event is sent on a
+    /// change and not once per pointer move.
+    hovered_option: Option<usize>,
     theme: Theme,
     frame: WidgetFrame,
     state: InteractionState,
@@ -149,6 +167,64 @@ impl DropdownWidget {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let row_offset = (local_y / row_height).floor() as usize;
         (row_offset < rows).then(|| self.first_row() + row_offset)
+    }
+
+    /// Where one realized option's row stands, in the window-pixel space the
+    /// panel gives this widget its frame in: the list hangs directly below the
+    /// closed row and is the frame's own width, so the row is one
+    /// `theme.row_height` band at its offset inside the realized window.
+    ///
+    /// The overlay the list draws in is offset by its slot's origin and never
+    /// clipped or moved, so this is where the row really is on the window — a
+    /// host can hang a tooltip on it without measuring anything.
+    fn option_row_frame(&self, index: usize) -> Option<WidgetFrame> {
+        let row_height = self.theme.row_height;
+        #[allow(clippy::cast_precision_loss)] // an open list realizes at most a screenful of rows
+        let row_offset =
+            index.checked_sub(self.first_row()).filter(|offset| *offset < self.realized_row_count())? as f32;
+        Some(WidgetFrame {
+            x: self.frame.x,
+            y: row_offset.mul_add(row_height, self.frame.y + self.frame.height),
+            width: self.frame.width,
+            height: row_height,
+        })
+    }
+
+    /// The option the pointer resolves to right now, or `None` while the list
+    /// is closed, unavailable, or the pointer is off its rows.
+    fn pointer_option(&self) -> Option<usize> {
+        let (x, y) = self.pointer_window.filter(|_| self.state.is_available())?;
+        self.option_row_at(x, y)
+    }
+
+    /// Recompute the option under the pointer and report it if it changed.
+    ///
+    /// Called from everything that can move an option out from under the
+    /// pointer — the pointer itself, an arrow key scrolling the realized
+    /// window, and every close — so what the host is told stays true while the
+    /// list moves under a pointer that has not.
+    fn settle_hovered_option(&mut self, ctx: &WasmCtx<'_>) {
+        let next = self.pointer_option();
+        if self.hovered_option == next {
+            return;
+        }
+        self.hovered_option = next;
+        let Some(parent) = ctx.parent() else {
+            return;
+        };
+        let row = next.and_then(|index| self.option_row_frame(index)).unwrap_or(WidgetFrame {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        });
+        parent.send(&DropdownHover {
+            option: next.and_then(|index| u32::try_from(index).ok()),
+            x: row.x,
+            y: row.y,
+            width: row.width,
+            height: row.height,
+        });
     }
 
     /// Open the list on the current choice. Refused for a read-only or
@@ -452,8 +528,9 @@ impl WidgetDefaults for DropdownWidget {
 }
 
 /// A dropdown. Spawned inline by a panel root with a [`DropdownConfig`];
-/// reports [`crate::DropdownSelected`] on a change of choice and
-/// [`crate::DropdownOpenChanged`] as its list opens and closes.
+/// reports [`crate::DropdownSelected`] on a change of choice,
+/// [`crate::DropdownOpenChanged`] as its list opens and closes, and
+/// [`DropdownHover`] as the option under the pointer in the open list changes.
 ///
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send
@@ -476,6 +553,8 @@ impl WasmActor for DropdownWidget {
             open: false,
             first_index: 0,
             highlighted_index: None,
+            pointer_window: None,
+            hovered_option: None,
             theme: config.theme,
             state: InteractionState::new(config.state),
             frame: WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
@@ -527,6 +606,7 @@ impl WasmActor for DropdownWidget {
         if self.state.replace(config.state) {
             emit_state_changed(ctx, &self.state);
         }
+        self.settle_hovered_option(ctx);
         pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
 
@@ -541,6 +621,7 @@ impl WasmActor for DropdownWidget {
             self.arms.clear();
             self.dismiss().emit(ctx);
         }
+        self.settle_hovered_option(ctx);
     }
 
     /// Focus loss closes the list. Overrides the shared default because
@@ -551,6 +632,18 @@ impl WasmActor for DropdownWidget {
         self.state.lose_focus();
         self.arms.clear();
         self.dismiss().emit(ctx);
+        self.settle_hovered_option(ctx);
+    }
+
+    /// The pointer left this widget, so nothing of the open list is under it.
+    /// Overrides the shared default because that one keeps only the
+    /// widget-wide hover fact, which says nothing about *which* option the
+    /// reader was resting on.
+    #[handler::single]
+    fn on_hover_lost(&mut self, ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
+        self.state.set_hovered(false);
+        self.pointer_window = None;
+        self.settle_hovered_option(ctx);
     }
 
     /// While open, any left press is the list's: on a row it chooses, off one
@@ -560,11 +653,13 @@ impl WasmActor for DropdownWidget {
         if press.button != mouse_button::LEFT {
             return;
         }
+        self.pointer_window = Some((press.x, press.y));
         if self.open {
             self.press_while_open(press.x, press.y).emit(ctx);
         } else {
             self.arms.press_mouse_button(&self.frame, self.state.can_mutate(), press);
         }
+        self.settle_hovered_option(ctx);
     }
 
     /// A left release back inside the closed row opens the list.
@@ -573,19 +668,23 @@ impl WasmActor for DropdownWidget {
         if release.button != mouse_button::LEFT {
             return;
         }
+        self.pointer_window = Some((release.x, release.y));
         if self.arms.release_pointer(&self.frame, self.state.can_mutate(), release.x, release.y) {
             self.open_list().emit(ctx);
         }
+        self.settle_hovered_option(ctx);
     }
 
     /// Motion moves the highlighted row. The root forwards every move to the
     /// grabbed child, so this tracks the pointer over the overlay rows that
     /// lie outside the widget's own slot.
     #[handler::single]
-    fn on_mouse_move(&mut self, _ctx: &mut WasmCtx<'_>, moved: MouseMove) {
+    fn on_mouse_move(&mut self, ctx: &mut WasmCtx<'_>, moved: MouseMove) {
+        self.pointer_window = Some((moved.x, moved.y));
         if self.open && self.state.is_available() {
             self.highlighted_index = self.option_row_at(moved.x, moved.y);
         }
+        self.settle_hovered_option(ctx);
     }
 
     /// Escape closes; Up/Down move the highlight of an open list; Enter
@@ -602,6 +701,9 @@ impl WasmActor for DropdownWidget {
                 }
             }
         }
+        // An arrow scrolls the realized window, so the option under a pointer
+        // that has not moved is a different option now.
+        self.settle_hovered_option(ctx);
     }
 
     #[handler::single]
@@ -609,6 +711,7 @@ impl WasmActor for DropdownWidget {
         if self.arms.release_key(self.state.can_mutate(), release.code) {
             self.toggle().emit(ctx);
         }
+        self.settle_hovered_option(ctx);
     }
 
     /// Reply the dropdown's local draw: the closed row as ordinary items, the
@@ -705,6 +808,8 @@ mod tests {
             open: false,
             first_index: 0,
             highlighted_index: None,
+            pointer_window: None,
+            hovered_option: None,
             theme: Theme::DEFAULT,
             frame: WidgetFrame { x: 10.0, y: 20.0, width: 100.0, height: 24.0 },
             state: InteractionState::new(WidgetControlState::default()),
@@ -884,6 +989,65 @@ mod tests {
         let list_top = widget.frame.y + widget.frame.height;
         assert_eq!(widget.option_row_at(20.0, list_top), Some(5));
         assert_eq!(widget.option_row_at(20.0, list_top + 48.0), Some(7));
+    }
+
+    #[test]
+    fn the_option_under_the_pointer_follows_the_realized_window_and_is_none_while_closed() {
+        // Tripwire: the owner's round-12 note 4 — an item dropdown's open list
+        // owes the same card the closed row stands. The open list lives in the
+        // overlay, out of the root's hit table, so the host's only alternative
+        // is to redo this geometry and it goes wrong exactly where a host
+        // cannot see it: an arrow key scrolls the realized window under a
+        // pointer that has not moved, and a widget reporting the row *offset*
+        // rather than the option index would explain the wrong item from the
+        // first scroll on. A closed list has no option under the pointer at all
+        // — the closed row is not one of its rows.
+        let mut widget = dropdown(40, 4, Some(0));
+        let row_height = widget.theme.row_height;
+        widget.pointer_window =
+            Some((widget.frame.x + 1.0, row_height.mul_add(1.5, widget.frame.y + widget.frame.height)));
+        assert_eq!(widget.pointer_option(), None, "a closed list holds no rows under the pointer");
+
+        widget.open_list();
+        assert_eq!(widget.pointer_option(), Some(1), "the second realized row");
+
+        for _ in 0..6 {
+            widget.move_highlight(HighlightMove::Next);
+        }
+        assert_eq!(widget.first_row(), 3, "the arrows scrolled the window");
+        assert_eq!(widget.pointer_option(), Some(4), "and a different option is under the still pointer");
+
+        widget.dismiss();
+        assert_eq!(widget.pointer_option(), None, "closing takes the rows out from under it");
+    }
+
+    #[test]
+    fn every_reported_row_rectangle_is_the_row_that_answers_the_pointer_there() {
+        // Tripwire: the rectangle is what a host hangs the item card on, so it
+        // has to be the row the hit test resolves. Compute it from the option
+        // index rather than its offset in the realized window and the card for
+        // the fortieth option lands forty rows down the window; anchor it on
+        // the frame rather than under the closed row and it covers the control
+        // it is explaining. An option the list has not realized has no
+        // rectangle at all rather than a plausible wrong one.
+        let mut widget = opened(40, 4, Some(0));
+        widget.first_index = 12;
+        let first = widget.first_row();
+
+        for index in first..first + widget.realized_row_count() {
+            let row = widget.option_row_frame(index).expect("a realized option stands somewhere");
+            assert_eq!((row.x, row.width, row.height), (widget.frame.x, widget.frame.width, widget.theme.row_height));
+            assert!(row.y >= widget.frame.y + widget.frame.height, "the list hangs below the closed row");
+            assert_eq!(
+                widget.option_row_at(row.x + 1.0, row.height.mul_add(0.5, row.y)),
+                Some(index),
+                "the rectangle reported for {index} is not the row that answers a pointer inside it",
+            );
+        }
+        assert!(
+            widget.option_row_frame(first + widget.realized_row_count()).is_none(),
+            "an unrealized option has no rectangle on the window",
+        );
     }
 
     #[test]

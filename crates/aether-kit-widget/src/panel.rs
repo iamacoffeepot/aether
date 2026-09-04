@@ -34,7 +34,7 @@
 //!   (plus text) from one root render sender.
 //! - **Value.** Each value-up event (`SliderChanged` / `TextCommitted` /
 //!   `RadioSelected` / `VirtualListSelected` / `VirtualListAction` /
-//!   `VirtualListHover` /
+//!   `VirtualListHover` / `DropdownHover` /
 //!   `ButtonClicked` / `ToggleChanged` /
 //!   `SegmentedSelected` / `NumericChanged` / `DropdownSelected` /
 //!   `TabSelected`), attributed by
@@ -73,13 +73,13 @@ use crate::set::{
 };
 use crate::theme::{SetTheme, TextRole, Theme};
 use crate::{
-    ButtonClicked, ButtonConfig, Collect, DropdownConfig, DropdownOpenChanged, DropdownSelected, FocusGained,
-    FocusLost, HoverGained, HoverLost, ImageConfig, LabelConfig, MenuBarConfig, MenuItemActivated, MenuOpenChanged,
-    NumericChanged, NumericConfig, PanelConfig, RadioConfig, RadioSelected, ScrollConfig, ScrollExtent, ScrollOutcome,
-    ScrollResidual, ScrollWidget, SegmentedConfig, SegmentedSelected, SliderChanged, SliderConfig, TabSelected,
-    TabStripConfig, TextAlign, TextAreaConfig, TextCommitted, TextFieldConfig, ToggleChanged, ToggleConfig,
-    VirtualListAction, VirtualListConfig, VirtualListHover, VirtualListSelected, Widget, WidgetChildSpec,
-    WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged,
+    ButtonClicked, ButtonConfig, Collect, DropdownConfig, DropdownHover, DropdownOpenChanged, DropdownSelected,
+    FocusGained, FocusLost, HoverGained, HoverLost, ImageConfig, LabelConfig, MenuBarConfig, MenuItemActivated,
+    MenuOpenChanged, NumericChanged, NumericConfig, PanelConfig, RadioConfig, RadioSelected, ScrollConfig,
+    ScrollExtent, ScrollOutcome, ScrollResidual, ScrollWidget, SegmentedConfig, SegmentedSelected, SliderChanged,
+    SliderConfig, TabSelected, TabStripConfig, TextAlign, TextAreaConfig, TextCommitted, TextFieldConfig,
+    ToggleChanged, ToggleConfig, VirtualListAction, VirtualListConfig, VirtualListHover, VirtualListSelected, Widget,
+    WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged,
 };
 use crate::{FrameDischarge, decode_nested_widget_config};
 use crate::{accept_open_child_list, emit, flush_membership};
@@ -795,6 +795,7 @@ fn behavior_mirror_kinds() -> Vec<u64> {
         NumericChanged::ID.0,
         DropdownSelected::ID.0,
         DropdownOpenChanged::ID.0,
+        DropdownHover::ID.0,
         TabSelected::ID.0,
         MenuItemActivated::ID.0,
         MenuOpenChanged::ID.0,
@@ -1340,6 +1341,25 @@ impl WasmActor for WidgetPanel {
             widget = self.child_name(ctx.source_mailbox()),
             row = hover.row,
             "widget virtual list hover",
+        );
+    }
+
+    /// The option under the pointer in a dropdown's **open** list changed —
+    /// the dropdown's twin of `on_virtual_list_hover`. Not a choice: the reader
+    /// is looking, so a host stands this option's explanation on the row
+    /// rectangle the event carries and leaves the current choice alone. `None`
+    /// is the pointer having left the list, or the list having closed. The
+    /// map-editor seam; the reference logs it.
+    ///
+    /// # Agent
+    /// A child's reply; not useful to send manually.
+    #[handler::manual]
+    fn on_dropdown_hover(&mut self, ctx: &mut WasmCtx<'_, Manual>, hover: DropdownHover) {
+        tracing::info!(
+            target: "aether_kit_widget",
+            widget = self.child_name(ctx.source_mailbox()),
+            option = hover.option,
+            "widget dropdown hover",
         );
     }
 
