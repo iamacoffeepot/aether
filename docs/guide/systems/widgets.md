@@ -375,7 +375,8 @@ A host that wants `⌘` in a label ships a face that has it, or writes
 ## Fixed-row virtual lists
 
 `VirtualListConfig { items, initial_selected_index, visible_row_count,
-empty_text, ruled, theme, state }` retains the complete row vector while
+empty_text, ruled, scroll_bar_gap_units, theme, state }` retains the complete
+row vector while
 realizing the rows the viewport reaches. The panel fixes the slot height at
 `theme.row_height * visible_row_count` — at the summed height of the first
 `visible_row_count` rows once any of them carries a height of its own
@@ -432,16 +433,23 @@ the pointer, a press on the bare track carries the reader to where they
 pointed. Scrolling never changes selection: a reader looking at something has
 not chosen it. A press on the bar chooses no row.
 
-The bar owns a **gutter** at the frame's right end — its track plus one
-spacing unit of gap — and a row is laid out, filled, and elided inside what is
-left, so the bar stands beside the rows rather than on them. (A row fill that
-ran the whole frame width put the track on top of the row it marked, which is
-what "the scrollbar has no padding with the inner content to the left so it
-just draws over it" was.) The reported intrinsic counts the same gutter, so a
-slot sized from it does not hand the bar back a gutter's worth of the text it
-just asked for. A host drawing its own rows against a kit list's geometry
-reserves the same width: `Theme::space(2)` of track plus `Theme::space(1)` of
-gap, whenever the vector overflows the viewport. A
+The bar owns a **gutter** at the frame's right end — its track plus
+`scroll_bar_gap_units` of clear space — and a row is laid out, filled, and
+elided inside what is left, so the bar stands beside the rows rather than on
+them. (A row fill that ran the whole frame width put the track on top of the
+row it marked, which is what "the scrollbar has no padding with the inner
+content to the left so it just draws over it" was.) The gap is the **host's**:
+`VirtualListConfig::scroll_bar_gap_units`, `VirtualListConfig::SCROLL_BAR_GAP_UNITS`
+— two units — by default, which is the least a control stands off a plate's
+edge in the method's spacing ladder (`designing-a-screen.md` §6). One unit was
+the whole gutter until round 15 and read as touching the values ("the
+scrollbar is still too close to content to the left side"); a host that wants
+more sets more, and every list gets the wider default without asking. The
+reported intrinsic counts the same gutter, so a slot sized from it does not
+hand the bar back a gutter's worth of the text it just asked for. A host
+drawing its own rows against a kit list's geometry reserves the same width:
+`Theme::space(2)` of track plus `Theme::space(scroll_bar_gap_units)` of gap,
+whenever the vector overflows the viewport. A
 virtual list joins the same wheel-only hit table a `ScrollWidget` does (see
 [Scroll containers and wheel ownership](#scroll-containers-and-wheel-ownership)),
 so a root that forks the reference panel routes `MouseWheel` to it by

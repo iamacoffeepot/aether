@@ -173,6 +173,17 @@
 //! touched cannot answer "how many entries are there" for a reader who has not
 //! touched it. The wheel moves the window and so does dragging the thumb; the
 //! two write the same `first_index`, which is the list's whole scroll state.
+//!
+//! The bar stands off the rows by a **gutter**, and the gutter is the host's:
+//! [`VirtualListConfig::scroll_bar_gap_units`], two spacing units by default,
+//! because a control inside a plate sits at least two units from its edge
+//! (`designing-a-screen.md` §6) and from the rows' side the rail is that edge.
+//! One unit was the whole gutter until round 15, and the owner read it as
+//! touching the values twice — round-14 note 5 and round-17 note 7, "the
+//! scrollbar is still too close to content to the left side". The gutter comes
+//! out of the row's own width, so the fill, the trailing column and the
+//! leading run's elision all stop on the gutter's left edge rather than
+//! running under the track.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -214,12 +225,6 @@ impl VisibleRowWindow {
 /// pixels on the four-pixel grid: wide enough to grab with a pointer, narrow
 /// enough that it reads as an edge of the list rather than a column in it.
 const SCROLL_BAR_UNITS: u8 = 2;
-
-/// How much clear space stands between a row's text and the scroll bar's
-/// track, in spacing units. One: the bar is a mark on the list's edge, and a
-/// row that runs up against it reads as text the bar is printing over
-/// (round-5 note 8).
-const SCROLL_BAR_GAP_UNITS: u8 = 1;
 
 /// How much clear space stands between a row's leading run and its trailing
 /// column, in spacing units. One — enough that the two read as two columns,
@@ -455,6 +460,10 @@ pub struct VirtualListWidget {
     font_metrics: FontMetricsAdapter,
     /// Whether a hairline stands between rows.
     ruled: bool,
+    /// The gutter between the rows and the scroll bar's track, in spacing
+    /// units — [`VirtualListConfig::scroll_bar_gap_units`], which the host
+    /// sets and the rows give up.
+    scroll_bar_gap_units: u8,
     /// The widest measured row, remembered across frames. A virtual list
     /// exists so that a frame never touches every item, and the intrinsic
     /// width is the one number that has to — so it is measured once and
@@ -829,7 +838,7 @@ impl VirtualListWidget {
         let full_width = self.frame.width.max(0.0);
         let mut tops = self.build_row_tops(full_width);
         if tops.last().copied().unwrap_or(0.0) > self.frame.height {
-            let gutter = self.track_width() + self.theme.space(SCROLL_BAR_GAP_UNITS);
+            let gutter = self.track_width() + self.scroll_bar_gap();
             tops = self.build_row_tops((full_width - gutter).max(0.0));
         }
         self.row_tops = Some(tops);
@@ -1169,11 +1178,17 @@ impl VirtualListWidget {
         scroll_bar(&self.frame, self.track_width(), self.scroll_extent())
     }
 
-    /// How much of the frame's right end the bar owns: its track plus one
-    /// spacing unit of gap. Zero when no bar stands, so a list that fits its
-    /// viewport gives its whole frame to its rows.
+    /// The clear space the bar keeps between itself and the rows: the host's
+    /// own [`VirtualListConfig::scroll_bar_gap_units`] in theme metrics.
+    fn scroll_bar_gap(&self) -> f32 {
+        self.theme.space(self.scroll_bar_gap_units)
+    }
+
+    /// How much of the frame's right end the bar owns: its track plus the
+    /// gutter. Zero when no bar stands, so a list that fits its viewport
+    /// gives its whole frame to its rows.
     fn bar_gutter_width(&self) -> f32 {
-        self.scroll_bar().map_or(0.0, |bar| bar.width + self.theme.space(SCROLL_BAR_GAP_UNITS))
+        self.scroll_bar().map_or(0.0, |bar| bar.width + self.scroll_bar_gap())
     }
 
     /// The topmost row the window can start at: the one past which the rest of
@@ -1304,7 +1319,7 @@ impl VirtualListWidget {
         let widest = self.widest_row_width()?;
         let height = self.viewport_height();
         let gutter = if self.visible_row_count > 0 && self.items.len() > self.visible_row_count {
-            self.track_width() + self.theme.space(SCROLL_BAR_GAP_UNITS)
+            self.track_width() + self.scroll_bar_gap()
         } else {
             0.0
         };
@@ -1628,6 +1643,7 @@ impl WasmActor for VirtualListWidget {
             state: InteractionState::new(config.state),
             pressed: false,
             ruled: config.ruled,
+            scroll_bar_gap_units: config.scroll_bar_gap_units,
             font_metrics: FontMetricsAdapter::new(font_id),
             widest_row_width: None,
             thumb_grab_pixels: None,
@@ -1653,6 +1669,7 @@ impl WasmActor for VirtualListWidget {
         self.items = config.items;
         self.empty_text = config.empty_text;
         self.ruled = config.ruled;
+        self.scroll_bar_gap_units = config.scroll_bar_gap_units;
         self.visible_row_count = usize_from_u32(config.visible_row_count);
         self.selected_index = initial_selection(config.initial_selected_index, self.items.len());
         self.first_index = 0;
@@ -1919,6 +1936,7 @@ mod tests {
             selected_index,
             first_index: 0,
             visible_row_count,
+            scroll_bar_gap_units: VirtualListConfig::SCROLL_BAR_GAP_UNITS,
             theme: Theme::DEFAULT,
             frame: WidgetFrame { x: 10.0, y: 20.0, width: 100.0, height: 120.0 },
             state: InteractionState::new(WidgetControlState::default()),
@@ -2786,9 +2804,80 @@ mod tests {
         let row_fill_right = widget.row_width();
         assert_eq!(
             bar.left - row_fill_right,
-            widget.theme.space(SCROLL_BAR_GAP_UNITS),
+            widget.scroll_bar_gap(),
             "and the gap between the row and the track is one spacing unit",
         );
+    }
+
+    /// A list of long-named rows with an amount in the second column, in a
+    /// frame wide enough that a name has somewhere to be cut, at the gutter
+    /// the host asked for.
+    fn gutter_list(scroll_bar_gap_units: u8) -> VirtualListWidget {
+        let mut widget = measured_list(200, 5);
+        widget.frame = WidgetFrame { x: 10.0, y: 20.0, width: 200.0, height: 120.0 };
+        widget.scroll_bar_gap_units = scroll_bar_gap_units;
+        widget.items = (0..200)
+            .map(|index| {
+                VirtualListRow::from(format!("a skill gem with a long name {index}"))
+                    .with_trailing(vec!["21/20".into()])
+            })
+            .collect();
+        widget.forget_measurements();
+        widget
+    }
+
+    /// The rightmost pen-plus-advance of anything one list draws.
+    fn drawn_right_edge(widget: &VirtualListWidget) -> f32 {
+        let metrics = widget.font_metrics.resolved().expect("the test table is installed");
+        placed_runs(widget)
+            .into_iter()
+            .map(|(text, x, _, size)| x + measured_text_width(metrics, &text, size))
+            .fold(0.0_f32, f32::max)
+    }
+
+    #[test]
+    fn a_wider_gutter_shortens_the_rows_rather_than_letting_them_run_under_the_track() {
+        // Tripwire: round-17 note 7 — "the scrollbar is still too close to
+        // content to the left side". The gutter is the host's now, and the
+        // only thing that makes a wider one real is that the rows are laid,
+        // filled *and elided* inside what is left of the frame. A gutter that
+        // only moved the track would draw the bar further in and leave the
+        // names and the amounts exactly where they were, which is under it.
+        let narrow = gutter_list(1);
+        let wide = gutter_list(3);
+
+        assert_eq!(
+            narrow.row_width() - wide.row_width(),
+            wide.theme.space(2),
+            "the two extra units come out of the row rather than out of nothing",
+        );
+        assert!(
+            drawn_right_edge(&wide) <= wide.row_width() - wide.theme.pad + 1e-3,
+            "every run stops on the row's right pad: {} in a row {} wide",
+            drawn_right_edge(&wide),
+            wide.row_width(),
+        );
+        assert!(
+            drawn_right_edge(&wide) < drawn_right_edge(&narrow),
+            "and the amounts moved left with the gutter rather than staying where they were",
+        );
+
+        let leading = |widget: &VirtualListWidget| placed_runs(widget).first().expect("a realized row").0.clone();
+        assert!(leading(&wide).ends_with(ELLIPSIS), "a name too long for the narrower row is cut: {}", leading(&wide));
+        assert!(
+            leading(&wide).chars().count() < leading(&narrow).chars().count(),
+            "and cut shorter than the same name in the same frame at one unit of gutter",
+        );
+    }
+
+    #[test]
+    fn the_default_gutter_is_the_two_units_a_control_stands_off_a_plate_edge() {
+        // Tripwire: the default is what every host that says nothing gets,
+        // and it is the number the owner asked for twice (round-14 note 5,
+        // round-17 note 7). A config default that fell back to `u8::default()`
+        // would give a silent host no gutter at all — the bar drawn flush
+        // against the values, which is the bug the field exists to fix.
+        assert_eq!(VirtualListConfig::default().scroll_bar_gap_units, 2);
     }
 
     #[test]
@@ -2806,7 +2895,7 @@ mod tests {
             let metrics = widget.font_metrics.resolved().expect("the test table is installed");
             widget.theme.pad.mul_add(2.0, measured_text_width(metrics, &widget.items[17].text, size))
                 + widget.track_width()
-                + widget.theme.space(SCROLL_BAR_GAP_UNITS)
+                + widget.scroll_bar_gap()
         };
         let [width, height] = widget.intrinsic().expect("a measured, non-empty list reports an intrinsic");
         assert!((width - expected).abs() < f32::EPSILON, "{width} is not the widest row plus a pad each side");
@@ -2856,7 +2945,7 @@ mod tests {
 
         let long = list(200, 5, 0);
         assert!(long.scroll_bar().is_some());
-        assert_eq!(long.bar_gutter_width(), long.track_width() + long.theme.space(SCROLL_BAR_GAP_UNITS));
+        assert_eq!(long.bar_gutter_width(), long.track_width() + long.scroll_bar_gap());
         assert_eq!(long.text_width_budget(), long.theme.pad.mul_add(-2.0, long.row_width()));
 
         let mut unlaid = list(200, 5, 0);

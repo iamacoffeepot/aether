@@ -512,6 +512,7 @@ fn virtual_list_child(subname: &str, state: WidgetControlState) -> WidgetChildSp
             visible_row_count: 5,
             theme: Theme::DEFAULT,
             state,
+            ..VirtualListConfig::default()
         }
         .encode_into_bytes(),
     }
@@ -712,11 +713,11 @@ fn solid_for<'a>(snapshot: &'a [DrawTexturedQuads], clip: &ClipRect) -> &'a Draw
 const SCROLL_BAR_QUADS: usize = 2;
 
 /// What a standing scroll bar takes off the right end of every row: its
-/// two-unit track plus one spacing unit of gap. A row is filled inside what is
+/// two-unit track plus the config's own gutter. A row is filled inside what is
 /// left, so the bar stands beside the rows rather than printing on them
-/// (round-5 note 8).
+/// (round-5 note 8) and off them by the gutter the host set (round-17 note 7).
 fn scroll_bar_gutter() -> f32 {
-    Theme::DEFAULT.space(2) + Theme::DEFAULT.space(1)
+    Theme::DEFAULT.space(2) + Theme::DEFAULT.space(VirtualListConfig::SCROLL_BAR_GAP_UNITS)
 }
 
 fn virtual_list_clip() -> ClipRect {

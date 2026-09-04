@@ -1064,7 +1064,7 @@ impl From<&str> for VirtualListRow {
 /// `aether.kit.widget.virtual_list.config` — a fixed-row viewport over a
 /// potentially large item vector. The panel fixes the viewport height from
 /// `visible_row_count`; the actor realizes only that bounded row window.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.kit.widget.virtual_list.config")]
 pub struct VirtualListConfig {
     pub items: Vec<VirtualListRow>,
@@ -1090,9 +1090,52 @@ pub struct VirtualListConfig {
     /// block opens, rather than one between every pair.
     #[serde(default)]
     pub ruled: bool,
+    /// How much clear space stands between the rows and the scroll bar's
+    /// track, in spacing units — the **gutter** the bar keeps off the values
+    /// beside it.
+    ///
+    /// [`Self::SCROLL_BAR_GAP_UNITS`] by default, which is two: a control
+    /// inside a plate sits at least two spacing units from its edge
+    /// (`designing-a-screen.md` §6), and from the rows' side the rail is that
+    /// edge. One unit was the whole gutter until round 15 and the owner read
+    /// it as touching the values twice over — round-14 note 5, *"More left
+    /// padding on the scroll bar in build tab"*, and round-17 note 7, *"The
+    /// scrollbar is still too close to content to the left side."*
+    ///
+    /// A host that wants more sets more. The gutter is taken off the rows'
+    /// own width, so the leading run elides against what is left of it rather
+    /// than running under the bar and being cut by it.
+    #[serde(default = "VirtualListConfig::scroll_bar_gap_default")]
+    pub scroll_bar_gap_units: u8,
     pub theme: Theme,
     #[serde(default)]
     pub state: WidgetControlState,
+}
+
+impl VirtualListConfig {
+    /// The gutter a list keeps between its rows and its scroll bar unless the
+    /// host says otherwise: **two** spacing units, the least a control stands
+    /// off a plate's edge in the method's own spacing ladder.
+    pub const SCROLL_BAR_GAP_UNITS: u8 = 2;
+
+    fn scroll_bar_gap_default() -> u8 {
+        Self::SCROLL_BAR_GAP_UNITS
+    }
+}
+
+impl Default for VirtualListConfig {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            initial_selected_index: None,
+            visible_row_count: 0,
+            empty_text: String::new(),
+            ruled: false,
+            scroll_bar_gap_units: Self::SCROLL_BAR_GAP_UNITS,
+            theme: Theme::default(),
+            state: WidgetControlState::default(),
+        }
+    }
 }
 
 /// One choice of a [`DropdownConfig`]: what it reads, and the ink it reads in.
