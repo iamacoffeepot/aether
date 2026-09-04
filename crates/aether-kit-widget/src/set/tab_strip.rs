@@ -6,11 +6,13 @@
 //! sets.
 //!
 //! Each tab is sized to its label plus padding — never equal thirds of the
-//! row — and the selected tab is marked by an underline along its bottom
-//! edge, nothing more: every tab keeps the same raised fill, so the strip
-//! reads as a row of places with one marked rather than a row of buttons with
-//! one lit, and hover stays the only fill change the pointer causes. A press
-//! selects; a focused Left/Right moves the selection and clamps at the ends.
+//! row — and the selected tab is marked twice, by ink and by an underline
+//! along its bottom edge: its label is written in the primary ink while every
+//! other tab's recedes into the muted one. Never by a fill — every tab keeps
+//! the same raised fill, so the strip reads as a row of places with one marked
+//! rather than a row of buttons with one lit, and hover stays the only fill
+//! change the pointer causes. A press selects; a focused Left/Right moves the
+//! selection and clamps at the ends.
 //! The strip owns nothing but the choice: which content the selected tab
 //! shows is the root's business.
 //!
@@ -460,6 +462,25 @@ impl TabStripWidget {
         (!run.is_empty()).then_some((run, run_x))
     }
 
+    /// The ink tab `index` writes its label in: the primary ink for the
+    /// selected tab, the muted ink for every other one.
+    ///
+    /// The first of the selected tab's two marks, and the one that survives a
+    /// glance. The underline is two pixels at the row's bottom edge and no tab
+    /// is plated, so with every label in the same ink the only thing saying
+    /// which content the reader is looking at is a hairline they have to go
+    /// find. Letting the unselected labels recede is the same move the rest of
+    /// the kit makes with `text_muted` — a caption, a placeholder, a hint —
+    /// and it keeps the strip's meaning in ink rather than spending a fill on
+    /// it.
+    fn label_ink(&self, index: usize) -> Rgba {
+        if index == self.selected_index {
+            self.theme.text_primary
+        } else {
+            self.theme.text_muted
+        }
+    }
+
     /// One label drawn in `ink`, at the row's shared baseline.
     fn label_item(&self, run: String, run_x: f32, ink: Rgba) -> WidgetDrawItem {
         let size = self.theme.label_size_pixels;
@@ -487,11 +508,12 @@ impl TabStripWidget {
             items.push(quad(left, 0.0, tab_width, height, self.theme.fill(self.theme.surface_raised, theme_state)));
 
             if index == self.selected_index {
-                // The only mark. A tab is a place, not a row of a list: filling
-                // the selected one turns the strip into a wall of buttons with
-                // one lit, while an underline on a plain tab reads as "you are
-                // here" at a glance. Hover keeps its own overlay, so the
-                // pointer still says which tab it is over.
+                // The mark the label's ink does not carry, and never a fill. A
+                // tab is a place, not a row of a list: filling the selected one
+                // turns the strip into a wall of buttons with one lit, while an
+                // underline on a plain tab reads as "you are here" at a glance.
+                // Hover keeps its own overlay, so the pointer still says which
+                // tab it is over.
                 items.push(quad(
                     left,
                     height - UNDERLINE_THICKNESS,
@@ -502,7 +524,7 @@ impl TabStripWidget {
             }
 
             if let Some((run, run_x)) = self.tab_run(label, left, tab_width) {
-                items.push(self.label_item(run, run_x, self.theme.fill(self.theme.text_primary, theme_state)));
+                items.push(self.label_item(run, run_x, self.theme.fill(self.label_ink(index), theme_state)));
             }
 
             left += tab_width + gap;
@@ -550,7 +572,7 @@ impl TabStripWidget {
             }
 
             if let Some((run, run_x)) = self.tab_run(label, left, tab_width) {
-                items.push(self.label_item(run, run_x, self.theme.fill(self.theme.text_primary, theme_state)));
+                items.push(self.label_item(run, run_x, self.theme.fill(self.label_ink(index), theme_state)));
             }
 
             left += tab_width + gap;
@@ -963,11 +985,11 @@ mod tests {
     }
 
     #[test]
-    fn the_selected_tab_is_marked_by_its_underline_alone() {
+    fn the_selected_tab_is_marked_without_a_fill_of_its_own() {
         // Tripwire: filling the selected tab turns a strip of places into a row
         // of buttons with one lit — every tab keeps the raised surface, and the
-        // underline is the whole mark. Hover is the only fill the pointer
-        // changes, which a re-added selection fill would drown out.
+        // marks are the label's ink and the underline. Hover is the only fill
+        // the pointer changes, which a re-added selection fill would drown out.
         let strip = strip(3, 1);
         let items = strip.draw_items();
         let (tabs, underlines): (Vec<_>, Vec<_>) = items
@@ -987,12 +1009,34 @@ mod tests {
             vec![(strip.frame.height - UNDERLINE_THICKNESS, UNDERLINE_THICKNESS, strip.theme.text_primary)],
             "exactly one underline, along the selected tab's bottom edge",
         );
-        assert!(
-            items
+    }
+
+    #[test]
+    fn only_the_selected_tab_writes_its_label_in_the_primary_ink() {
+        // Tripwire: a change that draws every tab in the primary ink flattens
+        // the strip. No tab is plated and the underline is two pixels at the
+        // row's bottom edge, so the ink is what answers "which content am I
+        // looking at" from a glance; with every label equally loud the reader
+        // has to go hunting for a hairline. Both shapes carry the same
+        // answer, so both are checked here.
+        for style in [TabStripStyle::Chips, TabStripStyle::Filled] {
+            let strip = TabStripWidget { style, ..strip(3, 1) };
+            let inks: Vec<Rgba> = strip
+                .draw_items()
                 .iter()
-                .all(|item| !matches!(item, WidgetDrawItem::Text { color, .. } if *color != strip.theme.text_primary)),
-            "every tab label reads in the primary ink; items were {items:?}",
-        );
+                .filter_map(|item| match item {
+                    WidgetDrawItem::Text { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect();
+
+            assert_eq!(inks.len(), 3, "{style:?}: one label per tab");
+            assert_eq!(inks[1], strip.theme.text_primary, "{style:?}: the selected tab keeps the primary ink");
+            assert!(
+                inks[0] == strip.theme.text_muted && inks[2] == strip.theme.text_muted,
+                "{style:?}: an unselected tab recedes into the muted ink; inks were {inks:?}",
+            );
+        }
     }
 
     #[test]
