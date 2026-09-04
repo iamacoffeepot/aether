@@ -144,7 +144,7 @@ use crate::set::defaults::WidgetDefaults;
 use crate::set::{
     ButtonFace, accept_font_metrics_result, apply_text_theme, approx_text_width, button_face_width, elide_to_width,
     measured_text_width, pump_text_font_metrics, push_button_face, push_control_outlines, quad, release_left,
-    reply_if_hidden, text_origin_y,
+    reply_if_hidden, text_origin_y, wrap_to_width,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
@@ -221,6 +221,28 @@ enum PressTarget {
     Row(Option<usize>),
 }
 
+/// Where the parts of one realized row stand, in widget-local pixels.
+///
+/// A row is a slot, a plate inside it, and a first line inside that. The three
+/// are one rectangle for the ordinary row and three for a table entry: the
+/// slot opens with the row's `space_before` **ground**, the plate is the fill
+/// under the whole entry, and the first line is the band its name, its
+/// trailing column and its verbs are centred in, with the note's lines under
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RowBands {
+    /// The top of the whole slot — the top of the row's space, which is where
+    /// a `rule_above` hairline stands.
+    slot_top: f32,
+    /// The top of the plate, below that space.
+    plate_top: f32,
+    /// How tall the plate is: the row less its space.
+    plate_height: f32,
+    /// The band the row's own line stands in — its role's pitch, which is the
+    /// whole plate for a row without a note.
+    line_height: f32,
+}
+
 /// Where one row verb stands, in widget-local pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ActionRect {
@@ -244,6 +266,23 @@ impl ActionRect {
 /// rule is there to separate entries, and anything heavier reads as a table
 /// border the rows are trapped in.
 const ROW_RULE_THICKNESS: f32 = 1.0;
+
+/// How far a note is set in past its own row's indent, in spacing units. One:
+/// enough that the sentence reads as hanging off the name above it, little
+/// enough that it stays inside the same entry.
+const NOTE_INDENT_UNITS: u8 = 1;
+
+/// A note line's height as a multiple of the caption size. Tighter than a
+/// row's pitch, because the lines of one note are one paragraph and the space
+/// between them is leading rather than a gap between rows.
+const NOTE_LINE_HEIGHT_RATIO: f32 = 1.3;
+
+/// The most lines one row's note may take. Three: a note is a sentence about
+/// the row above it, and a row that grows past three lines has stopped being
+/// an entry in a table and become a paragraph the host should draw itself.
+/// Past the cap the third line carries what is left of the sentence, elided
+/// with an [`ELLIPSIS`](crate::set::ELLIPSIS), so the cut says it is a cut.
+const MAX_NOTE_LINES: usize = 3;
 
 /// The shortest a thumb may get, as a multiple of the track's width. A list of
 /// thousands would otherwise compute a thumb a pixel tall — unreadable, and
@@ -285,19 +324,34 @@ impl ScrollBar {
     }
 }
 
-/// The bar a list of `item_count` items showing `visible_row_count` of them
-/// from `first_index` stands with, or `None` when there is nothing to say: a
-/// vector that fits its viewport, an unlaid-out frame, or a frame too narrow
-/// to give the track up without swallowing the rows.
-#[allow(clippy::cast_precision_loss)] // a row count a reader could scroll cannot lose precision
-fn scroll_bar(
-    frame: &WidgetFrame,
-    track_width: f32,
-    first_index: usize,
-    visible_row_count: usize,
-    item_count: usize,
-) -> Option<ScrollBar> {
-    if !valid_frame(frame) || visible_row_count == 0 || item_count <= visible_row_count {
+/// How far the viewport reaches, how far the whole vector reaches, and where
+/// the reader stands in it — the three facts the scroll bar is drawn from.
+///
+/// The unit is **rows** for a list at one pitch and **content pixels** for one
+/// whose rows differ, and the bar does not care which: it is a ratio of the
+/// three either way. Stating it once is what keeps the two kinds of list
+/// scrolling alike, and keeps a list of uniform rows measuring exactly the bar
+/// it measured before rows had heights of their own.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ScrollExtent {
+    offset: f32,
+    viewport: f32,
+    content: f32,
+}
+
+impl ScrollExtent {
+    /// How far the offset can travel before the last of the content stands at
+    /// the bottom of the viewport. `0.0` for content that fits.
+    fn travel(self) -> f32 {
+        (self.content - self.viewport).max(0.0)
+    }
+}
+
+/// The bar a list standing at `extent` draws, or `None` when there is nothing
+/// to say: a vector that fits its viewport, an unlaid-out frame, or a frame
+/// too narrow to give the track up without swallowing the rows.
+fn scroll_bar(frame: &WidgetFrame, track_width: f32, extent: ScrollExtent) -> Option<ScrollBar> {
+    if !valid_frame(frame) || extent.viewport <= 0.0 || extent.content <= extent.viewport {
         return None;
     }
     let width = track_width.min(frame.width * 0.5);
@@ -305,10 +359,9 @@ fn scroll_bar(
         return None;
     }
     let height = frame.height;
-    let share = visible_row_count as f32 / item_count as f32;
+    let share = extent.viewport / extent.content;
     let thumb_height = (height * share).max(width * MIN_THUMB_RATIO).min(height);
-    let max_first_index = item_count - visible_row_count;
-    let progress = first_index.min(max_first_index) as f32 / max_first_index as f32;
+    let progress = (extent.offset / extent.travel()).clamp(0.0, 1.0);
     Some(ScrollBar {
         left: frame.width - width,
         width,
@@ -318,18 +371,16 @@ fn scroll_bar(
     })
 }
 
-/// The first realized row a thumb whose top stands at `thumb_top` means — the
-/// inverse of the `progress` [`scroll_bar`] draws with, so a drag and the bar
-/// it moves cannot disagree about where the reader is.
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn first_index_at(bar: ScrollBar, thumb_top: f32, visible_row_count: usize, item_count: usize) -> usize {
-    let max_first_index = item_count.saturating_sub(visible_row_count);
+/// The scroll offset a thumb whose top stands at `thumb_top` means, in
+/// `extent`'s own unit — the inverse of the `progress` [`scroll_bar`] draws
+/// with, so a drag and the bar it moves cannot disagree about where the reader
+/// is.
+fn scroll_offset_at(bar: ScrollBar, thumb_top: f32, extent: ScrollExtent) -> f32 {
     let travel = bar.travel();
-    if max_first_index == 0 || travel <= 0.0 || !thumb_top.is_finite() {
-        return 0;
+    if travel <= 0.0 || !thumb_top.is_finite() {
+        return 0.0;
     }
-    let progress = (thumb_top / travel).clamp(0.0, 1.0);
-    ((progress * max_first_index as f32).round() as usize).min(max_first_index)
+    (thumb_top / travel).clamp(0.0, 1.0) * extent.travel()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -386,20 +437,83 @@ pub struct VirtualListWidget {
     /// point rather than only when a `MouseMove` arrives.
     pointer_local: Option<(f32, f32)>,
     hovered_row: Option<usize>,
+    /// The content-space top of every row: `items.len() + 1` prefix sums whose
+    /// last entry is the content height. `None` is the **fixed-pitch fast
+    /// path** — no row of the vector carries a note, an indent, a space or a
+    /// rule, so every row is the one pitch the frame divides into and there is
+    /// no table to keep.
+    ///
+    /// One `f32` per item is `O(rows)` memory over the whole vector, which is
+    /// the one thing a virtual list otherwise refuses to spend: it is spent
+    /// only by a list that asked for rows of its own heights, and a prefix sum
+    /// is what lets the window, the hit test, the bar and the reported hover
+    /// answer in `O(log rows)` rather than by walking from the top.
+    row_tops: Option<Vec<f32>>,
+    /// The `(width, height)` [`Self::row_tops`] was built for, or `None` for a
+    /// table that has to be rebuilt. A note wraps to the width the row has and
+    /// the gutter it gives up depends on the height, so the sums are only true
+    /// for one frame.
+    row_tops_frame: Option<(f32, f32)>,
+    /// Whether any row of the vector asks for a height of its own — a note, an
+    /// indent, a space, or a rule. Answered when the vector arrives rather
+    /// than per frame, because it is the question the fast path is decided by
+    /// and a virtual list exists so that a frame never walks every item.
+    rows_vary: bool,
+}
+
+/// Whether any of `items` asks for a height of its own.
+fn rows_vary(items: &[VirtualListRow]) -> bool {
+    items.iter().any(|row| row.note.is_some() || row.indent > 0 || row.space_before > 0 || row.rule_above)
 }
 
 impl VirtualListWidget {
+    /// The rows realized right now: the configured count from `first_index`
+    /// while every row is one height, and every row the frame reaches once the
+    /// offset table stands — a table of tall and short rows shows as many as
+    /// fit rather than as many as were asked for. At least one row is realized
+    /// either way, so a row taller than the whole viewport still draws.
     fn window(&self) -> VisibleRowWindow {
-        clamped_window(self.first_index, self.visible_row_count, self.items.len())
+        let Some(tops) = &self.row_tops else {
+            return clamped_window(self.first_index, self.visible_row_count, self.items.len());
+        };
+        if self.items.is_empty() || self.visible_row_count == 0 || !valid_frame(&self.frame) {
+            return VisibleRowWindow { first_index: 0, end_exclusive_index: 0 };
+        }
+        let first_index = self.first_index.min(self.max_first_index());
+        let limit = tops[first_index] + self.frame.height;
+        let end_exclusive_index = tops.partition_point(|top| *top < limit).clamp(first_index + 1, self.items.len());
+        VisibleRowWindow { first_index, end_exclusive_index }
     }
 
+    /// Move the window so the selected row stands in it, without moving it
+    /// further than that. A count of rows on the fast path; once the offset
+    /// table stands, the topmost row that still leaves the selected row's own
+    /// bottom edge inside the viewport, because a row below the selection may
+    /// be two lines tall and "one viewport of rows" is no longer a count.
     fn reveal_selection(&mut self) {
         let Some(selected_index) = self.selected_index else {
             self.first_index = 0;
             return;
         };
-        self.first_index =
-            reveal_window(selected_index, self.first_index, self.visible_row_count, self.items.len()).first_index;
+        if self.row_tops.is_none() {
+            self.first_index =
+                reveal_window(selected_index, self.first_index, self.visible_row_count, self.items.len()).first_index;
+            return;
+        }
+        let window = self.window();
+        if selected_index < window.first_index {
+            self.first_index = selected_index;
+            return;
+        }
+        if selected_index < window.end_exclusive_index {
+            self.first_index = window.first_index;
+            return;
+        }
+        let bottom = self.content_top(selected_index.saturating_add(1)) - self.frame.height;
+        let Some(tops) = &self.row_tops else {
+            return;
+        };
+        self.first_index = tops.partition_point(|top| *top < bottom).min(selected_index);
     }
 
     fn select(&mut self, selected_index: usize) -> Option<u32> {
@@ -498,14 +612,18 @@ impl VirtualListWidget {
         }
     }
 
-    /// One row's height: the viewport divided by the row count the list was
-    /// *configured* for, never by the number it happens to have realized. A
-    /// list holding fewer items than its viewport therefore draws its rows at
-    /// their normal height with the rest of the viewport left empty — dividing
-    /// by the realized count instead stretched two items over the whole frame,
-    /// so a short list rendered as one giant row.
+    /// One row's height while every row is one height: the viewport divided by
+    /// the row count the list was *configured* for, never by the number it
+    /// happens to have realized. A list holding fewer items than its viewport
+    /// therefore draws its rows at their normal height with the rest of the
+    /// viewport left empty — dividing by the realized count instead stretched
+    /// two items over the whole frame, so a short list rendered as one giant
+    /// row.
+    ///
+    /// `None` once the list keeps an offset table, and for a frame no row can
+    /// stand in.
     fn row_height(&self) -> Option<f32> {
-        if self.visible_row_count == 0 || !valid_frame(&self.frame) {
+        if self.row_tops.is_some() || self.visible_row_count == 0 || !valid_frame(&self.frame) {
             return None;
         }
         #[allow(clippy::cast_precision_loss)]
@@ -514,28 +632,213 @@ impl VirtualListWidget {
         (row_height.is_finite() && row_height > 0.0).then_some(row_height)
     }
 
+    /// The row the point `local_y` lands in, or `None` for a point off the
+    /// rows.
+    ///
+    /// A row's `space_before` gap belongs to the row **under** it — it is that
+    /// row's own space, and a press in it is a press aimed at the row it opens
+    /// rather than at the one it closed.
     fn row_at_local_y(&self, local_y: f32) -> Option<usize> {
         let window = self.window();
         if !local_y.is_finite() || local_y < 0.0 || local_y >= self.frame.height {
             return None;
         }
-        let row_height = self.row_height()?;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let row_offset = (local_y / row_height).floor() as usize;
-        (row_offset < window.len()).then(|| window.first_index + row_offset)
+        let Some(tops) = &self.row_tops else {
+            let row_height = self.row_height()?;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let row_offset = (local_y / row_height).floor() as usize;
+            return (row_offset < window.len()).then(|| window.first_index + row_offset);
+        };
+        let content_y = tops.get(window.first_index)? + local_y;
+        let index = tops.partition_point(|top| *top <= content_y).checked_sub(1)?;
+        (index >= window.first_index && index < window.end_exclusive_index).then_some(index)
     }
 
-    /// Drop the cached row measurement. Called wherever the items, the font,
-    /// or the type scale change, which is every input the measurement has.
+    /// Drop the cached row measurement and the offset table. Called wherever
+    /// the items, the font, or the type scale change, which is every input
+    /// either of them has.
     fn forget_measurements(&mut self) {
         self.widest_row_width = None;
+        self.row_tops_frame = None;
+    }
+
+    /// The pitch one row of `role` stands at.
+    ///
+    /// The theme's `row_height` is the **body** pitch and every other role
+    /// scales by its own type step against the body size, so a caption row is
+    /// shorter and a heading row taller in exactly the proportion their sizes
+    /// differ. One number to tune rather than four, and a role that grows in a
+    /// restyled theme takes its rows with it. A theme whose body size is zero
+    /// falls back to the pitch itself rather than collapsing every row.
+    fn role_row_height(&self, role: TextRole) -> f32 {
+        if self.theme.label_size_pixels <= 0.0 {
+            return self.theme.row_height.max(0.0);
+        }
+        (self.theme.row_height * self.theme.text_size_pixels(role) / self.theme.label_size_pixels).max(0.0)
+    }
+
+    /// How tall one line of a note is: the caption size by
+    /// [`NOTE_LINE_HEIGHT_RATIO`].
+    fn note_line_height(&self) -> f32 {
+        (self.theme.text_size_pixels(TextRole::Caption) * NOTE_LINE_HEIGHT_RATIO).max(0.0)
+    }
+
+    /// How far into the row's text budget a note starts: the row's own indent
+    /// and one unit more.
+    fn note_indent(&self, row: &VirtualListRow) -> f32 {
+        self.theme.space(row.indent.saturating_add(NOTE_INDENT_UNITS))
+    }
+
+    /// The note this row has to say. A note of nothing but space is not a
+    /// note: it would grow the row by a line that draws nothing.
+    fn note_of(row: &VirtualListRow) -> Option<&str> {
+        row.note.as_deref().map(str::trim).filter(|note| !note.is_empty())
+    }
+
+    /// The width a note wraps to in a row `row_width` wide: the row's text
+    /// budget less the note's own indent. A note runs the whole budget,
+    /// because the trailing column and the verbs stand on the row's *first*
+    /// line and the note is the line under them.
+    fn note_budget(&self, row: &VirtualListRow, row_width: f32) -> f32 {
+        (text_budget_of(row_width, self.theme.pad) - self.note_indent(row)).max(0.0)
+    }
+
+    /// One row's note as the lines it will be drawn on: word-wrapped to
+    /// `budget`, capped at [`MAX_NOTE_LINES`], with the last of those carrying
+    /// what is left of the sentence and eliding it.
+    ///
+    /// A row that has a note always gets at least one line — a single word
+    /// wider than the budget keeps its own line rather than being broken in
+    /// half — and the whole note stands on one line until the font's advances
+    /// land, because wrapping against a guess and again against the metrics
+    /// would change every row's height a frame after it drew.
+    fn note_lines(&self, row: &VirtualListRow, budget: f32) -> Vec<String> {
+        let Some(note) = Self::note_of(row) else {
+            return Vec::new();
+        };
+        let size = self.theme.text_size_pixels(TextRole::Caption);
+        let Some(metrics) = self.font_metrics.resolved() else {
+            return alloc::vec![String::from(note)];
+        };
+        let mut lines = wrap_to_width(note, budget, |run| measured_text_width(metrics, run, size));
+        if lines.len() > MAX_NOTE_LINES {
+            let mut rest = String::new();
+            for line in lines.split_off(MAX_NOTE_LINES - 1) {
+                if !rest.is_empty() {
+                    rest.push(' ');
+                }
+                rest.push_str(&line);
+            }
+            lines.push(self.fitted_text(&rest, size, budget));
+        }
+        lines
+    }
+
+    /// One row's whole height in a row `row_width` wide: the ground above it,
+    /// its role's pitch, and a line for each line of its note.
+    fn item_height(&self, row: &VirtualListRow, row_width: f32) -> f32 {
+        #[allow(clippy::cast_precision_loss)] // a note is at most MAX_NOTE_LINES lines
+        let note_lines = self.note_lines(row, self.note_budget(row, row_width)).len() as f32;
+        note_lines.mul_add(self.note_line_height(), self.theme.space(row.space_before) + self.role_row_height(row.role))
+    }
+
+    /// The offset table for the whole vector at `row_width`: `items.len() + 1`
+    /// running sums, the last of which is the content height.
+    fn build_row_tops(&self, row_width: f32) -> Vec<f32> {
+        let mut tops = Vec::with_capacity(self.items.len().saturating_add(1));
+        let mut top = 0.0;
+        tops.push(top);
+        for row in &self.items {
+            top += self.item_height(row, row_width);
+            tops.push(top);
+        }
+        tops
+    }
+
+    /// Rebuild the offset table when the frame it was built for is not the
+    /// frame the list has now, and keep no table at all for a vector no row of
+    /// which asks for a height of its own — the fixed-pitch fast path, where
+    /// the geometry is one multiply and the list costs exactly what it always
+    /// did.
+    ///
+    /// Called from every handler that goes on to consult the geometry, because
+    /// the heights are a function of the frame and the frame arrives through a
+    /// shared handler that knows nothing about rows.
+    ///
+    /// The gutter the scroll bar takes is itself a function of the heights, so
+    /// the table is built once at the full frame and again a gutter narrower
+    /// when that first pass overflows. Narrowing a row can only wrap a note
+    /// onto *more* lines, so content that overflowed still overflows and the
+    /// second pass is the last one.
+    fn refresh_row_layout(&mut self) {
+        if !self.rows_vary {
+            self.row_tops = None;
+            self.row_tops_frame = None;
+            return;
+        }
+        let frame = (self.frame.width, self.frame.height);
+        if self.row_tops.is_some() && self.row_tops_frame == Some(frame) {
+            return;
+        }
+        let full_width = self.frame.width.max(0.0);
+        let mut tops = self.build_row_tops(full_width);
+        if tops.last().copied().unwrap_or(0.0) > self.frame.height {
+            let gutter = self.track_width() + self.theme.space(SCROLL_BAR_GAP_UNITS);
+            tops = self.build_row_tops((full_width - gutter).max(0.0));
+        }
+        self.row_tops = Some(tops);
+        self.row_tops_frame = Some(frame);
+    }
+
+    /// The content-space top of one row's slot — the distance from the top of
+    /// the whole vector to the top of that row's `space_before` gap. `0.0`
+    /// without a table, where content space is counted in rows rather than in
+    /// pixels.
+    fn content_top(&self, item_index: usize) -> f32 {
+        self.row_tops.as_ref().and_then(|tops| tops.get(item_index).copied()).unwrap_or(0.0)
+    }
+
+    /// What the scroll bar is drawn from: rows for the fast path — the
+    /// vector's length, the configured viewport and `first_index`, exactly the
+    /// three counts the bar was drawn from before rows had heights of their
+    /// own — and content pixels once the offset table stands.
+    #[allow(clippy::cast_precision_loss)] // a row count a reader could scroll cannot lose precision
+    fn scroll_extent(&self) -> ScrollExtent {
+        let first_index = self.first_index.min(self.max_first_index());
+        self.row_tops.as_ref().map_or(
+            ScrollExtent {
+                offset: first_index as f32,
+                viewport: self.visible_row_count as f32,
+                content: self.items.len() as f32,
+            },
+            |tops| ScrollExtent {
+                offset: tops.get(first_index).copied().unwrap_or(0.0),
+                viewport: self.frame.height,
+                content: tops.last().copied().unwrap_or(0.0),
+            },
+        )
+    }
+
+    /// The first row a scroll offset in [`ScrollExtent`]'s own unit means:
+    /// that row count rounded on the fast path, and the last row whose top is
+    /// at or above the offset once the table stands.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn first_index_at_offset(&self, offset: f32) -> usize {
+        let max_first_index = self.max_first_index();
+        if !offset.is_finite() || offset <= 0.0 {
+            return 0;
+        }
+        let Some(tops) = &self.row_tops else {
+            return (offset.round() as usize).min(max_first_index);
+        };
+        tops.partition_point(|top| *top <= offset).saturating_sub(1).min(max_first_index)
     }
 
     /// The width a row's two columns share: the row they are drawn in, less
     /// one `pad` at each end, so nothing in a row touches either edge of the
     /// space it was given.
     fn text_width_budget(&self) -> f32 {
-        self.theme.pad.mul_add(-2.0, self.row_width()).max(0.0)
+        text_budget_of(self.row_width(), self.theme.pad)
     }
 
     /// The width the *leading* run has once the row's right-hand furniture is
@@ -632,34 +935,49 @@ impl VirtualListWidget {
     /// block sitting on the row's right pad; round-12 note 1 says the pad and
     /// the gaps both go, so a pressable face runs to the row's edge and the
     /// pair reads as one block of verbs rather than two loose controls.
-    fn action_rects(&self, row: &VirtualListRow, row_y: f32, row_height: f32) -> Vec<ActionRect> {
+    /// A verb stands on the row's **first line** rather than over its whole
+    /// height: a row with a note is two lines of one entry, and a face drawn
+    /// down both of them would read as a control over the sentence too.
+    fn action_rects(&self, row: &VirtualListRow, bands: RowBands) -> Vec<ActionRect> {
         let mut x = self.row_width() - self.actions_width(row);
         let mut rects = Vec::with_capacity(row.actions.len());
         for action in &row.actions {
             let width = self.action_width(action);
-            rects.push(ActionRect { x, y: row_y, width, height: row_height });
+            rects.push(ActionRect { x, y: bands.plate_top, width, height: bands.line_height });
             x += width;
         }
         rects
     }
 
-    /// The top of one item's row in widget-local pixels, or `None` for an item
-    /// outside the realized window.
-    fn row_top(&self, item_index: usize, row_height: f32) -> Option<f32> {
+    /// Where one realized row's parts stand in widget-local pixels, or `None`
+    /// for an item outside the realized window.
+    fn row_bands(&self, item_index: usize) -> Option<RowBands> {
         let window = self.window();
-        #[allow(clippy::cast_precision_loss)] // a realized row offset is at most a viewport's worth
-        let row_offset = item_index.checked_sub(window.first_index).filter(|offset| *offset < window.len())? as f32;
-        Some(row_offset * row_height)
+        let row_offset = item_index.checked_sub(window.first_index).filter(|offset| *offset < window.len())?;
+        let Some(tops) = &self.row_tops else {
+            let row_height = self.row_height()?;
+            #[allow(clippy::cast_precision_loss)] // a realized row offset is at most a viewport's worth
+            let slot_top = row_offset as f32 * row_height;
+            return Some(RowBands { slot_top, plate_top: slot_top, plate_height: row_height, line_height: row_height });
+        };
+        let row = self.items.get(item_index)?;
+        let slot_top = tops.get(item_index)? - tops.get(window.first_index)?;
+        let gap = self.theme.space(row.space_before);
+        Some(RowBands {
+            slot_top,
+            plate_top: slot_top + gap,
+            plate_height: (tops.get(item_index + 1)? - tops.get(item_index)? - gap).max(0.0),
+            line_height: self.role_row_height(row.role),
+        })
     }
 
     /// The verb under a point, if the point is on one. Consulted *before* the
     /// row fill, so a press on a verb never also selects the row under it.
     fn action_at(&self, local_x: f32, local_y: f32) -> Option<RowActionIndex> {
         let row_index = self.row_at_local_y(local_y)?;
-        let row_height = self.row_height()?;
         let row = self.items.get(row_index)?;
-        let row_y = self.row_top(row_index, row_height)?;
-        self.action_rects(row, row_y, row_height)
+        let bands = self.row_bands(row_index)?;
+        self.action_rects(row, bands)
             .into_iter()
             .position(|rect| rect.contains(local_x, local_y))
             .map(|action_index| RowActionIndex { row_index, action_index })
@@ -706,12 +1024,9 @@ impl VirtualListWidget {
         items: &mut Vec<WidgetDrawItem>,
         row: &VirtualListRow,
         item_index: usize,
-        row_y: f32,
-        row_height: f32,
+        bands: RowBands,
     ) {
-        for (action_index, (action, rect)) in
-            row.actions.iter().zip(self.action_rects(row, row_y, row_height)).enumerate()
-        {
+        for (action_index, (action, rect)) in row.actions.iter().zip(self.action_rects(row, bands)).enumerate() {
             let face = ButtonFace {
                 x: rect.x,
                 y: rect.y,
@@ -805,7 +1120,7 @@ impl VirtualListWidget {
     /// The bar this list stands with right now, or `None` when its vector
     /// fits its viewport.
     fn scroll_bar(&self) -> Option<ScrollBar> {
-        scroll_bar(&self.frame, self.track_width(), self.first_index, self.visible_row_count, self.items.len())
+        scroll_bar(&self.frame, self.track_width(), self.scroll_extent())
     }
 
     /// How much of the frame's right end the bar owns: its track plus one
@@ -815,9 +1130,19 @@ impl VirtualListWidget {
         self.scroll_bar().map_or(0.0, |bar| bar.width + self.theme.space(SCROLL_BAR_GAP_UNITS))
     }
 
-    /// The topmost row the window can start at.
+    /// The topmost row the window can start at: the one past which the rest of
+    /// the content no longer fills the viewport. A count on the fast path, and
+    /// the last row whose top clears a viewport of the content's end once the
+    /// offset table stands.
     fn max_first_index(&self) -> usize {
-        self.items.len().saturating_sub(self.visible_row_count)
+        let Some(tops) = &self.row_tops else {
+            return self.items.len().saturating_sub(self.visible_row_count);
+        };
+        let last_top = tops.last().copied().unwrap_or(0.0) - self.frame.height;
+        if !last_top.is_finite() || last_top <= 0.0 {
+            return 0;
+        }
+        tops.partition_point(|top| *top <= last_top).saturating_sub(1).min(self.items.len().saturating_sub(1))
     }
 
     /// Move the window to `first_index`, clamped. Selection is untouched: a
@@ -826,26 +1151,41 @@ impl VirtualListWidget {
         self.first_index = first_index.min(self.max_first_index());
     }
 
-    /// Scroll by content pixels, carrying the sub-row remainder. Positive
-    /// moves the window down the vector.
+    /// Scroll by content pixels, carrying the remainder too small to move a
+    /// row. Positive moves the window down the vector.
+    ///
+    /// The window starts on a row's own top either way, so the wheel picks the
+    /// row the rolled pixels land in and carries what is left into the next
+    /// roll. The carry is bounded by the viewport so that a reader who keeps
+    /// rolling at either end of the list does not build up a debt they have to
+    /// roll back out.
     #[allow(clippy::cast_possible_truncation)] // the row delta is bounded by the wheel's own pixels
     fn scroll_by_pixels(&mut self, pixels: f32) {
-        let Some(row_height) = self.row_height() else {
-            return;
-        };
         if !pixels.is_finite() {
             return;
         }
+        if self.row_tops.is_none() {
+            let Some(row_height) = self.row_height() else {
+                return;
+            };
+            let carried = self.wheel_residual_pixels + pixels;
+            let rows = (carried / row_height).trunc();
+            self.wheel_residual_pixels = row_height.mul_add(-rows, carried);
+            let steps = rows as i64;
+            let moved = if steps >= 0 {
+                self.first_index.saturating_add(steps.unsigned_abs() as usize)
+            } else {
+                self.first_index.saturating_sub(steps.unsigned_abs() as usize)
+            };
+            self.scroll_to(moved);
+            return;
+        }
+        let from = self.scroll_extent().offset;
         let carried = self.wheel_residual_pixels + pixels;
-        let rows = (carried / row_height).trunc();
-        self.wheel_residual_pixels = row_height.mul_add(-rows, carried);
-        let steps = rows as i64;
-        let moved = if steps >= 0 {
-            self.first_index.saturating_add(steps.unsigned_abs() as usize)
-        } else {
-            self.first_index.saturating_sub(steps.unsigned_abs() as usize)
-        };
-        self.scroll_to(moved);
+        let next = self.first_index_at_offset(from + carried);
+        let travelled = self.content_top(next) - from;
+        self.wheel_residual_pixels = (carried - travelled).clamp(-self.frame.height, self.frame.height);
+        self.scroll_to(next);
     }
 
     /// Take the thumb at `local_y`, from the point on it the pointer grabbed —
@@ -865,7 +1205,7 @@ impl VirtualListWidget {
         let (Some(grab), Some(bar)) = (self.thumb_grab_pixels, self.scroll_bar()) else {
             return;
         };
-        self.scroll_to(first_index_at(bar, local_y - grab, self.visible_row_count, self.items.len()));
+        self.scroll_to(self.first_index_at_offset(scroll_offset_at(bar, local_y - grab, self.scroll_extent())));
     }
 
     /// The bar's own draw: the track in the outline role, the thumb in the
@@ -916,8 +1256,7 @@ impl VirtualListWidget {
     /// took a gutter's worth of text out of.
     fn intrinsic(&mut self) -> Option<[f32; 2]> {
         let widest = self.widest_row_width()?;
-        #[allow(clippy::cast_precision_loss)] // a viewport of rows a reader could scroll cannot lose precision
-        let height = self.theme.row_height * self.visible_row_count as f32;
+        let height = self.viewport_height();
         let gutter = if self.visible_row_count > 0 && self.items.len() > self.visible_row_count {
             self.track_width() + self.theme.space(SCROLL_BAR_GAP_UNITS)
         } else {
@@ -927,10 +1266,30 @@ impl VirtualListWidget {
         (width.is_finite() && height.is_finite()).then_some([width, height])
     }
 
+    /// The height the viewport asks for: the configured row count at the one
+    /// pitch, and the first that many rows' own heights once they have any.
+    ///
+    /// Measured from the top of the vector rather than from the realized
+    /// window, so the height a slot was sized to does not change under the
+    /// reader as they scroll a table of tall and short rows.
+    fn viewport_height(&self) -> f32 {
+        #[allow(clippy::cast_precision_loss)] // a viewport of rows a reader could scroll cannot lose precision
+        let uniform = self.theme.row_height * self.visible_row_count as f32;
+        self.row_tops
+            .as_ref()
+            .map_or(uniform, |tops| tops.get(self.visible_row_count).or_else(|| tops.last()).copied().unwrap_or(0.0))
+    }
+
     /// The widest row in the whole item vector, measured once per change to
     /// the items or the font and cached. A row with a trailing run or a verb on
     /// it is as wide as all of its columns and the gaps between them: a slot
     /// sized from this has to hold the whole row, not just its name.
+    ///
+    /// A row's **note is not measured**. A note is prose, and prose sized to
+    /// its own longest line opens a pane at its ceiling on a sentence and
+    /// leaves the table it was supposed to size sitting in a column of empty
+    /// plate; the note wraps to whatever width the *rows* ask for. A row's
+    /// indent is counted, because that is width the name actually needs.
     fn widest_row_width(&mut self) -> Option<f32> {
         if let Some(widest) = self.widest_row_width {
             return Some(widest);
@@ -949,7 +1308,10 @@ impl VirtualListWidget {
                     run if run > 0.0 => gap + run,
                     _ => 0.0,
                 };
-                measured_text_width(metrics, &row.text, size) + trailing + self.actions_reserve_for(row)
+                self.theme.space(row.indent)
+                    + measured_text_width(metrics, &row.text, size)
+                    + trailing
+                    + self.actions_reserve_for(row)
             })
             .fold(0.0_f32, f32::max);
         self.widest_row_width = Some(widest);
@@ -992,9 +1354,16 @@ impl VirtualListWidget {
     /// is what the tier is, and a tier that disappears the moment the reader
     /// clicks the row is a tier the reader cannot compare.
     fn run_ink(&self, ink: TextInk, row: &VirtualListRow, selected: bool) -> Rgba {
+        self.ink_at(ink, row.role, selected)
+    }
+
+    /// [`Self::run_ink`] for a run set at a role of its own rather than at its
+    /// row's — which is a row's note, always a caption whatever the name above
+    /// it is set at.
+    fn ink_at(&self, ink: TextInk, role: TextRole, selected: bool) -> Rgba {
         let base = match ink {
             TextInk::Inherited if selected => self.theme.selection_text,
-            ink => self.theme.text_ink(ink, row.role),
+            ink => self.theme.text_ink(ink, role),
         };
         self.theme.fill(base, self.state.supporting_theme_state(false))
     }
@@ -1003,17 +1372,53 @@ impl VirtualListWidget {
     /// `n - 1` of them for `n` rows, each on the row boundary it divides. A
     /// rule under the last row would underline the list rather than separate
     /// anything, and one above the first would be a second top edge.
-    fn rule_items(&self, visible_row_count: usize, row_height: f32, row_width: f32) -> Vec<WidgetDrawItem> {
-        if !self.ruled || visible_row_count < 2 {
+    fn rule_items(&self, window: VisibleRowWindow, row_width: f32) -> Vec<WidgetDrawItem> {
+        if !self.ruled || window.len() < 2 {
             return Vec::new();
         }
-        (1..visible_row_count)
-            .map(|row_offset| {
-                #[allow(clippy::cast_precision_loss)]
-                let y = row_offset as f32 * row_height;
-                quad(0.0, y, row_width, ROW_RULE_THICKNESS, self.theme.outline)
+        ((window.first_index + 1)..window.end_exclusive_index)
+            .filter_map(|item_index| {
+                let bands = self.row_bands(item_index)?;
+                Some(quad(0.0, bands.slot_top, row_width, ROW_RULE_THICKNESS, self.theme.outline))
             })
             .collect()
+    }
+
+    /// The hairline one row draws to open a block: across the row's own text
+    /// budget, at the **top of its space** — the rule first, then the ground,
+    /// then the row — so a block boundary reads as a line with air under it
+    /// rather than as a line stuck to a name. It spans the budget rather than
+    /// the whole row so that it starts and ends where the text does, which is
+    /// what tells it apart from the frame's own edge.
+    fn rule_above_item(&self, row: &VirtualListRow, bands: RowBands) -> Option<WidgetDrawItem> {
+        row.rule_above.then(|| {
+            let width = self.text_width_budget();
+            quad(self.theme.pad, bands.slot_top, width, ROW_RULE_THICKNESS, self.theme.outline)
+        })
+    }
+
+    /// One row's note, drawn on the lines under its name: caption size, the
+    /// muted ink — which follows the row into `selection_text` when it is
+    /// chosen, exactly as a caption-role row's own text does — and set in by
+    /// the row's indent and one unit more.
+    fn push_row_note(&self, items: &mut Vec<WidgetDrawItem>, row: &VirtualListRow, bands: RowBands, selected: bool) {
+        let size = self.theme.text_size_pixels(TextRole::Caption);
+        let line_height = self.note_line_height();
+        let indent = self.note_indent(row);
+        for (line_offset, line) in self.note_lines(row, self.note_budget(row, self.row_width())).into_iter().enumerate()
+        {
+            #[allow(clippy::cast_precision_loss)] // a note is at most MAX_NOTE_LINES lines
+            let line_top = line_height.mul_add(line_offset as f32, bands.plate_top + bands.line_height);
+            items.push(WidgetDrawItem::Text {
+                x: self.theme.pad + indent,
+                y: text_origin_y(line_top, line_height, size),
+                font_id: self.theme.font_id,
+                text: line,
+                size_pixels: size,
+                color: self.ink_at(TextInk::Inherited, TextRole::Caption, selected),
+                clip: None,
+            });
+        }
     }
 
     /// The empty state: one caption-role, muted line at the top of the
@@ -1044,9 +1449,9 @@ impl VirtualListWidget {
         }
         let window = self.window();
         let visible_row_count = window.len();
-        let Some(row_height) = self.row_height() else {
+        if visible_row_count == 0 || !valid_frame(&self.frame) {
             return Vec::new();
-        };
+        }
 
         let row_width = self.row_width();
         let actions_reserve = self.actions_reserve(window);
@@ -1055,23 +1460,30 @@ impl VirtualListWidget {
         let leading_budget = self.leading_width_budget(trailing_column, actions_reserve);
         let mut items = Vec::with_capacity(visible_row_count.saturating_mul(3).saturating_add(8));
         for (row_offset, item) in self.items[window.first_index..window.end_exclusive_index].iter().enumerate() {
-            #[allow(clippy::cast_precision_loss)]
-            let row_y = row_offset as f32 * row_height;
             let item_index = window.first_index + row_offset;
+            let Some(bands) = self.row_bands(item_index) else {
+                continue;
+            };
             let selected = self.selected_index == Some(item_index);
             let hovered = self.hovered_row == Some(item_index);
-            items.push(quad(0.0, row_y, row_width, row_height, self.row_fill(selected, hovered)));
+            // The row's space is ground, not a taller plate: the fill starts
+            // below it, so the gap between two blocks is the surface showing
+            // through rather than one fat row.
+            items.extend(self.rule_above_item(item, bands));
+            items.push(quad(0.0, bands.plate_top, row_width, bands.plate_height, self.row_fill(selected, hovered)));
 
+            let indent = self.theme.space(item.indent);
             let size = self.theme.text_size_pixels(item.role);
             items.push(WidgetDrawItem::Text {
-                x: self.theme.pad,
-                y: text_origin_y(row_y, row_height, size),
+                x: self.theme.pad + indent,
+                y: text_origin_y(bands.plate_top, bands.line_height, size),
                 font_id: self.theme.font_id,
-                text: self.fitted_text(&item.text, size, leading_budget),
+                text: self.fitted_text(&item.text, size, (leading_budget - indent).max(0.0)),
                 size_pixels: size,
                 color: self.run_ink(item.ink, item, selected),
                 clip: None,
             });
+            self.push_row_note(&mut items, item, bands, selected);
             // The trailing run is set flush against the row's right pad — or
             // against the verb block when one stands there — so every row's
             // second column ends on one edge. Its spans run left to right from
@@ -1084,7 +1496,7 @@ impl VirtualListWidget {
                 for span in fitted {
                     items.push(WidgetDrawItem::Text {
                         x,
-                        y: text_origin_y(row_y, row_height, size),
+                        y: text_origin_y(bands.plate_top, bands.line_height, size),
                         font_id: self.theme.font_id,
                         text: String::from(span.text.as_str()),
                         size_pixels: size,
@@ -1094,9 +1506,9 @@ impl VirtualListWidget {
                     x += measured_text_width(metrics, &span.text, size) + self.theme.space(TRAILING_SPAN_GAP_UNITS);
                 }
             }
-            self.push_row_actions(&mut items, item, item_index, row_y, row_height);
+            self.push_row_actions(&mut items, item, item_index, bands);
         }
-        items.extend(self.rule_items(visible_row_count, row_height, row_width));
+        items.extend(self.rule_items(window, row_width));
         if let Some(bar) = self.scroll_bar() {
             items.extend(self.scroll_bar_items(bar));
         }
@@ -1152,6 +1564,7 @@ impl WasmActor for VirtualListWidget {
             reveal_window(selected_index, 0, visible_row_count, config.items.len()).first_index
         });
         Ok(Self {
+            rows_vary: rows_vary(&config.items),
             items: config.items,
             empty_text: config.empty_text,
             selected_index,
@@ -1170,6 +1583,8 @@ impl WasmActor for VirtualListWidget {
             pressed_action: None,
             pointer_local: None,
             hovered_row: None,
+            row_tops: None,
+            row_tops_frame: None,
         })
     }
 
@@ -1181,6 +1596,7 @@ impl WasmActor for VirtualListWidget {
 
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: VirtualListConfig) {
+        self.rows_vary = rows_vary(&config.items);
         self.items = config.items;
         self.empty_text = config.empty_text;
         self.ruled = config.ruled;
@@ -1191,10 +1607,13 @@ impl WasmActor for VirtualListWidget {
         self.wheel_residual_pixels = 0.0;
         self.hovered_action = None;
         self.pressed_action = None;
-        self.reveal_selection();
         self.font_metrics.set_desired(config.theme.font_id);
         self.theme = config.theme;
         self.forget_measurements();
+        // The heights are a function of the theme, so the table is rebuilt
+        // once it has landed and before anything asks where a row stands.
+        self.refresh_row_layout();
+        self.reveal_selection();
         self.apply_control_state(ctx, config.state);
         // A fresh vector under a still pointer is a different row under it.
         self.settle_hovered_row(ctx);
@@ -1233,6 +1652,7 @@ impl WasmActor for VirtualListWidget {
         if press.button != mouse_button::LEFT || !self.state.is_available() {
             return;
         }
+        self.refresh_row_layout();
         let (local_x, local_y) = (press.x - self.frame.x, press.y - self.frame.y);
         self.pointer_local = Some((local_x, local_y));
         match self.press_target(local_x, local_y) {
@@ -1256,6 +1676,7 @@ impl WasmActor for VirtualListWidget {
     /// following even once it leaves the narrow track.
     #[handler::single]
     fn on_mouse_move(&mut self, ctx: &mut WasmCtx<'_>, moved: MouseMove) {
+        self.refresh_row_layout();
         self.pointer_local = Some((moved.x - self.frame.x, moved.y - self.frame.y));
         if self.thumb_grab_pixels.is_some() {
             self.drag_thumb(moved.y - self.frame.y);
@@ -1287,6 +1708,7 @@ impl WasmActor for VirtualListWidget {
     #[handler::single]
     fn on_mouse_wheel(&mut self, ctx: &mut WasmCtx<'_>, wheel: MouseWheel) {
         if self.state.is_available() {
+            self.refresh_row_layout();
             self.scroll_by_pixels(-wheel.delta_y);
             self.settle_hovered_row(ctx);
         }
@@ -1297,6 +1719,7 @@ impl WasmActor for VirtualListWidget {
     /// cancels rather than removing the row it drifted away from.
     #[handler::single]
     fn on_mouse_button_release(&mut self, ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
+        self.refresh_row_layout();
         let armed = if release.button == mouse_button::LEFT {
             self.pressed_action.take()
         } else {
@@ -1317,6 +1740,7 @@ impl WasmActor for VirtualListWidget {
         if !self.state.can_mutate() {
             return;
         }
+        self.refresh_row_layout();
         let movement = match key.code {
             KEY_UP => SelectionMove::Up,
             KEY_DOWN => SelectionMove::Down,
@@ -1339,6 +1763,7 @@ impl WasmActor for VirtualListWidget {
         if reply_if_hidden(ctx, &self.state) {
             return;
         }
+        self.refresh_row_layout();
         let intrinsic = self.intrinsic();
         let items = self.draw_items();
         if let Some(parent) = ctx.parent() {
@@ -1405,6 +1830,14 @@ fn moved_selection(
     })
 }
 
+/// The width the two text columns of a row `row_width` wide share: the row
+/// less one `pad` at each end. Free of the widget because the offset table is
+/// built at a width the list does not have yet — the gutter it will give up
+/// depends on the heights the table is being built to find.
+fn text_budget_of(row_width: f32, pad: f32) -> f32 {
+    pad.mul_add(-2.0, row_width).max(0.0)
+}
+
 fn valid_frame(frame: &WidgetFrame) -> bool {
     frame.x.is_finite()
         && frame.y.is_finite()
@@ -1445,6 +1878,9 @@ mod tests {
             pressed_action: None,
             pointer_local: None,
             hovered_row: None,
+            row_tops: None,
+            row_tops_frame: None,
+            rows_vary: false,
         }
     }
 
@@ -1926,11 +2362,9 @@ mod tests {
 
     /// The rects the verbs of the `row_offset`-th realized row stand at.
     fn realized_action_rects(widget: &VirtualListWidget, row_offset: usize) -> Vec<ActionRect> {
-        let row_height = widget.row_height().expect("a laid-out list has a row height");
-        #[allow(clippy::cast_precision_loss)]
-        let row_y = row_offset as f32 * row_height;
-        let item = &widget.items[widget.window().first_index + row_offset];
-        widget.action_rects(item, row_y, row_height)
+        let item_index = widget.window().first_index + row_offset;
+        let bands = widget.row_bands(item_index).expect("a realized row stands somewhere");
+        widget.action_rects(&widget.items[item_index], bands)
     }
 
     #[test]
@@ -2184,10 +2618,11 @@ mod tests {
         // the list rather than dividing anything, and a rule above the first
         // draws a second top edge on the frame the panel already bounded.
         let mut widget = list(3, 5, 0);
-        assert!(widget.rule_items(3, 24.0, 100.0).is_empty(), "an unruled list draws none");
+        let window = widget.window();
+        assert!(widget.rule_items(window, 100.0).is_empty(), "an unruled list draws none");
 
         widget.ruled = true;
-        let rules = widget.rule_items(3, 24.0, 100.0);
+        let rules = widget.rule_items(window, 100.0);
         assert_eq!(rules.len(), 2, "three rows, two rules");
         for (index, rule) in rules.iter().enumerate() {
             let WidgetDrawItem::Quad { x, y, width, height, color, .. } = rule else {
@@ -2199,7 +2634,10 @@ mod tests {
             assert_eq!(*color, widget.theme.outline, "a divider is the outline role, not a colour of its own");
         }
 
-        assert!(widget.rule_items(1, 24.0, 100.0).is_empty(), "one row has nothing to divide");
+        assert!(
+            widget.rule_items(VisibleRowWindow { first_index: 0, end_exclusive_index: 1 }, 100.0).is_empty(),
+            "one row has nothing to divide",
+        );
         assert_eq!(
             widget.draw_items().iter().filter(|item| matches!(item, WidgetDrawItem::Quad { height, .. } if (*height - ROW_RULE_THICKNESS).abs() < f32::EPSILON)).count(),
             2,
@@ -2336,12 +2774,15 @@ mod tests {
         // first frame of every drag.
         let mut widget = list(200, 5, 0);
         let bar = widget.scroll_bar().expect("bar");
-        assert_eq!(first_index_at(bar, -10.0, 5, 200), 0, "above the track is the top of the vector");
-        assert_eq!(first_index_at(bar, bar.travel() + 10.0, 5, 200), 195, "and below it the end");
+        let at = |widget: &VirtualListWidget, bar, thumb_top| {
+            widget.first_index_at_offset(scroll_offset_at(bar, thumb_top, widget.scroll_extent()))
+        };
+        assert_eq!(at(&widget, bar, -10.0), 0, "above the track is the top of the vector");
+        assert_eq!(at(&widget, bar, bar.travel() + 10.0), 195, "and below it the end");
         for first_index in [0usize, 1, 40, 97, 194, 195] {
             widget.first_index = first_index;
             let drawn = widget.scroll_bar().expect("bar");
-            assert_eq!(first_index_at(drawn, drawn.thumb_top, 5, 200), first_index, "round trip at {first_index}");
+            assert_eq!(at(&widget, drawn, drawn.thumb_top), first_index, "round trip at {first_index}");
         }
 
         // A press on the thumb keeps the point that was grabbed under the
