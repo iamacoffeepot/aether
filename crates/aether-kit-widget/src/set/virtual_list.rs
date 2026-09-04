@@ -1552,6 +1552,50 @@ mod tests {
     }
 
     #[test]
+    fn every_row_ends_its_verbs_on_its_own_right_pad_one_gap_apart() {
+        // Tripwire: the owner's round-11 note 4 — "the buttons should be flush
+        // with each other and the last button should be flush with the end of
+        // the list item". Three ways to lose that, none of which the
+        // two-equal-verbs case above would catch. Left-align a row's block
+        // inside the *shared* column and every row carrying fewer or narrower
+        // verbs than the widest one ends short of the edge with a band of
+        // slack after it. Right-align against the frame instead of the row and
+        // the block slides under the scroll bar's gutter. Add the gap once for
+        // the block rather than once per pair and a third verb overlaps its
+        // neighbour.
+        let mut widget = actioned_list(40, 240.0);
+        widget.items[1] = VirtualListRow::from("one verb").with_actions(vec![RowAction::text("Change")]);
+        widget.items[2] = VirtualListRow::from("three verbs").with_actions(vec![
+            RowAction::text("Change"),
+            RowAction::text("Copy"),
+            RowAction::danger("x"),
+        ]);
+        widget.items[3] = VirtualListRow::from("no verbs at all");
+        widget.forget_measurements();
+
+        let gap = widget.theme.space(ACTION_GAP_UNITS);
+        let right_edge = widget.row_width() - widget.theme.pad;
+        assert!(widget.row_width() < widget.frame.width, "this list scrolls, so the gutter really is off the row");
+
+        for row_offset in 0..widget.window().len() {
+            let rects = realized_action_rects(&widget, row_offset);
+            let Some(last) = rects.last() else {
+                continue;
+            };
+            assert!(
+                (last.x + last.width - right_edge).abs() < 1e-3,
+                "row {row_offset} leaves slack after its last verb: {rects:?}",
+            );
+            for pair in rects.windows(2) {
+                assert!(
+                    (pair[1].x - (pair[0].x + pair[0].width) - gap).abs() < 1e-3,
+                    "row {row_offset} does not hold one gap unit between its verbs: {rects:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_press_on_a_row_verb_is_that_verb_and_never_also_the_row_under_it() {
         // Tripwire: the studio's gap 32 — round-9 note 4, "skills should be
         // removed via 'x' button bound to row". Two failures live in the
