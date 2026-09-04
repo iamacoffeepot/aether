@@ -493,17 +493,42 @@ that is only words is written as one (`VirtualListRow: From<String> +
 From<&str>`), so `(0..n).map(VirtualListRow::from)` is the whole of the plain
 case.
 
-`trailing` is the row's **second column**: a version, a count, a price, a key.
-It is set right-aligned against the row's own right pad, and the widest
-trailing run among the **realized** rows decides the column every visible row
-shares, with one spacing unit of clear space before it. The column is
-subtracted from the leading budget *first*, so the two rules that follow are
-one rule: the **leading run elides** into what is left (the same
-`elide_to_width` cut, with the ellipsis), and the **trailing run never does** —
-a name cut short still names the thing, while an amount cut to `21/…` is a
-wrong number. The column is the realized window's rather than the whole
-vector's because a reader compares what is on screen, and a column sized by an
+`trailing` is the row's **second column**: a version, a count, a price, a key,
+a run of tags. It is set right-aligned against the row's own right pad, and the
+widest trailing run among the **realized** rows decides the column every
+visible row shares, with one spacing unit of clear space before it. The column
+is subtracted from the leading budget *first*, so the **leading run elides**
+into what is left (the same `elide_to_width` cut, with the ellipsis) — a name
+cut short still names the thing, while an amount cut to `21/…` is a wrong
+number. The column is the realized window's rather than the whole vector's
+because a reader compares what is on screen, and a column sized by an
 off-screen row leaves a gap nothing stands in.
+
+The trailing run is a `Vec<InkedSpan>` rather than one string, because the
+words in it are often not one thing said once — `Spell Fire Duration` is three
+tags, and **a tag wears the ink of what it names**:
+
+```rust
+use aether_kit_widget::{InkedSpan, TextInk, VirtualListRow};
+
+let row = VirtualListRow::from(gem.name).with_trailing(vec![
+    InkedSpan::new("Fire", TextInk::HueWarm),
+    InkedSpan::new("Cold", TextInk::HueCool),
+    InkedSpan::from("lvl 20"),                     // no ink named: follows the row
+]);
+```
+
+The spans are laid out on one line in the order written, one **word gap** (one
+spacing unit) apart, and the run right-aligns as a whole against the same edge
+every other row's run ends on. The plain amount is one span from a string
+(`vec!["21/20".into()]`), so a one-ink column of numbers costs a `.into()` and
+nothing else.
+
+A run too wide for its column gives way by **dropping whole spans off its end**
+— never by cutting one mid-word. A span is a word that means something on its
+own, so half of one names nothing, and the leading run's ellipsis stays the
+only cut mark a row carries. What the run may take is the row's text budget
+less the verb block; the leading run takes what is left after that.
 
 `role` sets the type step both runs are drawn at, defaulting to
 `TextRole::Body`. A `Caption` row draws at the caption size in the muted ink,
@@ -521,11 +546,13 @@ use aether_kit_widget::{TextInk, VirtualListRow};
 let row = VirtualListRow::from(item.name).with_ink(TextInk::RarityRare);
 ```
 
-The trailing run keeps the row ink whatever the name is written in — a column
-of amounts is read down one edge, and four colours down it is a column nobody
-can compare. A named ink **outlives the row being chosen**: `selection_text`
-wins over `Inherited` and over nothing else, because what a tier says about a
-thing does not stop being true when the reader clicks it.
+Each trailing span carries its own ink the same way. A column of *amounts* is
+read down one edge and wants one ink there, so leave those spans `Inherited`;
+the colours are for a column of tags, where the ink is what the word means
+rather than decoration on a number. A named ink **outlives the row being
+chosen**: `selection_text` wins over `Inherited` and over nothing else, because
+what a tier or a damage type says about a thing does not stop being true when
+the reader clicks it.
 
 `ruled: true` puts a one-pixel `theme.outline` hairline between rows — `n - 1`
 of them for `n` realized rows, never a rule under the last one (that underlines
@@ -555,11 +582,27 @@ same measured-label-plus-two-pads width, the same elision, and the same hover /
 pressed answer a `ButtonConfig` draws with. They are written left to right, so
 the verb written last is the one at the row's edge.
 
+**Flush means touching.** Nothing stands between one face and the next, and the
+last face ends on the row's **own right edge** — not on its right pad, which
+the block stands in. So `[Change gem][×]` is one block of verbs a reader can
+press across, and the `×` really is at the end of the entry.
+
+Two touching faces are told apart by a **hairline in `Theme::edge()`** on every
+boundary inside the block. The rank a row verb takes is `ButtonEmphasis::Text`
+— a label and no face at all — so emphasis alone cannot separate two of them:
+two labels touching with nothing between them read as one word. Where a verb
+already draws an outlined stroke the hairline lands on it in the very same
+token, so a mixed block gains no second line, and the block's outer edges carry
+no rule (one at the row's edge is a second border; one before the first verb is
+a column rule nobody asked for).
+
 The block is the row's **third column**, reserved before the text exactly as
 the second one is: the widest verb block among the realized rows is the column
 every row gives up, so the names elide on one edge, the trailing run ends
 against the verbs rather than under them, and the reported intrinsic counts the
-block. A row with no `actions` is laid out precisely as it always was.
+block. What it takes off the text budget is the block plus its one gap of clear
+space *less* one pad, since the block stands in the pad the budget already gave
+up. A row with no `actions` is laid out precisely as it always was.
 
 A press on a verb arms it and the release-inside fires `VirtualListAction {
 row_index, action_index }` — the button's own press-then-release-inside, so a

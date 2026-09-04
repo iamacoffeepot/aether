@@ -790,6 +790,55 @@ pub struct RadioConfig {
     pub state: WidgetControlState,
 }
 
+/// One word of a run, and the ink it is written in.
+///
+/// A [`VirtualListRow`]'s trailing column is a `Vec<InkedSpan>` because the
+/// words in it are not one thing said once: `Spell Fire Duration` is three
+/// tags, and a tag wears the ink of what it names. Each span draws in its own
+/// [`TextInk`]; the spans are laid out on one line with the theme's word gap
+/// between them, and the run right-aligns as a whole.
+///
+/// A span that is only words is written as one (`InkedSpan: From<String> +
+/// From<&str>`), so the plain amount stays `vec!["21/20".into()]` and nothing
+/// about a one-ink column got harder. Schema-only; nested in
+/// [`VirtualListRow`].
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct InkedSpan {
+    pub text: String,
+    /// The ink this span is written in. [`TextInk::Inherited`] — the default —
+    /// follows the run it sits in, which is the one-ink column every list drew
+    /// before spans existed.
+    #[serde(default)]
+    pub ink: TextInk,
+}
+
+impl InkedSpan {
+    /// A span of `text` written in `ink`.
+    #[must_use]
+    pub fn new(text: impl Into<String>, ink: TextInk) -> Self {
+        Self { text: text.into(), ink }
+    }
+
+    /// The same span written in `ink`.
+    #[must_use]
+    pub fn with_ink(mut self, ink: TextInk) -> Self {
+        self.ink = ink;
+        self
+    }
+}
+
+impl From<String> for InkedSpan {
+    fn from(text: String) -> Self {
+        Self { text, ink: TextInk::default() }
+    }
+}
+
+impl From<&str> for InkedSpan {
+    fn from(text: &str) -> Self {
+        Self::from(String::from(text))
+    }
+}
+
 /// One verb bound to a single row of a [`VirtualListConfig`] — the `×` that
 /// unbinds *this* skill, the `Change gem` that re-picks *this* one.
 ///
@@ -837,12 +886,18 @@ impl RowAction {
 /// edge, which step of the type scale it is set at, and the verbs bound to it.
 ///
 /// `trailing` is the row's **second column** — a version, a count, a price, a
-/// key — set in its own right-aligned column at the row's right edge. The
-/// column is as wide as the widest trailing run among the *visible* rows, so
-/// the numbers line up and a reader comparing two of them reads down one edge
-/// instead of hunting through two sentences. The leading `text` elides into
-/// whatever is left; the trailing run never does, because a truncated amount
+/// key, a run of tags — set in its own right-aligned column at the row's right
+/// edge. The column is as wide as the widest trailing run among the *visible*
+/// rows, so the numbers line up and a reader comparing two of them reads down
+/// one edge instead of hunting through two sentences. The leading `text` elides
+/// into whatever is left; the trailing run gives way only by dropping whole
+/// [`InkedSpan`]s off its end, never by cutting one, because a truncated amount
 /// is worse than no amount.
+///
+/// It is a *run of spans* rather than one string because a tag wears the ink of
+/// what it names: `Fire` warm, `Cold` cool, `Chaos` violet, all on one line.
+/// An empty vector is the row that is only its leading text, and one span is
+/// the plain amount (`vec!["21/20".into()]`).
 ///
 /// `role` sets the row's type step, so a list can carry a name at
 /// [`TextRole::Body`] and a detail at [`TextRole::Caption`] — which draws in
@@ -853,9 +908,11 @@ impl RowAction {
 /// to "this one is rare and that one is not" without a `(unique)` suffix after
 /// the name or a plate behind the whole row, and it survives the row being
 /// selected or pointed at, because a tier does not stop applying when a reader
-/// touches it. The trailing run keeps the row's own ink whatever this says: a
-/// column of amounts is read down one edge, and four colours down it is a
-/// column nobody can compare.
+/// touches it. Each span of the trailing run carries its own ink the same way —
+/// see [`InkedSpan`]. A column of *amounts* still wants one ink down its edge,
+/// so leave those spans [`TextInk::Inherited`]; the colours are for a column of
+/// tags, where the ink is what the word means rather than decoration on a
+/// number.
 ///
 /// `actions` are the verbs bound to this row — see [`RowAction`]. They stand
 /// as buttons at the row's right end, in the order written, and the leading
@@ -869,10 +926,10 @@ impl RowAction {
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 pub struct VirtualListRow {
     pub text: String,
-    /// The run set in the row's right-hand column, or `None` for a row that is
-    /// only its leading text.
+    /// The spans set in the row's right-hand column, laid out on one line in
+    /// the order written. Empty for a row that is only its leading text.
     #[serde(default)]
-    pub trailing: Option<String>,
+    pub trailing: Vec<InkedSpan>,
     /// The type step both runs of this row are set at.
     #[serde(default)]
     pub role: TextRole,
@@ -894,6 +951,15 @@ impl VirtualListRow {
         self
     }
 
+    /// The same row with `trailing` in its right-hand column. The plain amount
+    /// is one span from a string — `row.with_trailing(vec!["21/20".into()])` —
+    /// and a run of tags is one span each.
+    #[must_use]
+    pub fn with_trailing(mut self, trailing: Vec<InkedSpan>) -> Self {
+        self.trailing = trailing;
+        self
+    }
+
     /// The same row with its name written in `ink`.
     #[must_use]
     pub fn with_ink(mut self, ink: TextInk) -> Self {
@@ -904,7 +970,7 @@ impl VirtualListRow {
 
 impl From<String> for VirtualListRow {
     fn from(text: String) -> Self {
-        Self { text, trailing: None, role: TextRole::default(), ink: TextInk::default(), actions: Vec::new() }
+        Self { text, trailing: Vec::new(), role: TextRole::default(), ink: TextInk::default(), actions: Vec::new() }
     }
 }
 
