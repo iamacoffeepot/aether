@@ -137,10 +137,25 @@ pub enum TextRole {
     Caption,
 }
 
-/// How far a tonal plate is carried from the raised surface toward its role
-/// colour. Far enough that the plate reads as belonging to the role, near
-/// enough that it never competes with the filled plate beside it.
-const TONAL_MIX: f32 = 0.22;
+/// The contrast ratio a control's own face — a tonal plate, a stroke around an
+/// outlined one — has to clear against the surface it stands on. WCAG 2.2
+/// §1.4.11's non-text minimum: below it a reader cannot see where the control
+/// is, which is exactly what a `Cancel` that disappears into a dialog plate is.
+const FACE_CONTRAST_TARGET: f32 = 3.0;
+
+/// How far a derived face may be carried toward the colour it borrows.
+///
+/// The floor keeps a face that already clears the target from collapsing back
+/// onto its start, so the rung still reads as *tinted*; the ceiling keeps it
+/// from arriving at the colour itself, which is what would make a tonal plate
+/// the filled plate under a second name. A role too near the surface in
+/// luminance to reach the target inside that range stops at the ceiling — as
+/// far as this ladder goes — rather than pretending it got there.
+const FACE_MIX_FLOOR: f32 = 0.12;
+const FACE_MIX_CEILING: f32 = 0.6;
+
+/// The offset in the WCAG contrast-ratio formula, `(L1 + 0.05) / (L2 + 0.05)`.
+const CONTRAST_OFFSET: f32 = 0.05;
 
 impl Theme {
     /// The font size this theme sets `role` at.
@@ -197,8 +212,28 @@ impl Theme {
         }
     }
 
-    /// A **tonal** plate in `role`: the raised surface carried a fifth of
-    /// the way toward it, keeping the surface's own alpha.
+    /// A colour's relative luminance, WCAG 2.2's weighted sum. The channels of
+    /// an [`Rgba`] are already linear (`Rgba::from_srgb8` converts on the way
+    /// in), so there is no decode step to do first.
+    #[must_use]
+    pub fn relative_luminance(color: Rgba) -> f32 {
+        0.2126_f32.mul_add(color.r, 0.7152_f32.mul_add(color.g, 0.0722 * color.b))
+    }
+
+    /// The WCAG contrast ratio between two colours: `1.0` for a pair that is
+    /// the same colour, `21.0` for black against white. Public because it is
+    /// the only honest answer to "does this face read on that plate" — the
+    /// question a palette is tuned against, and the one a tripwire over a
+    /// palette asserts instead of eyeballing.
+    #[must_use]
+    pub fn contrast_ratio(first: Rgba, second: Rgba) -> f32 {
+        let (first, second) = (Self::relative_luminance(first), Self::relative_luminance(second));
+        (first.max(second) + CONTRAST_OFFSET) / (first.min(second) + CONTRAST_OFFSET)
+    }
+
+    /// A **tonal** plate in `role`: the raised surface carried toward it until
+    /// the plate clears [`FACE_CONTRAST_TARGET`] against that same surface,
+    /// keeping the surface's own alpha.
     ///
     /// This is the quiet middle of the emphasis ladder — louder than an
     /// outline, quieter than a filled plate — and it is derived rather than
@@ -206,14 +241,68 @@ impl Theme {
     /// theme that moves its `accent` moves every tonal plate with it, the
     /// same way [`Self::fill`] moves every hover.
     ///
+    /// The mix is **computed from the target** rather than fixed, because a
+    /// fixed mix fixes a distance and not a legibility. At the flat 22% this
+    /// carried before, the neutral tonal plate cleared 2.67 against the raised
+    /// surface and the danger one 1.79 — and a dialog draws its plate in
+    /// `surface_raised`, the very surface this is derived from, so a tonal
+    /// `Cancel` on one read as lettering on the plate rather than as a button
+    /// (the owner's round-11 note 10). Deriving the mix fixes the *ratio*
+    /// instead, so both tones and any restyled role land on one visible step.
+    ///
     /// It is deliberately **not** `selection`. A chosen row and a secondary
     /// verb must not share a look (one meaning per visual token), which a
     /// tonal button reusing the selection role would break the moment the two
     /// stood side by side.
     #[must_use]
     pub fn tonal(&self, role: Rgba) -> Rgba {
-        let blended = self.surface_raised.lerp(role, TONAL_MIX);
-        Rgba::new(blended.r, blended.g, blended.b, self.surface_raised.a)
+        self.carried_to_face_contrast(self.surface_raised, role)
+    }
+
+    /// The stroke an **outlined** control draws around itself: the `outline`
+    /// role carried toward the primary ink until it clears
+    /// [`FACE_CONTRAST_TARGET`] against the raised surface.
+    ///
+    /// `outline` on its own is the *divider* token — the hairline between two
+    /// list rows, the rule under a dialog's title — and a divider is meant to
+    /// be nearly invisible: this theme's clears 1.29 against the raised
+    /// surface. Borrowed unchanged as a button's border it made the outlined
+    /// rung and the text rung one face at a glance, which is half of the
+    /// owner's round-11 note 4 — two row verbs at different emphases that read
+    /// alike. A control's edge and a content divider are two meanings, so they
+    /// are two tokens; this one is still *derived* from `outline`, so a
+    /// restyled divider still carries the edge with it.
+    #[must_use]
+    pub fn edge(&self) -> Rgba {
+        self.carried_to_face_contrast(self.outline, self.text_primary)
+    }
+
+    /// `start` carried toward `toward` by the smallest mix that clears
+    /// [`FACE_CONTRAST_TARGET`] against the raised surface, clamped into the
+    /// mix range and keeping `start`'s own alpha.
+    ///
+    /// Luminance and [`Rgba::lerp`] are both linear in the channels, so the
+    /// mix that lands on a target luminance is solved rather than searched:
+    /// `L(t) = L(start) + t * (L(toward) - L(start))`. The target sits on
+    /// whichever side of the surface `toward` lies, so a light theme — where a
+    /// face is carried *down* from a bright plate — resolves the same way a
+    /// dark one does.
+    fn carried_to_face_contrast(&self, start: Rgba, toward: Rgba) -> Rgba {
+        let surface = Self::relative_luminance(self.surface_raised);
+        let (from, to) = (Self::relative_luminance(start), Self::relative_luminance(toward));
+        let target = if to >= surface {
+            FACE_CONTRAST_TARGET.mul_add(surface + CONTRAST_OFFSET, -CONTRAST_OFFSET)
+        } else {
+            (surface + CONTRAST_OFFSET) / FACE_CONTRAST_TARGET - CONTRAST_OFFSET
+        };
+        let span = to - from;
+        let mix = if span.abs() > f32::EPSILON {
+            ((target - from) / span).clamp(FACE_MIX_FLOOR, FACE_MIX_CEILING)
+        } else {
+            FACE_MIX_CEILING
+        };
+        let blended = start.lerp(toward, mix);
+        Rgba::new(blended.r, blended.g, blended.b, start.a)
     }
 
     /// Standard src-over blend of `overlay` atop `base`, preserving
@@ -309,6 +398,54 @@ mod tests {
         let theme = Theme { hover_overlay: Rgba::new(1.0, 0.0, 0.0, 0.5), ..Theme::DEFAULT };
         let base = Rgba::new(0.0, 1.0, 0.0, 1.0);
         assert_eq!(theme.fill(base, ThemeState::Hover), Rgba::new(0.5, 0.5, 0.0, 1.0));
+    }
+
+    #[test]
+    fn a_derived_face_clears_the_contrast_target_on_the_plate_it_stands_on() {
+        // Tripwire: the owner's round-11 note 10 — `Cancel` blending into the
+        // New item dialog's plate. A dialog draws its plate in
+        // `surface_raised`, so a tonal button on one is `tonal(role)` against
+        // exactly that colour; at the old flat 22% mix it measured 2.67 for
+        // the neutral tone and 1.79 for danger, both under the 3.0 a control's
+        // own face needs to be seen. The rule is the ratio, so this holds for
+        // a restyled accent and for either tone, which a pinned mix did not.
+        // The mix is solved in `f32`, so a face that lands exactly on the
+        // target measures back a few parts in ten million under it. The
+        // tolerance is that rounding and nothing else — it is orders of
+        // magnitude below the 1.2 the old fixed mix fell short by.
+        let floor = FACE_CONTRAST_TARGET - 1e-4;
+        let theme = Theme::DEFAULT;
+        for role in [theme.accent, theme.error, theme.info, theme.warning] {
+            let ratio = Theme::contrast_ratio(theme.tonal(role), theme.surface_raised);
+            assert!(ratio >= floor, "a tonal plate reads at only {ratio} on the plate under it");
+        }
+
+        let edge = Theme::contrast_ratio(theme.edge(), theme.surface_raised);
+        assert!(edge >= floor, "an outlined control's stroke reads at only {edge}");
+        assert!(
+            Theme::contrast_ratio(theme.outline, theme.surface_raised) < FACE_CONTRAST_TARGET,
+            "the divider role is still the quiet hairline; the edge is a second token, not a rename of it",
+        );
+    }
+
+    #[test]
+    fn a_tonal_plate_never_arrives_at_the_role_it_borrows() {
+        // Tripwire: the mix is solved from a contrast target, and a target
+        // reachable only past the role itself would resolve the tonal rank
+        // into the filled one — one ladder rung wearing another's face, which
+        // is the defect the whole ladder exists to avoid. The ceiling is what
+        // stops it, and a raised target that quietly ate the ceiling would
+        // show up here rather than on a screen.
+        let theme = Theme::DEFAULT;
+        let surface = Theme::relative_luminance(theme.surface_raised);
+        for role in [theme.accent, theme.error, theme.info, theme.warning] {
+            let plate = Theme::relative_luminance(theme.tonal(role));
+            assert!(theme.tonal(role) != role, "the tonal rank resolved to the filled rank for {role:?}");
+            assert!(
+                plate > surface && plate < Theme::relative_luminance(role),
+                "the tonal plate for {role:?} left the span between the surface and the role",
+            );
+        }
     }
 
     #[test]
