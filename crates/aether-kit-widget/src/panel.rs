@@ -34,6 +34,7 @@
 //!   (plus text) from one root render sender.
 //! - **Value.** Each value-up event (`SliderChanged` / `TextCommitted` /
 //!   `RadioSelected` / `VirtualListSelected` / `VirtualListAction` /
+//!   `VirtualListHover` /
 //!   `ButtonClicked` / `ToggleChanged` /
 //!   `SegmentedSelected` / `NumericChanged` / `DropdownSelected` /
 //!   `TabSelected`), attributed by
@@ -77,8 +78,8 @@ use crate::{
     NumericChanged, NumericConfig, PanelConfig, RadioConfig, RadioSelected, ScrollConfig, ScrollExtent, ScrollOutcome,
     ScrollResidual, ScrollWidget, SegmentedConfig, SegmentedSelected, SliderChanged, SliderConfig, TabSelected,
     TabStripConfig, TextAlign, TextAreaConfig, TextCommitted, TextFieldConfig, ToggleChanged, ToggleConfig,
-    VirtualListAction, VirtualListConfig, VirtualListSelected, Widget, WidgetChildSpec, WidgetClipRect,
-    WidgetControlState, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged,
+    VirtualListAction, VirtualListConfig, VirtualListHover, VirtualListSelected, Widget, WidgetChildSpec,
+    WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged,
 };
 use crate::{FrameDischarge, decode_nested_widget_config};
 use crate::{accept_open_child_list, emit, flush_membership};
@@ -788,6 +789,7 @@ fn behavior_mirror_kinds() -> Vec<u64> {
         RadioSelected::ID.0,
         VirtualListSelected::ID.0,
         VirtualListAction::ID.0,
+        VirtualListHover::ID.0,
         ToggleChanged::ID.0,
         SegmentedSelected::ID.0,
         NumericChanged::ID.0,
@@ -1321,6 +1323,23 @@ impl WasmActor for WidgetPanel {
             row_index = action.row_index,
             action_index = action.action_index,
             "widget virtual list action",
+        );
+    }
+
+    /// The row of a virtual list under the pointer changed. Not a selection —
+    /// the reader is looking, not choosing — so a host stands this row's
+    /// explanation and leaves the current item alone. `None` is the pointer
+    /// having left the rows. The map-editor seam; the reference logs it.
+    ///
+    /// # Agent
+    /// A child's reply; not useful to send manually.
+    #[handler::manual]
+    fn on_virtual_list_hover(&mut self, ctx: &mut WasmCtx<'_, Manual>, hover: VirtualListHover) {
+        tracing::info!(
+            target: "aether_kit_widget",
+            widget = self.child_name(ctx.source_mailbox()),
+            row = hover.row,
+            "widget virtual list hover",
         );
     }
 

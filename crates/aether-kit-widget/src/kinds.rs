@@ -1350,6 +1350,29 @@ pub struct VirtualListAction {
     pub action_index: u32,
 }
 
+/// `aether.kit.widget.virtual_list.hover` — the row the pointer is resting on
+/// changed: `row` is an index into the config's `items`, or `None` once the
+/// pointer has left the rows. Which list it came from is the root's
+/// `source_mailbox` attribution, exactly as for [`VirtualListSelected`].
+///
+/// A list keeps its rows out of the host's hit table on purpose — the list owns
+/// them, realizes a window of them, and scrolls that window under a pointer
+/// that has not moved. So a host that wants to explain the row under the
+/// pointer had a choice between doing the list's own geometry a second time and
+/// getting it wrong the moment the list scrolled, or explaining nothing (the
+/// studio's gap 19). This is the list saying it instead: sent when the answer
+/// *changes*, from a pointer move, a wheel, a thumb drag, or the items being
+/// replaced under a still pointer.
+///
+/// It is not a selection and it does not become one. Hovering a row says the
+/// reader is looking at it — the tooltip a list of gems owes them — and nothing
+/// about what they have chosen.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[kind(name = "aether.kit.widget.virtual_list.hover")]
+pub struct VirtualListHover {
+    pub row: Option<u32>,
+}
+
 /// `aether.kit.widget.button.clicked` — a button's value-up event, fired once
 /// per completed press-then-release-inside. Fieldless: the click carries no
 /// data, and which button clicked is the root's `source_mailbox` attribution.

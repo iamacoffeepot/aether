@@ -318,7 +318,7 @@ impl Theme {
     }
 
     /// A **tonal** plate in `role`: the raised surface carried toward it until
-    /// the plate clears [`FACE_CONTRAST_TARGET`] against that same surface,
+    /// the plate clears the 3.0 face-contrast target against that same surface,
     /// keeping the surface's own alpha.
     ///
     /// This is the quiet middle of the emphasis ladder — louder than an
@@ -346,8 +346,8 @@ impl Theme {
     }
 
     /// The stroke an **outlined** control draws around itself: the `outline`
-    /// role carried toward the primary ink until it clears
-    /// [`FACE_CONTRAST_TARGET`] against the raised surface.
+    /// role carried toward the primary ink until it clears the same 3.0
+    /// face-contrast target against the raised surface.
     ///
     /// `outline` on its own is the *divider* token — the hairline between two
     /// list rows, the rule under a dialog's title — and a divider is meant to
