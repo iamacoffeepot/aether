@@ -130,8 +130,8 @@ impl Composite {
     /// too moves the whole group into one lane: the plate goes down first
     /// ([`Self::extend_overlay`]), the group's children follow in slot order,
     /// the fill still cuts the primary content's glyphs under it, and it
-    /// cannot cut its own children's — they are not in the lane the
-    /// subtraction reads.
+    /// cannot cut its own children's — the subtraction is positional, and
+    /// their labels are authored after the plate that hosts them.
     ///
     /// There is no layer number and no z-index here: the group is a set of
     /// slots the root already ordered, and the lane is the two-step order the

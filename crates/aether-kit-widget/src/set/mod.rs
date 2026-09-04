@@ -964,6 +964,18 @@ fn single_line_edit_draw_items(edit: &SingleLineEdit<'_>) -> Vec<WidgetDrawItem>
 /// `size_pixels` tall sank the glyphs.
 const FONT_ASCENT_RATIO: f32 = 1.047_851_6;
 
+/// How far below the baseline a descender reaches, as a fraction of the draw
+/// size — `RobotoMono`'s hhea descent, `555 / 2048` em. The shipped font's
+/// ratio applied uniformly, like [`FONT_ASCENT_RATIO`] beside it.
+const FONT_DESCENT_RATIO: f32 = 0.271_0;
+
+/// How tall one line of text is, as a fraction of the draw size: everything
+/// from the pen origin (`aether.text` puts the baseline one ascent below it)
+/// down past the deepest descender. This is the run's own box, which the
+/// root's clip subtraction reads to tell a fill standing over a line from one
+/// merely inside the same scissor.
+pub(crate) const FONT_LINE_BOX_RATIO: f32 = FONT_ASCENT_RATIO + FONT_DESCENT_RATIO;
+
 /// How far above the baseline a capital letter reaches, as a fraction of the
 /// draw size — `RobotoMono`'s OS/2 cap height, `1456 / 2048` em. The cap box is
 /// what a reader sees as "the text", so it is the box the row centers.

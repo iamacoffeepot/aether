@@ -1233,7 +1233,10 @@ bar's plate — puts those draws in `WidgetDrawList::overlay` instead of
 offset by each slot origin on the way up like any other draw but never
 intersected with the slot clip, and the root emits the whole cluster's overlay
 after every ordinary quad and glyph, so the list escapes its one-row slot and
-lands over the widgets below it.
+lands over the widgets below it. It lands there at its own slot's position,
+so a control that opens over its own siblings — a dropdown halfway up a group —
+still draws behind the ones registered after it. Register such a control last
+in its group.
 
 A *root* reaches the same lane two ways, for the plate that hosts other
 children rather than escaping its own slot. `Composite::extend_overlay(items)`
@@ -1244,14 +1247,38 @@ its slot clip, and its place in registration order. Together they make a
 **group**: a popover's plate through `extend_overlay`, its children through
 `set_slot_overlay` while it is open, flattened plate-first in layout order.
 
-That grouping is what the clip subtraction reads. The root cuts ordinary text
-out from under overlay fills once, per lane — the ordinary items against the
-overlay's fills, the overlay's items against nothing — so a plate hides the
-primary content it stands over and can never delete the labels of the children
-standing on it. Within one lane fills are simply under glyphs, as everywhere
-else in the kit. There is no layer number and no z-index on any draw kind: the
-group is a set of slots the root already ordered, and the lane is the two-step
-order the root already emits in.
+That grouping is what the clip subtraction reads, and the rule it reads it by
+is **positional**: a glyph run's holes are the fills authored *after* it. Text
+reaches the render cap one hop behind the quads, so a fill later in the order
+cannot cover the glyphs before it by draw order alone; the root cuts them out
+instead, re-clipping each run to what those later fills leave and dropping it
+when nothing is left. A fill authored *before* a run never touches it.
+
+One walk backwards over a lane carries that: the ordinary items start with the
+whole overlay already in the hole set (the overlay is entirely after them) and
+the overlay's own items start from empty, then each fill joins the set as the
+walk passes it. So a plate hides the primary content it stands over, can never
+delete the labels of the children standing on it — those are authored after its
+fill — and a dropdown one of those children opens *does* cut the sibling rows it
+covers, because its list is authored after them. A fill's hole is the rectangle
+it actually paints, its geometry narrowed by its own clip, so a virtual list's
+row scrolled out of its viewport takes nothing out of the header it was scrolled
+behind.
+
+What a fill is measured against is the **run**, not the run's clip. A clip is a
+scissor bound and is routinely much larger than the glyphs inside it — every row
+of a list carries the whole viewport — so the subtraction reads the box the text
+occupies: from its pen origin, one line tall and at most one em per character
+wide. A fill that misses that box is skipped whole, and so is a **hairline** —
+anything under half a draw size through, which is every stroke the kit draws
+over a run rather than over the line: a caret, an IME underline, a rule, a focus
+ring. Both exclusions are about cost rather than pixels. Cutting a scissor where
+no glyph was hidden renders the same frame, but it turns one text batch into
+three or four, on every row, every frame.
+
+There is no layer number and no z-index on any draw kind: the group is a set of
+slots the root already ordered, and the hole set is that same order read
+backwards.
 
 The overlay's counterpart on the input side is the
 **modal pointer grab**: `Focus::begin_grab(child)` routes every pointer event
