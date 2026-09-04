@@ -815,7 +815,9 @@ impl VirtualListWidget {
     /// onto *more* lines, so content that overflowed still overflows and the
     /// second pass is the last one.
     fn refresh_row_layout(&mut self) {
-        if !self.rows_vary {
+        // A frame no row can stand in draws nothing either way, and wrapping a
+        // note against a width of zero would break it into one line per word.
+        if !self.rows_vary || !valid_frame(&self.frame) {
             self.row_tops = None;
             self.row_tops_frame = None;
             return;
