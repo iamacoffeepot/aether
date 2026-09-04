@@ -33,7 +33,8 @@
 //!   up — and emits the whole panel as contiguous equal-clip solid batches
 //!   (plus text) from one root render sender.
 //! - **Value.** Each value-up event (`SliderChanged` / `TextCommitted` /
-//!   `RadioSelected` / `VirtualListSelected` / `ButtonClicked` / `ToggleChanged` /
+//!   `RadioSelected` / `VirtualListSelected` / `VirtualListAction` /
+//!   `ButtonClicked` / `ToggleChanged` /
 //!   `SegmentedSelected` / `NumericChanged` / `DropdownSelected` /
 //!   `TabSelected`), attributed by
 //!   `ctx.source_mailbox()`, is the seam a real editor translates into
@@ -76,8 +77,8 @@ use crate::{
     NumericChanged, NumericConfig, PanelConfig, RadioConfig, RadioSelected, ScrollConfig, ScrollExtent, ScrollOutcome,
     ScrollResidual, ScrollWidget, SegmentedConfig, SegmentedSelected, SliderChanged, SliderConfig, TabSelected,
     TabStripConfig, TextAlign, TextAreaConfig, TextCommitted, TextFieldConfig, ToggleChanged, ToggleConfig,
-    VirtualListConfig, VirtualListSelected, Widget, WidgetChildSpec, WidgetClipRect, WidgetControlState,
-    WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged,
+    VirtualListAction, VirtualListConfig, VirtualListSelected, Widget, WidgetChildSpec, WidgetClipRect,
+    WidgetControlState, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged,
 };
 use crate::{FrameDischarge, decode_nested_widget_config};
 use crate::{accept_open_child_list, emit, flush_membership};
@@ -786,6 +787,7 @@ fn behavior_mirror_kinds() -> Vec<u64> {
         ButtonClicked::ID.0,
         RadioSelected::ID.0,
         VirtualListSelected::ID.0,
+        VirtualListAction::ID.0,
         ToggleChanged::ID.0,
         SegmentedSelected::ID.0,
         NumericChanged::ID.0,
@@ -1301,6 +1303,24 @@ impl WasmActor for WidgetPanel {
             widget = self.child_name(ctx.source_mailbox()),
             selected_index = selected.selected_index,
             "widget virtual list selected",
+        );
+    }
+
+    /// A verb bound to one virtual-list row was pressed. Not a selection — the
+    /// list reports this instead of one, so a host acts on `row_index` without
+    /// the row having become current. The map-editor seam; the reference logs
+    /// it.
+    ///
+    /// # Agent
+    /// A child's reply; not useful to send manually.
+    #[handler::manual]
+    fn on_virtual_list_action(&mut self, ctx: &mut WasmCtx<'_, Manual>, action: VirtualListAction) {
+        tracing::info!(
+            target: "aether_kit_widget",
+            widget = self.child_name(ctx.source_mailbox()),
+            row_index = action.row_index,
+            action_index = action.action_index,
+            "widget virtual list action",
         );
     }
 

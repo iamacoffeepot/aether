@@ -40,6 +40,31 @@
 //! name at [`TextRole::Body`] and a detail at [`TextRole::Caption`] — muted,
 //! like a caption-role label — without the host drawing its own rows.
 //!
+//! # A verb can sit on the row
+//!
+//! Round-9 note 4 — "skills should be removed via 'x' button bound to row",
+//! drawn as `"Spark" ——— [Change gem] [x]`. A row's `actions` are
+//! [`RowAction`]s, and the list draws each as a real button at the row's right
+//! end: the kit's own button face (`push_button_face` in `set`), so one
+//! emphasis ladder, one elision rule, and one hover answer serve a verb whether
+//! it stands in a slot of its own or inside a row this widget owns.
+//!
+//! They are a **third column**, reserved before the text like the second one:
+//! the widest verb block among the realized rows is the column every row gives
+//! up, so the names elide on one edge rather than at ragged points, and the
+//! trailing run sits clear of the verbs instead of under them. A press on a
+//! verb arms it and the release-inside fires [`VirtualListAction`] — the
+//! button's own press-then-release-inside, so a press that slides off cancels,
+//! which is what a `×` that unbinds a skill deserves. It reports **no**
+//! selection: the whole reason a verb is on the row is that removing the third
+//! skill should not cost a select first.
+//!
+//! Row verbs are **pointer-first**. The kit's keyboard traversal moves between
+//! widgets (the root's Tab, `WidgetPanel::on_key`) and a list is one stop whose
+//! arrows and page keys are its selection; there is no focus traversal *into* a
+//! row, so nothing here binds a key to a verb. A host that needs the keyboard
+//! reach gives the verb a button of its own beside the list.
+//!
 //! [`VirtualListConfig::ruled`] adds a hairline between rows, `n - 1` of them
 //! for `n` realized rows. It is off by default: a list of choices is read down
 //! its fills, and rules on one are chrome. It is for a list of *entries*,
@@ -69,15 +94,16 @@ use aether_text::FontMetricsResult;
 
 use crate::set::defaults::WidgetDefaults;
 use crate::set::{
-    accept_font_metrics_result, apply_text_theme, elide_to_width, measured_text_width, pump_text_font_metrics,
-    push_control_outlines, quad, release_left, reply_if_hidden, text_origin_y,
+    ButtonFace, accept_font_metrics_result, apply_text_theme, approx_text_width, button_face_width, elide_to_width,
+    measured_text_width, pump_text_font_metrics, push_button_face, push_control_outlines, quad, release_left,
+    reply_if_hidden, text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{SetTheme, TextRole, Theme, ThemeState};
 use crate::{
-    Collect, SetWidgetState, VirtualListConfig, VirtualListRow, VirtualListSelected, WidgetControlState,
-    WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    Collect, HoverLost, RowAction, SetWidgetState, VirtualListAction, VirtualListConfig, VirtualListRow,
+    VirtualListSelected, WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +133,56 @@ const SCROLL_BAR_GAP_UNITS: u8 = 1;
 /// column, in spacing units. One — enough that the two read as two columns,
 /// little enough that a short name and its amount still read as one row.
 const TRAILING_GAP_UNITS: u8 = 1;
+
+/// How much clear space stands between one row verb and the next, and between
+/// the verb block and the text columns beside it, in spacing units. One — the
+/// same gap the trailing column keeps, so a row of two columns and two verbs
+/// reads as four things in a row rather than as a strip of controls.
+const ACTION_GAP_UNITS: u8 = 1;
+
+/// One verb of one row, addressed the way [`VirtualListAction`] reports it: an
+/// index into the item vector, and an index into that row's own actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RowActionIndex {
+    row_index: usize,
+    action_index: usize,
+}
+
+/// What a left press inside the list lands on.
+///
+/// The resolution order is the whole of it, and it is stated once here rather
+/// than spelled down the press handler: the bar owns its gutter, a **verb owns
+/// its own rect**, and the row owns everything else. A verb resolved after the
+/// row would remove a skill *and* leave the reader holding a selection they
+/// never asked for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PressTarget {
+    ScrollBar(ScrollBar),
+    Action(RowActionIndex),
+    /// The row under the point, or `None` for the empty viewport below the last
+    /// realized row — the list takes the press either way, and only an actual
+    /// row is chosen by it.
+    Row(Option<usize>),
+}
+
+/// Where one row verb stands, in widget-local pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ActionRect {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+impl ActionRect {
+    fn contains(self, local_x: f32, local_y: f32) -> bool {
+        local_x >= self.x
+            && local_x < self.x + self.width
+            && local_y >= self.y
+            && local_y < self.y + self.height
+            && self.width > 0.0
+    }
+}
 
 /// How thick the rule between two rows of a `ruled` list is. A hairline: the
 /// rule is there to separate entries, and anything heavier reads as a table
@@ -241,6 +317,12 @@ pub struct VirtualListWidget {
     /// trackpad's stream of sub-row deltas would otherwise round to nothing
     /// and the list would not move at all.
     wheel_residual_pixels: f32,
+    /// The row verb the pointer stands on, and the one a press armed. Per verb
+    /// rather than per widget, like the segmented control's hovered / pressed
+    /// segment: the row's fill answers the pointer for the row, and each verb
+    /// answers for itself.
+    hovered_action: Option<RowActionIndex>,
+    pressed_action: Option<RowActionIndex>,
 }
 
 impl VirtualListWidget {
@@ -291,10 +373,24 @@ impl VirtualListWidget {
         }
     }
 
+    /// Report one row's verb. Not a selection, and never accompanied by one:
+    /// the press that fires this chose nothing.
+    fn emit_action(ctx: &WasmCtx<'_>, index: RowActionIndex) {
+        let (Ok(row_index), Ok(action_index)) = (u32::try_from(index.row_index), u32::try_from(index.action_index))
+        else {
+            return;
+        };
+        if let Some(parent) = ctx.parent() {
+            parent.send(&VirtualListAction { row_index, action_index });
+        }
+    }
+
     fn replace_control_state(&mut self, next: WidgetControlState) -> bool {
         let changed = self.state.replace(next);
         if changed && !self.state.can_mutate() {
             self.pressed = false;
+            self.pressed_action = None;
+            self.hovered_action = None;
         }
         if changed && !self.state.is_available() {
             self.thumb_grab_pixels = None;
@@ -348,22 +444,171 @@ impl VirtualListWidget {
         self.theme.pad.mul_add(-2.0, self.row_width()).max(0.0)
     }
 
-    /// The width the *leading* run has once the trailing column is reserved:
-    /// the row's budget less that column and one spacing unit of clear space.
-    /// A window with no trailing runs reserves nothing, so an ordinary list is
-    /// laid out exactly as it was.
+    /// The width the *leading* run has once the row's right-hand furniture is
+    /// reserved: the row's budget less the verb block, the trailing column, and
+    /// one spacing unit of clear space before each. A window with neither
+    /// reserves nothing, so an ordinary list is laid out exactly as it was.
     ///
-    /// This is why the leading elides and the trailing does not: the trailing
-    /// column is subtracted *first* and the name takes what is left. An amount
-    /// cut to `12…` is worse than no amount at all, while a name cut to
-    /// `Increased Critic…` still names the thing.
-    fn leading_width_budget(&self, trailing_column: f32) -> f32 {
+    /// This is why the leading elides and nothing else does: both right-hand
+    /// columns are subtracted *first* and the name takes what is left. An
+    /// amount cut to `12…` is worse than no amount at all, a verb cut to `Rem…`
+    /// is a control nobody can read, while a name cut to `Increased Critic…`
+    /// still names the thing.
+    fn leading_width_budget(&self, trailing_column: f32, actions_reserve: f32) -> f32 {
         let reserved = if trailing_column > 0.0 {
             trailing_column + self.theme.space(TRAILING_GAP_UNITS)
         } else {
             0.0
         };
-        (self.text_width_budget() - reserved).max(0.0)
+        (self.text_width_budget() - reserved - actions_reserve).max(0.0)
+    }
+
+    /// One verb's width: its measured label plus one `pad` each side — exactly
+    /// the intrinsic a [`ButtonWidget`](crate::set::ButtonWidget) reports, so a
+    /// `×` on a row is the size it would be in a slot of its own. Approximated
+    /// from the character count until the font's advances land, because a verb
+    /// that occupied no width until then would let the name elide into the
+    /// space it is about to take and then cut it again on the next frame.
+    fn action_width(&self, action: &RowAction) -> f32 {
+        self.font_metrics.resolved().map_or_else(
+            || {
+                self.theme
+                    .pad
+                    .mul_add(2.0, approx_text_width(action.label.chars().count(), self.theme.label_size_pixels))
+            },
+            |metrics| button_face_width(&action.label, &self.theme, metrics),
+        )
+    }
+
+    /// The whole verb block one row carries: every verb, plus one gap between
+    /// each pair. `0.0` for a row with no verbs.
+    fn actions_width(&self, row: &VirtualListRow) -> f32 {
+        let Some(pair_count) = row.actions.len().checked_sub(1) else {
+            return 0.0;
+        };
+        #[allow(clippy::cast_precision_loss)] // a row carries verbs a reader can press, not thousands
+        let gaps = pair_count as f32 * self.theme.space(ACTION_GAP_UNITS);
+        row.actions.iter().map(|action| self.action_width(action)).sum::<f32>() + gaps
+    }
+
+    /// The verb block this window's rows share: the widest among the rows **on
+    /// screen**, like the trailing column and for the same reason — a column
+    /// sized by an off-screen row leaves a gap nothing stands in, and one row
+    /// eliding at a different point from its neighbours reads as a ragged edge.
+    fn actions_column(&self, window: VisibleRowWindow) -> f32 {
+        self.items[window.first_index..window.end_exclusive_index]
+            .iter()
+            .map(|row| self.actions_width(row))
+            .fold(0.0_f32, f32::max)
+    }
+
+    /// What the verbs take off the right end of every row's text: the shared
+    /// block plus one gap of clear space, or nothing when no realized row
+    /// carries a verb.
+    fn actions_reserve(&self, window: VisibleRowWindow) -> f32 {
+        match self.actions_column(window) {
+            column if column > 0.0 => column + self.theme.space(ACTION_GAP_UNITS),
+            _ => 0.0,
+        }
+    }
+
+    /// Where each verb of one row stands. The block is right-aligned against
+    /// the row's own right pad and the verbs run left to right in the order
+    /// they were written, so the last one written is the one at the row's edge
+    /// — the owner's `[Change gem] [x]`, with the `×` outermost.
+    fn action_rects(&self, row: &VirtualListRow, row_y: f32, row_height: f32) -> Vec<ActionRect> {
+        let gap = self.theme.space(ACTION_GAP_UNITS);
+        let mut x = self.row_width() - self.theme.pad - self.actions_width(row);
+        let mut rects = Vec::with_capacity(row.actions.len());
+        for action in &row.actions {
+            let width = self.action_width(action);
+            rects.push(ActionRect { x, y: row_y, width, height: row_height });
+            x += width + gap;
+        }
+        rects
+    }
+
+    /// The top of one item's row in widget-local pixels, or `None` for an item
+    /// outside the realized window.
+    fn row_top(&self, item_index: usize, row_height: f32) -> Option<f32> {
+        let window = self.window();
+        #[allow(clippy::cast_precision_loss)] // a realized row offset is at most a viewport's worth
+        let row_offset = item_index.checked_sub(window.first_index).filter(|offset| *offset < window.len())? as f32;
+        Some(row_offset * row_height)
+    }
+
+    /// The verb under a point, if the point is on one. Consulted *before* the
+    /// row fill, so a press on a verb never also selects the row under it.
+    fn action_at(&self, local_x: f32, local_y: f32) -> Option<RowActionIndex> {
+        let row_index = self.row_at_local_y(local_y)?;
+        let row_height = self.row_height()?;
+        let row = self.items.get(row_index)?;
+        let row_y = self.row_top(row_index, row_height)?;
+        self.action_rects(row, row_y, row_height)
+            .into_iter()
+            .position(|rect| rect.contains(local_x, local_y))
+            .map(|action_index| RowActionIndex { row_index, action_index })
+    }
+
+    /// What a left press at this widget-local point lands on, or `None` for a
+    /// press a list that cannot be changed refuses. The bar is resolved first
+    /// and needs no mutability: reading where you are in a read-only list is
+    /// not a change to it.
+    fn press_target(&self, local_x: f32, local_y: f32) -> Option<PressTarget> {
+        if let Some(bar) = self.scroll_bar()
+            && bar.contains(local_x, local_y)
+        {
+            return Some(PressTarget::ScrollBar(bar));
+        }
+        if !self.state.can_mutate() {
+            return None;
+        }
+        if let Some(index) = self.action_at(local_x, local_y) {
+            return Some(PressTarget::Action(index));
+        }
+        Some(PressTarget::Row(self.row_at_local_y(local_y)))
+    }
+
+    /// How one verb answers the pointer. A list that cannot be changed draws
+    /// every verb disabled — read-only as well as disabled, because a verb that
+    /// looks live and does nothing is worse than one that says it is dead —
+    /// and otherwise each verb carries its own Pressed → Hover → Normal.
+    fn action_theme_state(&self, index: RowActionIndex) -> ThemeState {
+        if !self.state.can_mutate() {
+            ThemeState::Disabled
+        } else if self.pressed_action == Some(index) {
+            ThemeState::Pressed
+        } else if self.hovered_action == Some(index) {
+            ThemeState::Hover
+        } else {
+            ThemeState::Normal
+        }
+    }
+
+    /// Draw one row's verbs as button faces, at the rects the block resolves to.
+    fn push_row_actions(
+        &self,
+        items: &mut Vec<WidgetDrawItem>,
+        row: &VirtualListRow,
+        item_index: usize,
+        row_y: f32,
+        row_height: f32,
+    ) {
+        for (action_index, (action, rect)) in
+            row.actions.iter().zip(self.action_rects(row, row_y, row_height)).enumerate()
+        {
+            let face = ButtonFace {
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height,
+                label: &action.label,
+                emphasis: action.emphasis,
+                tone: action.tone,
+            };
+            let theme_state = self.action_theme_state(RowActionIndex { row_index: item_index, action_index });
+            push_button_face(items, &face, &self.theme, theme_state, self.font_metrics.resolved());
+        }
     }
 
     /// One row's measured trailing width, or `0.0` for a row without one and
@@ -528,9 +773,9 @@ impl VirtualListWidget {
     }
 
     /// The widest row in the whole item vector, measured once per change to
-    /// the items or the font and cached. A row with a trailing run is as wide
-    /// as both its columns and the gap between them: a slot sized from this
-    /// has to hold the whole row, not just its name.
+    /// the items or the font and cached. A row with a trailing run or a verb on
+    /// it is as wide as all of its columns and the gaps between them: a slot
+    /// sized from this has to hold the whole row, not just its name.
     fn widest_row_width(&mut self) -> Option<f32> {
         if let Some(widest) = self.widest_row_width {
             return Some(widest);
@@ -547,7 +792,11 @@ impl VirtualListWidget {
                 let size = self.theme.text_size_pixels(row.role);
                 let trailing =
                     row.trailing.as_deref().map_or(0.0, |trailing| gap + measured_text_width(metrics, trailing, size));
-                measured_text_width(metrics, &row.text, size) + trailing
+                let actions = match self.actions_width(row) {
+                    block if block > 0.0 => block + self.theme.space(ACTION_GAP_UNITS),
+                    _ => 0.0,
+                };
+                measured_text_width(metrics, &row.text, size) + trailing + actions
             })
             .fold(0.0_f32, f32::max);
         self.widest_row_width = Some(widest);
@@ -617,7 +866,8 @@ impl VirtualListWidget {
 
         let row_width = self.row_width();
         let trailing_column = self.trailing_column(window);
-        let leading_budget = self.leading_width_budget(trailing_column);
+        let actions_reserve = self.actions_reserve(window);
+        let leading_budget = self.leading_width_budget(trailing_column, actions_reserve);
         let mut items = Vec::with_capacity(visible_row_count.saturating_mul(3).saturating_add(8));
         for (row_offset, item) in self.items[window.first_index..window.end_exclusive_index].iter().enumerate() {
             #[allow(clippy::cast_precision_loss)]
@@ -647,12 +897,13 @@ impl VirtualListWidget {
                 color: ink,
                 clip: None,
             });
-            // The trailing run is set flush against the row's right pad, so
-            // every row's second column ends on one edge. It is drawn whole:
-            // the column was reserved for the widest of them.
+            // The trailing run is set flush against the row's right pad — or
+            // against the verb block when one stands there — so every row's
+            // second column ends on one edge. It is drawn whole: the column was
+            // reserved for the widest of them.
             if let Some(trailing) = item.trailing.as_deref().filter(|_| trailing_column > 0.0) {
                 items.push(WidgetDrawItem::Text {
-                    x: row_width - self.theme.pad - self.trailing_width(item),
+                    x: row_width - self.theme.pad - actions_reserve - self.trailing_width(item),
                     y: text_origin_y(row_y, row_height, size),
                     font_id: self.theme.font_id,
                     text: String::from(trailing),
@@ -661,6 +912,7 @@ impl VirtualListWidget {
                     clip: None,
                 });
             }
+            self.push_row_actions(&mut items, item, item_index, row_y, row_height);
         }
         items.extend(self.rule_items(visible_row_count, row_height, row_width));
         if let Some(bar) = self.scroll_bar() {
@@ -686,21 +938,23 @@ impl WidgetDefaults for VirtualListWidget {
 
     fn cancel_activation(&mut self) {
         self.pressed = false;
+        self.pressed_action = None;
         self.thumb_grab_pixels = None;
     }
 }
 
 /// A fixed-row virtual list. Spawned inline by a panel root with a
 /// [`VirtualListConfig`]; reports [`VirtualListSelected`] when selection
-/// changes.
+/// changes and [`VirtualListAction`] when a verb bound to a row is pressed.
 ///
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `VirtualListConfig` again to replace the item vector or viewport. An
-/// item is a `VirtualListRow { text, trailing, role }` — write plain strings
-/// through `VirtualListRow::from` for a one-column list, set `trailing` for a
-/// second right-aligned column, and set `ruled` on the config to divide the
-/// rows with a hairline.
+/// item is a `VirtualListRow { text, trailing, role, actions }` — write plain
+/// strings through `VirtualListRow::from` for a one-column list, set `trailing`
+/// for a second right-aligned column, hang `actions` (`RowAction::text` /
+/// `RowAction::danger`) on a row for verbs at its right end, and set `ruled` on
+/// the config to divide the rows with a hairline.
 #[actor(instanced, composable, handler_set(WidgetDefaults))]
 impl WasmActor for VirtualListWidget {
     type Config = VirtualListConfig;
@@ -728,6 +982,8 @@ impl WasmActor for VirtualListWidget {
             widest_row_width: None,
             thumb_grab_pixels: None,
             wheel_residual_pixels: 0.0,
+            hovered_action: None,
+            pressed_action: None,
         })
     }
 
@@ -747,6 +1003,8 @@ impl WasmActor for VirtualListWidget {
         self.first_index = 0;
         self.thumb_grab_pixels = None;
         self.wheel_residual_pixels = 0.0;
+        self.hovered_action = None;
+        self.pressed_action = None;
         self.reveal_selection();
         self.font_metrics.set_desired(config.theme.font_id);
         self.theme = config.theme;
@@ -777,40 +1035,50 @@ impl WasmActor for VirtualListWidget {
         self.apply_control_state(ctx, set.state);
     }
 
-    /// A press on the scroll bar takes the thumb; anywhere else in the frame
-    /// chooses the row under it. The bar is checked first and does not need
-    /// the list to be mutable: reading where you are in a read-only list is
-    /// not a change to it.
+    /// A press on the scroll bar takes the thumb; a press on a row's verb arms
+    /// that verb and chooses nothing; anywhere else in the frame chooses the
+    /// row under it. The bar is checked first and does not need the list to be
+    /// mutable: reading where you are in a read-only list is not a change to
+    /// it.
     #[handler::single]
     fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, press: MouseButton) {
         if press.button != mouse_button::LEFT || !self.state.is_available() {
             return;
         }
         let (local_x, local_y) = (press.x - self.frame.x, press.y - self.frame.y);
-        if let Some(bar) = self.scroll_bar()
-            && bar.contains(local_x, local_y)
-        {
-            self.press_scroll_bar(bar, local_y);
-            return;
-        }
-        if !self.state.can_mutate() {
-            return;
-        }
-        self.pressed = true;
-        if let Some(selected_index) = self.row_at_local_y(local_y)
-            && let Some(selected_index) = self.select_if_mutable(selected_index)
-        {
-            Self::emit(ctx, selected_index);
+        match self.press_target(local_x, local_y) {
+            Some(PressTarget::ScrollBar(bar)) => self.press_scroll_bar(bar, local_y),
+            Some(PressTarget::Action(index)) => self.pressed_action = Some(index),
+            Some(PressTarget::Row(row_index)) => {
+                self.pressed = true;
+                if let Some(selected_index) = row_index.and_then(|row_index| self.select_if_mutable(row_index)) {
+                    Self::emit(ctx, selected_index);
+                }
+            }
+            None => {}
         }
     }
 
-    /// Carry a live thumb drag. The root captures the pointer on press, so the
-    /// drag keeps following even once it leaves the narrow track.
+    /// Carry a live thumb drag, or follow the pointer across the row verbs. The
+    /// root captures the pointer on press, so the drag keeps following even
+    /// once it leaves the narrow track.
     #[handler::single]
     fn on_mouse_move(&mut self, _ctx: &mut WasmCtx<'_>, moved: MouseMove) {
         if self.thumb_grab_pixels.is_some() {
             self.drag_thumb(moved.y - self.frame.y);
+            return;
         }
+        self.hovered_action =
+            self.state.can_mutate().then(|| self.action_at(moved.x - self.frame.x, moved.y - self.frame.y)).flatten();
+    }
+
+    /// The pointer left the list, so no verb of it is under the pointer any
+    /// more — the widget-wide hover fact the shared handler keeps says nothing
+    /// about which verb it was over.
+    #[handler::single]
+    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
+        self.state.set_hovered(false);
+        self.hovered_action = None;
     }
 
     /// The wheel moves the realized window and nothing else — the reader is
@@ -824,8 +1092,22 @@ impl WasmActor for VirtualListWidget {
         }
     }
 
+    /// A release inside the verb it was armed on fires that verb — the
+    /// button's own press-then-release-inside, so a press that slides off
+    /// cancels rather than removing the row it drifted away from.
     #[handler::single]
-    fn on_mouse_button_release(&mut self, _ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
+    fn on_mouse_button_release(&mut self, ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
+        let armed = if release.button == mouse_button::LEFT {
+            self.pressed_action.take()
+        } else {
+            None
+        };
+        if let Some(armed) = armed
+            && self.action_at(release.x - self.frame.x, release.y - self.frame.y) == Some(armed)
+        {
+            Self::emit_action(ctx, armed);
+        }
+
         release_left(&mut self.pressed, false, release);
         release_left(&mut self.thumb_grab_pixels, None, release);
     }
@@ -956,6 +1238,8 @@ mod tests {
             widest_row_width: None,
             thumb_grab_pixels: None,
             wheel_residual_pixels: 0.0,
+            hovered_action: None,
+            pressed_action: None,
         }
     }
 
@@ -1199,8 +1483,14 @@ mod tests {
                 text: String::from("a gem name far too long for this narrow list"),
                 trailing: Some(String::from("21/20")),
                 role: TextRole::Body,
+                actions: Vec::new(),
             },
-            VirtualListRow { text: String::from("short"), trailing: Some(String::from("1")), role: TextRole::Body },
+            VirtualListRow {
+                text: String::from("short"),
+                trailing: Some(String::from("1")),
+                role: TextRole::Body,
+                actions: Vec::new(),
+            },
         ];
         widget.forget_measurements();
 
@@ -1222,10 +1512,215 @@ mod tests {
         assert!((runs[3].0 + narrow_width - right_edge).abs() < f32::EPSILON, "and so does the narrow one");
 
         assert!(runs[0].1.ends_with(ELLIPSIS), "the name gave way: {:?}", runs[0].1);
-        let budget = widget.leading_width_budget(column);
+        let budget = widget.leading_width_budget(column, 0.0);
         assert_eq!(budget, widget.text_width_budget() - column - widget.theme.space(TRAILING_GAP_UNITS));
         let metrics = widget.font_metrics.resolved().expect("the test table is installed");
         assert!(measured_text_width(metrics, &runs[0].1, size) <= budget, "and stopped clear of the column");
+    }
+
+    /// A measured list whose every row carries the owner's pair of verbs —
+    /// `[Change] [x]`, the second destructive — on a frame wide enough to hold
+    /// a name beside them.
+    fn actioned_list(item_count: usize, frame_width: f32) -> VirtualListWidget {
+        let mut widget = measured_list(item_count, 5);
+        widget.frame.width = frame_width;
+        widget.items = (0..item_count)
+            .map(|index| {
+                VirtualListRow::from(format!("skill {index}"))
+                    .with_actions(vec![RowAction::text("Change"), RowAction::danger("x")])
+            })
+            .collect();
+        widget.forget_measurements();
+        widget
+    }
+
+    /// The vertical middle of the `row_offset`-th realized row.
+    fn row_middle_y(widget: &VirtualListWidget, row_offset: usize) -> f32 {
+        let row_height = widget.row_height().expect("a laid-out list has a row height");
+        #[allow(clippy::cast_precision_loss)]
+        let top = row_offset as f32 * row_height;
+        row_height.mul_add(0.5, top)
+    }
+
+    /// The rects the verbs of the `row_offset`-th realized row stand at.
+    fn realized_action_rects(widget: &VirtualListWidget, row_offset: usize) -> Vec<ActionRect> {
+        let row_height = widget.row_height().expect("a laid-out list has a row height");
+        #[allow(clippy::cast_precision_loss)]
+        let row_y = row_offset as f32 * row_height;
+        let item = &widget.items[widget.window().first_index + row_offset];
+        widget.action_rects(item, row_y, row_height)
+    }
+
+    #[test]
+    fn a_press_on_a_row_verb_is_that_verb_and_never_also_the_row_under_it() {
+        // Tripwire: the studio's gap 32 — round-9 note 4, "skills should be
+        // removed via 'x' button bound to row". Two failures live in the
+        // resolution order. Resolve the row first and the `×` selects the skill
+        // it is about to remove, leaving the reader holding a selection they
+        // never asked for; resolve no verb at all and the row is back to being
+        // a plate that only selects, which is the gap. The verb owns its rect,
+        // the row owns the rest.
+        let widget = actioned_list(200, 240.0);
+        let rects = realized_action_rects(&widget, 2);
+        let middle_y = row_middle_y(&widget, 2);
+
+        assert_eq!(rects.len(), 2, "both verbs stand: {rects:?}");
+        assert!(
+            (rects[1].x + rects[1].width - (widget.row_width() - widget.theme.pad)).abs() < f32::EPSILON,
+            "the verb written last ends at the row's right pad: {rects:?}",
+        );
+        assert_eq!(
+            rects[1].x - (rects[0].x + rects[0].width),
+            widget.theme.space(ACTION_GAP_UNITS),
+            "with one spacing unit between the pair",
+        );
+
+        assert_eq!(
+            widget.press_target(rects[1].x + 1.0, middle_y),
+            Some(PressTarget::Action(RowActionIndex { row_index: 2, action_index: 1 })),
+            "a press inside the × is the ×",
+        );
+        assert_eq!(
+            widget.press_target(rects[0].x + 1.0, middle_y),
+            Some(PressTarget::Action(RowActionIndex { row_index: 2, action_index: 0 })),
+            "and a press inside the first verb is that one, not the one beside it",
+        );
+        assert_eq!(
+            widget.press_target(widget.theme.pad, middle_y),
+            Some(PressTarget::Row(Some(2))),
+            "a press on the row's own text still chooses the row",
+        );
+        assert_eq!(
+            widget.press_target(rects[0].x - 1.0, middle_y),
+            Some(PressTarget::Row(Some(2))),
+            "and so does the pixel just short of the block — the gap belongs to the row",
+        );
+    }
+
+    #[test]
+    fn scrolling_carries_a_verb_with_its_own_row_and_reports_the_item_it_belongs_to() {
+        // Tripwire: the list realizes a window, so the row *offset* under the
+        // pointer is not the item index. A verb that reported its offset would
+        // remove the wrong skill the moment the reader scrolled — and one whose
+        // rect was computed from the item index rather than the offset would
+        // stand off the bottom of the frame entirely.
+        let mut widget = actioned_list(200, 240.0);
+        let top_row_middle = row_middle_y(&widget, 0);
+        let inside_the_cross = realized_action_rects(&widget, 0)[1].x + 1.0;
+        assert_eq!(
+            widget.press_target(inside_the_cross, top_row_middle),
+            Some(PressTarget::Action(RowActionIndex { row_index: 0, action_index: 1 })),
+        );
+
+        widget.first_index = 7;
+        assert_eq!(
+            widget.press_target(inside_the_cross, top_row_middle),
+            Some(PressTarget::Action(RowActionIndex { row_index: 7, action_index: 1 })),
+            "the same point is now the eighth skill's ×, because the window moved under it",
+        );
+        assert_eq!(realized_action_rects(&widget, 0)[1].y, 0.0, "and the verb is drawn at the top of the frame");
+    }
+
+    #[test]
+    fn a_row_name_elides_clear_of_the_verbs_and_the_verbs_are_drawn_whole() {
+        // Tripwire: the verbs are the row's third column and are reserved
+        // *first*, exactly as the trailing column is. Charge the name against
+        // the whole row and it runs under the buttons — the round-5 note-8
+        // defect one column further in; elide the verb instead and the reader
+        // gets a control labelled `Ch…`, which is not a control.
+        let mut widget = actioned_list(2, 240.0);
+        widget.items[0] = VirtualListRow {
+            text: String::from("a skill gem with a name far too long for this row"),
+            trailing: Some(String::from("21/20")),
+            role: TextRole::Body,
+            actions: vec![RowAction::text("Change"), RowAction::danger("x")],
+        };
+        widget.forget_measurements();
+
+        let window = widget.window();
+        let reserve = widget.actions_reserve(window);
+        assert_eq!(
+            reserve,
+            widget.actions_column(window) + widget.theme.space(ACTION_GAP_UNITS),
+            "the reserve is the shared block plus one gap of clear space",
+        );
+
+        let runs = drawn_runs(&widget);
+        let size = widget.theme.label_size_pixels;
+        let metrics = widget.font_metrics.resolved().expect("the test table is installed");
+        let (name_x, name) = runs[0].clone();
+        assert!(name.ends_with(ELLIPSIS), "the name gave way to the verbs: {name:?}");
+        let budget = widget.leading_width_budget(widget.trailing_column(window), reserve);
+        assert!(measured_text_width(metrics, &name, size) <= budget, "and stopped inside the budget: {name:?}");
+
+        let (trailing_x, trailing) = runs[1].clone();
+        assert_eq!(trailing, "21/20", "the amount is drawn whole");
+        assert!(
+            (trailing_x + measured_text_width(metrics, &trailing, size)
+                - (widget.row_width() - widget.theme.pad - reserve))
+                .abs()
+                < f32::EPSILON,
+            "and ends against the verb block rather than under it",
+        );
+
+        let labels: Vec<String> = runs[2..4].iter().map(|(_, run)| run.clone()).collect();
+        assert_eq!(labels, vec![String::from("Change"), String::from("x")], "both verbs read whole: {labels:?}");
+        assert!(name_x < trailing_x, "the row still reads name, amount, verbs from the left");
+
+        // The second row carries the same verbs, so both rows give up the same
+        // width and their names elide on one edge.
+        assert_eq!(widget.actions_width(&widget.items[0]), widget.actions_width(&widget.items[1]));
+    }
+
+    #[test]
+    fn a_list_that_cannot_be_changed_draws_its_verbs_dead_and_refuses_their_presses() {
+        // Tripwire: a read-only list is as unable to remove a skill as a
+        // disabled one, so both must *say* so. A verb that kept its live ink
+        // and swallowed the press is the worst of the three outcomes — the
+        // reader presses `×`, nothing happens, and nothing said it would not.
+        let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
+        let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
+        for control in [disabled, read_only] {
+            let mut widget = actioned_list(200, 240.0);
+            let inside_the_cross = realized_action_rects(&widget, 1)[1].x + 1.0;
+            let middle_y = row_middle_y(&widget, 1);
+            widget.replace_control_state(control.clone());
+
+            assert_eq!(
+                widget.action_theme_state(RowActionIndex { row_index: 1, action_index: 1 }),
+                ThemeState::Disabled,
+                "the verb draws dead",
+            );
+            assert_eq!(widget.press_target(inside_the_cross, middle_y), None, "and takes no press");
+            assert!(
+                widget
+                    .draw_items()
+                    .iter()
+                    .any(|item| matches!(item, WidgetDrawItem::Text { text, .. } if text == "x"),),
+                "it is still drawn — a verb that vanished would say the row lost its remove, not that it is dead",
+            );
+        }
+
+        // Hover and press are per verb, and the pointer leaving the list drops
+        // the one it was over: a stale hover would light a verb the pointer is
+        // nowhere near.
+        let mut widget = actioned_list(200, 240.0);
+        let hovered = RowActionIndex { row_index: 3, action_index: 0 };
+        widget.hovered_action = Some(hovered);
+        widget.pressed_action = Some(RowActionIndex { row_index: 3, action_index: 1 });
+        assert_eq!(widget.action_theme_state(hovered), ThemeState::Hover);
+        assert_eq!(
+            widget.action_theme_state(RowActionIndex { row_index: 3, action_index: 1 }),
+            ThemeState::Pressed,
+            "the armed verb outranks the hovered one on its own rect",
+        );
+        assert_eq!(
+            widget.action_theme_state(RowActionIndex { row_index: 4, action_index: 0 }),
+            ThemeState::Normal,
+            "and a verb the pointer is not on answers nothing",
+        );
+        widget.cancel_activation();
+        assert_eq!(widget.pressed_action, None, "focus loss disarms the verb like any other activation");
     }
 
     #[test]

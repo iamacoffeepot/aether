@@ -43,13 +43,12 @@ use alloc::vec::Vec;
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, KeyRelease, MouseButton, MouseButtonRelease};
-use aether_math::Rgba;
 use aether_text::FontMetricsResult;
 
 use crate::set::defaults::WidgetDefaults;
 use crate::set::{
-    ActivationArms, accept_font_metrics_result, apply_text_theme, centered_text_x, elide_to_width, measured_text_width,
-    pointer_wash, pump_text_font_metrics, push_border, quad, reply_if_hidden, text_origin_y,
+    ActivationArms, ButtonFace, accept_font_metrics_result, apply_text_theme, button_face_width,
+    pump_text_font_metrics, push_border, push_button_face, reply_if_hidden,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
@@ -78,63 +77,6 @@ pub struct ButtonWidget {
 }
 
 impl ButtonWidget {
-    /// The label's measured pixel width, `None` until the theme font's
-    /// metrics resolve.
-    ///
-    /// This is the sum of the glyphs' advances, not their ink bounds — the
-    /// metric table carries no ink extents — so a single-glyph label like `+`
-    /// is centered on its advance and its ink can sit a hair off the frame's
-    /// optical center.
-    fn measured_label_width(&self) -> Option<f32> {
-        self.font_metrics
-            .resolved()
-            .map(|metrics| measured_text_width(metrics, &self.label, self.theme.label_size_pixels))
-    }
-
-    /// The label run this frame has room for, and the local x it is drawn
-    /// at: the whole label centered when it fits, and — when the frame is
-    /// narrower than the intrinsic width — the label elided into the frame
-    /// and that centered, so the margins are equal at any width and a cut
-    /// label carries the mark saying so instead of being sliced by the
-    /// root's slot clip. Left-padded and whole while the measurement is
-    /// still outstanding, the frame or two before there is a width to center
-    /// or elide against. `None` when there is nothing to draw: an empty
-    /// label, or a frame too narrow to hold even the elision mark.
-    ///
-    /// **The pads are given up before the label is.** A pad each side is
-    /// what the *intrinsic* reserves — what a layout should give this
-    /// button if it can — not room the draw has to leave inside whatever
-    /// frame it was actually handed; that is the same rule
-    /// [`centered_text_x`] states for the origin, and eliding is where it
-    /// was missing. Charged against the padded budget alone, a control the
-    /// size of its own mark drew **nothing at all**: a `−` does not fit a
-    /// frame minus two pads, and neither does the ellipsis that would say
-    /// it was cut, so `elide_to_width` answered with the empty string and
-    /// the ascendancy inset's collapse button rendered as an empty
-    /// outlined square. So the padded budget is the preference and the
-    /// frame is the limit — a run that cannot afford its pads takes the
-    /// whole frame rather than disappearing, because a button drawing no
-    /// mark at all is worse than one whose mark reaches its edges.
-    fn draw_run(&self) -> Option<(String, f32)> {
-        let size = self.theme.label_size_pixels;
-        let width = self.frame.width;
-        let (run, run_x) = self.font_metrics.resolved().map_or_else(
-            || (self.label.clone(), self.theme.pad),
-            |metrics| {
-                let measure = |run: &str| measured_text_width(metrics, run, size);
-                let padded = elide_to_width(&self.label, self.theme.pad.mul_add(-2.0, width), measure);
-                let run = if padded.is_empty() {
-                    elide_to_width(&self.label, width, measure)
-                } else {
-                    padded
-                };
-                let run_x = centered_text_x(width, measure(&run));
-                (run, run_x)
-            },
-        );
-        (!run.is_empty()).then_some((run, run_x))
-    }
-
     /// Resolve a release: returns `true` (a click fired) only if the button
     /// was armed and the release landed back inside. Disarms either way.
     fn release_at(&mut self, x: f32, y: f32) -> bool {
@@ -305,19 +247,6 @@ impl WasmActor for ButtonWidget {
     }
 }
 
-/// The hairline a button's outline is stroked at.
-const STROKE_THICKNESS: f32 = 1.0;
-
-/// The three inks one (emphasis, tone) pair resolves to: the plate under the
-/// label, the stroke around it, and the label's own colour. `None` is a part
-/// the emphasis does not draw at all — a text button has neither plate nor
-/// stroke, which is what makes it the quietest thing on the screen.
-struct ButtonInk {
-    plate: Option<Rgba>,
-    stroke: Option<Rgba>,
-    label: Rgba,
-}
-
 impl ButtonWidget {
     /// The label plus one pad each side, at the theme's row height: what a
     /// layout needs to size a slot to this button's own label. `None` until
@@ -327,80 +256,27 @@ impl ButtonWidget {
     /// this, so a verb ranked down to text would otherwise move the row it
     /// sits in — the rank is a look, not a size.
     fn intrinsic(&self) -> Option<[f32; 2]> {
-        self.measured_label_width().map(|text_width| [self.theme.pad.mul_add(2.0, text_width), self.theme.row_height])
+        self.font_metrics
+            .resolved()
+            .map(|metrics| [button_face_width(&self.label, &self.theme, metrics), self.theme.row_height])
     }
 
-    /// The colour this button's tone speaks in: the accent for an ordinary
-    /// verb, the error role for one that throws work away.
-    fn tone_role(&self) -> Rgba {
-        match self.tone {
-            ButtonTone::Neutral => self.theme.accent,
-            ButtonTone::Danger => self.theme.error,
-        }
-    }
-
-    /// The plate, stroke, and label ink for this button's rank.
-    ///
-    /// The one rule worth stating: on the quiet emphases a *neutral* verb
-    /// reads in the primary ink, not in the accent. The accent is the
-    /// primary action's token (`designing-a-screen.md` §6), and a screen
-    /// whose four secondary verbs are all lettered in it has spent the token
-    /// again — which is the owner's "a single yellow button for everything"
-    /// in a thinner form. A danger verb keeps its colour at every rank,
-    /// because what it destroys does not get quieter.
-    fn ink(&self) -> ButtonInk {
-        let role = self.tone_role();
-        let quiet = match self.tone {
-            ButtonTone::Neutral => self.theme.text_primary,
-            ButtonTone::Danger => self.theme.error,
-        };
-        match self.emphasis {
-            ButtonEmphasis::Filled => ButtonInk { plate: Some(role), stroke: None, label: self.theme.accent_text },
-            ButtonEmphasis::Tonal => ButtonInk { plate: Some(self.theme.tonal(role)), stroke: None, label: quiet },
-            ButtonEmphasis::Outlined => ButtonInk {
-                plate: None,
-                stroke: Some(match self.tone {
-                    ButtonTone::Neutral => self.theme.outline,
-                    ButtonTone::Danger => self.theme.error,
-                }),
-                label: quiet,
-            },
-            ButtonEmphasis::Text => ButtonInk { plate: None, stroke: None, label: quiet },
-        }
-    }
-
-    /// The button's local draw: its plate or wash, its stroke, the centered
-    /// label, and the keyboard focus ring.
+    /// The button's local draw: the shared face — plate or wash, stroke, and
+    /// centered label — plus the keyboard focus ring the face itself has no
+    /// opinion about.
     fn draw_items(&self) -> Vec<WidgetDrawItem> {
-        let width = self.frame.width;
-        let height = self.frame.height;
-        let theme_state = self.state.theme_state(self.pressed());
-        let size = self.theme.label_size_pixels;
-        let ink = self.ink();
-
+        let (width, height) = (self.frame.width, self.frame.height);
         let mut items: Vec<WidgetDrawItem> = Vec::new();
-        match ink.plate {
-            Some(plate) => items.push(quad(0.0, 0.0, width, height, self.theme.fill(plate, theme_state))),
-            None => {
-                if let Some(wash) = pointer_wash(&self.theme, theme_state) {
-                    items.push(quad(0.0, 0.0, width, height, wash));
-                }
-            }
-        }
-        if let Some(stroke) = ink.stroke {
-            push_border(&mut items, width, height, STROKE_THICKNESS, self.theme.fill(stroke, theme_state));
-        }
-        if let Some((run, run_x)) = self.draw_run() {
-            items.push(WidgetDrawItem::Text {
-                x: run_x,
-                y: text_origin_y(0.0, height, size),
-                font_id: self.theme.font_id,
-                text: run,
-                size_pixels: size,
-                color: self.theme.fill(ink.label, theme_state),
-                clip: None,
-            });
-        }
+        let face =
+            ButtonFace { x: 0.0, y: 0.0, width, height, label: &self.label, emphasis: self.emphasis, tone: self.tone };
+        push_button_face(
+            &mut items,
+            &face,
+            &self.theme,
+            self.state.theme_state(self.pressed()),
+            self.font_metrics.resolved(),
+        );
+
         // Keyboard focus only: the button a pointer just pressed shows its
         // press, and a ring left over from the click says nothing more.
         if self.state.focus_visible() {
@@ -415,11 +291,19 @@ mod tests {
     use super::*;
     use aether_kinds::keycode::{KEY_ENTER, KEY_SPACE};
     use aether_kinds::{CachedFontMetrics, FontMetrics, GlyphAdvance};
+    use aether_math::Rgba;
 
     use crate::set::ELLIPSIS;
 
     use crate::WidgetControlState;
-    use crate::set::KeyboardArm;
+    use crate::set::{BUTTON_STROKE_THICKNESS, KeyboardArm, button_run, centered_text_x, measured_text_width};
+
+    /// The label run and local x this button draws — the shared
+    /// [`button_run`] rule against the button's own frame, theme and metrics,
+    /// which is exactly what `push_button_face` puts on the screen for it.
+    fn draw_run(button: &ButtonWidget) -> Option<(String, f32)> {
+        button_run(&button.label, button.frame.width, &button.theme, button.font_metrics.resolved())
+    }
 
     fn button() -> ButtonWidget {
         ButtonWidget {
@@ -494,7 +378,7 @@ mod tests {
         assert!(mark > button.theme.pad.mul_add(-2.0, button.frame.width), "the frame cannot afford both pads");
         assert!(mark <= button.frame.width, "and the mark does fit the frame itself, which is the whole point");
 
-        let (run, run_x) = button.draw_run().expect("a control with room for its mark must draw it");
+        let (run, run_x) = draw_run(&button).expect("a control with room for its mark must draw it");
         assert_eq!(run, button.label, "the mark is drawn whole, not elided to an ellipsis or to nothing");
         assert!(
             (run_x - (button.frame.width - mark) / 2.0).abs() < 1e-3,
@@ -506,7 +390,7 @@ mod tests {
         // wide button still elides against the padded budget, so a long
         // label keeps a pad of clear space beside its ellipsis.
         let wide = measured_button("Regenerate terrain", 16.0, 32.0, 200.0, 600.0);
-        let run = wide.draw_run().expect("a wide button draws").0;
+        let run = draw_run(&wide).expect("a wide button draws").0;
         let measured = measured_text_width(metrics, &run, wide.theme.label_size_pixels);
         assert!(run.ends_with(ELLIPSIS), "a label past the measure is still cut with the mark that says so");
         assert!(
@@ -540,7 +424,7 @@ mod tests {
             button.frame.width = width;
             let metrics = button.font_metrics.resolved().expect("measured");
             let size = button.theme.label_size_pixels;
-            let (run, run_x) = button.draw_run().expect("every width here has room for at least the elision mark");
+            let (run, run_x) = draw_run(&button).expect("every width here has room for at least the elision mark");
             let run_width = measured_text_width(metrics, &run, size);
             let (left_margin, right_margin) = (run_x, width - (run_x + run_width));
             assert!(
@@ -587,7 +471,7 @@ mod tests {
             .iter()
             .filter_map(|item| match item {
                 WidgetDrawItem::Quad { width, height, color, .. }
-                    if (*width == STROKE_THICKNESS || *height == STROKE_THICKNESS) =>
+                    if (*width == BUTTON_STROKE_THICKNESS || *height == BUTTON_STROKE_THICKNESS) =>
                 {
                     Some(*color)
                 }
@@ -684,13 +568,13 @@ mod tests {
         // say — a row of verbs would shift as one of them was ranked down,
         // and a dialog's confirm and cancel would stop lining up.
         let filled = measured_button("Regenerate terrain", 8.0, 14.0, 90.0, 500.0);
-        let (run, run_x) = filled.draw_run().expect("a measured button draws");
+        let (run, run_x) = draw_run(&filled).expect("a measured button draws");
         let intrinsic = filled.intrinsic().expect("and reports its size");
         for emphasis in [ButtonEmphasis::Tonal, ButtonEmphasis::Outlined, ButtonEmphasis::Text] {
             for tone in [ButtonTone::Neutral, ButtonTone::Danger] {
                 let ranked =
                     ButtonWidget { emphasis, tone, ..measured_button("Regenerate terrain", 8.0, 14.0, 90.0, 500.0) };
-                assert_eq!(ranked.draw_run(), Some((run.clone(), run_x)), "{emphasis:?}/{tone:?} moved the label");
+                assert_eq!(draw_run(&ranked), Some((run.clone(), run_x)), "{emphasis:?}/{tone:?} moved the label");
                 assert_eq!(ranked.intrinsic(), Some(intrinsic), "{emphasis:?}/{tone:?} changed the reserved size");
             }
         }
