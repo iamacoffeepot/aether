@@ -376,20 +376,23 @@ A host that wants `⌘` in a label ships a face that has it, or writes
 
 `VirtualListConfig { items, initial_selected_index, visible_row_count,
 empty_text, ruled, theme, state }` retains the complete row vector while
-realizing at most `visible_row_count` rows. The panel fixes the slot height at
-`theme.row_height * visible_row_count` and clips the slot to that viewport;
+realizing the rows the viewport reaches. The panel fixes the slot height at
+`theme.row_height * visible_row_count` — at the summed height of the first
+`visible_row_count` rows once any of them carries a height of its own
+([below](#a-row-that-is-a-table-entry)) — and clips the slot to that viewport;
 an empty item vector or zero-row viewport is not pointer- or focus-eligible.
 This bounded realization is the intended path for hundreds or thousands of
 uniform-height choices.
 
 Up and Down move selection by one. PageUp and PageDown move by the configured
 nonzero visible-row count. Movement clamps at the item-vector ends and shifts
-the realized window only enough to reveal the selected row. A row is always one
+the realized window only enough to reveal the selected row. A row is one
 configured row tall — the viewport divided by `visible_row_count`, never by the
-number of rows the list happens to hold — so a list with fewer items than its
-viewport draws that many normal rows at the top and leaves the rest of the
-frame empty, and hit testing below the last realized row selects nothing. (A
-list that spread its items to fill the frame instead turned a two-item list
+number of rows the list happens to hold — until some row asks for a height of
+its own ([below](#a-row-that-is-a-table-entry)), so a list with fewer items
+than its viewport draws that many normal rows at the top and leaves the rest of
+the frame empty, and hit testing below the last realized row selects nothing.
+(A list that spread its items to fill the frame instead turned a two-item list
 into a pair of slabs, with a selected row half the viewport high.) Hidden lists
 answer every `Collect` with an empty draw list; disabled and read-only lists
 reject both pointer and keyboard selection changes.
@@ -488,10 +491,12 @@ in the list the pointer was, so pointing at the fourth gem lit the first.
 
 ### A row is two columns and a type step
 
-An item is a `VirtualListRow { text, trailing, role, ink, actions }`, and a row
-that is only words is written as one (`VirtualListRow: From<String> +
-From<&str>`), so `(0..n).map(VirtualListRow::from)` is the whole of the plain
-case.
+An item is a `VirtualListRow { text, trailing, role, ink, actions, note,
+indent, space_before, rule_above }`, and a row that is only words is written as
+one (`VirtualListRow: From<String> + From<&str>`), so
+`(0..n).map(VirtualListRow::from)` is the whole of the plain case. The first
+five fields are the list of choices; the last four are the
+[table entry](#a-row-that-is-a-table-entry).
 
 `trailing` is the row's **second column**: a version, a count, a price, a key,
 a run of tags. It is set right-aligned against the row's own right pad, and the
@@ -626,6 +631,74 @@ Rank a row verb **down**. A column of rows each carrying a filled accent plate
 has spent the primary-action token once per row, which is the same defect as a
 screen of five yellow buttons — `RowAction::text` (quiet, neutral) and
 `RowAction::danger` (quiet, error-inked) are the two the kit names for it.
+
+### A row that is a table entry
+
+A list of choices is read down its fills. A **table** — a statistic, the figure
+derived from it, the sentence that qualifies it, the heading that opens a block
+— is read by its spacing before its type ([§4](../building/designing-a-screen.md)):
+gaps inside a group small, gaps between groups large, whitespace before any
+rule. A list of evenly spaced rows has no gaps to make large, which is why a
+table drawn on one had to spend a blank row to open a block and had nowhere to
+put a note but on a row of its own, where it reads as a statistic whose value
+failed to draw.
+
+Four fields answer that, each opt-in and each defaulting to the plain row:
+
+| field | what it draws |
+| --- | --- |
+| `note: Option<String>` | a second line under the leading run: caption size, muted ink, word-wrapped to the row's text budget, **three lines at most** with the last elided |
+| `indent: u8` | spacing units the leading run **and its note** start in by; the trailing column and the verbs do not move |
+| `space_before: u8` | spacing units of clear **ground** above the row — a group gap, not a taller plate; the first row's is honoured too |
+| `rule_above: bool` | a `theme.outline` hairline across the row's text budget at the **top of that space**: the rule, then the air, then the row |
+
+```rust
+use aether_kit_widget::VirtualListRow;
+
+let rows = vec![
+    VirtualListRow::from("Armour").with_trailing(vec!["0".into()]).with_space_before(1),
+    VirtualListRow::from("Physical damage mitigated")
+        .with_trailing(vec!["0%".into()])
+        .with_indent(2)
+        .with_note("armour is a function of the hit it meets, so a bigger hit is reduced by less"),
+    VirtualListRow::from("Resistances").with_space_before(3).with_rule_above(),
+];
+```
+
+Set any of them on any row and **every** row of that list is as tall as what it
+holds: its role's pitch, plus one line per line of its note, plus its own
+space. The role's pitch is `theme.row_height` for `Body` and that pitch scaled
+by the role's own type step against `label_size_pixels` for the others — so on
+the default theme a body row is 24, a caption row about 20.6, a heading row
+about 27.4, one number to tune rather than four. A note line is the caption
+size times 1.3.
+
+The list then keeps a prefix-sum **offset table**, one `f32` per item, rebuilt
+when the vector, the frame, the font or the theme changes; the realized window,
+the hit test, the reported hover, the scroll extent and the scroll bar's thumb
+are all read from it by bisection. The window is then every row the frame
+reaches rather than `visible_row_count` of them, and the bar's thumb is the
+viewport's share of the **summed height** rather than of the item count — a
+list of ten two-line rows is twice as long as one of ten plain rows and its bar
+says so.
+
+Set none of them and there is no table: the pitch is the frame divided by
+`visible_row_count` exactly as it always was, the bar is drawn from the same
+three counts, and a vector of ten thousand plain rows spends nothing on heights
+it never asked for. That fast path is why the four fields are a vocabulary a
+table opts into rather than a cost every list pays.
+
+Two things the note deliberately does not do. It is **not measured** into the
+intrinsic width — prose sized to its own longest line opens a pane at its
+ceiling on a sentence and leaves the table it was meant to size sitting in a
+column of empty plate, so the note wraps to whatever width the rows ask for
+(the indent *is* counted: that is width the name really needs). And it does not
+elide at the end of its first line — it wraps, and only a note past the third
+line is cut, with the ellipsis saying so.
+
+Indent belongs in the field, never in the string. Padding a name with spaces
+puts the indent in the text, and a proportional face's space advance is not the
+spacing unit.
 
 `initial_selected_index` is an `Option`, and a list whose model holds no
 current item shows none — no row lights up, rather than the first row lighting

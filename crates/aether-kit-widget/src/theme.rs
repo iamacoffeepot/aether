@@ -195,6 +195,18 @@ pub enum TextRole {
 /// names in them. What the four rungs *mean* belongs to the host; what they
 /// look like, and that each stays legible on every fill a row draws under it,
 /// belongs to the theme.
+///
+/// There is deliberately **no `Warning` or `Error` ink** here. The obvious
+/// pair — the `warning` and `error` roles written as a run — was measured
+/// against the four fills a list row draws and neither clears the 3.0 every
+/// ink above does: `warning` reads 7.89 on the plate but 2.83 on a chosen row
+/// under the pointer, and `error` reads 4.85 / 3.65 / 2.90 / 1.74 down the
+/// four. Those two roles are tuned as a control's own **face** — a validation
+/// stroke on the raised surface, carried to contrast by [`Theme::tonal`] and
+/// [`Theme::edge`] — and lettering has a higher bar than a stroke. Adding
+/// them as inks would ship a value the reader cannot read the moment they
+/// point at its row; a severity ink needs its own pair of colours lifted the
+/// way the hue set is, not a second job for these.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TextInk {
     /// Whatever the run would have been written in without an ink: the primary
