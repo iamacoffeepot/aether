@@ -67,7 +67,7 @@
 //! wide for the column gives way by **dropping whole spans off its end** — a
 //! span is a word that means something on its own, so half of one is worse than
 //! none of it, and the leading run's ellipsis stays the only cut mark on the
-//! row.
+//! row. The head span always stays: the column exists for the fact in it.
 //!
 //! `ink` colours a run: the leading `text` carries the row's, each trailing
 //! span carries its own ([`TextInk`]), so a name can say its own tier without a
@@ -748,10 +748,15 @@ impl VirtualListWidget {
     /// half of one is worse than none of it. The run gives way by dropping tags
     /// off the end rather than by cutting one mid-word, which keeps the
     /// ellipsis on the leading run the only cut mark a row carries.
+    ///
+    /// The **head span always stays**, even when it alone is wider than the
+    /// budget: the column exists for the fact in it, so a row whose one amount
+    /// is wider than the row shows the amount and gives the name nothing,
+    /// rather than showing an empty column and a full-width name.
     fn fitted_trailing<'row>(&self, row: &'row VirtualListRow, budget: f32) -> &'row [InkedSpan] {
         let size = self.theme.text_size_pixels(row.role);
         let mut spans = row.trailing.as_slice();
-        while !spans.is_empty() && self.spans_width(spans, size) > budget {
+        while spans.len() > 1 && self.spans_width(spans, size) > budget {
             spans = &spans[..spans.len() - 1];
         }
         spans
@@ -1878,7 +1883,7 @@ mod tests {
 
         let budget = widget.trailing_budget(0.0);
         let fitted = widget.fitted_trailing(&widget.items[0], budget);
-        assert!(!fitted.is_empty(), "a run that has room for one tag draws that tag");
+        assert!(!fitted.is_empty(), "the head tag stays whatever the budget is");
         assert!(fitted.len() < 4, "this row is too narrow for the whole run: {fitted:?}");
         assert_eq!(
             fitted,

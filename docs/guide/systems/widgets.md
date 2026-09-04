@@ -528,7 +528,10 @@ A run too wide for its column gives way by **dropping whole spans off its end**
 — never by cutting one mid-word. A span is a word that means something on its
 own, so half of one names nothing, and the leading run's ellipsis stays the
 only cut mark a row carries. What the run may take is the row's text budget
-less the verb block; the leading run takes what is left after that.
+less the verb block; the leading run takes what is left after that. The head
+span always stays, even when it alone is wider than that budget: the column
+exists for the fact in it, so a row whose one amount is wider than the row shows
+the amount and gives the name nothing.
 
 `role` sets the type step both runs are drawn at, defaulting to
 `TextRole::Body`. A `Caption` row draws at the caption size in the muted ink,
