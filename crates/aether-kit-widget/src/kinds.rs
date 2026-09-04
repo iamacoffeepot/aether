@@ -920,6 +920,44 @@ impl RowAction {
 /// scroll bar's gutter. An empty vector is the plain row, laid out as it
 /// always was.
 ///
+/// # A row that is a table entry
+///
+/// `note`, `indent`, `space_before` and `rule_above` are the four fields a
+/// *table* wants and a list of choices does not. A statistic and the sentence
+/// that qualifies it are one entry, not two rows; a derived figure hangs off
+/// the fact above it; a block of entries opens with air and a hairline. Set
+/// none of them and the list is laid out exactly as it always was, at one
+/// pitch — a row's height starts following its own content only once some row
+/// of the vector asks for one of the four.
+///
+/// `note` is the row's **second line**: set in [`TextRole::Caption`] and the
+/// muted ink under the leading run, word-wrapped to the row's own text budget,
+/// and capped at three lines with the last elided. A note is prose about the
+/// row above it, so it does not read as a row of its own — which a note pushed
+/// into the vector as a second [`VirtualListRow`] always did, right down to
+/// reading as a statistic whose value failed to draw.
+///
+/// `indent` moves the leading run and the note right by that many spacing
+/// units, and takes the same width off what they are elided and wrapped
+/// against. The trailing column and the verbs do **not** move: a value
+/// right-aligns on one edge whatever rung its name sits on, which is what lets
+/// a reader compare two figures down a column. Indent in the field rather than
+/// in the string — padding a name with spaces puts the indent in the text, and
+/// a proportional face's space advance is not the spacing unit.
+///
+/// `space_before` is clear space above the row in spacing units, drawn as
+/// **ground** rather than as a taller plate: a group gap, not a fatter row.
+/// The first row's space is honoured too. It replaces the blank row a table
+/// otherwise pushes in to open a block — a blank band on a raised plate is a
+/// hole rather than a gap, and it reads worst of all when the list is scrolled
+/// so that it lands at the top.
+///
+/// `rule_above` draws a hairline in the theme's `outline` across the row's
+/// text budget at the **top of that space** — the rule first, then the gap,
+/// then the row — so a block boundary reads as a line with air under it. It is
+/// per row, where [`VirtualListConfig::ruled`] is per list: `ruled` divides
+/// every pair of rows, this opens one block.
+///
 /// A row is written as a plain string wherever it is only words
 /// (`VirtualListRow: From<String> + From<&str>`). Schema-only; nested in
 /// [`VirtualListConfig`].
@@ -940,6 +978,20 @@ pub struct VirtualListRow {
     /// The verbs bound to this row, drawn as buttons at its right end.
     #[serde(default)]
     pub actions: Vec<RowAction>,
+    /// The row's second line — a caption-role, muted, wrapped sentence under
+    /// the leading run. `None` is the one-line row.
+    #[serde(default)]
+    pub note: Option<String>,
+    /// How far right the leading run and the note start, in spacing units.
+    /// The trailing column and the verbs stay where they are.
+    #[serde(default)]
+    pub indent: u8,
+    /// Clear space above the row in spacing units, drawn as ground.
+    #[serde(default)]
+    pub space_before: u8,
+    /// Whether a hairline stands at the top of that space.
+    #[serde(default)]
+    pub rule_above: bool,
 }
 
 impl VirtualListRow {
@@ -948,6 +1000,35 @@ impl VirtualListRow {
     #[must_use]
     pub fn with_actions(mut self, actions: Vec<RowAction>) -> Self {
         self.actions = actions;
+        self
+    }
+
+    /// The same row carrying `note` on a second line under its name.
+    #[must_use]
+    pub fn with_note(mut self, note: impl Into<String>) -> Self {
+        self.note = Some(note.into());
+        self
+    }
+
+    /// The same row started `indent` spacing units in — a derived figure
+    /// hanging off the fact above it.
+    #[must_use]
+    pub fn with_indent(mut self, indent: u8) -> Self {
+        self.indent = indent;
+        self
+    }
+
+    /// The same row with `space_before` spacing units of ground above it.
+    #[must_use]
+    pub fn with_space_before(mut self, space_before: u8) -> Self {
+        self.space_before = space_before;
+        self
+    }
+
+    /// The same row opening a block: a hairline at the top of its space.
+    #[must_use]
+    pub fn with_rule_above(mut self) -> Self {
+        self.rule_above = true;
         self
     }
 
@@ -970,7 +1051,7 @@ impl VirtualListRow {
 
 impl From<String> for VirtualListRow {
     fn from(text: String) -> Self {
-        Self { text, trailing: Vec::new(), role: TextRole::default(), ink: TextInk::default(), actions: Vec::new() }
+        Self { text, ..Self::default() }
     }
 }
 
@@ -1004,6 +1085,9 @@ pub struct VirtualListConfig {
     /// loses which trailing belongs to which name. The rule falls between
     /// rows only: `n` realized rows get `n - 1` rules, so the list is never
     /// underlined at its own bottom edge.
+    ///
+    /// A table wants [`VirtualListRow::rule_above`] instead — one rule where a
+    /// block opens, rather than one between every pair.
     #[serde(default)]
     pub ruled: bool,
     pub theme: Theme,
