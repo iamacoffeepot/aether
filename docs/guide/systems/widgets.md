@@ -486,6 +486,19 @@ item, it is measured once and re-measured only when the items, the font, or the
 type scale change. It is `None` until the metrics resolve and for a list with
 no rows.
 
+`WidgetDrawList::content_height` is the other half of that, and the one a host
+draws a **container** from: the whole item vector's height in pixels, which is
+the scroll extent said in the host's own unit — the offset table's last sum
+once rows carry heights of their own, and `theme.row_height × items.len()`
+while they are all one height. The intrinsic's height is the *viewport*; this
+is everything the list scrolls through, so a plate drawn to it is as tall as
+what it holds rather than a tall empty box (§4). Only the widget can answer it
+— the wrapping is the widget's because the font metrics are — and a host that
+counted rows itself would mirror the kit's note cap and line-height ratio and
+drift from them silently. It is `None` for a table the list has not measured
+yet (the advances still in flight), where a plate sized from a guess would
+resize under the reader a frame later.
+
 ### The row under the pointer
 
 A list keeps its rows out of the host's hit table — the list owns them,

@@ -726,7 +726,12 @@ impl WasmActor for DropdownWidget {
         }
         let intrinsic = self.intrinsic();
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { intrinsic, items: self.draw_items(), overlay: self.overlay_items() });
+            parent.send(&WidgetDrawList {
+                content_height: None,
+                intrinsic,
+                items: self.draw_items(),
+                overlay: self.overlay_items(),
+            });
         }
     }
 }

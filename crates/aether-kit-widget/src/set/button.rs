@@ -242,7 +242,12 @@ impl WasmActor for ButtonWidget {
             return;
         }
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { intrinsic: self.intrinsic(), items: self.draw_items(), overlay: Vec::new() });
+            parent.send(&WidgetDrawList {
+                content_height: None,
+                intrinsic: self.intrinsic(),
+                items: self.draw_items(),
+                overlay: Vec::new(),
+            });
         }
     }
 }

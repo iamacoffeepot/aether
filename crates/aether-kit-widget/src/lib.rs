@@ -551,7 +551,10 @@ fn text_items(list: &WidgetDrawList) -> Vec<DrawText> {
 pub fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
     emit_layer(ctx, list);
     if !list.overlay.is_empty() {
-        emit_layer(ctx, &WidgetDrawList { intrinsic: None, items: list.overlay.clone(), overlay: Vec::new() });
+        emit_layer(
+            ctx,
+            &WidgetDrawList { content_height: None, intrinsic: None, items: list.overlay.clone(), overlay: Vec::new() },
+        );
     }
 }
 
@@ -645,6 +648,7 @@ mod tests {
         let a = WidgetClipRect { x: 1.0, y: 2.0, width: 3.0, height: 4.0 };
         let b = WidgetClipRect { x: 5.0, y: 6.0, width: 7.0, height: 8.0 };
         let list = WidgetDrawList {
+            content_height: None,
             intrinsic: None,
             overlay: Vec::new(),
             items: vec![
@@ -721,6 +725,7 @@ mod tests {
     fn direct_planner_keeps_unclipped_solids_one_batch_and_omits_invalid_clips() {
         let invalid = WidgetClipRect { x: 0.0, y: 0.0, width: -1.0, height: 2.0 };
         let list = WidgetDrawList {
+            content_height: None,
             intrinsic: None,
             items: vec![quad(1.0, None), quad(2.0, Some(invalid)), quad(3.0, None)],
             overlay: Vec::new(),
@@ -742,6 +747,7 @@ mod tests {
         // a row the list half covers sends only its uncovered strip.
         let row = |y: f32| WidgetClipRect { x: 10.0, y, width: 200.0, height: 24.0 };
         let list = WidgetDrawList {
+            content_height: None,
             intrinsic: None,
             items: vec![text(12.0, "covered", Some(row(40.0))), text(12.0, "half", Some(row(64.0)))],
             overlay: vec![WidgetDrawItem::Quad {
@@ -787,6 +793,7 @@ mod tests {
         composite.fill(
             background,
             WidgetDrawList {
+                content_height: None,
                 intrinsic: None,
                 items: vec![text(8.0, "24.0", Some(WidgetClipRect { x: 0.0, y: 350.0, width: 100.0, height: 20.0 }))],
                 // The reveal plate, over the numeric and whatever sits to its
@@ -797,6 +804,7 @@ mod tests {
         composite.fill(
             title,
             WidgetDrawList {
+                content_height: None,
                 intrinsic: None,
                 items: vec![text(302.0, "Pick a gem", Some(title_row))],
                 overlay: Vec::new(),
@@ -805,6 +813,7 @@ mod tests {
         composite.fill(
             ok,
             WidgetDrawList {
+                content_height: None,
                 intrinsic: None,
                 items: vec![fill(WidgetClipRect { x: 300.0, y: 600.0, width: 80.0, height: 24.0 })],
                 overlay: Vec::new(),
@@ -812,7 +821,8 @@ mod tests {
         );
 
         let flat = composite.flatten(None);
-        let overlay_lane = WidgetDrawList { intrinsic: None, items: flat.overlay, overlay: Vec::new() };
+        let overlay_lane =
+            WidgetDrawList { content_height: None, intrinsic: None, items: flat.overlay, overlay: Vec::new() };
         assert!(
             text_items(&overlay_lane).iter().any(|item| item.text == "Pick a gem"),
             "the question's own title keeps its run: what a widget behind the plate raises went down \
@@ -834,6 +844,7 @@ mod tests {
         let row = |y: f32| WidgetClipRect { x: 110.0, y, width: 180.0, height: 20.0 };
         let opened_list = WidgetClipRect { x: 110.0, y: 130.0, width: 180.0, height: 45.0 };
         let list = WidgetDrawList {
+            content_height: None,
             intrinsic: None,
             items: vec![text(110.0, "primary content", Some(plate))],
             overlay: vec![
@@ -846,7 +857,8 @@ mod tests {
         };
 
         assert!(text_items(&list).is_empty(), "the content the plate stands over sends no glyphs");
-        let overlay_lane = WidgetDrawList { intrinsic: None, items: list.overlay, overlay: Vec::new() };
+        let overlay_lane =
+            WidgetDrawList { content_height: None, intrinsic: None, items: list.overlay, overlay: Vec::new() };
         assert!(
             text_items(&overlay_lane)
                 .iter()
@@ -865,6 +877,7 @@ mod tests {
         let run = WidgetClipRect { x: 0.0, y: 0.0, width: 100.0, height: 10.0 };
         let column = |x: f32| WidgetClipRect { x, y: -2.0, width: 10.0, height: 24.0 };
         let list = WidgetDrawList {
+            content_height: None,
             intrinsic: None,
             overlay: Vec::new(),
             items: vec![text(0.0, "a run that fills its whole row", Some(run)), fill(column(20.0)), fill(column(60.0))],
@@ -901,7 +914,12 @@ mod tests {
             clip: Some(row),
         };
         let caret = WidgetClipRect { x: 40.0, y: 4.0, width: 1.0, height: 16.0 };
-        let list = WidgetDrawList { intrinsic: None, overlay: Vec::new(), items: vec![value, fill(caret)] };
+        let list = WidgetDrawList {
+            content_height: None,
+            intrinsic: None,
+            overlay: Vec::new(),
+            items: vec![value, fill(caret)],
+        };
 
         let items = text_items(&list);
         assert_eq!(items.len(), 1, "the run stays one item; got {items:?}");
@@ -921,6 +939,7 @@ mod tests {
         let header = WidgetClipRect { x: 0.0, y: 0.0, width: 200.0, height: 20.0 };
         let viewport = WidgetClipRect { x: 0.0, y: 20.0, width: 200.0, height: 100.0 };
         let list = WidgetDrawList {
+            content_height: None,
             intrinsic: None,
             overlay: Vec::new(),
             items: vec![
@@ -949,6 +968,7 @@ mod tests {
     fn text_items_preserve_authored_order_and_omit_clipped_out_items() {
         let invalid = WidgetClipRect { x: 0.0, y: 0.0, width: -1.0, height: 2.0 };
         let list = WidgetDrawList {
+            content_height: None,
             intrinsic: None,
             overlay: Vec::new(),
             items: vec![

@@ -528,7 +528,7 @@ pub(super) fn reply_if_hidden(ctx: &WasmCtx<'_>, state: &InteractionState) -> bo
         return false;
     }
     if let Some(parent) = ctx.parent() {
-        parent.send(&WidgetDrawList { intrinsic: None, items: Vec::new(), overlay: Vec::new() });
+        parent.send(&WidgetDrawList { content_height: None, intrinsic: None, items: Vec::new(), overlay: Vec::new() });
     }
     true
 }
@@ -542,7 +542,12 @@ fn reply_with_draw_items(
         return;
     }
     if let Some(parent) = ctx.parent() {
-        parent.send(&WidgetDrawList { intrinsic: None, items: draw_items(), overlay: Vec::new() });
+        parent.send(&WidgetDrawList {
+            content_height: None,
+            intrinsic: None,
+            items: draw_items(),
+            overlay: Vec::new(),
+        });
     }
 }
 
@@ -1116,7 +1121,7 @@ pub(super) fn reply_single_line_edit(ctx: &WasmCtx<'_>, edit: SingleLineEdit<'_>
     });
 
     if let Some(parent) = ctx.parent() {
-        parent.send(&WidgetDrawList { intrinsic, items, overlay });
+        parent.send(&WidgetDrawList { content_height: None, intrinsic, items, overlay });
     }
 }
 

@@ -383,6 +383,20 @@ pub struct WidgetDrawList {
     /// reader of this field takes a component only when it is finite and
     /// non-negative, exactly as the panel does when it sizes a slot.
     pub intrinsic: Option<[f32; 2]>,
+    /// The whole of what the widget holds, in logical pixels down, when that
+    /// is taller than the viewport it draws in — a virtual list's whole item
+    /// vector rather than the window of it on screen. `None` for a widget
+    /// whose `intrinsic` height already is everything it holds, which is most
+    /// of them.
+    ///
+    /// It is here because only the widget can answer it: the wrapping is the
+    /// widget's, because the font metrics are. A host that draws a container
+    /// around a scrolling widget sizes it to this — a four-row table gets a
+    /// four-row plate rather than a tall empty box — instead of mirroring the
+    /// widget's own row arithmetic and drifting from it (the studio's gap
+    /// 41).
+    #[serde(default)]
+    pub content_height: Option<f32>,
     pub items: Vec<WidgetDrawItem>,
     pub overlay: Vec<WidgetDrawItem>,
 }

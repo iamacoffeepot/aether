@@ -30,6 +30,18 @@
 //! the whole item vector, which the list reports as its intrinsic width so a
 //! column can be sized to what it holds.
 //!
+//! # What the list reports about its own size
+//!
+//! Two numbers ride up with the draw list. `WidgetDrawList::intrinsic` is the
+//! size the list asks a **layout** for — the widest row of the whole vector
+//! plus a pad each side, by the configured viewport's height. `content_height`
+//! is what the whole vector stands at, which is the scroll extent said in
+//! pixels: the offset table's last sum for a table, the configured pitch by
+//! the item count for a fixed-pitch list. A host draws the container around a
+//! list from the second — a four-row table gets a four-row plate rather than a
+//! tall empty box — because only the widget can answer it, the wrapping being
+//! the widget's and the font metrics with it (the studio's gap 41).
+//!
 //! # The row under the pointer
 //!
 //! The list keeps its rows out of the host's hit table — the list owns them,
@@ -1385,6 +1397,31 @@ impl VirtualListWidget {
         (width.is_finite() && height.is_finite()).then_some([width, height])
     }
 
+    /// The whole item vector's height in pixels: the offset table's last sum
+    /// once the rows have heights of their own, and the configured pitch by
+    /// the item count while every row is one height.
+    ///
+    /// This is the scroll extent's `content` said in pixels. The extent counts
+    /// **rows** on the fixed-pitch path, because the bar is a ratio either
+    /// way; a host drawing a container around the list needs the pixels, so
+    /// the one number is stated in both units from the same two branches
+    /// rather than re-derived on the host's side out of a mirrored row
+    /// arithmetic that drifts (the studio's gap 41).
+    ///
+    /// `None` for a table whose rows the list has not measured yet — the
+    /// offset table missing while some row asks for a height of its own, or
+    /// the font's advances still in flight, either of which would answer with
+    /// a note wrapped onto a line count it is about to change. A plate sized
+    /// from that would resize under the reader a frame later.
+    fn content_height(&self) -> Option<f32> {
+        let Some(tops) = &self.row_tops else {
+            #[allow(clippy::cast_precision_loss)] // a row count a reader could scroll cannot lose precision
+            return (!self.rows_vary).then_some(self.theme.row_height * self.items.len() as f32);
+        };
+        self.font_metrics.resolved()?;
+        Some(tops.last().copied().unwrap_or(0.0))
+    }
+
     /// The height the viewport asks for: the configured row count at the one
     /// pitch, and the first that many rows' own heights once they have any.
     ///
@@ -1887,7 +1924,8 @@ impl WasmActor for VirtualListWidget {
     }
 
     /// Reply the realized rows, each elided to the width it has, plus the
-    /// intrinsic the widest row asks for.
+    /// intrinsic the widest row asks for and the height the whole vector
+    /// stands at.
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         if reply_if_hidden(ctx, &self.state) {
@@ -1895,9 +1933,10 @@ impl WasmActor for VirtualListWidget {
         }
         self.refresh_row_layout();
         let intrinsic = self.intrinsic();
+        let content_height = self.content_height();
         let items = self.draw_items();
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { intrinsic, items, overlay: Vec::new() });
+            parent.send(&WidgetDrawList { intrinsic, content_height, items, overlay: Vec::new() });
         }
     }
 }
@@ -2992,6 +3031,53 @@ mod tests {
             VirtualListConfig::default().scroll_strip_width(&theme),
             0.0,
             "a list drawing its own bar asks the host for no column at all",
+        );
+    }
+
+    #[test]
+    fn the_content_height_is_the_extent_the_table_scrolls_through_rather_than_a_pitch_by_rows() {
+        // Tripwire: the studio's gap 41. A host draws the plate under a list
+        // from this number and the list scrolls through the extent, so the
+        // two have to be the one number — a content height re-derived as
+        // pitch × rows under-measures every table whose rows carry a note or
+        // open a block, and the plate is then cut short of its own last rows
+        // while the list happily scrolls to them.
+        let items = alloc::vec![
+            VirtualListRow::from("Armour").with_trailing(vec!["1240".into()]),
+            noted(
+                "Physical damage mitigated",
+                "the share of a hit of the size this fight expects that the armour value above takes off",
+            ),
+            VirtualListRow::from("Resistances").with_space_before(3).with_rule_above(),
+        ];
+        let widget = table_list(items, 5);
+
+        assert_eq!(
+            widget.content_height(),
+            Some(widget.scroll_extent().content),
+            "the plate is drawn to the height the list scrolls through",
+        );
+        assert!(
+            widget.scroll_extent().content > widget.theme.row_height * 3.0,
+            "and a table of notes and block gaps stands taller than three rows of pitch",
+        );
+
+        let plain = measured_list(200, 5);
+        assert_eq!(plain.scroll_extent().content, 200.0, "a fixed-pitch list counts its extent in rows");
+        assert_eq!(
+            plain.content_height(),
+            Some(plain.theme.row_height * 200.0),
+            "and reports the same content in the pixels a host draws with",
+        );
+
+        let mut unwrapped = list(1, 5, 0);
+        unwrapped.items = alloc::vec![noted("Armour", "a sentence long enough to wrap onto a second line")];
+        unwrapped.rows_vary = true;
+        unwrapped.refresh_row_layout();
+        assert_eq!(
+            unwrapped.content_height(),
+            None,
+            "a table whose notes have not been wrapped against real advances says nothing rather than a number it is about to change",
         );
     }
 

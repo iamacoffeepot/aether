@@ -522,7 +522,12 @@ impl WasmActor for ToastWidget {
             return;
         }
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { intrinsic: None, items: Vec::new(), overlay: self.overlay_items() });
+            parent.send(&WidgetDrawList {
+                content_height: None,
+                intrinsic: None,
+                items: Vec::new(),
+                overlay: self.overlay_items(),
+            });
         }
     }
 }

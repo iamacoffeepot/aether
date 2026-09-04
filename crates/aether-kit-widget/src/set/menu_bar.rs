@@ -629,7 +629,12 @@ impl WasmActor for MenuBarWidget {
             return;
         }
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { intrinsic: None, items: self.draw_items(), overlay: self.overlay_items() });
+            parent.send(&WidgetDrawList {
+                content_height: None,
+                intrinsic: None,
+                items: self.draw_items(),
+                overlay: self.overlay_items(),
+            });
         }
     }
 }
