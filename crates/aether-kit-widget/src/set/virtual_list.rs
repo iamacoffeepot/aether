@@ -186,6 +186,15 @@
 //! touched it. The wheel moves the window and so does dragging the thumb; the
 //! two write the same `first_index`, which is the list's whole scroll state.
 //!
+//! The end of that travel is the **last window**: the first row whose top
+//! clears a viewport of the content's end, rather than the last row starting
+//! before it. A frame is rarely an exact prefix sum of its rows — a plate
+//! capped by a pane's height never is — and rounding the other way left the
+//! final row hanging below the frame's edge with nothing left to roll, which
+//! is round-17 note 1, "on defense extended stats cannot scroll to bottom"
+//! (the studio's gap 41a). The slack, never more than one row, falls above
+//! the last window's start.
+//!
 //! The bar stands off the rows by a **gutter**, and the gutter is the host's:
 //! [`VirtualListConfig::scroll_bar_gap_units`], two spacing units by default,
 //! because a control inside a plate sits at least two units from its edge
@@ -923,6 +932,14 @@ impl VirtualListWidget {
         let Some(tops) = &self.row_tops else {
             return (offset.round() as usize).min(max_first_index);
         };
+        // The end of the travel is the *last window* rather than the row that
+        // happens to start before it: a thumb dragged to the bottom of its
+        // track and a wheel rolled past the end both mean "show the end of the
+        // content", and rounding those down is the same row-short stop
+        // `max_first_index` rounds up out of (gap 41a).
+        if offset >= self.last_window_top() {
+            return max_first_index;
+        }
         tops.partition_point(|top| *top <= offset).saturating_sub(1).min(max_first_index)
     }
 
@@ -1261,19 +1278,37 @@ impl VirtualListWidget {
         self.scroll_bar().map_or(0.0, |bar| bar.width + self.scroll_bar_gap())
     }
 
+    /// Where the **last** window stands in content space: a viewport short of
+    /// the content's end, and `0.0` for content that fits. Zero on the fast
+    /// path, whose content is counted in rows rather than pixels.
+    fn last_window_top(&self) -> f32 {
+        self.row_tops.as_ref().map_or(0.0, |tops| tops.last().copied().unwrap_or(0.0) - self.frame.height)
+    }
+
     /// The topmost row the window can start at: the one past which the rest of
-    /// the content no longer fills the viewport. A count on the fast path, and
-    /// the last row whose top clears a viewport of the content's end once the
+    /// the content no longer fills the viewport. A count on the fast path,
+    /// where a viewport is a whole number of rows by construction, and the
+    /// **first** row whose top clears a viewport of the content's end once the
     /// offset table stands.
+    ///
+    /// That last window is rounded **up** (the studio's gap 41a, round-17 note
+    /// 1 — "on defense extended stats cannot scroll to bottom"). Rounded down
+    /// it started on the last row whose top is at or before the content's end,
+    /// so unless the frame happened to be an exact prefix sum of the rows the
+    /// window stopped short by up to a row's height and the final statistic
+    /// hung below the frame's edge with nothing left to roll. Up, the last row
+    /// lands inside the frame and the slack — never more than one row — falls
+    /// above the window's start, which is what every scrolling view does with
+    /// the end of its content.
     fn max_first_index(&self) -> usize {
         let Some(tops) = &self.row_tops else {
             return self.items.len().saturating_sub(self.visible_row_count);
         };
-        let last_top = tops.last().copied().unwrap_or(0.0) - self.frame.height;
+        let last_top = self.last_window_top();
         if !last_top.is_finite() || last_top <= 0.0 {
             return 0;
         }
-        tops.partition_point(|top| *top <= last_top).saturating_sub(1).min(self.items.len().saturating_sub(1))
+        tops.partition_point(|top| *top < last_top).min(self.items.len().saturating_sub(1))
     }
 
     /// Move the window to `first_index`, clamped. Selection is untouched: a
@@ -3031,6 +3066,79 @@ mod tests {
             VirtualListConfig::default().scroll_strip_width(&theme),
             0.0,
             "a list drawing its own bar asks the host for no column at all",
+        );
+    }
+
+    #[test]
+    fn the_last_row_of_a_table_lands_inside_the_frame_however_the_frame_divides_its_rows() {
+        // Tripwire: round-17 note 1, verbatim — "On defense extended stats
+        // cannot scroll to bottom" (the studio's gap 41a). The window starts
+        // on a row's own top, so the last window has to be the first one that
+        // reaches the content's end. Chosen as the *last* row starting at or
+        // before that end instead, the window stops short by up to a row and
+        // the final statistic hangs below the frame's edge with nothing left
+        // to roll — invisible on any frame that happens to be an exact prefix
+        // sum of its rows, which a plate capped by a pane's height never is.
+        let items = alloc::vec![
+            noted("Armour", "the share of a hit of the size this fight expects that this takes off it"),
+            VirtualListRow::from("Evasion").with_trailing(vec!["1240".into()]),
+            noted("Fire resistance", "the lines come to -60%, with no headroom over the maximum at all"),
+            VirtualListRow::from("Stun threshold").with_space_before(3).with_rule_above(),
+            noted("Block", "nothing on this build blocks, so the chance is the character's own"),
+        ];
+        let mut widget = table_list(items, 5);
+        let tops = widget.row_tops.clone().expect("a table keeps an offset table");
+
+        // A frame that ends half way down the second row's slot: the content's
+        // end lands strictly inside a row rather than on one's top edge.
+        let half_row = (tops[2] - tops[1]) * 0.5;
+        widget.frame = WidgetFrame { height: tops.last().expect("content") - tops[1] - half_row, ..widget.frame };
+        widget.refresh_row_layout();
+        let tops = widget.row_tops.clone().expect("a table keeps an offset table");
+        let last_top = widget.last_window_top();
+        assert!(
+            last_top > tops[1] && last_top < tops[2],
+            "the frame is not an exact prefix sum of the rows: {last_top} between {} and {}",
+            tops[1],
+            tops[2],
+        );
+
+        widget.scroll_to(usize::MAX);
+        let last_index = widget.items.len() - 1;
+        assert_eq!(widget.window().end_exclusive_index, widget.items.len(), "the last window realizes the last row");
+        let bands = widget.row_bands(last_index).expect("the last row is realized at the end of the vector");
+        assert!(
+            bands.plate_top + bands.plate_height <= widget.frame.height + 1e-3,
+            "the last row's bottom is inside the frame: {} of {}",
+            bands.plate_top + bands.plate_height,
+            widget.frame.height,
+        );
+
+        // And the bar reaches the same place: a thumb dragged to the bottom of
+        // its track means the end of the content, not the row that happens to
+        // start before it.
+        widget.first_index = 0;
+        let bar = widget.scroll_bar().expect("a table past its frame stands a bar");
+        widget.press_scroll_bar(bar, bar.height);
+        assert_eq!(widget.first_index, widget.max_first_index(), "the thumb's own end is the list's end");
+    }
+
+    #[test]
+    fn a_fixed_pitch_list_still_ends_on_its_last_row_exactly() {
+        // Tripwire: the fast path divides the frame by the configured row
+        // count, so its viewport is a whole number of rows and its last window
+        // is the item count less that — rounding it the way a table's is
+        // rounded would scroll one row past the end and draw a blank strip
+        // under the last row.
+        let mut widget = measured_list(200, 5);
+        widget.scroll_to(usize::MAX);
+        assert_eq!(widget.first_index, 195);
+        assert_eq!(widget.window().end_exclusive_index, 200, "and the window ends on the last item");
+        let bands = widget.row_bands(199).expect("the last row is realized");
+        assert!(
+            (bands.plate_top + bands.plate_height - widget.frame.height).abs() < 1e-3,
+            "its bottom is the frame's own bottom: {}",
+            bands.plate_top + bands.plate_height,
         );
     }
 

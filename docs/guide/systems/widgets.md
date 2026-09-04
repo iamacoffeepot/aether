@@ -433,6 +433,15 @@ the pointer, a press on the bare track carries the reader to where they
 pointed. Scrolling never changes selection: a reader looking at something has
 not chosen it. A press on the bar chooses no row.
 
+The end of the travel is the **last window** — the first row whose top clears
+a viewport of the content's end, not the last row that starts before it. The
+window begins on a row's own top, so on a frame that is not an exact prefix sum
+of its rows (a plate capped by a pane's height never is) the other rounding
+stopped short by up to a row and left the final row hanging below the frame's
+edge with nothing left to roll ("cannot scroll to bottom"). The slack, at most
+one row, falls above the window's start instead, and a thumb dragged to the
+bottom of its track lands in the same window the wheel does.
+
 The bar owns a **gutter** at the frame's right end — its track plus
 `scroll_bar_gap_units` of clear space — and a row is laid out, filled, and
 elided inside what is left, so the bar stands beside the rows rather than on
