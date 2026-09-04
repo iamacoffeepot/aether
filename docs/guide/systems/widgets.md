@@ -1177,12 +1177,14 @@ of its label than to its left. The strip reports the row it *wanted* as its
 `WidgetDrawList::intrinsic` — `[every tab at its natural width + one
 theme.space(1) between them, row height]` — so a layout that sizes the strip's
 slot to it never triggers the fit at all; like the image widget's natural size,
-the reference panel does not yet consume it. The selected tab is marked by a
-two-pixel `theme.text_primary` underline along its bottom edge and nothing
-else: every tab keeps the row's own `surface_raised` fill and `text_primary`
-ink, so the strip reads as a row of places with one marked rather than a row of
-buttons with one lit, and hover and press stay the only fills the pointer
-changes (the usual `Theme::fill` overlays). The tab strip is the one current-item
+the reference panel does not yet consume it. The selected tab is marked twice, by
+ink and by a two-pixel `theme.text_primary` underline along its bottom edge:
+its label is written in `theme.text_primary` while every other tab's recedes
+into `theme.text_muted`, the same ink the kit spends on a caption or a
+placeholder. It is never marked by a fill — every tab keeps the row's own
+`surface_raised`, so the strip reads as a row of places with one marked rather
+than a row of buttons with one lit, and hover and press stay the only fills the
+pointer changes (the usual `Theme::fill` overlays). The tab strip is the one current-item
 control that does not take the selection role — a segmented control divides one
 bar and needs the fill to say which part is chosen, while a tab already reads as
 a place you are standing in.
@@ -1207,7 +1209,10 @@ its own tab** at the strip's bottom edge, and a one-pixel `theme.outline` rule
 runs under the whole strip, drawn first so the underline lights its own span
 of it — the row reads as the top edge of the content it switches. The accent
 is spent as a *mark* and never as a fill, so no tab is plated in the primary
-action's colour. With no plate to carry the pointer's answer, a hovered or
+action's colour. The labels follow the chips' rule unchanged — the current
+tab's run in `theme.text_primary`, every other one's in `theme.text_muted` —
+so both shapes say which tab is live in ink first and differ only in the colour
+of the underline. With no plate to carry the pointer's answer, a hovered or
 pressed tab draws the role-agnostic `hover_overlay` / `pressed_overlay` as its
 whole background. A share too narrow for its label elides it with the kit's
 ellipsis and centres the run in the share, the same rule the fitted chips
