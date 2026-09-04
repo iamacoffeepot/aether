@@ -1139,6 +1139,7 @@ impl WasmActor for VirtualListWidget {
             return;
         }
         let (local_x, local_y) = (press.x - self.frame.x, press.y - self.frame.y);
+        self.pointer_local = Some((local_x, local_y));
         match self.press_target(local_x, local_y) {
             Some(PressTarget::ScrollBar(bar)) => self.press_scroll_bar(bar, local_y),
             Some(PressTarget::Action(index)) => self.pressed_action = Some(index),
@@ -1150,6 +1151,9 @@ impl WasmActor for VirtualListWidget {
             }
             None => {}
         }
+        // A press on a row reveals it, which can move the window: the pointer
+        // is where it was and the row under it may not be.
+        self.settle_hovered_row(ctx);
     }
 
     /// Carry a live thumb drag, or follow the pointer across the rows and the
@@ -1228,6 +1232,9 @@ impl WasmActor for VirtualListWidget {
         if let Some(selected_index) = self.move_selection_if_mutable(movement) {
             Self::emit(ctx, selected_index);
         }
+        // A keyboard reveal moves the window as surely as the wheel does, so
+        // the row under a pointer that has not moved is a different row now.
+        self.settle_hovered_row(ctx);
     }
 
     /// Reply the realized rows, each elided to the width it has, plus the

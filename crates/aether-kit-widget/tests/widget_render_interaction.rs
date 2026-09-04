@@ -3050,6 +3050,12 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
         "paging must reach and attribute the final item; log was:\n{}",
         tail_log.join("\n"),
     );
+    // The pointer has not moved since `hover_selected`, but forty-seven
+    // PageDowns have moved the realized window under it. The bottom row is
+    // still both the chosen row and the row under the pointer, so it still
+    // draws the composed selected-and-hovered face — which is the list
+    // recomputing its hover from the window rather than from the last pointer
+    // event alone.
     let tail = harness.committed_overlay_snapshot();
     assert_virtual_list_rows(&tail, 4, Theme::DEFAULT.fill(Theme::DEFAULT.selection, ThemeState::Hover), 8);
     assert_five_virtual_list_glyph_rows(&tail);
