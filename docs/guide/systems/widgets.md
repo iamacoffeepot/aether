@@ -277,6 +277,7 @@ an `Rgba`:
 | `Muted` | `text_muted`, whatever the role's size |
 | `Accent` | `accent` — as a **run**, never a plate |
 | `RarityCommon` / `RarityUncommon` / `RarityRare` / `RarityLegendary` | the four rungs of the theme's rarity ladder |
+| `HueWarm` / `HueCool` / `HueBright` / `HueViolet` / `HuePlain` | the five inks of the theme's hue set |
 
 It exists because a row is more than one run. A list row's name and its
 trailing amount, a dropdown option and the closed row it is repeated on —
@@ -291,6 +292,30 @@ each is chosen so it clears 4.5 against the raised surface and 3.0 against
 **every fill a row can draw under it** — the hover wash and the selection
 included. That is why the top rung is a warm gold rather than the obvious deep
 gold-brown: the deep one measures 2.4 on a chosen row under the pointer.
+
+The **hue set** is the second vocabulary, and it is a *set* rather than a
+ladder: five inks told apart by colour with no order between them, for a
+vocabulary whose members are kinds rather than ranks — a damage type, a
+faction, a category tag. `hue_plain` is the neutral member and the four beside
+it are a warm, a cool, a bright and a violet. What they *name* is the host's:
+the mapping from its own vocabulary to these five belongs in one function of
+its own, so a tag never picks an `Rgba` at the call site.
+
+They are measured the way the ladder is, against all four fills a list row can
+draw under them:
+
+| ink | default | on the plate | on the hover wash | on a selected row | selected, under the pointer |
+|---|---|---|---|---|---|
+| `HueWarm` | `#ffb08a` | 8.98 | 4.09 | 5.82 | 3.33 |
+| `HueCool` | `#8ad8ff` | 10.13 | 4.61 | 6.57 | 3.76 |
+| `HueBright` | `#ffef9e` | 13.73 | 6.26 | 8.91 | 5.10 |
+| `HueViolet` | `#d4b8ff` | 9.18 | 4.18 | 5.96 | 3.41 |
+| `HuePlain` | `#d6d2c4` | 10.53 | 4.80 | 6.83 | 3.91 |
+
+Every one of them is lifted off the saturation its hue "naturally" wants,
+because the saturated pick — the fire orange, the chaos purple — measures
+around 2.8 against a chosen row under the pointer, which is the fill a run of
+tags spends its life on in a list a reader is scanning.
 
 `Accent` is a run and not a plate for the same reason the button ladder
 reserves the filled accent for one verb: the accent means the primary action,
