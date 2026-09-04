@@ -51,36 +51,56 @@
 //!
 //! # A row is two columns and a type step
 //!
-//! A [`VirtualListRow`] is its `text`, an optional `trailing` run, and the
-//! `role` both are set at. The trailing run is the row's **second column**: a
-//! version, a count, a key — set right-aligned against the row's own right
-//! pad, with the widest trailing run among the *realized* rows deciding the
-//! column every one of them shares. The leading run elides into what is left
-//! and the trailing never does, because a name cut short still names the thing
-//! while an amount cut short is a wrong number. `role` lets a list carry a
-//! name at [`TextRole::Body`] and a detail at [`TextRole::Caption`] — muted,
-//! like a caption-role label — without the host drawing its own rows.
+//! A [`VirtualListRow`] is its `text`, a `trailing` run of [`InkedSpan`]s, and
+//! the `role` both are set at. The trailing run is the row's **second column**:
+//! a version, a count, a key, a run of tags — set right-aligned against the
+//! row's own right pad, with the widest trailing run among the *realized* rows
+//! deciding the column every one of them shares. The leading run elides into
+//! what is left, because a name cut short still names the thing while an amount
+//! cut short is a wrong number. `role` lets a list carry a name at
+//! [`TextRole::Body`] and a detail at [`TextRole::Caption`] — muted, like a
+//! caption-role label — without the host drawing its own rows.
 //!
-//! `ink` colours the **leading run only** ([`TextInk`]), so a name can say its
-//! own tier without a suffix after it or a plate behind the row. The trailing
-//! run keeps the row ink whatever the name is written in: a column of amounts
-//! is read down one edge, and four colours down it is a column nobody can
-//! compare. A named ink survives the row being chosen, because what a tier says
-//! about a thing does not stop being true when the reader clicks it.
+//! The trailing run is spans rather than one string because a tag wears the ink
+//! of what it names: `Spell Fire Duration` is three words in three inks on one
+//! line, one word gap apart. The run right-aligns as a whole, and a run too
+//! wide for the column gives way by **dropping whole spans off its end** — a
+//! span is a word that means something on its own, so half of one is worse than
+//! none of it, and the leading run's ellipsis stays the only cut mark on the
+//! row. The head span always stays: the column exists for the fact in it.
+//!
+//! `ink` colours a run: the leading `text` carries the row's, each trailing
+//! span carries its own ([`TextInk`]), so a name can say its own tier without a
+//! suffix after it or a plate behind the row. A named ink survives the row
+//! being chosen — what a tier or a damage type says about a thing does not stop
+//! being true when the reader clicks it — while a span left `Inherited` follows
+//! the row into `selection_text` the way it always did. A column of *amounts*
+//! wants one ink down its edge and gets it by naming none.
 //!
 //! # A verb can sit on the row
 //!
 //! Round-9 note 4 — "skills should be removed via 'x' button bound to row",
-//! drawn as `"Spark" ——— [Change gem] [x]`. A row's `actions` are
+//! drawn as `"Spark" ——— [Change gem][x]`. A row's `actions` are
 //! [`RowAction`]s, and the list draws each as a real button at the row's right
 //! end: the kit's own button face (`push_button_face` in `set`), so one
 //! emphasis ladder, one elision rule, and one hover answer serve a verb whether
 //! it stands in a slot of its own or inside a row this widget owns.
 //!
+//! The verbs are **flush** (round-12 note 1): nothing between one face and the
+//! next, and the last face ends on the row's own right edge rather than on its
+//! right pad. Two touching faces are told apart by a hairline in
+//! [`Theme::edge`] on every boundary inside the block, because the rank a row
+//! verb takes is [`ButtonEmphasis::Text`](crate::ButtonEmphasis) — a label and
+//! no face at all — and two labels touching with nothing between them read as
+//! one word. Where a verb already draws an outlined stroke the hairline lands
+//! on it in the very same token, so a mixed block gains no second line.
+//!
 //! They are a **third column**, reserved before the text like the second one:
 //! the widest verb block among the realized rows is the column every row gives
 //! up, so the names elide on one edge rather than at ragged points, and the
-//! trailing run sits clear of the verbs instead of under them. A press on a
+//! trailing run sits clear of the verbs instead of under them. The reserve is
+//! that block plus one gap of clear space *less* one pad, since the block
+//! stands in the pad the text budget already gave up. A press on a
 //! verb arms it and the release-inside fires [`VirtualListAction`] — the
 //! button's own press-then-release-inside, so a press that slides off cancels,
 //! which is what a `×` that unbinds a skill deserves. It reports **no**
@@ -130,7 +150,7 @@ use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{SetTheme, TextInk, TextRole, Theme, ThemeState};
 use crate::{
-    Collect, HoverLost, RowAction, SetWidgetState, VirtualListAction, VirtualListConfig, VirtualListHover,
+    Collect, HoverLost, InkedSpan, RowAction, SetWidgetState, VirtualListAction, VirtualListConfig, VirtualListHover,
     VirtualListRow, VirtualListSelected, WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 
@@ -162,11 +182,19 @@ const SCROLL_BAR_GAP_UNITS: u8 = 1;
 /// little enough that a short name and its amount still read as one row.
 const TRAILING_GAP_UNITS: u8 = 1;
 
-/// How much clear space stands between one row verb and the next, and between
-/// the verb block and the text columns beside it, in spacing units. One — the
-/// same gap the trailing column keeps, so a row of two columns and two verbs
-/// reads as four things in a row rather than as a strip of controls.
-const ACTION_GAP_UNITS: u8 = 1;
+/// The theme's word gap — how much clear space stands between one span of a
+/// trailing run and the next, in spacing units. One: the spans are words on
+/// one line, so they are spaced like words rather than like columns.
+const TRAILING_SPAN_GAP_UNITS: u8 = 1;
+
+/// How much clear space stands between the verb block and the text columns
+/// beside it, in spacing units. One — the same gap the trailing column keeps,
+/// so a row of two columns and a block of verbs reads as three things in a row.
+///
+/// Nothing stands between one verb and the next: they are **flush**, and the
+/// last one ends on the row's own right edge rather than on its right pad
+/// (round-12 note 1).
+const ACTION_BLOCK_GAP_UNITS: u8 = 1;
 
 /// One verb of one row, addressed the way [`VirtualListAction`] reports it: an
 /// index into the item vector, and an index into that row's own actions.
@@ -546,15 +574,35 @@ impl VirtualListWidget {
         )
     }
 
-    /// The whole verb block one row carries: every verb, plus one gap between
-    /// each pair. `0.0` for a row with no verbs.
+    /// The whole verb block one row carries: every verb, edge to edge. `0.0`
+    /// for a row with no verbs.
+    ///
+    /// Nothing is added between them — the owner's round-12 note 1, "flush
+    /// means touching" — so a two-verb block is exactly its two faces wide.
     fn actions_width(&self, row: &VirtualListRow) -> f32 {
-        let Some(pair_count) = row.actions.len().checked_sub(1) else {
-            return 0.0;
-        };
-        #[allow(clippy::cast_precision_loss)] // a row carries verbs a reader can press, not thousands
-        let gaps = pair_count as f32 * self.theme.space(ACTION_GAP_UNITS);
-        row.actions.iter().map(|action| self.action_width(action)).sum::<f32>() + gaps
+        row.actions.iter().map(|action| self.action_width(action)).sum()
+    }
+
+    /// What a verb block of `block` pixels takes off the right end of a row's
+    /// **text budget**, which is the row less one pad at each end.
+    ///
+    /// The block ends on the row's own right edge rather than on its right pad,
+    /// so the pad the text budget already gave up is pad the block is standing
+    /// in: the reserve is the block plus its one gap of clear space, *less*
+    /// that pad. `0.0` for a row with no verbs, and never negative — a theme
+    /// whose pad is wider than a whole verb block reserves nothing rather than
+    /// handing the text more room than the row has.
+    fn block_reserve(&self, block: f32) -> f32 {
+        match block {
+            block if block > 0.0 => (block + self.theme.space(ACTION_BLOCK_GAP_UNITS) - self.theme.pad).max(0.0),
+            _ => 0.0,
+        }
+    }
+
+    /// What one row's own verbs take off its text budget — the intrinsic's
+    /// half of [`Self::actions_reserve`], which measures the shared column.
+    fn actions_reserve_for(&self, row: &VirtualListRow) -> f32 {
+        self.block_reserve(self.actions_width(row))
     }
 
     /// The verb block this window's rows share: the widest among the rows **on
@@ -569,27 +617,28 @@ impl VirtualListWidget {
     }
 
     /// What the verbs take off the right end of every row's text: the shared
-    /// block plus one gap of clear space, or nothing when no realized row
-    /// carries a verb.
+    /// block's reserve, or nothing when no realized row carries a verb.
     fn actions_reserve(&self, window: VisibleRowWindow) -> f32 {
-        match self.actions_column(window) {
-            column if column > 0.0 => column + self.theme.space(ACTION_GAP_UNITS),
-            _ => 0.0,
-        }
+        self.block_reserve(self.actions_column(window))
     }
 
     /// Where each verb of one row stands. The block is right-aligned against
-    /// the row's own right pad and the verbs run left to right in the order
-    /// they were written, so the last one written is the one at the row's edge
-    /// — the owner's `[Change gem] [x]`, with the `×` outermost.
+    /// the **row's own right edge** — not its right pad — and the verbs run
+    /// left to right in the order they were written, touching, so the last one
+    /// written is the one on the edge: the owner's `[Change gem][x]`, with the
+    /// `×` outermost and nothing after it.
+    ///
+    /// Round 11 read "flush" as one spacing unit between the verbs and the
+    /// block sitting on the row's right pad; round-12 note 1 says the pad and
+    /// the gaps both go, so a pressable face runs to the row's edge and the
+    /// pair reads as one block of verbs rather than two loose controls.
     fn action_rects(&self, row: &VirtualListRow, row_y: f32, row_height: f32) -> Vec<ActionRect> {
-        let gap = self.theme.space(ACTION_GAP_UNITS);
-        let mut x = self.row_width() - self.theme.pad - self.actions_width(row);
+        let mut x = self.row_width() - self.actions_width(row);
         let mut rects = Vec::with_capacity(row.actions.len());
         for action in &row.actions {
             let width = self.action_width(action);
             rects.push(ActionRect { x, y: row_y, width, height: row_height });
-            x += width + gap;
+            x += width;
         }
         rects
     }
@@ -674,16 +723,56 @@ impl VirtualListWidget {
             };
             let theme_state = self.action_theme_state(RowActionIndex { row_index: item_index, action_index });
             push_button_face(items, &face, &self.theme, theme_state, self.font_metrics.resolved());
+            if action_index > 0 {
+                items.push(quad(rect.x, rect.y, ROW_RULE_THICKNESS, rect.height, self.theme.edge()));
+            }
         }
     }
 
-    /// One row's measured trailing width, or `0.0` for a row without one and
-    /// while the font's advances are still in flight.
-    fn trailing_width(&self, row: &VirtualListRow) -> f32 {
-        let (Some(trailing), Some(metrics)) = (row.trailing.as_deref(), self.font_metrics.resolved()) else {
+    /// The width `spans` occupy on one line at `size`: each span measured, plus
+    /// the theme's word gap between each pair. `0.0` for an empty run and while
+    /// the font's advances are still in flight.
+    fn spans_width(&self, spans: &[InkedSpan], size: f32) -> f32 {
+        let (Some(metrics), Some(pair_count)) = (self.font_metrics.resolved(), spans.len().checked_sub(1)) else {
             return 0.0;
         };
-        measured_text_width(metrics, trailing, self.theme.text_size_pixels(row.role))
+        #[allow(clippy::cast_precision_loss)] // a trailing run is a few words on one line
+        let gaps = pair_count as f32 * self.theme.space(TRAILING_SPAN_GAP_UNITS);
+        spans.iter().map(|span| measured_text_width(metrics, &span.text, size)).sum::<f32>() + gaps
+    }
+
+    /// The prefix of one row's trailing run that fits `budget`: whole spans
+    /// dropped off its **end** until what is left fits.
+    ///
+    /// A span is a word that means something on its own — `Fire`, `21/20` — so
+    /// half of one is worse than none of it. The run gives way by dropping tags
+    /// off the end rather than by cutting one mid-word, which keeps the
+    /// ellipsis on the leading run the only cut mark a row carries.
+    ///
+    /// The **head span always stays**, even when it alone is wider than the
+    /// budget: the column exists for the fact in it, so a row whose one amount
+    /// is wider than the row shows the amount and gives the name nothing,
+    /// rather than showing an empty column and a full-width name.
+    fn fitted_trailing<'row>(&self, row: &'row VirtualListRow, budget: f32) -> &'row [InkedSpan] {
+        let size = self.theme.text_size_pixels(row.role);
+        let mut spans = row.trailing.as_slice();
+        while spans.len() > 1 && self.spans_width(spans, size) > budget {
+            spans = &spans[..spans.len() - 1];
+        }
+        spans
+    }
+
+    /// The widest a trailing column may be: the row's text budget less the verb
+    /// block. A run of tags wider than the row it is in is not a column, and it
+    /// is what gives way rather than the leading run being squeezed to nothing.
+    fn trailing_budget(&self, actions_reserve: f32) -> f32 {
+        (self.text_width_budget() - actions_reserve).max(0.0)
+    }
+
+    /// One row's trailing run once it has been fitted to `budget`, or `0.0` for
+    /// a row without one and while the font's advances are still in flight.
+    fn trailing_width(&self, row: &VirtualListRow, budget: f32) -> f32 {
+        self.spans_width(self.fitted_trailing(row, budget), self.theme.text_size_pixels(row.role))
     }
 
     /// The trailing column this window's rows share: the widest trailing run
@@ -692,10 +781,10 @@ impl VirtualListWidget {
     /// see — and a column sized by an off-screen row would leave a visible gap
     /// nothing stands in. `0.0` when no realized row has a trailing run, which
     /// is the ordinary single-column list.
-    fn trailing_column(&self, window: VisibleRowWindow) -> f32 {
+    fn trailing_column(&self, window: VisibleRowWindow, budget: f32) -> f32 {
         self.items[window.first_index..window.end_exclusive_index]
             .iter()
-            .map(|row| self.trailing_width(row))
+            .map(|row| self.trailing_width(row, budget))
             .fold(0.0_f32, f32::max)
     }
 
@@ -856,13 +945,11 @@ impl VirtualListWidget {
             .iter()
             .map(|row| {
                 let size = self.theme.text_size_pixels(row.role);
-                let trailing =
-                    row.trailing.as_deref().map_or(0.0, |trailing| gap + measured_text_width(metrics, trailing, size));
-                let actions = match self.actions_width(row) {
-                    block if block > 0.0 => block + self.theme.space(ACTION_GAP_UNITS),
+                let trailing = match self.spans_width(&row.trailing, size) {
+                    run if run > 0.0 => gap + run,
                     _ => 0.0,
                 };
-                measured_text_width(metrics, &row.text, size) + trailing + actions
+                measured_text_width(metrics, &row.text, size) + trailing + self.actions_reserve_for(row)
             })
             .fold(0.0_f32, f32::max);
         self.widest_row_width = Some(widest);
@@ -962,8 +1049,9 @@ impl VirtualListWidget {
         };
 
         let row_width = self.row_width();
-        let trailing_column = self.trailing_column(window);
         let actions_reserve = self.actions_reserve(window);
+        let trailing_budget = self.trailing_budget(actions_reserve);
+        let trailing_column = self.trailing_column(window, trailing_budget);
         let leading_budget = self.leading_width_budget(trailing_column, actions_reserve);
         let mut items = Vec::with_capacity(visible_row_count.saturating_mul(3).saturating_add(8));
         for (row_offset, item) in self.items[window.first_index..window.end_exclusive_index].iter().enumerate() {
@@ -986,18 +1074,25 @@ impl VirtualListWidget {
             });
             // The trailing run is set flush against the row's right pad — or
             // against the verb block when one stands there — so every row's
-            // second column ends on one edge. It is drawn whole: the column was
-            // reserved for the widest of them.
-            if let Some(trailing) = item.trailing.as_deref().filter(|_| trailing_column > 0.0) {
-                items.push(WidgetDrawItem::Text {
-                    x: row_width - self.theme.pad - actions_reserve - self.trailing_width(item),
-                    y: text_origin_y(row_y, row_height, size),
-                    font_id: self.theme.font_id,
-                    text: String::from(trailing),
-                    size_pixels: size,
-                    color: self.run_ink(TextInk::Inherited, item, selected),
-                    clip: None,
-                });
+            // second column ends on one edge. Its spans run left to right from
+            // there, each in its own ink, one word gap apart.
+            if trailing_column > 0.0
+                && let Some(metrics) = self.font_metrics.resolved()
+            {
+                let fitted = self.fitted_trailing(item, trailing_budget);
+                let mut x = row_width - self.theme.pad - actions_reserve - self.spans_width(fitted, size);
+                for span in fitted {
+                    items.push(WidgetDrawItem::Text {
+                        x,
+                        y: text_origin_y(row_y, row_height, size),
+                        font_id: self.theme.font_id,
+                        text: String::from(span.text.as_str()),
+                        size_pixels: size,
+                        color: self.run_ink(span.ink, item, selected),
+                        clip: None,
+                    });
+                    x += measured_text_width(metrics, &span.text, size) + self.theme.space(TRAILING_SPAN_GAP_UNITS);
+                }
             }
             self.push_row_actions(&mut items, item, item_index, row_y, row_height);
         }
@@ -1458,9 +1553,8 @@ mod tests {
         let theme = Theme::DEFAULT;
         let mut widget = measured_list(2, 2);
         widget.items = vec![
-            VirtualListRow { trailing: Some(String::from("21/20")), ..VirtualListRow::from("Astral Plate") }
-                .with_ink(TextInk::RarityLegendary),
-            VirtualListRow { trailing: Some(String::from("1")), ..VirtualListRow::from("Iron Ring") },
+            VirtualListRow::from("Astral Plate").with_trailing(vec!["21/20".into()]).with_ink(TextInk::RarityLegendary),
+            VirtualListRow::from("Iron Ring").with_trailing(vec!["1".into()]),
         ];
         widget.selected_index = Some(0);
         widget.forget_measurements();
@@ -1681,20 +1775,8 @@ mod tests {
         // the visible rows, subtracted from every row's leading budget first.
         let mut widget = measured_list(2, 5);
         widget.items = vec![
-            VirtualListRow {
-                text: String::from("a gem name far too long for this narrow list"),
-                trailing: Some(String::from("21/20")),
-                role: TextRole::Body,
-                ink: TextInk::default(),
-                actions: Vec::new(),
-            },
-            VirtualListRow {
-                text: String::from("short"),
-                trailing: Some(String::from("1")),
-                role: TextRole::Body,
-                ink: TextInk::default(),
-                actions: Vec::new(),
-            },
+            VirtualListRow::from("a gem name far too long for this narrow list").with_trailing(vec!["21/20".into()]),
+            VirtualListRow::from("short").with_trailing(vec!["1".into()]),
         ];
         widget.forget_measurements();
 
@@ -1704,8 +1786,9 @@ mod tests {
             let wide = measured_text_width(metrics, "21/20", size);
             (wide, wide, measured_text_width(metrics, "1", size))
         };
+        let budget = widget.trailing_budget(0.0);
         assert!(narrow_width < wide_width, "the two trailing runs are different widths");
-        assert_eq!(widget.trailing_column(widget.window()), column, "the widest of them is the column");
+        assert_eq!(widget.trailing_column(widget.window(), budget), column, "the widest of them is the column");
 
         let runs = drawn_runs(&widget);
         assert_eq!(runs.len(), 4, "two rows, two runs each: {runs:?}");
@@ -1716,10 +1799,105 @@ mod tests {
         assert!((runs[3].0 + narrow_width - right_edge).abs() < f32::EPSILON, "and so does the narrow one");
 
         assert!(runs[0].1.ends_with(ELLIPSIS), "the name gave way: {:?}", runs[0].1);
-        let budget = widget.leading_width_budget(column, 0.0);
-        assert_eq!(budget, widget.text_width_budget() - column - widget.theme.space(TRAILING_GAP_UNITS));
+        let leading = widget.leading_width_budget(column, 0.0);
+        assert_eq!(leading, widget.text_width_budget() - column - widget.theme.space(TRAILING_GAP_UNITS));
         let metrics = widget.font_metrics.resolved().expect("the test table is installed");
-        assert!(measured_text_width(metrics, &runs[0].1, size) <= budget, "and stopped clear of the column");
+        assert!(measured_text_width(metrics, &runs[0].1, size) <= leading, "and stopped clear of the column");
+    }
+
+    #[test]
+    fn each_trailing_span_keeps_its_own_ink_and_a_named_one_survives_the_chosen_row() {
+        // Tripwire: the owner's round-12 note 6 — "spell tags are all the same
+        // colour regardless of tag". Two ways to keep that defect. Join the
+        // spans into one run before drawing and every tag comes out in the
+        // row's single ink, which is the gap itself. Let the chosen row's
+        // `selection_text` win over a span that names an ink and the tags go
+        // monochrome on the one row the reader is pointing at, which is the row
+        // they are asking about. A span that names no ink still follows the
+        // row — that is what keeps a column of amounts one ink down its edge.
+        let theme = Theme::DEFAULT;
+        let mut widget = measured_list(1, 1);
+        widget.frame.width = 400.0;
+        widget.items = vec![VirtualListRow::from("Fireball").with_trailing(vec![
+            InkedSpan::new("Fire", TextInk::HueWarm),
+            InkedSpan::new("Cold", TextInk::HueCool),
+            InkedSpan::from("lvl 20"),
+        ])];
+        widget.selected_index = Some(0);
+        widget.forget_measurements();
+
+        let runs = row_runs(&widget);
+        assert_eq!(runs.len(), 4, "the name and its three spans: {runs:?}");
+        assert_eq!(runs[1], (String::from("Fire"), theme.hue_warm));
+        assert_eq!(runs[2], (String::from("Cold"), theme.hue_cool));
+        assert_eq!(runs[3], (String::from("lvl 20"), theme.selection_text), "an inkless span follows the row");
+    }
+
+    #[test]
+    fn a_trailing_run_of_spans_sits_one_word_gap_apart_and_right_aligns_as_a_whole() {
+        // Tripwire: three layouts that look right on one row and wrong on the
+        // next. Right-align every span against the row's pad and they draw on
+        // top of each other. Lay the run out from the left of the shared column
+        // and a short run floats away from the edge every other row's run ends
+        // on. Drop the word gap and `Fire` `Cold` come out as `FireCold`, which
+        // is one word and the reason they are spans at all.
+        let mut widget = measured_list(1, 1);
+        widget.frame.width = 400.0;
+        widget.items =
+            vec![VirtualListRow::from("Fireball").with_trailing(vec!["Fire".into(), "Cold".into(), "lvl 20".into()])];
+        widget.forget_measurements();
+
+        let size = widget.theme.label_size_pixels;
+        let metrics = widget.font_metrics.resolved().expect("the test table is installed");
+        let gap = widget.theme.space(TRAILING_SPAN_GAP_UNITS);
+        let runs = drawn_runs(&widget);
+        assert_eq!(runs.len(), 4, "the name and its three spans: {runs:?}");
+
+        for pair in runs[1..].windows(2) {
+            let advance = measured_text_width(metrics, &pair[0].1, size) + gap;
+            assert!((pair[1].0 - (pair[0].0 + advance)).abs() < 1e-3, "the spans are not one word gap apart: {runs:?}");
+        }
+        let (last_x, last) = runs[3].clone();
+        assert!(
+            (last_x + measured_text_width(metrics, &last, size) - (widget.row_width() - widget.theme.pad)).abs() < 1e-3,
+            "the run as a whole does not end on the row's right pad: {runs:?}",
+        );
+    }
+
+    #[test]
+    fn a_trailing_run_too_wide_for_its_row_drops_whole_spans_off_its_end() {
+        // Tripwire: elided the way the leading run is, a run of tags answers
+        // `Fire Cold Light…` — half a tag, which names nothing — and drawn
+        // unfitted it runs out under the name and off the row's own edge. A
+        // span is a word that means something on its own, so the run gives way
+        // by whole spans from its end and the leading run's ellipsis stays the
+        // one cut mark a row carries.
+        let mut widget = measured_list(1, 1);
+        widget.items = vec![VirtualListRow::from("Fireball").with_trailing(vec![
+            "Fire".into(),
+            "Cold".into(),
+            "Lightning".into(),
+            "Chaos".into(),
+        ])];
+        widget.forget_measurements();
+
+        let budget = widget.trailing_budget(0.0);
+        let fitted = widget.fitted_trailing(&widget.items[0], budget);
+        assert!(!fitted.is_empty(), "the head tag stays whatever the budget is");
+        assert!(fitted.len() < 4, "this row is too narrow for the whole run: {fitted:?}");
+        assert_eq!(
+            fitted,
+            &widget.items[0].trailing[..fitted.len()],
+            "what is left is the run's own head, in order and whole",
+        );
+        assert!(
+            widget.spans_width(fitted, widget.theme.label_size_pixels) <= budget,
+            "and it fits the column it was fitted to",
+        );
+
+        let runs = drawn_runs(&widget);
+        assert_eq!(runs.len(), fitted.len() + 1, "the dropped tags are not drawn at all: {runs:?}");
+        assert!(runs[1..].iter().all(|(_, run)| !run.contains(ELLIPSIS)), "no tag was cut mid-word: {runs:?}");
     }
 
     /// A measured list whose every row carries the owner's pair of verbs —
@@ -1756,17 +1934,19 @@ mod tests {
     }
 
     #[test]
-    fn every_row_ends_its_verbs_on_its_own_right_pad_one_gap_apart() {
-        // Tripwire: the owner's round-11 note 4 — "the buttons should be flush
-        // with each other and the last button should be flush with the end of
-        // the list item". Three ways to lose that, none of which the
-        // two-equal-verbs case above would catch. Left-align a row's block
-        // inside the *shared* column and every row carrying fewer or narrower
-        // verbs than the widest one ends short of the edge with a band of
-        // slack after it. Right-align against the frame instead of the row and
-        // the block slides under the scroll bar's gutter. Add the gap once for
-        // the block rather than once per pair and a third verb overlaps its
-        // neighbour.
+    fn every_row_ends_its_verbs_flush_with_each_other_and_with_the_rows_own_edge() {
+        // Tripwire: the owner's round-12 note 1 — "the buttons for the skill
+        // remove and skill change aren't flush with each other (touching), and
+        // the 'x' button isn't touching the end of the entry". Round 11 read
+        // "flush" as one spacing unit between the verbs with the block on the
+        // row's right pad, which is what this inverts: nothing between one face
+        // and the next, and the last face on the row's own right edge. Three
+        // further ways to lose it. Left-align a row's block inside the *shared*
+        // column and every row carrying fewer or narrower verbs than the widest
+        // one ends short of the edge with a band of slack after it. Right-align
+        // against the frame instead of the row and the block slides under the
+        // scroll bar's gutter. Keep the pad and the `×` still floats off the
+        // end, which is the half of the note the geometry has to answer.
         let mut widget = actioned_list(40, 240.0);
         widget.items[1] = VirtualListRow::from("one verb").with_actions(vec![RowAction::text("Change")]);
         widget.items[2] = VirtualListRow::from("three verbs").with_actions(vec![
@@ -1777,8 +1957,7 @@ mod tests {
         widget.items[3] = VirtualListRow::from("no verbs at all");
         widget.forget_measurements();
 
-        let gap = widget.theme.space(ACTION_GAP_UNITS);
-        let right_edge = widget.row_width() - widget.theme.pad;
+        let right_edge = widget.row_width();
         assert!(widget.row_width() < widget.frame.width, "this list scrolls, so the gutter really is off the row");
 
         for row_offset in 0..widget.window().len() {
@@ -1792,11 +1971,45 @@ mod tests {
             );
             for pair in rects.windows(2) {
                 assert!(
-                    (pair[1].x - (pair[0].x + pair[0].width) - gap).abs() < 1e-3,
-                    "row {row_offset} does not hold one gap unit between its verbs: {rects:?}",
+                    (pair[1].x - (pair[0].x + pair[0].width)).abs() < 1e-3,
+                    "row {row_offset} holds its verbs apart instead of flush: {rects:?}",
                 );
             }
         }
+    }
+
+    #[test]
+    fn touching_verbs_are_told_apart_by_one_hairline_on_each_boundary_inside_the_block() {
+        // Tripwire: round-12 note 1 makes the faces touch, and the rank a row
+        // verb takes is `ButtonEmphasis::Text` — a label and no face at all —
+        // so two touching verbs are two labels with nothing between them, which
+        // reads as one word. The hairline is what tells them apart. One per
+        // boundary *inside* the block and none on its outer edges: a rule at
+        // the row's own right edge is a second border, and one before the first
+        // verb is a column rule nobody asked for.
+        let mut widget = actioned_list(1, 300.0);
+        widget.items[0] = VirtualListRow::from("Spark").with_actions(vec![
+            RowAction::text("Change"),
+            RowAction::text("Copy"),
+            RowAction::danger("x"),
+        ]);
+        widget.forget_measurements();
+
+        let rects = realized_action_rects(&widget, 0);
+        let hairlines: Vec<f32> = widget
+            .draw_items()
+            .into_iter()
+            .filter_map(|item| match item {
+                WidgetDrawItem::Quad { x, width, color, .. }
+                    if width == ROW_RULE_THICKNESS && color == widget.theme.edge() =>
+                {
+                    Some(x)
+                }
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(hairlines, vec![rects[1].x, rects[2].x], "one hairline per boundary between two verbs");
     }
 
     #[test]
@@ -1814,14 +2027,10 @@ mod tests {
 
         assert_eq!(rects.len(), 2, "both verbs stand: {rects:?}");
         assert!(
-            (rects[1].x + rects[1].width - (widget.row_width() - widget.theme.pad)).abs() < f32::EPSILON,
-            "the verb written last ends at the row's right pad: {rects:?}",
+            (rects[1].x + rects[1].width - widget.row_width()).abs() < f32::EPSILON,
+            "the verb written last ends on the row's own right edge: {rects:?}",
         );
-        assert_eq!(
-            rects[1].x - (rects[0].x + rects[0].width),
-            widget.theme.space(ACTION_GAP_UNITS),
-            "with one spacing unit between the pair",
-        );
+        assert_eq!(rects[1].x, rects[0].x + rects[0].width, "and the pair touches");
 
         assert_eq!(
             widget.press_target(rects[1].x + 1.0, middle_y),
@@ -1877,21 +2086,17 @@ mod tests {
         // defect one column further in; elide the verb instead and the reader
         // gets a control labelled `Ch…`, which is not a control.
         let mut widget = actioned_list(2, 240.0);
-        widget.items[0] = VirtualListRow {
-            text: String::from("a skill gem with a name far too long for this row"),
-            trailing: Some(String::from("21/20")),
-            role: TextRole::Body,
-            ink: TextInk::default(),
-            actions: vec![RowAction::text("Change"), RowAction::danger("x")],
-        };
+        widget.items[0] = VirtualListRow::from("a skill gem with a name far too long for this row")
+            .with_trailing(vec!["21/20".into()])
+            .with_actions(vec![RowAction::text("Change"), RowAction::danger("x")]);
         widget.forget_measurements();
 
         let window = widget.window();
         let reserve = widget.actions_reserve(window);
         assert_eq!(
             reserve,
-            widget.actions_column(window) + widget.theme.space(ACTION_GAP_UNITS),
-            "the reserve is the shared block plus one gap of clear space",
+            widget.actions_column(window) + widget.theme.space(ACTION_BLOCK_GAP_UNITS) - widget.theme.pad,
+            "the reserve is the shared block plus one gap of clear space, less the pad the block stands in",
         );
 
         let runs = drawn_runs(&widget);
@@ -1899,7 +2104,8 @@ mod tests {
         let metrics = widget.font_metrics.resolved().expect("the test table is installed");
         let (name_x, name) = runs[0].clone();
         assert!(name.ends_with(ELLIPSIS), "the name gave way to the verbs: {name:?}");
-        let budget = widget.leading_width_budget(widget.trailing_column(window), reserve);
+        let budget =
+            widget.leading_width_budget(widget.trailing_column(window, widget.trailing_budget(reserve)), reserve);
         assert!(measured_text_width(metrics, &name, size) <= budget, "and stopped inside the budget: {name:?}");
 
         let (trailing_x, trailing) = runs[1].clone();

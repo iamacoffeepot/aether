@@ -103,6 +103,29 @@ pub struct Theme {
     pub rarity_rare: Rgba,
     /// The top of the rarity ladder — a warm gold.
     pub rarity_legendary: Rgba,
+    /// The five inks of the **hue set** — the palette a vocabulary told apart
+    /// by colour rather than by rank writes its names in: a damage type, a
+    /// faction, a category tag. `hue_plain` is the neutral member, and the four
+    /// beside it are a warm, a cool, a bright and a violet.
+    ///
+    /// A **set**, not a ladder: the rarity rungs are ordered and these are not,
+    /// so a host maps its own vocabulary onto them in one function and nothing
+    /// here claims a warm tag outranks a cool one. Like the ladder they are
+    /// inks and never fills, and each is chosen to clear 4.5 against the raised
+    /// surface and 3.0 against every fill a row can draw under it — the hover
+    /// wash and the selection included — so a run of tags stays readable on the
+    /// row a reader is pointing at ([`TextInk`]).
+    pub hue_warm: Rgba,
+    /// The cool member of the hue set.
+    pub hue_cool: Rgba,
+    /// The bright member of the hue set.
+    pub hue_bright: Rgba,
+    /// The violet member of the hue set.
+    pub hue_violet: Rgba,
+    /// The neutral member of the hue set — the tag that names no colour of its
+    /// own, quieter than the primary ink so a run of coloured tags is what the
+    /// eye lands on.
+    pub hue_plain: Rgba,
     /// Inner padding, in pixels, a widget reserves between its
     /// border and its content.
     pub pad: f32,
@@ -196,6 +219,16 @@ pub enum TextInk {
     RarityRare,
     /// The top of the rarity ladder.
     RarityLegendary,
+    /// The warm member of the hue set.
+    HueWarm,
+    /// The cool member of the hue set.
+    HueCool,
+    /// The bright member of the hue set.
+    HueBright,
+    /// The violet member of the hue set.
+    HueViolet,
+    /// The neutral member of the hue set.
+    HuePlain,
 }
 
 /// The contrast ratio a control's own face — a tonal plate, a stroke around an
@@ -252,6 +285,11 @@ impl Theme {
             TextInk::RarityUncommon => self.rarity_uncommon,
             TextInk::RarityRare => self.rarity_rare,
             TextInk::RarityLegendary => self.rarity_legendary,
+            TextInk::HueWarm => self.hue_warm,
+            TextInk::HueCool => self.hue_cool,
+            TextInk::HueBright => self.hue_bright,
+            TextInk::HueViolet => self.hue_violet,
+            TextInk::HuePlain => self.hue_plain,
         }
     }
 
@@ -441,6 +479,18 @@ impl Theme {
         rarity_uncommon: Rgba::from_srgb8(0x9f, 0xc0, 0xff, 0xff),
         rarity_rare: Rgba::from_srgb8(0xf2, 0xd7, 0x5c, 0xff),
         rarity_legendary: Rgba::from_srgb8(0xe5, 0xb3, 0x71, 0xff),
+        // The hue set, measured against the four fills a row draws (raised,
+        // raised + hover, selection, selection + hover) — the worst of the four
+        // is a chosen row under the pointer, and each of these clears 3.0 there
+        // and 4.5 on the plate: warm 3.33 / 8.98, cool 3.76 / 10.13, bright
+        // 5.10 / 13.73, violet 3.41 / 9.18, plain 3.91 / 10.53. The saturated
+        // "natural" pick for each hue — a fire orange, a chaos purple — lands
+        // near 2.8 on that fill, which is why every one of these is lifted.
+        hue_warm: Rgba::from_srgb8(0xff, 0xb0, 0x8a, 0xff),
+        hue_cool: Rgba::from_srgb8(0x8a, 0xd8, 0xff, 0xff),
+        hue_bright: Rgba::from_srgb8(0xff, 0xef, 0x9e, 0xff),
+        hue_violet: Rgba::from_srgb8(0xd4, 0xb8, 0xff, 0xff),
+        hue_plain: Rgba::from_srgb8(0xd6, 0xd2, 0xc4, 0xff),
         pad: 8.0,
         gap: 6.0,
         row_height: 24.0,
@@ -524,14 +574,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn every_rarity_ink_reads_on_every_fill_a_row_can_draw_under_it() {
-        // Tripwire: a rarity ink is chosen for its hue, and a hue picked on a
-        // white page or against the plate alone goes illegible the moment its
-        // row is pointed at or chosen — the two fills a list row spends most
-        // of its life on. A deep gold-brown, the obvious choice for the top
-        // rung, measures 2.4 on a selected row under the pointer. This is what
-        // stops the next palette edit from shipping one.
+    /// Assert every ink of one named vocabulary reads on every fill a list row
+    /// can draw under it: 4.5 on the plate, where it is body text, and 3.0 on
+    /// each of the four — the plain surface, the hover wash, the selection, and
+    /// the selection under the pointer.
+    fn assert_every_ink_reads_on_every_row_fill(inks: &[TextInk]) {
         let theme = Theme::DEFAULT;
         let fills = [
             theme.surface_raised,
@@ -539,9 +586,8 @@ mod tests {
             theme.selection,
             theme.fill(theme.selection, ThemeState::Hover),
         ];
-        let ladder = [TextInk::RarityCommon, TextInk::RarityUncommon, TextInk::RarityRare, TextInk::RarityLegendary];
 
-        for ink in ladder {
+        for &ink in inks {
             let color = theme.text_ink(ink, TextRole::Body);
             assert!(
                 Theme::contrast_ratio(color, theme.surface_raised) >= 4.5,
@@ -552,6 +598,40 @@ mod tests {
                 assert!(ratio >= 3.0, "{ink:?} reads at only {ratio} on one of the row's own fills");
             }
         }
+    }
+
+    #[test]
+    fn every_rarity_ink_reads_on_every_fill_a_row_can_draw_under_it() {
+        // Tripwire: a rarity ink is chosen for its hue, and a hue picked on a
+        // white page or against the plate alone goes illegible the moment its
+        // row is pointed at or chosen — the two fills a list row spends most
+        // of its life on. A deep gold-brown, the obvious choice for the top
+        // rung, measures 2.4 on a selected row under the pointer. This is what
+        // stops the next palette edit from shipping one.
+        assert_every_ink_reads_on_every_row_fill(&[
+            TextInk::RarityCommon,
+            TextInk::RarityUncommon,
+            TextInk::RarityRare,
+            TextInk::RarityLegendary,
+        ]);
+    }
+
+    #[test]
+    fn every_hue_ink_reads_on_every_fill_a_row_can_draw_under_it() {
+        // Tripwire: the hue set is the one vocabulary picked for hue *first* —
+        // a fire tag is orange because fire is orange — and the saturated
+        // version of every one of these measures around 2.8 on a chosen row
+        // under the pointer, which is the fill a tag run spends its life on in
+        // a list a reader is scanning. The five shipped here are each lifted
+        // off their natural saturation for exactly that reason, and an edit
+        // that puts the "right" orange back fails here rather than on a screen.
+        assert_every_ink_reads_on_every_row_fill(&[
+            TextInk::HueWarm,
+            TextInk::HueCool,
+            TextInk::HueBright,
+            TextInk::HueViolet,
+            TextInk::HuePlain,
+        ]);
     }
 
     #[test]

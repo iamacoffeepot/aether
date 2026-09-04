@@ -277,6 +277,7 @@ an `Rgba`:
 | `Muted` | `text_muted`, whatever the role's size |
 | `Accent` | `accent` — as a **run**, never a plate |
 | `RarityCommon` / `RarityUncommon` / `RarityRare` / `RarityLegendary` | the four rungs of the theme's rarity ladder |
+| `HueWarm` / `HueCool` / `HueBright` / `HueViolet` / `HuePlain` | the five inks of the theme's hue set |
 
 It exists because a row is more than one run. A list row's name and its
 trailing amount, a dropdown option and the closed row it is repeated on —
@@ -291,6 +292,30 @@ each is chosen so it clears 4.5 against the raised surface and 3.0 against
 **every fill a row can draw under it** — the hover wash and the selection
 included. That is why the top rung is a warm gold rather than the obvious deep
 gold-brown: the deep one measures 2.4 on a chosen row under the pointer.
+
+The **hue set** is the second vocabulary, and it is a *set* rather than a
+ladder: five inks told apart by colour with no order between them, for a
+vocabulary whose members are kinds rather than ranks — a damage type, a
+faction, a category tag. `hue_plain` is the neutral member and the four beside
+it are a warm, a cool, a bright and a violet. What they *name* is the host's:
+the mapping from its own vocabulary to these five belongs in one function of
+its own, so a tag never picks an `Rgba` at the call site.
+
+They are measured the way the ladder is, against all four fills a list row can
+draw under them:
+
+| ink | default | on the plate | on the hover wash | on a selected row | selected, under the pointer |
+|---|---|---|---|---|---|
+| `HueWarm` | `#ffb08a` | 8.98 | 4.09 | 5.82 | 3.33 |
+| `HueCool` | `#8ad8ff` | 10.13 | 4.61 | 6.57 | 3.76 |
+| `HueBright` | `#ffef9e` | 13.73 | 6.26 | 8.91 | 5.10 |
+| `HueViolet` | `#d4b8ff` | 9.18 | 4.18 | 5.96 | 3.41 |
+| `HuePlain` | `#d6d2c4` | 10.53 | 4.80 | 6.83 | 3.91 |
+
+Every one of them is lifted off the saturation its hue "naturally" wants,
+because the saturated pick — the fire orange, the chaos purple — measures
+around 2.8 against a chosen row under the pointer, which is the fill a run of
+tags spends its life on in a list a reader is scanning.
 
 `Accent` is a run and not a plate for the same reason the button ladder
 reserves the filled accent for one verb: the accent means the primary action,
@@ -468,17 +493,45 @@ that is only words is written as one (`VirtualListRow: From<String> +
 From<&str>`), so `(0..n).map(VirtualListRow::from)` is the whole of the plain
 case.
 
-`trailing` is the row's **second column**: a version, a count, a price, a key.
-It is set right-aligned against the row's own right pad, and the widest
-trailing run among the **realized** rows decides the column every visible row
-shares, with one spacing unit of clear space before it. The column is
-subtracted from the leading budget *first*, so the two rules that follow are
-one rule: the **leading run elides** into what is left (the same
-`elide_to_width` cut, with the ellipsis), and the **trailing run never does** —
-a name cut short still names the thing, while an amount cut to `21/…` is a
-wrong number. The column is the realized window's rather than the whole
-vector's because a reader compares what is on screen, and a column sized by an
+`trailing` is the row's **second column**: a version, a count, a price, a key,
+a run of tags. It is set right-aligned against the row's own right pad, and the
+widest trailing run among the **realized** rows decides the column every
+visible row shares, with one spacing unit of clear space before it. The column
+is subtracted from the leading budget *first*, so the **leading run elides**
+into what is left (the same `elide_to_width` cut, with the ellipsis) — a name
+cut short still names the thing, while an amount cut to `21/…` is a wrong
+number. The column is the realized window's rather than the whole vector's
+because a reader compares what is on screen, and a column sized by an
 off-screen row leaves a gap nothing stands in.
+
+The trailing run is a `Vec<InkedSpan>` rather than one string, because the
+words in it are often not one thing said once — `Spell Fire Duration` is three
+tags, and **a tag wears the ink of what it names**:
+
+```rust
+use aether_kit_widget::{InkedSpan, TextInk, VirtualListRow};
+
+let row = VirtualListRow::from(gem.name).with_trailing(vec![
+    InkedSpan::new("Fire", TextInk::HueWarm),
+    InkedSpan::new("Cold", TextInk::HueCool),
+    InkedSpan::from("lvl 20"),                     // no ink named: follows the row
+]);
+```
+
+The spans are laid out on one line in the order written, one **word gap** (one
+spacing unit) apart, and the run right-aligns as a whole against the same edge
+every other row's run ends on. The plain amount is one span from a string
+(`vec!["21/20".into()]`), so a one-ink column of numbers costs a `.into()` and
+nothing else.
+
+A run too wide for its column gives way by **dropping whole spans off its end**
+— never by cutting one mid-word. A span is a word that means something on its
+own, so half of one names nothing, and the leading run's ellipsis stays the
+only cut mark a row carries. What the run may take is the row's text budget
+less the verb block; the leading run takes what is left after that. The head
+span always stays, even when it alone is wider than that budget: the column
+exists for the fact in it, so a row whose one amount is wider than the row shows
+the amount and gives the name nothing.
 
 `role` sets the type step both runs are drawn at, defaulting to
 `TextRole::Body`. A `Caption` row draws at the caption size in the muted ink,
@@ -496,11 +549,13 @@ use aether_kit_widget::{TextInk, VirtualListRow};
 let row = VirtualListRow::from(item.name).with_ink(TextInk::RarityRare);
 ```
 
-The trailing run keeps the row ink whatever the name is written in — a column
-of amounts is read down one edge, and four colours down it is a column nobody
-can compare. A named ink **outlives the row being chosen**: `selection_text`
-wins over `Inherited` and over nothing else, because what a tier says about a
-thing does not stop being true when the reader clicks it.
+Each trailing span carries its own ink the same way. A column of *amounts* is
+read down one edge and wants one ink there, so leave those spans `Inherited`;
+the colours are for a column of tags, where the ink is what the word means
+rather than decoration on a number. A named ink **outlives the row being
+chosen**: `selection_text` wins over `Inherited` and over nothing else, because
+what a tier or a damage type says about a thing does not stop being true when
+the reader clicks it.
 
 `ruled: true` puts a one-pixel `theme.outline` hairline between rows — `n - 1`
 of them for `n` realized rows, never a rule under the last one (that underlines
@@ -530,11 +585,27 @@ same measured-label-plus-two-pads width, the same elision, and the same hover /
 pressed answer a `ButtonConfig` draws with. They are written left to right, so
 the verb written last is the one at the row's edge.
 
+**Flush means touching.** Nothing stands between one face and the next, and the
+last face ends on the row's **own right edge** — not on its right pad, which
+the block stands in. So `[Change gem][×]` is one block of verbs a reader can
+press across, and the `×` really is at the end of the entry.
+
+Two touching faces are told apart by a **hairline in `Theme::edge()`** on every
+boundary inside the block. The rank a row verb takes is `ButtonEmphasis::Text`
+— a label and no face at all — so emphasis alone cannot separate two of them:
+two labels touching with nothing between them read as one word. Where a verb
+already draws an outlined stroke the hairline lands on it in the very same
+token, so a mixed block gains no second line, and the block's outer edges carry
+no rule (one at the row's edge is a second border; one before the first verb is
+a column rule nobody asked for).
+
 The block is the row's **third column**, reserved before the text exactly as
 the second one is: the widest verb block among the realized rows is the column
 every row gives up, so the names elide on one edge, the trailing run ends
 against the verbs rather than under them, and the reported intrinsic counts the
-block. A row with no `actions` is laid out precisely as it always was.
+block. What it takes off the text budget is the block plus its one gap of clear
+space *less* one pad, since the block stands in the pad the budget already gave
+up. A row with no `actions` is laid out precisely as it always was.
 
 A press on a verb arms it and the release-inside fires `VirtualListAction {
 row_index, action_index }` — the button's own press-then-release-inside, so a
@@ -618,6 +689,39 @@ re-reported when the options, the font, or the type scale change. Before it
 existed a host had to give every dropdown a full-width row of its own, which is
 right for a control that is its row's whole subject and wrong for a sort
 control that belongs beside the field it orders.
+
+### The option under the pointer
+
+The open list is drawn in the overlay, out of the root's hit table, so the same
+problem a virtual list has ([above](#the-row-under-the-pointer)) is the
+dropdown's: a host that wants to explain the option a reader is resting on can
+only redo this widget's geometry, and gets it wrong the moment an arrow key
+scrolls the realized window. The dropdown says it instead:
+
+```rust
+#[handler::manual]
+fn on_dropdown_hover(&mut self, ctx: &mut WasmCtx<'_, Manual>, hover: DropdownHover) {
+    // `hover.option` indexes the config's `options`; `x`/`y`/`width`/`height`
+    // are that row's rectangle in window pixels.
+}
+```
+
+`DropdownHover { option: Option<u32>, x, y, width, height }` is sent whenever
+the answer **changes** — a pointer move, an arrow key scrolling the window
+under a still pointer, the list closing — and is attributed by
+`ctx.source_mailbox()` like every other value-up event. `None` is the pointer
+having left the rows or the list having closed, and carries a zero rectangle:
+it is the event that takes the explanation down.
+
+The rectangle is the option's **row in the open list**, in the same window-pixel
+space the panel gives a widget its frame in, so a host stands a tooltip or an
+item card on the row without measuring anything. It is honest for the escaping
+overlay: the overlay is offset by its slot's origin and never clipped or moved,
+so the row draws exactly there. An option the list has not realized has no
+rectangle rather than a plausible wrong one.
+
+It is not a choice and does not become one — the reader is looking, not picking,
+and `DropdownSelected` still reports what they take.
 
 While the list is open every left press is the dropdown's: a press on a row
 takes that option and closes, a press anywhere else closes without a change.
