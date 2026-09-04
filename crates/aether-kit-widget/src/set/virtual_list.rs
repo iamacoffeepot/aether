@@ -1926,6 +1926,62 @@ mod tests {
             .collect()
     }
 
+    /// Every run one list draws, with where its pen starts and the size it is
+    /// set at: `(text, x, y, size_pixels)`.
+    fn placed_runs(widget: &VirtualListWidget) -> Vec<(String, f32, f32, f32)> {
+        widget
+            .draw_items()
+            .into_iter()
+            .filter_map(|item| match item {
+                WidgetDrawItem::Text { text, x, y, size_pixels, .. } => Some((text, x, y, size_pixels)),
+                WidgetDrawItem::Quad { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+            })
+            .collect()
+    }
+
+    /// Every quad one list draws: `(x, y, width, height, color)`.
+    fn drawn_quads(widget: &VirtualListWidget) -> Vec<(f32, f32, f32, f32, Rgba)> {
+        widget
+            .draw_items()
+            .into_iter()
+            .filter_map(|item| match item {
+                WidgetDrawItem::Quad { x, y, width, height, color, .. } => Some((x, y, width, height, color)),
+                WidgetDrawItem::Text { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+            })
+            .collect()
+    }
+
+    /// A measured list of table rows, laid out the way a handler leaves it —
+    /// the offset table built, the window settled — in a frame wide enough
+    /// that a note has somewhere to wrap.
+    fn table_list(items: Vec<VirtualListRow>, visible_row_count: usize) -> VirtualListWidget {
+        let mut widget = measured_list(items.len().max(1), visible_row_count);
+        widget.frame = WidgetFrame { x: 10.0, y: 20.0, width: 200.0, height: 120.0 };
+        widget.selected_index = None;
+        widget.rows_vary = rows_vary(&items);
+        widget.items = items;
+        widget.forget_measurements();
+        widget.refresh_row_layout();
+        widget
+    }
+
+    /// The plate one realized row draws — the quad in one of the four row
+    /// fills, in row order.
+    fn row_plates(widget: &VirtualListWidget) -> Vec<(f32, f32, f32, f32, Rgba)> {
+        let fills = [
+            widget.row_fill(false, false),
+            widget.row_fill(false, true),
+            widget.row_fill(true, false),
+            widget.row_fill(true, true),
+        ];
+        drawn_quads(widget).into_iter().filter(|(_, _, _, _, color)| fills.contains(color)).collect()
+    }
+
+    /// A row that says `text` and carries `note` under it.
+    fn noted(text: &str, note: &str) -> VirtualListRow {
+        VirtualListRow::from(text).with_note(note)
+    }
+
     #[test]
     fn the_row_under_the_pointer_follows_the_realized_window() {
         // Tripwire: the studio's gap 19 — the list keeps its rows out of the
@@ -2899,5 +2955,197 @@ mod tests {
         for item in &items[16..20] {
             assert!(matches!(item, WidgetDrawItem::Quad { color, .. } if *color == widget.theme.accent));
         }
+    }
+
+    /// The note the tests wrap: at the caption size on the half-em metric it
+    /// is 39 characters, which is wider than the 180-pixel budget a 200-pixel
+    /// row leaves a note, so it breaks once and only once.
+    const WRAPPING_NOTE: &str = "armour is a function of the hit it meets";
+
+    #[test]
+    fn a_note_is_a_second_line_of_its_row_and_the_row_grows_by_the_lines_it_took() {
+        // Tripwire: the studio's gap 38. A note pushed into the vector as a
+        // row of its own reads as a statistic whose value failed to draw, and
+        // a note drawn on a row whose height still came from
+        // `frame.height / visible_row_count` would print over the row beneath
+        // it. The row has to *grow*, and the growth has to reach the offset
+        // table the next row's top is read from.
+        let widget = table_list(alloc::vec![noted("Armour", WRAPPING_NOTE), VirtualListRow::from("Evasion")], 5);
+
+        let lines: Vec<String> = placed_runs(&widget)
+            .into_iter()
+            .filter(|(_, _, _, size)| (*size - widget.theme.caption_size_pixels).abs() < f32::EPSILON)
+            .map(|(text, _, _, _)| text)
+            .collect();
+        assert_eq!(lines.len(), 2, "the note wrapped onto two lines: {lines:?}");
+        assert!(lines[0].starts_with("armour is"), "and it broke between words: {lines:?}");
+        assert_eq!(lines.concat().replace(' ', ""), WRAPPING_NOTE.replace(' ', ""), "nothing was cut");
+
+        // Body pitch 24, two caption lines at 12 × 1.3: 24 + 31.2.
+        let grown = widget.content_top(1) - widget.content_top(0);
+        assert!((grown - 55.2).abs() < 1e-3, "the noted row stands {grown} tall");
+        assert!(
+            (widget.content_top(2) - widget.content_top(1) - 24.0).abs() < 1e-3,
+            "and the row under it is the plain body pitch again",
+        );
+
+        let plates = row_plates(&widget);
+        assert!((plates[1].1 - grown).abs() < 1e-3, "the next row starts below the note, not over it: {plates:?}");
+    }
+
+    #[test]
+    fn a_note_past_its_cap_ends_on_an_ellipsis_rather_than_growing_the_row_without_end() {
+        // Tripwire: a row is an entry in a table, and prose let to wrap
+        // forever turns one entry into a paragraph that pushes every other row
+        // off the viewport. The cap is three lines and the third says it was
+        // cut, which is what stops a note from silently losing its tail.
+        let long = "a monster's spells cannot be evaded and nor can a boss attack the game flashes red before it lands";
+        let widget = table_list(alloc::vec![noted("Evasion", long)], 5);
+
+        let lines: Vec<String> = placed_runs(&widget)
+            .into_iter()
+            .filter(|(_, _, _, size)| (*size - widget.theme.caption_size_pixels).abs() < f32::EPSILON)
+            .map(|(text, _, _, _)| text)
+            .collect();
+        assert_eq!(lines.len(), MAX_NOTE_LINES, "three lines and no more: {lines:?}");
+        assert!(lines[MAX_NOTE_LINES - 1].ends_with(ELLIPSIS), "and the last says it was cut: {lines:?}");
+    }
+
+    #[test]
+    fn a_point_inside_a_tall_row_names_that_row_rather_than_the_one_a_pitch_would_name() {
+        // Tripwire: every hit the list answers used to be `local_y / pitch`,
+        // which names the right row only while every row is one height. At a
+        // 24-pixel pitch the point 40 pixels down is row 1; in this list row 0
+        // is 55 pixels tall and 40 is still inside it. A press resolving to
+        // the wrong row selects the wrong entry, and the same arithmetic backs
+        // the reported hover.
+        let mut widget = table_list(alloc::vec![noted("Armour", WRAPPING_NOTE), VirtualListRow::from("Evasion")], 5);
+        assert_eq!(widget.row_at_local_y(40.0), Some(0), "40 is inside the noted row");
+        assert_eq!(widget.row_at_local_y(60.0), Some(1), "and 60 is past it");
+
+        widget.pointer_local = Some((widget.theme.pad, 40.0));
+        assert_eq!(widget.pointer_row(), Some(0), "so the hover the host is told about is the row the pointer is on");
+    }
+
+    #[test]
+    fn the_pointed_row_is_washed_over_the_whole_height_it_actually_has() {
+        // Tripwire: the fill is the only mark that says which row the pointer
+        // found, and one drawn at the configured pitch would wash the top 24
+        // pixels of a 55-pixel entry and leave its note on the plain plate —
+        // a row that reads as half-lit, and a hover rect that disagrees with
+        // the row the list just reported.
+        let mut widget = table_list(alloc::vec![noted("Armour", WRAPPING_NOTE), VirtualListRow::from("Evasion")], 5);
+        widget.hovered_row = Some(0);
+
+        let plates = row_plates(&widget);
+        let washed = plates.iter().find(|(_, _, _, _, color)| *color == widget.row_fill(false, true));
+        let (x, y, width, height, _) = *washed.expect("the pointed row draws the hover wash");
+        assert!((x, y, width) == (0.0, 0.0, widget.row_width()), "the wash covers the row across");
+        assert!((height - 55.2).abs() < 1e-3, "and down its whole height, note included: {height}");
+    }
+
+    #[test]
+    fn the_scroll_extent_is_the_sum_of_the_heights_rather_than_a_count_of_rows() {
+        // Tripwire: a bar whose thumb is `visible / item_count` says a list of
+        // ten short rows and a list of ten two-line rows are the same length,
+        // and its travel then lands the reader nowhere near where they
+        // pointed. Once rows have heights of their own the extent is pixels.
+        let items: Vec<VirtualListRow> = (0..8)
+            .map(|index| {
+                if index % 2 == 0 {
+                    noted(&format!("row {index}"), WRAPPING_NOTE)
+                } else {
+                    VirtualListRow::from(format!("row {index}"))
+                }
+            })
+            .collect();
+        let widget = table_list(items, 5);
+
+        let extent = widget.scroll_extent();
+        assert!((extent.content - (4.0f32.mul_add(55.2, 4.0 * 24.0))).abs() < 1e-2, "{extent:?}");
+        assert!((extent.viewport - widget.frame.height).abs() < f32::EPSILON, "the viewport is the frame, in pixels");
+        assert!(widget.scroll_bar().is_some(), "and content taller than the frame stands a bar");
+    }
+
+    #[test]
+    fn a_vector_that_asks_for_no_height_of_its_own_keeps_the_pitch_the_frame_divides_into() {
+        // Tripwire: the fast path. Every list written before rows had heights
+        // draws at `frame.height / visible_row_count` with no table kept, and
+        // a change that walked heights for all of them would both re-lay every
+        // existing list and spend one `f32` per item on vectors that never
+        // asked for it. This pins the geometry and the absence of the table.
+        let mut widget = measured_list(9, 5);
+        widget.refresh_row_layout();
+        assert!(widget.row_tops.is_none(), "a plain vector keeps no offset table");
+
+        let pitch = widget.row_height().expect("a laid-out plain list has one pitch");
+        assert!((pitch - widget.frame.height / 5.0).abs() < f32::EPSILON, "which is the frame divided by the count");
+        for (offset, plate) in row_plates(&widget).into_iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            let expected_y = offset as f32 * pitch;
+            assert!((plate.1 - expected_y).abs() < f32::EPSILON, "row {offset} stands at {}", plate.1);
+            assert!((plate.3 - pitch).abs() < f32::EPSILON, "row {offset} is one pitch tall");
+        }
+
+        let extent = widget.scroll_extent();
+        assert_eq!(
+            (extent.offset, extent.viewport, extent.content),
+            (0.0, 5.0, 9.0),
+            "and the bar is still drawn from the three counts",
+        );
+    }
+
+    #[test]
+    fn a_rule_above_stands_at_the_top_of_the_rows_space_with_the_gap_under_it() {
+        // Tripwire: `designing-a-screen.md` §4 puts whitespace before a rule,
+        // so a block reads as a line and then air and then its heading. A rule
+        // drawn against the heading instead — under the gap rather than over
+        // it — belongs to the block it just closed, which is the boundary read
+        // backwards. It spans the text budget, not the frame, so it is not
+        // mistaken for the list's own edge.
+        let heading = VirtualListRow::from("Resistances").with_space_before(3).with_rule_above();
+        let widget = table_list(alloc::vec![VirtualListRow::from("Armour"), heading], 5);
+
+        let rules: Vec<(f32, f32, f32, f32, Rgba)> =
+            drawn_quads(&widget).into_iter().filter(|quad| quad.4 == widget.theme.outline).collect();
+        assert_eq!(rules.len(), 1, "one rule, from the one row that asked for it: {rules:?}");
+        assert_eq!(
+            (rules[0].0, rules[0].1, rules[0].2, rules[0].3),
+            (widget.theme.pad, 24.0, widget.text_width_budget(), ROW_RULE_THICKNESS),
+            "the rule opens the block at the top of its space, across the text budget",
+        );
+
+        let plates = row_plates(&widget);
+        assert!(
+            (plates[1].1 - (24.0 + widget.theme.space(3))).abs() < 1e-3,
+            "and the plate starts below the space, which is ground rather than a taller row: {plates:?}",
+        );
+    }
+
+    #[test]
+    fn an_indent_moves_the_name_and_its_note_and_leaves_the_value_where_it_was() {
+        // Tripwire: the studio's gap 39. An indented row is a fact hanging off
+        // the one above it, and the signal is the left edge — but a value
+        // right-aligns on one column whatever rung its name sits on, because
+        // that column is what a reader compares two figures down. Moving the
+        // trailing run with the name would ruin the one alignment the table
+        // has, and faking the indent with spaces would put it in the text.
+        let derived = VirtualListRow::from("Physical damage mitigated")
+            .with_indent(2)
+            .with_note(WRAPPING_NOTE)
+            .with_trailing(alloc::vec!["0%".into()]);
+        let widget = table_list(alloc::vec![derived], 5);
+        let plain = table_list(alloc::vec![VirtualListRow::from("Armour").with_trailing(alloc::vec!["0%".into()])], 5);
+
+        let runs = placed_runs(&widget);
+        let name = runs.iter().find(|(text, _, _, _)| text.starts_with("Physical")).expect("the name");
+        let note = runs.iter().find(|(text, _, _, _)| text.starts_with("armour")).expect("the note");
+        assert!((name.1 - (widget.theme.pad + widget.theme.space(2))).abs() < f32::EPSILON, "the name steps in");
+        assert!((note.1 - (widget.theme.pad + widget.theme.space(3))).abs() < f32::EPSILON, "the note one unit more");
+
+        let value_x = |widget: &VirtualListWidget| {
+            placed_runs(widget).into_iter().find(|(text, _, _, _)| text == "0%").expect("the value").1
+        };
+        assert!((value_x(&widget) - value_x(&plain)).abs() < f32::EPSILON, "and the value column did not move");
     }
 }
