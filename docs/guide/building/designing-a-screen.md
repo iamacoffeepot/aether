@@ -350,8 +350,24 @@ and each is the general form of a specific complaint.
   filled, so the loudest thing on the screen is never the destructive one. A
   dialog's action row is one filled confirm and a text cancel. In the kit this
   is `ButtonConfig { emphasis, tone }`; the rank changes the look and nothing
-  about the size or the target. (Owner, round 8: "a single yellow button for
-  everything is kinda meh.")
+  about the size or the target. **A rank is only a rank if its face reads**:
+  the kit measures each one against the surface it stands on (WCAG 1.4.11's
+  3.0), because a quiet verb whose plate is a fifth of a step off the plate
+  behind it is not quiet, it is invisible — which is a `Cancel` a reader
+  cannot find on a dialog. (Owner, round 8: "a single yellow button for
+  everything is kinda meh." Owner, round 11: "Cancel button is blending in
+  with the background of the new item modal.")
+- **Colour that carries meaning is measured, not judged by eye.** Any colour
+  a reader has to *see* — a control's own face, a name written in its tier's
+  ink, a severity — is picked against a contrast ratio, and against **every**
+  background it can land on rather than the one it was drawn over while it was
+  being chosen. WCAG 2.2 gives the two numbers: 4.5 for body text, 3.0 for a
+  control's face and for large text. A list row is the case that catches
+  people out — it draws four fills (plain, pointed at, chosen, chosen and
+  pointed at), so an ink chosen on the plain one can be two thirds of the way
+  to invisible on the brightest. `Theme::contrast_ratio` is in the kit so this
+  is a number in a test rather than an opinion in a review. (Owner, round 11:
+  "Cancel button is blending in with the background of the new item modal.")
 - **Generate what can be generated.** A name, a summary line, a default:
   when the data implies one ("Wander of Kinetic Blast Ranger" from weapon,
   skill, and class), offer it rather than an empty field.
@@ -399,6 +415,9 @@ small, separable change and belongs in the kit rather than in any one consumer:
 - Apple Human Interface Guidelines: [segmented controls](https://developer.apple.com/design/human-interface-guidelines/segmented-controls) ·
   [pop-up buttons](https://developer.apple.com/design/human-interface-guidelines/pop-up-buttons) ·
   [sidebars](https://developer.apple.com/design/human-interface-guidelines/sidebars)
+- W3C WCAG 2.2: [contrast (minimum), 1.4.3](https://www.w3.org/WAI/WCAG22/Understanding/contrast-minimum.html) ·
+  [non-text contrast, 1.4.11](https://www.w3.org/WAI/WCAG22/Understanding/non-text-contrast.html) ·
+  [relative luminance](https://www.w3.org/WAI/GL/wiki/Relative_luminance)
 - Material Design 3: [type scale tokens](https://m3.material.io/styles/typography/type-scale-tokens) ·
   [spacing and the 8-pixel grid](https://m3.material.io/foundations/layout/understanding-layout/spacing) ·
   [canonical layouts](https://m3.material.io/foundations/layout/canonical-layouts/overview)
