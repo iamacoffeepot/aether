@@ -375,8 +375,8 @@ A host that wants `⌘` in a label ships a face that has it, or writes
 ## Fixed-row virtual lists
 
 `VirtualListConfig { items, initial_selected_index, visible_row_count,
-empty_text, ruled, scroll_bar_gap_units, theme, state }` retains the complete
-row vector while
+empty_text, ruled, scroll_bar_gap_units, host_scroll_strip, theme, state }`
+retains the complete row vector while
 realizing the rows the viewport reaches. The panel fixes the slot height at
 `theme.row_height * visible_row_count` — at the summed height of the first
 `visible_row_count` rows once any of them carries a height of its own
@@ -449,7 +449,29 @@ reported intrinsic counts the same gutter, so a slot sized from it does not
 hand the bar back a gutter's worth of the text it just asked for. A host
 drawing its own rows against a kit list's geometry reserves the same width:
 `Theme::space(2)` of track plus `Theme::space(scroll_bar_gap_units)` of gap,
-whenever the vector overflows the viewport. A
+whenever the vector overflows the viewport.
+
+A host that would rather the bar stood **beside** the list than inside it sets
+`host_scroll_strip`. The track is then drawn one gutter past the frame's right
+edge — the way a pane's rail is drawn past the tab body it scrolls — and the
+rows give up nothing at all, so a value's right edge stays where it is whether
+or not the vector overflows ("I feel like the scrollbar should EXTEND the panel
+slightly to exist and be adjacent"). The host owes the widget that column, and
+the widget says how wide it is:
+
+```rust
+let strip = config.scroll_strip_width(&theme); // 0.0 unless host_scroll_strip
+
+let list = Rect { width: plate.width - strip, ..plate };
+let clip = Rect { width: list.width + strip, ..list }; // or the track is clipped away
+```
+
+`scroll_strip_width` is the gutter plus `VirtualListConfig::scroll_track_width`,
+so a host reserving the column copies no kit constant, and it answers before
+any draw list arrives — which is when a layout needs it. The clip matters: a
+slot clipped to the list's own frame erases a track drawn outside it, and a
+press in the strip reaches the list only if the host's hit test reaches across
+it too. A
 virtual list joins the same wheel-only hit table a `ScrollWidget` does (see
 [Scroll containers and wheel ownership](#scroll-containers-and-wheel-ownership)),
 so a root that forks the reference panel routes `MouseWheel` to it by

@@ -1104,9 +1104,29 @@ pub struct VirtualListConfig {
     ///
     /// A host that wants more sets more. The gutter is taken off the rows'
     /// own width, so the leading run elides against what is left of it rather
-    /// than running under the bar and being cut by it.
+    /// than running under the bar and being cut by it — and off nothing at
+    /// all when the bar stands in the host's own strip
+    /// ([`Self::host_scroll_strip`]), where it is the clear space between the
+    /// frame's right edge and the track beyond it.
     #[serde(default = "VirtualListConfig::scroll_bar_gap_default")]
     pub scroll_bar_gap_units: u8,
+    /// Whether the scroll bar stands in a strip the **host** reserves beside
+    /// the list rather than in a gutter cut out of the list's own frame.
+    ///
+    /// `false` (the default) is the bar every list has drawn: the track down
+    /// the frame's right end, the rows laid inside what is left. `true` draws
+    /// the track in the strip just past the frame's right edge — the way a
+    /// pane's rail is drawn past the body it scrolls — and takes **nothing**
+    /// off the rows, so a value's right edge does not move when the vector
+    /// starts to overflow. The owner's round-16 note 3: *"I feel like the
+    /// scrollbar should EXTEND the panel slightly to exist and be adjacent."*
+    ///
+    /// A host that sets it owes the widget that column:
+    /// [`Self::scroll_strip_width`] is how wide, and the slot's clip has to
+    /// reach across it or the track is clipped away with everything else
+    /// outside the frame.
+    #[serde(default)]
+    pub host_scroll_strip: bool,
     pub theme: Theme,
     #[serde(default)]
     pub state: WidgetControlState,
@@ -1117,6 +1137,41 @@ impl VirtualListConfig {
     /// host says otherwise: **two** spacing units, the least a control stands
     /// off a plate's edge in the method's own spacing ladder.
     pub const SCROLL_BAR_GAP_UNITS: u8 = 2;
+
+    /// How wide the scroll bar's track is, in spacing units — two, which is
+    /// eight pixels on the four-pixel grid: wide enough to grab with a
+    /// pointer, narrow enough that it reads as an edge of the list rather
+    /// than a column in it.
+    pub const SCROLL_BAR_TRACK_UNITS: u8 = 2;
+
+    /// The track's width in `theme`'s own metrics — a metric rather than a
+    /// measurement, so it scales with a theme scaled for a dense display, and
+    /// never thinner than the one pixel it takes to see it.
+    #[must_use]
+    pub fn scroll_track_width(theme: &Theme) -> f32 {
+        theme.space(Self::SCROLL_BAR_TRACK_UNITS).max(Self::MIN_SCROLL_TRACK_PIXELS)
+    }
+
+    /// The strip this list wants beside its frame for a host-owned bar: the
+    /// gutter and the track, in `theme`'s metrics. `0.0` while the bar is the
+    /// list's own, where the same pair comes out of the frame instead.
+    ///
+    /// This is the number a host reserves the column with — it lays out
+    /// before any draw list arrives, and the track's own width is the kit's,
+    /// so a host counting it itself would be copying a constant that can
+    /// move.
+    #[must_use]
+    pub fn scroll_strip_width(&self, theme: &Theme) -> f32 {
+        if self.host_scroll_strip {
+            theme.space(self.scroll_bar_gap_units) + Self::scroll_track_width(theme)
+        } else {
+            0.0
+        }
+    }
+
+    /// The thinnest a track may be drawn, whatever a theme scales its spacing
+    /// down to: a bar nobody can see is a bar nobody can grab.
+    const MIN_SCROLL_TRACK_PIXELS: f32 = 1.0;
 
     fn scroll_bar_gap_default() -> u8 {
         Self::SCROLL_BAR_GAP_UNITS
@@ -1132,6 +1187,7 @@ impl Default for VirtualListConfig {
             empty_text: String::new(),
             ruled: false,
             scroll_bar_gap_units: Self::SCROLL_BAR_GAP_UNITS,
+            host_scroll_strip: false,
             theme: Theme::default(),
             state: WidgetControlState::default(),
         }
