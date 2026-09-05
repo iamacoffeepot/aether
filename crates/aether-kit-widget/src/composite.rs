@@ -17,10 +17,11 @@
 //! There are two lanes, not two layers. Everything above happens once in the
 //! ordinary lane and once in the overlay: a slot the node marked overlay
 //! ([`Composite::set_slot_overlay`]) flattens its draws into the overlay
-//! beside the node's own overlay chrome ([`Composite::extend_overlay`]), in
-//! the same chrome-then-slots order. That is how a plate and the children it
-//! hosts stay one group — which is what the root's clip subtraction reads to
-//! decide whose text a fill may cut.
+//! beside the node's own overlay chrome ([`Composite::extend_overlay`]), the
+//! chrome going down at the head of the group of raised slots it hosts. That
+//! is how a plate and the children it hosts stay one group, placed in the
+//! lane where the root's own layout order put them — which is what the root's
+//! clip subtraction reads to decide whose text a fill may cut.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -127,9 +128,9 @@ impl Composite {
     /// content, so it goes in the overlay — but a popover's controls are
     /// ordinary widgets of the root, and ordinary draws are what an overlay
     /// fill cuts text out from under. Marking the popover's children overlay
-    /// too moves the whole group into one lane: the plate goes down first
-    /// ([`Self::extend_overlay`]), the group's children follow in slot order,
-    /// the fill still cuts the primary content's glyphs under it, and it
+    /// too moves the whole group into one lane: the plate goes down at the
+    /// group's head ([`Self::extend_overlay`]), its children follow in slot
+    /// order, the fill still cuts the primary content's glyphs under it, and it
     /// cannot cut its own children's — the subtraction is positional, and
     /// their labels are authored after the plate that hosts them.
     ///
@@ -200,9 +201,12 @@ impl Composite {
 
     /// Append one of the node's own draws to its **overlay** chrome (local
     /// coordinates): the same fills-under-children rule, one lane up. The
-    /// node's overlay chrome flattens before any slot's overlay, so a plate
-    /// laid down here stands under the group of children raised onto it with
-    /// [`Self::set_slot_overlay`] and over everything in the ordinary lane.
+    /// node's overlay chrome flattens at the head of the group it hosts — just
+    /// before the first slot raised with [`Self::set_slot_overlay`], or at the
+    /// end of the lane when the node raised none — so a plate laid down here
+    /// stands under its own children and over everything laid before the
+    /// group: the whole ordinary lane, and an earlier sibling's escaped
+    /// overlay with it.
     pub fn extend_overlay(&mut self, items: impl IntoIterator<Item = WidgetDrawItem>) {
         self.overlay_chrome.extend(items);
     }
@@ -243,14 +247,29 @@ impl Composite {
     /// A slot marked with [`Self::set_slot_overlay`] puts its ordinary `items`
     /// in that same `overlay`, still offset by its origin and still cut to its
     /// slot clip: the clip is where the root framed the child, which the lane
-    /// does not change. The lane order is the node's overlay chrome first,
-    /// then each overlay slot in registration order, so a plate and the
-    /// children standing on it arrive in the order the root laid them out.
+    /// does not change.
+    ///
+    /// The node's own overlay chrome goes down **where the group it hosts
+    /// begins** — immediately before the first slot raised into the lane, and
+    /// at the end of the lane when the node raised none. That is the plate's
+    /// position in the root's own layout order, which is the only order there
+    /// is here: a plate laid with [`Self::extend_overlay`] has no slot to
+    /// register, so seeding the lane with it instead put it under every
+    /// ordinary sibling's escaped overlay — a background label's reveal band
+    /// or a still-open list painting across a modal plate, with no
+    /// registration order a host could fix it from. Laid at its group's head
+    /// it still arrives before the children standing on it, so the positional
+    /// subtraction leaves their labels whole.
     #[must_use]
     pub fn flatten(&self, intrinsic: Option<[f32; 2]>) -> WidgetDrawList {
         let mut items = self.chrome.clone();
-        let mut overlay = self.overlay_chrome.clone();
+        let mut overlay = Vec::new();
+        let mut plate_laid = false;
         for slot in &self.slots {
+            if slot.overlay && !plate_laid {
+                overlay.extend(self.overlay_chrome.iter().cloned());
+                plate_laid = true;
+            }
             let Some(list) = &slot.list else {
                 continue;
             };
@@ -261,6 +280,9 @@ impl Composite {
                 items.extend(placed);
             }
             overlay.extend(list.overlay.iter().map(|item| item.offset(slot.origin)));
+        }
+        if !plate_laid {
+            overlay.extend(self.overlay_chrome.iter().cloned());
         }
         WidgetDrawList { content_height: None, intrinsic, items, overlay }
     }
@@ -583,6 +605,49 @@ mod tests {
             vec![0.2, 0.3],
             "the node's own overlay chrome first, then the overlay slot — and the child draw \
              that fell outside its slot clip is dropped there exactly as it would be here",
+        );
+    }
+
+    #[test]
+    fn a_raised_plate_stands_over_the_sibling_overlay_laid_down_before_its_group() {
+        // Tripwire: the plate a popover or a dialog is laid on goes down
+        // through `extend_overlay`, which has no slot to register — so the
+        // only thing that can place it is the group of slots it hosts.
+        // Seeding the lane with it instead put it under *every* sibling's
+        // escaped overlay: a background label's hover-reveal band, or a
+        // dropdown still open behind the plate, painted across the modal, and
+        // no registration order could fix it because chrome has no position
+        // to move.
+        let mut root = Composite::new();
+        let background = MailboxId(1);
+        let on_plate = MailboxId(2);
+        root.register_slot(background, Vec2::ZERO, None, "background", "aether.kit.widget");
+        root.register_slot(on_plate, Vec2::ZERO, None, "on_plate", "aether.kit.widget");
+        assert!(root.set_slot_overlay(on_plate, true));
+
+        root.begin_frame();
+        root.extend_overlay([quad(0.0, 0.2)]);
+        let mut escaping = list(vec![quad(0.0, 0.1)]);
+        escaping.overlay = vec![quad(0.0, 0.15)];
+        assert!(root.fill(background, escaping));
+        assert!(root.fill(on_plate, list(vec![quad(0.0, 0.3)])));
+
+        let flat = root.flatten(None);
+        let tags = flat
+            .overlay
+            .iter()
+            .map(|item| match item {
+                WidgetDrawItem::Quad { color, .. } => color.r,
+                WidgetDrawItem::TexturedQuad { .. } | WidgetDrawItem::Text { .. } => {
+                    unreachable!("test builds only solid quads")
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tags,
+            vec![0.15, 0.2, 0.3],
+            "the background's escaped overlay went down where its slot sits, then the plate over it, \
+             then the child standing on the plate",
         );
     }
 

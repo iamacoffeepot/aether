@@ -1583,12 +1583,21 @@ in its group.
 
 A *root* reaches the same lane two ways, for the plate that hosts other
 children rather than escaping its own slot. `Composite::extend_overlay(items)`
-is the overlay's counterpart to `extend_chrome` — the node's own draws, laid
-down before any slot's — and `Composite::set_slot_overlay(child, true)` moves
-one registered slot's ordinary `items` into the overlay, keeping its origin,
-its slot clip, and its place in registration order. Together they make a
-**group**: a popover's plate through `extend_overlay`, its children through
-`set_slot_overlay` while it is open, flattened plate-first in layout order.
+is the overlay's counterpart to `extend_chrome` — the node's own draws — and
+`Composite::set_slot_overlay(child, true)` moves one registered slot's ordinary
+`items` into the overlay, keeping its origin, its slot clip, and its place in
+registration order. Together they make a **group**: a popover's plate through
+`extend_overlay`, its children through `set_slot_overlay` while it is open,
+flattened plate-first in layout order.
+
+The plate is laid at the **head of that group** — just before the first raised
+slot, and at the end of the lane when the node raised none — because chrome has
+no slot of its own to place it by. So it stands over everything the root laid
+before the group, an ordinary sibling's escaped overlay included: a background
+label's hover-reveal plate, or a dropdown still open behind a modal, goes down
+where its own slot sits and the plate covers it. The escape hatch above
+("register such a control last in its group") is for two *slots*; it does not
+apply to chrome, which is why the plate carries the rule instead.
 
 That grouping is what the clip subtraction reads, and the rule it reads it by
 is **positional**: a glyph run's holes are the fills authored *after* it. Text
