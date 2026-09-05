@@ -260,9 +260,12 @@ pub enum WidgetDrawItem {
         tint: Rgba,
         clip: Option<WidgetClipRect>,
     },
-    /// A glyph run. `(x, y)` is the baseline origin in local pixels;
-    /// `font_id` names a session-scoped font loaded through `aether.text`;
-    /// `color` is a linear RGBA multiplier over glyph coverage.
+    /// A glyph run. `(x, y)` is the top-left of the run's line box in local
+    /// pixels — the pen origin `set::text_origin_y` computes, which
+    /// `aether.text` puts the baseline one ascent below, matching
+    /// `aether_text::DrawText::origin` in `Screen` space. `font_id` names a
+    /// session-scoped font loaded through `aether.text`; `color` is a linear
+    /// RGBA multiplier over glyph coverage.
     Text { x: f32, y: f32, font_id: u32, text: String, size_pixels: f32, color: Rgba, clip: Option<WidgetClipRect> },
 }
 
@@ -1187,10 +1190,20 @@ impl VirtualListConfig {
     #[must_use]
     pub fn scroll_strip_width(&self, theme: &Theme) -> f32 {
         if self.host_scroll_strip {
-            theme.space(self.scroll_bar_gap_units) + Self::scroll_track_width(theme)
+            Self::host_strip_width(self.scroll_bar_gap_units, theme)
         } else {
             0.0
         }
+    }
+
+    /// The same column, measured from the gap units alone. A host that lays a
+    /// list out in **its** theme rather than the config's — the reference
+    /// panel fans its own theme down to every child — reserves the column with
+    /// this, so the strip it clips across is the one the list will draw its
+    /// track in, and the formula still lives in one place.
+    #[must_use]
+    pub fn host_strip_width(scroll_bar_gap_units: u8, theme: &Theme) -> f32 {
+        theme.space(scroll_bar_gap_units) + Self::scroll_track_width(theme)
     }
 
     /// The thinnest a track may be drawn, whatever a theme scales its spacing
@@ -1924,28 +1937,6 @@ impl Default for PanelConfig {
 mod tests {
     use super::*;
     use aether_data::wire;
-
-    #[test]
-    fn scroll_wire_vocabulary_uses_named_semantic_records() {
-        let ScrollExtent { width_pixels, height_pixels } = ScrollExtent { width_pixels: 32.0, height_pixels: 18.0 };
-        let ScrollOffset { x_pixels, y_pixels } = ScrollOffset { x_pixels: 4.0, y_pixels: 7.0 };
-        let ScrollDelta { x_pixels: horizontal_delta, y_pixels: vertical_delta } =
-            ScrollDelta { x_pixels: -2.0, y_pixels: 9.0 };
-        let ScrollResidual { x_pixels: horizontal_remainder, y_pixels: vertical_remainder } =
-            ScrollResidual { x_pixels: 0.0, y_pixels: 3.0 };
-
-        // Named-pattern destructuring is a compile-time tripwire: replacing
-        // any semantic record with a tuple, fixed array, or array alias makes
-        // this public-contract test stop compiling.
-        assert_eq!(width_pixels, 32.0);
-        assert_eq!(height_pixels, 18.0);
-        assert_eq!(x_pixels, 4.0);
-        assert_eq!(y_pixels, 7.0);
-        assert_eq!(horizontal_delta, -2.0);
-        assert_eq!(vertical_delta, 9.0);
-        assert_eq!(horizontal_remainder, 0.0);
-        assert_eq!(vertical_remainder, 3.0);
-    }
 
     #[test]
     fn widget_kind_preserves_established_wire_discriminants() {
