@@ -182,12 +182,13 @@ impl ImageWidget {
         let intrinsic =
             self.has_valid_natural_size().then_some([self.natural_width_pixels, self.natural_height_pixels]);
         if !self.state.is_visible() {
-            return WidgetDrawList { intrinsic, items: Vec::new(), overlay: Vec::new() };
+            return WidgetDrawList { content_height: None, intrinsic, items: Vec::new(), overlay: Vec::new() };
         }
         let Some(placement) = self.placement() else {
-            return WidgetDrawList { intrinsic, items: Vec::new(), overlay: Vec::new() };
+            return WidgetDrawList { content_height: None, intrinsic, items: Vec::new(), overlay: Vec::new() };
         };
         WidgetDrawList {
+            content_height: None,
             intrinsic,
             overlay: Vec::new(),
             items: vec![WidgetDrawItem::TexturedQuad {

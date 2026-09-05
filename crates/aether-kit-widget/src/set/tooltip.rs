@@ -751,7 +751,7 @@ impl WasmActor for TooltipWidget {
             }
         }
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { intrinsic: None, items: Vec::new(), overlay });
+            parent.send(&WidgetDrawList { content_height: None, intrinsic: None, items: Vec::new(), overlay });
         }
     }
 }

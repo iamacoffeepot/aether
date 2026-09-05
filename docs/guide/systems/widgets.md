@@ -375,7 +375,8 @@ A host that wants `⌘` in a label ships a face that has it, or writes
 ## Fixed-row virtual lists
 
 `VirtualListConfig { items, initial_selected_index, visible_row_count,
-empty_text, ruled, theme, state }` retains the complete row vector while
+empty_text, ruled, scroll_bar_gap_units, host_scroll_strip, theme, state }`
+retains the complete row vector while
 realizing the rows the viewport reaches. The panel fixes the slot height at
 `theme.row_height * visible_row_count` — at the summed height of the first
 `visible_row_count` rows once any of them carries a height of its own
@@ -432,16 +433,54 @@ the pointer, a press on the bare track carries the reader to where they
 pointed. Scrolling never changes selection: a reader looking at something has
 not chosen it. A press on the bar chooses no row.
 
-The bar owns a **gutter** at the frame's right end — its track plus one
-spacing unit of gap — and a row is laid out, filled, and elided inside what is
-left, so the bar stands beside the rows rather than on them. (A row fill that
-ran the whole frame width put the track on top of the row it marked, which is
-what "the scrollbar has no padding with the inner content to the left so it
-just draws over it" was.) The reported intrinsic counts the same gutter, so a
-slot sized from it does not hand the bar back a gutter's worth of the text it
-just asked for. A host drawing its own rows against a kit list's geometry
-reserves the same width: `Theme::space(2)` of track plus `Theme::space(1)` of
-gap, whenever the vector overflows the viewport. A
+The end of the travel is the **last window** — the first row whose top clears
+a viewport of the content's end, not the last row that starts before it. The
+window begins on a row's own top, so on a frame that is not an exact prefix sum
+of its rows (a plate capped by a pane's height never is) the other rounding
+stopped short by up to a row and left the final row hanging below the frame's
+edge with nothing left to roll ("cannot scroll to bottom"). The slack, at most
+one row, falls above the window's start instead, and a thumb dragged to the
+bottom of its track lands in the same window the wheel does.
+
+The bar owns a **gutter** at the frame's right end — its track plus
+`scroll_bar_gap_units` of clear space — and a row is laid out, filled, and
+elided inside what is left, so the bar stands beside the rows rather than on
+them. (A row fill that ran the whole frame width put the track on top of the
+row it marked, which is what "the scrollbar has no padding with the inner
+content to the left so it just draws over it" was.) The gap is the **host's**:
+`VirtualListConfig::scroll_bar_gap_units`, `VirtualListConfig::SCROLL_BAR_GAP_UNITS`
+— two units — by default, which is the least a control stands off a plate's
+edge in the method's spacing ladder (`designing-a-screen.md` §6). One unit was
+the whole gutter until round 15 and read as touching the values ("the
+scrollbar is still too close to content to the left side"); a host that wants
+more sets more, and every list gets the wider default without asking. The
+reported intrinsic counts the same gutter, so a slot sized from it does not
+hand the bar back a gutter's worth of the text it just asked for. A host
+drawing its own rows against a kit list's geometry reserves the same width:
+`Theme::space(2)` of track plus `Theme::space(scroll_bar_gap_units)` of gap,
+whenever the vector overflows the viewport.
+
+A host that would rather the bar stood **beside** the list than inside it sets
+`host_scroll_strip`. The track is then drawn one gutter past the frame's right
+edge — the way a pane's rail is drawn past the tab body it scrolls — and the
+rows give up nothing at all, so a value's right edge stays where it is whether
+or not the vector overflows ("I feel like the scrollbar should EXTEND the panel
+slightly to exist and be adjacent"). The host owes the widget that column, and
+the widget says how wide it is:
+
+```rust
+let strip = config.scroll_strip_width(&theme); // 0.0 unless host_scroll_strip
+
+let list = Rect { width: plate.width - strip, ..plate };
+let clip = Rect { width: list.width + strip, ..list }; // or the track is clipped away
+```
+
+`scroll_strip_width` is the gutter plus `VirtualListConfig::scroll_track_width`,
+so a host reserving the column copies no kit constant, and it answers before
+any draw list arrives — which is when a layout needs it. The clip matters: a
+slot clipped to the list's own frame erases a track drawn outside it, and a
+press in the strip reaches the list only if the host's hit test reaches across
+it too. A
 virtual list joins the same wheel-only hit table a `ScrollWidget` does (see
 [Scroll containers and wheel ownership](#scroll-containers-and-wheel-ownership)),
 so a root that forks the reference panel routes `MouseWheel` to it by
@@ -455,6 +494,19 @@ the reader scrolls — and because that is the one thing here that touches every
 item, it is measured once and re-measured only when the items, the font, or the
 type scale change. It is `None` until the metrics resolve and for a list with
 no rows.
+
+`WidgetDrawList::content_height` is the other half of that, and the one a host
+draws a **container** from: the whole item vector's height in pixels, which is
+the scroll extent said in the host's own unit — the offset table's last sum
+once rows carry heights of their own, and `theme.row_height × items.len()`
+while they are all one height. The intrinsic's height is the *viewport*; this
+is everything the list scrolls through, so a plate drawn to it is as tall as
+what it holds rather than a tall empty box (§4). Only the widget can answer it
+— the wrapping is the widget's because the font metrics are — and a host that
+counted rows itself would mirror the kit's note cap and line-height ratio and
+drift from them silently. It is `None` for a table the list has not measured
+yet (the advances still in flight), where a plate sized from a guess would
+resize under the reader a frame later.
 
 ### The row under the pointer
 

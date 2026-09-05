@@ -214,7 +214,7 @@ impl WasmActor for RadioGroupWidget {
         }
         push_control_outlines(&mut items, self.frame.width, self.frame.height, &self.state, &self.theme);
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { intrinsic: None, items, overlay: Vec::new() });
+            parent.send(&WidgetDrawList { content_height: None, intrinsic: None, items, overlay: Vec::new() });
         }
     }
 }

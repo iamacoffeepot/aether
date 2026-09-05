@@ -262,7 +262,7 @@ impl Composite {
             }
             overlay.extend(list.overlay.iter().map(|item| item.offset(slot.origin)));
         }
-        WidgetDrawList { intrinsic, items, overlay }
+        WidgetDrawList { content_height: None, intrinsic, items, overlay }
     }
 }
 
@@ -301,7 +301,7 @@ mod tests {
     }
 
     fn list(items: Vec<WidgetDrawItem>) -> WidgetDrawList {
-        WidgetDrawList { intrinsic: None, items, overlay: Vec::new() }
+        WidgetDrawList { content_height: None, intrinsic: None, items, overlay: Vec::new() }
     }
 
     #[test]

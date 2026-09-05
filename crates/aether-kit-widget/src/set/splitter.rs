@@ -455,7 +455,12 @@ impl WasmActor for SplitterWidget {
             return;
         }
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { intrinsic: None, items: self.draw_items(), overlay: Vec::new() });
+            parent.send(&WidgetDrawList {
+                content_height: None,
+                intrinsic: None,
+                items: self.draw_items(),
+                overlay: Vec::new(),
+            });
         }
     }
 }

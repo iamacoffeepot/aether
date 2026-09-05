@@ -30,6 +30,18 @@
 //! the whole item vector, which the list reports as its intrinsic width so a
 //! column can be sized to what it holds.
 //!
+//! # What the list reports about its own size
+//!
+//! Two numbers ride up with the draw list. `WidgetDrawList::intrinsic` is the
+//! size the list asks a **layout** for — the widest row of the whole vector
+//! plus a pad each side, by the configured viewport's height. `content_height`
+//! is what the whole vector stands at, which is the scroll extent said in
+//! pixels: the offset table's last sum for a table, the configured pitch by
+//! the item count for a fixed-pitch list. A host draws the container around a
+//! list from the second — a four-row table gets a four-row plate rather than a
+//! tall empty box — because only the widget can answer it, the wrapping being
+//! the widget's and the font metrics with it (the studio's gap 41).
+//!
 //! # The row under the pointer
 //!
 //! The list keeps its rows out of the host's hit table — the list owns them,
@@ -173,6 +185,36 @@
 //! touched cannot answer "how many entries are there" for a reader who has not
 //! touched it. The wheel moves the window and so does dragging the thumb; the
 //! two write the same `first_index`, which is the list's whole scroll state.
+//!
+//! The end of that travel is the **last window**: the first row whose top
+//! clears a viewport of the content's end, rather than the last row starting
+//! before it. A frame is rarely an exact prefix sum of its rows — a plate
+//! capped by a pane's height never is — and rounding the other way left the
+//! final row hanging below the frame's edge with nothing left to roll, which
+//! is round-17 note 1, "on defense extended stats cannot scroll to bottom"
+//! (the studio's gap 41a). The slack, never more than one row, falls above
+//! the last window's start.
+//!
+//! The bar stands off the rows by a **gutter**, and the gutter is the host's:
+//! [`VirtualListConfig::scroll_bar_gap_units`], two spacing units by default,
+//! because a control inside a plate sits at least two units from its edge
+//! (`designing-a-screen.md` §6) and from the rows' side the rail is that edge.
+//! One unit was the whole gutter until round 15, and the owner read it as
+//! touching the values twice — round-14 note 5 and round-17 note 7, "the
+//! scrollbar is still too close to content to the left side". The gutter comes
+//! out of the row's own width, so the fill, the trailing column and the
+//! leading run's elision all stop on the gutter's left edge rather than
+//! running under the track.
+//!
+//! Unless the strip is the **host's**: with
+//! [`VirtualListConfig::host_scroll_strip`] the track stands one gutter past
+//! the frame's right edge — the way a pane's rail is drawn past the body it
+//! scrolls — and the rows give up nothing, so a value's right edge does not
+//! move when the vector starts to overflow (round-16 note 3, "the scrollbar
+//! should EXTEND the panel slightly to exist and be adjacent"). The host owes
+//! the widget that column: [`VirtualListConfig::scroll_strip_width`] is how
+//! wide it is, and the slot's clip has to reach across it, since a clip of the
+//! frame alone erases a track drawn outside it.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -209,17 +251,6 @@ impl VisibleRowWindow {
         self.end_exclusive_index.saturating_sub(self.first_index)
     }
 }
-
-/// How wide the scroll bar's track is, in spacing units — two, which is eight
-/// pixels on the four-pixel grid: wide enough to grab with a pointer, narrow
-/// enough that it reads as an edge of the list rather than a column in it.
-const SCROLL_BAR_UNITS: u8 = 2;
-
-/// How much clear space stands between a row's text and the scroll bar's
-/// track, in spacing units. One: the bar is a mark on the list's edge, and a
-/// row that runs up against it reads as text the bar is printing over
-/// (round-5 note 8).
-const SCROLL_BAR_GAP_UNITS: u8 = 1;
 
 /// How much clear space stands between a row's leading run and its trailing
 /// column, in spacing units. One — enough that the two read as two columns,
@@ -391,28 +422,46 @@ impl ScrollExtent {
     }
 }
 
-/// The bar a list standing at `extent` draws, or `None` when there is nothing
-/// to say: a vector that fits its viewport, an unlaid-out frame, or a frame
-/// too narrow to give the track up without swallowing the rows.
-fn scroll_bar(frame: &WidgetFrame, track_width: f32, extent: ScrollExtent) -> Option<ScrollBar> {
+/// Where a list's scroll bar stands: in a gutter cut out of the list's own
+/// frame, or in a strip the host reserved past the frame's right edge
+/// ([`VirtualListConfig::host_scroll_strip`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BarPlacement {
+    InsideFrame,
+    HostStrip,
+}
+
+impl BarPlacement {
+    fn of(host_scroll_strip: bool) -> Self {
+        if host_scroll_strip {
+            Self::HostStrip
+        } else {
+            Self::InsideFrame
+        }
+    }
+}
+
+/// The column the track stands in, in widget-local pixels: down the frame's
+/// right end for the list's own bar, and past that end for one the host has
+/// reserved a strip for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TrackColumn {
+    left: f32,
+    width: f32,
+}
+
+/// The bar a list standing at `extent` draws in `track`, or `None` when there
+/// is nothing to say: a vector that fits its viewport, or an unlaid-out frame.
+fn scroll_bar(frame: &WidgetFrame, track: TrackColumn, extent: ScrollExtent) -> Option<ScrollBar> {
     if !valid_frame(frame) || extent.viewport <= 0.0 || extent.content <= extent.viewport {
         return None;
     }
-    let width = track_width.min(frame.width * 0.5);
-    if !width.is_finite() || width < 1.0 {
-        return None;
-    }
+    let width = track.width;
     let height = frame.height;
     let share = extent.viewport / extent.content;
     let thumb_height = (height * share).max(width * MIN_THUMB_RATIO).min(height);
     let progress = (extent.offset / extent.travel()).clamp(0.0, 1.0);
-    Some(ScrollBar {
-        left: frame.width - width,
-        width,
-        height,
-        thumb_top: progress * (height - thumb_height),
-        thumb_height,
-    })
+    Some(ScrollBar { left: track.left, width, height, thumb_top: progress * (height - thumb_height), thumb_height })
 }
 
 /// The scroll offset a thumb whose top stands at `thumb_top` means, in
@@ -455,6 +504,12 @@ pub struct VirtualListWidget {
     font_metrics: FontMetricsAdapter,
     /// Whether a hairline stands between rows.
     ruled: bool,
+    /// The gutter between the rows and the scroll bar's track, in spacing
+    /// units — [`VirtualListConfig::scroll_bar_gap_units`], which the host
+    /// sets and the rows give up.
+    scroll_bar_gap_units: u8,
+    /// Where the bar stands — [`VirtualListConfig::host_scroll_strip`].
+    bar_placement: BarPlacement,
     /// The widest measured row, remembered across frames. A virtual list
     /// exists so that a frame never touches every item, and the intrinsic
     /// width is the one number that has to — so it is measured once and
@@ -829,7 +884,7 @@ impl VirtualListWidget {
         let full_width = self.frame.width.max(0.0);
         let mut tops = self.build_row_tops(full_width);
         if tops.last().copied().unwrap_or(0.0) > self.frame.height {
-            let gutter = self.track_width() + self.theme.space(SCROLL_BAR_GAP_UNITS);
+            let gutter = self.bar_reserve_width();
             tops = self.build_row_tops((full_width - gutter).max(0.0));
         }
         self.row_tops = Some(tops);
@@ -877,6 +932,14 @@ impl VirtualListWidget {
         let Some(tops) = &self.row_tops else {
             return (offset.round() as usize).min(max_first_index);
         };
+        // The end of the travel is the *last window* rather than the row that
+        // happens to start before it: a thumb dragged to the bottom of its
+        // track and a wheel rolled past the end both mean "show the end of the
+        // content", and rounding those down is the same row-short stop
+        // `max_first_index` rounds up out of (gap 41a).
+        if offset >= self.last_window_top() {
+            return max_first_index;
+        }
         tops.partition_point(|top| *top <= offset).saturating_sub(1).min(max_first_index)
     }
 
@@ -1160,35 +1223,92 @@ impl VirtualListWidget {
     /// The track's configured width — a metric, not a measurement, so it
     /// scales with a theme scaled for a dense display.
     fn track_width(&self) -> f32 {
-        self.theme.space(SCROLL_BAR_UNITS).max(1.0)
+        VirtualListConfig::scroll_track_width(&self.theme)
+    }
+
+    /// Where the track stands, or `None` for a frame it cannot stand in.
+    ///
+    /// The list's own bar is capped at half the frame and refused below a
+    /// pixel: a frame too narrow to give the track up would swallow the rows
+    /// to draw it. A **host-strip** bar is neither, because it takes nothing
+    /// from the rows — it stands in the strip past the frame's right edge,
+    /// one gutter clear of it, which is ground the host reserved for it
+    /// ([`VirtualListConfig::scroll_strip_width`]).
+    fn track_column(&self) -> Option<TrackColumn> {
+        let width = self.track_width();
+        if self.bar_placement == BarPlacement::HostStrip {
+            let left = self.frame.width + self.scroll_bar_gap();
+            return (width.is_finite() && left.is_finite()).then_some(TrackColumn { left, width });
+        }
+        let width = width.min(self.frame.width * 0.5);
+        (width.is_finite() && width >= 1.0).then_some(TrackColumn { left: self.frame.width - width, width })
     }
 
     /// The bar this list stands with right now, or `None` when its vector
     /// fits its viewport.
     fn scroll_bar(&self) -> Option<ScrollBar> {
-        scroll_bar(&self.frame, self.track_width(), self.scroll_extent())
+        scroll_bar(&self.frame, self.track_column()?, self.scroll_extent())
     }
 
-    /// How much of the frame's right end the bar owns: its track plus one
-    /// spacing unit of gap. Zero when no bar stands, so a list that fits its
-    /// viewport gives its whole frame to its rows.
+    /// The clear space the bar keeps between itself and the rows: the host's
+    /// own [`VirtualListConfig::scroll_bar_gap_units`] in theme metrics.
+    fn scroll_bar_gap(&self) -> f32 {
+        self.theme.space(self.scroll_bar_gap_units)
+    }
+
+    /// What a standing bar takes off a row's width: its track plus the
+    /// gutter, and **nothing** when the strip is the host's — the whole point
+    /// of that flag is that a value's right edge does not move when the
+    /// vector starts to overflow.
+    fn bar_reserve_width(&self) -> f32 {
+        if self.bar_placement == BarPlacement::HostStrip {
+            0.0
+        } else {
+            self.track_width() + self.scroll_bar_gap()
+        }
+    }
+
+    /// How much of the frame's right end the bar owns. Zero when no bar
+    /// stands, so a list that fits its viewport gives its whole frame to its
+    /// rows, and zero for a host-strip bar, which never owned any of it.
     fn bar_gutter_width(&self) -> f32 {
-        self.scroll_bar().map_or(0.0, |bar| bar.width + self.theme.space(SCROLL_BAR_GAP_UNITS))
+        if self.bar_placement == BarPlacement::HostStrip {
+            return 0.0;
+        }
+        self.scroll_bar().map_or(0.0, |bar| bar.width + self.scroll_bar_gap())
+    }
+
+    /// Where the **last** window stands in content space: a viewport short of
+    /// the content's end, and `0.0` for content that fits. Zero on the fast
+    /// path, whose content is counted in rows rather than pixels.
+    fn last_window_top(&self) -> f32 {
+        self.row_tops.as_ref().map_or(0.0, |tops| tops.last().copied().unwrap_or(0.0) - self.frame.height)
     }
 
     /// The topmost row the window can start at: the one past which the rest of
-    /// the content no longer fills the viewport. A count on the fast path, and
-    /// the last row whose top clears a viewport of the content's end once the
+    /// the content no longer fills the viewport. A count on the fast path,
+    /// where a viewport is a whole number of rows by construction, and the
+    /// **first** row whose top clears a viewport of the content's end once the
     /// offset table stands.
+    ///
+    /// That last window is rounded **up** (the studio's gap 41a, round-17 note
+    /// 1 — "on defense extended stats cannot scroll to bottom"). Rounded down
+    /// it started on the last row whose top is at or before the content's end,
+    /// so unless the frame happened to be an exact prefix sum of the rows the
+    /// window stopped short by up to a row's height and the final statistic
+    /// hung below the frame's edge with nothing left to roll. Up, the last row
+    /// lands inside the frame and the slack — never more than one row — falls
+    /// above the window's start, which is what every scrolling view does with
+    /// the end of its content.
     fn max_first_index(&self) -> usize {
         let Some(tops) = &self.row_tops else {
             return self.items.len().saturating_sub(self.visible_row_count);
         };
-        let last_top = tops.last().copied().unwrap_or(0.0) - self.frame.height;
+        let last_top = self.last_window_top();
         if !last_top.is_finite() || last_top <= 0.0 {
             return 0;
         }
-        tops.partition_point(|top| *top <= last_top).saturating_sub(1).min(self.items.len().saturating_sub(1))
+        tops.partition_point(|top| *top < last_top).min(self.items.len().saturating_sub(1))
     }
 
     /// Move the window to `first_index`, clamped. Selection is untouched: a
@@ -1304,12 +1424,37 @@ impl VirtualListWidget {
         let widest = self.widest_row_width()?;
         let height = self.viewport_height();
         let gutter = if self.visible_row_count > 0 && self.items.len() > self.visible_row_count {
-            self.track_width() + self.theme.space(SCROLL_BAR_GAP_UNITS)
+            self.bar_reserve_width()
         } else {
             0.0
         };
         let width = self.theme.pad.mul_add(2.0, widest) + gutter;
         (width.is_finite() && height.is_finite()).then_some([width, height])
+    }
+
+    /// The whole item vector's height in pixels: the offset table's last sum
+    /// once the rows have heights of their own, and the configured pitch by
+    /// the item count while every row is one height.
+    ///
+    /// This is the scroll extent's `content` said in pixels. The extent counts
+    /// **rows** on the fixed-pitch path, because the bar is a ratio either
+    /// way; a host drawing a container around the list needs the pixels, so
+    /// the one number is stated in both units from the same two branches
+    /// rather than re-derived on the host's side out of a mirrored row
+    /// arithmetic that drifts (the studio's gap 41).
+    ///
+    /// `None` for a table whose rows the list has not measured yet — the
+    /// offset table missing while some row asks for a height of its own, or
+    /// the font's advances still in flight, either of which would answer with
+    /// a note wrapped onto a line count it is about to change. A plate sized
+    /// from that would resize under the reader a frame later.
+    fn content_height(&self) -> Option<f32> {
+        let Some(tops) = &self.row_tops else {
+            #[allow(clippy::cast_precision_loss)] // a row count a reader could scroll cannot lose precision
+            return (!self.rows_vary).then_some(self.theme.row_height * self.items.len() as f32);
+        };
+        self.font_metrics.resolved()?;
+        Some(tops.last().copied().unwrap_or(0.0))
     }
 
     /// The height the viewport asks for: the configured row count at the one
@@ -1628,6 +1773,8 @@ impl WasmActor for VirtualListWidget {
             state: InteractionState::new(config.state),
             pressed: false,
             ruled: config.ruled,
+            scroll_bar_gap_units: config.scroll_bar_gap_units,
+            bar_placement: BarPlacement::of(config.host_scroll_strip),
             font_metrics: FontMetricsAdapter::new(font_id),
             widest_row_width: None,
             thumb_grab_pixels: None,
@@ -1653,6 +1800,8 @@ impl WasmActor for VirtualListWidget {
         self.items = config.items;
         self.empty_text = config.empty_text;
         self.ruled = config.ruled;
+        self.scroll_bar_gap_units = config.scroll_bar_gap_units;
+        self.bar_placement = BarPlacement::of(config.host_scroll_strip);
         self.visible_row_count = usize_from_u32(config.visible_row_count);
         self.selected_index = initial_selection(config.initial_selected_index, self.items.len());
         self.first_index = 0;
@@ -1810,7 +1959,8 @@ impl WasmActor for VirtualListWidget {
     }
 
     /// Reply the realized rows, each elided to the width it has, plus the
-    /// intrinsic the widest row asks for.
+    /// intrinsic the widest row asks for and the height the whole vector
+    /// stands at.
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         if reply_if_hidden(ctx, &self.state) {
@@ -1818,9 +1968,10 @@ impl WasmActor for VirtualListWidget {
         }
         self.refresh_row_layout();
         let intrinsic = self.intrinsic();
+        let content_height = self.content_height();
         let items = self.draw_items();
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { intrinsic, items, overlay: Vec::new() });
+            parent.send(&WidgetDrawList { intrinsic, content_height, items, overlay: Vec::new() });
         }
     }
 }
@@ -1919,6 +2070,8 @@ mod tests {
             selected_index,
             first_index: 0,
             visible_row_count,
+            scroll_bar_gap_units: VirtualListConfig::SCROLL_BAR_GAP_UNITS,
+            bar_placement: BarPlacement::InsideFrame,
             theme: Theme::DEFAULT,
             frame: WidgetFrame { x: 10.0, y: 20.0, width: 100.0, height: 120.0 },
             state: InteractionState::new(WidgetControlState::default()),
@@ -2786,8 +2939,253 @@ mod tests {
         let row_fill_right = widget.row_width();
         assert_eq!(
             bar.left - row_fill_right,
-            widget.theme.space(SCROLL_BAR_GAP_UNITS),
+            widget.scroll_bar_gap(),
             "and the gap between the row and the track is one spacing unit",
+        );
+    }
+
+    /// A list of long-named rows with an amount in the second column, in a
+    /// frame wide enough that a name has somewhere to be cut, at the gutter
+    /// the host asked for.
+    fn gutter_list(scroll_bar_gap_units: u8) -> VirtualListWidget {
+        let mut widget = measured_list(200, 5);
+        widget.frame = WidgetFrame { x: 10.0, y: 20.0, width: 200.0, height: 120.0 };
+        widget.scroll_bar_gap_units = scroll_bar_gap_units;
+        widget.items = (0..200)
+            .map(|index| {
+                VirtualListRow::from(format!("a skill gem with a long name {index}"))
+                    .with_trailing(vec!["21/20".into()])
+            })
+            .collect();
+        widget.forget_measurements();
+        widget
+    }
+
+    /// The rightmost pen-plus-advance of anything one list draws.
+    fn drawn_right_edge(widget: &VirtualListWidget) -> f32 {
+        let metrics = widget.font_metrics.resolved().expect("the test table is installed");
+        placed_runs(widget)
+            .into_iter()
+            .map(|(text, x, _, size)| x + measured_text_width(metrics, &text, size))
+            .fold(0.0_f32, f32::max)
+    }
+
+    #[test]
+    fn a_wider_gutter_shortens_the_rows_rather_than_letting_them_run_under_the_track() {
+        // Tripwire: round-17 note 7 — "the scrollbar is still too close to
+        // content to the left side". The gutter is the host's now, and the
+        // only thing that makes a wider one real is that the rows are laid,
+        // filled *and elided* inside what is left of the frame. A gutter that
+        // only moved the track would draw the bar further in and leave the
+        // names and the amounts exactly where they were, which is under it.
+        let narrow = gutter_list(1);
+        let wide = gutter_list(3);
+
+        assert_eq!(
+            narrow.row_width() - wide.row_width(),
+            wide.theme.space(2),
+            "the two extra units come out of the row rather than out of nothing",
+        );
+        assert!(
+            drawn_right_edge(&wide) <= wide.row_width() - wide.theme.pad + 1e-3,
+            "every run stops on the row's right pad: {} in a row {} wide",
+            drawn_right_edge(&wide),
+            wide.row_width(),
+        );
+        assert!(
+            drawn_right_edge(&wide) < drawn_right_edge(&narrow),
+            "and the amounts moved left with the gutter rather than staying where they were",
+        );
+
+        let leading = |widget: &VirtualListWidget| placed_runs(widget).first().expect("a realized row").0.clone();
+        assert!(leading(&wide).ends_with(ELLIPSIS), "a name too long for the narrower row is cut: {}", leading(&wide));
+        assert!(
+            leading(&wide).chars().count() < leading(&narrow).chars().count(),
+            "and cut shorter than the same name in the same frame at one unit of gutter",
+        );
+    }
+
+    #[test]
+    fn the_default_gutter_is_the_two_units_a_control_stands_off_a_plate_edge() {
+        // Tripwire: the default is what every host that says nothing gets,
+        // and it is the number the owner asked for twice (round-14 note 5,
+        // round-17 note 7). A config default that fell back to `u8::default()`
+        // would give a silent host no gutter at all — the bar drawn flush
+        // against the values, which is the bug the field exists to fix.
+        assert_eq!(VirtualListConfig::default().scroll_bar_gap_units, 2);
+    }
+
+    #[test]
+    fn a_host_strip_bar_stands_past_the_frame_and_takes_nothing_off_the_rows() {
+        // Tripwire: the studio's gap 42 and round-16 note 3 — "I feel like
+        // the scrollbar should EXTEND the panel slightly to exist and be
+        // adjacent". A flag that only moved the track would leave the rows
+        // laid, filled and elided against a frame a gutter short, so the
+        // values would still step left the moment the vector overflowed —
+        // the bug the flag exists to remove, and invisible in a capture
+        // where the bar happens to stand in reserved ground anyway.
+        let mut widget = gutter_list(VirtualListConfig::SCROLL_BAR_GAP_UNITS);
+        widget.bar_placement = BarPlacement::HostStrip;
+
+        assert_eq!(widget.row_width(), widget.frame.width, "the rows keep the whole frame");
+        assert_eq!(widget.bar_gutter_width(), 0.0, "and give up nothing to a bar standing outside it");
+        assert_eq!(
+            widget.text_width_budget(),
+            widget.theme.pad.mul_add(-2.0, widget.frame.width),
+            "so a row's text budget is the frame less its two pads and no more",
+        );
+
+        let bar = widget.scroll_bar().expect("a vector past its viewport stands a bar");
+        assert_eq!(bar.left, widget.frame.width + widget.scroll_bar_gap(), "the track stands one gutter past the edge");
+        assert!(drawn_quads(&widget).iter().any(|(x, _, width, _, _)| {
+            (*x - bar.left).abs() < f32::EPSILON && (*width - bar.width).abs() < f32::EPSILON
+        }));
+
+        let inside = gutter_list(VirtualListConfig::SCROLL_BAR_GAP_UNITS);
+        assert!(
+            drawn_right_edge(&widget) > drawn_right_edge(&inside),
+            "and the amounts stand where they stand on a list that does not overflow at all",
+        );
+    }
+
+    #[test]
+    fn the_reported_strip_is_the_column_the_bar_actually_draws_in() {
+        // Tripwire: a host reserves the column from the config's report,
+        // before any draw list exists to measure. A report that disagreed
+        // with the draw — a gutter counted twice, a track the host guessed at
+        // — would put the bar half in the plate beside it or leave a column
+        // of ground nothing stands in.
+        let theme = Theme::DEFAULT;
+        let config = VirtualListConfig { host_scroll_strip: true, ..VirtualListConfig::default() };
+        let mut widget = gutter_list(config.scroll_bar_gap_units);
+        widget.bar_placement = BarPlacement::HostStrip;
+
+        let bar = widget.scroll_bar().expect("a vector past its viewport stands a bar");
+        assert_eq!(config.scroll_strip_width(&theme), bar.left + bar.width - widget.frame.width);
+        assert_eq!(
+            VirtualListConfig::default().scroll_strip_width(&theme),
+            0.0,
+            "a list drawing its own bar asks the host for no column at all",
+        );
+    }
+
+    #[test]
+    fn the_last_row_of_a_table_lands_inside_the_frame_however_the_frame_divides_its_rows() {
+        // Tripwire: round-17 note 1, verbatim — "On defense extended stats
+        // cannot scroll to bottom" (the studio's gap 41a). The window starts
+        // on a row's own top, so the last window has to be the first one that
+        // reaches the content's end. Chosen as the *last* row starting at or
+        // before that end instead, the window stops short by up to a row and
+        // the final statistic hangs below the frame's edge with nothing left
+        // to roll — invisible on any frame that happens to be an exact prefix
+        // sum of its rows, which a plate capped by a pane's height never is.
+        let items = alloc::vec![
+            noted("Armour", "the share of a hit of the size this fight expects that this takes off it"),
+            VirtualListRow::from("Evasion").with_trailing(vec!["1240".into()]),
+            noted("Fire resistance", "the lines come to -60%, with no headroom over the maximum at all"),
+            VirtualListRow::from("Stun threshold").with_space_before(3).with_rule_above(),
+            noted("Block", "nothing on this build blocks, so the chance is the character's own"),
+        ];
+        let mut widget = table_list(items, 5);
+        let tops = widget.row_tops.clone().expect("a table keeps an offset table");
+
+        // A frame that ends half way down the second row's slot: the content's
+        // end lands strictly inside a row rather than on one's top edge.
+        let half_row = (tops[2] - tops[1]) * 0.5;
+        widget.frame = WidgetFrame { height: tops.last().expect("content") - tops[1] - half_row, ..widget.frame };
+        widget.refresh_row_layout();
+        let tops = widget.row_tops.clone().expect("a table keeps an offset table");
+        let last_top = widget.last_window_top();
+        assert!(
+            last_top > tops[1] && last_top < tops[2],
+            "the frame is not an exact prefix sum of the rows: {last_top} between {} and {}",
+            tops[1],
+            tops[2],
+        );
+
+        widget.scroll_to(usize::MAX);
+        let last_index = widget.items.len() - 1;
+        assert_eq!(widget.window().end_exclusive_index, widget.items.len(), "the last window realizes the last row");
+        let bands = widget.row_bands(last_index).expect("the last row is realized at the end of the vector");
+        assert!(
+            bands.plate_top + bands.plate_height <= widget.frame.height + 1e-3,
+            "the last row's bottom is inside the frame: {} of {}",
+            bands.plate_top + bands.plate_height,
+            widget.frame.height,
+        );
+
+        // And the bar reaches the same place: a thumb dragged to the bottom of
+        // its track means the end of the content, not the row that happens to
+        // start before it.
+        widget.first_index = 0;
+        let bar = widget.scroll_bar().expect("a table past its frame stands a bar");
+        widget.press_scroll_bar(bar, bar.height);
+        assert_eq!(widget.first_index, widget.max_first_index(), "the thumb's own end is the list's end");
+    }
+
+    #[test]
+    fn a_fixed_pitch_list_still_ends_on_its_last_row_exactly() {
+        // Tripwire: the fast path divides the frame by the configured row
+        // count, so its viewport is a whole number of rows and its last window
+        // is the item count less that — rounding it the way a table's is
+        // rounded would scroll one row past the end and draw a blank strip
+        // under the last row.
+        let mut widget = measured_list(200, 5);
+        widget.scroll_to(usize::MAX);
+        assert_eq!(widget.first_index, 195);
+        assert_eq!(widget.window().end_exclusive_index, 200, "and the window ends on the last item");
+        let bands = widget.row_bands(199).expect("the last row is realized");
+        assert!(
+            (bands.plate_top + bands.plate_height - widget.frame.height).abs() < 1e-3,
+            "its bottom is the frame's own bottom: {}",
+            bands.plate_top + bands.plate_height,
+        );
+    }
+
+    #[test]
+    fn the_content_height_is_the_extent_the_table_scrolls_through_rather_than_a_pitch_by_rows() {
+        // Tripwire: the studio's gap 41. A host draws the plate under a list
+        // from this number and the list scrolls through the extent, so the
+        // two have to be the one number — a content height re-derived as
+        // pitch × rows under-measures every table whose rows carry a note or
+        // open a block, and the plate is then cut short of its own last rows
+        // while the list happily scrolls to them.
+        let items = alloc::vec![
+            VirtualListRow::from("Armour").with_trailing(vec!["1240".into()]),
+            noted(
+                "Physical damage mitigated",
+                "the share of a hit of the size this fight expects that the armour value above takes off",
+            ),
+            VirtualListRow::from("Resistances").with_space_before(3).with_rule_above(),
+        ];
+        let widget = table_list(items, 5);
+
+        assert_eq!(
+            widget.content_height(),
+            Some(widget.scroll_extent().content),
+            "the plate is drawn to the height the list scrolls through",
+        );
+        assert!(
+            widget.scroll_extent().content > widget.theme.row_height * 3.0,
+            "and a table of notes and block gaps stands taller than three rows of pitch",
+        );
+
+        let plain = measured_list(200, 5);
+        assert_eq!(plain.scroll_extent().content, 200.0, "a fixed-pitch list counts its extent in rows");
+        assert_eq!(
+            plain.content_height(),
+            Some(plain.theme.row_height * 200.0),
+            "and reports the same content in the pixels a host draws with",
+        );
+
+        let mut unwrapped = list(1, 5, 0);
+        unwrapped.items = alloc::vec![noted("Armour", "a sentence long enough to wrap onto a second line")];
+        unwrapped.rows_vary = true;
+        unwrapped.refresh_row_layout();
+        assert_eq!(
+            unwrapped.content_height(),
+            None,
+            "a table whose notes have not been wrapped against real advances says nothing rather than a number it is about to change",
         );
     }
 
@@ -2806,7 +3204,7 @@ mod tests {
             let metrics = widget.font_metrics.resolved().expect("the test table is installed");
             widget.theme.pad.mul_add(2.0, measured_text_width(metrics, &widget.items[17].text, size))
                 + widget.track_width()
-                + widget.theme.space(SCROLL_BAR_GAP_UNITS)
+                + widget.scroll_bar_gap()
         };
         let [width, height] = widget.intrinsic().expect("a measured, non-empty list reports an intrinsic");
         assert!((width - expected).abs() < f32::EPSILON, "{width} is not the widest row plus a pad each side");
@@ -2856,7 +3254,7 @@ mod tests {
 
         let long = list(200, 5, 0);
         assert!(long.scroll_bar().is_some());
-        assert_eq!(long.bar_gutter_width(), long.track_width() + long.theme.space(SCROLL_BAR_GAP_UNITS));
+        assert_eq!(long.bar_gutter_width(), long.track_width() + long.scroll_bar_gap());
         assert_eq!(long.text_width_budget(), long.theme.pad.mul_add(-2.0, long.row_width()));
 
         let mut unlaid = list(200, 5, 0);

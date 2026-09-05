@@ -353,6 +353,7 @@ fn virtual_list_spec(subname: &str, state: WidgetControlState) -> WidgetChildSpe
             visible_row_count: 5,
             theme: Theme::DEFAULT,
             state,
+            ..VirtualListConfig::default()
         }
         .encode_into_bytes(),
     }
