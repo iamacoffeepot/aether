@@ -252,8 +252,11 @@ let lines = wrap_to_width(hint, reveal_wrap_width(size_pixels), measure);
 It breaks only between words. A word wider than the measure keeps its own line,
 unsplit and over budget — the measure is a reading preference and cutting a
 word in half to honour it reads far worse than one long line. A `\n` in the
-source is the author's own break and always survives, so a longer hint can be
-divided into paragraphs deliberately.
+source is the author's own break and survives, blank lines included, so a
+longer hint can be divided into paragraphs deliberately — with one exception: a
+blank at the very start or the very end is dropped, because a break wants
+content on both sides of it and an empty row against the plate's edge only pads
+the box.
 
 Selection is a state, not an affordance, and every widget that has a current
 item draws it the same way: the chosen row of a virtual list, the chosen bucket

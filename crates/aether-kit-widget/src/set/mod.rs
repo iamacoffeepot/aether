@@ -1234,11 +1234,14 @@ pub fn elide_to_width(text: &str, max_width: f32, measure: impl Fn(&str) -> f32)
 /// wraps against whatever it will actually draw with — exact glyph advances
 /// once the font's metrics resolve, an approximation before that.
 ///
-/// A `\n` in the source is an author's own break and is always honoured,
-/// blank lines included, so a caller can divide a tooltip into paragraphs. A
-/// single word wider than `max_width` keeps its own line unsplit and over
-/// budget: `max_width` is a reading measure, and breaking a word in half to
-/// respect it reads far worse than one long line.
+/// A `\n` in the source is an author's own break and is honoured, interior
+/// blank lines included, so a caller can divide a tooltip into paragraphs.
+/// Leading and trailing blank lines are the exception and are dropped: a break
+/// needs content on both sides of it, and a plate padded by an empty row at
+/// the top or bottom reads as a box the wrong size rather than as a space the
+/// author asked for. A single word wider than `max_width` keeps its own line
+/// unsplit and over budget: `max_width` is a reading measure, and breaking a
+/// word in half to respect it reads far worse than one long line.
 #[must_use]
 pub fn wrap_to_width(text: &str, max_width: f32, measure: impl Fn(&str) -> f32) -> Vec<String> {
     wrap_to_width_hanging(text, max_width, 0.0, measure).into_iter().map(|line| line.text).collect()
@@ -1316,7 +1319,8 @@ pub fn wrap_to_width_hanging(
         });
     }
     // A trailing empty line is the split's artifact, not an author's break;
-    // one leading/trailing blank would otherwise pad every plate.
+    // any blank at either end would otherwise pad every plate. Interior ones
+    // stay — that is the paragraph break the author wrote.
     while lines.last().is_some_and(|line| line.text.is_empty()) {
         lines.pop();
     }
