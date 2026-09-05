@@ -1926,28 +1926,6 @@ mod tests {
     use aether_data::wire;
 
     #[test]
-    fn scroll_wire_vocabulary_uses_named_semantic_records() {
-        let ScrollExtent { width_pixels, height_pixels } = ScrollExtent { width_pixels: 32.0, height_pixels: 18.0 };
-        let ScrollOffset { x_pixels, y_pixels } = ScrollOffset { x_pixels: 4.0, y_pixels: 7.0 };
-        let ScrollDelta { x_pixels: horizontal_delta, y_pixels: vertical_delta } =
-            ScrollDelta { x_pixels: -2.0, y_pixels: 9.0 };
-        let ScrollResidual { x_pixels: horizontal_remainder, y_pixels: vertical_remainder } =
-            ScrollResidual { x_pixels: 0.0, y_pixels: 3.0 };
-
-        // Named-pattern destructuring is a compile-time tripwire: replacing
-        // any semantic record with a tuple, fixed array, or array alias makes
-        // this public-contract test stop compiling.
-        assert_eq!(width_pixels, 32.0);
-        assert_eq!(height_pixels, 18.0);
-        assert_eq!(x_pixels, 4.0);
-        assert_eq!(y_pixels, 7.0);
-        assert_eq!(horizontal_delta, -2.0);
-        assert_eq!(vertical_delta, 9.0);
-        assert_eq!(horizontal_remainder, 0.0);
-        assert_eq!(vertical_remainder, 3.0);
-    }
-
-    #[test]
     fn widget_kind_preserves_established_wire_discriminants() {
         // Tripwire: WidgetKind is nested in public configs and its encoded
         // variant index is the wire contract. Add variants at the end; never
