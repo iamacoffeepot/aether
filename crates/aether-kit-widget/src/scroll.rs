@@ -456,6 +456,7 @@ mod tests {
             type_namespace: "aether.kit.widget.virtual_list",
             scroll_viewport: None,
             wheel_eligible: true,
+            host_scroll_strip_units: None,
         }
     }
 
