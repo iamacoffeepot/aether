@@ -480,7 +480,10 @@ so a host reserving the column copies no kit constant, and it answers before
 any draw list arrives — which is when a layout needs it. The clip matters: a
 slot clipped to the list's own frame erases a track drawn outside it, and a
 press in the strip reaches the list only if the host's hit test reaches across
-it too. A
+it too. The reference `WidgetPanel` does exactly this for a
+`WidgetKind::VirtualList` child that sets the flag: it takes the strip out of
+the `WidgetFrame` it hands the list and keeps clipping and hit-testing the slot
+by the whole row rectangle it assigned. A
 virtual list joins the same wheel-only hit table a `ScrollWidget` does (see
 [Scroll containers and wheel ownership](#scroll-containers-and-wheel-ownership)),
 so a root that forks the reference panel routes `MouseWheel` to it by

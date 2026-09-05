@@ -123,6 +123,13 @@ pub struct SpawnedChild {
     pub state: WidgetControlState,
     pub type_namespace: &'static str,
     pub scroll_viewport: Option<ScrollExtent>,
+    /// The gap units of the clear column this child draws in **beside** its
+    /// frame, `None` when everything it draws is inside it. A virtual list
+    /// configured with `VirtualListConfig::host_scroll_strip` draws its track
+    /// past its own right edge, so the host owes it that column as clip *and*
+    /// as hit area: a slot clipped to the frame erases the bar, and a press
+    /// where the bar is reaches nothing.
+    pub host_scroll_strip_units: Option<u8>,
     /// Whether this child scrolls **itself** on the wheel: a virtual list owns
     /// its realized window, so the wheel over it belongs to it rather than to
     /// the nearest scroll container. It joins the same wheel-only hit table a
@@ -227,12 +234,22 @@ impl WidgetPanel {
     /// under its `name` subname and the spawned actor type `A`'s namespace) and
     /// the focus table (as its hit rect), send it its `WidgetFrame`, and
     /// remember it for value-up attribution.
-    fn place(&mut self, ctx: &mut WasmCtx<'_, Manual>, child: &SpawnedChild, frame: WidgetFrame, name: String) {
-        let focus_rect = FocusRect { x: frame.x, y: frame.y, width: frame.width, height: frame.height };
+    ///
+    /// `assigned` is the whole rectangle the stack gave this child. The slot
+    /// clip and both hit rects are that rectangle; what the child is *handed*
+    /// is [`content_frame`], the same rectangle less the clear column a
+    /// host-owned scroll bar stands in. Reserving the column that way is what
+    /// the flag asks of a host: the bar ends up beside the rows and still
+    /// inside the panel, and the clip — which was already the assigned
+    /// rectangle — reaches across it, where a track drawn past the full width
+    /// would have been clipped away with a press over it reaching nothing.
+    fn place(&mut self, ctx: &mut WasmCtx<'_, Manual>, child: &SpawnedChild, assigned: WidgetFrame, name: String) {
+        let frame = content_frame(&assigned, self.scroll_strip_pixels(child));
+        let focus_rect = FocusRect { x: assigned.x, y: assigned.y, width: assigned.width, height: assigned.height };
         self.composite.register_slot(
             child.id,
-            Vec2::new(frame.x, frame.y),
-            Some(WidgetClipRect { x: frame.x, y: frame.y, width: frame.width, height: frame.height }),
+            Vec2::new(assigned.x, assigned.y),
+            Some(WidgetClipRect { x: assigned.x, y: assigned.y, width: assigned.width, height: assigned.height }),
             &name,
             child.type_namespace,
         );
@@ -252,6 +269,13 @@ impl WidgetPanel {
         }
         ctx.send_to(child.id, &frame);
         self.children.push(ChildRef { id: child.id, name });
+    }
+
+    /// How wide a column this child's scroll bar stands in beside its rows,
+    /// in the panel's own live theme — the theme the panel fans down to every
+    /// child, so the column it reserves is the one the child draws in.
+    fn scroll_strip_pixels(&self, child: &SpawnedChild) -> f32 {
+        child.host_scroll_strip_units.map_or(0.0, |units| VirtualListConfig::host_strip_width(units, &self.theme))
     }
 
     /// Discharge a closed frame: flatten the composite and emit it from the
@@ -295,6 +319,38 @@ where
 {
     let row = layout.row_height_pixels();
     match spec.kind {
+        WidgetKind::Label
+        | WidgetKind::Image
+        | WidgetKind::Slider
+        | WidgetKind::Radio
+        | WidgetKind::TextField
+        | WidgetKind::TextArea => spawn_content_child::<P>(ctx, spec, row),
+        WidgetKind::Button => spawn_button_child::<P>(ctx, spec, row),
+        WidgetKind::VirtualList => spawn_virtual_list_child::<P>(ctx, spec, row),
+        WidgetKind::Toggle
+        | WidgetKind::Segmented
+        | WidgetKind::Numeric
+        | WidgetKind::Dropdown
+        | WidgetKind::TabStrip
+        | WidgetKind::MenuBar => spawn_row_control_child::<P>(ctx, spec, row),
+        WidgetKind::BehaviorHost => spawn_behavior_host(ctx, spec, row),
+        WidgetKind::Composite => spawn_composite_child::<P>(ctx, spec, layout, row),
+        WidgetKind::Scroll => spawn_scroll_child::<P>(ctx, spec, layout),
+    }
+}
+
+/// Spawn the display and value children whose profile is a fixed height and a
+/// fixed eligibility pair. Their decode/spawn bodies are mechanically alike,
+/// so they sit together here for the same reason
+/// [`spawn_row_control_child`] does: the exhaustive dispatcher above stays a
+/// dispatcher, and a reader looking for one kind's profile finds every
+/// sibling profile beside it.
+fn spawn_content_child<P: WasmActor>(
+    ctx: &mut WasmCtx<'_, Manual>,
+    spec: &WidgetChildSpec,
+    row: f32,
+) -> Option<SpawnedChild> {
+    match spec.kind {
         WidgetKind::Label => decode_child::<LabelConfig>(spec).and_then(|config| {
             let id = spawn::<P, LabelWidget>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
@@ -310,6 +366,7 @@ where
                 focusable: false,
                 state: config.state,
                 type_namespace: <LabelWidget as Addressable>::NAMESPACE,
+                host_scroll_strip_units: None,
                 wheel_eligible: false,
                 scroll_viewport: None,
             })
@@ -324,6 +381,7 @@ where
                 focusable: false,
                 state: config.state,
                 type_namespace: <ImageWidget as Addressable>::NAMESPACE,
+                host_scroll_strip_units: None,
                 wheel_eligible: false,
                 scroll_viewport: None,
             })
@@ -338,6 +396,7 @@ where
                 focusable: true,
                 state: config.state,
                 type_namespace: <SliderWidget as Addressable>::NAMESPACE,
+                host_scroll_strip_units: None,
                 wheel_eligible: false,
                 scroll_viewport: None,
             })
@@ -353,6 +412,7 @@ where
                 focusable: true,
                 state: config.state,
                 type_namespace: <RadioGroupWidget as Addressable>::NAMESPACE,
+                host_scroll_strip_units: None,
                 wheel_eligible: false,
                 scroll_viewport: None,
             })
@@ -367,6 +427,7 @@ where
                 focusable: true,
                 state: config.state,
                 type_namespace: <TextFieldWidget as Addressable>::NAMESPACE,
+                host_scroll_strip_units: None,
                 wheel_eligible: false,
                 scroll_viewport: None,
             })
@@ -382,21 +443,12 @@ where
                 focusable: true,
                 state: config.state,
                 type_namespace: <TextAreaWidget as Addressable>::NAMESPACE,
+                host_scroll_strip_units: None,
                 wheel_eligible: false,
                 scroll_viewport: None,
             })
         }),
-        WidgetKind::Button => spawn_button_child::<P>(ctx, spec, row),
-        WidgetKind::VirtualList => spawn_virtual_list_child::<P>(ctx, spec, row),
-        WidgetKind::Toggle
-        | WidgetKind::Segmented
-        | WidgetKind::Numeric
-        | WidgetKind::Dropdown
-        | WidgetKind::TabStrip
-        | WidgetKind::MenuBar => spawn_row_control_child::<P>(ctx, spec, row),
-        WidgetKind::BehaviorHost => spawn_behavior_host(ctx, spec, row),
-        WidgetKind::Composite => spawn_composite_child::<P>(ctx, spec, layout, row),
-        WidgetKind::Scroll => spawn_scroll_child::<P>(ctx, spec, layout),
+        _ => None,
     }
 }
 
@@ -415,6 +467,7 @@ fn spawn_button_child<P: WasmActor>(
         focusable: true,
         state: config.state,
         type_namespace: <ButtonWidget as Addressable>::NAMESPACE,
+        host_scroll_strip_units: None,
         wheel_eligible: false,
         scroll_viewport: None,
     })
@@ -428,6 +481,7 @@ fn spawn_virtual_list_child<P: WasmActor>(
     let config = decode_child::<VirtualListConfig>(spec)?;
     let profile = virtual_list_profile(&spec.subname, row, &config)?;
     let state = config.state.clone();
+    let host_scroll_strip_units = host_scroll_strip_units(&config);
     spawn::<P, VirtualListWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
         id,
         width_pixels: None,
@@ -436,9 +490,34 @@ fn spawn_virtual_list_child<P: WasmActor>(
         focusable: profile.eligible,
         state,
         type_namespace: <VirtualListWidget as Addressable>::NAMESPACE,
+        host_scroll_strip_units,
         wheel_eligible: true,
         scroll_viewport: None,
     })
+}
+
+/// The gap units a list's scroll strip is measured from, or `None` when its
+/// bar comes out of its own frame. `VirtualListConfig::host_scroll_strip` is a
+/// request to the host: the list draws its track past its right edge and takes
+/// nothing off its rows, so the column has to come from whoever placed it.
+fn host_scroll_strip_units(config: &VirtualListConfig) -> Option<u8> {
+    config.host_scroll_strip.then_some(config.scroll_bar_gap_units)
+}
+
+/// The frame a child lays its content in, out of the rectangle the stack
+/// assigned it: that rectangle less the clear column a host-owned scroll bar
+/// stands in (`VirtualListConfig::host_scroll_strip`). The panel keeps
+/// clipping and hit-testing the slot by the whole assigned rectangle, so the
+/// column stays inside the panel and the track drawn in it is neither clipped
+/// away nor unreachable by a press. A strip that is not a positive, finite
+/// number, or one wider than the assignment, reserves nothing.
+fn content_frame(assigned: &WidgetFrame, strip_pixels: f32) -> WidgetFrame {
+    let strip = if strip_pixels.is_finite() && (0.0..=assigned.width).contains(&strip_pixels) {
+        strip_pixels
+    } else {
+        0.0
+    };
+    WidgetFrame { x: assigned.x, y: assigned.y, width: assigned.width - strip, height: assigned.height }
 }
 
 fn virtual_list_profile(subname: &str, row_height: f32, config: &VirtualListConfig) -> Option<VirtualListProfile> {
@@ -489,6 +568,7 @@ fn spawn_composite_child<P: WasmActor>(
             focusable: false,
             state: WidgetControlState::default(),
             type_namespace: <Widget as Addressable>::NAMESPACE,
+            host_scroll_strip_units: None,
             wheel_eligible: false,
             scroll_viewport: None,
         })
@@ -522,6 +602,7 @@ fn spawn_scroll_child<P: WasmActor>(
             focusable: false,
             state: WidgetControlState::default(),
             type_namespace: <ScrollWidget as Addressable>::NAMESPACE,
+            host_scroll_strip_units: None,
             wheel_eligible: false,
             scroll_viewport: Some(viewport),
         })
@@ -546,6 +627,7 @@ fn spawn_row_control_child<P: WasmActor>(
                 focusable: true,
                 state: config.state,
                 type_namespace: <ToggleWidget as Addressable>::NAMESPACE,
+                host_scroll_strip_units: None,
                 wheel_eligible: false,
                 scroll_viewport: None,
             })
@@ -559,6 +641,7 @@ fn spawn_row_control_child<P: WasmActor>(
                 focusable: true,
                 state: config.state,
                 type_namespace: <SegmentedWidget as Addressable>::NAMESPACE,
+                host_scroll_strip_units: None,
                 wheel_eligible: false,
                 scroll_viewport: None,
             })
@@ -572,6 +655,7 @@ fn spawn_row_control_child<P: WasmActor>(
                 focusable: true,
                 state: config.state,
                 type_namespace: <NumericWidget as Addressable>::NAMESPACE,
+                host_scroll_strip_units: None,
                 wheel_eligible: false,
                 scroll_viewport: None,
             })
@@ -585,6 +669,7 @@ fn spawn_row_control_child<P: WasmActor>(
                 focusable: true,
                 state: config.state,
                 type_namespace: <DropdownWidget as Addressable>::NAMESPACE,
+                host_scroll_strip_units: None,
                 wheel_eligible: false,
                 scroll_viewport: None,
             })
@@ -598,6 +683,7 @@ fn spawn_row_control_child<P: WasmActor>(
                 focusable: true,
                 state: config.state,
                 type_namespace: <TabStripWidget as Addressable>::NAMESPACE,
+                host_scroll_strip_units: None,
                 wheel_eligible: false,
                 scroll_viewport: None,
             })
@@ -611,6 +697,7 @@ fn spawn_row_control_child<P: WasmActor>(
                 focusable: true,
                 state: config.state,
                 type_namespace: <MenuBarWidget as Addressable>::NAMESPACE,
+                host_scroll_strip_units: None,
                 wheel_eligible: false,
                 scroll_viewport: None,
             })
@@ -957,6 +1044,7 @@ fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, ro
             focusable: profile.focusable,
             state: profile.state,
             type_namespace: <aether_behavior::BehaviorHost as Addressable>::NAMESPACE,
+            host_scroll_strip_units: None,
             wheel_eligible: false,
             scroll_viewport: None,
         }),
@@ -1544,6 +1632,38 @@ mod dispatch_tests {
     fn feature_off_keeps_behavior_host_and_scroll_unwrappable() {
         assert_eq!(WidgetKind::BehaviorHost.type_tag(), None);
         assert_eq!(WidgetKind::Scroll.type_tag(), None);
+    }
+
+    #[test]
+    fn a_host_strip_list_owns_the_column_its_bar_stands_in() {
+        // Tripwire: `host_scroll_strip` is a request the *host* has to honour.
+        // The list draws its track at `frame.width + gap` and takes nothing
+        // off its rows, so a slot clipped to the frame drops the track and the
+        // thumb and a press where the bar is reaches nothing — a list that
+        // overflows with no visible, grabbable bar at all, which is worse than
+        // the inside-the-frame bar the flag replaced.
+        let theme = Theme::default();
+        let assigned = WidgetFrame { x: 4.0, y: 8.0, width: 200.0, height: 96.0 };
+
+        let config = VirtualListConfig { host_scroll_strip: true, ..VirtualListConfig::default() };
+        let units = host_scroll_strip_units(&config).expect("the flag asks the host for a column");
+        let strip = VirtualListConfig::host_strip_width(units, &theme);
+        assert_eq!(strip, config.scroll_strip_width(&theme), "the host reserves exactly what the list asks for");
+
+        let frame = content_frame(&assigned, strip);
+        assert_eq!(
+            (frame.x, frame.width),
+            (4.0, 200.0 - strip),
+            "the strip comes out of the rows' own width, so the bar stands beside them and inside the panel",
+        );
+        assert!(
+            frame.width + theme.space(units) + VirtualListConfig::scroll_track_width(&theme) <= assigned.width,
+            "and the track's far edge is inside the rectangle the panel clips and hit-tests the slot by",
+        );
+
+        let inside_the_frame = VirtualListConfig::default();
+        assert_eq!(host_scroll_strip_units(&inside_the_frame), None, "a list whose bar is its own asks for nothing");
+        assert_eq!(content_frame(&assigned, 0.0).width, assigned.width, "and keeps the whole assignment");
     }
 
     #[test]

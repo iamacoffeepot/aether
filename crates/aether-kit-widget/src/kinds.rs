@@ -1177,10 +1177,20 @@ impl VirtualListConfig {
     #[must_use]
     pub fn scroll_strip_width(&self, theme: &Theme) -> f32 {
         if self.host_scroll_strip {
-            theme.space(self.scroll_bar_gap_units) + Self::scroll_track_width(theme)
+            Self::host_strip_width(self.scroll_bar_gap_units, theme)
         } else {
             0.0
         }
+    }
+
+    /// The same column, measured from the gap units alone. A host that lays a
+    /// list out in **its** theme rather than the config's — the reference
+    /// panel fans its own theme down to every child — reserves the column with
+    /// this, so the strip it clips across is the one the list will draw its
+    /// track in, and the formula still lives in one place.
+    #[must_use]
+    pub fn host_strip_width(scroll_bar_gap_units: u8, theme: &Theme) -> f32 {
+        theme.space(scroll_bar_gap_units) + Self::scroll_track_width(theme)
     }
 
     /// The thinnest a track may be drawn, whatever a theme scales its spacing
