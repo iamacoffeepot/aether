@@ -143,12 +143,30 @@ struct VirtualListProfile {
     eligible: bool,
 }
 
+/// The routing profile a behavior host mirrors from the widget it wraps. It
+/// carries **every** field the direct spawn arm would have set for that kind,
+/// so a wrapped widget and a bare one cannot diverge field by field — the
+/// wheel especially: a wrapped list that reported itself wheel-ineligible was
+/// never registered in the panel's wheel-only hit table, and the wheel over it
+/// was dropped before the host could forward it.
 #[cfg(feature = "behavior")]
 struct ChildProfile {
     height: f32,
     pointer_eligible: bool,
     focusable: bool,
+    wheel_eligible: bool,
+    host_scroll_strip_units: Option<u8>,
     state: WidgetControlState,
+}
+
+#[cfg(feature = "behavior")]
+impl ChildProfile {
+    /// The profile of a widget that draws inside its frame and leaves the
+    /// wheel to the nearest scroll container — every stock kind but the
+    /// virtual list.
+    fn contained(height: f32, pointer_eligible: bool, focusable: bool, state: WidgetControlState) -> Self {
+        Self { height, pointer_eligible, focusable, wheel_eligible: false, host_scroll_strip_units: None, state }
+    }
 }
 
 /// The reference panel root. Loaded as a component with a [`PanelConfig`]; its
@@ -898,6 +916,85 @@ fn behavior_mirror_kinds() -> Vec<u64> {
     ]
 }
 
+/// The profile the host mirrors for the widget it wraps: the same height,
+/// eligibility, wheel ownership, scroll-strip request, and control state the
+/// direct spawn arm derives for that kind from the same config bytes. `None`
+/// for a kind no host can wrap, or config bytes that do not decode.
+#[cfg(feature = "behavior")]
+fn wrapped_profile(subname: &str, wrapped: WidgetKind, wrapped_config: &[u8], row: f32) -> Option<ChildProfile> {
+    let profile = match wrapped {
+        WidgetKind::Label => {
+            let config = decode_named::<LabelConfig>(subname, wrapped_config)?;
+            ChildProfile::contained(row, true, false, config.state)
+        }
+        WidgetKind::Image => {
+            let config = decode_named::<ImageConfig>(subname, wrapped_config)?;
+            ChildProfile::contained(row, false, false, config.state)
+        }
+        WidgetKind::Slider => {
+            let config = decode_named::<SliderConfig>(subname, wrapped_config)?;
+            ChildProfile::contained(row, true, true, config.state)
+        }
+        WidgetKind::Radio => {
+            let config = decode_named::<RadioConfig>(subname, wrapped_config)?;
+            ChildProfile::contained(row * config.options.len() as f32, true, true, config.state)
+        }
+        WidgetKind::TextField => {
+            let config = decode_named::<TextFieldConfig>(subname, wrapped_config)?;
+            ChildProfile::contained(row, true, true, config.state)
+        }
+        WidgetKind::TextArea => {
+            let config = decode_named::<TextAreaConfig>(subname, wrapped_config)?;
+            ChildProfile::contained(row * config.rows.max(1) as f32, true, true, config.state)
+        }
+        WidgetKind::Button => {
+            let config = decode_named::<ButtonConfig>(subname, wrapped_config)?;
+            ChildProfile::contained(row, true, true, config.state)
+        }
+        WidgetKind::VirtualList => {
+            let config = decode_named::<VirtualListConfig>(subname, wrapped_config)?;
+            let profile = virtual_list_profile(subname, row, &config)?;
+            // Mirrors `spawn_virtual_list_child`: the list owns the window it
+            // realizes, so the wheel over it is its own, and it asks its host
+            // for the same scroll strip whether or not it is wrapped.
+            ChildProfile {
+                height: profile.height,
+                pointer_eligible: profile.eligible,
+                focusable: profile.eligible,
+                wheel_eligible: true,
+                host_scroll_strip_units: host_scroll_strip_units(&config),
+                state: config.state,
+            }
+        }
+        WidgetKind::Toggle => {
+            let config = decode_named::<ToggleConfig>(subname, wrapped_config)?;
+            ChildProfile::contained(row, true, true, config.state)
+        }
+        WidgetKind::Segmented => {
+            let config = decode_named::<SegmentedConfig>(subname, wrapped_config)?;
+            ChildProfile::contained(row, true, true, config.state)
+        }
+        WidgetKind::Numeric => {
+            let config = decode_named::<NumericConfig>(subname, wrapped_config)?;
+            ChildProfile::contained(row, true, true, config.state)
+        }
+        WidgetKind::Dropdown => {
+            let config = decode_named::<DropdownConfig>(subname, wrapped_config)?;
+            ChildProfile::contained(row, true, true, config.state)
+        }
+        WidgetKind::TabStrip => {
+            let config = decode_named::<TabStripConfig>(subname, wrapped_config)?;
+            ChildProfile::contained(row, true, true, config.state)
+        }
+        WidgetKind::MenuBar => {
+            let config = decode_named::<MenuBarConfig>(subname, wrapped_config)?;
+            ChildProfile::contained(row, true, true, config.state)
+        }
+        WidgetKind::Composite | WidgetKind::Scroll | WidgetKind::BehaviorHost => return None,
+    };
+    Some(profile)
+}
+
 /// Spawn a [`WidgetKind::BehaviorHost`] slot (issue 2687): decode the
 /// [`BehaviorHostSpec`](crate::BehaviorHostSpec), map the wrapped widget kind
 /// to its type tag, build the `aether-behavior` `HostConfig`, and spawn the
@@ -923,81 +1020,7 @@ fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, ro
         );
         return None;
     };
-    let profile = match host_spec.wrapped {
-        WidgetKind::Label => {
-            let config = decode_named::<LabelConfig>(&spec.subname, &host_spec.wrapped_config)?;
-            ChildProfile { height: row, pointer_eligible: true, focusable: false, state: config.state }
-        }
-        WidgetKind::Image => {
-            let config = decode_named::<ImageConfig>(&spec.subname, &host_spec.wrapped_config)?;
-            ChildProfile { height: row, pointer_eligible: false, focusable: false, state: config.state }
-        }
-        WidgetKind::Slider => {
-            let config = decode_named::<SliderConfig>(&spec.subname, &host_spec.wrapped_config)?;
-            ChildProfile { height: row, pointer_eligible: true, focusable: true, state: config.state }
-        }
-        WidgetKind::Radio => {
-            let config = decode_named::<RadioConfig>(&spec.subname, &host_spec.wrapped_config)?;
-            ChildProfile {
-                height: row * config.options.len() as f32,
-                pointer_eligible: true,
-                focusable: true,
-                state: config.state,
-            }
-        }
-        WidgetKind::TextField => {
-            let config = decode_named::<TextFieldConfig>(&spec.subname, &host_spec.wrapped_config)?;
-            ChildProfile { height: row, pointer_eligible: true, focusable: true, state: config.state }
-        }
-        WidgetKind::TextArea => {
-            let config = decode_named::<TextAreaConfig>(&spec.subname, &host_spec.wrapped_config)?;
-            ChildProfile {
-                height: row * config.rows.max(1) as f32,
-                pointer_eligible: true,
-                focusable: true,
-                state: config.state,
-            }
-        }
-        WidgetKind::Button => {
-            let config = decode_named::<ButtonConfig>(&spec.subname, &host_spec.wrapped_config)?;
-            ChildProfile { height: row, pointer_eligible: true, focusable: true, state: config.state }
-        }
-        WidgetKind::VirtualList => {
-            let config = decode_named::<VirtualListConfig>(&spec.subname, &host_spec.wrapped_config)?;
-            let profile = virtual_list_profile(&spec.subname, row, &config)?;
-            ChildProfile {
-                height: profile.height,
-                pointer_eligible: profile.eligible,
-                focusable: profile.eligible,
-                state: config.state,
-            }
-        }
-        WidgetKind::Toggle => {
-            let config = decode_named::<ToggleConfig>(&spec.subname, &host_spec.wrapped_config)?;
-            ChildProfile { height: row, pointer_eligible: true, focusable: true, state: config.state }
-        }
-        WidgetKind::Segmented => {
-            let config = decode_named::<SegmentedConfig>(&spec.subname, &host_spec.wrapped_config)?;
-            ChildProfile { height: row, pointer_eligible: true, focusable: true, state: config.state }
-        }
-        WidgetKind::Numeric => {
-            let config = decode_named::<NumericConfig>(&spec.subname, &host_spec.wrapped_config)?;
-            ChildProfile { height: row, pointer_eligible: true, focusable: true, state: config.state }
-        }
-        WidgetKind::Dropdown => {
-            let config = decode_named::<DropdownConfig>(&spec.subname, &host_spec.wrapped_config)?;
-            ChildProfile { height: row, pointer_eligible: true, focusable: true, state: config.state }
-        }
-        WidgetKind::TabStrip => {
-            let config = decode_named::<TabStripConfig>(&spec.subname, &host_spec.wrapped_config)?;
-            ChildProfile { height: row, pointer_eligible: true, focusable: true, state: config.state }
-        }
-        WidgetKind::MenuBar => {
-            let config = decode_named::<MenuBarConfig>(&spec.subname, &host_spec.wrapped_config)?;
-            ChildProfile { height: row, pointer_eligible: true, focusable: true, state: config.state }
-        }
-        WidgetKind::Composite | WidgetKind::Scroll | WidgetKind::BehaviorHost => return None,
-    };
+    let profile = wrapped_profile(&spec.subname, host_spec.wrapped, &host_spec.wrapped_config, row)?;
     let script = match host_spec.script {
         ScriptRef::None => ScriptSource::None,
         ScriptRef::Inline(bytes) => ScriptSource::Inline(bytes),
@@ -1044,8 +1067,8 @@ fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, ro
             focusable: profile.focusable,
             state: profile.state,
             type_namespace: <aether_behavior::BehaviorHost as Addressable>::NAMESPACE,
-            host_scroll_strip_units: None,
-            wheel_eligible: false,
+            host_scroll_strip_units: profile.host_scroll_strip_units,
+            wheel_eligible: profile.wheel_eligible,
             scroll_viewport: None,
         }),
         Err(error) => {
@@ -1680,7 +1703,7 @@ mod dispatch_tests {
 #[cfg(all(test, feature = "behavior"))]
 mod behavior_tests {
     use super::*;
-    use crate::{BehaviorHostSpec, ScriptRef};
+    use crate::VirtualListRow;
     use aether_actor::ActorTypeTag;
     use aether_data::Kind;
 
@@ -1714,27 +1737,39 @@ mod behavior_tests {
         assert!(mirrored.contains(&ScrollResidual::ID.0));
     }
 
-    // Tripwire: a `BehaviorHostSpec` carrying a stock wrapped widget encodes as
-    // its `WidgetChildSpec.config` and decodes back through `decode_child`, so
-    // the panel arm can recover the wrapped kind + script it was handed.
+    // Tripwire: a wrapped widget's profile is the unwrapped one, field for
+    // field. A wrapped list that reported `wheel_eligible: false` was never
+    // registered in the panel's wheel-only table (`place` registers on
+    // `scroll_viewport.is_some() || wheel_eligible`), so `on_mouse_wheel`
+    // hit-tested nothing and the wheel over the list was dropped before the
+    // host could forward it down-lane — while the identical list spawned
+    // directly scrolled. The strip request rides along for the same reason.
     #[test]
-    fn host_spec_round_trips_through_child_config() {
-        let spec = BehaviorHostSpec {
-            wrapped: WidgetKind::Slider,
-            wrapped_config: vec![1, 2, 3],
-            script: ScriptRef::FsRef { namespace: String::from("assets"), path: String::from("scripts/knob.wasm") },
-            fuel_per_call: 0,
-            disable_after_traps: 0,
+    fn a_wrapped_list_keeps_the_wheel_and_the_strip_the_bare_one_asks_for() {
+        let config = VirtualListConfig {
+            items: alloc::vec![VirtualListRow::default(); 8],
+            visible_row_count: 3,
+            host_scroll_strip: true,
+            ..VirtualListConfig::default()
         };
-        let child = WidgetChildSpec {
-            subname: String::from("knob"),
-            kind: WidgetKind::BehaviorHost,
-            origin: [0.0, 0.0],
-            clip: None,
-            config: spec.encode_into_bytes(),
-        };
-        let decoded = decode_child::<BehaviorHostSpec>(&child).expect("host spec decodes");
-        assert_eq!(decoded.wrapped, WidgetKind::Slider);
-        assert!(matches!(decoded.script, ScriptRef::FsRef { .. }));
+        let wrapped = wrapped_profile("knob", WidgetKind::VirtualList, &config.encode_into_bytes(), 24.0)
+            .expect("a virtual list is wrappable");
+        assert!(wrapped.wheel_eligible, "the list owns the wheel over it whether or not a host wraps it");
+        assert_eq!(wrapped.host_scroll_strip_units, host_scroll_strip_units(&config));
+        assert_eq!(wrapped.height, 72.0, "and is as tall as the viewport it was configured for");
+
+        let slider = wrapped_profile("knob", WidgetKind::Slider, &SliderConfig::default().encode_into_bytes(), 24.0)
+            .expect("a slider is wrappable");
+        assert!(!slider.wheel_eligible, "a contained widget leaves the wheel to the nearest scroll container");
+        assert_eq!(slider.host_scroll_strip_units, None);
+
+        assert!(
+            wrapped_profile("knob", WidgetKind::Scroll, &[], 24.0).is_none(),
+            "a container is unwrappable, so it has no profile to mirror",
+        );
+        assert!(
+            wrapped_profile("knob", WidgetKind::Slider, &[0xff], 24.0).is_none(),
+            "and config bytes that do not decode leave no profile either",
+        );
     }
 }
