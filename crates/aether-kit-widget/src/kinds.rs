@@ -1342,7 +1342,7 @@ pub enum TabStripStyle {
 /// One entry of a [`Menu`]: its label, the accelerator it advertises at the
 /// right edge (`"Cmd+S"`, or empty), whether it can be activated, and whether
 /// a divider follows it. Schema-only; nested in [`MenuBarConfig`].
-#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct MenuItem {
     pub label: String,
     #[serde(default)]
@@ -1356,6 +1356,21 @@ pub struct MenuItem {
 impl MenuItem {
     const fn enabled_default() -> bool {
         true
+    }
+}
+
+/// Hand-written rather than derived: the derive would answer `enabled: false`
+/// and hand a Rust host writing `..Default::default()` a menu of items that
+/// cannot be pressed, while the same item decoded with the field absent is
+/// enabled. One default per field, whichever way the item is built.
+impl Default for MenuItem {
+    fn default() -> Self {
+        Self {
+            label: String::new(),
+            shortcut: String::new(),
+            enabled: Self::enabled_default(),
+            separator_after: false,
+        }
     }
 }
 
@@ -1959,6 +1974,21 @@ mod tests {
         assert_eq!(toggle.as_slice(), 11_u32.to_le_bytes());
         assert_eq!(segmented.as_slice(), 12_u32.to_le_bytes());
         assert_eq!(numeric.as_slice(), 13_u32.to_le_bytes());
+        let dropdown = wire::to_vec(&WidgetKind::Dropdown).expect("encode Dropdown");
+        let tab_strip = wire::to_vec(&WidgetKind::TabStrip).expect("encode TabStrip");
+        let menu_bar = wire::to_vec(&WidgetKind::MenuBar).expect("encode MenuBar");
+        assert_eq!(dropdown.as_slice(), 14_u32.to_le_bytes());
+        assert_eq!(tab_strip.as_slice(), 15_u32.to_le_bytes());
+        assert_eq!(menu_bar.as_slice(), 16_u32.to_le_bytes());
+    }
+
+    #[test]
+    fn a_menu_item_has_one_enabled_default_whichever_way_it_is_built() {
+        // Tripwire: `enabled_default` is what a decoded item gets when the
+        // field is absent; `Default` is what a Rust host gets from
+        // `..Default::default()`. Two paths to the same field, so they answer
+        // together or a menu built one way is silently inert.
+        assert_eq!(MenuItem::default().enabled, MenuItem::enabled_default());
     }
 
     #[test]
