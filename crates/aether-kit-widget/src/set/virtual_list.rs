@@ -572,6 +572,9 @@ impl VirtualListWidget {
     /// can reach, so a test can drive a flag the way a host sets it instead of
     /// assigning the field the flag maps to and proving nothing about the
     /// mapping.
+    /// The boot window is counted in rows at the one pitch, because there is
+    /// no frame yet to measure a table against; [`Self::refresh_row_layout`]
+    /// re-reveals the selection once there is.
     fn from_config(config: VirtualListConfig) -> Self {
         let font_id = config.theme.font_id;
         let visible_row_count = usize_from_u32(config.visible_row_count);
@@ -910,6 +913,13 @@ impl VirtualListWidget {
     /// when that first pass overflows. Narrowing a row can only wrap a note
     /// onto *more* lines, so content that overflowed still overflows and the
     /// second pass is the last one.
+    ///
+    /// The **first** table a list builds re-reveals the selection, because the
+    /// window it was booted with was picked before any table existed: `init`
+    /// has no frame to measure against, so it counts rows at the one pitch,
+    /// and a table's rows are not that pitch. Without this a list opened at a
+    /// selected row deep in its vector draws a window the selection is not in
+    /// and shows no highlight at all until the reader scrolls.
     fn refresh_row_layout(&mut self) {
         // A frame no row can stand in draws nothing either way, and wrapping a
         // note against a width of zero would break it into one line per word.
@@ -928,8 +938,12 @@ impl VirtualListWidget {
             let gutter = self.bar_reserve_width();
             tops = self.build_row_tops((full_width - gutter).max(0.0));
         }
+        let first_table = self.row_tops.is_none();
         self.row_tops = Some(tops);
         self.row_tops_frame = Some(frame);
+        if first_table {
+            self.reveal_selection();
+        }
     }
 
     /// The content-space top of one row's slot — the distance from the top of
@@ -3224,6 +3238,33 @@ mod tests {
             unwrapped.content_height(),
             None,
             "a table whose notes have not been wrapped against real advances says nothing rather than a number it is about to change",
+        );
+    }
+
+    #[test]
+    fn a_table_opens_with_the_row_the_host_selected_realized() {
+        // Tripwire: `init` has no frame, so it counts the boot window in rows
+        // at the one pitch — the only arithmetic there is before anything is
+        // measured. A table's rows are not that pitch: a row carrying a note
+        // stands taller, so the window that count picks realizes fewer rows
+        // than it counted and the selected row falls out of the bottom of it.
+        // The list then opens on a table with no highlight anywhere in it and
+        // stays that way until the reader scrolls or the host resends the
+        // config.
+        let mut widget = config_list(VirtualListConfig {
+            items: (0..50).map(|index| noted(&format!("stat {index}"), "a sentence under the statistic")).collect(),
+            initial_selected_index: Some(40),
+            visible_row_count: 5,
+            ..VirtualListConfig::default()
+        });
+        assert_eq!(widget.first_index, 36, "the boot window is five rows of pitch ending on the selection");
+
+        widget.refresh_row_layout();
+
+        let window = widget.window();
+        assert!(
+            (window.first_index..window.end_exclusive_index).contains(&40),
+            "the selected row stands in the realized window {window:?} rather than below it",
         );
     }
 
