@@ -412,6 +412,14 @@ impl LaterFills {
         self.rects.push(rect);
     }
 
+    /// Whether any later fill is near enough `run` to be worth walking the
+    /// list for — the union rejection, asked on its own so an unclipped run
+    /// can tell "nothing stands over me" from "I was cut back to my own box".
+    /// A non-finite run answers `false` here and keeps its scissor unbounded.
+    fn any_over(&self, run: WidgetClipRect) -> bool {
+        self.bounds.is_some_and(|bounds| run.overlaps(bounds))
+    }
+
     /// `clip` with every later fill that stands over the run cut out of it:
     /// `clip` alone when none of them does, nothing when together they cover
     /// the run.
@@ -432,7 +440,7 @@ impl LaterFills {
     ///   the run they touch, and reading them as holes would split a focused
     ///   field's run into strips around a one-pixel bar.
     fn cut(&self, clip: WidgetClipRect, run: WidgetClipRect, hairline: f32) -> Vec<WidgetClipRect> {
-        if !self.bounds.is_some_and(|bounds| run.overlaps(bounds)) {
+        if !self.any_over(run) {
             return vec![clip];
         }
         let mut remaining = vec![clip];
@@ -504,6 +512,14 @@ fn glyph_box(x: f32, y: f32, text: &str, size_pixels: f32) -> WidgetClipRect {
 /// ordinary items with the overlay's fills already in the set (the overlay is
 /// entirely after the ordinary lane) and again over the overlay's own items
 /// from empty.
+///
+/// A run with **no clip of its own** takes part on the same terms: it is cut
+/// against its own [`glyph_box`], and keeps its unbounded scissor only while
+/// nothing cuts it. Most of the kit's overlay text is authored that way — a
+/// label's hover reveal, a dropdown's open rows, a tooltip's lines — and
+/// `Composite::flatten` never stamps a slot clip onto an escaped overlay, so
+/// skipping it here would let the reveal plate's words print through the list
+/// opened over them.
 fn text_items(list: &WidgetDrawList) -> Vec<DrawText> {
     let mut later = LaterFills::default();
     for rect in list.overlay.iter().filter_map(WidgetDrawItem::covered_rect) {
@@ -529,13 +545,24 @@ fn text_items(list: &WidgetDrawList) -> Vec<DrawText> {
             space: QuadSpace::Screen,
             clip,
         };
+        let run = glyph_box(*x, *y, text, *size_pixels);
+        let hairline = size_pixels * HAIRLINE_RATIO;
         match clip {
             PreparedClip::Finite { rect } => {
-                let run = glyph_box(*x, *y, text, *size_pixels);
-                let hairline = size_pixels * HAIRLINE_RATIO;
                 items.extend(later.cut(rect, run, hairline).into_iter().map(|part| draw(Some(framebuffer_clip(part)))));
             }
-            PreparedClip::Unbounded => items.push(draw(None)),
+            PreparedClip::Unbounded => {
+                // Cut the run against its own box, and keep the unbounded
+                // scissor unless that took something out of it: the box is an
+                // estimate, so it is the right thing to subtract holes from
+                // and the wrong thing to hand the render cap as a bound.
+                let parts = later.cut(run, run, hairline);
+                if !later.any_over(run) || parts == [run] {
+                    items.push(draw(None));
+                } else {
+                    items.extend(parts.into_iter().map(|part| draw(Some(framebuffer_clip(part)))));
+                }
+            }
         }
     }
     items.reverse();
@@ -866,6 +893,49 @@ mod tests {
                 .eq(["the picker's own row", "an option in the list"]),
             "the plate leaves the labels drawn on it whole, its open list deletes the one it covers, \
              and the list's own option is authored after the list's fill",
+        );
+    }
+
+    #[test]
+    fn an_unclipped_run_is_cut_by_the_fill_raised_over_it() {
+        // Tripwire: a run authored with no clip of its own is still occluded
+        // by what is drawn after it. Every glyph run the kit raises into the
+        // overlay lane is authored that way — a label's overflow reveal, a
+        // dropdown's open rows, a tooltip's lines — and the flatten never
+        // stamps a slot clip onto an escaped overlay, so a run that skipped
+        // the subtraction printed its words straight through the list opened
+        // over it.
+        let reveal = |x: f32| WidgetDrawItem::Text {
+            x,
+            y: 100.0,
+            font_id: 1,
+            text: "revealed".into(),
+            size_pixels: 12.0,
+            color: Rgba::WHITE,
+            clip: None,
+        };
+        let opened_list = |x: f32| fill(WidgetClipRect { x, y: 98.0, width: 400.0, height: 30.0 });
+        let lane = |items| WidgetDrawList { content_height: None, intrinsic: None, items, overlay: Vec::new() };
+
+        assert!(
+            text_items(&lane(vec![reveal(10.0), opened_list(0.0)])).is_empty(),
+            "the covered run sends no glyphs at all",
+        );
+
+        let half = text_items(&lane(vec![reveal(10.0), opened_list(60.0)]));
+        assert_eq!(half.len(), 1, "the half-covered run stays one item; got {half:?}");
+        assert_eq!(
+            half[0].clip.clone().map(|clip| (clip.x, clip.width)),
+            Some((10.0, 50.0)),
+            "and is scissored to the part of its own box the list leaves",
+        );
+
+        let untouched = text_items(&lane(vec![reveal(10.0), opened_list(500.0)]));
+        assert_eq!(untouched.len(), 1);
+        assert!(
+            untouched[0].clip.is_none(),
+            "a run nothing stands over keeps no scissor: its box is a wide estimate, fit to subtract \
+             holes from and not to bound the run with",
         );
     }
 
