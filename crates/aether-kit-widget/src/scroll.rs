@@ -455,7 +455,6 @@ mod tests {
             state: WidgetControlState::default(),
             type_namespace: "aether.kit.widget.virtual_list",
             scroll_viewport: None,
-            host_scroll_strip_units: None,
             wheel_eligible: true,
             host_scroll_strip_units: None,
         }
