@@ -258,9 +258,13 @@ divided into paragraphs deliberately.
 Selection is a state, not an affordance, and every widget that has a current
 item draws it the same way: the chosen row of a virtual list, the chosen bucket
 of a segmented control, and the marker of a radio group's chosen option fill
-with `theme.selection`, and the text on them inks with `theme.selection_text`.
-A radio group's unselected markers stay on `surface_raised` and so read as
-empty slots beside the lit one. None of these use `accent`, which means the
+with `theme.selection`. `theme.selection_text` is the ink for text drawn *on*
+one of those fills, so the list row and the segmented bucket — which plate the
+whole cell their label sits in — take it. A radio group plates only its marker,
+never the row, so its labels are drawn on the panel's own `surface` and stay
+`text_primary` whether chosen or not; its unselected markers stay on
+`surface_raised` and so read as empty slots beside the lit one. None of these
+use `accent`, which means the
 primary action and the focus ring and nothing else — so a chosen row never
 reads as a button waiting to be pressed.
 
@@ -1268,7 +1272,12 @@ Left/Right movement clamps at the first and last option. Empty option lists
 have no hit buckets. `SegmentedSelected { index }` reports only actual changes.
 The selected bucket fills with `theme.selection` over `theme.selection_text`;
 hovered, pressed, disabled, validation, and focus presentation use the common
-theme/state contract.
+theme/state contract. Each option's label is elided with the kit's ellipsis to
+what its own bucket holds less one `pad` either side, measured against the
+theme font's resolved metrics — a label wider than its bucket would otherwise
+be overpainted by the next segment's fill, cut mid-glyph with nothing saying
+so. Until those metrics land the labels draw whole and left-padded, the same
+interim the tab strip has.
 
 `WidgetKind::TabStrip` spawns `TabStripWidget` from `TabStripConfig { labels,
 initial_index, style, theme, state }` — one row of tabs over parallel content
@@ -1813,10 +1822,10 @@ right — deliberately, because equal thirds size a control to its container,
 which stretches "OK" to a third of the pane and clips "Regenerate terrain" in
 the same row.
 
-Degenerate input clamps rather than propagating: a negative or NaN length
-becomes zero and a NaN position becomes zero, so a layout computed before the
-window size is known collapses to empty rectangles instead of poisoning every
-frame downstream with NaN.
+Degenerate input clamps rather than propagating: a negative, NaN or infinite
+length becomes zero and a NaN or infinite position becomes zero, so a layout
+computed before the window size is known collapses to empty rectangles instead
+of poisoning every frame downstream with NaN.
 
 ## The reference panel
 

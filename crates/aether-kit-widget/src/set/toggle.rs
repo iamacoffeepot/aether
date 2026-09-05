@@ -14,6 +14,7 @@ use alloc::vec::Vec;
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, KeyRelease, MouseButton, MouseButtonRelease};
+use aether_math::Rgba;
 
 use crate::set::defaults::WidgetDefaults;
 use crate::set::{ActivationArms, push_control_outlines, quad, reply_if_hidden, text_origin_y};
@@ -80,6 +81,82 @@ impl ToggleWidget {
         if let Some(parent) = ctx.parent() {
             parent.send(&ToggleChanged { on });
         }
+    }
+
+    /// The colour the track is filled with: the accent when on, the raised
+    /// surface when off.
+    fn track_color(&self) -> Rgba {
+        if self.on {
+            self.theme.accent
+        } else {
+            self.theme.surface_raised
+        }
+    }
+
+    /// The colour the knob is filled with — the one element that says which
+    /// side the switch is on, so it has to be a **face** against the track it
+    /// sits on rather than a hairline.
+    ///
+    /// The off knob drew in `outline`, which is the divider token `theme.rs`
+    /// documents as "meant to be nearly invisible" — and it drew it on the
+    /// `surface_raised` track, which is the very colour that token is
+    /// documented as disappearing against: [`Theme::contrast_ratio`] measures
+    /// the pair at 1.36. The switch read as an empty bar with no knob at all,
+    /// and off-vs-on was carried only by the track changing colour.
+    /// [`Theme::edge`] is the token derived for exactly this — `outline`
+    /// carried toward the primary ink until it clears the 3.0 face-contrast
+    /// target against that same raised surface — and it is the fix the button
+    /// ladder's outlined rank already took. The on knob keeps `accent_text`,
+    /// the ink paired with the accent the on track is filled with, at 9.96.
+    fn knob_color(&self) -> Rgba {
+        if self.on {
+            self.theme.accent_text
+        } else {
+            self.theme.edge()
+        }
+    }
+
+    /// The toggle's local draw: track, knob, optional label, and the focus /
+    /// validation outlines every control shares.
+    fn draw_items(&self) -> Vec<WidgetDrawItem> {
+        let width = self.frame.width;
+        let height = self.frame.height;
+        let track_height = (height * 0.65).clamp(4.0, height.max(4.0));
+        let track_width = (track_height * 1.8).min(width.max(0.0));
+        let track_y = (height - track_height) * 0.5;
+        let knob_size = (track_height - 4.0).max(1.0);
+        let knob_x = if self.on {
+            (track_width - knob_size - 2.0).max(2.0)
+        } else {
+            2.0
+        };
+        let state = self.state.theme_state(self.pressed());
+
+        let mut items = Vec::new();
+        items.push(quad(0.0, track_y, track_width, track_height, self.theme.fill(self.track_color(), state)));
+        items.push(quad(
+            knob_x,
+            track_y + 2.0,
+            knob_size,
+            knob_size,
+            self.theme.fill(self.knob_color(), self.state.supporting_theme_state(false)),
+        ));
+
+        if !self.label.is_empty() {
+            let size = self.theme.label_size_pixels;
+            items.push(WidgetDrawItem::Text {
+                x: track_width + self.theme.pad,
+                y: text_origin_y(0.0, height, size),
+                font_id: self.theme.font_id,
+                text: self.label.clone(),
+                size_pixels: size,
+                color: self.theme.fill(self.theme.text_primary, self.state.supporting_theme_state(false)),
+                clip: None,
+            });
+        }
+
+        push_control_outlines(&mut items, width, height, &self.state, &self.theme);
+        items
     }
 }
 
@@ -166,53 +243,13 @@ impl WasmActor for ToggleWidget {
         if reply_if_hidden(ctx, &self.state) {
             return;
         }
-        let width = self.frame.width;
-        let height = self.frame.height;
-        let track_height = (height * 0.65).clamp(4.0, height.max(4.0));
-        let track_width = (track_height * 1.8).min(width.max(0.0));
-        let track_y = (height - track_height) * 0.5;
-        let knob_size = (track_height - 4.0).max(1.0);
-        let knob_x = if self.on {
-            (track_width - knob_size - 2.0).max(2.0)
-        } else {
-            2.0
-        };
-        let state = self.state.theme_state(self.pressed());
-        let track_color = if self.on {
-            self.theme.accent
-        } else {
-            self.theme.surface_raised
-        };
-        let knob_color = if self.on {
-            self.theme.accent_text
-        } else {
-            self.theme.outline
-        };
-
-        let mut items = Vec::new();
-        items.push(quad(0.0, track_y, track_width, track_height, self.theme.fill(track_color, state)));
-        items.push(quad(
-            knob_x,
-            track_y + 2.0,
-            knob_size,
-            knob_size,
-            self.theme.fill(knob_color, self.state.supporting_theme_state(false)),
-        ));
-        if !self.label.is_empty() {
-            let size = self.theme.label_size_pixels;
-            items.push(WidgetDrawItem::Text {
-                x: track_width + self.theme.pad,
-                y: text_origin_y(0.0, height, size),
-                font_id: self.theme.font_id,
-                text: self.label.clone(),
-                size_pixels: size,
-                color: self.theme.fill(self.theme.text_primary, self.state.supporting_theme_state(false)),
-                clip: None,
-            });
-        }
-        push_control_outlines(&mut items, width, height, &self.state, &self.theme);
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { content_height: None, intrinsic: None, items, overlay: Vec::new() });
+            parent.send(&WidgetDrawList {
+                content_height: None,
+                intrinsic: None,
+                items: self.draw_items(),
+                overlay: Vec::new(),
+            });
         }
     }
 }
@@ -231,6 +268,41 @@ mod tests {
             state: InteractionState::new(WidgetControlState::default()),
             arms: ActivationArms::default(),
         }
+    }
+
+    /// The track's fill and the knob's, in draw order — the first two quads
+    /// the toggle pushes, before any outline.
+    fn track_and_knob(switch: &ToggleWidget) -> (Rgba, Rgba) {
+        let items = switch.draw_items();
+        let mut fills = items.iter().filter_map(|item| match item {
+            WidgetDrawItem::Quad { color, .. } => Some(*color),
+            _ => None,
+        });
+        (fills.next().expect("the track is drawn first"), fills.next().expect("the knob is drawn on it"))
+    }
+
+    // Tripwire: the knob is the one element that says which side the switch is
+    // on, so it has to be a face against the track it sits on. The off knob
+    // borrowed `outline` — the divider token `theme.rs` documents as "meant to
+    // be nearly invisible" and pins *below* the 3.0 face target on purpose —
+    // and drew it on the `surface_raised` track at 1.29, so the switch read as
+    // an empty bar with no knob at all. The mix behind `Theme::edge` is solved
+    // in `f32`, so a face landing exactly on the target measures back a few
+    // parts in ten million under it; the tolerance is that rounding and
+    // nothing else.
+    #[test]
+    fn the_knob_reads_as_a_face_against_its_own_track_in_both_positions() {
+        let floor = 3.0 - 1e-4;
+        let mut switch = toggle();
+
+        let (track, knob) = track_and_knob(&switch);
+        let off = Theme::contrast_ratio(knob, track);
+        assert!(off >= floor, "the off knob reads at only {off} against its own track");
+
+        switch.on = true;
+        let (track, knob) = track_and_knob(&switch);
+        let on = Theme::contrast_ratio(knob, track);
+        assert!(on >= floor, "the on knob reads at only {on} against its own track");
     }
 
     #[test]
