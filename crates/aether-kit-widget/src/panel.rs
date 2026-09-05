@@ -627,9 +627,9 @@ fn spawn_scroll_child<P: WasmActor>(
     })
 }
 
-/// Spawn the three issue-2926 one-row control children. Keeping their
-/// mechanical decode/spawn profiles together prevents the main exhaustive
-/// dispatcher from becoming a second long-form implementation surface.
+/// Spawn the one-row control children. Keeping their mechanical decode/spawn
+/// profiles together prevents the main exhaustive dispatcher from becoming a
+/// second long-form implementation surface.
 fn spawn_row_control_child<P: WasmActor>(
     ctx: &mut WasmCtx<'_, Manual>,
     spec: &WidgetChildSpec,

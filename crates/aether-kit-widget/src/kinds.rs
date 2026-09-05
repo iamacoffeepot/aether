@@ -260,9 +260,12 @@ pub enum WidgetDrawItem {
         tint: Rgba,
         clip: Option<WidgetClipRect>,
     },
-    /// A glyph run. `(x, y)` is the baseline origin in local pixels;
-    /// `font_id` names a session-scoped font loaded through `aether.text`;
-    /// `color` is a linear RGBA multiplier over glyph coverage.
+    /// A glyph run. `(x, y)` is the top-left of the run's line box in local
+    /// pixels — the pen origin `set::text_origin_y` computes, which
+    /// `aether.text` puts the baseline one ascent below, matching
+    /// `aether_text::DrawText::origin` in `Screen` space. `font_id` names a
+    /// session-scoped font loaded through `aether.text`; `color` is a linear
+    /// RGBA multiplier over glyph coverage.
     Text { x: f32, y: f32, font_id: u32, text: String, size_pixels: f32, color: Rgba, clip: Option<WidgetClipRect> },
 }
 
