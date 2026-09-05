@@ -1272,7 +1272,12 @@ Left/Right movement clamps at the first and last option. Empty option lists
 have no hit buckets. `SegmentedSelected { index }` reports only actual changes.
 The selected bucket fills with `theme.selection` over `theme.selection_text`;
 hovered, pressed, disabled, validation, and focus presentation use the common
-theme/state contract.
+theme/state contract. Each option's label is elided with the kit's ellipsis to
+what its own bucket holds less one `pad` either side, measured against the
+theme font's resolved metrics — a label wider than its bucket would otherwise
+be overpainted by the next segment's fill, cut mid-glyph with nothing saying
+so. Until those metrics land the labels draw whole and left-padded, the same
+interim the tab strip has.
 
 `WidgetKind::TabStrip` spawns `TabStripWidget` from `TabStripConfig { labels,
 initial_index, style, theme, state }` — one row of tabs over parallel content

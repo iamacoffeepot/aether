@@ -28,7 +28,6 @@ use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::keycode::{KEY_DOWN, KEY_UP};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease};
-use aether_math::Rgba;
 
 use crate::set::defaults::WidgetDefaults;
 use crate::set::{clamp_option_index, push_control_outlines, quad, release_left, reply_if_hidden, text_origin_y};
@@ -261,8 +260,9 @@ impl WasmActor for RadioGroupWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aether_math::Rgba;
+
     use crate::WidgetControlState;
-    use alloc::vec;
 
     fn group(options: &[&str], selected: usize) -> RadioGroupWidget {
         RadioGroupWidget {
