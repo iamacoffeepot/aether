@@ -400,7 +400,7 @@ mod tests {
         let (plate_width, run_x) = items.iter().fold((0.0_f32, None), |(width, x), item| match item {
             WidgetDrawItem::Quad { width: plate, .. } => (width.max(*plate), x),
             WidgetDrawItem::Text { x: run, .. } => (width, x.or(Some(*run))),
-            _ => (width, x),
+            WidgetDrawItem::TexturedQuad { .. } => (width, x),
         });
         let run_x = run_x.expect("the plate carries the run it reveals");
 

@@ -33,7 +33,7 @@ use crate::set::defaults::WidgetDefaults;
 use crate::set::{
     SingleLineEdit, accept_clipboard_paste, accept_font_metrics_result, apply_text_theme, arm_text_drag, edit_command,
     measured_text_width, pump_text_font_metrics, push_triangle, quad, release_left, reply_single_line_edit,
-    report_clipboard_copy, run_edit_key, single_line_box_fill, single_line_edit_overlay, single_line_hit_byte,
+    report_clipboard_copy, run_edit_key, single_line_box_fill, single_line_hit_byte,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::{EditPolicy, FontMetricsAdapter, TextEditState, TextSpan};
@@ -775,7 +775,7 @@ mod tests {
     use aether_kinds::FontMetrics;
     use alloc::vec::Vec;
 
-    use crate::set::{EditCommand, apply_edit_command};
+    use crate::set::{EditCommand, apply_edit_command, single_line_edit_overlay};
 
     fn numeric(min: f32, max: f32, step: f32, initial: f32) -> NumericWidget {
         NumericWidget::configured(NumericConfig {
