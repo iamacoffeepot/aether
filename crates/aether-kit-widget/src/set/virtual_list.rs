@@ -1377,9 +1377,13 @@ impl VirtualListWidget {
     ///
     /// The window starts on a row's own top either way, so the wheel picks the
     /// row the rolled pixels land in and carries what is left into the next
-    /// roll. The carry is bounded by the viewport so that a reader who keeps
-    /// rolling at either end of the list does not build up a debt they have to
-    /// roll back out.
+    /// roll. What a roll spends past either end of the vector is **dropped**
+    /// rather than carried: the window cannot travel that way, so banking it
+    /// would make the reader roll the debt back out before the list moved at
+    /// all — a dead wheel for as many notches as they over-rolled. The
+    /// fixed-pitch branch drops it by construction (its carry is what is left
+    /// under one row, and the rows past the end are clamped away); the table
+    /// branch has to say so.
     #[allow(clippy::cast_possible_truncation)] // the row delta is bounded by the wheel's own pixels
     fn scroll_by_pixels(&mut self, pixels: f32) {
         if !pixels.is_finite() {
@@ -1404,8 +1408,13 @@ impl VirtualListWidget {
         let from = self.scroll_extent().offset;
         let carried = self.wheel_residual_pixels + pixels;
         let next = self.first_index_at_offset(from + carried);
-        let travelled = self.content_top(next) - from;
-        self.wheel_residual_pixels = (carried - travelled).clamp(-self.frame.height, self.frame.height);
+        let residual = carried - (self.content_top(next) - from);
+        let spent_past_an_end = (next == 0 && residual < 0.0) || (next == self.max_first_index() && residual > 0.0);
+        self.wheel_residual_pixels = if spent_past_an_end {
+            0.0
+        } else {
+            residual.clamp(-self.frame.height, self.frame.height)
+        };
         self.scroll_to(next);
     }
 
@@ -3289,6 +3298,38 @@ mod tests {
         assert!(
             (window.first_index..window.end_exclusive_index).contains(&40),
             "the selected row stands in the realized window {window:?} rather than below it",
+        );
+    }
+
+    #[test]
+    fn a_table_banks_no_dead_wheel_travel_past_the_end_of_its_vector() {
+        // Tripwire: at either end the window cannot travel further, so what a
+        // roll spends there is spent. Carried instead it is a debt — the
+        // reader who over-rolls at the bottom rolls back up and the list sits
+        // still for as many notches as they over-rolled, up to a whole
+        // viewport of dead wheel. The fixed-pitch branch never banks more than
+        // one row's worth, so the debt is the table branch's own.
+        let items: Vec<VirtualListRow> =
+            (0..10).map(|index| noted(&format!("stat {index}"), "a sentence under the statistic")).collect();
+        let notch = 50.0;
+
+        let mut over_rolled = table_list(items.clone(), 3);
+        let bottom = over_rolled.max_first_index();
+        over_rolled.scroll_to(bottom);
+        for _ in 0..3 {
+            over_rolled.scroll_by_pixels(notch);
+        }
+        assert_eq!(over_rolled.first_index, bottom, "the window stands at the end and rolling past it moves nothing");
+
+        let mut control = table_list(items, 3);
+        control.scroll_to(bottom);
+        control.scroll_by_pixels(-notch);
+        assert!(control.first_index < bottom, "one roll back up moves a window that never over-rolled");
+
+        over_rolled.scroll_by_pixels(-notch);
+        assert_eq!(
+            over_rolled.first_index, control.first_index,
+            "and carries the over-rolled one exactly as far rather than paying off a debt first",
         );
     }
 
