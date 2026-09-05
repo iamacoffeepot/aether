@@ -27,11 +27,52 @@ use crate::{
     WidgetFrame,
 };
 
+/// The `min..=max` a slider actually runs over, normalised once from the raw
+/// [`SliderConfig`] pair.
+///
+/// `f32::clamp` asserts `min <= max` and rejects a NaN bound, so the config's
+/// two bare `f32`s reached it unchecked: a descending axis (`min: 1.0, max:
+/// 0.0`) or a bound computed from an empty data set trapped the widget actor
+/// at `init` and again on every press, move, release and arrow key.
+///
+/// A crossed pair is the same interval written backwards, so it swaps. A
+/// non-finite end names no interval at all, so the slider **degrades to the
+/// single value** its finite end carries (`0.0` when neither end is finite):
+/// the zero-span paths already exist and already behave — `fill_fraction`
+/// draws an empty track, `nudge_amount` is `0.0`, and the pointer maps
+/// everywhere to that one value — so a malformed range yields a slider that
+/// does not move rather than one that is not there.
+fn normalized_bounds(min: f32, max: f32) -> (f32, f32) {
+    match (min.is_finite(), max.is_finite()) {
+        (true, true) if min <= max => (min, max),
+        (true, true) => (max, min),
+        (true, false) => (min, min),
+        (false, true) => (max, max),
+        (false, false) => (0.0, 0.0),
+    }
+}
+
+/// The snap increment a slider actually uses. A non-finite `step` is no
+/// increment: an infinite one drove `steps.mul_add(step, min)` through
+/// `0.0 * inf` and mailed a NaN value down, so it leaves the slider
+/// continuous exactly as a non-positive step does.
+fn normalized_step(step: f32) -> f32 {
+    if step.is_finite() {
+        step
+    } else {
+        0.0
+    }
+}
+
 /// A horizontal value slider. Local draw is a track with a fill from the left
 /// to the current value, plus a focus ring when focused.
 pub struct SliderWidget {
+    /// The low end of the normalised range — see [`normalized_bounds`]. Never
+    /// NaN, and never above [`SliderWidget::max`].
     min: f32,
     max: f32,
+    /// The normalised snap increment — see [`normalized_step`]. Never NaN and
+    /// never infinite; `0.0` or less leaves the value continuous.
     step: f32,
     value: f32,
     theme: Theme,
@@ -45,8 +86,17 @@ pub struct SliderWidget {
 impl SliderWidget {
     /// Clamp `raw` into `min..=max` and snap it to the nearest `step`. A
     /// non-positive `step` leaves the value continuous (clamp only).
+    ///
+    /// The bounds are the normalised pair, so the clamp cannot trap. A NaN
+    /// `raw` — a `SliderConfig` whose `initial` came back NaN — has no place
+    /// on the axis and takes `min`, so this is total: a finite value out for
+    /// any value in.
     fn snapped(&self, raw: f32) -> f32 {
-        let clamped = raw.clamp(self.min, self.max);
+        let clamped = if raw.is_nan() {
+            self.min
+        } else {
+            raw.clamp(self.min, self.max)
+        };
         if self.step > 0.0 {
             let steps = ((clamped - self.min) / self.step).round();
             steps.mul_add(self.step, self.min).clamp(self.min, self.max)
@@ -138,10 +188,11 @@ impl WasmActor for SliderWidget {
     const NAMESPACE: &'static str = "aether.kit.widget.slider";
 
     fn init(config: SliderConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        let (min, max) = normalized_bounds(config.min, config.max);
         let mut slider = SliderWidget {
-            min: config.min,
-            max: config.max,
-            step: config.step,
+            min,
+            max,
+            step: normalized_step(config.step),
             value: config.initial,
             theme: config.theme,
             state: InteractionState::new(config.state),
@@ -155,11 +206,16 @@ impl WasmActor for SliderWidget {
     /// Reconfigure the range / step / theme in place, re-clamping the current
     /// value into the new range. `initial` is ignored on re-config (it seeds
     /// the value only at init) so a restyle does not jump the value.
+    ///
+    /// A live reconfigure normalises the range the same way `init` does: it is
+    /// the second path a malformed pair arrives on, and it re-clamps against
+    /// the new bounds immediately.
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: SliderConfig) {
-        self.min = config.min;
-        self.max = config.max;
-        self.step = config.step;
+        let (min, max) = normalized_bounds(config.min, config.max);
+        self.min = min;
+        self.max = max;
+        self.step = normalized_step(config.step);
         self.theme = config.theme;
         self.value = self.snapped(self.value);
         self.apply_control_state(ctx, config.state);
@@ -300,6 +356,44 @@ mod tests {
     fn nudge_amount_falls_back_to_a_hundredth_of_range() {
         assert_eq!(slider(0.0, 100.0, 5.0, 0.0).nudge_amount(), 5.0);
         assert_eq!(slider(0.0, 100.0, 0.0, 0.0).nudge_amount(), 1.0);
+    }
+
+    /// A slider built the way `init` builds one — through the same bounds and
+    /// step normalisation — so a test drives the config path rather than a
+    /// hand-written pair the widget could never hold.
+    fn configured(min: f32, max: f32, step: f32, initial: f32) -> SliderWidget {
+        let (min, max) = normalized_bounds(min, max);
+        let mut built = slider(min, max, normalized_step(step), initial);
+        built.value = built.snapped(initial);
+        built
+    }
+
+    // Tripwire: `f32::clamp` asserts `min <= max` and rejects a NaN bound, so
+    // a `SliderConfig` carrying a descending axis or a bound computed from an
+    // empty data set trapped the wasm actor at `init` and on every pointer
+    // event — the panel lost the child rather than drawing a clamped slider.
+    // Pinning the normalised pair is what keeps the clamp reachable only with
+    // an ordered, finite one.
+    #[test]
+    fn an_inverted_or_non_finite_config_range_does_not_trap_the_widget() {
+        let descending = configured(1.0, 0.0, 0.0, 0.5);
+        assert_eq!((descending.min, descending.max), (0.0, 1.0), "a crossed pair is one interval, written backwards");
+        assert_eq!(descending.value, 0.5);
+        assert_eq!(descending.value_from_pointer_x(300.0), 1.0, "the right edge still maps to the high end");
+
+        let half_known = configured(f32::NAN, 10.0, 0.0, 0.5);
+        assert_eq!((half_known.min, half_known.max), (10.0, 10.0), "a range with no low end is one value, not a trap");
+        assert_eq!(half_known.value, 10.0);
+        assert_eq!(half_known.value_from_pointer_x(150.0), 10.0, "a single-valued slider reports it everywhere");
+        assert_eq!(half_known.nudge_amount(), 0.0);
+        assert_eq!(half_known.fill_fraction(), 0.0);
+
+        let unknown = configured(f32::NAN, f32::NAN, f32::NAN, f32::NAN);
+        assert_eq!((unknown.min, unknown.max, unknown.step, unknown.value), (0.0, 0.0, 0.0, 0.0));
+
+        let unbounded_step = configured(0.0, 100.0, f32::INFINITY, 30.0);
+        assert_eq!(unbounded_step.step, 0.0, "an infinite step is no step, not a NaN value");
+        assert_eq!(unbounded_step.value, 30.0);
     }
 
     #[test]

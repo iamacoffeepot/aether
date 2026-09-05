@@ -741,9 +741,19 @@ pub struct WidgetStateChanged {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.kit.widget.slider.config")]
 pub struct SliderConfig {
+    /// The low end of the range. Normalised on arrival, at init and on every
+    /// re-sent config alike: a `min` above `max` is the same interval written
+    /// backwards and the two swap, and a non-finite end names no interval, so
+    /// the slider degrades to the single value the other end carries (`0`
+    /// when neither is finite) rather than trapping on `f32::clamp`.
     pub min: f32,
+    /// The high end of the range, normalised against `min` as above.
     pub max: f32,
+    /// The snap increment. `0` or less leaves the value continuous, and so
+    /// does a non-finite one.
     pub step: f32,
+    /// The value the slider starts at, clamped and snapped into the
+    /// normalised range. A non-finite `initial` takes `min`.
     pub initial: f32,
     pub theme: Theme,
     #[serde(default)]
