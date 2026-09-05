@@ -1331,8 +1331,11 @@ pub fn wrap_to_width_hanging(
 pub(crate) struct RevealPlate<'a> {
     pub(crate) theme: &'a Theme,
     pub(crate) text: &'a str,
-    /// Where the run starts inside the plate — one `pad`, for every caller so
-    /// far. Also the left margin the plate's width accounts for.
+    /// Where the run starts inside the plate — one `pad`, and the plate's
+    /// width accounts for that same margin at the far end. It is the plate's
+    /// own inset, never the origin the caller aligns its in-frame run by: a
+    /// `Start`-aligned run's origin is `0.0`, which would lay the glyphs under
+    /// the plate's own ring.
     pub(crate) text_x: f32,
     pub(crate) size_pixels: f32,
     pub(crate) ink: Rgba,
