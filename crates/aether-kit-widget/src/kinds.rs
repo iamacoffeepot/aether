@@ -1365,12 +1365,7 @@ impl MenuItem {
 /// enabled. One default per field, whichever way the item is built.
 impl Default for MenuItem {
     fn default() -> Self {
-        Self {
-            label: String::new(),
-            shortcut: String::new(),
-            enabled: Self::enabled_default(),
-            separator_after: false,
-        }
+        Self { label: String::new(), shortcut: String::new(), enabled: Self::enabled_default(), separator_after: false }
     }
 }
 

@@ -1090,6 +1090,39 @@ impl<'a> SingleLineEdit<'a> {
             height: self.frame.height,
         })
     }
+
+    /// The width the value has to fit for it to be readable where it is — the
+    /// edge [`Self::content_clip`] cuts at, not the box that clip sits in. The
+    /// two differ by the trailing `pad` on a control with a gutter, and a run
+    /// measured against the wider one is a run the clip cuts while the hover
+    /// reveal still calls it a fit: a whole `pad` of run widths truncated with
+    /// nothing to hover for. `content_width` when there is no gutter, where
+    /// the clip is `None` and the two edges are the same one.
+    fn reveal_content_width(&self) -> f32 {
+        self.content_clip().map_or_else(|| self.content_width(), |clip| clip.width)
+    }
+}
+
+/// The hover reveal a single-line editor owes when its value does not fit the
+/// box it is drawn in. Empty unless the pointer is on it and its metrics have
+/// resolved — an unmeasured run cannot be called too wide.
+pub(super) fn single_line_edit_overlay(edit: &SingleLineEdit<'_>) -> Vec<WidgetDrawItem> {
+    let theme = edit.theme;
+    let size = theme.value_size_pixels;
+    edit.metrics.filter(|_| edit.state.hovered()).map_or_else(Vec::new, |metrics| {
+        overflow_reveal_items(
+            &RevealPlate {
+                theme,
+                text: &edit.displayed.text,
+                text_x: theme.pad,
+                size_pixels: size,
+                ink: theme.fill(theme.text_primary, edit.theme_state),
+                content_width: edit.reveal_content_width(),
+                row_height: edit.frame.height,
+            },
+            &|run: &str| measured_text_width(metrics, run, size),
+        )
+    })
 }
 
 /// Reply one single-line editor's frame: its ordinary draw, plus the hover
@@ -1099,26 +1132,9 @@ pub(super) fn reply_single_line_edit(ctx: &WasmCtx<'_>, edit: SingleLineEdit<'_>
     if reply_if_hidden(ctx, edit.state) {
         return;
     }
-    let theme = edit.theme;
-    let size = theme.value_size_pixels;
     let intrinsic = edit.intrinsic;
     let items = single_line_edit_draw_items(&edit);
-
-    let overlay = edit.metrics.filter(|_| edit.state.hovered()).map_or_else(Vec::new, |metrics| {
-        let measure = |run: &str| measured_text_width(metrics, run, size);
-        overflow_reveal_items(
-            &RevealPlate {
-                theme,
-                text: &edit.displayed.text,
-                text_x: theme.pad,
-                size_pixels: size,
-                ink: theme.fill(theme.text_primary, edit.theme_state),
-                content_width: edit.content_width(),
-                row_height: edit.frame.height,
-            },
-            &measure,
-        )
-    });
+    let overlay = single_line_edit_overlay(&edit);
 
     if let Some(parent) = ctx.parent() {
         parent.send(&WidgetDrawList { content_height: None, intrinsic, items, overlay });
@@ -1320,8 +1336,10 @@ pub(crate) struct RevealPlate<'a> {
     pub(crate) text_x: f32,
     pub(crate) size_pixels: f32,
     pub(crate) ink: Rgba,
-    /// The width the run has to fit in before a plate is owed: the widget's
-    /// frame minus any chrome gutter.
+    /// The width the run has to fit in before a plate is owed. It is the edge
+    /// the caller's own clip cuts the run at, not the box that clip sits in:
+    /// measure against the wider box and every run between the two edges is
+    /// truncated on screen while the reveal calls it a fit.
     pub(crate) content_width: f32,
     /// One wrapped line's height — the widget's own row height.
     pub(crate) row_height: f32,

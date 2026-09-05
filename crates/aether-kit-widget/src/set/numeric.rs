@@ -33,7 +33,7 @@ use crate::set::defaults::WidgetDefaults;
 use crate::set::{
     SingleLineEdit, accept_clipboard_paste, accept_font_metrics_result, apply_text_theme, arm_text_drag, edit_command,
     measured_text_width, pump_text_font_metrics, push_triangle, quad, release_left, reply_single_line_edit,
-    report_clipboard_copy, run_edit_key, single_line_box_fill, single_line_hit_byte,
+    report_clipboard_copy, run_edit_key, single_line_box_fill, single_line_edit_overlay, single_line_hit_byte,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::{EditPolicy, FontMetricsAdapter, TextEditState, TextSpan};
@@ -1214,6 +1214,44 @@ mod tests {
         );
         edit.gutter = column.width;
         edit.content_clip()
+    }
+
+    /// The overlay the collect path raises for this numeric, read the same
+    /// actor-free way `content_clip_of` reads its clip.
+    fn overlay_of(widget: &NumericWidget, column: StepperColumn) -> Vec<WidgetDrawItem> {
+        let displayed = widget.edit.displayed();
+        let mut edit = SingleLineEdit::new(
+            &displayed,
+            widget.resolved_metrics(),
+            &widget.theme,
+            &widget.state,
+            ThemeState::Normal,
+            &widget.frame,
+        );
+        edit.gutter = column.width;
+        single_line_edit_overlay(&edit)
+    }
+
+    #[test]
+    fn a_value_the_clip_cuts_is_a_value_the_hover_reveals() {
+        // The reveal's threshold and the clip's edge are one edge or the
+        // reader loses a band of values: cut on screen, and hovering offers
+        // nothing back. A nine-character value in a 100-pixel field is 63
+        // pixels of run drawn from x = 8, so it runs 3 pixels past the clip at
+        // 68 while still fitting the 76-pixel box the old threshold measured.
+        let mut widget = numeric(-9999.0, 9999.0, 0.5, 0.0);
+        with_metrics(&mut widget);
+        widget.frame = WidgetFrame { x: 0.0, y: 0.0, width: 100.0, height: 24.0 };
+        widget.edit = TextEditState::new(String::from("-1234.567"));
+        widget.state.set_hovered(true);
+
+        let column = widget.steppers().expect("a laid-out numeric has its column");
+        let clip = content_clip_of(&widget, column).expect("a gutter means a seam");
+        let metrics = widget.resolved_metrics().expect("measured");
+        let run = measured_text_width(metrics, "-1234.567", widget.theme.value_size_pixels);
+        assert!(widget.theme.pad + run > clip.width, "the value has to be one the clip cuts: {run} in {clip:?}");
+
+        assert!(!overlay_of(&widget, column).is_empty(), "a cut value hovers to a reveal plate");
     }
 
     #[test]

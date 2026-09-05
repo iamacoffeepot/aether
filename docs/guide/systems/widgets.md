@@ -1415,9 +1415,12 @@ text starts one `pad` in and every part of it the reader can see — glyphs,
 selection band, IME underline, caret — carries a clip that ends one `pad` short
 of the hairline. So a value that fits has the same space at each end, and one
 that does not is cut at that margin rather than printing across the seam and
-under the arrows (round-4 note 6). A control with no gutter — a plain text
-field — has no seam to be held off and carries no clip; its slot is already its
-own frame. Nothing in
+under the arrows (round-4 note 6). That margin is also what the hover reveal
+measures against, so a value the clip cuts is a value hovering offers back
+whole — measured against the box instead, a run between the two edges would be
+truncated on screen with the reveal calling it a fit. A control with no gutter —
+a plain text field — has no seam to be held off and carries no clip; its slot is
+already its own frame. Nothing in
 `NumericConfig` changed: steppers are what a numeric *is*, not something to opt
 into.
 
