@@ -130,6 +130,25 @@ impl SliderWidget {
         }
     }
 
+    /// Apply one arrow press, returning the value it moved to — or `None`
+    /// when it moved nothing.
+    ///
+    /// An arrow key is not a gesture with an end, so unlike a drag's release
+    /// it has nothing to commit unless the value actually changed. Held at an
+    /// end stop it re-clamps to the same value on every key repeat, and on a
+    /// slider whose range is a single value [`Self::nudge_amount`] is `0.0`,
+    /// so emitting unconditionally reported `committed: true` for a value
+    /// that never moved — and the kind's own doc tells a consumer to throttle
+    /// expensive work to exactly those. Mirrors `SegmentedWidget::step`.
+    fn nudge(&mut self, delta: f32) -> Option<f32> {
+        let next = self.snapped(self.value + delta);
+        if next == self.value {
+            return None;
+        }
+        self.value = next;
+        Some(next)
+    }
+
     /// The value as a `0.0..=1.0` fraction of the range, for the fill width.
     fn fill_fraction(&self) -> f32 {
         let span = self.max - self.min;
@@ -270,8 +289,9 @@ impl WasmActor for SliderWidget {
             KEY_RIGHT | KEY_UP => self.nudge_amount(),
             _ => return,
         };
-        self.value = self.snapped(self.value + delta);
-        self.emit(ctx, true);
+        if self.nudge(delta).is_some() {
+            self.emit(ctx, true);
+        }
     }
 
     /// Reply the slider's local draw: track, fill, and a focus ring when
@@ -394,6 +414,17 @@ mod tests {
         let unbounded_step = configured(0.0, 100.0, f32::INFINITY, 30.0);
         assert_eq!(unbounded_step.step, 0.0, "an infinite step is no step, not a NaN value");
         assert_eq!(unbounded_step.value, 30.0);
+    }
+
+    #[test]
+    fn an_arrow_that_the_clamp_swallows_reports_no_change() {
+        let mut at_the_stop = configured(0.0, 100.0, 10.0, 100.0);
+        assert_eq!(at_the_stop.nudge(10.0), None, "a repeat held at max moves nothing");
+        assert_eq!(at_the_stop.nudge(-10.0), Some(90.0), "and the arrow off it still moves");
+
+        let mut pinned = configured(5.0, 5.0, 0.0, 5.0);
+        assert_eq!(pinned.nudge_amount(), 0.0, "a single-valued range has no nudge to apply");
+        assert_eq!(pinned.nudge(0.0), None, "so every arrow press is a no-op, not a committed one");
     }
 
     #[test]
