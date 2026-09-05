@@ -1488,8 +1488,19 @@ impl VirtualListWidget {
     }
 
     /// The whole item vector's height in pixels: the offset table's last sum
-    /// once the rows have heights of their own, and the configured pitch by
-    /// the item count while every row is one height.
+    /// once the rows have heights of their own, and the pitch the rows are
+    /// actually drawn at ([`Self::row_height`]) by the item count while every
+    /// row is one height.
+    ///
+    /// The **drawn** pitch rather than the theme's, because a fixed-pitch list
+    /// divides the frame it was given by the row count it was configured for:
+    /// in a frame that is not `theme.row_height × visible_row_count` tall the
+    /// rows stand taller or shorter than the theme's pitch and the vector
+    /// scrolls through the sum of those. A plate sized from the theme number
+    /// would be cut short of the rows it is meant to hold, which is the very
+    /// gap this reports to close. The theme's pitch is the fallback for a
+    /// frame no row can stand in, where there is nothing drawn to disagree
+    /// with.
     ///
     /// This is the scroll extent's `content` said in pixels. The extent counts
     /// **rows** on the fixed-pitch path, because the bar is a ratio either
@@ -1505,8 +1516,9 @@ impl VirtualListWidget {
     /// from that would resize under the reader a frame later.
     fn content_height(&self) -> Option<f32> {
         let Some(tops) = &self.row_tops else {
+            let pitch = self.row_height().unwrap_or(self.theme.row_height);
             #[allow(clippy::cast_precision_loss)] // a row count a reader could scroll cannot lose precision
-            return (!self.rows_vary).then_some(self.theme.row_height * self.items.len() as f32);
+            return (!self.rows_vary).then_some(pitch * self.items.len() as f32);
         };
         self.font_metrics.resolved()?;
         Some(tops.last().copied().unwrap_or(0.0))
@@ -3228,6 +3240,18 @@ mod tests {
             plain.content_height(),
             Some(plain.theme.row_height * 200.0),
             "and reports the same content in the pixels a host draws with",
+        );
+
+        // A frame the host did not size to the intrinsic: the five rows are
+        // drawn to it, so the vector stands taller than the theme's pitch by
+        // rows and a plate drawn to that number would be cut short of them.
+        let mut off_pitch = measured_list(20, 5);
+        off_pitch.frame.height = 200.0;
+        assert_eq!(off_pitch.row_height(), Some(40.0), "a taller frame draws its five rows taller");
+        assert_eq!(
+            off_pitch.content_height(),
+            Some(40.0 * 20.0),
+            "and the content height follows the pitch the rows are drawn at, not the theme's",
         );
 
         let mut unwrapped = list(1, 5, 0);
