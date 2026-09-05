@@ -1400,9 +1400,12 @@ Once the theme font's metrics resolve, a numeric reports its
 height]` — so a consumer sizes the field to the range it configured instead of
 guessing at it. The widest value is whichever *bound* renders longer, formatted
 exactly the way the field formats a committed value (`-100 .. 20` is widest at
-its minimum: the sign is a character like any other), capped at the edit
-buffer's own 32-character bound so an effectively unbounded range asks for a
-field rather than a wall. The endpoints, and only the endpoints, because the
+its minimum: the sign is a character like any other). A committed value is
+written in exponent form when its plain decimal does not fit the edit buffer's
+own 32-character cap — `f32::to_string` never reaches for one, so `3e38` would
+otherwise render as thirty-nine digits, and a buffer installed past the cap
+refuses every later insert whole — which is also what keeps an effectively
+unbounded range asking for a field rather than a wall. The endpoints, and only the endpoints, because the
 number has to be stable: a width that also weighed the value on screen would
 resize the slot on every keystroke, so a fractional `step` that renders an
 interior value longer than either bound (`0 .. 100` by `0.5` holds `"12.5"`) is
@@ -1418,7 +1421,13 @@ Numeric keeps the visible buffer separate from its last committed number.
 Empty, `-`, `.`, and other invalid or non-finite intermediates remain visible
 and emit nothing. A finite edit is clamped and snapped for a
 `NumericChanged { committed: false }` preview without rewriting what the user
-typed. Enter or focus loss canonicalizes a valid value and emits
+typed. The grid it snaps to is the **multiples of `step`**, anchored at zero
+rather than at `min`, and `min` and `max` are reached by the clamp rather than
+by the grid: an anchor at the far end of the range would reconstruct the value
+as `min + k * step` and multiply the step's own `f32` error by the step count,
+so `-100_000 .. 100_000` by `0.01` would commit a typed `12.34` as `12.337765`
+and an unbounded range (whose `min` falls back to `f32::MIN`) would snap every
+value to the anchor. Enter or focus loss canonicalizes a valid value and emits
 `committed: true`; an invalid buffer reverts to the last canonical value
 without an event. Up/Down and the steppers step from the current valid value,
 falling back to the committed value, and immediately canonicalize and commit.
@@ -1658,13 +1667,20 @@ elision mark rather than on a glyph the root's slot clip sliced in half.
 TextField and TextArea share the same UTF-8-safe edit, selection, and IME
 state. Once the configured font resolves, pointer placement, caret motion,
 selection fills, preedit cursor bands, and preedit underlines all use its exact
-glyph advances. `TextAreaConfig { initial, max_chars, rows, theme, state }`
+glyph advances. Before it resolves — and for as long as it never does, when the
+theme names a font the host never loaded — both controls fall back to the
+per-character approximation rather than stop answering: a press still places a
+caret and arms a drag, and Up/Down still move. `TextAreaConfig { initial, max_chars, rows, theme, state }`
 adds a fixed whole-line viewport: `rows` is the number of visible theme rows
 (`0` means one), vertical motion preserves the caret's preferred measured x
 across shorter lines, and the viewport scrolls by complete lines to keep the
 caret visible. Plain Enter inserts a newline; Ctrl+Enter sends
 `TextCommitted` without changing the value. A multiline selection can cross
-newlines and renders one measured band in each covered visible row.
+newlines and renders one measured band in each covered visible row. `\n` is the
+only line break either buffer holds: an insert drops carriage returns whatever
+the control, so a CRLF paste from the clipboard becomes plain newlines instead
+of leaving a `\r` inside the line for layout to charge an advance and the text
+cap to draw a missing-glyph box for.
 
 ## Scroll containers and wheel ownership
 

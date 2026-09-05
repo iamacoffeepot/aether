@@ -26,6 +26,7 @@ use aether_kinds::{
 };
 use aether_math::Rgba;
 use aether_text::FontMetricsResult;
+use alloc::format;
 use alloc::string::{String, ToString};
 
 use crate::set::defaults::WidgetDefaults;
@@ -219,6 +220,21 @@ impl NumericWidget {
         NumericBounds::from_config(self.min, self.max)
     }
 
+    /// `raw` held inside the range and snapped to the nearest multiple of
+    /// `step`. `None` for a value that is not a finite number.
+    ///
+    /// The grid is anchored at **zero**, not at `bounds.min`, and that choice
+    /// is the whole of this function's arithmetic. A min-anchored grid
+    /// reconstructs the value as `min + k * step`, which multiplies the step's
+    /// own representation error by the step count: `min = -100_000` by `0.01`
+    /// puts ten million steps under a typed `12.34` and commits `12.337765`,
+    /// and a non-finite bound — which resolves to `f32::MIN` — puts the anchor
+    /// so far out that every value is lost below its ulp and snaps back to the
+    /// anchor, pinning the control at one number. Anchored at zero the error
+    /// stays proportional to the value rather than to the range, and the grid
+    /// is the same one whenever `min` is itself a multiple of the step, which
+    /// is the ordinary case. `min` is still reachable: the clamp below is what
+    /// holds a range whose ends are off the grid.
     fn normalize(&self, raw: f32) -> Option<f32> {
         if !raw.is_finite() {
             return None;
@@ -228,8 +244,8 @@ impl NumericWidget {
         if !self.step.is_finite() || self.step <= 0.0 {
             return Some(clamped);
         }
-        let steps = ((f64::from(clamped) - f64::from(bounds.min)) / f64::from(self.step)).round();
-        let snapped = steps.mul_add(f64::from(self.step), f64::from(bounds.min));
+        let steps = (f64::from(clamped) / f64::from(self.step)).round();
+        let snapped = steps * f64::from(self.step);
         // The finite check below rejects an f64 result outside f32's range.
         #[allow(clippy::cast_possible_truncation)]
         let snapped = snapped as f32;
@@ -240,11 +256,25 @@ impl NumericWidget {
         })
     }
 
+    /// A committed value as the text the buffer holds it in.
+    ///
+    /// `f32::to_string` never reaches for an exponent, so a large magnitude
+    /// renders as up to thirty-nine digits and a tiny one as forty-odd zeros
+    /// and a tail — past [`NUMERIC_EDIT_MAX_CHARS`], which is the cap every
+    /// *typed* insert is held to. A buffer installed past that cap refuses
+    /// every later insert whole, leaving a control only Backspace can move, so
+    /// a value whose plain form does not fit is written in exponent form
+    /// instead: it parses back through the same path and is never more than
+    /// fifteen characters.
     fn canonical(value: f32) -> String {
         if value == 0.0 {
-            String::from("0")
+            return String::from("0");
+        }
+        let plain = value.to_string();
+        if plain.chars().count() <= NUMERIC_EDIT_MAX_CHARS as usize {
+            plain
         } else {
-            value.to_string()
+            format!("{value:e}")
         }
     }
 
@@ -353,8 +383,8 @@ impl NumericWidget {
     /// committed value.
     ///
     /// Both bounds, not just `max`, because `-100 .. 20` is widest at its
-    /// minimum — the sign is a character like any other. The formatted text is
-    /// capped at the edit buffer's own character bound so an effectively
+    /// minimum — the sign is a character like any other. [`Self::canonical`]
+    /// is bounded by the edit buffer's own character cap, so an effectively
     /// unbounded range (a non-finite bound resolves to `f32::MAX`) asks for a
     /// field rather than a wall.
     ///
@@ -368,7 +398,7 @@ impl NumericWidget {
     fn widest_value_width(&self, metrics: &CachedFontMetrics) -> f32 {
         let bounds = self.bounds();
         [bounds.min, bounds.max]
-            .map(|value| Self::canonical(value).chars().take(NUMERIC_EDIT_MAX_CHARS as usize).collect::<String>())
+            .map(Self::canonical)
             .iter()
             .map(|text| measured_text_width(metrics, text, self.theme.value_size_pixels))
             .fold(0.0, f32::max)
@@ -793,6 +823,27 @@ mod tests {
     }
 
     #[test]
+    fn snapping_stays_near_the_value_however_far_the_range_reaches() {
+        // A grid anchored at `min` reconstructs the value as `min + k * step`,
+        // so the step's own f32 error is multiplied by `k`. At `min =
+        // -100_000` by `0.01` there are ten million steps between the anchor
+        // and a typed `12.34`, and that error reaches 0.0022 — a fifth of a
+        // step, and a committed number the reader never typed.
+        let mut widget = numeric(-100_000.0, 100_000.0, 0.01, 0.0);
+        assert_eq!(replace_buffer(&mut widget, "12.34"), Some(NumericEmission { value: 12.34, committed: false }));
+        assert_eq!(widget.commit_buffer(), Some(NumericEmission { value: 12.34, committed: true }));
+        assert_eq!(widget.edit.value(), "12.34", "what was typed is on the grid, so it is what commits");
+
+        // An unbounded range resolves `min` to `f32::MIN`, whose ulp is larger
+        // than any value the reader will ever type: anchored there, every
+        // value fell back onto the anchor and the control could not be moved.
+        let mut unbounded = numeric(f32::NEG_INFINITY, f32::INFINITY, 0.5, 2.0);
+        assert_eq!(unbounded.committed_value, 2.0, "the initial value survives an unbounded range");
+        assert_eq!(unbounded.stepped(StepDirection::Up), NumericEmission { value: 2.5, committed: true });
+        assert_eq!(unbounded.stepped(StepDirection::Down), NumericEmission { value: 2.0, committed: true });
+    }
+
+    #[test]
     fn invalid_commit_reverts_to_the_last_canonical_value_without_event() {
         let mut widget = numeric(-10.0, 20.0, 0.5, 2.0);
         assert_eq!(replace_buffer(&mut widget, "-"), None);
@@ -859,6 +910,25 @@ mod tests {
 
         assert_eq!(replace_buffer(&mut widget, "7.5"), Some(NumericEmission { value: 7.5, committed: false }));
         assert_eq!(widget.edit.value(), "7.5");
+    }
+
+    #[test]
+    fn a_commit_installs_a_buffer_the_cap_a_typed_insert_faces_still_admits() {
+        // `f32::to_string` never reaches for an exponent, so 3e38 renders as
+        // thirty-nine digits — past the cap every typed insert is held to.
+        // Installed unchecked, that buffer refuses every later insert
+        // (`after = 39 + 1 > 32` rejects the whole thing), so the control
+        // looks frozen with only Backspace and Delete still working.
+        let mut widget = numeric(0.0, f32::MAX, 0.0, 0.0);
+        assert_eq!(replace_buffer(&mut widget, "3e38"), Some(NumericEmission { value: 3e38, committed: false }));
+        assert_eq!(widget.commit_buffer(), Some(NumericEmission { value: 3e38, committed: true }));
+        assert!(
+            widget.edit.value().chars().count() <= NUMERIC_EDIT_MAX_CHARS as usize,
+            "a committed buffer fits the cap: {:?}",
+            widget.edit.value()
+        );
+        assert_eq!(widget.parsed_buffer(), Some(3e38), "and still parses back to what it committed");
+        assert!(widget.edit.insert("1", NumericWidget::policy()), "so an edit after the commit is not refused");
     }
 
     #[test]
@@ -1069,18 +1139,22 @@ mod tests {
 
     #[test]
     fn an_unbounded_range_asks_for_a_field_rather_than_a_wall() {
-        // Tripwire: the bounds fall back to f32::MIN / MAX, whose canonical
-        // text is 39 characters — wider than the buffer can ever hold, so the
-        // reported width is capped at the buffer's own bound.
+        // Tripwire: the bounds fall back to f32::MIN / MAX, whose plain
+        // decimal text is 39 characters — wider than the buffer can ever hold.
+        // Canonical text reaches for an exponent rather than a wall of zeros
+        // at that size, and the width asked for is that text's.
+        let widest = NumericWidget::canonical(f32::MIN);
+        assert_eq!(widest, "-3.4028235e38", "the fallback bound, in the form the buffer would hold it");
+
         let mut widget = numeric(f32::NAN, f32::NAN, 1.0, 0.0);
         with_metrics(&mut widget);
         let theme = &Theme::DEFAULT;
         let advance = theme.value_size_pixels * 0.5;
         #[allow(clippy::cast_precision_loss)]
-        let capped = NUMERIC_EDIT_MAX_CHARS as f32;
+        let chars = widest.chars().count() as f32;
         assert_eq!(
             widget.intrinsic().expect("measured")[0],
-            advance.mul_add(capped, theme.pad * 2.0) + theme.row_height
+            advance.mul_add(chars, theme.pad * 2.0) + theme.row_height
         );
     }
 
