@@ -258,9 +258,13 @@ divided into paragraphs deliberately.
 Selection is a state, not an affordance, and every widget that has a current
 item draws it the same way: the chosen row of a virtual list, the chosen bucket
 of a segmented control, and the marker of a radio group's chosen option fill
-with `theme.selection`, and the text on them inks with `theme.selection_text`.
-A radio group's unselected markers stay on `surface_raised` and so read as
-empty slots beside the lit one. None of these use `accent`, which means the
+with `theme.selection`. `theme.selection_text` is the ink for text drawn *on*
+one of those fills, so the list row and the segmented bucket — which plate the
+whole cell their label sits in — take it. A radio group plates only its marker,
+never the row, so its labels are drawn on the panel's own `surface` and stay
+`text_primary` whether chosen or not; its unselected markers stay on
+`surface_raised` and so read as empty slots beside the lit one. None of these
+use `accent`, which means the
 primary action and the focus ring and nothing else — so a chosen row never
 reads as a button waiting to be pressed.
 
