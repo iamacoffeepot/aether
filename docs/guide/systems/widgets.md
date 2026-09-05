@@ -501,9 +501,14 @@ no rows.
 
 `WidgetDrawList::content_height` is the other half of that, and the one a host
 draws a **container** from: the whole item vector's height in pixels, which is
-the scroll extent said in the host's own unit — the offset table's last sum
-once rows carry heights of their own, and `theme.row_height × items.len()`
-while they are all one height. The intrinsic's height is the *viewport*; this
+everything the list scrolls through said in the host's own unit — the offset
+table's last sum
+once rows carry heights of their own, and the pitch the rows are drawn at
+(`frame.height ÷ visible_row_count`) × `items.len()` while they are all one
+height. The drawn pitch rather than `theme.row_height`, because a slot that is
+not `theme.row_height × visible_row_count` tall draws its rows to the frame it
+was given, and a plate sized from the theme number would be cut short of the
+rows it holds. The intrinsic's height is the *viewport*; this
 is everything the list scrolls through, so a plate drawn to it is as tall as
 what it holds rather than a tall empty box (§4). Only the widget can answer it
 — the wrapping is the widget's because the font metrics are — and a host that
