@@ -1662,7 +1662,11 @@ adds a fixed whole-line viewport: `rows` is the number of visible theme rows
 across shorter lines, and the viewport scrolls by complete lines to keep the
 caret visible. Plain Enter inserts a newline; Ctrl+Enter sends
 `TextCommitted` without changing the value. A multiline selection can cross
-newlines and renders one measured band in each covered visible row.
+newlines and renders one measured band in each covered visible row. `\n` is the
+only line break either buffer holds: an insert drops carriage returns whatever
+the control, so a CRLF paste from the clipboard becomes plain newlines instead
+of leaving a `\r` inside the line for layout to charge an advance and the text
+cap to draw a missing-glyph box for.
 
 ## Scroll containers and wheel ownership
 
