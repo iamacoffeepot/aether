@@ -1634,6 +1634,14 @@ every way a list or a menu can close, including focus loss. Without the grab a
 press that lands outside the widget's own rect would go to whatever is under
 it, and the open list would have no way to learn it should close.
 
+A holder that goes hidden or disabled loses the grab in that same breath:
+`Focus::update_availability` drops it alongside the hover and the drag capture.
+The widget does report its close edge, but it reports its state change first,
+so the root's `open: false` handshake arrives to find a holder it can no longer
+route to — and a grab merely filtered out of `grabbed()` is still stored, ready
+to re-arm the instant the widget is enabled again and swallow every press on
+the panel.
+
 A focused Button activates once on Enter press (repeat presses are suppressed
 until release) and once on Space release after a matching Space press. Focus
 loss or unavailability cancels the keyboard arm. Its label sits centered in the

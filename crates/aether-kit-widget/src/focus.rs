@@ -274,8 +274,13 @@ impl Focus {
         Some(HoverTransition { previous, next })
     }
 
-    /// Apply a source-attributed state change. If the child becomes unavailable,
-    /// move focus forward and clear live hover/capture paths immediately.
+    /// Apply a source-attributed state change. If the child becomes
+    /// unavailable, move focus forward and drop every pointer path it held —
+    /// hover, the drag capture, and the modal grab. The grab is dropped rather
+    /// than merely filtered out of [`Self::grabbed`] because a filtered grab is
+    /// still stored: the widget's own close handshake (`grabbed() == source`)
+    /// misses while the child is away, and the grab re-arms the moment the
+    /// child comes back, swallowing every press on the panel.
     pub fn update_availability(&mut self, child: MailboxId, state: &WidgetControlState) -> AvailabilityEffects {
         let Some(index) = self.entries.iter().position(|entry| entry.child == child) else {
             return AvailabilityEffects::default();
@@ -299,6 +304,9 @@ impl Focus {
         if self.capture == Some(child) {
             self.capture = None;
             effects.cleared_capture = Some(child);
+        }
+        if self.grab == Some(child) {
+            self.grab = None;
         }
         effects
     }
@@ -515,6 +523,27 @@ mod tests {
 
         focus.end_grab();
         assert_eq!(focus.pointer_target(5.0, 5.0), None, "and nothing is registered where the captor used to be");
+    }
+
+    #[test]
+    fn an_unavailable_grab_holder_drops_the_grab_instead_of_re_arming_when_it_returns() {
+        // Tripwire: a dropdown disabled while its list is open emits its
+        // `WidgetStateChanged` before its `DropdownOpenChanged { open: false }`,
+        // so the panel's `grabbed() == Some(source)` close handshake compares
+        // against an already-filtered `None` and never calls `end_grab`. A grab
+        // still stored re-activates the moment the child is re-enabled, and
+        // every press on the panel then falls into a closed dropdown.
+        let mut focus = focus_with_three();
+        focus.begin_grab(MailboxId(3));
+
+        let mut disabled = available();
+        disabled.enabled = false;
+        focus.update_availability(MailboxId(3), &disabled);
+        assert_eq!(focus.grabbed(), None, "an unavailable holder routes nothing while it is away");
+
+        focus.update_availability(MailboxId(3), &available());
+        assert_eq!(focus.grabbed(), None, "and the grab does not come back with the child");
+        assert_eq!(focus.pointer_target(5.0, 5.0), Some(MailboxId(1)), "so its siblings are reachable again");
     }
 
     #[test]
