@@ -457,6 +457,7 @@ mod tests {
             scroll_viewport: None,
             host_scroll_strip_units: None,
             wheel_eligible: true,
+            host_scroll_strip_units: None,
         }
     }
 
