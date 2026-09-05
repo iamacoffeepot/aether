@@ -219,6 +219,21 @@ impl NumericWidget {
         NumericBounds::from_config(self.min, self.max)
     }
 
+    /// `raw` held inside the range and snapped to the nearest multiple of
+    /// `step`. `None` for a value that is not a finite number.
+    ///
+    /// The grid is anchored at **zero**, not at `bounds.min`, and that choice
+    /// is the whole of this function's arithmetic. A min-anchored grid
+    /// reconstructs the value as `min + k * step`, which multiplies the step's
+    /// own representation error by the step count: `min = -100_000` by `0.01`
+    /// puts ten million steps under a typed `12.34` and commits `12.337765`,
+    /// and a non-finite bound — which resolves to `f32::MIN` — puts the anchor
+    /// so far out that every value is lost below its ulp and snaps back to the
+    /// anchor, pinning the control at one number. Anchored at zero the error
+    /// stays proportional to the value rather than to the range, and the grid
+    /// is the same one whenever `min` is itself a multiple of the step, which
+    /// is the ordinary case. `min` is still reachable: the clamp below is what
+    /// holds a range whose ends are off the grid.
     fn normalize(&self, raw: f32) -> Option<f32> {
         if !raw.is_finite() {
             return None;
@@ -228,8 +243,8 @@ impl NumericWidget {
         if !self.step.is_finite() || self.step <= 0.0 {
             return Some(clamped);
         }
-        let steps = ((f64::from(clamped) - f64::from(bounds.min)) / f64::from(self.step)).round();
-        let snapped = steps.mul_add(f64::from(self.step), f64::from(bounds.min));
+        let steps = (f64::from(clamped) / f64::from(self.step)).round();
+        let snapped = steps * f64::from(self.step);
         // The finite check below rejects an f64 result outside f32's range.
         #[allow(clippy::cast_possible_truncation)]
         let snapped = snapped as f32;
@@ -790,6 +805,27 @@ mod tests {
 
         assert_eq!(replace_buffer(&mut widget, "99"), Some(NumericEmission { value: 10.0, committed: false }));
         assert_eq!(widget.edit.value(), "99");
+    }
+
+    #[test]
+    fn snapping_stays_near_the_value_however_far_the_range_reaches() {
+        // A grid anchored at `min` reconstructs the value as `min + k * step`,
+        // so the step's own f32 error is multiplied by `k`. At `min =
+        // -100_000` by `0.01` there are ten million steps between the anchor
+        // and a typed `12.34`, and that error reaches 0.0022 — a fifth of a
+        // step, and a committed number the reader never typed.
+        let mut widget = numeric(-100_000.0, 100_000.0, 0.01, 0.0);
+        assert_eq!(replace_buffer(&mut widget, "12.34"), Some(NumericEmission { value: 12.34, committed: false }));
+        assert_eq!(widget.commit_buffer(), Some(NumericEmission { value: 12.34, committed: true }));
+        assert_eq!(widget.edit.value(), "12.34", "what was typed is on the grid, so it is what commits");
+
+        // An unbounded range resolves `min` to `f32::MIN`, whose ulp is larger
+        // than any value the reader will ever type: anchored there, every
+        // value fell back onto the anchor and the control could not be moved.
+        let mut unbounded = numeric(f32::NEG_INFINITY, f32::INFINITY, 0.5, 2.0);
+        assert_eq!(unbounded.committed_value, 2.0, "the initial value survives an unbounded range");
+        assert_eq!(unbounded.stepped(StepDirection::Up), NumericEmission { value: 2.5, committed: true });
+        assert_eq!(unbounded.stepped(StepDirection::Down), NumericEmission { value: 2.0, committed: true });
     }
 
     #[test]

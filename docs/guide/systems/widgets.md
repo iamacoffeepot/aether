@@ -1418,7 +1418,13 @@ Numeric keeps the visible buffer separate from its last committed number.
 Empty, `-`, `.`, and other invalid or non-finite intermediates remain visible
 and emit nothing. A finite edit is clamped and snapped for a
 `NumericChanged { committed: false }` preview without rewriting what the user
-typed. Enter or focus loss canonicalizes a valid value and emits
+typed. The grid it snaps to is the **multiples of `step`**, anchored at zero
+rather than at `min`, and `min` and `max` are reached by the clamp rather than
+by the grid: an anchor at the far end of the range would reconstruct the value
+as `min + k * step` and multiply the step's own `f32` error by the step count,
+so `-100_000 .. 100_000` by `0.01` would commit a typed `12.34` as `12.337765`
+and an unbounded range (whose `min` falls back to `f32::MIN`) would snap every
+value to the anchor. Enter or focus loss canonicalizes a valid value and emits
 `committed: true`; an invalid buffer reverts to the last canonical value
 without an event. Up/Down and the steppers step from the current valid value,
 falling back to the committed value, and immediately canonicalize and commit.
