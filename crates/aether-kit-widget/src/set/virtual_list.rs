@@ -2971,13 +2971,14 @@ mod tests {
     }
 
     #[test]
-    fn a_row_stops_a_spacing_unit_short_of_the_bar_standing_beside_it() {
+    fn a_row_stops_the_hosts_gutter_short_of_the_bar_standing_beside_it() {
         // Tripwire: round-5 note 8 — "the scrollbar has no padding with the
         // inner content to the left so it just draws over it". A row laid out
         // across the whole frame runs under the track, so the bar prints on
         // top of the row's fill and, for a long enough name, its text. The
-        // gutter is the track plus one spacing unit, and both the fill and the
-        // elision budget stop at it.
+        // gutter is the track plus the host's own `scroll_bar_gap_units` —
+        // two by default — and both the fill and the elision budget stop at
+        // it.
         let mut widget = measured_list(200, 5);
         widget.items =
             (0..200).map(|index| VirtualListRow::from(format!("a skill gem with a long name {index}"))).collect();
@@ -3003,7 +3004,7 @@ mod tests {
         assert_eq!(
             bar.left - row_fill_right,
             widget.scroll_bar_gap(),
-            "and the gap between the row and the track is one spacing unit",
+            "and the gap between the row and the track is the host's gutter",
         );
     }
 
