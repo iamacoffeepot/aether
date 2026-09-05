@@ -566,6 +566,47 @@ fn rows_vary(items: &[VirtualListRow]) -> bool {
 }
 
 impl VirtualListWidget {
+    /// The list a host's [`VirtualListConfig`] makes — everything `init` does,
+    /// less the ctx it does not use. The hop from config to fields is one
+    /// callable thing rather than a struct literal only the actor entry point
+    /// can reach, so a test can drive a flag the way a host sets it instead of
+    /// assigning the field the flag maps to and proving nothing about the
+    /// mapping.
+    fn from_config(config: VirtualListConfig) -> Self {
+        let font_id = config.theme.font_id;
+        let visible_row_count = usize_from_u32(config.visible_row_count);
+        let selected_index = initial_selection(config.initial_selected_index, config.items.len());
+        let first_index = selected_index.map_or(0, |selected_index| {
+            reveal_window(selected_index, 0, visible_row_count, config.items.len()).first_index
+        });
+
+        Self {
+            rows_vary: rows_vary(&config.items),
+            items: config.items,
+            empty_text: config.empty_text,
+            selected_index,
+            first_index,
+            visible_row_count,
+            theme: config.theme,
+            frame: WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
+            state: InteractionState::new(config.state),
+            pressed: false,
+            ruled: config.ruled,
+            scroll_bar_gap_units: config.scroll_bar_gap_units,
+            bar_placement: BarPlacement::of(config.host_scroll_strip),
+            font_metrics: FontMetricsAdapter::new(font_id),
+            widest_row_width: None,
+            thumb_grab_pixels: None,
+            wheel_residual_pixels: 0.0,
+            hovered_action: None,
+            pressed_action: None,
+            pointer_local: None,
+            hovered_row: None,
+            row_tops: None,
+            row_tops_frame: None,
+        }
+    }
+
     /// The rows realized right now: the configured count from `first_index`
     /// while every row is one height, and every row the frame reaches once the
     /// offset table stands — a table of tall and short rows shows as many as
@@ -1755,37 +1796,7 @@ impl WasmActor for VirtualListWidget {
     const NAMESPACE: &'static str = "aether.kit.widget.virtual_list";
 
     fn init(config: VirtualListConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        let font_id = config.theme.font_id;
-        let visible_row_count = usize_from_u32(config.visible_row_count);
-        let selected_index = initial_selection(config.initial_selected_index, config.items.len());
-        let first_index = selected_index.map_or(0, |selected_index| {
-            reveal_window(selected_index, 0, visible_row_count, config.items.len()).first_index
-        });
-        Ok(Self {
-            rows_vary: rows_vary(&config.items),
-            items: config.items,
-            empty_text: config.empty_text,
-            selected_index,
-            first_index,
-            visible_row_count,
-            theme: config.theme,
-            frame: WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
-            state: InteractionState::new(config.state),
-            pressed: false,
-            ruled: config.ruled,
-            scroll_bar_gap_units: config.scroll_bar_gap_units,
-            bar_placement: BarPlacement::of(config.host_scroll_strip),
-            font_metrics: FontMetricsAdapter::new(font_id),
-            widest_row_width: None,
-            thumb_grab_pixels: None,
-            wheel_residual_pixels: 0.0,
-            hovered_action: None,
-            pressed_action: None,
-            pointer_local: None,
-            hovered_row: None,
-            row_tops: None,
-            row_tops_frame: None,
-        })
+        Ok(Self::from_config(config))
     }
 
     /// Ask for the theme font's metrics; rows are elided against real
@@ -2090,11 +2101,10 @@ mod tests {
         }
     }
 
-    /// The same list with a resolved metric table whose every glyph advances
+    /// Resolve a widget's metrics against a table whose every glyph advances
     /// half an em, so a row's width is `chars * size / 2` — exact without
     /// depending on a real font file.
-    fn measured_list(item_count: usize, visible_row_count: usize) -> VirtualListWidget {
-        let mut widget = list(item_count, visible_row_count, 0);
+    fn install_test_metrics(widget: &mut VirtualListWidget) {
         widget.font_metrics.take_pending_request();
         widget.font_metrics.accept_reply(Some(CachedFontMetrics::new(&FontMetrics {
             units_per_em: 1000.0,
@@ -2104,6 +2114,24 @@ mod tests {
             default_advance: 500.0,
             advances: Vec::new(),
         })));
+    }
+
+    /// The same list with those metrics resolved.
+    fn measured_list(item_count: usize, visible_row_count: usize) -> VirtualListWidget {
+        let mut widget = list(item_count, visible_row_count, 0);
+        install_test_metrics(&mut widget);
+        widget
+    }
+
+    /// A measured list built the way a host's config builds one — through
+    /// `init`'s own mapping — in a frame wide enough that a name has somewhere
+    /// to be cut. The fixture for anything whose subject is a config *field*:
+    /// assigning the widget field the flag maps to would leave that mapping
+    /// untested.
+    fn config_list(config: VirtualListConfig) -> VirtualListWidget {
+        let mut widget = VirtualListWidget::from_config(config);
+        widget.frame = WidgetFrame { x: 10.0, y: 20.0, width: 200.0, height: 120.0 };
+        install_test_metrics(&mut widget);
         widget
     }
 
@@ -2948,17 +2976,23 @@ mod tests {
     /// frame wide enough that a name has somewhere to be cut, at the gutter
     /// the host asked for.
     fn gutter_list(scroll_bar_gap_units: u8) -> VirtualListWidget {
-        let mut widget = measured_list(200, 5);
-        widget.frame = WidgetFrame { x: 10.0, y: 20.0, width: 200.0, height: 120.0 };
-        widget.scroll_bar_gap_units = scroll_bar_gap_units;
-        widget.items = (0..200)
-            .map(|index| {
-                VirtualListRow::from(format!("a skill gem with a long name {index}"))
-                    .with_trailing(vec!["21/20".into()])
-            })
-            .collect();
-        widget.forget_measurements();
-        widget
+        gutter_config_list(VirtualListConfig { scroll_bar_gap_units, ..VirtualListConfig::default() })
+    }
+
+    /// The same fixture from a whole config, so a test whose subject is one of
+    /// its flags exercises the config → widget hop rather than the field it
+    /// lands in.
+    fn gutter_config_list(config: VirtualListConfig) -> VirtualListWidget {
+        config_list(VirtualListConfig {
+            items: (0..200)
+                .map(|index| {
+                    VirtualListRow::from(format!("a skill gem with a long name {index}"))
+                        .with_trailing(vec!["21/20".into()])
+                })
+                .collect(),
+            visible_row_count: 5,
+            ..config
+        })
     }
 
     /// The rightmost pen-plus-advance of anything one list draws.
@@ -3024,8 +3058,13 @@ mod tests {
         // values would still step left the moment the vector overflowed —
         // the bug the flag exists to remove, and invisible in a capture
         // where the bar happens to stand in reserved ground anyway.
-        let mut widget = gutter_list(VirtualListConfig::SCROLL_BAR_GAP_UNITS);
-        widget.bar_placement = BarPlacement::HostStrip;
+        //
+        // Built from the config the host sets rather than by assigning the
+        // placement: the flag's whole plumbing is the hop from
+        // `host_scroll_strip` to `bar_placement`, and a test that assigned the
+        // placement itself would pass with that hop deleted.
+        let widget = gutter_config_list(VirtualListConfig { host_scroll_strip: true, ..VirtualListConfig::default() });
+        assert_eq!(widget.bar_placement, BarPlacement::HostStrip, "the host's flag put the bar in the host's strip");
 
         assert_eq!(widget.row_width(), widget.frame.width, "the rows keep the whole frame");
         assert_eq!(widget.bar_gutter_width(), 0.0, "and give up nothing to a bar standing outside it");
@@ -3057,8 +3096,7 @@ mod tests {
         // of ground nothing stands in.
         let theme = Theme::DEFAULT;
         let config = VirtualListConfig { host_scroll_strip: true, ..VirtualListConfig::default() };
-        let mut widget = gutter_list(config.scroll_bar_gap_units);
-        widget.bar_placement = BarPlacement::HostStrip;
+        let widget = gutter_config_list(config.clone());
 
         let bar = widget.scroll_bar().expect("a vector past its viewport stands a bar");
         assert_eq!(config.scroll_strip_width(&theme), bar.left + bar.width - widget.frame.width);
