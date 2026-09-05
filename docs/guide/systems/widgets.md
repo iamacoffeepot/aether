@@ -497,7 +497,8 @@ no rows.
 
 `WidgetDrawList::content_height` is the other half of that, and the one a host
 draws a **container** from: the whole item vector's height in pixels, which is
-the scroll extent said in the host's own unit — the offset table's last sum
+everything the list scrolls through said in the host's own unit — the offset
+table's last sum
 once rows carry heights of their own, and the pitch the rows are drawn at
 (`frame.height ÷ visible_row_count`) × `items.len()` while they are all one
 height. The drawn pitch rather than `theme.row_height`, because a slot that is
