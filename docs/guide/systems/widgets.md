@@ -1728,7 +1728,16 @@ not fall through to a covered region.
 
 The first accepted pointer press owns pointer motion and releases across region
 boundaries until the matching button is released. Wheel uses the position in
-its own event. Keyboard, committed text, IME preedit, and modifiers route only
+its own event.
+
+A motion that changes which region it routes to also goes to the region it
+left, once, at the position the pointer has now. Each panel derives hover only
+from a motion it receives, so a region that merely stopped being the target
+would keep the child it lit lit — a hover wash under a pointer that is in
+another pane, in the gap between two region rects, or off the window. The
+abandoned region hit-tests the new position against its own table, finds
+nothing under it, and sends that child its `HoverLost`. A region that holds the
+press owns motion outright, so a drag over a peer exits nobody. Keyboard, committed text, IME preedit, and modifiers route only
 to the focused region. An exact activation chord can focus a region (for
 example, the console's backquote chord). Ctrl+Tab cycles editor regions,
 Ctrl+Shift+Tab cycles backward, and both the reserved press and matching

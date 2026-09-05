@@ -76,9 +76,18 @@ impl WasmActor for EditorShell {
         }
     }
 
+    /// Motion goes to the region under the pointer — and, first, to the region
+    /// it just left. That region hit-tests the same position against its own
+    /// table, finds nothing, and hands the child it had lit its `HoverLost`;
+    /// without it the abandoned pane keeps drawing a hover wash under a pointer
+    /// that is in another pane entirely.
     #[handler::single]
     fn on_mouse_move(&mut self, ctx: &mut WasmCtx<'_>, moved: MouseMove) {
-        if let Some(target) = self.routing.pointer_motion(moved) {
+        let route = self.routing.pointer_motion(moved);
+        if let Some(exited) = route.exited {
+            ctx.send_to(exited, &moved);
+        }
+        if let Some(target) = route.target {
             ctx.send_to(target, &moved);
         }
     }
