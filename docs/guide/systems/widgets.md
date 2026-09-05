@@ -1656,7 +1656,10 @@ elision mark rather than on a glyph the root's slot clip sliced in half.
 TextField and TextArea share the same UTF-8-safe edit, selection, and IME
 state. Once the configured font resolves, pointer placement, caret motion,
 selection fills, preedit cursor bands, and preedit underlines all use its exact
-glyph advances. `TextAreaConfig { initial, max_chars, rows, theme, state }`
+glyph advances. Before it resolves — and for as long as it never does, when the
+theme names a font the host never loaded — both controls fall back to the
+per-character approximation rather than stop answering: a press still places a
+caret and arms a drag, and Up/Down still move. `TextAreaConfig { initial, max_chars, rows, theme, state }`
 adds a fixed whole-line viewport: `rows` is the number of visible theme rows
 (`0` means one), vertical motion preserves the caret's preferred measured x
 across shorter lines, and the viewport scrolls by complete lines to keep the
