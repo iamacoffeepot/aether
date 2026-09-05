@@ -33,9 +33,10 @@
 //! then mails them down.
 //!
 //! Degenerate input is clamped, never panicked on and never propagated:
-//! a negative or NaN length becomes zero, and a NaN position becomes
-//! zero. A layout fed a not-yet-known window size collapses to empty
-//! rectangles instead of poisoning every frame downstream with NaN.
+//! a negative, NaN or infinite length becomes zero, and a NaN or
+//! infinite position becomes zero. A layout fed a not-yet-known window
+//! size collapses to empty rectangles instead of poisoning every frame
+//! downstream with NaN.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -44,21 +45,33 @@ use aether_math::Vec2;
 
 use crate::WidgetFrame;
 
-/// A length along one axis, sanitized. Negative and NaN both collapse to
-/// zero: `f32::max` returns its non-NaN operand, which is what folds the
-/// NaN case in without a separate branch.
+/// A length along one axis, sanitized. Negative, NaN and infinite all
+/// collapse to zero.
+///
+/// Infinity is the one that does not stay in its own cell, which is why
+/// the `f32::max` fold that catches NaN is not enough on its own: a
+/// `Cell::Share(f32::INFINITY)` makes a row's total weight infinite, so
+/// that cell's own width is `inf / inf` — NaN — and the placement walk's
+/// `x += cell_width` then carries the NaN into every later cell's origin
+/// in the row. Rejecting it here is the same boundary
+/// `PlacementBounds::sane` and `scroll`'s `finite_or_zero` reject it at.
 fn extent(value: f32) -> f32 {
-    value.max(0.0)
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// A position along one axis, sanitized. Negative is meaningful — a
 /// region may legitimately start left of or above the origin — so only
-/// NaN is corrected.
+/// the values that name no position are corrected: NaN, and an infinity
+/// that would otherwise be handed down as every frame's `x` or `y`.
 fn coord(value: f32) -> f32 {
-    if value.is_nan() {
-        0.0
-    } else {
+    if value.is_finite() {
         value
+    } else {
+        0.0
     }
 }
 
@@ -457,6 +470,42 @@ mod tests {
         assert_eq!(
             rect(&inset(WidgetFrame { x: 0.0, y: f32::NAN, width: -5.0, height: f32::NAN }, f32::NAN)),
             [0.0, 0.0, 0.0, 0.0]
+        );
+    }
+
+    // Tripwire: infinity is the degenerate value NaN's `f32::max` fold does
+    // not catch, and it does not stay in its own cell. A `Share(inf)` makes
+    // the row's total weight infinite, so its own width is `inf / inf` = NaN,
+    // and `x += NaN` then poisons every later cell's origin in that row — the
+    // exact propagation the module header and the guide both promise cannot
+    // happen. `Fixed(inf)` is the same hole with an infinite coordinate.
+    #[test]
+    fn an_infinite_extent_collapses_like_a_nan_one() {
+        let placed = Column { origin: Vec2::new(0.0, 0.0), width: 400.0, gap: 8.0 }
+            .place(&[Row::cells(24.0, vec![Cell::Share(f32::INFINITY), Cell::Fixed(60.0)])]);
+        assert_eq!(rect(&placed.frames[0]), [0.0, 0.0, 0.0, 24.0], "an infinite weight takes no width");
+        assert_eq!(rect(&placed.frames[1]), [8.0, 0.0, 60.0, 24.0], "and the cell after it keeps its own origin");
+
+        let fixed = Column { origin: Vec2::new(0.0, 0.0), width: 400.0, gap: 8.0 }
+            .place(&[Row::cells(24.0, vec![Cell::Fixed(f32::INFINITY), Cell::Share(1.0)])]);
+        assert_eq!(rect(&fixed.frames[0]), [0.0, 0.0, 0.0, 24.0]);
+        assert_eq!(rect(&fixed.frames[1]), [8.0, 0.0, 392.0, 24.0]);
+
+        let unplaceable = Column { origin: Vec2::new(f32::INFINITY, 20.0), width: f32::INFINITY, gap: f32::INFINITY }
+            .place(&[Row::single(f32::INFINITY)]);
+        assert_eq!(rect(&unplaceable.frames[0]), [0.0, 20.0, 0.0, 0.0]);
+        assert_eq!(unplaceable.height, 0.0);
+
+        assert_eq!(
+            rect(
+                &dock(
+                    WidgetFrame { x: f32::INFINITY, y: 0.0, width: f32::INFINITY, height: 720.0 },
+                    DockSide::Left,
+                    f32::INFINITY,
+                )
+                .pane
+            ),
+            [0.0, 0.0, 0.0, 720.0],
         );
     }
 }

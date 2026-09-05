@@ -1789,10 +1789,10 @@ right — deliberately, because equal thirds size a control to its container,
 which stretches "OK" to a third of the pane and clips "Regenerate terrain" in
 the same row.
 
-Degenerate input clamps rather than propagating: a negative or NaN length
-becomes zero and a NaN position becomes zero, so a layout computed before the
-window size is known collapses to empty rectangles instead of poisoning every
-frame downstream with NaN.
+Degenerate input clamps rather than propagating: a negative, NaN or infinite
+length becomes zero and a NaN or infinite position becomes zero, so a layout
+computed before the window size is known collapses to empty rectangles instead
+of poisoning every frame downstream with NaN.
 
 ## The reference panel
 
