@@ -1,5 +1,5 @@
 // `#[handler]` methods take their decoded mail by value per the ADR-0033
-// dispatch ABI (see `widget/mod.rs`).
+// dispatch ABI (the full rationale is on the same allow in `lib.rs`).
 #![allow(clippy::needless_pass_by_value)]
 // A radio group's row count is its (small) option count; the `usize as f32`
 // for its stacked pixel height cannot lose precision at any real option count.
@@ -726,7 +726,8 @@ fn spawn_row_control_child<P: WasmActor>(
 
 /// Decode one child spec's opaque config bytes as the concrete config type
 /// `C` its [`WidgetKind`] selects, warning and yielding `None` on a decode
-/// failure so the caller skips the slot (mirroring `widget.rs`).
+/// failure so the caller skips the slot (mirroring `decode_nested_widget_config`
+/// in `lib.rs`).
 fn decode_child<C: Kind>(spec: &WidgetChildSpec) -> Option<C> {
     decode_named(&spec.subname, &spec.config)
 }
