@@ -1496,9 +1496,16 @@ while a key is armed, so a held Enter fires one click, not a hundred — and the
 two rules must not be confused: repeat suppression belongs to activation, never
 to editing.
 
-`mutable` gates only the destructive half. A read-only or disabled control
-still selects, copies, and moves its caret; it just cannot delete, cut, or
-paste. A read-only field a person cannot copy out of is worse than useless.
+`mutable` gates only the destructive half. A read-only control still selects,
+copies, and moves its caret; it just cannot delete, cut, or paste. A read-only
+field a person cannot copy out of is worse than useless.
+
+Disabled is the harder gate and a different one. Every text control returns on
+`!is_available()` — `visible && enabled` — before it reaches the shared
+vocabulary at all, and `gain_focus` refuses focus on the same predicate, so a
+disabled control takes no key and no pointer selection: there is nothing to copy
+out of it because it never holds the caret. A host with text it wants a reader
+to copy leaves the control enabled and sets `read_only`.
 
 ## Root-owned focus and input
 
