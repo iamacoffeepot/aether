@@ -1222,7 +1222,11 @@ impl WasmActor for WidgetPanel {
         }
     }
 
-    /// A release forwards to the captured / hit child and clears capture.
+    /// A release forwards to the captured / hit child and clears capture. The
+    /// hover half of that is suppressed while a modal grab holds, the same as
+    /// [`Self::on_mouse_move`]'s — `Focus::release_capture` owns the rule, so
+    /// a release inside an open menu cannot light the control its plate
+    /// stands over.
     #[handler::single]
     fn on_mouse_button_release(&mut self, ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
         if let Some(child) = self.focus.pointer_target(release.x, release.y) {
