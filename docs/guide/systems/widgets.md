@@ -1400,9 +1400,12 @@ Once the theme font's metrics resolve, a numeric reports its
 height]` — so a consumer sizes the field to the range it configured instead of
 guessing at it. The widest value is whichever *bound* renders longer, formatted
 exactly the way the field formats a committed value (`-100 .. 20` is widest at
-its minimum: the sign is a character like any other), capped at the edit
-buffer's own 32-character bound so an effectively unbounded range asks for a
-field rather than a wall. The endpoints, and only the endpoints, because the
+its minimum: the sign is a character like any other). A committed value is
+written in exponent form when its plain decimal does not fit the edit buffer's
+own 32-character cap — `f32::to_string` never reaches for one, so `3e38` would
+otherwise render as thirty-nine digits, and a buffer installed past the cap
+refuses every later insert whole — which is also what keeps an effectively
+unbounded range asking for a field rather than a wall. The endpoints, and only the endpoints, because the
 number has to be stable: a width that also weighed the value on screen would
 resize the slot on every keystroke, so a fractional `step` that renders an
 interior value longer than either bound (`0 .. 100` by `0.5` holds `"12.5"`) is

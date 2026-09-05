@@ -26,6 +26,7 @@ use aether_kinds::{
 };
 use aether_math::Rgba;
 use aether_text::FontMetricsResult;
+use alloc::format;
 use alloc::string::{String, ToString};
 
 use crate::set::defaults::WidgetDefaults;
@@ -255,11 +256,25 @@ impl NumericWidget {
         })
     }
 
+    /// A committed value as the text the buffer holds it in.
+    ///
+    /// `f32::to_string` never reaches for an exponent, so a large magnitude
+    /// renders as up to thirty-nine digits and a tiny one as forty-odd zeros
+    /// and a tail — past [`NUMERIC_EDIT_MAX_CHARS`], which is the cap every
+    /// *typed* insert is held to. A buffer installed past that cap refuses
+    /// every later insert whole, leaving a control only Backspace can move, so
+    /// a value whose plain form does not fit is written in exponent form
+    /// instead: it parses back through the same path and is never more than
+    /// fifteen characters.
     fn canonical(value: f32) -> String {
         if value == 0.0 {
-            String::from("0")
+            return String::from("0");
+        }
+        let plain = value.to_string();
+        if plain.chars().count() <= NUMERIC_EDIT_MAX_CHARS as usize {
+            plain
         } else {
-            value.to_string()
+            format!("{value:e}")
         }
     }
 
@@ -368,8 +383,8 @@ impl NumericWidget {
     /// committed value.
     ///
     /// Both bounds, not just `max`, because `-100 .. 20` is widest at its
-    /// minimum — the sign is a character like any other. The formatted text is
-    /// capped at the edit buffer's own character bound so an effectively
+    /// minimum — the sign is a character like any other. [`Self::canonical`]
+    /// is bounded by the edit buffer's own character cap, so an effectively
     /// unbounded range (a non-finite bound resolves to `f32::MAX`) asks for a
     /// field rather than a wall.
     ///
@@ -383,7 +398,7 @@ impl NumericWidget {
     fn widest_value_width(&self, metrics: &CachedFontMetrics) -> f32 {
         let bounds = self.bounds();
         [bounds.min, bounds.max]
-            .map(|value| Self::canonical(value).chars().take(NUMERIC_EDIT_MAX_CHARS as usize).collect::<String>())
+            .map(Self::canonical)
             .iter()
             .map(|text| measured_text_width(metrics, text, self.theme.value_size_pixels))
             .fold(0.0, f32::max)
@@ -898,6 +913,25 @@ mod tests {
     }
 
     #[test]
+    fn a_commit_installs_a_buffer_the_cap_a_typed_insert_faces_still_admits() {
+        // `f32::to_string` never reaches for an exponent, so 3e38 renders as
+        // thirty-nine digits — past the cap every typed insert is held to.
+        // Installed unchecked, that buffer refuses every later insert
+        // (`after = 39 + 1 > 32` rejects the whole thing), so the control
+        // looks frozen with only Backspace and Delete still working.
+        let mut widget = numeric(0.0, f32::MAX, 0.0, 0.0);
+        assert_eq!(replace_buffer(&mut widget, "3e38"), Some(NumericEmission { value: 3e38, committed: false }));
+        assert_eq!(widget.commit_buffer(), Some(NumericEmission { value: 3e38, committed: true }));
+        assert!(
+            widget.edit.value().chars().count() <= NUMERIC_EDIT_MAX_CHARS as usize,
+            "a committed buffer fits the cap: {:?}",
+            widget.edit.value()
+        );
+        assert_eq!(widget.parsed_buffer(), Some(3e38), "and still parses back to what it committed");
+        assert!(widget.edit.insert("1", NumericWidget::policy()), "so an edit after the commit is not refused");
+    }
+
+    #[test]
     fn pointer_placement_and_selection_never_split_multibyte_text() {
         let mut widget = numeric(-10.0, 20.0, 0.5, 2.0);
         widget.frame = WidgetFrame { x: 10.0, y: 0.0, width: 100.0, height: 24.0 };
@@ -1105,18 +1139,22 @@ mod tests {
 
     #[test]
     fn an_unbounded_range_asks_for_a_field_rather_than_a_wall() {
-        // Tripwire: the bounds fall back to f32::MIN / MAX, whose canonical
-        // text is 39 characters — wider than the buffer can ever hold, so the
-        // reported width is capped at the buffer's own bound.
+        // Tripwire: the bounds fall back to f32::MIN / MAX, whose plain
+        // decimal text is 39 characters — wider than the buffer can ever hold.
+        // Canonical text reaches for an exponent rather than a wall of zeros
+        // at that size, and the width asked for is that text's.
+        let widest = NumericWidget::canonical(f32::MIN);
+        assert_eq!(widest, "-3.4028235e38", "the fallback bound, in the form the buffer would hold it");
+
         let mut widget = numeric(f32::NAN, f32::NAN, 1.0, 0.0);
         with_metrics(&mut widget);
         let theme = &Theme::DEFAULT;
         let advance = theme.value_size_pixels * 0.5;
         #[allow(clippy::cast_precision_loss)]
-        let capped = NUMERIC_EDIT_MAX_CHARS as f32;
+        let chars = widest.chars().count() as f32;
         assert_eq!(
             widget.intrinsic().expect("measured")[0],
-            advance.mul_add(capped, theme.pad * 2.0) + theme.row_height
+            advance.mul_add(chars, theme.pad * 2.0) + theme.row_height
         );
     }
 
