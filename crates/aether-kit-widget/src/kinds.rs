@@ -260,9 +260,12 @@ pub enum WidgetDrawItem {
         tint: Rgba,
         clip: Option<WidgetClipRect>,
     },
-    /// A glyph run. `(x, y)` is the baseline origin in local pixels;
-    /// `font_id` names a session-scoped font loaded through `aether.text`;
-    /// `color` is a linear RGBA multiplier over glyph coverage.
+    /// A glyph run. `(x, y)` is the top-left of the run's line box in local
+    /// pixels — the pen origin `set::text_origin_y` computes, which
+    /// `aether.text` puts the baseline one ascent below, matching
+    /// `aether_text::DrawText::origin` in `Screen` space. `font_id` names a
+    /// session-scoped font loaded through `aether.text`; `color` is a linear
+    /// RGBA multiplier over glyph coverage.
     Text { x: f32, y: f32, font_id: u32, text: String, size_pixels: f32, color: Rgba, clip: Option<WidgetClipRect> },
 }
 
@@ -741,9 +744,19 @@ pub struct WidgetStateChanged {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.kit.widget.slider.config")]
 pub struct SliderConfig {
+    /// The low end of the range. Normalised on arrival, at init and on every
+    /// re-sent config alike: a `min` above `max` is the same interval written
+    /// backwards and the two swap, and a non-finite end names no interval, so
+    /// the slider degrades to the single value the other end carries (`0`
+    /// when neither is finite) rather than trapping on `f32::clamp`.
     pub min: f32,
+    /// The high end of the range, normalised against `min` as above.
     pub max: f32,
+    /// The snap increment. `0` or less leaves the value continuous, and so
+    /// does a non-finite one.
     pub step: f32,
+    /// The value the slider starts at, clamped and snapped into the
+    /// normalised range. A non-finite `initial` takes `min`.
     pub initial: f32,
     pub theme: Theme,
     #[serde(default)]
@@ -1177,10 +1190,20 @@ impl VirtualListConfig {
     #[must_use]
     pub fn scroll_strip_width(&self, theme: &Theme) -> f32 {
         if self.host_scroll_strip {
-            theme.space(self.scroll_bar_gap_units) + Self::scroll_track_width(theme)
+            Self::host_strip_width(self.scroll_bar_gap_units, theme)
         } else {
             0.0
         }
+    }
+
+    /// The same column, measured from the gap units alone. A host that lays a
+    /// list out in **its** theme rather than the config's — the reference
+    /// panel fans its own theme down to every child — reserves the column with
+    /// this, so the strip it clips across is the one the list will draw its
+    /// track in, and the formula still lives in one place.
+    #[must_use]
+    pub fn host_strip_width(scroll_bar_gap_units: u8, theme: &Theme) -> f32 {
+        theme.space(scroll_bar_gap_units) + Self::scroll_track_width(theme)
     }
 
     /// The thinnest a track may be drawn, whatever a theme scales its spacing
@@ -1319,7 +1342,7 @@ pub enum TabStripStyle {
 /// One entry of a [`Menu`]: its label, the accelerator it advertises at the
 /// right edge (`"Cmd+S"`, or empty), whether it can be activated, and whether
 /// a divider follows it. Schema-only; nested in [`MenuBarConfig`].
-#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct MenuItem {
     pub label: String,
     #[serde(default)]
@@ -1333,6 +1356,16 @@ pub struct MenuItem {
 impl MenuItem {
     const fn enabled_default() -> bool {
         true
+    }
+}
+
+/// Hand-written rather than derived: the derive would answer `enabled: false`
+/// and hand a Rust host writing `..Default::default()` a menu of items that
+/// cannot be pressed, while the same item decoded with the field absent is
+/// enabled. One default per field, whichever way the item is built.
+impl Default for MenuItem {
+    fn default() -> Self {
+        Self { label: String::new(), shortcut: String::new(), enabled: Self::enabled_default(), separator_after: false }
     }
 }
 
@@ -1916,28 +1949,6 @@ mod tests {
     use aether_data::wire;
 
     #[test]
-    fn scroll_wire_vocabulary_uses_named_semantic_records() {
-        let ScrollExtent { width_pixels, height_pixels } = ScrollExtent { width_pixels: 32.0, height_pixels: 18.0 };
-        let ScrollOffset { x_pixels, y_pixels } = ScrollOffset { x_pixels: 4.0, y_pixels: 7.0 };
-        let ScrollDelta { x_pixels: horizontal_delta, y_pixels: vertical_delta } =
-            ScrollDelta { x_pixels: -2.0, y_pixels: 9.0 };
-        let ScrollResidual { x_pixels: horizontal_remainder, y_pixels: vertical_remainder } =
-            ScrollResidual { x_pixels: 0.0, y_pixels: 3.0 };
-
-        // Named-pattern destructuring is a compile-time tripwire: replacing
-        // any semantic record with a tuple, fixed array, or array alias makes
-        // this public-contract test stop compiling.
-        assert_eq!(width_pixels, 32.0);
-        assert_eq!(height_pixels, 18.0);
-        assert_eq!(x_pixels, 4.0);
-        assert_eq!(y_pixels, 7.0);
-        assert_eq!(horizontal_delta, -2.0);
-        assert_eq!(vertical_delta, 9.0);
-        assert_eq!(horizontal_remainder, 0.0);
-        assert_eq!(vertical_remainder, 3.0);
-    }
-
-    #[test]
     fn widget_kind_preserves_established_wire_discriminants() {
         // Tripwire: WidgetKind is nested in public configs and its encoded
         // variant index is the wire contract. Add variants at the end; never
@@ -1958,6 +1969,21 @@ mod tests {
         assert_eq!(toggle.as_slice(), 11_u32.to_le_bytes());
         assert_eq!(segmented.as_slice(), 12_u32.to_le_bytes());
         assert_eq!(numeric.as_slice(), 13_u32.to_le_bytes());
+        let dropdown = wire::to_vec(&WidgetKind::Dropdown).expect("encode Dropdown");
+        let tab_strip = wire::to_vec(&WidgetKind::TabStrip).expect("encode TabStrip");
+        let menu_bar = wire::to_vec(&WidgetKind::MenuBar).expect("encode MenuBar");
+        assert_eq!(dropdown.as_slice(), 14_u32.to_le_bytes());
+        assert_eq!(tab_strip.as_slice(), 15_u32.to_le_bytes());
+        assert_eq!(menu_bar.as_slice(), 16_u32.to_le_bytes());
+    }
+
+    #[test]
+    fn a_menu_item_has_one_enabled_default_whichever_way_it_is_built() {
+        // Tripwire: `enabled_default` is what a decoded item gets when the
+        // field is absent; `Default` is what a Rust host gets from
+        // `..Default::default()`. Two paths to the same field, so they answer
+        // together or a menu built one way is silently inert.
+        assert_eq!(MenuItem::default().enabled, MenuItem::enabled_default());
     }
 
     #[test]

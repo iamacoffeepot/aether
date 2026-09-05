@@ -83,6 +83,21 @@ pub struct RegionPointerRoute {
     pub focus: Option<RegionFocusTransition>,
 }
 
+/// A pointer-motion route. `target` is the region the pointer is over now (or
+/// the one that owns the press in flight); `exited` is the region the previous
+/// motion went to, named exactly once, on the move that leaves it.
+///
+/// A region recomputes its own hover only from a motion it receives, so a
+/// region that simply stops being the target keeps the child it lit lit —
+/// across a pane boundary, into a gap between two region rects, or off every
+/// region — for as long as the pointer stays away. Handing `exited` the same
+/// motion is what re-derives that region's hover to nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegionPointerMotionRoute {
+    pub exited: Option<MailboxId>,
+    pub target: Option<MailboxId>,
+}
+
 /// A key route. Reserved editor chords are consumed with no target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegionKeyRoute {
@@ -139,6 +154,9 @@ pub struct Routing {
     modifiers: Modifiers,
     cycle_armed: bool,
     press_owner: Option<RegionPressOwner>,
+    /// The region the last motion was routed to, so the next one that routes
+    /// elsewhere can name it as exited.
+    motion_target: Option<MailboxId>,
 }
 
 impl Routing {
@@ -204,12 +222,15 @@ impl Routing {
             .and_then(|target| self.accepting_target(target, RegionInputLane::PointerRelease))
     }
 
-    #[must_use]
-    pub fn pointer_motion(&self, moved: MouseMove) -> Option<MailboxId> {
-        if let Some(owner) = self.press_owner {
-            return self.accepting_target(owner.target, RegionInputLane::PointerMotion);
-        }
-        self.hit_test(moved.x, moved.y).and_then(|target| self.accepting_target(target, RegionInputLane::PointerMotion))
+    pub fn pointer_motion(&mut self, moved: MouseMove) -> RegionPointerMotionRoute {
+        let target = self
+            .press_owner
+            .map(|owner| owner.target)
+            .or_else(|| self.hit_test(moved.x, moved.y))
+            .and_then(|target| self.accepting_target(target, RegionInputLane::PointerMotion));
+        let exited = self.motion_target.filter(|previous| Some(*previous) != target);
+        self.motion_target = target;
+        RegionPointerMotionRoute { exited, target }
     }
 
     #[must_use]
@@ -347,6 +368,10 @@ mod tests {
         MouseButtonRelease { window: TEST_WINDOW_ID, button, x, y }
     }
 
+    fn moved(x: f32, y: f32) -> MouseMove {
+        MouseMove { window: TEST_WINDOW_ID, x, y }
+    }
+
     #[test]
     fn overlap_chooses_topmost_and_lane_rejection_does_not_fall_through() {
         let lower = region(1, rect(0.0, 0.0, 20.0, 20.0), true, RegionInputLanes::ALL);
@@ -370,13 +395,49 @@ mod tests {
         assert_eq!(route.target, Some(MailboxId(1)));
         assert_eq!(route.focus, Some(RegionFocusTransition { previous: None, next: Some(MailboxId(1)) }));
         assert_eq!(routing.pointer_press(press(1, 25.0, 5.0)).target, Some(MailboxId(1)));
-        assert_eq!(routing.pointer_motion(MouseMove { window: TEST_WINDOW_ID, x: 25.0, y: 5.0 }), Some(MailboxId(1)));
+        assert_eq!(
+            routing.pointer_motion(moved(25.0, 5.0)),
+            RegionPointerMotionRoute { exited: None, target: Some(MailboxId(1)) },
+            "a drag over the peer exits nothing: the owner is still the target",
+        );
 
         assert_eq!(routing.pointer_release(release(1, 25.0, 5.0)), Some(MailboxId(1)));
         assert_eq!(routing.press_owner(), Some(RegionPressOwner { target: MailboxId(1), button: 0 }));
         assert_eq!(routing.pointer_release(release(0, 25.0, 5.0)), Some(MailboxId(1)));
         assert_eq!(routing.press_owner(), None);
-        assert_eq!(routing.pointer_motion(MouseMove { window: TEST_WINDOW_ID, x: 25.0, y: 5.0 }), Some(MailboxId(2)));
+        assert_eq!(
+            routing.pointer_motion(moved(25.0, 5.0)),
+            RegionPointerMotionRoute { exited: Some(MailboxId(1)), target: Some(MailboxId(2)) },
+        );
+    }
+
+    #[test]
+    fn crossing_out_of_a_region_names_it_once_so_its_hover_is_let_go() {
+        // Tripwire: a region recomputes hover only from a motion it receives.
+        // Routing named just the new target, so the pane the pointer left kept
+        // the button it had lit lit — a hover wash under no pointer at all.
+        let mut routing = Routing::new(&[
+            region(1, rect(0.0, 0.0, 300.0, 600.0), true, RegionInputLanes::ALL),
+            region(2, rect(300.0, 0.0, 600.0, 600.0), true, RegionInputLanes::ALL),
+        ]);
+
+        assert_eq!(
+            routing.pointer_motion(moved(150.0, 100.0)),
+            RegionPointerMotionRoute { exited: None, target: Some(MailboxId(1)) },
+        );
+        assert_eq!(routing.pointer_motion(moved(160.0, 110.0)).exited, None, "moving within a region exits nothing");
+
+        assert_eq!(
+            routing.pointer_motion(moved(500.0, 100.0)),
+            RegionPointerMotionRoute { exited: Some(MailboxId(1)), target: Some(MailboxId(2)) },
+            "the pane the pointer left is named so it can go unlit",
+        );
+        assert_eq!(
+            routing.pointer_motion(moved(500.0, 900.0)),
+            RegionPointerMotionRoute { exited: Some(MailboxId(2)), target: None },
+            "leaving every region is the same edge",
+        );
+        assert_eq!(routing.pointer_motion(moved(500.0, 950.0)).exited, None, "and a region is let go exactly once");
     }
 
     #[test]

@@ -1,5 +1,5 @@
 // `#[handler]` methods take their decoded mail by value per the ADR-0033
-// dispatch ABI (see `widget/mod.rs`).
+// dispatch ABI (the full rationale is on the same allow in `lib.rs`).
 #![allow(clippy::needless_pass_by_value)]
 
 //! The static label (issue 2660).
@@ -113,10 +113,16 @@ impl LabelWidget {
         (run, Some(width))
     }
 
-    /// The hover reveal: the whole run on a raised plate, drawn from the
-    /// label's own origin, whenever the pointer is over a label whose text
-    /// overflows its frame. Empty otherwise.
-    fn overflow_overlay(&self, size_pixels: f32, text_x: f32, text_width: Option<f32>) -> Vec<WidgetDrawItem> {
+    /// The hover reveal: the whole run on a raised plate hung at the label's
+    /// own origin, whenever the pointer is over a label whose text overflows
+    /// its frame. Empty otherwise.
+    ///
+    /// The run sits one `pad` inside that plate rather than at the label's own
+    /// alignment origin. The plate is its own box, and the alignment origin is
+    /// `0.0` for the default `Start` — which would draw the glyphs under the
+    /// one-pixel ring the plate is framed by, and leave a box the width
+    /// accounts for a left margin it never lays.
+    fn overflow_overlay(&self, size_pixels: f32, text_width: Option<f32>) -> Vec<WidgetDrawItem> {
         if !self.state.hovered() || text_width.is_none() {
             return Vec::new();
         }
@@ -128,7 +134,7 @@ impl LabelWidget {
             &RevealPlate {
                 theme: &self.theme,
                 text: &self.text,
-                text_x,
+                text_x: self.theme.pad,
                 size_pixels,
                 ink: self.theme.fill(self.ink(), self.state.theme_state(false)),
                 content_width: self.frame.width,
@@ -304,7 +310,7 @@ impl WasmActor for LabelWidget {
             });
         }
 
-        let overlay = self.overflow_overlay(size, text_x, measured);
+        let overlay = self.overflow_overlay(size, measured);
         let intrinsic = measured.map(|text_width| [text_width, self.theme.row_height]);
         if let Some(parent) = ctx.parent() {
             parent.send(&WidgetDrawList { content_height: None, intrinsic, items, overlay });
@@ -363,20 +369,44 @@ mod tests {
         let width = |label: &LabelWidget| label.measured_width(size);
 
         let mut wide = measured_label("mmmmmmmmmmmmmmmm", 40.0);
-        assert!(wide.overflow_overlay(size, 0.0, width(&wide)).is_empty(), "an un-hovered label reveals nothing");
+        assert!(wide.overflow_overlay(size, width(&wide)).is_empty(), "an un-hovered label reveals nothing");
         wide.state.set_hovered(true);
-        assert!(!wide.overflow_overlay(size, 0.0, width(&wide)).is_empty(), "hovering an overflowing run reveals it");
+        assert!(!wide.overflow_overlay(size, width(&wide)).is_empty(), "hovering an overflowing run reveals it");
 
         let mut narrow = measured_label("mm", 200.0);
         narrow.state.set_hovered(true);
-        assert!(narrow.overflow_overlay(size, 0.0, width(&narrow)).is_empty(), "a run that fits reveals nothing");
+        assert!(narrow.overflow_overlay(size, width(&narrow)).is_empty(), "a run that fits reveals nothing");
 
         let mut unmeasured = measured_label("mmmmmmmmmmmmmmmm", 40.0);
         unmeasured.state.set_hovered(true);
         assert!(
-            unmeasured.overflow_overlay(size, 0.0, None).is_empty(),
+            unmeasured.overflow_overlay(size, None).is_empty(),
             "an unmeasured run has no width to raise a plate to",
         );
+    }
+
+    #[test]
+    fn the_reveal_plate_lays_the_margin_its_own_width_accounts_for() {
+        // The plate is `pad + longest + pad` wide, so a run drawn at the
+        // label's own alignment origin — `0.0` for the default `Start` — sits
+        // under the one-pixel ring on the left while the width still reserves
+        // a margin there.
+        let theme = &Theme::DEFAULT;
+        let size = theme.label_size_pixels;
+        let mut label = measured_label("mmmmmmmmmmmmmmmm", 40.0);
+        label.state.set_hovered(true);
+
+        let items = label.overflow_overlay(size, label.measured_width(size));
+        let (plate_width, run_x) = items.iter().fold((0.0_f32, None), |(width, x), item| match item {
+            WidgetDrawItem::Quad { width: plate, .. } => (width.max(*plate), x),
+            WidgetDrawItem::Text { x: run, .. } => (width, x.or(Some(*run))),
+            WidgetDrawItem::TexturedQuad { .. } => (width, x),
+        });
+        let run_x = run_x.expect("the plate carries the run it reveals");
+
+        assert_eq!(run_x, theme.pad, "the run starts one pad inside the plate, clear of its ring");
+        let longest = label.measured_width(size).expect("measured");
+        assert_eq!(plate_width - (run_x + longest), run_x, "the margin at each end of the plate is the same one");
     }
 
     #[test]
@@ -411,7 +441,7 @@ mod tests {
 
         label.state.set_hovered(true);
         assert!(
-            !label.overflow_overlay(size, 0.0, measured).is_empty(),
+            !label.overflow_overlay(size, measured).is_empty(),
             "the reveal is what makes the cut text readable, so it must still fire",
         );
 

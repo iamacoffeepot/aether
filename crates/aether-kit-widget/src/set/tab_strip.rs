@@ -1,5 +1,5 @@
 // `#[handler]` methods take their decoded mail by value per the ADR-0033
-// dispatch ABI (see `widget/mod.rs`).
+// dispatch ABI (the full rationale is on the same allow in `lib.rs`).
 #![allow(clippy::needless_pass_by_value)]
 
 //! The tab strip: one row of tabs selecting one of several parallel content

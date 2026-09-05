@@ -1090,6 +1090,39 @@ impl<'a> SingleLineEdit<'a> {
             height: self.frame.height,
         })
     }
+
+    /// The width the value has to fit for it to be readable where it is — the
+    /// edge [`Self::content_clip`] cuts at, not the box that clip sits in. The
+    /// two differ by the trailing `pad` on a control with a gutter, and a run
+    /// measured against the wider one is a run the clip cuts while the hover
+    /// reveal still calls it a fit: a whole `pad` of run widths truncated with
+    /// nothing to hover for. `content_width` when there is no gutter, where
+    /// the clip is `None` and the two edges are the same one.
+    fn reveal_content_width(&self) -> f32 {
+        self.content_clip().map_or_else(|| self.content_width(), |clip| clip.width)
+    }
+}
+
+/// The hover reveal a single-line editor owes when its value does not fit the
+/// box it is drawn in. Empty unless the pointer is on it and its metrics have
+/// resolved — an unmeasured run cannot be called too wide.
+pub(super) fn single_line_edit_overlay(edit: &SingleLineEdit<'_>) -> Vec<WidgetDrawItem> {
+    let theme = edit.theme;
+    let size = theme.value_size_pixels;
+    edit.metrics.filter(|_| edit.state.hovered()).map_or_else(Vec::new, |metrics| {
+        overflow_reveal_items(
+            &RevealPlate {
+                theme,
+                text: &edit.displayed.text,
+                text_x: theme.pad,
+                size_pixels: size,
+                ink: theme.fill(theme.text_primary, edit.theme_state),
+                content_width: edit.reveal_content_width(),
+                row_height: edit.frame.height,
+            },
+            &|run: &str| measured_text_width(metrics, run, size),
+        )
+    })
 }
 
 /// Reply one single-line editor's frame: its ordinary draw, plus the hover
@@ -1099,26 +1132,9 @@ pub(super) fn reply_single_line_edit(ctx: &WasmCtx<'_>, edit: SingleLineEdit<'_>
     if reply_if_hidden(ctx, edit.state) {
         return;
     }
-    let theme = edit.theme;
-    let size = theme.value_size_pixels;
     let intrinsic = edit.intrinsic;
     let items = single_line_edit_draw_items(&edit);
-
-    let overlay = edit.metrics.filter(|_| edit.state.hovered()).map_or_else(Vec::new, |metrics| {
-        let measure = |run: &str| measured_text_width(metrics, run, size);
-        overflow_reveal_items(
-            &RevealPlate {
-                theme,
-                text: &edit.displayed.text,
-                text_x: theme.pad,
-                size_pixels: size,
-                ink: theme.fill(theme.text_primary, edit.theme_state),
-                content_width: edit.content_width(),
-                row_height: edit.frame.height,
-            },
-            &measure,
-        )
-    });
+    let overlay = single_line_edit_overlay(&edit);
 
     if let Some(parent) = ctx.parent() {
         parent.send(&WidgetDrawList { content_height: None, intrinsic, items, overlay });
@@ -1218,11 +1234,14 @@ pub fn elide_to_width(text: &str, max_width: f32, measure: impl Fn(&str) -> f32)
 /// wraps against whatever it will actually draw with — exact glyph advances
 /// once the font's metrics resolve, an approximation before that.
 ///
-/// A `\n` in the source is an author's own break and is always honoured,
-/// blank lines included, so a caller can divide a tooltip into paragraphs. A
-/// single word wider than `max_width` keeps its own line unsplit and over
-/// budget: `max_width` is a reading measure, and breaking a word in half to
-/// respect it reads far worse than one long line.
+/// A `\n` in the source is an author's own break and is honoured, interior
+/// blank lines included, so a caller can divide a tooltip into paragraphs.
+/// Leading and trailing blank lines are the exception and are dropped: a break
+/// needs content on both sides of it, and a plate padded by an empty row at
+/// the top or bottom reads as a box the wrong size rather than as a space the
+/// author asked for. A single word wider than `max_width` keeps its own line
+/// unsplit and over budget: `max_width` is a reading measure, and breaking a
+/// word in half to respect it reads far worse than one long line.
 #[must_use]
 pub fn wrap_to_width(text: &str, max_width: f32, measure: impl Fn(&str) -> f32) -> Vec<String> {
     wrap_to_width_hanging(text, max_width, 0.0, measure).into_iter().map(|line| line.text).collect()
@@ -1300,7 +1319,8 @@ pub fn wrap_to_width_hanging(
         });
     }
     // A trailing empty line is the split's artifact, not an author's break;
-    // one leading/trailing blank would otherwise pad every plate.
+    // any blank at either end would otherwise pad every plate. Interior ones
+    // stay — that is the paragraph break the author wrote.
     while lines.last().is_some_and(|line| line.text.is_empty()) {
         lines.pop();
     }
@@ -1315,13 +1335,18 @@ pub fn wrap_to_width_hanging(
 pub(crate) struct RevealPlate<'a> {
     pub(crate) theme: &'a Theme,
     pub(crate) text: &'a str,
-    /// Where the run starts inside the plate — one `pad`, for every caller so
-    /// far. Also the left margin the plate's width accounts for.
+    /// Where the run starts inside the plate — one `pad`, and the plate's
+    /// width accounts for that same margin at the far end. It is the plate's
+    /// own inset, never the origin the caller aligns its in-frame run by: a
+    /// `Start`-aligned run's origin is `0.0`, which would lay the glyphs under
+    /// the plate's own ring.
     pub(crate) text_x: f32,
     pub(crate) size_pixels: f32,
     pub(crate) ink: Rgba,
-    /// The width the run has to fit in before a plate is owed: the widget's
-    /// frame minus any chrome gutter.
+    /// The width the run has to fit in before a plate is owed. It is the edge
+    /// the caller's own clip cuts the run at, not the box that clip sits in:
+    /// measure against the wider box and every run between the two edges is
+    /// truncated on screen while the reveal calls it a fit.
     pub(crate) content_width: f32,
     /// One wrapped line's height — the widget's own row height.
     pub(crate) row_height: f32,

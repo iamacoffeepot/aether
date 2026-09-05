@@ -1,5 +1,5 @@
 // `#[handler]` methods take their decoded mail by value per the ADR-0033
-// dispatch ABI (see `widget/mod.rs`).
+// dispatch ABI (the full rationale is on the same allow in `lib.rs`).
 #![allow(clippy::needless_pass_by_value)]
 
 //! Multiline measured text editing with a fixed whole-line viewport.
@@ -17,9 +17,10 @@ use aether_text::FontMetricsResult;
 
 use crate::set::defaults::WidgetDefaults;
 use crate::set::{
-    accept_clipboard_paste, apply_text_control_state, apply_text_theme, edit_command, pump_text_font_metrics,
-    push_control_outlines, quad, release_left, reply_with_draw_items, report_clipboard_copy, run_edit_key,
-    text_baseline_y, text_control_theme_state, text_origin_y, update_text_modifiers,
+    accept_clipboard_paste, apply_text_control_state, apply_text_theme, approx_text_width, edit_command,
+    pump_text_font_metrics, push_control_outlines, quad, release_left, reply_with_draw_items, report_clipboard_copy,
+    run_edit_key, single_line_hit_byte, text_baseline_y, text_control_theme_state, text_origin_y,
+    update_text_modifiers,
 };
 use crate::state::InteractionState;
 use crate::text_edit::{EditPolicy, FontMetricsAdapter, SingleLineLayout, TextEditState, TextSpan};
@@ -143,11 +144,22 @@ impl TextAreaWidget {
         }
     }
 
+    /// The pixel x of the caret `byte` bytes into `line_text`.
+    ///
+    /// Approximated per character until the font's advances land, the same
+    /// degradation [`single_line_hit_byte`] makes in the other direction and
+    /// the single-line draw path already makes for its own caret. A text
+    /// control whose font never resolves — the theme names one the host never
+    /// loaded — has to stay usable rather than stop answering the pointer.
+    fn line_caret_x(&self, line_text: &str, byte: usize) -> f32 {
+        self.font_metrics.resolved().map_or_else(
+            || approx_text_width(line_text[..byte].chars().count(), self.theme.value_size_pixels),
+            |metrics| SingleLineLayout::build(line_text, metrics, self.theme.value_size_pixels).caret_x(byte),
+        )
+    }
+
     fn move_vertical(&mut self, direction: VerticalDirection, extend: bool) {
         let (target_byte, desired_x) = {
-            let Some(metrics) = self.font_metrics.resolved() else {
-                return;
-            };
             let text = self.edit.value();
             let lines = text_lines(text);
             let current_index = line_index_for_byte(&lines, self.edit.caret());
@@ -158,18 +170,21 @@ impl TextAreaWidget {
             let Some(target_index) = target_index else {
                 return;
             };
+
             let current = lines[current_index];
-            let current_text = &text[current.start_byte..current.end_byte];
-            let current_layout = SingleLineLayout::build(current_text, metrics, self.theme.value_size_pixels);
             let local_caret = self.edit.caret().min(current.end_byte) - current.start_byte;
-            let desired_x = self.preferred_x_pixels.unwrap_or_else(|| current_layout.caret_x(local_caret));
+            let desired_x = self
+                .preferred_x_pixels
+                .unwrap_or_else(|| self.line_caret_x(&text[current.start_byte..current.end_byte], local_caret));
+
             let target_line = lines[target_index];
-            let target_layout = SingleLineLayout::build(
+            let landed = single_line_hit_byte(
                 &text[target_line.start_byte..target_line.end_byte],
-                metrics,
+                self.font_metrics.resolved(),
                 self.theme.value_size_pixels,
+                desired_x,
             );
-            (target_line.start_byte + target_layout.hit_test(desired_x), desired_x)
+            (target_line.start_byte + landed, desired_x)
         };
 
         if extend {
@@ -191,8 +206,7 @@ impl TextAreaWidget {
         }
     }
 
-    fn hit_byte(&self, event_x: f32, event_y: f32) -> Option<usize> {
-        let metrics = self.font_metrics.resolved()?;
+    fn hit_byte(&self, event_x: f32, event_y: f32) -> usize {
         let lines = text_lines(self.edit.value());
         let visible = self.visible_rows();
         let local_y = event_y - self.frame.y;
@@ -206,13 +220,13 @@ impl TextAreaWidget {
         .min(visible.saturating_sub(1));
         let line_index = self.scroll_top.saturating_add(row).min(lines.len().saturating_sub(1));
         let line = lines[line_index];
-        let local_x = event_x - self.frame.x - self.theme.pad;
-        let layout = SingleLineLayout::build(
-            &self.edit.value()[line.start_byte..line.end_byte],
-            metrics,
-            self.theme.value_size_pixels,
-        );
-        Some(line.start_byte + layout.hit_test(local_x))
+        line.start_byte
+            + single_line_hit_byte(
+                &self.edit.value()[line.start_byte..line.end_byte],
+                self.font_metrics.resolved(),
+                self.theme.value_size_pixels,
+                event_x - self.frame.x - self.theme.pad,
+            )
     }
 
     fn push_line_band(&self, items: &mut Vec<WidgetDrawItem>, layout: &SingleLineLayout, span: TextSpan, row_top: f32) {
@@ -484,12 +498,9 @@ impl WasmActor for TextAreaWidget {
         if press.button != mouse_button::LEFT || !self.state.is_available() {
             return;
         }
-        let Some(byte) = self.hit_byte(press.x, press.y) else {
-            return;
-        };
         self.dragging = true;
         self.preferred_x_pixels = None;
-        self.edit.place_caret(byte);
+        self.edit.place_caret(self.hit_byte(press.x, press.y));
         self.reconcile_scroll();
     }
 
@@ -499,10 +510,8 @@ impl WasmActor for TextAreaWidget {
             return;
         }
         self.scroll_drag_edge(moved.y);
-        if let Some(byte) = self.hit_byte(moved.x, moved.y) {
-            self.edit.extend_to(byte);
-            self.preferred_x_pixels = None;
-        }
+        self.edit.extend_to(self.hit_byte(moved.x, moved.y));
+        self.preferred_x_pixels = None;
     }
 
     #[handler::single]
@@ -554,6 +563,8 @@ mod tests {
     use super::*;
     use aether_kinds::{FontMetrics, GlyphAdvance};
 
+    use crate::set::APPROX_ADVANCE_RATIO;
+
     fn variable_metrics() -> CachedFontMetrics {
         CachedFontMetrics::new(&FontMetrics {
             units_per_em: 1000.0,
@@ -568,11 +579,22 @@ mod tests {
         })
     }
 
-    #[allow(clippy::cast_precision_loss)] // test rows are tiny exact integers
     fn area(text: &str, rows: u32) -> TextAreaWidget {
+        built(text, rows, Some(variable_metrics()))
+    }
+
+    /// An area whose font never resolved — the theme names a font
+    /// `aether.text` cannot load, so the reply is an error and the adapter
+    /// installs nothing.
+    fn unmeasured_area(text: &str, rows: u32) -> TextAreaWidget {
+        built(text, rows, None)
+    }
+
+    #[allow(clippy::cast_precision_loss)] // test rows are tiny exact integers
+    fn built(text: &str, rows: u32, metrics: Option<CachedFontMetrics>) -> TextAreaWidget {
         let mut font_metrics = FontMetricsAdapter::new(7);
         assert_eq!(font_metrics.take_pending_request(), Some(7));
-        assert!(!font_metrics.accept_reply(Some(variable_metrics())));
+        assert!(!font_metrics.accept_reply(metrics));
         let mut area = TextAreaWidget {
             edit: TextEditState::new(String::from(text)),
             max_chars: 0,
@@ -649,6 +671,26 @@ mod tests {
         assert!(area.edit.value().is_char_boundary(selected.end_byte));
         assert!(area.edit.insert("Q", area.policy()));
         assert_eq!(area.edit.value(), "éQi");
+    }
+
+    #[test]
+    fn an_unmeasured_area_still_places_a_caret_and_moves_it_vertically() {
+        // A text field whose font never resolves stays usable: its hit test
+        // falls back to the per-character approximation. The area used to have
+        // no fallback at all, so a press placed no caret and armed no drag and
+        // Up/Down did nothing — the reader could type into it but never click
+        // into it or move through it.
+        let mut area = unmeasured_area("imx\ni\nimx", 3);
+        let advance = area.theme.value_size_pixels * APPROX_ADVANCE_RATIO;
+        let byte = area.hit_byte(
+            advance.mul_add(2.0, area.frame.x + area.theme.pad),
+            area.theme.row_height.mul_add(1.5, area.frame.y),
+        );
+        assert_eq!(byte, 5, "the second row, past the end of its one short character");
+
+        area.edit.place_caret(byte);
+        area.move_vertical(VerticalDirection::Up, false);
+        assert_eq!(area.edit.caret(), 1, "and the approximated x carries up to the row above");
     }
 
     #[test]
