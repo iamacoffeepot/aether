@@ -420,7 +420,7 @@ mod tests {
             let WidgetDrawItem::Quad { x, y, width, height, color, .. } = rule else {
                 panic!("a rule is a quad: {rule:?}");
             };
-            #[allow(clippy::cast_precision_loss)]
+            #[allow(clippy::cast_precision_loss)] // test rows are tiny exact integers
             let expected_y = (index + 1) as f32 * 24.0;
             assert_eq!((*x, *y, *width, *height), (0.0, expected_y, 100.0, ROW_RULE_THICKNESS));
             assert_eq!(*color, widget.theme.outline, "a divider is the outline role, not a colour of its own");

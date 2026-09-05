@@ -84,7 +84,7 @@ impl VirtualListWidget {
         if self.row_tops.is_some() || self.visible_row_count == 0 || !valid_frame(&self.frame) {
             return None;
         }
-        #[allow(clippy::cast_precision_loss)]
+        #[allow(clippy::cast_precision_loss)] // a visible row count is a small integer
         let divisor = self.visible_row_count as f32;
         let row_height = self.frame.height / divisor;
         (row_height.is_finite() && row_height > 0.0).then_some(row_height)

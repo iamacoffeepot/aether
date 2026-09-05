@@ -198,7 +198,7 @@ pub(super) fn actioned_list(item_count: usize, frame_width: f32) -> VirtualListW
 /// The vertical middle of the `row_offset`-th realized row.
 pub(super) fn row_middle_y(widget: &VirtualListWidget, row_offset: usize) -> f32 {
     let row_height = widget.row_height().expect("a laid-out list has a row height");
-    #[allow(clippy::cast_precision_loss)]
+    #[allow(clippy::cast_precision_loss)] // a row offset within one viewport
     let top = row_offset as f32 * row_height;
     row_height.mul_add(0.5, top)
 }

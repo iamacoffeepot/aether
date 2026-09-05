@@ -117,7 +117,7 @@ impl RadioGroupWidget {
 
         let mut items: Vec<WidgetDrawItem> = Vec::new();
         for (i, option) in self.options.iter().enumerate() {
-            #[allow(clippy::cast_precision_loss)]
+            #[allow(clippy::cast_precision_loss)] // an option index is a handful of rows
             let row_y = i as f32 * row_height;
             let marker_y = (row_height - marker).mul_add(0.5, row_y);
             let selected = i == self.selected;

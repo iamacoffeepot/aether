@@ -438,7 +438,7 @@ mod tests {
         let runs = drawn_runs(&control);
         assert_eq!(runs.len(), 3, "every option draws a run");
         for (index, (run, left, right)) in runs.iter().enumerate() {
-            #[allow(clippy::cast_precision_loss)]
+            #[allow(clippy::cast_precision_loss)] // test options are three small buckets
             let bucket_left = index as f32 * segment_width;
             assert!(*left >= bucket_left + pad, "run {index} starts inside its own bucket");
             assert!(
