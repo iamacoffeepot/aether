@@ -382,10 +382,14 @@ A host that wants `⌘` in a label ships a face that has it, or writes
 empty_text, ruled, scroll_bar_gap_units, host_scroll_strip, theme, state }`
 retains the complete row vector while
 realizing the rows the viewport reaches. The panel fixes the slot height at
-`theme.row_height * visible_row_count` — at the summed height of the first
-`visible_row_count` rows once any of them carries a height of its own
-([below](#a-row-that-is-a-table-entry)) — and clips the slot to that viewport;
-an empty item vector or zero-row viewport is not pointer- or focus-eligible.
+`theme.row_height * visible_row_count` for every list, table or not — it has no
+font metrics and reads no child reply, so a uniform pitch is the only height it
+can compute — and clips the slot to that viewport; an empty item vector or
+zero-row viewport is not pointer- or focus-eligible. A list whose rows carry
+heights of their own ([below](#a-row-that-is-a-table-entry)) therefore needs a
+host that sizes the slot itself, from the list's reported
+`WidgetDrawList::intrinsic` (below); the widget draws whatever rows the frame it
+was given reaches.
 This bounded realization is the intended path for hundreds or thousands of
 uniform-height choices.
 
@@ -495,7 +499,12 @@ so a root that forks the reference panel routes `MouseWheel` to it by
 
 Those metrics also give the list its `WidgetDrawList::intrinsic`: `[widest row
 in the whole item vector + 2 × pad + the scroll bar's gutter when the vector
-overflows, theme.row_height × visible_row_count]`. It
+overflows, the viewport's height]`. That height is
+`theme.row_height × visible_row_count` while every row is one pitch tall, and
+the summed height of the first `visible_row_count` rows once some row carries a
+height of its own ([below](#a-row-that-is-a-table-entry)) — the offset table's
+`visible_row_count`th sum, or its last one when the vector is shorter than the
+viewport. It
 measures the items, not the realized window, so the width does not change as
 the reader scrolls — and because that is the one thing here that touches every
 item, it is measured once and re-measured only when the items, the font, or the
