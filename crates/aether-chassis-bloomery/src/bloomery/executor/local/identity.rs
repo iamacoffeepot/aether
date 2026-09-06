@@ -125,16 +125,14 @@ impl ProcessIdentity {
 /// The live-child teardown path names the group by the head pid
 /// (`process_group(0)` at spawn), even when that head is already a zombie and
 /// cannot be observed. A pid-only kill would leave harness grandchildren in
-/// the group, reparented to init.
+/// the group, reparented to init. Group 0 and a pgid that does not fit a
+/// signed pid are refused rather than signalled.
 pub fn terminate_pgid(pgid: u32) -> Result<(), LocalExecutorError> {
-    if pgid == 0 {
-        return Err(unterminated("refusing to signal process group 0"));
-    }
-    signal_group(pgid, "-TERM")?;
+    signal_group(pgid, "TERM")?;
     if wait_until_pgid_gone(pgid) {
         return Ok(());
     }
-    signal_group(pgid, "-KILL")?;
+    signal_group(pgid, "KILL")?;
     if wait_until_pgid_gone(pgid) {
         return Ok(());
     }
@@ -251,18 +249,47 @@ impl StatFields {
     }
 }
 
+/// A process-group id `kill` can name as `-{pgid}`.
+///
+/// Group 0 is this process's group. A `u32` that does not fit `i32` cannot be a
+/// signed kill target either — formatting it as `-{pgid}` would not be a pid.
+fn signed_pgid(pgid: u32) -> Result<i32, LocalExecutorError> {
+    if pgid == 0 {
+        return Err(unterminated("refusing to signal process group 0"));
+    }
+    i32::try_from(pgid).map_err(|_| unterminated(format!("process group {pgid} does not fit a signed pid")))
+}
+
+/// `kill` argv that delivers `signal` to process group `pgid`.
+///
+/// POSIX `-s` is the signal. Linux getopt-style `kill` (procps-ng, util-linux)
+/// then needs `--` so `-{pgid}` is a target, not clustered short options; BSD
+/// `kill` treats `--` as pid 0 — this process's group — so macOS must omit it.
+fn kill_group_args(signal: &str, pgid: i32) -> Vec<String> {
+    if cfg!(target_os = "linux") {
+        vec!["-s".to_owned(), signal.to_owned(), "--".to_owned(), format!("-{pgid}")]
+    } else {
+        vec!["-s".to_owned(), signal.to_owned(), format!("-{pgid}")]
+    }
+}
+
 fn signal_group(pgid: u32, signal: &str) -> Result<(), LocalExecutorError> {
-    // No `--`: BSD `kill` (macOS) treats it as a pid, and `-{pgid}` is already numeric.
-    let status = Command::new("kill")
-        .args([signal, &format!("-{pgid}")])
+    let pid = signed_pgid(pgid)?;
+    let output = Command::new("kill")
+        .args(kill_group_args(signal, pid))
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .stderr(Stdio::piped())
+        .output()
         .map_err(LocalExecutorError::Io)?;
-    // `kill` exits non-zero when every member is already gone, which is the
-    // success the waiter below is about to observe — not a reason to stop.
-    let _ = status;
-    Ok(())
+    // Non-zero is ESRCH when every member is already gone, and a usage/EPERM
+    // fault when the group is still there. Only the former is delivery.
+    if output.status.success() || !any_process_in_group(pgid) {
+        return Ok(());
+    }
+    Err(unterminated(format!(
+        "kill -s {signal} did not deliver to process group {pgid}: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
 }
 
 fn wait_until_pgid_gone(pgid: u32) -> bool {
@@ -346,9 +373,10 @@ fn ps_listing_has_live_member(listing: &str, pgid: u32) -> bool {
 }
 
 fn group_responds_to_signal_zero(pgid: u32) -> Option<bool> {
+    let pid = signed_pgid(pgid).ok()?;
     signal_zero_observation(
         Command::new("kill")
-            .args(["-0", &format!("-{pgid}")])
+            .args(kill_group_args("0", pid))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -389,12 +417,12 @@ mod tests {
     #[cfg(unix)]
     use std::time::{Duration, Instant};
 
-    use super::{
-        ProcessIdentity, StatFields, group_is_live, proc_listing_is_live, ps_listing_has_live_member,
-        signal_zero_observation,
-    };
     #[cfg(unix)]
-    use super::{any_process_in_group, terminate_pgid};
+    use super::any_process_in_group;
+    use super::{
+        LocalExecutorError, ProcessIdentity, StatFields, group_is_live, kill_group_args, proc_listing_is_live,
+        ps_listing_has_live_member, signal_zero_observation, terminate_pgid,
+    };
 
     fn stat_line(comm: &str, pgid: u32, starttime: u64) -> String {
         stat_line_state('S', comm, pgid, starttime)
@@ -544,6 +572,47 @@ mod tests {
     }
 
     #[test]
+    fn group_kill_argv_is_platform_unambiguous() {
+        // Tripwire (#5646): Linux getopt-style `kill` and BSD `kill` do not share
+        // a shorthand for "signal this process group". `kill -TERM -{pgid}` is a
+        // usage error on procps-ng; `kill -- -{pgid}` is pid 0 on BSD.
+        let term = kill_group_args("TERM", 42);
+        let kill = kill_group_args("KILL", 42);
+        let probe = kill_group_args("0", 42);
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(term, ["-s", "TERM", "--", "-42"]);
+            assert_eq!(kill, ["-s", "KILL", "--", "-42"]);
+            assert_eq!(probe, ["-s", "0", "--", "-42"]);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert_eq!(term, ["-s", "TERM", "-42"]);
+            assert_eq!(kill, ["-s", "KILL", "-42"]);
+            assert_eq!(probe, ["-s", "0", "-42"]);
+        }
+    }
+
+    #[test]
+    fn terminate_pgid_refuses_unsafe_or_unrepresentable_group_targets() {
+        // Tripwire: group 0 is this process's group. A pgid that does not fit a
+        // signed pid cannot be named as `-{pgid}` either. Both must fail before
+        // `kill` runs — a usage error used to be swallowed as "already gone".
+        match terminate_pgid(0) {
+            Err(LocalExecutorError::Unterminated(detail)) => {
+                assert!(detail.contains("process group 0"), "{detail}");
+            }
+            other => panic!("group 0 must be refused, got {other:?}"),
+        }
+        match terminate_pgid(u32::MAX) {
+            Err(LocalExecutorError::Unterminated(detail)) => {
+                assert!(detail.contains(&u32::MAX.to_string()), "{detail}");
+            }
+            other => panic!("an unrepresentable pgid must be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn a_proc_observation_does_not_invoke_fallback_probes() {
         // Tripwire: eager Option::or evaluates ps and kill even after /proc
         // answered. The production helper must skip those closures.
@@ -588,8 +657,11 @@ mod tests {
     #[cfg(unix)]
     impl Drop for GroupGuard {
         fn drop(&mut self) {
+            let Ok(pid) = super::signed_pgid(self.0) else {
+                return;
+            };
             let _ = Command::new("kill")
-                .args(["-KILL", &format!("-{}", self.0)])
+                .args(super::kill_group_args("KILL", pid))
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();

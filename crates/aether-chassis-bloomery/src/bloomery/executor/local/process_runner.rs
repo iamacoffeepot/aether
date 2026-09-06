@@ -1717,8 +1717,13 @@ mod tests {
     #[cfg(target_os = "linux")]
     impl Drop for GroupGuard {
         fn drop(&mut self) {
+            // Same argv as production `kill_group_args("KILL", …)`: POSIX `-s`
+            // and `--` so procps-ng cannot parse `-{pgid}` as short options.
+            let Some(pid) = i32::try_from(self.0).ok().filter(|&pid| pid > 0) else {
+                return;
+            };
             let _ = Command::new("kill")
-                .args(["-KILL", "--", &format!("-{}", self.0)])
+                .args(["-s", "KILL", "--", &format!("-{pid}")])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();
