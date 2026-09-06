@@ -86,6 +86,32 @@ fn force_update_of_an_absent_ref_creates_it() {
 }
 
 #[test]
+fn get_ref_is_exact_when_only_descendants_exist() {
+    with_each_backend(|label, git| {
+        let child = git.create_commit("child", EMPTY_TREE, &[]).expect(label).sha;
+        let other = git.create_commit("other", EMPTY_TREE, &[]).expect(label).sha;
+        git.create_ref("heads/topic/child", &child)
+            .unwrap_or_else(|error| panic!("{label}: create child: {error}"));
+        git.create_ref("heads/topic/other", &other)
+            .unwrap_or_else(|error| panic!("{label}: create other: {error}"));
+
+        match git.get_ref("heads/topic") {
+            Ok(None) => {}
+            other => panic!("{label}: an absent parent must not resolve to a descendant, got {other:?}"),
+        }
+        assert_eq!(
+            git.get_ref("heads/topic/child").expect(label).expect("child").sha,
+            child,
+            "{label}: the descendant remains addressable by its exact name"
+        );
+        match git.update_ref("heads/topic", &child, false) {
+            Err(GitDataError::MissingObject(_)) => {}
+            other => panic!("{label}: non-force on an absent parent is MissingObject, got {other:?}"),
+        }
+    });
+}
+
+#[test]
 fn same_ref_batch_is_a_command_fault_and_leaves_the_ref() {
     // Tripwire: git's `update-ref --stdin` refuses two ops on one name, which
     // is the pre-fix `release_targets` batch (Update-to-tombstone then Delete).
