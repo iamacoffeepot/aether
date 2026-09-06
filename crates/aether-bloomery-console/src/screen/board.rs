@@ -39,6 +39,7 @@ pub struct BloomRow {
     pub id_prefix: String,
     pub status: String,
     pub member_count: usize,
+    pub age: String,
 }
 
 /// A member row under its bloom.
@@ -213,10 +214,10 @@ impl Board {
     pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, store: &Store) {
         let rows = rows_from(store, self.lane);
         let dimmed = store.view().is_stale();
-        self.render_table(frame, area, store, &rows, dimmed);
+        self.render_table(frame, area, &rows, dimmed);
     }
 
-    fn render_table(&mut self, frame: &mut Frame<'_>, area: Rect, store: &Store, rows: &[BoardRow], dimmed: bool) {
+    fn render_table(&mut self, frame: &mut Frame<'_>, area: Rect, rows: &[BoardRow], dimmed: bool) {
         let muted = if dimmed {
             palette::body().add_modifier(Modifier::DIM)
         } else {
@@ -228,18 +229,14 @@ impl Board {
         };
         let header =
             Row::new([title, "STATE", "STAGE", "AGE"]).style(palette::body().add_modifier(Modifier::BOLD).patch(muted));
-        let extras = metrics_of(store);
         let table_rows = rows.iter().map(|row| match row {
-            BoardRow::Bloom(bloom) => {
-                let extra = extras.iter().find(|extra| extra.bloom == bloom.id && extra.workpiece.is_none());
-                Row::new([
-                    Cell::from(bloom.id_prefix.clone()),
-                    Cell::from(format!("{}  {} mem", bloom.status, bloom.member_count)),
-                    Cell::from(""),
-                    Cell::from(extra.map_or("—", |extra| extra.elapsed.as_str())),
-                ])
-                .style(palette::body().add_modifier(Modifier::BOLD).patch(muted))
-            }
+            BoardRow::Bloom(bloom) => Row::new([
+                Cell::from(bloom.id_prefix.clone()),
+                Cell::from(format!("{}  {} mem", bloom.status, bloom.member_count)),
+                Cell::from(""),
+                Cell::from(bloom.age.clone()),
+            ])
+            .style(palette::body().add_modifier(Modifier::BOLD).patch(muted)),
             BoardRow::Member(member) => Row::new([
                 Cell::from(format!("  {}", member.workpiece)),
                 Cell::from(member.state.clone()),
@@ -307,6 +304,7 @@ fn rows_of(view: &ViewDocument, lane: BoardLane, dispatches: &[MetricDispatch]) 
             id_prefix: bloom.id.prefix(),
             status,
             member_count: bloom.members.len(),
+            age: elapsed_of(dispatches, bloom.id, None),
         }));
         for member in members {
             rows.push(BoardRow::Member(member_row(bloom.id, member, dispatches)));
@@ -339,42 +337,6 @@ fn member_stage(member: &MemberView, bloom: DigestHex, dispatches: &[MetricDispa
 
 fn bloom_status_label(status: Option<BloomStatus>) -> String {
     status.map_or_else(|| "?".to_owned(), |status| status.to_string())
-}
-
-struct SubjectMetrics {
-    bloom: DigestHex,
-    workpiece: Option<String>,
-    elapsed: String,
-}
-
-fn metrics_of(store: &Store) -> Vec<SubjectMetrics> {
-    let dispatches = store.dispatches().value.as_ref().map_or(&[][..], Vec::as_slice);
-    let mut keys: Vec<(DigestHex, Option<String>)> = Vec::new();
-    for row in dispatches {
-        push_subject(&mut keys, row.bloom, None);
-        push_subject(&mut keys, row.bloom, Some(row.workpiece.clone()));
-    }
-    if let Some(view) = store.view().value.as_ref() {
-        for bloom in &view.blooms {
-            push_subject(&mut keys, bloom.id, None);
-            for member in &bloom.members {
-                push_subject(&mut keys, bloom.id, Some(member.workpiece.clone()));
-            }
-        }
-    }
-    keys.into_iter()
-        .map(|(bloom, workpiece)| SubjectMetrics {
-            elapsed: elapsed_of(dispatches, bloom, workpiece.as_deref()),
-            bloom,
-            workpiece,
-        })
-        .collect()
-}
-
-fn push_subject(keys: &mut Vec<(DigestHex, Option<String>)>, bloom: DigestHex, workpiece: Option<String>) {
-    if !keys.iter().any(|(existing, existing_workpiece)| *existing == bloom && *existing_workpiece == workpiece) {
-        keys.push((bloom, workpiece));
-    }
 }
 
 fn elapsed_of(dispatches: &[MetricDispatch], bloom: DigestHex, workpiece: Option<&str>) -> String {
@@ -420,6 +382,54 @@ mod tests {
             cursor: Some(CompositionCursorView { stage: Some(StageId::Construct), attempts: 1, candidate: None }),
             ..member(workpiece)
         }
+    }
+
+    fn dispatch(bloom: DigestHex, workpiece: &str, recorded_unix_millis: Option<u64>, sequence: u64) -> MetricDispatch {
+        MetricDispatch {
+            bloom,
+            workpiece: workpiece.to_owned(),
+            recorded_unix_millis,
+            sequence,
+            ..MetricDispatch::default()
+        }
+    }
+
+    /// Live sealed bloom plus a landed history bloom with independent dispatch stamps.
+    fn ages_document() -> (ViewDocument, [MetricDispatch; 8]) {
+        let live = digest(1);
+        let landed = digest(2);
+        let view = ViewDocument {
+            blooms: vec![
+                BloomView {
+                    id: live,
+                    status: Some(BloomStatus::Sealed),
+                    members: vec![
+                        in_flight_construct("wp-run"),
+                        in_flight_construct("wp-gap"),
+                        MemberView { resolution: Some(Present {}), ..member("wp-done") },
+                    ],
+                    ..BloomView::default()
+                },
+                BloomView {
+                    id: landed,
+                    status: Some(BloomStatus::Landed),
+                    members: vec![MemberView { resolution: Some(Present {}), ..member("wp-landed") }],
+                    ..BloomView::default()
+                },
+            ],
+            ..ViewDocument::default()
+        };
+        let dispatches = [
+            dispatch(live, "wp-run", Some(1_000), 1),
+            dispatch(live, "wp-run", Some(3_000), 2),
+            dispatch(live, "wp-done", Some(2_000), 3),
+            dispatch(live, "wp-done", Some(9_000), 4),
+            dispatch(live, "wp-gap", Some(5_000), 5),
+            dispatch(live, "wp-gap", None, 6),
+            dispatch(landed, "wp-landed", Some(10_000), 7),
+            dispatch(landed, "wp-landed", Some(7_210_000), 8),
+        ];
+        (view, dispatches)
     }
 
     #[test]
@@ -586,6 +596,68 @@ mod tests {
         };
         assert_eq!(member.stage, "Construct");
         assert_eq!(member.age, "3s");
+    }
+
+    #[test]
+    fn displayed_bloom_ages_ignore_undisplayed_history() {
+        // The plausible bug: AGE still walks every retained member and
+        // landed bloom, so a live header absorbs a history span, a walking
+        // member loses its own stamps, or a missing timestamp paints a duration.
+        let (view, dispatches) = ages_document();
+        let live = digest(1);
+        let landed = digest(2);
+        let live_rows = rows_of(&view, BoardLane::Live, &dispatches);
+        assert_eq!(live_rows.len(), 3);
+        let BoardRow::Bloom(bloom) = &live_rows[0] else {
+            panic!("first live row is the bloom");
+        };
+        assert_eq!(bloom.id, live);
+        assert_eq!(bloom.age, "8s");
+        let BoardRow::Member(running) = &live_rows[1] else {
+            panic!("second live row is the walking member");
+        };
+        assert_eq!(running.workpiece, "wp-run");
+        assert_eq!(running.age, "2s");
+        let BoardRow::Member(gap) = &live_rows[2] else {
+            panic!("third live row is the single-stamp member");
+        };
+        assert_eq!(gap.workpiece, "wp-gap");
+        assert_eq!(gap.age, "—");
+        assert!(live_rows.iter().all(|row| match row {
+            BoardRow::Member(member) => member.workpiece != "wp-done" && member.workpiece != "wp-landed",
+            BoardRow::Bloom(bloom) => bloom.id != landed,
+        }));
+
+        let history_rows = rows_of(&view, BoardLane::History, &dispatches);
+        assert_eq!(history_rows.len(), 2);
+        let BoardRow::Bloom(history) = &history_rows[0] else {
+            panic!("first history row is the landed bloom");
+        };
+        assert_eq!(history.id, landed);
+        assert_eq!(history.age, "2h");
+        let BoardRow::Member(landed_member) = &history_rows[1] else {
+            panic!("second history row is the landed member");
+        };
+        assert_eq!(landed_member.workpiece, "wp-landed");
+        assert_eq!(landed_member.age, "2h");
+    }
+
+    #[test]
+    fn live_board_paint_keeps_history_age_off_the_age_column() {
+        // The plausible bug: live paint still rescans undisplayed history, so
+        // a landed bloom's span appears in the AGE column of the live table.
+        let (view, dispatches) = ages_document();
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_view(Ok(view));
+        store.apply_dispatches(Ok(dispatches.to_vec()));
+        let mut board = Board::new();
+        let mut terminal = Terminal::new(TestBackend::new(80, 10)).expect("test backend");
+        terminal.draw(|frame| board.render(frame, frame.area(), &store)).expect("draw");
+        let text: String = terminal.backend().buffer().content().iter().map(Cell::symbol).collect();
+        assert!(text.contains("8s"), "{text}");
+        assert!(text.contains("2s"), "{text}");
+        assert!(text.contains("—"), "{text}");
+        assert!(!text.contains("2h"), "{text}");
     }
 
     #[test]

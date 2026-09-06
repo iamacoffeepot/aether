@@ -3,6 +3,7 @@
 //! The walk is iterative with a depth cap because the value is served data.
 
 use ratatui::text::{Line, Span};
+use ratatui::widgets::{Paragraph, Wrap};
 use serde_json::Value;
 
 use crate::palette::{self, Role};
@@ -153,6 +154,16 @@ fn with_indent(indent: usize, mut spans: Vec<Span<'static>>) -> Vec<Span<'static
 
 fn styled(text: impl Into<String>, role: Role) -> Span<'static> {
     Span::styled(text.into(), palette::paint(role))
+}
+
+/// Clamp a paragraph scroll offset to the last wrapped screen row at `width`.
+///
+/// Uses the same `Wrap { trim: false }` composer the artifact and expanded-JSON
+/// paragraphs paint, via ratatui's `Paragraph::line_count`.
+#[must_use]
+pub fn clamp_wrapped_scroll(offset: usize, lines: &[Line<'_>], width: u16) -> usize {
+    let rows = Paragraph::new(lines.to_vec()).style(palette::body()).wrap(Wrap { trim: false }).line_count(width);
+    offset.min(rows.saturating_sub(1))
 }
 
 #[cfg(test)]
