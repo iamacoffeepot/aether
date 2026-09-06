@@ -143,9 +143,17 @@ mod platform {
         }
         #[cfg(target_os = "windows")]
         {
-            use winit::platform::windows::WindowExtWindows;
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-            let hwnd = native.hwnd();
+            let hwnd = match native
+                .window_handle()
+                .map_err(|error| format!("could not obtain the window handle: {error}"))?
+                .as_raw()
+            {
+                RawWindowHandle::Win32(handle) => handle.hwnd.get(),
+                other => return Err(format!("expected a Win32 window handle, got {other:?}")),
+            };
+
             INSTALLED.with_borrow(|installed| {
                 if let Some(previous) = installed {
                     // SAFETY: `hwnd` came from the live window we were handed.
