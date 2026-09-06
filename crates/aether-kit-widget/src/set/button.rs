@@ -285,7 +285,7 @@ impl ButtonWidget {
         // Keyboard focus only: the button a pointer just pressed shows its
         // press, and a ring left over from the click says nothing more.
         if self.state.focus_visible() {
-            push_border(&mut items, width, height, 2.0, self.theme.accent);
+            push_border(&mut items, &self.theme, width, height, 2.0, self.theme.accent);
         }
         items
     }
@@ -301,7 +301,7 @@ mod tests {
     use crate::set::ELLIPSIS;
 
     use crate::WidgetControlState;
-    use crate::set::{BUTTON_STROKE_THICKNESS, KeyboardArm, button_run, centered_text_x, measured_text_width};
+    use crate::set::{KeyboardArm, button_run, centered_text_x, measured_text_width};
 
     /// The label run and local x this button draws — the shared
     /// [`button_run`] rule against the button's own frame, theme and metrics,
@@ -459,26 +459,28 @@ mod tests {
     /// wash a plateless rank shows the pointer. `None` when it draws neither.
     fn plate(button: &ButtonWidget) -> Option<Rgba> {
         button.draw_items().iter().find_map(|item| match item {
-            WidgetDrawItem::Quad { width, height, color, .. }
+            WidgetDrawItem::Shape { width, height, fill, .. }
                 if *width == button.frame.width && *height == button.frame.height =>
             {
-                Some(*color)
+                *fill
             }
             _ => None,
         })
     }
 
-    /// The hairline rows of a button's stroke — the quads that are neither
-    /// the full-frame plate nor as thick as the focus ring.
+    /// The hairline stroke of a button's face — the full-frame shape's
+    /// inside stroke, at the theme's hairline rather than the focus ring's.
     fn stroke(button: &ButtonWidget) -> Vec<Rgba> {
         button
             .draw_items()
             .iter()
             .filter_map(|item| match item {
-                WidgetDrawItem::Quad { width, height, color, .. }
-                    if (*width == BUTTON_STROKE_THICKNESS || *height == BUTTON_STROKE_THICKNESS) =>
+                WidgetDrawItem::Shape { width, height, stroke: Some(stroke), .. }
+                    if *width == button.frame.width
+                        && *height == button.frame.height
+                        && stroke.width_pixels == button.theme.stroke_width_pixels =>
                 {
-                    Some(*color)
+                    Some(stroke.color)
                 }
                 _ => None,
             })
@@ -490,9 +492,13 @@ mod tests {
         button
             .draw_items()
             .iter()
-            .map(|item| match item {
-                WidgetDrawItem::Quad { color, .. } | WidgetDrawItem::Text { color, .. } => *color,
-                WidgetDrawItem::TexturedQuad { tint, .. } => *tint,
+            .flat_map(|item| match item {
+                WidgetDrawItem::Quad { color, .. } | WidgetDrawItem::Text { color, .. } => vec![*color],
+                WidgetDrawItem::TexturedQuad { tint, .. } => vec![*tint],
+                WidgetDrawItem::Shape { fill, stroke, .. } => {
+                    fill.iter().copied().chain(stroke.as_ref().map(|stroke| stroke.color)).collect()
+                }
+                WidgetDrawItem::Triangle { a, .. } => vec![a.color],
             })
             .collect()
     }

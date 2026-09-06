@@ -33,7 +33,7 @@ use aether_text::FontMetricsResult;
 
 use crate::set::{
     WidgetDefaults, accept_font_metrics_result, apply_text_theme, approx_text_width, even_split_widths,
-    measured_text_width, pump_text_font_metrics, push_control_outlines, push_rect_border, quad, reply_if_hidden,
+    measured_text_width, pump_text_font_metrics, push_control_outlines, quad, raised_plate, reply_if_hidden, ring,
     slot_at_local_x, slot_left, text_origin_y,
 };
 use crate::state::{InteractionState, emit_state_changed};
@@ -388,7 +388,7 @@ impl MenuBarWidget {
         let pad = self.theme.pad;
         let last = menu.items.len().saturating_sub(1);
         let mut items = Vec::with_capacity(menu.items.len().saturating_mul(3).saturating_add(5));
-        items.push(quad(left, top, width, plate_height, self.theme.surface_raised));
+        items.push(raised_plate(&self.theme, left, top, width, plate_height, self.theme.surface_raised, None));
 
         let mut row_top = top;
         for (index, item) in menu.items.iter().enumerate() {
@@ -430,7 +430,7 @@ impl MenuBarWidget {
             row_top += self.item_extent(item, index == last);
         }
 
-        push_rect_border(&mut items, left, top, width, plate_height, HAIRLINE_THICKNESS, self.theme.outline);
+        items.push(ring(&self.theme, left, top, width, plate_height, HAIRLINE_THICKNESS, self.theme.outline));
         items
     }
 }
@@ -714,7 +714,10 @@ mod tests {
             .iter()
             .filter_map(|item| match item {
                 WidgetDrawItem::Text { text, .. } => Some(text.as_str()),
-                WidgetDrawItem::Quad { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
+                WidgetDrawItem::Quad { .. }
+                | WidgetDrawItem::TexturedQuad { .. }
+                | WidgetDrawItem::Shape { .. }
+                | WidgetDrawItem::Triangle { .. } => None,
             })
             .collect()
     }

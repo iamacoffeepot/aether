@@ -34,6 +34,7 @@ use alloc::vec::Vec;
 
 use aether_data::MailboxId;
 use aether_math::{Rgba, Vec2};
+use aether_render::{ScreenVertex, ShapeShadow, ShapeStroke};
 use serde::{Deserialize, Serialize};
 
 use crate::theme::{TextInk, TextRole, Theme};
@@ -267,6 +268,30 @@ pub enum WidgetDrawItem {
     /// session-scoped font loaded through `aether.text`; `color` is a linear
     /// RGBA multiplier over glyph coverage.
     Text { x: f32, y: f32, font_id: u32, text: String, size_pixels: f32, color: Rgba, clip: Option<WidgetClipRect> },
+    /// A rounded, stroked, shadowed box (ADR-0213) — the chrome a plate, a
+    /// field, a button, a knob, or a ring is drawn with. `(x, y)` is the
+    /// top-left corner and `(width, height)` the size of the box in the
+    /// widget's local pixels; `corner_radius` rounds its corners (a radius
+    /// at or above half the shorter side is a circle); `fill`, `stroke`
+    /// (inside the edge), and `shadow` are each optional and compose
+    /// shadow under fill under stroke, every edge anti-aliased on the GPU.
+    /// One item where a plate and its four stroke quads used to be.
+    Shape {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        corner_radius: f32,
+        fill: Option<Rgba>,
+        stroke: Option<ShapeStroke>,
+        shadow: Option<ShapeShadow>,
+        clip: Option<WidgetClipRect>,
+    },
+    /// One flat triangle — three corners in the widget's local pixels,
+    /// each with its own linear RGBA — the kit's caret and arrowhead. A
+    /// mark on the control it sits in, never something standing over text,
+    /// so it casts no hole.
+    Triangle { a: ScreenVertex, b: ScreenVertex, c: ScreenVertex, clip: Option<WidgetClipRect> },
 }
 
 impl WidgetDrawItem {
@@ -308,6 +333,25 @@ impl WidgetDrawItem {
                 color: *color,
                 clip: clip.map(|rect| rect.offset(by)),
             },
+            Self::Shape { x, y, width, height, corner_radius, fill, stroke, shadow, clip } => Self::Shape {
+                x: x + by.x,
+                y: y + by.y,
+                width: *width,
+                height: *height,
+                corner_radius: *corner_radius,
+                fill: *fill,
+                stroke: stroke.clone(),
+                shadow: shadow.clone(),
+                clip: clip.map(|rect| rect.offset(by)),
+            },
+            Self::Triangle { a, b, c, clip } => {
+                let corner = |corner: &ScreenVertex| ScreenVertex {
+                    x: corner.x + by.x,
+                    y: corner.y + by.y,
+                    color: corner.color,
+                };
+                Self::Triangle { a: corner(a), b: corner(b), c: corner(c), clip: clip.map(|rect| rect.offset(by)) }
+            }
         }
     }
 
@@ -315,21 +359,34 @@ impl WidgetDrawItem {
     /// space. Empty or invalid results omit the item.
     #[must_use]
     pub(super) fn intersect_clip(&self, slot: Option<WidgetClipRect>) -> Option<Self> {
-        let own = match self {
-            Self::Quad { clip, .. } | Self::TexturedQuad { clip, .. } | Self::Text { clip, .. } => *clip,
-        };
-        let clip = match intersect_widget_clips(own, slot) {
+        let clip = match intersect_widget_clips(self.clip(), slot) {
             WidgetClipIntersection::Unbounded => None,
             WidgetClipIntersection::Finite { rect } => Some(rect),
             WidgetClipIntersection::Empty => return None,
         };
         let mut item = self.clone();
         match &mut item {
-            Self::Quad { clip: own, .. } | Self::TexturedQuad { clip: own, .. } | Self::Text { clip: own, .. } => {
+            Self::Quad { clip: own, .. }
+            | Self::TexturedQuad { clip: own, .. }
+            | Self::Text { clip: own, .. }
+            | Self::Shape { clip: own, .. }
+            | Self::Triangle { clip: own, .. } => {
                 *own = clip;
             }
         }
         Some(item)
+    }
+
+    /// This item's own clip, whichever variant it is.
+    #[must_use]
+    fn clip(&self) -> Option<WidgetClipRect> {
+        match self {
+            Self::Quad { clip, .. }
+            | Self::TexturedQuad { clip, .. }
+            | Self::Text { clip, .. }
+            | Self::Shape { clip, .. }
+            | Self::Triangle { clip, .. } => *clip,
+        }
     }
 
     /// The rectangle this item actually paints — its geometry narrowed by its
@@ -337,13 +394,22 @@ impl WidgetDrawItem {
     /// clip erases. This is the hole a fill punches in the glyph runs authored
     /// before it: reading the geometry alone would let a row scrolled out of a
     /// viewport cut text the viewport clip already spared it from.
+    ///
+    /// A shape covers its **fill box** and nothing more: the shadow covers
+    /// nothing (it is soft, and what it stands over is meant to show through),
+    /// and a shape with no fill — a ring, a halo — covers nothing either, so
+    /// a focus ring drawn as one stroke never punches a hole in the field it
+    /// rings. Conservative at rounded corners, where the box is a little more
+    /// than the fill. A triangle is a mark and covers nothing.
     #[must_use]
     pub(super) fn covered_rect(&self) -> Option<WidgetClipRect> {
         let (rect, clip) = match self {
-            Self::Quad { x, y, width, height, clip, .. } | Self::TexturedQuad { x, y, width, height, clip, .. } => {
+            Self::Quad { x, y, width, height, clip, .. }
+            | Self::TexturedQuad { x, y, width, height, clip, .. }
+            | Self::Shape { x, y, width, height, fill: Some(_), clip, .. } => {
                 (WidgetClipRect { x: *x, y: *y, width: *width, height: *height }, *clip)
             }
-            Self::Text { .. } => return None,
+            Self::Text { .. } | Self::Shape { fill: None, .. } | Self::Triangle { .. } => return None,
         };
         match intersect_widget_clips(Some(rect), clip) {
             WidgetClipIntersection::Finite { rect } => Some(rect),
@@ -354,10 +420,7 @@ impl WidgetDrawItem {
     /// This item's effective clip, rejecting an invalid explicit rectangle.
     #[must_use]
     pub(super) fn valid_clip(&self) -> WidgetClipIntersection {
-        let clip = match self {
-            Self::Quad { clip, .. } | Self::TexturedQuad { clip, .. } | Self::Text { clip, .. } => *clip,
-        };
-        intersect_widget_clips(clip, None)
+        intersect_widget_clips(self.clip(), None)
     }
 }
 

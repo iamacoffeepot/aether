@@ -120,7 +120,8 @@ use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::Vec2;
 use aether_render::QuadBlend;
 use aether_render::{
-    DrawSolidQuads, DrawTexturedQuads, RenderCapability, SolidQuad, TexturedQuad as RenderTexturedQuad,
+    DrawScreenTriangles, DrawShapes, DrawSolidQuads, DrawTexturedQuads, RenderCapability, ScreenTriangle, Shape,
+    SolidQuad, TexturedQuad as RenderTexturedQuad,
 };
 use aether_text::{DrawText, DrawTextBatch, TextCapability};
 
@@ -334,17 +335,55 @@ impl PreparedClip {
 enum DirectRun {
     Solid { clip: PreparedClip, quads: Vec<SolidQuad> },
     Textured { texture_id: u32, clip: PreparedClip, quads: Vec<RenderTexturedQuad> },
+    Shapes { clip: PreparedClip, shapes: Vec<Shape> },
+    Triangles { clip: PreparedClip, triangles: Vec<ScreenTriangle> },
 }
 
 /// Plan the filtered non-text subsequence in one pass. Adjacent solids
 /// coalesce by effective clip; adjacent textured items coalesce by texture id
-/// and effective clip. A kind, texture, or clip transition flushes without
+/// and effective clip; adjacent shapes and adjacent triangles each coalesce
+/// by effective clip. A kind, texture, or clip transition flushes without
 /// globally regrouping repeated keys, preserving painter order. Invalid
 /// explicit clips omit their items.
 fn direct_runs(list: &WidgetDrawList) -> Vec<DirectRun> {
     let mut runs: Vec<DirectRun> = Vec::new();
     for item in &list.items {
         match item {
+            WidgetDrawItem::Shape { x, y, width, height, corner_radius, fill, stroke, shadow, .. } => {
+                let Some(clip) = PreparedClip::for_item(item) else {
+                    continue;
+                };
+                let shape = Shape {
+                    x: *x,
+                    y: *y,
+                    width: *width,
+                    height: *height,
+                    corner_radius: *corner_radius,
+                    fill: *fill,
+                    stroke: stroke.clone(),
+                    shadow: shadow.clone(),
+                };
+                if let Some(DirectRun::Shapes { clip: run_clip, shapes }) = runs.last_mut()
+                    && *run_clip == clip
+                {
+                    shapes.push(shape);
+                } else {
+                    runs.push(DirectRun::Shapes { clip, shapes: vec![shape] });
+                }
+            }
+            WidgetDrawItem::Triangle { a, b, c, .. } => {
+                let Some(clip) = PreparedClip::for_item(item) else {
+                    continue;
+                };
+                let triangle = ScreenTriangle { a: a.clone(), b: b.clone(), c: c.clone() };
+                if let Some(DirectRun::Triangles { clip: run_clip, triangles }) = runs.last_mut()
+                    && *run_clip == clip
+                {
+                    triangles.push(triangle);
+                } else {
+                    runs.push(DirectRun::Triangles { clip, triangles: vec![triangle] });
+                }
+            }
             WidgetDrawItem::Quad { x, y, width, height, color, .. } => {
                 let Some(clip) = PreparedClip::for_item(item) else {
                     continue;
@@ -607,6 +646,16 @@ fn emit_layer(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
                     clip: clip.framebuffer(),
                     quads,
                 });
+            }
+            DirectRun::Shapes { clip, shapes } => {
+                ctx.actor::<RenderCapability>().send(&DrawShapes {
+                    space: QuadSpace::Screen,
+                    clip: clip.framebuffer(),
+                    shapes,
+                });
+            }
+            DirectRun::Triangles { clip, triangles } => {
+                ctx.actor::<RenderCapability>().send(&DrawScreenTriangles { clip: clip.framebuffer(), triangles });
             }
         }
     }
@@ -1054,6 +1103,102 @@ mod tests {
         assert_eq!(items.len(), 3, "three valid text items survive filtering");
         assert!(items.iter().map(|item| item.text.as_str()).eq(["first", "second", "third"]));
         assert!(items.iter().map(|item| item.origin[0]).eq([10.0, 20.0, 40.0]));
+    }
+
+    fn shape(x: f32, fill: Option<Rgba>, clip: Option<WidgetClipRect>) -> WidgetDrawItem {
+        WidgetDrawItem::Shape {
+            x,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+            corner_radius: 2.0,
+            fill,
+            stroke: None,
+            shadow: None,
+            clip,
+        }
+    }
+
+    fn triangle(x: f32, clip: Option<WidgetClipRect>) -> WidgetDrawItem {
+        let corner = |x: f32, y: f32| aether_render::ScreenVertex { x, y, color: Rgba::WHITE };
+        WidgetDrawItem::Triangle { a: corner(x, 0.0), b: corner(x + 4.0, 0.0), c: corner(x + 2.0, 4.0), clip }
+    }
+
+    /// ADR-0213: shapes and triangles plan like the other direct items —
+    /// adjacent ones coalesce by clip into one batch, a kind change flushes,
+    /// and painter order across kinds is kept. A planner that folded shapes
+    /// into the solid run would send them through the wrong kind; one that
+    /// never coalesced would cost a batch per plate.
+    #[test]
+    fn direct_planner_coalesces_adjacent_shapes_and_triangles_by_clip() {
+        let clip = WidgetClipRect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
+        let list = WidgetDrawList {
+            content_height: None,
+            intrinsic: None,
+            items: vec![
+                shape(0.0, Some(Rgba::WHITE), None),
+                shape(1.0, None, None),
+                quad(2.0, None),
+                shape(3.0, Some(Rgba::WHITE), Some(clip)),
+                triangle(4.0, Some(clip)),
+                triangle(5.0, Some(clip)),
+                shape(6.0, Some(Rgba::WHITE), Some(clip)),
+            ],
+            overlay: Vec::new(),
+        };
+
+        let runs = direct_runs(&list);
+        let shape_xs = |run: &DirectRun| match run {
+            DirectRun::Shapes { shapes, .. } => shapes.iter().map(|shape| shape.x).collect::<Vec<_>>(),
+            DirectRun::Triangles { triangles, .. } => triangles.iter().map(|triangle| triangle.a.x).collect(),
+            DirectRun::Solid { quads, .. } => quads.iter().map(|quad| quad.x).collect(),
+            DirectRun::Textured { .. } => unreachable!("no textured items here"),
+        };
+        assert_eq!(runs.len(), 5, "shapes, quad, shapes, triangles, shapes: {runs:?}");
+        assert_eq!(
+            runs.iter().map(shape_xs).collect::<Vec<_>>(),
+            vec![vec![0.0, 1.0], vec![2.0], vec![3.0], vec![4.0, 5.0], vec![6.0]]
+        );
+        assert!(matches!(runs[3], DirectRun::Triangles { clip: PreparedClip::Finite { rect }, .. } if rect == clip));
+    }
+
+    /// ADR-0213 §2: a shape covers its fill box and nothing more. A filled
+    /// plate raised after a run cuts the run like a quad does; a ring (no
+    /// fill) and a triangle over the same run cut nothing — a focus ring or
+    /// a caret drawn as one item must not punch a hole in the field's text.
+    #[test]
+    fn a_filled_shape_cuts_the_text_under_it_and_a_ring_or_a_caret_does_not() {
+        let line = WidgetClipRect { x: 0.0, y: 0.0, width: 100.0, height: 20.0 };
+        let over = |item: WidgetDrawItem| {
+            let list = WidgetDrawList {
+                content_height: None,
+                intrinsic: None,
+                items: vec![text(0.0, "hello", Some(line)), item],
+                overlay: Vec::new(),
+            };
+            text_items(&list).into_iter().map(|draw| draw.clip).collect::<Vec<_>>()
+        };
+        let plate = |fill: Option<Rgba>| WidgetDrawItem::Shape {
+            x: 0.0,
+            y: 0.0,
+            width: 40.0,
+            height: 20.0,
+            corner_radius: 4.0,
+            fill,
+            stroke: None,
+            shadow: None,
+            clip: None,
+        };
+        let (plate, ring) = (plate(Some(Rgba::WHITE)), plate(None));
+        let caret = triangle(10.0, None);
+
+        assert_eq!(
+            over(plate),
+            vec![Some(ClipRect { x: 40.0, y: 0.0, width: 60.0, height: 20.0 })],
+            "the run keeps only what the plate leaves",
+        );
+        assert_eq!(over(ring), vec![Some(framebuffer_clip(line))], "a ring covers nothing");
+        assert_eq!(over(caret), vec![Some(framebuffer_clip(line))], "a triangle covers nothing");
     }
 
     #[test]
