@@ -762,8 +762,9 @@ fn read_only_text_field_blocks_activation_until_enabled() {
         1,
         "read-only Enter must not commit, while enabled Enter commits once; log was:\n{joined}",
     );
-    assert!(
-        commits[0].contains("text=locked"),
+    assert_eq!(
+        commits[0].as_str(),
+        "widget=locked text=locked widget text committed",
         "blocked read-only TextInput must not alter the later committed value; log was:\n{joined}",
     );
 }
