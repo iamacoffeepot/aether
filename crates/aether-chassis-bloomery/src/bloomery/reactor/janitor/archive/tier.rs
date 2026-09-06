@@ -326,18 +326,21 @@ fn tree_bytes(path: &Path) -> u64 {
 }
 
 #[cfg(test)]
+type SourceRemoveFaultFn = fn(&Path) -> io::Result<()>;
+
+#[cfg(test)]
 thread_local! {
-    static SOURCE_REMOVE_FAULT: Cell<Option<fn(&Path) -> io::Result<()>>> = const { Cell::new(None) };
+    static SOURCE_REMOVE_FAULT: Cell<Option<SourceRemoveFaultFn>> = const { Cell::new(None) };
 }
 
 #[cfg(test)]
-fn take_source_remove_fault() -> Option<fn(&Path) -> io::Result<()>> {
+fn take_source_remove_fault() -> Option<SourceRemoveFaultFn> {
     SOURCE_REMOVE_FAULT.with(Cell::take)
 }
 
 #[cfg(test)]
 #[must_use]
-fn install_source_remove_fault(fault: fn(&Path) -> io::Result<()>) -> SourceRemoveFault {
+fn install_source_remove_fault(fault: SourceRemoveFaultFn) -> SourceRemoveFault {
     SOURCE_REMOVE_FAULT.with(|slot| slot.set(Some(fault)));
     SourceRemoveFault
 }
