@@ -163,7 +163,7 @@ mod tests {
         let landing = local(fake);
         match landing.land_proposal(&bloom(), base, new_head, None).unwrap() {
             ProposalOutcome::Proposed { number } => assert_eq!(number, LOCAL_PROPOSAL),
-            other => panic!("expected Proposed, got {other:?}"),
+            other @ ProposalOutcome::BaseMoved { .. } => panic!("expected Proposed, got {other:?}"),
         }
         landing
     }
@@ -248,7 +248,7 @@ mod tests {
         let landing = local(&fake);
         match landing.land_proposal(&bloom(), &base, &new_head, None).unwrap() {
             ProposalOutcome::Proposed { number } => assert_eq!(number, LOCAL_PROPOSAL),
-            other => panic!("expected Proposed, got {other:?}"),
+            other @ ProposalOutcome::BaseMoved { .. } => panic!("expected Proposed, got {other:?}"),
         }
         let LandProposal::Landed(receipt) = landing.poll_land(&bloom(), &base, LOCAL_PROPOSAL).unwrap() else {
             panic!("mainline already at the proposed head is this bloom's land");
